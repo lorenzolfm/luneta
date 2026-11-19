@@ -1,26 +1,20 @@
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::pin;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
-use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_checks_response::{self, failed};
-use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
-    closes_response, AskResponse, ClosesRequest, DumpScreenRequest, IssueRepositoriesRequest,
-    KeepChecksRequest, KeepPrintedRequest, KillRequest, ListContentsRequest, ListDirsRequest,
-    ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, On,
+    AskResponse, IssueRepositoriesRequest, KeepChecksRequest, ListContentsRequest,
+    ListDirsRequest, ListDirsResponse, ListSkillsRequest, On, PrintedFile,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::checks::{self, Failed, Failing, Log, PullPage};
-use lunetad::closes::{Close, Closes};
-use lunetad::mux::{Exited, TabId};
 use lunetad::images::{self, Png};
 use lunetad::issues::{self, Filed, Filing, Remote, Unfiled};
 use lunetad::links::{Pasted, Ready, Unready};
-use lunetad::opens::{Open, Opened};
-use lunetad::printed::{Kept, Printed};
+use lunetad::printed::Kept;
 use lunetad::prunes::{self, Deleting, Plan, Pruned};
 use lunetad::skills::{Name, Runs, Skill};
 use lunetad::transcripts::{Reading, SessionId};
@@ -81,24 +75,6 @@ impl Away {
         Ok(listed.listed)
     }
 
-    pub fn screen(
-        &mut self,
-        session: &SessionName,
-        pane: Option<u32>,
-    ) -> Result<(u32, String), String> {
-        let request = DumpScreenRequest { on: Some(self.on()), session: session.to_string(), pane };
-        let dumped = self.ask(|mut daemon| async move { daemon.dump_screen(request).await })?;
-        Ok((dumped.pane, dumped.screen))
-    }
-
-    pub fn open(&mut self, open: &Open) -> Result<Opened, String> {
-        let request = open.asked(Some(self.on()));
-        let opened = self.ask(|mut daemon| async move { daemon.open(request).await })?;
-        let on = &self.on;
-        let notes = opened.notes.into_iter().map(|note| format!("{on}: {note}")).collect();
-        Ok(Opened { terminal: opened.terminal, notes })
-    }
-
     pub fn skills(&mut self, dir: &str, harness: Harness) -> Result<Vec<Skill>, String> {
         let harness = Some(harness.to_api().into());
         let request = ListSkillsRequest { on: Some(self.on()), dir: dir.to_owned(), harness };
@@ -108,33 +84,6 @@ impl Away {
             Some(Skill { name: Name::new(skill.name)?, description: skill.description, runs })
         };
         Ok(listed.skills.into_iter().filter_map(skill).collect())
-    }
-
-    pub fn printed(
-        &mut self,
-        session: &SessionName,
-        pane: u32,
-        typed: &Said,
-    ) -> Result<Printed, String> {
-        let (session, typed) = (session.to_string(), typed.as_str().to_owned());
-        let request = KeepPrintedRequest { on: Some(self.on()), session, pane, typed };
-        let answer = self.ask(|mut daemon| async move { daemon.keep_printed(request).await })?;
-        let kept = |File { path, lines, left_out }| Kept {
-            file: path,
-            lines: usize::try_from(lines).unwrap_or(usize::MAX),
-            left_out: usize::try_from(left_out).unwrap_or(usize::MAX),
-        };
-        match answer.printed {
-            Some(keep_printed_response::Printed::After(file)) => Ok(Printed::After(kept(file))),
-            Some(keep_printed_response::Printed::Nothing(())) => Ok(Printed::Nothing),
-            Some(keep_printed_response::Printed::Unsure(file)) => Ok(Printed::Unsure(kept(file))),
-            Some(keep_printed_response::Printed::Top(top)) => Ok(Printed::Top(top.file.map(kept))),
-            None => Err(format!(
-                "{}: its lunetad says what the pane printed in words this luneta cannot read, as \
-                 a newer one does",
-                self.on
-            )),
-        }
     }
 
     pub fn checks(&mut self, page: &PullPage) -> Result<Failing, String> {
@@ -152,7 +101,7 @@ impl Away {
         };
         let read = |check: keep_checks_response::Failed| {
             let log = match check.log.ok_or_else(newer)? {
-                failed::Log::Kept(File { path, lines, left_out }) => Log::Kept(Kept {
+                failed::Log::Kept(PrintedFile { path, lines, left_out }) => Log::Kept(Kept {
                     file: path,
                     lines: usize::try_from(lines).unwrap_or(usize::MAX),
                     left_out: usize::try_from(left_out).unwrap_or(usize::MAX),
@@ -164,52 +113,6 @@ impl Away {
         };
         let failed = answer.failed.into_iter().map(read).collect::<Result<_, String>>()?;
         Ok(Failing { head: answer.head, failed, pending: answer.pending, passed: answer.passed })
-    }
-
-    pub fn closes(&mut self, session: &SessionName, pane: u32) -> Result<Closes, String> {
-        let request = ClosesRequest { on: Some(self.on()), session: session.to_string(), pane };
-        let answer = self.ask(|mut daemon| async move { daemon.closes(request).await })?;
-        match answer.closes {
-            Some(closes_response::Closes::Pane(())) => Ok(Closes::Pane),
-            Some(closes_response::Closes::Tab(tab)) => {
-                Ok(Closes::Tab { id: TabId(tab.id), panes: tab.panes })
-            },
-            Some(closes_response::Closes::Session(())) => Ok(Closes::Session),
-            None => Err(format!(
-                "{}: its lunetad says what closing the pane closes in words this luneta cannot \
-                 read, as a newer one does",
-                self.on
-            )),
-        }
-    }
-
-    pub fn close(
-        &mut self,
-        session: &SessionName,
-        started: SystemTime,
-        close: &Close,
-    ) -> Result<(), String> {
-        let request = close.asked(Some(self.on()), session, started);
-        self.ask(|mut daemon| async move { daemon.close(request).await })
-    }
-
-    pub fn kill(&mut self, session: &SessionName, started: SystemTime) -> Result<(), String> {
-        let (session, started_at) = (session.to_string(), Some(started.into()));
-        let request = KillRequest { on: Some(self.on()), session, started_at };
-        self.ask(|mut daemon| async move { daemon.kill(request).await })
-    }
-
-    pub fn exited(&mut self) -> Result<Vec<Exited>, String> {
-        let request = ListExitedRequest { on: Some(self.on()) };
-        let listed = self.ask(|mut daemon| async move { daemon.list_exited(request).await })?;
-        let sent = listed.exited.len();
-        let exited = exited_of(listed);
-        let left_out = sent - exited.len();
-        if left_out > 0 {
-            let on = &self.on;
-            log::say(&format!("{on}: left out {left_out} sessions zellij keeps that do not read"));
-        }
-        Ok(exited)
     }
 
     pub fn ends(&mut self, reading: &Reading) -> Result<HashMap<SessionId, String>, String> {
@@ -413,14 +316,6 @@ fn dirs_of(answer: ListDirsResponse) -> Vec<Dir> {
         Some(Dir { path: Directory::parse(dir.path).ok()?, name })
     };
     answer.dirs.into_iter().filter_map(dir).collect()
-}
-
-fn exited_of(answer: ListExitedResponse) -> Vec<Exited> {
-    let exited = |exited: lunetad::api::list_exited_response::Exited| {
-        let name = SessionName::running(&exited.name).ok()?;
-        Some(Exited { name, ago: exited.ago?.try_into().ok()? })
-    };
-    answer.exited.into_iter().filter_map(exited).collect()
 }
 
 #[cfg(test)]

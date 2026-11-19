@@ -221,11 +221,11 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let path = state.path().join("luneta").join(NAME);
         let log = Log::open(path.clone(), Process::Luneta).unwrap();
-        log.write("zellij did not take its client there", at(1_793_282_592, 481)).unwrap();
+        log.write("luneta-mux did not take its client there", at(1_793_282_592, 481)).unwrap();
         log.write("and again", at(1_793_282_593, 7)).unwrap();
         let pid = std::process::id();
         let expected = format!(
-            "2026-10-29T14:03:12.481Z luneta[{pid}] zellij did not take its client there\n\
+            "2026-10-29T14:03:12.481Z luneta[{pid}] luneta-mux did not take its client there\n\
              2026-10-29T14:03:13.007Z luneta[{pid}] and again\n"
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), expected);
@@ -251,12 +251,12 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let path = state.path().join(NAME);
         let log = Log::open(path.clone(), Process::Luneta).unwrap();
-        log.write("zellij said:\nError: \u{1b}[31mno\u{1b}[0m\n", at(0, 0)).unwrap();
+        log.write("gh said:\nError: \u{1b}[31mno\u{1b}[0m\n", at(0, 0)).unwrap();
         log.write(&"x".repeat(SAID_MAX * 2), at(0, 0)).unwrap();
         let written = fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = written.lines().collect();
         assert_eq!(lines.len(), 2, "{written}");
-        assert!(lines[0].ends_with(r"zellij said:\nError: \u{1b}[31mno\u{1b}[0m"), "{written}");
+        assert!(lines[0].ends_with(r"gh said:\nError: \u{1b}[31mno\u{1b}[0m"), "{written}");
         assert!(lines[1].ends_with(&format!(" {}…", "x".repeat(SAID_MAX))), "{}", lines[1]);
     }
 

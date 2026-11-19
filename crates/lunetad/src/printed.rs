@@ -5,7 +5,7 @@ use luneta_protocol::said::Said;
 
 use crate::mux::own::api::Dumped;
 use crate::mux::own::server::Terminals;
-use crate::mux::{Mux, SessionName, TerminalKey};
+use crate::mux::TerminalKey;
 use crate::{folder, keeps};
 
 const TAIL: usize = 2000;
@@ -48,10 +48,6 @@ impl Printed {
             Printed::Nothing | Printed::Top(None) => None,
         }
     }
-}
-
-pub fn kept_after(session: &SessionName, pane: u32, typed: &Said) -> Result<Printed, String> {
-    kept(&Mux::Zellij(session).text_dumped(pane)?, typed)
 }
 
 pub fn kept_in(terminal: TerminalKey, typed: &Said) -> Result<Printed, String> {

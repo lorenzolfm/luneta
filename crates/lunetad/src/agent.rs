@@ -9,7 +9,7 @@ use serde::Deserialize as _;
 use crate::api;
 use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
-use crate::mux::{Named, Sessions, ZellijPane};
+use crate::mux::TerminalKey;
 
 const FILE_BYTES_MAX: u64 = 64 * 1024;
 
@@ -24,7 +24,7 @@ pub struct Agent {
     pub started_at: Option<SystemTime>,
     pub name: Option<Name>,
     pub entrypoint: Option<Said>,
-    pub pane: Option<Named>,
+    pub pane: Option<TerminalKey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,8 +187,7 @@ impl Source {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unread {
     pub pid: u32,
-    pub started: Option<SystemTime>,
-    pub pane: Option<Named>,
+    pub pane: Option<TerminalKey>,
 }
 
 pub fn named_pid(path: &Path) -> Option<u32> {
@@ -226,7 +225,7 @@ pub fn moment(millis: u64) -> SystemTime {
 
 impl Agent {
     #[must_use]
-    pub fn to_api(&self, sessions: &Sessions, topic: Option<Said>) -> api::Agent {
+    pub fn to_api(&self, topic: Option<Said>) -> api::Agent {
         assert!(self.pid > 1);
         let known = |status: api::Status| Some(Reported::KnownStatus(status.into()));
         let (status, waiting_for) = match &self.status {
@@ -250,16 +249,7 @@ impl Agent {
             name: self.name.as_ref().map(Name::to_api),
             entrypoint: self.entrypoint.clone().map(String::from),
             waiting_for,
-            pane: self.pane.as_ref().map(|named| match named {
-                Named::Zellij(ZellijPane { session: named, pane }) => {
-                    api::agent::Pane::Zellij(api::Zellij {
-                        named: named.clone(),
-                        session: sessions.lead(named, self.started_at).map(ToString::to_string),
-                        pane: *pane,
-                    })
-                },
-                Named::Terminal(key) => api::agent::Pane::Terminal((*key).into()),
-            }),
+            terminal: self.pane.map(Into::into),
             topic: topic.map(String::from),
         }
     }
@@ -267,30 +257,9 @@ impl Agent {
 
 impl Unread {
     #[must_use]
-    pub fn to_api(&self, sessions: &Sessions) -> api::UnreadFile {
+    pub fn to_api(&self) -> api::UnreadFile {
         assert!(self.pid > 1);
-        api::UnreadFile {
-            pid: self.pid,
-            zellij: self.pane.as_ref().and_then(zellij_of).map(|(named, pane)| api::Zellij {
-                named: named.to_owned(),
-                session: self.started.and_then(|started| {
-                    sessions.lead(named, Some(started)).map(ToString::to_string)
-                }),
-                pane,
-            }),
-            own: None,
-            terminal: self.pane.as_ref().and_then(|named| match named {
-                Named::Terminal(key) => Some((*key).into()),
-                Named::Zellij(_) => None,
-            }),
-        }
-    }
-}
-
-fn zellij_of(named: &Named) -> Option<(&str, u32)> {
-    match named {
-        Named::Zellij(ZellijPane { session, pane }) => Some((session, *pane)),
-        Named::Terminal(_) => None,
+        api::UnreadFile { pid: self.pid, terminal: self.pane.map(Into::into) }
     }
 }
 

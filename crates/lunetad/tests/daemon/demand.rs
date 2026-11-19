@@ -2,7 +2,6 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -12,20 +11,12 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
-    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse,
-    CloseRequest, ClosesRequest,
-    ClosesResponse, DeleteExitedRequest, DumpScreenRequest, DumpScreenResponse, GoRequest,
-    FileIssueRequest, FileIssueResponse, IssueRepositoriesRequest, IssueRepositoriesResponse,
-    InfoResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest, KeepImageResponse,
-    KeepPrintedRequest, KeepPrintedResponse,
-    KillRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
-    ListContentsResponse, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
-    ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
-    OpenResponse, OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse,
-    PrunesRequest, PrunesResponse, RefugeRequest,
-    RefugeResponse, RenameSessionRequest, StartRequest, TranscriptEndsRequest,
-    TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse, TurnIntoTabRequest,
-    TurnIntoTabResponse, Version, WatchRequest,
+    self, AskRequest, AskResponse, FileIssueRequest, FileIssueResponse, IssueRepositoriesRequest,
+    IssueRepositoriesResponse, InfoResponse, KeepChecksRequest, KeepChecksResponse,
+    KeepImageRequest, KeepImageResponse, ListAgentsResponse, ListContentsRequest,
+    ListContentsResponse, ListDirsRequest, ListDirsResponse, ListSkillsRequest, ListSkillsResponse,
+    PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
 use prost::Message as _;
@@ -50,8 +41,6 @@ const STAND_IN: &str = "LUNETA_TEST_STAND_IN_FOLDER";
 const STAND_IN_VERSION: &str = "LUNETA_TEST_STAND_IN_VERSION";
 
 const STAND_IN_PID: &str = "LUNETA_TEST_STAND_IN_PID";
-
-const STAND_IN_READS: &str = "LUNETA_TEST_STAND_IN_READS";
 
 const STAND_IN_BRIDGED: &str = "LUNETA_TEST_STAND_IN_BRIDGED_VERSION";
 
@@ -168,7 +157,7 @@ fn lunetad_with_no_log_says_first_why_it_does_not_start() {
 fn the_cli_says_that_no_daemon_runs_and_starts_none() {
     let host = Host::new();
     let none_runs = |host: &Host| {
-        for command in ["info", "agents", "sessions"] {
+        for command in ["info", "agents"] {
             let output = answered(host.vars().command(LUNETA).arg(command));
             let said = String::from_utf8_lossy(&output.stderr);
             assert_eq!(output.status.code(), Some(NONE_RUNS), "{command}: {said}");
@@ -297,7 +286,7 @@ fn luneta_starts_the_lunetad_beside_it_or_else_the_one_on_the_path() {
         format!("echo {name} >> '{}'\nexec '{LUNETAD}' \"$@\"\n", started.display())
     };
     script(&elsewhere.path().join("lunetad"), &stand_in("beside"));
-    script(&host.zellij.bin().join("lunetad"), &stand_in("path"));
+    script(&host.bin().join("lunetad"), &stand_in("path"));
     let luneta = elsewhere.path().join("luneta");
 
     stop(pid(&watch(&host, &luneta)));
@@ -310,7 +299,7 @@ fn luneta_starts_the_lunetad_beside_it_or_else_the_one_on_the_path() {
 #[test]
 fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     let host = Host::new();
-    let mut older = stand_in(&host, OLDER, None, None);
+    let mut older = stand_in(&host, OLDER, None);
     let said = info(host.vars());
     assert!(said.starts_with(&format!("lunetad {OLDER} (pid {})", older.pid())), "{said}");
 
@@ -319,7 +308,8 @@ fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     let beside = elsewhere.path().join("lunetad");
     script(&beside, other);
     let said = refused(&host, &elsewhere.path().join("luneta"));
-    let kept = format!("but {} is 0.0.0, no newer, so luneta leaves it be", beside.display());
+    let real = beside.canonicalize().unwrap();
+    let kept = format!("but {} is 0.0.0, no newer, so luneta leaves it be", real.display());
     assert!(said.contains(&format!("lunetad {OLDER} (pid {})", older.pid())), "{said}");
     assert!(said.contains(&kept), "{said}");
     assert_eq!(older.ended_within(Duration::ZERO), None);
@@ -339,13 +329,13 @@ fn luneta_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
     let stamped = |built| release::spelled(release::VERSION, Some(built));
 
     let later = Host::new();
-    let mut after = stand_in(&later, &stamped(u64::MAX), None, None);
+    let mut after = stand_in(&later, &stamped(u64::MAX), None);
     let said = refused(&later, Path::new(LUNETA));
     assert!(said.contains(&format!("is newer than this luneta, {}", *release::SAID)), "{said}");
     assert_eq!(after.ended_within(Duration::ZERO), None);
 
     let host = Host::new();
-    let mut before = stand_in(&host, &stamped(0), None, None);
+    let mut before = stand_in(&host, &stamped(0), None);
     if release::BUILT.is_some() {
         let reached = pid(&watch(&host, Path::new(LUNETA)));
         let _daemon = Detached { host: &host, pid: reached };
@@ -371,7 +361,7 @@ fn luneta_and_lunetad_say_their_build_alike() {
 fn lunetas_that_find_an_older_daemon_at_once_reach_the_one_in_its_place() {
     const LUNETAS: usize = 8;
     let host = Host::new();
-    let mut older = stand_in(&host, OLDER, None, None);
+    let mut older = stand_in(&host, OLDER, None);
     let pids: Vec<u32> = thread::scope(|scope| {
         let asking: Vec<_> = (0..LUNETAS)
             .map(|_| scope.spawn(|| pid(&watch(&host, Path::new(LUNETA)))))
@@ -386,7 +376,7 @@ fn lunetas_that_find_an_older_daemon_at_once_reach_the_one_in_its_place() {
 #[test]
 fn luneta_watch_refuses_a_daemon_newer_than_it_and_leaves_it_be() {
     let host = Host::new();
-    let mut newer = stand_in(&host, NEWER, None, None);
+    let mut newer = stand_in(&host, NEWER, None);
     let said = refused(&host, Path::new(LUNETA));
     let (pid, own) = (newer.pid(), release::SAID.as_str());
     let both = format!("lunetad {NEWER} (pid {pid}) is newer than this luneta, {own}");
@@ -399,7 +389,7 @@ fn luneta_watch_refuses_a_daemon_newer_than_it_and_leaves_it_be() {
 fn the_cli_asks_no_daemon_of_another_build_and_info_says_it_is_one() {
     for version in [OLDER, NEWER] {
         let host = Host::new();
-        let mut other = stand_in(&host, version, None, None);
+        let mut other = stand_in(&host, version, None);
         let output = answered(host.vars().command(LUNETA).arg("agents"));
         let said = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{said}");
@@ -421,20 +411,12 @@ fn the_cli_asks_no_daemon_of_another_build_and_info_says_it_is_one() {
 fn luneta_watch_stops_no_process_but_the_one_the_kernel_says_listens() {
     let host = Host::new();
     let mut decoy = Running::spawn(Command::new("sleep").arg("60"));
-    let mut older = stand_in(&host, OLDER, Some(decoy.pid()), None);
+    let mut older = stand_in(&host, OLDER, Some(decoy.pid()));
     let said = refused(&host, Path::new(LUNETA));
     let listens = "but the kernel says another process listens on its socket, so luneta stops none";
     assert!(said.contains(listens), "{said}");
     assert_eq!(decoy.ended_within(Duration::ZERO), None);
     assert_eq!(older.ended_within(Duration::ZERO), None);
-}
-
-#[test]
-fn the_daemon_says_the_folder_it_reads_zellij_s_sessions_in() {
-    let host = Host::new();
-    let _daemon = start(host.vars()).unwrap();
-    let reads = told(&host).and_then(|info| info.zellij_folder);
-    assert_eq!(reads.as_deref(), Some(host.sockets.path().as_os_str().as_bytes()));
 }
 
 #[test]
@@ -448,32 +430,10 @@ fn the_daemon_says_the_folder_it_reads_claude_code_s_sessions_in() {
     assert_eq!(reads.as_deref(), Some(claude.as_os_str().as_bytes()));
 }
 
-#[test]
-fn luneta_watch_neither_asks_nor_stops_a_daemon_of_another_zellij_folder() {
-    let host = Host::new();
-    let elsewhere = tempfile::tempdir().unwrap();
-    let mut older = stand_in(&host, OLDER, None, Some(elsewhere.path()));
-    let output = answered(host.vars().command(LUNETA).arg("watch"));
-    let said = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{said}");
-    let (reads, own) = (elsewhere.path().display(), host.sockets.path().display());
-    assert!(said.contains(&format!("reads zellij's sessions in {reads}, not in {own}")), "{said}");
-    assert_eq!(older.ended_within(Duration::ZERO), None);
-
-    let host = Host::new();
-    let link = elsewhere.path().join("sockets");
-    symlink(host.sockets.path(), &link).unwrap();
-    let same = stand_in(&host, &release::SAID, None, Some(&link));
-    assert_eq!(pid(&watch(&host, Path::new(LUNETA))), same.pid());
-}
-
-fn stand_in(host: &Host, version: &str, says: Option<u32>, reads: Option<&Path>) -> Running {
+fn stand_in(host: &Host, version: &str, says: Option<u32>) -> Running {
     let mut command = stand_in_command(host, version);
     if let Some(pid) = says {
         command.env(STAND_IN_PID, pid.to_string());
-    }
-    if let Some(reads) = reads {
-        command.env(STAND_IN_READS, reads);
     }
     let stand_in = Running::spawn(&mut command);
     let said = says.unwrap_or(stand_in.pid());
@@ -500,18 +460,12 @@ fn stand_in_lunetad() {
     };
     let (version, built) = build_of(env::var(STAND_IN_VERSION).unwrap());
     let pid = env::var(STAND_IN_PID).map_or(std::process::id(), |pid| pid.parse().unwrap());
-    let reads = env::var_os(STAND_IN_READS).map(PathBuf::from);
     let claim = Claim::take(Path::new(&folder)).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let listener = tokio::net::UnixListener::bind(claim.socket()).unwrap();
         tonic::transport::Server::builder()
-            .add_service(DaemonServer::new(StandIn {
-                version,
-                built,
-                pid,
-                reads,
-            }))
+            .add_service(DaemonServer::new(StandIn { version, built, pid }))
             .serve_with_incoming(UnixListenerStream::new(listener))
             .await
             .unwrap();
@@ -555,7 +509,7 @@ fn stand_in_bridged_lunetad() {
     runtime.block_on(async {
         let served = tokio::net::UnixStream::from_std(served).unwrap();
         let pid = std::process::id();
-        let stand_in = StandIn { version, built, pid, reads: None };
+        let stand_in = StandIn { version, built, pid };
         tonic::transport::Server::builder()
             .add_service(DaemonServer::new(stand_in))
             .serve_with_incoming(tokio_stream::once(Ok::<_, io::Error>(served)).chain(pending()))
@@ -577,15 +531,13 @@ struct StandIn {
     version: String,
     built: Option<u64>,
     pid: u32,
-    reads: Option<PathBuf>,
 }
 
 #[tonic::async_trait]
 impl Daemon for StandIn {
     async fn info(&self, _: Request<()>) -> Result<Response<InfoResponse>, Status> {
         let (version, built, pid) = (self.version.clone(), self.built, self.pid);
-        let zellij_folder = self.reads.as_ref().map(|reads| reads.as_os_str().as_bytes().to_vec());
-        let info = InfoResponse { version, built, pid, zellij_folder, ..InfoResponse::default() };
+        let info = InfoResponse { version, built, pid, ..InfoResponse::default() };
         Ok(Response::new(info))
     }
 
@@ -596,10 +548,6 @@ impl Daemon for StandIn {
     async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<api::Host>, Status> {
         let version = Version { pid: self.pid, seq: 0 };
         Ok(Response::new(api::Host { version: Some(version), ..api::Host::default() }))
-    }
-
-    async fn go(&self, _: Request<GoRequest>) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
     type KeepChecksStream = tokio_stream::Empty<Result<KeepChecksResponse, Status>>;
@@ -643,68 +591,11 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in makes no worktree"))
     }
 
-    async fn list_clients(
-        &self,
-        _: Request<ListClientsRequest>,
-    ) -> Result<Response<ListClientsResponse>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn other_tabs(
-        &self,
-        _: Request<OtherTabsRequest>,
-    ) -> Result<Response<OtherTabsResponse>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn turn_into_tab(
-        &self,
-        _: Request<TurnIntoTabRequest>,
-    ) -> Result<Response<TurnIntoTabResponse>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn turn_into_panes(
-        &self,
-        _: Request<TurnIntoPanesRequest>,
-    ) -> Result<Response<TurnIntoPanesResponse>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn refuge(&self, _: Request<RefugeRequest>) -> Result<Response<RefugeResponse>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn open(&self, _: Request<OpenRequest>) -> Result<Response<OpenResponse>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
     async fn list_skills(
         &self,
         _: Request<ListSkillsRequest>,
     ) -> Result<Response<ListSkillsResponse>, Status> {
         Err(Status::unimplemented("a stand-in finds no skills"))
-    }
-
-    async fn keep_printed(
-        &self,
-        _: Request<KeepPrintedRequest>,
-    ) -> Result<Response<KeepPrintedResponse>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn name_session(
-        &self,
-        _: Request<NameSessionRequest>,
-    ) -> Result<Response<NameSessionResponse>, Status> {
-        Err(Status::unimplemented("a stand-in names nothing"))
-    }
-
-    async fn check_name(
-        &self,
-        _: Request<CheckNameRequest>,
-    ) -> Result<Response<CheckNameResponse>, Status> {
-        Err(Status::unimplemented("a stand-in checks nothing"))
     }
 
     async fn list_dirs(
@@ -719,47 +610,6 @@ impl Daemon for StandIn {
         _: Request<ListContentsRequest>,
     ) -> Result<Response<ListContentsResponse>, Status> {
         Err(Status::unimplemented("a stand-in lists nothing"))
-    }
-
-    async fn dump_screen(
-        &self,
-        _: Request<DumpScreenRequest>,
-    ) -> Result<Response<DumpScreenResponse>, Status> {
-        Err(Status::unimplemented("a stand-in has no screen"))
-    }
-
-    async fn start(&self, _: Request<StartRequest>) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn closes(&self, _: Request<ClosesRequest>) -> Result<Response<ClosesResponse>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn close(&self, _: Request<CloseRequest>) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn kill(&self, _: Request<KillRequest>) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn list_exited(
-        &self,
-        _: Request<ListExitedRequest>,
-    ) -> Result<Response<ListExitedResponse>, Status> {
-        Err(Status::unimplemented("a stand-in keeps no session"))
-    }
-
-    async fn delete_exited(&self, _: Request<DeleteExitedRequest>) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    async fn rename_session(
-        &self,
-        _: Request<RenameSessionRequest>,
-    ) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
     async fn transcript_ends(
@@ -828,7 +678,7 @@ impl Daemon for StandIn {
 #[test]
 fn the_waits_of_half_a_minute_hold_side_by_side() {
     let waits: [(&str, fn()); 5] = [
-        ("the daemon ends alone", the_daemon_ends_once_zellij_has_had_no_session_for_a_while),
+        ("the daemon ends alone", the_daemon_ends_once_nothing_has_kept_it_for_a_while),
         ("a terminal keeps the daemon", crate::own::the_daemon_runs_on_while_a_terminal_does),
         ("a client keeps the daemon", the_daemon_runs_on_while_a_client_watches_it),
         (
@@ -851,17 +701,12 @@ fn the_waits_of_half_a_minute_hold_side_by_side() {
     assert_eq!(failed, [] as [&str; 0]);
 }
 
-fn the_daemon_ends_once_zellij_has_had_no_session_for_a_while() {
+fn the_daemon_ends_once_nothing_has_kept_it_for_a_while() {
     let host = Host::new();
-    let work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
-    eventually("work runs", || (!host.host().sessions.is_empty()).then_some(()));
+    host.host();
     let _silent = UnixStream::connect(host.runtime.path().join(SOCKET)).unwrap();
-
-    drop(work);
-    fs::remove_file(host.contract().join("work")).unwrap();
     let alone = Instant::now();
-    eventually("work has ended", || host.host().sessions.is_empty().then_some(()));
     assert_eq!(daemon.ended_within(Duration::from_secs(25)), None);
     let ended = daemon.ended_within(Duration::from_secs(20)).expect("the daemon runs on");
     let took = alone.elapsed();
@@ -870,7 +715,7 @@ fn the_daemon_ends_once_zellij_has_had_no_session_for_a_while() {
     assert!(took >= Duration::from_secs(30), "{took:?}");
     assert!(!host.runtime.path().join(SOCKET).exists());
     let said = daemon.said_after(Duration::from_secs(1));
-    assert!(said.iter().any(|line| line.contains("no session for 30s")), "{said:?}");
+    assert!(said.iter().any(|line| line.contains("no terminal for 30s")), "{said:?}");
 }
 
 fn the_daemon_runs_on_while_a_client_watches_it() {

@@ -2,7 +2,6 @@
 {
   tools = [
     pkgs.coreutils
-    pkgs.fish
     pkgs.flock
     pkgs.gawk
     pkgs.lsof
@@ -96,13 +95,20 @@
     }
 
     luneta_folder() {
-      local folder
-      folder="$(fish --no-config -c "source shell/luneta.fish; __luneta_folder")"
-      [[ $folder == /* ]] || {
-        echo "dev ${name}: __luneta_folder names '$folder', no absolute folder" >&2
-        return 1
-      }
-      echo "$folder"
+      local root
+      if [[ ''${XDG_RUNTIME_DIR-} == /* ]]; then
+        echo "''${XDG_RUNTIME_DIR%/}/luneta"
+      elif [ "$(uname)" = Darwin ]; then
+        root="$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)"
+        root="''${root%/}"
+        [[ $root == /* ]] || {
+          echo "dev ${name}: DARWIN_USER_TEMP_DIR names '$root', no absolute folder" >&2
+          return 1
+        }
+        echo "$root/luneta"
+      else
+        echo "/tmp/luneta-$(id -u)"
+      fi
     }
 
     holders() {

@@ -431,7 +431,7 @@ fn version(host: &Host) -> Version {
 fn a_reorder_made_on_a_stale_order_is_refused_here_and_on_another_machine() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
@@ -497,7 +497,7 @@ fn a_reorder_made_on_a_stale_order_is_refused_here_and_on_another_machine() {
 fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
@@ -560,7 +560,7 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
 fn a_branch_s_worktree_is_made_in_a_clone_on_its_machine_and_opens_with_a_shell() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();

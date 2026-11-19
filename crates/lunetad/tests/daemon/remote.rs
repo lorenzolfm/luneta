@@ -11,32 +11,20 @@ use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::keep_image_request::{Image, Part};
 use lunetad::api::keep_checks_response::{failed, Failed};
-use lunetad::api::keep_printed_response::{self, File};
-use lunetad::api::{
-    close_request, closes_response, list_exited_response, other_tabs_response,
-    turn_into_panes_response, turn_into_tab_response,
-};
 use lunetad::api::list_skills_response::Skill;
-use lunetad::api::open_request::{self, Opens};
-use lunetad::api::refuge_response::{Ended, Went};
 use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::projects::Held;
 use lunetad::api::{
-    self, AskRequest, CheckNameRequest, Client, CloseRequest, ClosesRequest, DeleteExitedRequest,
-    FileIssueRequest, IssueRepositoriesRequest, IssueRepository,
-    DumpScreenRequest, GoRequest, KeepChecksRequest, KeepImageRequest, KeepPrintedRequest,
-    KillRequest,
-    ListClientsRequest,
-    ListContentsRequest, ListDirsRequest, ListExitedRequest, ListSkillsRequest,
-    NameSessionRequest, On, OpenRequest, OtherTabsRequest, PasteRequest, RefugeRequest,
-    RenameSessionRequest, StartRequest, TranscriptEndsRequest, TurnIntoPanesRequest,
-    TurnIntoTabRequest, WatchRequest,
+    self, AskRequest, FileIssueRequest, IssueRepositoriesRequest, IssueRepository,
+    KeepChecksRequest, KeepImageRequest, ListContentsRequest, ListDirsRequest, ListSkillsRequest,
+    On, PasteRequest, PrintedFile as File, TranscriptEndsRequest, WatchRequest,
 };
-use lunetad::asks::{Asked, Step, Turn, User};
+use lunetad::asks::{Asked, Step, Turn};
 use lunetad::images::{self, Png};
 use lunetad::issues::Filed;
 use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Wanted, Work};
 use lunetad::transcripts::SessionId;
-use lunetad::{release, Directory, SessionName};
+use lunetad::{release, Directory};
 use rustix::process::{kill_process, test_kill_process, Pid, Signal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -47,7 +35,7 @@ use crate::host::{
     answered, eventually, folder_in, script, shared_script, start, start_as, Host, Vars,
     LUNETA, LUNETAD,
 };
-use crate::sessions::listed;
+use crate::projects::project;
 use crate::worktree::{cloned_as_wt, git};
 
 pub struct FakeSsh {
@@ -221,9 +209,19 @@ fn unreached(host: &Host, destination: &str) -> remote::Unreached {
 }
 
 fn names(host: &remote::Host) -> Vec<&str> {
-    let mut names: Vec<&str> = host.sessions.iter().map(|it| it.name.as_str()).collect();
+    let held = host.projects.as_ref().and_then(|projects| projects.held.as_ref());
+    let Some(Held::Kept(kept)) = held else {
+        return Vec::new();
+    };
+    let mut names: Vec<&str> = kept.projects.iter().map(|it| it.name.as_str()).collect();
     names.sort_unstable();
     names
+}
+
+fn project_named(host: &Host, name: &str) {
+    let dir = host.home.path().join(name);
+    fs::create_dir(&dir).unwrap();
+    project(host, &dir, None);
 }
 
 fn ended(pid: u32) -> bool {
@@ -236,16 +234,16 @@ fn ended(pid: u32) -> bool {
 fn a_daemon_says_each_machine_its_hosts_file_names() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     ssh.reaches("far", far.vars());
-    let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
+    project_named(&far, "work");
     hosts(&here, "nowhere\n-oProxyCommand=sh\nfar\n");
     let _here = start(here.vars()).unwrap();
 
-    let first = reached(&here, "far", |far| !far.sessions.is_empty());
+    let first = reached(&here, "far", |far| !names(far).is_empty());
     assert_eq!(names(&first), ["work"]);
-    let _play = far.serve("play");
+    project_named(&far, "play");
     reached(&here, "far", |far| names(far) == ["play", "work"]);
 
     let host = here.host();
@@ -260,15 +258,6 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
         },
         other => panic!("nowhere is {other:?}"),
     }
-    let output = here.vars().command(LUNETA).arg("sessions").output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let said = String::from_utf8(output.stdout).unwrap();
-    let lines: Vec<&str> = said.lines().collect();
-    assert!(lines[0].starts_with("nowhere/  (unreached for "), "{said}");
-    let far = ["far/", "  work  (no panes listed yet)", "  play  (no panes listed yet)"];
-    assert_eq!(lines[1..4], far, "{said}");
-    let unread = "(lunetad could not read all of luneta's hosts file: its log says why)";
-    assert_eq!(lines[4..], [unread], "{said}");
 }
 
 #[test]
@@ -276,7 +265,7 @@ fn a_machine_whose_lunetad_is_another_build_is_unreached_and_says_both() {
     let here = Host::new();
     let stamp = release::BUILT.map_or(1, |built| built + 1);
     let other = release::spelled(release::VERSION, Some(stamp));
-    FakeSsh::new(here.zellij.bin()).reaches_a_stand_in("far", &other);
+    FakeSsh::new(here.bin()).reaches_a_stand_in("far", &other);
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
     let unreached = unreached(&here, "far");
@@ -290,7 +279,7 @@ fn a_machine_whose_lunetad_is_another_build_is_unreached_and_says_both() {
 fn what_another_machine_is_told_to_say_comes_with_its_host() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
@@ -308,7 +297,7 @@ fn what_another_machine_is_told_to_say_comes_with_its_host() {
 fn a_hosts_file_that_does_not_read_leaves_the_machines_as_they_were() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
@@ -334,7 +323,7 @@ fn a_hosts_file_that_does_not_read_leaves_the_machines_as_they_were() {
 fn a_machine_that_leaves_the_hosts_file_is_watched_no_more() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     ssh.reaches("far", far.vars());
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
@@ -352,7 +341,7 @@ fn a_machine_that_leaves_the_hosts_file_is_watched_no_more() {
 fn a_machine_whose_daemon_ends_is_reached_again() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     ssh.reaches("far", far.vars());
     let far_daemon = start(far.vars()).unwrap();
     hosts(&here, "far\n");
@@ -360,7 +349,12 @@ fn a_machine_whose_daemon_ends_is_reached_again() {
     reached(&here, "far", |_| true);
 
     drop(far_daemon);
-    let _later = far.serve("later");
+    eventually("far's daemon is started again", || {
+        let folder = folder_in(far.runtime.path())?;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(lunetad::connect(&folder)).ok().map(|_| ())
+    });
+    project_named(&far, "later");
     reached(&here, "far", |far| names(far) == ["later"]);
     let _again = Detached { host: &far, pid: far.host().version.unwrap().pid };
 }
@@ -369,7 +363,7 @@ fn a_machine_whose_daemon_ends_is_reached_again() {
 fn a_question_while_a_machine_is_reached_again_is_handed_on() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     ssh.reaches("far", far.vars());
     let far_daemon = start(far.vars()).unwrap();
     hosts(&here, "far\n");
@@ -385,8 +379,7 @@ fn a_question_while_a_machine_is_reached_again_is_handed_on() {
     let checked = runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let on = Some(On { destination: "far".to_owned() });
-        let check = CheckNameRequest { on, name: "fresh".to_owned() };
-        tokio::time::timeout(Duration::from_secs(10), daemon.check_name(check)).await
+        tokio::time::timeout(Duration::from_secs(10), daemon.list_skills(skills_on(on))).await
     });
     assert!(checked.as_ref().is_ok_and(Result::is_ok), "{checked:?}");
     assert_eq!(ssh.runs("far"), runs + 1);
@@ -397,7 +390,7 @@ fn a_question_while_a_machine_is_reached_again_is_handed_on() {
 fn a_question_while_a_machine_is_reached_again_is_asked_of_no_other_build() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     ssh.reaches("far", far.vars());
     let far_daemon = start(far.vars()).unwrap();
     hosts(&here, "far\n");
@@ -414,8 +407,7 @@ fn a_question_while_a_machine_is_reached_again_is_asked_of_no_other_build() {
     let checked = runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let on = Some(On { destination: "far".to_owned() });
-        let check = CheckNameRequest { on, name: "fresh".to_owned() };
-        tokio::time::timeout(Duration::from_secs(10), daemon.check_name(check)).await
+        tokio::time::timeout(Duration::from_secs(10), daemon.list_skills(skills_on(on))).await
     });
     let refused = checked.expect("it was answered in time").expect_err("another build answered");
     assert_eq!(refused.message(), "lunetad does not reach far now", "{refused:?}");
@@ -427,7 +419,7 @@ fn a_question_while_a_machine_is_reached_again_is_asked_of_no_other_build() {
 fn a_machine_ssh_no_longer_reaches_is_unreached_since_it_last_answered() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     ssh.reaches("far", far.vars());
     let far_daemon = start(far.vars()).unwrap();
     hosts(&here, "far\n");
@@ -448,8 +440,8 @@ fn a_machine_ssh_no_longer_reaches_is_unreached_since_it_last_answered() {
 fn two_daemons_that_watch_each_other_come_to_rest() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
-    FakeSsh::new(far.zellij.bin()).reaches("here", here.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
+    FakeSsh::new(far.bin()).reaches("here", here.vars());
     hosts(&here, "far\n");
     hosts(&far, "here\n");
     let _here = start(here.vars()).unwrap();
@@ -491,7 +483,7 @@ fn watch_until(host: &Host, until: Instant) {
 pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     ssh.reaches("far", far.vars());
     let mut far_daemon = start(far.vars()).unwrap();
     hosts(&here, "far\n");
@@ -506,9 +498,9 @@ pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
 pub fn two_daemons_that_watch_each_other_and_nothing_else_end() {
     let here = Host::new();
     let far = Host::new();
-    let to_far = FakeSsh::new(here.zellij.bin());
+    let to_far = FakeSsh::new(here.bin());
     to_far.reaches("far", far.vars());
-    let to_here = FakeSsh::new(far.zellij.bin());
+    let to_here = FakeSsh::new(far.bin());
     to_here.reaches("here", here.vars());
     hosts(&here, "far\n");
     hosts(&far, "here\n");
@@ -528,7 +520,7 @@ pub fn two_daemons_that_watch_each_other_and_nothing_else_end() {
 #[test]
 fn what_each_ssh_to_a_machine_says_again_is_said_once() {
     let here = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     hosts(&here, "nowhere\n");
     let mut daemon = start(here.vars()).unwrap();
     eventually("ssh runs to nowhere a few times", || {
@@ -542,14 +534,17 @@ fn what_each_ssh_to_a_machine_says_again_is_said_once() {
     assert_eq!(lines, 1, "{said:?}");
 }
 
-fn refused_go(host: &Host, destination: &str) -> Status {
+pub fn skills_on(on: Option<On>) -> ListSkillsRequest {
+    ListSkillsRequest { on, dir: "/".to_owned(), harness: Some(api::Harness::Pi.into()) }
+}
+
+fn refused_question(host: &Host, destination: &str) -> Status {
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let on = Some(On { destination: destination.to_owned() });
-        let go = GoRequest { on, at: "work".to_owned(), to: "play".to_owned(), pane: None };
-        daemon.go(go).await.unwrap_err()
+        daemon.list_skills(skills_on(on)).await.unwrap_err()
     })
 }
 
@@ -557,7 +552,7 @@ fn refused_go(host: &Host, destination: &str) -> Status {
 fn a_question_for_a_machine_not_reached_runs_ssh_to_it_at_once() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
@@ -568,7 +563,7 @@ fn a_question_for_a_machine_not_reached_runs_ssh_to_it_at_once() {
 
     ssh.reaches("far", far.vars());
     let asked = Instant::now();
-    let refused = refused_go(&here, "far");
+    let refused = refused_question(&here, "far");
     assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
     reached(&here, "far", |_| true);
     let took = asked.elapsed();
@@ -580,7 +575,7 @@ fn a_question_for_a_machine_not_reached_runs_ssh_to_it_at_once() {
 fn the_log_says_why_a_machine_is_unreached_as_that_changes() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let mut daemon = start(here.vars()).unwrap();
@@ -595,7 +590,7 @@ fn the_log_says_why_a_machine_is_unreached_as_that_changes() {
         (ssh.runs("far") >= runs + 2).then_some(())
     });
     ssh.reaches("far", far.vars());
-    refused_go(&here, "far");
+    refused_question(&here, "far");
     reached(&here, "far", |_| true);
 
     let said = daemon.said_after(Duration::from_secs(1));
@@ -612,7 +607,7 @@ fn the_log_says_why_a_machine_is_unreached_as_that_changes() {
 fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     ssh.reaches("far", far.vars());
     let _far = start(far.vars()).unwrap();
     hosts(&here, "nowhere\n");
@@ -653,22 +648,8 @@ fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
 fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
-    script(&far.zellij.bin().join("claude"), "echo '[]'\n");
-    let _work = far.serve("work");
-    let tab = listed(4, "", (3, ""), None);
-    far.zellij.list("work", &serde_json::json!([tab]));
-    far.zellij.clients("work", &[(1, "terminal_3")]);
-    far.zellij.list("idle", &serde_json::json!([tab]));
-    let beside = listed(5, "", (6, ""), None);
-    far.zellij.list("two", &serde_json::json!([tab, beside]));
-    let holds = listed(8, "", (3, ""), None);
-    far.zellij.list("held", &serde_json::json!([tab, holds, beside]));
-    far.zellij.list("turning", &serde_json::json!([tab, beside]));
-    far.zellij.clients("turning", &[(1, "terminal_4")]);
-    let there = listed(4, "", (6, ""), None);
-    far.zellij.stacks_into("turning", 1, &serde_json::json!([there, beside]));
-    far.zellij.dumps("work", "~> cargo test\nerror[E0308]\n~>\n");
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
+    script(&far.bin().join("claude"), "echo '[]'\n");
     let job = "https://github.com/o/n/actions/runs/42/job/7";
     let run = |name: &str, conclusion: &str| serde_json::json!({
         "__typename": "CheckRun", "name": name, "workflowName": "ci", "status": "COMPLETED",
@@ -688,84 +669,15 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    let listed = reached(&here, "far", |far| !far.sessions.is_empty());
-    let work_started = listed.sessions.iter().find(|it| it.name == "work").unwrap().started_at;
+    reached(&here, "far", |_| true);
 
     let on = |destination: &str| Some(On { destination: destination.to_owned() });
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let (at, to) = ("work".to_owned(), "play".to_owned());
-        let go = GoRequest { on: on("far"), at, to, pane: Some(2) };
-        daemon.go(go).await.unwrap();
-        let went = ["--session=work action switch-session --pane-id terminal_2 -- play"];
-        assert_eq!(far.zellij.went(), went);
-        assert_eq!(here.zellij.went(), [] as [String; 0]);
-
-        let work = |on| ListClientsRequest { on, session: "work".to_owned() };
-        let listed = daemon.list_clients(work(on("far"))).await.unwrap().into_inner();
-        assert_eq!(listed.clients, [Client { id: 1, pane: Some(3) }]);
-        let here_none = daemon.list_clients(work(None)).await.unwrap_err();
-        assert_eq!(here_none.code(), Code::FailedPrecondition, "{here_none:?}");
-        let nowhere = daemon.list_clients(work(on("nowhere"))).await.unwrap_err();
-        assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
-
-        let seats = |seat: &str| vec![seat.to_owned()];
-        let ended = RefugeRequest { on: on("far"), seats: seats("gone") };
-        let found = daemon.refuge(ended).await.unwrap().into_inner();
-        let refuge = Some(api::Refuge { session: "work".to_owned(), before: listed.clients });
-        assert_eq!(found.ended, Some(Ended::Went(Went { refuge })));
-        let detached = RefugeRequest { on: on("far"), seats: seats("work") };
-        let found = daemon.refuge(detached).await.unwrap().into_inner();
-        assert_eq!(found.ended, Some(Ended::Kept(())));
-
-        let (at, to) = (String::new(), "play".to_owned());
-        let nameless = daemon.go(GoRequest { on: on("far"), at, to, pane: None }).await.unwrap_err();
-        assert_eq!(nameless.code(), Code::InvalidArgument, "{nameless:?}");
-        let seatless = RefugeRequest { on: on("far"), seats: Vec::new() };
-        let seatless = daemon.refuge(seatless).await.unwrap_err();
-        assert_eq!(seatless.code(), Code::InvalidArgument, "{seatless:?}");
-        assert_eq!(far.zellij.went(), went);
-
-        let open = |opens| OpenRequest {
-            on: on("far"),
-            session: "work".to_owned(),
-            cwd: "/w".to_owned(),
-            command: vec!["claude".to_owned()],
-            opens,
-        };
-        let pane = daemon.open(open(Some(Opens::Beside(2)))).await.unwrap().into_inner();
-        let tab = Opens::Tab(open_request::Tab { name: Some("#5".to_owned()), alone_since: None });
-        let tab = daemon.open(open(Some(tab))).await.unwrap().into_inner();
-        assert_eq!((pane.terminal, tab.terminal), (9, 4));
-        let opened = [
-            "2 --session=work action new-pane --no-focus --cwd=/w -- claude",
-            "- --session=work action new-tab --no-focus --cwd=/w --name=#5 -- claude",
-        ];
-        assert_eq!(far.zellij.opened(), opened);
-        let nothing = daemon.open(open(None)).await.unwrap_err();
-        assert_eq!(nothing.code(), Code::InvalidArgument, "{nothing:?}");
-        let invalid =
-            |status: Status| assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
-        let relative = OpenRequest { cwd: "w".to_owned(), ..open(Some(Opens::Beside(2))) };
-        invalid(daemon.open(relative).await.unwrap_err());
-        let unnamed = |name: &str| {
-            Opens::Tab(open_request::Tab { name: Some(name.to_owned()), alone_since: None })
-        };
-        invalid(daemon.open(open(Some(unnamed("")))).await.unwrap_err());
-        let idle = OpenRequest { session: "idle".to_owned(), ..open(Some(unnamed("#5"))) };
-        let idle = daemon.open(idle).await.unwrap_err();
-        assert_eq!(idle.code(), Code::FailedPrecondition, "{idle:?}");
-        assert!(idle.message().contains("no client is in idle"), "{idle:?}");
-        assert_eq!(far.zellij.opened(), opened);
-        assert_eq!(here.zellij.opened(), [] as [String; 0]);
-        daemon.open(open(Some(unnamed("-x")))).await.unwrap();
-        let dashed = "- --session=work action new-tab --no-focus --cwd=/w --name=-x -- claude";
-        assert_eq!(far.zellij.opened().last().map(String::as_str), Some(dashed));
-
-        let skills = dir.path().to_str().unwrap().to_owned();
-        let skills = ListSkillsRequest { on: on("far"), dir: skills, harness: None };
+        let dir_of_skills = dir.path().to_str().unwrap().to_owned();
+        let skills = ListSkillsRequest { on: on("far"), dir: dir_of_skills.clone(), harness: None };
         let found = daemon.list_skills(skills).await.unwrap();
         let near =
             Skill { name: "near".to_owned(), description: "Near.".to_owned(), only_you: false };
@@ -775,22 +687,14 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let found = daemon.list_skills(skills).await.unwrap();
         let (name, description) = ("near-pi".to_owned(), "Near pi.".to_owned());
         assert_eq!(found.into_inner().skills, [Skill { name, description, only_you: false }]);
+        let invalid =
+            |status: Status| assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
         let nowhere = ListSkillsRequest { on: on("far"), dir: String::new(), harness: None };
         invalid(daemon.list_skills(nowhere).await.unwrap_err());
-
-        let typed = "cargo test".to_owned();
-        let session = "work".to_owned();
-        let printed = KeepPrintedRequest { on: on("far"), session, pane: 2, typed };
-        let kept = daemon.keep_printed(printed).await.unwrap().into_inner().printed;
-        let Some(keep_printed_response::Printed::After(File { path, lines: 1, left_out: 0 })) = kept
-        else {
-            panic!("kept {kept:?}");
-        };
-        assert!(Path::new(&path).starts_with(far.runtime.path().canonicalize().unwrap()), "{path}");
-        assert_eq!(fs::read_to_string(&path).unwrap(), "error[E0308]\n");
-        let (session, typed) = ("work".to_owned(), String::new());
-        let untyped = KeepPrintedRequest { on: on("far"), session, pane: 2, typed };
-        invalid(daemon.keep_printed(untyped).await.unwrap_err());
+        let unreached =
+            ListSkillsRequest { on: on("nowhere"), dir: dir_of_skills.clone(), harness: None };
+        let unreached = daemon.list_skills(unreached).await.unwrap_err();
+        assert_eq!(unreached.code(), Code::Unavailable, "{unreached:?}");
 
         let checks = |url: &str| KeepChecksRequest { on: on("far"), url: url.to_owned() };
         let kept = daemon.keep_checks(checks("https://github.com/o/n/pull/328")).await;
@@ -836,163 +740,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let again = format!("api --hostname github.com {logs}");
         assert_eq!(fetching(), [fetched.clone(), fetched, again]);
 
-        let dump = |pane| DumpScreenRequest { on: on("far"), session: "work".to_owned(), pane };
-        let asked = daemon.dump_screen(dump(Some(2))).await.unwrap().into_inner();
-        let shown = daemon.dump_screen(dump(None)).await.unwrap().into_inner();
-        let screen = "~> cargo test\nerror[E0308]\n~>\n";
-        assert_eq!((asked.pane, asked.screen.as_str()), (2, screen));
-        assert_eq!((shown.pane, shown.screen.as_str()), (4, screen));
-        let nameless = DumpScreenRequest { session: String::new(), ..dump(None) };
-        invalid(daemon.dump_screen(nameless).await.unwrap_err());
-
-        let work = dir.path().join("work");
-        fs::create_dir(&work).unwrap();
-        let work = work.to_str().unwrap().to_owned();
-        let before = SystemTime::now();
-        let named = NameSessionRequest { on: on("far"), dir: Some(work.clone()) };
-        let named = daemon.name_session(named).await.unwrap().into_inner();
-        assert_eq!((named.name.as_str(), named.dir.as_deref()), ("work-2", Some(work.as_str())));
-        let named_at = named.named_at.map(|at| SystemTime::try_from(at).unwrap());
-        assert!(named_at.is_some_and(|at| at >= before && at <= SystemTime::now()), "{named_at:?}");
-        let relative = NameSessionRequest { on: on("far"), dir: Some("work".to_owned()) };
-        invalid(daemon.name_session(relative).await.unwrap_err());
-        let homes = [(on("far"), &far), (None, &here)];
-        for (on, host) in homes {
-            let home = NameSessionRequest { on, dir: None };
-            let named = daemon.name_session(home).await.unwrap().into_inner();
-            let name = host.home.path().file_name().and_then(|name| name.to_str());
-            assert_eq!(Some(named.name.as_str()), name);
-            assert_eq!(named.dir.as_deref(), host.home.path().to_str());
-        }
-        let (at, to, cwd) = ("work".to_owned(), named.name.clone(), Some("work".to_owned()));
-        invalid(daemon.start(StartRequest { on: on("far"), at, to, cwd }).await.unwrap_err());
-        let (at, cwd) = ("work".to_owned(), Some(work.clone()));
-        daemon.start(StartRequest { on: on("far"), at, to: named.name, cwd }).await.unwrap();
-        let started = format!("--session=work action switch-session --cwd={work} -- work-2");
-        assert_eq!(far.zellij.went().last(), Some(&started));
-        assert_eq!(here.zellij.went(), [] as [String; 0]);
-
-        let check = |on, name: &str| CheckNameRequest { on, name: name.to_owned() };
-        let asked = SystemTime::now();
-        let free = daemon.check_name(check(on("far"), "fresh")).await.unwrap().into_inner();
-        let named_at = free.named_at.map(|at| SystemTime::try_from(at).unwrap());
-        assert!(named_at.is_some_and(|at| at >= asked && at <= SystemTime::now()), "{named_at:?}");
-        let runs = daemon.check_name(check(on("far"), "work")).await.unwrap_err();
-        assert_eq!(runs.code(), Code::FailedPrecondition, "{runs:?}");
-        assert!(runs.message().contains("work runs already"), "{runs:?}");
-        daemon.check_name(check(None, "work")).await.unwrap();
-        invalid(daemon.check_name(check(on("far"), "a/b")).await.unwrap_err());
-
-        let closes = |session: &str| {
-            let session = session.to_owned();
-            ClosesRequest { on: on("far"), session, pane: 4 }
-        };
-        let two = daemon.closes(closes("two")).await.unwrap().into_inner().closes;
-        let tab = closes_response::Tab { id: 3, panes: vec![4] };
-        assert_eq!(two, Some(closes_response::Closes::Tab(tab)));
-        let idle = daemon.closes(closes("idle")).await.unwrap().into_inner().closes;
-        let whole = closes_response::Closes::Session(());
-        assert_eq!(idle, Some(whole));
-        let close = |session: &str, closes| {
-            let started_at = Some(SystemTime::UNIX_EPOCH.into());
-            let session = session.to_owned();
-            CloseRequest { on: on("far"), session, closes: Some(closes), started_at }
-        };
-        let pane = close_request::Closes::Pane;
-        let tab = |id, panes| close_request::Closes::Tab(closes_response::Tab { id, panes });
-        daemon.close(close("held", pane(4))).await.unwrap();
-        daemon.close(close("two", tab(3, vec![4]))).await.unwrap();
-        for (session, closes, why) in [
-            ("two", pane(4), "pane 4 would take its tab along now"),
-            ("two", tab(6, vec![5, 9]), "tab 6 holds other panes than it did"),
-            ("idle", tab(3, vec![4]), "tab 3 would take the session along now"),
-            ("two", pane(9), "pane 9 is gone"),
-        ] {
-            let stays = daemon.close(close(session, closes)).await.unwrap_err();
-            assert_eq!(stays.code(), Code::FailedPrecondition, "{stays:?}");
-            assert!(stays.message().contains(why), "{stays:?}");
-        }
-        invalid(daemon.close(close("two", tab(3, Vec::new()))).await.unwrap_err());
-        let none = CloseRequest { closes: None, ..close("two", pane(4)) };
-        invalid(daemon.close(none).await.unwrap_err());
-        let closed_there = [
-            "--session=held action close-pane --pane-id terminal_4",
-            "--session=two action close-tab-by-id 3",
-        ];
-        assert_eq!(far.zellij.closed(), closed_there);
-
-        let tabs = OtherTabsRequest { on: on("far"), session: "turning".to_owned(), pane: 4 };
-        let tabs = daemon.other_tabs(tabs).await.unwrap().into_inner().tabs;
-        assert_eq!(tabs, [other_tabs_response::Tab { pane: 5, name: String::new() }]);
-        let session = || "turning".to_owned();
-        let started_at = Some(SystemTime::UNIX_EPOCH.into());
-        let turn = TurnIntoPanesRequest {
-            on: on("far"),
-            session: session(),
-            pane: 4,
-            beside: 5,
-            started_at,
-        };
-        let came = daemon.turn_into_panes(turn).await.unwrap().into_inner().came;
-        let done = turn_into_panes_response::Came::Done(());
-        assert_eq!(came, Some(done));
-        let stacked = "--session=turning action stack-panes -- terminal_9 terminal_4";
-        assert_eq!(far.zellij.turned(), [stacked]);
-        assert_eq!(here.zellij.turned(), [] as [String; 0]);
-        let stand_in = "--session=turning action close-pane --pane-id terminal_9";
-        assert_eq!(far.zellij.closed()[2], stand_in);
-
-        let session = "held".to_owned();
-        let turn = TurnIntoTabRequest { on: on("far"), session, pane: 4, started_at };
-        let came = daemon.turn_into_tab(turn).await.unwrap().into_inner().came;
-        assert_eq!(came, Some(turn_into_tab_response::Came::NoClient(())));
-
-        let kill = |started_at: Option<_>| {
-            KillRequest { on: on("far"), session: "work".to_owned(), started_at }
-        };
-        invalid(daemon.kill(kill(None)).await.unwrap_err());
-        let held = |started_at: Option<_>| CloseRequest {
-            on: on("far"),
-            session: "work".to_owned(),
-            closes: Some(pane(4)),
-            started_at,
-        };
-        invalid(daemon.close(held(None)).await.unwrap_err());
-        let since = Some(SystemTime::UNIX_EPOCH.into());
-        let stays = daemon.close(held(since)).await.unwrap_err();
-        assert!(stays.message().contains("a session made since"), "{stays:?}");
-        daemon.kill(kill(work_started)).await.unwrap();
-        assert_eq!(far.zellij.closed()[3..], ["delete-session --force -- work"]);
-        assert_eq!(here.zellij.closed(), [] as [String; 0]);
-
-        far.keep("old");
-        let exited = |on| ListExitedRequest { on };
-        let listed = daemon.list_exited(exited(on("far"))).await.unwrap().into_inner();
-        let ago = Some(prost_types::Duration { seconds: 3723, nanos: 0 });
-        let old = list_exited_response::Exited { name: "old".to_owned(), ago };
-        assert_eq!(listed.exited, [old]);
-        let listed = daemon.list_exited(exited(None)).await.unwrap().into_inner();
-        assert_eq!(listed.exited, [] as [list_exited_response::Exited; 0]);
-        let kept = daemon.check_name(check(on("far"), "old")).await.unwrap_err();
-        assert_eq!(kept.code(), Code::FailedPrecondition, "{kept:?}");
-        assert!(kept.message().contains("zellij keeps old, which ended"), "{kept:?}");
-        let delete = |session: &str| {
-            DeleteExitedRequest { on: on("far"), session: session.to_owned() }
-        };
-        daemon.delete_exited(delete("old")).await.unwrap();
-        assert_eq!(far.zellij.closed()[4..], ["delete-session -- old"]);
-        let listed = daemon.list_exited(exited(on("far"))).await.unwrap().into_inner();
-        assert_eq!(listed.exited, [] as [list_exited_response::Exited; 0]);
-        invalid(daemon.delete_exited(delete("")).await.unwrap_err());
-        let rename = |to: &str| {
-            let session = "idle".to_owned();
-            RenameSessionRequest { on: on("far"), session, to: to.to_owned() }
-        };
-        daemon.rename_session(rename("rest")).await.unwrap();
-        assert_eq!(far.zellij.renamed(), ["--session=idle action rename-session -- rest"]);
-        invalid(daemon.rename_session(rename(&"long".repeat(16))).await.unwrap_err());
-        assert_eq!(here.zellij.renamed(), [] as [String; 0]);
-
         let (id, unwritten) =
             ("0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60", "9e8d7c6b-5a4f-4e3d-2c1b-0a9f8e7d6c5b");
         let project = far.home.path().join(".claude/projects/-w");
@@ -1018,14 +765,14 @@ fn claude_that_takes_turns(host: &Host) {
     let home = host.home.path().display();
     let text = format!(
         r#"cat > "{home}/words"
-{{ echo "cwd=$(pwd -P)"; echo "pane=${{LUNETA_PANE-unset}}"; echo "away=${{LUNETA_AWAY-unset}}"
+{{ echo "cwd=$(pwd -P)"
 echo "turn=${{LUNETA_TURN-unset}}"; echo "before=${{LUNETA_TURN_BEFORE-unset}}"
 resumed=none; for arg; do [ "$after" = --resume ] && resumed=$arg; after=$arg; done
 echo "resumed=$resumed"; echo "model=$2 $3"
 }} > "{home}/told"
 echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
 ran='{{"type":"assistant","parent_tool_use_id":null,"message":{{"content":[{{"type":"tool_use",'\
-'"id":"toolu_1","name":"Bash","input":{{"command":"luneta here"}}}}]}}}}'
+'"id":"toolu_1","name":"Bash","input":{{"command":"luneta agents"}}}}]}}}}'
 case "$(cat "{home}/words")" in
     *please-fail*)
         echo '{{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}}'
@@ -1034,10 +781,10 @@ case "$(cat "{home}/words")" in
     *please-get-stuck*) echo "$ran"; echo $$ > "{home}/stuck"; exec sleep 60 ;;
 esac
 echo "$ran"
-echo '{{"type":"result","subtype":"success","is_error":false,"result":"You are in work:2."}}'
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"No agent runs."}}'
 "#
     );
-    script(&host.zellij.bin().join("claude"), &text);
+    script(&host.bin().join("claude"), &text);
 }
 
 fn told(host: &Host) -> (Vec<String>, String) {
@@ -1064,12 +811,11 @@ async fn turn(
     }
 }
 
-fn ask(on: &str, cwd: Option<&Path>, words: &str, user: User, first: bool) -> AskRequest {
+fn ask(on: &str, cwd: Option<&Path>, words: &str, first: bool) -> AskRequest {
     let resumed = (!first).then(|| SessionId::parse("7c22").unwrap());
     let turn = Turn::new(255, (!first).then_some(10)).unwrap();
-    let row = "The row highlighted is session work.".to_owned();
-    let (cwd, pi) = (cwd.map(Path::to_owned), lunetad::Harness::Pi);
-    let asked = Asked::new(cwd, words, resumed, row, user, turn, pi).unwrap();
+    let row = "The row highlighted is project work.".to_owned();
+    let asked = Asked::new(cwd.map(Path::to_owned), words, resumed, row, turn).unwrap();
     asked.asked(Some(On { destination: on.to_owned() }))
 }
 
@@ -1077,13 +823,12 @@ fn ask(on: &str, cwd: Option<&Path>, words: &str, user: User, first: bool) -> As
 fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     claude_that_takes_turns(&far);
-    let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
     let dir = far.home.path().join("w");
     fs::create_dir(&dir).unwrap();
     let (dir_there, home_there) =
@@ -1093,54 +838,51 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let work = User::Pane { session: SessionName::running("work").unwrap(), pane: 2 };
-        let first = ask("far", Some(&dir), "where am I", work, true);
+        let first = ask("far", Some(&dir), "which agents run", true);
         let (steps, ended) = turn(&mut daemon, first).await;
-        let ran = Step::Ran { id: "toolu_1".to_owned(), command: "luneta here".to_owned() };
+        let ran = Step::Ran { id: "toolu_1".to_owned(), command: "luneta agents".to_owned() };
         let session = Step::Session(SessionId::parse("7c22").unwrap());
-        let said = Step::Said("You are in work:2.".to_owned());
+        let said = Step::Said("No agent runs.".to_owned());
         assert_eq!(steps, [session.clone(), ran.clone(), said.clone()]);
         ended.unwrap();
         let (told_there, words) = told(&far);
         assert_eq!(told_there, [
             format!("cwd={}", dir_there.display()),
-            "pane=work:2".to_owned(),
-            "away=unset".to_owned(),
             "turn=00000000000000ff".to_owned(),
             "before=unset".to_owned(),
             "resumed=none".to_owned(),
             "model=--model sonnet".to_owned(),
         ]);
-        let pi = "[luneta: start an agent in pi, unless the user names Claude Code.]";
-        assert_eq!(words, format!("[luneta: the user is in pane work:2.]\n{pi}\n\nwhere am I"));
+        assert_eq!(words, "which agents run");
 
-        let (steps, ended) = turn(&mut daemon, ask("far", None, "yes", User::Away, false)).await;
+        let (steps, ended) = turn(&mut daemon, ask("far", None, "yes", false)).await;
         assert_eq!(steps, [session.clone(), ran.clone(), said]);
         ended.unwrap();
         let (told_there, words) = told(&far);
-        assert_eq!(told_there[..6], [
+        assert_eq!(told_there[..4], [
             format!("cwd={}", home_there.display()),
-            "pane=unset".to_owned(),
-            "away=1".to_owned(),
             "turn=00000000000000ff".to_owned(),
             "before=000000000000000a".to_owned(),
             "resumed=7c22".to_owned(),
         ]);
-        assert!(words.starts_with("[luneta: the user is on another machine just now"), "{words}");
+        assert_eq!(words, "yes");
 
-        let failing = ask("far", None, "please-fail", User::Untold, true);
+        let failing = ask("far", None, "please-fail", true);
         let (steps, ended) = turn(&mut daemon, failing).await;
         assert_eq!(steps, std::slice::from_ref(&session));
         let failed = ended.unwrap_err();
         assert_eq!((failed.code(), failed.message()), (Code::FailedPrecondition, "Not logged in"));
 
-        let stuck = ask("far", None, "please-get-stuck", User::Untold, true);
+        let stuck = ask("far", None, "please-get-stuck", true);
         let mut steps = daemon.ask(stuck).await.unwrap().into_inner();
         for step in [session, ran] {
             assert_eq!(steps.message().await.unwrap().map(Step::of), Some(Ok(Some(step))));
         }
-        let stuck = fs::read_to_string(far.home.path().join("stuck")).unwrap();
-        let stuck = Pid::from_raw(stuck.trim().parse().unwrap()).unwrap();
+        let stuck = far.home.path().join("stuck");
+        let stuck = eventually("claude there says its pid", || {
+            fs::read_to_string(&stuck).ok().and_then(|pid| pid.trim().parse().ok())
+        });
+        let stuck = Pid::from_raw(stuck).unwrap();
         assert!(test_kill_process(stuck).is_ok());
         drop(steps);
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1151,14 +893,14 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
 
         let invalid =
             |status: Status| assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
-        let x = || ask("far", None, "x", User::Untold, true);
+        let x = || ask("far", None, "x", true);
         let relative = AskRequest { cwd: Some("w".to_owned()), ..x() };
         invalid(turn(&mut daemon, relative).await.1.unwrap_err());
         let blank = AskRequest { words: " ".to_owned(), ..x() };
         invalid(turn(&mut daemon, blank).await.1.unwrap_err());
         let forged = AskRequest { resumed: Some("--debug".to_owned()), ..x() };
         invalid(turn(&mut daemon, forged).await.1.unwrap_err());
-        let nowhere = turn(&mut daemon, ask("nowhere", None, "x", User::Untold, true)).await;
+        let nowhere = turn(&mut daemon, ask("nowhere", None, "x", true)).await;
         assert_eq!(nowhere.1.unwrap_err().code(), Code::Unavailable);
         assert!(!here.home.path().join("told").exists());
     });
@@ -1168,20 +910,19 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
 fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     claude_that_takes_turns(&far);
-    let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let started = Instant::now();
-        let slow = ask("far", None, "please-be-slow", User::Untold, true);
+        let slow = ask("far", None, "please-be-slow", true);
         let (steps, ended) = turn(&mut daemon, slow).await;
         ended.unwrap();
         assert_eq!(steps.len(), 3, "{steps:?}");
@@ -1194,7 +935,7 @@ fn claude_that_writes_issues(host: &Host) {
     let text = format!(
         r#"words=$(cat)
 printf '%s' "$words" > "{home}/told"
-{{ echo "cwd=$(pwd -P)"; echo "pane=${{ZELLIJ-unset}}"
+{{ echo "cwd=$(pwd -P)"; echo "pane=${{LUNETA_MUX_TERMINAL-unset}}"
 for arg; do case "$arg" in --*) echo "$arg";; esac; done
 }} > "{home}/wrote"
 handed=
@@ -1207,20 +948,19 @@ esac
 printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"{{}}","structured_output":{{"title":"A red button","body":"It is red.\nToo red.","label":"bug"}}}}'
 "#
     );
-    script(&host.zellij.bin().join("claude"), &text);
+    script(&host.bin().join("claude"), &text);
 }
 
 #[test]
 fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     claude_that_writes_issues(&far);
-    let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
     let dir = far.home.path().join("w");
     fs::create_dir(&dir).unwrap();
     let there = dir.canonicalize().unwrap().display().to_string();
@@ -1306,9 +1046,9 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
         let unread = unread.unwrap().into_inner().message().await.unwrap_err();
         assert_eq!(unread.code(), Code::Aborted, "{unread:?}");
         assert_eq!(unread.message(), r#"gh said "Created it", no issue's page"#);
-        fs::remove_file(far.zellij.bin().join("pulls/create-says")).unwrap();
+        fs::remove_file(far.bin().join("pulls/create-says")).unwrap();
 
-        fs::remove_file(far.zellij.bin().join("pulls/created")).unwrap();
+        fs::remove_file(far.bin().join("pulls/created")).unwrap();
         let unwritten = daemon.file_issue(file(on("far"), &dir, "please-fail")).await;
         let unwritten = unwritten.unwrap().into_inner().message().await.unwrap_err();
         assert_eq!(unwritten.code(), Code::FailedPrecondition, "{unwritten:?}");
@@ -1340,7 +1080,7 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
 fn another_machine_s_directories_are_listed_there() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let dir = tempfile::tempdir().unwrap();
     let (work, notes) = (dir.path().join("work"), dir.path().join("notes"));
     fs::create_dir(&work).unwrap();
@@ -1352,15 +1092,14 @@ fn another_machine_s_directories_are_listed_there() {
             script
         })
     };
-    script(&far.zellij.bin().join("zoxide"), &lists(&[&work, &notes]));
-    script(&here.zellij.bin().join("zoxide"), &lists(&["/here/only"]));
-    script(&far.zellij.bin().join("eza"), "echo \"far: $*\"\n");
-    script(&here.zellij.bin().join("eza"), "echo \"here: $*\"\n");
-    let _work = far.serve("work");
+    script(&far.bin().join("zoxide"), &lists(&[&work, &notes]));
+    script(&here.bin().join("zoxide"), &lists(&["/here/only"]));
+    script(&far.bin().join("eza"), "echo \"far: $*\"\n");
+    script(&here.bin().join("eza"), "echo \"here: $*\"\n");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
 
     let on = |destination: &str| Some(On { destination: destination.to_owned() });
     let folder = folder_in(here.runtime.path()).unwrap();
@@ -1370,7 +1109,7 @@ fn another_machine_s_directories_are_listed_there() {
         let listed = daemon.list_dirs(ListDirsRequest { on: on("far") }).await.unwrap();
         let named: Vec<(String, String)> =
             listed.into_inner().dirs.into_iter().map(|dir| (dir.path, dir.name)).collect();
-        let dirs = [(work.clone(), "work-2".to_owned()), (notes.clone(), "notes".to_owned())];
+        let dirs = [(work.clone(), "work".to_owned()), (notes.clone(), "notes".to_owned())];
         assert_eq!(named, dirs);
         let nowhere = daemon.list_dirs(ListDirsRequest { on: on("nowhere") }).await.unwrap_err();
         assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
@@ -1411,12 +1150,11 @@ async fn kept_image(
 fn an_image_is_kept_on_another_machine_through_the_bridge() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
-    let _work = far.serve("work");
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
 
     let on = |destination: &str| Some(On { destination: destination.to_owned() });
     let folder = folder_in(here.runtime.path()).unwrap();
@@ -1574,7 +1312,7 @@ fn clone_with_issue_7(host: &Host, scratch: &Path) -> PathBuf {
     git(&bare, &["remote", "add", "upstream", github]);
     git(&bare, &["config", &format!("url.{}.insteadOf", up.display()), github]);
     let main = clone.join("main").display().to_string();
-    script(&host.zellij.bin().join("zoxide"), &format!("echo '{main}'\n"));
+    script(&host.bin().join("zoxide"), &format!("echo '{main}'\n"));
     clone
 }
 
@@ -1582,16 +1320,15 @@ fn clone_with_issue_7(host: &Host, scratch: &Path) -> PathBuf {
 fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
     let clone = clone_with_issue_7(&far, &scratch);
     let main = clone.join("main").display().to_string();
-    let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1639,8 +1376,8 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
 fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
-    script(&far.zellij.bin().join("zoxide"), "exit 0\n");
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
+    script(&far.bin().join("zoxide"), "exit 0\n");
     far.gh.issue(8, "https://github.com/o/n/pull/8");
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
@@ -1655,11 +1392,10 @@ fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
     fs::write(&config, fs::read_to_string(&config).unwrap() + "[broken\n").unwrap();
     cloned_as_wt(&scratch, &scratch.join("up"), &by_wt);
     git(&by_wt.join(".bare"), &["remote", "add", "upstream", github]);
-    let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1711,13 +1447,13 @@ fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
 #[test]
 fn ssh_says_what_host_a_remote_names_and_is_asked_of_no_option() {
     let host = Host::new();
-    let runs = host.zellij.bin().join("ssh-runs");
+    let runs = host.bin().join("ssh-runs");
     let ssh = format!(
         "echo \"$*\" >> {}\nif [ \"$2\" = github-work ]; then echo 'hostname github.com'; else echo \"hostname $2\"; fi\n",
         quoted(&runs.display().to_string())
     );
-    script(&host.zellij.bin().join("ssh"), &ssh);
-    script(&host.zellij.bin().join("zoxide"), "exit 0\n");
+    script(&host.bin().join("ssh"), &ssh);
+    script(&host.bin().join("zoxide"), "exit 0\n");
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
     let clone = |name: &str, url: &str| {
@@ -1875,17 +1611,16 @@ fn w_leaves_the_worktree_where_it_is() {
 fn r_on_a_far_machine_s_pane_syncs_there_or_says_why_it_did_not() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
     let clone = clone_with_pull_7(&far, &scratch);
     let (up, feat) = (scratch.join("up"), clone.join("feat"));
     git(&clone.join(".bare"), &["worktree", "add", "-q", "--track", "-b", "feat", "../feat", "origin/feat"]);
-    let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
 
     let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
     let pane = links::Worked { pull: Some(link), ..pane_in(&feat) };
@@ -2178,42 +1913,19 @@ fn r_syncs_a_pull_request_from_a_fork_s_main() {
 }
 
 #[test]
-fn a_machine_that_made_the_worktree_and_went_no_further_says_so_apart() {
-    let host = Host::new();
-    let scratch = tempfile::tempdir().unwrap();
-    let scratch = scratch.path().canonicalize().unwrap();
-    let clone = clone_with_issue_7(&host, &scratch);
-    let _daemon = start(host.vars()).unwrap();
-    host.hide_kept_sessions();
-
-    let folder = folder_in(host.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
-        let asked = Pasted::new(Work::Link(issue), Vec::new()).asked(None);
-        let mut answer = daemon.paste(asked).await.unwrap().into_inner();
-        let why = answer.message().await.unwrap_err();
-        assert_eq!(why.code(), Code::Aborted, "{why:?}");
-    });
-    assert!(clone.join("issue-7").join(".git").is_file());
-}
-
-#[test]
 fn a_machine_whose_answer_stalls_may_have_made_the_worktree() {
     let here = Host::new();
     let far = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     ssh.reaches("far", far.vars());
     ssh.answers_through_a_cat("far");
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
     let clone = clone_with_issue_7(&far, &scratch);
-    let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -2233,7 +1945,7 @@ fn a_machine_whose_answer_stalls_may_have_made_the_worktree() {
 fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
     let (up, clone) = (scratch.join("up"), scratch.join("n"));
@@ -2246,11 +1958,10 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
     let plan = plan.display().to_string();
     git(&up, &["commit", "-q", "--allow-empty", "-m", "two"]);
     let tip = rev_parse(&up, "main");
-    let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -2358,7 +2069,7 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
 fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     far.gh.issue(8, "https://github.com/o/n/issues/8");
     far.gh.issue(9, "https://github.com/o/n/issues/9");
     far.gh.issue(10, "https://github.com/o/n/issues/10");
@@ -2367,11 +2078,10 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
     let clone = clone_with_issue_7(&far, &scratch);
     let (bare, main, moved) = (clone.join(".bare"), clone.join("main"), clone.join("issue-7"));
     git(&bare, &["worktree", "add", "-q", "../issue-7", "feat"]);
-    let _work = far.serve("work");
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
+    reached(&here, "far", |_| true);
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -2472,54 +2182,4 @@ fn rev_parse_verify(dir: &Path, what: &str) -> Option<String> {
         .output()
         .unwrap();
     said.status.success().then(|| String::from_utf8(said.stdout).unwrap().trim().to_owned())
-}
-
-#[test]
-fn a_tab_there_opens_alone_in_a_session_made_since() {
-    let here = Host::new();
-    let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
-    let _work = far.serve("work");
-    let laid = |id: u32, tab_id: u32| {
-        listed(id, "", (tab_id, ""), None)
-    };
-    far.zellij.list("work", &serde_json::json!([laid(10, 1), laid(11, 2)]));
-    far.zellij.clients("work", &[(1, "terminal_10")]);
-    far.zellij.opens_into("work", &serde_json::json!([laid(10, 1), laid(11, 2), laid(12, 3)]));
-    far.zellij.list("idle", &serde_json::json!([laid(13, 1)]));
-    let _far = start(far.vars()).unwrap();
-    hosts(&here, "far\n");
-    let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| !far.sessions.is_empty());
-
-    let folder = folder_in(here.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let alone_in = |session: &str, since: SystemTime| OpenRequest {
-            on: Some(On { destination: "far".to_owned() }),
-            session: session.to_owned(),
-            cwd: "/w/n/issue-7".to_owned(),
-            command: Vec::new(),
-            opens: Some(Opens::Tab(open_request::Tab {
-                name: Some("#7".to_owned()),
-                alone_since: Some(since.into()),
-            })),
-        };
-        let alone = |since| alone_in("work", since);
-        let made = daemon.open(alone(SystemTime::UNIX_EPOCH)).await.unwrap().into_inner();
-        assert_eq!((made.terminal, made.notes), (12, Vec::new()));
-        let closed = [1, 2].map(|tab| format!("--session=work action close-tab-by-id {tab}"));
-        assert_eq!(far.zellij.closed(), closed);
-        let later = SystemTime::now() + Duration::from_hours(1);
-        let kept = daemon.open(alone(later)).await.unwrap().into_inner();
-        let notes = vec!["work ran already, and keeps its tabs".to_owned()];
-        assert_eq!((kept.terminal, kept.notes), (12, notes));
-        assert_eq!(far.zellij.closed(), closed);
-        assert_eq!(here.zellij.closed(), [] as [String; 0]);
-        let idle = daemon.open(alone_in("idle", SystemTime::UNIX_EPOCH)).await.unwrap_err();
-        assert_eq!(idle.code(), Code::FailedPrecondition, "{idle:?}");
-        assert!(idle.message().contains("no client is in idle"), "{idle:?}");
-        assert_eq!(far.zellij.closed(), closed);
-    });
 }

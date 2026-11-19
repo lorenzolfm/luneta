@@ -123,24 +123,9 @@ pub struct OwnKey {
     pub made: OwnMade,
 }
 
-impl OwnKey {
-    pub fn of(own: &crate::api::OwnSession) -> Result<Self, String> {
-        let id = OwnId::new(own.id).ok_or("own: 0 is no session's id")?;
-        let made = own.made_at.ok_or_else(|| format!("own session {id} has no made_at"))?;
-        let made = OwnMade::read(made).map_err(|why| format!("own session {id}'s made_at: {why}"))?;
-        Ok(OwnKey { id, made })
-    }
-}
-
 impl From<TerminalKey> for crate::api::TerminalKey {
     fn from(key: TerminalKey) -> Self {
         crate::api::TerminalKey { id: key.id.get(), made_at: Some(key.made.into()) }
-    }
-}
-
-impl From<OwnKey> for crate::api::OwnSession {
-    fn from(key: OwnKey) -> Self {
-        crate::api::OwnSession { id: key.id.get(), made_at: Some(key.made.into()) }
     }
 }
 
@@ -154,21 +139,6 @@ impl OwnPane {
     #[must_use]
     pub fn new(session: OwnKey, pane: u32) -> Option<Self> {
         NonZeroU32::new(pane).map(|id| OwnPane { session, id })
-    }
-
-    pub fn of(own: &crate::api::Own) -> Result<Self, String> {
-        let pane = own.pane;
-        let none = || format!("own pane {pane} of no session");
-        let session = own.session.as_ref().ok_or_else(none)?;
-        let session = OwnKey::of(session).map_err(|why| format!("own pane {pane}: {why}"))?;
-        let zero = || format!("own session {}: 0 is no pane's id", session.id);
-        OwnPane::new(session, pane).ok_or_else(zero)
-    }
-}
-
-impl From<OwnPane> for crate::api::Own {
-    fn from(own: OwnPane) -> Self {
-        crate::api::Own { session: Some(own.session.into()), pane: own.id.get() }
     }
 }
 
@@ -230,27 +200,6 @@ mod tests {
         ];
         for environ in unnamed {
             assert_eq!(terminal_in(&environ), None, "{environ:?}");
-        }
-    }
-
-    #[test]
-    fn an_own_pane_said_reads_as_one_of_a_session_and_not_0() {
-        use crate::api::{Own, OwnSession};
-        let made = OwnMade::from_nanos(60_000_000_000);
-        let pane = OwnPane::new(OwnKey { id: OwnId::new(3).unwrap(), made }, 12).unwrap();
-        let said = Own::from(pane);
-        assert_eq!(OwnPane::of(&said), Ok(pane));
-        let session = said.session.unwrap();
-        let before_1970 = prost_types::Timestamp { seconds: -1, nanos: 0 };
-        let unread = [
-            Own { pane: 0, ..said },
-            Own { session: None, ..said },
-            Own { session: Some(OwnSession { id: 0, ..session }), ..said },
-            Own { session: Some(OwnSession { made_at: None, ..session }), ..said },
-            Own { session: Some(OwnSession { made_at: Some(before_1970), ..session }), ..said },
-        ];
-        for own in unread {
-            assert!(OwnPane::of(&own).is_err(), "{own:?}");
         }
     }
 }

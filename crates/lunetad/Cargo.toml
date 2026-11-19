@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 publish = false
-description = "The luneta daemon, and luneta: zellij beside a sidebar of the host, and the CLI that asks the daemon"
+description = "The luneta daemon, and luneta: its terminals beside a sidebar of the host, and the CLI that asks the daemon"
 
 [[bin]]
 name = "lunetad"

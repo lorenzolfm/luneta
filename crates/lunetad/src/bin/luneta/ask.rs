@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lunetad::asks::{self, Asked, Step, Turn, User};
+use lunetad::asks::{self, Asked, Step, Turn};
 use lunetad::transcripts::SessionId;
 use lunetad::Destination;
 use ratatui::buffer::Buffer;
@@ -11,7 +11,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
-use crate::agents::Harness;
 use crate::away::{self, Away};
 use crate::brief::{self, Asking};
 use crate::due::Due;
@@ -88,13 +87,6 @@ impl Ask {
         self.number
     }
 
-    pub fn machine(&self) -> Machine {
-        match &self.works {
-            Works::Here(_) => Machine::Local,
-            Works::There { on, .. } => Machine::Remote(on.clone()),
-        }
-    }
-
     pub fn key(&mut self, key: &KeyEvent) -> Keyed {
         let bare = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
         let control = key.modifiers == KeyModifiers::CONTROL;
@@ -130,7 +122,7 @@ impl Ask {
         self.typed.push_str(&text);
     }
 
-    pub fn send(&mut self, user: User, agents: Harness, events: &Sender<Event>) {
+    pub fn send(&mut self, events: &Sender<Event>) {
         if self.turn.is_some() {
             return;
         }
@@ -145,7 +137,7 @@ impl Ask {
         };
         let resumed = self.session.clone();
         let highlighted = self.highlighted.clone();
-        let asked = Asked::new(cwd, &words, resumed, highlighted, user, turn, agents);
+        let asked = Asked::new(cwd, &words, resumed, highlighted, turn);
         self.talk.push(Said::You(words));
         let asked = match asked {
             Ok(asked) => asked,
@@ -294,18 +286,17 @@ fn highlighted(target: &Target) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
-    use std::time::{Duration, SystemTime};
 
     use super::*;
     use crate::menu::{PaneRow, Ran};
     use crate::sidebar::{Listed, PaneKey, ProjectRow};
 
     fn listed() -> Listed {
-        Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+        Listed::new_project("luneta", 3)
     }
 
     fn project_on(on: Machine) -> Target {
-        let project = ProjectRow::of(Listed::new_project("luneta", 3)).unwrap();
+        let project = ProjectRow::of(Listed::new_project("luneta", 3));
         Target::Project(on, ProjectTarget { project, dir: "/w/luneta".to_owned() })
     }
 
@@ -316,7 +307,7 @@ mod tests {
     fn pane_row_on(machine: Machine) -> Target {
         let row = PaneRow {
             session: listed(),
-            pane: PaneKey::Zellij(4),
+            pane: PaneKey::terminal(4),
             terminal: None,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/ask".to_owned()),
@@ -497,7 +488,6 @@ mod tests {
         let top = |ask: &Ask| shown(ask, 40, 7)[1].clone();
         let pane = Ask::new(1, &pane_row(), Path::new("/w"));
         assert_eq!(pane.works, Works::Here(PathBuf::from("/w/luneta/main")));
-        assert_eq!(pane.machine(), Machine::Local);
         let row = "is view luneta:4, in /w/luneta/main, on branch feat/ask: \"this\"";
         assert!(pane.highlighted.contains(row), "{}", pane.highlighted);
         assert_eq!(top(&pane), "┌─ Ask ────────────────── luneta/main ─┐");
@@ -511,7 +501,6 @@ mod tests {
         };
         let pane = Ask::new(3, &pane_row_on(nixos()), Path::new("/w"));
         assert_eq!(pane.works, there(Some("/w/luneta/main")));
-        assert_eq!(pane.machine(), nixos());
         assert!(pane.highlighted.contains(row), "{}", pane.highlighted);
         assert_eq!(top(&pane), "┌─ Ask ───────── luneta/main on nixos ─┐");
         let session = Ask::new(4, &project_on(nixos()), Path::new("/w"));
@@ -529,7 +518,7 @@ mod tests {
         ask.works = Works::There { on: "nixos".parse().unwrap(), cwd: Some("w".to_owned()) };
         typed(&mut ask, "close it");
         let (events, _heard) = mpsc::channel();
-        ask.send(User::Untold, Harness::ClaudeCode, &events);
+        ask.send(&events);
         let wrong = "ask: cwd: w is no absolute path".to_owned();
         assert_eq!(ask.talk, [Said::You("close it".to_owned()), Said::Wrong(wrong)]);
         assert!(!ask.turning());

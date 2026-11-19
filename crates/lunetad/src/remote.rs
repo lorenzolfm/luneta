@@ -530,12 +530,10 @@ async fn watched(
         }
         let api::Host {
             version: _,
-            sessions,
             git_statuses,
             agents,
             unread,
             pull_requests,
-            unread_sockets,
             unread_files,
             remotes: _,
             unread_hosts: _,
@@ -543,12 +541,10 @@ async fn watched(
             projects,
         } = host;
         let host = remote::Host {
-            sessions,
             git_statuses,
             agents,
             unread,
             pull_requests,
-            unread_sockets,
             unread_files,
             sayings,
             projects,

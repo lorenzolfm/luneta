@@ -21,14 +21,6 @@ pub fn visited() -> Result<Vec<Dir>, String> {
     Ok(dirs_in(&listed))
 }
 
-pub fn visited_free() -> Result<Vec<Dir>, String> {
-    let visited = visited()?;
-    let sessions = names::named()?;
-    let names: Vec<&str> = sessions.iter().map(SessionName::as_str).collect();
-    let free = |dir: Dir| Dir { name: dir.name.free(&names), path: dir.path };
-    Ok(visited.into_iter().map(free).collect())
-}
-
 fn dirs_in(listed: &[u8]) -> Vec<Dir> {
     let dir = |line: &[u8]| {
         let path = Directory::parse(std::str::from_utf8(line).ok()?.to_owned()).ok()?;

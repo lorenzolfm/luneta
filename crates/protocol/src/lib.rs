@@ -3,7 +3,6 @@ pub mod github;
 pub mod release;
 pub mod said;
 pub mod shell;
-pub mod tab;
 pub mod unread;
 
 #[allow(
@@ -41,31 +40,6 @@ impl v1::Agent {
     pub fn at_a_prompt(&self) -> bool {
         let word = self.runs_in().prompt_word();
         word.is_some_and(|word| self.entrypoint.as_deref() == Some(word))
-    }
-
-    #[must_use]
-    pub fn zellij(&self) -> Option<&v1::Zellij> {
-        match &self.pane {
-            Some(v1::agent::Pane::Zellij(zellij)) => Some(zellij),
-            Some(v1::agent::Pane::Own(_) | v1::agent::Pane::Terminal(_)) | None => None,
-        }
-    }
-}
-
-impl v1::Session {
-    #[must_use]
-    pub fn multiplexer(&self) -> v1::session::Mux {
-        let (started_at, socket) = (self.started_at, self.socket);
-        self.mux.unwrap_or(v1::session::Mux::Zellij(v1::ZellijSession { started_at, socket }))
-    }
-
-    #[must_use]
-    pub fn started(&self) -> Option<std::time::SystemTime> {
-        let at = match self.multiplexer() {
-            v1::session::Mux::Zellij(zellij) => zellij.started_at,
-            v1::session::Mux::Own(own) => own.made_at,
-        };
-        std::time::SystemTime::try_from(at?).ok()
     }
 }
 

@@ -9,7 +9,7 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{file_text, moment, named_pid, nonempty, Agent, Harness, Status};
-use crate::mux::{self, Named};
+use crate::mux::{self, TerminalKey};
 use crate::watch::{self, Troubles};
 use crate::{log, process};
 
@@ -45,10 +45,10 @@ struct File {
     mode: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct Process {
     started: SystemTime,
-    pane: Option<Named>,
+    pane: Option<TerminalKey>,
 }
 
 pub struct AgentFiles {
@@ -112,7 +112,7 @@ impl AgentFiles {
                 continue;
             };
             let file = read(&path, &key.1, found.started);
-            processes.insert(key, found.clone());
+            processes.insert(key, found);
             match file {
                 Ok(Some(file)) => agents.push(agent(pid, file, found)),
                 Ok(None) => {

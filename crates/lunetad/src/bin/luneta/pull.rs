@@ -165,7 +165,6 @@ pub fn fetch_upstream(dir: &str, branch: &str) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::time::{Duration, SystemTime};
 
     use lunetad::Destination;
 
@@ -185,8 +184,8 @@ mod tests {
 
     fn pane(id: u32, dir: &str) -> Worked {
         let works = links::Worked { dir: dir.to_owned(), pull: None, here: false };
-        let session = Listed::new("main", SystemTime::UNIX_EPOCH + Duration::from_secs(1));
-        Worked { session, pane: PaneKey::Zellij(id), works }
+        let session = Listed::new_project("main", 1);
+        Worked { session, pane: PaneKey::terminal(id), works }
     }
 
     fn there(at: usize) -> links::Ready<usize> {
@@ -226,7 +225,7 @@ mod tests {
         let (found, asked) = asking(&link(), others, |_| Ok(there(0)));
         let Found { on, ready } = found.unwrap();
         assert_eq!((on, asked), (Machine::Local, vec![Machine::Local]));
-        assert_eq!(ready.at, At::Session((pane(1, "/m").session, PaneKey::Zellij(1))));
+        assert_eq!(ready.at, At::Session((pane(1, "/m").session, PaneKey::terminal(1))));
     }
 
     #[test]
@@ -241,7 +240,7 @@ mod tests {
         });
         let Found { on, ready } = found.unwrap();
         assert_eq!(on, Machine::Remote(vps()));
-        assert_eq!(ready.at, At::Session((pane(9, "/w").session, PaneKey::Zellij(9))));
+        assert_eq!(ready.at, At::Session((pane(9, "/w").session, PaneKey::terminal(9))));
         let order = vec![Machine::Local, Machine::Remote(far()), Machine::Remote(vps())];
         assert_eq!(asked, order);
     }

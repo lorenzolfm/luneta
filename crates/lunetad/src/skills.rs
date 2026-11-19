@@ -667,7 +667,7 @@ mod tests {
             let mut claude = Command::new("claude");
             for (key, _) in std::env::vars() {
                 let session = key.starts_with("CLAUDE") && key != "CLAUDE_CONFIG_DIR";
-                if session || key.starts_with("ZELLIJ") || key.starts_with("LUNETA") {
+                if session || key.starts_with("LUNETA") {
                     claude.env_remove(key);
                 }
             }

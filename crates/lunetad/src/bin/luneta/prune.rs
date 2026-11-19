@@ -13,17 +13,17 @@ use lunetad::Directory;
 
 use crate::away::{self, Away};
 use crate::commands;
-use crate::drive::{self, Agreed, PLANNED};
+use crate::agreed::{self, Agreed, PLANNED};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 
 pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode {
-    let turn = match drive::turn_here() {
+    let turn = match agreed::turn_here() {
         Ok(turn) => turn,
         Err(why) => return failed(&why),
     };
-    let dir = match drive::directory(repo) {
+    let dir = match agreed::directory(repo) {
         Ok(dir) => dir,
         Err(why) => return failed(&why),
     };

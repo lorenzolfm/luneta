@@ -1,42 +1,36 @@
 use std::error::Error;
 use std::future::Future;
 use std::io::{self, Read as _, Write as _};
-use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use clap::Subcommand;
-use luneta_protocol::github::{self, State, Verdict};
 use luneta_protocol::unread::Unread;
-use lunetad::api::agent::{self, Status as Reported};
-use lunetad::api::checkout::Head;
+use lunetad::api::agent::Status as Reported;
 use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::projects::Held;
 use lunetad::api::remote::Reached;
 use lunetad::api::say::Does;
-use lunetad::api::git_status::Stands;
 use lunetad::api::{
-    Agent, GitStatus, ListAgentsResponse, PullRequest, Say, SayRequest, Session, Status,
-    UnreadFile, Version, WatchRequest, Zellij,
+    Agent, ListAgentsResponse, Say, SayRequest, Status, Utterance, Version, WatchRequest,
 };
-use lunetad::asks::User;
 use lunetad::folder::SOCKET;
-use lunetad::mux::{OwnId, OwnPane, SessionName, TerminalKey, ZellijPane};
+use lunetad::mux::TerminalKey;
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
-use lunetad::sayings::{self, Asker, BYTES_MAX};
+use lunetad::sayings::BYTES_MAX;
 use lunetad::{release, Destination};
 use prost::Message as _;
 use tonic::transport::Channel;
 
+use crate::agreed::{self, Agreed};
 use crate::bridge;
 use crate::daemon::{self, Unreached};
-use crate::drive::{self, Address, Agreed, Opening, Turning};
 use crate::machines::{self, Added};
 use crate::prune;
 use crate::start;
 use crate::terminate;
-use crate::zellij::{self, Seat};
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -46,15 +40,10 @@ pub enum Command {
     )]
     Info,
     #[command(
-        about = "List the agents that run, and the pane each is in. Where no lunetad runs, it says \
-                 so and exits 5"
+        about = "List the agents that run, and the terminal each is in. Where no lunetad runs, it \
+                 says so and exits 5"
     )]
     Agents,
-    #[command(
-        about = "List the zellij sessions that run, their panes, and the git status of the folder \
-                 each pane works in. Where no lunetad runs, it says so and exits 5"
-    )]
-    Sessions,
     #[command(
         about = "Wait for the host to change, and write it out as the protocol encodes it, for a \
                  program to read. lunetad is started where none runs, and again where an older \
@@ -92,12 +81,6 @@ pub enum Command {
         destination: Destination,
     },
     #[command(
-        about = "Say which pane this runs in, as `<session>:<pane>`, by the name its session has \
-                 now: zellij's variables keep the name it had as the pane opened, and lunetad \
-                 follows a rename"
-    )]
-    Here,
-    #[command(
         about = "Start a worktree, and say its folder. A folder opens a worktree there, in \
                  the project it is in, or in a project made of it, named after it. A branch has \
                  a worktree made of it, as `wt add` does, in the clone wt made that this runs \
@@ -113,51 +96,6 @@ pub enum Command {
                     name goes before a branch of it"
         )]
         what: String,
-    },
-    #[command(about = "Open a pane, a tab or a session, as the menu's New group does")]
-    Open {
-        #[command(subcommand)]
-        what: Opening,
-    },
-    #[command(
-        about = "Take you to a session, or to a pane of one: the client that last typed in the \
-                 session this runs in, which zellij moves"
-    )]
-    Go {
-        #[arg(
-            value_parser = drive::address,
-            help = "`<session>` or `<session>:<pane>`, as `luneta agents` names them"
-        )]
-        to: Address,
-    },
-    #[command(
-        about = "Turn a pane into a tab, or a tab into panes of another, as the menu's Turn group \
-                 does. What runs in them runs on"
-    )]
-    Turn {
-        #[command(subcommand)]
-        what: Turning,
-    },
-    #[command(
-        about = "Close panes and delete sessions, as the menu's Delete group does. The panes of a \
-                 session close together: a tab goes once nothing left holds it open, and the \
-                 session once all its tabs do. Without `--yes`, say what would go and which \
-                 agents with it, and the plan to tell `--yes`, and close nothing"
-    )]
-    Close {
-        #[arg(
-            required = true,
-            value_parser = drive::address,
-            help = "Each `<session>` to delete, or `<session>:<pane>` to close"
-        )]
-        what: Vec<Address>,
-        #[arg(
-            long,
-            value_name = "PLAN",
-            value_parser = drive::agreed,
-            help = "Close them, while what would go is still the plan said as `PLAN`"
-        )]
-        yes: Option<Agreed>,
     },
     #[command(
         about = "Delete the worktrees of a repository whose pull requests are merged, with their \
@@ -175,7 +113,7 @@ pub enum Command {
         #[arg(
             long,
             value_name = "PLAN",
-            value_parser = drive::agreed,
+            value_parser = agreed::agreed,
             help = "Delete them, while what would go is still the plan said as `PLAN`"
         )]
         yes: Option<Agreed>,
@@ -193,7 +131,7 @@ pub enum Command {
         #[arg(
             long,
             value_name = "PLAN",
-            value_parser = drive::agreed,
+            value_parser = agreed::agreed,
             conflicts_with_all = ["here", "ending"],
             help = "End it all, while what would end is still the plan said as `PLAN`"
         )]
@@ -246,7 +184,6 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
     match command {
         Command::Info => ask(folder, daemon::of_any_build(folder), info),
         Command::Agents => ask(folder, daemon::running(folder), agents),
-        Command::Sessions => ask(folder, daemon::running(folder), sessions),
         Command::Watch { after } => {
             let current = async {
                 let current = daemon::current(folder).await.map_err(Unreached::Failed)?;
@@ -256,11 +193,6 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         },
         Command::Bridge => bridge::run(folder),
         Command::Ssh { destination } => ssh(destination, folder),
-        Command::Here => drive::here(folder),
-        Command::Open { what } => drive::open(what, folder),
-        Command::Go { to } => drive::go(to, folder),
-        Command::Turn { what } => drive::turn(what),
-        Command::Close { what, yes } => drive::close(what, *yes, folder),
         Command::Prune { repo, yes } => prune::run(repo.as_deref(), *yes, folder),
         Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
         Command::Terminate { yes, here, ending } => terminate::run(*yes, *here, *ending, folder),
@@ -296,7 +228,6 @@ where
 }
 
 fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
-    let mut untold = None;
     let does = if stop {
         Does::Stop(())
     } else {
@@ -307,29 +238,14 @@ fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
                 return ExitCode::FAILURE;
             },
         };
-        let seat = zellij::here().unwrap_or_else(|why| {
-            untold = Some(why);
-            None
-        });
-        let asker = match seat.map(asker_of).transpose() {
-            Ok(asker) => asker.flatten(),
-            Err(why) => {
-                eprintln!("luneta: speaker: {why}");
-                return ExitCode::FAILURE;
-            },
-        };
-        let utterance = sayings::asked(text, asker);
+        let utterance = Utterance { text };
         if now { Does::Now(utterance) } else { Does::InTurn(utterance) }
     };
     let say = Some(Say { does: Some(does) });
-    let asked = ask(folder, daemon::running(folder), |mut daemon| async move {
+    ask(folder, daemon::running(folder), |mut daemon| async move {
         daemon.say(SayRequest { say }).await?;
         Ok(())
-    });
-    if let (Some(why), true) = (untold, asked == ExitCode::SUCCESS) {
-        eprintln!("luneta: said from no pane, as it cannot tell the one it runs in: {why}");
-    }
-    asked
+    })
 }
 
 fn from_stdin() -> Result<String, String> {
@@ -338,19 +254,6 @@ fn from_stdin() -> Result<String, String> {
     let got = io::stdin().take(limit).read_to_end(&mut read);
     got.map_err(|error| format!("stdin does not read: {error}"))?;
     Ok(String::from_utf8_lossy(&read).into_owned())
-}
-
-fn asker_of(seat: Seat) -> Result<Option<Asker>, String> {
-    let asker = match seat {
-        Seat::Opened(ZellijPane { session, pane }) => {
-            let named = SessionName::running(&session)
-                .map_err(|why| format!("session {session:?}: {why}"))?;
-            Asker { named, pane }
-        },
-        Seat::Asked { user: User::Pane { session, pane }, .. } => Asker { named: session, pane },
-        Seat::Asked { user: User::Away | User::Untold, .. } => return Ok(None),
-    };
-    Ok(Some(asker))
 }
 
 fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
@@ -378,11 +281,13 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
     };
     match runtime.block_on(first_reach(daemon, destination)) {
         Ok(Some(Reached::Host(host))) => {
-            let sessions = match host.sessions.len() {
-                1 => "1 session".to_owned(),
-                n => format!("{n} sessions"),
-            };
-            println!("{destination}: reached, {sessions}");
+            match host.projects.and_then(|projects| projects.held) {
+                Some(Held::Kept(kept)) => match kept.projects.len() {
+                    1 => println!("{destination}: reached, 1 project"),
+                    n => println!("{destination}: reached, {n} projects"),
+                },
+                Some(Held::Unkept(_)) | None => println!("{destination}: reached"),
+            }
             ExitCode::SUCCESS
         },
         Ok(Some(Reached::Unreached(unreached))) => {
@@ -395,7 +300,7 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
             ExitCode::FAILURE
         },
         Ok(Some(Reached::Reaching(())) | None) => {
-            println!("{destination}: lunetad reaches it still; `luneta sessions` says how it went");
+            println!("{destination}: lunetad reaches it still; the sidebar says how it went");
             ExitCode::SUCCESS
         },
         Err(error) => {
@@ -488,53 +393,20 @@ async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-pub fn seat_of(agent: &Agent) -> Result<String, (String, String)> {
-    match &agent.pane {
-        Some(agent::Pane::Own(pane)) => {
-            OwnPane::of(pane).map(own_seat).map_err(|why| {
-                let session = pane.session.and_then(|session| OwnId::new(session.id));
-                (unnamed_own(session, NonZeroU32::new(pane.pane)), why)
-            })
-        },
-        Some(agent::Pane::Terminal(key)) => TerminalKey::of(key)
+fn seat_of(agent: &Agent) -> Result<String, (String, String)> {
+    match &agent.terminal {
+        Some(key) => TerminalKey::of(key)
             .map(terminal_seat)
             .map_err(|why| (format!("terminal {} (unread)", key.id), why)),
-        Some(agent::Pane::Zellij(_)) | None => Ok(seat(agent.zellij())),
+        None => Ok("-".to_owned()),
     }
 }
 
-pub fn terminal_seat(key: TerminalKey) -> String {
-    let seat = format!("terminal {}", key.id);
-    assert!(zellij::pane_address(&seat).is_err(), "{seat} reads as a pane");
-    seat
+fn terminal_seat(key: TerminalKey) -> String {
+    format!("terminal {}", key.id)
 }
 
-pub fn own_seat(pane: OwnPane) -> String {
-    unnamed_own(Some(pane.session.id), Some(pane.id))
-}
-
-fn unnamed_own(session: Option<OwnId>, pane: Option<NonZeroU32>) -> String {
-    let id = session.map_or_else(|| "?".to_owned(), |id| id.to_string());
-    let pane = pane.map_or_else(|| "?".to_owned(), |id| id.to_string());
-    let seat = format!("?:{pane} (own {id})");
-    assert!(zellij::pane_address(&seat).is_err(), "{seat} reads as a pane");
-    seat
-}
-
-pub fn seat(zellij: Option<&Zellij>) -> String {
-    match zellij {
-        None => "-".to_owned(),
-        Some(zellij) => match zellij.session.as_deref() {
-            None => format!("?:{} (named {})", zellij.pane, zellij.named),
-            Some(now) if now != zellij.named => {
-                format!("{now}:{} (named {})", zellij.pane, zellij.named)
-            },
-            Some(now) => format!("{now}:{}", zellij.pane),
-        },
-    }
-}
-
-pub fn line(seat: &str, width: usize, agent: &Agent) -> String {
+fn line(seat: &str, width: usize, agent: &Agent) -> String {
     let status = match &agent.status {
         Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
             Ok(Status::Busy) => "busy",
@@ -550,141 +422,8 @@ pub fn line(seat: &str, width: usize, agent: &Agent) -> String {
     format!("{seat:<width$}  {status:<7}  {:>7}  {label}", agent.pid)
 }
 
-pub fn unread_line(seat: &str, width: usize, file: &UnreadFile) -> String {
-    format!("{seat:<width$}  {:<7}  {:>7}  its session file does not read", "?", file.pid)
-}
-
 pub fn unread(unread: Unread) -> String {
     format!("{unread}, and its log says which")
-}
-
-async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
-    let asked = WatchRequest { after: None, kept: None, shown: false };
-    let host = daemon.watch(asked).await?.into_inner();
-    let here = as_rows(&host.sessions);
-    sessions_of(&here, &host.git_statuses, &host.pull_requests, "");
-    for remote in &host.remotes {
-        let machine = &remote.destination;
-        match &remote.reached {
-            Some(Reached::Host(host)) => {
-                println!("{machine}/");
-                let far = as_rows(&host.sessions);
-                sessions_of(&far, &host.git_statuses, &host.pull_requests, "  ");
-            },
-            Some(Reached::Reaching(())) => println!("{machine}/  (reaching it)"),
-            Some(Reached::Unreached(unreached)) => {
-                let since = unreached.since.and_then(|at| SystemTime::try_from(at).ok());
-                let long = since.and_then(|at| at.elapsed().ok());
-                let long = long.map(|long| format!(" for {}", span(long.as_secs())));
-                let why = &unreached.why;
-                println!("{machine}/  (unreached{}: {why})", long.unwrap_or_default());
-            },
-            None => println!("{machine}/  (does not read)"),
-        }
-    }
-    if host.unread_hosts.is_some_and(|unread| unread > 0) {
-        println!("(lunetad could not read all of luneta's hosts file: its log says why)");
-    }
-    Ok(())
-}
-
-fn as_rows(sessions: &[Session]) -> Vec<&Session> {
-    let mut rows: Vec<&Session> = sessions.iter().collect();
-    rows.sort_by_cached_key(|session| {
-        let started = session.started();
-        (started.is_none(), started, session.name.clone())
-    });
-    rows
-}
-
-fn sessions_of(
-    sessions: &[&Session],
-    git_statuses: &[GitStatus],
-    pull_requests: &[PullRequest],
-    indent: &str,
-) {
-    for session in sessions {
-        let Some(panes) = &session.panes else {
-            println!("{indent}{}  (no panes listed yet)", session.name);
-            continue;
-        };
-        println!("{indent}{}", session.name);
-        for pane in &panes.panes {
-            let at = format!("{}:{}", pane.tab_name, pane.id);
-            let Some(cwd) = pane.cwd.as_deref() else {
-                println!("{indent}  {at}  -");
-                continue;
-            };
-            let Some(status) = git_statuses.iter().find(|status| status.dir == cwd) else {
-                println!("{indent}  {at}  {cwd}");
-                continue;
-            };
-            let stands = stands(status).unwrap_or_else(|| "(does not read)".to_owned());
-            let pull_request = pull_requests.iter().find(|it| it.dir == cwd);
-            let pulled = pull_request.map(|it| {
-                format!("  {}", pulled(it).unwrap_or_else(|| "(does not read)".to_owned()))
-            });
-            let pulled = pulled.unwrap_or_default();
-            let repo = match status.stands.as_ref() {
-                Some(Stands::Checkout(checkout)) => checkout.repository.as_ref(),
-                Some(Stands::NoCheckout(it)) => Some(&it.repository),
-                Some(Stands::Outside(())) | None => None,
-            };
-            let repo = repo.map_or_default(|it| format!("  repo {it}"));
-            println!("{indent}  {at}  {cwd}  {stands}{pulled}{repo}");
-        }
-    }
-}
-
-fn stands(status: &GitStatus) -> Option<String> {
-    let checkout = match status.stands.as_ref()? {
-        Stands::NoCheckout(_) => return Some("no checkout".to_owned()),
-        Stands::Outside(()) => return Some("no repository".to_owned()),
-        Stands::Checkout(checkout) => checkout,
-    };
-    let head = checkout.head.as_ref()?;
-    let changes = checkout.changes?;
-    let mut said = vec![match head {
-        Head::Detached(()) => "detached".to_owned(),
-        Head::Branch(branch) => branch.name.clone(),
-    }];
-    let counts = [
-        (changes.conflicted, "conflicted"),
-        (changes.staged, "staged"),
-        (changes.modified, "modified"),
-        (changes.renamed, "renamed"),
-        (changes.deleted, "deleted"),
-        (changes.untracked, "untracked"),
-        (checkout.stashes, "stashed"),
-    ];
-    let some = counts.iter().filter(|(count, _)| *count > 0);
-    said.extend(some.map(|(count, kind)| format!("{count} {kind}")));
-    if let Head::Branch(branch) = head
-        && let Some(upstream) = branch.upstream
-    {
-        let (ahead, behind) = (upstream.ahead, upstream.behind);
-        said.extend((ahead > 0).then(|| format!("{ahead} ahead")));
-        said.extend((behind > 0).then(|| format!("{behind} behind")));
-    }
-    Some(said.join(", "))
-}
-
-fn pulled(pull_request: &PullRequest) -> Option<String> {
-    let pull_request = github::PullRequest::of_api(pull_request)?;
-    let state = match pull_request.state {
-        State::Open => "open",
-        State::Draft => "draft",
-        State::Merged => "merged",
-        State::Closed => "closed",
-    };
-    let checks = match pull_request.verdict() {
-        Some(Verdict::Failing) => ", checks failing",
-        Some(Verdict::Pending) => ", checks pending",
-        Some(Verdict::Passing) => ", checks passing",
-        None => "",
-    };
-    let old = if pull_request.stale { ", as gh said before it failed" } else { "" };
-    Some(format!("#{} {state}{checks}{old}", pull_request.number))
 }
 
 async fn watch(

@@ -9,7 +9,7 @@ use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Harness, Status};
 use serde_json::{json, Value};
 
-use crate::agents::{process, Host};
+use crate::agents::{process, terminal, Host, MADE_NANOS};
 use crate::host::{eventually, start, start_as, Daemon, Running, Vars, LUNETAD};
 
 const PI: &str = r#"
@@ -67,8 +67,8 @@ impl Pi {
             .args(["--input-type=module", "--eval", PI])
             .arg(extension(host))
             .arg(mode)
-            .env("ZELLIJ_SESSION_NAME", "work")
-            .env("ZELLIJ_PANE_ID", "3")
+            .env("LUNETA_MUX_TERMINAL", "3")
+            .env("LUNETA_MUX_TERMINAL_MADE", MADE_NANOS.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
         let mut process = Running::spawn(&mut command);
@@ -196,8 +196,7 @@ fn a_pi_agent_is_listed_by_what_its_extension_hears() {
     assert_eq!((idle.session_id.as_str(), idle.cwd.as_str()), ("first", "/home/you/work"));
     assert_eq!(idle.entrypoint.as_deref(), Some("tui"));
     assert!(idle.at_a_prompt());
-    let zellij = idle.zellij().cloned().unwrap();
-    assert_eq!((zellij.named.as_str(), zellij.pane), ("work", 3));
+    assert_eq!(idle.terminal, Some(terminal(3)));
     let since: SystemTime = idle.status_since.unwrap().try_into().unwrap();
     assert!(before - Duration::from_millis(1) <= since, "dated {since:?}, after {before:?}");
     assert!(idle.started_at.is_some());

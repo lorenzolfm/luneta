@@ -28,7 +28,7 @@ use crate::projects::{quoted, Opens, Subfolder, WORKTREES_MAX};
 use crate::shells::Doing;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
-use crate::{opens, Directory};
+use crate::{shells, Directory};
 
 pub const CLIENTS_MAX: usize = 64;
 
@@ -283,7 +283,7 @@ pub fn start(
         restore_attempts: Attempts::default(),
         told: None,
         troubles: Troubles::default(),
-        shell: opens::your_shell(),
+        shell: shells::your_shell(),
     };
     let thread = thread::Builder::new().name("layouts".to_owned());
     thread.spawn(move || run(layouts, &commands, sweep))?;

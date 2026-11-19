@@ -561,11 +561,11 @@ mod tests {
     use crate::sidebar::{Mark, PaneKey};
 
     fn work() -> Listed {
-        Listed::new("work", UNIX_EPOCH + Duration::from_secs(10))
+        Listed::new_project("work", 10)
     }
 
     fn place(pane: u32) -> PanePlace {
-        PanePlace { session: work(), pane: PaneKey::Zellij(pane) }
+        PanePlace { session: work(), pane: PaneKey::terminal(pane) }
     }
 
     fn seated(pid: u32, doing: Doing) -> Seated {

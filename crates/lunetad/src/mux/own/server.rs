@@ -23,8 +23,8 @@ use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
 use super::frames::colours;
-use super::TerminalKey;
-use crate::mux::{in_no_pane, Failure, Runs};
+use super::{in_no_pane, TerminalKey};
+use crate::mux::{Failure, Runs};
 use crate::projects::{Line, Size, VIEWS_MAX};
 use crate::shells::{Doing, Front};
 use crate::{folder, log, release, Directory};
@@ -283,7 +283,6 @@ fn opens(cwd: &Directory, runs: Runs<'_>) -> Result<api::Opens, Failure> {
             let unread = || Failure::Own(format!("the shell {} is not UTF-8", shell.display()));
             (program(vec![shell.to_str().ok_or_else(unread)?.to_owned()]), api::Ends::Closes)
         },
-        Runs::ZellijShell => (api::opens::Runs::Shell(api::Shell {}), api::Ends::Closes),
         Runs::Command { program: first, args } => {
             let argv = std::iter::once(first.to_owned()).chain(args.iter().cloned()).collect();
             (program(argv), api::Ends::Holds)

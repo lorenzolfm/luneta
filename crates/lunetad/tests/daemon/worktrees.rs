@@ -178,7 +178,7 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     host.gh.issue(7, "https://github.com/o/n/issues/7");
     let asked = host.home.path().join("claude-asked");
     let claude = format!("printf '%s\\n' \"$@\" > {}\nexec sleep 600\n", asked.display());
-    script(&host.zellij.bin().join("claude"), &claude);
+    script(&host.bin().join("claude"), &claude);
 
     let issue = clone.join("issue-7");
     assert_eq!(said(&started(host, &clone.join("main"), "#7", &[])), shown(&issue));

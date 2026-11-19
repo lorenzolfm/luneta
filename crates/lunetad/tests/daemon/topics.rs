@@ -28,7 +28,7 @@ esac
 "#,
         told = told.display()
     );
-    script(&host.zellij.bin().join("claude"), &text);
+    script(&host.bin().join("claude"), &text);
 }
 
 fn told_file(host: &Host) -> PathBuf {
@@ -41,7 +41,7 @@ fn calls(host: &Host) -> Vec<String> {
 }
 
 fn agent_at_work(host: &Host) -> Running {
-    let agent = process(Some(("work", 3)));
+    let agent = process(Some(3));
     let sessions = host.home.path().join(".claude/sessions");
     fs::create_dir_all(&sessions).unwrap();
     let file = file_for(ID, &agent, "busy").to_string();
@@ -131,8 +131,8 @@ fn a_window_here_has_another_machine_name_its_agents_topics() {
     let far = Host::new();
     claude_that_names_topics(&here);
     claude_that_names_topics(&far);
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
-    FakeSsh::new(far.zellij.bin()).reaches("here", here.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
+    FakeSsh::new(far.bin()).reaches("here", here.vars());
     hosts(&here, "far\n");
     hosts(&far, "here\n");
     let _here = start(here.vars()).unwrap();

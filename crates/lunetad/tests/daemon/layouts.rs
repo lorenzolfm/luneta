@@ -11,9 +11,9 @@ use lunetad::api::change_projects_request::{
 };
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::projects::Held;
-use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Worktree};
+use lunetad::api::{terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Worktree};
 use lunetad::api::daemon_client::DaemonClient;
-use lunetad::api::{frames_request, CheckNameRequest, On, FramesRequest};
+use lunetad::api::{frames_request, On, FramesRequest};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
 use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
@@ -30,7 +30,7 @@ use crate::agents::file_of_pid;
 use crate::host::{eventually, folder_in, script, start, Host};
 use crate::own::{self, Owned};
 use crate::projects::{self, asked, kept, project, worktree};
-use crate::remote::{hosts, reached, FakeSsh};
+use crate::remote::{hosts, reached, skills_on, FakeSsh};
 use crate::starts::{directory, makes_shells, mouse, projects_of, Window};
 use crate::worktree::{cloned_as_wt, git, worktree_added};
 
@@ -1123,7 +1123,7 @@ fn an_agent_resumes_when_lunetad_starts_with_no_mux() {
         file.replace(['\n', ' '], "").contains(&agent.replace(' ', "")).then_some(())
     });
     let asked = owned.host.home.path().join("claude-asked");
-    let claude = owned.host.zellij.bin().join("claude");
+    let claude = owned.host.bin().join("claude");
     script(&claude, &format!("echo \"$*\" > '{}'\nexec sleep 600\n", asked.display()));
     drop(shown);
     owned.stop_daemon();
@@ -1381,16 +1381,7 @@ fn an_agent_in_a_layout_s_terminal_is_there_by_the_terminal_s_key() {
     let agent = eventually("the agent is on the host", || {
         owned.host.host().agents.into_iter().find(|agent| agent.pid == pid)
     });
-    assert_eq!(agent.pane, Some(agent::Pane::Terminal(key)));
-    assert_eq!(agent.zellij(), None);
-    let host = owned.host.host();
-    let own_session = |session: &lunetad::api::Session| {
-        matches!(session.mux, Some(lunetad::api::session::Mux::Own(_)))
-    };
-    assert!(!host.sessions.iter().any(own_session), "{:?}", host.sessions);
-    let own_agent = |agent: &lunetad::api::Agent| matches!(agent.pane, Some(agent::Pane::Own(_)));
-    assert!(!host.agents.iter().any(own_agent), "{:?}", host.agents);
-    assert!(host.unread_files.iter().all(|file| file.own.is_none()), "{:?}", host.unread_files);
+    assert_eq!(agent.terminal, Some(key));
 }
 
 fn text_of(lines: &[Line]) -> Vec<String> {
@@ -1419,7 +1410,7 @@ fn a_layout_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
     let far = Owned::new();
     let worktree = WorktreeId::of(worktree_in_home(&far)).unwrap();
     let here = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.host.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.host.vars());
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
     reached(&here, "far", |_| true);
@@ -1468,7 +1459,7 @@ fn a_bridge_holds_its_most_shows_and_layouts_open_and_keeps_room_for_questions()
     let far = Owned::new();
     let worktree = worktree_in_home(&far);
     let here = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.host.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.host.vars());
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
     reached(&here, "far", |_| true);
@@ -1490,8 +1481,7 @@ fn a_bridge_holds_its_most_shows_and_layouts_open_and_keeps_room_for_questions()
         let refused = daemon.frames(tokio_stream::iter(words)).await.err();
         let refused = refused.expect("a layout past the most is refused");
         assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
-        let check = CheckNameRequest { on: on(), name: "fresh".to_owned() };
-        let checked = tokio::time::timeout(HEARD_IN, daemon.check_name(check)).await;
+        let checked = tokio::time::timeout(HEARD_IN, daemon.list_skills(skills_on(on()))).await;
         assert!(checked.as_ref().is_ok_and(Result::is_ok), "{checked:?}");
 
         drop(held.pop());
@@ -1588,7 +1578,7 @@ fn luneta_shows_another_machine_s_worktree_types_there_and_opens_a_terminal_besi
     let terminal = shown.open_running(&["sh", "-c", "echo far-is-$((6 * 7)); exec sh"]);
     drop(shown);
     let here = Owned::new();
-    FakeSsh::new(here.host.zellij.bin()).reaches("far", far.host.vars());
+    FakeSsh::new(here.host.bin()).reaches("far", far.host.vars());
     hosts(&here.host, "far\n");
     let mut window = Window::open(&here.host, &directory("project"), &[]);
     window.spot_of("faraway");

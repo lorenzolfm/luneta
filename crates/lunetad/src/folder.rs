@@ -226,31 +226,47 @@ mod tests {
         assert_eq!(runtime.unwrap(), Path::new("/run/user/1000/luneta"));
     }
 
+    fn dev_s_luneta_folder() -> String {
+        let nix = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nix/dev/installed.nix");
+        let nix = fs::read_to_string(nix).expect("dev's shell is in the source, as the build has it");
+        let (head, tail) = ("    luneta_folder() {\n", "\n    }\n");
+        let start = nix.find(head).expect("installed.nix defines luneta_folder");
+        let length = nix[start..].find(tail).expect("luneta_folder ends") + tail.len();
+        let text = &nix[start..start + length];
+        let bare = text.replace("''${", "").replace("${name}", "");
+        assert!(!bare.contains("''"), "luneta_folder escapes only ${{ for nix: {text}");
+        assert!(!bare.contains("${"), "luneta_folder takes only name from nix: {text}");
+        text.replace("''${", "${").replace("${name}", "install")
+    }
+
     #[test]
-    fn the_fish_hook_names_the_folder_lunetad_finds() {
-        let hook = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shell/luneta.fish");
+    fn dev_names_the_folder_lunetad_finds() {
+        let function = dev_s_luneta_folder();
         let path = std::env::var_os("PATH").unwrap_or_default();
         for set in [
             vec![],
             vec!["XDG_RUNTIME_DIR=/run/user/1000"],
             vec!["XDG_RUNTIME_DIR=/run/user/1000/", "TMPDIR=/tmp/a"],
+            vec!["XDG_RUNTIME_DIR=/run/user/1000//"],
             vec!["XDG_RUNTIME_DIR=run", "TMPDIR=/tmp/a"],
             vec!["XDG_RUNTIME_DIR=", "TMPDIR=/tmp/a"],
             vec!["TMPDIR=/tmp/a"],
         ] {
-            let mut fish = std::process::Command::new("fish");
-            fish.args(["--no-config", "-c", "source $argv[1]; __luneta_folder"]).arg(&hook);
-            fish.env_clear().env("PATH", &path);
+            let mut bash = std::process::Command::new("bash");
+            bash.args(["--noprofile", "--norc", "-euo", "pipefail", "-c"]);
+            bash.arg(format!("{function}luneta_folder\n"));
+            bash.env_clear().env("PATH", &path);
             for entry in &set {
                 let (name, value) = entry.split_once('=').unwrap();
-                fish.env(name, value);
+                bash.env(name, value);
             }
-            let said = fish.output().expect("fish runs, as the devshell and the build have it");
+            let said = bash.output().expect("bash runs, as the devshell and the build have it");
             let stderr = String::from_utf8_lossy(&said.stderr);
-            assert!(said.status.success() && stderr.is_empty(), "{set:?}: {stderr}");
-            let named = String::from_utf8(said.stdout).unwrap();
-            let named = Path::new(named.strip_suffix('\n').unwrap());
-            assert_eq!(named, find_in(&environ(&set)).unwrap(), "{set:?}");
+            assert!(said.status.success(), "{set:?}: {stderr}");
+            assert!(stderr.is_empty(), "{set:?}: {stderr}");
+            let named = said.stdout.strip_suffix(b"\n").expect("luneta_folder ends its line");
+            let found = find_in(&environ(&set)).unwrap();
+            assert_eq!(OsStr::from_bytes(named), found.as_os_str(), "{set:?}");
         }
     }
 }
