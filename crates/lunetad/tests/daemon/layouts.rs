@@ -955,7 +955,7 @@ fn a_project_closes_with_each_worktree_s_terminals_and_one_with_none_is_forgotte
 }
 
 #[test]
-fn a_close_lunetad_cannot_keep_once_its_terminals_closed_says_it_may_be_made() {
+fn a_close_lunetad_cannot_keep_is_in_doubt_only_once_the_mux_closed_a_terminal() {
     let changed = "{\"version\": 10, \"projects\": []}\n";
     for closing in ["view", "worktree", "project"] {
         let owned = Owned::new();
@@ -993,6 +993,16 @@ fn a_close_lunetad_cannot_keep_once_its_terminals_closed_says_it_may_be_made() {
         eventually(&format!("{closing}: its terminal leaves the mux"), left);
         assert_eq!(fs::read_to_string(&file).unwrap(), changed, "{closing}: the file is left");
     }
+    let owned = Owned::new();
+    let project = project_in_home(&owned);
+    let worktree = worktree(&owned.host, project, &work_folder(&owned));
+    assert!(watched(&owned, worktree).is_empty(), "a folder's own worktree opens no terminal");
+    fs::write(kept(&owned.host), changed).unwrap();
+    let worktrees = vec![worktree];
+    let close = Change::CloseProject(CloseProject { project, worktrees, seen: Vec::new() });
+    let refused = asked(&owned.host, close).unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "it closed nothing: {refused:?}");
+    assert!(!refused.message().contains(" closed, and "), "{}", refused.message());
 }
 
 #[test]

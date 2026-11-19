@@ -700,10 +700,11 @@ impl Layouts {
             let changed = format!("project {project}'s worktrees or terminals are not those seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
         }
-        self.close_terminals(&terminals)?;
-        let closed = self.store.closed(Closing::Project(project));
-        let unwritten = closed.map_err(half_closed(format!("project {project}'s terminals")))?;
-        if let Some(why) = unwritten {
+        let mux_closed = self.close_terminals(&terminals)?;
+        let kept = self.store.closed(Closing::Project(project));
+        let what = format!("project {project}'s terminals");
+        let kept = if mux_closed { kept.map_err(half_closed(what)) } else { kept };
+        if let Some(why) = kept? {
             self.unwritten(&why);
         }
         let projects = self.store.projects().expect("projects just changed are kept");
@@ -730,10 +731,11 @@ impl Layouts {
         }
         let most = LAYOUT_VIEWS_MAX;
         assert!(terminals.len() <= most, "a layout holds at most {most} terminals");
-        self.close_terminals(&terminals)?;
-        let closed = self.store.closed(Closing::Worktree(worktree));
-        let unwritten = closed.map_err(half_closed(format!("worktree {worktree}'s terminals")))?;
-        if let Some(why) = unwritten {
+        let mux_closed = self.close_terminals(&terminals)?;
+        let kept = self.store.closed(Closing::Worktree(worktree));
+        let what = format!("worktree {worktree}'s terminals");
+        let kept = if mux_closed { kept.map_err(half_closed(what)) } else { kept };
+        if let Some(why) = kept? {
             self.unwritten(&why);
         }
         self.forget_closed(&terminals);
@@ -751,33 +753,36 @@ impl Layouts {
         Ok(None)
     }
 
-    fn close_terminals(&mut self, terminals: &[TerminalViewId]) -> Result<(), Failed> {
+    fn close_terminals(&mut self, terminals: &[TerminalViewId]) -> Result<bool, Failed> {
         assert!(terminals.len() <= VIEWS_MAX, "at most {VIEWS_MAX} views are kept");
         let unclosed = |failure: Failure| Failed::Unclosed(failure.to_string());
         let unseen = terminals.iter().any(|terminal| !self.known.contains_key(terminal));
         let tags = if unseen { self.mux.tags().map_err(unclosed)? } else { Vec::new() };
         let mut done: Vec<TerminalViewId> = Vec::with_capacity(terminals.len());
+        let mut mux_closed = false;
         for terminal in terminals {
             let known = self.known.get(terminal).map(|known| known.key);
             let found = || {
                 let found = tags.iter().find(|(tag, _)| tagged(tag) == Some(terminal.view()));
                 found.map(|(_, key)| *key)
             };
-            if let Some(key) = known.or_else(found)
-                && let Err(failure) = self.mux.closed(key)
-            {
-                for closed in done {
-                    if let Err(failed) = self.closed(closed.view()) {
-                        let why = failed.said();
-                        self.troubles.say(format!("terminal {closed} closed, and stays: {why}"));
+            if let Some(key) = known.or_else(found) {
+                if let Err(failure) = self.mux.closed(key) {
+                    for closed in done {
+                        if let Err(failed) = self.closed(closed.view()) {
+                            let why = failed.said();
+                            let stays = format!("terminal {closed} closed, and stays: {why}");
+                            self.troubles.say(stays);
+                        }
                     }
+                    return Err(unclosed(failure));
                 }
-                return Err(unclosed(failure));
+                mux_closed = true;
             }
             done.push(*terminal);
         }
         assert_eq!(done, terminals, "each terminal is closed in the mux, in order");
-        Ok(())
+        Ok(mux_closed)
     }
 
     fn forget_closed(&mut self, terminals: &[TerminalViewId]) {
