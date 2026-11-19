@@ -114,6 +114,8 @@ const LABEL: usize = 3 + MARK + 1 + icons::WIDTH + 1;
 
 const WORKTREE: usize = 4;
 
+const NAME_KEPT: usize = 12;
+
 const LONG: Duration = Duration::from_secs(1);
 
 const NO_HERE_VIEW: &str =
@@ -574,7 +576,7 @@ enum Row {
     Worktree {
         machine: Machine,
         place: WorktreePlace,
-        name: String,
+        named: Named,
         missing: bool,
         hits: Vec<usize>,
         under: Under,
@@ -583,7 +585,6 @@ enum Row {
         waiting: usize,
         dot: bool,
         busy: bool,
-        checkout: Option<Checkout>,
     },
     View {
         machine: Machine,
@@ -629,6 +630,44 @@ struct Checkout {
     status: String,
     changed: Option<Changed>,
     pull_request: Option<Numbered>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Named {
+    Unbranched(String),
+    Branch(Checkout),
+    Apart { name: String, checkout: Checkout },
+}
+
+impl Named {
+    fn of(name: String, checkout: Option<Checkout>) -> Named {
+        match checkout {
+            None => Named::Unbranched(name),
+            Some(checkout) if checkout.branch == name => Named::Branch(checkout),
+            Some(checkout) => Named::Apart { name, checkout },
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Named::Unbranched(name) | Named::Apart { name, .. } => name,
+            Named::Branch(checkout) => &checkout.branch,
+        }
+    }
+
+    fn checkout(&self) -> Option<&Checkout> {
+        match self {
+            Named::Unbranched(_) => None,
+            Named::Branch(checkout) | Named::Apart { checkout, .. } => Some(checkout),
+        }
+    }
+
+    fn height(&self) -> usize {
+        match self {
+            Named::Unbranched(_) | Named::Branch(_) => 1,
+            Named::Apart { .. } => 2,
+        }
+    }
 }
 
 fn changed_shown(changed: Changed) -> (Vec<Span<'static>>, usize) {
@@ -695,8 +734,8 @@ impl Row {
 
     fn height(&self) -> usize {
         match self {
-            Row::Worktree { checkout: Some(_), .. } => 2,
-            _ => 1,
+            Row::Worktree { named, .. } => named.height(),
+            Row::Machine { .. } | Row::Project { .. } | Row::View { .. } => 1,
         }
     }
 
@@ -2531,7 +2570,7 @@ impl Sidebar {
                         rows.push(Row::Worktree {
                             machine: machine.clone(),
                             place: worktree.place.clone(),
-                            name: worktree.name.clone(),
+                            named: Named::of(worktree.name.clone(), checkout),
                             missing: worktree.seen == projects::Seen::Missing,
                             hits: worktree_hits.unwrap_or_default(),
                             under,
@@ -2540,7 +2579,6 @@ impl Sidebar {
                             waiting: tally.waiting,
                             dot: tally.dots > 0,
                             busy: tally.busy > 0,
-                            checkout,
                         });
                         if let Some(found) = worktree_found {
                             found_at(worktree_at, found, &mut weigh);
@@ -2959,14 +2997,14 @@ impl Sidebar {
     fn highlighted_link(&self) -> Result<Link, String> {
         let row = self.cursor.as_ref().and_then(|spot| self.row_of(spot));
         let checked_out = |row: &Row| match row {
-            Row::Worktree { checkout: Some(checkout), .. } => Some(checkout.clone()),
+            Row::Worktree { named, .. } => named.checkout().cloned(),
             Row::View { .. } => self.row_of(&self.worktree_of(&row.spot())?).and_then(|at| {
-                let Row::Worktree { checkout, .. } = &self.rows[at] else {
+                let Row::Worktree { named, .. } = &self.rows[at] else {
                     return None;
                 };
-                checkout.clone()
+                named.checkout().cloned()
             }),
-            Row::Machine { .. } | Row::Project { .. } | Row::Worktree { .. } => None,
+            Row::Machine { .. } | Row::Project { .. } => None,
         };
         let checkout = row.and_then(|at| checked_out(&self.rows[at]));
         let Some(Checkout { pull_request: Some(numbered), .. }) = checkout else {
@@ -4333,6 +4371,7 @@ impl Sidebar {
             let background = on.map(|(_, _, background)| *background);
             let RowLines { lines: row_drawn, number, cuts: row_cuts } =
                 row_lines(row, width, frame, now);
+            assert_eq!(row_drawn.len(), row.height(), "a row draws the lines it takes");
             if !lifted
                 && let Some(number) = number
             {
@@ -5062,19 +5101,25 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             }
             RowLines { lines: vec![Line::from(spans)], number: None, cuts }
         },
-        Row::Worktree {
-            name, missing, hits, under, here, colour, waiting, dot, busy, checkout, ..
-        } => {
+        Row::Worktree { named, missing, hits, under, here, colour, waiting, dot, busy, .. } => {
             let folded = *under == Under::Folded;
             let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
             let gone = if *missing { MISSING } else { "" };
-            let fixed = WORKTREE + gone.width() + reserve + 1;
-            let room = width.saturating_sub(fixed);
+            let name = named.name();
+            let line_room = width.saturating_sub(WORKTREE + gone.width() + reserve + 1);
+            let beside = match named {
+                Named::Branch(checkout) => Some(Beside::fitting(checkout, name, line_room)),
+                Named::Unbranched(_) | Named::Apart { .. } => None,
+            };
+            let held = beside.as_ref().map_or(0, Beside::width);
+            let status = beside.as_ref().map_or("", |beside| beside.status.as_str());
+            let room = line_room.saturating_sub(beside.as_ref().map_or(0, Beside::taken));
             let style = Style::new().fg(*colour).add_modifier(Modifier::BOLD);
             let (shown, wide) = lit(name, room, Keep::Start, hits, style);
             let mut cuts: Vec<CutAt> = cut_at(0, WORKTREE, name, room).into_iter().collect();
-            let gap = width.saturating_sub(WORKTREE + wide + gone.width() + reserve + 1);
+            let taken = WORKTREE + wide + gone.width() + held + status.width() + reserve + 1;
+            let gap = width.saturating_sub(taken);
             let mut spans = vec![
                 margin(*here),
                 Span::raw(" "),
@@ -5083,22 +5128,28 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             ];
             spans.extend(shown);
             spans.push(Span::styled(gone, Style::new().fg(ERROR)));
-            spans.push(Span::raw(" ".repeat(gap)));
+            let mut number = None;
+            if let Some(beside) = beside {
+                let start: usize = spans.iter().map(Span::width).sum();
+                number = beside.number_at(0, start);
+                spans.extend(beside.spans);
+                spans.push(Span::raw(" ".repeat(gap)));
+                spans.push(Span::raw(beside.status));
+            } else {
+                spans.push(Span::raw(" ".repeat(gap)));
+            }
             if let Some(badge) = badge {
                 spans.push(Span::raw(" "));
                 spans.push(badge);
             }
             let mut lines = vec![Line::from(spans)];
-            let mut number = None;
-            if let Some(checkout) = checkout {
+            if let Named::Apart { name, checkout } = named {
+                assert_ne!(name, &checkout.branch, "a name apart is not its branch");
                 let at = lines.len();
-                let (drawn, columns, branch_room) =
-                    checkout_line(*here, Span::raw(" "), checkout, width);
+                let (drawn, numbered, branch_room) = checkout_line(*here, checkout, at, width);
                 lines.push(drawn);
                 cuts.extend(cut_at(at, LABEL, &checkout.branch, branch_room));
-                let link = checkout.pull_request.as_ref().and_then(Numbered::link);
-                let number_at = |(columns, link)| NumberAt { line: at, columns, link };
-                number = columns.zip(link).map(number_at);
+                number = numbered;
             }
             RowLines { lines, number, cuts }
         },
@@ -5247,48 +5298,113 @@ fn gutter(bracket: Option<(Bracket, Color)>) -> Span<'static> {
     Span::styled(glyph, Style::new().fg(colour))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Keeps {
+    All,
+    NumberAndStatus,
+    Number,
+    Nothing,
+}
+
+impl Keeps {
+    const WIDEST_FIRST: [Keeps; 4] =
+        [Keeps::All, Keeps::NumberAndStatus, Keeps::Number, Keeps::Nothing];
+
+    fn changed(self) -> bool {
+        match self {
+            Keeps::All => true,
+            Keeps::NumberAndStatus | Keeps::Number | Keeps::Nothing => false,
+        }
+    }
+
+    fn number(self) -> bool {
+        match self {
+            Keeps::All | Keeps::NumberAndStatus | Keeps::Number => true,
+            Keeps::Nothing => false,
+        }
+    }
+
+    fn status(self) -> bool {
+        match self {
+            Keeps::All | Keeps::NumberAndStatus => true,
+            Keeps::Number | Keeps::Nothing => false,
+        }
+    }
+}
+
+struct Beside<'a> {
+    spans: Vec<Span<'static>>,
+    number: Option<(Range<usize>, &'a Link)>,
+    status: String,
+}
+
+impl<'a> Beside<'a> {
+    fn of(checkout: &'a Checkout, keeps: Keeps) -> Beside<'a> {
+        let mut spans = Vec::new();
+        if let Some(changed) = checkout.changed.filter(|_| keeps.changed()) {
+            spans.push(Span::raw(" "));
+            spans.extend(changed_shown(changed).0);
+        }
+        let mut number = None;
+        if let Some(numbered) = checkout.pull_request.as_ref().filter(|_| keeps.number()) {
+            spans.push(Span::raw(" "));
+            let start: usize = spans.iter().map(Span::width).sum();
+            let shown = Span::styled(numbered.shown(), Style::new().fg(numbered.colour));
+            let columns = start..start + shown.width();
+            number = numbered.link().map(|link| (columns, link));
+            spans.push(shown);
+            spans.extend(numbered.checks.map(|checks| verdict_mark(checks, numbered.stale)));
+        }
+        let status = if keeps.status() { checkout.status.clone() } else { String::new() };
+        Beside { spans, number, status }
+    }
+
+    fn fitting(checkout: &'a Checkout, name: &str, room: usize) -> Beside<'a> {
+        let kept = name.width().min(NAME_KEPT);
+        let mut widest_first = Keeps::WIDEST_FIRST.into_iter();
+        let keeps = widest_first.find(|keeps| Beside::of(checkout, *keeps).taken() + kept <= room);
+        Beside::of(checkout, keeps.unwrap_or(Keeps::Nothing))
+    }
+
+    fn width(&self) -> usize {
+        self.spans.iter().map(Span::width).sum()
+    }
+
+    fn taken(&self) -> usize {
+        let status = if self.status.is_empty() { 0 } else { self.status.width() + 1 };
+        self.width() + status
+    }
+
+    fn number_at(&self, at: usize, start: usize) -> Option<NumberAt<'a>> {
+        let (columns, link) = self.number.as_ref()?;
+        let columns = start + columns.start..start + columns.end;
+        Some(NumberAt { line: at, columns, link })
+    }
+}
+
 fn checkout_line(
     here: bool,
-    gutter: Span<'static>,
     checkout: &Checkout,
+    at: usize,
     width: usize,
-) -> (Line<'static>, Option<Range<usize>>, usize) {
+) -> (Line<'static>, Option<NumberAt<'_>>, usize) {
+    let beside = Beside::of(checkout, Keeps::All);
+    let held = beside.width();
     let status = &checkout.status;
-    let changed = checkout.changed.map(changed_shown);
-    let number = checkout
-        .pull_request
-        .as_ref()
-        .map(|numbered| Span::styled(numbered.shown(), Style::new().fg(numbered.colour)));
-    let numbered = checkout.pull_request.as_ref();
-    let mark = numbered.and_then(|it| Some(verdict_mark(it.checks?, it.stale)));
-    let held = changed.as_ref().map_or(0, |(_, wide)| wide + 1)
-        + number.as_ref().map_or(0, |number| number.content.width() + 1)
-        + mark.as_ref().map_or(0, Span::width);
-    let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
-    let room = width.saturating_sub(LABEL + held + reserve + 1);
+    let room = width.saturating_sub(LABEL + beside.taken() + 1);
     let branch = cut(&checkout.branch, room);
     let gap = width.saturating_sub(LABEL + cells(&branch) + held + status.width() + 1);
     let mut spans = vec![
         margin(here),
-        gutter,
-        Span::raw(" ".repeat(LABEL - 2)),
+        Span::raw(" ".repeat(LABEL - 1)),
         Span::styled(branch, Style::new().fg(gruvbox::GREY)),
     ];
-    let mut columns = None;
-    if let Some((shown, _)) = changed {
-        spans.push(Span::raw(" "));
-        spans.extend(shown);
-    }
-    if let Some(number) = number {
-        spans.push(Span::raw(" "));
-        let start: usize = spans.iter().map(Span::width).sum();
-        columns = Some(start..start + number.width());
-        spans.push(number);
-        spans.extend(mark);
-    }
+    let start: usize = spans.iter().map(Span::width).sum();
+    let number = beside.number_at(at, start);
+    spans.extend(beside.spans);
     spans.push(Span::raw(" ".repeat(gap)));
-    spans.push(Span::raw(status.clone()));
-    (Line::from(spans), columns, room)
+    spans.push(Span::raw(beside.status));
+    (Line::from(spans), number, room)
 }
 
 pub fn cut(text: &str, room: usize) -> String {
@@ -7343,6 +7459,72 @@ mod tests {
         assert_eq!(mark(9, "●"), gruvbox::YELLOW);
         assert_eq!(mark(12, "✓"), gruvbox::GREEN);
         assert_eq!(mark(24, "●"), gruvbox::GREY);
+    }
+
+    #[test]
+    fn a_worktree_named_after_its_branch_takes_one_line_folded_or_not() {
+        let mut sidebar = fresh();
+        let branched = worktree_of(31, "issue-489", "/w/issue-489", &[1]);
+        let renamed = worktree_of(32, "tidy", "/w/fix", &[2]);
+        let projects = vec![a_project(7, "luneta", vec![branched, renamed])];
+        let mut host = Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) };
+        let name = Said::new("issue-489".to_owned()).expect("a branch's name");
+        let head = Head::Branch { name, upstream: None, changed: Changed::new(120, 34) };
+        let changes = Changes { modified: 1, ..Changes::default() };
+        let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
+        host.git_statuses.push(status.to_api("/w/issue-489"));
+        let number = NonZeroU32::new(538).expect("a pull request's number");
+        let url = Some(LINK.replace("246", "538"));
+        let (state, checks) = (State::Open, None);
+        let pull_request = PullRequest { number, state, url, checks, stale: false };
+        host.pull_requests.push(pull_request.to_api("/w/issue-489"));
+        let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
+        checked_out(statuses, pulls, "/w/fix", "fix", Some((246, State::Open, Some(LINK))));
+        sidebar.heard(host);
+
+        let one = "  ▾ issue-489 +120 -34 #538  !";
+        let lines = screen(&mut sidebar, false, 32, 12);
+        let tidy = ["  ▾ tidy", "       fix #246", "     \u{e795} w/fix"];
+        assert_eq!(lines[5..10], [&[one, "     \u{e795} w/issue-489"][..], &tidy[..]].concat());
+        let area = Rect::new(0, 0, 32, 12);
+        let mut buffer = Buffer::empty(area);
+        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        let columns = |y: u16, number: &str| {
+            let cells: Vec<&str> = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
+            let start = cells.windows(number.len()).position(|it| it.concat() == number);
+            let start = u16::try_from(start.expect(number)).unwrap();
+            (start..start + u16::try_from(number.len()).unwrap()).collect::<Vec<_>>()
+        };
+        assert_eq!(number_spot(&drawn, 5), columns(5, "#538"));
+        assert_eq!(number_spot(&drawn, 8), columns(8, "#246"));
+        let on = drawn.at(Position::new(columns(8, "#246")[0], 8));
+        assert_eq!(on, Some(Hit::Number(link())));
+        let project = project_row("luneta", 7);
+        let view = |id| ViewPlace::new(listed("luneta", 7), ViewKey::terminal(id));
+        let view = |id| go_here(Place::View(view(id)));
+        let worktree = |id| {
+            let worktree = WorktreeId::of(id).unwrap();
+            go_here(Place::Worktree(WorktreePlace { project: project.clone(), worktree }))
+        };
+        assert_eq!(click(&mut sidebar, 10, 6, area), view(1));
+        assert_eq!(click(&mut sidebar, 10, 8, area), worktree(32));
+        assert_eq!(click(&mut sidebar, 10, 9, area), view(2));
+
+        sidebar.focus(Keys::Sidebar);
+        let place = |id| {
+            let worktree = WorktreeId::of(id).unwrap();
+            Spot::Local(Place::Worktree(WorktreePlace { project: project.clone(), worktree }))
+        };
+        sidebar.cursor = Some(place(31));
+        type_in(&mut sidebar, " ");
+        sidebar.cursor = Some(place(32));
+        type_in(&mut sidebar, " ");
+        let lines = screen(&mut sidebar, false, 32, 12);
+        let folded = ["  ▸ issue-489 +120 -34 #538  !", "  ▸ tidy", "       fix #246", ""];
+        assert_eq!(lines[5..9], folded);
+        assert_eq!(screen(&mut sidebar, false, 22, 12)[5], "  ▸ issue-489 #538 !");
+        assert_eq!(screen(&mut sidebar, false, 20, 12)[5], "  ▸ issue-489 #538");
+        assert_eq!(screen(&mut sidebar, false, 16, 12)[5], "  ▸ issue-489");
     }
 
     #[test]
