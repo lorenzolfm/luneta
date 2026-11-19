@@ -66,7 +66,6 @@ pkgs.writeShellApplication {
   name = "dev";
   meta.description = "luneta build recipes on the flake-pinned toolchain";
   passthru.commands = {
-    lint = command (import ./commands/lint.nix args);
     clippy-cross = command (import ./commands/clippy.nix args).cross;
   };
   text = ''

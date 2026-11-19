@@ -254,7 +254,6 @@ message CloseRequest {
     ClosesResponse.Tab tab = 4;
   }
   google.protobuf.Timestamp started_at = 5;
-  reserved 6, 7;
 }
 
 message OtherTabsRequest {
@@ -311,7 +310,6 @@ message KillRequest {
   On on = 1;
   string session = 2;
   google.protobuf.Timestamp started_at = 3;
-  reserved 4, 5;
 }
 
 message ListExitedRequest {
@@ -358,7 +356,6 @@ message AskRequest {
     UserPane pane = 6;
     google.protobuf.Empty away = 7;
   }
-  reserved 11;
   fixed64 turn = 8;
   optional fixed64 before = 9;
   optional Harness agents = 10;
@@ -403,9 +400,9 @@ message PasteRequest {
   On on = 1;
   oneof work {
     string link = 2;
-    File file = 4;
+    File file = 3;
   }
-  repeated Worked worked = 3;
+  repeated Worked worked = 4;
   bool at_head = 5;
   bool reads_moved_off = 6;
 
@@ -481,7 +478,6 @@ message Say {
 message Utterance {
   string text = 1;
   optional Zellij speaker = 2;
-  reserved 3;
 }
 
 message SayRequest {
@@ -503,15 +499,15 @@ message Remote {
   }
 
   message Host {
-    repeated Session sessions = 2;
-    repeated WorkTree work_trees = 3;
-    repeated Agent agents = 4;
-    uint32 unread = 5;
-    repeated PullRequest pull_requests = 6;
-    optional uint32 unread_sockets = 7;
-    repeated UnreadFile unread_files = 8;
-    repeated Saying sayings = 11;
-    Projects projects = 12;
+    repeated Session sessions = 1;
+    repeated WorkTree work_trees = 2;
+    repeated Agent agents = 3;
+    uint32 unread = 4;
+    repeated PullRequest pull_requests = 5;
+    optional uint32 unread_sockets = 6;
+    repeated UnreadFile unread_files = 7;
+    repeated Saying sayings = 8;
+    Projects projects = 9;
   }
 
   message Unreached {
@@ -540,10 +536,9 @@ message Session {
   Clients clients = 4;
   uint64 socket = 5;
   oneof mux {
-    ZellijSession zellij = 7;
-    OwnSession own = 8;
+    ZellijSession zellij = 6;
+    OwnSession own = 7;
   }
-  reserved 6;
 }
 
 message OwnSession {
@@ -605,9 +600,9 @@ message Shell {
     google.protobuf.Timestamp at = 2;
     oneof ending {
       int32 status = 3;
-      google.protobuf.Empty resumed = 5;
+      google.protobuf.Empty resumed = 4;
     }
-    google.protobuf.Duration took = 4;
+    google.protobuf.Duration took = 5;
   }
 
   message Stopped {
@@ -722,25 +717,23 @@ message Agent {
   string cwd = 3;
   oneof status {
     Status known_status = 4;
-    string other_status = 10;
+    string other_status = 5;
   }
-  google.protobuf.Timestamp status_since = 5;
-  google.protobuf.Timestamp started_at = 6;
-  Name name = 7;
-  optional string entrypoint = 8;
+  google.protobuf.Timestamp status_since = 6;
+  google.protobuf.Timestamp started_at = 7;
+  Name name = 8;
+  optional string entrypoint = 9;
   oneof pane {
-    Zellij zellij = 9;
-    Own own = 16;
-    TerminalKey terminal = 17;
+    Zellij zellij = 10;
+    Own own = 11;
+    TerminalKey terminal = 12;
   }
   oneof waiting_for {
-    WaitingFor known_waiting_for = 11;
-    string other_waiting_for = 12;
+    WaitingFor known_waiting_for = 13;
+    string other_waiting_for = 14;
   }
-  optional Harness harness = 13;
-  reserved 14;
-  reserved "review";
-  optional string topic = 15;
+  optional Harness harness = 15;
+  optional string topic = 16;
 }
 
 enum Harness {
@@ -781,9 +774,8 @@ enum NameSource {
 }
 
 message Own {
-  OwnSession session = 3;
+  OwnSession session = 1;
   uint32 pane = 2;
-  reserved 1;
 }
 
 message Zellij {
@@ -955,24 +947,21 @@ message ChangeProjectsRequest {
   oneof change {
     AddProject add_project = 2;
     AddWorkstream add_workstream = 3;
-    RenameProject rename_project = 4;
-    RenameWorkstream rename_workstream = 5;
-    ForgetProject forget_project = 8;
-    ForgetWorkstream forget_workstream = 9;
-    WorkstreamAt workstream_at = 10;
-    RenameTerminal rename_terminal = 11;
-    CloseWorkstream close_workstream = 12;
-    ReorderProjects reorder_projects = 15;
-    ReorderWorkstreams reorder_workstreams = 16;
-    CloseProject close_project = 17;
-    Start start = 18;
-    Pull pull = 19;
-    Bring bring = 20;
-    Join join = 22;
+    WorkstreamAt workstream_at = 4;
+    Start start = 5;
+    Join join = 6;
+    Pull pull = 7;
+    RenameProject rename_project = 8;
+    RenameWorkstream rename_workstream = 9;
+    RenameTerminal rename_terminal = 10;
+    ReorderProjects reorder_projects = 11;
+    ReorderWorkstreams reorder_workstreams = 12;
+    ForgetProject forget_project = 13;
+    ForgetWorkstream forget_workstream = 14;
+    CloseProject close_project = 15;
+    CloseWorkstream close_workstream = 16;
+    Bring bring = 17;
   }
-
-  reserved 6, 7, 13, 14, 21;
-  reserved "move_project", "move_workstream", "widen_project";
 
   message AddProject {
     string dir = 1;
@@ -985,24 +974,6 @@ message ChangeProjectsRequest {
     optional string name = 3;
   }
 
-  message RenameProject {
-    fixed64 project = 1;
-    string to = 2;
-  }
-
-  message RenameWorkstream {
-    fixed64 workstream = 1;
-    optional string to = 2;
-  }
-
-  message ForgetProject {
-    fixed64 project = 1;
-  }
-
-  message ForgetWorkstream {
-    fixed64 workstream = 1;
-  }
-
   message WorkstreamAt {
     fixed64 project = 1;
     string folder = 2;
@@ -1013,6 +984,10 @@ message ChangeProjectsRequest {
     optional string name = 2;
   }
 
+  message Join {
+    string folder = 1;
+  }
+
   message Pull {
     string holder = 1;
     string folder = 2;
@@ -1020,20 +995,19 @@ message ChangeProjectsRequest {
     string name = 4;
   }
 
-  message RenameTerminal {
-    fixed64 terminal = 1;
+  message RenameProject {
+    fixed64 project = 1;
+    string to = 2;
+  }
+
+  message RenameWorkstream {
+    fixed64 workstream = 1;
     optional string to = 2;
   }
 
-  message CloseWorkstream {
-    fixed64 workstream = 1;
-    repeated fixed64 seen = 2;
-  }
-
-  message CloseProject {
-    fixed64 project = 1;
-    repeated fixed64 workstreams = 2;
-    repeated fixed64 seen = 3;
+  message RenameTerminal {
+    fixed64 terminal = 1;
+    optional string to = 2;
   }
 
   message ReorderProjects {
@@ -1047,29 +1021,39 @@ message ChangeProjectsRequest {
     repeated fixed64 seen = 3;
   }
 
+  message ForgetProject {
+    fixed64 project = 1;
+  }
+
+  message ForgetWorkstream {
+    fixed64 workstream = 1;
+  }
+
+  message CloseProject {
+    fixed64 project = 1;
+    repeated fixed64 workstreams = 2;
+    repeated fixed64 seen = 3;
+  }
+
+  message CloseWorkstream {
+    fixed64 workstream = 1;
+    repeated fixed64 seen = 2;
+  }
+
   message Bring {
     fixed64 workstream = 1;
     TerminalKey from = 2;
-  }
-
-  message Join {
-    string folder = 1;
-
-    reserved 2, 3;
-    reserved "clone", "project";
   }
 }
 
 message ChangeProjectsResponse {
   oneof made {
-    fixed64 project = 3;
-    fixed64 workstream = 4;
-    fixed64 found = 5;
-    fixed64 taken = 6;
+    fixed64 project = 1;
+    fixed64 workstream = 2;
+    fixed64 found = 3;
+    fixed64 taken = 4;
   }
-  Version kept = 2;
-
-  reserved 1;
+  Version kept = 5;
 }
 
 message ShowRequest {
@@ -1102,10 +1086,10 @@ message ShowRequest {
     oneof beside {
       google.protobuf.Empty largest = 1;
       Towards towards = 2;
-      google.protobuf.Empty focused = 4;
-      google.protobuf.Empty alone = 5;
+      google.protobuf.Empty focused = 3;
+      google.protobuf.Empty alone = 4;
     }
-    repeated string argv = 3;
+    repeated string argv = 5;
   }
 
   message Focus {
@@ -1117,13 +1101,11 @@ message ShowRequest {
   }
 
   message Resize {
-    reserved 2;
-    reserved "grow";
     oneof sides {
       Direction direction = 1;
-      google.protobuf.Empty every = 3;
+      google.protobuf.Empty every = 2;
     }
-    Growth growth = 4;
+    Growth growth = 3;
   }
 
   message Move {
@@ -1186,13 +1168,12 @@ message ShowResponse {
   }
 
   message Laid {
-    reserved 4, 5;
     fixed64 workstream = 1;
     ShowRequest.Size size = 2;
     repeated Pane panes = 3;
     oneof shown {
-      fixed64 tiled = 6;
-      fixed64 full = 7;
+      fixed64 tiled = 4;
+      fixed64 full = 5;
     }
   }
 
