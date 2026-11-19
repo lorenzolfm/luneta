@@ -14,6 +14,7 @@ mod checks;
 mod clipboard;
 mod close;
 mod commands;
+mod copied;
 mod daemon;
 mod desktop;
 mod dictation;

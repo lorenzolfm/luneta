@@ -29,6 +29,10 @@ impl Sweep {
         self.to = kept(to, within);
     }
 
+    pub fn last_y(self) -> u16 {
+        self.ends().1.y
+    }
+
     fn ends(self) -> (Position, Position) {
         if (self.from.y, self.from.x) <= (self.to.y, self.to.x) {
             (self.from, self.to)

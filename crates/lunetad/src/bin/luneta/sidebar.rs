@@ -40,6 +40,7 @@ use crate::aloud;
 use crate::brief::{Brief, Note, Over, Transcript};
 use crate::checks;
 use crate::close::{self, Act, Deletes, Plan, Scope, Subject, Untold};
+use crate::copied::Copied;
 use crate::folds::{Fold, Folds};
 use crate::gruvbox;
 use crate::icons;
@@ -1248,7 +1249,7 @@ pub struct Sidebar {
     laid: Layout,
     room: usize,
     notice: Option<String>,
-    copied: Option<(NonZeroU32, SystemTime)>,
+    copied: Option<(Copied, SystemTime)>,
     image_going: Option<Destination>,
     aloud: Option<aloud::Shown>,
     aloud_buttons: Spots<aloud::Button>,
@@ -1323,8 +1324,20 @@ struct Layout {
     area: Rect,
     top: usize,
     rows: Vec<(Spot, usize)>,
-    bottom: usize,
+    notes_y: u16,
     notes: Vec<String>,
+}
+
+impl Layout {
+    fn keeps(&self, sweep: Sweep, laid: &Layout) -> bool {
+        let rows_stay = self.area == laid.area && self.top == laid.top && self.rows == laid.rows;
+        let notes_stay = self.notes_y == laid.notes_y && self.notes == laid.notes;
+        match (rows_stay, notes_stay) {
+            (true, true) => true,
+            (true, false) => sweep.last_y() < self.notes_y.min(laid.notes_y),
+            (false, _) => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2860,7 +2873,7 @@ impl Sidebar {
                 if let Some(Pending::Group { key, .. }) = pending
                     && let Some(action) = menu::in_group(key, c) =>
             {
-                return self.row_action(action, now);
+                return self.row_action(action);
             },
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
@@ -2943,9 +2956,9 @@ impl Sidebar {
         })
     }
 
-    fn yank(&mut self, now: SystemTime) -> Asked {
+    fn yank(&mut self) -> Asked {
         match self.highlighted_link() {
-            Ok(link) => self.copy(link, now),
+            Ok(link) => Asked::Copy(link),
             Err(why) => {
                 self.notify(why);
                 Asked::Nothing
@@ -2953,14 +2966,9 @@ impl Sidebar {
         }
     }
 
-    fn copy(&mut self, link: Link, now: SystemTime) -> Asked {
-        self.copied = Some((link.number(), now));
-        Asked::Copy(link)
-    }
-
-    fn row_action(&mut self, action: Action, now: SystemTime) -> Asked {
+    fn row_action(&mut self, action: Action) -> Asked {
         match action {
-            Action::YankPull => self.yank(now),
+            Action::YankPull => self.yank(),
             Action::OpenPull => self.browse(),
             Action::OpenWorktree => self.open_worktree(),
             other => unreachable!("{other:?} is in a row group and has no handler"),
@@ -2987,10 +2995,14 @@ impl Sidebar {
         }
     }
 
-    pub fn number_clicked(&mut self, link: Link, now: SystemTime) -> Asked {
+    pub fn number_clicked(&mut self, link: Link) -> Asked {
         self.notice = None;
         self.unpend();
-        self.copy(link, now)
+        Asked::Copy(link)
+    }
+
+    pub fn copied(&mut self, copied: Copied, now: SystemTime) {
+        self.copied = Some((copied, now));
     }
 
     fn selected_key(&mut self, key: &KeyEvent) -> Option<Asked> {
@@ -4239,10 +4251,11 @@ impl Sidebar {
             }
         }
         self.top = self.top.min(drawn.len().saturating_sub(1));
-        let bottom = notes.lines.len();
-        let laid = Layout { area, top: self.top, rows, bottom, notes: notes.said };
-        lines.extend(drawn.into_iter().skip(self.top).take(room));
         let notes_from = height.saturating_sub(notes.lines.len());
+        let notes_line = u16::try_from(notes_from).expect("the notes start inside the area");
+        let notes_y = area.y.checked_add(notes_line).expect("an area ends inside the screen");
+        let laid = Layout { area, top: self.top, rows, notes_y, notes: notes.said };
+        lines.extend(drawn.into_iter().skip(self.top).take(room));
         lines.resize(notes_from, Line::default());
         let goes_on = notes.goes_on.iter().map(|line| notes_from + line).collect();
         lines.extend(notes.lines);
@@ -4261,7 +4274,7 @@ impl Sidebar {
             }
         }
         let inside = inside(area);
-        if matches!(&self.moving, Moving::Swept(_, under) if *under != laid) {
+        if matches!(&self.moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, &laid)) {
             self.moving = Moving::Still;
         }
         if let Moving::Sweeping(sweep) | Moving::Swept(sweep, _) = &self.moving {
@@ -4283,7 +4296,7 @@ impl Sidebar {
         let width = usize::from(area.width.saturating_sub(1));
         let rule = if self.away.is_some() {
             Style::new().fg(ERROR)
-        } else if self.image_going.is_some() {
+        } else if self.image_going.is_some() || self.copied.is_some() {
             Style::new().fg(NAME)
         } else {
             Style::new().add_modifier(Modifier::DIM)
@@ -4415,8 +4428,8 @@ impl Sidebar {
         if let Some(notice) = &self.notice {
             notes.say(notice, width, error);
         }
-        if let Some((number, _)) = &self.copied {
-            notes.say(&format!("copied #{number}"), width, Style::new().fg(NAME));
+        if let Some((copied, _)) = &self.copied {
+            notes.say(&copied.said(note_room(width)), width, Style::new().fg(NAME));
         }
         if let Some(filed) = &self.filed {
             notes.say(filed, width, Style::new().fg(NAME));
@@ -4862,12 +4875,12 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 Machine::Local => (name.clone(), word),
                 Machine::Remote(_) => (format!("{name}{word}"), String::new()),
             };
-            let named = room.saturating_sub(word.width()).max(room.min(1));
+            let named = room.saturating_sub(cells(&word)).max(room.min(1));
             let shown = cut(&name, named);
-            let worded = room - shown.width();
+            let worded = room - cells(&shown);
             let said = format!("{shown}{}", cut(&word, worded));
-            assert!(said.width() <= room, "a machine's name and word fit their room");
-            let gap = width.saturating_sub(MACHINE_LEAD + said.width() + age.width() + 1);
+            assert!(cells(&said) <= room, "a machine's name and word fit their room");
+            let gap = width.saturating_sub(MACHINE_LEAD + cells(&said) + age.width() + 1);
             let line = Line::from(vec![
                 Span::raw(" "),
                 Span::styled(FOLDED, dim),
@@ -4898,8 +4911,8 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let cuts = cut_at(0, MACHINE_LEAD, name, room).into_iter().collect();
             let bold = Style::new().add_modifier(Modifier::BOLD);
             let shown = cut(name, room);
-            let word = cut(&word, room.saturating_sub(shown.width()));
-            let said = shown.width() + word.width();
+            let word = cut(&word, room.saturating_sub(cells(&shown)));
+            let said = cells(&shown) + cells(&word);
             assert!(said <= room, "a machine's name and word fit their room");
             let rule = room - said;
             let rule_style = if *here && *folded { Style::new().fg(ACCENT) } else { dim };
@@ -5066,7 +5079,7 @@ pub fn lit(
             _ => spans.push(Span::styled(c.to_string(), style)),
         }
     }
-    (spans, shown.width())
+    (spans, cells(&shown))
 }
 
 fn badge(waiting: usize, dotted: bool, spinning: bool, frame: usize) -> Option<Span<'static>> {
@@ -5156,7 +5169,7 @@ fn checkout_line(
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
     let room = width.saturating_sub(LABEL + held + reserve + 1);
     let branch = cut(&checkout.branch, room);
-    let gap = width.saturating_sub(LABEL + branch.width() + held + status.width() + 1);
+    let gap = width.saturating_sub(LABEL + cells(&branch) + held + status.width() + 1);
     let mut spans = vec![
         margin(here),
         gutter,
@@ -5181,13 +5194,13 @@ fn checkout_line(
 }
 
 pub fn cut(text: &str, room: usize) -> String {
-    if text.width() <= room {
+    if cells(text) <= room {
         return text.to_owned();
     }
     let mut kept = String::new();
     let mut taken = 0;
     for shown in text.graphemes(true) {
-        let width = shown.width();
+        let width = cells(shown);
         if taken + width + 1 > room {
             break;
         }
@@ -5201,13 +5214,13 @@ pub fn cut(text: &str, room: usize) -> String {
 }
 
 pub fn tail(text: &str, room: usize) -> String {
-    if text.width() <= room {
+    if cells(text) <= room {
         return text.to_owned();
     }
     let mut start = text.len();
     let mut taken = 0;
     for (at, shown) in text.grapheme_indices(true).rev() {
-        let width = shown.width();
+        let width = cells(shown);
         if taken + width + 1 > room {
             break;
         }
@@ -5237,16 +5250,24 @@ impl Notes {
     }
 }
 
+fn note_room(width: usize) -> usize {
+    width.saturating_sub(2).max(1)
+}
+
 pub fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
-    let room = width.saturating_sub(2).max(1);
+    let room = note_room(width);
     let mut lines = Vec::new();
     let mut line = String::new();
+    let mut taken = 0;
     for shown in text.graphemes(true) {
-        if line.width() + shown.width() > room {
+        let width = cells(shown);
+        if taken + width > room {
             lines.push(Line::styled(format!(" {line}"), style));
             line.clear();
+            taken = 0;
         }
         line.push_str(shown);
+        taken += width;
     }
     if !line.is_empty() {
         lines.push(Line::styled(format!(" {line}"), style));
@@ -6096,6 +6117,24 @@ mod tests {
         sidebar.hear(idle_agent());
         sidebar.image_going(None);
         assert_eq!(rule(&mut sidebar), open);
+    }
+
+    #[test]
+    fn collapsed_the_sidebar_tints_its_rule_while_a_copy_s_note_shows() {
+        let mut sidebar = fresh();
+        sidebar.hear(idle_agent());
+        let now = moment(160_000);
+        let rule = |sidebar: &mut Sidebar, at| {
+            let buffer = collapsed(sidebar, 3, at);
+            let cell = &buffer[(0, 0)];
+            (cell.fg, cell.modifier.contains(Modifier::DIM))
+        };
+        let resting = rule(&mut sidebar, now);
+        sidebar.copied(Copied::text("cargo"), now);
+        assert_eq!(rule(&mut sidebar, now), (NAME, false));
+        let gone = now + COPIED_SHOWS;
+        sidebar.ticked(gone, steady(gone), true);
+        assert_eq!(rule(&mut sidebar, gone), resting);
     }
 
     #[test]
@@ -7168,6 +7207,25 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_a_tail_and_a_wrap_draw_within_the_cells_of_their_room() {
+        let drawn = |text: &str| {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 1));
+            let (x, _) = buffer.set_line(0, 0, &Line::raw(text.to_owned()), 40);
+            usize::from(x)
+        };
+        assert_eq!(cut("لا لا لا لا", 8), "لا لا ل…");
+        assert_eq!(cut("ｶﾞｷﾞｸﾞｹﾞｺﾞ", 8), "ｶﾞｷﾞｸﾞ…");
+        for text in ["لا لا لا لا", "ｶﾞｷﾞｸﾞｹﾞｺﾞ"] {
+            assert!(drawn(&cut(text, 8)) <= 8, "a cut of {text:?} draws past 8 cells");
+            assert!(drawn(&tail(text, 8)) <= 8, "a tail of {text:?} draws past 8 cells");
+            for line in wrapped(text, 10, Style::new()) {
+                let line = line.to_string();
+                assert!(drawn(&line) <= 9, "{line:?} of {text:?} draws past its room");
+            }
+        }
+    }
+
+    #[test]
     fn a_lit_name_fits_its_room() {
         let family = "👩\u{200d}👩\u{200d}👧";
         let texts = [
@@ -7581,7 +7639,7 @@ mod tests {
     }
 
     #[test]
-    fn y_p_copies_the_highlighted_row_s_link_and_a_note_says_so() {
+    fn y_p_asks_for_the_highlighted_row_s_link_and_the_legend_comes_back() {
         let mut sidebar = pulls();
         sidebar.cursor = Some(Spot::Local(view_of("s", 10, 1)));
         let now = moment(160_000);
@@ -7591,11 +7649,20 @@ mod tests {
         assert_eq!(lines[22..], [rule, " p  PR link".to_owned()]);
 
         assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
+        let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now);
+        assert!(lines.iter().any(|line| line.starts_with("─ luneta ──")), "the legend is back");
+        assert_eq!(sidebar.copied, None, "the note waits for the copy");
+    }
+
+    #[test]
+    fn a_copy_s_note_names_what_went_until_three_seconds_pass_or_a_key() {
+        let mut sidebar = pulls();
+        let now = moment(160_000);
+        sidebar.copied(Copied::Pull(link().number()), now);
         let buffer = drawn_at(&mut sidebar, true, 32, 24, now);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now);
         let note = lines.iter().position(|line| line == " copied #246").expect("the note");
         assert_eq!(buffer[(1, u16::try_from(note).unwrap())].fg, NAME);
-        assert!(lines.iter().any(|line| line.starts_with("─ luneta ──")), "the legend is back");
 
         let shown = |sidebar: &mut Sidebar, millis| {
             let at = moment(millis);
@@ -7605,8 +7672,10 @@ mod tests {
         assert!(shown(&mut sidebar, 162_999));
         assert!(!shown(&mut sidebar, 163_000));
 
-        assert_eq!(sidebar.key(&char('y'), now), Asked::Nothing);
-        assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
+        sidebar.copied(Copied::text("cargo nextest run --workspace\nmore"), now);
+        let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now);
+        let said = " copied 2 lines \"cargo nexte…\"";
+        assert!(lines.iter().any(|line| line == said), "the note fits on one line: {lines:#?}");
         sidebar.key(&char('j'), now);
         assert_eq!(sidebar.copied, None);
     }
@@ -7877,16 +7946,15 @@ mod tests {
         let here = sidebar.cursor.clone();
         let now = moment(160_000);
         sidebar.notify("what went wrong before".to_owned());
-        assert_eq!(sidebar.number_clicked(link(), now), Asked::Copy(link()));
+        assert_eq!(sidebar.number_clicked(link()), Asked::Copy(link()));
         assert_eq!(sidebar.cursor, here);
         assert_eq!(sidebar.keys, Keys::Terminal);
         assert_eq!(sidebar.notice, None);
-        assert_eq!(sidebar.copied, Some((link().number(), now)));
 
         sidebar.focus(Keys::Sidebar);
         sidebar.cursor = Some(Spot::Local(view_of("s", 10, 1)));
         sidebar.key(&char('y'), now);
-        sidebar.number_clicked(link(), now);
+        sidebar.number_clicked(link());
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
     }
     fn clicks(sidebar: &mut Sidebar, from: u16) -> Vec<(String, Option<Hit>)> {
@@ -9701,7 +9769,7 @@ mod tests {
             checked_out(statuses, pulls, "/w/a", "main", None);
             listed
         };
-        let moves: [&dyn Fn(&mut Sidebar); 8] = [
+        let moves: [&dyn Fn(&mut Sidebar); 7] = [
             &|sidebar| {
                 sidebar.mouse(mouse(MouseEventKind::ScrollDown, 7, 5), area);
             },
@@ -9712,14 +9780,10 @@ mod tests {
                 sidebar.hear(first_view_is(9, "other"));
             },
             &|sidebar| {
-                sidebar.notify("other word".to_owned());
+                sidebar.notify("other word ".repeat(60));
             },
             &|sidebar| {
                 sidebar.hear(branch_too());
-            },
-            &|sidebar| {
-                sidebar.focus(Keys::Sidebar);
-                sidebar.key(&char('?'), moment(160_000));
             },
             &|sidebar| {
                 framed(sidebar, Rect::new(0, 0, 28, 26));
@@ -9736,6 +9800,39 @@ mod tests {
             moved(&mut sidebar);
             assert_eq!(reversed(&framed(&mut sidebar, area)), [], "case {case}");
         }
+    }
+
+    #[test]
+    fn a_sweep_stays_while_only_the_notes_below_it_change() {
+        let area = Rect::new(0, 0, 32, 26);
+        let mut sidebar = searched();
+        sidebar.notify("first word".to_owned());
+        framed(&mut sidebar, area);
+        assert_eq!(swept(&mut sidebar, area, (7, 6), (9, 6)), copied("a-p"));
+        let cells = [(7, 6), (8, 6), (9, 6)];
+        let now = moment(160_000);
+        sidebar.copied(Copied::text("a-p"), now);
+        assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
+        sidebar.notify("other word".to_owned());
+        assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
+        let gone = now + COPIED_SHOWS;
+        sidebar.ticked(gone, steady(gone), true);
+        assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
+        sidebar.focus(Keys::Sidebar);
+        sidebar.key(&char('?'), gone);
+        assert_eq!(reversed(&framed(&mut sidebar, area)), cells, "the legend is below it");
+    }
+
+    #[test]
+    fn a_sweep_over_a_note_goes_once_another_note_moves_it() {
+        let area = Rect::new(0, 0, 32, 26);
+        let mut sidebar = searched();
+        sidebar.notify("first word".to_owned());
+        framed(&mut sidebar, area);
+        assert_eq!(swept(&mut sidebar, area, (1, 25), (5, 25)), copied("first"));
+        assert_eq!(reversed(&framed(&mut sidebar, area)).len(), 5);
+        sidebar.copied(Copied::text("first"), moment(160_000));
+        assert_eq!(reversed(&framed(&mut sidebar, area)), []);
     }
 
     #[test]
