@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use lunetad::api::terminal::Found;
+use serde_json::json;
 
 use crate::host::{eventually, LUNETA};
 use crate::own::Owned;
@@ -84,6 +85,22 @@ fn luneta_shows_its_worktree_and_what_its_shell_prints() {
     });
     let said = format!(" copied \"{PRINTED}\"");
     eventually("the sidebar says what was copied", || window.shows(&said).then_some(()));
+}
+
+#[test]
+fn a_click_on_a_pull_request_s_number_copies_its_link_and_says_so() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let page = "https://github.com/owner/repo/pull/7";
+    let pull = json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": page });
+    owned.host.gh.open("main", &pull);
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    let at = window.spot_of("#7");
+    window.send(&[mouse(0, at, 'M'), mouse(0, at, 'm')].concat());
+    eventually("the click copies the pull request's link", || {
+        window.copied().contains(&page.to_owned()).then_some(())
+    });
+    eventually("the sidebar says what was copied", || window.shows(" copied #7").then_some(()));
 }
 
 #[test]
