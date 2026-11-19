@@ -1,7 +1,6 @@
 [advisories]
 ignore = [
   { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained proc-macro, not a vulnerability" },
-  { id = "RUSTSEC-2026-0433", reason = "pulldown-cmark wikilink flaw needs ENABLE_WIKILINKS, set only by prost-build on trusted input at build time" },
 ]
 
 [sources]
