@@ -1,4 +1,4 @@
-{ pkgs }:
+{ pkgs, name }:
 {
   tools = [
     pkgs.coreutils
@@ -7,11 +7,11 @@
     pkgs.procps
   ];
   text = ''
-    programs=(luneta lunetad luneta-mux)
-    home="''${CARGO_HOME:-$HOME/.cargo}/bin"
+    programs=(luneta-mux lunetad luneta)
+    bin="''${CARGO_HOME:-$HOME/.cargo}/bin"
 
     usage() {
-      echo "usage: $said [--mux]" >&2
+      echo "usage: dev ${name} [--mux]" >&2
       exit 2
     }
 
@@ -21,14 +21,18 @@
       *) usage ;;
     esac
 
-    listed() {
+    processes() {
       ps -ww -u "$(id -u)" -o pid= -o args=
     }
 
     muxes() {
       local folder
       folder="$(fish --no-config -c "source shell/luneta.fish; __luneta_folder")"
-      listed | awk -v folder="$folder" '$2 ~ /(^|\/)luneta-mux$/ && NF == 3 && $3 == folder { print $1 }'
+      [[ $folder == /* ]] || {
+        echo "dev ${name}: __luneta_folder names '$folder', no absolute folder" >&2
+        return 1
+      }
+      processes | awk -v folder="$folder" '$2 ~ /(^|\/)luneta-mux$/ && NF == 3 && $3 == folder { print $1 }'
     }
 
     stop() {
@@ -44,18 +48,19 @@
         [ "''${#left[@]}" -gt 0 ] || return 0
         sleep 0.1
       done
-      echo "$said: pid ''${left[*]} did not end in 5s" >&2
+      echo "dev ${name}: pid ''${left[*]} did not end in 5s" >&2
       return 1
     }
 
     end_mux() {
       local running
       mapfile -t running < <(muxes)
+      wait "$!"
       if [ "''${#running[@]}" -eq 0 ]; then
-        echo "$said: no luneta-mux runs" >&2
+        echo "dev ${name}: no luneta-mux runs" >&2
         return 0
       fi
-      echo "$said: ending luneta-mux (pid ''${running[*]}) and what runs in its terminals; lunetad starts the one beside it and restores them" >&2
+      echo "dev ${name}: ending luneta-mux (pid ''${running[*]}) and what runs in its terminals; lunetad starts the one beside it and restores them" >&2
       stop "''${running[@]}"
     }
   '';
