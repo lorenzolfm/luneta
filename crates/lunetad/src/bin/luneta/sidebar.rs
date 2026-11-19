@@ -694,10 +694,11 @@ impl Row {
     fn stops(&self) -> bool {
         match self {
             Row::Machine { heads: Heads::Projects { folded, .. }, .. } => *folded,
-            Row::Worktree { under, .. } => *under != Under::Rows,
-            Row::Machine { heads: Heads::Nothing, .. } | Row::Project { .. } | Row::View { .. } => {
-                true
-            },
+            Row::Worktree { under: Under::Rows, .. } => false,
+            Row::Machine { heads: Heads::Nothing, .. }
+            | Row::Project { .. }
+            | Row::Worktree { under: Under::Folded | Under::Empty, .. }
+            | Row::View { .. } => true,
         }
     }
 }
@@ -5407,6 +5408,15 @@ mod tests {
         }
     }
 
+    fn step_onto_its_first_view(sidebar: &mut Sidebar) {
+        let project = cursor(sidebar).expect("the highlight is on a row of this machine");
+        assert!(matches!(project, Place::Session(_)), "it starts on a project's row: {project:?}");
+        sidebar.step(1);
+        let view = cursor(sidebar).expect("a step keeps the highlight on this machine");
+        assert!(matches!(view, Place::View(_)), "one step down lands on a view: {view:?}");
+        assert_eq!(view.listed(), project.listed(), "the view is the project's own");
+    }
+
     fn folded(sidebar: &Sidebar, name: &str) -> bool {
         sidebar.folds.contains(Fold::Project(&Machine::Local, project_named(sidebar, name)))
     }
@@ -6251,7 +6261,8 @@ mod tests {
         type_in(&mut sidebar, "j");
         let (lines, lit) = seen(&mut sidebar, true, 32, 24);
         let lit: Vec<&str> = lit.iter().map(|y| lines[usize::from(*y)].as_str()).collect();
-        assert!(matches!(lit[..], [row] if row.starts_with(" ▾ newer ─")), "{lit:?}");
+        assert_eq!(lit.len(), 1, "{lit:?}");
+        assert!(lit[0].starts_with(" ▾ newer ─"), "{lit:?}");
         type_in(&mut sidebar, "h");
         assert_eq!(cursor(&sidebar), newer);
         assert!(folded(&sidebar, "newer"));
@@ -6341,7 +6352,7 @@ mod tests {
     fn folding_a_view_s_worktree_then_its_project_stops_the_highlight_on_its_row() {
         let mut sidebar = two_sessions();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        sidebar.step(1);
+        step_onto_its_first_view(&mut sidebar);
         type_in(&mut sidebar, "hh");
         let older = Place::Session(listed("older", 10));
         assert_eq!(cursor(&sidebar), Some(older.clone()));
@@ -6836,7 +6847,7 @@ mod tests {
         );
         assert!(!dimmed(&mut sidebar, 3, 6, moment(160_000)));
         assert_eq!(sidebar.listing().local.agents[0].mark, Mark::Finished);
-        sidebar.step(1);
+        step_onto_its_first_view(&mut sidebar);
         sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
         assert!(lines(&mut sidebar, moment(160_000))[5].ends_with(" •"));
         sidebar.key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), moment(160_000));
@@ -8021,7 +8032,7 @@ mod tests {
     fn a_click_on_the_legend_or_the_menu_under_it_presses_its_key() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.step(1);
+        step_onto_its_first_view(&mut sidebar);
         sidebar.key(&char('?'), moment(160_000));
         let clicked = clicks(&mut sidebar, 0);
         assert!(clicked[..7].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
@@ -8097,7 +8108,7 @@ mod tests {
     fn a_click_on_the_legend_once_the_menu_took_its_place_does_nothing() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.step(1);
+        step_onto_its_first_view(&mut sidebar);
         sidebar.key(&char('?'), moment(160_000));
         sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
         let delete = clicks(&mut sidebar, 18);
@@ -8119,7 +8130,7 @@ mod tests {
     fn a_group_shows_once_a_pause_passes_and_never_when_typed_fast() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.step(1);
+        step_onto_its_first_view(&mut sidebar);
         let now = moment(160_000);
         sidebar.key(&char('d'), now);
         assert_eq!(sidebar.due(now), Some(PAUSE));
@@ -8327,7 +8338,7 @@ mod tests {
     fn a_click_on_a_skill_of_the_menu_under_the_rows_starts_an_agent_on_it() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.step(1);
+        step_onto_its_first_view(&mut sidebar);
         sidebar.key(&char('m'), moment(160_000));
         let cwd = "/w/luneta/main".to_owned();
         let agent = agents::Harness::ClaudeCode;
@@ -8371,7 +8382,7 @@ mod tests {
             host.agents[0].harness = Some(Harness::Pi.into());
         }
         sidebar.focus(Keys::Sidebar);
-        sidebar.step(1);
+        step_onto_its_first_view(&mut sidebar);
         let started = |session: &str, beside, cwd: &str, harness, spelled| {
             let command = [harness, spelled].map(str::to_owned).to_vec();
             let key = listed(session, if session == "older" { 10 } else { 20 }).own_key();
@@ -8409,7 +8420,7 @@ mod tests {
     fn a_key_of_the_menu_opens_it_for_the_highlighted_row() {
         let mut sidebar = own_two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.step(1);
+        step_onto_its_first_view(&mut sidebar);
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 17, moment(160_000) + PAUSE);
         assert_eq!(lines[10..], [
@@ -8750,7 +8761,7 @@ mod tests {
     fn a_md_file_s_path_pasted_opens_the_menu_for_it() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.step(1);
+        step_onto_its_first_view(&mut sidebar);
         for text in [
             "notes.txt",
             "two\nlines.md",
@@ -9196,7 +9207,7 @@ mod tests {
         }];
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
-        sidebar.step(1);
+        step_onto_its_first_view(&mut sidebar);
         let older = || SessionName::parse("older").unwrap();
         let fold = Note {
             on: Machine::Local,
