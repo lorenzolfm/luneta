@@ -43,13 +43,6 @@ impl v1::Agent {
     }
 }
 
-impl v1::Session {
-    #[must_use]
-    pub fn started(&self) -> Option<std::time::SystemTime> {
-        std::time::SystemTime::try_from(self.own?.made_at?).ok()
-    }
-}
-
 impl v1::Project {
     #[must_use]
     pub fn worktrees(&self) -> Option<&[v1::Worktree]> {

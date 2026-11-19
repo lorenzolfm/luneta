@@ -1383,8 +1383,6 @@ fn an_agent_in_a_layout_s_terminal_is_there_by_the_terminal_s_key() {
     });
     assert_eq!(agent.pane, Some(agent::Pane::Terminal(key)));
     let host = owned.host.host();
-    let own_session = |session: &lunetad::api::Session| session.own.is_some();
-    assert!(!host.sessions.iter().any(own_session), "{:?}", host.sessions);
     let own_agent = |agent: &lunetad::api::Agent| matches!(agent.pane, Some(agent::Pane::Own(_)));
     assert!(!host.agents.iter().any(own_agent), "{:?}", host.agents);
     assert!(host.unread_files.iter().all(|file| file.own.is_none()), "{:?}", host.unread_files);

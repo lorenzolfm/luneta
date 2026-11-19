@@ -5223,7 +5223,7 @@ mod tests {
     use std::sync::LazyLock;
 
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
-    use lunetad::api::{self, Clients, NameSource, Pane, Panes, Session, UnreadFile, Version};
+    use lunetad::api::{self, NameSource, Pane, UnreadFile, Version};
     use lunetad::mux::own::{OwnId, OwnMade};
     use prost_types::Timestamp;
     use ratatui::buffer::Cell;
@@ -5251,6 +5251,13 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct Session {
+        name: String,
+        panes: Vec<Pane>,
+        own: api::OwnSession,
+    }
+
     fn session(name: &str, started: i64, panes: Vec<Pane>) -> Session {
         let id = u64::try_from(started).unwrap();
         made(name, id, Timestamp { seconds: started, nanos: 0 }, panes)
@@ -5265,12 +5272,7 @@ mod tests {
         for pane in &mut panes {
             pane.key = Some(api::TerminalKey { id: pane.id, made_at });
         }
-        Session {
-            name: name.to_owned(),
-            panes: Some(Panes { panes }),
-            clients: Some(Clients { clients: Vec::new() }),
-            own: Some(api::OwnSession { id, made_at: Some(made) }),
-        }
+        Session { name: name.to_owned(), panes, own: api::OwnSession { id, made_at: Some(made) } }
     }
 
     fn named(session: &str) -> u64 {
@@ -5384,16 +5386,12 @@ mod tests {
 
     impl Hears for Sidebar {
         fn hear(&mut self, mut host: Host) {
-            seat_files(&host.sessions, &mut host.unread_files);
-            if host.projects.is_none() || !host.sessions.is_empty() {
-                host.projects = Some(projects_of(&host.sessions, &mut host.agents));
-            }
+            let projects = host.projects.get_or_insert_with(|| projects_of(Vec::new())).clone();
+            seat(&projects, &mut host.agents, &mut host.unread_files);
             for remote in &mut host.remotes {
-                if let Some(Reached::Host(far)) = &mut remote.reached
-                    && (far.projects.is_none() || !far.sessions.is_empty())
-                {
-                    far.projects = Some(projects_of(&far.sessions, &mut far.agents));
-                    seat_files(&far.sessions, &mut far.unread_files);
+                if let Some(Reached::Host(far)) = &mut remote.reached {
+                    let projects = far.projects.get_or_insert_with(|| projects_of(Vec::new())).clone();
+                    seat(&projects, &mut far.agents, &mut far.unread_files);
                 }
             }
             self.heard(host);
@@ -5404,43 +5402,39 @@ mod tests {
         WorktreeId::of(project * 1000 + u64::from(tab)).unwrap()
     }
 
-    fn project_id(session: &Session) -> u64 {
-        session.own.expect("a session of a project").id
-    }
-
-    fn placed(sessions: &[Session], own: &mut api::Own) {
+    fn placed(projects: &api::Projects, own: &mut api::Own) {
         let Some(asked) = own.session.filter(|it| it.made_at.is_none()) else {
             return;
         };
-        if let Some(session) = sessions.iter().find(|it| named(&it.name) == asked.id) {
+        let Some(api::projects::Held::Kept(kept)) = &projects.held else {
+            return;
+        };
+        if let Some(project) = kept.projects.iter().find(|it| named(&it.name) == asked.id) {
             let made_at = Some(Timestamp::default());
-            own.session = Some(api::OwnSession { id: project_id(session), made_at });
+            own.session = Some(api::OwnSession { id: project.id, made_at });
         }
     }
 
-    fn seat_files(sessions: &[Session], files: &mut [UnreadFile]) {
-        for own in files.iter_mut().filter_map(|file| file.own.as_mut()) {
-            placed(sessions, own);
+    fn seat(projects: &api::Projects, agents: &mut [Agent], files: &mut [UnreadFile]) {
+        let in_agents = agents.iter_mut().filter_map(|agent| match &mut agent.pane {
+            Some(api::agent::Pane::Own(own)) => Some(own),
+            Some(api::agent::Pane::Terminal(_)) | None => None,
+        });
+        let in_files = files.iter_mut().filter_map(|file| file.own.as_mut());
+        for own in in_agents.chain(in_files) {
+            placed(projects, own);
         }
     }
 
-    fn projects_of(sessions: &[Session], agents: &mut [Agent]) -> api::Projects {
-        let mut sessions: Vec<&Session> = sessions.iter().collect();
+    fn projects_of(mut sessions: Vec<Session>) -> api::Projects {
         sessions.sort_by_key(|session| {
-            let made = session.own.and_then(|own| own.made_at).map(|at| at.seconds);
+            let made = session.own.made_at.map(|at| at.seconds);
             (made, session.name.clone())
         });
         let made_at = Some(Timestamp::default());
-        let owned: Vec<Session> = sessions.iter().map(|it| (*it).clone()).collect();
-        for agent in agents.iter_mut() {
-            if let Some(api::agent::Pane::Own(own)) = &mut agent.pane {
-                placed(&owned, own);
-            }
-        }
-        let project = |session: &&Session| {
+        let project = |session: &Session| {
             let mut worktrees: Vec<api::Worktree> = Vec::new();
-            let panes = session.panes.iter().flat_map(|panes| &panes.panes);
-            let mut panes: Vec<&Pane> = panes.collect();
+            let mut panes: Vec<&Pane> = session.panes.iter().collect();
             panes.sort_by_key(|pane| (pane.tab, pane.id));
             for pane in panes {
                 let terminal = api::Terminal {
@@ -5456,7 +5450,7 @@ mod tests {
                     held: pane.held,
                     name: None,
                 };
-                let id = tab_of(project_id(session), pane.tab).get();
+                let id = tab_of(session.own.id, pane.tab).get();
                 match worktrees.iter_mut().find(|it| it.id == id) {
                     Some(worktree) => worktree.terminals.push(terminal),
                     None => worktrees.push(api::Worktree {
@@ -5470,7 +5464,7 @@ mod tests {
                 }
             }
             api::Project {
-                id: project_id(session),
+                id: session.own.id,
                 name: session.name.clone(),
                 dir: "/w".to_owned(),
                 missing: false,
@@ -5485,7 +5479,6 @@ mod tests {
     fn host(sessions: Vec<Session>, agents: Vec<Agent>) -> Host {
         Host {
             version: Some(Version { pid: 1, seq: 1 }),
-            sessions,
             git_statuses: Vec::new(),
             agents,
             unread: 0,
@@ -5494,7 +5487,7 @@ mod tests {
             remotes: Vec::new(),
             unread_hosts: Some(0),
             sayings: Vec::new(),
-            projects: None,
+            projects: Some(projects_of(sessions)),
         }
     }
 
@@ -5608,15 +5601,9 @@ mod tests {
         sidebar
     }
 
-    fn owned(mut sidebar: Sidebar) -> Sidebar {
-        let mut host = sidebar.host.take().expect("heard");
-        for (at, session) in host.sessions.iter_mut().enumerate() {
-            let id = u64::try_from(at).unwrap() + 1;
-            let panes = session.panes.take().map_or_else(Vec::new, |panes| panes.panes);
-            *session = own_session(&session.name, id, panes);
-        }
-        sidebar.hear(host);
-        sidebar
+    fn owned(sessions: Vec<Session>) -> Vec<Session> {
+        let each = sessions.into_iter().zip(1..);
+        each.map(|(session, id)| own_session(&session.name, id, session.panes)).collect()
     }
 
     fn floating_menu(sidebar: &Sidebar) -> Option<&Menu> {
@@ -6106,7 +6093,7 @@ mod tests {
         let mut sidebar = fresh();
         let unstarted = session("x", 0, vec![]);
         let mut unsocketed = session("z", 30, vec![]);
-        unsocketed.own = Some(api::OwnSession { id: 0, made_at: Some(Timestamp::default()) });
+        unsocketed.own = api::OwnSession { id: 0, made_at: Some(Timestamp::default()) };
         let misnamed = session("a/b", 40, vec![]);
         let long = session(&"w".repeat(66), 50, vec![]);
         let sessions = vec![unstarted, session("y", 20, vec![]), unsocketed, misnamed, long];
@@ -6380,9 +6367,7 @@ mod tests {
     #[test]
     fn a_click_on_a_session_with_no_panes_goes_there() {
         let mut sidebar = fresh();
-        let mut starting = session("x", 10, Vec::new());
-        starting.panes = None;
-        sidebar.hear(host(vec![starting], Vec::new()));
+        sidebar.hear(host(vec![session("x", 10, Vec::new())], Vec::new()));
         let area = Rect::new(0, 0, 32, 6);
         screen(&mut sidebar, false, area.width, area.height);
         let x = Place::Session(listed("x", 10));
@@ -7184,32 +7169,33 @@ mod tests {
         assert_eq!(lines, [" ab", " ⚠️c", " d"]);
     }
 
+    fn searched_sessions() -> Vec<Session> {
+        vec![
+            session(
+                "bipa",
+                10,
+                vec![
+                    pane(1, 0, "/w/a", "a-p-i-x"),
+                    pane(2, 1, "/w/b", "dda-bank-slip"),
+                    pane(3, 2, "/w/c", "pix outflow"),
+                ],
+            ),
+            session("notes", 20, vec![pane(1, 0, "/home/me/Documents", "fish")]),
+            session(
+                "zed",
+                30,
+                vec![
+                    pane(1, 0, "/w/q", "htop"),
+                    pane(2, 1, "/w/r", "z-e-d"),
+                    pane(3, 2, "/w/s", "less logs"),
+                ],
+            ),
+        ]
+    }
+
     fn searched() -> Sidebar {
         let mut sidebar = fresh();
-        sidebar.hear(host(
-            vec![
-                session(
-                    "bipa",
-                    10,
-                    vec![
-                        pane(1, 0, "/w/a", "a-p-i-x"),
-                        pane(2, 1, "/w/b", "dda-bank-slip"),
-                        pane(3, 2, "/w/c", "pix outflow"),
-                    ],
-                ),
-                session("notes", 20, vec![pane(1, 0, "/home/me/Documents", "fish")]),
-                session(
-                    "zed",
-                    30,
-                    vec![
-                        pane(1, 0, "/w/q", "htop"),
-                        pane(2, 1, "/w/r", "z-e-d"),
-                        pane(3, 2, "/w/s", "less logs"),
-                    ],
-                ),
-            ],
-            Vec::new(),
-        ));
+        sidebar.hear(host(searched_sessions(), Vec::new()));
         sidebar
     }
 
@@ -7339,7 +7325,8 @@ mod tests {
 
     #[test]
     fn going_to_a_pane_found_in_luneta_s_folded_project_unfolds_it() {
-        let mut sidebar = owned(searched());
+        let mut sidebar = fresh();
+        sidebar.hear(host(owned(searched_sessions()), Vec::new()));
         type_in(&mut sidebar, "hh");
         assert_eq!(rows_shown(&mut sidebar)[..2], [" ▸ bipa", " ▾ notes"]);
         type_in(&mut sidebar, "/pix");
@@ -7487,9 +7474,13 @@ mod tests {
     }
 
     fn pulls() -> Sidebar {
+        pulls_with(Vec::new())
+    }
+
+    fn pulls_with(more: Vec<Pane>) -> Sidebar {
         let dirs = ["/w/a", "/w/b", "/w/c", "/w/d"];
-        let panes = dirs.iter().zip(1..).map(|(cwd, id)| pane(id, id, cwd, "fish")).collect();
-        let mut host = host(vec![session("s", 10, panes)], Vec::new());
+        let panes = dirs.iter().zip(1..).map(|(cwd, id)| pane(id, id, cwd, "fish"));
+        let mut host = host(vec![session("s", 10, panes.chain(more).collect())], Vec::new());
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let closed = "https://github.com/owner/repo/pull/9";
         checked_out(statuses, pulls, "/w/a", "fix", Some((246, State::Open, Some(LINK))));
@@ -7771,10 +7762,9 @@ mod tests {
 
     #[test]
     fn the_number_of_a_pull_request_is_a_spot_of_its_own() {
-        let mut sidebar = pulls();
-        let host = sidebar.host.as_mut().unwrap();
         let panes = ["/w/e", "/w/f"].iter().zip(5..).map(|(cwd, id)| pane(id, id, cwd, "fish"));
-        host.sessions[0].panes.as_mut().unwrap().panes.extend(panes);
+        let mut sidebar = pulls_with(panes.collect());
+        let host = sidebar.host.as_mut().unwrap();
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let long = "handoff-eng-11259-and-more";
         let (merged, draft) = (LINK.replace("246", "4321"), LINK.replace("246", "12"));
@@ -9663,11 +9653,11 @@ mod tests {
     }
 
     fn first_pane_is(id: u32, command: &str) -> Host {
-        let mut listed = searched().host.unwrap();
-        let first = &mut listed.sessions[0].panes.as_mut().unwrap().panes[0];
+        let mut sessions = searched_sessions();
+        let first = &mut sessions[0].panes[0];
         first.id = id;
         first.command = Some(command.to_owned());
-        listed
+        host(sessions, Vec::new())
     }
 
     #[test]
@@ -9848,14 +9838,13 @@ mod tests {
 
     fn up(sessions: Vec<Session>, agents: Vec<Agent>) -> Reached {
         Reached::Host(remote::Host {
-            sessions,
             git_statuses: Vec::new(),
             agents,
             unread: 0,
             pull_requests: Vec::new(),
             unread_files: Vec::new(),
             sayings: Vec::new(),
-            projects: None,
+            projects: Some(projects_of(sessions)),
         })
     }
 
@@ -9875,17 +9864,23 @@ mod tests {
     }
 
     fn machines() -> Host {
+        machines_with(Vec::new(), Vec::new())
+    }
+
+    fn machines_with(here: Vec<Session>, there: Vec<Session>) -> Host {
+        let main = session("main", 20, vec![pane(1, 0, "/w/b", "claude")]);
         let nixos = up(
-            vec![session("main", 20, vec![pane(1, 0, "/w/b", "claude")])],
+            [main].into_iter().chain(there).collect(),
             vec![agent("main", 1, Status::Waiting, Some("fix"))],
         );
+        let main = session("main", 10, vec![pane(1, 0, "/w/a", "fish")]);
         Host {
             remotes: vec![
                 remote("nixos", nixos),
                 remote("me@vps", down(100)),
                 remote("pi", Reached::Reaching(())),
             ],
-            ..host(vec![session("main", 10, vec![pane(1, 0, "/w/a", "fish")])], Vec::new())
+            ..host([main].into_iter().chain(here).collect(), Vec::new())
         }
     }
 
@@ -10478,13 +10473,8 @@ mod tests {
     }
 
     fn two_each() -> Host {
-        let mut host = machines();
-        host.sessions.push(session("work", 30, vec![pane(1, 0, "/w/c", "fish")]));
-        let Some(Reached::Host(nixos)) = &mut host.remotes[0].reached else {
-            panic!("nixos is reached");
-        };
-        nixos.sessions.push(session("dev", 40, vec![pane(1, 0, "/w/d", "fish")]));
-        host
+        let work = session("work", 30, vec![pane(1, 0, "/w/c", "fish")]);
+        machines_with(vec![work], vec![session("dev", 40, vec![pane(1, 0, "/w/d", "fish")])])
     }
 
     #[test]
@@ -10543,7 +10533,6 @@ mod tests {
 
     fn in_order(host: &Host, ids: &[u64], seq: u64) -> Host {
         let mut host = host.clone();
-        host.sessions.clear();
         let kept = kept_of(&mut host);
         kept.projects.retain(|it| ids.contains(&it.id));
         kept.projects.sort_by_key(|it| ids.iter().position(|id| *id == it.id));

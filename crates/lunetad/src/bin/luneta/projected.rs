@@ -97,12 +97,10 @@ impl Project {
 
 impl Projected {
     pub fn adapted(host: &mut Host) -> Result<Projected, String> {
-        host.sessions.clear();
         let mut far_projects = BTreeMap::new();
         let named = machines::named_once(&host.remotes);
         for (remote, destination) in host.remotes.iter_mut().zip(named) {
             if let Some(remote::Reached::Host(far)) = &mut remote.reached {
-                far.sessions.clear();
                 let projects = kept(far.projects.as_ref());
                 let projects: Vec<Project> =
                     projects.iter().filter_map(|it| project(it).ok()).collect();
@@ -332,14 +330,13 @@ mod tests {
         };
         let kept = Held::Kept(Kept { projects: vec![project], version: None });
         let projects = Some(api::Projects { held: Some(kept) });
-        let own = api::Session { name: "old".to_owned(), ..api::Session::default() };
         let in_terminal = |pid, id| api::Agent {
             pid,
             pane: Some(agent::Pane::Terminal(key(id))),
             ..api::Agent::default()
         };
         let (agent, stray) = (in_terminal(40, 5), in_terminal(41, 9));
-        api::Host { projects, sessions: vec![own], agents: vec![agent, stray], ..Host::default() }
+        api::Host { projects, agents: vec![agent, stray], ..Host::default() }
     }
 
     fn worktree(id: u64) -> WorktreeId {
@@ -347,11 +344,10 @@ mod tests {
     }
 
     #[test]
-    fn sessions_go_and_an_agent_in_a_terminal_of_a_project_on_any_machine_sits_on_its_pane() {
+    fn an_agent_in_a_terminal_of_a_project_on_any_machine_sits_on_its_pane() {
         let mut host = host();
         let far = api::remote::Host {
             projects: host.projects.clone(),
-            sessions: host.sessions.clone(),
             agents: host.agents.clone(),
             ..api::remote::Host::default()
         };
@@ -359,7 +355,6 @@ mod tests {
         host.remotes = vec![api::Remote { destination: "nixos".to_owned(), reached }];
         let mut adapted = host.clone();
         let projected = Projected::adapted(&mut adapted).unwrap();
-        assert!(adapted.sessions.is_empty(), "{:?}", adapted.sessions);
         let project_key = key_of(ProjectId::of(7).unwrap());
         let own = api::Own::from(OwnPane { session: project_key, id: NonZeroU32::new(5).unwrap() });
         assert_eq!(adapted.agents[0].pane, Some(agent::Pane::Own(own)));
@@ -367,7 +362,6 @@ mod tests {
         let Some(remote::Reached::Host(far)) = &adapted.remotes[0].reached else {
             panic!("the remote is reached");
         };
-        assert!(far.sessions.is_empty(), "{:?}", far.sessions);
         assert_eq!(far.agents[0].pane, Some(agent::Pane::Own(own)));
         assert_eq!(far.agents[1].pane, host.agents[1].pane);
         let (here, nixos) = (Machine::Local, Machine::Remote("nixos".parse().unwrap()));

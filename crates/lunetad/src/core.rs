@@ -343,7 +343,6 @@ impl Known {
             self.remotes.iter().map(|(destination, reached)| reached.to_api(destination)).collect();
         api::Host {
             version: None,
-            sessions: Vec::new(),
             git_statuses: self.statuses.iter().map(|(dir, status)| status.to_api(dir)).collect(),
             agents,
             unread,

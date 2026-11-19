@@ -202,16 +202,15 @@ message Version {
 
 message Host {
   Version version = 1;
-  repeated Session sessions = 2;
-  repeated GitStatus git_statuses = 3;
-  repeated Agent agents = 4;
-  uint32 unread = 5;
-  repeated PullRequest pull_requests = 6;
-  repeated UnreadFile unread_files = 7;
-  repeated Remote remotes = 8;
-  optional uint32 unread_hosts = 9;
-  repeated Saying sayings = 10;
-  Projects projects = 11;
+  repeated GitStatus git_statuses = 2;
+  repeated Agent agents = 3;
+  uint32 unread = 4;
+  repeated PullRequest pull_requests = 5;
+  repeated UnreadFile unread_files = 6;
+  repeated Remote remotes = 7;
+  optional uint32 unread_hosts = 8;
+  repeated Saying sayings = 9;
+  Projects projects = 10;
 }
 
 message Say {
@@ -245,14 +244,13 @@ message Remote {
   }
 
   message Host {
-    repeated Session sessions = 1;
-    repeated GitStatus git_statuses = 2;
-    repeated Agent agents = 3;
-    uint32 unread = 4;
-    repeated PullRequest pull_requests = 5;
-    repeated UnreadFile unread_files = 6;
-    repeated Saying sayings = 7;
-    Projects projects = 8;
+    repeated GitStatus git_statuses = 1;
+    repeated Agent agents = 2;
+    uint32 unread = 3;
+    repeated PullRequest pull_requests = 4;
+    repeated UnreadFile unread_files = 5;
+    repeated Saying sayings = 6;
+    Projects projects = 7;
   }
 
   message Unreached {
@@ -275,29 +273,9 @@ message Remote {
   }
 }
 
-message Session {
-  string name = 1;
-  Panes panes = 2;
-  Clients clients = 3;
-  OwnSession own = 4;
-}
-
 message OwnSession {
   uint64 id = 1;
   google.protobuf.Timestamp made_at = 2;
-}
-
-message Panes {
-  repeated Pane panes = 1;
-}
-
-message Clients {
-  repeated Client clients = 1;
-}
-
-message Client {
-  uint32 id = 1;
-  optional uint32 pane = 2;
 }
 
 message Pane {
