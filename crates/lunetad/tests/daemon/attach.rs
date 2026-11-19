@@ -82,6 +82,8 @@ fn luneta_shows_its_worktree_and_what_its_shell_prints() {
     eventually("the drag copies what it went over", || {
         window.copied().contains(&PRINTED.to_owned()).then_some(())
     });
+    let said = format!(" copied \"{PRINTED}\"");
+    eventually("the sidebar says what was copied", || window.shows(&said).then_some(()));
 }
 
 #[test]

@@ -51,6 +51,7 @@ use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::checks;
 use crate::close::Act;
+use crate::copied::Copied;
 use crate::desktop::{self, Desktop, Reader, Told};
 use crate::dictation::{self, Dictated, Dictation};
 use crate::folds::{self, Folds};
@@ -912,9 +913,13 @@ impl App {
                 };
                 self.sidebar.unmoved(&on, ticket, &order, note);
             },
-            Event::Copy(link) => clip(terminal, ClipboardType::Clipboard, &link.url())?,
+            Event::Copy(link) => {
+                clip(terminal, ClipboardType::Clipboard, &link.url())?;
+                self.sidebar.copied(Copied::Pull(link.number()), SystemTime::now());
+            },
             Event::CopyText(text) => {
                 clip(terminal, ClipboardType::Clipboard, &text)?;
+                self.sidebar.copied(Copied::text(&text), SystemTime::now());
                 self.copied = Some(text);
             },
             Event::Image(went) => self.image_went(went),
@@ -1569,7 +1574,7 @@ impl App {
                 }
             },
             Hit::Number(link) => {
-                let asked = self.sidebar.number_clicked(link, SystemTime::now());
+                let asked = self.sidebar.number_clicked(link);
                 self.follow(asked);
             },
             Hit::Menu(..) => {},
