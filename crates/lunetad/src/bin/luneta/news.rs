@@ -16,7 +16,7 @@ const DWELL: Duration = Duration::from_secs(1);
 #[derive(Default)]
 pub struct News {
     seen: Ledger<Key>,
-    been: Ledger<Session>,
+    stayed: Ledger<Session>,
     unread: Ledger<Key>,
     dwelling: Option<(Key, SystemTime, Instant)>,
     projects_missing: Missing<Session>,
@@ -28,7 +28,7 @@ impl News {
         match folder::make(runtime) {
             Ok(folder) => News {
                 seen: Ledger::within(folder.path().join("seen")),
-                been: Ledger::within(folder.path().join("been")),
+                stayed: Ledger::within(folder.path().join("stayed")),
                 unread: Ledger::within(folder.path().join("unread")),
                 ..News::default()
             },
@@ -39,18 +39,18 @@ impl News {
     pub fn unshared(why: &str) -> Self {
         News {
             seen: Ledger::unshared(why.to_owned()),
-            been: Ledger::unshared(why.to_owned()),
+            stayed: Ledger::unshared(why.to_owned()),
             unread: Ledger::unshared(why.to_owned()),
             ..News::default()
         }
     }
 
     pub fn lost(&self) -> Option<&str> {
-        self.seen.lost().or(self.been.lost()).or(self.unread.lost())
+        self.seen.lost().or(self.stayed.lost()).or(self.unread.lost())
     }
 
     pub fn reload(&mut self) -> bool {
-        self.been.reload();
+        self.stayed.reload();
         let seen = self.seen.reload();
         self.unread.reload() || seen
     }
@@ -64,7 +64,7 @@ impl News {
     }
 
     pub fn last_seen(&self, session: Session) -> Option<SystemTime> {
-        self.been.get(session)
+        self.stayed.get(session)
     }
 
     pub fn mark_unread(&mut self, key: Key, now: SystemTime) {
@@ -106,8 +106,8 @@ impl News {
         finished: Option<SystemTime>,
         now: SystemTime,
     ) -> bool {
-        if self.been.get(key.session).is_none_or(|been| been < since) {
-            self.been.set(key.session, Some(now));
+        if self.stayed.get(key.session).is_none_or(|stayed| stayed < since) {
+            self.stayed.set(key.session, Some(now));
         }
         let mut changed = self.saw(key, finished, now);
         if self.unread.get(key).is_some_and(|marked| marked < since) {
@@ -126,9 +126,9 @@ impl News {
     }
 
     pub fn listed(&mut self, live: Option<&Lists>, at: Instant) {
-        let kept: BTreeSet<Session> = self.been.kept().collect();
+        let kept: BTreeSet<Session> = self.stayed.kept().collect();
         let gone = self.projects_missing.gone(&kept, live, at);
-        self.been.forget(&gone);
+        self.stayed.forget(&gone);
         let kept: BTreeSet<Key> = self.seen.kept().chain(self.unread.kept()).collect();
         let gone = self.views_missing.gone(&kept, live, at);
         self.seen.forget(&gone);
@@ -136,7 +136,7 @@ impl News {
     }
 
     fn dirs(&self) -> Vec<&Path> {
-        [self.seen.dir(), self.been.dir(), self.unread.dir()].into_iter().flatten().collect()
+        [self.seen.dir(), self.stayed.dir(), self.unread.dir()].into_iter().flatten().collect()
     }
 }
 
@@ -316,7 +316,8 @@ mod tests {
         dwell(&mut news, Some(view(1)), at(201));
         news.mark_unread(view(1), at(202));
         news.mark_unread(view(2), at(202));
-        let open = listing(session(10), &[2]);
+        let mut open = listing(session(10), &[2]);
+        open.unreached(&Machine::Remote("me@vps".parse().unwrap()));
         news.listed(Some(&open), steady(at(210)));
         news.listed(Some(&open), steady(at(219)));
         assert_eq!((new(&news), news.is_unread(view(1))), ([false, true], true));

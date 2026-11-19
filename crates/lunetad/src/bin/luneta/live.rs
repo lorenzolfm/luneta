@@ -35,19 +35,19 @@ impl Lists {
 }
 
 pub trait Runs: Mark {
-    fn on(self, live: &Lists) -> Option<&Machine>;
+    fn heard(self, live: &Lists) -> Option<(&Machine, bool)>;
 }
 
 impl Runs for Session {
-    fn on(self, live: &Lists) -> Option<&Machine> {
-        live.projects.get(&self).map(|(machine, _)| machine)
+    fn heard(self, live: &Lists) -> Option<(&Machine, bool)> {
+        live.projects.get(&self).map(|(machine, _)| (machine, true))
     }
 }
 
 impl Runs for Key {
-    fn on(self, live: &Lists) -> Option<&Machine> {
+    fn heard(self, live: &Lists) -> Option<(&Machine, bool)> {
         let (machine, views) = live.projects.get(&self.session)?;
-        views.contains(&self.view).then_some(machine)
+        Some((machine, views.contains(&self.view)))
     }
 }
 
@@ -73,10 +73,12 @@ impl<R: Runs> Missing<R> {
         };
         let mut gone = BTreeSet::new();
         for mark in kept {
-            if let Some(machine) = mark.on(live) {
+            if let Some((machine, listed)) = mark.heard(live) {
                 self.ran_on.insert(*mark, machine.clone());
-                self.since.remove(mark);
-                continue;
+                if listed {
+                    self.since.remove(mark);
+                    continue;
+                }
             }
             let unsure = match self.ran_on.get(mark) {
                 Some(machine) => live.unsure.contains(machine),
