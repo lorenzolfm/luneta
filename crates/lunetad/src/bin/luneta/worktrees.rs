@@ -58,10 +58,10 @@ impl Unmade {
         }
     }
 
-    fn said_of(self, made: &str) -> String {
+    fn said_of(self, what: &str) -> String {
         match self {
-            Unmade::Nests(why) | Unmade::Failed(why) => format!("no {made} made: {why}"),
-            Unmade::InDoubt(why) => format!("{why}, so the {made} may be made"),
+            Unmade::Nests(why) | Unmade::Failed(why) => format!("no {what} made: {why}"),
+            Unmade::InDoubt(why) => format!("{why}, so the {what} may be made"),
         }
     }
 }
@@ -184,8 +184,8 @@ fn zero(made: &str) -> String {
     format!("lunetad said it made {made} 0, and no id is 0")
 }
 
-fn unread(made: Option<Made>, wanted: &str) -> Unmade {
-    Unmade::InDoubt(format!("luneta can't read lunetad's answer {made:?} as a {wanted}"))
+fn unread(answer: Option<Made>, wanted: &str) -> Unmade {
+    Unmade::InDoubt(format!("luneta can't read lunetad's answer {answer:?} as a {wanted}"))
 }
 
 fn landed(made: Option<Made>) -> Result<Landed, Unmade> {
@@ -517,10 +517,10 @@ pub fn project_made(
         Some(Made::Project(root)) if root == project.get() => Ok(Landing::Unopened(project)),
         made => landed(made).map(Landing::Worktree),
     });
-    let empty = |unmade: Unmade| {
+    let unstarted = |unmade: Unmade| {
         format!("{folder} is project {project}: {}", unmade.said_of("worktree"))
     };
-    started.map_err(empty)
+    started.map_err(unstarted)
 }
 
 fn spelled(name: &Name) -> String {
@@ -627,11 +627,12 @@ mod tests {
             Status::aborted("it said no"),
             Status::not_found("it said no"),
             Status::unimplemented("it said no"),
-            Status::already_exists("it said no"),
         ];
         for status in &refusals {
             assert_eq!(said(status), "no project made: it said no", "{status:?}");
         }
+        let nests = Status::already_exists("/a/b is inside /a");
+        assert_eq!(said(&nests), "no project made: /a/b is inside /a");
         let doubts = [
             Status::unavailable("it dropped"),
             Status::cancelled("it dropped"),
@@ -643,7 +644,7 @@ mod tests {
         for status in &doubts {
             assert_eq!(said(status), "it dropped, so the project may be made", "{status:?}");
         }
-        for status in &refusals[..5] {
+        for status in &refusals {
             assert!(matches!(Unmoved::of(status), Unmoved::Refused(_)), "{status:?}");
         }
         for status in &doubts {
