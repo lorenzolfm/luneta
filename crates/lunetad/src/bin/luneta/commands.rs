@@ -30,7 +30,7 @@ use prost::Message as _;
 use tonic::transport::Channel;
 
 use crate::bridge;
-use crate::daemon;
+use crate::daemon::{self, Unreached};
 use crate::drive::{self, Address, Agreed, Opening, Turning};
 use crate::machines::{self, Added};
 use crate::prune;
@@ -40,13 +40,19 @@ use crate::zellij::{self, Seat};
 
 #[derive(Subcommand)]
 pub enum Command {
-    #[command(about = "Say which lunetad runs, and for how long it has")]
+    #[command(
+        about = "Say which lunetad runs, and for how long it has. Where none runs, it says so and \
+                 exits 5"
+    )]
     Info,
-    #[command(about = "List the agents that run, and the pane each is in")]
+    #[command(
+        about = "List the agents that run, and the pane each is in. Where no lunetad runs, it says \
+                 so and exits 5"
+    )]
     Agents,
     #[command(
         about = "List the zellij sessions that run, their panes, and the git status of the folder \
-                 each pane works in"
+                 each pane works in. Where no lunetad runs, it says so and exits 5"
     )]
     Sessions,
     #[command(
@@ -213,7 +219,7 @@ pub enum Command {
     #[command(
         about = "Read text aloud on the machine you sit at, whichever machine this runs on: queue \
                  it, after what waits to be read, and return once lunetad has it, without waiting \
-                 for it to be read. It fails at once where no lunetad runs"
+                 for it to be read. It fails at once where no lunetad runs, and exits 5"
     )]
     Say {
         #[arg(allow_hyphen_values = true, help = "What to read. Without it, what comes on stdin")]
@@ -242,7 +248,10 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Agents => ask(folder, daemon::running(folder), agents),
         Command::Sessions => ask(folder, daemon::running(folder), sessions),
         Command::Watch { after } => {
-            let current = async { daemon::current(folder).await.map(|current| current.daemon) };
+            let current = async {
+                let current = daemon::current(folder).await.map_err(Unreached::Failed)?;
+                Ok(current.daemon)
+            };
             ask(folder, current, |daemon| watch(daemon, *after))
         },
         Command::Bridge => bridge::run(folder),
@@ -261,7 +270,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
 
 fn ask<R, F, Asked>(folder: &Path, reaching: R, asking: F) -> ExitCode
 where
-    R: Future<Output = Result<DaemonClient<Channel>, String>>,
+    R: Future<Output = Result<DaemonClient<Channel>, Unreached>>,
     F: FnOnce(DaemonClient<Channel>) -> Asked,
     Asked: Future<Output = Result<(), Box<dyn Error>>>,
 {
@@ -274,9 +283,9 @@ where
     };
     let daemon = match runtime.block_on(reaching) {
         Ok(daemon) => daemon,
-        Err(why) => {
-            eprintln!("luneta: {why}");
-            return ExitCode::FAILURE;
+        Err(unreached) => {
+            eprintln!("luneta: {unreached}");
+            return unreached.exit_code();
         },
     };
     if let Err(error) = runtime.block_on(asking(daemon)) {

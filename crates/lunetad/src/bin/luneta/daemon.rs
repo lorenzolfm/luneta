@@ -1,13 +1,14 @@
 use std::cell::OnceCell;
 use std::env;
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -34,25 +35,56 @@ const SAID_MAX: u64 = 4096;
 
 pub const VERSION_LIMIT: Duration = Duration::from_secs(2);
 
+pub const NONE_RUNS: u8 = 5;
+
 pub struct Current {
     pub folder: Folder,
     pub daemon: DaemonClient<Channel>,
     pub info: InfoResponse,
 }
 
-pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, String> {
-    let folder = folder::open(path).map_err(|refusal| refusal.to_string())?;
-    let folder = folder.ok_or_else(|| none_runs(path))?;
+pub enum Unreached {
+    NoneRuns(PathBuf),
+    Failed(String),
+}
+
+impl Unreached {
+    pub fn exit_code(&self) -> ExitCode {
+        match self {
+            Unreached::NoneRuns(_) => ExitCode::from(NONE_RUNS),
+            Unreached::Failed(_) => ExitCode::FAILURE,
+        }
+    }
+}
+
+impl fmt::Display for Unreached {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unreached::NoneRuns(path) => write!(f, "no lunetad runs in {}", path.display()),
+            Unreached::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<Unreached> for String {
+    fn from(unreached: Unreached) -> String {
+        unreached.to_string()
+    }
+}
+
+pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
+    let refused = |refusal: folder::Refusal| Unreached::Failed(refusal.to_string());
+    let folder = folder::open(path).map_err(refused)?;
+    let folder = folder.ok_or_else(|| Unreached::NoneRuns(path.to_owned()))?;
     let error = match lunetad::connect(&folder).await {
         Ok(daemon) => return Ok(daemon),
         Err(error) => error,
     };
-    let held = folder::held(&folder).map_err(|refusal| refusal.to_string())?;
-    Err(if held {
-        format!("{}: {}", folder.socket().display(), causes(&error))
+    if folder::held(&folder).map_err(refused)? {
+        Err(Unreached::Failed(format!("{}: {}", folder.socket().display(), causes(&error))))
     } else {
-        none_runs(path)
-    })
+        Err(Unreached::NoneRuns(path.to_owned()))
+    }
 }
 
 pub async fn current(path: &Path) -> Result<Current, String> {
@@ -153,10 +185,6 @@ pub async fn current(path: &Path) -> Result<Current, String> {
         }
         tokio::time::sleep(LOOK).await;
     }
-}
-
-fn none_runs(path: &Path) -> String {
-    format!("no lunetad runs in {}", path.display())
 }
 
 fn same_folder(a: &Path, b: &Path) -> bool {

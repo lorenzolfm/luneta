@@ -82,7 +82,7 @@ fn the_cli_refuses_a_folder_that_is_not_yours_alone() {
     fs::set_permissions(root.path().join("luneta"), Permissions::from_mode(0o755)).unwrap();
 
     let output = vars.command(LUNETA).arg("info").output().unwrap();
-    assert!(!output.status.success());
     let said = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{said}");
     assert!(said.contains("is open to other users"), "{said}");
 }

@@ -35,8 +35,8 @@ That is no pane address: no verb takes it.
   `<machine>/` line, indented under it. The verbs don't reach them yet: a
   session there is none of the ones they act on, even under the same name.
 
-`sessions` and `agents` need lunetad, which luneta starts. The verbs below ask
-zellij themselves and work without it. Only `close` then can't tell which
+`sessions` and `agents` need lunetad, which luneta starts. Where none runs, they
+say so and exit 5. The verbs below ask zellij themselves and work without it. Only `close` then can't tell which
 agents end, and `prune` deletes nothing and says so.
 
 `here`, `go`, `open session`, `close`, and `open pane`/`open tab` without
