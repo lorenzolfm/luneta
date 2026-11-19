@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lunetad::asks::{self, Asked, Step, Turn};
 use lunetad::transcripts::SessionId;
-use lunetad::Destination;
+use lunetad::{Destination, Directory};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -46,7 +46,7 @@ enum Said {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Works {
     Here(PathBuf),
-    There { on: Destination, cwd: Option<String> },
+    There { on: Destination, cwd: Option<Directory> },
 }
 
 #[derive(Debug)]
@@ -65,11 +65,10 @@ impl Ask {
     pub fn new(number: u64, target: &Target, dir: &Path) -> Self {
         let works = match target.machine() {
             Machine::Local => {
-                Works::Here(target.cwd().map_or_else(|| dir.to_owned(), PathBuf::from))
+                let cwd = target.cwd().map(|cwd| PathBuf::from(cwd.as_str()));
+                Works::Here(cwd.unwrap_or_else(|| dir.to_owned()))
             },
-            Machine::Remote(on) => {
-                Works::There { on: on.clone(), cwd: target.cwd().map(str::to_owned) }
-            },
+            Machine::Remote(on) => Works::There { on: on.clone(), cwd: target.cwd().cloned() },
         };
         Ask {
             number,
@@ -133,7 +132,9 @@ impl Ask {
         let turn = Turn::after(self.turned);
         let (on, cwd) = match &self.works {
             Works::Here(cwd) => (None, Some(cwd.clone())),
-            Works::There { on, cwd } => (Some(on.clone()), cwd.as_ref().map(PathBuf::from)),
+            Works::There { on, cwd } => {
+                (Some(on.clone()), cwd.as_ref().map(|cwd| PathBuf::from(cwd.as_str())))
+            },
         };
         let resumed = self.session.clone();
         let highlighted = self.highlighted.clone();
@@ -215,7 +216,9 @@ impl Ask {
         lines.extend(footer);
         let right = match &self.works {
             Works::Here(cwd) => sidebar::short_cwd(&cwd.to_string_lossy()),
-            Works::There { on, cwd: Some(cwd) } => format!("{} on {on}", sidebar::short_cwd(cwd)),
+            Works::There { on, cwd: Some(cwd) } => {
+                format!("{} on {on}", sidebar::short_cwd(cwd.as_str()))
+            },
             Works::There { on, cwd: None } => format!("~ on {on}"),
         };
         brief::boxed(buffer, over, TITLE, &right, &lines);
@@ -288,7 +291,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::menu::{ViewRow, Ran};
+    use crate::menu::{Cwd, ViewRow, Ran};
     use crate::sidebar::{Listed, ViewKey, ProjectRow};
 
     fn listed() -> Listed {
@@ -309,7 +312,7 @@ mod tests {
             session: listed(),
             view: ViewKey::terminal(4),
             terminal: None,
-            cwd: Some("/w/luneta/main".to_owned()),
+            cwd: Cwd::of(Some("/w/luneta/main".to_owned())),
             branch: Some("feat/ask".to_owned()),
             repository: None,
             pull_request: None,
@@ -497,7 +500,8 @@ mod tests {
         assert!(session.highlighted.contains(session_row), "{}", session.highlighted);
 
         let there = |cwd: Option<&str>| {
-            Works::There { on: "nixos".parse().unwrap(), cwd: cwd.map(str::to_owned) }
+            let cwd = cwd.map(|cwd| Directory::parse(cwd.to_owned()).unwrap());
+            Works::There { on: "nixos".parse().unwrap(), cwd }
         };
         let view = Ask::new(3, &view_row_on(nixos()), Path::new("/w"));
         assert_eq!(view.works, there(Some("/w/luneta/main")));
@@ -510,12 +514,21 @@ mod tests {
         assert_eq!(header.works, there(None));
         let row = "is the header of this machine: \"this\"";
         assert!(header.highlighted.contains(row), "{}", header.highlighted);
+
+        let unread = |on: Machine| {
+            let Target::View(on, row) = view_row_on(on) else { unreachable!("a view's row") };
+            Target::View(on, ViewRow { cwd: Cwd::of(Some("w".to_owned())), ..row })
+        };
+        let view = Ask::new(6, &unread(Machine::Local), Path::new("/w"));
+        assert_eq!(view.works, Works::Here(PathBuf::from("/w")));
+        assert!(view.highlighted.contains("is view luneta:4, on branch"), "{}", view.highlighted);
+        assert_eq!(Ask::new(7, &unread(nixos()), Path::new("/w")).works, there(None));
     }
 
     #[test]
     fn a_turn_that_is_none_says_why() {
         let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
-        ask.works = Works::There { on: "nixos".parse().unwrap(), cwd: Some("w".to_owned()) };
+        ask.works = Works::Here(PathBuf::from("w"));
         typed(&mut ask, "close it");
         let (events, _heard) = mpsc::channel();
         ask.send(&events);
