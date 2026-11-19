@@ -129,7 +129,7 @@ const UNSHOWN_CURSOR: (CursorShape, bool) = (CursorShape::HollowBlock, false);
 
 const CLIENT: u64 = 1;
 
-const QUIT: &str = "asked to quit";
+const ASKED_TO_QUIT: &str = "asked to quit";
 
 pub enum Event {
     Input(Input),
@@ -378,7 +378,7 @@ struct App {
     naming: Naming,
     alerts: Alerts,
     desktop: Desktop,
-    quit: bool,
+    quit_asked: bool,
 }
 
 pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
@@ -616,16 +616,14 @@ fn run_in(
         naming: Naming::Idle,
         alerts: Alerts::new(focused),
         desktop,
-        quit: false,
+        quit_asked: false,
     };
     app.watch();
     if let Some(root) = root {
         app.open_worktree(Machine::Local, root);
     }
     let ran = run_loop(terminal, &mut app, inbox);
-    for change in app.changes.drain(..) {
-        let _ = change.join();
-    }
+    app.wait_for_changes();
     ran?;
     Ok(app.failure())
 }
@@ -651,10 +649,14 @@ struct Move {
 
 const MOVE_PANICKED: &str = "luneta could not ask lunetad for the move: asking panicked";
 
-fn moves_on(lunetad: &Path, on: &Machine, events: &Sender<Event>) -> SyncSender<Move> {
+fn moves_on(
+    lunetad: &Path,
+    on: &Machine,
+    events: &Sender<Event>,
+) -> (SyncSender<Move>, JoinHandle<()>) {
     let (moves, asked) = mpsc::sync_channel::<Move>(sidebar::MOVES_MAX);
     let (lunetad, on, events) = (lunetad.to_owned(), on.clone(), events.clone());
-    thread::spawn(move || {
+    let moving = thread::spawn(move || {
         let mut stopped = Stopped::default();
         for Move { ticket, order } in asked {
             if stopped.holds(ticket) {
@@ -674,7 +676,7 @@ fn moves_on(lunetad: &Path, on: &Machine, events: &Sender<Event>) -> SyncSender<
             }
         }
     });
-    moves
+    (moves, moving)
 }
 
 #[derive(Default)]
@@ -720,7 +722,7 @@ fn run_loop(
             },
         }
         for _ in 1..FRAME_EVENTS_MAX {
-            if app.quit {
+            if app.quit_asked {
                 break;
             }
             let Some(event) = inbox.try_next() else {
@@ -728,8 +730,8 @@ fn run_loop(
             };
             app.handle(event, terminal)?;
         }
-        if app.quit {
-            say_ends(QUIT);
+        if app.quit_asked {
+            say_ends(ASKED_TO_QUIT);
             return Ok(());
         }
         app.ticked(Instant::now());
@@ -1705,9 +1707,12 @@ impl App {
                 }
             },
             Asked::Move { on, order, ticket } => {
-                let (lunetad, events) = (&self.lunetad, &self.events);
-                let mover = self.movers.entry(on.clone());
-                let mover = mover.or_insert_with(|| moves_on(lunetad, &on, events));
+                if !self.movers.contains_key(&on) {
+                    let (moves, moving) = moves_on(&self.lunetad, &on, &self.events);
+                    self.keep_change(moving);
+                    self.movers.insert(on.clone(), moves);
+                }
+                let mover = self.movers.get(&on).expect("a machine's mover was just made");
                 match mover.try_send(Move { ticket, order }) {
                     Ok(()) => {},
                     Err(TrySendError::Full(Move { ticket, order })) => {
@@ -1721,7 +1726,10 @@ impl App {
                     },
                 }
             },
-            Asked::Quit => self.quit = true,
+            Asked::Quit => {
+                assert!(!self.quit_asked, "luneta follows nothing once asked to quit");
+                self.quit_asked = true;
+            },
         }
     }
 
@@ -1743,6 +1751,15 @@ impl App {
         self.changes.push(change);
     }
 
+    fn wait_for_changes(&mut self) {
+        self.movers.clear();
+        for change in self.changes.drain(..) {
+            if change.join().is_err() {
+                log::say("a change luneta sent panicked");
+            }
+        }
+    }
+
     fn project_act(&mut self, on: &Machine, act: &Act) {
         match (on, act) {
             (_, Act::Worktree { worktree, seen, .. }) => {
@@ -1755,11 +1772,11 @@ impl App {
             },
             (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) => {
                 let (terminal, events) = (*terminal, self.events.clone());
-                thread::spawn(move || {
+                self.keep_change(thread::spawn(move || {
                     if let Err(failure) = lunetad::mux::own::server::Terminals.closed(terminal) {
                         let _ = events.send(Event::Notice(format!("menu: not closed: {failure}")));
                     }
-                });
+                }));
             },
             _ => self.sidebar.notify(format!("menu: {NOT_YET}")),
         }
@@ -2283,7 +2300,7 @@ impl App {
         assert_eq!(self.naming, Naming::Idle, "luneta names one session at a time");
         self.naming = Naming::Busy;
         let events = self.events.clone();
-        thread::spawn(move || drop(events.send(Event::Named(made()))));
+        self.keep_change(thread::spawn(move || drop(events.send(Event::Named(made())))));
     }
 
     fn named(&mut self, made: Made) {

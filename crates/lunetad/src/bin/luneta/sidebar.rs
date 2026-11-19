@@ -2697,7 +2697,10 @@ impl Sidebar {
                 Some(Top::Command(Action::Unread)) => self.toggle_unread(now),
                 Some(Top::Command(Action::Reorder)) => self.select(),
                 Some(Top::Command(Action::Quit)) => return Asked::Quit,
-                Some(Top::Command(_) | Top::Shift(_)) => {},
+                Some(Top::Command(other)) => {
+                    unreachable!("{other:?} is a key of the sidebar with no handler")
+                },
+                Some(Top::Shift(_)) => {},
                 None => {
                     let asked = self.open_menu(Some(c));
                     if let Some(menu) = &self.menu {
@@ -7705,6 +7708,17 @@ mod tests {
             let asked = sidebar.key(&char(path[1]), now);
             let said = asked != Asked::Nothing || sidebar.notice.is_some();
             assert!(said, "{action:?} on {path:?} does nothing");
+        }
+    }
+
+    #[test]
+    fn every_key_of_the_sidebar_s_own_has_a_handler() {
+        let now = moment(160_000);
+        let own = Action::row().filter(|(_, path)| path.len() == 1);
+        for (_, path) in own {
+            let mut sidebar = pulls();
+            sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
+            sidebar.key(&char(path[0]), now);
         }
     }
 

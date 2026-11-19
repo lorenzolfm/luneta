@@ -439,8 +439,12 @@ const _: () = {
                 assert!(grouped(path, &ROW_GROUPS), "{}", row);
             },
             Key::RowAndMenu(path) => {
-                let both = "a path of the sidebar and the menu is a key of no group in either";
-                assert!(grouped(path, &ROW_GROUPS) && grouped(path, &MENU_GROUPS), "{}", both);
+                let one = "a path of the sidebar and the menu is one key";
+                assert!(path.len() == 1, "{}", one);
+                let row = "a key of the sidebar and the menu opens no group of the sidebar";
+                assert!(!is_group(&ROW_GROUPS, path[0]), "{}", row);
+                let menu = "a key of the sidebar and the menu opens no group of the menu";
+                assert!(!is_group(&MENU_GROUPS, path[0]), "{}", menu);
             },
             Key::Pasted(_) | Key::Chord(_) => {},
         }
@@ -459,9 +463,13 @@ mod tests {
 
     #[test]
     fn two_actions_on_one_key_fit_no_row_alike() {
+        let menu = |action: Action| Action::menu().find(|(it, _)| *it == action).map(|it| it.1);
+        let row = |action: Action| Action::row().find(|(it, _)| *it == action).map(|it| it.1);
         for (at, one) in Action::ALL.into_iter().enumerate() {
             for other in Action::ALL.into_iter().skip(at + 1) {
-                if one.key() == other.key() {
+                let in_the_menu = menu(one).is_some_and(|path| menu(other) == Some(path));
+                let in_the_sidebar = row(one).is_some_and(|path| row(other) == Some(path));
+                if one.key() == other.key() || in_the_menu || in_the_sidebar {
                     assert!(!overlap(one, other), "{one:?} and {other:?} on {:?}", one.key());
                 }
             }
