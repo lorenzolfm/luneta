@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, ChildStdout, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use lunetad::api::agent::{self, Status as Reported};
+use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Harness, Status};
 use serde_json::{json, Value};
 
@@ -196,7 +196,7 @@ fn a_pi_agent_is_listed_by_what_its_extension_hears() {
     assert_eq!((idle.session_id.as_str(), idle.cwd.as_str()), ("first", "/home/you/work"));
     assert_eq!(idle.entrypoint.as_deref(), Some("tui"));
     assert!(idle.at_a_prompt());
-    assert_eq!(idle.pane, Some(agent::Pane::Terminal(terminal(3))));
+    assert_eq!(idle.terminal, Some(terminal(3)));
     let since: SystemTime = idle.status_since.unwrap().try_into().unwrap();
     assert!(before - Duration::from_millis(1) <= since, "dated {since:?}, after {before:?}");
     assert!(idle.started_at.is_some());

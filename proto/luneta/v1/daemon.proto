@@ -273,11 +273,6 @@ message Remote {
   }
 }
 
-message OwnSession {
-  uint64 id = 1;
-  google.protobuf.Timestamp made_at = 2;
-}
-
 message Pane {
   uint32 id = 1;
   uint32 tab = 2;
@@ -419,8 +414,7 @@ message ListAgentsResponse {
 
 message UnreadFile {
   uint32 pid = 1;
-  Own own = 2;
-  TerminalKey terminal = 3;
+  TerminalKey terminal = 2;
 }
 
 message Agent {
@@ -435,16 +429,13 @@ message Agent {
   google.protobuf.Timestamp started_at = 7;
   Name name = 8;
   optional string entrypoint = 9;
-  oneof pane {
-    Own own = 10;
-    TerminalKey terminal = 11;
-  }
+  TerminalKey terminal = 10;
   oneof waiting_for {
-    WaitingFor known_waiting_for = 12;
-    string other_waiting_for = 13;
+    WaitingFor known_waiting_for = 11;
+    string other_waiting_for = 12;
   }
-  optional Harness harness = 14;
-  optional string topic = 15;
+  optional Harness harness = 13;
+  optional string topic = 14;
 }
 
 enum Harness {
@@ -482,11 +473,6 @@ enum NameSource {
   NAME_SOURCE_AUTO = 5;
   NAME_SOURCE_HOOK = 6;
   NAME_SOURCE_OTHER = 7;
-}
-
-message Own {
-  OwnSession session = 1;
-  uint32 pane = 2;
 }
 
 message PrunesRequest {

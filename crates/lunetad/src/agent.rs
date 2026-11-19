@@ -249,7 +249,7 @@ impl Agent {
             name: self.name.as_ref().map(Name::to_api),
             entrypoint: self.entrypoint.clone().map(String::from),
             waiting_for,
-            pane: self.pane.map(|key| api::agent::Pane::Terminal(key.into())),
+            terminal: self.pane.map(Into::into),
             topic: topic.map(String::from),
         }
     }
@@ -259,7 +259,7 @@ impl Unread {
     #[must_use]
     pub fn to_api(&self) -> api::UnreadFile {
         assert!(self.pid > 1);
-        api::UnreadFile { pid: self.pid, own: None, terminal: self.pane.map(Into::into) }
+        api::UnreadFile { pid: self.pid, terminal: self.pane.map(Into::into) }
     }
 }
 

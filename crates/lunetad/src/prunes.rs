@@ -17,7 +17,7 @@ use crate::git::{self, Common};
 use crate::github::{self, Asker, Based, Pulled};
 use crate::mux::TerminalKey;
 use crate::program;
-use crate::seats::{self, UnreadSeat};
+use crate::seats;
 
 pub const PLANNING: Duration = Duration::from_mins(5);
 
@@ -170,33 +170,24 @@ pub struct Occupied {
 
 impl Occupied {
     pub fn of(host: &api::Host) -> Result<Occupied, String> {
-        seats::unread(host.unread, &host.unread_files).map_err(|unplaced| unplaced.to_string())?;
+        let unread = seats::unread(host.unread, &host.unread_files);
+        let unread = unread.map_err(|unplaced| unplaced.to_string())?;
         let terminals = terminals(host)?;
-        for file in &host.unread_files {
-            let pid = file.pid;
-            match UnreadSeat::of(file) {
-                UnreadSeat::NoPane => {
+        for seats::Unread { pid, pane } in unread {
+            match pane {
+                None => {
                     return Err(format!(
                         "lunetad cannot read the session file of agent {pid}, which runs in no \
                          pane"
                     ));
                 },
-                UnreadSeat::Own(_) => {
-                    return Err(format!(
-                        "lunetad cannot read the session file of agent {pid}, which runs in an \
-                         own session, and lunetad holds none"
-                    ));
-                },
-                UnreadSeat::Terminal(key) if !terminals.iter().any(|(it, _)| *it == Some(key)) => {
+                Some(key) if !terminals.iter().any(|(it, _)| *it == Some(key)) => {
                     return Err(format!(
                         "lunetad cannot read the session file of agent {pid}, which runs in a \
                          terminal no layout holds"
                     ));
                 },
-                UnreadSeat::Terminal(_) => {},
-                UnreadSeat::Unplaced => {
-                    unreachable!("seats::unread refuses a file it cannot place")
-                },
+                Some(_) => {},
             }
         }
         let panes = terminals.into_iter().map(|(_, folder)| folder).collect();
@@ -1057,7 +1048,7 @@ mod tests {
     fn a_file_unread_in_a_terminal_no_layout_holds_could_be_anywhere() {
         use api::terminal::Found;
         let terminal = Some(terminal_key(4));
-        let file = api::UnreadFile { pid: 9, terminal, ..api::UnreadFile::default() };
+        let file = api::UnreadFile { pid: 9, terminal };
         let host = |terminals| api::Host {
             unread: 1,
             unread_files: vec![file],
@@ -1076,19 +1067,13 @@ mod tests {
         assert!(Occupied::of(&api::Host::default()).is_ok());
         let files =
             |unread, unread_files| api::Host { unread, unread_files, ..api::Host::default() };
-        let file = || api::UnreadFile { pid: 9, own: None, terminal: None };
+        let file = || api::UnreadFile { pid: 9, terminal: None };
         let unplaced = "lunetad cannot read 1 of Claude Code's session files, nor tell where its \
                         agent runs";
         assert_eq!(Occupied::of(&files(1, vec![])), Err(unplaced.to_owned()));
-        let made_at = Some(prost_types::Timestamp::default());
-        let key = |id| api::OwnSession { id, made_at };
-        let own = |pane| {
-            api::UnreadFile { own: Some(api::Own { session: Some(key(3)), pane }), ..file() }
-        };
-        let unheld = "lunetad cannot read the session file of agent 9, which runs in an own \
-                      session, and lunetad holds none";
-        assert_eq!(Occupied::of(&files(1, vec![own(4)])), Err(unheld.to_owned()));
-        assert_eq!(Occupied::of(&files(1, vec![own(0)])), Err(unplaced.to_owned()));
+        let zero = api::TerminalKey { id: 0, made_at: Some(prost_types::Timestamp::default()) };
+        let unkeyed = api::UnreadFile { terminal: Some(zero), ..file() };
+        assert_eq!(Occupied::of(&files(1, vec![unkeyed])), Err(unplaced.to_owned()));
         assert_eq!(
             Occupied::of(&files(1, vec![file()])),
             Err("lunetad cannot read the session file of agent 9, which runs in no pane".to_owned())

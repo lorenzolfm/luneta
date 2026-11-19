@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use lunetad::api::agent::{self, Status as Reported, WaitingFor as Waits};
+use lunetad::api::agent::{Status as Reported, WaitingFor as Waits};
 use lunetad::api::{self, Agent, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor};
 use lunetad::mux::{OwnMade, TerminalKey};
 use serde_json::json;
@@ -137,10 +137,6 @@ pub fn file_of_pid(id: &str, pid: u32, status: &str) -> serde_json::Value {
     file(id, pid, &started(pid), status)
 }
 
-fn in_terminal(id: u32) -> agent::Pane {
-    agent::Pane::Terminal(terminal(id))
-}
-
 pub fn terminal(id: u32) -> api::TerminalKey {
     let id = std::num::NonZeroU32::new(id).unwrap();
     TerminalKey { id, made: OwnMade::from_nanos(MADE_NANOS) }.into()
@@ -180,13 +176,13 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
         .iter()
         .map(|agent| {
             let status = agent.status.clone();
-            (agent.session_id.as_str(), agent.pid, status, agent.pane)
+            (agent.session_id.as_str(), agent.pid, status, agent.terminal)
         })
         .collect();
     assert_eq!(
         seen,
         [
-            ("inside", inside.pid(), Some(known(Status::Busy)), Some(in_terminal(3))),
+            ("inside", inside.pid(), Some(known(Status::Busy)), Some(terminal(3))),
             ("outside", outside.pid(), Some(known(Status::Idle)), None),
         ]
     );
@@ -366,8 +362,8 @@ fn a_file_that_does_not_read_is_counted_at_once_where_its_process_runs() {
     }
     let _daemon = start(host.vars()).unwrap();
     let listed = host.list();
-    let in_it = UnreadFile { pid: inside.pid(), own: None, terminal: Some(terminal(3)) };
-    let elsewhere = UnreadFile { pid: outside.pid(), own: None, terminal: None };
+    let in_it = UnreadFile { pid: inside.pid(), terminal: Some(terminal(3)) };
+    let elsewhere = UnreadFile { pid: outside.pid(), terminal: None };
     let mut files = vec![in_it, elsewhere];
     files.sort_by_key(|file| file.pid);
     assert_eq!((listed.unread, listed.unread_files), (2, files));

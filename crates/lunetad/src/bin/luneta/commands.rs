@@ -1,14 +1,13 @@
 use std::error::Error;
 use std::future::Future;
 use std::io::{self, Read as _, Write as _};
-use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use clap::Subcommand;
 use luneta_protocol::unread::Unread;
-use lunetad::api::agent::{self, Status as Reported};
+use lunetad::api::agent::Status as Reported;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::remote::Reached;
@@ -17,7 +16,7 @@ use lunetad::api::{
     Agent, ListAgentsResponse, Say, SayRequest, Status, Utterance, Version, WatchRequest,
 };
 use lunetad::folder::SOCKET;
-use lunetad::mux::{OwnId, OwnPane, TerminalKey};
+use lunetad::mux::TerminalKey;
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
 use lunetad::sayings::BYTES_MAX;
@@ -395,14 +394,8 @@ async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>>
 }
 
 fn seat_of(agent: &Agent) -> Result<String, (String, String)> {
-    match &agent.pane {
-        Some(agent::Pane::Own(pane)) => {
-            OwnPane::of(pane).map(own_seat).map_err(|why| {
-                let session = pane.session.and_then(|session| OwnId::new(session.id));
-                (unnamed_own(session, NonZeroU32::new(pane.pane)), why)
-            })
-        },
-        Some(agent::Pane::Terminal(key)) => TerminalKey::of(key)
+    match &agent.terminal {
+        Some(key) => TerminalKey::of(key)
             .map(terminal_seat)
             .map_err(|why| (format!("terminal {} (unread)", key.id), why)),
         None => Ok("-".to_owned()),
@@ -411,16 +404,6 @@ fn seat_of(agent: &Agent) -> Result<String, (String, String)> {
 
 fn terminal_seat(key: TerminalKey) -> String {
     format!("terminal {}", key.id)
-}
-
-fn own_seat(pane: OwnPane) -> String {
-    unnamed_own(Some(pane.session.id), Some(pane.id))
-}
-
-fn unnamed_own(session: Option<OwnId>, pane: Option<NonZeroU32>) -> String {
-    let id = session.map_or_else(|| "?".to_owned(), |id| id.to_string());
-    let pane = pane.map_or_else(|| "?".to_owned(), |id| id.to_string());
-    format!("?:{pane} (own {id})")
 }
 
 fn line(seat: &str, width: usize, agent: &Agent) -> String {

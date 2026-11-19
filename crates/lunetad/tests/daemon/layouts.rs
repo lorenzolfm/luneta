@@ -11,7 +11,7 @@ use lunetad::api::change_projects_request::{
 };
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::projects::Held;
-use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Worktree};
+use lunetad::api::{terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Worktree};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{frames_request, On, FramesRequest};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
@@ -1381,11 +1381,7 @@ fn an_agent_in_a_layout_s_terminal_is_there_by_the_terminal_s_key() {
     let agent = eventually("the agent is on the host", || {
         owned.host.host().agents.into_iter().find(|agent| agent.pid == pid)
     });
-    assert_eq!(agent.pane, Some(agent::Pane::Terminal(key)));
-    let host = owned.host.host();
-    let own_agent = |agent: &lunetad::api::Agent| matches!(agent.pane, Some(agent::Pane::Own(_)));
-    assert!(!host.agents.iter().any(own_agent), "{:?}", host.agents);
-    assert!(host.unread_files.iter().all(|file| file.own.is_none()), "{:?}", host.unread_files);
+    assert_eq!(agent.terminal, Some(key));
 }
 
 fn text_of(lines: &[Line]) -> Vec<String> {

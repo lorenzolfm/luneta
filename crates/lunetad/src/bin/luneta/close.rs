@@ -3,9 +3,9 @@ use std::fmt;
 use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
-use lunetad::mux::OwnKey;
+use lunetad::mux::{OwnKey, TerminalKey};
 use lunetad::projects::{ProjectId, ViewId, WorktreeId};
-use lunetad::seats::Where;
+use lunetad::seats::Unread;
 use lunetad::SessionName;
 
 use crate::sidebar::{Listed, PaneKey};
@@ -70,12 +70,13 @@ impl fmt::Display for Untold {
     }
 }
 
-pub fn unread_in(
-    unread_seats: &[(Where, u32)],
-    session: Where,
-) -> impl Iterator<Item = (u32, Doing)> + '_ {
-    let in_session = unread_seats.iter().filter(move |(at, _)| *at == session);
-    in_session.map(|(_, pane)| (*pane, Doing::Unknown))
+pub fn unread_in<'a>(
+    unread: &'a [Unread],
+    held: &'a [TerminalKey],
+) -> impl Iterator<Item = (u32, Doing)> + 'a {
+    let placed = unread.iter().filter_map(|file| file.pane);
+    let held = placed.filter(move |key| held.contains(key));
+    held.map(|key| (key.id.get(), Doing::Unknown))
 }
 
 #[derive(Debug)]

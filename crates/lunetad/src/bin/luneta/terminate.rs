@@ -10,7 +10,6 @@ use std::thread;
 use std::time::Duration;
 
 use clap::CommandFactory as _;
-use lunetad::api::agent;
 use lunetad::asks::Turn;
 use lunetad::program::{self, Ran};
 use lunetad::projects::{self, Forgotten, Projects};
@@ -201,7 +200,7 @@ fn agents_in(served: &[PathBuf]) -> Counted {
             Err(why) => return Counted::Uncounted(why),
         };
         for agent in &listed.agents {
-            let in_mux = matches!(agent.pane, Some(agent::Pane::Terminal(_) | agent::Pane::Own(_)));
+            let in_mux = agent.terminal.is_some();
             match Doing::from(agent) {
                 Doing::Shell => {},
                 _ if !in_mux => {},

@@ -882,8 +882,8 @@ impl App {
                 }
             },
             Event::Reached { claude_folder } => self.claude_folder = claude_folder,
-            Event::Daemon(Ok(mut host)) => {
-                self.projected = Projected::adapted(&mut host).unwrap_or_else(|why| {
+            Event::Daemon(Ok(host)) => {
+                self.projected = Projected::adapted(&host).unwrap_or_else(|why| {
                     self.sidebar.notify(format!("lunetad's projects: {why}"));
                     Projected::default()
                 });
