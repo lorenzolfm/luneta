@@ -8,6 +8,7 @@ use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
 use lunetad::api::change_projects_request::{
     Bring, Change, CloseProject, CloseWorkstream, ForgetWorkstream, RenameTerminal,
 };
+use lunetad::api::change_projects_response::Made;
 use lunetad::api::projects::Held;
 use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Workstream};
 use lunetad::api::daemon_client::DaemonClient;
@@ -26,7 +27,7 @@ use tonic::{Code, Status, Streaming};
 use crate::agents::file_of_pid;
 use crate::host::{eventually, folder_in, script, start, Host};
 use crate::own::Owned;
-use crate::projects::{asked, kept, project, workstream};
+use crate::projects::{self, asked, kept, project, workstream};
 use crate::remote::{hosts, reached, FakeSsh};
 use crate::starts::{directory, makes_shells, mouse, projects_of, Window};
 use crate::worktree::{cloned_as_wt, git};
@@ -448,11 +449,12 @@ fn a_bring_sends_the_clients_on_the_terminal_it_is_asked_from_to_the_workstream(
     let from = on.key_of(right);
     let bring = |workstream, from| Change::Bring(Bring { workstream, from: Some(from) });
 
-    assert_eq!(asked(&owned.host, bring(here, from)).unwrap(), None);
-    assert_eq!(asked(&owned.host, bring(there, from)).unwrap(), None);
+    let taken = |workstream, from| projects::made(&owned.host, bring(workstream, from)).unwrap();
+    assert_eq!(taken(here, from), Some(Made::Taken(here)), "the client on it is there already");
+    assert_eq!(taken(there, from), Some(Made::Taken(there)));
     assert_eq!(on.until_sent(), there, "the client on the terminal is sent");
     let unknown = TerminalKey { id: from.id + 100, made_at: from.made_at };
-    assert_eq!(asked(&owned.host, bring(there, unknown)).unwrap(), None);
+    assert_eq!(taken(there, unknown), None, "no client is on a terminal not known");
     off.ask(focus(right));
     off.until("the other client on the right", |laid| focused_of(laid) == Some(right));
     on.ask(focus(left));

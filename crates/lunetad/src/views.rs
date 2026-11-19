@@ -630,15 +630,18 @@ impl Views {
             return Ok(None);
         };
         let sent = api::ShowResponse { event: Some(show_response::Event::Sent(workstream.get())) };
-        let focused = |it: &Client| it.focus == Some(held) && it.workstream != workstream;
-        let brought = self.clients.iter().filter(|(_, it)| focused(it)).map(|(id, _)| *id);
-        let brought: Vec<ClientId> = brought.collect();
-        for client in brought {
-            if !told(&self.clients[&client].out, sent.clone()) {
+        let on = self.clients.iter().filter(|(_, it)| it.focus == Some(held)).map(|(id, _)| *id);
+        let on: Vec<ClientId> = on.collect();
+        let mut taken = false;
+        for client in on {
+            let it = &self.clients[&client];
+            if it.workstream == workstream || told(&it.out, sent.clone()) {
+                taken = true;
+            } else {
                 self.clients.remove(&client);
             }
         }
-        Ok(None)
+        Ok(taken.then_some(Made::Taken(workstream)))
     }
 
     fn kept(&self) -> Result<&Projects, String> {

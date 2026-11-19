@@ -7,12 +7,14 @@ use std::time::Duration;
 use lunetad::links::{self, Kind, Link, Of, Pasted, Unready, Work, Worked};
 use lunetad::mux::own::terminal_here;
 use lunetad::program;
-use lunetad::projects::WorkstreamId;
+use lunetad::projects::{Dir, WorkstreamId};
 use lunetad::Directory;
 
 use crate::agents::{self, Kept};
 use crate::machines::Machine;
-use crate::workstreams;
+use crate::workstreams::{self, Joined, Went};
+
+pub const UNFINISHED: u8 = 4;
 
 const ASKING: Duration = Duration::from_secs(30);
 
@@ -27,7 +29,14 @@ pub enum What {
 }
 
 impl What {
-    pub fn read(text: &str, cwd: &Path, is_dir: impl Fn(&Path) -> bool) -> Result<What, String> {
+    pub fn read(
+        text: &str,
+        cwd: &Path,
+        home: Option<&Path>,
+        is_dir: impl Fn(&Path) -> bool,
+    ) -> Result<What, String> {
+        let relative = cwd.display();
+        assert!(cwd.is_absolute(), "a folder is read against an absolute cwd, not {relative}");
         let text = text.trim();
         if text.is_empty() {
             return Err("nothing to start: name a folder, a branch, an issue or a pull request"
@@ -45,7 +54,12 @@ impl What {
             let number = number.parse().ok().filter(|_| digits);
             return number.map(What::Issue).ok_or_else(|| format!("{text} is no issue's number"));
         }
-        let dir = cwd.join(text);
+        let below_home = Dir::below_home(text);
+        let dir = match (below_home, home) {
+            (Some(""), Some(home)) => home.to_path_buf(),
+            (Some(below), Some(home)) => home.join(below.trim_start_matches('/')),
+            _ => cwd.join(text),
+        };
         if is_dir(&dir) {
             return Ok(What::Folder(dir));
         }
@@ -57,10 +71,15 @@ impl What {
     }
 }
 
-struct Started {
-    workstream: Option<WorkstreamId>,
-    folder: PathBuf,
-    note: Option<String>,
+enum Started {
+    Project { folder: PathBuf },
+    Workstream { workstream: WorkstreamId, folder: PathBuf, left: Left },
+}
+
+enum Left {
+    Done,
+    Noted(String),
+    Unfinished(String),
 }
 
 pub fn run(what: &str, path: &Path) -> ExitCode {
@@ -71,37 +90,80 @@ pub fn run(what: &str, path: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    if let Some(note) = &started.note {
-        eprintln!("luneta: {note}");
+    let (folder, finished) = match &started {
+        Started::Project { folder } => {
+            let at = folder.display();
+            eprintln!("luneta: {at} is a project with no workstream there: start a folder in it");
+            (folder, true)
+        },
+        Started::Workstream { workstream, folder, left } => {
+            let done = match left {
+                Left::Done => true,
+                Left::Noted(note) => {
+                    eprintln!("luneta: {note}");
+                    true
+                },
+                Left::Unfinished(why) => {
+                    eprintln!("luneta: {why}");
+                    false
+                },
+            };
+            let went = went(path, *workstream);
+            (folder, done && went)
+        },
+    };
+    println!("{}", folder.display());
+    if finished {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(UNFINISHED)
     }
-    if let Some(workstream) = started.workstream
-        && let Some(from) = terminal_here()
-        && let Err(why) = workstreams::bring(path, workstream, from)
-    {
-        eprintln!("luneta: started, and went nowhere: {why}");
+}
+
+fn went(path: &Path, workstream: WorkstreamId) -> bool {
+    let Some(from) = terminal_here() else {
+        return true;
+    };
+    match workstreams::bring(path, workstream, from) {
+        Ok(Went::Taken) => true,
+        Ok(Went::Elsewhere) => {
+            eprintln!("luneta: no luneta is on this terminal, so none went there");
+            true
+        },
+        Err(why) => {
+            eprintln!("luneta: started, and went nowhere: {why}");
+            false
+        },
     }
-    println!("{}", started.folder.display());
-    ExitCode::SUCCESS
 }
 
 fn started(what: &str, path: &Path) -> Result<Started, String> {
     let cwd = env::current_dir().map_err(|error| format!("no directory to start from: {error}"))?;
     let cwd = workstreams::real(&cwd)?;
-    match What::read(what, &cwd, Path::is_dir)? {
+    let home = env::var_os("HOME").map(PathBuf::from).filter(|home| home.is_absolute());
+    match What::read(what, &cwd, home.as_deref(), Path::is_dir)? {
         What::Folder(dir) => {
             let folder = workstreams::real(&dir)?;
+            let clone = links::wt_holder(utf8(&folder)?).filter(|clone| Path::new(clone) != folder);
+            if let Some(clone) = clone {
+                let joined = workstreams::worked_in(path, &folder, &clone, links::holder)?;
+                let workstream = joined.workstream();
+                return Ok(Started::Workstream { workstream, folder, left: Left::Done });
+            }
             let at = Directory::parse(utf8(&folder)?.to_owned())?;
-            let workstream = workstreams::made_at(path, &Machine::Local, &at, None)?;
-            let note = workstream.is_none().then(|| {
-                format!("{at} is a project with no workstream there: start a folder in it")
-            });
-            Ok(Started { workstream, folder, note })
+            Ok(match workstreams::made_at(path, &Machine::Local, &at, None)? {
+                Some(workstream) => {
+                    let folder = workstreams::folder_of(path, workstream).unwrap_or(folder);
+                    Started::Workstream { workstream, folder, left: Left::Done }
+                },
+                None => Started::Project { folder },
+            })
         },
         What::Branch(branch) => {
             let repo = utf8(&cwd)?;
             let folder = workstreams::real(&links::made(repo, &Of::Branch(branch))?)?;
-            let (workstream, _) = in_clone(path, &folder)?;
-            Ok(Started { workstream: Some(workstream), folder, note: None })
+            let workstream = in_clone(path, &folder)?.workstream();
+            Ok(Started::Workstream { workstream, folder, left: Left::Done })
         },
         What::Issue(number) => linked(path, &cwd, &numbered(number, &cwd)?),
         What::Link(link) => linked(path, &cwd, &link),
@@ -116,25 +178,27 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let worked = std::iter::once(here).chain(others).collect();
     let ready = Pasted::new(Work::Link(link.clone()), worked).ready().map_err(said)?;
     let folder = PathBuf::from(&ready.worktree);
-    let (workstream, made) = in_clone(path, &folder)?;
+    let joined = in_clone(path, &folder)?;
+    let workstream = joined.workstream();
     let off = Work::Link(link.clone()).off_branch(ready.branch.as_deref());
-    let note = match (link.kind(), made, off.filter(|_| ready.moved_off)) {
-        (Kind::Pull, _, _) | (Kind::Issue, false, _) => None,
-        (Kind::Issue, true, Some(off)) => {
-            Some(format!("{} is {off}, so no agent starts there", folder.display()))
+    let left = match (link.kind(), joined, off.filter(|_| ready.moved_off)) {
+        (Kind::Pull, _, _) | (Kind::Issue, Joined::Found(_), Some(_)) => Left::Done,
+        (Kind::Issue, Joined::Made(_), Some(off)) => {
+            Left::Noted(format!("{} is {off}, so no agent starts there", folder.display()))
         },
-        (Kind::Issue, true, None) => {
+        (Kind::Issue, _, None) => {
             let harness = Kept::shared().0.harness();
             let argv = agents::on_words(harness, format!("{TACKLE} {}", link.url()), &[]);
-            workstreams::opened(path, workstream, argv)
-                .err()
-                .map(|why| format!("no agent started on {}: {why}", link.tab()))
+            match workstreams::opened(path, workstream, argv) {
+                Ok(()) => Left::Done,
+                Err(why) => Left::Unfinished(format!("no agent started on {}: {why}", link.tab())),
+            }
         },
     };
-    Ok(Started { workstream: Some(workstream), folder, note })
+    Ok(Started::Workstream { workstream, folder, left })
 }
 
-fn in_clone(path: &Path, folder: &Path) -> Result<(WorkstreamId, bool), String> {
+fn in_clone(path: &Path, folder: &Path) -> Result<Joined, String> {
     let worktree = utf8(folder)?;
     let clone = links::holder(worktree)
         .ok_or_else(|| format!("git does not say what repository {worktree} is"))?;
@@ -168,7 +232,7 @@ mod tests {
     use super::*;
 
     fn read(text: &str) -> Result<What, String> {
-        What::read(text, Path::new("/w/luneta"), |dir| {
+        What::read(text, Path::new("/w/luneta"), Some(Path::new("/w")), |dir| {
             [Path::new("/w/luneta/main"), Path::new("/w/luneta"), Path::new("/w")].contains(&dir)
         })
     }
@@ -180,6 +244,8 @@ mod tests {
         assert_eq!(read(" . "), Ok(What::Folder(PathBuf::from("/w/luneta/."))));
         assert_eq!(read("feat/sidebar"), Ok(What::Branch("feat/sidebar".to_owned())));
         assert_eq!(read("issue-448"), Ok(What::Branch("issue-448".to_owned())));
+        assert_eq!(read("~"), Ok(What::Folder(PathBuf::from("/w"))), "~ is home");
+        assert_eq!(read("~/luneta"), Ok(What::Folder(PathBuf::from("/w/luneta"))));
     }
 
     #[test]

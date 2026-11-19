@@ -22,9 +22,13 @@ pub fn asked(host: &Host, change: Change) -> Result<Option<u64>, Status> {
 
 fn asked_on(host: &Host, on: Option<&str>, change: Change) -> Result<Option<u64>, Status> {
     let made = |made| match made {
-        Made::Project(id) | Made::Workstream(id) => id,
+        Made::Project(id) | Made::Workstream(id) | Made::Found(id) | Made::Taken(id) => id,
     };
     answered_on(host, on, change).map(|answered| answered.made.map(made))
+}
+
+pub fn made(host: &Host, change: Change) -> Result<Option<Made>, Status> {
+    answered_on(host, None, change).map(|answered| answered.made)
 }
 
 fn answered_on(host: &Host, on: Option<&str>, change: Change) -> Result<Answered, Status> {

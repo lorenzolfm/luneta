@@ -71,8 +71,9 @@ fn a_folder_starts_in_the_project_it_is_in_or_one_made_of_it_and_luneta_goes_the
     assert_eq!(folders(&owned.host), made);
     assert_eq!(said(&started(&owned.host, &docs, ".", &[])), shown(&docs));
     assert_eq!(folders(&owned.host), made, "a workstream there already is the one started");
-    assert_eq!(said(&started(&owned.host, &docs, "..", &[])), shown(&work));
-    assert_eq!(folders(&owned.host), made, "a project's own folder starts its last workstream");
+    let last = said(&started(&owned.host, &docs, "..", &[]));
+    assert_eq!(last, shown(&docs), "a project's own folder starts its last workstream, said");
+    assert_eq!(folders(&owned.host), made);
 
     let here = WorkstreamId::of(projects(&owned.host)[0].workstreams[0].id).unwrap();
     let folder = folder_in(owned.host.runtime.path()).unwrap();
@@ -103,6 +104,14 @@ fn a_folder_starts_in_the_project_it_is_in_or_one_made_of_it_and_luneta_goes_the
         }
     });
     assert_eq!(sent, there);
+    let unseen = [
+        ("LUNETA_MUX_TERMINAL", (key.id.get() + 100).to_string()),
+        ("LUNETA_MUX_TERMINAL_MADE", key.made.nanos().to_string()),
+    ];
+    let stayed = started(&owned.host, &home, "work/docs", &unseen);
+    assert_eq!(said(&stayed), shown(&docs), "no luneta on the terminal is no failure");
+    let stderr = String::from_utf8_lossy(&stayed.stderr);
+    assert!(stderr.contains("no luneta is on this terminal"), "{stderr}");
 
     assert_eq!(refused(&started(&owned.host, &home, "./gone", &[])), format!(
         "luneta: {} is no folder",
@@ -145,11 +154,17 @@ fn a_branch_joins_the_project_of_its_clone_made_at_a_worktree_which_widens_to_th
     let (main, feat) = (clone.join("main"), clone.join("feat"));
     let made = project(host, &main, None);
     workstream(host, made, &main);
+    let docs = clone.join("docs");
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "-b", "docs", "../docs", "main"]);
 
+    assert_eq!(said(&started(host, &clone, "docs", &[])), shown(&docs));
+    let widened = |at: &[&Path]| {
+        let folders = at.iter().map(|it| it.display().to_string()).collect();
+        vec![("main".to_owned(), clone.display().to_string(), folders)]
+    };
+    assert_eq!(folders(host), widened(&[&main, &docs]), "a worktree's folder joins it too");
     assert_eq!(said(&started(host, &main, "feat", &[])), shown(&feat));
-    let both = [&main, &feat].map(|it| it.display().to_string()).to_vec();
-    let widened = vec![("main".to_owned(), clone.display().to_string(), both)];
-    assert_eq!(folders(host), widened);
+    assert_eq!(folders(host), widened(&[&main, &docs, &feat]));
     assert_eq!(projects(host)[0].id, made, "the workstream joins the project there was");
 
 
@@ -198,4 +213,16 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     assert_eq!((folders(host), terminals()), (made, 1), "no second agent starts on it");
     let unknown = refused(&started(host, &clone.join("main"), "#8", &[]));
     assert!(unknown.starts_with("luneta: gh issue view: "), "{unknown}");
+
+    host.gh.issue(9, "https://github.com/o/n/issues/9");
+    let nine = clone.join("issue-9");
+    git(&bare, &["worktree", "add", "-q", "-b", "issue-9", "../issue-9", "main"]);
+    let empty = workstream(host, projects(host)[0].id, &nine);
+    fs::remove_file(&asked).unwrap();
+    assert_eq!(said(&started(host, &clone.join("main"), "#9", &[])), shown(&nine));
+    let agent = eventually("an agent starts where none was", || fs::read_to_string(&asked).ok());
+    assert_eq!(agent, "Tackle https://github.com/o/n/issues/9\n");
+    let mut held = projects(host).into_iter().flat_map(|it| it.workstreams);
+    let there = held.find(|it| it.id == empty).expect("the empty workstream is the one started");
+    assert_eq!(there.terminals.len(), 1);
 }

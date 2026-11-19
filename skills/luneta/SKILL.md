@@ -194,16 +194,27 @@ luneta start https://github.com/o/app/pull/7   # a pull request, checked out in 
 - Run it in the repository the branch, issue or pull request is of, or from
   anywhere for a link: luneta finds a clone of the link's repository. Quote
   `'#42'`, or the shell drops it as a comment.
-- A branch, an issue or a pull request needs a clone `wt clone` made. In a
-  plain clone it makes nothing and says why: tell the user.
+- A branch needs a clone `wt clone` made: in a plain clone it makes nothing
+  and says why. Tell the user. An issue or a pull request goes to a clone
+  `wt clone` made of its repository: the one it runs in, else one of
+  luneta's projects, else one zoxide knows.
+- A folder in a worktree of a clone `wt clone` made joins the clone's
+  project, as a branch's worktree does.
 - The issue's agent starts in the harness the user picked last in luneta's
   menu. Don't open another agent for it: `start` already has. Started again,
-  it goes to the same workstream and starts no second agent.
-- A folder of the name goes before a branch of it.
+  it goes to the same workstream and starts no second agent. If the
+  workstream there has no terminal, the agent starts in it.
+- A folder of the name goes before a branch of it. `~` is the user's home,
+  quoted or not.
+- It exits 4 when the workstream started but its agent did not, or taking
+  the user there failed: the folder is printed all the same, and stderr says
+  what failed. Tell the user. Starting it again is safe: it starts the agent
+  only where no terminal is.
 - Run in a terminal of luneta's, it takes the user there if they are on your
-  terminal. For several issues at once, run it once per issue: each gets its
-  own worktree and agent, and the user lands on the first, as they leave your
-  terminal with it.
+  terminal. If they are not, it exits 0 and stderr says no luneta is on this
+  terminal: the user stays where they are. For several issues at once, run it
+  once per issue: each gets its own worktree and agent, and the user lands on
+  the first, as they leave your terminal with it.
 
 ## New session to work on X
 
