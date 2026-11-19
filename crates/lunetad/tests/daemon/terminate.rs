@@ -300,6 +300,11 @@ fn luneta_terminate_here_ends_nothing_in_luneta_s_terminal_or_on_a_key_that_chan
         assert!(refused.stderr.contains("runs in a terminal of luneta's"), "{}", refused.stderr);
         assert!(refused.lines.is_empty(), "{:?}", refused.lines);
     }
+    let unnamed = here_ending(host.vars(), &key, &[("LUNETA_MUX_TERMINAL", "7")]);
+    assert_eq!(unnamed.code, Some(1), "{}", unnamed.stderr);
+    let why = "name no terminal: LUNETA_MUX_TERMINAL_MADE is unset";
+    assert!(unnamed.stderr.contains(why), "{}", unnamed.stderr);
+    assert!(unnamed.lines.is_empty(), "{:?}", unnamed.lines);
     let stale = here_ending(host.vars(), "0000000000000000", &[]);
     assert_eq!(stale.code, Some(1), "{}", stale.stderr);
     assert!(stale.stderr.contains("changed since: ends lunetad"), "{}", stale.stderr);

@@ -10,7 +10,8 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    file_text, moment, named_pid, nonempty, Agent, Harness, Name, Source, Status, Unread,
+    file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Harness, Name, Source,
+    Status, Unread,
 };
 use crate::mux::{self, TerminalKey};
 use crate::{log, process, program};
@@ -92,7 +93,7 @@ pub struct SessionFiles {
     dir: PathBuf,
     domain: process::Domain,
     seen: HashMap<u32, Seen>,
-    terminals: HashMap<(u32, String), Option<TerminalKey>>,
+    terminals: HashMap<(u32, String), Result<Option<TerminalKey>, String>>,
     troubles: Troubles,
     scanned: bool,
 }
@@ -147,8 +148,9 @@ impl SessionFiles {
         let mut terminals = HashMap::with_capacity(self.seen.len());
         let mut terminal_of = |pid: u32, start: String| {
             let key = (pid, start);
-            let terminal = self.terminals.remove(&key).unwrap_or_else(|| mux::terminal_of(pid));
-            terminals.insert(key, terminal);
+            let read = self.terminals.remove(&key).unwrap_or_else(|| mux::terminal_of(pid));
+            let terminal = terminal_or_trouble(pid, &read, &mut self.troubles);
+            terminals.insert(key, read);
             terminal
         };
         let mut agents = Vec::with_capacity(self.seen.len());

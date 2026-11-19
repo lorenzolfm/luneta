@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime};
 use luneta_protocol::said::Said;
 use serde::Deserialize;
 
-use crate::agent::{file_text, moment, named_pid, nonempty, Agent, Harness, Status};
+use crate::agent::{
+    file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Harness, Status,
+};
 use crate::mux::{self, TerminalKey};
 use crate::watch::{self, Troubles};
 use crate::{log, process};
@@ -45,10 +47,9 @@ struct File {
     mode: Option<String>,
 }
 
-#[derive(Clone, Copy)]
 struct Process {
     started: SystemTime,
-    terminal: Option<TerminalKey>,
+    terminal: Result<Option<TerminalKey>, String>,
 }
 
 pub struct AgentFiles {
@@ -111,10 +112,11 @@ impl AgentFiles {
             let Some(found) = found else {
                 continue;
             };
-            let file = read(&path, &key.1, found.started);
-            processes.insert(key, found);
-            match file {
-                Ok(Some(file)) => agents.push(agent(pid, file, found)),
+            match read(&path, &key.1, found.started) {
+                Ok(Some(file)) => {
+                    let terminal = terminal_or_trouble(pid, &found.terminal, &mut self.troubles);
+                    agents.push(agent(pid, file, found.started, terminal));
+                },
                 Ok(None) => {
                     let why = format!("{}: no process of its pid wrote it", path.display());
                     self.troubles.say(why);
@@ -122,6 +124,7 @@ impl AgentFiles {
                 Err(error) if error.kind() == ErrorKind::NotFound => {},
                 Err(error) => self.troubles.say(format!("{}: {error}", path.display())),
             }
+            processes.insert(key, found);
         }
         self.processes = processes;
         self.troubles.done();
@@ -161,7 +164,7 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<File
     Ok(stands.then_some(file))
 }
 
-fn agent(pid: u32, file: File, process: Process) -> Agent {
+fn agent(pid: u32, file: File, started: SystemTime, terminal: Option<TerminalKey>) -> Agent {
     Agent {
         pid,
         harness: Harness::Pi,
@@ -169,9 +172,9 @@ fn agent(pid: u32, file: File, process: Process) -> Agent {
         cwd: file.cwd,
         status: Status::of(Some(file.status.as_str()), None),
         status_since: Some(moment(file.status_since)),
-        started_at: Some(process.started),
+        started_at: Some(started),
         name: None,
         entrypoint: file.mode.and_then(|mode| Said::new(mode.trim().to_owned())),
-        terminal: process.terminal,
+        terminal,
     }
 }

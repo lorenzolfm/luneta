@@ -471,7 +471,10 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
         Ok(start) => start,
         Err(refusal) => return did_not_start(&format!("no worktree to show: {refusal}")),
     };
-    let runs_in = lunetad::mux::own::terminal_here();
+    let runs_in = match lunetad::mux::own::terminal_here() {
+        Ok(runs_in) => runs_in,
+        Err(why) => return did_not_start(&why),
+    };
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(error) => return did_not_start(&format!("no terminal: {error}")),

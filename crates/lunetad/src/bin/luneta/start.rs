@@ -121,8 +121,13 @@ pub fn run(what: &str, path: &Path) -> ExitCode {
 }
 
 fn went(path: &Path, worktree: WorktreeId) -> bool {
-    let Some(from) = terminal_here() else {
-        return true;
+    let from = match terminal_here() {
+        Ok(Some(from)) => from,
+        Ok(None) => return true,
+        Err(why) => {
+            eprintln!("luneta: started, and went nowhere: {why}");
+            return false;
+        },
     };
     match worktrees::bring(path, worktree, from) {
         Ok(Went::Taken) => true,
