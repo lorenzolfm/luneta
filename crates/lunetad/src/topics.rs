@@ -347,6 +347,7 @@ pub fn follow(
 mod tests {
     use std::fs::{OpenOptions, Permissions};
     use std::io::Write as _;
+    use std::num::NonZeroU32;
     use std::os::unix::fs::PermissionsExt as _;
 
     use serde_json::json;
@@ -354,7 +355,7 @@ mod tests {
 
     use super::*;
     use crate::agent::{Harness, Source};
-    use crate::mux::{Named, ZellijPane};
+    use crate::mux::{OwnMade, TerminalKey};
 
     const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
 
@@ -373,7 +374,7 @@ mod tests {
             started_at: Some(began() + Duration::from_secs(1)),
             name: None,
             entrypoint: Some(Said::new("cli".to_owned()).unwrap()),
-            pane: Some(Named::Zellij(ZellijPane { session: "work".to_owned(), pane: 1 })),
+            pane: Some(TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(60) }),
         }
     }
 

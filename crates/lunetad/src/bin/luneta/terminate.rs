@@ -20,9 +20,8 @@ use signal_hook::consts::SIGHUP;
 
 use crate::close::Doing;
 use crate::commands;
-use crate::drive::{self, Agreed, PLANNED};
+use crate::agreed::{self, Agreed, PLANNED};
 use crate::machines::{self, Machine};
-use crate::zellij;
 
 const ROUNDS: usize = 3;
 
@@ -51,7 +50,7 @@ pub fn run(yes: Option<Agreed>, here: bool, ending: Option<Key>, folder: &Path) 
             None => say_alone(&folders),
         };
     }
-    let turn = match drive::turn_here() {
+    let turn = match agreed::turn_here() {
         Ok(turn) => turn,
         Err(why) => return failed(&why),
     };
@@ -306,8 +305,8 @@ fn say_alone(folders: &Folders) -> ExitCode {
 }
 
 fn end_alone(key: Key, folders: &Folders) -> ExitCode {
-    let in_luneta = match zellij::here() {
-        Ok(seat) => seat.is_some() || lunetad::mux::own::terminal_here().is_some(),
+    let in_luneta = match agreed::turn_here() {
+        Ok(turn) => turn.is_some() || lunetad::mux::own::terminal_here().is_some(),
         Err(why) => return failed(&format!("ended nothing, as {why}")),
     };
     if in_luneta {

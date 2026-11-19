@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lunetad::program::{self, Ran};
 use lunetad::transcripts::{digest, Digest, Reading, SessionId, IDS_MAX};
-use lunetad::{one_answer, Destination};
+use lunetad::{one_answer, Destination, SessionName};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -24,7 +24,6 @@ use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::sidebar;
-use crate::zellij::SessionName;
 
 const MODEL: &str = "haiku";
 
@@ -46,7 +45,7 @@ const LEFT_OUT_BYTES: usize = 4 * 1024;
 const WIDTH_MIN: u16 = 60;
 
 const SYSTEM: &str = "You brief a developer who is coming back to their desk after a break. They \
-    left Claude Code agents at work in zellij sessions, and want to know at a glance how each \
+    left Claude Code agents at work in luneta's projects, and want to know at a glance how each \
     is doing. The notes you get say where each agent runs, its status and its branch, and end \
     with what its transcript said last. Write plain text for a terminal: no markdown, no \
     headings, no bold, no code fences. Say what each agent is working on and where it stands, \

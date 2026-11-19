@@ -3,8 +3,6 @@ use std::time::{Duration, SystemTime};
 
 use crate::api;
 use crate::api::say::Does;
-use crate::mux::{SessionName, Sessions};
-use crate::seats::Where;
 
 pub const BYTES_MAX: usize = 16 * 1024;
 
@@ -12,56 +10,9 @@ pub const STALE: Duration = Duration::from_mins(2);
 
 const KEPT: usize = 16;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Speaker(pub api::Zellij);
-
-impl Speaker {
-    #[must_use]
-    pub fn called(&self) -> &str {
-        self.0.session.as_deref().unwrap_or(&self.0.named)
-    }
-
-    #[must_use]
-    pub fn seat(&self) -> Option<(Where<'_>, u32)> {
-        Some((Where::Zellij(self.0.session.as_deref()?), self.0.pane))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Asker {
-    pub named: SessionName,
-    pub pane: u32,
-}
-
-impl Asker {
-    pub fn of(zellij: Option<api::Zellij>) -> Result<Option<Asker>, String> {
-        let Some(zellij) = zellij else {
-            return Ok(None);
-        };
-        let named =
-            SessionName::running(&zellij.named).map_err(|why| format!("speaker: {why}"))?;
-        Ok(Some(Asker { named, pane: zellij.pane }))
-    }
-
-    fn placed(self, sessions: &Sessions) -> Speaker {
-        let Asker { named, pane } = self;
-        let session = sessions.lead(named.as_str(), None).map(ToString::to_string);
-        Speaker(api::Zellij { named: named.to_string(), session, pane })
-    }
-}
-
 #[must_use]
-pub fn asked(text: String, asker: Option<Asker>) -> api::Utterance {
-    let speaker = asker.map(|Asker { named, pane }| api::Zellij {
-        named: named.to_string(),
-        session: None,
-        pane,
-    });
-    api::Utterance { text, speaker }
-}
-
-fn utterance(text: String, speaker: Option<Speaker>) -> api::Utterance {
-    api::Utterance { text, speaker: speaker.map(|Speaker(zellij)| zellij) }
+pub fn asked(text: String) -> api::Utterance {
+    api::Utterance { text }
 }
 
 #[derive(Debug)]
@@ -74,7 +25,6 @@ pub enum ToSay {
 #[derive(Debug)]
 pub struct Spoken {
     text: String,
-    asker: Option<Asker>,
 }
 
 impl ToSay {
@@ -89,23 +39,17 @@ impl ToSay {
 
 impl Spoken {
     fn parse(utterance: api::Utterance) -> Result<Spoken, String> {
-        let api::Utterance { text, speaker } = utterance;
+        let api::Utterance { text } = utterance;
         if text.trim().is_empty() {
             return Err("it says nothing".to_owned());
         }
-        let asker = Asker::of(speaker)?;
-        bounded(&text, asker.as_ref().map(|asker| asker.named.as_str()))?;
-        Ok(Spoken { text, asker })
+        let bytes = text.len();
+        if bytes > BYTES_MAX {
+            let most = format!("{BYTES_MAX} is the most to say at once");
+            return Err(format!("it is {bytes} bytes long, and {most}"));
+        }
+        Ok(Spoken { text })
     }
-}
-
-fn bounded(text: &str, called: Option<&str>) -> Result<(), String> {
-    let bytes = text.len() + called.map_or(0, str::len);
-    if bytes > BYTES_MAX {
-        let most = format!("{BYTES_MAX} is the most to say at once");
-        return Err(format!("it is {bytes} bytes long, and {most}"));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -115,16 +59,10 @@ pub struct Sayings {
 }
 
 impl Sayings {
-    pub fn take(
-        &mut self,
-        said: ToSay,
-        sessions: &Sessions,
-        at: SystemTime,
-    ) -> Result<(), String> {
-        let placed = |spoken| placed(spoken, sessions);
+    pub fn take(&mut self, said: ToSay, at: SystemTime) {
         let does = match said {
-            ToSay::InTurn(spoken) => Does::InTurn(placed(spoken)?),
-            ToSay::Now(spoken) => Does::Now(placed(spoken)?),
+            ToSay::InTurn(spoken) => Does::InTurn(spoken.said()),
+            ToSay::Now(spoken) => Does::Now(spoken.said()),
             ToSay::Stop => Does::Stop(()),
         };
         self.numbered += 1;
@@ -134,7 +72,6 @@ impl Sayings {
         if self.kept.len() > KEPT {
             self.kept.pop_front();
         }
-        Ok(())
     }
 
     #[must_use]
@@ -144,35 +81,25 @@ impl Sayings {
     }
 }
 
-fn placed(spoken: Spoken, sessions: &Sessions) -> Result<api::Utterance, String> {
-    let Spoken { text, asker } = spoken;
-    assert_ne!(text.trim(), "");
-    assert!(text.len() <= BYTES_MAX);
-    let speaker = asker.map(|asker| asker.placed(sessions));
-    bounded(&text, speaker.as_ref().map(Speaker::called))?;
-    Ok(utterance(text, speaker))
+impl Spoken {
+    fn said(self) -> api::Utterance {
+        let Spoken { text } = self;
+        assert_ne!(text.trim(), "");
+        assert!(text.len() <= BYTES_MAX);
+        api::Utterance { text }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn does(text: &str, speaker: Option<api::Zellij>) -> Does {
-        Does::InTurn(api::Utterance { text: text.to_owned(), speaker })
-    }
-
-    fn utterance(sayings: &Sayings) -> api::Utterance {
-        let does = sayings.fresh(SystemTime::UNIX_EPOCH).pop().unwrap().say.unwrap().does;
-        let Some(Does::InTurn(utterance)) = does else { panic!("{does:?}") };
-        utterance
+    fn does(text: &str) -> Does {
+        Does::InTurn(api::Utterance { text: text.to_owned() })
     }
 
     fn said(text: &str) -> ToSay {
-        ToSay::parse(does(text, None)).unwrap()
-    }
-
-    fn from(named: &str, session: Option<&str>) -> api::Zellij {
-        api::Zellij { named: named.to_owned(), session: session.map(str::to_owned), pane: 3 }
+        ToSay::parse(does(text)).unwrap()
     }
 
     fn texts(sayings: &[api::Saying]) -> Vec<&str> {
@@ -189,7 +116,7 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH;
         let mut sayings = Sayings::default();
         for count in 0..KEPT + 2 {
-            sayings.take(said(&count.to_string()), &Sessions::default(), at).unwrap();
+            sayings.take(said(&count.to_string()), at);
         }
         let fresh = sayings.fresh(at);
         assert_eq!(fresh.len(), KEPT);
@@ -202,9 +129,8 @@ mod tests {
     fn what_was_said_too_long_ago_goes() {
         let at = SystemTime::UNIX_EPOCH + Duration::from_hours(1);
         let mut sayings = Sayings::default();
-        let sessions = Sessions::default();
-        sayings.take(said("early"), &sessions, at).unwrap();
-        sayings.take(said("late"), &sessions, at + Duration::from_mins(1)).unwrap();
+        sayings.take(said("early"), at);
+        sayings.take(said("late"), at + Duration::from_mins(1));
         assert_eq!(texts(&sayings.fresh(at + STALE)), ["early", "late"]);
         assert_eq!(texts(&sayings.fresh(at + STALE + Duration::from_secs(1))), ["late"]);
         assert_eq!(texts(&sayings.fresh(at + Duration::from_hours(2))), [""; 0]);
@@ -212,32 +138,10 @@ mod tests {
     }
 
     #[test]
-    fn what_a_speaker_was_asked_with_has_no_say_in_its_session() {
-        let asked = ToSay::parse(does("hello", Some(from("work", Some("made up"))))).unwrap();
-        let mut sayings = Sayings::default();
-        sayings.take(asked, &Sessions::default(), SystemTime::UNIX_EPOCH).unwrap();
-        let placed = utterance(&sayings).speaker.unwrap();
-        assert_eq!(placed.session, None);
-        assert_eq!(placed.named, "work");
-    }
-
-    #[test]
     fn what_says_nothing_or_too_much_is_not_taken() {
-        assert!(ToSay::parse(does(" \n\t", None)).is_err());
-        assert!(ToSay::parse(does(&"a".repeat(BYTES_MAX + 1), None)).is_err());
-        assert!(ToSay::parse(does(&"a".repeat(BYTES_MAX), None)).is_ok());
+        assert!(ToSay::parse(does(" \n\t")).is_err());
+        assert!(ToSay::parse(does(&"a".repeat(BYTES_MAX + 1))).is_err());
+        assert!(ToSay::parse(does(&"a".repeat(BYTES_MAX))).is_ok());
         assert!(ToSay::parse(Does::Stop(())).is_ok());
-    }
-
-    #[test]
-    fn the_name_of_a_session_counts_and_has_to_be_a_name() {
-        let parsed = |text: &str, named: &str| ToSay::parse(does(text, Some(from(named, None))));
-        let text = "a".repeat(BYTES_MAX - 4);
-        assert!(parsed(&text, "name").is_ok());
-        assert!(parsed(&text, "names").is_err());
-        assert!(parsed("hi", &"a".repeat(BYTES_MAX)).is_err());
-        for no_name in ["", " ", "..", "a/b"] {
-            assert!(parsed("hi", no_name).is_err(), "{no_name:?}");
-        }
     }
 }

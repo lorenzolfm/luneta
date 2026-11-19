@@ -11,28 +11,10 @@ service Daemon {
   rpc Info(google.protobuf.Empty) returns (InfoResponse);
   rpc ListAgents(google.protobuf.Empty) returns (ListAgentsResponse);
   rpc Watch(WatchRequest) returns (Host);
-  rpc Go(GoRequest) returns (google.protobuf.Empty);
-  rpc ListClients(ListClientsRequest) returns (ListClientsResponse);
-  rpc Refuge(RefugeRequest) returns (RefugeResponse);
-  rpc Open(OpenRequest) returns (OpenResponse);
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
-  rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);
   rpc KeepChecks(KeepChecksRequest) returns (stream KeepChecksResponse);
-  rpc NameSession(NameSessionRequest) returns (NameSessionResponse);
-  rpc CheckName(CheckNameRequest) returns (CheckNameResponse);
   rpc ListDirs(ListDirsRequest) returns (ListDirsResponse);
   rpc ListContents(ListContentsRequest) returns (ListContentsResponse);
-  rpc DumpScreen(DumpScreenRequest) returns (DumpScreenResponse);
-  rpc Start(StartRequest) returns (google.protobuf.Empty);
-  rpc Closes(ClosesRequest) returns (ClosesResponse);
-  rpc Close(CloseRequest) returns (google.protobuf.Empty);
-  rpc OtherTabs(OtherTabsRequest) returns (OtherTabsResponse);
-  rpc TurnIntoTab(TurnIntoTabRequest) returns (TurnIntoTabResponse);
-  rpc TurnIntoPanes(TurnIntoPanesRequest) returns (TurnIntoPanesResponse);
-  rpc Kill(KillRequest) returns (google.protobuf.Empty);
-  rpc ListExited(ListExitedRequest) returns (ListExitedResponse);
-  rpc DeleteExited(DeleteExitedRequest) returns (google.protobuf.Empty);
-  rpc RenameSession(RenameSessionRequest) returns (google.protobuf.Empty);
   rpc TranscriptEnds(TranscriptEndsRequest) returns (TranscriptEndsResponse);
   rpc Ask(AskRequest) returns (stream AskResponse);
   rpc Paste(PasteRequest) returns (stream PasteResponse);
@@ -52,59 +34,6 @@ message On {
   string destination = 1;
 }
 
-message GoRequest {
-  On on = 1;
-  string at = 2;
-  string to = 3;
-  optional uint32 pane = 4;
-}
-
-message ListClientsRequest {
-  On on = 1;
-  string session = 2;
-}
-
-message ListClientsResponse {
-  repeated Client clients = 1;
-}
-
-message RefugeRequest {
-  On on = 1;
-  repeated string seats = 2;
-}
-
-message RefugeResponse {
-  oneof ended {
-    google.protobuf.Empty kept = 1;
-    Went went = 2;
-  }
-
-  message Went {
-    Refuge refuge = 1;
-  }
-}
-
-message OpenRequest {
-  On on = 1;
-  string session = 2;
-  string cwd = 3;
-  repeated string command = 4;
-  oneof opens {
-    uint32 beside = 5;
-    Tab tab = 6;
-  }
-
-  message Tab {
-    optional string name = 1;
-    google.protobuf.Timestamp alone_since = 2;
-  }
-}
-
-message OpenResponse {
-  uint32 terminal = 1;
-  repeated string notes = 2;
-}
-
 message ListSkillsRequest {
   On on = 1;
   string dir = 2;
@@ -121,30 +50,10 @@ message ListSkillsResponse {
   }
 }
 
-message KeepPrintedRequest {
-  On on = 1;
-  string session = 2;
-  uint32 pane = 3;
-  string typed = 4;
-}
-
-message KeepPrintedResponse {
-  oneof printed {
-    File after = 1;
-    google.protobuf.Empty nothing = 2;
-    File unsure = 3;
-    Top top = 4;
-  }
-
-  message File {
-    string path = 1;
-    uint64 lines = 2;
-    uint64 left_out = 3;
-  }
-
-  message Top {
-    File file = 1;
-  }
+message PrintedFile {
+  string path = 1;
+  uint64 lines = 2;
+  uint64 left_out = 3;
 }
 
 message KeepChecksRequest {
@@ -162,30 +71,10 @@ message KeepChecksResponse {
     string name = 1;
     string link = 2;
     oneof log {
-      KeepPrintedResponse.File kept = 3;
+      PrintedFile kept = 3;
       string unkept = 4;
     }
   }
-}
-
-message NameSessionRequest {
-  On on = 1;
-  optional string dir = 2;
-}
-
-message NameSessionResponse {
-  string name = 1;
-  google.protobuf.Timestamp named_at = 2;
-  optional string dir = 3;
-}
-
-message CheckNameRequest {
-  On on = 1;
-  string name = 2;
-}
-
-message CheckNameResponse {
-  google.protobuf.Timestamp named_at = 1;
 }
 
 message ListDirsRequest {
@@ -210,133 +99,6 @@ message ListContentsResponse {
   string listed = 1;
 }
 
-message DumpScreenRequest {
-  On on = 1;
-  string session = 2;
-  optional uint32 pane = 3;
-}
-
-message DumpScreenResponse {
-  uint32 pane = 1;
-  string screen = 2;
-}
-
-message StartRequest {
-  On on = 1;
-  string at = 2;
-  string to = 3;
-  optional string cwd = 4;
-}
-
-message ClosesRequest {
-  On on = 1;
-  string session = 2;
-  uint32 pane = 3;
-}
-
-message ClosesResponse {
-  oneof closes {
-    google.protobuf.Empty pane = 1;
-    Tab tab = 2;
-    google.protobuf.Empty session = 3;
-  }
-
-  message Tab {
-    uint32 id = 1;
-    repeated uint32 panes = 2;
-  }
-}
-
-message CloseRequest {
-  On on = 1;
-  string session = 2;
-  oneof closes {
-    uint32 pane = 3;
-    ClosesResponse.Tab tab = 4;
-  }
-  google.protobuf.Timestamp started_at = 5;
-}
-
-message OtherTabsRequest {
-  On on = 1;
-  string session = 2;
-  uint32 pane = 3;
-}
-
-message OtherTabsResponse {
-  repeated Tab tabs = 1;
-
-  message Tab {
-    uint32 pane = 1;
-    string name = 2;
-  }
-}
-
-message TurnIntoTabRequest {
-  On on = 1;
-  string session = 2;
-  uint32 pane = 3;
-  google.protobuf.Timestamp started_at = 4;
-}
-
-message TurnIntoTabResponse {
-  oneof came {
-    google.protobuf.Empty done = 1;
-    google.protobuf.Empty no_client = 2;
-  }
-}
-
-message TurnIntoPanesRequest {
-  On on = 1;
-  string session = 2;
-  uint32 pane = 3;
-  uint32 beside = 4;
-  google.protobuf.Timestamp started_at = 5;
-}
-
-message TurnIntoPanesResponse {
-  oneof came {
-    google.protobuf.Empty done = 1;
-    Partly partly = 2;
-  }
-
-  message Partly {
-    uint32 moved = 1;
-    uint32 of = 2;
-    string why = 3;
-  }
-}
-
-message KillRequest {
-  On on = 1;
-  string session = 2;
-  google.protobuf.Timestamp started_at = 3;
-}
-
-message ListExitedRequest {
-  On on = 1;
-}
-
-message ListExitedResponse {
-  repeated Exited exited = 1;
-
-  message Exited {
-    string name = 1;
-    google.protobuf.Duration ago = 2;
-  }
-}
-
-message DeleteExitedRequest {
-  On on = 1;
-  string session = 2;
-}
-
-message RenameSessionRequest {
-  On on = 1;
-  string session = 2;
-  string to = 3;
-}
-
 message TranscriptEndsRequest {
   On on = 1;
   repeated string ids = 2;
@@ -353,18 +115,8 @@ message AskRequest {
   string words = 3;
   optional string resumed = 4;
   string highlighted = 5;
-  oneof user {
-    UserPane pane = 6;
-    google.protobuf.Empty away = 7;
-  }
-  fixed64 turn = 8;
-  optional fixed64 before = 9;
-  optional Harness agents = 10;
-
-  message UserPane {
-    string session = 1;
-    uint32 pane = 2;
-  }
+  fixed64 turn = 6;
+  optional fixed64 before = 7;
 }
 
 message AskResponse {
@@ -437,11 +189,6 @@ message PasteResponse {
   }
 }
 
-message Refuge {
-  string session = 1;
-  repeated Client before = 2;
-}
-
 message WatchRequest {
   Version after = 1;
   optional bool kept = 2;
@@ -460,12 +207,11 @@ message Host {
   repeated Agent agents = 4;
   uint32 unread = 5;
   repeated PullRequest pull_requests = 6;
-  optional uint32 unread_sockets = 7;
-  repeated UnreadFile unread_files = 8;
-  repeated Remote remotes = 9;
-  optional uint32 unread_hosts = 10;
-  repeated Saying sayings = 11;
-  Projects projects = 12;
+  repeated UnreadFile unread_files = 7;
+  repeated Remote remotes = 8;
+  optional uint32 unread_hosts = 9;
+  repeated Saying sayings = 10;
+  Projects projects = 11;
 }
 
 message Say {
@@ -478,7 +224,6 @@ message Say {
 
 message Utterance {
   string text = 1;
-  optional Zellij speaker = 2;
 }
 
 message SayRequest {
@@ -505,10 +250,9 @@ message Remote {
     repeated Agent agents = 3;
     uint32 unread = 4;
     repeated PullRequest pull_requests = 5;
-    optional uint32 unread_sockets = 6;
-    repeated UnreadFile unread_files = 7;
-    repeated Saying sayings = 8;
-    Projects projects = 9;
+    repeated UnreadFile unread_files = 6;
+    repeated Saying sayings = 7;
+    Projects projects = 8;
   }
 
   message Unreached {
@@ -533,24 +277,14 @@ message Remote {
 
 message Session {
   string name = 1;
-  google.protobuf.Timestamp started_at = 2;
-  Panes panes = 3;
-  Clients clients = 4;
-  uint64 socket = 5;
-  oneof mux {
-    ZellijSession zellij = 6;
-    OwnSession own = 7;
-  }
+  Panes panes = 2;
+  Clients clients = 3;
+  OwnSession own = 4;
 }
 
 message OwnSession {
   uint64 id = 1;
   google.protobuf.Timestamp made_at = 2;
-}
-
-message ZellijSession {
-  google.protobuf.Timestamp started_at = 1;
-  uint64 socket = 2;
 }
 
 message Panes {
@@ -695,9 +429,8 @@ message InfoResponse {
   string version = 1;
   uint32 pid = 2;
   google.protobuf.Timestamp started_at = 3;
-  optional bytes zellij_folder = 4;
-  optional bytes claude_folder = 5;
-  optional uint64 built = 6;
+  optional bytes claude_folder = 4;
+  optional uint64 built = 5;
 }
 
 message ListAgentsResponse {
@@ -708,9 +441,8 @@ message ListAgentsResponse {
 
 message UnreadFile {
   uint32 pid = 1;
-  Zellij zellij = 2;
-  Own own = 3;
-  TerminalKey terminal = 4;
+  Own own = 2;
+  TerminalKey terminal = 3;
 }
 
 message Agent {
@@ -726,16 +458,15 @@ message Agent {
   Name name = 8;
   optional string entrypoint = 9;
   oneof pane {
-    Zellij zellij = 10;
-    Own own = 11;
-    TerminalKey terminal = 12;
+    Own own = 10;
+    TerminalKey terminal = 11;
   }
   oneof waiting_for {
-    WaitingFor known_waiting_for = 13;
-    string other_waiting_for = 14;
+    WaitingFor known_waiting_for = 12;
+    string other_waiting_for = 13;
   }
-  optional Harness harness = 15;
-  optional string topic = 16;
+  optional Harness harness = 14;
+  optional string topic = 15;
 }
 
 enum Harness {
@@ -778,12 +509,6 @@ enum NameSource {
 message Own {
   OwnSession session = 1;
   uint32 pane = 2;
-}
-
-message Zellij {
-  string named = 1;
-  optional string session = 2;
-  uint32 pane = 3;
 }
 
 message PrunesRequest {

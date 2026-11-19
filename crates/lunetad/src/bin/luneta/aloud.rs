@@ -7,8 +7,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyModifiers};
 use lunetad::api::say::Does;
 use lunetad::api::{Saying, Utterance};
-use lunetad::sayings::{Speaker, STALE};
-use lunetad::seats::Where;
+use lunetad::sayings::STALE;
 use lunetad::transcripts::one_line;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -67,7 +66,7 @@ const SHOWN_CHARS: usize = 200;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Whose {
     Selection,
-    Said { on: Machine, speaker: Option<Speaker> },
+    Said { on: Machine },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,14 +76,6 @@ pub enum Shown {
 }
 
 impl Shown {
-    pub fn from(&self) -> Option<(&Machine, Where<'_>, u32)> {
-        let Shown::Reading { whose: Whose::Said { on, speaker: Some(speaker) }, .. } = self else {
-            return None;
-        };
-        let (session, pane) = speaker.seat()?;
-        Some((on, session, pane))
-    }
-
     pub fn paused(&self) -> bool {
         match self {
             Shown::Reading { paused, .. } | Shown::Fetching { paused, .. } => *paused,
@@ -122,13 +113,8 @@ impl Shown {
             Shown::Reading { whose, text, .. } => {
                 let who = match whose {
                     Whose::Selection => "selection".to_owned(),
-                    Whose::Said { on, speaker } => {
-                        match (speaker.as_ref().map(Speaker::called), on) {
-                            (Some(called), _) => called.to_owned(),
-                            (None, Machine::Local) => machines::local_name(),
-                            (None, Machine::Remote(on)) => on.to_string(),
-                        }
-                    },
+                    Whose::Said { on: Machine::Local } => machines::local_name(),
+                    Whose::Said { on: Machine::Remote(on) } => on.to_string(),
                 };
                 let who = cut(&who, room);
                 let rest = room.saturating_sub(who.width() + 3);
@@ -183,7 +169,6 @@ struct Queue {
     in_turn: VecDeque<Waiting>,
     now: Option<Now>,
     numbered: u64,
-    named: Option<(Machine, String)>,
     heard: HashMap<Machine, Option<(u32, u64)>>,
     paused: bool,
 }
@@ -216,9 +201,8 @@ impl Queue {
     fn take(&mut self, on: &Machine, saying: Saying, at: SystemTime) {
         let does = saying.say.and_then(|say| say.does);
         let waiting = |utterance: Utterance| {
-            let Utterance { text, speaker } = utterance;
-            let speaker = speaker.map(Speaker);
-            Waiting { whose: Whose::Said { on: on.clone(), speaker }, text, came: Some(at) }
+            let Utterance { text } = utterance;
+            Waiting { whose: Whose::Said { on: on.clone() }, text, came: Some(at) }
         };
         match does {
             Some(Does::InTurn(utterance)) => self.after(waiting(utterance)),
@@ -281,18 +265,7 @@ impl Queue {
                 continue;
             }
             let Waiting { whose, text, .. } = next;
-            let speaker = match &whose {
-                Whose::Said { on, speaker: Some(speaker) } => {
-                    Some((on.clone(), speaker.called().to_owned()))
-                },
-                Whose::Said { speaker: None, .. } | Whose::Selection => None,
-            };
-            let spoken = match &speaker {
-                Some((_, session)) if self.named != speaker => format!("{session}. {text}"),
-                Some(_) | None => text.clone(),
-            };
-            self.named = speaker;
-            return Some(Next { spoken, whose, text });
+            return Some(Next { spoken: text.clone(), whose, text });
         }
     }
 
@@ -474,7 +447,7 @@ impl Aloud {
 mod tests {
     use std::time::Duration;
 
-    use lunetad::api::{Say, Zellij};
+    use lunetad::api::Say;
     use lunetad::Destination;
     use ratatui::layout::Position;
 
@@ -497,17 +470,12 @@ mod tests {
         Saying { pid: PID, number, say: Some(Say { does: Some(does) }) }
     }
 
-    fn pane(named: &str, session: Option<&str>) -> Zellij {
-        Zellij { named: named.to_owned(), session: session.map(str::to_owned), pane: 3 }
+    fn utterance(text: &str) -> Utterance {
+        Utterance { text: text.to_owned() }
     }
 
-    fn utterance(text: &str, session: Option<&str>) -> Utterance {
-        let speaker = session.map(|session| pane(session, Some(session)));
-        Utterance { text: text.to_owned(), speaker }
-    }
-
-    fn in_turn(number: u64, text: &str, session: Option<&str>) -> Saying {
-        saying(number, Does::InTurn(utterance(text, session)))
+    fn in_turn(number: u64, text: &str) -> Saying {
+        saying(number, Does::InTurn(utterance(text)))
     }
 
     fn here(sayings: Vec<Saying>) -> Vec<(Machine, Option<Vec<Saying>>)> {
@@ -535,27 +503,27 @@ mod tests {
     #[test]
     fn what_a_machine_said_before_its_first_answer_says_nothing() {
         let mut queue = Queue::default();
-        queue.hear(here(vec![in_turn(1, "before", None)]), true, at(0));
+        queue.hear(here(vec![in_turn(1, "before")]), true, at(0));
         assert!(!queue.busy());
-        queue.hear(here(vec![in_turn(1, "before", None), in_turn(2, "after", None)]), true, at(1));
+        queue.hear(here(vec![in_turn(1, "before"), in_turn(2, "after")]), true, at(1));
         assert_eq!(spoken(&mut queue), ["after"]);
     }
 
     #[test]
     fn what_was_heard_is_read_once() {
         let mut queue = hearing();
-        let one = in_turn(1, "one", None);
+        let one = in_turn(1, "one");
         queue.hear(here(vec![one.clone()]), true, at(1));
-        queue.hear(here(vec![one.clone(), in_turn(2, "two", None)]), true, at(2));
-        queue.hear(here(vec![one, in_turn(2, "two", None)]), true, at(3));
+        queue.hear(here(vec![one.clone(), in_turn(2, "two")]), true, at(2));
+        queue.hear(here(vec![one, in_turn(2, "two")]), true, at(3));
         assert_eq!(spoken(&mut queue), ["one", "two"]);
     }
 
     #[test]
     fn a_daemon_started_again_counts_afresh_and_is_heard() {
         let mut queue = hearing();
-        queue.hear(here(vec![in_turn(5, "old", None)]), true, at(1));
-        let again = Saying { pid: PID + 1, ..in_turn(1, "new", None) };
+        queue.hear(here(vec![in_turn(5, "old")]), true, at(1));
+        let again = Saying { pid: PID + 1, ..in_turn(1, "new") };
         queue.hear(here(vec![again]), true, at(2));
         assert_eq!(spoken(&mut queue), ["old", "new"]);
     }
@@ -565,19 +533,19 @@ mod tests {
         let mut queue = hearing();
         let far_said = |sayings| vec![(Machine::Local, Some(Vec::new())), (far(), sayings)];
         queue.hear(far_said(None), true, at(1));
-        queue.hear(far_said(Some(vec![in_turn(1, "while away", None)])), true, at(2));
+        queue.hear(far_said(Some(vec![in_turn(1, "while away")])), true, at(2));
         assert_eq!(spoken(&mut queue), ["while away"]);
         queue.hear(here(Vec::new()), true, at(3));
-        queue.hear(far_said(Some(vec![in_turn(2, "gone a while", None)])), true, at(4));
+        queue.hear(far_said(Some(vec![in_turn(2, "gone a while")])), true, at(4));
         assert!(!queue.busy());
     }
 
     #[test]
     fn a_luneta_that_does_not_read_leaves_behind_what_it_heard() {
         let mut queue = hearing();
-        queue.hear(here(vec![in_turn(1, "for the other", None)]), false, at(1));
+        queue.hear(here(vec![in_turn(1, "for the other")]), false, at(1));
         assert!(!queue.busy());
-        let both = vec![in_turn(1, "for the other", None), in_turn(2, "for this", None)];
+        let both = vec![in_turn(1, "for the other"), in_turn(2, "for this")];
         queue.hear(here(both), true, at(2));
         assert_eq!(spoken(&mut queue), ["for this"]);
     }
@@ -585,7 +553,7 @@ mod tests {
     #[test]
     fn past_the_most_that_wait_the_oldest_goes() {
         let mut queue = hearing();
-        let many = (1..=WAITING as u64 + 2).map(|n| in_turn(n, &n.to_string(), None)).collect();
+        let many = (1..=WAITING as u64 + 2).map(|n| in_turn(n, &n.to_string())).collect();
         queue.hear(here(many), true, at(1));
         let read = spoken(&mut queue);
         assert_eq!(read.len(), WAITING);
@@ -595,9 +563,9 @@ mod tests {
     #[test]
     fn now_goes_first_and_cuts_off_what_plays() {
         let mut queue = hearing();
-        queue.hear(here(vec![in_turn(1, "next", None)]), true, at(1));
+        queue.hear(here(vec![in_turn(1, "next")]), true, at(1));
         let quiet = reading(&mut queue, 1);
-        let now = saying(2, Does::Now(utterance("first", None)));
+        let now = saying(2, Does::Now(utterance("first")));
         queue.hear(here(vec![now]), true, at(2));
         assert!(quiet.cut.load(Ordering::Relaxed));
         assert_eq!(spoken(&mut queue), ["first", "next"]);
@@ -606,8 +574,8 @@ mod tests {
     #[test]
     fn past_the_most_that_wait_what_goes_first_stays() {
         let mut queue = hearing();
-        let mut said = vec![saying(1, Does::Now(utterance("first", None)))];
-        said.extend((2..=WAITING as u64 + 2).map(|n| in_turn(n, &n.to_string(), None)));
+        let mut said = vec![saying(1, Does::Now(utterance("first")))];
+        said.extend((2..=WAITING as u64 + 2).map(|n| in_turn(n, &n.to_string())));
         queue.hear(here(said), true, at(1));
         let read = spoken(&mut queue);
         assert_eq!(read.len(), WAITING + 1);
@@ -619,9 +587,9 @@ mod tests {
     fn what_goes_first_takes_the_place_of_one_that_has_not_begun() {
         let mut queue = hearing();
         let said = vec![
-            in_turn(1, "next", None),
-            saying(2, Does::Now(utterance("cut off", None))),
-            saying(3, Does::Now(utterance("first", None))),
+            in_turn(1, "next"),
+            saying(2, Does::Now(utterance("cut off"))),
+            saying(3, Does::Now(utterance("first"))),
         ];
         queue.hear(here(said), true, at(1));
         assert_eq!(spoken(&mut queue), ["first", "next"]);
@@ -631,7 +599,7 @@ mod tests {
     fn stop_lets_go_of_what_was_to_go_first_too() {
         let mut queue = hearing();
         let said =
-            vec![saying(1, Does::Now(utterance("first", None))), saying(2, Does::Stop(()))];
+            vec![saying(1, Does::Now(utterance("first"))), saying(2, Does::Stop(()))];
         queue.hear(here(said), true, at(1));
         assert!(!queue.busy());
     }
@@ -639,8 +607,8 @@ mod tests {
     #[test]
     fn what_was_to_go_first_goes_once_it_has_waited_too_long() {
         let mut queue = hearing();
-        queue.hear(here(vec![saying(1, Does::Now(utterance("early", None)))]), true, at(1));
-        queue.hear(here(vec![in_turn(2, "late", None)]), true, at(1) + STALE);
+        queue.hear(here(vec![saying(1, Does::Now(utterance("early")))]), true, at(1));
+        queue.hear(here(vec![in_turn(2, "late")]), true, at(1) + STALE);
         assert_eq!(queue.next(at(2) + STALE).map(|next| next.spoken).as_deref(), Some("late"));
     }
 
@@ -649,9 +617,9 @@ mod tests {
         let mut queue = hearing();
         let quiet = reading(&mut queue, 1);
         let said = vec![
-            in_turn(1, "gone", None),
+            in_turn(1, "gone"),
             saying(2, Does::Stop(())),
-            in_turn(3, "after the stop", None),
+            in_turn(3, "after the stop"),
         ];
         queue.hear(here(said), true, at(1));
         assert!(quiet.cut.load(Ordering::Relaxed));
@@ -659,39 +627,10 @@ mod tests {
     }
 
     #[test]
-    fn the_session_is_named_as_the_speaker_changes() {
-        let mut queue = hearing();
-        let said = vec![
-            in_turn(1, "one", Some("luneta")),
-            in_turn(2, "two", Some("luneta")),
-            in_turn(3, "three", Some("wt")),
-            in_turn(4, "four", Some("luneta")),
-            in_turn(5, "no pane", None),
-            in_turn(6, "six", Some("luneta")),
-        ];
-        queue.hear(here(said), true, at(1));
-        assert_eq!(
-            spoken(&mut queue),
-            ["luneta. one", "two", "wt. three", "luneta. four", "no pane", "luneta. six"],
-        );
-    }
-
-    #[test]
-    fn a_session_of_that_name_on_another_machine_is_another_speaker() {
-        let mut queue = hearing();
-        let said = |text, number| Some(vec![in_turn(number, text, Some("main"))]);
-        let here_said = said("here", 1);
-        let far_quiet = (far(), Some(Vec::new()));
-        queue.hear(vec![(Machine::Local, here_said.clone()), far_quiet], true, at(1));
-        queue.hear(vec![(Machine::Local, here_said), (far(), said("there", 1))], true, at(1));
-        assert_eq!(spoken(&mut queue), ["main. here", "main. there"]);
-    }
-
-    #[test]
     fn what_has_waited_too_long_is_not_read() {
         let mut queue = hearing();
-        queue.hear(here(vec![in_turn(1, "early", None)]), true, at(1));
-        queue.hear(here(vec![in_turn(2, "late", None)]), true, at(1) + STALE);
+        queue.hear(here(vec![in_turn(1, "early")]), true, at(1));
+        queue.hear(here(vec![in_turn(2, "late")]), true, at(1) + STALE);
         let next = queue.next(at(2) + STALE).unwrap();
         assert_eq!(next.spoken, "late");
         assert_eq!(queue.next(at(2) + STALE), None);
@@ -789,7 +728,7 @@ mod tests {
         let mut queue = hearing();
         drop(reading(&mut queue, 1));
         queue.pause(at(1));
-        let said = vec![saying(1, Does::Stop(())), in_turn(2, "after the stop", None)];
+        let said = vec![saying(1, Does::Stop(())), in_turn(2, "after the stop")];
         queue.hear(here(said), true, at(2));
         assert!(!queue.paused);
         assert_eq!(spoken(&mut queue), ["after the stop"]);
@@ -800,7 +739,7 @@ mod tests {
         let mut queue = hearing();
         let quiet = reading(&mut queue, 1);
         queue.pause(at(1));
-        queue.hear(here(vec![saying(1, Does::Now(utterance("first", None)))]), true, at(2));
+        queue.hear(here(vec![saying(1, Does::Now(utterance("first")))]), true, at(2));
         assert!(quiet.cut.load(Ordering::Relaxed));
         assert!(queue.paused);
         assert_eq!(spoken(&mut queue), ["first"]);
@@ -811,9 +750,9 @@ mod tests {
         let mut queue = hearing();
         drop(reading(&mut queue, 1));
         queue.pause(at(1));
-        queue.hear(here(vec![saying(1, Does::Now(utterance("first", None)))]), true, at(1));
+        queue.hear(here(vec![saying(1, Does::Now(utterance("first")))]), true, at(1));
         let last = WAITING as u64 + 1;
-        let rest = (2..=last).map(|n| in_turn(n, &n.to_string(), None)).collect();
+        let rest = (2..=last).map(|n| in_turn(n, &n.to_string())).collect();
         queue.hear(here(rest), true, at(2));
         queue.unpause();
         let mut clock = at(3) + STALE * 5;
@@ -832,23 +771,23 @@ mod tests {
     fn what_comes_behind_what_waited_through_a_pause_is_read_too() {
         let mut queue = hearing();
         drop(reading(&mut queue, 1));
-        queue.hear(here(vec![in_turn(1, "waited", None)]), true, at(1));
+        queue.hear(here(vec![in_turn(1, "waited")]), true, at(1));
         queue.pause(at(1));
         queue.unpause();
-        queue.hear(here(vec![in_turn(2, "behind", None)]), true, at(2));
+        queue.hear(here(vec![in_turn(2, "behind")]), true, at(2));
         let late = at(2) + STALE * 5;
         assert_eq!(queue.next(late).map(|next| next.spoken).as_deref(), Some("waited"));
         assert_eq!(queue.next(late).map(|next| next.spoken).as_deref(), Some("behind"));
-        queue.hear(here(vec![in_turn(3, "after", None)]), true, at(3));
+        queue.hear(here(vec![in_turn(3, "after")]), true, at(3));
         assert_eq!(queue.next(late), None, "it waited on nothing of yours");
     }
 
     #[test]
     fn a_pause_does_not_bring_back_what_had_waited_too_long() {
         let mut queue = hearing();
-        let early = vec![saying(1, Does::Now(utterance("first", None))), in_turn(2, "early", None)];
+        let early = vec![saying(1, Does::Now(utterance("first"))), in_turn(2, "early")];
         queue.hear(here(early), true, at(1));
-        queue.hear(here(vec![in_turn(3, "late", None)]), true, at(1) + STALE);
+        queue.hear(here(vec![in_turn(3, "late")]), true, at(1) + STALE);
         drop(reading(&mut queue, 1));
         queue.pause(at(2) + STALE);
         queue.unpause();
@@ -860,7 +799,7 @@ mod tests {
     #[test]
     fn a_pause_of_only_what_had_waited_too_long_is_none() {
         let mut queue = hearing();
-        queue.hear(here(vec![in_turn(1, "early", None)]), true, at(1));
+        queue.hear(here(vec![in_turn(1, "early")]), true, at(1));
         queue.pause(at(2) + STALE);
         assert!(!queue.paused);
         assert!(!queue.busy());
@@ -870,7 +809,7 @@ mod tests {
     fn pausing_what_is_paused_lets_go_of_nothing() {
         let mut queue = hearing();
         drop(reading(&mut queue, 1));
-        queue.hear(here(vec![in_turn(1, "rest", None)]), true, at(1));
+        queue.hear(here(vec![in_turn(1, "rest")]), true, at(1));
         queue.pause(at(1));
         queue.pause(at(2) + STALE * 5);
         assert!(queue.paused);
@@ -881,7 +820,7 @@ mod tests {
     fn nothing_goes_stale_during_a_pause() {
         let mut queue = hearing();
         drop(reading(&mut queue, 1));
-        queue.hear(here(vec![in_turn(1, "rest", None)]), true, at(1));
+        queue.hear(here(vec![in_turn(1, "rest")]), true, at(1));
         queue.pause(at(1));
         assert!(queue.ended(1));
         assert!(queue.paused, "what waits is what you paused too");
@@ -891,7 +830,7 @@ mod tests {
     #[test]
     fn going_on_with_nothing_paused_gives_what_waits_no_more_time() {
         let mut queue = hearing();
-        queue.hear(here(vec![in_turn(1, "early", None)]), true, at(1));
+        queue.hear(here(vec![in_turn(1, "early")]), true, at(1));
         queue.unpause();
         assert_eq!(queue.next(at(2) + STALE), None);
     }
@@ -987,38 +926,7 @@ mod tests {
             let line = Shown::Reading { whose, text, paused: false }.said(40);
             line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()
         };
-        let from = |speaker| Whose::Said { on: far(), speaker };
         assert_eq!(line(Whose::Selection), format!("{MARK} selection · the tests pass"));
-        let said = from(Some(Speaker(pane("old", Some("luneta")))));
-        assert_eq!(line(said), format!("{MARK} luneta · the tests pass"));
-        assert_eq!(line(from(None)), format!("{MARK} far · the tests pass"));
-        let untold = from(Some(Speaker(pane("old", None))));
-        assert_eq!(line(untold), format!("{MARK} old · the tests pass"));
-    }
-
-    #[test]
-    fn what_comes_from_a_session_not_told_marks_no_row() {
-        let shown = |speaker| {
-            let whose = Whose::Said { on: far(), speaker: Some(speaker) };
-            Shown::Reading { whose, text: String::new(), paused: false }
-        };
-        let told = shown(Speaker(pane("old", Some("new"))));
-        assert_eq!(told.from(), Some((&far(), Where::Zellij("new"), 3)));
-        assert_eq!(shown(Speaker(pane("old", None))).from(), None);
-    }
-
-    #[test]
-    fn a_session_not_told_goes_by_the_name_the_pane_knows_it_by() {
-        let mut queue = hearing();
-        let from = |text: &str, speaker| {
-            Utterance { text: text.to_owned(), speaker: Some(speaker) }
-        };
-        let said = vec![
-            saying(1, Does::InTurn(from("told", pane("old", Some("new"))))),
-            saying(2, Does::InTurn(from("same", pane("other", Some("new"))))),
-            saying(3, Does::InTurn(from("untold", pane("old", None)))),
-        ];
-        queue.hear(here(said), true, at(1));
-        assert_eq!(spoken(&mut queue), ["new. told", "same", "old. untold"]);
+        assert_eq!(line(Whose::Said { on: far() }), format!("{MARK} far · the tests pass"));
     }
 }

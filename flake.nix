@@ -86,7 +86,6 @@
             fileset = pkgs.lib.fileset.unions [
               cargoFiles
               ./.config/nextest.toml
-              ./shell/luneta.fish
             ];
           };
 
@@ -168,7 +167,6 @@
 
             nativeCheckInputs = [
               pkgs.cargo-nextest
-              pkgs.fish
               pkgs.git
               pkgs.nodejs
               pkgs.openssh
@@ -191,10 +189,6 @@
                 cargo nextest run --cargo-profile "$CARGO_PROFILE" --profile ci \
                   --test-threads "$NIX_BUILD_CORES" --locked ${testRun}
                 cargoWithProfile test --doc --locked ${testRun}
-              '';
-
-              postInstall = ''
-                install -Dm444 ${./shell/luneta.fish} $out/share/fish/vendor_conf.d/luneta.fish
               '';
 
               meta = {
@@ -283,7 +277,6 @@
             packages = buildTools ++ [
               dev
               pkgs.cargo-nextest
-              pkgs.fish
               pkgs.nodejs
             ];
             buildInputs = speechLibs ++ [ libghosttyVt.dev ];

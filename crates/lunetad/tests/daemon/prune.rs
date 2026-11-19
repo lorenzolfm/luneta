@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::projects::Held;
 use lunetad::api::{On, PrunesRequest};
 use lunetad::prunes::{self, Came, Deleting, Goes, Plan, Pruned, Pushed, RemoteBranch};
 use lunetad::Directory;
@@ -12,8 +12,8 @@ use serde_json::json;
 use tonic::Code;
 
 use crate::host::{Daemon, Host, LUNETA, LUNETAD, answered, eventually, folder_in, start, start_as};
+use crate::projects::{project, worktree};
 use crate::remote::{FakeSsh, hosts, reached};
-use crate::sessions::listed;
 use crate::worktree::{cloned_as_wt, git};
 
 const PLANNED: i32 = 3;
@@ -82,27 +82,26 @@ fn merged(number: u32, head: &str, author: &str) -> serde_json::Value {
     })
 }
 
-fn serving(host: &Host, dirs: &[&Path]) -> (UnixListener, Daemon) {
-    let panes: Vec<serde_json::Value> = dirs
-        .iter()
-        .zip(1..)
-        .map(|(dir, id)| listed(id, "~", (0, "Tab #1"), Some(&dir.display().to_string())))
-        .collect();
-    serving_as(host, &json!(panes), host.vars().command(LUNETAD))
+fn serving(host: &Host, dir: &Path) -> (Daemon, u64) {
+    serving_as(host, dir, host.vars().command(LUNETAD))
 }
 
-fn serving_as(host: &Host, panes: &serde_json::Value, lunetad: Command) -> (UnixListener, Daemon) {
-    host.zellij.list("work", panes);
-    let work = host.serve("work");
+fn serving_as(host: &Host, dir: &Path, lunetad: Command) -> (Daemon, u64) {
     let daemon = start_as(lunetad).unwrap();
-    eventually("the daemon lists the session's panes", || {
-        let sessions = host.host().sessions;
-        sessions
-            .iter()
-            .find(|session| session.name == "work" && session.panes.is_some())
-            .map(|_| ())
-    });
-    (work, daemon)
+    let made = project(host, dir, None);
+    worktree(host, made, dir);
+    let one = || (terminals(&host.host()) == 1).then_some(());
+    eventually("the daemon holds a terminal there", one);
+    (daemon, made)
+}
+
+fn terminals(host: &lunetad::api::Host) -> usize {
+    let held = host.projects.as_ref().and_then(|projects| projects.held.as_ref());
+    let Some(Held::Kept(kept)) = held else {
+        return 0;
+    };
+    let worktrees = kept.projects.iter().flat_map(|project| project.worktrees().unwrap_or(&[]));
+    worktrees.map(|worktree| worktree.terminals.len()).sum()
 }
 
 fn prune(host: &Host, from: &Path, repo: &Path, more: &[&str]) -> Output {
@@ -153,7 +152,6 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
 
     let paned = repository.pushed("paned");
     host.gh.open("paned", &merged(6, &paned, "me"));
-    fs::create_dir(repository.at("paned").join("src")).unwrap();
 
     let based = repository.pushed("based");
     host.gh.open("based", &merged(7, &based, "me"));
@@ -182,7 +180,7 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
 
     repository.pushed("no-pull");
 
-    let _serving = serving(&host, &[&repository.at("paned").join("src")]);
+    let _serving = serving(&host, &repository.at("paned"));
 
     let asked = prune(&host, &repository.at("from"), &repository.at("main"), &[]);
     let (said, plan) = planned(&asked);
@@ -267,19 +265,12 @@ fn a_plan_that_changed_deletes_nothing_and_says_the_new_one() {
         let head = repository.pushed(name);
         host.gh.open(name, &merged(1, &head, "me"));
     }
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let (_daemon, made) = serving(&host, &repository.at("main"));
     let (_, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
 
-    let in_dir = |id, dir: &Path| listed(id, "~", (0, "Tab #1"), Some(&dir.display().to_string()));
-    host.zellij.list(
-        "work",
-        &json!([in_dir(1, &repository.at("main")), in_dir(2, &repository.at("one"))]),
-    );
-    eventually("the daemon lists the new pane", || {
-        let sessions = host.host().sessions;
-        let panes = sessions.iter().find_map(|session| session.panes.as_ref())?;
-        (panes.panes.len() == 2).then_some(())
-    });
+    worktree(&host, made, &repository.at("one"));
+    let two = || (terminals(&host.host()) == 2).then_some(());
+    eventually("the daemon holds the new terminal", two);
     let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
     let (said, now) = planned(&told);
     assert_ne!(now, plan);
@@ -311,7 +302,7 @@ fn a_directory_in_no_repository_says_so() {
     let host = Host::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
-    let _serving = serving(&host, &[&scratch]);
+    let _daemon = start(host.vars()).unwrap();
     let said = prune(&host, &scratch, &scratch, &[]);
     let why = String::from_utf8_lossy(&said.stderr);
     assert_eq!(said.status.code(), Some(1), "{why}");
@@ -346,7 +337,7 @@ fn a_worktree_git_refuses_stays_and_the_others_go() {
     git(&at, &["push", "-q"]);
     assert_ne!(head, before);
     host.gh.open("held", &merged(2, &head, "me"));
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
     let (_, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
     let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
     let why = String::from_utf8_lossy(&told.stderr);
@@ -372,7 +363,7 @@ fn a_far_branch_it_could_not_delete_keeps_its_worktree_to_try_again() {
     let head = repository.pushed("one");
     host.gh.open("one", &merged(1, &head, "me"));
     git(&repository.up, &["config", "receive.denyDeletes", "true"]);
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
 
     let (_, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
     let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
@@ -400,7 +391,7 @@ fn in_the_ask_box_a_plan_takes_its_yes_only_in_the_next_turn() {
     host.gh.api("me\n");
     let head = repository.pushed("one");
     host.gh.open("one", &merged(1, &head, "me"));
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
     let in_turn = |vars: &[(&str, &str)], more: &[&str]| {
         let mut command = host.vars().command(LUNETA);
         command
@@ -451,7 +442,7 @@ fn a_branch_that_pushes_to_the_default_under_another_name_stays() {
     git(&bare, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/dev"]);
     host.gh.open("my-main", &merged(1, &head, "me"));
     host.gh.open("my-dev", &merged(2, &head, "me"));
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
 
     let said = prune(&host, &scratch, &repository.at("main"), &[]);
     let listed = String::from_utf8_lossy(&said.stdout);
@@ -473,7 +464,7 @@ fn a_branch_that_is_the_default_of_a_remote_never_fetched_stays() {
     host.gh.open("dev", &merged(1, &head, "me"));
     git(&repository.up, &["symbolic-ref", "HEAD", "refs/heads/dev"]);
     git(&bare, &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
 
     let said = prune(&host, &scratch, &repository.at("main"), &[]);
     let listed = String::from_utf8_lossy(&said.stdout);
@@ -500,7 +491,7 @@ fn an_untracked_file_keeps_its_worktree_whatever_git_is_set_to_show() {
     host.gh.open("one", &merged(1, &head, "me"));
     fs::write(repository.at("one").join("new"), "not yet added").unwrap();
     git(&repository.clone.join(".bare"), &["config", "status.showUntrackedFiles", "no"]);
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
 
     let said = prune(&host, &scratch, &repository.at("main"), &[]);
     let listed = String::from_utf8_lossy(&said.stdout);
@@ -523,7 +514,7 @@ fn a_worktree_with_another_in_it_stays_until_that_one_has_gone() {
     let inner = repository.at("outer").join(".claude/worktrees/inner");
     git(&bare, &["worktree", "add", "-q", "-b", "inner", &inner.display().to_string(), "main"]);
     fs::write(inner.join("new"), "not yet added").unwrap();
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
 
     let said = prune(&host, &scratch, &repository.at("main"), &[]);
     let listed = String::from_utf8_lossy(&said.stdout);
@@ -533,25 +524,6 @@ fn a_worktree_with_another_in_it_stays_until_that_one_has_gone() {
     fs::remove_dir_all(&inner).unwrap();
     let (said, _) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
     assert!(said.contains("delete outer"), "{said}");
-}
-
-#[test]
-fn a_pane_with_nothing_running_in_it_does_not_stop_a_plan() {
-    let host = Host::new();
-    let scratch = tempfile::tempdir().unwrap();
-    let scratch = scratch.path().canonicalize().unwrap();
-    let repository = Repository::new(&scratch);
-    host.gh.api("me\n");
-    let head = repository.pushed("one");
-    host.gh.open("one", &merged(1, &head, "me"));
-    let main = repository.at("main").display().to_string();
-    let mut finished = listed(2, "sh -c exit 3", (0, "Tab #1"), None);
-    finished["is_held"] = json!(true);
-    let panes = json!([listed(1, "~", (0, "Tab #1"), Some(&main)), finished]);
-    let _serving = serving_as(&host, &panes, host.vars().command(LUNETAD));
-
-    let (said, _) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
-    assert!(said.contains("delete one"), "{said}");
 }
 
 #[test]
@@ -568,8 +540,7 @@ fn a_plan_does_not_need_the_directory_it_runs_in() {
     let mut from_there = host.vars().command(LUNETAD);
     from_there.current_dir(&gone);
     let main = repository.at("main").display().to_string();
-    let panes = json!([listed(1, "~", (0, "Tab #1"), Some(&main))]);
-    let _serving = serving_as(&host, &panes, from_there);
+    let _serving = serving_as(&host, &repository.at("main"), from_there);
     fs::remove_dir(&gone).unwrap();
 
     let folder = folder_in(host.runtime.path()).unwrap();
@@ -598,7 +569,7 @@ fn the_daemon_deletes_only_what_it_would_plan_itself() {
     let head = repository.pushed("one");
     host.gh.open("one", &merged(1, &head, "me"));
     git(&repository.up, &["branch", "other", &head]);
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
 
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -654,7 +625,7 @@ fn a_branch_on_a_remote_that_is_not_where_its_head_is_stays() {
     host.gh.open("fork-gone", &said);
     let head = repository.pushed("own");
     host.gh.open("own", &merged(3, &head, "me"));
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
 
     let (said, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
     let not_there = "branch on-fork; what is pushed of it stays: origin is not where its pull \
@@ -687,7 +658,7 @@ fn what_was_agreed_goes_in_whatever_order_it_is_told() {
         let head = repository.pushed(name);
         host.gh.open(name, &merged(1, &head, "me"));
     }
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
 
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -737,7 +708,7 @@ fn a_pull_request_open_on_the_parent_keeps_a_worktree_merged_on_the_fork() {
     host.gh.open_in(parent, "closed-there", &on_parent(30, "CLOSED", &closed));
     let merged_there = repository.pushed("merged-there");
     host.gh.open_in(parent, "merged-there", &on_parent(40, "MERGED", &merged_there));
-    let _serving = serving(&host, &[&repository.at("main")]);
+    let _serving = serving(&host, &repository.at("main"));
 
     let (said, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
     assert!(said.contains("keep open-there #1: #10 is open on its parent"), "{said}");
@@ -760,7 +731,7 @@ fn a_pull_request_open_on_the_parent_keeps_a_worktree_merged_on_the_fork() {
 fn a_far_row_lists_and_deletes_on_its_own_machine() {
     let here = Host::new();
     let far = Host::new();
-    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
     let repository = Repository::new(&scratch);
@@ -769,10 +740,13 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
     far.gh.open("one", &merged(1, &head, "me"));
     let head = repository.pushed("paned");
     far.gh.open("paned", &merged(2, &head, "me"));
-    let _serving = serving(&far, &[&repository.at("paned")]);
+    let _serving = serving(&far, &repository.at("paned"));
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
-    reached(&here, "far", |far| far.sessions.iter().any(|session| session.panes.is_some()));
+    reached(&here, "far", |far| {
+        let kept = far.projects.as_ref().and_then(|projects| projects.held.as_ref());
+        matches!(kept, Some(Held::Kept(kept)) if !kept.projects.is_empty())
+    });
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

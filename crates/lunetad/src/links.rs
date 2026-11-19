@@ -774,7 +774,7 @@ fn ready(
     let remote = seen.get(&repository).and_then(Looked::remote);
     if let Some(branch) = link.branch() {
         if reads_moved_off && let Some(moved) = moved_off(&repository, &branch)? {
-            return moved.ready(going, worked, work);
+            return Ok(moved.ready(going, worked, work));
         }
         let remote = remote.ok_or_else(|| {
             format!("git does not say a remote of {repository} is {}", link.repository())
@@ -832,7 +832,7 @@ fn ready_file(
     let branch = file.branch();
     let work = Readied::File { real };
     if reads_moved_off && let Some(moved) = moved_off(&repository, &branch)? {
-        return moved.ready(going, worked, work);
+        return Ok(moved.ready(going, worked, work));
     }
     base(&repository, ORIGIN, &branch)?;
     made_worktree(&repository, &Of::Branch(Branch(branch)), going, worked, work)
@@ -844,15 +844,10 @@ struct MovedOff {
 }
 
 impl MovedOff {
-    fn ready(
-        self,
-        going: Going,
-        worked: &[Worked],
-        work: Readied,
-    ) -> Result<Ready<usize>, Unready> {
+    fn ready(self, going: Going, worked: &[Worked], work: Readied) -> Ready<usize> {
         let MovedOff { folder, on: branch } = self;
-        let at = going_to(&folder, going, worked)?;
-        Ok(Ready { at, folder, branch, moved_off: true, work })
+        let at = going_to(&folder, going, worked);
+        Ready { at, folder, branch, moved_off: true, work }
     }
 }
 
@@ -899,19 +894,17 @@ fn made_worktree(
     work: Readied,
 ) -> Result<Ready<usize>, Unready> {
     let folder = worktree(dir, of)?;
-    let at = going_to(&folder, going, worked)?;
+    let at = going_to(&folder, going, worked);
     Ok(Ready { at, branch: branch(&folder), moved_off: false, folder, work })
 }
 
-fn going_to(folder: &str, going: Going, worked: &[Worked]) -> Result<At<usize>, Unready> {
+fn going_to(folder: &str, going: Going, worked: &[Worked]) -> At<usize> {
     let in_it = worked.iter().enumerate().filter(|(_, it)| it.dir == folder);
-    Ok(match (in_it.min_by_key(|(at, it)| (!it.here, *at)), going) {
+    match (in_it.min_by_key(|(at, it)| (!it.here, *at)), going) {
         (Some((at, _)), _) => At::There(at),
         (None, Going::Session(at)) => At::Session(at),
-        (None, Going::Clone { cwd, name }) => {
-            At::Clone { cwd, name: free(&name).map_err(Unready::InDoubt)? }
-        },
-    })
+        (None, Going::Clone { cwd, name }) => At::Clone { cwd, name },
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -975,11 +968,6 @@ fn session_for(dir: &str) -> Result<(Directory, SessionName), String> {
     let name = names::session_for(Path::new(cwd.as_str()))
         .ok_or_else(|| format!("no session can be named for {cwd}"))?;
     Ok((cwd, name))
-}
-
-fn free(name: &SessionName) -> Result<SessionName, String> {
-    let named = names::named()?;
-    Ok(name.free(&named.iter().map(SessionName::as_str).collect::<Vec<_>>()))
 }
 
 fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {

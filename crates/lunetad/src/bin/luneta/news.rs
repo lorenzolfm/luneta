@@ -167,8 +167,8 @@ mod tests {
         news.dwell(here, finished, now, steady(now))
     }
 
-    fn session(started: u64) -> Session {
-        Session::new(at(started), std::num::NonZeroU64::MIN).unwrap()
+    fn session(project: u64) -> Session {
+        Session::Project(lunetad::projects::ProjectId::of(project).unwrap())
     }
 
     fn pane(pane: u32) -> Key {

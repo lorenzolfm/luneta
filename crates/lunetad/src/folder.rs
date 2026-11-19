@@ -225,32 +225,4 @@ mod tests {
         let runtime = find_in(&environ(&["XDG_RUNTIME_DIR=/run/user/1000", "TMPDIR=/tmp/a"]));
         assert_eq!(runtime.unwrap(), Path::new("/run/user/1000/luneta"));
     }
-
-    #[test]
-    fn the_fish_hook_names_the_folder_lunetad_finds() {
-        let hook = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shell/luneta.fish");
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        for set in [
-            vec![],
-            vec!["XDG_RUNTIME_DIR=/run/user/1000"],
-            vec!["XDG_RUNTIME_DIR=/run/user/1000/", "TMPDIR=/tmp/a"],
-            vec!["XDG_RUNTIME_DIR=run", "TMPDIR=/tmp/a"],
-            vec!["XDG_RUNTIME_DIR=", "TMPDIR=/tmp/a"],
-            vec!["TMPDIR=/tmp/a"],
-        ] {
-            let mut fish = std::process::Command::new("fish");
-            fish.args(["--no-config", "-c", "source $argv[1]; __luneta_folder"]).arg(&hook);
-            fish.env_clear().env("PATH", &path);
-            for entry in &set {
-                let (name, value) = entry.split_once('=').unwrap();
-                fish.env(name, value);
-            }
-            let said = fish.output().expect("fish runs, as the devshell and the build have it");
-            let stderr = String::from_utf8_lossy(&said.stderr);
-            assert!(said.status.success() && stderr.is_empty(), "{set:?}: {stderr}");
-            let named = String::from_utf8(said.stdout).unwrap();
-            let named = Path::new(named.strip_suffix('\n').unwrap());
-            assert_eq!(named, find_in(&environ(&set)).unwrap(), "{set:?}");
-        }
-    }
 }

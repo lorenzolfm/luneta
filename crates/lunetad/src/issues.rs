@@ -576,10 +576,8 @@ mod tests {
         let removed = |name: &str| {
             claude.get_envs().any(|(key, value)| key.to_str() == Some(name) && value.is_none())
         };
-        let zellij = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
         let terminal = ["LUNETA_MUX_TERMINAL", "LUNETA_MUX_TERMINAL_MADE"];
-        let panes = zellij.into_iter().chain(terminal);
-        for name in panes.chain(git::REPOSITORY_VARS) {
+        for name in terminal.into_iter().chain(git::REPOSITORY_VARS) {
             assert!(removed(name), "{name}");
         }
         assert_eq!(filing().words, "a red button");

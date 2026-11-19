@@ -1,25 +1,21 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::{symlink, PermissionsExt};
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lunetad::api::change_projects_request::{Change, ForgetProject};
 use lunetad::api::checkout::Head;
 use lunetad::api::git_status::{NoCheckout, Stands};
-use lunetad::api::refuge_response::{Ended, Went};
-use lunetad::api::{
-    self, Branch, Changes, Checkout, ListClientsRequest, PullRequestState, RefugeRequest,
-    Upstream, Version,
-};
-use tonic::Code;
+use lunetad::api::projects::Held;
+use lunetad::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream, Version};
 use prost::Message as _;
 use serde_json::json;
 
-use crate::host::{eventually, folder_in, start, Host, LUNETA};
+use crate::host::{eventually, start, Host, LUNETA};
+use crate::projects::{asked, project};
 
 impl Host {
     fn watch(&self, after: Option<Version>) -> (api::Host, Duration) {
@@ -36,437 +32,20 @@ impl Host {
     }
 }
 
-pub fn session<'a>(host: &'a api::Host, name: &str) -> Option<&'a api::Session> {
-    host.sessions.iter().find(|session| session.name == name)
+fn watched(host: &Host, dir: &str) -> (u64, String) {
+    let id = project(host, Path::new(dir), None);
+    let folder = eventually("lunetad keeps the project", || {
+        let held = host.host().projects.and_then(|projects| projects.held);
+        let Some(Held::Kept(kept)) = held else {
+            return None;
+        };
+        Some(kept.projects.into_iter().find(|it| it.id == id)?.dir)
+    });
+    (id, folder)
 }
 
-pub fn listed(id: u32, title: &str, tab: (u32, &str), cwd: Option<&str>) -> serde_json::Value {
-    json!({
-        "id": id,
-        "is_plugin": false,
-        "is_selectable": true,
-        "is_suppressed": false,
-        "is_floating": false,
-        "is_focused": false,
-        "is_fullscreen": false,
-        "is_held": false,
-        "title": title,
-        "tab_id": tab.0,
-        "tab_position": tab.0,
-        "tab_name": tab.1,
-        "terminal_command": null,
-        "pane_command": cwd.map(|_| "fish"),
-        "pane_cwd": cwd,
-    })
-}
-
-fn pane(id: u32, tab: (u32, &str), cwd: Option<&str>) -> api::Pane {
-    api::Pane {
-        id,
-        tab: tab.0,
-        tab_name: tab.1.to_owned(),
-        cwd: cwd.map(str::to_owned),
-        command: cwd.map(|_| "fish".to_owned()),
-        titled: None,
-        shell: None,
-        tab_id: Some(tab.0),
-        held: false,
-        key: None,
-    }
-}
-
-#[test]
-fn a_session_is_there_as_its_socket_is_and_has_its_panes_once_zellij_lists_them() {
-    let host = Host::new();
-    let _daemon = start(host.vars()).unwrap();
-    let _work = host.serve("work");
-
-    let work = eventually("work runs", || session(&host.host(), "work").cloned());
-    assert!(work.started_at.is_some());
-    assert_eq!(work.panes, None);
-
-    let mut suppressed = listed(0, "tail -f /dev/null", (0, "Tab #1"), Some("/home/you"));
-    suppressed["is_suppressed"] = json!(true);
-    let mut plugin = listed(2, "luneta", (0, "Tab #1"), None);
-    plugin["is_plugin"] = json!(true);
-    let mut unsaid = listed(4, "Pane #2", (1, "review"), None);
-    unsaid["pane_command"] = json!("");
-    let shell = listed(3, "~/work", (0, "Tab #1"), Some("/home/you/work"));
-    host.zellij.list("work", &json!([suppressed, plugin, shell, unsaid]));
-
-    let panes = eventually("zellij lists the panes of work", || {
-        session(&host.host(), "work")?.panes.clone()
-    });
-    assert_eq!(
-        panes.panes,
-        [pane(3, (0, "Tab #1"), Some("/home/you/work")), pane(4, (1, "review"), None)]
-    );
-
-    let mut busy = shell.clone();
-    busy["pane_cwd"] = json!(null);
-    busy["pane_command"] = json!(null);
-    let mut renamed = unsaid.clone();
-    renamed["tab_name"] = json!("reviewed");
-    host.zellij.list("work", &json!([busy, renamed]));
-    let panes = eventually("zellij lists the panes of work again", || {
-        let panes = session(&host.host(), "work")?.panes.clone()?;
-        panes.panes.iter().any(|pane| pane.tab_name == "reviewed").then_some(panes)
-    });
-    assert_eq!(panes.panes[0], pane(3, (0, "Tab #1"), Some("/home/you/work")));
-}
-
-#[test]
-fn a_session_is_asked_about_again_as_zellij_writes_that_it_changed() {
-    let host = Host::new();
-    let home = listed(1, "~", (0, "Tab #1"), Some("/home/you"));
-    host.zellij.list("work", &json!([home]));
-    host.write_metadata("work", &kept(&[(1, 0)], 1));
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
-    eventually("zellij lists the panes of work", || session(&host.host(), "work")?.panes.clone());
-
-    host.zellij.asked_again("work");
-    let opened = listed(2, "~/work", (1, "Tab #2"), Some("/home/you/work"));
-    host.zellij.list("work", &json!([home, opened]));
-    host.write_metadata("work", &kept(&[(1, 0), (2, 1)], 2));
-    let wrote = Instant::now();
-    eventually("work has the pane opened", || {
-        let panes = session(&host.host(), "work")?.panes.clone()?;
-        (panes.panes.len() == 2).then_some(())
-    });
-    assert!(wrote.elapsed() < Duration::from_secs(1), "{:?}", wrote.elapsed());
-}
-
-#[test]
-fn a_session_that_hangs_holds_the_others_up_no_longer_than_it_is_asked_about() {
-    let host = Host::new();
-    let home = listed(1, "~", (0, "Tab #1"), Some("/home/you"));
-    host.zellij.list("work", &json!([home]));
-    host.zellij.hang("stuck");
-    let _work = host.serve("work");
-    let _stuck = host.serve("stuck");
-    let _daemon = start(host.vars()).unwrap();
-    eventually("zellij lists the panes of work", || session(&host.host(), "work")?.panes.clone());
-    let stuck = || host.zellij.asked().iter().any(|asked| asked == "stuck");
-    eventually("zellij is asked about stuck", || stuck().then_some(()));
-
-    let opened = listed(2, "~/work", (1, "Tab #2"), Some("/home/you/work"));
-    host.zellij.list("work", &json!([home, opened]));
-    let opening = Instant::now();
-    let done = AtomicBool::new(false);
-    thread::scope(|scope| {
-        scope.spawn(|| {
-            for age in 2..80 {
-                if done.load(Ordering::Relaxed) {
-                    return;
-                }
-                host.write_metadata("work", &kept(&[(1, 0), (2, 1)], age));
-                thread::sleep(Duration::from_millis(200));
-            }
-        });
-        eventually("work has the pane opened", || {
-            let panes = session(&host.host(), "work")?.panes.clone()?;
-            (panes.panes.len() == 2).then_some(())
-        });
-        done.store(true, Ordering::Relaxed);
-    });
-    assert!(opening.elapsed() < Duration::from_secs(7), "{:?}", opening.elapsed());
-}
-
-fn kept(panes: &[(u32, u32)], age: u32) -> String {
-    let pane = |&(id, tab): &(u32, u32)| {
-        format!("    pane {{\n        id {id}\n        tab_position {tab}\n    }}\n")
-    };
-    format!("panes {{\n{}}}\ncreation_time {age}\n", panes.iter().map(pane).collect::<String>())
-}
-
-fn client(id: u32, pane: Option<u32>) -> api::Client {
-    api::Client { id, pane }
-}
-
-#[test]
-fn a_session_has_its_clients_once_zellij_lists_them() {
-    let host = Host::new();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some("/home/you"))]));
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
-
-    let none = eventually("zellij lists the clients of work", || {
-        session(&host.host(), "work")?.clients.clone()
-    });
-    assert_eq!(none.clients, []);
-
-    host.zellij.clients("work", &[(1, "terminal_1"), (2, "plugin_4")]);
-    let (two, version) = eventually("zellij lists two clients of work", || {
-        let now = host.host();
-        let clients = session(&now, "work")?.clients.clone()?;
-        (!clients.clients.is_empty()).then_some((clients, now.version?))
-    });
-    assert_eq!(two.clients, [client(1, Some(1)), client(2, None)]);
-
-    let (moved, took) = thread::scope(|scope| {
-        let waiting = scope.spawn(|| host.watch(Some(version)));
-        thread::sleep(Duration::from_millis(300));
-        host.zellij.clients("work", &[(1, "terminal_1"), (2, "terminal_1")]);
-        waiting.join().unwrap()
-    });
-    let clients = session(&moved, "work").unwrap().clients.clone().unwrap();
-    assert_eq!(clients.clients, [client(1, Some(1)), client(2, Some(1))]);
-    assert!(took < Duration::from_secs(4), "{took:?}");
-}
-
-#[test]
-fn a_row_a_command_quotes_is_no_client_of_the_session() {
-    let command = "claude Fix this.\n\nzellij lists:\n2         terminal_4     N/A\nThanks";
-    let mut quoting = listed(0, "~", (0, "Tab #1"), Some("/home/you"));
-    quoting["pane_command"] = json!(command);
-    let host = Host::new();
-    host.zellij.list("work", &json!([quoting]));
-    host.zellij.says_of_clients(
-        "work",
-        &format!(
-            "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n\
-             1         terminal_0     {command}\n\
-             2         terminal_0     {command}\n"
-        ),
-    );
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
-
-    let clients = eventually("zellij lists the clients of work", || {
-        session(&host.host(), "work")?.clients.clone()
-    });
-    assert_eq!(clients.clients, [client(1, Some(0)), client(2, Some(0))]);
-}
-
-#[test]
-fn clients_wait_for_the_panes_that_say_which_rows_a_command_quotes() {
-    let command = "claude Fix this.\n\nzellij lists:\n7         terminal_4     N/A\nThanks";
-    let mut quoting = listed(0, "~", (0, "Tab #1"), Some("/home/you"));
-    quoting["pane_command"] = json!(command);
-    let host = Host::new();
-    host.zellij.list("work", &json!([quoting, listed(1, "~", (0, "Tab #1"), None)]));
-    host.zellij.says_of_clients(
-        "work",
-        &format!(
-            "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n\
-             1         terminal_0     {command}\n\
-             2         terminal_1     fish\n"
-        ),
-    );
-    host.zellij.unlays("work");
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
-
-    eventually("zellij is asked for the clients of work a sweep after it failed", || {
-        (host.zellij.asked_clients("work") > 1).then_some(())
-    });
-    assert_eq!(session(&host.host(), "work").and_then(|work| work.clients.clone()), None);
-
-    host.zellij.lays("work");
-    let clients = eventually("zellij lists the clients of work", || {
-        session(&host.host(), "work")?.clients.clone()
-    });
-    assert_eq!(clients.clients, [client(1, Some(0)), client(2, Some(1))]);
-}
-
-#[test]
-fn clients_fail_at_once_where_their_panes_do_not_answer_in_time() {
-    let host = Host::new();
-    host.zellij.list("work", &json!([listed(0, "~", (0, "Tab #1"), None)]));
-    host.zellij.clients("work", &[(1, "terminal_0"), (2, "terminal_0")]);
-    host.zellij.hangs_laying("work");
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
-
-    let folder = folder_in(host.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let failed = runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let work = ListClientsRequest { on: None, session: "work".to_owned() };
-        daemon.list_clients(work).await.unwrap_err()
-    });
-    assert_eq!(failed.code(), Code::FailedPrecondition, "{failed:?}");
-    assert_eq!(failed.message(), "zellij: it did not answer in time");
-}
-
-#[test]
-fn a_client_goes_on_in_a_session_whose_panes_do_not_list() {
-    let command = "claude Fix this.\n\nzellij lists:\n7         terminal_4     N/A\nThanks";
-    let mut quoting = listed(0, "~", (0, "Tab #1"), Some("/home/you"));
-    quoting["pane_command"] = json!(command);
-    let host = Host::new();
-    host.zellij.list("work", &json!([quoting, listed(1, "~", (0, "Tab #1"), None)]));
-    host.zellij.says_of_clients(
-        "work",
-        &format!(
-            "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n\
-             1         terminal_0     {command}\n\
-             2         terminal_1     fish\n"
-        ),
-    );
-    host.zellij.unlays("work");
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
-    eventually("the daemon lists work", || session(&host.host(), "work").map(drop));
-
-    let folder = folder_in(host.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let found = runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let ended = RefugeRequest { on: None, seats: vec!["gone".to_owned()] };
-        daemon.refuge(ended).await.unwrap().into_inner()
-    });
-    let before = vec![client(1, Some(0)), client(7, Some(4)), client(2, Some(1))];
-    let refuge = Some(api::Refuge { session: "work".to_owned(), before });
-    assert_eq!(found.ended, Some(Ended::Went(Went { refuge })));
-}
-
-#[test]
-fn an_agent_s_title_is_on_the_host_without_the_frame_it_turns() {
-    let host = Host::new();
-    let titled = |title: &str| json!([listed(1, title, (0, "Tab #1"), None)]);
-    host.zellij.list("work", &titled("◐ Fix the fold"));
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
-    let said = |host: &api::Host| {
-        let panes = session(host, "work")?.panes.clone()?;
-        panes.panes[0].titled.clone()
-    };
-    let topic_is = |what: &str, wanted: Option<&str>| {
-        eventually(what, || {
-            let now = host.host();
-            session(&now, "work")?.clients.as_ref()?;
-            (said(&now)?.topic.as_deref() == wanted).then_some(now.version.unwrap())
-        })
-    };
-
-    let busy = topic_is("the agent's topic is on the host", Some("Fix the fold"));
-    host.zellij.list("work", &titled("◑ Fix the fold"));
-    let asked = host.zellij.asked().len();
-    eventually("zellij lists the next frame", || {
-        (host.zellij.asked().len() >= asked + 2).then_some(())
-    });
-    assert_eq!(host.host().version, Some(busy));
-
-    host.zellij.list("work", &titled("✳ Claude Code"));
-    let rested = topic_is("the agent has no topic", None);
-    assert!(rested.seq > busy.seq);
-
-    host.zellij.list("work", &titled("~"));
-    eventually("a shell's title is no agent's", || {
-        let panes = session(&host.host(), "work")?.panes.clone()?;
-        panes.panes[0].titled.is_none().then_some(())
-    });
-}
-
-#[test]
-fn what_zellij_lists_that_does_not_read_leaves_what_it_listed_before() {
-    let host = Host::new();
-    let shell = listed(1, "~", (0, "Tab #1"), Some("/home/you"));
-    host.zellij.list("work", &json!([shell]));
-    host.zellij.list("play", &json!([shell]));
-    let (_work, _play) = (host.serve("work"), host.serve("play"));
-    let mut daemon = start(host.vars()).unwrap();
-    let before = [pane(1, (0, "Tab #1"), Some("/home/you"))];
-    for name in ["work", "play"] {
-        eventually("zellij lists the panes of both", || {
-            let panes = session(&host.host(), name)?.panes.clone()?;
-            (panes.panes == before).then_some(())
-        });
-    }
-
-    let mut plugin = listed(2, "luneta", (0, "Tab #1"), None);
-    plugin.as_object_mut().unwrap().remove("is_plugin");
-    host.zellij.list("work", &json!([shell, plugin]));
-    host.zellij.list("play", &json!([shell, shell]));
-    let said = daemon.said_after(Duration::from_secs(5)).to_vec();
-    let unread = |name: &str, why: &str| {
-        let about = format!("the panes of {name}: zellij listed what does not read: {why}");
-        said.iter().any(|line| line.contains(&about))
-    };
-    assert!(unread("work", "missing field `is_plugin`"), "{said:?}");
-    assert!(unread("play", "pane 1 comes twice"), "{said:?}");
-    let now = host.host();
-    for name in ["work", "play"] {
-        assert_eq!(session(&now, name).unwrap().panes.as_ref().unwrap().panes, before, "{name}");
-    }
-}
-
-#[test]
-fn sessions_that_share_a_name_have_no_panes_and_a_renamed_one_keeps_its() {
-    let host = Host::new();
-    let shell = listed(1, "~", (0, "Tab #1"), Some("/home/you"));
-    host.zellij.list("work", &json!([shell]));
-    host.zellij.list("play", &json!([shell]));
-    let newer = host.sockets.path().join("contract_version_2");
-    fs::create_dir(&newer).unwrap();
-    let _work = (host.serve("work"), UnixListener::bind(newer.join("work")).unwrap());
-    let _play = host.serve("play");
-    let _daemon = start(host.vars()).unwrap();
-
-    eventually("zellij is asked about play twice", || {
-        let play = host.zellij.asked().into_iter().filter(|name| name == "play").count();
-        (play >= 2).then_some(())
-    });
-    let now = host.host();
-    let work: Vec<&api::Session> = now.sessions.iter().filter(|it| it.name == "work").collect();
-    assert_eq!(work.len(), 2);
-    assert!(work.iter().all(|session| session.panes.is_none()), "{work:?}");
-
-    fs::rename(host.contract().join("play"), host.contract().join("game")).unwrap();
-    let game = eventually("play is called game", || session(&host.host(), "game")?.panes.clone());
-    assert_eq!(game.panes, [pane(1, (0, "Tab #1"), Some("/home/you"))]);
-
-    let _game = UnixListener::bind(newer.join("game")).unwrap();
-    eventually("neither session called game has panes", || {
-        let now = host.host();
-        let game: Vec<&api::Session> = now.sessions.iter().filter(|it| it.name == "game").collect();
-        (game.len() == 2 && game.iter().all(|session| session.panes.is_none())).then_some(())
-    });
-}
-
-#[test]
-fn a_session_that_no_longer_shares_its_name_is_asked_about_at_once() {
-    let host = Host::new();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some("/home/you"))]));
-    let newer = host.sockets.path().join("contract_version_2");
-    fs::create_dir(&newer).unwrap();
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
-    eventually("zellij lists the panes of work", || session(&host.host(), "work")?.panes.clone());
-
-    host.zellij.asked_again("work");
-    let _shared = UnixListener::bind(newer.join("work")).unwrap();
-    eventually("neither session called work has panes", || {
-        let now = host.host();
-        let work: Vec<&api::Session> = now.sessions.iter().filter(|it| it.name == "work").collect();
-        (work.len() == 2 && work.iter().all(|session| session.panes.is_none())).then_some(())
-    });
-    fs::remove_file(newer.join("work")).unwrap();
-    let ended = Instant::now();
-    eventually("work has its panes again", || session(&host.host(), "work")?.panes.clone());
-    assert!(ended.elapsed() < Duration::from_secs(1), "{:?}", ended.elapsed());
-}
-
-#[test]
-fn the_host_says_how_many_of_zellij_s_folders_it_could_not_read() {
-    let host = Host::new();
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
-    eventually("work runs", || session(&host.host(), "work").map(|_| ()));
-
-    let mode = |mode| fs::set_permissions(host.contract(), Permissions::from_mode(mode)).unwrap();
-    mode(0o000);
-    let unread = eventually("the folder of work does not read", || {
-        Some(host.host()).filter(|now| now.unread_sockets == Some(1))
-    });
-    mode(0o755);
-    assert!(session(&unread, "work").is_none(), "{:?}", unread.sessions);
-    eventually("work runs again, and every folder reads", || {
-        let now = host.host();
-        (now.unread_sockets == Some(0) && session(&now, "work").is_some()).then_some(())
-    });
+fn forgotten(host: &Host, project: u64) {
+    asked(host, Change::ForgetProject(ForgetProject { project })).unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) -> bool {
@@ -521,7 +100,7 @@ fn changed_every_way(dir: &Path, origin: &Path) {
 }
 
 #[test]
-fn git_says_how_the_folder_stands_where_each_pane_works() {
+fn git_says_how_each_project_s_folder_stands() {
     let host = Host::new();
     let dirs = tempfile::tempdir().unwrap();
     let (tree, plain, detached) =
@@ -536,10 +115,8 @@ fn git_says_how_the_folder_stands_where_each_pane_works() {
 
     let spelled = |dir: &PathBuf| dir.display().to_string();
     let (tree, plain, detached) = (spelled(&tree), spelled(&plain), spelled(&detached));
-    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
-    host.zellij.list("work", &json!([in_dir(1, &tree), in_dir(2, &plain), in_dir(3, &detached)]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    let watching = [&tree, &plain, &detached].map(|dir| watched(&host, dir).0);
 
     let statuses = eventually("git says how all three stand", || {
         let statuses = host.host().git_statuses;
@@ -568,7 +145,7 @@ fn git_says_how_the_folder_stands_where_each_pane_works() {
     assert_eq!(stands(&detached), checkout(&detached, Head::Detached(()), none, 0));
     assert_eq!(stands(&plain), Some(Stands::Outside(())));
 
-    host.zellij.list("work", &json!([in_dir(1, &tree), in_dir(3, &detached)]));
+    forgotten(&host, watching[1]);
     eventually("what git said of plain goes", || {
         let statuses = host.host().git_statuses;
         statuses.iter().all(|status| status.dir != plain).then_some(())
@@ -608,10 +185,10 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
 
     let spelled = |dir: &PathBuf| dir.display().to_string();
     let (work, other) = (spelled(&work), spelled(&other));
-    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
-    host.zellij.list("work", &json!([in_dir(1, &work), in_dir(2, &other)]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    for dir in [&work, &other] {
+        watched(&host, dir);
+    }
 
     let changed = |dir: &str| {
         host.host().git_statuses.iter().find(|status| status.dir == dir).and_then(|status| {
@@ -641,125 +218,6 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
 }
 
 #[test]
-fn luneta_sessions_names_the_repository_each_pane_works_in() {
-    let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
-    let dirs = dirs.path().canonicalize().unwrap();
-    let (seed, app, clone, plain) =
-        (dirs.join("seed"), dirs.join("app"), dirs.join("clone"), dirs.join("plain"));
-    for dir in [&seed, &app, &plain] {
-        fs::create_dir(dir).unwrap();
-    }
-    assert!(git(&seed, &["init", "-q", "-b", "main"]));
-    commit(&seed, "file", "text\n");
-    let seeded = seed.display().to_string();
-    assert!(git(&dirs, &["clone", "-q", &seeded, "clone"]));
-    assert!(git(&app, &["clone", "-q", "--bare", &seeded, ".bare"]));
-    fs::write(app.join(".git"), "gitdir: ./.bare\n").unwrap();
-    assert!(git(&app, &["worktree", "add", "-q", "main"]));
-    assert!(git(&app, &["worktree", "add", "-q", "-b", "other", "issue-1"]));
-
-    let spelled = |dir: &Path| dir.display().to_string();
-    let (repo, clone, plain) = (spelled(&app), spelled(&clone), spelled(&plain));
-    let (main, other) = (format!("{repo}/main"), format!("{repo}/issue-1"));
-    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
-    let panes = [
-        in_dir(1, &main),
-        in_dir(2, &other),
-        in_dir(3, &repo),
-        in_dir(4, &clone),
-        in_dir(5, &plain),
-    ];
-    host.zellij.list("work", &json!(panes));
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
-    eventually("git says of all five", || (host.host().git_statuses.len() == 5).then_some(()));
-
-    let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
-    let said = String::from_utf8(said.stdout).unwrap();
-    let lines: Vec<&str> = said.lines().collect();
-    assert_eq!(
-        lines,
-        [
-            "work".to_owned(),
-            format!("  Tab #1:1  {main}  main  repo {repo}"),
-            format!("  Tab #1:2  {other}  other  repo {repo}"),
-            format!("  Tab #1:3  {repo}  no checkout  repo {repo}"),
-            format!("  Tab #1:4  {clone}  main  repo {clone}"),
-            format!("  Tab #1:5  {plain}  no repository"),
-        ],
-    );
-}
-
-#[test]
-fn luneta_sessions_lists_the_sessions_as_the_sidebar_does() {
-    let host = Host::new();
-    let _zeta = host.serve("zeta");
-    thread::sleep(Duration::from_millis(50));
-    let _alpha = host.serve("alpha");
-    let _daemon = start(host.vars()).unwrap();
-    eventually("both are listed", || (host.host().sessions.len() == 2).then_some(()));
-    let listed = || {
-        let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
-        let said = String::from_utf8(said.stdout).unwrap();
-        let first = |line: &str| line.split_whitespace().next().unwrap().to_owned();
-        said.lines().map(first).collect::<Vec<String>>()
-    };
-    assert_eq!(listed(), ["zeta", "alpha"]);
-}
-
-#[test]
-fn luneta_sessions_says_nothing_of_a_directory_git_will_not_read() {
-    let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
-    let dirs = dirs.path().canonicalize().unwrap();
-    let (seed, plain) = (dirs.join("seed"), dirs.join("zz-plain"));
-    for dir in [&seed, &plain] {
-        fs::create_dir(dir).unwrap();
-    }
-    assert!(git(&seed, &["init", "-q", "-b", "main"]));
-    commit(&seed, "file", "text\n");
-    let seeded = seed.display().to_string();
-    assert!(git(&dirs, &["clone", "-q", "--bare", &seeded, ".bare"]));
-    assert!(git(&dirs, &["clone", "-q", &seeded, "broken"]));
-    assert!(git(&dirs, &["clone", "-q", &seeded, "newer"]));
-    fs::write(dirs.join("broken/.git/index"), "no index\n").unwrap();
-    assert!(git(&dirs.join("newer"), &["config", "core.repositoryformatversion", "99"]));
-
-    let spelled = |dir: &Path| dir.display().to_string();
-    let (bare, broken) = (spelled(&dirs.join(".bare")), spelled(&dirs.join("broken")));
-    let (newer, plain) = (spelled(&dirs.join("newer")), spelled(&plain));
-    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
-    let panes = [in_dir(1, &bare), in_dir(2, &broken), in_dir(3, &newer), in_dir(4, &plain)];
-    host.zellij.list("work", &json!(panes));
-    let _work = host.serve("work");
-    let mut daemon = start(host.vars()).unwrap();
-    eventually("git says of the last", || (!host.host().git_statuses.is_empty()).then_some(()));
-
-    let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
-    let said = String::from_utf8(said.stdout).unwrap();
-    let lines: Vec<&str> = said.lines().collect();
-    assert_eq!(
-        lines,
-        [
-            "work".to_owned(),
-            format!("  Tab #1:1  {bare}"),
-            format!("  Tab #1:2  {broken}"),
-            format!("  Tab #1:3  {newer}"),
-            format!("  Tab #1:4  {plain}  no repository"),
-        ],
-    );
-    let logged = daemon.said_after(Duration::from_secs(1));
-    for why in [
-        format!("git did not say what repository {bare} is in"),
-        format!("git status in {broken} said"),
-        format!("git did not say what repository {newer} is in"),
-    ] {
-        assert!(logged.iter().any(|line| line.contains(&why)), "{why}: {logged:?}");
-    }
-}
-
-#[test]
 fn what_git_said_stands_once_it_will_not_read_the_repository() {
     let host = Host::new();
     let dir = tempfile::tempdir().unwrap();
@@ -767,9 +225,8 @@ fn what_git_said_stands_once_it_will_not_read_the_repository() {
     assert!(git(&dir, &["init", "-q", "-b", "main"]));
     commit(&dir, "file", "text\n");
     let cwd = dir.display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let before = eventually("git says how it stands", || checkout(&host, &cwd));
     assert_eq!(before.repository.as_deref(), Some(cwd.as_str()));
 
@@ -834,10 +291,9 @@ fn says_at_once_as_a_checkout_changes(format: &str) {
     assert!(git(&repo, &["worktree", "add", "-q", "-b", "work", &spelled(&tree), "origin/main"]));
     assert!(git(&repo, &["worktree", "add", "-q", "--detach", &spelled(&beside)]));
     assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
-    let src = spelled(&tree.join("src"));
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&src))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    let (_, src) = watched(&host, &spelled(&tree.join("src")));
+    assert_eq!(src, spelled(&tree), "a folder in a checkout is its checkout's project");
     eventually("git says how the tree stands", || checkout(&host, &src));
 
     let edit = |file: &str, text: &str| fs::write(tree.join(file), text).unwrap();
@@ -906,13 +362,12 @@ fn git_says_at_once_as_a_repository_made_in_another_changes() {
     let host = Host::new();
     let tree = tempfile::tempdir().unwrap();
     let (top, src) = (tree.path(), tree.path().join("src"));
-    assert!(git(top, &["init", "-q", "-b", "main"]));
     fs::create_dir(&src).unwrap();
-    commit(top, "src/lib.rs", "start\n");
     let cwd = src.display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    assert_eq!(watched(&host, &cwd).1, cwd, "src is in no repository yet");
+    assert!(git(top, &["init", "-q", "-b", "main"]));
+    commit(top, "src/lib.rs", "start\n");
     eventually("git says how the tree stands", || checkout(&host, &cwd));
 
     let made = || assert!(git(&src, &["init", "-q", "-b", "inner"]));
@@ -926,17 +381,16 @@ fn a_git_folder_that_does_not_read_leaves_the_checkout_it_is_in_watched() {
     let host = Host::new();
     let tree = tempfile::tempdir().unwrap();
     let (top, src) = (tree.path(), tree.path().join("src"));
-    assert!(git(top, &["init", "-q", "-b", "main"]));
     fs::create_dir(&src).unwrap();
+    let cwd = src.display().to_string();
+    let _daemon = start(host.vars()).unwrap();
+    assert_eq!(watched(&host, &cwd).1, cwd, "src is in no repository yet");
+    assert!(git(top, &["init", "-q", "-b", "main"]));
     commit(top, "src/lib.rs", "start\n");
     let unread = src.join(".git");
     let mode = |mode| fs::set_permissions(&unread, Permissions::from_mode(mode)).unwrap();
     fs::create_dir(&unread).unwrap();
     mode(0o000);
-    let cwd = src.display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
-    let _daemon = start(host.vars()).unwrap();
     eventually("git says how the tree stands", || checkout(&host, &cwd));
 
     let modified = |it: &Checkout| it.changes.unwrap_or_default().modified == 1;
@@ -950,9 +404,8 @@ fn git_says_at_once_as_a_repository_begins_where_there_was_none() {
     let host = Host::new();
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     in_no_repository(&host, &cwd);
 
     let made = || assert!(git(dir.path(), &["init", "-q", "-b", "first"]));
@@ -970,9 +423,8 @@ fn git_says_at_once_as_a_repository_begins_in_a_directory_made_again() {
     let work = dir.path().join("work");
     fs::create_dir(&work).unwrap();
     let cwd = work.display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     in_no_repository(&host, &cwd);
 
     let (asked, started) = (noted.statuses(), Instant::now());
@@ -985,7 +437,7 @@ fn git_says_at_once_as_a_repository_begins_in_a_directory_made_again() {
 }
 
 #[test]
-fn a_checkout_taken_away_is_in_no_repository() {
+fn a_checkout_taken_away_is_said_of_no_more() {
     let host = Host::new();
     let dir = tempfile::tempdir().unwrap();
     let work = dir.path().join("work");
@@ -993,13 +445,15 @@ fn a_checkout_taken_away_is_in_no_repository() {
     assert!(git(&work, &["init", "-q", "-b", "main"]));
     commit(&work, "file", "text\n");
     let cwd = work.display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     eventually("git says it is a checkout", || checkout(&host, &cwd));
 
     fs::remove_dir_all(&work).unwrap();
-    in_no_repository(&host, &cwd);
+    eventually("git says nothing of it", || {
+        let statuses = host.host().git_statuses;
+        statuses.iter().all(|status| status.dir != cwd).then_some(())
+    });
 }
 
 #[test]
@@ -1010,9 +464,8 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     let top = tree.path();
     assert!(git(top, &["init", "-q", "-b", "main"]));
     let cwd = top.join(".git").display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let repository = fs::canonicalize(top).unwrap().display().to_string();
     let of_its_clone = Some(Stands::NoCheckout(NoCheckout { repository }));
     eventually("git says it is no checkout of its clone", || {
@@ -1038,9 +491,8 @@ fn git_says_at_once_as_a_directory_moved_into_a_checkout_changes() {
     assert!(git(&top, &["init", "-q", "-b", "main"]));
     commit(&top, "src/lib.rs", "start\n");
     let cwd = top.display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     eventually("git says how the tree stands", || checkout(&host, &cwd));
 
     let changes = |it: &Checkout| it.changes.unwrap_or_default();
@@ -1069,9 +521,8 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
     fs::create_dir_all(&build).unwrap();
     symlink(top.join("target"), top.join(".git/refs/target")).unwrap();
     let cwd = top.display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let untracked = |count| {
         let changes = |it: &Checkout| it.changes.unwrap_or_default();
         move |it: &Checkout| changes(it).untracked == count
@@ -1103,9 +554,8 @@ fn git_runs_no_command_a_repository_names() {
     let named = format!("touch '{}'", ran.display());
     assert!(git(&top, &["config", "core.fsmonitor", &named]));
     let cwd = top.display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     eventually("git says how the tree stands", || checkout(&host, &cwd));
     assert!(!ran.exists(), "git ran the command the repository named");
     assert!(git(&top, &["ls-files"]));
@@ -1143,10 +593,10 @@ fn the_behind_count_is_of_what_the_remote_has() {
     let here = fs::read_to_string(tree.join(".git/refs/heads/main")).unwrap();
 
     let (cwd, alone, done) = (spelled(&tree), spelled(&lone), spelled(&merged));
-    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
-    host.zellij.list("work", &json!([in_dir(1, &cwd), in_dir(2, &alone), in_dir(3, &done)]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    for dir in [&cwd, &alone, &done] {
+        watched(&host, dir);
+    }
     let upstream = |it: Checkout| match it.head {
         Some(Head::Branch(branch)) => branch.upstream.map(|it| (it.ahead, it.behind)),
         _ => None,
@@ -1191,9 +641,8 @@ fn the_fetch_runs_no_command_a_repository_names() {
     assert!(git(&tree, &["config", "core.sshCommand", &named]));
 
     let cwd = spelled(&tree);
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let log = host.home.path().join(".local/state/luneta/luneta.log");
     let refused = format!("git did not fetch the upstream of main in {cwd}");
     let why = |line: &str| line.contains(&refused) && line.contains("core.sshcommand");
@@ -1211,13 +660,15 @@ fn the_fetch_runs_no_command_a_repository_names() {
 fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     let host = Host::new();
     let dirs = tempfile::tempdir().unwrap();
-    let (tree, other) = (dirs.path().join("tree"), dirs.path().join("other"));
-    fs::create_dir_all(tree.join("src")).unwrap();
+    let (tree, twin, other) =
+        (dirs.path().join("tree"), dirs.path().join("twin"), dirs.path().join("other"));
+    fs::create_dir(&tree).unwrap();
     fs::create_dir(&other).unwrap();
     for dir in [&tree, &other] {
         assert!(git(dir, &["init", "-q", "-b", "main"]));
         commit(dir, "README", "start\n");
     }
+    assert!(git(&tree, &["worktree", "add", "-q", "-f", &twin.display().to_string(), "main"]));
     let page = |number| format!("https://github.com/owner/repo/pull/{number}");
     let run = |conclusion: &str| json!({
         "__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": conclusion,
@@ -1231,11 +682,11 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     host.gh.open("main", &main);
     host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true, "url": page(8) }));
     let spelled = |dir: &Path| dir.display().to_string();
-    let (top, src, beside) = (spelled(&tree), spelled(&tree.join("src")), spelled(&other));
-    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
-    host.zellij.list("work", &json!([in_dir(1, &top), in_dir(2, &src), in_dir(3, &beside)]));
-    let _work = host.serve("work");
+    let (top, src, beside) = (spelled(&tree), spelled(&twin), spelled(&other));
     let mut daemon = start(host.vars()).unwrap();
+    for dir in [&top, &src, &beside] {
+        watched(&host, dir);
+    }
     let found = || -> BTreeMap<String, (u32, PullRequestState, String)> {
         let pull_requests = host.host().pull_requests.into_iter();
         pull_requests.map(|it| (it.dir.clone(), (it.number, it.state(), it.url))).collect()
@@ -1255,11 +706,10 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
 
     assert!(git(&tree, &["switch", "-q", "-c", "fold"]));
     let draft = (8, PullRequestState::Draft, page(8));
-    eventually("gh finds fold's pull request in both of tree's", || {
-        let found = found();
-        (found.get(&top) == Some(&draft) && found.get(&src) == Some(&draft)).then_some(())
+    eventually("gh finds fold's pull request in tree", || {
+        (found().get(&top) == Some(&draft)).then_some(())
     });
-    assert_eq!(found().get(&beside), Some(&open));
+    assert_eq!((found().get(&src), found().get(&beside)), (Some(&open), Some(&open)));
     assert_eq!(host.gh.asked(), ["main", "main", "fold"]);
 
     assert!(git(&other, &["switch", "-q", "-c", "bare"]));
@@ -1289,10 +739,10 @@ fn a_branch_gh_hangs_on_holds_up_no_other() {
     let page = "https://github.com/owner/repo/pull/7";
     host.gh.open("main", &json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": page }));
     let (stuck, other) = (stuck.display().to_string(), other.display().to_string());
-    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
-    host.zellij.list("work", &json!([in_dir(1, &stuck), in_dir(2, &other)]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    for dir in [&stuck, &other] {
+        watched(&host, dir);
+    }
 
     eventually("gh is asked about stuck", || {
         host.gh.asked().iter().any(|branch| branch == "stuck").then_some(())
@@ -1319,9 +769,8 @@ fn pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails() {
     };
     host.gh.open("main", &checked("PENDING"));
     let cwd = tree.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let shown = || {
         let pull_requests = host.host().pull_requests;
         pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| (it.checks, it.stale))
@@ -1404,9 +853,8 @@ fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
         host.gh.open_in(PARENT, branch, &pull(number, "OPEN"));
     }
     let cwd = tree.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let found = || {
         let host = host.host();
         host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
@@ -1480,9 +928,8 @@ fn a_closed_pull_request_in_a_fork_gives_way_to_its_parent_s() {
     host.gh.open_in(PARENT, "merged", &pull(4, "OPEN"));
     host.gh.open("alone", &pull(5, "CLOSED"));
     let cwd = tree.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let found = || {
         let host = host.host();
         host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
@@ -1518,9 +965,8 @@ fn a_fork_s_default_branch_shows_no_merged_pull_request_of_its_parent() {
     host.gh.open_in(PARENT, "main", &pull(1, "MERGED"));
     host.gh.open_in(PARENT, "trunk", &pull(2, "MERGED"));
     let cwd = tree.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let found = || {
         let host = host.host();
         host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
@@ -1548,9 +994,8 @@ fn a_fork_s_default_branch_keeps_what_the_fork_says_over_its_parent_s_closed_one
     host.gh.open("main", &pull(1, "CLOSED"));
     host.gh.open_in(PARENT, "main", &pull(2, "CLOSED"));
     let cwd = tree.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let found = || {
         let host = host.host();
         host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
@@ -1603,9 +1048,8 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
     host.gh.open_in(PARENT, "of_the_fork", &pull(15, "OPEN"));
     host.gh.fork_of("upstream", "repo");
     let cwd = dir.display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let found = || {
         let host = host.host();
         host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
@@ -1657,9 +1101,8 @@ fn a_fork_s_parent_is_looked_up_again_as_its_remotes_change() {
     host.gh.open_in("github.com/third/repo", "third", &pull(3, "OPEN"));
     host.gh.open_in("github.com/third/repo", "same", &pull(4, "OPEN"));
     let cwd = tree.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let found = || {
         let host = host.host();
         host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
@@ -1696,9 +1139,8 @@ fn a_checkout_during_an_ask_of_a_fork_s_parent_is_no_trouble() {
     host.gh.open_in(PARENT, "fold", &json!({ "number": 1 }));
     host.gh.switch("fold");
     let cwd = tree.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let in_parent = format!("{PARENT} fold");
     let asked = ["fold", in_parent.as_str(), "fold"];
 
@@ -1720,9 +1162,8 @@ fn what_goes_wrong_in_a_fork_s_parent_names_it_and_leaves_what_the_fork_said() {
     host.gh.open("main", &pull(1, "CLOSED"));
     host.gh.open_in(PARENT, "main", &json!({ "number": 2 }));
     let cwd = tree.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
 
     let named = format!("gh pr view of {PARENT} in {cwd} said what does not read");
     eventually("the daemon says whose answer does not read", || {
@@ -1756,9 +1197,8 @@ fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
     host.gh.open_in(PARENT, "ours", &pull(2845, "https://github.com/upstream/repo/pull/2845"));
     host.gh.open("ours", &pull(9, in_fork));
     let cwd = tree.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let found = || {
         let host = host.host();
         host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| (it.number, it.url))
@@ -1799,9 +1239,8 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
     host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true, "url": page }));
     host.gh.switch("fold");
     let cwd = tree.path().display().to_string();
-    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
-    let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
+    watched(&host, &cwd);
     let seen = || {
         let host = host.host();
         let status = host.git_statuses.iter().find(|status| status.dir == cwd);
@@ -1828,24 +1267,9 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
 #[test]
 fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     let host = Host::new();
-    let _work: Vec<UnixListener> = (1..=3)
-        .map(|version| {
-            thread::sleep(Duration::from_millis(20));
-            let contract = host.sockets.path().join(format!("contract_version_{version}"));
-            fs::create_dir_all(&contract).unwrap();
-            UnixListener::bind(contract.join("work")).unwrap()
-        })
-        .collect();
     let daemon = start(host.vars()).unwrap();
 
     let (first, took) = host.watch(None);
-    let started: BTreeSet<(i64, i32)> = first
-        .sessions
-        .iter()
-        .filter(|session| session.name == "work")
-        .map(|session| session.started_at.map(|at| (at.seconds, at.nanos)).unwrap())
-        .collect();
-    assert_eq!(started.len(), 3, "{started:?}");
     let version = first.version.unwrap();
     assert_eq!(version.pid, daemon.pid());
     assert!(took < Duration::from_secs(2), "{took:?}");
@@ -1854,14 +1278,19 @@ fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     assert_eq!(same.version, Some(version));
     assert!(took >= Duration::from_secs(3), "{took:?}");
 
+    let play = tempfile::tempdir().unwrap();
+    let play = play.path().join("play");
+    fs::create_dir(&play).unwrap();
     let (changed, took) = thread::scope(|scope| {
         let waiting = scope.spawn(|| host.watch(Some(version)));
         thread::sleep(Duration::from_millis(300));
-        let _play = host.serve("play");
+        watched(&host, &play.display().to_string());
         waiting.join().unwrap()
     });
     assert!(changed.version.unwrap().seq > version.seq);
-    assert!(session(&changed, "play").is_some());
+    let kept = changed.projects.and_then(|projects| projects.held);
+    let Some(Held::Kept(kept)) = kept else { panic!("lunetad keeps no projects: {kept:?}") };
+    assert!(kept.projects.iter().any(|project| project.name == "play"), "{kept:?}");
     assert!(took < Duration::from_secs(3), "{took:?}");
 
     let another = Version { pid: version.pid + 1, ..changed.version.unwrap() };

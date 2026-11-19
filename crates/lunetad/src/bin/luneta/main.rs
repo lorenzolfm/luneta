@@ -1,4 +1,5 @@
 mod actions;
+mod agreed;
 mod agents;
 mod alerts;
 mod aloud;
@@ -17,7 +18,6 @@ mod daemon;
 mod desktop;
 mod dictation;
 mod due;
-mod drive;
 mod folds;
 mod gruvbox;
 mod host;
@@ -55,15 +55,12 @@ mod voice;
 mod watch;
 mod width;
 mod worktrees;
-mod zellij;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use lunetad::{folder, release};
-
-use crate::zellij::SessionName;
+use lunetad::{folder, release, SessionName};
 
 #[derive(Parser)]
 #[command(
@@ -71,7 +68,7 @@ use crate::zellij::SessionName;
     version = release::SAID.as_str(),
     about = "Sessions of luneta's own multiplexer, beside a sidebar of every session on this \
              host and what the agent in each pane is doing. With a command, ask lunetad, the \
-             daemon of this host, instead, or have it open, move or close something"
+             daemon of this host, instead, or have it start or delete something"
 )]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -79,8 +76,7 @@ struct Cli {
         help = "The session to attach to, made in this directory if none runs by that name. \
                 Without one, luneta joins a session that runs: the one named for this directory, \
                 as the picker names it, or else the one you looked at last, or else the newest. \
-                It makes the one named for this directory only where none runs. A name a \
-                session of zellij's has is refused"
+                It makes the one named for this directory only where none runs"
     )]
     session: Option<String>,
     #[command(subcommand)]

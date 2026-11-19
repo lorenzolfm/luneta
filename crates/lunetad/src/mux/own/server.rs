@@ -283,7 +283,6 @@ fn opens(cwd: &Directory, runs: Runs<'_>) -> Result<api::Opens, Failure> {
             let unread = || Failure::Own(format!("the shell {} is not UTF-8", shell.display()));
             (program(vec![shell.to_str().ok_or_else(unread)?.to_owned()]), api::Ends::Closes)
         },
-        Runs::ZellijShell => (api::opens::Runs::Shell(api::Shell {}), api::Ends::Closes),
         Runs::Command { program: first, args } => {
             let argv = std::iter::once(first.to_owned()).chain(args.iter().cloned()).collect();
             (program(argv), api::Ends::Holds)

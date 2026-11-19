@@ -167,7 +167,7 @@ impl Name {
 
     pub fn of_project(text: &str) -> Result<Name, String> {
         let name = Name::parse(text)?;
-        SessionName::running(text).map_err(|why| format!("{text:?} names no project: {why}"))?;
+        SessionName::listed(text).map_err(|why| format!("{text:?} names no project: {why}"))?;
         Ok(name)
     }
 

@@ -140,7 +140,7 @@ fn luneta_terminate_ends_the_lunetad_that_keeps_the_projects_and_its_mux_from_an
 #[test]
 fn luneta_terminate_ends_luneta_on_each_machine_ssh_reaches_and_skips_the_others() {
     let (here_host, far) = (Host::new(), Host::new());
-    let ssh = FakeSsh::new(here_host.zellij.bin());
+    let ssh = FakeSsh::new(here_host.bin());
     ssh.reaches("far", far.vars());
     ssh.runs_luneta("far", far.vars());
     hosts(&here_host, "far\ngone\n");
@@ -270,8 +270,8 @@ fn luneta_terminate_here_ends_nothing_in_luneta_s_terminal_or_on_a_key_that_chan
     let key = stdout.lines().next().expect("a key comes first").to_owned();
 
     let terminal = [("LUNETA_MUX_TERMINAL", "7"), ("LUNETA_MUX_TERMINAL_MADE", "60")];
-    let zellij = [("ZELLIJ_SESSION_NAME", "work"), ("ZELLIJ_PANE_ID", "2")];
-    for set in [&terminal[..], &zellij[..]] {
+    let asked = [("LUNETA_TURN", "00000000000000ff")];
+    for set in [&terminal[..], &asked[..]] {
         let refused = here_ending(host.vars(), &key, set);
         assert_eq!(refused.code, Some(1), "{set:?}: {}", refused.stderr);
         assert!(refused.stderr.contains("runs in a terminal of luneta's"), "{}", refused.stderr);

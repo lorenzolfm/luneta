@@ -11,13 +11,12 @@ use luneta_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
 use luneta_protocol::github::{PullRequest, State, Verdict};
 use luneta_protocol::said::Said;
 use luneta_protocol::shell::Ending;
-use luneta_protocol::{tab, unread};
+use luneta_protocol::unread;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::shell::Doing;
 use lunetad::api::{self, Agent, Front, Harness, Host, Pane, Saying, Shell, Status, UnreadFile};
-use lunetad::asks::User;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links::{self, Branch};
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
@@ -26,7 +25,7 @@ use lunetad::projects::{self, Dir, ProjectId, ViewId, WorktreeId, CLONE_WORKTREE
 use lunetad::prunes;
 use lunetad::seats::{self, seated, Where};
 use lunetad::transcripts::SessionId;
-use lunetad::{log, Destination, Directory};
+use lunetad::{log, Destination, Directory, SessionName};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -40,7 +39,7 @@ use crate::alerts::{self, Reach};
 use crate::aloud;
 use crate::brief::{Brief, Note, Over, Transcript};
 use crate::checks;
-use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject, Untold, Whose};
+use crate::close::{self, Act, Deletes, Plan, Scope, Subject, Untold};
 use crate::folds::{Fold, Folds};
 use crate::gruvbox;
 use crate::icons;
@@ -61,7 +60,6 @@ use crate::pull::{Found, Kind, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::sweep::{cells, Page, Sweep};
-use crate::zellij::{Closes, Open, SessionName, Tab};
 
 pub const COLUMNS: u16 = 32;
 
@@ -133,13 +131,13 @@ pub struct ProjectRow {
 
 impl ProjectRow {
     #[must_use]
-    pub fn of(listed: Listed) -> Option<Self> {
-        let id = listed.project()?;
-        Some(ProjectRow { listed, id })
+    pub fn of(listed: Listed) -> Self {
+        let id = listed.project();
+        ProjectRow { listed, id }
     }
 
     fn of_api(project: &api::Project) -> Option<Self> {
-        let name = SessionName::running(&project.name).ok()?;
+        let name = SessionName::listed(&project.name).ok()?;
         let id = ProjectId::of(project.id)?;
         Some(ProjectRow { listed: Listed { name, kept: ledger::Session::Project(id) }, id })
     }
@@ -156,16 +154,14 @@ impl ProjectRow {
 
     #[cfg(test)]
     pub fn new(name: &str, id: u64) -> Self {
-        ProjectRow::of(Listed::new_project(name, id)).unwrap()
+        ProjectRow::of(Listed::new_project(name, id))
     }
 }
 
 impl Listed {
-
-    fn project(&self) -> Option<ProjectId> {
+    fn project(&self) -> ProjectId {
         match self.kept {
-            ledger::Session::Project(project) => Some(project),
-            ledger::Session::Zellij { .. } => None,
+            ledger::Session::Project(project) => project,
         }
     }
 
@@ -173,36 +169,16 @@ impl Listed {
         &self.name
     }
 
-    pub fn own_key(&self) -> Option<OwnKey> {
-        match self.whose() {
-            Whose::Own(key) => Some(key),
-            Whose::Zellij(_) => None,
-        }
+    pub fn own_key(&self) -> OwnKey {
+        projected::key_of(self.project())
     }
 
-    pub fn whose(&self) -> Whose {
-        match self.kept {
-            ledger::Session::Zellij { started_ns, .. } => Whose::Zellij(ledger::moment(started_ns)),
-            ledger::Session::Project(project) => Whose::Own(projected::key_of(project)),
-        }
-    }
-
-    pub fn at(&self) -> Where<'_> {
-        self.own_key().map_or_else(|| Where::Zellij(self.name.as_str()), Where::Own)
-    }
-
-    pub fn own(&self) -> bool {
-        self.own_key().is_some()
+    pub fn at(&self) -> Where {
+        Where::Own(self.own_key())
     }
 
     fn key(&self, pane: u32) -> Key {
         Key { session: self.kept, pane }
-    }
-
-    #[cfg(test)]
-    pub fn new(name: &str, started: SystemTime) -> Self {
-        let kept = ledger::Session::new(started, std::num::NonZeroU64::MIN).unwrap();
-        Listed { name: SessionName::parse(name).unwrap(), kept }
     }
 
     #[cfg(test)]
@@ -252,29 +228,19 @@ pub struct PanePlace {
 }
 
 impl PanePlace {
-    pub fn new(session: Listed, pane: PaneKey) -> Option<Self> {
-        let agrees = match (session.whose(), pane) {
-            (Whose::Zellij(_), PaneKey::Zellij(_)) | (Whose::Own(_), PaneKey::Terminal(_)) => true,
-            (Whose::Zellij(_), PaneKey::Terminal(_)) | (Whose::Own(_), PaneKey::Zellij(_)) => false,
-        };
-        agrees.then_some(PanePlace { session, pane })
+    pub fn new(session: Listed, pane: PaneKey) -> Self {
+        PanePlace { session, pane }
     }
 
     pub fn of(session: Listed, pane: &Pane) -> Option<Self> {
-        let pane = match session.whose() {
-            Whose::Zellij(_) => PaneKey::Zellij(pane.id),
-            Whose::Own(_) => {
-                let key = TerminalKey::of(pane.key.as_ref()?).ok()?;
-                (key.id.get() == pane.id).then_some(PaneKey::Terminal(key))?
-            },
-        };
-        PanePlace::new(session, pane)
+        let key = TerminalKey::of(pane.key.as_ref()?).ok()?;
+        let pane = (key.id.get() == pane.id).then_some(PaneKey::Terminal(key))?;
+        Some(PanePlace::new(session, pane))
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PaneKey {
-    Zellij(u32),
     Terminal(TerminalKey),
 }
 
@@ -282,7 +248,6 @@ impl PaneKey {
     #[must_use]
     pub fn id(self) -> u32 {
         match self {
-            PaneKey::Zellij(pane) => pane,
             PaneKey::Terminal(key) => key.id.get(),
         }
     }
@@ -620,7 +585,6 @@ enum Row {
         label: String,
         hits: Vec<usize>,
         bracket: Option<(Bracket, Color)>,
-        speaks: bool,
     },
 }
 
@@ -999,12 +963,12 @@ struct Seen<'a> {
 }
 
 impl Seen<'_> {
-    fn unread_seats(&self) -> Result<Vec<(Where<'_>, u32)>, unread::Unplaced> {
+    fn unread_seats(&self) -> Result<Vec<(Where, u32)>, unread::Unplaced> {
         seats::unread(self.unread, self.unread_files)
     }
 
-    fn seated(&self) -> HashMap<(Where<'_>, u32), &Agent> {
-        seated(self.agents, &[])
+    fn seated(&self) -> HashMap<(Where, u32), &Agent> {
+        seated(self.agents)
     }
 
     fn panes(&self) -> impl Iterator<Item = (&Listed, &Pane)> {
@@ -1076,19 +1040,8 @@ fn machines<'a>(host: &'a Host, shelves: &'a [Shelf]) -> Machines<'a> {
 
 fn opens_own(asking: Held, on: &Machine, wants: Wants) -> Result<Asked, Wants> {
     match wants {
-        Wants::Open { session, pane, cwd, opens } => match session.own_key() {
-            Some(key) => {
-                let session = session.name;
-                let open = match opens {
-                    Opens::Pane { beside, command } => Open::Pane { session, beside, cwd, command },
-                    Opens::Tab { name, command } => {
-                        let tab = Tab { cwd, name, command };
-                        Open::Tab { session, tab, alone_since: None }
-                    },
-                };
-                Ok(Asked::Open { asking, on: on.clone(), key, open })
-            },
-            None => Err(Wants::Open { session, pane, cwd, opens }),
+        Wants::Open { session, cwd, opens, .. } => {
+            Ok(Asked::Open { asking, on: on.clone(), key: session.own_key(), cwd, opens })
         },
         wants => Err(wants),
     }
@@ -1108,8 +1061,7 @@ pub enum Asked {
     Leave,
     Closes { menu: u64, on: Machine, session: Listed, pane: PaneKey },
     Delete { on: Machine, act: Act },
-    Open { asking: Held, on: Machine, key: OwnKey, open: Open },
-    OpenZellij { menu: u64, on: Machine, open: Open },
+    Open { asking: Held, on: Machine, key: OwnKey, cwd: Directory, opens: Opens },
     NewWorktree { on: Machine, project: ProjectId, branch: Branch },
     Welcome { asking: Held, on: Machine, session: Listed, pane: PaneKey },
     AddProject { on: Machine, folder: String, name: Option<projects::Name> },
@@ -1142,7 +1094,6 @@ impl Asked {
             Asked::Prunes { menu, .. }
             | Asked::Prune { menu, .. }
             | Asked::Closes { menu, .. }
-            | Asked::OpenZellij { menu, .. }
             | Asked::Make { menu, .. }
             | Asked::Pull { menu, .. }
             | Asked::Find { menu, .. }
@@ -1205,7 +1156,7 @@ const HEADER: usize = 3;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Keys {
     #[default]
-    Zellij,
+    Terminal,
     Sidebar,
     Lent,
 }
@@ -1214,7 +1165,7 @@ impl Keys {
     fn held(self) -> bool {
         match self {
             Keys::Sidebar | Keys::Lent => true,
-            Keys::Zellij => false,
+            Keys::Terminal => false,
         }
     }
 }
@@ -1379,9 +1330,7 @@ impl Movable {
         match spot {
             Spot::Machine(_) => None,
             Spot::Local(place) | Spot::Remote(_, place) => match place {
-                Place::Session(session) => {
-                    Some(Movable::Project(machine, ProjectRow::of(session)?))
-                },
+                Place::Session(session) => Some(Movable::Project(machine, ProjectRow::of(session))),
                 Place::Worktree(place) => Some(Movable::Worktree(machine, place)),
                 Place::Pane(_) => None,
             },
@@ -1911,14 +1860,6 @@ impl Sidebar {
         self.working.values().any(Menu::turning)
     }
 
-    fn opened_said(place: &Place) -> String {
-        let session = place.session();
-        match place.pane() {
-            Some(pane) => format!("menu: opened {session}:{pane}"),
-            None => format!("menu: opened {session}"),
-        }
-    }
-
     fn went_said(place: &Place) -> String {
         let session = place.session();
         match place.pane() {
@@ -2008,7 +1949,7 @@ impl Sidebar {
 
     fn own_known(&self, key: OwnKey) -> Option<&Known> {
         let mut known = shelf(&self.shelves, self.on()).iter();
-        known.find(|known| known.listed().own_key() == Some(key))
+        known.find(|known| known.listed().own_key() == key)
     }
 
     fn own_place(&self, pane: OwnPane) -> Option<PanePlace> {
@@ -2024,7 +1965,7 @@ impl Sidebar {
     }
 
     fn unfold_own(&mut self, key: OwnKey) {
-        if let Some(project) = self.own_listed(key).as_ref().and_then(Listed::project) {
+        if let Some(project) = self.own_listed(key).as_ref().map(Listed::project) {
             let on = self.on().clone();
             self.folds.set(Fold::Machine(&on), false);
             self.folds.set(Fold::Project(&on, project), false);
@@ -2032,18 +1973,11 @@ impl Sidebar {
     }
 
     fn seats_here(own_seat: Option<OwnSeat>, listed: &Listed) -> bool {
-        own_seat.is_some_and(|seat| listed.own_key() == Some(seat.session()))
+        own_seat.is_some_and(|seat| listed.own_key() == seat.session())
     }
 
     pub fn on(&self) -> &Machine {
         self.seat.as_ref().map_or(&Machine::Local, |seat| &seat.on)
-    }
-
-    pub fn user(&self, machine: &Machine) -> User {
-        if self.on() != machine {
-            return User::Away;
-        }
-        User::Untold
     }
 
     fn here_place(&self) -> Result<PanePlace, &'static str> {
@@ -2106,7 +2040,7 @@ impl Sidebar {
         let here_key = here.and_then(Here::pane).map(|place| place.session.key(place.pane.id()));
         let heard = seen.ok();
         let seated = heard.map_or_default(|seen| seen.seated());
-        let unread = heard.filter(|_| self.away.is_none()).map(|seen| seen.unread_seats());
+        let unread = heard.filter(|_| self.away.is_none()).map(Seen::unread_seats);
         let statuses: HashMap<&str, &lunetad::api::GitStatus> = heard
             .iter()
             .flat_map(|seen| seen.git_statuses)
@@ -2330,7 +2264,6 @@ impl Sidebar {
         }
         let here_pane = self.here_place().ok();
         let here_worktree = self.here_worktree();
-        let aloud = self.aloud.as_ref().and_then(aloud::Shown::from);
         let Some(host) = &self.host else {
             return;
         };
@@ -2522,9 +2455,6 @@ impl Sidebar {
                             let icon = program.and_then(icons::of);
                             let (machine, session) = (machine.clone(), place.session);
                             let id = place.pane;
-                            let speaks = aloud.is_some_and(|(on, at, id)| {
-                                *on == machine && at == session.at() && id == pane.id
-                            });
                             let row = move |bracket| Row::Pane {
                                 machine,
                                 session,
@@ -2536,7 +2466,6 @@ impl Sidebar {
                                 label,
                                 hits: hits.unwrap_or_default(),
                                 bracket,
-                                speaks,
                             };
                             shown.push((row, found));
                         }
@@ -2676,7 +2605,7 @@ impl Sidebar {
     fn folding(&self, spot: &Spot) -> Option<Folding> {
         match spot.place() {
             None => Some(Folding::Machine),
-            Some(Place::Session(session)) => Some(Folding::Project(session.project()?)),
+            Some(Place::Session(session)) => Some(Folding::Project(session.project())),
             Some(Place::Worktree(place)) => Some(Folding::Worktree(place.worktree)),
             Some(Place::Pane(_)) => match self.homes.get(spot)?.place()? {
                 Place::Worktree(place) => Some(Folding::Worktree(place.worktree)),
@@ -2795,7 +2724,7 @@ impl Sidebar {
         };
         let lifted = match self.row_of(&spot).map(|at| &self.rows[at]) {
             Some(Row::Worktree { under, .. }) if folded && *under != Under::Rows => {
-                spot.place().and_then(|place| place.listed().project()).map(Folding::Project)
+                spot.place().map(|place| Folding::Project(place.listed().project()))
             },
             Some(Row::Project { under, .. }) if folded && *under != Under::Rows => {
                 Some(Folding::Machine)
@@ -3277,10 +3206,6 @@ impl Sidebar {
         self.menu_did(Placed::Sidebar(Pause::Nothing), did)
     }
 
-    pub fn agent(&self) -> agents::Harness {
-        self.agent.harness()
-    }
-
     fn keep_agent(&mut self, harness: agents::Harness) {
         if let Err(why) = self.agent.keep(harness) {
             let name = agents::name(harness);
@@ -3357,9 +3282,7 @@ impl Sidebar {
     }
 
     fn terminal_of(&self, machine: &Machine, listed: &Listed, pane: PaneKey) -> Option<ViewId> {
-        let PaneKey::Terminal(key) = pane else {
-            return None;
-        };
+        let PaneKey::Terminal(key) = pane;
         let mut known = shelf(&self.shelves, machine).iter();
         let worktrees = &known.find(|it| it.listed() == listed)?.worktrees;
         let mut held = worktrees.iter().flat_map(|worktree| &worktree.in_panes);
@@ -3593,14 +3516,8 @@ impl Sidebar {
                 self.keep_agent(agent);
                 Asked::Find { menu: number, on, cwd, agent }
             },
-            Wants::Open { session, cwd, opens: Opens::Pane { beside, command }, .. } => {
-                let open = Open::Pane { session: session.name, beside, cwd, command };
-                Asked::OpenZellij { menu: number, on, open }
-            },
-            Wants::Open { session, opens: Opens::Tab { .. }, .. } => {
-                let refused = format!("{} is one of zellij's sessions", session.name());
-                self.drop_menu_saying(number, format!("menu: {refused}: {}", menu::OWN_ONLY));
-                Asked::Nothing
+            Wants::Open { .. } => {
+                unreachable!("an open is asked of the host before the menu is kept")
             },
             Wants::Pull(work, wanted) => match self.worked(&on) {
                 Ok(worked) => {
@@ -3754,7 +3671,7 @@ impl Sidebar {
 
     fn project_deletes(&self, on: &Machine, listed: &Listed) -> Result<Deletes, String> {
         let unlisted = || format!("project {} is no longer listed", listed.name());
-        let (project, key) = listed.project().zip(listed.own_key()).ok_or_else(unlisted)?;
+        let (project, key) = (listed.project(), listed.own_key());
         let known = shelf(&self.shelves, on).iter().find(|known| known.project.id() == project);
         let known = known.ok_or_else(unlisted)?;
         let worktrees = known.worktrees.iter().map(|worktree| worktree.place.worktree).collect();
@@ -3785,28 +3702,18 @@ impl Sidebar {
     }
 
     fn subject<'a>(&'a self, on: &Machine, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
-        let seat = if Self::seats_here(self.own_seat_on(on), listed) {
-            Seat::In
-        } else {
-            Seat::Elsewhere
-        };
         let mut agents = Err(Untold::Away);
-        let mut refuge: Option<Listed> = None;
-        if let Some(seen) = self.seen(on) {
-            if self.away.is_none() {
-                agents = seen.unread_seats().map_err(Untold::Unplaced).map(|unread_seats| {
-                    let seated = seen.seated();
-                    let doing = seated.iter().filter(|((at, _), _)| *at == listed.at());
-                    let doing =
-                        doing.map(|((_, pane), agent)| (*pane, close::Doing::from(*agent)));
-                    doing.chain(close::unread_in(&unread_seats, listed.at())).collect()
-                });
-            }
-            let mut others = seen.projects.iter().map(|known| known.listed().clone());
-            let local = *on == Machine::Local;
-            refuge = others.rfind(|other| local && other != listed && other.own());
+        if let Some(seen) = self.seen(on)
+            && self.away.is_none()
+        {
+            agents = seen.unread_seats().map_err(Untold::Unplaced).map(|unread_seats| {
+                let seated = seen.seated();
+                let doing = seated.iter().filter(|((at, _), _)| *at == listed.at());
+                let doing = doing.map(|((_, pane), agent)| (*pane, close::Doing::from(*agent)));
+                doing.chain(close::unread_in(&unread_seats, listed.at())).collect()
+            });
         }
-        Subject { session: listed, seat, deletes, agents, refuge: refuge.map(Place::Session) }
+        Subject { session: listed, deletes, agents }
     }
 
     fn brief(&mut self, taken: Taken, briefed: Briefed) -> Asked {
@@ -3887,18 +3794,14 @@ impl Sidebar {
             (Act::Pane { session, pane, .. }, Some(at)) => {
                 place.session() == session.as_str() && at == pane.id()
             },
-            (
-                Act::Tab { session, panes, .. } | Act::Worktree { session, panes, .. },
-                Some(at),
-            ) => place.session() == session.as_str() && panes.contains(&at),
+            (Act::Worktree { session, panes, .. }, Some(at)) => {
+                place.session() == session.as_str() && panes.contains(&at)
+            },
             (Act::Worktree { worktree, .. }, None) => {
                 matches!(place, Place::Worktree(at) if at.worktree == *worktree)
             },
-            (Act::Pane { .. } | Act::Tab { .. }, None) => false,
-            (
-                Act::Project { session, .. } | Act::Kill { session, .. } | Act::Leave { session, .. },
-                _,
-            ) => place.session() == session.as_str(),
+            (Act::Pane { .. }, None) => false,
+            (Act::Project { session, .. }, _) => place.session() == session.as_str(),
         };
         let takes = |spot: &Spot| {
             spot.place().is_some_and(|place| spot.machine() == on && takes_place(place))
@@ -3916,39 +3819,12 @@ impl Sidebar {
         Asked::Delete { on, act }
     }
 
-    pub fn opened(&mut self, menu: u64, opened: Result<PaneKey, String>) -> Asked {
-        let Some((waiting, taken, opening)) = self.take_seen(menu, Menu::opening) else {
-            return Asked::Nothing;
-        };
-        let on = waiting.target().machine().clone();
-        let pane = match opened {
-            Ok(pane) => pane,
-            Err(why) => {
-                self.say_of(taken, format!("menu: nothing opened: {why}"));
-                return Asked::Nothing;
-            },
-        };
-        let session = opening;
-        let named = session.name().clone();
-        let Some(place) = PanePlace::new(session, pane) else {
-            self.say_of(taken, format!("menu: {named} and view {pane} are of different muxes"));
-            return Asked::Nothing;
-        };
-        let place = Place::Pane(place);
-        if let Taken::Open(_) = taken {
-            return Asked::Go { on, place };
-        }
-        let said = Self::opened_said(&place);
-        self.say(said);
-        Asked::Nothing
-    }
-
     pub fn made_for(&mut self, menu: u64) -> Option<Held> {
         let made = |it: &Menu| it.made().map(|_| ());
         self.take_seen(menu, made).map(|(_, taken, ())| taken.held())
     }
 
-    pub fn closes(&mut self, menu: u64, closes: Result<Closes, String>) -> Asked {
+    pub fn closes(&mut self, menu: u64, closes: Result<(), String>) -> Asked {
         let waiting = self.open().filter(|it| it.number() == menu);
         let Some(((session, pane), on)) =
             waiting.and_then(|it| Some((it.planning()?, it.target().machine())))
@@ -3957,7 +3833,7 @@ impl Sidebar {
         };
         let (session, on) = (session.clone(), on.clone());
         let plan = match closes {
-            Ok(closes) => self.plan(&on, &session, Deletes::Pane { pane, closes }),
+            Ok(()) => self.plan(&on, &session, Deletes::Pane(pane)),
             Err(why) => Err(format!("menu: nothing closed: {why}")),
         };
         self.planned(plan)
@@ -4825,7 +4701,7 @@ impl<'a> Finder<'a> {
         cwd: Option<&str>,
     ) -> Option<(Fit, Vec<usize>)> {
         let cwd = cwd.map(short_cwd);
-        self.find(label, &[branch, tab::named(tab_name), cwd.as_deref()])
+        self.find(label, &[branch, Some(tab_name), cwd.as_deref()])
     }
 
     pub fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
@@ -5103,12 +4979,11 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             }
             RowLines { lines, number, cuts }
         },
-        Row::Pane { here, unread, marked, icon, label, hits, bracket, speaks, .. } => {
+        Row::Pane { here, unread, marked, icon, label, hits, bracket, .. } => {
             let mark = marked.as_ref().map(|marked| &marked.mark);
             let since = marked.as_ref().and_then(|marked| marked.since);
             let age = since.map_or_default(|since| age(since, now));
-            let speaker = if *speaks { aloud::MARK.width() + 1 } else { 0 };
-            let reserve = speaker + if age.is_empty() { 0 } else { age.width() + 1 };
+            let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
             let label_style = match mark {
                 Some(Mark::Waiting) => Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
                 Some(_) => Style::new(),
@@ -5133,13 +5008,9 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let room = width.saturating_sub(LABEL + reserve + 1);
             let (shown, wide) = lit(label, room, Keep::Start, hits, label_style);
             let cuts: Vec<CutAt> = cut_at(0, LABEL, label, room).into_iter().collect();
-            let gap = width.saturating_sub(LABEL + wide + speaker + age.width() + 1);
+            let gap = width.saturating_sub(LABEL + wide + age.width() + 1);
             spans.extend(shown);
             spans.push(Span::raw(" ".repeat(gap)));
-            if *speaks {
-                spans.push(Span::styled(aloud::MARK, Style::new().fg(ACCENT)));
-                spans.push(Span::raw(" "));
-            }
             spans.push(Span::styled(age, dim));
             RowLines { lines: vec![Line::from(spans)], number: None, cuts }
         },
@@ -5373,15 +5244,12 @@ pub fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
     use std::sync::LazyLock;
 
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
-    use lunetad::api::session::Mux;
-    use lunetad::api::{
-        self, Clients, NameSource, Pane, Panes, Session, UnreadFile, Version, Zellij,
-    };
+    use lunetad::api::{self, Clients, NameSource, Pane, Panes, Session, UnreadFile, Version};
     use lunetad::mux::own::{OwnId, OwnMade};
-    use lunetad::mux::TabId;
     use prost_types::Timestamp;
     use ratatui::buffer::Cell;
 
@@ -5409,29 +5277,35 @@ mod tests {
     }
 
     fn session(name: &str, started: i64, panes: Vec<Pane>) -> Session {
-        Session {
-            name: name.to_owned(),
-            started_at: Some(Timestamp { seconds: started, nanos: 0 }),
-            panes: Some(Panes { panes }),
-            clients: None,
-            socket: started as u64,
-            mux: None,
-        }
+        let id = u64::try_from(started).unwrap();
+        made(name, id, Timestamp { seconds: started, nanos: 0 }, panes)
     }
 
-    fn own_session(name: &str, id: u64, mut panes: Vec<Pane>) -> Session {
+    fn own_session(name: &str, id: u64, panes: Vec<Pane>) -> Session {
+        made(name, id, Timestamp::default(), panes)
+    }
+
+    fn made(name: &str, id: u64, made: Timestamp, mut panes: Vec<Pane>) -> Session {
         let made_at = Some(Timestamp::default());
         for pane in &mut panes {
             pane.key = Some(api::TerminalKey { id: pane.id, made_at });
         }
         Session {
             name: name.to_owned(),
-            started_at: None,
             panes: Some(Panes { panes }),
             clients: Some(Clients { clients: Vec::new() }),
-            socket: 0,
-            mux: Some(Mux::Own(api::OwnSession { id, made_at })),
+            own: Some(api::OwnSession { id, made_at: Some(made) }),
         }
+    }
+
+    fn named(session: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        session.hash(&mut hasher);
+        hasher.finish() | 1 << 63
+    }
+
+    fn in_named(session: &str, pane: u32) -> api::Own {
+        api::Own { session: Some(api::OwnSession { id: named(session), made_at: None }), pane }
     }
 
     fn in_own(agent: Agent, id: u64, pane: u32) -> Agent {
@@ -5502,7 +5376,7 @@ mod tests {
     }
 
     fn project_row(name: &str, id: u64) -> ProjectRow {
-        ProjectRow::of(listed(name, id)).unwrap()
+        ProjectRow::of(listed(name, id))
     }
 
     fn projects(seen: &[u64], wanted: &[u64]) -> Reorder {
@@ -5513,7 +5387,7 @@ mod tests {
     fn project_named(sidebar: &Sidebar, name: &str) -> ProjectId {
         let mut known = shelf(&sidebar.shelves, &Machine::Local).iter();
         let known = known.find(|known| known.listed().name.as_str() == name).expect("a project");
-        known.listed().project().unwrap()
+        known.listed().project()
     }
 
     fn agent(session: &str, pane: u32, status: Status, name: Option<&str>) -> Agent {
@@ -5527,11 +5401,7 @@ mod tests {
             started_at: Some(Timestamp { seconds: 50, nanos: 0 }),
             name: name.map(|text| api::Name { text: text.to_owned(), source: None }),
             entrypoint: Some("cli".to_owned()),
-            pane: Some(api::agent::Pane::Zellij(Zellij {
-                named: session.to_owned(),
-                session: Some(session.to_owned()),
-                pane,
-            })),
+            pane: Some(api::agent::Pane::Own(in_named(session, pane))),
             waiting_for: None,
             topic: None,
         }
@@ -5564,44 +5434,37 @@ mod tests {
     }
 
     fn project_id(session: &Session) -> u64 {
-        match &session.mux {
-            Some(Mux::Own(own)) => own.id,
-            Some(Mux::Zellij(_)) | None => session.socket,
+        session.own.expect("a session of a project").id
+    }
+
+    fn placed(sessions: &[Session], own: &mut api::Own) {
+        let Some(asked) = own.session.filter(|it| it.made_at.is_none()) else {
+            return;
+        };
+        if let Some(session) = sessions.iter().find(|it| named(&it.name) == asked.id) {
+            let made_at = Some(Timestamp::default());
+            own.session = Some(api::OwnSession { id: project_id(session), made_at });
         }
     }
 
     fn seat_files(sessions: &[Session], files: &mut [UnreadFile]) {
-        for file in files {
-            let Some(zellij) = file.zellij.take() else {
-                continue;
-            };
-            let Some(session) = sessions.iter().find(|it| it.name == zellij.named) else {
-                file.zellij = Some(zellij);
-                continue;
-            };
-            let made_at = Some(Timestamp::default());
-            let own = api::OwnSession { id: project_id(session), made_at };
-            file.own = Some(api::Own { session: Some(own), pane: zellij.pane });
+        for own in files.iter_mut().filter_map(|file| file.own.as_mut()) {
+            placed(sessions, own);
         }
     }
 
     fn projects_of(sessions: &[Session], agents: &mut [Agent]) -> api::Projects {
         let mut sessions: Vec<&Session> = sessions.iter().collect();
         sessions.sort_by_key(|session| {
-            let started = session.started_at.filter(|_| !matches!(session.mux, Some(Mux::Own(_))));
-            (started.map(|at| at.seconds), session.name.clone())
+            let made = session.own.and_then(|own| own.made_at).map(|at| at.seconds);
+            (made, session.name.clone())
         });
         let made_at = Some(Timestamp::default());
+        let owned: Vec<Session> = sessions.iter().map(|it| (*it).clone()).collect();
         for agent in agents.iter_mut() {
-            let Some(api::agent::Pane::Zellij(zellij)) = &agent.pane else {
-                continue;
-            };
-            let Some(session) = sessions.iter().find(|it| it.name == zellij.named) else {
-                continue;
-            };
-            let own = api::OwnSession { id: project_id(session), made_at };
-            let own = api::Own { session: Some(own), pane: zellij.pane };
-            agent.pane = Some(api::agent::Pane::Own(own));
+            if let Some(api::agent::Pane::Own(own)) = &mut agent.pane {
+                placed(&owned, own);
+            }
         }
         let project = |session: &&Session| {
             let mut worktrees: Vec<api::Worktree> = Vec::new();
@@ -5656,7 +5519,6 @@ mod tests {
             agents,
             unread: 0,
             pull_requests: Vec::new(),
-            unread_sockets: Some(0),
             unread_files: Vec::new(),
             remotes: Vec::new(),
             unread_hosts: Some(0),
@@ -5679,7 +5541,7 @@ mod tests {
     ) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        sidebar.focus(if focused { Keys::Sidebar } else { Keys::Zellij });
+        sidebar.focus(if focused { Keys::Sidebar } else { Keys::Terminal });
         sidebar.draw(&mut buffer, area, now);
         let lit: &[Color] = if focused { &[LIT, RESTING] } else { &[RESTING] };
         in_gruvbox(&buffer, &[&[Color::Reset], lit].concat());
@@ -5777,19 +5639,10 @@ mod tests {
 
     fn owned(mut sidebar: Sidebar) -> Sidebar {
         let mut host = sidebar.host.take().expect("heard");
-        let mut made = Vec::new();
         for (at, session) in host.sessions.iter_mut().enumerate() {
             let id = u64::try_from(at).unwrap() + 1;
-            made.push((session.name.clone(), id));
             let panes = session.panes.take().map_or_else(Vec::new, |panes| panes.panes);
             *session = own_session(&session.name, id, panes);
-        }
-        for agent in &mut host.agents {
-            if let Some(api::agent::Pane::Zellij(zellij)) = agent.pane.clone() {
-                let named = made.iter().find(|(name, ..)| *name == zellij.named);
-                let (_, id) = named.expect("the agent's session");
-                *agent = in_own(agent.clone(), *id, zellij.pane);
-            }
         }
         sidebar.hear(host);
         sidebar
@@ -5808,7 +5661,7 @@ mod tests {
     }
 
     fn sit(sidebar: &mut Sidebar, place: &Place) {
-        let key = place.listed().own_key().expect("an own session");
+        let key = place.listed().own_key();
         let pane = OwnPane::new(key, place.pane().expect("a pane")).expect("a pane");
         if sidebar.own_seat().is_none() {
             sidebar.attaching(Machine::Local, key);
@@ -5938,10 +5791,9 @@ mod tests {
         let place = Place::Worktree(WorktreePlace { project, worktree });
         sidebar.cursor = Some(Spot::Local(place));
         type_in(&mut sidebar, "d");
-        let whose = listed("luneta", 7).whose();
         let session = session_name("luneta");
         let seen = [1, 2].map(|id| ViewId::of(id).unwrap()).to_vec();
-        let act = Act::Worktree { session, whose, worktree, panes: vec![1, 2], seen };
+        let act = Act::Worktree { session, worktree, panes: vec![1, 2], seen };
         let asked = sidebar.key(&char('d'), moment(160_000));
         assert_eq!(asked, Asked::Delete { on: Machine::Local, act });
         let after = sidebar.closing.as_ref().and_then(|closing| closing.after.clone());
@@ -6281,10 +6133,9 @@ mod tests {
     #[test]
     fn a_project_of_id_0_or_a_refused_name_is_left_out_and_said() {
         let mut sidebar = fresh();
-        let mut unstarted = session("x", 0, vec![]);
-        unstarted.started_at = None;
+        let unstarted = session("x", 0, vec![]);
         let mut unsocketed = session("z", 30, vec![]);
-        unsocketed.socket = 0;
+        unsocketed.own = Some(api::OwnSession { id: 0, made_at: Some(Timestamp::default()) });
         let misnamed = session("a/b", 40, vec![]);
         let long = session(&"w".repeat(66), 50, vec![]);
         let sessions = vec![unstarted, session("y", 20, vec![]), unsocketed, misnamed, long];
@@ -6391,7 +6242,7 @@ mod tests {
         let folded = Some(Place::Session(listed("newer", 20)));
         sidebar.key(&g, moment(160_000));
         assert_eq!(cursor(&sidebar), folded);
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         sidebar.focus(Keys::Sidebar);
         sidebar.key(&g, moment(160_000));
         assert_eq!(cursor(&sidebar), folded);
@@ -6702,63 +6553,16 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_the_daemon_cannot_follow_sits_where_its_pane_works() {
-        let mut lost = agent("gone", 1, Status::Waiting, Some("fold"));
-        let gone = Zellij { named: "gone".to_owned(), session: None, pane: 1 };
-        lost.pane = Some(api::agent::Pane::Zellij(gone));
-        let sessions = [
-            session("renamed", 10, vec![pane(1, 0, "/w/luneta/main", "claude")]),
-            session("other", 20, vec![pane(1, 0, "/w/elsewhere", "fish")]),
-        ];
-        let agents = [lost];
-        let held = seated(&agents, &sessions);
-        assert_eq!(held.keys().collect::<Vec<_>>(), [&(Where::Zellij("renamed"), 1)]);
-        let own = own_session("own", 1, vec![pane(1, 0, "/w/luneta/main", "claude")]);
-        let with_own = [session("renamed", 10, vec![pane(1, 0, "/w/luneta/main", "fish")]), own];
-        let held = seated(&agents, &with_own);
-        assert_eq!(held.keys().collect::<Vec<_>>(), [&(Where::Zellij("renamed"), 1)]);
-
-        let titled = Pane {
-            titled: Some(api::Titled { topic: None }),
-            ..pane(1, 0, "/w/luneta/main", "fish")
-        };
-        let sessions = [
-            session("renamed", 10, vec![titled]),
-            session("other", 20, vec![pane(1, 0, "/w/luneta/main", "fish")]),
-        ];
-        let held = seated(&agents, &sessions);
-        assert_eq!(held.keys().collect::<Vec<_>>(), [&(Where::Zellij("renamed"), 1)]);
-    }
-
-    #[test]
-    fn a_pi_agent_the_daemon_cannot_follow_takes_no_claude_code_pane() {
-        let lost = Agent {
-            harness: Some(Harness::Pi.into()),
-            pane: Some(api::agent::Pane::Zellij(Zellij {
-                named: "gone".to_owned(),
-                session: None,
-                pane: 1,
-            })),
-            ..agent("gone", 1, Status::Idle, Some("pi"))
-        };
-        let sessions = [
-            session("renamed", 10, vec![pane(1, 0, "/w/luneta/main", "pi")]),
-            session("other", 20, vec![pane(1, 0, "/w/luneta/main", "claude")]),
-        ];
-        assert_eq!(seated(&[lost], &sessions).len(), 0);
-    }
-
-    #[test]
     fn a_pane_holds_the_agent_started_at_a_prompt() {
         let mut prompt = agent("s", 1, Status::Idle, Some("prompt"));
         prompt.started_at = Some(Timestamp { seconds: 90, nanos: 0 });
         let mut headless = agent("s", 1, Status::Busy, Some("headless"));
         headless.entrypoint = Some("sdk-cli".to_owned());
-        let agents = [headless, prompt];
-        let seated = seated(&agents, &[]);
+        let agents = [in_own(headless, 1, 1), in_own(prompt, 1, 1)];
+        let seated = seated(&agents);
         assert_eq!(
             seated
-                .get(&(Where::Zellij("s"), 1))
+                .get(&(Where::Own(projected::key_of(ProjectId::of(1).unwrap())), 1))
                 .and_then(|agent| agent.name.as_ref())
                 .map(|name| name.text.as_str()),
             Some("prompt")
@@ -6774,8 +6578,10 @@ mod tests {
             ..agent("s", 1, Status::Idle, Some(name))
         };
         let agents = [of("on its own", "print", 10), of("prompt", "tui", 90)];
-        let seated = seated(&agents, &[]);
-        let name = seated.get(&(Where::Zellij("s"), 1)).and_then(|agent| agent.name.as_ref());
+        let agents = agents.map(|agent| in_own(agent, 1, 1));
+        let seated = seated(&agents);
+        let at = (Where::Own(projected::key_of(ProjectId::of(1).unwrap())), 1);
+        let name = seated.get(&at).and_then(|agent| agent.name.as_ref());
         assert_eq!(name.map(|name| name.text.as_str()), Some("prompt"));
     }
 
@@ -7098,8 +6904,7 @@ mod tests {
     fn projects_of_one_name_keep_their_dots_apart() {
         let mut sidebar = fresh();
         let claude = || vec![pane(1, 0, "/w/luneta/main", "claude")];
-        let mut twin = own_session("b", 1, claude());
-        twin.socket = 11;
+        let twin = own_session("b", 1, claude());
         let mut there = in_own(agent("b", 1, Status::Idle, Some("fold")), 1, 1);
         there.pid = 2;
         sidebar.hear(host(
@@ -7550,7 +7355,7 @@ mod tests {
             let asked = if let Some(code) = close {
                 sidebar.key(&KeyEvent::new(code, KeyModifiers::NONE), moment(160_000))
             } else {
-                sidebar.focus(Keys::Zellij);
+                sidebar.focus(Keys::Terminal);
                 Asked::Nothing
             };
             let pix = pane_of("bipa", 10, 3);
@@ -8007,7 +7812,7 @@ mod tests {
         let host = sidebar.host.clone().unwrap();
         sidebar.hear(host);
 
-        for keys in [Keys::Zellij, Keys::Sidebar] {
+        for keys in [Keys::Terminal, Keys::Sidebar] {
             sidebar.focus(keys);
             let area = Rect::new(0, 0, 32, 32);
             let mut buffer = Buffer::empty(area);
@@ -8032,7 +7837,7 @@ mod tests {
     #[test]
     fn a_number_out_of_sight_takes_no_click() {
         let mut sidebar = pulls();
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         let area = Rect::new(0, 0, 32, 8);
         let mut buffer = Buffer::empty(area);
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
@@ -8072,13 +7877,13 @@ mod tests {
     #[test]
     fn a_click_on_a_number_copies_and_does_nothing_else() {
         let mut sidebar = pulls();
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         let here = sidebar.cursor.clone();
         let now = moment(160_000);
         sidebar.notify("what went wrong before".to_owned());
         assert_eq!(sidebar.number_clicked(link(), now), Asked::Copy(link()));
         assert_eq!(sidebar.cursor, here);
-        assert_eq!(sidebar.keys, Keys::Zellij);
+        assert_eq!(sidebar.keys, Keys::Terminal);
         assert_eq!(sidebar.notice, None);
         assert_eq!(sidebar.copied, Some((link().number(), now)));
 
@@ -8434,10 +8239,10 @@ mod tests {
         let tigerstyle = || Choice::Skill(name("tigerstyle"));
         assert_eq!(sidebar.chose(2, tigerstyle(), moment(160_000)), Asked::Nothing);
         let command = ["claude", "/tigerstyle"].map(str::to_owned).to_vec();
-        let (session, cwd) = (session_name("older"), directory(&cwd));
-        let open = Open::Pane { session, beside: 1, cwd, command };
-        let key = listed("older", 10).own_key().unwrap();
-        let open = Asked::Open { asking: Held::Open, on: Machine::Local, key, open };
+        let cwd = directory(&cwd);
+        let open = Opens::Pane { beside: 1, command };
+        let key = listed("older", 10).own_key();
+        let open = Asked::Open { asking: Held::Open, on: Machine::Local, key, cwd, opens: open };
         assert_eq!(sidebar.chose(1, tigerstyle(), moment(160_000)), open);
     }
 
@@ -8453,23 +8258,23 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let started = |session: &str, beside, cwd: &str, harness, spelled| {
             let command = [harness, spelled].map(str::to_owned).to_vec();
-            let key = listed(session, if session == "older" { 10 } else { 20 }).own_key().unwrap();
-            let (session, cwd) = (session_name(session), directory(cwd));
-            let open = Open::Pane { session, beside, cwd, command };
-            Asked::Open { asking: Held::Open, on: Machine::Local, key, open }
+            let key = listed(session, if session == "older" { 10 } else { 20 }).own_key();
+            let cwd = directory(cwd);
+            let open = Opens::Pane { beside, command };
+            Asked::Open { asking: Held::Open, on: Machine::Local, key, cwd, opens: open }
         };
         type_in(&mut sidebar, "c");
         let pi = started("older", 1, "/w/luneta/main", "pi", "/skill:tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
 
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         sidebar.focus(Keys::Sidebar);
         sidebar.step(2);
         type_in(&mut sidebar, "c");
         let claude = started("newer", 1, "/w/b", "claude", "/tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), claude);
 
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "c");
         let tab = KeyEvent::from(KeyCode::Tab);
@@ -8477,7 +8282,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "pi\n");
         let pi = started("newer", 1, "/w/b", "pi", "/skill:tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "c");
         let pi = started("newer", 1, "/w/b", "pi", "/skill:tigerstyle");
@@ -8509,7 +8314,7 @@ mod tests {
         let (project, branch) = (ProjectId::of(2).unwrap(), Branch::parse("fix").unwrap());
         let made = Asked::NewWorktree { on: Machine::Local, project, branch };
         assert_eq!(branched(&mut sidebar, "fix"), made);
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         assert!(sidebar.open().is_none());
     }
 
@@ -8543,14 +8348,11 @@ mod tests {
         let key = OwnKey { id, made: OwnMade::from_nanos(0) };
         sidebar.attaching(Machine::Local, key);
         assert_eq!(sidebar.here_place(), Err(NO_HERE_PANE));
-        assert_eq!(sidebar.user(&Machine::Local), User::Untold);
         let client = OwnClientId::new(4).unwrap();
         sidebar.went_own(OwnPane::new(key, 1).unwrap(), client);
         let twin = Listed::new_project("twin", 1);
         let here = PanePlace { session: twin.clone(), pane: PaneKey::terminal(1) };
         assert_eq!(sidebar.here_place(), Ok(here));
-        assert_eq!(sidebar.user(&Machine::Local), User::Untold, "a project's row names no user");
-        assert_eq!(sidebar.user(&Machine::Remote(nixos())), User::Away);
         sidebar.focus(Keys::Sidebar);
         sidebar.cursor = Some(Spot::Local(Place::Session(twin)));
         type_in(&mut sidebar, "d");
@@ -8559,7 +8361,7 @@ mod tests {
     }
 
     #[test]
-    fn luneta_unseated_sits_in_no_project_and_its_delete_leaves_none() {
+    fn luneta_unseated_sits_in_no_project_and_its_delete_closes_the_view() {
         let mut sidebar = fresh();
         let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
         let sessions = vec![own_session("twin", 1, panes()), own_session("newest", 2, Vec::new())];
@@ -8574,8 +8376,8 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes_here(1, twin, pane));
-        let kill = Act::Kill { session: session_name("twin"), whose: Whose::Own(key) };
-        assert_eq!(sidebar.closes(1, Ok(Closes::Session)), delete_here(kill));
+        let act = Act::Pane { session: session_name("twin"), pane };
+        assert_eq!(sidebar.closes(1, Ok(())), delete_here(act));
     }
 
     #[test]
@@ -8660,7 +8462,7 @@ mod tests {
         };
 
         let mut sidebar = pulling();
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         assert!(sidebar.open().is_none());
         assert_eq!(sidebar.working.len(), 1);
         let lines = screen(&mut sidebar, false, 32, 17);
@@ -8681,7 +8483,7 @@ mod tests {
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         let there = || {
             let work = Readied::Link(link());
             let at = At::There((own_listed("older", 1), PaneKey::terminal(4)));
@@ -8713,13 +8515,12 @@ mod tests {
         let folder = "/w/luneta/feat".to_owned();
         let ready = Ready { at, folder: folder.clone(), branch: None, moved_off: false, work };
         let (cwd, name) = (directory(&folder), Some("#5".to_owned()));
-        let tab = Tab { cwd, name, command: Vec::new() };
-        let open = Open::Tab { session: session_name("older"), tab, alone_since: None };
-        let key = own_listed("older", 1).own_key().unwrap();
-        let asked = Asked::Open { asking: Held::Open, on: Machine::Local, key, open };
+        let open = Opens::Tab { name, command: Vec::new() };
+        let key = own_listed("older", 1).own_key();
+        let asked = Asked::Open { asking: Held::Open, on: Machine::Local, key, cwd, opens: open };
         assert_eq!(sidebar.pulled(number, Ok(Found { on: Machine::Local, ready })), asked);
         assert!(sidebar.open().is_none());
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         assert!(sidebar.working.is_empty());
     }
 
@@ -8756,10 +8557,10 @@ mod tests {
         let number = sidebar.open().map_or(0, Menu::number);
         sidebar.paste(page);
         assert_eq!(sidebar.open().map(Menu::number), Some(number));
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         assert!(sidebar.working.contains_key(&number));
         sidebar.notice = None;
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         sidebar.paste(page);
         assert!(sidebar.open().is_none());
         assert_eq!(sidebar.notice.as_deref(), Some("#5 is on its way"));
@@ -8962,10 +8763,10 @@ mod tests {
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 13, moment(160_000) + PAUSE);
         assert_eq!(lines[6], "─ New ─────────── luneta/main ─", "{lines:?}");
-        let (session, cwd) = (session_name("s"), directory("/w/luneta/main"));
-        let pane = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
-        let key = listed("s", 10).own_key().unwrap();
-        let pane = Asked::Open { asking: Held::Open, on: Machine::Local, key, open: pane };
+        let cwd = directory("/w/luneta/main");
+        let pane = Opens::Pane { beside: 1, command: Vec::new() };
+        let key = listed("s", 10).own_key();
+        let pane = Asked::Open { asking: Held::Open, on: Machine::Local, key, cwd, opens: pane };
         assert_eq!(sidebar.key(&char('v'), moment(160_000)), pane);
     }
 
@@ -8992,9 +8793,9 @@ mod tests {
                       nothing.";
         let command = vec!["claude".to_owned(), prompt.to_owned()];
         let cwd = directory("/w/luneta/main");
-        let open = Open::Pane { session: session_name("s"), beside: 1, cwd, command };
-        let key = listed("s", 10).own_key().unwrap();
-        let open = Asked::Open { asking: Held::Open, on: Machine::Local, key, open };
+        let open = Opens::Pane { beside: 1, command };
+        let key = listed("s", 10).own_key();
+        let open = Asked::Open { asking: Held::Open, on: Machine::Local, key, cwd, opens: open };
         assert_eq!(sidebar.printed(1, nothing()), open);
         assert!(sidebar.open().is_none());
 
@@ -9034,7 +8835,7 @@ mod tests {
         let printed = matches!(&asked, Asked::Printed { session, .. } if *session == project);
         assert!(printed, "{asked:?}");
         let number = sidebar.open().map_or(0, Menu::number);
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         assert_eq!(sidebar.working.len(), 1);
         let lines = screen(&mut sidebar, false, 40, 17);
         let notes: String = lines[14..].join(" ");
@@ -9055,7 +8856,7 @@ mod tests {
             let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
                 panic!("no job for the key");
             };
-            sidebar.focus(Keys::Zellij);
+            sidebar.focus(Keys::Terminal);
             let work = Readied::Link(Link::parse(page).unwrap());
             let folder = "/w/luneta/feat".to_owned();
             let ready = Ready { at, folder, branch: None, moved_off: false, work };
@@ -9079,7 +8880,7 @@ mod tests {
         let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
             panic!("no job for the key");
         };
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         let at = At::Session((listed("older", 10), PaneKey::terminal(1)));
         let branch = Some("dev-docs".to_owned());
         let (folder, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
@@ -9150,28 +8951,28 @@ mod tests {
             ran: Ran::Unhooked,
         })));
 
-        let (older, cwd) = (session_name("older"), directory("/w/luneta/main"));
+        let cwd = directory("/w/luneta/main");
         type_in(&mut sidebar, "n");
         let (project, branch) = (ProjectId::of(1).unwrap(), Branch::parse("feat").unwrap());
         let made = Asked::NewWorktree { on: Machine::Local, project, branch };
         assert_eq!(branched(&mut sidebar, "feat"), made);
         assert!(sidebar.floating().is_none());
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
 
         float_a_menu(&mut sidebar);
         type_in(&mut sidebar, "c");
         let command = ["claude", "/thermo-nuclear-review"];
         let command = command.map(str::to_owned).to_vec();
-        let pane = Open::Pane { session: older, beside: 1, cwd, command };
-        let key = own_listed("older", 1).own_key().unwrap();
-        let pane = Asked::Open { asking: Held::Open, on: Machine::Local, key, open: pane };
+        let pane = Opens::Pane { beside: 1, command };
+        let key = own_listed("older", 1).own_key();
+        let pane = Asked::Open { asking: Held::Open, on: Machine::Local, key, cwd, opens: pane };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), pane);
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         assert!(sidebar.open().is_none());
     }
 
     #[test]
-    fn the_agent_here_is_the_one_in_the_pane_luneta_s_zellij_is_on() {
+    fn the_agent_here_is_the_one_in_the_pane_luneta_is_on() {
         let on_pane = |id: u32| {
             let mut sidebar = fresh();
             let panes = vec![
@@ -9189,24 +8990,23 @@ mod tests {
             };
             let agents = vec![agent("s", 1, Status::Idle, None), printing, pi];
             let agents = agents.into_iter().map(|agent| {
-                let pane = agent.pane.clone();
-                let Some(api::agent::Pane::Zellij(zellij)) = pane else {
-                    panic!("an agent of a pane of zellij's");
+                let Some(api::agent::Pane::Own(own)) = agent.pane else {
+                    panic!("an agent of a pane of a project's");
                 };
-                in_own(agent, 1, zellij.pane)
+                in_own(agent, 1, own.pane)
             });
             sidebar.hear(host(vec![own_session("s", 1, panes)], agents.collect()));
             assert_eq!(sidebar.here_agent(), None);
             sit(&mut sidebar, &own_pane_of("s", 1, id));
             sidebar.here_agent()
         };
-        let session = SessionName::running("s").expect("a name");
+        let session = SessionName::listed("s").expect("a name");
         let (dir, harness) = ("/w/a".to_owned(), agents::Harness::ClaudeCode);
         let here = HereAgent { on: Machine::Local, session, pane: 1, dir, harness };
         assert_eq!(on_pane(1), Some(here));
         assert_eq!(on_pane(2), None);
         assert_eq!(on_pane(3), None);
-        let session = SessionName::running("s").expect("a name");
+        let session = SessionName::listed("s").expect("a name");
         let (dir, harness) = ("/w/d".to_owned(), agents::Harness::Pi);
         let here = HereAgent { on: Machine::Local, session, pane: 4, dir, harness };
         assert_eq!(on_pane(4), Some(here));
@@ -9233,7 +9033,7 @@ mod tests {
 
         float_a_menu(&mut sidebar);
         type_in(&mut sidebar, "nv");
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         assert_eq!((floated(&sidebar).as_deref(), sidebar.notice.as_deref()), (None, Some(wrong)));
 
         sidebar.focus(Keys::Sidebar);
@@ -9483,7 +9283,7 @@ mod tests {
             type_in(&mut sidebar, "d");
             let closes = || closes_here(1, listed("newer", 20), PaneKey::terminal(1));
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
-            assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Nothing);
+            assert_eq!(sidebar.closes(1, Ok(())), Asked::Nothing);
             let lines = screen(&mut sidebar, true, 160, 16);
             let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
             let asks = format!("Close the view? luneta cannot tell which agents it ends: {why}");
@@ -9492,10 +9292,9 @@ mod tests {
             assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
             let act = Act::Pane {
                 session: session_name("newer"),
-                whose: listed("newer", 20).whose(),
                 pane: PaneKey::terminal(1),
             };
-            assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), delete_here(act));
+            assert_eq!(sidebar.closes(1, Ok(())), delete_here(act));
         }
     }
 
@@ -9505,9 +9304,8 @@ mod tests {
             let mut sidebar = two_sessions();
             sidebar.focus(Keys::Sidebar);
             let host = sidebar.host.clone().expect("the sidebar has heard the host");
-            let session = Some("newer".to_owned());
-            let zellij = Zellij { named: "newer".to_owned(), session, pane };
-            let file = UnreadFile { pid: 200, zellij: Some(zellij), own: None, terminal: None };
+            let own = Some(in_named("newer", pane));
+            let file = UnreadFile { pid: 200, own, terminal: None };
             let unread_files = vec![file];
             sidebar.hear(Host { unread: 1, unread_files, ..host });
             sidebar.step(2);
@@ -9516,10 +9314,9 @@ mod tests {
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
             let act = Act::Pane {
                 session: session_name("newer"),
-                whose: listed("newer", 20).whose(),
                 pane: PaneKey::terminal(1),
             };
-            let went = sidebar.closes(1, Ok(Closes::Pane));
+            let went = sidebar.closes(1, Ok(()));
             let lines = screen(&mut sidebar, true, 120, 16);
             let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
             let note = "lunetad cannot read 1 of Claude Code's session files";
@@ -9534,16 +9331,14 @@ mod tests {
         let made_at = Some(Timestamp::default());
         let own = Some(api::OwnSession { id: 1, made_at });
         let own = Some(api::Own { session: own, pane: 1 });
-        let in_own = UnreadFile { pid: 200, zellij: None, own, terminal: None };
-        let zellij = Zellij { named: "twin".to_owned(), session: Some("twin".to_owned()), pane: 1 };
-        let in_zellij = UnreadFile { pid: 200, zellij: Some(zellij), own: None, terminal: None };
-        let made = OwnMade::from_nanos(0);
-        let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made });
+        let in_own = UnreadFile { pid: 200, own, terminal: None };
+        let other = Some(api::OwnSession { id: 10, made_at });
+        let in_other = UnreadFile { own: Some(api::Own { session: other, pane: 1 }), ..in_own };
         let worktree = tab_of(1, 0);
         let (twin, panes) = (session_name("twin"), vec![1]);
         let seen = vec![ViewId::of(1).unwrap()];
-        let close = Act::Worktree { session: twin, whose, worktree, panes, seen };
-        for (file, asks) in [(in_own, true), (in_zellij, false)] {
+        let close = Act::Worktree { session: twin, worktree, panes, seen };
+        for (file, asks) in [(in_own, true), (in_other, false)] {
             let mut sidebar = fresh();
             let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
             let sessions = vec![session("twin", 10, panes()), own_session("twin", 1, panes())];
@@ -9562,7 +9357,7 @@ mod tests {
     }
 
     #[test]
-    fn a_delete_goes_by_what_zellij_closes_and_the_highlight_past_it() {
+    fn a_delete_closes_the_view_and_the_highlight_goes_past_it() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         sidebar.step(1);
@@ -9571,10 +9366,9 @@ mod tests {
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
         let act = Act::Pane {
             session: session_name("older"),
-            whose: listed("older", 10).whose(),
             pane: PaneKey::terminal(2),
         };
-        assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), delete_here(act));
+        assert_eq!(sidebar.closes(1, Ok(())), delete_here(act));
         assert!(sidebar.open().is_none());
         sidebar.hear(host(
             vec![
@@ -9594,19 +9388,13 @@ mod tests {
         type_in(&mut sidebar, "d");
         let closes = || closes_here(1, own_listed("older", 1), PaneKey::terminal(1));
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
-        let tab = || Closes::Tab { id: TabId(0), panes: vec![1] };
-        assert_eq!(sidebar.closes(1, Ok(tab())), Asked::Nothing);
+        assert_eq!(sidebar.closes(1, Ok(())), Asked::Nothing);
         assert_eq!(bottom(&mut sidebar), " <y> Yes <BS> Back <ESC> Close");
         let lines = screen(&mut sidebar, true, 32, 16);
-        assert_eq!(lines[13], " Close its tab? 1 agent, 1");
+        assert_eq!(lines[13], " Close the view? 1 agent, 1");
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
-        let act = Act::Tab {
-            session: session_name("older"),
-            whose: own_listed("older", 1).whose(),
-            tab: TabId(0),
-            panes: vec![1],
-        };
-        assert_eq!(sidebar.closes(1, Ok(tab())), delete_here(act));
+        let act = Act::Pane { session: session_name("older"), pane: PaneKey::terminal(1) };
+        assert_eq!(sidebar.closes(1, Ok(())), delete_here(act));
         sidebar.cursor = Some(Spot::Local(Place::Session(own_listed("older", 1))));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
@@ -9631,9 +9419,8 @@ mod tests {
         let made_at = Some(Timestamp { seconds: 1, nanos: 0 });
         panes[0].key = Some(api::TerminalKey { id: 1, made_at });
         sidebar.hear(host(vec![remade], Vec::new()));
-        let whose = own_listed("young", 2).whose();
-        let act = Act::Pane { session: session_name("young"), whose, pane: planned };
-        assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), delete_here(act));
+        let act = Act::Pane { session: session_name("young"), pane: planned };
+        assert_eq!(sidebar.closes(1, Ok(())), delete_here(act));
     }
 
     #[test]
@@ -10120,7 +9907,6 @@ mod tests {
             agents,
             unread: 0,
             pull_requests: Vec::new(),
-            unread_sockets: Some(0),
             unread_files: Vec::new(),
             sayings: Vec::new(),
             projects: None,
@@ -10361,7 +10147,7 @@ mod tests {
         sidebar.key(&char('d'), now);
         let number = sidebar.open().expect("the menu").number();
         sidebar.key(&char('m'), now);
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         assert_eq!(sidebar.prunes(number, Ok(plan)), Asked::Nothing);
         assert!(sidebar.working.is_empty());
         let note = "menu: nothing deleted: the menu closed before you said yes; d m asks again";
@@ -10396,10 +10182,10 @@ mod tests {
             PaneRow { session, pane, terminal, cwd, branch, repository, pull_request: None, ran };
         let menu = sidebar.open().expect("the menu");
         assert_eq!(menu.target(), &Target::Pane(on.clone(), row.clone()));
-        let (session, cwd) = (session_name("main"), directory("/w/b"));
-        let open = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
-        let key = listed("main", 20).own_key().unwrap();
-        let asked = Asked::Open { asking: Held::Open, on: on.clone(), key, open };
+        let cwd = directory("/w/b");
+        let open = Opens::Pane { beside: 1, command: Vec::new() };
+        let key = listed("main", 20).own_key();
+        let asked = Asked::Open { asking: Held::Open, on: on.clone(), key, cwd, opens: open };
         assert_eq!(sidebar.key(&char('v'), moment(160_000)), asked);
         assert!(sidebar.open().is_none());
 
@@ -10537,7 +10323,6 @@ mod tests {
         assert!(lines.contains(&"Close the worktree? 1 agent, 1 waiting"), "{lines:#?}");
         let act = Act::Worktree {
             session: session_name("main"),
-            whose: listed("main", 20).whose(),
             worktree: place.worktree,
             panes: vec![1, 2],
             seen: vec![ViewId::of(1).unwrap(), ViewId::of(2).unwrap()],
@@ -10603,9 +10388,9 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         let there = listed("main", 20);
-        sidebar.attaching(Machine::Remote(nixos()), there.own_key().unwrap());
+        sidebar.attaching(Machine::Remote(nixos()), there.own_key());
         sidebar.showing(tab_of(20, 0));
-        let project = ProjectRow::of(there).unwrap();
+        let project = ProjectRow::of(there);
         let place = WorktreePlace { project, worktree: tab_of(20, 0) };
         assert_eq!(sidebar.listing().shown, Some((Machine::Remote(nixos()), place)));
     }
@@ -10693,7 +10478,7 @@ mod tests {
         type_in(&mut sidebar, "j");
         assert!(!says(&mut sidebar));
         type_in(&mut sidebar, "k");
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         assert!(!screen(&mut sidebar, false, 96, 24).contains(&why.to_owned()));
     }
 
@@ -11051,7 +10836,7 @@ mod tests {
         assert_eq!(empty, " ▸ \u{f108} mac · no projects", "a machine with none is one row");
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "Gu");
-        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Terminal);
         tick(&mut sidebar, 140_000);
         tick(&mut sidebar, 155_000);
         assert_eq!(row(&mut sidebar), seen);
@@ -11102,14 +10887,12 @@ mod tests {
         };
         assert_eq!(marked(&mut sidebar), [""; 0]);
 
-        let speaker = Zellij { named: "old".to_owned(), session: Some("work".to_owned()), pane: 2 };
-        let speaker = lunetad::sayings::Speaker(speaker);
-        let whose = aloud::Whose::Said { on: Machine::Local, speaker: Some(speaker) };
+        let whose = aloud::Whose::Said { on: Machine::Remote(nixos()) };
         let text = "the tests pass".to_owned();
         sidebar.aloud(Some(aloud::Shown::Reading { whose, text, paused: false }));
         let rows = marked(&mut sidebar);
-        assert_eq!(rows.len(), 1, "a zellij speaker marks no project's row: {rows:#?}");
-        assert!(rows[0].contains("work · the tests pass"), "{rows:#?}");
+        assert_eq!(rows.len(), 1, "what is read aloud marks no project's row: {rows:#?}");
+        assert!(rows[0].contains("nixos · the tests pass"), "{rows:#?}");
 
         sidebar.aloud(None);
         assert_eq!(marked(&mut sidebar), [""; 0]);

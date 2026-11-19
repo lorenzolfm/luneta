@@ -10,12 +10,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::api::ask_request::{self, UserPane};
 use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
-use crate::mux::{self, SessionName};
-use crate::{git, program, Harness};
+use crate::mux;
+use crate::{git, program};
 
 pub const MODEL: &str = "sonnet";
 
@@ -23,25 +22,11 @@ pub const TURN: Duration = Duration::from_mins(10);
 
 pub const LOOK: Duration = Duration::from_millis(5);
 
-pub const ASKED_VAR: &str = "LUNETA_PANE";
-
-pub const AWAY_VAR: &str = "LUNETA_AWAY";
-
 pub const TURN_VAR: &str = "LUNETA_TURN";
 pub const BEFORE_VAR: &str = "LUNETA_TURN_BEFORE";
 
-pub const AGENTS_VAR: &str = "LUNETA_AGENTS";
-
-const AGENTS_PI: &str = "pi";
-
-pub const ALLOWED: [&str; 16] = [
-    "Bash(luneta here:*)",
-    "Bash(luneta sessions:*)",
+pub const ALLOWED: [&str; 10] = [
     "Bash(luneta agents:*)",
-    "Bash(luneta open:*)",
-    "Bash(luneta go:*)",
-    "Bash(luneta turn:*)",
-    "Bash(luneta close:*)",
     "Bash(luneta prune:*)",
     "Bash(zoxide query:*)",
     "Bash(gh issue view:*)",
@@ -56,27 +41,16 @@ pub const ALLOWED: [&str; 16] = [
 pub const SKILL: &str = include_str!("../../../skills/luneta/SKILL.md");
 
 pub const SYSTEM: &str = "You run in luneta's ask box. The user typed what they want in luneta's \
-    sidebar, and reads what you say in a small box over zellij: write plain text for a \
-    terminal, with no markdown, no headings, no tables and no code fences, and keep it short. \
-    Do what they ask with luneta's commands, as the luneta skill below says, and end with a \
-    line or two on what you did, and where. Run one command in each call to Bash, with \
-    nothing around it: no $(…), no pipes, no && and no ;. Only these run: luneta here, \
-    sessions, agents, open, go, turn, close and prune, zoxide query, gh issue view and list, gh pr view \
-    and list, luneta worktree, and git worktree add and list. Claude Code denies any other. A \
-    pane you open runs the user's shell, Claude Code as claude [--name <name>] [<prompt>], or, \
-    where the turn's line says pi, pi as pi [--name <name>] [<prompt>], with no other option \
-    of theirs: luneta refuses any other command. You cannot wait for \
-    the user in the middle of a turn: to ask them anything, as the skill has you ask before \
-    a close, or which of two things they meant, end your turn with the question. Their \
-    answer comes as the next message. So a close or a prune takes --yes only in the turn after \
-    the one that said its plan.\n\nEach message of the user's starts with a line of luneta's in \
-    brackets, which says the pane they are in as they send it, or that they are on another \
-    machine, or that luneta cannot tell: that goes for the turn, whatever one before said. \
-    `luneta here` names that pane, and a close's plan marks the agent there (this runs here). \
-    You run in no pane yourself, so closing it does not end you, but it is the user's: leave \
-    it and its session out of \"all\", as the skill says.";
-
-const AWAY_SET: &str = "1";
+    sidebar, and reads what you say in a small box in luneta: write plain text for a terminal, \
+    with no markdown, no headings, no tables and no code fences, and keep it short. Do what \
+    they ask with luneta's commands, as the luneta skill below says, and end with a line or two \
+    on what you did, and where. Run one command in each call to Bash, with nothing around it: \
+    no $(…), no pipes, no && and no ;. Only these run: luneta agents and prune, zoxide query, \
+    gh issue view and list, gh pr view and list, luneta worktree, and git worktree add and \
+    list. Claude Code denies any other. You cannot wait for the user in the middle of a turn: \
+    to ask them anything, as the skill has you ask before a prune, or which of two things they \
+    meant, end your turn with the question. Their answer comes as the next message. So a prune \
+    takes --yes only in the turn after the one that said its plan.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Turn {
@@ -133,89 +107,8 @@ impl Turn {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum User {
-    Pane { session: SessionName, pane: u32 },
-    Away,
-    Untold,
-}
-
-impl User {
-    fn name_in(&self, command: &mut Command) {
-        for name in [ASKED_VAR, AWAY_VAR] {
-            command.env_remove(name);
-        }
-        match self {
-            User::Pane { session, pane } => command.env(ASKED_VAR, format!("{session}:{pane}")),
-            User::Away => command.env(AWAY_VAR, AWAY_SET),
-            User::Untold => command,
-        };
-    }
-
-    fn asked(&self) -> Option<ask_request::User> {
-        match self {
-            User::Untold => None,
-            User::Away => Some(ask_request::User::Away(())),
-            User::Pane { session, pane } => {
-                let session = session.to_string();
-                Some(ask_request::User::Pane(UserPane { session, pane: *pane }))
-            },
-        }
-    }
-
-    fn read(said: Where<'_>) -> Result<User, String> {
-        match said {
-            Where { asked: None, away: None } => Ok(User::Untold),
-            Where { asked: None, away: Some(AWAY_SET) } => Ok(User::Away),
-            Where { asked: None, away: Some(away) } => {
-                Err(format!("{AWAY_VAR} is {away:?}, and luneta's ask box sets it to {AWAY_SET}"))
-            },
-            Where { asked: Some(asked), away: None } => {
-                let pane = asked.rsplit_once(':').and_then(|(session, pane)| {
-                    let session = SessionName::running(session).ok()?;
-                    Some(User::Pane { session, pane: pane.parse().ok()? })
-                });
-                let no_pane = || format!("{ASKED_VAR}: {asked} is no pane of a session zellij runs");
-                pane.ok_or_else(no_pane)
-            },
-            Where { asked: Some(asked), away: Some(_) } => Err(format!(
-                "{ASKED_VAR} names {asked}, a pane luneta's ask box asked from, and {AWAY_VAR} \
-                 says it asked from another machine"
-            )),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Where<'a> {
-    pub asked: Option<&'a str>,
-    pub away: Option<&'a str>,
-}
-
-pub fn turn_in(
-    key: Option<&str>,
-    before: Option<&str>,
-    user: Where<'_>,
-) -> Result<Option<(Turn, User)>, String> {
-    let Some(turn) = Turn::read(key, before)? else {
-        let set = match user {
-            Where { asked: None, away: None } => return Ok(None),
-            Where { asked: Some(_), .. } => ASKED_VAR,
-            Where { away: Some(_), .. } => AWAY_VAR,
-        };
-        return Err(format!("{set} is set, and {TURN_VAR} is not"));
-    };
-    Ok(Some((turn, User::read(user)?)))
-}
-
-pub fn agents_in(said: Option<&str>) -> Result<Harness, String> {
-    match said {
-        None => Ok(Harness::ClaudeCode),
-        Some(AGENTS_PI) => Ok(Harness::Pi),
-        Some(said) => {
-            Err(format!("{AGENTS_VAR} is {said:?}, and luneta's ask box sets it to {AGENTS_PI}"))
-        },
-    }
+pub fn turn_in(key: Option<&str>, before: Option<&str>) -> Result<Option<Turn>, String> {
+    Turn::read(key, before)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,9 +153,7 @@ pub struct Asked {
     words: String,
     resumed: Option<SessionId>,
     highlighted: String,
-    user: User,
     turn: Turn,
-    agents: Harness,
 }
 
 impl Asked {
@@ -271,9 +162,7 @@ impl Asked {
         words: &str,
         resumed: Option<SessionId>,
         highlighted: String,
-        user: User,
         turn: Turn,
-        agents: Harness,
     ) -> Result<Asked, String> {
         if let Some(cwd) = cwd.as_ref().filter(|cwd| !cwd.is_absolute()) {
             return Err(format!("cwd: {} is no absolute path", cwd.display()));
@@ -282,12 +171,11 @@ impl Asked {
         if words.is_empty() {
             return Err("words: nothing asked".to_owned());
         }
-        Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, user, turn, agents })
+        Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, turn })
     }
 
     pub fn of(request: AskRequest) -> Result<(Option<On>, Asked), String> {
-        let AskRequest { on, cwd, words, resumed, highlighted, user, turn, before, agents } =
-            request;
+        let AskRequest { on, cwd, words, resumed, highlighted, turn, before } = request;
         let resumed = match resumed {
             None => None,
             Some(resumed) => Some(
@@ -295,34 +183,22 @@ impl Asked {
                     .ok_or_else(|| format!("resumed: {resumed:?} names no session"))?,
             ),
         };
-        let user = match user {
-            None => User::Untold,
-            Some(ask_request::User::Away(())) => User::Away,
-            Some(ask_request::User::Pane(UserPane { session, pane })) => {
-                let session = SessionName::running(&session).map_err(|why| format!("user: {why}"))?;
-                User::Pane { session, pane }
-            },
-        };
         let turn = Turn::new(turn, before)?;
-        let agents = Harness::said(agents).map_err(|why| format!("agents: {why}"))?;
         let cwd = cwd.map(PathBuf::from);
-        let asked = Asked::new(cwd, &words, resumed, highlighted, user, turn, agents)?;
+        let asked = Asked::new(cwd, &words, resumed, highlighted, turn)?;
         Ok((on, asked))
     }
 
     #[must_use]
     pub fn asked(&self, on: Option<On>) -> AskRequest {
-        let user = self.user.asked();
         AskRequest {
             on,
             cwd: self.cwd.as_ref().map(|cwd| cwd.to_string_lossy().into_owned()),
             words: self.words.clone(),
             resumed: self.resumed.as_ref().map(|resumed| resumed.as_str().to_owned()),
             highlighted: self.highlighted.clone(),
-            user,
             turn: self.turn.key,
             before: self.turn.before,
-            agents: Some(self.agents.to_api().into()),
         }
     }
 
@@ -331,7 +207,7 @@ impl Asked {
         wanted: &dyn Fn() -> bool,
         hear: &dyn Fn(Step),
     ) -> Option<Result<(), String>> {
-        talk(self.claude(), &told(&self.user, self.agents, &self.words), wanted, hear)
+        talk(self.claude(), &self.words, wanted, hear)
     }
 
     fn claude(&self) -> Command {
@@ -346,12 +222,7 @@ impl Asked {
         claude.arg("--allowedTools").args(ALLOWED);
         mux::in_no_pane(&mut claude);
         git::local(&mut claude);
-        self.user.name_in(&mut claude);
         self.turn.name_in(&mut claude);
-        match self.agents {
-            Harness::Pi => claude.env(AGENTS_VAR, AGENTS_PI),
-            Harness::ClaudeCode => claude.env_remove(AGENTS_VAR),
-        };
         if let Some(path) = env::current_exe().ok().and_then(|exe| path_with(&exe)) {
             claude.env("PATH", path);
         }
@@ -366,29 +237,6 @@ impl Asked {
 
 fn system(highlighted: &str) -> String {
     format!("{SYSTEM}\n\n{highlighted}\n\n{SKILL}")
-}
-
-fn told(user: &User, agents: Harness, words: &str) -> String {
-    let agents = match agents {
-        Harness::Pi => "[luneta: start an agent in pi, unless the user names Claude Code.]",
-        Harness::ClaudeCode => "[luneta: start an agent in Claude Code. luneta opens pi only once \
-                                the user picks it with Tab in luneta's menu.]",
-    };
-    let user = match user {
-        User::Pane { session, pane } => format!("[luneta: the user is in pane {session}:{pane}.]"),
-        User::Away => "[luneta: the user is on another machine just now, where luneta's zellij \
-                       is, and in none of this machine's panes: `luneta here`, `go` and `open \
-                       session` fail, and so do `open pane` without --beside and `open tab` \
-                       without --session. A close takes none of their panes along. Tell the \
-                       user so where you need them.]"
-            .to_owned(),
-        User::Untold => "[luneta: it cannot tell which pane the user is in just now, so `luneta \
-                         here`, `go`, `open session` and a close fail, and so do `open pane` \
-                         without --beside and `open tab` without --session. Tell the user so \
-                         where you need them.]"
-            .to_owned(),
-    };
-    format!("{user}\n{agents}\n\n{words}")
 }
 
 fn path_with(exe: &Path) -> Option<OsString> {
@@ -546,14 +394,8 @@ mod tests {
 
     use super::*;
 
-    const CLAUDE: Harness = Harness::ClaudeCode;
-
     fn turn() -> Turn {
         Turn { key: 255, before: Some(10) }
-    }
-
-    fn pane(session: &str, pane: u32) -> User {
-        User::Pane { session: SessionName::running(session).unwrap(), pane }
     }
 
     fn session(id: &str) -> SessionId {
@@ -565,16 +407,14 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_runs_where_it_is_asked_for_where_you_are() {
+    fn the_agent_runs_where_it_is_asked_for() {
         let var = |command: &Command, name: &str| {
             let set = command.get_envs().find(|(key, _)| key.to_str() == Some(name));
             set.map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
         };
-        let highlighted = "The row highlighted is pane luneta:4.".to_owned();
+        let highlighted = "The row highlighted is terminal 4 of luneta.".to_owned();
         let cwd = Some(PathBuf::from("/w/luneta"));
-        let you = pane("luneta", 2);
-        let first = Asked::new(cwd, " close it ", None, highlighted, you, turn(), CLAUDE);
-        let first = first.unwrap();
+        let first = Asked::new(cwd, " prune it ", None, highlighted, turn()).unwrap();
         let claude = first.claude();
         assert_eq!(claude.get_current_dir(), Some(Path::new("/w/luneta")));
         let said = args(&claude);
@@ -583,92 +423,47 @@ mod tests {
         let output = ["--output-format", "stream-json", "--verbose"];
         assert_eq!(said[..13], [&model[..], &permissions, &output].concat());
         assert_eq!(said[13], "--append-system-prompt");
-        let system = format!("{SYSTEM}\n\nThe row highlighted is pane luneta:4.\n\n{SKILL}");
+        let system = format!("{SYSTEM}\n\nThe row highlighted is terminal 4 of luneta.\n\n{SKILL}");
         assert_eq!(said[14], system);
         assert_eq!(said[15..], [&["--allowedTools"][..], &ALLOWED[..]].concat());
-        let told_first = told(&first.user, first.agents, &first.words);
-        let line = "[luneta: start an agent in Claude Code. luneta opens pi only once the user \
-                    picks it with Tab in luneta's menu.]";
-        let you = "[luneta: the user is in pane luneta:2.]";
-        assert_eq!(told_first, format!("{you}\n{line}\n\nclose it"));
-        let pi = told(&first.user, Harness::Pi, "go");
-        let line = "[luneta: start an agent in pi, unless the user names Claude Code.]";
-        assert_eq!(pi, format!("{you}\n{line}\n\ngo"));
-        let zellij = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
+        assert_eq!(first.words, "prune it");
         let terminal = ["LUNETA_MUX_TERMINAL", "LUNETA_MUX_TERMINAL_MADE"];
-        let panes = zellij.into_iter().chain(terminal);
-        for name in panes.chain(git::REPOSITORY_VARS).chain([AWAY_VAR]) {
+        for name in terminal.into_iter().chain(git::REPOSITORY_VARS) {
             assert_eq!(var(&claude, name), Some(None), "{name}");
         }
-        assert_eq!(var(&claude, ASKED_VAR), Some(Some("luneta:2".to_owned())));
         assert_eq!(var(&claude, TURN_VAR), Some(Some("00000000000000ff".to_owned())));
         assert_eq!(var(&claude, BEFORE_VAR), Some(Some("000000000000000a".to_owned())));
 
         let resumed = Some(session("7c22"));
-        let next = Asked::new(None, "yes", resumed, String::new(), User::Away, turn(), CLAUDE);
+        let next = Asked::new(None, "yes", resumed, String::new(), turn());
         let claude = next.unwrap().claude();
         assert_eq!(claude.get_current_dir(), env::var_os("HOME").as_deref().map(Path::new));
         assert_eq!(args(&claude)[15..17], ["--resume", "7c22"]);
-        assert_eq!(var(&claude, ASKED_VAR), Some(None));
-        assert_eq!(var(&claude, AWAY_VAR), Some(Some("1".to_owned())));
-        let away = told(&User::Away, Harness::ClaudeCode, "yes");
-        assert!(away.starts_with("[luneta: the user is on another machine just now"), "{away}");
-        assert!(away.ends_with("]\n\nyes"), "{away}");
 
         let first = Turn { key: 10, before: None };
-        let untold = Asked::new(None, "yes", None, String::new(), User::Untold, first, CLAUDE);
-        let claude = untold.unwrap().claude();
-        assert_eq!([var(&claude, ASKED_VAR), var(&claude, AWAY_VAR)], [Some(None), Some(None)]);
+        let claude = Asked::new(None, "yes", None, String::new(), first).unwrap().claude();
         assert_eq!(var(&claude, TURN_VAR), Some(Some("000000000000000a".to_owned())));
         assert_eq!(var(&claude, BEFORE_VAR), Some(None));
-        let untold = told(&User::Untold, Harness::ClaudeCode, "yes");
-        let says = "[luneta: it cannot tell which pane the user is in";
-        assert!(untold.starts_with(says), "{untold}");
-        assert!(untold.ends_with("]\n\nyes"), "{untold}");
     }
 
     #[test]
-    fn the_agent_s_commands_read_the_turn_and_where_you_are() {
+    fn the_agent_s_commands_read_the_turn() {
         let var = |command: &Command, name: &str| {
             let set = command.get_envs().find(|(key, _)| key.to_str() == Some(name));
             set.and_then(|(_, value)| value).map(|value| value.to_string_lossy().into_owned())
         };
         let first = Turn::new(10, None).unwrap();
-        for user in [pane("a:b", 4), User::Away, User::Untold] {
-            for turn in [first, turn()] {
-                let you = user.clone();
-                let asked = Asked::new(None, "yes", None, String::new(), you, turn, CLAUDE);
-                let claude = asked.unwrap().claude();
-                let names = [TURN_VAR, BEFORE_VAR, ASKED_VAR, AWAY_VAR];
-                let [key, before, asked, away] = names.map(|name| var(&claude, name));
-                let said = Where { asked: asked.as_deref(), away: away.as_deref() };
-                let read = turn_in(key.as_deref(), before.as_deref(), said);
-                assert_eq!(read, Ok(Some((turn, user.clone()))));
-            }
+        for turn in [first, turn()] {
+            let claude = Asked::new(None, "yes", None, String::new(), turn).unwrap().claude();
+            let [key, before] = [TURN_VAR, BEFORE_VAR].map(|name| var(&claude, name));
+            assert_eq!(turn_in(key.as_deref(), before.as_deref()), Ok(Some(turn)));
         }
-        assert_eq!(turn_in(None, None, Where::default()), Ok(None));
-    }
-
-    #[test]
-    fn the_agent_s_commands_read_the_harness_of_the_turn() {
-        for agents in [Harness::ClaudeCode, Harness::Pi] {
-            let you = User::Untold;
-            let asked = Asked::new(None, "yes", None, String::new(), you, turn(), agents);
-            let claude = asked.unwrap().claude();
-            let set = claude.get_envs().find(|(key, _)| key.to_str() == Some(AGENTS_VAR));
-            let said = set.and_then(|(_, value)| value).and_then(|value| value.to_str());
-            assert_eq!(agents_in(said), Ok(agents));
-        }
-        for forged in ["", "claude", "Pi", "pi "] {
-            assert!(agents_in(Some(forged)).is_err(), "{forged:?}");
-        }
+        assert_eq!(turn_in(None, None), Ok(None));
     }
 
     #[test]
     fn the_agent_s_commands_read_no_turn_the_box_could_not_name() {
-        let (key, before) = (Some("ff"), Some("0a"));
-        let at = |asked, away| Where { asked, away };
-        assert_eq!(turn_in(key, before, Where::default()), Ok(Some((turn(), User::Untold))));
+        assert_eq!(turn_in(Some("ff"), Some("0a")), Ok(Some(turn())));
         for (key, before) in [
             (Some(""), None),
             (Some("forged"), None),
@@ -676,22 +471,7 @@ mod tests {
             (None, Some("ff")),
             (Some("ff"), Some("ff")),
         ] {
-            assert!(turn_in(key, before, Where::default()).is_err(), "{key:?} {before:?}");
-        }
-        for said in [at(Some("work:2"), None), at(None, Some("1"))] {
-            assert!(turn_in(None, None, said).is_err(), "{said:?}");
-        }
-        for (asked, away) in [
-            (Some(""), None),
-            (Some("work"), None),
-            (Some(":4"), None),
-            (Some("work:x"), None),
-            (Some("a/b:4"), None),
-            (None, Some("")),
-            (None, Some("0")),
-            (Some("work:2"), Some("1")),
-        ] {
-            assert!(turn_in(key, before, at(asked, away)).is_err(), "{asked:?} {away:?}");
+            assert!(turn_in(key, before).is_err(), "{key:?} {before:?}");
         }
     }
 
@@ -708,17 +488,12 @@ mod tests {
     #[test]
     fn a_turn_is_asked_of_a_daemon_as_it_is() {
         let on = || Some(On { destination: "nixos".to_owned() });
-        for user in [pane("luneta", 2), User::Away, User::Untold] {
-            for (cwd, resumed) in [(Some("/w".into()), None), (None, Some(session("7c22")))] {
-                let row = "row".to_owned();
-                let asked = Asked::new(cwd, "close it", resumed, row, user.clone(), turn(), CLAUDE);
-                let asked = asked.unwrap();
-                assert_eq!(Asked::of(asked.asked(on())), Ok((on(), asked)));
-            }
+        for (cwd, resumed) in [(Some("/w".into()), None), (None, Some(session("7c22")))] {
+            let asked = Asked::new(cwd, "prune it", resumed, "row".to_owned(), turn()).unwrap();
+            assert_eq!(Asked::of(asked.asked(on())), Ok((on(), asked)));
         }
         let request = || {
-            let row = "row".to_owned();
-            let asked = Asked::new(None, "close it", None, row, User::Untold, turn(), CLAUDE);
+            let asked = Asked::new(None, "prune it", None, "row".to_owned(), turn());
             asked.unwrap().asked(None)
         };
         let invalid = [
@@ -726,12 +501,7 @@ mod tests {
             AskRequest { cwd: Some("w".to_owned()), ..request() },
             AskRequest { words: " \n".to_owned(), ..request() },
             AskRequest { resumed: Some("--debug".to_owned()), ..request() },
-            AskRequest {
-                user: Some(ask_request::User::Pane(UserPane { session: String::new(), pane: 2 })),
-                ..request()
-            },
             AskRequest { turn: 7, before: Some(7), ..request() },
-            AskRequest { agents: Some(99), ..request() },
         ];
         for request in invalid {
             assert!(Asked::of(request.clone()).is_err(), "{request:?}");
@@ -740,7 +510,7 @@ mod tests {
 
     #[test]
     fn a_step_is_handed_on_as_it_is() {
-        let ran = Step::Ran { id: "toolu_1".to_owned(), command: "luneta here".to_owned() };
+        let ran = Step::Ran { id: "toolu_1".to_owned(), command: "luneta agents".to_owned() };
         let steps = [
             Step::Session(session("7c22")),
             ran,
@@ -782,13 +552,13 @@ mod tests {
             read(&line(assistant(json!([
                 {"type": "thinking", "thinking": "hmm"},
                 {"type": "text", "text": "  Looking.  "},
-                {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "luneta sessions", "description": "List"}},
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "luneta agents", "description": "List"}},
                 {"type": "tool_use", "id": "toolu_2", "name": "Read", "input": {"file_path": "/w/x"}},
                 {"type": "text", "text": " "},
             ])))),
             [
                 Read::Step(Step::Said("Looking.".to_owned())),
-                Read::Step(Step::Ran { id: "toolu_1".to_owned(), command: "luneta sessions".to_owned() }),
+                Read::Step(Step::Ran { id: "toolu_1".to_owned(), command: "luneta agents".to_owned() }),
                 Read::Step(Step::Ran { id: "toolu_2".to_owned(), command: "Read".to_owned() }),
             ]
         );
@@ -831,13 +601,13 @@ mod tests {
             (heard.into_inner(), ended)
         };
         let init = r#"{"type":"system","subtype":"init","session_id":"7c22"}"#;
-        let ran = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"luneta here"}}]}}"#;
+        let ran = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"luneta agents"}}]}}"#;
         let done = r#"{"type":"result","subtype":"success","is_error":false,"result":"You are in luneta:2."}"#;
         let script = format!("read words; echo '{init}'; echo '{ran}'; echo \"$words\" >&2; echo '{done}'");
         let (said, ended) = heard(&script, "where am I\n");
         assert_eq!(said, [
             Step::Session(session("7c22")),
-            Step::Ran { id: "toolu_1".to_owned(), command: "luneta here".to_owned() },
+            Step::Ran { id: "toolu_1".to_owned(), command: "luneta agents".to_owned() },
             Step::Said("You are in luneta:2.".to_owned()),
         ]);
         assert_eq!(ended, Some(Ok(())));

@@ -31,7 +31,7 @@ use lunetad::mux::TerminalKey;
 use lunetad::projects::{Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::links::Unready;
-use lunetad::{Destination, Direction, Growth};
+use lunetad::{Destination, Direction, Directory, Growth, SessionName};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -50,7 +50,7 @@ use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::checks;
-use crate::close::{Act, Whose};
+use crate::close::Act;
 use crate::desktop::{self, Desktop, Reader, Told};
 use crate::dictation::{self, Dictated, Dictation};
 use crate::folds::{self, Folds};
@@ -58,7 +58,7 @@ use crate::images::{self, Went};
 use crate::input;
 use crate::issue::{self, Issue};
 use crate::machines::{self, Added, Machine};
-use crate::menu::{self, Choice, Rename};
+use crate::menu::{self, Choice, Opens, Rename};
 use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
@@ -77,7 +77,6 @@ use crate::projected::{self, Projected};
 use crate::viewed::{self, Heeded, Viewed};
 use crate::worktrees::{self, Landed, Landing, Unmoved};
 use crate::width::Width;
-use crate::zellij::{self, Close, Closes, Open, SessionName};
 
 pub enum Made {
     Worktree { on: Machine, made: Result<Landing, String>, argv: Vec<String> },
@@ -154,9 +153,7 @@ pub enum Event {
     CopyText(String),
     Image(Went),
     ImageSlow(Destination),
-    Opened { menu: u64, opened: Result<u32, String> },
     Named(Made),
-    Closes { menu: u64, closes: Result<Closes, String> },
     Skills { menu: u64, agent: agents::Harness, skills: Result<Vec<Skill>, String> },
     Pulled { menu: u64, found: Result<Found, String> },
     Prunes { menu: u64, plan: Result<prunes::Plan, String> },
@@ -253,7 +250,7 @@ impl Focus {
                     | Over::Dictation(..),
                 ),
                 Side::Session | Side::Collapsed,
-            ) => Keys::Zellij,
+            ) => Keys::Terminal,
         }
     }
 }
@@ -947,14 +944,6 @@ impl App {
                 self.sidebar.unsay(peers::NO_READER);
                 self.hold_aloud();
             },
-            Event::Opened { menu, opened } => {
-                let asked = self.sidebar.opened(menu, opened.map(PaneKey::Zellij));
-                self.follow(asked);
-            },
-            Event::Closes { menu, closes } => {
-                let asked = self.sidebar.closes(menu, closes);
-                self.follow(asked);
-            },
             Event::Skills { menu, agent, skills } => self.sidebar.found(menu, agent, skills),
             Event::Named(made) => self.named(made),
             Event::Pulled { menu, found } => {
@@ -1394,7 +1383,7 @@ impl App {
                 if matches!(self.sidebar.on(), Machine::Remote(there) if *there == on) {
                     self.paste(&path);
                 } else {
-                    self.image_not_pasted(&format!("zellij left {on}, where it is at {path}"));
+                    self.image_not_pasted(&format!("luneta left {on}, where it is at {path}"));
                 }
             },
             Went::Failed(why) => self.image_not_pasted(&why),
@@ -1684,35 +1673,13 @@ impl App {
                 self.go(&on, &place);
                 self.leave();
             },
-            Asked::Closes { menu, on, session, pane: PaneKey::Zellij(pane) } => {
-                zellij::closes(menu, &on, session.name().clone(), pane, &self.events);
-            },
-            Asked::Closes { menu, pane: PaneKey::Terminal(_), .. } => {
-                let asked = self.sidebar.closes(menu, Ok(Closes::Pane));
+            Asked::Closes { menu, .. } => {
+                let asked = self.sidebar.closes(menu, Ok(()));
                 self.follow(asked);
             },
-            Asked::Delete { on, act } if act.own() => self.project_act(&on, &act),
-            Asked::Delete { on, act } => match act {
-                Act::Worktree { .. } | Act::Project { .. } => self.project_act(&on, &act),
-                Act::Pane { session, whose, pane } => {
-                    let close = Close::Pane(pane.id());
-                    self.keep_change(zellij::close(&on, session, whose, close, &self.events));
-                },
-                Act::Tab { session, whose, tab, panes } => {
-                    let close = Close::Tab { id: tab, panes };
-                    self.keep_change(zellij::close(&on, session, whose, close, &self.events));
-                },
-                Act::Kill { session, whose } => {
-                    self.keep_change(zellij::kill(&on, session, whose, &self.events));
-                },
-                Act::Leave { session, to, .. } => {
-                    self.go(&on, &to);
-                    zellij::stays(&session, &self.events);
-                },
-            },
-            Asked::Open { asking, on, key, open } => self.project_open(asking, &on, key, &open),
-            Asked::OpenZellij { menu, on, open } => {
-                self.keep_change(zellij::open(menu, &on, open, &self.events));
+            Asked::Delete { on, act } => self.project_act(&on, &act),
+            Asked::Open { asking, on, key, cwd, opens } => {
+                self.project_open(asking, &on, key, &cwd, &opens);
             },
             Asked::Welcome { asking, on, session, pane } => {
                 self.welcome(asking, &on, &session, pane);
@@ -1780,9 +1747,8 @@ impl App {
                 let said = move |skills| Event::Skills { menu, agent, skills };
                 skills::find(&on, &cwd, agent, &self.events, said);
             },
-            Asked::Printed { menu, on, session, pane, ended } => {
-                let route = projected::route(&on, &session, pane);
-                printed::read(menu, route, ended, &self.events);
+            Asked::Printed { menu, on, pane, ended, .. } => {
+                printed::read(menu, projected::route(&on, pane), ended, &self.events);
             },
             Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
             Asked::Brief(brief) => {
@@ -1873,11 +1839,8 @@ impl App {
                 let (project, worktrees, seen) = (*project, worktrees.clone(), seen.clone());
                 self.project_act_delete(on, Doomed::Project { project, worktrees, seen });
             },
-            Act::Pane { whose: Whose::Own(_), pane: PaneKey::Terminal(key), .. } => {
+            Act::Pane { pane: PaneKey::Terminal(key), .. } => {
                 self.project_act_delete(on, Doomed::View(*key));
-            },
-            Act::Pane { .. } | Act::Tab { .. } | Act::Kill { .. } | Act::Leave { .. } => {
-                self.sidebar.notify(format!("menu: {NOT_YET}"));
             },
         }
     }
@@ -1901,10 +1864,7 @@ impl App {
     }
 
     fn welcome(&mut self, asking: sidebar::Held, on: &Machine, session: &Listed, pane: PaneKey) {
-        let Some(key) = session.own_key() else {
-            return self.sidebar.notify(format!("menu: {}", menu::OWN_ONLY));
-        };
-        let held = self.projected.project(on, key).and_then(|project| {
+        let held = self.projected.project(on, session.own_key()).and_then(|project| {
             let pane = OwnPane::new(project.key, pane.id())?;
             self.projected.of_pane(on, pane)
         });
@@ -1916,12 +1876,19 @@ impl App {
         self.give_opened(Opener::of(asking));
     }
 
-    fn project_open(&mut self, asking: sidebar::Held, on: &Machine, key: OwnKey, open: &Open) {
+    fn project_open(
+        &mut self,
+        asking: sidebar::Held,
+        on: &Machine,
+        key: OwnKey,
+        cwd: &Directory,
+        opens: &Opens,
+    ) {
         let Some(project) = self.projected.project(on, key) else {
             return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());
         };
-        match open {
-            Open::Pane { beside, command, .. } => {
+        match opens {
+            Opens::Pane { beside, command } => {
                 let pane = OwnPane::new(project.key, *beside);
                 let held = pane.and_then(|it| self.projected.of_pane(on, it));
                 let Some((worktree, terminal)) = held else {
@@ -1931,9 +1898,9 @@ impl App {
                 self.shown().open_beside_focused(command.clone());
                 self.give_opened(Opener::of(asking));
             },
-            Open::Tab { tab, .. } => {
+            Opens::Tab { name, command } => {
                 let (lunetad, id, on) = (self.lunetad.clone(), project.id, on.clone());
-                let (cwd, name, argv) = (tab.cwd.clone(), tab.name.clone(), tab.command.clone());
+                let (cwd, name, argv) = (cwd.clone(), name.clone(), command.clone());
                 if self.refuse_naming(None) {
                     return;
                 }
@@ -1991,26 +1958,16 @@ impl App {
                     self.picked(did);
                 }
             },
-            Picked::Delete { on, act } if act.own() => {
+            Picked::Delete { on, act } => {
                 self.project_act(&on, &act);
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Delete { on, act: Act::Leave { session, to, .. } } => {
-                self.go(&on, &to);
-                zellij::stays(&session, &self.events);
-                self.give(Focus::on(self.focus.side.session()));
-            },
-            Picked::Delete { on, act } => self.follow(Asked::Delete { on, act }),
         }
     }
 
     fn converse(&mut self) {
-        let Some(Over::Ask(ask)) = &self.focus.over else {
-            return;
-        };
-        let user = self.sidebar.user(&ask.machine());
         if let Some(Over::Ask(ask)) = &mut self.focus.over {
-            ask.send(user, self.sidebar.agent(), &self.events);
+            ask.send(&self.events);
         }
     }
 
@@ -2201,10 +2158,7 @@ impl App {
     fn go_project(&mut self, machine: &Machine, place: &Place) -> Result<(), String> {
         let listed = place.listed();
         let session = listed.name();
-        let Some(key) = listed.own_key() else {
-            return Err(format!("{session} is one of zellij's sessions: {}", menu::OWN_ONLY));
-        };
-        let Some(project) = self.projected.project(machine, key) else {
+        let Some(project) = self.projected.project(machine, listed.own_key()) else {
             if let Machine::Remote(destination) = machine
                 && !self.projected.reaches(machine)
             {
@@ -2236,7 +2190,7 @@ impl App {
             self.go_worktree(machine, last, None);
             return Ok(());
         };
-        let pane = OwnPane::new(key, pane).ok_or("a view of id 0")?;
+        let pane = OwnPane::new(listed.own_key(), pane).ok_or("a view of id 0")?;
         let (worktree, terminal) = self.projected.of_pane(machine, pane).ok_or_else(|| {
             format!("lunetad lists no view {} in {session}", pane.id)
         })?;

@@ -46,9 +46,9 @@ mod tests {
     #[test]
     fn a_box_hears_its_answer_once_or_that_there_was_none() {
         let (events, heard) = mpsc::channel();
-        let opened = |menu| move |opened| Event::Opened { menu, opened };
-        Due::new(&events, opened(7)).pay(Ok(4));
-        let due = Due::<u32>::new(&events, opened(8));
+        let voiced = |number| move |ended| Event::Voiced { number, ended };
+        Due::new(&events, voiced(7)).pay(Ok(()));
+        let due = Due::<()>::new(&events, voiced(8));
         let panicked = thread::spawn(move || {
             let _due = due;
             panic!("a thread that panics");
@@ -56,8 +56,8 @@ mod tests {
         assert!(panicked.join().is_err());
         let heard: Vec<Event> = heard.try_iter().collect();
         assert_eq!(heard.len(), 2);
-        assert!(matches!(heard[0], Event::Opened { menu: 7, opened: Ok(4) }));
-        let Event::Opened { menu: 8, opened: Err(why) } = &heard[1] else {
+        assert!(matches!(heard[0], Event::Voiced { number: 7, ended: Ok(()) }));
+        let Event::Voiced { number: 8, ended: Err(why) } = &heard[1] else {
             panic!("the box waiting on the thread that panicked hears");
         };
         assert_eq!(why, UNANSWERED);

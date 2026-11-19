@@ -12,7 +12,7 @@ use serde::Deserialize;
 use crate::agent::{
     file_text, moment, named_pid, nonempty, Agent, Harness, Name, Source, Status, Unread,
 };
-use crate::mux::{self, Named};
+use crate::mux::{self, TerminalKey};
 use crate::{log, process, program};
 use crate::watch::{self, Troubles};
 
@@ -92,7 +92,7 @@ pub struct SessionFiles {
     dir: PathBuf,
     domain: process::Domain,
     seen: HashMap<u32, Seen>,
-    panes: HashMap<(u32, String), Option<Named>>,
+    panes: HashMap<(u32, String), Option<TerminalKey>>,
     troubles: Troubles,
     scanned: bool,
 }
@@ -148,7 +148,7 @@ impl SessionFiles {
         let mut pane = |pid: u32, start: String| {
             let key = (pid, start);
             let pane = self.panes.remove(&key).unwrap_or_else(|| mux::pane_of(pid));
-            panes.insert(key, pane.clone());
+            panes.insert(key, pane);
             pane
         };
         let mut agents = Vec::with_capacity(self.seen.len());
@@ -159,8 +159,7 @@ impl SessionFiles {
                 Seen::Torn { before: None, .. } => continue,
                 Seen::Unread => {
                     if let Some(start) = process::start(pid) {
-                        let started = process::started(pid);
-                        unread.push(Unread { pid, started, pane: pane(pid, start) });
+                        unread.push(Unread { pid, pane: pane(pid, start) });
                     }
                     continue;
                 },
@@ -201,7 +200,7 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
     }
 }
 
-fn agent(pid: u32, file: &File, pane: Option<Named>) -> Agent {
+fn agent(pid: u32, file: &File, pane: Option<TerminalKey>) -> Agent {
     let word = |text: &Option<String>| Said::new(text.as_deref()?.trim().to_owned());
     let name = file.name.clone().and_then(Said::new);
     let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
@@ -237,9 +236,7 @@ mod tests {
         let mut unset: Vec<&OsStr> =
             claude.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name).collect();
         unset.sort_unstable();
-        let own = ["LUNETA_MUX_TERMINAL", "LUNETA_MUX_TERMINAL_MADE"].map(OsStr::new);
-        let zellij = ["ZELLIJ", "ZELLIJ_PANE_ID", "ZELLIJ_SESSION_NAME"].map(OsStr::new);
-        assert_eq!(unset, [own.as_slice(), &zellij].concat());
+        assert_eq!(unset, ["LUNETA_MUX_TERMINAL", "LUNETA_MUX_TERMINAL_MADE"].map(OsStr::new));
         let heard = Command::new("cat").stdin(told).output().unwrap();
         assert_eq!(heard.stdout, b"the prompt");
     }

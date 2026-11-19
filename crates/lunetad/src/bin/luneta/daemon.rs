@@ -1,10 +1,8 @@
 use std::cell::OnceCell;
 use std::env;
-use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
-use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
@@ -15,7 +13,6 @@ use std::time::{Duration, Instant};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::InfoResponse;
 use lunetad::folder::{self, Folder, ANOTHER_RUNS, LOG};
-use lunetad::mux::Zellij;
 use lunetad::program;
 use lunetad::release::{self, Build, Of, Other, OWN};
 use rustix::process::{Pid, Signal};
@@ -108,7 +105,6 @@ pub async fn current(path: &Path) -> Result<Current, String> {
     let mut stopped: Option<u32> = None;
     let mut doubted: Option<u32> = None;
     let starting = OnceCell::new();
-    let own = Zellij::socket_folder().path().to_owned();
     loop {
         let why = match lunetad::connect(&folder).await {
             Ok(mut daemon) => match daemon.info(()).await {
@@ -116,18 +112,8 @@ pub async fn current(path: &Path) -> Result<Current, String> {
                     let info = info.into_inner();
                     let of = release::of(&info.version, info.built);
                     let (version, pid) = (release::spelled(&info.version, info.built), info.pid);
-                    let reads = info.zellij_folder.as_deref();
-                    let reads = reads.map(|reads| Path::new(OsStr::from_bytes(reads)));
                     if stopped == Some(pid) {
                         format!("lunetad {version} (pid {pid}) was stopped, and has not ended")
-                    } else if let Some(reads) = reads.filter(|reads| !same_folder(reads, &own)) {
-                        reap(started);
-                        return Err(format!(
-                            "lunetad {version} (pid {pid}) reads zellij's sessions in {}, not in \
-                             {}, where luneta's zellij keeps them",
-                            reads.display(),
-                            own.display()
-                        ));
                     } else if of == Of::Own {
                         reap(started);
                         return Ok(Current { folder, daemon, info });
@@ -229,10 +215,6 @@ fn kept(other: &Other, pid: u32, starting: Option<Build>) -> String {
          no newer, so luneta leaves it be",
         program.display()
     )
-}
-
-fn same_folder(a: &Path, b: &Path) -> bool {
-    a == b || fs::canonicalize(a).is_ok_and(|a| fs::canonicalize(b).is_ok_and(|b| a == b))
 }
 
 fn reap(started: Starting) {

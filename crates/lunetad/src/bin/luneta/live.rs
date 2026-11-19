@@ -75,14 +75,10 @@ impl Missing {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
-    use std::time::SystemTime;
-
     use super::*;
 
     fn session(n: u64) -> Session {
-        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(n);
-        Session::new(started, NonZeroU64::new(n).unwrap()).unwrap()
+        Session::Project(lunetad::projects::ProjectId::of(n).unwrap())
     }
 
     fn lists<const N: usize>(machines: [(&Machine, &[Session], bool); N]) -> Lists {

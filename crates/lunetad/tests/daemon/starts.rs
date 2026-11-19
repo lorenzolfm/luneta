@@ -17,7 +17,7 @@ use base64::Engine as _;
 use lunetad::api::projects::Held;
 use lunetad::api::terminal::Found;
 use lunetad::api;
-use lunetad::opens;
+use lunetad::shells;
 use lunetad::program::alone;
 use rustix::fs::{Mode, OFlags};
 use rustix::io::{fcntl_setfd, FdFlags};
@@ -228,7 +228,7 @@ fn log_of(host: &Host) -> String {
 const FOLDERS: &str = "\x1b[100;5u";
 
 pub fn makes_shells() -> bool {
-    Path::new(&opens::your_shell()).is_file()
+    Path::new(&shells::your_shell()).is_file()
 }
 
 pub fn projects_of(owned: &Owned) -> Vec<api::Project> {
@@ -303,7 +303,7 @@ fn a_clone_s_root_picked_from_the_folders_lists_its_worktrees_to_open() {
     let owned = Owned::new();
     let dir = cloned("project", &["one", "two"]);
     let root = real(&dir.path);
-    script(&owned.host.zellij.bin().join("zoxide"), &format!("echo '{root}'\n"));
+    script(&owned.host.bin().join("zoxide"), &format!("echo '{root}'\n"));
     let mut window = Window::open(&owned.host, &directory("elsewhere"), &[]);
     let none = || window.shows("no projects").then_some(());
     eventually("luneta's sidebar says it has no project", none);

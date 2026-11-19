@@ -3,32 +3,25 @@ use std::io;
 use std::mem;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use luneta_protocol::git::{GitStatus, Head};
 use luneta_protocol::said::Said;
 use tokio::sync::oneshot;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, Unread};
 use crate::api;
 use crate::claude::Scan;
 use crate::github::Found;
 use crate::mux::own::server::{self, Is};
-use crate::panes::{self, Pane, Titled};
+use crate::panes::{self, Titled};
 use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage, Subfolder};
 use crate::projects::{ViewId, Worktree, WorktreeId, CLONE_WORKTREES_MAX};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
-use crate::shells::{Doing, Shell};
+use crate::shells::Doing;
 use crate::transcripts::SessionId;
-use crate::mux::{Client, Id, Listed, SessionName, Sessions, Socket};
 use crate::mux::TerminalKey;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Asked {
-    pub id: Id,
-    pub name: SessionName,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shown {
@@ -58,21 +51,16 @@ pub enum Listing {
 pub enum Command {
     Agents(Scan),
     PiAgents(Vec<Agent>),
-    Sockets { sockets: Vec<Socket>, unread: u32 },
-    Panes { asked: Asked, panes: Vec<Pane> },
-    Clients { asked: Asked, clients: Listed },
     Terminals(BTreeMap<ViewId, Located>),
     GitStatus { dir: String, status: GitStatus },
     PullRequests(BTreeMap<String, Found>),
-    Shells(Vec<Shell>),
     Topics(HashMap<SessionId, Said>),
     Hosts(Named),
     Projects { projects: Result<Projects, String>, revision: Revision },
     Missing(BTreeSet<Dir>),
     Listed(BTreeMap<Dir, Listing>),
     Remote { destination: Destination, reached: Reached },
-    Say { said: ToSay, at: SystemTime, answer: oneshot::Sender<Result<(), String>> },
-    Sessions(oneshot::Sender<Vec<Addressed>>),
+    Say { said: ToSay, at: SystemTime, answer: oneshot::Sender<()> },
     Dirs(oneshot::Sender<BTreeSet<String>>),
     ProjectFolders(oneshot::Sender<BTreeSet<Dir>>),
     Clones(oneshot::Sender<BTreeMap<Dir, BTreeSet<WorktreeId>>>),
@@ -85,15 +73,7 @@ pub enum Command {
     Watch { after: Option<api::Version>, answer: oneshot::Sender<Option<api::Host>> },
 }
 
-pub struct Addressed {
-    pub id: Id,
-    pub name: SessionName,
-    pub told: u64,
-    pub listed: bool,
-}
-
 pub struct Wakes {
-    pub panes: SyncSender<()>,
     pub git: SyncSender<()>,
     pub github: SyncSender<()>,
 }
@@ -120,14 +100,9 @@ pub fn start(wakes: Wakes) -> io::Result<SyncSender<Command>> {
 struct Known {
     found: Scan,
     pi: Vec<Agent>,
-    sessions: Sessions,
-    unread_sockets: u32,
     terminals: BTreeMap<ViewId, Located>,
-    panes: HashMap<Id, Vec<Pane>>,
-    clients: HashMap<Id, Listed>,
     statuses: BTreeMap<String, GitStatus>,
     pull_requests: BTreeMap<String, Found>,
-    shells: Vec<Shell>,
     topics: HashMap<SessionId, Said>,
     remotes: Vec<(Destination, Reached)>,
     unread_hosts: u32,
@@ -135,8 +110,6 @@ struct Known {
     revision: Revision,
     missing: BTreeSet<Dir>,
     listed: BTreeMap<Dir, Listing>,
-    words: u64,
-    told: HashMap<Id, u64>,
     host: api::Host,
     seq: u64,
     waiting: Vec<oneshot::Sender<Option<api::Host>>>,
@@ -147,14 +120,9 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
     let mut known = Known {
         found: Scan { agents: Vec::new(), unread: Vec::new() },
         pi: Vec::new(),
-        sessions: Sessions::default(),
-        unread_sockets: 0,
         terminals: BTreeMap::new(),
-        panes: HashMap::new(),
-        clients: HashMap::new(),
         statuses: BTreeMap::new(),
         pull_requests: BTreeMap::new(),
-        shells: Vec::new(),
         topics: HashMap::new(),
         remotes: Vec::new(),
         unread_hosts: 0,
@@ -162,8 +130,6 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         revision: Revision::default(),
         missing: BTreeSet::new(),
         listed: BTreeMap::new(),
-        words: 0,
-        told: HashMap::new(),
         host: api::Host::default(),
         seq: 0,
         waiting: Vec::with_capacity(WAITING_MAX),
@@ -181,26 +147,6 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let pids: HashSet<u32> = now.iter().map(|agent| agent.pid).collect();
                 assert_eq!(pids.len(), now.len(), "an agent's pid comes twice");
                 known.pi = now;
-            },
-            Command::Sockets { sockets, unread } => {
-                known.unread_sockets = unread;
-                if known.saw(sockets) {
-                    wake(&wakes.panes);
-                }
-            },
-            Command::Panes { asked, panes } => {
-                if !known.answers(&asked) {
-                    continue;
-                }
-                if known.listed(asked.id, panes) {
-                    wake(&wakes.git);
-                }
-            },
-            Command::Clients { asked, clients } => {
-                if !known.answers(&asked) {
-                    continue;
-                }
-                known.clients.insert(asked.id, clients);
             },
             Command::Terminals(now) => {
                 let before = known.dirs();
@@ -220,11 +166,6 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 }
             },
             Command::PullRequests(now) => known.pull_requests = now,
-            Command::Shells(now) => {
-                if known.heard(now) {
-                    wake(&wakes.panes);
-                }
-            },
             Command::Topics(now) => known.topics = now,
             Command::Hosts(now) => known.named(now),
             Command::Projects { projects, revision } => {
@@ -253,16 +194,8 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 *was = reached;
             },
             Command::Say { said, at, answer } => {
-                let taken = known.sayings.take(said, &known.sessions, at);
-                let _ = answer.send(taken);
-            },
-            Command::Sessions(answer) => {
-                let sessions = known.addressed().into_iter().map(|(id, name)| {
-                    let told = known.told.get(&id).expect("a word is said of each as it comes");
-                    Addressed { id, name, told: *told, listed: known.panes.contains_key(&id) }
-                });
-                let _ = answer.send(sessions.collect());
-                continue;
+                known.sayings.take(said, at);
+                let _ = answer.send(());
             },
             Command::Dirs(answer) => {
                 let _ = answer.send(known.dirs());
@@ -319,45 +252,6 @@ fn wake(thread: &SyncSender<()>) {
 }
 
 impl Known {
-    fn answers(&self, asked: &Asked) -> bool {
-        self.sessions.addressed(&asked.name) == Some(asked.id)
-    }
-
-    fn addressed(&self) -> HashSet<(Id, SessionName)> {
-        let sessions = &self.sessions;
-        let alone = |&(id, name): &(Id, &SessionName)| sessions.addressed(name) == Some(id);
-        sessions.running().filter(alone).map(|(id, name)| (id, name.clone())).collect()
-    }
-
-    fn saw(&mut self, sockets: Vec<Socket>) -> bool {
-        let before = self.addressed();
-        self.sessions.saw(sockets);
-        let now = self.addressed();
-        let addressed = |session: &Id| now.iter().any(|(id, _)| id == session);
-        self.panes.retain(|session, _| addressed(session));
-        self.clients.retain(|session, _| addressed(session));
-        self.told.retain(|session, _| addressed(session));
-        let came: Vec<Id> = now.difference(&before).map(|(id, _)| *id).collect();
-        for session in &came {
-            self.say(*session);
-        }
-        !came.is_empty()
-    }
-
-    fn heard(&mut self, now: Vec<Shell>) -> bool {
-        let unsaid = |shell: &&Shell, among: &[Shell]| !among.iter().any(|was| was.says_as(shell));
-        let new = now.iter().filter(|shell| unsaid(shell, &self.shells));
-        let gone = self.shells.iter().filter(|shell| unsaid(shell, &now));
-        let can_ask = |session: &Id| self.told.contains_key(session);
-        let told: HashSet<Id> =
-            new.chain(gone).filter_map(|shell| self.house(shell)).filter(can_ask).collect();
-        for session in &told {
-            self.say(*session);
-        }
-        self.shells = now;
-        !told.is_empty()
-    }
-
     fn named(&mut self, now: Named) {
         let unique: HashSet<&Destination> = now.machines.iter().collect();
         assert_eq!(unique.len(), now.machines.len(), "a machine is named twice");
@@ -372,36 +266,12 @@ impl Known {
         }
     }
 
-    fn say(&mut self, session: Id) {
-        self.words = self.words.checked_add(1).expect("fewer than 2^64 words are said");
-        self.told.insert(session, self.words);
-    }
-
-    fn house(&self, shell: &Shell) -> Option<Id> {
-        let by = shell.started.checked_add(Duration::from_secs(1))?;
-        self.sessions.housing(&shell.named, by)
-    }
-
-    fn listed(&mut self, session: Id, mut panes: Vec<Pane>) -> bool {
-        assert!(self.sessions.name_of(session).is_some());
-        let ids: HashSet<u32> = panes.iter().map(|pane| pane.id).collect();
-        assert_eq!(ids.len(), panes.len(), "a pane's id comes twice");
-        if let Some(listed) = self.panes.get(&session) {
-            panes::keep(&mut panes, listed);
-        }
-        let before = self.dirs();
-        self.panes.insert(session, panes);
-        !self.dirs().is_subset(&before)
-    }
-
     fn dirs(&self) -> BTreeSet<String> {
-        let cwds = self.panes.values().flatten().filter_map(|pane| pane.cwd.as_ref());
-        let cwds = cwds.map(|cwd| cwd.as_str().to_owned());
         let listed = self.terminals.values().filter_map(|found| match found {
             Located::Shown(Shown { listed: Some(listed), .. }) => Dir::parse(&listed.cwd).ok(),
             Located::Shown(Shown { listed: None, .. }) | Located::Lost | Located::Looking => None,
         });
-        let cwds = cwds.chain(listed.map(|cwd| cwd.as_str().to_owned()));
+        let cwds = listed.map(|cwd| cwd.as_str().to_owned());
         let present = |folder: &Dir| !self.missing.contains(folder);
         let folders = self.projects.iter().flat_map(Projects::worktree_folders).filter(present);
         cwds.chain(folders.map(|folder| folder.as_str().to_owned())).collect()
@@ -445,51 +315,21 @@ impl Known {
     fn agents(&self) -> Vec<api::Agent> {
         let claude = self.found.agents.iter().map(|agent| {
             let topic = self.topics.get(agent.session_id.as_str()).cloned();
-            agent.to_api(&self.sessions, topic)
+            agent.to_api(topic)
         });
-        claude.chain(self.pi.iter().map(|agent| agent.to_api(&self.sessions, None))).collect()
+        claude.chain(self.pi.iter().map(|agent| agent.to_api(None))).collect()
     }
 
     fn unread(&self) -> (u32, Vec<api::UnreadFile>) {
         let mut files: Vec<api::UnreadFile> =
-            self.found.unread.iter().map(|file| file.to_api(&self.sessions)).collect();
+            self.found.unread.iter().map(Unread::to_api).collect();
         files.sort_by_key(|file| file.pid);
         let count =
             u32::try_from(files.len()).expect("a folder listed in memory has under 2^32 files");
         (count, files)
     }
 
-    fn shells(&self) -> HashMap<(Id, u32), &Shell> {
-        let mut shells: HashMap<(Id, u32), &Shell> = HashMap::new();
-        for shell in &self.shells {
-            let Some(session) = self.house(shell) else {
-                continue;
-            };
-            shells
-                .entry((session, shell.pane))
-                .and_modify(|was| {
-                    if was.started < shell.started {
-                        *was = shell;
-                    }
-                })
-                .or_insert(shell);
-        }
-        shells
-    }
-
-    fn assert_listed(&self) {
-        for id in self.panes.keys().chain(self.clients.keys()) {
-            let name = self.sessions.name_of(*id).expect("a session zellij listed runs");
-            assert_eq!(self.sessions.addressed(name), Some(*id));
-        }
-        let addressed = self.addressed();
-        assert_eq!(self.told.len(), addressed.len());
-        assert!(addressed.iter().all(|(id, _)| self.told.contains_key(id)));
-    }
-
     fn built(&self) -> api::Host {
-        self.assert_listed();
-        let sessions = self.built_sessions();
         let mut agents = self.agents();
         agents.sort_by_key(|agent| agent.pid);
         let (unread, unread_files) = self.unread();
@@ -503,12 +343,11 @@ impl Known {
             self.remotes.iter().map(|(destination, reached)| reached.to_api(destination)).collect();
         api::Host {
             version: None,
-            sessions,
+            sessions: Vec::new(),
             git_statuses: self.statuses.iter().map(|(dir, status)| status.to_api(dir)).collect(),
             agents,
             unread,
             pull_requests,
-            unread_sockets: Some(self.unread_sockets),
             unread_files,
             remotes,
             unread_hosts: Some(self.unread_hosts),
@@ -623,34 +462,6 @@ impl Known {
         let found = self.pull_requests.get(folder.as_str());
         let found = found.filter(|found| branch == Some(found.branch.as_str()));
         Seen::Read(Stage::of(branch, found.map(|found| &found.pull_request)))
-    }
-
-    fn built_sessions(&self) -> Vec<api::Session> {
-        let mut running: Vec<(Id, &SessionName)> = self.sessions.running().collect();
-        running.sort_unstable_by_key(|(id, name)| (*name, id.started()));
-        let shells = self.shells();
-        let zellij_panes = |id: Id, panes: &[Pane]| {
-            let doing = |pane: &Pane| shells.get(&(id, pane.id)).map(|shell| &shell.doing);
-            api::Panes { panes: panes.iter().map(|pane| pane.to_api(doing(pane))).collect() }
-        };
-        let clients_of = |clients: &Listed| api::Clients {
-            clients: clients.iter().copied().map(Client::to_api).collect(),
-        };
-        running
-            .into_iter()
-            .map(|(id, name)| {
-                let started_at = Some(id.started().into());
-                let zellij = api::ZellijSession { started_at, socket: id.socket() };
-                api::Session {
-                    name: name.to_string(),
-                    started_at: zellij.started_at,
-                    socket: zellij.socket,
-                    panes: self.panes.get(&id).map(|panes| zellij_panes(id, panes)),
-                    clients: self.clients.get(&id).map(clients_of),
-                    mux: Some(api::session::Mux::Zellij(zellij)),
-                }
-            })
-            .collect()
     }
 
     fn version(&self) -> api::Version {

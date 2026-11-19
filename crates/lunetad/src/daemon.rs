@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
-use luneta_protocol::said::Said;
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
 use tokio::runtime::Handle;
@@ -27,39 +26,23 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::api::change_projects_request::{self, AddWorktree};
 use crate::api::change_projects_response;
 use crate::api::make_worktree_response::Landed;
-use crate::api::close_request;
-use crate::api::closes_response::{self, Tab as ClosedTab};
 use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
 use crate::api::keep_image_request::{Image, Part};
 use crate::api::keep_checks_response::{self, Failed as FailedCheck};
-use crate::api::keep_printed_response::{self, File as PrintedFile, Top};
 use crate::api::list_dirs_response::Dir;
-use crate::api::list_exited_response::Exited;
 use crate::api::list_skills_response::Skill;
-use crate::api::open_request::{self, Opens};
-use crate::api::other_tabs_response::Tab as OtherTab;
-use crate::api::refuge_response::{self, Went};
-use crate::api::{turn_into_panes_response, turn_into_tab_response};
 use crate::api::{
     self, AskRequest, AskResponse, ChangeProjectsRequest, ChangeProjectsResponse,
-    CheckNameRequest, CheckNameResponse, CloseRequest, ClosesRequest, ClosesResponse,
-    DeleteExitedRequest, DumpScreenRequest, DumpScreenResponse, FileIssueRequest,
-    FileIssueResponse, GoRequest, InfoResponse,
-    IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
-    KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
-    ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
-    ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
-    MakeWorktreeRequest, MakeWorktreeResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
-    OpenResponse, OtherTabsRequest,
-    OtherTabsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
-    PrunesResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, SayRequest, ShowRequest,
-    ShowResponse, StartRequest,
-    TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse,
-    TurnIntoTabRequest, TurnIntoTabResponse, FramesRequest,
+    FileIssueRequest, FileIssueResponse, InfoResponse, IssueRepositoriesRequest,
+    IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest,
+    KeepImageResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
+    ListDirsRequest, ListDirsResponse, ListSkillsRequest, ListSkillsResponse,
+    MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest, PasteResponse, PrintedFile,
+    PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, SayRequest, ShowRequest,
+    ShowResponse, TranscriptEndsRequest, TranscriptEndsResponse, FramesRequest,
 };
 use crate::asks::{Asked, Step};
-use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::projects::{Ask, Changed, Failed, Lock, Made, ProjectId, Store, WorktreeId};
@@ -71,27 +54,18 @@ use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::issues::{self, Filing, Remote, Unfiled};
 use crate::links::{self, Branch, Of, Pasted, Unready};
-use crate::names::Starts;
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Bridging, Destination, Standing};
-use crate::watch::Troubles;
-use crate::mux::{self, Mux, SessionName, SocketFolder, Zellij};
-use crate::opens::{Open, Tab};
-use crate::printed::{Kept as KeptFile, Printed};
+use crate::printed::Kept as KeptFile;
 use crate::transcripts::Reading;
 use crate::agent::Agent;
-use crate::turns::{IntoPanes, IntoTab};
 use crate::checks::{Failing, Log};
 use crate::{
-    checks, claude, client, closes, eza, fetches, git, github, keeps, log, moves, names, opens,
-    owns, panes, pi, printed, projects, release, remote, screens, shells, skills, topics, turns,
-    watch, zoxide,
-    Harness,
+    checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed, projects,
+    release, remote, skills, topics, watch, zoxide, Harness,
 };
 
 const SWEEP: Duration = Duration::from_secs(2);
-
-const TERMINAL_SWEEP: Duration = Duration::from_secs(1);
 
 const GIT_STATUS_SWEEP: Duration = Duration::from_secs(5);
 
@@ -173,11 +147,10 @@ pub async fn serve(
 ) -> io::Result<()> {
     let listener = UnixListener::bind(&claim.socket)?;
     let started = SystemTime::now();
-    let (wake_panes, panes_woken) = mpsc::sync_channel(1);
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
     let github = wake_github.clone();
-    let wakes = Wakes { panes: wake_panes.clone(), git: wake_git.clone(), github };
+    let wakes = Wakes { git: wake_git.clone(), github };
     let core = core::start(wakes)?;
     let store = Store::open(projects, core.clone())?;
     if let Some(why) = store.unkept() {
@@ -187,13 +160,11 @@ pub async fn serve(
     let layouts = layouts::start(core.clone(), store, wake_owns.clone(), SWEEP)?;
     projects::follow(core.clone(), layouts.clone(), SWEEP)?;
     let (end, ending) = oneshot::channel();
-    let sockets = Zellij::socket_folder();
     let claude_folder = claude::folder();
     let watchers = Arc::new(Watchers::default());
-    let folders = (claude_folder.clone(), sockets.clone());
     let owns = Arc::new(AtomicBool::new(false));
-    follow(&core, &claim.folder, folders, (watchers.clone(), owns.clone()), end)?;
-    panes::follow(core.clone(), wake_panes, panes_woken, Zellij::cache_folder(), SWEEP)?;
+    follow(&core, &claim.folder, claude_folder.clone())?;
+    tokio::spawn(stand(watchers.clone(), owns.clone(), end));
     owns::follow(layouts.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
@@ -212,12 +183,12 @@ pub async fn serve(
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
-    let host = Host { started, sockets, claude_folder, core, watchers, bridges, layouts };
+    let host = Host { started, claude_folder, core, watchers, bridges, layouts };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     let ended = async move {
         if ending.await.is_err() {
-            log::say("zellij's sessions are no longer followed, and so lunetad ends");
+            log::say("lunetad no longer follows what keeps it, and so it ends");
         }
         match fs::remove_file(&socket) {
             Ok(()) => {},
@@ -280,9 +251,7 @@ impl Alone {
 fn follow(
     core: &SyncSender<Command>,
     folder: &Path,
-    (claude_folder, sockets): (Option<PathBuf>, SocketFolder),
-    (watchers, owns): (Arc<Watchers>, Arc<AtomicBool>),
-    end: oneshot::Sender<()>,
+    claude_folder: Option<PathBuf>,
 ) -> io::Result<()> {
     match claude_folder {
         Some(folder) => {
@@ -307,47 +276,29 @@ fn follow(
     let any = |_: &Path| true;
     let mode = RecursiveMode::NonRecursive;
     let pids = |agents: &Vec<Agent>| agents.iter().map(|agent| agent.pid).collect();
-    watch::watch_ending("pi", dir, mode, any, SWEEP, read, pids, tell)?;
-    let mut shells = shells::Shells::new(folder);
-    let dir = shells.dir().to_owned();
-    let read = move || shells.read();
-    let tell = {
-        let core = core.clone();
-        move |found| core.send(Command::Shells(found)).is_ok()
-    };
-    let any = |_: &Path| true;
-    watch::watch("shells", dir, RecursiveMode::Recursive, any, TERMINAL_SWEEP, read, tell)?;
-    let core = core.clone();
-    let read = {
-        let sockets = sockets.clone();
-        let mut troubles = Troubles::default();
-        move || sockets.scan(&mut troubles)
-    };
+    watch::watch_ending("pi", dir, mode, any, SWEEP, read, pids, tell)
+}
+
+async fn stand(watchers: Arc<Watchers>, owns: Arc<AtomicBool>, end: oneshot::Sender<()>) {
+    let mut sweeps = tokio::time::interval(SWEEP);
     let mut alone = Alone::default();
-    let mut end = Some(end);
-    let tell = move |scan: mux::Scan| {
+    loop {
+        sweeps.tick().await;
         let (clients, daemons) = (watchers.clients.looked(), watchers.daemons.looked());
         let (window, far_window) = (watchers.windows.looked(), watchers.far_windows.looked());
-        let sessions = !scan.alone() || owns.load(Ordering::Relaxed);
-        let standing = Standing::of(sessions || clients || window, window);
+        let terminals = owns.load(Ordering::Relaxed);
+        let standing = Standing::of(terminals || clients || window, window);
         watchers.standing.send_if_modified(|was| mem::replace(was, standing) != standing);
         let shown = window || far_window;
         watchers.shown.send_if_modified(|was| mem::replace(was, shown) != shown);
-        if alone.saw(standing == Standing::Idle && !daemons, Instant::now()) >= ALONE
-            && let Some(end) = end.take()
-        {
+        if alone.saw(standing == Standing::Idle && !daemons, Instant::now()) >= ALONE {
             let secs = ALONE.as_secs();
-            let none = format!(
-                "zellij has had no session for {secs}s, nor luneta-mux, nor lunetad a watcher"
-            );
+            let none = format!("luneta-mux has had no terminal for {secs}s, nor lunetad a watcher");
             log::say(&format!("{none}, and so lunetad ends"));
             let _ = end.send(());
+            return;
         }
-        core.send(Command::Sockets { sockets: scan.sockets, unread: scan.unread }).is_ok()
-    };
-    let wanted = |path: &Path| Zellij::of_sessions(path);
-    let sockets = sockets.path().to_owned();
-    watch::watch("zellij", sockets, RecursiveMode::Recursive, wanted, SWEEP, read, tell)
+    }
 }
 
 #[derive(Default)]
@@ -431,7 +382,6 @@ impl Drop for Waits<'_> {
 
 struct Host {
     started: SystemTime,
-    sockets: SocketFolder,
     claude_folder: Option<PathBuf>,
     core: SyncSender<Command>,
     watchers: Arc<Watchers>,
@@ -446,7 +396,6 @@ impl Daemon for Host {
             version: release::VERSION.to_owned(),
             pid: std::process::id(),
             started_at: Some(self.started.into()),
-            zellij_folder: Some(self.sockets.path().as_os_str().as_bytes().to_vec()),
             claude_folder: self.claude_folder.as_ref().map(|it| it.as_os_str().as_bytes().to_vec()),
             built: release::BUILT,
         }))
@@ -468,77 +417,6 @@ impl Daemon for Host {
             Err(_) => self.watched(None).await,
         };
         watched.map(Response::new)
-    }
-
-    async fn go(&self, request: Request<GoRequest>) -> Result<Response<()>, Status> {
-        let GoRequest { on, at, to, pane } = request.into_inner();
-        let (at, to) = (named("at", &at)?, named("to", &to)?);
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let (at, to) = (at.to_string(), to.to_string());
-            return daemon.go(GoRequest { on: None, at, to, pane }).await;
-        }
-        let went = task::spawn_blocking(move || Mux::Zellij(&at).went(&to, pane)).await;
-        let went = went.map_err(|error| unfinished(&error))?;
-        went.map_err(Status::failed_precondition)?;
-        Ok(Response::new(()))
-    }
-
-    async fn list_clients(
-        &self,
-        request: Request<ListClientsRequest>,
-    ) -> Result<Response<ListClientsResponse>, Status> {
-        let ListClientsRequest { on, session } = request.into_inner();
-        let session = named("session", &session)?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let session = session.to_string();
-            return daemon.list_clients(ListClientsRequest { on: None, session }).await;
-        }
-        let listed = task::spawn_blocking(move || clients_of(&session)).await;
-        let listed = listed.map_err(|error| unfinished(&error))?;
-        let clients = listed.map_err(Status::failed_precondition)?;
-        Ok(Response::new(ListClientsResponse { clients }))
-    }
-
-    async fn refuge(
-        &self,
-        request: Request<RefugeRequest>,
-    ) -> Result<Response<RefugeResponse>, Status> {
-        let RefugeRequest { on, seats } = request.into_inner();
-        let seats: Vec<SessionName> =
-            seats.iter().map(|seat| named("seats", seat)).collect::<Result<_, _>>()?;
-        if seats.is_empty() {
-            return Err(Status::invalid_argument("seats: the client was in none"));
-        }
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let seats = seats.iter().map(SessionName::to_string).collect();
-            return daemon.refuge(RefugeRequest { on: None, seats }).await;
-        }
-        let sockets = self.sockets.clone();
-        let found = task::spawn_blocking(move || {
-            moves::refuge(&sockets, &seats, moves::before)
-        });
-        let refuge = |moves::Refuge { session, before, .. }| api::Refuge {
-            session: session.to_string(),
-            before,
-        };
-        let ended = match found.await.map_err(|error| unfinished(&error))? {
-            moves::Ended::Kept => refuge_response::Ended::Kept(()),
-            moves::Ended::Went(found) => {
-                refuge_response::Ended::Went(Went { refuge: found.map(refuge) })
-            },
-        };
-        Ok(Response::new(RefugeResponse { ended: Some(ended) }))
-    }
-
-    async fn open(&self, request: Request<OpenRequest>) -> Result<Response<OpenResponse>, Status> {
-        let (on, open) = asked_open(request.into_inner())?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            return daemon.open(open.asked(None)).await;
-        }
-        let opened = task::spawn_blocking(move || opens::opening(&open)).await;
-        let opened = opened.map_err(|error| unfinished(&error))?;
-        let opens::Opened { terminal, notes } = opened.map_err(Status::failed_precondition)?;
-        Ok(Response::new(OpenResponse { terminal, notes }))
     }
 
     async fn list_skills(
@@ -564,34 +442,6 @@ impl Daemon for Host {
         Ok(Response::new(ListSkillsResponse { skills: skills.into_iter().map(skill).collect() }))
     }
 
-    async fn keep_printed(
-        &self,
-        request: Request<KeepPrintedRequest>,
-    ) -> Result<Response<KeepPrintedResponse>, Status> {
-        let KeepPrintedRequest { on, session, pane, typed } = request.into_inner();
-        let session = named("session", &session)?;
-        let typed = Said::new(typed).ok_or_else(|| Status::invalid_argument("typed: it is empty"))?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let (session, typed) = (session.to_string(), typed.into());
-            return daemon.keep_printed(KeepPrintedRequest { on: None, session, pane, typed }).await;
-        }
-        let kept = task::spawn_blocking(move || printed::kept_after(&session, pane, &typed)).await;
-        let kept = kept.map_err(|error| unfinished(&error))?;
-        let kept = kept.map_err(Status::failed_precondition)?;
-        let file = |KeptFile { file, lines, left_out }| PrintedFile {
-            path: file,
-            lines: lines as u64,
-            left_out: left_out as u64,
-        };
-        let printed = match kept {
-            Printed::After(kept) => keep_printed_response::Printed::After(file(kept)),
-            Printed::Nothing => keep_printed_response::Printed::Nothing(()),
-            Printed::Unsure(kept) => keep_printed_response::Printed::Unsure(file(kept)),
-            Printed::Top(kept) => keep_printed_response::Printed::Top(Top { file: kept.map(file) }),
-        };
-        Ok(Response::new(KeepPrintedResponse { printed: Some(printed) }))
-    }
-
     type KeepChecksStream =
         Pin<Box<dyn Stream<Item = Result<KeepChecksResponse, Status>> + Send>>;
 
@@ -613,43 +463,6 @@ impl Daemon for Host {
         Ok(Response::new(Box::pin(answer)))
     }
 
-    async fn name_session(
-        &self,
-        request: Request<NameSessionRequest>,
-    ) -> Result<Response<NameSessionResponse>, Status> {
-        let NameSessionRequest { on, dir } = request.into_inner();
-        let starts = match dir {
-            Some(dir) => Starts::In(directory("dir", dir)?),
-            None => Starts::Home,
-        };
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let dir = starts.dir().map(str::to_owned);
-            return daemon.name_session(NameSessionRequest { on: None, dir }).await;
-        }
-        let named = task::spawn_blocking(move || names::free_at(starts)).await;
-        let named = named.map_err(|error| unfinished(&error))?;
-        let (name, since, dir) = named.map_err(Status::failed_precondition)?;
-        let (named_at, dir) = (Some(since.into()), Some(dir.into()));
-        Ok(Response::new(NameSessionResponse { name: name.to_string(), named_at, dir }))
-    }
-
-    async fn check_name(
-        &self,
-        request: Request<CheckNameRequest>,
-    ) -> Result<Response<CheckNameResponse>, Status> {
-        let CheckNameRequest { on, name } = request.into_inner();
-        let name = SessionName::parse(&name)
-            .map_err(|why| Status::invalid_argument(format!("name: {why}")))?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let name = name.to_string();
-            return daemon.check_name(CheckNameRequest { on: None, name }).await;
-        }
-        let checked = task::spawn_blocking(move || names::unused(&name)).await;
-        let checked = checked.map_err(|error| unfinished(&error))?;
-        let since = checked.map_err(|unusable| Status::failed_precondition(unusable.to_string()))?;
-        Ok(Response::new(CheckNameResponse { named_at: Some(since.into()) }))
-    }
-
     async fn list_dirs(
         &self,
         request: Request<ListDirsRequest>,
@@ -658,7 +471,7 @@ impl Daemon for Host {
         if let Some(mut daemon) = self.bridged(on).await? {
             return daemon.list_dirs(ListDirsRequest { on: None }).await;
         }
-        let visited = task::spawn_blocking(zoxide::visited_free).await;
+        let visited = task::spawn_blocking(zoxide::visited).await;
         let visited = visited.map_err(|error| unfinished(&error))?;
         let visited = visited.map_err(Status::failed_precondition)?;
         let dir = |zoxide::Dir { path, name }| Dir { path: path.into(), name: name.to_string() };
@@ -678,219 +491,6 @@ impl Daemon for Host {
         let listed = listed.map_err(|error| unfinished(&error))?;
         let listed = listed.map_err(Status::failed_precondition)?;
         Ok(Response::new(ListContentsResponse { listed }))
-    }
-
-    async fn dump_screen(
-        &self,
-        request: Request<DumpScreenRequest>,
-    ) -> Result<Response<DumpScreenResponse>, Status> {
-        let DumpScreenRequest { on, session, pane } = request.into_inner();
-        let session = named("session", &session)?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let session = session.to_string();
-            return daemon.dump_screen(DumpScreenRequest { on: None, session, pane }).await;
-        }
-        let dumped = task::spawn_blocking(move || screens::dumped(&session, pane)).await;
-        let dumped = dumped.map_err(|error| unfinished(&error))?;
-        let (pane, screen) = dumped.map_err(Status::failed_precondition)?;
-        Ok(Response::new(DumpScreenResponse { pane, screen }))
-    }
-
-    async fn start(&self, request: Request<StartRequest>) -> Result<Response<()>, Status> {
-        let StartRequest { on, at, to, cwd } = request.into_inner();
-        let (at, to) = (named("at", &at)?, named("to", &to)?);
-        let cwd = cwd.map(|cwd| directory("cwd", cwd)).transpose()?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(String::from));
-            return daemon.start(StartRequest { on: None, at, to, cwd }).await;
-        }
-        let start = move || Mux::Zellij(&at).started(&to, cwd.as_ref());
-        let started = task::spawn_blocking(start).await;
-        let started = started.map_err(|error| unfinished(&error))?;
-        started.map_err(Status::failed_precondition)?;
-        Ok(Response::new(()))
-    }
-
-    async fn closes(
-        &self,
-        request: Request<ClosesRequest>,
-    ) -> Result<Response<ClosesResponse>, Status> {
-        let ClosesRequest { on, session, pane } = request.into_inner();
-        let session = named("session", &session)?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let session = session.to_string();
-            return daemon.closes(ClosesRequest { on: None, session, pane }).await;
-        }
-        let found = task::spawn_blocking(move || closes::closes_now(&session, pane)).await;
-        let found = found.map_err(|error| unfinished(&error))?;
-        let closes = match found.map_err(Status::failed_precondition)? {
-            Closes::Pane => closes_response::Closes::Pane(()),
-            Closes::Tab { id, panes } => {
-                closes_response::Closes::Tab(ClosedTab { id: id.0, panes })
-            },
-            Closes::Session => closes_response::Closes::Session(()),
-        };
-        Ok(Response::new(ClosesResponse { closes: Some(closes) }))
-    }
-
-    async fn close(&self, request: Request<CloseRequest>) -> Result<Response<()>, Status> {
-        let CloseRequest { on, session, closes, started_at } = request.into_inner();
-        let session = named("session", &session)?;
-        let started = started_of(started_at)?;
-        let close = match closes {
-            Some(close_request::Closes::Pane(pane)) => Close::Pane(pane),
-            Some(close_request::Closes::Tab(ClosedTab { panes, .. })) if panes.is_empty() => {
-                return Err(Status::invalid_argument("closes: a tab of no terminal"));
-            },
-            Some(close_request::Closes::Tab(ClosedTab { id, panes })) => {
-                Close::Tab { id: mux::TabId(id), panes }
-            },
-            None => return Err(Status::invalid_argument("closes: neither a pane nor a tab")),
-        };
-        if let Some(mut daemon) = self.bridged(on).await? {
-            return daemon.close(close.asked(None, &session, started)).await;
-        }
-        let closed = task::spawn_blocking(move || closes::closed(&session, started, &close));
-        let closed = closed.await;
-        let closed = closed.map_err(|error| unfinished(&error))?;
-        closed.map_err(Status::failed_precondition)?;
-        Ok(Response::new(()))
-    }
-
-    async fn other_tabs(
-        &self,
-        request: Request<OtherTabsRequest>,
-    ) -> Result<Response<OtherTabsResponse>, Status> {
-        let OtherTabsRequest { on, session, pane } = request.into_inner();
-        let session = named("session", &session)?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let session = session.to_string();
-            return daemon.other_tabs(OtherTabsRequest { on: None, session, pane }).await;
-        }
-        let tabs = task::spawn_blocking(move || turns::other_tabs(&session, pane)).await;
-        let tabs = tabs.map_err(|error| unfinished(&error))?;
-        let tabs = tabs.map_err(Status::failed_precondition)?;
-        let tab = |turns::OtherTab { pane, name }| OtherTab { pane, name };
-        Ok(Response::new(OtherTabsResponse { tabs: tabs.into_iter().map(tab).collect() }))
-    }
-
-    async fn turn_into_tab(
-        &self,
-        request: Request<TurnIntoTabRequest>,
-    ) -> Result<Response<TurnIntoTabResponse>, Status> {
-        let TurnIntoTabRequest { on, session, pane, started_at } = request.into_inner();
-        let session = named("session", &session)?;
-        let started = started_of(started_at)?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let (session, started_at) = (session.to_string(), Some(started.into()));
-            let asked = TurnIntoTabRequest { on: None, session, pane, started_at };
-            return daemon.turn_into_tab(asked).await;
-        }
-        let came = task::spawn_blocking(move || turns::into_tab(&session, started, pane)).await;
-        let came = came.map_err(|error| unfinished(&error))?;
-        let came = match came.map_err(Status::failed_precondition)? {
-            IntoTab::Done => turn_into_tab_response::Came::Done(()),
-            IntoTab::NoClient => turn_into_tab_response::Came::NoClient(()),
-        };
-        Ok(Response::new(TurnIntoTabResponse { came: Some(came) }))
-    }
-
-    async fn turn_into_panes(
-        &self,
-        request: Request<TurnIntoPanesRequest>,
-    ) -> Result<Response<TurnIntoPanesResponse>, Status> {
-        let TurnIntoPanesRequest { on, session, pane, beside, started_at } = request.into_inner();
-        let session = named("session", &session)?;
-        let started = started_of(started_at)?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let (session, started_at) = (session.to_string(), Some(started.into()));
-            let asked = TurnIntoPanesRequest { on: None, session, pane, beside, started_at };
-            return daemon.turn_into_panes(asked).await;
-        }
-        let came =
-            task::spawn_blocking(move || turns::into_panes(&session, started, pane, beside)).await;
-        let came = came.map_err(|error| unfinished(&error))?;
-        let came = match came.map_err(Status::failed_precondition)? {
-            IntoPanes::Done => turn_into_panes_response::Came::Done(()),
-            IntoPanes::Partly { moved, of, why } => {
-                let partly = turn_into_panes_response::Partly { moved, of, why };
-                turn_into_panes_response::Came::Partly(partly)
-            },
-        };
-        Ok(Response::new(TurnIntoPanesResponse { came: Some(came) }))
-    }
-
-    async fn kill(&self, request: Request<KillRequest>) -> Result<Response<()>, Status> {
-        let KillRequest { on, session, started_at } = request.into_inner();
-        let session = named("session", &session)?;
-        let started = started_of(started_at)?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let (session, started_at) = (session.to_string(), Some(started.into()));
-            return daemon.kill(KillRequest { on: None, session, started_at }).await;
-        }
-        let killed = task::spawn_blocking(move || closes::killed(&session, started));
-        let killed = killed.await;
-        let killed = killed.map_err(|error| unfinished(&error))?;
-        killed.map_err(Status::failed_precondition)?;
-        Ok(Response::new(()))
-    }
-
-    async fn list_exited(
-        &self,
-        request: Request<ListExitedRequest>,
-    ) -> Result<Response<ListExitedResponse>, Status> {
-        let ListExitedRequest { on } = request.into_inner();
-        if let Some(mut daemon) = self.bridged(on).await? {
-            return daemon.list_exited(ListExitedRequest { on: None }).await;
-        }
-        let listed = task::spawn_blocking(Zellij::exited).await;
-        let listed = listed.map_err(|error| unfinished(&error))?;
-        let listed = listed.map_err(Status::failed_precondition)?;
-        let exited = |mux::Exited { name, ago }| {
-            Some(Exited { name: name.to_string(), ago: Some(ago.try_into().ok()?) })
-        };
-        let read = listed.len();
-        let exited: Vec<Exited> = listed.into_iter().filter_map(exited).collect();
-        let left_out = read - exited.len();
-        if left_out > 0 {
-            log::say(&format!("left out {left_out} kept sessions of an age no Duration holds"));
-        }
-        Ok(Response::new(ListExitedResponse { exited }))
-    }
-
-    async fn delete_exited(
-        &self,
-        request: Request<DeleteExitedRequest>,
-    ) -> Result<Response<()>, Status> {
-        let DeleteExitedRequest { on, session } = request.into_inner();
-        let session = named("session", &session)?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let session = session.to_string();
-            return daemon.delete_exited(DeleteExitedRequest { on: None, session }).await;
-        }
-        let deleted = task::spawn_blocking(move || closes::deleted(&session)).await;
-        let deleted = deleted.map_err(|error| unfinished(&error))?;
-        deleted.map_err(Status::failed_precondition)?;
-        Ok(Response::new(()))
-    }
-
-    async fn rename_session(
-        &self,
-        request: Request<RenameSessionRequest>,
-    ) -> Result<Response<()>, Status> {
-        let RenameSessionRequest { on, session, to } = request.into_inner();
-        let session = named("session", &session)?;
-        let to = SessionName::parse(&to)
-            .map_err(|why| Status::invalid_argument(format!("to: {why}")))?;
-        if let Some(mut daemon) = self.bridged(on).await? {
-            let (session, to) = (session.to_string(), to.to_string());
-            return daemon.rename_session(RenameSessionRequest { on: None, session, to }).await;
-        }
-        let renamed = move || Mux::Zellij(&session).renamed(&to);
-        let renamed = task::spawn_blocking(renamed).await;
-        let renamed = renamed.map_err(|error| unfinished(&error))?;
-        renamed.map_err(Status::failed_precondition)?;
-        Ok(Response::new(()))
     }
 
     async fn transcript_ends(
@@ -930,8 +530,7 @@ impl Daemon for Host {
         let say = say.ok_or_else(|| Status::invalid_argument("it says nothing to do"))?;
         let said = ToSay::parse(say).map_err(Status::invalid_argument)?;
         let at = SystemTime::now();
-        let taken = self.ask(|answer| Command::Say { said, at, answer }).await?;
-        taken.map_err(Status::invalid_argument)?;
+        self.ask(|answer| Command::Say { said, at, answer }).await?;
         Ok(Response::new(()))
     }
 
@@ -1335,43 +934,8 @@ where
     ReceiverStream::new(steps)
 }
 
-fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
-    let listed = Mux::Zellij(session).clients()?;
-    Ok(listed.iter().copied().map(mux::Client::to_api).collect())
-}
-
-fn started_of<At: TryInto<SystemTime>>(started_at: Option<At>) -> Result<SystemTime, Status> {
-    started_at.and_then(|at| at.try_into().ok()).ok_or_else(|| {
-        Status::invalid_argument("started_at: it says no time the session started at")
-    })
-}
-
-fn named(field: &str, name: &str) -> Result<SessionName, Status> {
-    SessionName::running(name).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
-}
-
 fn directory(field: &str, dir: String) -> Result<Directory, Status> {
     Directory::parse(dir).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
-}
-
-fn asked_open(request: OpenRequest) -> Result<(Option<api::On>, Open), Status> {
-    let OpenRequest { on, session, cwd, command, opens } = request;
-    let (session, cwd) = (named("session", &session)?, directory("cwd", cwd)?);
-    let open = match opens {
-        None => return Err(Status::invalid_argument("opens: neither a pane nor a tab")),
-        Some(Opens::Beside(beside)) => Open::Pane { session, beside, cwd, command },
-        Some(Opens::Tab(open_request::Tab { name: Some(name), .. })) if name.is_empty() => {
-            let why = "opens: a tab's name is empty, where an absent one has zellij number it";
-            return Err(Status::invalid_argument(why));
-        },
-        Some(Opens::Tab(open_request::Tab { name, alone_since })) => {
-            let alone_since = alone_since.map(SystemTime::try_from).transpose().map_err(|_| {
-                Status::invalid_argument("opens: alone_since says no time a session started at")
-            })?;
-            Open::Tab { session, tab: Tab { cwd, name, command }, alone_since }
-        },
-    };
-    Ok((on, open))
 }
 
 fn asked_branch(branch: &str) -> Result<Branch, Status> {
@@ -1544,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn zellij_is_alone_from_the_first_look_that_finds_no_session() {
+    fn lunetad_is_alone_from_the_first_look_that_finds_nothing_keeping_it() {
         let start = Instant::now();
         let at = |secs| start + Duration::from_secs(secs);
         let mut alone = Alone::default();

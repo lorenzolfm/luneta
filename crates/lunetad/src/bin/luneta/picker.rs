@@ -19,11 +19,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use lunetad::mux::{Exited, Zellij};
 use lunetad::projects::{self, Name, ProjectId, Seen, ViewId};
 use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
-use lunetad::{eza, screens, Destination, Directory};
+use lunetad::{eza, screens, Destination, Directory, SessionName};
 
 use crate::alerts::Doing;
 use crate::away::{self, Away};
@@ -38,9 +37,8 @@ use crate::sidebar::{
     ProjectRow, WorktreePlace,
 };
 use crate::spots::{Drawn, Spots};
-use crate::projected::{self, Projected, Route};
+use crate::projected::{self, Projected};
 use crate::worktrees;
-use crate::zellij::{self, Closes, SessionName};
 
 const TITLE: &str = "luneta";
 
@@ -210,14 +208,13 @@ pub enum Picked {
 }
 
 pub enum Heard {
-    Exited { on: Machine, ask: u64, exited: Result<Vec<Exited>, String> },
     Peek {
         on: Machine,
         session: Listed,
         asked: Option<PaneKey>,
         peek: Result<(u32, String), String>,
     },
-    Closes { on: Machine, place: PanePlace, closes: Result<Closes, String> },
+    Closes { on: Machine, place: PanePlace, closes: Result<(), String> },
     Renamed { from: String, to: Name, renamed: Result<(), String> },
     Closed { name: String, closed: Result<(), String> },
     Dirs { on: Machine, ask: u64, visited: Result<Vec<Dir>, String> },
@@ -226,7 +223,6 @@ pub enum Heard {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
-    Exited { on: Machine, ask: u64 },
     Peek { on: Machine, session: Listed, asked: Option<PaneKey> },
     Closes { on: Machine, place: PanePlace },
     Rename { on: Machine, renames: Renames, to: Name },
@@ -253,48 +249,19 @@ impl Renames {
 pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>) {
     let events = events.clone();
     let hear: Box<dyn FnOnce() -> Heard + Send> = match ask {
-        Ask::Exited { on, ask } => Box::new(move || {
-            let exited = match &on {
-                Machine::Local => Zellij::exited(),
-                Machine::Remote(destination) => reach(destination)
-                    .and_then(|mut away| away.exited()),
-            };
-            Heard::Exited { on, ask, exited }
-        }),
         Ask::Peek { on, session, asked } => {
-            let route = match asked {
-                Some(pane) => projected::route(&on, &session, pane).map(|route| route.map(Some)),
+            let terminal = match asked {
+                Some(pane) => projected::route(&on, pane),
                 None => projected.whole(&on, &session),
             };
             Box::new(move || {
-                let peek = match route {
-                    Err(why) => Err(why),
-                    Ok(Route::Terminal(key)) => {
-                        screens::terminal(key).map(|screen| (key.id.get(), screen))
-                    },
-                    Ok(Route::Zellij { on: Machine::Local, session: name, pane }) => {
-                        screens::dumped(&name, pane)
-                    },
-                    Ok(Route::Zellij { on: Machine::Remote(destination), session: name, pane }) => {
-                        Away::reach(&destination, away::ANSWER)
-                            .and_then(|mut away| away.screen(&name, pane))
-                    },
-                };
+                let peek = terminal.and_then(|key| {
+                    screens::terminal(key).map(|screen| (key.id.get(), screen))
+                });
                 Heard::Peek { on, session, asked, peek }
             })
         },
-        Ask::Closes { on, place } => Box::new(move || {
-            let name = place.session.name();
-            let closes = match (&on, place.pane) {
-                (_, PaneKey::Terminal(_)) => Ok(Closes::Pane),
-                (Machine::Local, PaneKey::Zellij(pane)) => zellij::closes_now(name, pane),
-                (Machine::Remote(destination), PaneKey::Zellij(pane)) => {
-                    Away::reach(destination, away::ANSWER)
-                        .and_then(|mut away| away.closes(name, pane))
-                },
-            };
-            Heard::Closes { on, place, closes }
-        }),
+        Ask::Closes { on, place } => Box::new(move || Heard::Closes { on, place, closes: Ok(()) }),
         Ask::Rename { on, renames, to } => Box::new(move || {
             let renamed = match &renames {
                 Renames::Worktree { place, .. } => {
@@ -351,7 +318,7 @@ pub enum Key {
     Unopened { on: Machine, project: ProjectRow, folder: Directory },
     Machine { on: Machine },
     Agent { on: Machine, place: PanePlace },
-    Dir { on: Machine, path: Directory, session: Result<SessionName, &'static str> },
+    Dir { on: Machine, path: Directory, session: SessionName },
     New { on: Machine, project: ProjectRow, folder: Directory, name: Name },
 }
 
@@ -516,21 +483,12 @@ enum Visited {
 }
 
 #[derive(Debug)]
-enum Ended {
-    Asking(u64),
-    Heard(Vec<Exited>),
-    Failed,
-}
-
-#[derive(Debug)]
 pub struct Picker {
     number: u64,
     list: List,
     term: String,
     stage: Stage,
     listing: Listing,
-    exited: HashMap<Machine, Ended>,
-    exited_asked: u64,
     visited: HashMap<Machine, Visited>,
     dirs_asked: u64,
     worktrees: Rows,
@@ -561,8 +519,6 @@ impl Picker {
             term: String::new(),
             stage: Stage::Search,
             listing,
-            exited: HashMap::new(),
-            exited_asked: 0,
             visited: HashMap::new(),
             dirs_asked: 0,
             worktrees: Rows::default(),
@@ -577,7 +533,6 @@ impl Picker {
             aiming: true,
             scope: None,
         };
-        picker.ask_kept();
         picker.ask_dirs();
         picker.rebuild(true);
         picker
@@ -595,8 +550,6 @@ impl Picker {
         self.listing = listing;
         let machines = self.machines();
         self.visited.retain(|on, _| machines.contains(on));
-        self.exited.retain(|on, _| machines.contains(on));
-        self.ask_kept();
         self.ask_dirs();
         self.rebuild(false);
     }
@@ -670,30 +623,8 @@ impl Picker {
         }
     }
 
-    fn ask_kept(&mut self) {
-        for on in self.machines() {
-            if !self.exited.contains_key(&on) {
-                self.exited_asked += 1;
-                let ask = self.exited_asked;
-                self.exited.insert(on.clone(), Ended::Asking(ask));
-                self.asking.push(Ask::Exited { on, ask });
-            }
-        }
-    }
-
     pub fn heard(&mut self, heard: Heard) -> Picked {
         match heard {
-            Heard::Exited { on, ask, exited } => {
-                if !matches!(self.exited.get(&on), Some(Ended::Asking(asked)) if *asked == ask) {
-                    return Picked::Nothing;
-                }
-                let ended = match exited {
-                    Ok(exited) => Ended::Heard(exited),
-                    Err(_) => Ended::Failed,
-                };
-                self.exited.insert(on, ended);
-                self.rebuild(false);
-            },
             Heard::Peek { on, session, asked, peek } => {
                 let peek = match peek {
                     Ok((_, dumped)) => Peek::of(&dumped),
@@ -711,10 +642,9 @@ impl Picker {
                     return Picked::Nothing;
                 }
                 return match closes {
-                    Ok(closes) => Picked::Plan {
-                        on,
-                        session: place.session,
-                        deletes: Deletes::Pane { pane: place.pane, closes },
+                    Ok(()) => {
+                        let deletes = Deletes::Pane(place.pane);
+                        Picked::Plan { on, session: place.session, deletes }
                     },
                     Err(why) => {
                         self.stage = Stage::Search;
@@ -1007,11 +937,11 @@ impl Picker {
                 let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
                 Picked::Add { on, project, folder, name: None }
             },
-            Key::Machine { .. } | Key::Dir { session: Err(_), .. } => Picked::Nothing,
+            Key::Machine { .. } => Picked::Nothing,
             Key::Agent { on, place } => {
                 Picked::Go { on: on.clone(), place: Place::Pane(place.clone()) }
             },
-            Key::Dir { on, path, session: Ok(session) } => {
+            Key::Dir { on, path, session } => {
                 Picked::Make { on: on.clone(), session: session.clone(), cwd: path.clone() }
             },
             Key::New { on, project, folder, name } => {
@@ -1155,18 +1085,10 @@ impl Picker {
         Ok(name)
     }
 
-    fn taken(&self, on: &Machine) -> Result<Vec<&str>, &'static str> {
-        let exited = match self.exited.get(on) {
-            Some(Ended::Heard(exited)) => exited,
-            Some(Ended::Asking(_)) | None => {
-                return Err("zellij has yet to say which sessions ended");
-            },
-            Some(Ended::Failed) => return Err("zellij did not say which sessions ended"),
-        };
+    fn taken(&self, on: &Machine) -> Vec<&str> {
         let projects = self.shelved(on).into_iter().flat_map(|shelved| &shelved.projects);
         let projects = projects.map(|housed| housed.project.listed().name().as_str());
-        let ended = exited.iter().map(|exited| exited.name.as_str());
-        Ok(self.here_session(on).into_iter().chain(projects).chain(ended).collect())
+        self.here_session(on).into_iter().chain(projects).collect()
     }
 
     fn rebuild(&mut self, snap: bool) {
@@ -1278,10 +1200,10 @@ impl Picker {
             };
             let named = visited.iter().map(|dir| {
                 let session = match &on {
-                    Machine::Local => taken.as_deref().map(|taken| dir.name.free(taken)),
-                    Machine::Remote(_) => Ok(dir.name.clone()),
+                    Machine::Local => dir.name.free(&taken),
+                    Machine::Remote(_) => dir.name.clone(),
                 };
-                (dir, session.map_err(|why| *why))
+                (dir, session)
             });
             let found = dir_rows(&matcher, &self.term, &on, named);
             let first = grouped(&mut rows, found, ruled.then(|| self.machine_name(&on)));
@@ -1748,10 +1670,7 @@ impl Picker {
                     format!("{} keeps no project", self.machine_name(on))
                 })),
                 Key::Agent { on, .. } => Ok(there("Go to agent", on)),
-                Key::Dir { on, session: Ok(session), .. } => {
-                    Ok(there(&format!("Make \"{session}\""), on))
-                },
-                Key::Dir { session: Err(why), .. } => Err((*why).to_owned()),
+                Key::Dir { on, session, .. } => Ok(there(&format!("Make \"{session}\""), on)),
                 Key::New { project, name, .. } => {
                     let project = project.listed().name();
                     Ok(format!("New worktree \"{}\" in {project}", name.as_str()))
@@ -1899,11 +1818,11 @@ fn dir_rows<'a>(
     matcher: &SkimMatcherV2,
     term: &str,
     on: &Machine,
-    dirs: impl Iterator<Item = (&'a Dir, Result<SessionName, &'static str>)>,
+    dirs: impl Iterator<Item = (&'a Dir, SessionName)>,
 ) -> Vec<Row> {
     let mut found: Vec<(bool, i64, usize, Row)> = Vec::new();
     for (at, (dir, session)) in dirs.enumerate() {
-        let name = session.as_ref().unwrap_or(&dir.name).to_string();
+        let name = session.to_string();
         let hit = if term.is_empty() {
             Some((0, Vec::new()))
         } else {
@@ -2106,13 +2025,13 @@ mod tests {
         UNIX_EPOCH + NOW
     }
 
-    fn listed(name: &str, started: u64) -> Listed {
-        Listed::new(name, UNIX_EPOCH + Duration::from_secs(started))
+    fn listed(name: &str, id: u64) -> Listed {
+        Listed::new_project(name, id)
     }
 
     fn seated(name: &str, started: u64, pane: u32, label: &str, mark: Mark) -> Seated {
         Seated {
-            place: PanePlace { session: listed(name, started), pane: PaneKey::Zellij(pane) },
+            place: PanePlace { session: listed(name, started), pane: PaneKey::terminal(pane) },
             label: label.to_owned(),
             mark,
             status: "idle".to_owned(),
@@ -2132,10 +2051,6 @@ mod tests {
         Runs { agents }
     }
 
-    fn ended(name: &str, ago: u64) -> Exited {
-        Exited { name: SessionName::running(name).unwrap(), ago: Duration::from_secs(ago) }
-    }
-
     fn directory(path: &str) -> Directory {
         Directory::parse(path.to_owned()).unwrap()
     }
@@ -2146,14 +2061,6 @@ mod tests {
 
     fn heard_here(visited: Result<Vec<Dir>, String>) -> Heard {
         Heard::Dirs { on: Machine::Local, ask: 1, visited }
-    }
-
-    fn kept_here(exited: Result<Vec<Exited>, String>) -> Heard {
-        Heard::Exited { on: Machine::Local, ask: 1, exited }
-    }
-
-    fn exited_asks(picker: &mut Picker) -> Vec<Ask> {
-        picker.asks().into_iter().filter(|ask| matches!(ask, Ask::Exited { .. })).collect()
     }
 
     fn project(name: &str, id: u64) -> ProjectRow {
@@ -2236,7 +2143,6 @@ mod tests {
 
     fn opened(listing: Listing) -> Picker {
         let mut picker = Picker::open(1, List::Worktrees, listing, Machine::Local);
-        picker.heard(kept_here(Ok(Vec::new())));
         picker.asks();
         picker
     }
@@ -2365,8 +2271,7 @@ mod tests {
     fn the_worktrees_go_by_their_last_use_and_an_empty_project_is_one_row() {
         let mut picker = Picker::open(1, List::Worktrees, works(), Machine::Local);
         let on = Machine::Local;
-        let asks = vec![Ask::Exited { on: on.clone(), ask: 1 }, Ask::Dirs { on, ask: 1 }];
-        assert_eq!(picker.asks(), asks);
+        assert_eq!(picker.asks(), [Ask::Dirs { on, ask: 1 }]);
         let shown = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
         assert_eq!(rows(&picker), shown);
         let (lines, _) = list(&picker);
@@ -2428,21 +2333,18 @@ mod tests {
     fn o_w_lists_the_worktrees_of_its_project_alone_that_are_not_open() {
         let luneta = project("luneta", 1).id();
         let mut picker = Picker::opening(1, with_unopened(works()), Machine::Local, luneta);
-        picker.heard(kept_here(Ok(Vec::new())));
         assert_eq!(rows(&picker), ["luneta › old", "luneta › spike"]);
         typed(&mut picker, "zzz");
         assert_eq!(rows(&picker), ["no match for \"zzz\""], "no worktree is made of what is typed");
         let mut all_open = works();
         let web = with_unopened(works()).shelves[0].projects[2].unopened.clone();
         all_open.shelves[0].projects[2].unopened = web;
-        let mut picker = Picker::opening(2, all_open, Machine::Local, luneta);
-        picker.heard(kept_here(Ok(Vec::new())));
+        let picker = Picker::opening(2, all_open, Machine::Local, luneta);
         assert_eq!(rows(&picker), ["every worktree is open"]);
         let said_of = |number: u64, unopened: Unopened| {
             let mut listing = works();
             listing.shelves[0].projects[0].unopened = unopened;
-            let mut picker = Picker::opening(number, listing, Machine::Local, luneta);
-            picker.heard(kept_here(Ok(Vec::new())));
+            let picker = Picker::opening(number, listing, Machine::Local, luneta);
             rows(&picker)
         };
         let unlisted = Unopened::Unlisted("not listed yet".to_owned());
@@ -2458,8 +2360,7 @@ mod tests {
         let old = projects::Dir::parse("/home/you/luneta/old").unwrap();
         listing.shelves[0].projects[0].unopened = Unopened::Listed(vec![old]);
         let luneta = project("luneta", 1).id();
-        let mut picker = Picker::opening(1, listing, Machine::Local, luneta);
-        picker.heard(kept_here(Ok(Vec::new())));
+        let picker = Picker::opening(1, listing, Machine::Local, luneta);
         assert_eq!(rows(&picker), ["luneta › old"]);
     }
 
@@ -2536,14 +2437,14 @@ mod tests {
         assert_eq!(yes, Some(Pick::Key(KeyEvent::from(KeyCode::Char('y')))));
         press(&mut picker, KeyCode::Esc);
 
-        let place = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(4) };
+        let place = PanePlace { session: listed("c", 30), pane: PaneKey::terminal(4) };
         let listing = Listing {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
         let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
         press(&mut picker, KeyCode::Delete);
-        let heard = Heard::Closes { on: Machine::Local, place, closes: Ok(Closes::Pane) };
+        let heard = Heard::Closes { on: Machine::Local, place, closes: Ok(()) };
         assert!(matches!(picker.heard(heard), Picked::Plan { .. }));
         let (rows, give_up) = clicks(&picker, "<ESC>");
         assert!(!rows.is_empty() && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
@@ -2934,7 +2835,7 @@ mod tests {
 
     #[test]
     fn del_on_an_agent_asks_before_ending_it_at_work_and_goes_ahead_on_yes_to_the_same_plan() {
-        let place = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(4) };
+        let place = PanePlace { session: listed("c", 30), pane: PaneKey::terminal(4) };
         let listing = Listing {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
@@ -2942,15 +2843,13 @@ mod tests {
         let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
         picker.asks();
         let c = listed("c", 30);
-        let deletes = || Deletes::Pane { pane: PaneKey::Zellij(4), closes: Closes::Pane };
+        let deletes = || Deletes::Pane(PaneKey::terminal(4));
         let planning = Picked::Plan { on: Machine::Local, session: c.clone(), deletes: deletes() };
-        let act = || {
-            Act::Pane { session: c.name().clone(), whose: c.whose(), pane: PaneKey::Zellij(4) }
-        };
+        let act = || Act::Pane { session: c.name().clone(), pane: PaneKey::terminal(4) };
         let plan = |doing: Doing| Plan::of(act(), Ok(&[(4, doing)]));
         let closes = |picker: &mut Picker| {
             assert_eq!(picker.asks(), [Ask::Closes { on: Machine::Local, place: place.clone() }]);
-            let closes = Ok(Closes::Pane);
+            let closes = Ok(());
             picker.heard(Heard::Closes { on: Machine::Local, place: place.clone(), closes })
         };
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
@@ -2978,8 +2877,8 @@ mod tests {
     }
 
     #[test]
-    fn del_on_an_agent_asks_zellij_what_closing_its_pane_closes_first() {
-        let place = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(4) };
+    fn del_on_an_agent_asks_what_closing_its_pane_closes_first() {
+        let place = PanePlace { session: listed("c", 30), pane: PaneKey::terminal(4) };
         let listing = Listing {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
@@ -2989,18 +2888,18 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         let ask = Ask::Closes { on: Machine::Local, place: place.clone() };
         assert_eq!(picker.asks(), vec![ask]);
-        let heard = |on, place| Heard::Closes { on, place, closes: Ok(Closes::Pane) };
-        let other = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(5) };
+        let heard = |on, place| Heard::Closes { on, place, closes: Ok(()) };
+        let other = PanePlace { session: listed("c", 30), pane: PaneKey::terminal(5) };
         assert_eq!(picker.heard(heard(Machine::Local, other)), Picked::Nothing);
         assert_eq!(picker.heard(heard(nixos(), place.clone())), Picked::Nothing);
-        let deletes = Deletes::Pane { pane: PaneKey::Zellij(4), closes: Closes::Pane };
+        let deletes = Deletes::Pane(PaneKey::terminal(4));
         let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), deletes };
         assert_eq!(picker.heard(heard(Machine::Local, place)), plan);
     }
 
     #[test]
     fn agents_named_alike_are_told_apart_and_yours_is_pinned_over_them() {
-        let place = PanePlace { session: listed("work", 20), pane: PaneKey::Zellij(9) };
+        let place = PanePlace { session: listed("work", 20), pane: PaneKey::terminal(9) };
         let listing = Listing {
             here: Some(Here::Pane { on: Machine::Local, place }),
             local: agents(vec![
@@ -3037,17 +2936,17 @@ mod tests {
         };
         let listing = Listing {
             local: agents(vec![
-                at(1, "Zero-length lines in jobs", "src/zellij"),
-                at(2, "fix", "src/zellij"),
-                at(3, "zellij panics", "misc/luneta"),
+                at(1, "Zero-length lines in jobs", "src/mux"),
+                at(2, "fix", "src/mux"),
+                at(3, "mux panics", "misc/luneta"),
                 at(4, "docs", "luneta/main"),
             ]),
             ..Listing::default()
         };
         let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
-        typed(&mut picker, "zellij");
+        typed(&mut picker, "mux");
         let rows = found(&picker);
-        let shown = [("zellij panics", "zellij"), ("Zero-length lines in jobs", ""), ("fix", "")];
+        let shown = [("mux panics", "mux"), ("Zero-length lines in jobs", ""), ("fix", "")];
         assert_eq!(rows.len(), shown.len(), "{rows:?}");
         for ((line, lit), (label, lights)) in rows.iter().zip(shown) {
             assert!(line.contains(label) && lit == lights, "{rows:?}");
@@ -3064,14 +2963,13 @@ mod tests {
         };
         let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
         assert_eq!(list(&picker).0, ["asking zoxide…"]);
-        picker.heard(kept_here(Ok(vec![ended("bipa", 100)])));
         picker.heard(heard_here(Ok(vec![
             visited("/home/you/luneta", "luneta"),
             visited("/home/you/luneta/main", "luneta-main"),
             visited("/home/you/Work/bipa", "bipa"),
             visited("/home/you/notes", "notes"),
         ])));
-        assert_eq!(names(&picker), ["luneta-2", "luneta-main", "bipa-2", "notes-2"]);
+        assert_eq!(names(&picker), ["luneta-2", "luneta-main", "bipa", "notes-2"]);
         let (lines, _) = list(&picker);
         assert!(lines[0].ends_with(" /home/you/luneta"), "{lines:?}");
         assert_eq!(lit(&picker), "luneta-2");
@@ -3088,49 +2986,18 @@ mod tests {
     }
 
     #[test]
-    fn no_session_takes_the_name_luneta_s_zellij_is_on_its_way_to() {
+    fn no_session_takes_the_name_of_the_one_luneta_is_on_its_way_to() {
         let listing = Listing {
             here: Some(here("notes")),
             shelves: vec![shelved(Machine::Local, vec![housed("luneta", 1, Vec::new())])],
             ..Listing::default()
         };
         let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
-        picker.heard(kept_here(Ok(Vec::new())));
         picker.heard(heard_here(Ok(vec![
             visited("/home/you/notes", "notes"),
             visited("/home/you/luneta", "luneta"),
         ])));
         assert_eq!(names(&picker), ["notes-2", "luneta-2"]);
-    }
-
-    #[test]
-    fn a_directory_makes_no_session_until_zellij_says_which_ended() {
-        let said = |picker: &Picker| {
-            let buffer = drawn(picker);
-            text(&buffer, buffer.area).join(" ")
-        };
-        let dirs = || vec![visited("/home/you/notes", "notes"), visited("/home/you/bipa", "bipa")];
-        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local);
-        picker.heard(heard_here(Ok(dirs())));
-        press(&mut picker, KeyCode::Down);
-        assert_eq!(lit(&picker), "bipa");
-        let why = "zellij has yet to say which sessions ended";
-        assert!(said(&picker).contains(why), "{}", said(&picker));
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
-        picker.heard(kept_here(Ok(vec![ended("bipa", 100)])));
-        assert_eq!(lit(&picker), "bipa-2");
-        let session = SessionName::parse("bipa-2").unwrap();
-        let cwd = directory("/home/you/bipa");
-        let made = Picked::Make { on: Machine::Local, session, cwd };
-        assert_eq!(press(&mut picker, KeyCode::Enter), made);
-
-        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local);
-        let failed = Err("zellij: it did not answer in time".to_owned());
-        picker.heard(kept_here(failed));
-        picker.heard(heard_here(Ok(dirs())));
-        let why = "zellij did not say which sessions ended";
-        assert!(said(&picker).contains(why), "{}", said(&picker));
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
     }
 
     #[test]
@@ -3190,15 +3057,7 @@ mod tests {
     fn every_machine_s_directories_go_under_its_rule_this_one_s_first() {
         let mut picker = Picker::open(1, List::Dirs, two_machines(), Machine::Local);
         let dirs = |on: Machine, ask: u64| Ask::Dirs { on, ask };
-        let exited = |on: Machine, ask: u64| Ask::Exited { on, ask };
-        let asks = vec![
-            exited(Machine::Local, 1),
-            exited(nixos(), 2),
-            dirs(Machine::Local, 1),
-            dirs(nixos(), 2),
-        ];
-        assert_eq!(picker.asks(), asks);
-        picker.heard(kept_here(Ok(Vec::new())));
+        assert_eq!(picker.asks(), [dirs(Machine::Local, 1), dirs(nixos(), 2)]);
         let api = "/home/me/Projects/api";
         let there = vec![visited(api, "api"), visited("/home/me/blog", "blog-2")];
         picker.heard(Heard::Dirs { on: nixos(), ask: 2, visited: Ok(there) });
@@ -3308,27 +3167,10 @@ mod tests {
     }
 
     #[test]
-    fn each_machine_s_zellij_is_asked_which_sessions_ended_as_it_is_listed() {
-        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local);
-        assert_eq!(exited_asks(&mut picker), [Ask::Exited { on: Machine::Local, ask: 1 }]);
-        picker.heard(kept_here(Ok(Vec::new())));
-        picker.listed(two_machines());
-        assert_eq!(exited_asks(&mut picker), [Ask::Exited { on: nixos(), ask: 2 }]);
-        picker.listed(two_machines());
-        assert_eq!(exited_asks(&mut picker), [] as [Ask; 0]);
-
-        let gone = || Listing { remotes: Vec::new(), ..two_machines() };
-        picker.listed(gone());
-        picker.listed(two_machines());
-        assert_eq!(exited_asks(&mut picker), [Ask::Exited { on: nixos(), ask: 3 }]);
-    }
-
-    #[test]
     fn a_project_of_another_machine_takes_no_name_here() {
         let shelves = vec![shelved(nixos(), vec![housed("api", 1, Vec::new())])];
         let listing = Listing { shelves, ..two_machines() };
         let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
-        picker.heard(kept_here(Ok(Vec::new())));
         picker.heard(heard_here(Ok(vec![visited("/home/you/api", "api")])));
         assert_eq!(grouped(&picker), ["── desk", "api"]);
     }
@@ -3341,7 +3183,7 @@ mod tests {
             seated("api", 40, 2, "fix", Mark::Idle),
         ]);
         let listing = Listing {
-            here: Some(Here::Pane { on: nixos(), place: at(PaneKey::Zellij(9)) }),
+            here: Some(Here::Pane { on: nixos(), place: at(PaneKey::terminal(9)) }),
             local: agents(vec![seated("api", 30, 1, "fix", Mark::Idle)]),
             ..on_nixos(there)
         };
@@ -3359,10 +3201,10 @@ mod tests {
         let named: Vec<String> = lines[1..].iter().map(name).collect();
         assert_eq!(named, ["── desk", "fix", "── nixos", "fix"]);
         press(&mut picker, KeyCode::Down);
-        let fix = Picked::Go { on: nixos(), place: Place::Pane(at(PaneKey::Zellij(2))) };
+        let fix = Picked::Go { on: nixos(), place: Place::Pane(at(PaneKey::terminal(2))) };
         assert_eq!(press(&mut picker, KeyCode::Enter), fix);
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        assert_eq!(picker.asks(), [Ask::Closes { on: nixos(), place: at(PaneKey::Zellij(2)) }]);
+        assert_eq!(picker.asks(), [Ask::Closes { on: nixos(), place: at(PaneKey::terminal(2)) }]);
     }
 
     fn asked(ask: Ask, projected: &Projected) -> Heard {
@@ -3375,7 +3217,7 @@ mod tests {
     }
 
     #[test]
-    fn a_project_row_s_pane_closes_alone_by_key_with_no_word_to_zellij() {
+    fn a_project_row_s_pane_closes_alone_by_key() {
         let projected = Projected::default();
         let session = Listed::new_project("work", 7);
         let place = PanePlace { session: session.clone(), pane: PaneKey::terminal(4) };
@@ -3383,14 +3225,14 @@ mod tests {
         let Heard::Closes { closes, .. } = asked(close, &projected) else {
             panic!("a close is answered with its plan");
         };
-        assert_eq!(closes, Ok(Closes::Pane));
+        assert_eq!(closes, Ok(()));
         let far = Machine::Remote("far".parse().unwrap());
         let there = PanePlace { session: session.clone(), pane: PaneKey::terminal(4) };
         let close = Ask::Closes { on: far.clone(), place: there };
         let Heard::Closes { closes, .. } = asked(close, &projected) else {
             panic!("a close on another machine is answered with its plan");
         };
-        assert_eq!(closes, Ok(Closes::Pane), "lunetad there closes it");
+        assert_eq!(closes, Ok(()), "lunetad there closes it");
         let peek = Ask::Peek { on: far, session, asked: Some(PaneKey::terminal(4)) };
         let peeked = asked(peek, &projected);
         let Heard::Peek { peek, .. } = peeked else {

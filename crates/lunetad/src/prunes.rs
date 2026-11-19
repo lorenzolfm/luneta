@@ -170,11 +170,6 @@ pub struct Occupied {
 
 impl Occupied {
     pub fn of(host: &api::Host) -> Result<Occupied, String> {
-        if host.unread_sockets != Some(0) {
-            return Err("lunetad did not read all of zellij's folder, and may leave out a session \
-                        that runs"
-                .to_owned());
-        }
         seats::unread(host.unread, &host.unread_files).map_err(|unplaced| unplaced.to_string())?;
         let terminals = terminals(host)?;
         for file in &host.unread_files {
@@ -198,30 +193,10 @@ impl Occupied {
                          terminal no layout holds"
                     ));
                 },
-                UnreadSeat::Terminal(_) | UnreadSeat::Zellij { .. } | UnreadSeat::Unplaced => {},
+                UnreadSeat::Terminal(_) | UnreadSeat::Unplaced => {},
             }
         }
-        let mut panes: Vec<PathBuf> = terminals.into_iter().map(|(_, folder)| folder).collect();
-        for session in &host.sessions {
-            let name = &session.name;
-            let listed = session
-                .panes
-                .as_ref()
-                .ok_or_else(|| format!("session {name} has yet to list its panes"))?;
-            for pane in &listed.panes {
-                match &pane.cwd {
-                    Some(cwd) => panes.push(PathBuf::from(cwd)),
-                    None if pane.held => {},
-                    None => {
-                        let id = pane.id;
-                        return Err(format!(
-                            "zellij does not say where pane {name}:{id} works; close it if what \
-                             ran in it has ended"
-                        ));
-                    },
-                }
-            }
-        }
+        let panes = terminals.into_iter().map(|(_, folder)| folder).collect();
         let agents = host.agents.iter().map(|agent| PathBuf::from(&agent.cwd)).collect();
         Ok(Occupied { panes, agents })
     }
@@ -1021,40 +996,18 @@ mod tests {
         );
     }
 
-    fn pane(id: u32, cwd: Option<&str>) -> api::Pane {
-        api::Pane { id, cwd: cwd.map(str::to_owned), ..api::Pane::default() }
-    }
-
-    fn session(name: &str, panes: Option<Vec<api::Pane>>) -> api::Session {
-        let panes = panes.map(|panes| api::Panes { panes });
-        api::Session { name: name.to_owned(), panes, ..api::Session::default() }
+    fn viewed(held: api::projects::Held) -> api::Host {
+        let projects = Some(api::Projects { held: Some(held) });
+        api::Host { projects, ..api::Host::default() }
     }
 
     #[test]
-    fn a_pane_or_an_agent_in_a_worktree_or_under_it_keeps_it() {
-        let host = api::Host {
-            sessions: vec![session(
-                "work",
-                Some(vec![
-                    pane(1, Some("/w/a/src")),
-                    pane(2, Some("/w/bb")),
-                    api::Pane { held: true, ..pane(3, Some("/w/d")) },
-                ]),
-            )],
-            agents: vec![api::Agent { cwd: "/w/c".to_owned(), ..api::Agent::default() }],
-            unread_sockets: Some(0),
-            ..api::Host::default()
-        };
+    fn an_agent_in_a_worktree_or_under_it_keeps_it() {
+        let agents = vec![api::Agent { cwd: "/w/c/src".to_owned(), ..api::Agent::default() }];
+        let host = api::Host { agents, ..api::Host::default() };
         let occupied = Occupied::of(&host).unwrap();
-        assert_eq!(occupied.why_in(Path::new("/w/a")), Some(A_PANE));
-        assert_eq!(occupied.why_in(Path::new("/w/b")), None);
         assert_eq!(occupied.why_in(Path::new("/w/c")), Some(AN_AGENT));
-        assert_eq!(occupied.why_in(Path::new("/w/d")), Some(A_PANE));
-    }
-
-    fn viewed(held: api::projects::Held) -> api::Host {
-        let projects = Some(api::Projects { held: Some(held) });
-        api::Host { projects, unread_sockets: Some(0), ..api::Host::default() }
+        assert_eq!(occupied.why_in(Path::new("/w/cc")), None);
     }
 
     fn kept(terminals: Vec<api::Terminal>) -> api::projects::Held {
@@ -1104,7 +1057,7 @@ mod tests {
         let file = api::UnreadFile { pid: 9, terminal, ..api::UnreadFile::default() };
         let host = |terminals| api::Host {
             unread: 1,
-            unread_files: vec![file.clone()],
+            unread_files: vec![file],
             ..viewed(kept(terminals))
         };
         assert!(Occupied::of(&host(vec![in_layout("/w/a", Found::Key(terminal_key(4)))])).is_ok());
@@ -1116,57 +1069,25 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_the_daemon_has_yet_to_place_tells_nothing() {
-        let host = |session| api::Host {
-            sessions: vec![session],
-            unread_sockets: Some(0),
-            ..api::Host::default()
-        };
-        let unlisted = Occupied::of(&host(session("work", None)));
-        assert_eq!(unlisted, Err("session work has yet to list its panes".to_owned()));
-        let unsaid = Occupied::of(&host(session("work", Some(vec![pane(4, None)]))));
-        let why = "zellij does not say where pane work:4 works; close it if what ran in it has \
-                   ended";
-        assert_eq!(unsaid, Err(why.to_owned()));
-    }
-
-    #[test]
     fn what_the_daemon_could_not_read_could_be_in_any_worktree() {
-        let sockets = |unread_sockets| api::Host { unread_sockets, ..api::Host::default() };
-        let left_out = "lunetad did not read all of zellij's folder, and may leave out a session \
-                        that runs";
-        for unread in [Some(1), None] {
-            assert_eq!(Occupied::of(&sockets(unread)), Err(left_out.to_owned()));
-        }
-        assert!(Occupied::of(&sockets(Some(0))).is_ok());
-
-        let files = |unread, unread_files| api::Host {
-            unread,
-            unread_files,
-            ..sockets(Some(0))
-        };
-        let file = |zellij| api::UnreadFile { pid: 9, zellij, own: None, terminal: None };
-        let in_pane = |session: Option<&str>| {
-            let session = session.map(str::to_owned);
-            Some(api::Zellij { named: "work".to_owned(), session, pane: 4 })
-        };
-        assert!(Occupied::of(&files(1, vec![file(in_pane(Some("work")))])).is_ok());
+        assert!(Occupied::of(&api::Host::default()).is_ok());
+        let files =
+            |unread, unread_files| api::Host { unread, unread_files, ..api::Host::default() };
+        let file = || api::UnreadFile { pid: 9, own: None, terminal: None };
         let unplaced = "lunetad cannot read 1 of Claude Code's session files, nor tell where its \
                         agent runs";
-        for unplaced_files in [vec![], vec![file(in_pane(None))]] {
-            assert_eq!(Occupied::of(&files(1, unplaced_files)), Err(unplaced.to_owned()));
-        }
+        assert_eq!(Occupied::of(&files(1, vec![])), Err(unplaced.to_owned()));
         let made_at = Some(prost_types::Timestamp::default());
         let key = |id| api::OwnSession { id, made_at };
         let own = |pane| {
-            api::UnreadFile { own: Some(api::Own { session: Some(key(3)), pane }), ..file(None) }
+            api::UnreadFile { own: Some(api::Own { session: Some(key(3)), pane }), ..file() }
         };
         let unheld = "lunetad cannot read the session file of agent 9, which runs in an own \
                       session, and lunetad holds none";
         assert_eq!(Occupied::of(&files(1, vec![own(4)])), Err(unheld.to_owned()));
         assert_eq!(Occupied::of(&files(1, vec![own(0)])), Err(unplaced.to_owned()));
         assert_eq!(
-            Occupied::of(&files(1, vec![file(None)])),
+            Occupied::of(&files(1, vec![file()])),
             Err("lunetad cannot read the session file of agent 9, which runs in no pane".to_owned())
         );
     }

@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,34 +8,24 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use lunetad::api::agent::{Status as Reported, WaitingFor as Waits};
-use lunetad::api::{
-    self,
-    Agent, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor,
-    Zellij,
-};
+use lunetad::api::agent::{self, Status as Reported, WaitingFor as Waits};
+use lunetad::api::{self, Agent, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor};
+use lunetad::mux::{OwnMade, TerminalKey};
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::host::{eventually, start, FakeZellij, Running, Vars, LUNETA};
+use crate::host::{eventually, start, Running, Vars, LUNETA};
 
 pub struct Host {
     runtime: TempDir,
     home: TempDir,
-    zellij: TempDir,
-    pub lists: FakeZellij,
 }
 
 impl Host {
     pub fn new() -> Self {
-        let host = Host {
-            runtime: tempfile::tempdir().unwrap(),
-            home: tempfile::tempdir().unwrap(),
-            zellij: tempfile::tempdir().unwrap(),
-            lists: FakeZellij::new(),
-        };
+        let host =
+            Host { runtime: tempfile::tempdir().unwrap(), home: tempfile::tempdir().unwrap() };
         fs::create_dir_all(host.sessions()).unwrap();
-        fs::create_dir_all(host.contract()).unwrap();
         host
     }
 
@@ -44,8 +33,6 @@ impl Host {
         Vars {
             runtime: Some(self.runtime.path()),
             home: Some(self.home.path()),
-            zellij: Some(self.zellij.path()),
-            bin: Some(self.lists.bin()),
             ..Vars::default()
         }
     }
@@ -60,10 +47,6 @@ impl Host {
 
     pub fn pi_folder(&self) -> PathBuf {
         self.home.path().join(".pi/agent")
-    }
-
-    pub fn contract(&self) -> PathBuf {
-        self.zellij.path().join("contract_version_1")
     }
 
     fn file_of(&self, pid: u32) -> PathBuf {
@@ -84,17 +67,6 @@ impl Host {
         })
     }
 
-    pub fn host(&self) -> api::Host {
-        let folder =
-            crate::host::folder_in(self.runtime.path()).expect("no daemon has made its folder");
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        runtime.block_on(async {
-            let mut daemon = lunetad::connect(&folder).await.unwrap();
-            let asked = api::WatchRequest { after: None, kept: None, shown: false };
-            daemon.watch(asked).await.unwrap().into_inner()
-        })
-    }
-
     pub fn agents(&self) -> Vec<Agent> {
         self.list().agents
     }
@@ -104,12 +76,15 @@ impl Host {
     }
 }
 
-pub fn process(pane: Option<(&str, u32)>) -> Running {
+pub const MADE_NANOS: u64 = 60;
+
+pub fn process(terminal: Option<u32>) -> Running {
     let mut command = Command::new("sleep");
-    command.arg("600").env_remove("ZELLIJ_SESSION_NAME").env_remove("ZELLIJ_PANE_ID");
+    command.arg("600");
     command.env_remove("LUNETA_MUX_TERMINAL").env_remove("LUNETA_MUX_TERMINAL_MADE");
-    if let Some((session, id)) = pane {
-        command.env("ZELLIJ_SESSION_NAME", session).env("ZELLIJ_PANE_ID", id.to_string());
+    if let Some(id) = terminal {
+        command.env("LUNETA_MUX_TERMINAL", id.to_string());
+        command.env("LUNETA_MUX_TERMINAL_MADE", MADE_NANOS.to_string());
     }
     Running::spawn(&mut command)
 }
@@ -162,12 +137,13 @@ pub fn file_of_pid(id: &str, pid: u32, status: &str) -> serde_json::Value {
     file(id, pid, &started(pid), status)
 }
 
-fn zellij(named: &str, session: Option<&str>, pane: u32) -> Zellij {
-    Zellij { named: named.to_owned(), session: session.map(str::to_owned), pane }
+fn in_terminal(id: u32) -> agent::Pane {
+    agent::Pane::Terminal(terminal(id))
 }
 
-pub fn now_in(agent: &Agent) -> Option<&str> {
-    agent.zellij().and_then(|zellij| zellij.session.as_deref())
+pub fn terminal(id: u32) -> api::TerminalKey {
+    let id = std::num::NonZeroU32::new(id).unwrap();
+    TerminalKey { id, made: OwnMade::from_nanos(MADE_NANOS) }.into()
 }
 
 fn known(status: Status) -> Reported {
@@ -177,7 +153,7 @@ fn known(status: Status) -> Reported {
 #[test]
 fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
     let host = Host::new();
-    let inside = process(Some(("work", 3)));
+    let inside = process(Some(3));
     let outside = process(None);
     let (reused, foreign) = (process(None), process(None));
     let crashed = process(None);
@@ -204,13 +180,13 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
         .iter()
         .map(|agent| {
             let status = agent.status.clone();
-            (agent.session_id.as_str(), agent.pid, status, agent.zellij().cloned())
+            (agent.session_id.as_str(), agent.pid, status, agent.pane)
         })
         .collect();
     assert_eq!(
         seen,
         [
-            ("inside", inside.pid(), Some(known(Status::Busy)), Some(zellij("work", None, 3))),
+            ("inside", inside.pid(), Some(known(Status::Busy)), Some(in_terminal(3))),
             ("outside", outside.pid(), Some(known(Status::Idle)), None),
         ]
     );
@@ -382,9 +358,7 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
 #[test]
 fn a_file_that_does_not_read_is_counted_at_once_where_its_process_runs() {
     let host = Host::new();
-    let work = host.contract().join("work");
-    let _server = UnixListener::bind(&work).unwrap();
-    let (inside, outside) = (process(Some(("work", 3))), process(None));
+    let (inside, outside) = (process(Some(3)), process(None));
     for running in [&inside, &outside] {
         let mut shape = file_for("newer", running, "busy");
         shape["procStart"] = json!({ "ticks": started(running.pid()) });
@@ -392,20 +366,11 @@ fn a_file_that_does_not_read_is_counted_at_once_where_its_process_runs() {
     }
     let _daemon = start(host.vars()).unwrap();
     let listed = host.list();
-    let in_work = Some(zellij("work", Some("work"), 3));
-    let in_work = UnreadFile { pid: inside.pid(), zellij: in_work, own: None, terminal: None };
-    let elsewhere = UnreadFile { pid: outside.pid(), zellij: None, own: None, terminal: None };
-    let mut files = vec![in_work, elsewhere];
+    let in_it = UnreadFile { pid: inside.pid(), own: None, terminal: Some(terminal(3)) };
+    let elsewhere = UnreadFile { pid: outside.pid(), own: None, terminal: None };
+    let mut files = vec![in_it, elsewhere];
     files.sort_by_key(|file| file.pid);
     assert_eq!((listed.unread, listed.unread_files), (2, files));
-
-    fs::rename(&work, host.contract().join("play")).unwrap();
-    let moved = eventually("the file's process is in play", || {
-        let files = host.list().unread_files;
-        let file = files.into_iter().find(|file| file.pid == inside.pid())?;
-        file.zellij.filter(|zellij| zellij.session.as_deref() == Some("play"))
-    });
-    assert_eq!(moved, zellij("work", Some("play"), 3));
 }
 
 #[test]
@@ -464,58 +429,4 @@ fn a_folder_the_daemon_cannot_read_it_says_so_once() {
     let once: HashSet<&&String> = about.iter().collect();
     assert_eq!(once.len(), about.len(), "{said:?}");
     assert_eq!(host.agents(), [] as [Agent; 0]);
-}
-
-#[test]
-fn a_renamed_session_takes_its_agents_with_it() {
-    let host = Host::new();
-    let _server = UnixListener::bind(host.contract().join("work")).unwrap();
-    let agent = process(Some(("work", 2)));
-    host.write(agent.pid(), &file_for("agent", &agent, "idle"));
-    let _daemon = start(host.vars()).unwrap();
-    assert_eq!(host.agent("agent").unwrap().zellij(), Some(&zellij("work", Some("work"), 2)));
-
-    fs::rename(host.contract().join("work"), host.contract().join("play")).unwrap();
-    let moved = eventually("the agent is in play", || {
-        host.agent("agent").filter(|agent| now_in(agent) == Some("play"))
-    });
-    assert_eq!(moved.zellij(), Some(&zellij("work", Some("play"), 2)));
-}
-
-#[test]
-fn a_session_that_takes_a_name_does_not_take_the_agents_it_had() {
-    let host = Host::new();
-    let _server = UnixListener::bind(host.contract().join("work")).unwrap();
-    let older = process(Some(("work", 2)));
-    host.write(older.pid(), &file_for("older", &older, "idle"));
-    let _daemon = start(host.vars()).unwrap();
-
-    fs::rename(host.contract().join("work"), host.contract().join("play")).unwrap();
-    let in_play = |agent: &Agent| now_in(agent) == Some("play");
-    eventually("the agent is in play", || host.agent("older").filter(in_play));
-
-    let _taken = UnixListener::bind(host.contract().join("work")).unwrap();
-    let newer = process(Some(("work", 5)));
-    host.write(newer.pid(), &file_for("newer", &newer, "idle"));
-    let either = eventually("the newer agent could be in either", || {
-        let untold = |agent: &Agent| agent.zellij().is_some_and(|z| z.session.is_none());
-        host.agent("newer").filter(untold)
-    });
-    assert_eq!(either.zellij(), Some(&zellij("work", None, 5)));
-    assert_eq!(host.agent("older").unwrap().zellij(), Some(&zellij("work", Some("play"), 2)));
-}
-
-#[test]
-fn a_name_taken_before_the_daemon_started_leads_nowhere() {
-    let host = Host::new();
-    let _server = UnixListener::bind(host.contract().join("work")).unwrap();
-    let agent = process(Some(("work", 2)));
-    let mut said = file_for("agent", &agent, "idle");
-    said["startedAt"] = json!(now() - 1_000);
-    host.write(agent.pid(), &said);
-    fs::rename(host.contract().join("work"), host.contract().join("play")).unwrap();
-    let _taken = UnixListener::bind(host.contract().join("work")).unwrap();
-    let _daemon = start(host.vars()).unwrap();
-
-    assert_eq!(host.agent("agent").unwrap().zellij(), Some(&zellij("work", None, 2)));
 }

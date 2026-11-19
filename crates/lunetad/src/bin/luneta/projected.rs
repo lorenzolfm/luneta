@@ -7,9 +7,8 @@ use lunetad::api::{self, agent, remote, terminal, Host};
 use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{ProjectId, ViewId, WorktreeId};
-use lunetad::{Destination, SessionName};
+use lunetad::Destination;
 
-use crate::close::Whose;
 use crate::host::NOT_YET;
 use crate::machines::{self, Machine};
 use crate::sidebar::{Listed, PaneKey};
@@ -41,31 +40,10 @@ pub struct Project {
     pub holds: Holds,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Route<P> {
-    Zellij { on: Machine, session: SessionName, pane: P },
-    Terminal(TerminalKey),
-}
-
-impl<P> Route<P> {
-    pub fn map<Q>(self, pane: impl FnOnce(P) -> Q) -> Route<Q> {
-        match self {
-            Route::Zellij { on, session, pane: at } => {
-                Route::Zellij { on, session, pane: pane(at) }
-            },
-            Route::Terminal(key) => Route::Terminal(key),
-        }
-    }
-}
-
-pub fn route(on: &Machine, session: &Listed, pane: PaneKey) -> Result<Route<u32>, String> {
+pub fn route(on: &Machine, pane: PaneKey) -> Result<TerminalKey, String> {
     match (pane, on) {
-        (PaneKey::Zellij(pane), on) => {
-            let (on, session) = (on.clone(), session.name().clone());
-            Ok(Route::Zellij { on, session, pane })
-        },
         (PaneKey::Terminal(_), Machine::Remote(_)) => Err(NOT_YET.to_owned()),
-        (PaneKey::Terminal(key), Machine::Local) => Ok(Route::Terminal(key)),
+        (PaneKey::Terminal(key), Machine::Local) => Ok(key),
     }
 }
 
@@ -198,17 +176,13 @@ impl Projected {
         Some((worktree, terminal))
     }
 
-    pub fn whole(&self, on: &Machine, session: &Listed) -> Result<Route<Option<u32>>, String> {
-        let Whose::Own(key) = session.whose() else {
-            let (on, session) = (on.clone(), session.name().clone());
-            return Ok(Route::Zellij { on, session, pane: None });
-        };
+    pub fn whole(&self, on: &Machine, session: &Listed) -> Result<TerminalKey, String> {
         if let Machine::Remote(_) = on {
             return Err(NOT_YET.to_owned());
         }
-        let project = self.project(on, key).ok_or("lunetad keeps no such project")?;
+        let project = self.project(on, session.own_key()).ok_or("lunetad keeps no such project")?;
         let unshown = || format!("{} has no terminal to show", project.name);
-        project.first_keyed().map(Route::Terminal).ok_or_else(unshown)
+        project.first_keyed().ok_or_else(unshown)
     }
 
     #[must_use]
@@ -480,17 +454,10 @@ mod tests {
         let made = OwnMade::read(prost_types::Timestamp::default()).unwrap();
         let keyed = |id| TerminalKey { id: NonZeroU32::new(id).unwrap(), made };
         let unlisted = PaneKey::Terminal(keyed(9));
-        assert_eq!(route(&here, &project, unlisted), Ok(Route::Terminal(keyed(9))));
-        let first = Ok(Route::Terminal(keyed(4)));
-        assert_eq!(projected.whole(&here, &project), first, "the first one keyed");
-        let zellij = Listed::new("s", std::time::SystemTime::UNIX_EPOCH);
-        let session = zellij.name().clone();
-        let by_name = Route::Zellij { on: here.clone(), session: session.clone(), pane: 9 };
-        assert_eq!(route(&here, &zellij, PaneKey::Zellij(9)), Ok(by_name));
+        assert_eq!(route(&here, unlisted), Ok(keyed(9)));
+        assert_eq!(projected.whole(&here, &project), Ok(keyed(4)), "the first one keyed");
         let far = Machine::Remote("far".parse().unwrap());
-        let whole = Route::Zellij { on: far.clone(), session, pane: None };
-        assert_eq!(projected.whole(&far, &zellij), Ok(whole));
-        assert_eq!(route(&far, &project, unlisted), Err(NOT_YET.to_owned()));
+        assert_eq!(route(&far, unlisted), Err(NOT_YET.to_owned()));
         assert_eq!(projected.whole(&far, &project), Err(NOT_YET.to_owned()));
         let gone = Listed::new_project("gone", 8);
         let unkept = Err("lunetad keeps no such project".to_owned());
