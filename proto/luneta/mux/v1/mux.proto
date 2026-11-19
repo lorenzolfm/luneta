@@ -73,9 +73,8 @@ enum Ends {
 }
 
 message DumpRequest {
-  reserved 1;
-  Dumped dumped = 2;
-  TerminalKey terminal = 3;
+  Dumped dumped = 1;
+  TerminalKey terminal = 2;
 }
 
 enum Dumped {
@@ -93,8 +92,7 @@ message ListRequest {}
 message WatchRequest {}
 
 message Listing {
-  reserved 1;
-  repeated Terminal terminals = 2;
+  repeated Terminal terminals = 1;
 }
 
 message Terminal {
@@ -335,8 +333,7 @@ message Refused {
 }
 
 message Frame {
-  reserved 1;
-  TerminalKey terminal = 10;
+  TerminalKey terminal = 1;
   Size size = 2;
   oneof rows {
     Whole whole = 3;
@@ -363,9 +360,8 @@ message Row {
 }
 
 message Line {
-  reserved 2;
   repeated Glyph glyphs = 1;
-  Ending ending = 3;
+  Ending ending = 2;
 }
 
 enum Ending {

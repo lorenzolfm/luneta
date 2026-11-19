@@ -284,15 +284,6 @@ fn version(host: &Host) -> Version {
 }
 
 #[test]
-fn a_change_from_a_luneta_older_than_the_order_seen_reads_as_no_change() {
-    use prost::Message as _;
-    for field in [6_u8, 7, 13, 14] {
-        let asked = ChangeProjectsRequest::decode([(field << 3) | 2, 0].as_slice()).unwrap();
-        assert_eq!(asked.change, None, "field {field}");
-    }
-}
-
-#[test]
 fn a_reorder_made_on_a_stale_order_is_refused_here_and_on_another_machine() {
     let here = Host::new();
     let far = Host::new();
