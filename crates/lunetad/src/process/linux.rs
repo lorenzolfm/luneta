@@ -59,9 +59,8 @@ pub fn started(pid: u32) -> Option<SystemTime> {
     now.checked_sub(Duration::new(secs, nanos).saturating_sub(after_boot))
 }
 
-#[must_use]
-pub fn environ(pid: u32) -> Option<Vec<OsString>> {
-    Some(nul_split(&fs::read(proc(pid, "environ")).ok()?))
+pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
+    Ok(nul_split(&fs::read(proc(pid, "environ"))?))
 }
 
 fn nul_split(raw: &[u8]) -> Vec<OsString> {
@@ -93,7 +92,7 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
         let Some(start) = start(pid) else {
             continue;
         };
-        let Some(environ) = environ(pid) else {
+        let Ok(environ) = environ(pid) else {
             continue;
         };
         let Ok(cmdline) = fs::read(proc(pid, "cmdline")) else {

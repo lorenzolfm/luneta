@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io;
+use std::os::unix::ffi::OsStringExt;
 use std::ptr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,10 +32,48 @@ pub fn started(pid: u32) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_secs(secs.checked_add(1)?))
 }
 
-#[must_use]
-pub fn environ(pid: u32) -> Option<Vec<OsString>> {
-    let refresh = ProcessRefreshKind::nothing().with_environ(UpdateKind::Always);
-    with(pid, refresh, |process| process.environ().to_vec())
+#[expect(
+    unsafe_code,
+    reason = "sysctl writes into the buffer it is handed, and no further than the length it is told"
+)]
+pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
+    let pid = libc::c_int::try_from(pid).map_err(|_| io::Error::from(Errno::INVAL))?;
+    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let name_length = libc::c_uint::try_from(name.len()).expect("three names fit a c_uint");
+    let mut size: libc::size_t = 0;
+    let sized = unsafe {
+        let into = ptr::null_mut();
+        libc::sysctl(name.as_mut_ptr(), name_length, into, &raw mut size, ptr::null_mut(), 0)
+    };
+    if sized == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut procargs = vec![0_u8; size];
+    let read = unsafe {
+        let into = procargs.as_mut_ptr().cast();
+        libc::sysctl(name.as_mut_ptr(), name_length, into, &raw mut size, ptr::null_mut(), 0)
+    };
+    if read == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    assert!(size <= procargs.len(), "sysctl wrote {size} bytes into {}", procargs.len());
+    procargs.truncate(size);
+    let short = "KERN_PROCARGS2 holds fewer arguments than its argc";
+    environ_in(&procargs).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, short))
+}
+
+fn environ_in(procargs: &[u8]) -> Option<Vec<OsString>> {
+    let (count, strings) = procargs.split_first_chunk::<{ size_of::<libc::c_int>() }>()?;
+    let argument_count = usize::try_from(libc::c_int::from_ne_bytes(*count)).ok()?;
+    let path_end = strings.iter().position(|byte| *byte == 0).unwrap_or(strings.len());
+    let padded = &strings[path_end..];
+    let arguments_start = padded.iter().position(|byte| *byte != 0).unwrap_or(padded.len());
+    let mut each = padded[arguments_start..].split(|byte| *byte == 0);
+    for _ in 0..argument_count {
+        each.next()?;
+    }
+    let entries = each.take_while(|entry| !entry.is_empty());
+    Some(entries.map(|entry| OsString::from_vec(entry.to_vec())).collect())
 }
 
 #[must_use]

@@ -20,7 +20,7 @@ compile_error!("lunetad reads processes on Linux and macOS, and on nothing else 
 
 pub use os::{environ, mine, signalled, start, started, Domain};
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id {
     pub pid: u32,
     pub start: String,
@@ -58,7 +58,10 @@ pub fn ends(pid: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::env;
+    use std::ffi::OsString;
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, SystemTime};
@@ -101,6 +104,24 @@ mod tests {
         child.wait().unwrap();
         assert_eq!(super::start(pid), None);
         assert!(heard_within(pid, Duration::from_secs(5)), "ended, and waited for");
+    }
+
+    #[test]
+    fn an_environment_reads_as_it_was_given() {
+        let path = env::var_os("PATH").expect("the tests run with a PATH");
+        let mut given = Command::new("sh");
+        given.args(["-c", "echo; read -r line"]).stdin(Stdio::piped()).stdout(Stdio::piped());
+        given.env_clear().env("PATH", &path).env("LUNETA_GIVEN", "a b=c");
+        let mut child = given.spawn().unwrap();
+        child.stdout.as_mut().unwrap().read_exact(&mut [0; 1]).expect("it says it runs");
+        let read = super::environ(child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let mut read = read.expect("this user's process has an environment that reads");
+        read.sort_unstable();
+        let mut path_given = OsString::from("PATH=");
+        path_given.push(path);
+        assert_eq!(read, [OsString::from("LUNETA_GIVEN=a b=c"), path_given]);
     }
 
     #[test]

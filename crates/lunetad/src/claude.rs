@@ -93,7 +93,7 @@ pub struct SessionFiles {
     dir: PathBuf,
     domain: process::Domain,
     seen: HashMap<u32, Seen>,
-    terminals: HashMap<(u32, String), Option<TerminalKey>>,
+    terminals: HashMap<process::Id, Option<TerminalKey>>,
     troubles: Troubles,
     scanned: bool,
 }
@@ -146,12 +146,11 @@ impl SessionFiles {
         self.seen = seen;
 
         let mut terminals = HashMap::with_capacity(self.seen.len());
-        let mut terminal_of = |pid: u32, start: String| {
-            let key = (pid, start);
-            let terminal = self.terminals.remove(&key).unwrap_or_else(|| {
-                terminal_or_trouble(pid, mux::terminal_of(pid), &mut self.troubles)
+        let mut terminal_of = |id: process::Id| {
+            let terminal = self.terminals.remove(&id).unwrap_or_else(|| {
+                terminal_or_trouble(id.pid, mux::terminal_of(&id), &mut self.troubles)
             });
-            terminals.insert(key, terminal);
+            terminals.insert(id, terminal);
             terminal
         };
         let mut agents = Vec::with_capacity(self.seen.len());
@@ -162,7 +161,8 @@ impl SessionFiles {
                 Seen::Torn { before: None, .. } => continue,
                 Seen::Unread => {
                     if let Some(start) = process::start(pid) {
-                        unread.push(Unread { pid, terminal: terminal_of(pid, start) });
+                        let terminal = terminal_of(process::Id { pid, start });
+                        unread.push(Unread { pid, terminal });
                     }
                     continue;
                 },
@@ -174,7 +174,7 @@ impl SessionFiles {
             if process::start(pid).as_ref() != Some(&start) {
                 continue;
             }
-            agents.push(agent(pid, file, terminal_of(pid, start)));
+            agents.push(agent(pid, file, terminal_of(process::Id { pid, start })));
         }
         self.terminals = terminals;
         assert!(agents.len() + unread.len() <= self.seen.len());

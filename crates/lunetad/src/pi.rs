@@ -57,7 +57,7 @@ pub struct AgentFiles {
     luneta: PathBuf,
     dir: PathBuf,
     pi: Option<PathBuf>,
-    processes: HashMap<(u32, String), Process>,
+    processes: HashMap<process::Id, Process>,
     troubles: Troubles,
 }
 
@@ -106,17 +106,17 @@ impl AgentFiles {
             let Some(start) = process::start(pid) else {
                 continue;
             };
-            let key = (pid, start);
-            let found = self.processes.remove(&key).or_else(|| {
+            let id = process::Id { pid, start };
+            let found = self.processes.remove(&id).or_else(|| {
                 let started = process::started(pid)?;
-                let terminal = terminal_or_trouble(pid, mux::terminal_of(pid), &mut self.troubles);
+                let terminal = terminal_or_trouble(pid, mux::terminal_of(&id), &mut self.troubles);
                 Some(Process { started, terminal })
             });
             let Some(found) = found else {
                 continue;
             };
-            let file = read(&path, &key.1, found.started);
-            processes.insert(key, found);
+            let file = read(&path, &id.start, found.started);
+            processes.insert(id, found);
             match file {
                 Ok(Some(file)) => agents.push(agent(pid, file, found)),
                 Ok(None) => {
