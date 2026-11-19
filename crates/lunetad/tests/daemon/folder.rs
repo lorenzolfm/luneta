@@ -2,17 +2,15 @@ use std::fs::{self, Permissions};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 
-use crate::host::{info, start, Vars, LUNETA, SOCKET};
+use crate::host::{info, start, Host, Vars, LUNETA, SOCKET};
 
 type Case = for<'p> fn(&'p Path, &'p Path) -> (Vars<'p>, &'p Path);
 
 #[test]
 fn the_cli_finds_the_daemon_where_the_variables_say() {
-    let cases: [Case; 4] = [
+    let cases: [Case; 2] = [
         |a, _| (Vars { runtime: Some(a), ..Vars::default() }, a),
-        |_, b| (Vars { temp: Some(b), ..Vars::default() }, b),
         |a, b| (Vars { runtime: Some(a), temp: Some(b), ..Vars::default() }, a),
-        |_, b| (Vars { runtime: Some(Path::new("")), temp: Some(b), ..Vars::default() }, b),
     ];
     for case in cases {
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -41,6 +39,19 @@ fn one_daemon_holds_the_folder_until_it_dies() {
     let next = start(vars).unwrap();
     let said = info(vars);
     assert!(said.contains(&format!("(pid {})", next.pid())), "{said}");
+}
+
+#[test]
+fn a_second_lunetad_of_one_home_names_the_first_and_does_not_start() {
+    let host = Host::new();
+    let _first = start(host.vars()).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let (ended, said) = start(Vars { runtime: Some(other.path()), ..host.vars() }).err().unwrap();
+    assert!(!ended.success());
+    let first = host.runtime.path().join("luneta");
+    let names = format!("and listens in {}: `luneta terminate` ends it", first.display());
+    assert!(said.contains(&names), "{said}");
+    assert!(!other.path().join(SOCKET).exists(), "a second lunetad of one home listens");
 }
 
 #[test]

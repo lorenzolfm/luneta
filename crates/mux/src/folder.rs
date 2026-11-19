@@ -10,15 +10,6 @@ pub const LOCK: &str = "mux.lock";
 
 pub const ANOTHER_RUNS: u8 = 3;
 
-#[must_use]
-pub fn find() -> Option<PathBuf> {
-    ["XDG_RUNTIME_DIR", "TMPDIR"]
-        .into_iter()
-        .filter_map(std::env::var_os)
-        .find(|root| !root.is_empty())
-        .map(|root| PathBuf::from(root).join("luneta"))
-}
-
 #[derive(Debug)]
 pub enum Refusal {
     NotYours(PathBuf),

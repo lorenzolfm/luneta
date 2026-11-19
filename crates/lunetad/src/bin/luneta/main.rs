@@ -146,8 +146,7 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let folder: Result<PathBuf, String> = folder::find()
-        .ok_or_else(|| "neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in".to_owned());
+    let folder: Result<PathBuf, String> = folder::find().map_err(|unfound| format!("{unfound}, to find lunetad in"));
     let Some(command) = cli.command else {
         let session = match cli.session.as_deref().map(SessionName::parse).transpose() {
             Ok(session) => session,

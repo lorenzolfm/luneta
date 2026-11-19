@@ -23,7 +23,8 @@ pub(crate) mod layout;
 mod spot;
 mod view;
 
-pub use file::{forget, kept, Changed, Failed, Forgotten, Revision, Store};
+pub use file::{forget, holder, kept, take, Changed, Elsewhere, Failed, Forgotten, Lock, Revision};
+pub use file::{Store, Unheld};
 pub use layout::{Size, FRAME_CELLS, PANES_MAX};
 pub use spot::{Spot, LOOK as SPOT_LOOK, WORKTREES_MAX};
 pub use view::{Line, Placed, Runs, Session, Terminal, View, LINE_BYTES_MAX, SESSION_BYTES_MAX};

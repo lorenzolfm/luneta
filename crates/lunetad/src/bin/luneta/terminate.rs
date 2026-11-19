@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher as _};
 use std::io::{self, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use lunetad::api::agent;
 use lunetad::asks::Turn;
 use lunetad::program::{self, Ran};
 use lunetad::projects::{self, Forgotten, Projects};
-use lunetad::terminate::{self, Id, Running, Unended};
+use lunetad::terminate::{self, Folders, Id, Running, Unended};
 use lunetad::{Destination, HostsParsed};
 use signal_hook::consts::SIGHUP;
 
@@ -44,10 +44,11 @@ impl fmt::Display for Key {
 }
 
 pub fn run(yes: Option<Agreed>, here: bool, ending: Option<Key>, folder: &Path) -> ExitCode {
+    let folders = Folders::of(folder);
     if here {
         return match ending {
-            Some(key) => end_alone(key, folder),
-            None => say_alone(folder),
+            Some(key) => end_alone(key, &folders),
+            None => say_alone(&folders),
         };
     }
     let turn = match drive::turn_here() {
@@ -60,7 +61,7 @@ pub fn run(yes: Option<Agreed>, here: bool, ending: Option<Key>, folder: &Path) 
             return failed(&format!("ended nothing, as the hosts file does not read: {why}"));
         },
     };
-    let planned = plan(hosts, folder);
+    let planned = plan(hosts, &folders);
     let agreed_in = |turn| Agreed::of_terminate(&planned.keys(), &planned.unread, turn);
     let agreed = agreed_in(turn.map(Turn::key));
     let takes = match turn {
@@ -68,7 +69,7 @@ pub fn run(yes: Option<Agreed>, here: bool, ending: Option<Key>, folder: &Path) 
         Some(turn) => turn.before().map(|before| agreed_in(Some(before))),
     };
     if yes.is_some() && yes == takes {
-        return terminated(&planned, folder);
+        return terminated(&planned, &folders);
     }
     for line in planned.lines() {
         say(&line);
@@ -139,9 +140,10 @@ impl Kept {
 }
 
 impl Here {
-    fn now(folder: &Path) -> Here {
-        let running = terminate::running(folder);
-        let agents = if running.lunetads.is_empty() { Counted::Unasked } else { agents_in(folder) };
+    fn now(folders: &Folders) -> Here {
+        let running = terminate::running(folders);
+        let agents =
+            if running.served.is_empty() { Counted::Unasked } else { agents_in(&running.served) };
         let projects = projects::kept().map(|projects| Kept::of(&projects));
         Here { running, agents, projects }
     }
@@ -192,21 +194,23 @@ fn uncounted_said(why: &str) -> String {
     format!(", and the agents in its terminals with them, which lunetad did not count: {why}")
 }
 
-fn agents_in(folder: &Path) -> Counted {
-    let listed = match commands::listed_agents(folder) {
-        Ok(listed) => listed,
-        Err(why) => return Counted::Uncounted(why),
-    };
+fn agents_in(served: &[PathBuf]) -> Counted {
     let mut agents = Agents::default();
-    for agent in &listed.agents {
-        let in_mux = matches!(agent.pane, Some(agent::Pane::Terminal(_) | agent::Pane::Own(_)));
-        match Doing::from(agent) {
-            Doing::Shell => {},
-            _ if !in_mux => {},
-            doing => {
-                agents.count += 1;
-                agents.busy += usize::from(doing == Doing::Busy);
-            },
+    for folder in served {
+        let listed = match commands::listed_agents(folder) {
+            Ok(listed) => listed,
+            Err(why) => return Counted::Uncounted(why),
+        };
+        for agent in &listed.agents {
+            let in_mux = matches!(agent.pane, Some(agent::Pane::Terminal(_) | agent::Pane::Own(_)));
+            match Doing::from(agent) {
+                Doing::Shell => {},
+                _ if !in_mux => {},
+                doing => {
+                    agents.count += 1;
+                    agents.busy += usize::from(doing == Doing::Busy);
+                },
+            }
         }
     }
     Counted::Agents(agents)
@@ -294,14 +298,14 @@ fn kept_said(kept: Kept) -> String {
     }
 }
 
-fn say_alone(folder: &Path) -> ExitCode {
-    let here = Here::now(folder);
+fn say_alone(folders: &Folders) -> ExitCode {
+    let here = Here::now(folders);
     say(&here.key().to_string());
     say(&here.says());
     ExitCode::SUCCESS
 }
 
-fn end_alone(key: Key, folder: &Path) -> ExitCode {
+fn end_alone(key: Key, folders: &Folders) -> ExitCode {
     let in_luneta = match zellij::here() {
         Ok(seat) => seat.is_some() || lunetad::mux::own::terminal_here().is_some(),
         Err(why) => return failed(&format!("ended nothing, as {why}")),
@@ -312,13 +316,13 @@ fn end_alone(key: Key, folder: &Path) -> ExitCode {
              this runs in a terminal of luneta's: run `luneta terminate` to say the plan",
         );
     }
-    let here = Here::now(folder);
+    let here = Here::now(folders);
     if here.key() != key {
         let says = here.says();
         return failed(&format!("ended nothing, as what would end here changed since: {says}"));
     }
     hold_on_through_hangups();
-    match Ending::default().all(here.agents, folder) {
+    match Ending::default().all(here.agents, folders) {
         Ok(ended) => {
             say(&ended.says());
             ExitCode::SUCCESS
@@ -399,14 +403,14 @@ fn skipped_said(skip: &Skip) -> String {
     }
 }
 
-fn plan(hosts: HostsParsed, folder: &Path) -> Planned {
+fn plan(hosts: HostsParsed, folders: &Folders) -> Planned {
     let HostsParsed { machines: destinations, unread } = hosts;
     let (here, remotes) = thread::scope(|scope| {
         let asked: Vec<_> = destinations
             .iter()
             .map(|destination| scope.spawn(move || asked(destination)))
             .collect();
-        let here = Here::now(folder);
+        let here = Here::now(folders);
         let remotes = destinations.iter().zip(asked).map(|(destination, asked)| {
             let panicked = || Far::Skipped(Skip::Unsaid("asking it panicked".to_owned()));
             let far = asked.join().unwrap_or_else(|_| panicked());
@@ -466,10 +470,10 @@ fn answer(ran: Ran, limit: Duration) -> Result<String, Skip> {
     }
 }
 
-fn terminated(planned: &Planned, folder: &Path) -> ExitCode {
+fn terminated(planned: &Planned, folders: &Folders) -> ExitCode {
     hold_on_through_hangups();
     let mut ending = Ending::default();
-    let first = ending.daemons(folder);
+    let first = ending.daemons(folders);
     let remotes: Vec<(&Destination, Result<String, String>)> = thread::scope(|scope| {
         let endings: Vec<_> = planned
             .remotes
@@ -499,7 +503,7 @@ fn terminated(planned: &Planned, folder: &Path) -> ExitCode {
             })
             .collect()
     });
-    let here = first.and_then(|()| ending.all(planned.here.agents.clone(), folder));
+    let here = first.and_then(|()| ending.all(planned.here.agents.clone(), folders));
     let mut well = true;
     let local = &planned.local;
     match here {
@@ -553,38 +557,38 @@ struct Ended {
 }
 
 impl Ending {
-    fn daemons(&mut self, folder: &Path) -> Result<(), String> {
-        let running = terminate::running(folder);
+    fn daemons(&mut self, folders: &Folders) -> Result<(), String> {
+        let running = terminate::running(folders);
         end_or(&running.luneta_ids(), terminate::LUNETA)?;
         self.lunetas.extend(running.lunetas.into_iter().map(|it| (it.id, role(&it.argv))));
-        let lunetads = terminate::running(folder).lunetads;
+        let lunetads = terminate::running(folders).lunetads;
         end_or(&lunetads, terminate::LUNETAD)?;
         self.lunetads.extend(lunetads);
         Ok(())
     }
 
-    fn round(&mut self, folder: &Path) -> Result<Result<Forgotten, String>, String> {
-        self.daemons(folder)?;
+    fn round(&mut self, folders: &Folders) -> Result<Result<Forgotten, String>, String> {
+        self.daemons(folders)?;
         let forgot = projects::forget();
-        let muxes = terminate::running(folder).muxes;
+        let muxes = terminate::running(folders).muxes;
         end_or(&muxes, terminate::MUX)?;
         self.muxes.extend(muxes);
         Ok(forgot)
     }
 
-    fn all(mut self, agents: Counted, folder: &Path) -> Result<Ended, String> {
-        let mut forgot = self.round(folder)?;
+    fn all(mut self, agents: Counted, folders: &Folders) -> Result<Ended, String> {
+        let mut forgot = self.round(folders)?;
         for _ in 1..ROUNDS {
-            if terminate::running(folder).is_empty() {
+            if terminate::running(folders).is_empty() {
                 break;
             }
-            let later = self.round(folder)?;
+            let later = self.round(folders)?;
             forgot = match forgot {
                 Ok(first) => later.map(|_| first),
                 Err(_) => later,
             };
         }
-        let running = terminate::running(folder);
+        let running = terminate::running(folders);
         if !running.is_empty() {
             let of_luneta = running.luneta_ids().into_iter().map(|id| (terminate::LUNETA, id));
             let of_lunetad = running.lunetads.into_iter().map(|id| (terminate::LUNETAD, id));
@@ -683,6 +687,7 @@ mod tests {
             lunetas: vec![luneta(1, &[]), luneta(2, &["api"]), luneta(3, &["bridge"])],
             lunetads: vec![id(4)],
             muxes: vec![id(5)],
+            served: vec![PathBuf::from("/run/user/1000/luneta")],
         };
         let agents = Counted::Agents(Agents { count: 3, busy: 1 });
         let projects = Ok(Kept { projects: 4, workstreams: 9 });

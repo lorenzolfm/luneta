@@ -18,8 +18,6 @@ use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 
-const NO_FOLDER: &str = "neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in";
-
 pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let turn = match drive::turn_here() {
         Ok(turn) => turn,
@@ -168,7 +166,7 @@ fn planned(on: &Machine, dir: &Directory) -> Result<Plan, String> {
 }
 
 fn local_occupied() -> Result<Occupied, String> {
-    let folder = lunetad::folder::find().ok_or(NO_FOLDER)?;
+    let folder = lunetad::folder::find().map_err(|unfound| format!("{unfound}, to find lunetad in"))?;
     commands::occupied(&folder)
 }
 

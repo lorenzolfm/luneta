@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, ErrorKind, Read as _, Write as _};
+use std::io::{self, ErrorKind, Read as _, Seek as _, SeekFrom, Write as _};
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 use std::thread;
@@ -27,6 +30,10 @@ const LOCK: &str = "projects.lock";
 const HELD_TRIES: u32 = 40;
 
 const HELD_PAUSE: Duration = Duration::from_millis(50);
+
+const SAID_TRIES: u32 = 20;
+
+const SAID_PAUSE: Duration = Duration::from_millis(10);
 
 const VERSION: u32 = 6;
 
@@ -216,6 +223,7 @@ pub struct Store {
     keeping: Keeping,
     revision: Revision,
     core: SyncSender<Command>,
+    _held: Option<File>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -239,8 +247,85 @@ pub struct Changed {
 }
 
 enum Keeping {
-    Kept { file: PathBuf, projects: Projects, written: Projects, _lock: File },
+    Kept { file: PathBuf, projects: Projects, written: Projects },
     Unkept(String),
+}
+
+pub struct Lock {
+    file: PathBuf,
+    lock: File,
+}
+
+#[derive(Debug)]
+pub enum Unheld {
+    Elsewhere(Elsewhere),
+    Unkept(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Elsewhere {
+    folder: PathBuf,
+    holder: Option<PathBuf>,
+}
+
+impl fmt::Display for Elsewhere {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let folder = self.folder.display();
+        match &self.holder {
+            Some(holder) => write!(
+                f,
+                "another lunetad keeps the projects in {folder}, and listens in {}: `luneta \
+                 terminate` ends it",
+                holder.display()
+            ),
+            None => write!(
+                f,
+                "another lunetad keeps the projects in {folder}, one too old to say where it \
+                 listens"
+            ),
+        }
+    }
+}
+
+pub fn take(listens_in: &Path) -> Result<Lock, Unheld> {
+    take_at(state::path(FILE), listens_in)
+}
+
+fn take_at(file: Result<PathBuf, Unset>, listens_in: &Path) -> Result<Lock, Unheld> {
+    let nowhere = |unset| Unheld::Unkept(format!("projects are kept nowhere: {unset}"));
+    let file = file.map_err(nowhere)?;
+    let lock = locked(&file, listens_in)?;
+    Ok(Lock { file, lock })
+}
+
+#[must_use]
+pub fn holder() -> Option<PathBuf> {
+    let file = state::path(FILE).ok()?;
+    let lock = File::open(file.parent()?.join(LOCK)).ok()?;
+    match lock.try_lock() {
+        Err(TryLockError::WouldBlock) => said_by(&lock),
+        Ok(()) | Err(TryLockError::Error(_)) => None,
+    }
+}
+
+fn said_by(lock: &File) -> Option<PathBuf> {
+    for _ in 0..SAID_TRIES {
+        let said = said_now(lock)?;
+        if !said.is_empty() {
+            let holder = PathBuf::from(OsStr::from_bytes(&said));
+            return (said.len() <= PATH_BYTES_MAX && holder.is_absolute()).then_some(holder);
+        }
+        thread::sleep(SAID_PAUSE);
+    }
+    None
+}
+
+fn said_now(mut lock: &File) -> Option<Vec<u8>> {
+    let mut said = Vec::new();
+    let limit = u64::try_from(PATH_BYTES_MAX).expect("a path's bytes fit a u64");
+    lock.seek(SeekFrom::Start(0)).ok()?;
+    lock.take(limit + 1).read_to_end(&mut said).ok()?;
+    Some(said)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -255,16 +340,12 @@ pub enum Failed {
 }
 
 impl Store {
-    pub fn open(core: SyncSender<Command>) -> io::Result<Store> {
-        Store::at(state::path(FILE), core)
-    }
-
-    pub fn at(file: Result<PathBuf, Unset>, core: SyncSender<Command>) -> io::Result<Store> {
-        let keeping = match file {
-            Err(unset) => Keeping::Unkept(format!("projects are kept nowhere: {unset}")),
-            Ok(file) => Keeping::of(file),
+    pub fn open(kept: Result<Lock, String>, core: SyncSender<Command>) -> io::Result<Store> {
+        let (keeping, held) = match kept {
+            Ok(Lock { file, lock }) => (Keeping::of(file), Some(lock)),
+            Err(why) => (Keeping::Unkept(why), None),
         };
-        let store = Store { keeping, revision: Revision::default(), core };
+        let store = Store { keeping, revision: Revision::default(), core, _held: held };
         store.tell().map_err(|_| io::Error::other("the daemon's core has stopped"))?;
         Ok(store)
     }
@@ -400,19 +481,15 @@ impl Store {
 
 impl Keeping {
     fn of(file: PathBuf) -> Keeping {
-        let lock = match locked(&file) {
-            Ok(lock) => lock,
-            Err(why) => return Keeping::Unkept(why),
-        };
         match read(&file) {
             Ok(Read { projects, rooted: false }) => {
                 let written = projects.clone();
-                Keeping::Kept { file, projects, written, _lock: lock }
+                Keeping::Kept { file, projects, written }
             },
             Ok(Read { projects, rooted: true }) => match write(&file, &projects) {
                 Ok(()) => {
                     let written = projects.clone();
-                    Keeping::Kept { file, projects, written, _lock: lock }
+                    Keeping::Kept { file, projects, written }
                 },
                 Err(error) => {
                     Keeping::Unkept(left(&file, &format!("rooted, it is unwritten: {error}")))
@@ -423,21 +500,22 @@ impl Keeping {
     }
 }
 
-fn locked(file: &Path) -> Result<File, String> {
+fn locked(file: &Path, listens_in: &Path) -> Result<File, Unheld> {
     let folder = file.parent().expect("a file of `state::path` is in a folder");
     let path = folder.join(LOCK);
     let failed = |at: &Path, error: io::Error| {
-        format!("{}: {error}, and so no projects are kept", at.display())
+        Unheld::Unkept(format!("{}: {error}, and so no projects are kept", at.display()))
     };
     fs::create_dir_all(folder).map_err(|error| failed(folder, error))?;
     let mut options = OpenOptions::new();
-    let opened = options.create(true).truncate(false).write(true).open(&path);
-    let lock = opened.map_err(|error| failed(&path, error))?;
+    let opened = options.create(true).truncate(false).read(true).write(true).open(&path);
+    let mut lock = opened.map_err(|error| failed(&path, error))?;
     if held(&lock).map_err(|error| failed(&path, error))? {
+        let said = lock.set_len(0).and_then(|()| lock.write_all(listens_in.as_os_str().as_bytes()));
+        said.map_err(|error| failed(&path, error))?;
         return Ok(lock);
     }
-    let folder = folder.display();
-    Err(format!("another lunetad keeps the projects in {folder}, and so none are kept here"))
+    Err(Unheld::Elsewhere(Elsewhere { folder: folder.to_owned(), holder: said_by(&lock) }))
 }
 
 fn held(lock: &File) -> io::Result<bool> {
@@ -1118,6 +1196,16 @@ mod tests {
         mpsc::sync_channel(16)
     }
 
+    const LISTENS_IN: &str = "/run/user/1000/luneta";
+
+    fn store_at(file: Result<PathBuf, Unset>, core: SyncSender<Command>) -> Store {
+        let kept = take_at(file, Path::new(LISTENS_IN)).map_err(|unheld| match unheld {
+            Unheld::Unkept(why) => why,
+            Unheld::Elsewhere(elsewhere) => panic!("{elsewhere}"),
+        });
+        Store::open(kept, core).unwrap()
+    }
+
     fn heard(commands: &Receiver<Command>) -> Vec<Result<Projects, String>> {
         let told = |command| {
             let Command::Projects { projects, .. } = command else {
@@ -1137,7 +1225,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         let (core, commands) = channel();
-        let mut store = Store::at(Ok(file.clone()), core.clone()).unwrap();
+        let mut store = store_at(Ok(file.clone()), core.clone());
         assert_eq!(store.unkept(), None);
         let vault = Some(Name::parse("bitwarden backup").unwrap());
         store.change(Change::AddProject { spot: alone("/home/me/Vault"), name: vault }).unwrap();
@@ -1155,7 +1243,7 @@ mod tests {
         assert_eq!(kept.as_ref().map(|kept| kept.workstreams().count()), Ok(3));
 
         drop(store);
-        let again = Store::at(Ok(file.clone()), core).unwrap();
+        let again = store_at(Ok(file.clone()), core);
         assert_eq!(again.unkept(), None);
         assert_eq!(heard(&commands), [kept]);
         let mut left: Vec<String> = fs::read_dir(file.parent().unwrap())
@@ -1174,7 +1262,7 @@ mod tests {
         assert!(!file.parent().unwrap().exists(), "nothing is made to forget nothing");
 
         let (core, _commands) = channel();
-        let mut store = Store::at(Ok(file.clone()), core.clone()).unwrap();
+        let mut store = store_at(Ok(file.clone()), core.clone());
         let luneta = Change::AddProject { spot: clone_of("/w/luneta", &[]), name: None };
         let made = store.change(luneta);
         let Some(Made::Project(luneta)) = made.unwrap() else { panic!("luneta is made") };
@@ -1188,7 +1276,7 @@ mod tests {
         drop(store);
         assert_eq!(forget_at(&file), Ok(Forgotten::Read(held)));
         assert!(!file.exists());
-        let again = Store::at(Ok(file.clone()), core).unwrap();
+        let again = store_at(Ok(file.clone()), core);
         assert_eq!(again.projects(), Some(&Projects::default()));
         drop(again);
 
@@ -1589,7 +1677,7 @@ mod tests {
             fs::create_dir_all(file.parent().unwrap()).unwrap();
             fs::write(&file, text).unwrap();
             let (core, commands) = channel();
-            let mut store = Store::at(Ok(file.clone()), core).unwrap();
+            let mut store = store_at(Ok(file.clone()), core);
             let unkept = store.unkept().unwrap().to_owned();
             assert!(unkept.contains(why), "{unkept:?} for {text}");
             assert!(unkept.ends_with("and so it is left as it is"), "{unkept}");
@@ -1602,19 +1690,21 @@ mod tests {
     }
 
     #[test]
-    fn a_file_too_big_is_not_read_whole() {
+    fn a_file_too_big_is_not_read_whole_and_its_lock_stays_held() {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, " ".repeat(FILE_BYTES_MAX + 1)).unwrap();
-        let store = Store::at(Ok(file), channel().0).unwrap();
+        let store = store_at(Ok(file.clone()), channel().0);
         assert!(store.unkept().unwrap().contains("over 33554432 bytes"));
+        let second = take_at(Ok(file), Path::new("/tmp/b"));
+        assert!(matches!(second, Err(Unheld::Elsewhere(_))), "{:?}", second.err());
     }
 
     #[test]
     fn with_no_state_folder_nothing_is_kept_and_it_says_why() {
         let (core, _commands) = channel();
-        let mut store = Store::at(Err(Unset), core).unwrap();
+        let mut store = store_at(Err(Unset), core);
         let unkept = store.unkept().unwrap().to_owned();
         assert!(unkept.starts_with("projects are kept nowhere: neither XDG_STATE_HOME"));
         let change = Change::AddProject { spot: alone("/c"), name: None };
@@ -1626,14 +1716,14 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         let (core, commands) = channel();
-        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        let mut store = store_at(Ok(file.clone()), core);
         drop(commands);
         let change = Change::AddProject { spot: alone("/c"), name: None };
         assert_eq!(store.change(change), Err(Failed::KeptUntold));
 
         drop(store);
         let (core, commands) = channel();
-        Store::at(Ok(file), core).unwrap();
+        store_at(Ok(file), core);
         let [kept] = heard(&commands).try_into().unwrap();
         let kept = kept.unwrap();
         assert_eq!(kept.all()[0].dir().as_str(), "/c");
@@ -1644,7 +1734,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         let (core, commands) = channel();
-        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        let mut store = store_at(Ok(file.clone()), core);
         store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
         let written = fs::read_to_string(&file).unwrap();
         assert_eq!(heard(&commands).len(), 2);
@@ -1682,7 +1772,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         let (core, commands) = channel();
-        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        let mut store = store_at(Ok(file.clone()), core);
         let made = store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
         let Some(Made::Project(project)) = made else { panic!("/a is made") };
         let add = add_in(project, alone("/a/b"));
@@ -1715,32 +1805,60 @@ mod tests {
     }
 
     #[test]
-    fn a_second_store_of_one_file_waits_for_the_first_then_keeps_nothing() {
+    fn a_second_lock_of_one_file_waits_for_the_first_then_names_where_it_listens() {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         let (core, _commands) = channel();
-        let first = Store::at(Ok(file.clone()), core.clone()).unwrap();
-        let mut second = Store::at(Ok(file.clone()), core.clone()).unwrap();
-        let unkept = second.unkept().unwrap().to_owned();
-        assert!(unkept.starts_with("another lunetad keeps the projects in "), "{unkept}");
-        let change = Change::AddProject { spot: alone("/c"), name: None };
-        assert_eq!(second.change(change), Err(Failed::NotKept(unkept)));
+        let first = store_at(Ok(file.clone()), core);
+        let lock = file.parent().unwrap().join(LOCK);
+        assert_eq!(fs::read_to_string(&lock).unwrap(), LISTENS_IN);
+        let Err(Unheld::Elsewhere(elsewhere)) = take_at(Ok(file.clone()), Path::new("/tmp/b"))
+        else {
+            panic!("a second lock of one file is taken");
+        };
+        let folder = file.parent().unwrap().to_owned();
+        let holder = Some(PathBuf::from(LISTENS_IN));
+        assert_eq!(elsewhere, Elsewhere { folder: folder.clone(), holder });
+        let said = elsewhere.to_string();
+        assert!(said.contains(&format!("listens in {LISTENS_IN}: `luneta terminate`")), "{said}");
+
+        fs::write(&lock, "").unwrap();
+        let Err(Unheld::Elsewhere(older)) = take_at(Ok(file.clone()), Path::new("/tmp/b")) else {
+            panic!("a second lock of one file is taken");
+        };
+        assert_eq!(older, Elsewhere { folder, holder: None });
+        assert!(older.to_string().ends_with("one too old to say where it listens"), "{older}");
 
         let released = thread::spawn(move || {
             thread::sleep(HELD_PAUSE * 4);
             drop(first);
         });
-        let third = Store::at(Ok(file), core).unwrap();
+        let third = take_at(Ok(file), Path::new("/tmp/b"));
         released.join().unwrap();
-        assert_eq!(third.unkept(), None);
+        assert!(third.is_ok(), "{:?}", third.err());
+        assert_eq!(fs::read_to_string(&lock).unwrap(), "/tmp/b");
     }
 
     #[test]
-    fn a_file_changed_behind_its_back_is_never_written_over() {
+    fn a_holder_s_folder_written_a_moment_after_its_lock_is_read() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join(LOCK);
+        fs::write(&path, "").unwrap();
+        let lock = File::open(&path).unwrap();
+        let writing = thread::spawn(move || {
+            thread::sleep(SAID_PAUSE);
+            fs::write(path, LISTENS_IN).unwrap();
+        });
+        assert_eq!(said_by(&lock), Some(PathBuf::from(LISTENS_IN)));
+        writing.join().unwrap();
+    }
+
+    #[test]
+    fn a_file_changed_behind_its_back_is_never_written_over_and_its_lock_stays_held() {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         let (core, commands) = channel();
-        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        let mut store = store_at(Ok(file.clone()), core);
         store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
         let written = fs::read_to_string(&file).unwrap();
         let edited = written.replace(r#""name": "a""#, r#""name": "edited""#);
@@ -1755,6 +1873,8 @@ mod tests {
         assert_eq!(store.unkept(), Some(why.as_str()));
         assert_eq!(heard(&commands).last(), Some(&Err(why)));
         assert_eq!(fs::read_to_string(&file).unwrap(), edited);
+        let second = take_at(Ok(file), Path::new("/tmp/b"));
+        assert!(matches!(second, Err(Unheld::Elsewhere(_))), "{:?}", second.err());
     }
 
     #[test]
@@ -1762,7 +1882,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         let (core, commands) = channel();
-        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        let mut store = store_at(Ok(file.clone()), core);
         let project = store.change(Change::AddProject { spot: alone("/a"), name: None });
         let Some(Made::Project(project)) = project.unwrap() else { panic!("/a is made") };
         let add = add_in(project, alone("/a/b"));

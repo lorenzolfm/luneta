@@ -1426,6 +1426,7 @@ dependencies = [
  "crossterm",
  "fuzzy-matcher",
  "hyper-util",
+ "libc",
  "luneta-protocol",
  "notify",
  "prost",

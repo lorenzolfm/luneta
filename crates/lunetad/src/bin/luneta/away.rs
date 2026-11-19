@@ -49,8 +49,7 @@ pub struct Away {
 
 impl Away {
     pub fn reach(destination: &Destination, patience: Duration) -> Result<Away, String> {
-        let folder = lunetad::folder::find()
-            .ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in")?;
+        let folder = lunetad::folder::find().map_err(|unfound| format!("{unfound}, to find lunetad in"))?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

@@ -62,6 +62,7 @@ fn luneta_terminate_ends_lunetad_the_mux_its_terminals_and_lunetas_and_forgets_t
     kept_in_home(&owned.host);
     let server = built_server();
     let mut mux = owned.host.vars().command(server.to_str().unwrap());
+    mux.arg(owned.host.folder());
     let mut mux = Running::spawn(mux.stdin(Stdio::null()));
     let socket = owned.socket();
     eventually("the server listens", || socket.exists().then_some(()));
@@ -107,6 +108,33 @@ fn luneta_terminate_ends_lunetad_the_mux_its_terminals_and_lunetas_and_forgets_t
         panic!("a lunetad started again keeps projects: {held:?}");
     };
     assert!(kept.projects.is_empty(), "{:?}", kept.projects);
+}
+
+#[test]
+fn luneta_terminate_ends_the_lunetad_that_keeps_the_projects_and_its_mux_from_another_folder() {
+    let mut owned = Owned::new();
+    kept_in_home(&owned.host);
+    let server = built_server();
+    let mut mux = owned.host.vars().command(server.to_str().unwrap());
+    mux.arg(owned.host.folder());
+    let mut mux = Running::spawn(mux.stdin(Stdio::null()));
+    let socket = owned.socket();
+    eventually("the server listens", || socket.exists().then_some(()));
+    let other = tempfile::tempdir().unwrap();
+    let there = Vars { runtime: Some(other.path()), ..owned.host.vars() };
+
+    let planned = terminate(there, None);
+    assert_eq!(planned.code, Some(3), "{}", planned.stderr);
+    let says = "ends lunetad and luneta-mux; forgets 1 project and 1 workstream";
+    assert_eq!(planned.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
+
+    let ended = terminate(there, Some(&plan_in(&planned)));
+    assert_eq!(ended.code, Some(0), "{}", ended.stderr);
+    let says = "ended lunetad and luneta-mux; forgot 1 project and 1 workstream";
+    assert_eq!(ended.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
+    let keeps = "the lunetad that keeps the projects runs on";
+    assert!(owned.daemon_ended_within(ENDS).is_some(), "{keeps}");
+    assert!(mux.ended_within(ENDS).is_some(), "the luneta-mux of {keeps}");
 }
 
 #[test]

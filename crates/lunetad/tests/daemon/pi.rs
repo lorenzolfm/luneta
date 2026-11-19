@@ -10,7 +10,7 @@ use lunetad::api::{Agent, Harness, Status};
 use serde_json::{json, Value};
 
 use crate::agents::{process, Host};
-use crate::host::{eventually, start, Daemon, Running, Vars};
+use crate::host::{eventually, start, start_as, Daemon, Running, Vars, LUNETAD};
 
 const PI: &str = r#"
 import { createInterface } from "node:readline";
@@ -136,7 +136,7 @@ fn the_extension_goes_where_pi_finds_it_once_pi_has_run() {
 fn a_pi_in_a_shell_that_moved_tmpdir_is_listed() {
     let host = Host::new();
     fs::create_dir_all(host.pi_folder()).unwrap();
-    let _daemon = start(Vars { runtime: None, temp: Some(host.runtime()), ..host.vars() }).unwrap();
+    let _daemon = start(host.vars()).unwrap();
     eventually("the extension is there", || extension(&host).is_file().then_some(()));
 
     let moved = tempfile::tempdir().unwrap();
@@ -165,8 +165,11 @@ fn a_folder_s_spelling_is_no_code_in_the_extension() {
 fn a_daemon_takes_the_extension_back_from_one_that_took_it_and_went() {
     let (host, _daemon) = with_pi();
     let its_own = fs::read_to_string(extension(&host)).unwrap();
-    let elsewhere = tempfile::tempdir().unwrap();
-    let other = start(Vars { runtime: Some(elsewhere.path()), ..host.vars() }).unwrap();
+    let (elsewhere, its_home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (runtime, home) = (Some(elsewhere.path()), Some(its_home.path()));
+    let mut other = Vars { runtime, home, ..host.vars() }.command(LUNETAD);
+    other.env("PI_CODING_AGENT_DIR", host.pi_folder());
+    let other = start_as(other).unwrap();
     eventually("the other daemon has the extension", || {
         (fs::read_to_string(extension(&host)).unwrap() != its_own).then_some(())
     });

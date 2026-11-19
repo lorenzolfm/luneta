@@ -73,6 +73,7 @@
             fileset = pkgs.lib.fileset.unions [
               cargoFiles
               ./.config/nextest.toml
+              ./shell/luneta.fish
             ];
           };
 
@@ -154,6 +155,7 @@
 
             nativeCheckInputs = [
               pkgs.cargo-nextest
+              pkgs.fish
               pkgs.git
               pkgs.nodejs
               pkgs.openssh
@@ -268,6 +270,7 @@
             packages = buildTools ++ [
               dev
               pkgs.cargo-nextest
+              pkgs.fish
               pkgs.nodejs
             ];
             buildInputs = speechLibs ++ [ libghosttyVt.dev ];

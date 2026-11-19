@@ -177,10 +177,12 @@ fn the_server_listens_and_gives_way_as_the_daemon_has_it() {
     let program = built_server();
     let program = program.to_str().unwrap();
     let mut first = host.vars().command(program);
+    first.arg(host.folder());
     let _first = Running::spawn(first.stdin(Stdio::null()));
     let socket = host.folder().join(server::SOCKET);
     eventually("the first server listens", || socket.exists().then_some(()));
     let mut second = host.vars().command(program);
+    second.arg(host.folder());
     let second = second.stdin(Stdio::null()).stderr(Stdio::null()).status().unwrap();
     assert_eq!(second.code(), Some(i32::from(server::ANOTHER_RUNS)));
 }
@@ -189,6 +191,7 @@ pub fn the_daemon_runs_on_while_a_terminal_does() {
     let mut owned = Owned::new();
     let program = built_server();
     let mut mux = owned.host.vars().command(program.to_str().unwrap());
+    mux.arg(owned.host.folder());
     let _mux = Running::spawn(mux.stdin(Stdio::null()));
     let socket = owned.socket();
     eventually("the server listens", || socket.exists().then_some(()));

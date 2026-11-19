@@ -9,10 +9,16 @@ fn main() -> ExitCode {
         eprintln!("luneta-mux: no session of its own: {error}");
         return ExitCode::FAILURE;
     }
-    let Some(path) = folder::find() else {
-        eprintln!("luneta-mux: neither XDG_RUNTIME_DIR nor TMPDIR is set");
+    let mut arguments = std::env::args_os().skip(1);
+    let (Some(path), None) = (arguments.next(), arguments.next()) else {
+        eprintln!("luneta-mux: give it the one folder to listen in, as lunetad does");
         return ExitCode::FAILURE;
     };
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        eprintln!("luneta-mux: {} is no folder to listen in, as it is not absolute", path.display());
+        return ExitCode::FAILURE;
+    }
     let claim = match folder::claim(&path) {
         Ok(claim) => claim,
         Err(refusal @ folder::Refusal::Running(_)) => {

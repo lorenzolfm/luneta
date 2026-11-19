@@ -191,6 +191,7 @@ pub fn laid(session: &SessionName) -> Result<Vec<Laid>, Failure> {
 
 fn zellij() -> Command {
     let mut command = Command::new(PROGRAM);
+    command.env(super::SOCKET_DIR, super::folder().path());
     quiet(&mut command);
     command
 }
@@ -512,7 +513,16 @@ mod tests {
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::ExitStatus;
 
+    use super::super::{folder, SOCKET_DIR};
     use super::*;
+
+    #[test]
+    fn zellij_looks_for_its_sessions_where_lunetad_reads_them() {
+        let command = zellij();
+        let mut told = command.get_envs().filter(|(name, _)| *name == SOCKET_DIR);
+        let (_, told) = told.next().expect("zellij is told its folder");
+        assert_eq!(told, Some(folder().path().as_os_str()));
+    }
 
     #[test]
     fn a_session_name_that_starts_with_a_dash_is_no_option() {
