@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rustix::process::Signal;
@@ -57,7 +57,7 @@ fn running_of(found: Vec<process::Found>, folder: &Path, me: u32) -> Running {
         if found.id.pid == me {
             continue;
         }
-        let Ok(theirs) = folder::find_in(&found.environ) else {
+        let Some(theirs) = listened_in(&found) else {
             continue;
         };
         if same(&theirs, folder) {
@@ -73,6 +73,16 @@ fn running_of(found: Vec<process::Found>, folder: &Path, me: u32) -> Running {
     running.lunetads.sort_unstable();
     running.muxes.sort_unstable();
     running
+}
+
+fn listened_in(found: &process::Found) -> Option<PathBuf> {
+    if found.name == MUX
+        && let [_, folder] = found.argv.as_slice()
+        && Path::new(folder).is_absolute()
+    {
+        return Some(PathBuf::from(folder));
+    }
+    folder::find_in(&found.environ).ok()
 }
 
 fn same(a: &Path, b: &Path) -> bool {
@@ -134,10 +144,28 @@ mod tests {
     }
 
     fn found(pid: u32, name: &str, environ: &[&str]) -> process::Found {
+        given(pid, name, &[], environ)
+    }
+
+    fn given(pid: u32, name: &str, arguments: &[&str], environ: &[&str]) -> process::Found {
         let id = Id { pid, start: "1".to_owned() };
-        let argv = vec![name.to_owned()];
+        let argv = [name].iter().chain(arguments).map(|&argument| argument.to_owned()).collect();
         let environ = environ.iter().map(OsString::from).collect();
         process::Found { id, name: name.to_owned(), argv, environ }
+    }
+
+    #[test]
+    fn a_mux_is_luneta_s_only_in_the_folder_it_was_given() {
+        let folder = Path::new("/run/user/1000/luneta");
+        let ours = ["XDG_RUNTIME_DIR=/run/user/1000"];
+        let listed = vec![
+            given(1, MUX, &["/run/user/1000/luneta"], &[]),
+            given(2, MUX, &["/tmp/test/luneta"], &ours),
+            given(3, MUX, &[], &ours),
+        ];
+        let running = running_of(listed, folder, 0);
+        let muxes: Vec<u32> = running.muxes.into_iter().map(|id| id.pid).collect();
+        assert_eq!(muxes, [1, 3]);
     }
 
     #[test]
