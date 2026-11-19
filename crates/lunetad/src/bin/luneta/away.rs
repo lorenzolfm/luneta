@@ -188,8 +188,8 @@ impl Away {
         prunes::pruned_of(answer)
     }
 
-    pub fn rebase(&mut self, dir: &Directory) -> Result<Rebased, String> {
-        let request = rebases::asked(Some(self.on()), dir);
+    pub fn rebase(&mut self, dir: &Directory, branch: &str) -> Result<Rebased, String> {
+        let request = rebases::asked(Some(self.on()), dir, Some(branch));
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_of(rebases::REBASING, async move {
             timeout(patience, daemon.rebase(request)).await

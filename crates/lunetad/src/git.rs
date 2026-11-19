@@ -273,12 +273,13 @@ pub enum DefaultBranch {
 
 impl DefaultBranch {
     fn of(target: &str) -> Option<DefaultBranch> {
-        if let Some(branch) = target.strip_prefix("refs/heads/") {
+        let named = |branch: &&str| !branch.is_empty();
+        if let Some(branch) = target.strip_prefix("refs/heads/").filter(named) {
             return Some(DefaultBranch::Local { branch: branch.to_owned() });
         }
         let remote = target.strip_prefix("refs/remotes/")?;
         DEFAULT_REMOTES.into_iter().find_map(|name| {
-            let branch = remote.strip_prefix(name)?.strip_prefix('/')?;
+            let branch = remote.strip_prefix(name)?.strip_prefix('/').filter(named)?;
             Some(DefaultBranch::Remote { remote: name, branch: branch.to_owned() })
         })
     }
@@ -308,18 +309,19 @@ impl fmt::Display for DefaultBranch {
     }
 }
 
-pub fn default_branch(dir: &str) -> Result<Option<DefaultBranch>, String> {
+pub fn default_branch(dir: &str, limit: Duration) -> Result<DefaultBranch, String> {
     let named = defaults();
     let mut listing = vec!["for-each-ref", LISTING];
     listing.extend(named.iter().map(String::as_str));
-    let listed = says(dir, &listing)?;
+    let listed = says_within(dir, &listing, limit)?;
     let listed = refs(&listed);
-    let Some((_, target)) = first_default(&named, &listed) else {
-        return Ok(None);
-    };
     let remotes = DEFAULT_REMOTES.join(", ");
+    let Some((_, target)) = first_default(&named, &listed) else {
+        let none = "and no main or master of its own";
+        return Err(format!("no HEAD, main or master of {remotes}, {none}"));
+    };
     let unknown = || format!("git says {target} is the default branch, of none of {remotes}");
-    DefaultBranch::of(target).map(Some).ok_or_else(unknown)
+    DefaultBranch::of(target).ok_or_else(unknown)
 }
 
 pub enum NamedHead {
@@ -348,10 +350,14 @@ pub fn named_head(dir: &str, branch: &str) -> Result<Option<NamedHead>, String> 
 }
 
 pub(crate) fn says(dir: &str, args: &[&str]) -> Result<String, String> {
+    says_within(dir, args, LIMIT)
+}
+
+pub(crate) fn says_within(dir: &str, args: &[&str], limit: Duration) -> Result<String, String> {
     let asked = args.join(" ");
     let mut git = Command::new("git");
     local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]).args(args));
-    let ran = program::run(&mut git, LIMIT)
+    let ran = program::run(&mut git, limit)
         .map_err(|error| format!("git {asked} in {dir} could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("git {asked} in {dir}: {why}"))?;
     Ok(String::from_utf8_lossy(&said).trim_end().to_owned())
@@ -853,7 +859,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{Changed, Common, changed, stamp};
+    use super::{Changed, Common, DefaultBranch, changed, stamp};
 
     fn git(dir: &Path, args: &[&str]) -> bool {
         let mut git = std::process::Command::new("git");
@@ -870,6 +876,20 @@ mod tests {
             .status()
             .unwrap()
             .success()
+    }
+
+    #[test]
+    fn a_default_branch_is_a_named_branch_of_a_known_remote_or_of_its_own() {
+        let remote = |branch: &str| {
+            DefaultBranch::Remote { remote: "origin", branch: branch.to_owned() }
+        };
+        assert_eq!(DefaultBranch::of("refs/remotes/origin/main"), Some(remote("main")));
+        assert_eq!(DefaultBranch::of("refs/remotes/origin/team/main"), Some(remote("team/main")));
+        let local = DefaultBranch::Local { branch: "trunk".to_owned() };
+        assert_eq!(DefaultBranch::of("refs/heads/trunk"), Some(local));
+        for unnamed in ["refs/remotes/origin/", "refs/heads/", "refs/remotes/originals/main"] {
+            assert_eq!(DefaultBranch::of(unnamed), None, "{unnamed}");
+        }
     }
 
     #[test]

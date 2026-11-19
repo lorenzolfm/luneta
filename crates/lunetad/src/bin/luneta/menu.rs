@@ -903,15 +903,11 @@ impl Target {
                 Offer::ForgetMachine(destination)
             },
             (Action::DeleteMerged, _) => Offer::DeleteMerged(self.merged_in()?),
-            (Action::Rebase, Target::View(_, row))
-                if row.repository.is_some() && row.branch.is_some() =>
-            {
-                Offer::Rebase(Rebases::View(row))
+            (Action::Rebase, Target::View(_, row)) if row.repository.is_some() => {
+                Offer::Rebase(Rebases::View(row, row.branch.as_deref()?))
             },
-            (Action::Rebase, Target::Worktree(_, row))
-                if row.repository.is_some() && row.branch.is_some() =>
-            {
-                Offer::Rebase(Rebases::Worktree(row))
+            (Action::Rebase, Target::Worktree(_, row)) if row.repository.is_some() => {
+                Offer::Rebase(Rebases::Worktree(row, row.branch.as_deref()?))
             },
             (Action::BriefEvery, _) => Offer::Brief(brief::Scope::Every),
             (Action::BriefThis, _) => Offer::Brief(brief::Scope::Session),
@@ -1070,29 +1066,27 @@ struct Beside {
 }
 
 enum Rebases<'t> {
-    View(&'t ViewRow),
-    Worktree(&'t WorktreeRow),
+    View(&'t ViewRow, &'t str),
+    Worktree(&'t WorktreeRow, &'t str),
 }
 
-enum Rebasing {
+enum Resolves {
     Beside(Beside),
     In(WorktreeId),
 }
 
 impl Rebases<'_> {
-    fn asked(&self) -> Result<(Rebasing, Directory, String), String> {
+    fn asked(&self) -> Result<(Resolves, Directory, String), String> {
         match self {
-            Rebases::View(row) => {
+            Rebases::View(row, branch) => {
                 let beside = row.beside()?;
-                let (dir, branch) = (beside.cwd.clone(), row.branch.clone());
-                let branch = branch.expect("a view is rebased only on a branch");
-                Ok((Rebasing::Beside(beside), dir, branch))
+                let dir = beside.cwd.clone();
+                Ok((Resolves::Beside(beside), dir, (*branch).to_owned()))
             },
-            Rebases::Worktree(row) => {
+            Rebases::Worktree(row, branch) => {
                 let dir = Directory::parse(row.folder.clone());
                 let dir = dir.map_err(|why| format!("menu: the folder of {}, {why}", row.name))?;
-                let branch = row.branch.clone().expect("a worktree is rebased only on a branch");
-                Ok((Rebasing::In(row.place.worktree), dir, branch))
+                Ok((Resolves::In(row.place.worktree), dir, (*branch).to_owned()))
             },
         }
     }
@@ -1187,7 +1181,7 @@ pub enum Wants {
     Plan { session: Listed, scope: Scope },
     Prunes { dir: Directory },
     Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
-    Rebase { dir: Directory },
+    Rebase { dir: Directory, branch: String },
     Open { session: Listed, view: ViewKey, command: Vec<String> },
     Pull(Work, Wanted),
     Printed { session: Listed, view: ViewKey, ended: Ended },
@@ -1245,7 +1239,7 @@ enum Stage {
     Opening { keys: Keys },
     Reading { keys: Keys, last: Last, beside: Beside, ended: Ended },
     Fetching { keys: Keys, beside: Beside, page: PullPage },
-    Rebasing { keys: Keys, from: Rebasing, branch: String },
+    Rebasing { keys: Keys, resolves: Resolves, branch: String },
     Pull { work: Work, agent: Harness, step: Step },
     Typing { keys: Keys, chain: Chain },
 }
@@ -1497,8 +1491,9 @@ impl Menu {
                 stays(Stage::Sweeping { keys, dir }, wants)
             },
             Offer::Rebase(rebases) => match rebases.asked() {
-                Ok((from, dir, branch)) => {
-                    stays(Stage::Rebasing { keys, from, branch }, Wants::Rebase { dir })
+                Ok((resolves, dir, branch)) => {
+                    let wants = Wants::Rebase { dir, branch: branch.clone() };
+                    stays(Stage::Rebasing { keys, resolves, branch }, wants)
                 },
                 Err(reason) => wrong(reason),
             },
@@ -1791,11 +1786,15 @@ impl Menu {
 
     pub fn rebased(self, rebased: Result<Rebased, String>) -> Did {
         let Menu { number, target, stage } = self;
-        let Stage::Rebasing { keys, from, branch } = stage else {
+        let Stage::Rebasing { keys, resolves, branch } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let rebased = match rebased {
-            Ok(rebased) => rebased,
+            Ok(rebased) if rebased.branch == branch => rebased,
+            Ok(Rebased { branch: other, .. }) => {
+                let why = format!("menu: {branch}: lunetad rebased {other}, not {branch}");
+                return Did::Closed(Done::Wrong(why));
+            },
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: {branch}: {why}"))),
         };
         let Came::Stopped(stopped) = &rebased.came else {
@@ -1803,13 +1802,13 @@ impl Menu {
         };
         let prompt = rebases::prompt(&rebased.branch, &rebased.onto, stopped);
         let command = agents::on_words(keys.agent.harness(), prompt, &[]);
-        match from {
-            Rebasing::Beside(Beside { session, view, .. }) => {
+        match resolves {
+            Resolves::Beside(Beside { session, view, .. }) => {
                 let stage = Stage::Opening { keys };
                 let wants = Wants::Open { session, view, command };
                 Did::Stays(Menu { number, target, stage }, wants)
             },
-            Rebasing::In(worktree) => {
+            Resolves::In(worktree) => {
                 let on = target.machine().clone();
                 Did::Closed(Done::OpenIn { on, worktree, command })
             },
@@ -3197,13 +3196,14 @@ mod tests {
     }
 
     fn on_conflicts() -> Came {
-        Came::Stopped(rebases::Stopped { at: None, conflicted: vec!["menu.rs".to_owned()] })
+        let conflicted = rebases::Conflicted::of(vec!["menu.rs".to_owned()]);
+        Came::Stopped(rebases::Stopped { at: None, conflicted })
     }
 
     fn rebasing(target: Target) -> Menu {
         let (menu, _) = stays(opened(target, Some(GIT)));
         let (menu, wants) = stays(menu.key(&char('r')));
-        assert_eq!(wants, Wants::Rebase { dir: main_dir() });
+        assert_eq!(wants, Wants::Rebase { dir: main_dir(), branch: "feat/menu".to_owned() });
         assert!(menu.rebasing() && menu.waits());
         menu
     }
@@ -3222,6 +3222,10 @@ mod tests {
         assert_eq!(already, Done::Said("menu: feat/menu is on origin/main already".to_owned()));
         let failed = closed(rebasing(view_row()).rebased(Err("git fetch: no route".to_owned())));
         assert_eq!(failed, Done::Wrong("menu: feat/menu: git fetch: no route".to_owned()));
+        let other = Rebased { branch: "main".to_owned(), ..rebased(on_conflicts()) };
+        let moved = closed(rebasing(view_row()).rebased(Ok(other)));
+        let wrong = "menu: feat/menu: lunetad rebased main, not feat/menu";
+        assert_eq!(moved, Done::Wrong(wrong.to_owned()), "no agent starts on another branch");
     }
 
     #[test]

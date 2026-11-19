@@ -20,7 +20,7 @@ pub fn run(dir: Option<&Path>, path: &Path) -> ExitCode {
         Ok(dir) => dir,
         Err(why) => return failed(&why),
     };
-    let rebased = match rebases::rebase(&dir) {
+    let rebased = match rebases::rebase(&dir, None) {
         Ok(rebased) => rebased,
         Err(why) => return failed(&format!("no rebase: {why}")),
     };
@@ -51,15 +51,23 @@ fn failed(why: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-pub fn start(menu: u64, on: Machine, dir: Directory, events: &Sender<Event>) -> JoinHandle<()> {
+pub fn start(
+    menu: u64,
+    on: Machine,
+    dir: Directory,
+    branch: String,
+    events: &Sender<Event>,
+) -> JoinHandle<()> {
     let due = Due::new(events, move |rebased| Event::Rebased { menu, rebased });
-    thread::spawn(move || due.pay(rebased(&on, &dir)))
+    thread::spawn(move || due.pay(rebased(&on, &dir, &branch)))
 }
 
-fn rebased(on: &Machine, dir: &Directory) -> Result<Rebased, String> {
+fn rebased(on: &Machine, dir: &Directory, branch: &str) -> Result<Rebased, String> {
     match on {
-        Machine::Local => rebases::rebase(dir),
-        Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.rebase(dir),
+        Machine::Local => rebases::rebase(dir, Some(branch)),
+        Machine::Remote(destination) => {
+            Away::reach(destination, away::ANSWER)?.rebase(dir, branch)
+        },
     }
 }
 
@@ -71,7 +79,7 @@ pub fn said(rebased: &Rebased) -> String {
         Came::Clean { ahead: 0 } => format!("{branch} is at {onto} now"),
         Came::Clean { ahead: 1 } => format!("{branch} is rebased onto {onto}, one commit on top"),
         Came::Clean { ahead } => format!("{branch} is rebased onto {onto}, {ahead} commits on top"),
-        Came::Stopped(Stopped { conflicted, .. }) => match conflicted.len() {
+        Came::Stopped(Stopped { conflicted, .. }) => match conflicted.count() {
             0 => format!("the rebase of {branch} onto {onto} stopped"),
             1 => format!("the rebase of {branch} onto {onto} stopped on conflicts in a file"),
             files => {
@@ -83,6 +91,8 @@ pub fn said(rebased: &Rebased) -> String {
 
 #[cfg(test)]
 mod tests {
+    use lunetad::rebases::Conflicted;
+
     use super::*;
 
     fn rebased(came: Came) -> Rebased {
@@ -92,7 +102,7 @@ mod tests {
     #[test]
     fn what_a_rebase_came_to_is_said_in_a_line() {
         let stopped = |count: usize| {
-            let conflicted = (0..count).map(|it| it.to_string()).collect();
+            let conflicted = Conflicted::of((0..count).map(|it| it.to_string()).collect());
             Came::Stopped(Stopped { at: None, conflicted })
         };
         let said: Vec<String> = [

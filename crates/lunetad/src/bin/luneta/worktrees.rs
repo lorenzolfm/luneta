@@ -608,6 +608,11 @@ pub enum Opening {
     Beside,
 }
 
+enum Asking {
+    Unsent(Asked),
+    Sent { before: BTreeSet<ViewId> },
+}
+
 pub fn opened(
     path: &Path,
     worktree: WorktreeId,
@@ -627,8 +632,7 @@ pub fn opened(
         Opening::IfEmpty => Beside::Alone,
         Opening::Beside => Beside::Focused,
     };
-    let mut open = Some(Asked::Open { beside, argv });
-    let mut before: Option<BTreeSet<ViewId>> = None;
+    let mut asking = Asking::Unsent(Asked::Open { beside, argv });
     let until = Instant::now() + OPENING;
     loop {
         let left = until.saturating_duration_since(Instant::now());
@@ -640,16 +644,17 @@ pub fn opened(
             },
             Heard::Laid(laid) => {
                 let views: BTreeSet<ViewId> = laid.views().map(|view| view.id).collect();
-                match &before {
-                    None if opening == Opening::IfEmpty && !laid.is_empty() => return Ok(()),
-                    None => {
-                        let open = open.take().expect("a terminal is asked for once");
+                asking = match (asking, opening) {
+                    (Asking::Unsent(_), Opening::IfEmpty) if !laid.is_empty() => return Ok(()),
+                    (Asking::Unsent(open), Opening::IfEmpty | Opening::Beside) => {
                         show.ask(open);
-                        before = Some(views);
+                        Asking::Sent { before: views }
                     },
-                    Some(before) if !views.is_subset(before) => return Ok(()),
-                    Some(_) => {},
-                }
+                    (Asking::Sent { before }, _) if views.is_subset(&before) => {
+                        Asking::Sent { before }
+                    },
+                    (Asking::Sent { .. }, _) => return Ok(()),
+                };
             },
             Heard::Edged { .. } | Heard::Sent(_) => {},
             Heard::Left(gone) => return Err(format!("worktree {gone} is gone")),

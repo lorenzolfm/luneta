@@ -1108,7 +1108,7 @@ pub enum Asked {
     OpenWorktree { on: Machine, project: ProjectRow },
     Prunes { menu: u64, on: Machine, dir: Directory },
     Prune { menu: u64, on: Machine, dir: Directory, agreed: BTreeSet<prunes::Deleting> },
-    Rebase { menu: u64, on: Machine, dir: Directory },
+    Rebase { menu: u64, on: Machine, dir: Directory, branch: String },
     Go { on: Machine, place: Place },
     Take,
     Copy(Link),
@@ -3725,7 +3725,7 @@ impl Sidebar {
                 Asked::Make { menu: number, on, project, cwd, name, command }
             },
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
-            Wants::Rebase { dir } => Asked::Rebase { menu: number, on, dir },
+            Wants::Rebase { dir, branch } => Asked::Rebase { menu: number, on, dir, branch },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
             Wants::Plan { session, scope: Scope::View(view) } => {
                 let plan = self.plan(&on, &session, Deletes::View(view));
@@ -10715,7 +10715,8 @@ mod tests {
         let dir = Directory::parse("/w/b".to_owned()).unwrap();
         let on = Machine::Remote(nixos());
         let number = sidebar.menus + 1;
-        assert_eq!(sidebar.key(&char('r'), now), Asked::Rebase { menu: number, on, dir });
+        let branch = "fix".to_owned();
+        assert_eq!(sidebar.key(&char('r'), now), Asked::Rebase { menu: number, on, dir, branch });
         assert!(sidebar.open().expect("the menu").rebasing());
         let rebased = rebases::Rebased {
             branch: "fix".to_owned(),

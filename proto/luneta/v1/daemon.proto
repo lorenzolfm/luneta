@@ -555,6 +555,7 @@ message PruneResponse {
 message RebaseRequest {
   On on = 1;
   string dir = 2;
+  optional string branch = 3;
 }
 
 message RebaseResponse {
@@ -573,6 +574,7 @@ message RebaseResponse {
   message Stopped {
     optional string at = 1;
     repeated string conflicted = 2;
+    uint32 conflicted_count = 3;
   }
 }
 

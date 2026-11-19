@@ -140,7 +140,7 @@ fn a_far_worktree_is_rebased_on_its_own_machine() {
         let on = || Some(On { destination: "far".to_owned() });
         let dir = Directory::parse(repository.fix.display().to_string()).unwrap();
         let mut rebase = async |came: Came| {
-            let answer = daemon.rebase(rebases::asked(on(), &dir)).await.unwrap();
+            let answer = daemon.rebase(rebases::asked(on(), &dir, Some("fix"))).await.unwrap();
             let answer = answer.into_inner().message().await.unwrap().unwrap();
             let rebased = Rebased::of_api(answer).unwrap();
             assert_eq!((rebased.branch.as_str(), rebased.onto.as_str()), ("fix", "origin/main"));

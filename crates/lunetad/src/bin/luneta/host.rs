@@ -1760,9 +1760,9 @@ impl App {
                 pull::prepare(menu, asking, &self.events);
             },
             Asked::Prunes { menu, on, dir } => prune::plan(menu, on, dir, &self.events),
-            Asked::Rebase { menu, on, dir } => {
+            Asked::Rebase { menu, on, dir, branch } => {
                 let here = on == Machine::Local;
-                let rebasing = rebase::start(menu, on, dir, &self.events);
+                let rebasing = rebase::start(menu, on, dir, branch, &self.events);
                 if here {
                     self.keep_change(rebasing);
                 }
