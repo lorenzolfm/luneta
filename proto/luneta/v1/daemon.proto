@@ -908,6 +908,7 @@ message Project {
 
   message Clone {
     repeated Worktree worktrees = 1;
+    repeated string unopened = 2;
   }
 }
 

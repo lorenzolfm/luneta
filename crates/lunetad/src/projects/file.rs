@@ -1297,7 +1297,7 @@ mod tests {
         assert_eq!(told.len(), 4);
         assert_eq!(told[0], Ok(Projects::default()));
         let kept = told.pop().unwrap();
-        assert_eq!(kept.as_ref().map(|kept| kept.worktrees().count()), Ok(3));
+        assert_eq!(kept.as_ref().map(|kept| kept.worktrees().count()), Ok(2));
 
         drop(store);
         let again = store_at(Ok(file.clone()), core);
@@ -1351,6 +1351,8 @@ mod tests {
         let change = Change::AddProject { spot: clone_of("/w/luneta", &["top"]), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
         let project = ProjectId::new(ids[0]);
+        let top = add_in(project, spot_at("/w/luneta", "top"));
+        (projects, _) = projects.changed(top, &mut draw).unwrap();
         let named = Some(Name::parse("release").unwrap());
         let main = add_named(project, spot_at("/w/luneta", "main"), named);
         (projects, _) = projects.changed(main, &mut draw).unwrap();
@@ -1408,6 +1410,8 @@ mod tests {
         let mut draw = || Ok(drawn.next().unwrap());
         let change = Change::AddProject { spot: clone_of("/w/luneta", &["top"]), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
+        let top = add_in(ProjectId::new(ids[0]), spot_at("/w/luneta", "top"));
+        (projects, _) = projects.changed(top, &mut draw).unwrap();
         let worktree = WorktreeId::new(ids[1]);
         let size = super::super::Size::of(80, 24).unwrap();
         let [shell, vim, agent] = [4, 5, 6].map(|id| ViewId::of(id).unwrap());

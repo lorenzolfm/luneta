@@ -36,12 +36,14 @@ pub const YANK: char = 'y';
 
 pub const YANK_PULL: char = 'p';
 
+pub const OPEN: char = 'o';
+
 pub const SKILLS: char = 'c';
 
 pub const MENU_GROUPS: [(char, &str); 4] =
     [(SKILLS, "Skills"), ('n', "New"), ('d', "Delete"), ('b', "Brief")];
 
-pub const ROW_GROUPS: [(char, &str); 1] = [(YANK, "Yank")];
+pub const ROW_GROUPS: [(char, &str); 2] = [(YANK, "Yank"), (OPEN, "Open")];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Noun {
@@ -131,6 +133,7 @@ actions! {
     Unread,
     Reorder,
     OpenPull,
+    OpenWorktree,
     YankPull,
     PastedWorktree,
     PastedReview,
@@ -281,7 +284,11 @@ impl Action {
                 spec("Reorder", &["move", "select"], Key::Row(&['v']), IN_A_PROJECT, Any)
             },
             Action::OpenPull => {
-                spec("Open PR", &["browser", "pull request"], Key::Row(&['o']), CHECKED_OUT, Any)
+                spec("PR", &["browser", "pull request"], Key::Row(&[OPEN, 'p']), CHECKED_OUT, Any)
+            },
+            Action::OpenWorktree => {
+                let keywords = &["checkout", "branch", "unopened"];
+                spec("Worktree", keywords, Key::Row(&[OPEN, 'w']), IN_A_PROJECT, Any)
             },
             Action::YankPull => {
                 spec("PR link", &["copy", "url"], Key::Row(&[YANK, YANK_PULL]), CHECKED_OUT, Any)

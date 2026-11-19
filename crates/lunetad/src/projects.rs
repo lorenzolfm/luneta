@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read as _};
@@ -956,11 +956,11 @@ impl Projects {
                 Some(self.made(joined.ok_or_else(|| held.unplaced(&spot))?))
             },
             Change::Listed { root, subfolders, seen } => {
-                changed.worktrees_listed(&root, &subfolders, &seen, &mut draw)?;
+                changed.worktrees_listed(&root, &subfolders, &seen)?;
                 None
             },
             Change::Rooted { root, subfolders } => {
-                changed.rooted(&root, &subfolders, &mut draw)?;
+                changed.rooted(&root, &subfolders);
                 None
             },
             Change::RenameProject { project, to } => {
@@ -1073,7 +1073,7 @@ impl Projects {
                 let layout = changed.layout_of(terminal.view())?;
                 let moved = layout.terminal_mut(terminal).clone();
                 layout.closed(terminal.view());
-                assert!(changed.find(from).is_some(), "{from} stays, if empty");
+                changed.left(from);
                 changed.worktree_mut(to)?.layout.opened(View::Terminal(moved), placed, size)?;
                 let held_in = changed.holding_terminal(terminal.view()).map(|(it, _)| it.id());
                 assert_eq!(held_in, Some(to), "terminal {terminal} moved to worktree {to}");
@@ -1111,11 +1111,11 @@ impl Projects {
         match closing {
             Closing::Worktree(worktree) => {
                 let closed = std::mem::take(&mut changed.worktree_mut(worktree)?.layout);
+                changed.left(worktree);
                 for view in closed.views() {
                     let id = layout::Leaf::id(view);
                     assert!(!changed.holds(id.0), "view {id} goes with its worktree's layout");
                 }
-                assert!(changed.find(worktree).is_some(), "worktree {worktree} stays, empty");
             },
             Closing::Project(project) => {
                 let at = changed.projects.iter().position(|it| it.id == project);
@@ -1153,15 +1153,11 @@ impl Projects {
             return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
         }
         let id = ProjectId(self.fresh(draw)?);
-        self.projects.push(Project { id, name, dir, holds: Holds::Clone(Vec::new()) });
-        if let Some(subfolders) = spot.subfolders() {
-            for subfolder in subfolders {
-                self.worktree_made(id, subfolder, None, draw)?;
-            }
-        } else {
-            let own = Worktree::new(self.drawn(draw)?, None);
-            self.project(id)?.holds = Holds::Folder(own);
-        }
+        let holds = match spot.subfolders() {
+            Some(_) => Holds::Clone(Vec::new()),
+            None => Holds::Folder(Worktree::new(self.drawn(draw)?, None)),
+        };
+        self.projects.push(Project { id, name, dir, holds });
         Ok(id)
     }
 
@@ -1247,7 +1243,6 @@ impl Projects {
         root: &Dir,
         subfolders: &BTreeSet<Subfolder>,
         seen: &BTreeSet<WorktreeId>,
-        draw: &mut impl FnMut() -> io::Result<Id>,
     ) -> Result<(), String> {
         let clone = |it: &&Project| it.dir == *root && matches!(it.holds, Holds::Clone(_));
         let Some(project) = self.projects.iter().find(clone).map(Project::id) else {
@@ -1256,28 +1251,22 @@ impl Projects {
         let rows = self.rows(project)?;
         let held = |worktree: &Worktree| worktree.layout.terminals().count();
         let terminals: usize = rows.iter().map(|(_, it)| held(it)).sum();
+        let before = rows.len();
         rows.retain(|(subfolder, it)| {
             !seen.contains(&it.id) || subfolders.contains(subfolder) || held(it) > 0
         });
+        assert!(rows.len() <= before, "a listing of worktrees makes no row");
         let kept: usize = rows.iter().map(|(_, it)| held(it)).sum();
         assert_eq!(kept, terminals, "a listing of worktrees drops no terminal");
-        for subfolder in subfolders {
-            self.worktree_made(project, subfolder, None, draw)?;
-        }
         Ok(())
     }
 
-    fn rooted(
-        &mut self,
-        root: &Dir,
-        subfolders: &BTreeSet<Subfolder>,
-        draw: &mut impl FnMut() -> io::Result<Id>,
-    ) -> Result<(), String> {
+    fn rooted(&mut self, root: &Dir, subfolders: &BTreeSet<Subfolder>) {
         let Some(project) = self.projects.iter_mut().find(|it| it.dir == *root) else {
-            return Ok(());
+            return;
         };
         let Holds::Folder(own) = &project.holds else {
-            return Ok(());
+            return;
         };
         let holding = |subfolder: &Subfolder| {
             let folder = root.at(subfolder);
@@ -1285,16 +1274,12 @@ impl Projects {
         };
         let most = subfolders.iter().enumerate().max_by_key(|(at, it)| (holding(it), Reverse(*at)));
         let Some((_, home)) = most else {
-            return Ok(());
+            return;
         };
         let views = project.view_count();
         project.holds = Holds::Clone(vec![(home.clone(), own.clone())]);
         assert_eq!(project.view_count(), views, "a folder rooted keeps every view");
-        let id = project.id;
-        for subfolder in subfolders {
-            self.worktree_made(id, subfolder, None, draw)?;
-        }
-        Ok(())
+        assert_eq!(project.worktrees().count(), 1, "a folder rooted is one row, its own");
     }
 
     fn kept_as(changed: &Projects) {
@@ -1387,9 +1372,19 @@ impl Projects {
         let held_in = self.holding_view(view).map(|(worktree, _)| worktree.id());
         let worktree = held_in.ok_or_else(|| unknown("view", view))?;
         changed.layout_of(view)?.closed(view);
-        assert!(changed.find(worktree).is_some(), "{worktree} stays, if empty");
+        changed.left(worktree);
         assert!(!changed.holds(view.0), "view {view} left its layout");
         Ok(())
+    }
+
+    fn left(&mut self, worktree: WorktreeId) {
+        let (project, held) = self.find(worktree).expect("a worktree left was held");
+        let goes = matches!(project.holds, Holds::Clone(_)) && held.layout.is_empty();
+        if goes {
+            self.without(worktree).expect("a clone's worktree is in its rows");
+        }
+        let stays = self.find(worktree).is_some();
+        assert_eq!(stays, !goes, "a clone's worktree goes with its last view, a folder's stays");
     }
 
     fn layout_of(&mut self, terminal: ViewId) -> Result<&mut Layout, String> {
@@ -1542,6 +1537,7 @@ pub fn follow(
             let Some(clones) = core::ask(&core, Command::Clones) else {
                 return;
             };
+            let mut listed = BTreeMap::new();
             for (root, seen) in clones.into_iter().filter(|(root, _)| !missing.contains(root)) {
                 let subfolders = match spot::subfolders(&root, SPOT_LOOK) {
                     Ok(subfolders) => subfolders,
@@ -1550,12 +1546,15 @@ pub fn follow(
                         continue;
                     },
                 };
+                listed.insert(root.clone(), subfolders.clone());
                 if layouts.send(layouts::Command::Worktrees { root, subfolders, seen }).is_err() {
                     return;
                 }
             }
+            assert!(listed.len() <= PROJECTS_MAX, "a sweep lists the worktrees of kept clones");
             troubles.done();
-            if core.send(Command::Missing(missing)).is_err() {
+            let told = core.send(Command::Missing(missing)).is_ok();
+            if !told || core.send(Command::Listed(listed)).is_err() {
                 return;
             }
             thread::sleep(sweep);
@@ -1660,7 +1659,12 @@ mod tests {
     }
 
     fn clone(projects: &mut Projects, root: &str, subfolders: &[&str]) -> ProjectId {
-        added(projects, clone_of(root, subfolders))
+        let made = added(projects, clone_of(root, subfolders));
+        assert_eq!(projects.project_of(made).unwrap().worktrees().count(), 0, "none is opened");
+        for subfolder in subfolders.iter().copied().collect::<BTreeSet<_>>() {
+            add(projects, add_in(made, spot_at(root, subfolder)));
+        }
+        made
     }
 
     fn own(projects: &Projects, project: ProjectId) -> WorktreeId {
@@ -1861,6 +1865,23 @@ mod tests {
     }
 
     #[test]
+    fn a_clone_s_project_opens_none_of_its_worktrees_until_one_is_asked_for() {
+        let mut projects = Projects::default();
+        let luneta = added(&mut projects, clone_of("/w/luneta", &["main", "feat"]));
+        assert_eq!(projects.project_of(luneta).unwrap().worktrees().count(), 0);
+        let root = Change::Start { spot: clone_of("/w/luneta", &["main", "feat"]), name: None };
+        let (same, made) = change(&projects, root).unwrap();
+        assert_eq!((same == projects, made), (true, Some(Made::Project(luneta))), "none opened");
+        let feat = Change::Start { spot: spot_at("/w/luneta", "feat"), name: None };
+        let Made::Worktree(feat) = add(&mut projects, feat) else {
+            panic!("a start in a worktree opens it");
+        };
+        let held = projects.project_of(luneta).unwrap();
+        let opened: Vec<_> = held.worktrees().map(|it| it.id).collect();
+        assert_eq!(opened, [feat], "only the one asked for");
+    }
+
+    #[test]
     fn a_start_goes_to_its_worktree_and_in_no_project_makes_one() {
         let mut projects = Projects::default();
         clone(&mut projects, "/w/luneta", &["main"]);
@@ -1881,7 +1902,7 @@ mod tests {
         let (held, there) = projects.find(elo_main).unwrap();
         let held_as = (held.name(), held.dir(), held.folder(there.id()));
         assert_eq!(held_as, (&name("elo-app"), &dir("/w/elo"), Some(dir("/w/elo/main"))));
-        assert_eq!(held.worktrees().count(), 2, "one for each of git's worktrees");
+        assert_eq!(held.worktrees().count(), 1, "the one started in, and no other of git's");
 
         let vault = Change::Start { spot: folder("/w/vault"), name: None };
         let Made::Worktree(notes) = add(&mut projects, vault) else {
@@ -2066,8 +2087,8 @@ mod tests {
         let main = worktree(&mut projects, luneta, "/w/luneta/main");
         opened(&mut projects, main, 100, Placed::Alone);
         projects = projects.closed(Closing::Worktree(main)).unwrap();
-        assert!(layout(&projects, main).is_empty(), "a worktree closes its terminals and stays");
-        assert!(projects.project_of(luneta).is_some());
+        assert!(projects.find(main).is_none(), "a worktree closes with its terminals");
+        assert!(projects.project_of(luneta).is_some(), "and its project stays");
     }
 
     #[test]
@@ -2208,11 +2229,11 @@ mod tests {
         let refused = change(&projects, Change::ForgetWorktree { worktree: main });
         assert!(refused.unwrap_err().contains("holds 1 views still"));
         (projects, _) = change(&projects, Change::Close { view: one }).unwrap();
-        assert!(layout(&projects, main).is_empty(), "a worktree stays with its last terminal gone");
+        assert!(projects.find(main).is_none(), "a worktree goes with its last terminal");
     }
 
     #[test]
-    fn a_worktree_stays_when_its_last_terminal_closes() {
+    fn a_clone_s_worktree_goes_with_its_last_view_and_a_folder_s_stays() {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let main = worktree(&mut projects, luneta, "/w/luneta/main");
@@ -2223,11 +2244,17 @@ mod tests {
         let held_in = projects.holding_terminal(two).map(|(it, _)| it.id());
         assert_eq!(held_in, Some(main), "a terminal not its layout's last leaves the worktree");
         (projects, _) = change(&projects, Change::Close { view: two }).unwrap();
-        let left = projects.all()[0].worktrees().map(|it| it.id);
-        assert_eq!(left.collect::<Vec<_>>(), [main]);
+        assert_eq!(projects.all()[0].worktrees().count(), 0, "its last view takes its row");
+        assert_eq!(projects.all().len(), 1, "and the project stays with no row");
         assert_eq!(projects.terminals().count(), 0);
         let gone = change(&projects, Change::Close { view: two });
         assert!(gone.unwrap_err().contains("no view has the id"));
+
+        let vault = project(&mut projects, "/w/vault");
+        let own = own(&projects, vault);
+        let three = opened(&mut projects, own, 102, Placed::Alone);
+        (projects, _) = change(&projects, Change::Close { view: three }).unwrap();
+        assert!(layout(&projects, own).is_empty(), "a folder's worktree is its project, and stays");
     }
 
     #[test]
@@ -2256,7 +2283,7 @@ mod tests {
 
         (projects, _) = change(&projects, moving(one, feat)).unwrap();
         assert_eq!(layout(&projects, feat).tree().unwrap().panes(), [two, one]);
-        assert!(layout(&projects, main).is_empty(), "a worktree stays with its last moved out");
+        assert!(projects.find(main).is_none(), "a worktree goes with its last terminal moved out");
     }
 
     #[test]
@@ -2281,22 +2308,20 @@ mod tests {
     }
 
     #[test]
-    fn an_open_taken_back_leaves_its_worktree_even_empty() {
+    fn an_open_taken_back_takes_its_worktree_with_it() {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let main = worktree(&mut projects, luneta, "/w/luneta/main");
         let one = opened(&mut projects, main, 100, Placed::Alone);
         let unopen = || Change::Unopen { terminal: TerminalViewId::new(one) };
         (projects, _) = change(&projects, unopen()).unwrap();
-        assert!(layout(&projects, main).is_empty());
-        let left = projects.all()[0].worktrees().map(|it| it.id);
-        assert_eq!(left.collect::<Vec<_>>(), [main], "a worktree an open failed in stays");
+        assert!(projects.find(main).is_none(), "a worktree goes with the last open taken back");
         let gone = change(&projects, unopen());
         assert!(gone.unwrap_err().contains("no view has the id"));
     }
 
     #[test]
-    fn a_worktree_closes_its_terminals_where_a_forget_is_refused() {
+    fn a_worktree_closes_with_its_terminals_where_a_forget_is_refused() {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let main = worktree(&mut projects, luneta, "/w/luneta/main");
@@ -2308,8 +2333,15 @@ mod tests {
         assert!(forget.unwrap_err().contains("holds 2 views still"));
         projects = projects.closed(Closing::Worktree(main)).unwrap();
         let left = projects.all()[0].worktrees().map(|it| it.id);
-        assert_eq!(left.collect::<Vec<_>>(), [main, kept]);
+        assert_eq!(left.collect::<Vec<_>>(), [kept], "a closed worktree goes");
         assert_eq!(projects.terminals().count(), 0);
+        projects = projects.closed(Closing::Worktree(kept)).unwrap();
+        assert_eq!(projects.all()[0].worktrees().count(), 0, "an empty one goes too");
+        let vault = project(&mut projects, "/w/vault");
+        let own = own(&projects, vault);
+        opened(&mut projects, own, 102, Placed::Alone);
+        projects = projects.closed(Closing::Worktree(own)).unwrap();
+        assert!(layout(&projects, own).is_empty(), "a folder's worktree stays, empty");
         let unknown = projects.closed(Closing::Worktree(WorktreeId::of(99).unwrap()));
         assert!(unknown.unwrap_err().contains("no worktree has the id"));
     }
@@ -2365,7 +2397,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_of_a_clone_s_worktrees_adds_the_new_and_forgets_the_empty_rest() {
+    fn a_listing_of_a_clone_s_worktrees_adds_none_and_forgets_the_empty_unlisted() {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &["main", "gone", "held"]);
         let vault = project(&mut projects, "/w/vault");
@@ -2389,7 +2421,7 @@ mod tests {
         assert_eq!(at(&projects, "/w/luneta/late"), None, "seen and not listed, it goes");
         let held = projects.project_of(luneta).unwrap();
         let folders: Vec<Dir> = held.placed().map(|(folder, _)| folder).collect();
-        assert_eq!(folders, ["/w/luneta/held", "/w/luneta/main", "/w/luneta/new"].map(dir));
+        assert_eq!(folders, ["/w/luneta/held", "/w/luneta/main"].map(dir), "new is opened by hand");
         assert_eq!(at(&projects, "/w/luneta/main"), Some(main), "listed again, it keeps its own");
         let (same, _) = change(&projects, listed(&projects, "/w/vault", &[])).unwrap();
         assert_eq!(same, projects, "a folder's project lists no worktrees");
@@ -2452,7 +2484,7 @@ mod tests {
         assert_eq!(held.folder(own), Some(dir("/w/luneta/feat")), "it goes where its terminals are");
         let homes = [one, two].map(|it| projects.holding_terminal(it).map(|(home, _)| home.id()));
         assert_eq!(homes, [Some(own), Some(own)]);
-        assert!(at(&projects, "/w/luneta/main").is_some_and(|it| it != own));
+        assert_eq!(held.worktrees().count(), 1, "the others are opened by hand");
         let again = rooted("/w/luneta", &["feat", "fix", "main"]);
         let (same, _) = change(&projects, again).unwrap();
         assert_eq!(same, projects, "a clone's project is rooted once, and listed after");

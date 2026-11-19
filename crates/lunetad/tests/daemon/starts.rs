@@ -250,17 +250,14 @@ pub fn shown(owned: &Owned, folder: &Path) -> Option<api::Worktree> {
 }
 
 #[test]
-fn a_bare_luneta_makes_the_project_of_its_directory_and_shows_its_one_worktree() {
+fn a_bare_luneta_where_no_project_holds_its_folder_makes_none_and_shows_none() {
     let owned = Owned::new();
     let dir = directory("project");
-    let _window = Window::open(&owned.host, &dir, &[]);
-    eventually("luneta shows the project's folder", || shown(&owned, &dir.path));
-    let projects = projects_of(&owned);
-    let made: Vec<(&str, &str, usize)> = projects
-        .iter()
-        .map(|it| (it.name.as_str(), it.dir.as_str(), it.worktrees().unwrap().len()))
-        .collect();
-    assert_eq!(made, [("project", real(&dir.path).as_str(), 1)]);
+    let window = Window::open(&owned.host, &dir, &[]);
+    let none = || window.shows("no projects").then_some(());
+    eventually("luneta's sidebar says it has no project", none);
+    thread::sleep(Duration::from_secs(1));
+    assert!(projects_of(&owned).is_empty(), "a project is made only when asked for");
 }
 
 #[test]
@@ -282,7 +279,20 @@ fn a_bare_luneta_in_a_project_s_own_folder_shows_its_worktree_used_last() {
     assert!(self::shown(&owned, &folders[0]).is_none(), "one, used never, stays empty");
     let counted = |it: &api::Project| it.worktrees().unwrap().len();
     let worktrees = projects_of(&owned).iter().map(counted).sum::<usize>();
-    assert_eq!(worktrees, 3, "no worktree is made at the clone's root");
+    assert_eq!(worktrees, 1, "none is opened at the clone's root, nor one never opened");
+}
+
+#[test]
+fn a_bare_luneta_at_a_clone_s_root_with_none_open_lists_its_worktrees_to_open() {
+    let owned = Owned::new();
+    let dir = cloned("project", &["one", "two"]);
+    project(&owned.host, Path::new(&real(&dir.path)), None);
+    let window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta lists the clone's worktrees, none open", || {
+        (window.shows("project › one") && window.shows("not open")).then_some(())
+    });
+    let projects = projects_of(&owned);
+    assert!(projects[0].worktrees().unwrap().is_empty(), "none opens until one is picked: {projects:?}");
 }
 
 #[test]
@@ -364,7 +374,7 @@ fn a_named_luneta_refuses_a_name_two_projects_share() {
 }
 
 #[test]
-fn a_bare_luneta_says_why_lunetad_keeps_no_more_projects_rather_than_go_to_another() {
+fn a_named_luneta_says_why_lunetad_keeps_no_more_projects_rather_than_go_to_another() {
     let owned = Owned::new();
     let kept = directory("kept");
     for at in 0..lunetad::projects::PROJECTS_MAX {
@@ -373,7 +383,7 @@ fn a_bare_luneta_says_why_lunetad_keeps_no_more_projects_rather_than_go_to_anoth
         project(&owned.host, Path::new(&real(&dir)), None);
     }
     let dir = directory("new");
-    let output = luneta(owned.host.vars(), &dir.path).output().unwrap();
+    let output = luneta(owned.host.vars(), &dir.path).arg("new").output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     let refusal = String::from_utf8(output.stderr).unwrap();
     assert!(refusal.contains("projects, as many as are kept"), "{refusal}");
@@ -395,16 +405,6 @@ fn a_bare_luneta_where_no_project_may_be_made_shows_the_one_it_saw_last() {
     let _window = Window::open(&owned.host, &outer, &[]);
     eventually("luneta shows inner", || shown(&owned, &main));
     assert_eq!(projects_of(&owned).len(), 1, "no project is made around another");
-}
-
-#[test]
-fn a_bare_luneta_where_the_directory_names_no_project_asks_for_a_name() {
-    let owned = Owned::new();
-    let output = luneta(owned.host.vars(), Path::new("/")).output().unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let refusal = String::from_utf8(output.stderr).unwrap();
-    let said = "luneta: no worktree to show: / names no project: name one";
-    assert!(refusal.starts_with(said), "{refusal}");
 }
 
 #[test]

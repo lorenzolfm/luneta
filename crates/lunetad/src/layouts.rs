@@ -599,8 +599,8 @@ impl Layouts {
             self.unwritten(&why);
         }
         let projects = self.store.projects().expect("projects just changed are kept");
-        let emptied = projects.find(worktree).is_some_and(|(_, it)| it.layout().is_empty());
-        assert!(emptied, "worktree {worktree} is closed, and stays empty");
+        let emptied = projects.find(worktree).is_none_or(|(_, it)| it.layout().is_empty());
+        assert!(emptied, "worktree {worktree} is closed: gone, or a folder's, empty");
         self.forget_closed(&[worktree], &terminals);
         Ok(None)
     }
@@ -1152,8 +1152,8 @@ impl Layouts {
         if let Some(heir) = heir {
             assert!(projects.holding_view(heir).is_some(), "view {heir} took the room it left");
         } else {
-            let emptied = projects.find(worktree).is_some_and(|(_, it)| it.layout().is_empty());
-            assert!(emptied, "worktree {worktree} stays, empty, after its last view");
+            let emptied = projects.find(worktree).is_none_or(|(_, it)| it.layout().is_empty());
+            assert!(emptied, "worktree {worktree}, after its last view, is gone or empty");
         }
         let focused = self.clients.values().any(|client| client.focus == Some(view));
         assert!(!focused, "no client focuses view {view}, which closed");
@@ -1410,6 +1410,9 @@ impl Layouts {
         let mut gone = Vec::new();
         for (id, client) in clients.iter_mut() {
             let Some((_, shown)) = projects.find(client.worktree) else {
+                if let Some(emptied) = client.said.as_ref().and_then(emptied) {
+                    let _ = client.out.try_send(Ok(emptied));
+                }
                 let forgotten = format!("worktree {} is forgotten", client.worktree);
                 let _ = client.out.try_send(Err(Status::not_found(forgotten)));
                 gone.push(*id);
@@ -1588,6 +1591,17 @@ fn is_folder(folder: &Dir) -> Result<bool, String> {
         Ok(Looked::Stuck) => Err(format!("{} did not answer in {secs}s", folder.as_str())),
         Err(error) => Err(format!("{} is not looked at: {error}", folder.as_str())),
     }
+}
+
+fn emptied(said: &api::ShowResponse) -> Option<api::ShowResponse> {
+    let Some(show_response::Event::Laid(laid)) = &said.event else {
+        return None;
+    };
+    if laid.panes.is_empty() {
+        return None;
+    }
+    let empty = show_response::Laid { panes: Vec::new(), shown: None, ..laid.clone() };
+    Some(api::ShowResponse { event: Some(show_response::Event::Laid(empty)) })
 }
 
 fn told(out: &Out, word: api::ShowResponse) -> bool {

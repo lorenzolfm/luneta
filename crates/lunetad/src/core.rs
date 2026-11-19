@@ -15,8 +15,8 @@ use crate::claude::Scan;
 use crate::github::Found;
 use crate::mux::own::server::{self, Is};
 use crate::panes::{self, Pane, Titled};
-use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage, ViewId};
-use crate::projects::{Worktree, WorktreeId};
+use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage, Subfolder};
+use crate::projects::{ViewId, Worktree, WorktreeId};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::{Doing, Shell};
@@ -63,6 +63,7 @@ pub enum Command {
     Hosts(Named),
     Projects { projects: Result<Projects, String>, revision: Revision },
     Missing(BTreeSet<Dir>),
+    Listed(BTreeMap<Dir, BTreeSet<Subfolder>>),
     Remote { destination: Destination, reached: Reached },
     Say { said: ToSay, at: SystemTime, answer: oneshot::Sender<Result<(), String>> },
     Sessions(oneshot::Sender<Vec<Addressed>>),
@@ -127,6 +128,7 @@ struct Known {
     projects: Result<Projects, String>,
     revision: Revision,
     missing: BTreeSet<Dir>,
+    listed: BTreeMap<Dir, BTreeSet<Subfolder>>,
     words: u64,
     told: HashMap<Id, u64>,
     host: api::Host,
@@ -153,6 +155,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         projects: Err("lunetad has read no projects yet".to_owned()),
         revision: Revision::default(),
         missing: BTreeSet::new(),
+        listed: BTreeMap::new(),
         words: 0,
         told: HashMap::new(),
         host: api::Host::default(),
@@ -234,6 +237,8 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     wake(&wakes.git);
                 }
             },
+            Command::Listed(now) if now == known.listed => continue,
+            Command::Listed(now) => known.listed = now,
             Command::Remote { destination, reached } => {
                 let Some((_, was)) = known.remotes.iter_mut().find(|(it, _)| *it == destination)
                 else {
@@ -530,10 +535,11 @@ impl Known {
         let holds = |project: &Project| match project.holds() {
             Holds::Folder(own) => api::project::Holds::Folder(worktree(project.dir().clone(), own)),
             Holds::Clone(rows) => {
+                let unopened = self.unopened(project.dir(), rows);
                 let rows = rows.iter().map(|(subfolder, it)| {
                     worktree(project.dir().at(subfolder), it)
                 });
-                api::project::Holds::Clone(api::project::Clone { worktrees: rows.collect() })
+                api::project::Holds::Clone(api::project::Clone { worktrees: rows.collect(), unopened })
             },
         };
         let project = |project: &Project| api::Project {
@@ -546,6 +552,18 @@ impl Known {
         let projects = projects.all().iter().map(project).collect();
         let kept = api::projects::Kept { projects, version: Some(self.revision.to_api()) };
         api::Projects { held: Some(api::projects::Held::Kept(kept)) }
+    }
+
+    fn unopened(&self, dir: &Dir, rows: &[(Subfolder, Worktree)]) -> Vec<String> {
+        let Some(listed) = self.listed.get(dir) else {
+            return Vec::new();
+        };
+        let opened: BTreeSet<&Subfolder> = rows.iter().map(|(subfolder, _)| subfolder).collect();
+        let unopened = listed.iter().filter(|it| !opened.contains(it));
+        let folder = |it: &Subfolder| dir.at(it).as_str().to_owned();
+        let unopened: Vec<String> = unopened.map(folder).collect();
+        assert!(unopened.len() <= listed.len(), "a project's unopened worktrees are listed ones");
+        unopened
     }
 
     fn built_terminals(&self, worktree: &Worktree) -> Vec<api::Terminal> {

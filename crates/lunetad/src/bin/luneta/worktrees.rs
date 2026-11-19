@@ -17,7 +17,6 @@ use lunetad::{Asked, Beside, Heard};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
-use lunetad::names::session_for;
 use lunetad::Directory;
 
 use crate::daemon;
@@ -266,9 +265,10 @@ fn last_used(project: &Project) -> Option<WorktreeId> {
     last.map(|it| it.id)
 }
 
-fn at_folder(path: &Path, project: &Project, folder: &str) -> Result<Option<WorktreeId>, Tried> {
+fn at_folder(path: &Path, project: &Project, folder: &str) -> Result<Option<Opened>, Tried> {
     assert!(holds(&project.dir, Path::new(folder)), "{folder} is in {}", project.dir);
-    in_kept(path, project.id, started_at(path, folder))
+    let started = in_kept(path, project.id, started_at(path, folder))?;
+    Ok(Some(started.map_or(Opened::Root(project.id), Opened::Worktree)))
 }
 
 fn chosen(
@@ -277,12 +277,15 @@ fn chosen(
     name: Option<&str>,
     cwd: &Path,
     folder: &str,
-) -> Option<Result<Option<WorktreeId>, Tried>> {
+) -> Option<Result<Option<Opened>, Tried>> {
     if let Some(name) = name {
         let named: Vec<&Project> = projects.iter().filter(|project| project.name == name).collect();
         match named[..] {
             [] => {},
-            [one] => return Some(Ok(last_used(one))),
+            [one] => {
+                let opened = last_used(one).map_or(Opened::Root(one.id), Opened::Worktree);
+                return Some(Ok(Some(opened)));
+            },
             [..] => {
                 let dirs: Vec<&str> = named.iter().map(|project| project.dir.as_str()).collect();
                 let dirs = dirs.join(", ");
@@ -309,7 +312,7 @@ pub fn start(
     name: Option<&str>,
     cwd: &Path,
     seen: impl Fn(ProjectId) -> Option<SystemTime>,
-) -> Result<Option<WorktreeId>, String> {
+) -> Result<Option<Opened>, String> {
     let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
     twice(|| started(path, name, cwd, folder, &seen))
 }
@@ -320,28 +323,23 @@ fn started(
     cwd: &Path,
     folder: &str,
     seen: &impl Fn(ProjectId) -> Option<SystemTime>,
-) -> Result<Option<WorktreeId>, Tried> {
-    if let Some(chosen) = chosen(path, &kept(path)?, name, cwd, folder) {
-        return chosen;
-    }
-    let unmade = if name.is_some() || session_for(cwd).is_some() {
-        match add_project(path, folder, name) {
-            Ok(_) => format!("lunetad made the project of {}, with no worktree", cwd.display()),
-            Err(Unmade::Failed(why)) => return Err(Tried::Failed(why)),
-            Err(Unmade::Nests(why)) => why,
-        }
-    } else {
-        format!("{} names no project: name one", cwd.display())
-    };
+) -> Result<Option<Opened>, Tried> {
     let projects = kept(path)?;
     if let Some(chosen) = chosen(path, &projects, name, cwd, folder) {
         return chosen;
     }
-    if name.is_some() {
-        return Err(Tried::Failed(unmade));
-    }
-    let last = |project: &&Project| seen(project.id);
-    Ok(last_used(projects.iter().max_by_key(last).ok_or(unmade)?))
+    let Some(name) = name else {
+        let last = |project: &&Project| seen(project.id);
+        let held = projects.iter().filter(|project| !project.worktrees().is_empty());
+        return Ok(held.max_by_key(last).and_then(last_used).map(Opened::Worktree));
+    };
+    let unmade = match add_project(path, folder, Some(name)) {
+        Ok(_) => format!("lunetad made the project of {}, and keeps it nowhere", cwd.display()),
+        Err(Unmade::Failed(why)) => return Err(Tried::Failed(why)),
+        Err(Unmade::Nests(why)) => why,
+    };
+    let projects = kept(path)?;
+    chosen(path, &projects, Some(name), cwd, folder).unwrap_or(Err(Tried::Failed(unmade)))
 }
 
 pub fn made_at(
@@ -416,11 +414,16 @@ pub fn renamed_terminal(
     changed_there(machine, Change::RenameTerminal(RenameTerminal { terminal, to }))
 }
 
+pub enum Opened {
+    Worktree(WorktreeId),
+    Root(ProjectId),
+}
+
 pub fn project_made(
     machine: &Machine,
     folder: &str,
     name: Option<&Name>,
-) -> Result<WorktreeId, String> {
+) -> Result<Opened, String> {
     let (dir, name) = (folder.to_owned(), name.map(spelled));
     let unmade = |why: String| format!("no project made: {why}");
     let made = made_there(machine, Change::AddProject(AddProject { dir, name })).map_err(unmade)?;
@@ -430,7 +433,12 @@ pub fn project_made(
     };
     let empty = |why: String| format!("{folder} is project {project}, with no worktree: {why}");
     let start = Start { folder: folder.to_owned(), name: None };
-    worktree_made(made_there(machine, Change::Start(start)).map_err(empty)?).map_err(empty)
+    match made_there(machine, Change::Start(start)).map_err(empty)? {
+        Some(Made::Project(root)) if root == project => {
+            ProjectId::of(project).map(Opened::Root).ok_or_else(|| zero("project"))
+        },
+        made => worktree_made(made).map(Opened::Worktree).map_err(empty),
+    }
 }
 
 fn spelled(name: &Name) -> String {

@@ -112,6 +112,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_lunetad_starts_again() 
                         terminals: Vec::new(),
                         used_at: None,
                     }],
+                    unopened: Vec::new(),
                 })),
             },
             api::Project {
@@ -184,7 +185,7 @@ fn a_folder_that_goes_is_kept_and_said_to_be_missing() {
 }
 
 #[test]
-fn a_clone_s_worktrees_made_or_removed_outside_luneta_come_and_go_on_the_sweep() {
+fn a_clone_s_worktrees_made_or_removed_outside_luneta_are_listed_unopened_on_the_sweep() {
     let host = Host::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = fs::canonicalize(scratch.path()).unwrap();
@@ -192,7 +193,7 @@ fn a_clone_s_worktrees_made_or_removed_outside_luneta_come_and_go_on_the_sweep()
     cloned_as_wt(&scratch, &up, &clone);
     let _daemon = start(host.vars()).unwrap();
     let luneta = project(&host, &clone.join("main"), None);
-    let folders = |host: &Host| {
+    let listed = |host: &Host| {
         let Held::Kept(Kept { projects, .. }) = held(host) else {
             panic!("the projects are kept");
         };
@@ -200,16 +201,26 @@ fn a_clone_s_worktrees_made_or_removed_outside_luneta_come_and_go_on_the_sweep()
             panic!("{projects:?}");
         };
         assert_eq!((project.id, project.dir.as_str()), (luneta, text(&clone).as_str()));
-        project.worktrees().unwrap().iter().map(|it| it.folder.clone()).collect::<Vec<_>>()
+        let opened = project.worktrees().unwrap().iter().map(|it| it.folder.clone());
+        let unopened = match &project.holds {
+            Some(Holds::Clone(clone)) => clone.unopened.clone(),
+            Some(Holds::Folder(_)) | None => Vec::new(),
+        };
+        (opened.collect::<Vec<_>>(), unopened)
     };
-    assert_eq!(folders(&host), [text(&clone.join("main"))], "a project is its clone's");
+    let (main, feat) = (text(&clone.join("main")), text(&clone.join("feat-2")));
+    let none = Vec::<String>::new;
+    let unopened = (none(), vec![main.clone()]);
+    eventually("a project is its clone's, none open", || (listed(&host) == unopened).then_some(()));
 
     worktree_added(&clone, "feat-2");
-    let both = [text(&clone.join("main")), text(&clone.join("feat-2"))];
-    eventually("a worktree made is listed", || (folders(&host) == both).then_some(()));
+    let both = (none(), vec![feat.clone(), main.clone()]);
+    eventually("a worktree made is listed, not opened", || (listed(&host) == both).then_some(()));
+    worktree(&host, luneta, &clone.join("feat-2"));
+    let opened = (vec![feat.clone()], vec![main.clone()]);
+    eventually("one opened is a row", || (listed(&host) == opened).then_some(()));
     git(&clone.join(".bare"), &["worktree", "remove", "../feat-2"]);
-    let one = [text(&clone.join("main"))];
-    eventually("a worktree removed goes", || (folders(&host) == one).then_some(()));
+    eventually("a worktree removed goes", || (listed(&host) == unopened).then_some(()));
 }
 
 #[test]
@@ -240,13 +251,21 @@ fn a_folder_s_project_becomes_its_clone_s_when_wt_clones_into_its_folder() {
     worktree_added(&folder, "feat-2");
     let both = [text(&folder.join("feat-2")), text(&folder.join("main"))];
     let rooted = |host: &Host| {
-        let held = rows(host);
-        let mut folders: Vec<String> = held.iter().map(|(_, it)| it.clone()).collect();
-        folders.sort();
-        let kept = held.iter().any(|(id, _)| *id == own);
-        (kept && folders == both).then_some(())
+        let [(id, at)] = rows(host).try_into().ok()?;
+        (id == own && both.contains(&at)).then_some(at)
     };
-    eventually("the project is its clone's, and its worktree one of git's", || rooted(&host));
+    let at = eventually("the project is its clone's, its worktree one of git's", || rooted(&host));
+    let unopened = |host: &Host| {
+        let Held::Kept(Kept { projects, .. }) = held(host) else {
+            panic!("the projects are kept");
+        };
+        let other: Vec<&String> = both.iter().filter(|it| **it != at).collect();
+        let Some(Holds::Clone(clone)) = &projects[0].holds else {
+            return None;
+        };
+        (clone.unopened.iter().collect::<Vec<_>>() == other).then_some(())
+    };
+    eventually("git's other worktree is listed, not opened", || unopened(&host));
 }
 
 #[test]
@@ -382,13 +401,11 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
         worktrees.map(|it| (it.id, it.folder.clone())).collect::<Vec<_>>()
     };
 
-    let Some(Made::Found(feat)) = start("luneta/feat") else {
+    let Some(Made::Worktree(feat)) = start("luneta/feat") else {
         panic!("a start in a worktree of a project far keeps goes to it there");
     };
-    let listed = folders();
-    let main = listed.iter().find(|(_, it)| *it == text(&real.join("luneta/main"))).unwrap().0;
-    let want = [(feat, text(&real.join("luneta/feat"))), (main, text(&real.join("luneta/main")))];
-    assert_eq!(listed, want, "one for each worktree of project {luneta}");
+    let want = [(feat, text(&real.join("luneta/feat")))];
+    assert_eq!(folders(), want, "only the one started in, of project {luneta}'s worktrees");
     assert_eq!(start("luneta/feat"), Some(Made::Found(feat)), "the same one again");
     assert_eq!(start("luneta"), Some(Made::Found(feat)), "its clone's root opens the first");
     worktree_added(&real.join("luneta"), "pr-7");

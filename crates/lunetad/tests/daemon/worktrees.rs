@@ -87,12 +87,13 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
 
     assert_eq!(said(&started(&owned.host, &main, "feat", &[])), shown(&feat));
     assert!(feat.join(".git").is_file(), "wt made the worktree");
-    let worktrees = [&feat, &main].map(|it| it.display().to_string()).to_vec();
-    let made = vec![("n".to_owned(), clone.display().to_string(), worktrees)];
-    assert_eq!(folders(&owned.host), made, "one for each of its clone's worktrees");
+    let opened = vec![feat.display().to_string()];
+    let made = vec![("n".to_owned(), clone.display().to_string(), opened)];
+    assert_eq!(folders(&owned.host), made, "only the worktree started opens");
     assert_eq!(said(&started(&owned.host, &main, "feat", &[])), shown(&feat));
     assert_eq!(folders(&owned.host), made, "the worktree is started again");
 
+    worktree(&owned.host, projects(&owned.host)[0].id, &main);
     let projects = projects(&owned.host);
     let worktrees = projects[0].worktrees().unwrap();
     let [there, here] = [0, 1].map(|at| WorktreeId::of(worktrees[at].id).unwrap());
@@ -184,9 +185,9 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     assert!(issue.join(".git").is_file(), "the issue's worktree is made");
     let agent = eventually("an agent starts on the issue", || fs::read_to_string(&asked).ok());
     assert_eq!(agent, "Tackle https://github.com/o/n/issues/7\n");
-    let worktrees = [&issue, &clone.join("main")].map(|it| it.display().to_string()).to_vec();
-    let made = vec![("n".to_owned(), clone.display().to_string(), worktrees)];
-    assert_eq!(folders(host), made);
+    let opened = vec![issue.display().to_string()];
+    let made = vec![("n".to_owned(), clone.display().to_string(), opened)];
+    assert_eq!(folders(host), made, "only the issue's worktree opens");
     let terminals = || projects(host)[0].worktrees().unwrap()[0].terminals.len();
     assert_eq!(terminals(), 1);
 

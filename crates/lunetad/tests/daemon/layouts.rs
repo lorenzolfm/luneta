@@ -755,10 +755,13 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     });
     assert!(tagged(&owned.listing(), stays).is_some(), "another worktree's terminal stays");
     shown.until("the view emptied", |laid| laid.panes.is_empty());
-    assert_eq!(watched(&owned, closing), [], "a worktree closed stays, empty");
+    let gone = || watched_worktree(&owned, closing).is_none().then_some(());
+    eventually("a worktree closed goes", gone);
+    assert_eq!(watched(&owned, other).len(), 1, "the other stays, with its terminal");
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.contains(&format!("{closing:016x}")), "{file}");
-    assert_eq!(asked(&owned.host, closed(&[])).unwrap(), None, "and closes again");
+    assert!(!file.contains(&format!("{closing:016x}")), "{file}");
+    let again = asked(&owned.host, closed(&[])).unwrap_err();
+    assert!(again.message().contains("no worktree has the id"), "{}", again.message());
 }
 
 #[test]
