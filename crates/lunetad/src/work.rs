@@ -10,10 +10,13 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use crate::api::list_work_response::{Issue as SaidIssue, Pull as SaidPull};
+use crate::api::list_work_response::{
+    Issue as SaidIssue, Listed as SaidListed, Pull as SaidPull, Work as SaidWork,
+};
 use crate::api::ListWorkResponse;
+use crate::directory::Directory;
 use crate::projects::{Dir, PROJECTS_MAX};
-use crate::{git, program};
+use crate::{git, issues, program};
 
 pub const LISTED_MAX: usize = 50;
 
@@ -55,20 +58,47 @@ pub struct Pull {
     pub author: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct More {
+    pub issues: bool,
+    pub pulls: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Work {
     issues: Vec<Issue>,
     pulls: Vec<Pull>,
+    more: More,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Listed {
+    Work(Work),
+    Unhosted,
+}
+
+impl Listed {
+    #[must_use]
+    pub fn answer(&self) -> ListWorkResponse {
+        let listed = match self {
+            Listed::Work(work) => SaidListed::Work(work.answer()),
+            Listed::Unhosted => SaidListed::Unhosted(()),
+        };
+        ListWorkResponse { listed: Some(listed) }
+    }
+
+    pub fn of(said: ListWorkResponse) -> Result<Listed, String> {
+        match said.listed.ok_or("listed: neither work nor unhosted")? {
+            SaidListed::Work(work) => Work::of(work).map(Listed::Work),
+            SaidListed::Unhosted(()) => Ok(Listed::Unhosted),
+        }
+    }
 }
 
 impl Work {
-    pub fn new(issues: Vec<Issue>, pulls: Vec<Pull>) -> Result<Work, String> {
-        if issues.len() > LISTED_MAX {
-            return Err(format!("at most {LISTED_MAX} issues"));
-        }
-        if pulls.len() > LISTED_MAX {
-            return Err(format!("at most {LISTED_MAX} pull requests"));
-        }
+    pub fn new(issues: Vec<Issue>, pulls: Vec<Pull>, more: More) -> Result<Work, String> {
+        full("issues", issues.len(), more.issues)?;
+        full("pull requests", pulls.len(), more.pulls)?;
         for issue in &issues {
             titled(issue.number, &issue.title)?;
             if issue.labels.len() > LABELS_MAX {
@@ -85,7 +115,7 @@ impl Work {
                 named(pull.number, "its author", author)?;
             }
         }
-        Ok(Work { issues, pulls })
+        Ok(Work { issues, pulls, more })
     }
 
     #[must_use]
@@ -99,36 +129,55 @@ impl Work {
     }
 
     #[must_use]
-    pub fn answer(&self) -> ListWorkResponse {
-        let issues = self.issues.iter().map(|issue| SaidIssue {
+    pub fn more(&self) -> More {
+        self.more
+    }
+
+    fn answer(&self) -> SaidWork {
+        let Work { issues, pulls, more } = self;
+        let issues = issues.iter().map(|issue| SaidIssue {
             number: issue.number.get(),
             title: issue.title.clone(),
             labels: issue.labels.clone(),
         });
-        let pulls = self.pulls.iter().map(|pull| SaidPull {
+        let pulls = pulls.iter().map(|pull| SaidPull {
             number: pull.number.get(),
             title: pull.title.clone(),
             draft: pull.draft,
             branch: pull.branch.clone(),
-            author: pull.author.clone().unwrap_or_default(),
+            author: pull.author.clone(),
         });
-        ListWorkResponse { issues: issues.collect(), pulls: pulls.collect() }
+        SaidWork {
+            issues: issues.collect(),
+            pulls: pulls.collect(),
+            more_issues: more.issues,
+            more_pulls: more.pulls,
+        }
     }
 
-    pub fn of(said: ListWorkResponse) -> Result<Work, String> {
-        let ListWorkResponse { issues, pulls } = said;
+    fn of(said: SaidWork) -> Result<Work, String> {
+        let SaidWork { issues, pulls, more_issues, more_pulls } = said;
         let number = |number| NonZeroU32::new(number).ok_or("an issue or pull request of number 0");
         let issues = issues.into_iter().map(|SaidIssue { number: at, title, labels }| {
             Ok(Issue { number: number(at)?, title, labels })
         });
         let pulls = pulls.into_iter().map(|SaidPull { number: at, title, draft, branch, author }| {
-            let author = Some(author).filter(|author| !author.is_empty());
             Ok(Pull { number: number(at)?, title, draft, branch, author })
         });
         let issues = issues.collect::<Result<Vec<_>, &str>>()?;
         let pulls = pulls.collect::<Result<Vec<_>, &str>>()?;
-        Work::new(issues, pulls)
+        Work::new(issues, pulls, More { issues: more_issues, pulls: more_pulls })
     }
+}
+
+fn full(kind: &str, listed: usize, more: bool) -> Result<(), String> {
+    if listed > LISTED_MAX {
+        return Err(format!("at most {LISTED_MAX} {kind}"));
+    }
+    if more && listed < LISTED_MAX {
+        return Err(format!("{listed} {kind} are listed of more, where {LISTED_MAX} would be"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -138,19 +187,20 @@ pub struct Listings {
 }
 
 impl Listings {
-    pub fn list(&self, dir: &Dir) -> Result<Work, String> {
+    pub fn list(&self, dir: &Dir) -> Result<Listed, String> {
         let slots = locked(&self.slots);
-        let waited = self.done.wait_timeout_while(slots, PATIENCE, |slots| slots.running(dir));
-        let (mut slots, waited) = waited.unwrap_or_else(PoisonError::into_inner);
-        if waited.timed_out() {
-            let (dir, waited) = (dir.as_str(), PATIENCE.as_secs());
-            return Err(format!("gh has listed the work in {dir} for over {waited}s"));
-        }
+        let running = |slots: &mut Slots| matches!(slots.seen(dir, Instant::now()), Seen::Running);
+        let waited = self.done.wait_timeout_while(slots, PATIENCE, running);
+        let (mut slots, _) = waited.unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
-        if let Some(listed) = slots.fresh(dir, now) {
-            return listed;
+        match slots.seen(dir, now) {
+            Seen::Running => {
+                let (dir, waited) = (dir.as_str(), PATIENCE.as_secs());
+                return Err(format!("gh has listed the work in {dir} for over {waited}s"));
+            },
+            Seen::Fresh(listed) => return listed.clone(),
+            Seen::Unlisted => slots.run(dir, now)?,
         }
-        slots.run(dir, now)?;
         drop(slots);
         let listed = panic::catch_unwind(|| listed_by_gh(dir));
         let kept = listed.as_ref().ok().map(|listed| (Instant::now(), listed.clone()));
@@ -168,19 +218,22 @@ struct Slots {
 #[derive(Debug)]
 enum Slot {
     Running,
-    Listed { at: Instant, listed: Result<Work, String> },
+    Listed { at: Instant, listed: Result<Listed, String> },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Seen<'a> {
+    Running,
+    Fresh(&'a Result<Listed, String>),
+    Unlisted,
 }
 
 impl Slots {
-    fn running(&self, dir: &Dir) -> bool {
-        matches!(self.slots.get(dir), Some(Slot::Running))
-    }
-
-    fn fresh(&self, dir: &Dir, now: Instant) -> Option<Result<Work, String>> {
-        match self.slots.get(dir)? {
-            Slot::Listed { at, listed } if fresh(*at, now) => Some(listed.clone()),
-            Slot::Listed { .. } => None,
-            Slot::Running => unreachable!("a listing that runs is waited for before it is read"),
+    fn seen(&self, dir: &Dir, now: Instant) -> Seen<'_> {
+        match self.slots.get(dir) {
+            Some(Slot::Running) => Seen::Running,
+            Some(Slot::Listed { at, listed }) if fresh(*at, now) => Seen::Fresh(listed),
+            Some(Slot::Listed { .. }) | None => Seen::Unlisted,
         }
     }
 
@@ -207,7 +260,7 @@ impl Slots {
         Ok(())
     }
 
-    fn ran(&mut self, dir: &Dir, kept: Option<(Instant, Result<Work, String>)>) {
+    fn ran(&mut self, dir: &Dir, kept: Option<(Instant, Result<Listed, String>)>) {
         let was = self.slots.remove(dir);
         assert!(matches!(was, Some(Slot::Running)), "only a listing that runs ends");
         if let Some((at, listed)) = kept {
@@ -252,7 +305,10 @@ struct Author {
     login: String,
 }
 
-fn listed_by_gh(dir: &Dir) -> Result<Work, String> {
+fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
+    if issues::remotes(&Directory::from(dir))?.is_empty() {
+        return Ok(Listed::Unhosted);
+    }
     let folder = dir.as_str().to_owned();
     let pulls = thread::Builder::new()
         .name("work-pulls".to_owned())
@@ -260,12 +316,14 @@ fn listed_by_gh(dir: &Dir) -> Result<Work, String> {
         .map_err(|error| format!("no thread to list pull requests in: {error}"))?;
     let issues = gh::<ListedIssue>(dir.as_str(), &ISSUES, ISSUE_FIELDS);
     let pulls = pulls.join().unwrap_or_else(|panic| panic::resume_unwind(panic));
-    let issues = issues?.into_iter().map(|ListedIssue { number, title, labels }| {
+    let (issues, more_issues) = issues?;
+    let (pulls, more_pulls) = pulls?;
+    let issues = issues.into_iter().map(|ListedIssue { number, title, labels }| {
         let labels = labels.into_iter().map(|label| cut(label.name, NAME_BYTES_MAX));
         let labels = labels.filter(|label| !label.is_empty()).take(LABELS_MAX).collect();
         Issue { number, title: cut(title, TITLE_BYTES_MAX), labels }
     });
-    let pulls = pulls?.into_iter().map(|pull| {
+    let pulls = pulls.into_iter().map(|pull| {
         if pull.head_ref_name.is_empty() {
             return Err(format!("gh lists pull request #{} with no branch", pull.number));
         }
@@ -279,8 +337,10 @@ fn listed_by_gh(dir: &Dir) -> Result<Work, String> {
         })
     });
     let pulls = pulls.collect::<Result<Vec<_>, String>>()?;
-    let work = Work::new(issues.collect(), pulls);
-    Ok(work.expect("gh's lists are cut to their most, and their names to NAME_BYTES_MAX, none empty"))
+    let more = More { issues: more_issues, pulls: more_pulls };
+    let work = Work::new(issues.collect(), pulls, more);
+    let work = work.expect("gh's lists are cut to their most, and their names to NAME_BYTES_MAX, none empty");
+    Ok(Listed::Work(work))
 }
 
 fn titled(number: NonZeroU32, title: &str) -> Result<(), String> {
@@ -300,9 +360,9 @@ fn named(number: NonZeroU32, what: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn gh<T: DeserializeOwned>(dir: &str, asked: &[&str], fields: &str) -> Result<Vec<T>, String> {
+fn gh<T: DeserializeOwned>(dir: &str, asked: &[&str], fields: &str) -> Result<(Vec<T>, bool), String> {
     let said = asked.join(" ");
-    let limit = LISTED_MAX.to_string();
+    let limit = (LISTED_MAX + 1).to_string();
     let mut listing = Command::new("gh");
     listing.args(asked).args(["--limit", &limit, "--json", fields]).current_dir(dir);
     git::local(&mut listing);
@@ -311,9 +371,11 @@ fn gh<T: DeserializeOwned>(dir: &str, asked: &[&str], fields: &str) -> Result<Ve
         _ => format!("gh {said} could not be run: {error}"),
     })?;
     let answer = ran.answer().map_err(|why| format!("gh {said}: {why}"))?;
-    let listed: Vec<T> = serde_json::from_slice(&answer)
+    let mut listed: Vec<T> = serde_json::from_slice(&answer)
         .map_err(|why| format!("gh {said} said what does not read: {why}"))?;
-    Ok(listed.into_iter().take(LISTED_MAX).collect())
+    let more = listed.len() > LISTED_MAX;
+    listed.truncate(LISTED_MAX);
+    Ok((listed, more))
 }
 
 fn cut(mut text: String, most: usize) -> String {
@@ -332,28 +394,43 @@ mod tests {
 
     #[test]
     fn work_goes_over_the_wire_and_back_as_it_was() {
-        let pull = Pull {
-            number: NonZeroU32::new(524).unwrap(),
+        let pull = |number: u32, author: Option<&str>| Pull {
+            number: NonZeroU32::new(number).unwrap(),
             title: "Say view, not pane".to_owned(),
             draft: true,
             branch: "issue-511".to_owned(),
-            author: None,
+            author: author.map(str::to_owned),
         };
         let labelled = Issue { labels: vec!["enhancement".to_owned()], ..issue(507, "Home") };
-        let work = Work::new(vec![labelled, issue(498, "Menu")], vec![pull]).unwrap();
-        assert_eq!(Work::of(work.answer()), Ok(work));
+        let work = Work::new(vec![labelled, issue(498, "Menu")], vec![pull(524, None), pull(526, Some("o"))], More::default());
+        let work = Listed::Work(work.unwrap());
+        assert_eq!(Listed::of(work.answer()), Ok(work));
+        let many: Vec<Issue> = (1..=50).map(|at| issue(at, "many")).collect();
+        let more = More { issues: true, pulls: false };
+        let full = Listed::Work(Work::new(many, vec![], more).unwrap());
+        assert_eq!(Listed::of(full.answer()), Ok(full));
+        assert_eq!(Listed::of(Listed::Unhosted.answer()), Ok(Listed::Unhosted));
+        let unsaid = Listed::of(ListWorkResponse { listed: None });
+        assert_eq!(unsaid, Err("listed: neither work nor unhosted".to_owned()));
     }
 
     #[test]
     fn work_holds_no_number_0_and_no_more_than_it_lists() {
-        let mut said = Work::new(vec![issue(1, "one")], vec![]).unwrap().answer();
+        let mut said = Work::new(vec![issue(1, "one")], vec![], More::default()).unwrap().answer();
         said.issues[0].number = 0;
         assert_eq!(Work::of(said), Err("an issue or pull request of number 0".to_owned()));
-        let many = (1..=51).map(|at| issue(at, "many")).collect();
-        assert_eq!(Work::new(many, vec![]), Err("at most 50 issues".to_owned()));
+        let many = |most: u32| (1..=most).map(|at| issue(at, "many")).collect::<Vec<_>>();
+        assert_eq!(Work::new(many(51), vec![], More::default()), Err("at most 50 issues".to_owned()));
         let long = issue(7, &"é".repeat(TITLE_BYTES_MAX));
         let refused = Err("#7 has a title longer than 1024 bytes".to_owned());
-        assert_eq!(Work::new(vec![long], vec![]), refused);
+        assert_eq!(Work::new(vec![long], vec![], More::default()), refused);
+        let more = More { issues: false, pulls: true };
+        let refused = Err("0 pull requests are listed of more, where 50 would be".to_owned());
+        assert_eq!(Work::new(many(50), vec![], more), refused, "more is said only past a full list");
+        let more = More { issues: true, pulls: false };
+        let refused = Err("49 issues are listed of more, where 50 would be".to_owned());
+        assert_eq!(Work::new(many(49), vec![], more), refused);
+        assert_eq!(Work::new(many(50), vec![], more).map(|work| work.more()), Ok(more));
     }
 
     #[test]
@@ -371,15 +448,16 @@ mod tests {
             (pull(&long, None), "#9: its branch is longer than 256 bytes"),
             (pull("b", Some("")), "#9: its author is empty"),
         ];
+        let work = |issues, pulls| Work::new(issues, pulls, More::default());
         for (pull, why) in refused {
-            assert_eq!(Work::new(vec![], vec![pull]), Err(why.to_owned()));
+            assert_eq!(work(vec![], vec![pull]), Err(why.to_owned()));
         }
         let labelled = |label: &str| Issue { labels: vec![label.to_owned()], ..issue(4, "t") };
-        assert_eq!(Work::new(vec![labelled("")], vec![]), Err("#4: a label is empty".to_owned()));
+        assert_eq!(work(vec![labelled("")], vec![]), Err("#4: a label is empty".to_owned()));
         let refused = Err("#4: a label is longer than 256 bytes".to_owned());
-        assert_eq!(Work::new(vec![labelled(&long)], vec![]), refused);
+        assert_eq!(work(vec![labelled(&long)], vec![]), refused);
         let most = "b".repeat(NAME_BYTES_MAX);
-        assert!(Work::new(vec![labelled(&most)], vec![pull(&most, Some(&most))]).is_ok());
+        assert!(work(vec![labelled(&most)], vec![pull(&most, Some(&most))]).is_ok());
     }
 
     fn dir(path: &str) -> Dir {
@@ -389,22 +467,20 @@ mod tests {
     #[test]
     fn a_listing_is_kept_a_while_and_none_is_kept_of_one_that_panicked() {
         let (mut slots, now, luneta) = (Slots::default(), Instant::now(), dir("/w/luneta"));
-        assert_eq!(slots.fresh(&luneta, now), None);
+        assert_eq!(slots.seen(&luneta, now), Seen::Unlisted);
         slots.run(&luneta, now).unwrap();
-        assert!(slots.running(&luneta));
-        let work = Ok(Work::new(vec![issue(1, "one")], vec![]).unwrap());
+        assert_eq!(slots.seen(&luneta, now), Seen::Running);
+        let work = Ok(Listed::Work(Work::new(vec![issue(1, "one")], vec![], More::default()).unwrap()));
         slots.ran(&luneta, Some((now, work.clone())));
-        assert!(!slots.running(&luneta));
-        assert_eq!(slots.fresh(&luneta, now + FRESH.saturating_sub(Duration::from_millis(1))), Some(work));
-        assert_eq!(slots.fresh(&luneta, now + FRESH), None);
+        assert_eq!(slots.seen(&luneta, now + FRESH.saturating_sub(Duration::from_millis(1))), Seen::Fresh(&work));
+        assert_eq!(slots.seen(&luneta, now + FRESH), Seen::Unlisted);
         let refused = Err("gh is not on the PATH".to_owned());
         slots.run(&luneta, now + FRESH).unwrap();
         slots.ran(&luneta, Some((now + FRESH, refused.clone())));
-        assert_eq!(slots.fresh(&luneta, now + FRESH), Some(refused), "a refusal is kept as long");
+        assert_eq!(slots.seen(&luneta, now + FRESH), Seen::Fresh(&refused), "a refusal is kept as long");
         slots.run(&luneta, now + FRESH * 2).unwrap();
         slots.ran(&luneta, None);
-        assert!(!slots.running(&luneta));
-        assert_eq!(slots.fresh(&luneta, now + FRESH * 2), None);
+        assert_eq!(slots.seen(&luneta, now + FRESH * 2), Seen::Unlisted);
     }
 
     #[test]
@@ -414,11 +490,11 @@ mod tests {
         let after = |millis: usize| now + Duration::from_millis(u64::try_from(millis).unwrap());
         for (at, dir) in dirs[..LISTINGS_MAX].iter().enumerate() {
             slots.run(dir, after(at)).unwrap();
-            slots.ran(dir, Some((after(at), Ok(Work::default()))));
+            slots.ran(dir, Some((after(at), Ok(Listed::Unhosted))));
         }
         slots.run(&dirs[LISTINGS_MAX], after(LISTINGS_MAX)).unwrap();
-        assert_eq!(slots.fresh(&dirs[0], after(LISTINGS_MAX)), None, "the oldest made room");
-        assert_eq!(slots.fresh(&dirs[1], after(LISTINGS_MAX)), Some(Ok(Work::default())));
+        assert_eq!(slots.seen(&dirs[0], after(LISTINGS_MAX)), Seen::Unlisted, "the oldest made room");
+        assert_eq!(slots.seen(&dirs[1], after(LISTINGS_MAX)), Seen::Fresh(&Ok(Listed::Unhosted)));
         assert_eq!(slots.slots.len(), LISTINGS_MAX);
         slots.run(&dirs[0], now + FRESH * 2).unwrap();
         assert_eq!(slots.slots.len(), 2, "the stale went, and the two running stay");

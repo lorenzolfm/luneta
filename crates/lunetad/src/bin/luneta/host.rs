@@ -29,7 +29,7 @@ use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::asks::Marked;
 use lunetad::rebases::{Rebased, Unrebased};
-use lunetad::work::Work;
+use lunetad::work;
 use lunetad::{Destination, Direction, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -183,7 +183,7 @@ pub enum Event {
     Folds,
     News,
     Agent,
-    Work { number: u64, listed: Result<Work, String> },
+    Work { number: u64, listed: Result<work::Listed, String> },
     Alerted(alerts::Read),
     Clicked(alerts::Key),
     #[cfg(not(target_os = "macos"))]
@@ -754,6 +754,15 @@ fn caught<T>(named: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     panic::catch_unwind(AssertUnwindSafe(named)).unwrap_or_else(|_| Err(NAMING_PANICKED.to_owned()))
 }
 
+fn fetch_work(lunetad: &Path, events: &Sender<Event>, home: &Home) {
+    let (number, on, project) = (home.number(), home.machine().clone(), home.project());
+    let (lunetad, events) = (lunetad.to_owned(), events.clone());
+    thread::spawn(move || {
+        let listed = caught(|| worktrees::work(&lunetad, &on, project));
+        let _ = events.send(Event::Work { number, listed });
+    });
+}
+
 struct Move {
     ticket: u64,
     order: Reorder,
@@ -1005,8 +1014,8 @@ impl App {
                     && ask.number() == number
                 {
                     ask.heard(heard);
-                } else if let Some(home) = self.home_mut().filter(|it| it.ask_number() == Some(number)) {
-                    home.heard(heard);
+                } else if let Some(ask) = self.home_mut().and_then(|home| home.ask_numbered(number)) {
+                    ask.heard(heard);
                 }
             },
             Event::Remotes { number, remotes } => {
@@ -1447,18 +1456,12 @@ impl App {
     }
 
     fn ask_work(&mut self, now: Instant) {
-        let Some(home) = self.home_mut() else {
+        let Some(Right::Home(home)) = &mut self.right else {
             return;
         };
-        if !home.asks(now) {
-            return;
+        if home.asks(now) {
+            fetch_work(&self.lunetad, &self.events, home);
         }
-        let (number, on, project) = (home.number(), home.machine().clone(), home.project());
-        let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
-        thread::spawn(move || {
-            let listed = caught(|| worktrees::work(&lunetad, &on, project));
-            let _ = events.send(Event::Work { number, listed });
-        });
     }
 
     fn go_home(&mut self, on: &Machine, project: ProjectId) {
@@ -1470,11 +1473,11 @@ impl App {
         self.homes += 1;
         self.asks += 1;
         let home = Home::new(self.homes, self.asks, on.clone(), project);
+        fetch_work(&self.lunetad, &self.events, &home);
         self.right = Some(Right::Home(home));
         let homed = self.name_home();
         let fresh = matches!(homed, Some(Homed::Named | Homed::Unknown));
         assert!(fresh, "a home just made was never named, so it has not gone: {homed:?}");
-        self.ask_work(Instant::now());
         self.seat();
     }
 

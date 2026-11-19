@@ -6,14 +6,14 @@ use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lunetad::asks::Marked;
 use lunetad::projects::ProjectId;
-use lunetad::work::{self, Work};
+use lunetad::work::{self, Listed, Work};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::ask::{self, Ask, Heard};
+use crate::ask::{self, Ask};
 use crate::gruvbox;
 use crate::host::Event;
 use crate::machines::Machine;
@@ -31,6 +31,8 @@ const MARKED: &str = "◆";
 const UNMARKED: &str = "◇";
 
 const ASKING: &str = "asking gh for the open issues and pull requests…";
+
+const UNHOSTED: &str = "no remote on GitHub, so nothing is listed here";
 
 const ASK_ROWS_MIN: u16 = 4;
 
@@ -50,15 +52,20 @@ pub enum Keyed {
 #[derive(Debug)]
 enum Listing {
     Asking,
+    Came { shown: Shown, next: Next },
+}
+
+#[derive(Debug)]
+enum Shown {
     Listed { work: Work, stale: Option<String> },
+    Unhosted,
     Unlisted(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fetch {
-    Due,
+enum Next {
     Asking,
-    Got(Instant),
+    At(Instant),
 }
 
 #[derive(Debug)]
@@ -75,8 +82,7 @@ pub struct Home {
     project: ProjectId,
     named: Named,
     listing: Listing,
-    fetch: Fetch,
-    cursor: usize,
+    cursor: Option<Item>,
     marked: BTreeSet<Item>,
 }
 
@@ -88,8 +94,7 @@ impl Home {
             project,
             named: Named::Not { asks },
             listing: Listing::Asking,
-            fetch: Fetch::Due,
-            cursor: 0,
+            cursor: None,
             marked: BTreeSet::new(),
         }
     }
@@ -106,10 +111,10 @@ impl Home {
         self.project
     }
 
-    pub fn ask_number(&self) -> Option<u64> {
-        match &self.named {
-            Named::Not { .. } => None,
-            Named::As { ask, .. } => Some(ask.number()),
+    pub fn ask_numbered(&mut self, number: u64) -> Option<&mut Ask> {
+        match &mut self.named {
+            Named::As { ask, .. } if ask.number() == number => Some(ask),
+            Named::As { .. } | Named::Not { .. } => None,
         }
     }
 
@@ -134,40 +139,52 @@ impl Home {
     }
 
     pub fn asks(&mut self, now: Instant) -> bool {
-        let due = match self.fetch {
-            Fetch::Due => true,
-            Fetch::Asking => false,
-            Fetch::Got(at) => now >= at + AGAIN,
+        let Listing::Came { next, .. } = &mut self.listing else {
+            return false;
         };
+        let due = matches!(*next, Next::At(at) if now >= at + AGAIN);
         if due {
-            self.fetch = Fetch::Asking;
+            *next = Next::Asking;
         }
         due
     }
 
     pub fn due(&self) -> Option<Instant> {
-        match self.fetch {
-            Fetch::Got(at) => Some(at + AGAIN),
-            Fetch::Due | Fetch::Asking => None,
+        match self.listing {
+            Listing::Came { next: Next::At(at), .. } => Some(at + AGAIN),
+            Listing::Came { next: Next::Asking, .. } | Listing::Asking => None,
         }
     }
 
-    pub fn listed(&mut self, listed: Result<Work, String>, now: Instant) {
-        assert_eq!(self.fetch, Fetch::Asking, "a listing comes only when one was asked");
-        self.fetch = Fetch::Got(now);
-        let listing = std::mem::replace(&mut self.listing, Listing::Asking);
-        self.listing = match (listed, listing) {
-            (Ok(work), _) => Listing::Listed { work, stale: None },
-            (Err(why), Listing::Listed { work, .. }) => Listing::Listed { work, stale: Some(why) },
-            (Err(why), Listing::Asking | Listing::Unlisted(_)) => Listing::Unlisted(why),
+    pub fn listed(&mut self, listed: Result<Listed, String>, now: Instant) {
+        let was = self.at(&self.items());
+        let last = match std::mem::replace(&mut self.listing, Listing::Asking) {
+            Listing::Asking => None,
+            Listing::Came { shown, next: Next::Asking } => Some(shown),
+            Listing::Came { next: Next::At(_), .. } => {
+                unreachable!("a listing comes only when one was asked")
+            },
         };
+        let shown = match (listed, last) {
+            (Ok(Listed::Work(work)), _) => Shown::Listed { work, stale: None },
+            (Ok(Listed::Unhosted), _) => Shown::Unhosted,
+            (Err(why), Some(Shown::Listed { work, .. })) => Shown::Listed { work, stale: Some(why) },
+            (Err(why), None | Some(Shown::Unhosted | Shown::Unlisted(_))) => Shown::Unlisted(why),
+        };
+        self.listing = Listing::Came { shown, next: Next::At(now) };
         let items = self.items();
         self.marked.retain(|item| items.contains(item));
-        self.cursor = self.cursor.min(items.len().saturating_sub(1));
+        let near = was.map_or(0, |was| was.min(items.len().saturating_sub(1)));
+        let kept = self.cursor.filter(|item| items.contains(item));
+        self.cursor = kept.or_else(|| items.get(near).copied());
+    }
+
+    fn at(&self, items: &[Item]) -> Option<usize> {
+        self.cursor.and_then(|cursor| items.iter().position(|item| *item == cursor))
     }
 
     fn items(&self) -> Vec<Item> {
-        let Listing::Listed { work, .. } = &self.listing else {
+        let Listing::Came { shown: Shown::Listed { work, .. }, .. } = &self.listing else {
             return Vec::new();
         };
         let pulls = work.pulls().iter().map(|pull| Item::Pull(pull.number));
@@ -202,18 +219,20 @@ impl Home {
     }
 
     fn step_up(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+        let items = self.items();
+        let at = self.at(&items).map_or(0, |at| at.saturating_sub(1));
+        self.cursor = items.get(at).copied();
     }
 
     fn step_down(&mut self) {
-        let last = self.items().len().saturating_sub(1);
-        self.cursor = (self.cursor + 1).min(last);
+        let items = self.items();
+        let last = items.len().saturating_sub(1);
+        let at = self.at(&items).map_or(0, |at| (at + 1).min(last));
+        self.cursor = items.get(at).copied();
     }
 
     fn mark(&mut self) {
-        let items = self.items();
-        let Some(item) = items.get(self.cursor).copied() else {
-            assert!(items.is_empty(), "the cursor is on a listed row while there is one");
+        let Some(item) = self.cursor else {
             return;
         };
         if !self.marked.remove(&item) {
@@ -248,13 +267,6 @@ impl Home {
         assert!(asks > ask.number(), "a new talk is numbered past the one it replaces");
         *ask = Ask::homed(asks, &self.on, dir, name);
         self.marked.clear();
-    }
-
-    pub fn heard(&mut self, heard: Heard) {
-        let Named::As { ask, .. } = &mut self.named else {
-            unreachable!("luneta hears only a prompt it numbered, and an unnamed home has none");
-        };
-        ask.heard(heard);
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -325,7 +337,7 @@ impl Home {
         };
         let mut head = vec![head];
         let (lines, at) = self.list_lines(width);
-        if let Listing::Listed { stale: Some(why), .. } = &self.listing {
+        if let Listing::Came { shown: Shown::Listed { stale: Some(why), .. }, .. } = &self.listing {
             let why = format!(" not listed again: {why}");
             head.push(Line::styled(sidebar::cut(&why, width), Style::new().fg(gruvbox::RED)));
         }
@@ -344,49 +356,52 @@ impl Home {
 
     fn list_lines(&self, width: usize) -> (Vec<Line<'static>>, Option<usize>) {
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let work = match &self.listing {
+        let shown = match &self.listing {
             Listing::Asking => return (vec![Line::styled(format!("   {ASKING}"), dim)], None),
-            Listing::Unlisted(why) => {
+            Listing::Came { shown, .. } => shown,
+        };
+        let work = match shown {
+            Shown::Unhosted => return (menu::wrap(&format!(" {UNHOSTED}"), width, dim), None),
+            Shown::Unlisted(why) => {
                 let said = format!(" gh lists nothing here: {why}");
                 let red = Style::new().fg(gruvbox::RED);
                 return (menu::wrap(&said, width, red), None);
             },
-            Listing::Listed { work, .. } => work,
+            Shown::Listed { work, .. } => work,
         };
         let numbered = |number: NonZeroU32| format!("#{number}");
         let numbers = work.issues().iter().map(|it| it.number).chain(work.pulls().iter().map(|it| it.number));
         let number_width = numbers.map(|number| numbered(number).len()).max().unwrap_or(0);
-        let (mut lines, mut at, mut item) = (Vec::new(), None, 0);
-        let heading = |title: &str, count: usize| {
+        let (mut lines, mut at) = (Vec::new(), None);
+        let heading = |title: &str, count: usize, more: bool| {
+            let more = if more { "+" } else { "" };
             Line::from(vec![
                 Span::styled(format!(" {title}"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" · {count}"), dim),
+                Span::styled(format!(" · {count}{more}"), dim),
             ])
         };
-        lines.push(heading("Pull requests", work.pulls().len()));
+        lines.push(heading("Pull requests", work.pulls().len(), work.more().pulls));
         if work.pulls().is_empty() {
             lines.push(Line::styled("   no open pull requests", dim));
         }
         for pull in work.pulls() {
-            let here = item == self.cursor;
+            let here = self.cursor == Some(Item::Pull(pull.number));
             at = at.or(here.then_some(lines.len()));
             let marked = self.marked.contains(&Item::Pull(pull.number));
             let side = if pull.draft { format!("{} · draft", pull.branch) } else { pull.branch.clone() };
             lines.push(row(width, (here, marked), (&numbered(pull.number), number_width), &pull.title, &side));
-            item += 1;
         }
         lines.push(Line::default());
-        lines.push(heading("Issues", work.issues().len()));
+        lines.push(heading("Issues", work.issues().len(), work.more().issues));
         if work.issues().is_empty() {
             lines.push(Line::styled("   no open issues", dim));
         }
         for issue in work.issues() {
-            let here = item == self.cursor;
+            let here = self.cursor == Some(Item::Issue(issue.number));
             at = at.or(here.then_some(lines.len()));
             let marked = self.marked.contains(&Item::Issue(issue.number));
             let side = issue.labels.join(", ");
             lines.push(row(width, (here, marked), (&numbered(issue.number), number_width), &issue.title, &side));
-            item += 1;
         }
         (lines, at)
     }
@@ -424,7 +439,7 @@ fn row(
 
 #[cfg(test)]
 mod tests {
-    use lunetad::work::{Issue, Pull};
+    use lunetad::work::{Issue, More, Pull};
 
     use super::*;
 
@@ -432,7 +447,7 @@ mod tests {
         NonZeroU32::new(at).unwrap()
     }
 
-    fn work(issues: &[(u32, &str, &[&str])], pulls: &[(u32, &str, &str, bool)]) -> Work {
+    fn work(issues: &[(u32, &str, &[&str])], pulls: &[(u32, &str, &str, bool)]) -> Listed {
         let issues = issues.iter().map(|(at, title, labels)| Issue {
             number: number(*at),
             title: (*title).to_owned(),
@@ -445,10 +460,10 @@ mod tests {
             branch: (*branch).to_owned(),
             author: None,
         });
-        Work::new(issues.collect(), pulls.collect()).unwrap()
+        Listed::Work(Work::new(issues.collect(), pulls.collect(), More::default()).unwrap())
     }
 
-    fn listed() -> Work {
+    fn listed() -> Listed {
         let issues: [(u32, &str, &[&str]); 2] =
             [(507, "Open a project on a home view", &["enhancement"]), (98, "Menu says no", &[])];
         work(&issues, &[(524, "Say view, not pane", "issue-511", true)])
@@ -480,7 +495,7 @@ mod tests {
     #[test]
     fn the_lists_show_pull_requests_then_issues_and_tab_marks_and_steps_on() {
         let (mut home, now) = (home(), Instant::now());
-        assert!(home.asks(now));
+        assert!(!home.asks(now), "a new home is asking already");
         assert_eq!(shown(&home, 60, 12)[2], "   asking gh for the open issues and pull requests…");
         home.listed(Ok(listed()), now);
         assert_eq!(home.key(&key(KeyCode::Tab)), Keyed::Nothing);
@@ -523,18 +538,18 @@ mod tests {
     fn the_work_is_asked_once_at_a_time_and_again_a_minute_after_it_came() {
         let (mut home, now) = (home(), Instant::now());
         assert_eq!(home.due(), None);
-        assert!(home.asks(now), "a new home asks at once");
-        assert!(!home.asks(now + AGAIN), "and not again while it is asked");
+        assert!(!home.asks(now + AGAIN), "a new home asks no more while its first ask is out");
         home.listed(Ok(listed()), now);
         assert_eq!(home.due(), Some(now + AGAIN));
         assert!(!home.asks(now + AGAIN.saturating_sub(Duration::from_millis(1))));
         assert!(home.asks(now + AGAIN));
+        assert_eq!(home.due(), None);
+        assert!(!home.asks(now + AGAIN * 2), "and not again while it is asked");
     }
 
     #[test]
     fn a_listing_that_fails_keeps_the_last_and_one_that_comes_drops_the_marks_of_what_went() {
         let (mut home, now) = (home(), Instant::now());
-        home.asks(now);
         home.listed(Err("gh is not on the PATH".to_owned()), now);
         assert_eq!(shown(&home, 60, 10)[2], " gh lists nothing here: gh is not on the PATH");
         home.asks(now + AGAIN);
@@ -551,15 +566,60 @@ mod tests {
         let issues: [(u32, &str, &[&str]); 1] = [(98, "Menu says no", &[])];
         home.listed(Ok(work(&issues, &[(524, "Say view", "issue-511", false)])), now + AGAIN * 3);
         assert_eq!(home.marks(), Marked::new([], [number(524)]).unwrap(), "#507 was closed");
-        assert_eq!(home.cursor, 1, "the cursor stays on a row that is listed");
+        assert_eq!(home.cursor, Some(Item::Issue(number(98))), "the cursor stays on its row");
         home.key(&key(KeyCode::Down));
-        assert_eq!(home.cursor, 1, "and no further than the last");
+        assert_eq!(home.cursor, Some(Item::Issue(number(98))), "and no further than the last");
+    }
+
+    #[test]
+    fn a_new_pull_request_on_top_leaves_the_cursor_on_its_item_and_one_that_closed_gives_its_place() {
+        let (mut home, now) = (home(), Instant::now());
+        home.listed(Ok(listed()), now);
+        home.key(&key(KeyCode::Down));
+        assert_eq!(home.cursor, Some(Item::Issue(number(507))));
+        home.asks(now + AGAIN);
+        let pulls = [(545, "Fresh", "issue-544", false), (524, "Say view, not pane", "issue-511", true)];
+        let issues: [(u32, &str, &[&str]); 2] = [(507, "Open a project", &[]), (98, "Menu says no", &[])];
+        home.listed(Ok(work(&issues, &pulls)), now + AGAIN);
+        assert_eq!(home.cursor, Some(Item::Issue(number(507))), "a row above came, and the cursor kept #507");
+        home.key(&key(KeyCode::Tab));
+        assert_eq!(home.marks(), Marked::new([number(507)], []).unwrap());
+        assert_eq!(home.cursor, Some(Item::Issue(number(98))));
+        home.key(&key(KeyCode::Up));
+        home.asks(now + AGAIN * 2);
+        let issues: [(u32, &str, &[&str]); 1] = [(98, "Menu says no", &[])];
+        home.listed(Ok(work(&issues, &pulls)), now + AGAIN * 2);
+        assert_eq!(home.cursor, Some(Item::Issue(number(98))), "#507 closed, and #98 took its place");
+        assert_eq!(home.marks(), Marked::default());
+    }
+
+    #[test]
+    fn a_full_list_says_there_are_more_and_a_project_off_github_says_it_lists_nothing() {
+        let (mut home, now) = (home(), Instant::now());
+        let issues = (1..=50).map(|at| Issue { number: number(at), title: "many".to_owned(), labels: vec![] });
+        let more = More { issues: true, pulls: false };
+        let full = Work::new(issues.collect(), vec![], more).unwrap();
+        home.listed(Ok(Listed::Work(full)), now);
+        let lines = shown(&home, 60, 14);
+        assert_eq!(lines[2], " Pull requests · 0");
+        assert_eq!(lines[5], " Issues · 50+");
+        home.asks(now + AGAIN);
+        home.listed(Ok(Listed::Unhosted), now + AGAIN);
+        assert_eq!(home.cursor, None, "nothing is listed to be on");
+        let lines = shown(&home, 60, 14);
+        assert_eq!(lines[2], " no remote on GitHub, so nothing is listed here");
+        assert_eq!(home.key(&key(KeyCode::Tab)), Keyed::Nothing);
+        assert_eq!(home.marks(), Marked::default());
+        assert_eq!(home.due(), Some(now + AGAIN * 2), "it asks again, as a remote may be added");
+        home.asks(now + AGAIN * 2);
+        home.listed(Err("git did not say the remotes".to_owned()), now + AGAIN * 2);
+        assert_eq!(shown(&home, 60, 14)[2], " gh lists nothing here: git did not say the remotes");
     }
 
     #[test]
     fn a_home_takes_no_prompt_until_it_knows_its_project_s_folder() {
         let mut home = Home::new(1, 1, Machine::Local, ProjectId::of(3).unwrap());
-        assert_eq!((home.known(), home.ask_number()), (false, None));
+        assert_eq!((home.known(), home.ask_numbered(1).is_some()), (false, false));
         for typed in "go".chars() {
             assert_eq!(home.key(&key(KeyCode::Char(typed))), Keyed::Nothing);
         }
@@ -568,7 +628,8 @@ mod tests {
         assert_eq!(unnamed[..3], [" …", "", "   asking gh for the open issues and pull requests…"]);
         assert!(unnamed[3..].iter().all(String::is_empty), "and no prompt shows: {unnamed:?}");
         home.named("luneta", "/w/luneta");
-        assert_eq!((home.known(), home.ask_number()), (true, Some(1)));
+        assert_eq!((home.known(), home.ask_numbered(1).is_some()), (true, true));
+        assert!(home.ask_numbered(2).is_none(), "a prompt is heard only by its own number");
         let named = shown(&home, 60, 14);
         assert!(named.contains(&"│ › _                                                      │".to_owned()), "{named:?}");
     }
@@ -576,13 +637,13 @@ mod tests {
     #[test]
     fn esc_starts_the_talk_over_and_forgets_the_marks() {
         let (mut home, now) = (home(), Instant::now());
-        home.asks(now);
         home.listed(Ok(listed()), now);
         home.key(&key(KeyCode::Tab));
         home.key(&key(KeyCode::Char('x')));
         assert_eq!(home.key(&key(KeyCode::Esc)), Keyed::StartOver);
         home.start_over(2);
-        assert_eq!((home.ask_number(), home.marks()), (Some(2), Marked::default()));
+        assert_eq!(home.marks(), Marked::default());
+        assert!(home.ask_numbered(1).is_none() && home.ask_numbered(2).is_some());
         assert!(shown(&home, 60, 14).contains(&"│ › _                                                      │".to_owned()));
     }
 }

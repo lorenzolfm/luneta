@@ -19,6 +19,8 @@ const PRINTED: &str = "own-42";
 
 const HERE: &str = "luneta runs here";
 
+const UNHOSTED: &str = "no remote on GitHub, so nothing is listed here";
+
 const LEFT: &str = "\x1b[104;5u";
 
 const RIGHT: &str = "\x1b[108;5u";
@@ -292,7 +294,7 @@ fn a_worktree_opened_or_made_while_luneta_shows_none_takes_the_keys() {
     unshow(&mut window);
     let erased = "\x7f".repeat(root.chars().count());
     window.send(&format!("np{erased}{}\r\r", other.path.display()));
-    eventually("the new project's home shows", || window.shows("Issues · 0").then_some(()));
+    eventually("the new project's home shows", || window.shows(UNHOSTED).then_some(()));
     window.send("own-2");
     eventually("its prompt takes the keys", || window.shows("› own-2_").then_some(()));
 }
@@ -309,7 +311,7 @@ fn a_menu_opened_while_a_project_is_made_keeps_the_keys() {
     window.send(&format!("{SIDEBAR}np{erased}{}\r\r{SIDEBAR}n", other.path.display()));
     let named = format!(" other  {}", other.path.parent().unwrap().file_name().unwrap().display());
     eventually("luneta shows the new project's home", || {
-        (window.shows(&named) && window.shows("Issues · 0")).then_some(())
+        (window.shows(&named) && window.shows(UNHOSTED)).then_some(())
     });
     eventually("the menu opened meanwhile stays open", || window.shows("─ New ─").then_some(()));
 }
@@ -409,12 +411,12 @@ fn a_click_on_a_project_s_row_goes_to_its_home_and_one_on_a_worktree_s_back() {
     eventually("Ctrl l goes to docs", || (used(docs) > used(main)).then_some(()));
     let row = sidebar_row(&window, "▾ work");
     click(&mut window, row);
-    eventually("a click on work's row shows its home", || window.shows("Issues · 0").then_some(()));
+    eventually("a click on work's row shows its home", || window.shows(UNHOSTED).then_some(()));
     assert!(used(docs) > used(main), "the home goes to no worktree");
     let row = sidebar_row(&window, "▾ main");
     click(&mut window, row);
     eventually("a click on main's row goes there, out of the home", || {
-        (used(main) > used(docs) && !window.shows("Issues · 0")).then_some(())
+        (used(main) > used(docs) && !window.shows(UNHOSTED)).then_some(())
     });
 }
 

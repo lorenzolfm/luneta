@@ -809,8 +809,17 @@ message ListWorkRequest {
 }
 
 message ListWorkResponse {
-  repeated Issue issues = 1;
-  repeated Pull pulls = 2;
+  oneof listed {
+    Work work = 1;
+    google.protobuf.Empty unhosted = 2;
+  }
+
+  message Work {
+    repeated Issue issues = 1;
+    repeated Pull pulls = 2;
+    bool more_issues = 3;
+    bool more_pulls = 4;
+  }
 
   message Issue {
     uint32 number = 1;
@@ -823,7 +832,7 @@ message ListWorkResponse {
     string title = 2;
     bool draft = 3;
     string branch = 4;
-    string author = 5;
+    optional string author = 5;
   }
 }
 

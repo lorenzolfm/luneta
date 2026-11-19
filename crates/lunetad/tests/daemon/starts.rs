@@ -288,6 +288,7 @@ fn a_bare_luneta_in_a_project_s_own_folder_shows_its_worktree_used_last() {
 fn a_bare_luneta_at_a_clone_s_root_shows_its_home_and_asks_the_agent_of_what_is_marked() {
     let owned = Owned::new();
     let dir = cloned("project", &["one", "two"]);
+    git(&dir.path.join(".bare"), &["remote", "add", "upstream", "git@github.com:o/n.git"]);
     let root = real(&dir.path);
     project(&owned.host, Path::new(&root), None);
     let issues = serde_json::json!([
@@ -341,7 +342,7 @@ fn a_clone_s_root_picked_from_the_folders_shows_its_home() {
     eventually("the folders list the clone's root", || window.shows(&tmp).then_some(()));
     window.send("\r");
     eventually("luneta shows the project's home", || {
-        (window.shows("Issues · 0") && window.shows("no open pull requests")).then_some(())
+        window.shows("no remote on GitHub, so nothing is listed here").then_some(())
     });
     let projects = projects_of(&owned);
     let opened = projects[0].worktrees().unwrap();

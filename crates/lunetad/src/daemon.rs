@@ -846,8 +846,8 @@ impl Daemon for Host {
         let (layouts, listings) = (self.layouts.clone(), Arc::clone(&self.listings));
         let answer = late(move || {
             let root = rooted(&layouts, project)?;
-            let work = listings.list(root.dir()).map_err(Status::failed_precondition)?;
-            Ok(work.answer())
+            let listed = listings.list(root.dir()).map_err(Status::failed_precondition)?;
+            Ok(listed.answer())
         });
         Ok(Response::new(Box::pin(answer)))
     }

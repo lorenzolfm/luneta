@@ -17,7 +17,7 @@ use lunetad::changes::Unchanged;
 use lunetad::mux::own::TerminalKey;
 use lunetad::projects::{self, Name, Plain, ProjectId, Size, ViewId, WorktreeId};
 use lunetad::links::{self, Branch, Unready};
-use lunetad::work::{self, Work};
+use lunetad::work::{self, Listed};
 use lunetad::{Asked, Beside, Daemon, Heard, SessionName};
 use tonic::{Code, Status};
 
@@ -240,14 +240,14 @@ pub fn branched(
     })
 }
 
-pub fn work(path: &Path, machine: &Machine, project: ProjectId) -> Result<Work, String> {
+pub fn work(path: &Path, machine: &Machine, project: ProjectId) -> Result<Listed, String> {
     let request = ListWorkRequest { on: on(machine), project: project.get() };
     let asking = async |daemon: &mut Daemon| {
         let said = |status: Status| status.message().to_owned();
         let mut answer = daemon.list_work(request).await.map_err(said)?.into_inner();
         let listed = answer.message().await.map_err(said)?;
         let listed = listed.ok_or("lunetad ended its answer with no list")?;
-        Work::of(listed)
+        Listed::of(listed)
     };
     asked_or(path, WORK_PATIENCE, asking, |late| late)
 }
