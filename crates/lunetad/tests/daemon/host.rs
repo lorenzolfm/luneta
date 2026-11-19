@@ -129,6 +129,16 @@ if [ "$1 $2" = "label list" ] || [ "$1 $2 $3 $4" = "issue list --author @me" ]; 
     [ "$1" = issue ] && echo '[{"title":"An older one","body":"It was older.","labels":[]}]'
     exit 0
 fi
+if [ "$1 $2 $3 $4" = "issue list --state open" ] || [ "$1 $2 $3 $4" = "pr list --state open" ]; then
+    echo "$(pwd -P) $*" >> "$pulls/worked"
+    if [ -f "$pulls/work-fails" ]; then
+        cat "$pulls/work-fails" >&2
+        exit 1
+    fi
+    [ -f "$pulls/work-$1" ] && exec cat "$pulls/work-$1"
+    echo '[]'
+    exit 0
+fi
 if [ "$1 $2" = "issue create" ]; then
     { echo "$(pwd -P)"; echo "$*"; cat; } > "$pulls/created"
     [ -f "$pulls/create-says" ] && exec cat "$pulls/create-says"
@@ -292,6 +302,23 @@ exec cat "$said"
 
     pub fn old(&self) {
         fs::write(self.pulls.join("old"), "").unwrap();
+    }
+
+    pub fn work(&self, issues: &serde_json::Value, pulls: &serde_json::Value) {
+        fs::write(self.pulls.join("work-issue"), issues.to_string()).unwrap();
+        fs::write(self.pulls.join("work-pr"), pulls.to_string()).unwrap();
+    }
+
+    pub fn refuse_work(&self, why: &str) {
+        fs::write(self.pulls.join("work-fails"), format!("{why}\n")).unwrap();
+    }
+
+    pub fn worked(&self) -> Vec<String> {
+        match fs::read_to_string(self.pulls.join("worked")) {
+            Ok(asked) => asked.lines().map(str::to_owned).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("what gh was asked does not read: {error}"),
+        }
     }
 
     pub fn refuse_lists(&self, why: &str) {

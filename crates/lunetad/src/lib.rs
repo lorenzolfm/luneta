@@ -43,6 +43,7 @@ mod topics;
 pub mod transcripts;
 mod layouts;
 mod watch;
+pub mod work;
 pub mod zoxide;
 
 pub use agent::Harness;

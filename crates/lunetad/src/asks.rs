@@ -1,7 +1,9 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -14,7 +16,7 @@ use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
 use crate::mux;
-use crate::{git, program};
+use crate::{git, program, work};
 
 pub const MODEL: &str = "sonnet";
 
@@ -25,7 +27,8 @@ pub const LOOK: Duration = Duration::from_millis(5);
 pub const TURN_VAR: &str = "LUNETA_TURN";
 pub const BEFORE_VAR: &str = "LUNETA_TURN_BEFORE";
 
-pub const ALLOWED: [&str; 10] = [
+pub const ALLOWED: [&str; 11] = [
+    "Bash(luneta start:*)",
     "Bash(luneta agents:*)",
     "Bash(luneta prune:*)",
     "Bash(zoxide query:*)",
@@ -45,12 +48,12 @@ pub const SYSTEM: &str = "You run in luneta's ask box. The user typed what they 
     with no markdown, no headings, no tables and no code fences, and keep it short. Do what \
     they ask with luneta's commands, as the luneta skill below says, and end with a line or two \
     on what you did, and where. Run one command in each call to Bash, with nothing around it: \
-    no $(…), no pipes, no && and no ;. Only these run: luneta agents and prune, zoxide query, \
-    gh issue view and list, gh pr view and list, luneta worktree, and git worktree add and \
-    list. Claude Code denies any other. You cannot wait for the user in the middle of a turn: \
-    to ask them anything, as the skill has you ask before a prune, or which of two things they \
-    meant, end your turn with the question. Their answer comes as the next message. So a prune \
-    takes --yes only in the turn after the one that said its plan.";
+    no $(…), no pipes, no && and no ;. Only these run: luneta start, agents and prune, zoxide \
+    query, gh issue view and list, gh pr view and list, luneta worktree, and git worktree add \
+    and list. Claude Code denies any other. You cannot wait for the user in the middle of a \
+    turn: to ask them anything, as the skill has you ask before a prune, or which of two things \
+    they meant, end your turn with the question. Their answer comes as the next message. So a \
+    prune takes --yes only in the turn after the one that said its plan.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Turn {
@@ -150,6 +153,57 @@ pub struct Asked {
     resumed: Option<SessionId>,
     highlighted: String,
     turn: Turn,
+    marked: Marked,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Marked {
+    issues: BTreeSet<NonZeroU32>,
+    pulls: BTreeSet<NonZeroU32>,
+}
+
+impl Marked {
+    pub fn new(
+        issues: impl IntoIterator<Item = NonZeroU32>,
+        pulls: impl IntoIterator<Item = NonZeroU32>,
+    ) -> Result<Marked, String> {
+        let (issues, pulls): (BTreeSet<_>, BTreeSet<_>) = (issues.into_iter().collect(), pulls.into_iter().collect());
+        if issues.len() > work::LISTED_MAX || pulls.len() > work::LISTED_MAX {
+            let most = work::LISTED_MAX;
+            return Err(format!("marked: at most {most} issues and {most} pull requests"));
+        }
+        Ok(Marked { issues, pulls })
+    }
+
+    fn read(issues: Vec<u32>, pulls: Vec<u32>) -> Result<Marked, String> {
+        let numbered = |numbers: Vec<u32>| {
+            let numbers = numbers.into_iter().map(NonZeroU32::new);
+            numbers.collect::<Option<Vec<_>>>().ok_or("marked: no issue or pull request is #0")
+        };
+        Marked::new(numbered(issues)?, numbered(pulls)?)
+    }
+
+    fn told(&self) -> Option<String> {
+        let listed = |kind: &str, numbers: &BTreeSet<NonZeroU32>| {
+            let numbers: Vec<String> = numbers.iter().map(|number| format!("#{number}")).collect();
+            let (last, rest) = numbers.split_last()?;
+            Some(match rest {
+                [] => format!("{kind} {last}"),
+                rest => format!("{kind}s {} and {last}", rest.join(", ")),
+            })
+        };
+        let issues = listed("issue", &self.issues);
+        let pulls = listed("pull request", &self.pulls);
+        let marked = match (issues, pulls) {
+            (None, None) => return None,
+            (Some(one), None) | (None, Some(one)) => one,
+            (Some(issues), Some(pulls)) => format!("{issues}, and {pulls}"),
+        };
+        Some(format!(
+            "[luneta: in the project's work view the user marked {marked}: \"these\" or \"them\" \
+             may mean them.]"
+        ))
+    }
 }
 
 impl Asked {
@@ -167,11 +221,18 @@ impl Asked {
         if words.is_empty() {
             return Err("words: nothing asked".to_owned());
         }
-        Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, turn })
+        let marked = Marked::default();
+        Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, turn, marked })
+    }
+
+    #[must_use]
+    pub fn marking(self, marked: Marked) -> Asked {
+        Asked { marked, ..self }
     }
 
     pub fn of(request: AskRequest) -> Result<(Option<On>, Asked), String> {
-        let AskRequest { on, cwd, words, resumed, highlighted, turn, before } = request;
+        let AskRequest { on, cwd, words, resumed, highlighted, turn, before, marked_issues, marked_pulls } =
+            request;
         let resumed = match resumed {
             None => None,
             Some(resumed) => Some(
@@ -181,8 +242,9 @@ impl Asked {
         };
         let turn = Turn::new(turn, before)?;
         let cwd = cwd.map(PathBuf::from);
+        let marked = Marked::read(marked_issues, marked_pulls)?;
         let asked = Asked::new(cwd, &words, resumed, highlighted, turn)?;
-        Ok((on, asked))
+        Ok((on, asked.marking(marked)))
     }
 
     #[must_use]
@@ -195,6 +257,8 @@ impl Asked {
             highlighted: self.highlighted.clone(),
             turn: self.turn.key,
             before: self.turn.before,
+            marked_issues: self.marked.issues.iter().map(|number| number.get()).collect(),
+            marked_pulls: self.marked.pulls.iter().map(|number| number.get()).collect(),
         }
     }
 
@@ -203,7 +267,7 @@ impl Asked {
         wanted: &dyn Fn() -> bool,
         hear: &dyn Fn(Step),
     ) -> Option<Result<(), String>> {
-        talk(self.claude(), &self.words, wanted, hear)
+        talk(self.claude(), &told(&self.marked, &self.words), wanted, hear)
     }
 
     fn claude(&self) -> Command {
@@ -233,6 +297,13 @@ impl Asked {
 
 fn system(highlighted: &str) -> String {
     format!("{SYSTEM}\n\n{highlighted}\n\n{SKILL}")
+}
+
+fn told(marked: &Marked, words: &str) -> String {
+    match marked.told() {
+        Some(marked) => format!("{marked}\n\n{words}"),
+        None => words.to_owned(),
+    }
 }
 
 fn path_with(exe: &Path) -> Option<OsString> {
@@ -471,6 +542,25 @@ mod tests {
         }
     }
 
+    fn marked(issues: &[u32], pulls: &[u32]) -> Marked {
+        let numbers = |numbers: &[u32]| numbers.iter().map(|it| NonZeroU32::new(*it).unwrap()).collect::<Vec<_>>();
+        Marked::new(numbers(issues), numbers(pulls)).unwrap()
+    }
+
+    #[test]
+    fn what_the_user_marked_goes_with_the_turn_before_their_words() {
+        let told = |marked: Marked| told(&marked, "tackle these");
+        let said = told(marked(&[14, 12], &[20]));
+        let line = "[luneta: in the project's work view the user marked issues #12 and #14, and \
+                    pull request #20: \"these\" or \"them\" may mean them.]";
+        assert_eq!(said, format!("{line}\n\ntackle these"));
+        let marks = |said: String| said.lines().next().map(str::to_owned).unwrap();
+        assert!(marks(told(marked(&[3], &[]))).contains("marked issue #3:"));
+        assert!(marks(told(marked(&[1, 2, 3], &[]))).contains("marked issues #1, #2 and #3:"));
+        assert!(marks(told(marked(&[], &[7, 9]))).contains("marked pull requests #7 and #9:"));
+        assert_eq!(told(Marked::default()), "tackle these", "an unmarked turn is the words alone");
+    }
+
     #[test]
     fn a_turn_goes_by_its_own_key_and_the_one_before() {
         let first = Turn::after(None);
@@ -486,7 +576,9 @@ mod tests {
         let on = || Some(On { destination: "nixos".to_owned() });
         for (cwd, resumed) in [(Some("/w".into()), None), (None, Some(session("7c22")))] {
             let asked = Asked::new(cwd, "prune it", resumed, "row".to_owned(), turn()).unwrap();
-            assert_eq!(Asked::of(asked.asked(on())), Ok((on(), asked)));
+            assert_eq!(Asked::of(asked.asked(on())), Ok((on(), asked.clone())));
+            let marked = asked.marking(marked(&[12, 14], &[20]));
+            assert_eq!(Asked::of(marked.asked(on())), Ok((on(), marked)));
         }
         let request = || {
             let asked = Asked::new(None, "prune it", None, "row".to_owned(), turn());
@@ -498,6 +590,8 @@ mod tests {
             AskRequest { words: " \n".to_owned(), ..request() },
             AskRequest { resumed: Some("--debug".to_owned()), ..request() },
             AskRequest { turn: 7, before: Some(7), ..request() },
+            AskRequest { marked_issues: vec![12, 0], ..request() },
+            AskRequest { marked_pulls: (1..=51).collect(), ..request() },
         ];
         for request in invalid {
             assert!(Asked::of(request.clone()).is_err(), "{request:?}");

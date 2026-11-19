@@ -27,6 +27,7 @@ service Daemon {
   rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
   rpc ChangeProjects(ChangeProjectsRequest) returns (ChangeProjectsResponse);
   rpc MakeWorktree(MakeWorktreeRequest) returns (stream MakeWorktreeResponse);
+  rpc ListWork(ListWorkRequest) returns (stream ListWorkResponse);
   rpc Show(stream ShowRequest) returns (stream ShowResponse);
   rpc Frames(stream FramesRequest) returns (stream luneta.mux.v1.ToViewer);
 }
@@ -118,6 +119,8 @@ message AskRequest {
   string highlighted = 5;
   fixed64 turn = 6;
   optional fixed64 before = 7;
+  repeated uint32 marked_issues = 8;
+  repeated uint32 marked_pulls = 9;
 }
 
 message AskResponse {
@@ -797,6 +800,30 @@ message MakeWorktreeResponse {
   oneof landed {
     fixed64 made = 1;
     fixed64 found = 2;
+  }
+}
+
+message ListWorkRequest {
+  On on = 1;
+  fixed64 project = 2;
+}
+
+message ListWorkResponse {
+  repeated Issue issues = 1;
+  repeated Pull pulls = 2;
+
+  message Issue {
+    uint32 number = 1;
+    string title = 2;
+    repeated string labels = 3;
+  }
+
+  message Pull {
+    uint32 number = 1;
+    string title = 2;
+    bool draft = 3;
+    string branch = 4;
+    string author = 5;
   }
 }
 
