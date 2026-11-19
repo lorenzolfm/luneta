@@ -4,7 +4,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::{Dir, Subfolder, WORKTREES_MAX};
-use crate::git::{self, Common};
+use crate::git::{self, Common, BARE};
 use crate::program::{self, Ran};
 
 pub const CLONE_WORKTREES_MAX: usize = 256;
@@ -12,8 +12,6 @@ pub const CLONE_WORKTREES_MAX: usize = 256;
 pub const LOOK: Duration = Duration::from_secs(2);
 
 const LISTED_MAX: usize = 2 * CLONE_WORKTREES_MAX;
-
-const BARE: &str = ".bare";
 
 const _: () = assert!(CLONE_WORKTREES_MAX <= WORKTREES_MAX);
 
@@ -164,8 +162,7 @@ fn ran(git: &mut Command, asked: &str, until: Instant, look: Duration) -> Result
 }
 
 fn root_of(common: &str) -> Option<Dir> {
-    let root = common.strip_suffix(BARE)?.strip_suffix('/')?;
-    Dir::parse(root).ok()
+    Dir::parse(git::clone_root(common)?).ok()
 }
 
 fn porcelain(root: &Dir, said: &[u8]) -> Result<BTreeSet<Subfolder>, String> {

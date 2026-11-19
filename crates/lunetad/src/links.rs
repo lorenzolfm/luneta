@@ -18,7 +18,7 @@ use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response;
 use crate::api::{On, PasteRequest, PasteResponse};
 use crate::client::Daemon;
-use crate::git::{self, directory_gone, one_line, Common};
+use crate::git::{self, directory_gone, one_line, Common, BARE};
 use crate::program::{self, Ran};
 use crate::projects::{self, Dir, Holders, Name, Spot, SPOT_LOOK};
 use crate::{zoxide, Destination, Directory};
@@ -440,6 +440,7 @@ impl Remote {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layout {
     Wt,
+    Bare,
     Git,
     Unsaid,
 }
@@ -856,7 +857,9 @@ fn moved_off(dir: &str, own: &str) -> Result<Option<MovedOff>, String> {
     let Common::Of(common) = common_dir(dir) else {
         return Err(format!("git does not say what repository {dir} is"));
     };
-    let there = wt_makes(&common, own);
+    let Some(there) = wt_makes(&common, own) else {
+        return Err(format!("{dir} is in no clone wt made"));
+    };
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "worktree", "list", "--porcelain"]));
     let ran = program::run(&mut git, ANSWER)
@@ -870,9 +873,8 @@ fn moved_off(dir: &str, own: &str) -> Result<Option<MovedOff>, String> {
     Ok(directory(&there).map(|folder| MovedOff { folder, on: on.map(str::to_owned) }))
 }
 
-fn wt_makes(common: &str, branch: &str) -> String {
-    let container = common.strip_suffix("/.bare").unwrap_or(common);
-    format!("{container}/{branch}")
+fn wt_makes(common: &str, branch: &str) -> Option<String> {
+    git::clone_root(common).map(|root| format!("{root}/{branch}"))
 }
 
 fn sits_off<'a>(listed: &'a str, there: &str, own: &str) -> Option<&'a str> {
@@ -957,15 +959,19 @@ fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
         Looked::Unsaid(why) => Some((dir.clone(), why.clone())),
         Looked::Of(..) | Looked::NotOf => None,
     };
-    match (laid_out(Layout::Git), laid_out(Layout::Unsaid)) {
-        (Some(dir), _) => Unready::Failed(format!(
+    match (laid_out(Layout::Git), laid_out(Layout::Bare), laid_out(Layout::Unsaid)) {
+        (Some(dir), _, _) => Unready::Failed(format!(
             "{dir} is in a clone of {repository} that git made, and wt would make the worktree \
              in its .git; wt clone it first"
         )),
-        (None, Some(dir)) => Unready::Failed(format!(
+        (None, Some(dir), _) => Unready::Failed(format!(
+            "{dir} is in a bare clone of {repository} that is not a {BARE}, and luneta makes \
+             worktrees only beside one; wt clone it first"
+        )),
+        (None, None, Some(dir)) => Unready::Failed(format!(
             "git did not say whether {dir}, of {repository}, is in a clone wt made"
         )),
-        (None, None) => match seen.iter().filter_map(unsaid).min() {
+        (None, None, None) => match seen.iter().filter_map(unsaid).min() {
             Some((dir, why)) => Unready::Failed(format!(
                 "git did not say whether {dir} is of {repository}: {why}"
             )),
@@ -1054,7 +1060,11 @@ fn layout(dir: &str) -> Layout {
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "config", "--type=bool", "--get", "core.bare"]));
     match said(&mut git).as_deref() {
-        Some("true") => Layout::Wt,
+        Some("true") => match common_dir(dir) {
+            Common::Of(common) if git::clone_root(&common).is_some() => Layout::Wt,
+            Common::Of(_) => Layout::Bare,
+            Common::NoRepository | Common::Unsaid(_) => Layout::Unsaid,
+        },
         Some("false") => Layout::Git,
         _ => Layout::Unsaid,
     }
@@ -1256,6 +1266,10 @@ fn git_reads(dir: &str) -> Result<(), String> {
 fn wt_made(dir: &str) -> Result<(), String> {
     match layout(dir) {
         Layout::Wt => Ok(()),
+        Layout::Bare => Err(format!(
+            "{dir} is in a bare repository that is not a {BARE}, and luneta makes worktrees only \
+             beside one; wt clone it first"
+        )),
         Layout::Git => Err(format!(
             "{dir} is in a clone git made, and wt would make the worktree in its .git; wt clone \
              it first"
@@ -1300,6 +1314,8 @@ mod tests {
     }
 
     const BY_GIT: Repository = Repository { by: Remote::Origin, layout: Layout::Git };
+
+    const BARE_ELSEWHERE: Repository = Repository { by: Remote::Origin, layout: Layout::Bare };
 
     const UNSAID: Repository = Repository { by: Remote::Origin, layout: Layout::Unsaid };
 
@@ -1522,11 +1538,12 @@ mod tests {
 
     #[test]
     fn a_clone_is_the_first_by_its_origin_or_else_by_another_remote() {
-        let dirs = ["/a", "/git", "/unsaid", "/fork/main", "/b", "/upstream", "/fork"]
+        let dirs = ["/bare", "/git", "/unsaid", "/fork/main", "/b", "/upstream", "/fork"]
             .map(str::to_owned);
         let remotes = |dir: &str| match dir {
             "/fork/main" | "/fork" => Some(by_wt(Remote::Other)),
             "/upstream" => Some(by_wt(Remote::Origin)),
+            "/bare" => Some(BARE_ELSEWHERE),
             "/git" => Some(BY_GIT),
             "/unsaid" => Some(UNSAID),
             _ => None,
@@ -1569,6 +1586,26 @@ mod tests {
                 ("/a/cdk", of(UNSAID)),
                 ("/w/cdk/src", of(BY_GIT)),
                 ("/mnt/stuck", stuck()),
+            ])),
+            by_git()
+        );
+        let bare = Unready::Failed(
+            "/w/cdk.git is in a bare clone of cashubtc/cdk that is not a .bare, and luneta makes \
+             worktrees only beside one; wt clone it first"
+                .to_owned(),
+        );
+        assert_eq!(
+            no_clone(&link(), &seen(&[
+                ("/a/cdk", of(UNSAID)),
+                ("/w/cdk.git", of(BARE_ELSEWHERE)),
+                ("/mnt/stuck", stuck()),
+            ])),
+            bare
+        );
+        assert_eq!(
+            no_clone(&link(), &seen(&[
+                ("/w/cdk.git", of(BARE_ELSEWHERE)),
+                ("/w/cdk/src", of(BY_GIT)),
             ])),
             by_git()
         );
@@ -1986,17 +2023,33 @@ mod tests {
     }
 
     #[test]
-    fn luneta_looks_for_a_worktree_where_wt_makes_one() {
+    fn luneta_makes_worktrees_only_beside_a_bare_where_wt_makes_them_too() {
         let scratch = tempfile::tempdir().unwrap();
-        for name in [".bare", ".git", "cdk.git"] {
-            let bare = fs::canonicalize(scratch.path()).unwrap().join(name);
-            let bare = bare.to_str().unwrap();
-            assert!(git(scratch.path(), &["init", "-q", "--bare", bare]).is_some());
-            let Common::Of(common) = common_dir(bare) else { panic!("no repository at {bare}") };
-            let found = Repo::discover(Some(Path::new(bare))).unwrap();
-            let wt = found.container().unwrap().join("issue-7");
-            assert_eq!(wt_makes(&common, "issue-7"), wt.to_str().unwrap());
+        let scratch = fs::canonicalize(scratch.path()).unwrap();
+        let bare = scratch.join("cdk/.bare");
+        let bare = bare.to_str().unwrap();
+        assert!(git(&scratch, &["init", "-q", "--bare", bare]).is_some());
+        let Common::Of(common) = common_dir(bare) else { panic!("no repository at {bare}") };
+        let found = Repo::discover(Some(Path::new(bare))).unwrap();
+        let wt = found.container().unwrap().join("issue-7");
+        assert_eq!(wt_makes(&common, "issue-7").as_deref(), wt.to_str());
+        assert_eq!(layout(bare), Layout::Wt);
+        assert_eq!(wt_made(bare), Ok(()));
+        for name in ["infra/.git", "cdk.git"] {
+            let elsewhere = scratch.join(name);
+            let elsewhere = elsewhere.to_str().unwrap();
+            assert!(git(&scratch, &["init", "-q", "--bare", elsewhere]).is_some());
+            let Common::Of(common) = common_dir(elsewhere) else {
+                panic!("no repository at {elsewhere}")
+            };
+            let found = Repo::discover(Some(Path::new(elsewhere))).unwrap();
+            assert!(found.container().is_ok(), "wt makes worktrees in {elsewhere}");
+            assert_eq!(wt_makes(&common, "issue-7"), None);
+            assert_eq!(layout(elsewhere), Layout::Bare);
         }
+        let plain = scratch.join("plain");
+        assert!(git(&scratch, &["init", "-q", plain.to_str().unwrap()]).is_some());
+        assert_eq!(layout(plain.to_str().unwrap()), Layout::Git);
     }
 
     #[test]
