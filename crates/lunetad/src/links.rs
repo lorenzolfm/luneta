@@ -802,7 +802,7 @@ fn synced(
     }
 }
 
-fn held_by_no_folder(repository: &str, plain: &[Plain]) -> Result<(), String> {
+pub fn held_by_no_folder(repository: &str, plain: &[Plain]) -> Result<(), String> {
     let real = directory(repository).ok_or_else(|| format!("{repository} is no folder now"))?;
     let real = Dir::parse(&real).map_err(|why| format!("{repository}: {why}"))?;
     match plain.iter().find(|it| it.dir.below(&real).is_some()) {
@@ -1030,11 +1030,6 @@ fn cloned(
         }
     }
     best.map(|(_, at)| at)
-}
-
-#[must_use]
-pub fn wt_holder(dir: &str) -> Option<String> {
-    (layout(dir) == Layout::Wt).then(|| holder(dir)).flatten()
 }
 
 #[must_use]

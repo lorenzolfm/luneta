@@ -1004,6 +1004,14 @@ impl Projects {
         self.projects.iter().find_map(|project| Some((project.id, project.within(spot)?)))
     }
 
+    fn swallowing(&self, spot: &Spot) -> Option<Plain> {
+        if !spot.is_clone() {
+            return None;
+        }
+        let (project, _) = self.inside(spot)?;
+        self.project_of(project)?.plain()
+    }
+
     fn stale(&self, change: &Change) -> Option<String> {
         match change {
             Change::ReorderProjects { seen, .. } => {
@@ -1065,6 +1073,9 @@ impl Projects {
                 Some(self.landed(&mut changed, made, &opens, &mut draw)?)
             },
             Change::Join { spot, opens } => {
+                if let Some(plain) = self.swallowing(&spot) {
+                    return Err(held_by_folder(&spot.place(), &plain));
+                }
                 let (project, within) = match self.inside(&spot) {
                     Some(found) => found,
                     None => changed.made_inside(&spot, None, &mut draw)?,
@@ -2217,6 +2228,20 @@ mod tests {
         assert_eq!(said, format!("/n/cdk/fix is in /n, project n's folder; {one}"));
         assert_eq!(projects, before, "the folder's worktree is neither renamed nor opened");
         assert_eq!(projects.project_of(notes).unwrap().worktrees().count(), 1);
+    }
+
+    #[test]
+    fn a_join_of_a_clone_inside_a_folder_s_project_is_refused_and_a_folder_in_it_found() {
+        let mut projects = Projects::default();
+        let notes = project(&mut projects, "/n");
+        let said = change(&projects, joining(spot_at("/n/cdk", "fix"))).unwrap_err();
+        let one = "n is a folder, and its own is its one worktree";
+        assert_eq!(said, format!("/n/cdk/fix is in /n, project n's folder; {one}"));
+        let said = change(&projects, joining(clone_of("/n/cdk", &["fix"]))).unwrap_err();
+        assert_eq!(said, format!("/n/cdk is in /n, project n's folder; {one}"));
+        let own = projects.project_of(notes).unwrap().worktrees().next().unwrap().id();
+        let (same, found) = change(&projects, joining(folder("/n/drafts"))).unwrap();
+        assert_eq!((same == projects, found), (true, Some(Made::Found(own))));
     }
 
     #[test]

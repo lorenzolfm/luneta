@@ -149,11 +149,6 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
     match What::read(what, &cwd, home.as_deref(), Path::is_dir)? {
         What::Folder(dir) => {
             let folder = worktrees::real(&dir)?;
-            let clone = links::wt_holder(utf8(&folder)?).filter(|clone| Path::new(clone) != folder);
-            if clone.is_some() {
-                let worktree = worktrees::worked_in(path, &folder, Vec::new())?.worktree();
-                return Ok(Started::Worktree { worktree, folder, left: Left::Done });
-            }
             let at = Directory::parse(utf8(&folder)?.to_owned())?;
             Ok(match worktrees::made_at(path, &Machine::Local, &at, None)? {
                 Landing::Worktree(landed) => {
@@ -168,6 +163,7 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
         },
         What::Branch(branch) => {
             let repo = utf8(&cwd)?;
+            links::held_by_no_folder(repo, &worktrees::plain(path)?)?;
             let folder = worktrees::real(&links::made(repo, &Of::Branch(branch))?)?;
             let worktree = worktrees::worked_in(path, &folder, Vec::new())?.worktree();
             Ok(Started::Worktree { worktree, folder, left: Left::Done })

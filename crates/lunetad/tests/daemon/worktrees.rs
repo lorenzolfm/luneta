@@ -164,6 +164,34 @@ fn a_project_asked_for_at_a_worktree_is_its_clone_s_and_a_branch_joins_it() {
 }
 
 #[test]
+fn a_branch_in_a_clone_a_folder_s_project_holds_makes_nothing_and_its_folder_goes_there() {
+    let owned = Owned::new();
+    let host = &owned.host;
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (up, notes) = (scratch.join("up"), scratch.join("notes"));
+    fs::create_dir(&notes).unwrap();
+    let clone = notes.join("n");
+    cloned_as_wt(&scratch, &up, &clone);
+    project(host, &notes, None);
+    let notes_s = notes.display().to_string();
+    let kept = vec![("notes".to_owned(), notes_s.clone(), vec![notes_s.clone()])];
+    assert_eq!(folders(host), kept);
+    let main = clone.join("main");
+
+    let one = "notes is a folder, and its own is its one worktree";
+    let held = format!("{} is in {notes_s}, project notes's folder; {one}", main.display());
+    assert_eq!(refused(&started(host, &main, "feat", &[])), format!("luneta: nothing made: {held}"));
+    assert!(!clone.join("feat").exists(), "wt makes no worktree");
+    assert_eq!(folders(host), kept);
+
+    let went = started(host, &clone, "main", &[]);
+    assert_eq!(said(&went), shown(&main), "a worktree's folder goes to the folder's project");
+    assert!(went.stderr.is_empty(), "{}", String::from_utf8_lossy(&went.stderr));
+    assert_eq!(folders(host), kept, "and makes it no row");
+}
+
+#[test]
 fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     let owned = Owned::new();
     let host = &owned.host;
