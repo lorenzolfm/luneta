@@ -113,7 +113,10 @@ pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
         let request = WatchRequest { after: None, kept: None, shown: false };
         let host = daemon.watch(request).await.map_err(|status| status.message().to_owned())?;
         match host.into_inner().projects.and_then(|projects| projects.held) {
-            Some(Held::Kept(kept)) => kept.projects.iter().map(projected::project).collect(),
+            Some(Held::Kept(kept)) => {
+                let projects = kept.projects.iter().map(projected::project);
+                projected::bounded(projects.collect::<Result<Vec<Project>, String>>()?)
+            },
             Some(Held::Unkept(why)) => Err(format!("lunetad keeps no projects: {why}")),
             None => Err("lunetad is older than its projects".to_owned()),
         }
