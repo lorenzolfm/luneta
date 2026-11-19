@@ -1,10 +1,8 @@
 use std::collections::BTreeMap;
-use std::num::NonZeroU32;
 
 use lunetad::api::projects::Held;
 use lunetad::api::{self, remote, terminal, Host};
 use lunetad::log;
-use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnTerminal};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{ProjectId, Used, ViewId, WorktreeId, WORKTREES_MAX};
 use lunetad::Destination;
@@ -34,7 +32,6 @@ pub enum Holds {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
     pub id: ProjectId,
-    pub key: OwnKey,
     pub name: String,
     pub dir: String,
     pub holds: Holds,
@@ -53,16 +50,6 @@ pub struct Projected {
     far: BTreeMap<Destination, Vec<Project>>,
 }
 
-#[must_use]
-pub fn own_id(project: ProjectId) -> OwnId {
-    OwnId::new(project.get()).expect("a project's id is not 0")
-}
-
-#[must_use]
-pub fn key_of(project: ProjectId) -> OwnKey {
-    OwnKey { id: own_id(project), made: OwnMade::from_nanos(0) }
-}
-
 impl Project {
     #[must_use]
     pub fn worktrees(&self) -> &[Worktree] {
@@ -77,10 +64,10 @@ impl Project {
     }
 
     #[must_use]
-    pub fn own_of(&self, terminal: ViewId) -> Option<OwnTerminal> {
+    pub fn terminal_of(&self, view: ViewId) -> Option<TerminalKey> {
         let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
-        let (_, key) = held.find(|(id, _)| *id == terminal)?;
-        Some(OwnTerminal { session: self.key, id: key.as_ref()?.id })
+        let (_, key) = held.find(|(id, _)| *id == view)?;
+        *key
     }
 
     fn first_keyed(&self) -> Option<TerminalKey> {
@@ -88,14 +75,14 @@ impl Project {
         held.find_map(|(_, key)| *key)
     }
 
-    fn holding(&self, terminal: NonZeroU32) -> Option<(WorktreeId, ViewId, TerminalKey)> {
-        let held = self.worktrees().iter().flat_map(|worktree| {
-            let keyed = worktree.terminals.iter().filter_map(|(id, key)| Some((*id, (*key)?)));
-            keyed.map(|(id, key)| (worktree.id, id, key))
+    #[must_use]
+    pub fn view_of(&self, terminal: TerminalKey) -> Option<(WorktreeId, ViewId)> {
+        let mut held = self.worktrees().iter().flat_map(|worktree| {
+            let on_terminal = worktree.terminals.iter().filter(|(_, key)| *key == Some(terminal));
+            on_terminal.map(|(id, _)| (worktree.id, *id))
         });
-        let mut on_terminal = held.filter(|(_, _, key)| key.id == terminal);
-        let first = on_terminal.next()?;
-        on_terminal.next().is_none().then_some(first)
+        let first = held.next()?;
+        held.next().is_none().then_some(first)
     }
 }
 
@@ -136,8 +123,8 @@ impl Projected {
     }
 
     #[must_use]
-    pub fn project(&self, on: &Machine, key: OwnKey) -> Option<&Project> {
-        self.projects(on).iter().find(|project| project.key == key)
+    pub fn project(&self, on: &Machine, id: ProjectId) -> Option<&Project> {
+        self.projects(on).iter().find(|project| project.id == id)
     }
 
     #[must_use]
@@ -170,17 +157,11 @@ impl Projected {
         (before.map(|it| it.id), after.map(|it| it.id))
     }
 
-    #[must_use]
-    pub fn of_own(&self, on: &Machine, own: OwnTerminal) -> Option<(WorktreeId, ViewId)> {
-        let (worktree, terminal, _) = self.project(on, own.session)?.holding(own.id)?;
-        Some((worktree, terminal))
-    }
-
     pub fn whole(&self, on: &Machine, session: &Listed) -> Result<TerminalKey, String> {
         if let Machine::Remote(_) = on {
             return Err(NOT_YET.to_owned());
         }
-        let project = self.project(on, session.own_key()).ok_or("lunetad keeps no such project")?;
+        let project = self.project(on, session.project()).ok_or("lunetad keeps no such project")?;
         let unshown = || format!("{} has no terminal to show", project.name);
         project.first_keyed().ok_or_else(unshown)
     }
@@ -259,19 +240,25 @@ fn project(project: &api::Project) -> Result<Project, String> {
         },
         None => return Err(format!("project {named} says not what it holds")),
     };
-    Ok(Project { id, key: key_of(id), name: project.name.clone(), dir: project.dir.clone(), holds })
+    Ok(Project { id, name: project.name.clone(), dir: project.dir.clone(), holds })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
-
     use lunetad::api::projects::Kept;
 
     use super::*;
 
     fn key(id: u32) -> api::TerminalKey {
         api::TerminalKey { id, made_at: Some(prost_types::Timestamp::default()) }
+    }
+
+    fn keyed(id: u32) -> TerminalKey {
+        TerminalKey::of(&key(id)).unwrap()
+    }
+
+    fn seven() -> ProjectId {
+        ProjectId::of(7).unwrap()
     }
 
     fn terminal(id: u64, found: terminal::Found, topic: Option<&str>) -> api::Terminal {
@@ -331,11 +318,10 @@ mod tests {
         let reached = Some(remote::Reached::Host(far));
         host.remotes = vec![api::Remote { destination: "nixos".to_owned(), reached }];
         let projected = Projected::adapted(&host).unwrap();
-        let project_key = key_of(ProjectId::of(7).unwrap());
         let (here, nixos) = (Machine::Local, Machine::Remote("nixos".parse().unwrap()));
-        let five = OwnTerminal { session: project_key, id: NonZeroU32::new(5).unwrap() };
+        let five = |on| projected.project(on, seven())?.view_of(keyed(5));
         let held = Some((worktree(12), ViewId::of(23).unwrap()));
-        assert_eq!((projected.of_own(&here, five), projected.of_own(&nixos, five)), (held, held));
+        assert_eq!((five(&here), five(&nixos)), (held, held));
         let names = |on| -> Vec<&str> {
             projected.projects(on).iter().map(|it| it.name.as_str()).collect()
         };
@@ -351,13 +337,12 @@ mod tests {
     #[test]
     fn a_view_or_tab_of_a_project_row_leads_back_to_its_worktree_and_terminal() {
         let projected = Projected::adapted(&host()).unwrap();
-        let project_key = key_of(ProjectId::of(7).unwrap());
-        let own = OwnTerminal { session: project_key, id: NonZeroU32::new(4).unwrap() };
         let terminal = ViewId::of(21).unwrap();
-        assert_eq!(projected.of_own(&Machine::Local, own), Some((worktree(11), terminal)));
-        let project = &projected.projects(&Machine::Local)[0];
-        assert_eq!(project.own_of(terminal), Some(own));
-        assert_eq!(project.own_of(ViewId::of(22).unwrap()), None, "a lost one is no view");
+        let project = projected.project(&Machine::Local, seven()).unwrap();
+        assert_eq!(project.view_of(keyed(4)), Some((worktree(11), terminal)));
+        assert_eq!(project.terminal_of(terminal), Some(keyed(4)));
+        assert_eq!(project.terminal_of(ViewId::of(22).unwrap()), None, "a lost one is no view");
+        assert_eq!(projected.project(&Machine::Local, ProjectId::of(8).unwrap()), None);
         let (tabs, titles) = projected.tabs(&Machine::Local, worktree(11));
         let names: Vec<&str> = tabs.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["main", "docs"]);
@@ -394,27 +379,25 @@ mod tests {
     }
 
     #[test]
-    fn a_view_two_terminals_claim_leads_to_neither() {
+    fn a_terminal_two_views_claim_leads_to_neither_and_one_made_again_to_its_own_view() {
         let mut host = host();
         let made_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
-        let remade = api::TerminalKey { id: 4, made_at };
-        let again = terminal(24, terminal::Found::Key(remade), None);
-        rows(kept(&mut host))[1].terminals.push(again);
+        let remade = api::TerminalKey { id: 5, made_at };
+        let terminals = &mut rows(kept(&mut host))[1].terminals;
+        terminals.push(terminal(24, terminal::Found::Key(key(4)), None));
+        terminals.push(terminal(25, terminal::Found::Key(remade), None));
         let projected = Projected::adapted(&host).unwrap();
-        let project_key = key_of(ProjectId::of(7).unwrap());
-        let four = OwnTerminal { session: project_key, id: NonZeroU32::new(4).unwrap() };
-        assert_eq!(projected.of_own(&Machine::Local, four), None);
-        let five = OwnTerminal { session: project_key, id: NonZeroU32::new(5).unwrap() };
-        let held = Some((worktree(12), ViewId::of(23).unwrap()));
-        assert_eq!(projected.of_own(&Machine::Local, five), held);
+        let project = projected.project(&Machine::Local, seven()).unwrap();
+        assert_eq!(project.view_of(keyed(4)), None, "two views claim terminal 4");
+        let view = |id| Some((worktree(12), ViewId::of(id).unwrap()));
+        assert_eq!(project.view_of(keyed(5)), view(23));
+        assert_eq!(project.view_of(TerminalKey::of(&remade).unwrap()), view(25));
     }
 
     #[test]
     fn a_view_routes_by_its_key_and_a_whole_project_row_to_its_first_keyed_terminal() {
         let projected = Projected::adapted(&host()).unwrap();
         let (here, project) = (Machine::Local, Listed::new_project("bitwarden backup", 7));
-        let made = OwnMade::read(prost_types::Timestamp::default()).unwrap();
-        let keyed = |id| TerminalKey { id: NonZeroU32::new(id).unwrap(), made };
         let unlisted = ViewKey::Terminal(keyed(9));
         assert_eq!(route(&here, unlisted), Ok(keyed(9)));
         assert_eq!(projected.whole(&here, &project), Ok(keyed(4)), "the first one keyed");

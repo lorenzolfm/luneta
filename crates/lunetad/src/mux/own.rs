@@ -1,6 +1,5 @@
 use std::ffi::OsString;
-use std::fmt;
-use std::num::{NonZeroU32, NonZeroU64, ParseIntError};
+use std::num::{NonZeroU32, ParseIntError};
 use std::process::Command;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -11,48 +10,6 @@ pub mod api;
 pub mod frames;
 pub mod server;
 pub mod viewer;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OwnId(NonZeroU64);
-
-impl OwnId {
-    #[must_use]
-    pub fn new(id: u64) -> Option<Self> {
-        NonZeroU64::new(id).map(OwnId)
-    }
-
-    #[must_use]
-    pub fn get(self) -> u64 {
-        self.0.get()
-    }
-}
-
-impl fmt::Display for OwnId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OwnClientId(NonZeroU64);
-
-impl OwnClientId {
-    #[must_use]
-    pub fn new(id: u64) -> Option<Self> {
-        NonZeroU64::new(id).map(OwnClientId)
-    }
-
-    #[must_use]
-    pub fn get(self) -> u64 {
-        self.0.get()
-    }
-}
-
-impl fmt::Display for OwnClientId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OwnMade(u64);
@@ -118,28 +75,9 @@ impl TerminalKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct OwnKey {
-    pub id: OwnId,
-    pub made: OwnMade,
-}
-
 impl From<TerminalKey> for crate::api::TerminalKey {
     fn from(key: TerminalKey) -> Self {
         crate::api::TerminalKey { id: key.id.get(), made_at: Some(key.made.into()) }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct OwnTerminal {
-    pub session: OwnKey,
-    pub id: NonZeroU32,
-}
-
-impl OwnTerminal {
-    #[must_use]
-    pub fn new(session: OwnKey, terminal: u32) -> Option<Self> {
-        NonZeroU32::new(terminal).map(|id| OwnTerminal { session, id })
     }
 }
 

@@ -3,7 +3,7 @@ use std::fmt;
 use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
-use lunetad::mux::{OwnKey, TerminalKey};
+use lunetad::mux::TerminalKey;
 use lunetad::projects::{ProjectId, ViewId, WorktreeId};
 use lunetad::seats::Unread;
 use lunetad::SessionName;
@@ -23,12 +23,7 @@ pub enum Scope {
 pub enum Deletes {
     View(ViewKey),
     Worktree { worktree: WorktreeId, views: Vec<u32>, seen: Vec<ViewId> },
-    Project {
-        key: OwnKey,
-        project: ProjectId,
-        worktrees: Vec<WorktreeId>,
-        seen: Vec<ViewId>,
-    },
+    Project { project: ProjectId, worktrees: Vec<WorktreeId>, seen: Vec<ViewId> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,7 +87,6 @@ pub enum Act {
     Worktree { session: SessionName, worktree: WorktreeId, views: Vec<u32>, seen: Vec<ViewId> },
     Project {
         session: SessionName,
-        key: OwnKey,
         project: ProjectId,
         worktrees: Vec<WorktreeId>,
         seen: Vec<ViewId>,
@@ -138,9 +132,9 @@ pub fn plan(subject: &Subject) -> Plan {
             let (worktree, views, seen) = (*worktree, views.clone(), seen.clone());
             Act::Worktree { session, worktree, views, seen }
         },
-        Deletes::Project { key, project, worktrees, seen } => {
+        Deletes::Project { project, worktrees, seen } => {
             let (worktrees, seen) = (worktrees.clone(), seen.clone());
-            Act::Project { session, key: *key, project: *project, worktrees, seen }
+            Act::Project { session, project: *project, worktrees, seen }
         },
     };
     Plan::of(act, subject.agents.as_deref().map_err(|untold| *untold))
@@ -264,12 +258,10 @@ mod tests {
     #[test]
     fn a_project_s_delete_kills_it_and_always_asks_first_by_the_project_s_name() {
         let project = Listed::new_project("luneta", 6);
-        let key = project.own_key();
         let worktrees = vec![WorktreeId::of(31).unwrap()];
         let seen = vec![ViewId::of(4).unwrap()];
         let project_id = ProjectId::of(6).unwrap();
         let deletes = || Deletes::Project {
-            key,
             project: project_id,
             worktrees: worktrees.clone(),
             seen: seen.clone(),
@@ -277,7 +269,7 @@ mod tests {
         let planned = |agents| plan(&subject(&project, deletes(), agents));
         let session = project.name().clone();
         let (worktrees, seen) = (worktrees.clone(), seen.clone());
-        let act = Act::Project { session, key, project: project_id, worktrees, seen };
+        let act = Act::Project { session, project: project_id, worktrees, seen };
         let busy = planned(vec![(4, Doing::Busy)]);
         assert_eq!(busy.act, act, "an own project is deleted with what was seen of it");
         assert_eq!(busy.question().as_deref(), Some("Delete project luneta? 1 agent, 1 busy"));
