@@ -988,7 +988,7 @@ impl App {
                 self.sidebar.filed(number, &to.to_string(), &filed);
                 self.desktop.tell(Told::issue(&to.to_string(), &filed));
                 match filed {
-                    Ok(filed) => self.clip(terminal, Clip::Filed(filed.link().clone()))?,
+                    Ok(filed) => self.clip(terminal, Clip::Filed(filed))?,
                     Err(_) => self.unfiled.keep(number, repository, to, words),
                 }
             },

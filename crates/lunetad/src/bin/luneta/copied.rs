@@ -3,7 +3,8 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::Deref;
 
 use base64::Engine as _;
-use lunetad::links::{Kind, Link};
+use lunetad::issues::Filed;
+use lunetad::links::Link;
 
 use crate::sidebar::cut;
 use crate::sweep::cells;
@@ -16,7 +17,7 @@ pub struct Excerpt(String);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Clip {
     Pull(Link),
-    Filed(Link),
+    Filed(Filed),
     Excerpt(Excerpt),
 }
 
@@ -55,13 +56,11 @@ impl Copies {
     pub fn clip(&mut self, out: &mut impl io::Write, clip: Clip) -> io::Result<Option<Copied>> {
         match clip {
             Clip::Pull(link) => {
-                assert_eq!(link.kind(), Kind::Pull, "a row keeps only its pull request's link");
                 write(out, &link.url())?;
                 Ok(Some(Copied::Pull(link.number())))
             },
-            Clip::Filed(link) => {
-                assert_eq!(link.kind(), Kind::Issue, "an issue is filed only with an issue's link");
-                write(out, &link.url())?;
+            Clip::Filed(filed) => {
+                write(out, &filed.link().url())?;
                 Ok(None)
             },
             Clip::Excerpt(excerpt) => {
@@ -168,15 +167,15 @@ mod tests {
         Copied::text(&excerpt(text))
     }
 
-    fn link(kind: &str) -> Link {
-        Link::parse(&format!("https://github.com/o/r/{kind}/246")).expect("a link on github.com")
+    fn link() -> Link {
+        Link::parse("https://github.com/o/r/pull/246").expect("a link on github.com")
     }
 
     #[test]
     fn what_to_copy_goes_out_as_osc_52() {
         let mut out = Vec::new();
         let mut copies = Copies::default();
-        let note = copies.clip(&mut out, Clip::Pull(link("pull"))).unwrap();
+        let note = copies.clip(&mut out, Clip::Pull(link())).unwrap();
         assert_eq!(note, Some(Copied::Pull(NonZeroU32::new(246).unwrap())));
         let spelled = "aHR0cHM6Ly9naXRodWIuY29tL28vci9wdWxsLzI0Ng==";
         assert_eq!(String::from_utf8(out).unwrap(), format!("\x1b]52;c;{spelled}\x07"));
@@ -188,13 +187,14 @@ mod tests {
         let mut out = Vec::new();
         let pull = Some(Copied::Pull(NonZeroU32::new(246).unwrap()));
         let mut clip = |copies: &mut Copies, clip| copies.clip(&mut out, clip).unwrap();
-        assert_eq!(clip(&mut copies, Clip::Pull(link("pull"))), pull);
+        assert_eq!(clip(&mut copies, Clip::Pull(link())), pull);
         assert_eq!(copies.excerpt(), None, "a link luneta made is not read");
         assert_eq!(clip(&mut copies, Clip::Excerpt(excerpt("swept"))), Some(noted("swept")));
         assert_eq!(copies.excerpt(), Some("swept"));
-        assert_eq!(clip(&mut copies, Clip::Pull(link("pull"))), pull);
+        assert_eq!(clip(&mut copies, Clip::Pull(link())), pull);
         assert_eq!(copies.excerpt(), Some("swept"), "a pull request's link leaves it");
-        let filed = clip(&mut copies, Clip::Filed(link("issues")));
+        let filed = Filed::page("https://github.com/o/r/issues/7", "Red").expect("an issue's page");
+        let filed = clip(&mut copies, Clip::Filed(filed));
         assert_eq!(filed, None, "a filed issue says so in its own note");
         assert_eq!(copies.excerpt(), Some("swept"), "a filed issue's link leaves it");
         let selected = clip(&mut copies, Clip::Excerpt(excerpt("selected")));
