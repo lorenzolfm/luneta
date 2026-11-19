@@ -11,11 +11,27 @@ pub const BUILT: Option<u64> = match option_env!("LUNETA_BUILT") {
     None => None,
 };
 
+const _: () = assert!(env!("CARGO_PKG_VERSION_PRE").is_empty(), "a release has no pre-release");
+
+pub const OWN: Build = Build {
+    release: match (
+        number(env!("CARGO_PKG_VERSION_MAJOR")),
+        number(env!("CARGO_PKG_VERSION_MINOR")),
+        number(env!("CARGO_PKG_VERSION_PATCH")),
+    ) {
+        (Some(major), Some(minor), Some(patch)) => Release(major, minor, patch),
+        _ => panic!("CARGO_PKG_VERSION is no three numbers"),
+    },
+    built: BUILT,
+};
+
 pub static SAID: LazyLock<String> = LazyLock::new(|| spelled(VERSION, BUILT));
 
-#[must_use]
-pub fn is_own(version: &str, built: Option<u64>) -> bool {
-    version == VERSION && built == BUILT
+const fn number(said: &str) -> Option<u64> {
+    match u64::from_str_radix(said, 10) {
+        Ok(number) => Some(number),
+        Err(_) => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,11 +58,6 @@ pub struct Build {
 
 impl Build {
     #[must_use]
-    pub fn own() -> Option<Build> {
-        Build::of(VERSION, BUILT)
-    }
-
-    #[must_use]
     pub fn of(version: &str, built: Option<u64>) -> Option<Build> {
         Some(Build { release: Release::parse(version)?, built })
     }
@@ -71,6 +82,45 @@ impl fmt::Display for Build {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Of {
+    Own,
+    Other(Other),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Other {
+    spelled: String,
+    build: Option<Build>,
+}
+
+impl Other {
+    #[must_use]
+    pub fn build(&self) -> Option<Build> {
+        self.build
+    }
+
+    #[must_use]
+    pub fn is_newer(&self) -> bool {
+        self.build.is_some_and(|build| build > OWN)
+    }
+}
+
+impl fmt::Display for Other {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.spelled)
+    }
+}
+
+#[must_use]
+pub fn of(version: &str, built: Option<u64>) -> Of {
+    let theirs = Build::of(version, built);
+    if theirs == Some(OWN) {
+        return Of::Own;
+    }
+    Of::Other(Other { spelled: spelled(version, built), build: theirs })
+}
+
 #[must_use]
 pub fn spelled(version: &str, built: Option<u64>) -> String {
     match built {
@@ -88,12 +138,25 @@ mod tests {
         for built in [None, Some(1793301121)] {
             assert_eq!(Build::parse(&spelled("0.2.2", built)), Build::of("0.2.2", built));
         }
-        assert_eq!(Build::parse(&SAID), Build::own());
-        assert_eq!(Build::own().map(|own| own.to_string()).as_deref(), Some(SAID.as_str()));
-        assert!(is_own(VERSION, BUILT));
-        assert!(!is_own(VERSION, Some(BUILT.map_or(0, |built| built + 1))));
+        assert_eq!(Build::parse(&SAID), Some(OWN));
+        assert_eq!(OWN.to_string(), *SAID);
         assert_eq!(Build::parse("0.2.2+"), None);
         assert_eq!(Build::parse("0.2.2+x"), None);
         assert_eq!(Build::parse("0.2+1"), None);
+    }
+
+    #[test]
+    fn only_this_build_is_own_and_another_says_how_it_is_spelled() {
+        assert_eq!(of(VERSION, BUILT), Of::Own);
+        let other = |version, built| match of(version, built) {
+            Of::Other(other) => other,
+            Of::Own => panic!("{} is another build than {}", spelled(version, built), *SAID),
+        };
+        let stamp = Some(BUILT.map_or(0, |built| built + 1));
+        assert_eq!(other(VERSION, stamp).to_string(), spelled(VERSION, stamp));
+        let unread = other("0.3.0-rc.1", BUILT);
+        assert_eq!((unread.build(), unread.is_newer()), (None, false));
+        assert!(other("999.0.0", BUILT).is_newer());
+        assert!(!other("0.0.0", BUILT).is_newer());
     }
 }

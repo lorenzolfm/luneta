@@ -461,8 +461,8 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
         Some(up) => println!("lunetad {build} (pid {}), up {}", info.pid, span(up.as_secs())),
         None => println!("lunetad {build} (pid {})", info.pid),
     }
-    if !release::is_own(&info.version, info.built) {
-        eprintln!("luneta: {}", daemon::unmatched(&info));
+    if let release::Of::Other(other) = release::of(&info.version, info.built) {
+        eprintln!("luneta: {}", daemon::unmatched(&other, info.pid));
     }
     Ok(())
 }

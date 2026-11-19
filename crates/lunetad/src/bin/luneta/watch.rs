@@ -53,13 +53,6 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
                                 break "an answer with no version, which this luneta does not read"
                                     .to_owned();
                             };
-                            if version.pid != info.pid {
-                                break format!(
-                                    "lunetad (pid {}) answered in the place of the one luneta \
-                                     reached (pid {})",
-                                    version.pid, info.pid
-                                );
-                            }
                             after = Some(version);
                             if events.send(Event::Daemon(Ok(host))).is_err() {
                                 return;

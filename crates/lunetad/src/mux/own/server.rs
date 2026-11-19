@@ -3,8 +3,8 @@ use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::process::{self, Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -54,13 +54,13 @@ const LOOK: Duration = Duration::from_millis(10);
 
 const AGAIN: Duration = Duration::from_millis(100);
 
-static MATCHED: AtomicU32 = AtomicU32::new(0);
+static MATCHED: AtomicI32 = AtomicI32::new(0);
 
-static STARTED: AtomicU32 = AtomicU32::new(0);
+static STARTED: AtomicI32 = AtomicI32::new(0);
 
 pub(super) struct Unmatched {
-    pid: Option<u32>,
-    build: Option<String>,
+    pid: Option<Pid>,
+    build: Option<release::Other>,
 }
 
 impl fmt::Display for Unmatched {
@@ -137,15 +137,13 @@ impl Server {
 fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
     let unstopped = |why: String| Failure::Own(format!("{unmatched}, and is not stopped: {why}"));
     let pid = unmatched.pid.ok_or_else(|| unstopped("the kernel names no pid for it".to_owned()))?;
-    assert_ne!(pid, process::id(), "lunetad is never the luneta-mux it stops");
-    if STARTED.load(Ordering::Relaxed) == pid {
+    assert_ne!(pid, rustix::process::getpid(), "lunetad is never the luneta-mux it stops");
+    if Pid::from_raw(STARTED.load(Ordering::Relaxed)) == Some(pid) {
         let from = program();
         let from = from.display();
         return Err(Failure::Own(format!("{unmatched}, though lunetad started it from {from}")));
     }
-    let id = i32::try_from(pid).ok().and_then(Pid::from_raw);
-    let id = id.ok_or_else(|| unstopped(format!("{pid} is no pid")))?;
-    match rustix::process::kill_process(id, Signal::TERM) {
+    match rustix::process::kill_process(pid, Signal::TERM) {
         Ok(()) | Err(rustix::io::Errno::SRCH) => {},
         Err(error) => return Err(unstopped(error.to_string())),
     }
@@ -217,7 +215,7 @@ pub(super) async fn connect(socket: &Path, answer: Option<Duration>) -> io::Resu
         .await
         .map_err(io::Error::other)?;
     let mut client = MuxClient::new(channel);
-    if pid.is_some_and(|pid| MATCHED.load(Ordering::Relaxed) == pid) {
+    if pid.is_some() && Pid::from_raw(MATCHED.load(Ordering::Relaxed)) == pid {
         return Ok(Reached::Matched(client));
     }
     let within = answer.unwrap_or(ANSWER);
@@ -229,14 +227,15 @@ pub(super) async fn connect(socket: &Path, answer: Option<Duration>) -> io::Resu
     let build = match asked.map_err(|_| late())? {
         Ok(info) => {
             let api::InfoResponse { version, built } = info.into_inner();
-            if release::is_own(&version, built) {
-                if let Some(pid) = pid {
-                    assert_ne!(pid, 0, "MATCHED holds 0 for no pid, so no pid named is 0");
-                    MATCHED.store(pid, Ordering::Relaxed);
-                }
-                return Ok(Reached::Matched(client));
+            match release::of(&version, built) {
+                release::Of::Own => {
+                    if let Some(pid) = pid {
+                        MATCHED.store(pid.as_raw_pid(), Ordering::Relaxed);
+                    }
+                    return Ok(Reached::Matched(client));
+                },
+                release::Of::Other(other) => Some(other),
             }
-            Some(release::spelled(&version, built))
         },
         Err(status) if status.code() == Code::Unimplemented => None,
         Err(status) => return Err(io::Error::other(refused(&status).to_string())),
@@ -244,14 +243,13 @@ pub(super) async fn connect(socket: &Path, answer: Option<Duration>) -> io::Resu
     Ok(Reached::Unmatched(Unmatched { pid, build }))
 }
 
-fn mine(stream: UnixStream) -> io::Result<(UnixStream, Option<u32>)> {
+fn mine(stream: UnixStream) -> io::Result<(UnixStream, Option<Pid>)> {
     let peer = stream.peer_cred()?;
     if peer.uid() != rustix::process::getuid().as_raw() {
         let refusal = "another user's process listens on luneta-mux's socket";
         return Err(io::Error::new(ErrorKind::PermissionDenied, refusal));
     }
-    let pid = peer.pid().and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0);
-    Ok((stream, pid))
+    Ok((stream, peer.pid().and_then(Pid::from_raw)))
 }
 
 fn opens(cwd: &Directory, runs: Runs<'_>) -> Result<api::Opens, Failure> {
@@ -676,7 +674,7 @@ impl Started {
         let spawned = command.spawn();
         let unstarted = |error| Failure::Own(format!("{}: {error}", program.display()));
         let child = spawned.map_err(unstarted)?;
-        STARTED.store(child.id(), Ordering::Relaxed);
+        STARTED.store(Pid::from_child(&child).as_raw_pid(), Ordering::Relaxed);
         Ok(Started { child, reaper })
     }
 

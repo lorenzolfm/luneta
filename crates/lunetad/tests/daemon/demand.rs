@@ -53,10 +53,6 @@ const STAND_IN_PID: &str = "LUNETA_TEST_STAND_IN_PID";
 
 const STAND_IN_READS: &str = "LUNETA_TEST_STAND_IN_READS";
 
-const STAND_IN_WATCH_PID: &str = "LUNETA_TEST_STAND_IN_WATCH_PID";
-
-const STAND_IN_NOTES: &str = "LUNETA_TEST_STAND_IN_NOTES";
-
 const STAND_IN_BRIDGED: &str = "LUNETA_TEST_STAND_IN_BRIDGED_VERSION";
 
 const BRIDGED_FD: &str = "/dev/fd/3";
@@ -485,15 +481,6 @@ fn stand_in(host: &Host, version: &str, says: Option<u32>, reads: Option<&Path>)
     stand_in
 }
 
-pub fn stand_in_watched_as(host: &Host, watches_as: u32, notes: &Path) -> Running {
-    let mut command = stand_in_command(host, &release::SAID);
-    command.env(STAND_IN_WATCH_PID, watches_as.to_string()).env(STAND_IN_NOTES, notes);
-    let stand_in = Running::spawn(&mut command);
-    eventually("the stand-in answers", || (answering(host)? == stand_in.pid()).then_some(()));
-    fs::remove_file(notes).unwrap();
-    stand_in
-}
-
 fn stand_in_command(host: &Host, version: &str) -> Command {
     let mut command = Command::new(env::current_exe().unwrap());
     command
@@ -514,8 +501,6 @@ fn stand_in_lunetad() {
     let (version, built) = build_of(env::var(STAND_IN_VERSION).unwrap());
     let pid = env::var(STAND_IN_PID).map_or(std::process::id(), |pid| pid.parse().unwrap());
     let reads = env::var_os(STAND_IN_READS).map(PathBuf::from);
-    let watches_as = env::var(STAND_IN_WATCH_PID).ok().map(|pid| pid.parse().unwrap());
-    let notes = env::var_os(STAND_IN_NOTES).map(PathBuf::from);
     let claim = Claim::take(Path::new(&folder)).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
@@ -526,8 +511,6 @@ fn stand_in_lunetad() {
                 built,
                 pid,
                 reads,
-                watches_as,
-                notes,
             }))
             .serve_with_incoming(UnixListenerStream::new(listener))
             .await
@@ -572,7 +555,7 @@ fn stand_in_bridged_lunetad() {
     runtime.block_on(async {
         let served = tokio::net::UnixStream::from_std(served).unwrap();
         let pid = std::process::id();
-        let stand_in = StandIn { version, built, pid, reads: None, watches_as: None, notes: None };
+        let stand_in = StandIn { version, built, pid, reads: None };
         tonic::transport::Server::builder()
             .add_service(DaemonServer::new(stand_in))
             .serve_with_incoming(tokio_stream::once(Ok::<_, io::Error>(served)).chain(pending()))
@@ -595,23 +578,11 @@ struct StandIn {
     built: Option<u64>,
     pid: u32,
     reads: Option<PathBuf>,
-    watches_as: Option<u32>,
-    notes: Option<PathBuf>,
-}
-
-impl StandIn {
-    fn note(&self, asked: &str) {
-        if let Some(notes) = &self.notes {
-            let mut notes = OpenOptions::new().create(true).append(true).open(notes).unwrap();
-            writeln!(notes, "{asked}").unwrap();
-        }
-    }
 }
 
 #[tonic::async_trait]
 impl Daemon for StandIn {
     async fn info(&self, _: Request<()>) -> Result<Response<InfoResponse>, Status> {
-        self.note("info");
         let (version, built, pid) = (self.version.clone(), self.built, self.pid);
         let zellij_folder = self.reads.as_ref().map(|reads| reads.as_os_str().as_bytes().to_vec());
         let info = InfoResponse { version, built, pid, zellij_folder, ..InfoResponse::default() };
@@ -623,8 +594,7 @@ impl Daemon for StandIn {
     }
 
     async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<api::Host>, Status> {
-        self.note("watch");
-        let version = Version { pid: self.watches_as.unwrap_or(self.pid), seq: 0 };
+        let version = Version { pid: self.pid, seq: 0 };
         Ok(Response::new(api::Host { version: Some(version), ..api::Host::default() }))
     }
 

@@ -17,7 +17,7 @@ use lunetad::api::InfoResponse;
 use lunetad::folder::{self, Folder, ANOTHER_RUNS, LOG};
 use lunetad::mux::Zellij;
 use lunetad::program;
-use lunetad::release::{self, Build};
+use lunetad::release::{self, Build, Of, Other, OWN};
 use rustix::process::{Pid, Signal};
 use tonic::transport::Channel;
 
@@ -76,10 +76,10 @@ pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
     let mut daemon = of_any_build(path).await?;
     let info = daemon.info(()).await;
     let info = info.map_err(|status| Unreached::Failed(causes(&status)))?.into_inner();
-    if !release::is_own(&info.version, info.built) {
-        return Err(Unreached::Failed(unmatched(&info)));
+    match release::of(&info.version, info.built) {
+        Of::Own => Ok(daemon),
+        Of::Other(other) => Err(Unreached::Failed(unmatched(&other, info.pid))),
     }
-    Ok(daemon)
 }
 
 pub async fn of_any_build(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
@@ -114,7 +114,7 @@ pub async fn current(path: &Path) -> Result<Current, String> {
             Ok(mut daemon) => match daemon.info(()).await {
                 Ok(info) => {
                     let info = info.into_inner();
-                    let running = Build::of(&info.version, info.built);
+                    let of = release::of(&info.version, info.built);
                     let (version, pid) = (release::spelled(&info.version, info.built), info.pid);
                     let reads = info.zellij_folder.as_deref();
                     let reads = reads.map(|reads| Path::new(OsStr::from_bytes(reads)));
@@ -128,12 +128,14 @@ pub async fn current(path: &Path) -> Result<Current, String> {
                             reads.display(),
                             own.display()
                         ));
-                    } else if release::is_own(&info.version, info.built) {
+                    } else if of == Of::Own {
                         reap(started);
                         return Ok(Current { folder, daemon, info });
-                    } else if !makes_way(running, Build::own(), || *starting.get_or_init(build)) {
+                    } else if let Of::Other(other) = &of
+                        && !makes_way(other.build(), OWN, || *starting.get_or_init(build))
+                    {
                         reap(started);
-                        return Err(kept(&info, starting.get().copied().flatten()));
+                        return Err(kept(other, pid, starting.get().copied().flatten()));
                     } else {
                         match listener(&folder, pid).await {
                             Listener::Other if doubted == Some(pid) => {
@@ -205,11 +207,9 @@ pub async fn current(path: &Path) -> Result<Current, String> {
     }
 }
 
-pub fn unmatched(info: &InfoResponse) -> String {
-    assert!(!release::is_own(&info.version, info.built), "only another build is unmatched");
-    let (theirs, pid) = (release::spelled(&info.version, info.built), info.pid);
-    let (daemon, own) = (format!("lunetad {theirs} (pid {pid})"), release::SAID.as_str());
-    if newer(info) {
+pub fn unmatched(other: &Other, pid: u32) -> String {
+    let (daemon, own) = (format!("lunetad {other} (pid {pid})"), release::SAID.as_str());
+    if other.is_newer() {
         format!("{daemon} is newer than this luneta, {own}: run a luneta of its build")
     } else {
         let replaced = "open luneta to have it replaced";
@@ -217,21 +217,15 @@ pub fn unmatched(info: &InfoResponse) -> String {
     }
 }
 
-fn newer(info: &InfoResponse) -> bool {
-    Build::of(&info.version, info.built) > Build::own()
-}
-
-fn kept(info: &InfoResponse, starting: Option<Build>) -> String {
-    assert!(!release::is_own(&info.version, info.built), "only another build is kept");
-    let (theirs, pid) = (release::spelled(&info.version, info.built), info.pid);
-    if newer(info) {
-        let unmatched = unmatched(info);
+fn kept(other: &Other, pid: u32, starting: Option<Build>) -> String {
+    if other.is_newer() {
+        let unmatched = unmatched(other, pid);
         return format!("{unmatched}, or end it (`kill {pid}`) for this one to start its own");
     }
     let (own, program) = (release::SAID.as_str(), lunetad());
     let says = starting.map_or_else(|| "says no build".to_owned(), |it| format!("is {it}"));
     format!(
-        "lunetad {theirs} (pid {pid}) is another build than this luneta, {own}, but {} {says}, \
+        "lunetad {other} (pid {pid}) is another build than this luneta, {own}, but {} {says}, \
          no newer, so luneta leaves it be",
         program.display()
     )
@@ -313,13 +307,9 @@ fn lunetad() -> PathBuf {
     beside.unwrap_or_else(|| PathBuf::from(LUNETAD))
 }
 
-fn makes_way(
-    running: Option<Build>,
-    own: Option<Build>,
-    starting: impl FnOnce() -> Option<Build>,
-) -> bool {
+fn makes_way(running: Option<Build>, own: Build, starting: impl FnOnce() -> Option<Build>) -> bool {
     let older = |than: Build| running.is_none_or(|running| running < than);
-    own.is_some_and(older) && starting().is_some_and(older)
+    older(own) && starting().is_some_and(older)
 }
 
 fn build() -> Option<Build> {
@@ -360,7 +350,7 @@ mod tests {
     #[test]
     fn a_daemon_makes_way_for_a_newer_build_alone() {
         let way = |running, own, starting| {
-            makes_way(Build::parse(running), Build::parse(own), || Build::parse(starting))
+            makes_way(Build::parse(running), Build::parse(own).unwrap(), || Build::parse(starting))
         };
         assert!(way("0.2.2", "0.2.2+2", "0.2.2+2"));
         assert!(way("0.2.2+1", "0.2.2+2", "0.2.2+2"));
