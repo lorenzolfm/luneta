@@ -339,6 +339,7 @@ struct App {
     issues: u64,
     unfiled: issue::Kept,
     pickers: u64,
+    inputs: u64,
     dictations: u64,
     image: images::Going,
     repeats: dictation::Repeats,
@@ -570,6 +571,7 @@ fn run_in(
         issues: 0,
         unfiled: issue::Kept::default(),
         pickers: 0,
+        inputs: 0,
         dictations: 0,
         image: images::Going::default(),
         repeats: dictation::Repeats::of(dictation::KEY),
@@ -1027,6 +1029,15 @@ impl App {
     }
 
     fn input(&mut self, input: Input) {
+        let heard = match &input {
+            Input::Key(key) => key.kind != KeyEventKind::Release,
+            Input::Mouse(mouse) => mouse.kind != MouseEventKind::Moved,
+            Input::Paste(_) | Input::FocusGained | Input::FocusLost => true,
+            Input::Resize(..) => false,
+        };
+        if heard {
+            self.inputs += 1;
+        }
         match input {
             Input::Key(key) => self.key(&key),
             Input::Mouse(mouse) => self.mouse(mouse),
@@ -1190,7 +1201,7 @@ impl App {
 
     fn key_to_session(&mut self, key: &KeyEvent) {
         if let Some(right) = &mut self.right {
-            right.key(key);
+            right.key(key, self.inputs);
         }
     }
 

@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::vte::ansi::CursorShape;
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use lunetad::folder;
 use lunetad::mux::own::api::{self, typed};
 use lunetad::mux::own::frames::{self, Frame, Rows};
@@ -83,7 +83,14 @@ struct Layout {
     pointer: Pointer,
     tabs: Vec<Tab>,
     titles: BTreeMap<ViewId, String>,
-    closing: Option<ViewId>,
+    closing: Closing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Closing {
+    Unarmed,
+    Armed { view: ViewId, input: u64 },
+    Closed,
 }
 
 impl Layout {
@@ -96,7 +103,7 @@ impl Layout {
             pointer: Pointer::Free,
             tabs: Vec::new(),
             titles: BTreeMap::new(),
-            closing: None,
+            closing: Closing::Unarmed,
         }
     }
 
@@ -112,18 +119,33 @@ impl Layout {
         self.laid().and_then(Laid::focused).is_some_and(|pane| pane.found == Found::Welcome)
     }
 
-    fn closes(&mut self, key: &KeyEvent) -> Option<ViewId> {
+    fn closes(&mut self, key: &KeyEvent, input: u64) -> Option<ViewId> {
         assert!(self.welcomes(), "only a welcome view is closed by its keys");
         let focused = self.focused().expect("a welcome view welcomes when focused");
-        let closing = self.closing.take();
-        if key.code != KeyCode::Char(CLOSE) || !key.modifiers.is_empty() {
+        let closing = std::mem::replace(&mut self.closing, Closing::Unarmed);
+        let pressed = key.kind == KeyEventKind::Press && key.modifiers.is_empty();
+        if !pressed || key.code != KeyCode::Char(CLOSE) {
             return None;
         }
-        if closing == Some(focused) {
+        let next = |armed: u64| armed.checked_add(1) == Some(input);
+        let twice = matches!(closing, Closing::Armed { view, input } if view == focused && next(input));
+        if twice {
+            self.closing = Closing::Closed;
             return Some(focused);
         }
-        self.closing = Some(focused);
+        self.closing = Closing::Armed { view: focused, input };
         None
+    }
+
+    fn held_after_close(&mut self, key: &KeyEvent) -> bool {
+        if self.closing != Closing::Closed {
+            return false;
+        }
+        let held = key.kind == KeyEventKind::Repeat && key.code == KeyCode::Char(CLOSE);
+        if !held {
+            self.closing = Closing::Unarmed;
+        }
+        held
     }
 
     fn focused_key(&self) -> Option<TerminalKey> {
@@ -154,7 +176,9 @@ impl Layout {
         }
         if self.focused() != laid.focused().map(|pane| pane.view) {
             self.pointer = Pointer::Free;
-            self.closing = None;
+            if matches!(self.closing, Closing::Armed { .. }) {
+                self.closing = Closing::Unarmed;
+            }
         }
         let empty = laid.is_empty();
         self.laid = Some(laid);
@@ -733,10 +757,13 @@ impl Viewed {
         }
     }
 
-    pub fn key(&mut self, key: &KeyEvent) {
+    pub fn key(&mut self, key: &KeyEvent, input: u64) {
         self.unselect();
+        if self.layout.held_after_close(key) {
+            return;
+        }
         if self.layout.welcomes() {
-            if let Some(view) = self.layout.closes(key) {
+            if let Some(view) = self.layout.closes(key, input) {
                 self.ask(Asked::Close(view));
             }
             return;
@@ -1083,18 +1110,46 @@ mod tests {
         let typed = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let d = typed(KeyCode::Char(CLOSE));
         let welcome = Some(ViewId::of(12).unwrap());
-        assert_eq!(layout.closes(&d), None);
-        assert_eq!(layout.closes(&d), welcome, "d d closes it, by its id");
-        assert_eq!(layout.closes(&d), None);
-        assert_eq!(layout.closes(&typed(KeyCode::Char('x'))), None);
-        assert_eq!(layout.closes(&d), None, "another key between the two starts over");
+        assert_eq!(layout.closes(&d, 1), None);
+        assert_eq!(layout.closes(&d, 2), welcome, "d d closes it, by its id");
+        assert_eq!(layout.closes(&d, 3), None);
+        assert_eq!(layout.closes(&typed(KeyCode::Char('x')), 4), None);
+        assert_eq!(layout.closes(&d, 5), None, "another key between the two starts over");
         let ctrl_d = KeyEvent::new(KeyCode::Char(CLOSE), KeyModifiers::CONTROL);
-        assert_eq!(layout.closes(&ctrl_d), None);
-        assert_eq!(layout.closes(&d), None, "Ctrl d is no d");
+        assert_eq!(layout.closes(&ctrl_d, 6), None);
+        assert_eq!(layout.closes(&d, 7), None, "Ctrl d is no d");
         assert!(!layout.laid_out(laid(panes(), 11, false)));
         assert!(!layout.laid_out(laid(panes(), 12, false)));
-        assert_eq!(layout.closes(&d), None, "a focus gone elsewhere and back starts over");
-        assert_eq!(layout.closes(&d), welcome);
+        assert_eq!(layout.closes(&d, 8), None, "a focus gone elsewhere and back starts over");
+        assert_eq!(layout.closes(&d, 9), welcome);
+        assert_eq!(layout.closes(&d, 10), None);
+        let elsewhere = "an input luneta takes itself between the two starts over";
+        assert_eq!(layout.closes(&d, 12), None, "{elsewhere}");
+        assert_eq!(layout.closes(&d, 13), welcome);
+    }
+
+    #[test]
+    fn a_held_d_closes_no_welcome_view_and_after_d_d_reaches_no_view() {
+        use show_response::pane::Found as Said;
+        let mut welcome = pane(12, (10, 0, 10, 4), None);
+        welcome.found = Some(Said::Welcome(()));
+        let panes = || vec![pane(11, (0, 0, 10, 4), Some(1)), welcome];
+        let mut layout = Layout::new(workstream(1), None);
+        layout.laid_out(laid(panes(), 12, false));
+        let kind = |kind| KeyEvent::new_with_kind(KeyCode::Char(CLOSE), KeyModifiers::NONE, kind);
+        let (d, held) = (kind(KeyEventKind::Press), kind(KeyEventKind::Repeat));
+        assert_eq!(layout.closes(&d, 1), None);
+        for input in 2..6 {
+            assert!(!layout.held_after_close(&held));
+            assert_eq!(layout.closes(&held, input), None, "a held d is no d d");
+        }
+        assert_eq!(layout.closes(&d, 6), None);
+        assert_eq!(layout.closes(&d, 7), Some(ViewId::of(12).unwrap()));
+        assert!(!layout.laid_out(laid(vec![pane(11, (0, 0, 20, 4), Some(1))], 11, false)));
+        assert!(layout.held_after_close(&held), "the d held after the close is dropped");
+        assert!(layout.held_after_close(&held));
+        assert!(!layout.held_after_close(&d), "a d pressed again reaches the terminal");
+        assert!(!layout.held_after_close(&held));
     }
 
     #[test]
