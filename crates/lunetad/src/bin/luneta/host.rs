@@ -117,7 +117,7 @@ impl Opener {
 
 const NAMING: &str = "menu: luneta names a session already: try again once it has made it";
 
-const NAMING_PANICKED: &str = "menu: luneta could not name the session: naming it panicked";
+const NAMING_PANICKED: &str = "luneta could not name the session: naming it panicked";
 
 pub const NOT_YET: &str = "luneta does not do that to a worktree yet";
 

@@ -413,12 +413,15 @@ fn started(
         let found = found.map(Landed::Found);
         return Ok(found.map(Landing::Worktree));
     };
-    let unfound = match add_project(path, folder, Some(name)) {
-        Ok(_) => format!("lunetad made the project of {}, and keeps it nowhere", cwd.display()),
+    let unmade = match add_project(path, folder, Some(name)) {
+        Ok(_) => None,
         Err(unmade @ Unmade::Failed(_)) => return Err(Tried::Failed(unmade.said_of("project"))),
-        Err(unmade @ (Unmade::Nests(_) | Unmade::InDoubt(_))) => unmade.said_of("project"),
+        Err(unmade @ (Unmade::Nests(_) | Unmade::InDoubt(_))) => Some(unmade.said_of("project")),
     };
-    let projects = kept(path)?;
+    let unlisted = |unlisted: String| Tried::Failed(unmade.clone().unwrap_or(unlisted));
+    let projects = kept(path).map_err(unlisted)?;
+    let unkept = || format!("lunetad made the project of {}, and keeps it nowhere", cwd.display());
+    let unfound = unmade.unwrap_or_else(unkept);
     let chosen = chosen(path, &projects, Some(name), cwd, folder);
     chosen.unwrap_or(Err(Tried::Failed(unfound))).map(Some)
 }
@@ -545,7 +548,10 @@ pub fn worked_in(path: &Path, folder: &Path, argv: Vec<String>) -> Result<Landed
     let folder = folder.to_str().ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
     let change = Change::Join(Join { folder: folder.to_owned(), argv });
     let joined = changed_on(path, None, change).and_then(landed);
-    joined.map_err(|unmade| unmade.said_of("worktree"))
+    joined.map_err(|unmade| match unmade {
+        Unmade::Nests(why) | Unmade::Failed(why) => why,
+        Unmade::InDoubt(why) => format!("{why}, so lunetad may keep {folder} as a worktree"),
+    })
 }
 
 pub fn dirs(path: &Path) -> Result<Vec<String>, String> {
@@ -644,6 +650,8 @@ mod tests {
         for status in &doubts {
             assert_eq!(said(status), "it dropped, so the project may be made", "{status:?}");
         }
+        let timed_out = Status::cancelled("Timeout expired");
+        assert_eq!(said(&timed_out), "Timeout expired, so the project may be made");
         for status in &refusals {
             assert!(matches!(Unmoved::of(status), Unmoved::Refused(_)), "{status:?}");
         }
@@ -658,7 +666,8 @@ mod tests {
         let never = std::future::pending::<Result<Option<Made>, Unmade>>();
         let late = runtime.block_on(answered_within(Duration::ZERO, never, Unmade::InDoubt));
         let said = late.map_err(|unmade| unmade.said_of("worktree"));
-        assert_eq!(said, Err("lunetad did not answer in 0s, so the worktree may be made".to_owned()));
+        let late = "lunetad did not answer in 0s, so the worktree may be made";
+        assert_eq!(said, Err(late.to_owned()));
     }
 
     #[test]
