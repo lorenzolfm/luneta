@@ -31,6 +31,8 @@ const SIDEBAR: &str = "\x1b[97;5u";
 
 const MENU: &str = "\x1b[97;3u";
 
+const PALETTE: &str = "\x1b[107;9u";
+
 const ESC: &str = "\x1b[27u";
 
 const MENU_SHOWS: &str = "n  New ▸";
@@ -184,6 +186,33 @@ fn the_menu_and_its_note_over_the_view_give_the_keys_back_as_they_close() {
     eventually("the welcome view has the keys again", || {
         (!window.shows(WELCOMES)).then_some(())
     });
+}
+
+#[test]
+fn super_k_runs_an_action_and_asks_for_a_name_in_its_own_box() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    window.send(PALETTE);
+    window.spot_of("─ Actions ");
+    window.send("new view\r");
+    eventually("the palette opens a second terminal", || {
+        let terminals = shown(&owned, &dir.path)?.terminals;
+        let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
+        (found.count() == 2 && !window.shows("─ Actions ")).then_some(())
+    });
+    window.send(PALETTE);
+    window.spot_of("─ Actions ");
+    window.send("rename\r");
+    window.spot_of("its new name");
+    window.send("logs\r");
+    eventually("the view is named in the palette", || {
+        let terminals = shown(&owned, &dir.path)?.terminals;
+        terminals.iter().any(|it| it.name.as_deref() == Some("logs")).then_some(())
+    });
+    assert!(!window.shows("its new name"), "the palette closes once the name is given");
 }
 
 #[test]

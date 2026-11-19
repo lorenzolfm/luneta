@@ -38,9 +38,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Terminal};
 
-use crate::actions::{
-    Chord, AGENTS, COLLAPSE, DIRS, DOWN, GROW, LEFT, MENU, RIGHT, WORKTREES, SHRINK, SWAP, UP,
-};
+use crate::actions::{Chord, COLLAPSE, DOWN, GROW, LEFT, MENU, RIGHT, SHRINK, SWAP, UP};
 use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange};
@@ -59,13 +57,13 @@ use crate::images::{self, Went};
 use crate::input;
 use crate::issue::{self, Issue};
 use crate::machines::{self, Added, Machine};
-use crate::menu::{self, Choice, Opens, Rename};
+use crate::menu::{self, Choice, Opens, Origin, Rename};
 use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
 use crate::prune;
 use crate::peers;
-use crate::picker::{self, List, Picked, Picker};
+use crate::picker::{self, List, Palette, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
 use crate::sidebar::{
@@ -1281,50 +1279,7 @@ impl App {
             },
             None => {},
         }
-        if chord == MENU {
-            self.let_go();
-            if self.right.as_ref().is_some_and(Viewed::welcomes) {
-                self.sidebar.float_note(WELCOME_MENU.to_owned());
-            } else {
-                self.sidebar.float_menu();
-            }
-            return;
-        }
-        let list = match chord {
-            WORKTREES => Some(List::Worktrees),
-            AGENTS => Some(List::Agents),
-            DIRS => Some(List::Dirs),
-            _ => None,
-        };
-        if let Some(list) = list {
-            self.pickers += 1;
-            let aim = match (list, self.focus.side) {
-                (List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
-                _ => None,
-            };
-            let aim = aim.unwrap_or_default();
-            let listing = self.sidebar.listing();
-            let picker = Box::new(Picker::open(self.pickers, list, listing, aim));
-            self.give(Focus { side: self.focus.side, over: Some(Over::Picker(picker)) });
-            return;
-        }
-        if chord == SWAP {
-            let on_terminal = matches!(self.holder(), Holder::Terminal);
-            self.give(Focus::on(if on_terminal { Side::Sidebar } else { Side::Session }));
-            return;
-        }
-        if chord == COLLAPSE {
-            let collapsed = self.focus.side == Side::Collapsed;
-            self.give(Focus::on(if collapsed { Side::Session } else { Side::Collapsed }));
-            return;
-        }
-        if let Some(direction) = stepped(chord) {
-            self.step(direction);
-            return;
-        }
-        if let Some(change) = resized(chord) {
-            self.leave();
-            self.ask_right(lunetad::Asked::Resize(change));
+        if self.chord(chord) {
             return;
         }
         match self.holder() {
@@ -1340,6 +1295,62 @@ impl App {
             },
             Holder::Box(_) => unreachable!("a box takes the key"),
         }
+    }
+
+    fn chord(&mut self, chord: Chord) -> bool {
+        if chord == MENU {
+            self.let_go();
+            if self.right.as_ref().is_some_and(Viewed::welcomes) {
+                self.sidebar.float_note(WELCOME_MENU.to_owned());
+            } else {
+                self.sidebar.float_menu();
+            }
+            return true;
+        }
+        if let Some(list) = List::opened_by(chord) {
+            self.pickers += 1;
+            let aim = match (list, self.focus.side) {
+                (List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
+                _ => None,
+            };
+            let aim = aim.unwrap_or_default();
+            let (listing, palette) = (self.sidebar.listing(), self.palette());
+            let picker = Box::new(Picker::open(self.pickers, list, listing, aim, palette));
+            self.give(Focus { side: self.focus.side, over: Some(Over::Picker(picker)) });
+            return true;
+        }
+        if chord == SWAP {
+            let on_terminal = matches!(self.holder(), Holder::Terminal);
+            self.give(Focus::on(if on_terminal { Side::Sidebar } else { Side::Session }));
+            return true;
+        }
+        if chord == COLLAPSE {
+            let collapsed = self.focus.side == Side::Collapsed;
+            self.give(Focus::on(if collapsed { Side::Session } else { Side::Collapsed }));
+            return true;
+        }
+        if let Some(direction) = stepped(chord) {
+            self.step(direction);
+            return true;
+        }
+        if let Some(change) = resized(chord) {
+            self.leave();
+            self.ask_right(lunetad::Asked::Resize(change));
+            return true;
+        }
+        false
+    }
+
+    fn palette(&self) -> Palette {
+        let welcomes = self.right.as_ref().is_some_and(Viewed::welcomes);
+        let (aim, origin) = match self.focus.side {
+            Side::Sidebar => (self.sidebar.aimed_row(), Origin::Sidebar),
+            Side::Session | Side::Collapsed if welcomes => {
+                (self.sidebar.aimed_worktree(), Origin::Views)
+            },
+            Side::Session | Side::Collapsed => (self.sidebar.aimed_view(), Origin::Views),
+        };
+        Palette { aim, origin }
     }
 
     fn key_to_session(&mut self, key: &KeyEvent) {
@@ -1927,8 +1938,8 @@ impl App {
 
     fn open_worktree(&mut self, on: Machine, project: ProjectId) {
         self.pickers += 1;
-        let listing = self.sidebar.listing();
-        let picker = Box::new(Picker::opening(self.pickers, listing, on, project));
+        let (listing, palette) = (self.sidebar.listing(), self.palette());
+        let picker = Box::new(Picker::opening(self.pickers, listing, (on, project), palette));
         self.give(Focus { side: self.focus.side, over: Some(Over::Picker(picker)) });
     }
 
@@ -1967,6 +1978,32 @@ impl App {
             Picked::Delete { on, act } => {
                 self.project_act(&on, &act);
                 self.give(Focus::on(self.focus.side.session()));
+            },
+            Picked::Chord(chord) => {
+                self.give(Focus::on(self.focus.side));
+                match chord {
+                    aloud::KEY => self.read_aloud(),
+                    chord if aloud::stops(chord) => self.stop_aloud(),
+                    chord => {
+                        let ran = self.chord(chord);
+                        assert!(ran, "every chord the palette lists is one App::chord runs");
+                    },
+                }
+            },
+            Picked::Menu { target, origin, action } => {
+                self.give(Focus::on(self.focus.side));
+                let asked = self.sidebar.act_in_menu(&target, action, origin);
+                self.follow(asked);
+            },
+            Picked::Row { target, action } => {
+                self.give(Focus::on(self.focus.side));
+                let asked = self.sidebar.act_on_row(&target, action, SystemTime::now());
+                self.follow(asked);
+            },
+            Picked::Done { done, origin } => {
+                self.give(Focus::on(self.focus.side));
+                let asked = self.sidebar.chained(done, origin);
+                self.follow(asked);
             },
         }
     }
