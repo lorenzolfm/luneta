@@ -693,11 +693,10 @@ message ChangeProjectsRequest {
   }
 
   message Pull {
-    string holder = 1;
-    string folder = 2;
-    string project = 3;
-    string name = 4;
-    repeated string argv = 5;
+    string folder = 1;
+    optional string project = 2;
+    string name = 3;
+    repeated string argv = 4;
   }
 
   message RenameProject {

@@ -21,6 +21,7 @@ use crate::api::paste_response::{self, Clone as MadeClone};
 use crate::api::{On, PasteRequest, PasteResponse};
 use crate::git::{self, directory_gone, one_line, Common};
 use crate::program::{self, Ran};
+use crate::projects::{self, Dir, Plain};
 use crate::{names, zoxide, Destination, Directory, SessionName};
 
 mod sync;
@@ -668,15 +669,16 @@ impl Pasted {
         PasteRequest { on, work: Some(work), worked, at_head, reads_moved_off }
     }
 
-    pub fn ready(&self) -> Result<Ready<usize>, Unready> {
+    pub fn ready(&self, plain: &[Plain]) -> Result<Ready<usize>, Unready> {
+        let (worked, reads_moved_off) = (self.worked.as_slice(), self.reads_moved_off);
         match &self.work {
-            Work::Link(link) => ready(link, self.wanted, self.reads_moved_off, &self.worked),
-            Work::File(file) => ready_file(file, self.reads_moved_off, &self.worked),
+            Work::Link(link) => ready(link, self.wanted, reads_moved_off, worked, plain),
+            Work::File(file) => ready_file(file, reads_moved_off, worked, plain),
         }
     }
 
-    pub fn answer(&self) -> Result<PasteResponse, Unready> {
-        let answer = self.ready()?.answer();
+    pub fn answer(&self, plain: &[Plain]) -> Result<PasteResponse, Unready> {
+        let answer = self.ready(plain)?.answer();
         Ok(PasteResponse { at_head: self.wanted == Wanted::AtHead, ..answer })
     }
 
@@ -746,6 +748,7 @@ fn ready(
     wanted: Wanted,
     reads_moved_off: bool,
     worked: &[Worked],
+    plain: &[Plain],
 ) -> Result<Ready<usize>, Unready> {
     let mut seen: HashMap<String, Looked> = HashMap::new();
     let mut hosts: HashMap<String, Option<String>> = HashMap::new();
@@ -769,6 +772,7 @@ fn ready(
             None => return Err(no_clone(link, &seen)),
         },
     };
+    held_by_no_folder(&repository, plain)?;
     kind_holds(link)?;
     let work = Readied::Link(link.clone());
     let remote = seen.get(&repository).and_then(Looked::remote);
@@ -799,6 +803,15 @@ fn synced(
     }
 }
 
+fn held_by_no_folder(repository: &str, plain: &[Plain]) -> Result<(), String> {
+    let real = directory(repository).ok_or_else(|| format!("{repository} is no folder now"))?;
+    let real = Dir::parse(&real).map_err(|why| format!("{repository}: {why}"))?;
+    match plain.iter().find(|it| it.dir.below(&real).is_some()) {
+        Some(held) => Err(format!("nothing made: {}", projects::held_by_folder(&real, held))),
+        None => Ok(()),
+    }
+}
+
 fn kind_holds(link: &Link) -> Result<(), String> {
     if link.kind() == Kind::Issue {
         let page = page(link)?;
@@ -813,10 +826,12 @@ fn ready_file(
     file: &File,
     reads_moved_off: bool,
     worked: &[Worked],
+    plain: &[Plain],
 ) -> Result<Ready<usize>, Unready> {
     let real = file.real()?;
     let (repository, common) = file.repository(&real)?;
     wt_made(&repository)?;
+    held_by_no_folder(&repository, plain)?;
     let mut seen: HashMap<String, bool> = HashMap::new();
     let session = session_among(worked, |dir| {
         let same = |of: Common| matches!(of, Common::Of(of) if of == common);

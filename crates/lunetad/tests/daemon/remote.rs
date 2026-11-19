@@ -1410,6 +1410,44 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
 }
 
 #[test]
+fn a_link_whose_clone_a_folder_s_project_holds_makes_nothing() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
+    let scratch = tempfile::tempdir().unwrap();
+    let notes = scratch.path().canonicalize().unwrap().join("notes");
+    fs::create_dir(&notes).unwrap();
+    let clone = clone_with_issue_7(&far, &notes);
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    project(&far, &notes, None);
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let link = Work::Link(Link::parse("https://github.com/o/n/issues/7").unwrap());
+        for worked in [vec![view_in(&clone.join("main"))], Vec::new()] {
+            let refused = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), worked)).await;
+            let refused = refused.unwrap_err();
+            assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+            let (main, notes) = (clone.join("main"), notes.display());
+            let one = "notes is a folder, and its own is its one worktree";
+            let held = format!("{} is in {notes}, project notes's folder; {one}", main.display());
+            assert_eq!(refused.message(), format!("nothing made: {held}"));
+        }
+    });
+    assert!(!clone.join("issue-7").exists(), "no worktree is made for the issue");
+    let mut branches = Command::new("git");
+    branches.arg("-C").arg(clone.join(".bare")).args(["branch", "--list", "issue-7"]);
+    let branches = branches.output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&branches.stdout), "", "nor its branch");
+    assert!(far.gh.issues().is_empty(), "nor is GitHub asked: {:?}", far.gh.issues());
+}
+
+#[test]
 fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
     let here = Host::new();
     let far = Host::new();
