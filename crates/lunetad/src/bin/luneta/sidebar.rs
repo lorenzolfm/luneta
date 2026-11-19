@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -33,7 +34,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::actions::{self, Action, Command, QUIT};
+use crate::actions::{Action, Command, QUIT};
 use crate::agents::{self, Kept};
 use crate::alerts::{self, Reach};
 use crate::aloud;
@@ -53,7 +54,7 @@ use crate::menu::{
     ProjectTarget, Ran, Rename, Target, Top, Wants, WorktreeRow,
 };
 use crate::news::News;
-use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
+use crate::picker::{Aim, Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
 use crate::printed::Printed;
 use crate::projected;
 use crate::prune;
@@ -120,6 +121,11 @@ const NO_HERE_VIEW: &str =
 
 const PALETTE_ROW_GONE: &str =
     "palette: the highlighted row changed while the palette was open, so nothing ran";
+
+const PALETTE_UNPLACED: &str =
+    "palette: luneta does not know yet which view its client is on; try again in a moment";
+
+const PALETTE_NO_ROW: &str = "palette: the sidebar highlights no row yet";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Listed {
@@ -3375,42 +3381,26 @@ impl Sidebar {
         self.put(Menu::new(self.menus, target, agent), Placed::Afloat);
     }
 
-    pub fn aimed(&self, origin: Origin) -> Target {
-        let target = match origin {
-            Origin::Sidebar => self.target(),
-            Origin::Views => {
-                let place = self.here_place().ok();
-                place.and_then(|place| self.target_at(self.on(), Place::View(place)))
-            },
-        };
-        target.unwrap_or_else(|| Target::Machine(self.on().clone()))
+    pub fn aimed_row(&self) -> Aim {
+        self.target().map_or(Aim::Unplaced(PALETTE_NO_ROW), |row| Aim::At(Rc::new(row)))
     }
 
-    pub fn act(
-        &mut self,
-        target: &Target,
-        action: Action,
-        origin: Origin,
-        now: SystemTime,
-    ) -> Asked {
+    pub fn aimed_view(&self) -> Aim {
+        let place = self.here_place().ok();
+        let target = place.and_then(|place| self.target_at(self.on(), Place::View(place)));
+        target.map_or(Aim::Unplaced(PALETTE_UNPLACED), |view| Aim::At(Rc::new(view)))
+    }
+
+    pub fn aimed_worktree(&self) -> Aim {
+        let place = self.here_worktree();
+        let target = place.and_then(|place| self.target_at(self.on(), Place::Worktree(place)));
+        target.map_or(Aim::Unplaced(PALETTE_UNPLACED), |worktree| Aim::At(Rc::new(worktree)))
+    }
+
+    pub fn act_on_row(&mut self, target: &Target, action: Action, now: SystemTime) -> Asked {
         self.notice = None;
         self.end_mode();
-        match action.key() {
-            actions::Key::Row(_) => {
-                assert_eq!(origin, Origin::Sidebar, "the sidebar's keys are listed in it alone");
-                assert!(self.has_keys(), "the sidebar has the keys its own keys act with");
-                self.act_on_row(target, action, now)
-            },
-            actions::Key::Menu(_) | actions::Key::RowAndMenu(_) => {
-                self.act_in_menu(target, action, origin)
-            },
-            actions::Key::Pasted(_) | actions::Key::Chord(_) => {
-                unreachable!("the palette lists no pasted key, and App runs the chords")
-            },
-        }
-    }
-
-    fn act_on_row(&mut self, target: &Target, action: Action, now: SystemTime) -> Asked {
+        assert!(self.has_keys(), "the sidebar has the keys its own keys act with");
         let command = Command::of(action);
         if command == Some(Command::Search) {
             self.find(String::new());
@@ -3423,7 +3413,7 @@ impl Sidebar {
                 Some(Command::Search | Command::Quit) => {
                     unreachable!("Search ran above, and Quit is a menu key too")
                 },
-                None => return self.row_action(action, now),
+                None => return self.row_action(action),
             }
         } else {
             self.notify(PALETTE_ROW_GONE.to_owned());
@@ -3431,7 +3421,9 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    fn act_in_menu(&mut self, target: &Target, action: Action, origin: Origin) -> Asked {
+    pub fn act_in_menu(&mut self, target: &Target, action: Action, origin: Origin) -> Asked {
+        self.notice = None;
+        self.end_mode();
         if Command::of(action) == Some(Command::Quit) {
             return Asked::Quit;
         }
@@ -3445,8 +3437,8 @@ impl Sidebar {
     }
 
     fn highlights(&self, target: &Target) -> bool {
-        let highlighted = self.aimed(Origin::Sidebar);
-        (highlighted.machine(), highlighted.place()) == (target.machine(), target.place())
+        let at = |target: &Target| (target.machine().clone(), target.place());
+        self.target().is_some_and(|highlighted| at(&highlighted) == at(target))
     }
 
     pub fn chained(&mut self, done: Done, origin: Origin) -> Asked {
@@ -9265,25 +9257,38 @@ mod tests {
     #[test]
     fn the_palette_aims_at_the_view_or_the_row_and_runs_its_action_where_it_opened() {
         let mut sidebar = two_sessions();
-        let nowhere = Target::Machine(Machine::Local);
-        assert_eq!(sidebar.aimed(Origin::Views), nowhere, "no view is shown yet");
+        let unplaced = Aim::Unplaced(PALETTE_UNPLACED);
+        assert_eq!(sidebar.aimed_view(), unplaced, "no view is shown yet");
+        assert_eq!(sidebar.aimed_worktree(), unplaced, "no worktree is shown yet");
         sit(&mut sidebar, &view_of("older", 10, 1));
-        let target = sidebar.aimed(Origin::Views);
-        let Target::View(_, row) = &target else {
+        let Aim::At(target) = sidebar.aimed_view() else {
+            panic!("the palette aims at the view shown");
+        };
+        let Target::View(_, row) = target.as_ref() else {
             panic!("the palette aims at the view shown: {target:?}");
         };
         assert_eq!(row.view, view_key(10, 1));
-        let asked = sidebar.act(&target, Action::CloseView, Origin::Views, moment(160_000));
+        sidebar.showing(tab_of(10, 0));
+        let Aim::At(welcome) = sidebar.aimed_worktree() else {
+            panic!("over a welcome view, the palette aims at its worktree");
+        };
+        let Target::Worktree(_, worktree) = welcome.as_ref() else {
+            panic!("over a welcome view, the palette aims at its worktree: {welcome:?}");
+        };
+        assert_eq!(worktree.place.worktree, tab_of(10, 0));
+        let asked = sidebar.act_in_menu(&target, Action::CloseView, Origin::Views);
         assert_eq!(asked, Asked::Nothing, "a view's close is planned before it is asked");
         assert_eq!(sidebar.holding(), Holding::Afloat, "over the views, its menu floats");
         sidebar.close_menu();
 
         sidebar.focus(Keys::Sidebar);
-        let target = sidebar.aimed(Origin::Sidebar);
-        assert_eq!(Some(&target), sidebar.target().as_ref(), "in the sidebar, it aims at the row");
-        sidebar.act(&target, Action::NewMachine, Origin::Sidebar, moment(160_000));
+        let Aim::At(target) = sidebar.aimed_row() else {
+            panic!("in the sidebar, it aims at the highlighted row");
+        };
+        assert_eq!(Some(target.as_ref()), sidebar.target().as_ref(), "it aims at the row");
+        sidebar.act_in_menu(&target, Action::NewMachine, Origin::Sidebar);
         assert_eq!(sidebar.holding(), Holding::Menu, "in the sidebar, its menu opens there");
-        sidebar.act(&target, Action::Search, Origin::Sidebar, moment(160_000));
+        sidebar.act_on_row(&target, Action::Search, moment(160_000));
         assert_eq!(sidebar.holding(), Holding::Search, "a sidebar key's action runs as its key");
         let vps: Destination = "me@vps".parse().unwrap();
         let asked = sidebar.chained(Done::Ssh(vps.clone()), Origin::Sidebar);
@@ -9295,16 +9300,20 @@ mod tests {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
         let bipa = Spot::Local(Place::Session(listed("bipa", 10)));
+        sidebar.cursor = None;
+        assert_eq!(sidebar.aimed_row(), Aim::Unplaced(PALETTE_NO_ROW));
         sidebar.cursor = Some(bipa.clone());
-        let target = sidebar.aimed(Origin::Sidebar);
+        let Aim::At(target) = sidebar.aimed_row() else {
+            panic!("the palette aims at the highlighted row");
+        };
         sidebar.key(&char('j'), moment(160_000));
         assert_ne!(sidebar.cursor, Some(bipa.clone()), "j moves the highlight");
-        let asked = sidebar.act(&target, Action::Reorder, Origin::Sidebar, moment(160_000));
+        let asked = sidebar.act_on_row(&target, Action::Reorder, moment(160_000));
         assert_eq!(asked, Asked::Nothing);
         assert_eq!(sidebar.holding(), Holding::Nothing, "its row is no longer highlighted");
         assert_eq!(sidebar.notice.as_deref(), Some(PALETTE_ROW_GONE));
         sidebar.cursor = Some(bipa);
-        sidebar.act(&target, Action::Reorder, Origin::Sidebar, moment(160_000));
+        sidebar.act_on_row(&target, Action::Reorder, moment(160_000));
         assert_eq!(sidebar.holding(), Holding::Reorder, "on the row it named, it runs");
     }
 

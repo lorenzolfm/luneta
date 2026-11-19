@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -189,9 +190,22 @@ pub struct Seated {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Aim {
+    At(Rc<Target>),
+    Unplaced(&'static str),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Palette {
-    pub target: Target,
+    pub aim: Aim,
     pub origin: Origin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Run {
+    Chord(actions::Chord),
+    Menu(Rc<Target>),
+    Row(Rc<Target>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +246,13 @@ impl List {
         }
     }
 
+    fn previews(self) -> bool {
+        match self {
+            List::Actions => false,
+            List::Worktrees | List::Agents | List::Dirs => true,
+        }
+    }
+
     fn title(self) -> &'static str {
         match self {
             List::Actions => "Actions",
@@ -251,7 +272,9 @@ pub enum Picked {
     Make { on: Machine, session: SessionName, cwd: Directory },
     Plan { on: Machine, session: Listed, deletes: Deletes },
     Delete { on: Machine, act: Act },
-    Act { target: Target, origin: Origin, action: Action },
+    Chord(actions::Chord),
+    Menu { target: Target, origin: Origin, action: Action },
+    Row { target: Target, action: Action },
     Done { done: Done, origin: Origin },
 }
 
@@ -365,7 +388,7 @@ pub enum Key {
     Agent { on: Machine, place: ViewPlace },
     Dir { on: Machine, path: Directory, session: SessionName },
     New { on: Machine, project: ProjectRow, folder: Directory, name: Name },
-    Action(Action),
+    Action(Action, Run),
 }
 
 #[derive(Clone, Debug)]
@@ -436,7 +459,7 @@ enum Stage {
     Planning { on: Machine, place: ViewPlace, agreed: Option<Plan> },
     Asking { on: Machine, place: ViewPlace, plan: Plan, asks: String },
     Closing { on: Machine, place: WorktreePlace, name: String, ends: Ends, asks: String },
-    Chain(Chain),
+    Chain { chain: Chain, on: Machine },
 }
 
 struct Shot {
@@ -752,18 +775,15 @@ impl Picker {
                 }
                 Picked::Nothing
             },
-            Stage::Chain(_) if (key.code, key.modifiers) == actions::PALETTE => Picked::Close,
-            Stage::Chain(chain) => {
-                let on = self.palette.target.machine().clone();
-                match chain.key(key, &on) {
-                    Chained::Typing(chain) => {
-                        self.stage = Stage::Chain(chain);
-                        Picked::Nothing
-                    },
-                    Chained::Back => Picked::Nothing,
-                    Chained::Close => Picked::Close,
-                    Chained::Done(done) => Picked::Done { done, origin: self.palette.origin },
-                }
+            Stage::Chain { .. } if (key.code, key.modifiers) == actions::PALETTE => Picked::Close,
+            Stage::Chain { chain, on } => match chain.key(key, &on) {
+                Chained::Typing(chain) => {
+                    self.stage = Stage::Chain { chain, on };
+                    Picked::Nothing
+                },
+                Chained::Back => Picked::Nothing,
+                Chained::Close => Picked::Close,
+                Chained::Done(done) => Picked::Done { done, origin: self.palette.origin },
             },
         };
         self.follow();
@@ -779,7 +799,7 @@ impl Picker {
                 self.rebuild(true);
             },
             Stage::Rename { input, .. } => input.push_str(&text),
-            Stage::Chain(chain) => chain.paste(&text),
+            Stage::Chain { chain, .. } => chain.paste(&text),
             Stage::Planning { .. } | Stage::Asking { .. } | Stage::Closing { .. } => {},
         }
     }
@@ -896,13 +916,16 @@ impl Picker {
         };
         framed(buffer, area, TITLE, "", Vec::new());
         let layout = Layout::of(Rect::new(area.x + 1, area.y + 1, width, height));
-        let layout =
-            if palette { Layout { results: layout.full, preview: None, ..layout } } else { layout };
+        let layout = if self.list.previews() {
+            layout
+        } else {
+            Layout { results: layout.full, preview: None, ..layout }
+        };
         if let Stage::Rename { on, renames, input } = &self.stage {
             let spots = self.draw_rename(buffer, &layout, on, renames, input);
             return Drawn::Picker { number: self.number, area, spots };
         }
-        if let Stage::Chain(chain) = &self.stage {
+        if let Stage::Chain { chain, .. } = &self.stage {
             let spots = self.draw_chain(buffer, &layout, chain);
             return Drawn::Picker { number: self.number, area, spots };
         }
@@ -1045,67 +1068,80 @@ impl Picker {
                 let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
                 Picked::Add { on, project, folder, name: Some(name.clone()) }
             },
-            Key::Action(action) => {
-                let action = *action;
-                self.act(action)
+            Key::Action(action, run) => {
+                let (action, run) = (*action, run.clone());
+                self.act(action, run)
             },
         }
     }
 
-    fn act(&mut self, action: Action) -> Picked {
-        assert!(self.offers(action), "Enter runs only an action the palette lists");
-        if let actions::Key::Chord(chord) = action.key()
-            && let Some(list) = List::opened_by(chord)
-        {
-            self.list = list;
-            return Picked::Nothing;
+    fn act(&mut self, action: Action, run: Run) -> Picked {
+        match run {
+            Run::Chord(chord) => {
+                let Some(list) = List::opened_by(chord) else {
+                    return Picked::Chord(chord);
+                };
+                self.list = list;
+                Picked::Nothing
+            },
+            Run::Row(target) => Picked::Row { target: Target::clone(&target), action },
+            Run::Menu(target) => {
+                if let Some(why) = self.refused(&target, action) {
+                    self.error = Some(why);
+                    return Picked::Nothing;
+                }
+                if let Some(chain) = Chain::of(&target, action) {
+                    self.stage = Stage::Chain { chain, on: target.machine().clone() };
+                    return Picked::Nothing;
+                }
+                Picked::Menu { target: Target::clone(&target), origin: self.palette.origin, action }
+            },
         }
-        if let Some(why) = self.refused(action) {
-            self.error = Some(why);
-            return Picked::Nothing;
-        }
-        let Palette { target, origin } = &self.palette;
-        if let Some(chain) = Chain::of(target, action) {
-            self.stage = Stage::Chain(chain);
-            return Picked::Nothing;
-        }
-        Picked::Act { target: target.clone(), origin: *origin, action }
     }
 
-    fn refused(&self, action: Action) -> Option<String> {
+    fn refused(&self, target: &Target, action: Action) -> Option<String> {
         if action != Action::NewWorktree {
             return None;
         }
-        let target = &self.palette.target;
         let housed = self.housed(target.machine(), &target.project()?)?;
         housed.unopened.refuses_new_worktree(&housed.project)
     }
 
-    fn offers(&self, action: Action) -> bool {
-        let Palette { target, origin } = &self.palette;
-        if action.in_palette() {
-            return match (action.key(), origin) {
-                (actions::Key::Menu(_) | actions::Key::RowAndMenu(_), _) => target.fits(action),
-                (actions::Key::Row(_), Origin::Sidebar) => action.fits(target.noun()),
-                (actions::Key::Row(_), Origin::Views) => false,
-                (actions::Key::Chord(_), _) => true,
-                (actions::Key::Pasted(_), _) => unreachable!("the palette leaves pasted keys out"),
-            };
+    fn run(&self, action: Action) -> Option<Run> {
+        if !action.in_palette() {
+            return None;
         }
-        false
+        let Palette { aim, origin } = &self.palette;
+        match (action.key(), aim, origin) {
+            (actions::Key::Chord(chord), ..) => Some(Run::Chord(chord)),
+            (actions::Key::Menu(_) | actions::Key::RowAndMenu(_), Aim::At(target), _) => {
+                target.fits(action).then(|| Run::Menu(Rc::clone(target)))
+            },
+            (actions::Key::Row(_), Aim::At(target), Origin::Sidebar) => {
+                action.fits(target.noun()).then(|| Run::Row(Rc::clone(target)))
+            },
+            (actions::Key::Row(_), Aim::At(_), Origin::Views)
+            | (
+                actions::Key::Menu(_) | actions::Key::RowAndMenu(_) | actions::Key::Row(_),
+                Aim::Unplaced(_),
+                _,
+            )
+            | (actions::Key::Pasted(_), ..) => None,
+        }
     }
 
     fn action_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
-        let fitting = Action::ALL.into_iter().filter(|action| self.offers(*action));
+        let fitting = Action::ALL.into_iter().filter_map(|it| Some((it, self.run(it)?)));
         let worktrees = self.listed_worktrees(finder);
         let worktrees = worktrees.into_iter().filter(|row| !matches!(row.key, Key::Machine { .. }));
         let Some(finder) = finder else {
-            let rows = fitting.map(|action| Row::plain(Key::Action(action), titled(action)));
+            let row = |(action, run)| Row::plain(Key::Action(action, run), titled(action));
+            let rows = fitting.map(row);
             return rows.chain(worktrees).collect();
         };
         let term = self.term.to_lowercase();
         let mut found: Vec<(Tier, Fit, Row)> =
-            fitting.filter_map(|action| found_action(finder, &term, action)).collect();
+            fitting.filter_map(|(action, run)| found_action(finder, &term, action, run)).collect();
         found.sort_by_key(|(tier, fit, _)| (*tier, Reverse(*fit)));
         let ahead = found.iter().take_while(|(tier, ..)| *tier < Tier::Fuzzy).count();
         let mut found = found.into_iter().map(|(.., row)| row);
@@ -1116,7 +1152,10 @@ impl Picker {
     }
 
     fn aimed_at(&self) -> String {
-        let target = &self.palette.target;
+        let target = match &self.palette.aim {
+            Aim::At(target) => target.as_ref(),
+            Aim::Unplaced(_) => return List::Actions.title().to_owned(),
+        };
         let named = match target {
             Target::View(on, row) => {
                 let project = row.session.name();
@@ -1168,7 +1207,7 @@ impl Picker {
                 self.error = Some("a worktree not open has no views to close".to_owned());
                 Picked::Nothing
             },
-            Key::Machine { .. } | Key::Dir { .. } | Key::New { .. } | Key::Action(_) => {
+            Key::Machine { .. } | Key::Dir { .. } | Key::New { .. } | Key::Action(..) => {
                 Picked::Nothing
             },
         }
@@ -1218,7 +1257,7 @@ impl Picker {
                 | Key::Dir { .. }
                 | Key::New { .. }
                 | Key::Unopened { .. }
-                | Key::Action(_),
+                | Key::Action(..),
             )
             | None => return,
         };
@@ -1418,7 +1457,8 @@ impl Picker {
     }
 
     fn follow(&mut self) {
-        let preview = match self.rows().selected().map(|row| &row.key) {
+        let selected = self.rows().selected().filter(|_| self.list.previews());
+        let preview = match selected.map(|row| &row.key) {
             Some(Key::Worktree { on, place }) => {
                 let focus = self.focus(on, self.row_worktree(on, place));
                 let looked = |focus| (on.clone(), place.project.listed().clone(), Some(focus));
@@ -1431,7 +1471,7 @@ impl Picker {
             Some(Key::Unopened { on, folder, .. }) => {
                 Some(Preview::Dir((on.clone(), folder.clone())))
             },
-            Some(Key::Project { .. } | Key::Machine { .. } | Key::New { .. } | Key::Action(_))
+            Some(Key::Project { .. } | Key::Machine { .. } | Key::New { .. } | Key::Action(..))
             | None => None,
         };
         match (preview, &self.wanted) {
@@ -1466,7 +1506,12 @@ impl Picker {
             notes.extend(menu::wrap(why, width, error));
         }
         match self.list {
-            List::Actions | List::Worktrees => {},
+            List::Actions => {
+                if let Aim::Unplaced(why) = &self.palette.aim {
+                    notes.extend(menu::wrap(why, width, error));
+                }
+            },
+            List::Worktrees => {},
             List::Agents => {
                 if let Some(why) = &self.listing.away {
                     let why = format!("lunetad does not answer: {why}");
@@ -1624,7 +1669,7 @@ impl Picker {
                 let lead = Span::styled("+", Style::new().fg(gruvbox::GREEN));
                 (Some(lead), bold, vec![Span::styled("new worktree", grey)])
             },
-            Key::Action(action) => {
+            Key::Action(action, _) => {
                 let key = menu::spelled(*action, self.palette.origin);
                 (None, Style::new().fg(gruvbox::FG1), vec![Span::styled(key, dim)])
             },
@@ -1778,7 +1823,9 @@ impl Picker {
                 let looked = (on.clone(), place.project.listed().clone(), Some(focus));
                 (right, Line::from(caption), looked)
             },
-            Key::Action(_) => unreachable!("the palette draws no preview"),
+            Key::Action(..) => {
+                unreachable!("actions are listed in the Actions list, which previews none")
+            },
             Key::Agent { on, place } => {
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
@@ -1878,7 +1925,7 @@ impl Picker {
                     let project = project.listed().name();
                     Ok(format!("New worktree \"{}\" in {project}", name.as_str()))
                 },
-                Key::Action(_) => Ok("Run".to_owned()),
+                Key::Action(..) => Ok("Run".to_owned()),
             },
             None if self.list == List::Worktrees && !self.term.is_empty() => {
                 Name::parse(&self.term).map(|_| String::new())
@@ -1904,7 +1951,9 @@ impl Picker {
             },
             (Stage::Planning { .. }, _) => vec![(Hint::Esc, "Give up")],
             (Stage::Rename { .. }, _) => vec![(Hint::Enter, "Rename"), (Hint::Esc, "Cancel")],
-            (Stage::Chain(chain), _) => vec![(Hint::Enter, chain.enter()), (Hint::Esc, "Back")],
+            (Stage::Chain { chain, .. }, _) => {
+                vec![(Hint::Enter, chain.enter()), (Hint::Esc, "Back")]
+            },
             (Stage::Search, List::Actions) => vec![
                 (Hint::Moves, "Move"),
                 (Hint::Enter, "Run"),
@@ -1992,10 +2041,16 @@ fn tier(finder: &Finder<'_>, term: &str, text: &str) -> Option<(Tier, Fit, Vec<u
     Some((tier, fit, hits))
 }
 
-fn found_action(finder: &Finder<'_>, term: &str, action: Action) -> Option<(Tier, Fit, Row)> {
+fn found_action(
+    finder: &Finder<'_>,
+    term: &str,
+    action: Action,
+    run: Run,
+) -> Option<(Tier, Fit, Row)> {
     let Spec { keywords, .. } = action.spec();
     let title = titled(action);
-    let row = |name, hits| Row { key: Key::Action(action), name, hits, rules: Rules::default() };
+    let key = Key::Action(action, run);
+    let row = |name, hits| Row { key: key.clone(), name, hits, rules: Rules::default() };
     let named = tier(finder, term, &title);
     let keyword = keywords.iter().filter_map(|it| Some((tier(finder, term, it)?, *it)));
     let keyword = keyword.min_by_key(|((tier, fit, _), _)| (*tier, Reverse(*fit)));
@@ -2404,10 +2459,14 @@ mod tests {
     }
 
     fn aimless() -> Palette {
-        Palette { target: Target::Machine(Machine::Local), origin: Origin::Views }
+        Palette { aim: Aim::At(Rc::new(Target::Machine(Machine::Local))), origin: Origin::Views }
     }
 
     fn at_fix(origin: Origin) -> Palette {
+        Palette { aim: Aim::At(Rc::new(fix_view())), origin }
+    }
+
+    fn fix_view() -> Target {
         let row = ViewRow {
             session: fix().project.listed().clone(),
             view: ViewKey::terminal(3),
@@ -2418,7 +2477,7 @@ mod tests {
             pull_request: None,
             ran: Ran::Unhooked,
         };
-        Palette { target: Target::View(Machine::Local, row), origin }
+        Target::View(Machine::Local, row)
     }
 
     fn palette_on(listing: Listing, palette: Palette) -> Picker {
@@ -3680,12 +3739,19 @@ mod tests {
     fn enter_on_an_action_hands_it_on_with_the_palette_s_target() {
         let mut picker = palette(Origin::Views);
         typed(&mut picker, "close the view");
-        let Palette { target, origin } = at_fix(Origin::Views);
-        let act = Picked::Act { target, origin, action: Action::CloseView };
+        let (target, origin) = (fix_view(), Origin::Views);
+        let act = Picked::Menu { target, origin, action: Action::CloseView };
         assert_eq!(press(&mut picker, KeyCode::Enter), act);
+        retyped(&mut picker, "sidebar or views");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Chord(actions::SWAP));
         retyped(&mut picker, "pick an agent");
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
         assert!(said(&picker).contains("─ Agents"), "the finder's own list opens in the box");
+
+        let mut picker = palette(Origin::Sidebar);
+        typed(&mut picker, "unread");
+        let unread = Picked::Row { target: fix_view(), action: Action::Unread };
+        assert_eq!(press(&mut picker, KeyCode::Enter), unread);
 
         let mut listing = works();
         listing.shelves[0].projects[0].unopened = Unopened::Folder;
@@ -3694,6 +3760,29 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
         let refused = projects::folder_has_one_worktree(fix().project.listed().name());
         assert!(said(&picker).contains(&refused), "{}", said(&picker));
+    }
+
+    #[test]
+    fn an_unplaced_palette_lists_only_the_keys_that_work_anywhere_and_says_why() {
+        let why = "palette: luneta does not know yet which view its client is on";
+        let unplaced = Palette { aim: Aim::Unplaced(why), origin: Origin::Views };
+        let mut picker = palette_on(works(), unplaced);
+        let every = every_action(&mut picker);
+        let worktrees = every.iter().position(|row| row.contains(" › ")).unwrap();
+        let anywhere = Action::anywhere().map(|(action, _)| action).filter(|it| it.in_palette());
+        let anywhere: Vec<String> = anywhere.map(titled).collect();
+        assert_eq!(every[..worktrees], anywhere);
+        assert!(said(&picker).contains("luneta does not know yet"), "{}", said(&picker));
+    }
+
+    #[test]
+    fn the_palette_asks_for_no_preview_of_a_worktree_it_lights() {
+        let mut picker = palette(Origin::Views);
+        typed(&mut picker, "fix");
+        press(&mut picker, KeyCode::Down);
+        press(&mut picker, KeyCode::Down);
+        assert_eq!(keyed_action(&picker).0, "luneta › fix");
+        assert_eq!(picker.due(), None, "the Actions list draws no preview to ask for");
     }
 
     #[test]

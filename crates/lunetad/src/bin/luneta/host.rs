@@ -38,7 +38,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Terminal};
 
-use crate::actions::{self, Chord, COLLAPSE, DOWN, GROW, LEFT, MENU, RIGHT, SHRINK, SWAP, UP};
+use crate::actions::{Chord, COLLAPSE, DOWN, GROW, LEFT, MENU, RIGHT, SHRINK, SWAP, UP};
 use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange};
@@ -1339,14 +1339,15 @@ impl App {
     }
 
     fn palette(&self) -> Palette {
-        let origin = match self.holder() {
-            Holder::Sidebar(Holding::Afloat) => {
-                unreachable!("a floating menu or note takes the keys that open a picker")
+        let welcomes = self.right.as_ref().is_some_and(Viewed::welcomes);
+        let (aim, origin) = match self.focus.side {
+            Side::Sidebar => (self.sidebar.aimed_row(), Origin::Sidebar),
+            Side::Session | Side::Collapsed if welcomes => {
+                (self.sidebar.aimed_worktree(), Origin::Views)
             },
-            Holder::Sidebar(_) => Origin::Sidebar,
-            Holder::Terminal | Holder::Box(_) => Origin::Views,
+            Side::Session | Side::Collapsed => (self.sidebar.aimed_view(), Origin::Views),
         };
-        Palette { target: self.sidebar.aimed(origin), origin }
+        Palette { aim, origin }
     }
 
     fn key_to_session(&mut self, key: &KeyEvent) {
@@ -1975,23 +1976,26 @@ impl App {
                 self.project_act(&on, &act);
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Act { target, origin, action } => {
+            Picked::Chord(chord) => {
                 self.give(Focus::on(self.focus.side));
-                match action.key() {
-                    actions::Key::Chord(chord) if chord == aloud::KEY => self.read_aloud(),
-                    actions::Key::Chord(chord) if aloud::stops(chord) => self.stop_aloud(),
-                    actions::Key::Chord(chord) => {
+                match chord {
+                    aloud::KEY => self.read_aloud(),
+                    chord if aloud::stops(chord) => self.stop_aloud(),
+                    chord => {
                         let ran = self.chord(chord);
                         assert!(ran, "every chord the palette lists is one App::chord runs");
                     },
-                    actions::Key::Menu(_) | actions::Key::Row(_) | actions::Key::RowAndMenu(_) => {
-                        let asked = self.sidebar.act(&target, action, origin, SystemTime::now());
-                        self.follow(asked);
-                    },
-                    actions::Key::Pasted(_) => {
-                        unreachable!("the palette leaves the pasted keys out")
-                    },
                 }
+            },
+            Picked::Menu { target, origin, action } => {
+                self.give(Focus::on(self.focus.side));
+                let asked = self.sidebar.act_in_menu(&target, action, origin);
+                self.follow(asked);
+            },
+            Picked::Row { target, action } => {
+                self.give(Focus::on(self.focus.side));
+                let asked = self.sidebar.act_on_row(&target, action, SystemTime::now());
+                self.follow(asked);
             },
             Picked::Done { done, origin } => {
                 self.give(Focus::on(self.focus.side));
