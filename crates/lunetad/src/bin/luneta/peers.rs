@@ -261,6 +261,12 @@ struct Peer {
     unfocuses: bool,
 }
 
+impl Drop for Peer {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
 impl Peers {
     pub fn heard(&mut self, number: u64, peered: Peered) {
         match peered {
@@ -301,9 +307,7 @@ impl Peers {
     }
 
     fn gone(&mut self, number: u64) {
-        if let Some(peer) = self.peers.remove(&number) {
-            let _ = peer.stream.shutdown(Shutdown::Both);
-        }
+        self.peers.remove(&number);
         if self.last.is_some_and(|last| last.number == number) {
             self.last = None;
         }
@@ -542,6 +546,15 @@ mod tests {
         for text in [ToHolder::Stopped.said().as_str(), "clicked", "nothing-to-read x"] {
             assert_eq!(FromHolder::parse(text), None, "{text:?}");
         }
+    }
+
+    #[test]
+    fn a_line_cut_short_is_never_read() {
+        let (mut holder, window) = UnixStream::pair().expect("a connection");
+        holder.write_all(b"clicked luneta-41\nclicked luneta-4").expect("it writes");
+        holder.shutdown(Shutdown::Both).expect("it ends");
+        let read: Vec<_> = lines(window, FromHolder::parse).collect();
+        assert_eq!(read, [FromHolder::Clicked(key(41))]);
     }
 
     fn next(heard: &Receiver<Event>) -> (u64, Peered) {
