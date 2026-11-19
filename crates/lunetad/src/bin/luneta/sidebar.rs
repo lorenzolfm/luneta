@@ -1821,6 +1821,7 @@ impl Sidebar {
     fn unfold_own(&mut self, key: OwnKey) {
         if let Some(project) = self.own_listed(key).as_ref().and_then(Listed::project) {
             let on = self.on().clone();
+            self.folds.set(Fold::Machine(&on), false);
             self.folds.set(Fold::Project(&on, project), false);
         }
     }
@@ -2543,14 +2544,14 @@ impl Sidebar {
     }
 
     fn toggle(&mut self) {
-        let Some(spot) = &self.cursor else {
+        let Some(spot) = self.cursor.clone() else {
             return;
         };
-        let Some(folding) = self.folding(spot) else {
+        let Some(folding) = self.folding(&spot) else {
             return;
         };
         let folded = self.folded(&spot.machine(), folding);
-        self.fold(!folded);
+        self.set_fold(&spot, folding, !folded);
     }
 
     fn fold(&mut self, folded: bool) {
@@ -2560,7 +2561,6 @@ impl Sidebar {
         let Some(folding) = self.folding(&spot) else {
             return;
         };
-        let machine = spot.machine();
         let lifted = match self.row_of(&spot).map(|at| &self.rows[at]) {
             Some(Row::Worktree { under, .. }) if folded && *under != Under::Rows => {
                 spot.place().and_then(|place| place.listed().project()).map(Folding::Project)
@@ -2570,7 +2570,11 @@ impl Sidebar {
             },
             _ => None,
         };
-        let folding = lifted.unwrap_or(folding);
+        self.set_fold(&spot, lifted.unwrap_or(folding), folded);
+    }
+
+    fn set_fold(&mut self, spot: &Spot, folding: Folding, folded: bool) {
+        let machine = spot.machine();
         if folding == Folding::Machine {
             let (_, _, heads) = self.machine_row(&machine);
             if heads == Heads::Nothing {
@@ -2580,9 +2584,9 @@ impl Sidebar {
         let header = Spot::Machine(machine.clone());
         let (fold, row) = match folding {
             Folding::Machine => (Fold::Machine(&machine), Some(header)),
-            Folding::Project(project) => (Fold::Project(&machine, project), project_of(&spot)),
+            Folding::Project(project) => (Fold::Project(&machine, project), project_of(spot)),
             Folding::Worktree(worktree) => {
-                (Fold::Worktree(&machine, worktree), self.worktree_of(&spot))
+                (Fold::Worktree(&machine, worktree), self.worktree_of(spot))
             },
         };
         if !self.folds.set(fold, folded) {
@@ -5629,6 +5633,31 @@ mod tests {
     }
 
     #[test]
+    fn space_or_a_click_folds_an_empty_row_itself_and_h_folds_what_holds_it() {
+        let mut sidebar = fresh();
+        let solo = a_project(8, "solo", vec![worktree_of(31, "fresh", "/w/solo", &[])]);
+        let projects = vec![a_project(7, "empty", Vec::new()), solo];
+        sidebar.heard(Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) });
+        sidebar.focus(Keys::Sidebar);
+        let (empty, tab) = (ProjectId::of(7).unwrap(), WorktreeId::of(31).unwrap());
+        let folded = |sidebar: &Sidebar| {
+            let on = &Machine::Local;
+            [Fold::Machine(on), Fold::Project(on, empty), Fold::Worktree(on, tab)]
+                .map(|fold| sidebar.folds.contains(fold))
+        };
+        type_in(&mut sidebar, " ");
+        assert_eq!(folded(&sidebar), [false, true, false]);
+        type_in(&mut sidebar, " j ");
+        assert_eq!(folded(&sidebar), [false, false, true]);
+        let area = Rect::new(0, 0, 32, 10);
+        screen(&mut sidebar, true, area.width, area.height);
+        assert_eq!(click(&mut sidebar, 1, 4, area), Asked::Take);
+        assert_eq!(folded(&sidebar), [false, true, true]);
+        type_in(&mut sidebar, "h");
+        assert_eq!(folded(&sidebar), [true, true, true]);
+    }
+
+    #[test]
     fn a_worktree_s_row_deletes_the_worktree_with_its_panes() {
         let mut sidebar = fresh();
         let fix = worktree_of(31, "fix", "/w/fix", &[1, 2]);
@@ -6169,6 +6198,19 @@ mod tests {
         let made = OwnMade::from_nanos(0);
         sidebar.attaching(Machine::Local, OwnKey { id: OwnId::new(1).unwrap(), made });
         assert!(!folded(&sidebar, "older"));
+    }
+
+    #[test]
+    fn going_into_a_project_on_a_folded_machine_unfolds_the_machine() {
+        let mut sidebar = own_two_sessions();
+        sidebar.folds.set(Fold::Machine(&Machine::Local), true);
+        sidebar.rebuild();
+        let folded = " ▸ \u{f108} mac ══════════════════ ●1";
+        assert_eq!(screen(&mut sidebar, false, 32, 5)[3], folded);
+        let pane = own_pane_of("older", 1, 1);
+        sit(&mut sidebar, &pane);
+        assert!(!sidebar.folds.contains(Fold::Machine(&Machine::Local)));
+        assert_eq!(sidebar.here_row, Some(Spot::Local(pane)));
     }
 
     #[test]
