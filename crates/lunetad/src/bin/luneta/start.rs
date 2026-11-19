@@ -12,7 +12,7 @@ use lunetad::Directory;
 
 use crate::agents::{self, Kept};
 use crate::machines::Machine;
-use crate::worktrees::{self, Joined, Went};
+use crate::worktrees::{self, Joined, Landing, Went};
 
 pub const UNFINISHED: u8 = 4;
 
@@ -152,13 +152,13 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
             }
             let at = Directory::parse(utf8(&folder)?.to_owned())?;
             Ok(match worktrees::made_at(path, &Machine::Local, &at, None)? {
-                Some(worktree) => {
+                Landing::Worktree(worktree) => {
                     let there = worktrees::folder_of(path, worktree);
                     let there = there.unwrap_or_else(|_| folder.clone());
                     let folder = if folder.starts_with(&there) { folder } else { there };
                     Started::Worktree { worktree, folder, left: Left::Done }
                 },
-                None => Started::Project { folder },
+                Landing::Unopened(_) => Started::Project { folder },
             })
         },
         What::Branch(branch) => {

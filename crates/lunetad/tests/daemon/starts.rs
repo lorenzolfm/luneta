@@ -225,6 +225,8 @@ fn log_of(host: &Host) -> String {
     fs::read_to_string(host.home.path().join(".local/state/luneta/luneta.log")).unwrap()
 }
 
+const FOLDERS: &str = "\x1b[100;5u";
+
 pub fn makes_shells() -> bool {
     Path::new(&opens::your_shell()).is_file()
 }
@@ -292,7 +294,29 @@ fn a_bare_luneta_at_a_clone_s_root_with_none_open_lists_its_worktrees_to_open() 
         (window.shows("project › one") && window.shows("not open")).then_some(())
     });
     let projects = projects_of(&owned);
-    assert!(projects[0].worktrees().unwrap().is_empty(), "none opens until one is picked: {projects:?}");
+    let opened = projects[0].worktrees().unwrap();
+    assert!(opened.is_empty(), "none opens until one is picked: {projects:?}");
+}
+
+#[test]
+fn a_clone_s_root_picked_from_the_folders_lists_its_worktrees_to_open() {
+    let owned = Owned::new();
+    let dir = cloned("project", &["one", "two"]);
+    let root = real(&dir.path);
+    script(&owned.host.zellij.bin().join("zoxide"), &format!("echo '{root}'\n"));
+    let mut window = Window::open(&owned.host, &directory("elsewhere"), &[]);
+    let none = || window.shows("no projects").then_some(());
+    eventually("luneta's sidebar says it has no project", none);
+    window.send(FOLDERS);
+    let tmp = dir.path.parent().unwrap().file_name().unwrap().to_str().unwrap().to_owned();
+    eventually("the folders list the clone's root", || window.shows(&tmp).then_some(()));
+    window.send("\r");
+    eventually("luneta lists the clone's worktrees, none open", || {
+        (window.shows("project › one") && window.shows("not open")).then_some(())
+    });
+    let projects = projects_of(&owned);
+    let opened = projects[0].worktrees().unwrap();
+    assert!(opened.is_empty(), "none opens until one is picked: {projects:?}");
 }
 
 #[test]

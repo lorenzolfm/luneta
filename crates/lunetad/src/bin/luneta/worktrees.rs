@@ -348,11 +348,13 @@ pub fn made_at(
     machine: &Machine,
     cwd: &Directory,
     name: Option<&str>,
-) -> Result<Option<WorktreeId>, String> {
+) -> Result<Landing, String> {
     let (folder, name) = (cwd.to_string(), name.map(str::to_owned));
     match changed_on(path, on(machine), Change::Start(Start { folder, name })) {
-        Ok(Some(Made::Project(_))) => Ok(None),
-        Ok(made) => worktree_made(made).map(Some),
+        Ok(Some(Made::Project(project))) => {
+            ProjectId::of(project).map(Landing::Unopened).ok_or_else(|| zero("project"))
+        },
+        Ok(made) => worktree_made(made).map(Landing::Worktree),
         Err(unmade) => Err(unmade.said()),
     }
 }
