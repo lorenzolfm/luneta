@@ -26,6 +26,8 @@ const SHRINK: &str = "\x1b[45;3u";
 
 const CLOSE: &str = "\x1b[97;3udd";
 
+const WELCOME: &str = "\x1b[97;3unh";
+
 fn seam(window: &Window) -> Option<usize> {
     window.screen().iter().find_map(|line| {
         let (at, _) = line.char_indices().filter(|(_, c)| *c == '╭').nth(1)?;
@@ -84,6 +86,30 @@ fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
         let emptied = workstreams.any(|it| it.id == id && it.terminals.is_empty());
         (emptied && window.shows(UNSHOWN)).then_some(())
     });
+}
+
+#[test]
+fn the_menu_opens_a_welcome_view_beside_the_terminal_and_d_d_in_it_closes_it() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    let frames = |window: &Window| window.screen().iter().map(|it| it.matches('╭').count()).max();
+    window.send(WELCOME);
+    eventually("a welcome view is drawn beside the terminal", || {
+        (frames(&window) == Some(2) && window.shows("runs no terminal")).then_some(())
+    });
+    let ids = || -> Vec<u64> {
+        shown(&owned, &dir.path).expect("the workstream").terminals.iter().map(|it| it.id).collect()
+    };
+    let terminals = ids();
+    assert_eq!(terminals.len(), 1, "a welcome view runs no terminal");
+    window.send("dd");
+    eventually("the welcome view closes and the terminal stays", || {
+        (frames(&window) == Some(1) && !window.shows("runs no terminal")).then_some(())
+    });
+    assert_eq!(ids(), terminals);
 }
 
 #[test]

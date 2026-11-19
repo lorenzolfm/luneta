@@ -240,7 +240,7 @@ fn full_of(laid: &Laid) -> Option<u64> {
 fn key(pane: &Pane) -> Option<TerminalKey> {
     match &pane.found {
         Some(Found::Key(key)) => Some(*key),
-        Some(Found::Lost(()) | Found::Looking(())) | None => None,
+        Some(Found::Lost(()) | Found::Looking(()) | Found::Welcome(())) | None => None,
     }
 }
 
@@ -514,6 +514,42 @@ fn a_closed_terminal_leaves_the_mux_and_its_layout_to_the_terminal_beside_it() {
 }
 
 #[test]
+fn a_welcome_view_opens_beside_the_focus_and_closes_as_a_terminal_does() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let terminal = shown.open();
+    shown.ask(Event::Welcome(()));
+    let welcomes = |pane: &Pane| matches!(pane.found, Some(Found::Welcome(())));
+    let laid = shown.until("a welcome view", |laid| laid.panes.len() == 2);
+    let welcome = laid.panes.iter().find(|pane| welcomes(pane)).expect("a welcome").terminal;
+    assert_eq!(focused_of(&laid), Some(welcome), "the welcome view opened takes the focus");
+    let listed = watched_workstream(&owned, workstream).expect("the workstream is watched");
+    let ids: Vec<u64> = listed.terminals.iter().map(|it| it.id).collect();
+    assert_eq!(ids, [terminal], "a welcome view runs no terminal");
+    eventually("the welcome view is kept within a sweep", || {
+        fs::read_to_string(kept(&owned.host)).unwrap().contains(r#""welcome": {"#).then_some(())
+    });
+    assert_eq!(owned.listing().terminals.len(), 1, "the mux holds no welcome view");
+
+    shown.ask(Event::Close(()));
+    let laid = shown.until("the welcome view closed", |laid| laid.panes.len() == 1);
+    assert_eq!((laid.panes[0].terminal, focused_of(&laid)), (terminal, Some(terminal)));
+    assert!(tagged(&owned.listing(), terminal).is_some(), "the terminal beside it stays");
+
+    shown.ask(Event::Welcome(()));
+    shown.until("a welcome view again", |laid| laid.panes.len() == 2);
+    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::Terminal(terminal)) }));
+    shown.until("the terminal focused", |it| focused_of(it) == Some(terminal));
+    shown.ask(Event::Close(()));
+    let laid = shown.until("the terminal gone", |laid| laid.panes.len() == 1);
+    assert!(welcomes(&laid.panes[0]), "the welcome view is left alone");
+    shown.ask(Event::Close(()));
+    shown.until("the layout emptied", |laid| laid.panes.is_empty());
+    assert_eq!(watched(&owned, workstream), [], "the workstream stays with its last view gone");
+}
+
+#[test]
 fn a_workstream_stays_when_its_layout_s_last_terminal_closes_and_the_mux_takes_the_next() {
     let owned = Owned::new();
     let staying = workstream_in_home(&owned);
@@ -544,7 +580,7 @@ fn a_layout_comes_back_with_its_terminals_when_lunetad_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 7,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 8,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();

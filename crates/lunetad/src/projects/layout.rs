@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::num::NonZeroU16;
 
-use super::TerminalId;
+use super::ViewId;
 
 pub const FRAME_CELLS: u16 = 1;
 
@@ -247,11 +247,11 @@ impl Least {
 }
 
 pub trait Leaf {
-    fn id(&self) -> TerminalId;
+    fn id(&self) -> ViewId;
 }
 
-impl Leaf for TerminalId {
-    fn id(&self) -> TerminalId {
+impl Leaf for ViewId {
+    fn id(&self) -> ViewId {
         *self
     }
 }
@@ -291,7 +291,7 @@ pub enum Preordered<L> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Removed<L> {
     Last,
-    Out { gone: L, heir: TerminalId },
+    Out { gone: L, heir: ViewId },
 }
 
 #[must_use]
@@ -372,7 +372,7 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn panes(&self) -> Vec<TerminalId> {
+    pub fn panes(&self) -> Vec<ViewId> {
         self.leaves().map(Leaf::id).collect()
     }
 
@@ -381,16 +381,16 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn holds(&self, pane: TerminalId) -> bool {
+    pub fn holds(&self, pane: ViewId) -> bool {
         self.leaf(pane).is_some()
     }
 
     #[must_use]
-    pub fn get(&self, pane: TerminalId) -> Option<&L> {
+    pub fn get(&self, pane: ViewId) -> Option<&L> {
         Some(self.leaf_at(self.leaf(pane)?))
     }
 
-    pub fn get_mut(&mut self, pane: TerminalId) -> Option<&mut L> {
+    pub fn get_mut(&mut self, pane: ViewId) -> Option<&mut L> {
         let node = self.leaf(pane)?;
         match &mut self.nodes[node] {
             Node::Pane(leaf) => Some(leaf),
@@ -423,16 +423,16 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn rects(&self, size: Size) -> Vec<(TerminalId, Rect)> {
+    pub fn rects(&self, size: Size) -> Vec<(ViewId, Rect)> {
         self.laid(size).into_iter().map(|(leaf, rect)| (leaf.id(), rect)).collect()
     }
 
     #[must_use]
     pub fn room(
         &self,
-        at: TerminalId,
+        at: ViewId,
         towards: Towards,
-        new: TerminalId,
+        new: ViewId,
         size: Size,
     ) -> Option<Size> {
         if self.len() >= PANES_MAX {
@@ -450,8 +450,8 @@ impl<L: Leaf> Tree<L> {
     #[must_use]
     pub fn room_beside(
         &self,
-        at: TerminalId,
-        new: TerminalId,
+        at: ViewId,
+        new: ViewId,
         size: Size,
     ) -> Option<(Towards, Size)> {
         let (_, rect) = self.rects(size).into_iter().find(|(pane, _)| *pane == at)?;
@@ -464,15 +464,15 @@ impl<L: Leaf> Tree<L> {
     #[must_use]
     pub fn room_beside_largest(
         &self,
-        new: TerminalId,
+        new: ViewId,
         size: Size,
-    ) -> Option<(TerminalId, Towards, Size)> {
+    ) -> Option<(ViewId, Towards, Size)> {
         let (largest, _) = self.largest(size);
         let (towards, inner) = self.room_beside(largest, new, size)?;
         Some((largest, towards, inner))
     }
 
-    pub fn split(&mut self, at: TerminalId, towards: Towards, new: L, size: Size) {
+    pub fn split(&mut self, at: ViewId, towards: Towards, new: L, size: Size) {
         let id = new.id();
         let size = self.fitted(size);
         self.grafted(at, towards, new);
@@ -480,7 +480,7 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn largest(&self, size: Size) -> (TerminalId, Towards) {
+    pub fn largest(&self, size: Size) -> (ViewId, Towards) {
         let rects = self.rects(size);
         let (pane, rect) = rects
             .iter()
@@ -492,7 +492,7 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn heir(&self, pane: TerminalId) -> Option<TerminalId> {
+    pub fn heir(&self, pane: ViewId) -> Option<ViewId> {
         let node = self.leaf(pane).expect("a pane with an heir is in the tree");
         let (_, sibling) = self.halves_of(node)?;
         let panes = self.panes();
@@ -503,7 +503,7 @@ impl<L: Leaf> Tree<L> {
         Some(heir)
     }
 
-    pub fn remove(&mut self, pane: TerminalId) -> Removed<L> {
+    pub fn remove(&mut self, pane: ViewId) -> Removed<L> {
         let node = self.leaf(pane).expect("a removed pane is in the tree");
         let Some(heir) = self.heir(pane) else {
             assert_eq!(self.nodes.len(), 1, "the root is a pane only in a tree of one");
@@ -521,7 +521,7 @@ impl<L: Leaf> Tree<L> {
         Removed::Out { gone, heir }
     }
 
-    pub fn swap(&mut self, one: TerminalId, other: TerminalId) {
+    pub fn swap(&mut self, one: ViewId, other: ViewId) {
         let one = self.leaf(one).expect("a swapped pane is in the tree");
         let other = self.leaf(other).expect("a swapped pane is in the tree");
         self.nodes.swap(one, other);
@@ -530,10 +530,10 @@ impl<L: Leaf> Tree<L> {
     #[must_use]
     pub fn neighbour(
         &self,
-        pane: TerminalId,
+        pane: ViewId,
         direction: Direction,
         size: Size,
-    ) -> Option<TerminalId> {
+    ) -> Option<ViewId> {
         let rects = self.rects(size);
         let from = rects.iter().find(|(found, _)| *found == pane);
         let (_, from) = *from.expect("a pane of the tree is laid out");
@@ -549,7 +549,7 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn in_order(&self, pane: TerminalId, order: Order) -> Option<TerminalId> {
+    pub fn in_order(&self, pane: ViewId, order: Order) -> Option<ViewId> {
         let panes = self.panes();
         let place = panes.iter().position(|found| *found == pane);
         let place = place.expect("a pane of the tree is in its order");
@@ -557,7 +557,7 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn resize(&mut self, pane: TerminalId, sides: Sides, growth: Growth, size: Size) -> bool {
+    pub fn resize(&mut self, pane: ViewId, sides: Sides, growth: Growth, size: Size) -> bool {
         let before = self.rects(size);
         let moved = match sides {
             Sides::One(direction) => self.border_moved(pane, direction, growth, size),
@@ -572,7 +572,7 @@ impl<L: Leaf> Tree<L> {
             assert_eq!(after, before, "a resize that moves no border moves no pane");
             return false;
         }
-        let rect_of = |rects: &[(TerminalId, Rect)]| {
+        let rect_of = |rects: &[(ViewId, Rect)]| {
             let found = rects.iter().find(|(id, _)| *id == pane);
             found.map(|(_, rect)| *rect).expect("a resized pane is in the tree")
         };
@@ -592,7 +592,7 @@ impl<L: Leaf> Tree<L> {
 
     fn border_moved(
         &mut self,
-        pane: TerminalId,
+        pane: ViewId,
         direction: Direction,
         growth: Growth,
         size: Size,
@@ -620,7 +620,7 @@ impl<L: Leaf> Tree<L> {
         unreachable!("a walk up a tree of {} nodes reaches its root", self.nodes.len());
     }
 
-    fn shape(&self) -> Tree<TerminalId> {
+    fn shape(&self) -> Tree<ViewId> {
         let nodes = self.nodes.iter().map(|node| match node {
             Node::Pane(leaf) => Node::Pane(leaf.id()),
             Node::Split(split) => Node::Split(*split),
@@ -628,7 +628,7 @@ impl<L: Leaf> Tree<L> {
         Tree { nodes: nodes.collect() }
     }
 
-    fn grafted(&mut self, at: TerminalId, towards: Towards, new: L) {
+    fn grafted(&mut self, at: ViewId, towards: Towards, new: L) {
         assert!(!self.holds(new.id()), "pane {} is split into a tree that holds it", new.id());
         assert!(self.nodes.len() + 2 <= NODES_MAX, "a tree holds at most {PANES_MAX} panes");
         let node = self.leaf(at).expect("a split pane is in the tree");
@@ -655,7 +655,7 @@ impl<L: Leaf> Tree<L> {
         Some((parent, split.first()))
     }
 
-    fn leaf(&self, pane: TerminalId) -> Option<usize> {
+    fn leaf(&self, pane: ViewId) -> Option<usize> {
         self.nodes.iter().position(|node| matches!(node, Node::Pane(leaf) if leaf.id() == pane))
     }
 
@@ -864,8 +864,8 @@ fn touching(from: Rect, to: Rect, direction: Direction) -> Option<u16> {
 mod tests {
     use super::*;
 
-    fn pane(id: u64) -> TerminalId {
-        TerminalId::of(id).unwrap()
+    fn pane(id: u64) -> ViewId {
+        ViewId::of(id).unwrap()
     }
 
     fn size(columns: u16, rows: u16) -> Size {
@@ -876,14 +876,14 @@ mod tests {
         Rect { column, row, columns, rows }
     }
 
-    fn three(at: Size) -> Tree<TerminalId> {
+    fn three(at: Size) -> Tree<ViewId> {
         let mut tree = Tree::one(pane(1));
         tree.split(pane(1), Towards::Right, pane(2), at);
         tree.split(pane(2), Towards::Down, pane(3), at);
         tree
     }
 
-    fn tiles(tree: &Tree<TerminalId>, at: Size) {
+    fn tiles(tree: &Tree<ViewId>, at: Size) {
         let rects = tree.rects(at);
         let (columns, rows) = tree.fitted(at).get();
         let mut covered = vec![0u8; usize::from(columns) * usize::from(rows)];
@@ -1129,7 +1129,7 @@ mod tests {
         tree.split(pane(1), Towards::Down, pane(4), at);
         assert!(tree.resize(pane(4), Sides::One(Direction::Up), Growth::Grow, at));
         assert!(matches!(tree.remove(pane(2)), Removed::Out { .. }));
-        let preorder: Vec<Preordered<TerminalId>> = tree
+        let preorder: Vec<Preordered<ViewId>> = tree
             .preorder()
             .into_iter()
             .map(|node| match node {
@@ -1158,7 +1158,7 @@ mod tests {
         let split = Preordered::Split { towards: Towards::Right, share: SHARES / 2 };
         let leaf = |id| Preordered::Pane(pane(id));
         let over = Preordered::Split { towards: Towards::Right, share: SHARES + 1 };
-        let refused: [(Vec<Preordered<TerminalId>>, &str); 5] = [
+        let refused: [(Vec<Preordered<ViewId>>, &str); 5] = [
             (vec![], "lacks a half"),
             (vec![split, leaf(1)], "lacks a half"),
             (vec![leaf(1), leaf(2)], "after its last terminal"),

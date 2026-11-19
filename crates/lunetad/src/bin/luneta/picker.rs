@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use lunetad::mux::{Exited, Zellij};
-use lunetad::projects::{self, Name, Seen, TerminalId};
+use lunetad::projects::{self, Name, Seen, ViewId};
 use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
 use lunetad::{eza, screens, Destination, Directory};
@@ -94,7 +94,7 @@ pub struct Streamed {
     pub seen: Seen,
     pub used: Option<SystemTime>,
     pub terminals: Vec<PaneKey>,
-    pub held: Vec<TerminalId>,
+    pub held: Vec<ViewId>,
     pub waiting: usize,
     pub ending: Result<Vec<close::Doing>, Untold>,
 }
@@ -210,7 +210,7 @@ pub enum Ask {
     Peek { on: Machine, session: Listed, asked: Option<PaneKey> },
     Closes { on: Machine, place: PanePlace },
     Rename { on: Machine, renames: Renames, to: Name },
-    Close { on: Machine, place: WorkstreamPlace, name: String, seen: Vec<TerminalId> },
+    Close { on: Machine, place: WorkstreamPlace, name: String, seen: Vec<ViewId> },
     Dirs { on: Machine, ask: u64 },
     List { on: Machine, path: Directory },
 }
@@ -2087,8 +2087,8 @@ mod tests {
         }
     }
 
-    fn held(terminals: &[u32]) -> Vec<TerminalId> {
-        terminals.iter().map(|id| TerminalId::of(u64::from(*id)).unwrap()).collect()
+    fn held(terminals: &[u32]) -> Vec<ViewId> {
+        terminals.iter().map(|id| ViewId::of(u64::from(*id)).unwrap()).collect()
     }
 
     fn housed(name: &str, id: u64, workstreams: Vec<Streamed>) -> Housed {

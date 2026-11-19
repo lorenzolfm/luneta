@@ -112,6 +112,7 @@ actions! {
     ExplainLast,
     FixChecks,
     NewView,
+    NewWelcome,
     NewWorkstream,
     NewProject,
     NewMachine,
@@ -212,6 +213,10 @@ impl Action {
             Action::NewView => {
                 let new = menu(&['n', 'v']);
                 spec("new view", &["pane", "split", "terminal", "shell"], new, VIEW, Any)
+            },
+            Action::NewWelcome => {
+                let new = menu(&['n', 'h']);
+                spec("new welcome view", &["home", "start", "greeting"], new, VIEW, Any)
             },
             Action::NewWorkstream => {
                 spec("new workstream", &["tab", "task"], menu(&['n', 'w']), IN_A_PROJECT, Any)

@@ -251,12 +251,12 @@ fn a_projects_file_lunetad_cannot_read_is_left_as_it_is_and_no_change_is_kept() 
     let host = Host::new();
     let file = kept(&host);
     fs::create_dir_all(file.parent().unwrap()).unwrap();
-    let newer = "{\"version\": 8, \"projects\": [], \"views\": []}\n";
+    let newer = "{\"version\": 9, \"projects\": [], \"views\": []}\n";
     fs::write(&file, newer).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let mut daemon = start(host.vars()).unwrap();
     let said = daemon.said_after(Duration::ZERO).join("\n");
-    assert!(said.contains("of version 8, and this lunetad reads only 1 to 7"), "{said}");
+    assert!(said.contains("of version 9, and this lunetad reads only 1 to 8"), "{said}");
 
     let add = AddProject { dir: text(scratch.path()), name: None };
     let refused = changed(&host, Change::AddProject(add)).unwrap_err();

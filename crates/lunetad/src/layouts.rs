@@ -21,7 +21,7 @@ use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
 use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
 use crate::projects::{Layout, Made, Project, ProjectId, Projects, Ran, Runs, Spot};
-use crate::projects::{Session, Size, Store, Terminal, TerminalId, Used, Workstream};
+use crate::projects::{Session, Size, Store, Terminal, Used, View, ViewId, Workstream};
 use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
 use crate::projects::{Worktree, WORKSTREAMS_MAX};
 use crate::shells::Doing;
@@ -101,6 +101,7 @@ pub enum Asked {
     Size(Size),
     Go(WorkstreamId),
     Open { beside: Beside, argv: Vec<String> },
+    Welcome,
     Close,
     Focus(Focus),
     Resize { sides: Sides, growth: layout::Growth },
@@ -125,7 +126,7 @@ enum Done {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Step(Step),
-    Terminal(TerminalId),
+    Terminal(ViewId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +158,7 @@ impl Asked {
                 }
                 Asked::Open { beside, argv }
             },
+            Event::Welcome(()) => Asked::Welcome,
             Event::Close(()) => Asked::Close,
             Event::Focus(show_request::Focus { to }) => {
                 use show_request::focus::To;
@@ -166,7 +168,7 @@ impl Asked {
                     },
                     To::Order(order) => Focus::Step(Step::Order(order_of(order)?)),
                     To::Terminal(terminal) => {
-                        Focus::Terminal(id("focus", terminal).map(TerminalId::new)?)
+                        Focus::Terminal(id("focus", terminal).map(ViewId::new)?)
                     },
                 })
             },
@@ -285,15 +287,15 @@ struct Layouts {
     mux: Terminals,
     clients: BTreeMap<ClientId, Client>,
     arrivals: u64,
-    known: BTreeMap<TerminalId, Known>,
+    known: BTreeMap<ViewId, Known>,
     listed: BTreeMap<TerminalKey, server::Terminal>,
     looked: bool,
-    last_focus: BTreeMap<WorkstreamId, TerminalId>,
-    unhomed: BTreeSet<TerminalId>,
-    restore_round: BTreeSet<TerminalId>,
+    last_focus: BTreeMap<WorkstreamId, ViewId>,
+    unhomed: BTreeSet<ViewId>,
+    restore_round: BTreeSet<ViewId>,
     restore_last_at: Option<Instant>,
     restore_attempts: Attempts,
-    told: Option<BTreeMap<TerminalId, Located>>,
+    told: Option<BTreeMap<ViewId, Located>>,
     troubles: Troubles,
     shell: OsString,
 }
@@ -302,7 +304,7 @@ struct Client {
     workstream: WorkstreamId,
     size: Size,
     runs_in: Option<TerminalKey>,
-    focus: Option<TerminalId>,
+    focus: Option<ViewId>,
     out: Out,
     said: Option<api::ShowResponse>,
 }
@@ -342,15 +344,15 @@ enum Paste {
 
 #[derive(Default)]
 struct Attempts {
-    failures: BTreeMap<TerminalId, u32>,
+    failures: BTreeMap<ViewId, u32>,
 }
 
 impl Attempts {
-    fn wanted(&self, terminal: TerminalId) -> bool {
+    fn wanted(&self, terminal: ViewId) -> bool {
         self.failures.get(&terminal).is_none_or(|count| *count < RESTORE_ATTEMPTS_MAX)
     }
 
-    fn failed(&mut self, terminal: TerminalId, why: &str) -> String {
+    fn failed(&mut self, terminal: ViewId, why: &str) -> String {
         let count = self.charged(terminal);
         if count < RESTORE_ATTEMPTS_MAX {
             let attempt = format!("attempt {count} of {RESTORE_ATTEMPTS_MAX}");
@@ -361,7 +363,7 @@ impl Attempts {
         }
     }
 
-    fn crashed(&mut self, terminal: TerminalId, after: Duration) -> String {
+    fn crashed(&mut self, terminal: ViewId, after: Duration) -> String {
         let count = self.charged(terminal);
         let secs = after.as_secs();
         let ended = format!("luneta-mux ended {secs}s after terminal {terminal} was restored");
@@ -372,11 +374,11 @@ impl Attempts {
         }
     }
 
-    fn settled(&mut self, terminal: TerminalId) {
+    fn settled(&mut self, terminal: ViewId) {
         self.failures.remove(&terminal);
     }
 
-    fn charged(&mut self, terminal: TerminalId) -> u32 {
+    fn charged(&mut self, terminal: ViewId) -> u32 {
         assert!(self.wanted(terminal), "terminal {terminal}, given up, is not restored again");
         let count = self.failures.entry(terminal).or_insert(0);
         *count += 1;
@@ -384,7 +386,7 @@ impl Attempts {
         *count
     }
 
-    fn retain(&mut self, unsettled: impl Fn(TerminalId) -> bool) {
+    fn retain(&mut self, unsettled: impl Fn(ViewId) -> bool) {
         self.failures.retain(|terminal, _| unsettled(*terminal));
         assert!(self.failures.len() <= TERMINALS_MAX, "no more failures than terminals");
     }
@@ -547,7 +549,7 @@ impl Layouts {
         &mut self,
         project: ProjectId,
         seen_workstreams: &BTreeSet<WorkstreamId>,
-        seen: &BTreeSet<TerminalId>,
+        seen: &BTreeSet<ViewId>,
     ) -> Result<Option<Made>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no project has the id {project}"));
@@ -555,11 +557,11 @@ impl Layouts {
         let workstreams: Vec<WorkstreamId> = held.workstreams().map(Workstream::id).collect();
         let layouts = held.workstreams().map(Workstream::layout);
         let terminals = layouts.flat_map(Layout::terminals).map(layout::Leaf::id);
-        let terminals: Vec<TerminalId> = terminals.collect();
+        let terminals: Vec<ViewId> = terminals.collect();
         assert!(workstreams.len() <= WORKSTREAMS_MAX, "a project holds at most {WORKSTREAMS_MAX}");
         assert!(terminals.len() <= TERMINALS_MAX, "a project holds at most {TERMINALS_MAX} terminals");
         let held_workstreams: BTreeSet<WorkstreamId> = workstreams.iter().copied().collect();
-        let held_terminals: BTreeSet<TerminalId> = terminals.iter().copied().collect();
+        let held_terminals: BTreeSet<ViewId> = terminals.iter().copied().collect();
         if held_workstreams != *seen_workstreams || held_terminals != *seen {
             let changed = format!("project {project}'s workstreams or terminals are not those seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
@@ -580,12 +582,12 @@ impl Layouts {
     fn close_workstream(
         &mut self,
         workstream: WorkstreamId,
-        seen: &BTreeSet<TerminalId>,
+        seen: &BTreeSet<ViewId>,
     ) -> Result<Option<Made>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no workstream has the id {workstream}"));
         let (_, shown) = projects.find(workstream).ok_or_else(unknown)?;
-        let terminals: Vec<TerminalId> = shown.layout().terminals().map(layout::Leaf::id).collect();
+        let terminals: Vec<ViewId> = shown.layout().terminals().map(layout::Leaf::id).collect();
         if terminals.iter().copied().collect::<BTreeSet<_>>() != *seen {
             let changed = format!("workstream {workstream}'s terminals are not the ones seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
@@ -602,12 +604,12 @@ impl Layouts {
         Ok(None)
     }
 
-    fn close_terminals(&mut self, terminals: &[TerminalId]) -> Result<(), Failed> {
+    fn close_terminals(&mut self, terminals: &[ViewId]) -> Result<(), Failed> {
         assert!(terminals.len() <= TERMINALS_MAX, "at most {TERMINALS_MAX} terminals are kept");
         let unclosed = |failure: Failure| Failed::Unclosed(failure.to_string());
         let unseen = terminals.iter().any(|terminal| !self.known.contains_key(terminal));
         let tags = if unseen { self.mux.tags().map_err(unclosed)? } else { Vec::new() };
-        let mut done: Vec<TerminalId> = Vec::with_capacity(terminals.len());
+        let mut done: Vec<ViewId> = Vec::with_capacity(terminals.len());
         for terminal in terminals {
             let known = self.known.get(terminal).map(|known| known.key);
             let found = || {
@@ -630,7 +632,7 @@ impl Layouts {
         Ok(())
     }
 
-    fn forget_closed(&mut self, workstreams: &[WorkstreamId], terminals: &[TerminalId]) {
+    fn forget_closed(&mut self, workstreams: &[WorkstreamId], terminals: &[ViewId]) {
         for terminal in terminals {
             self.known.remove(terminal);
         }
@@ -721,6 +723,7 @@ impl Layouts {
                 self.went(to);
             },
             Asked::Open { beside, argv } => self.open(client, beside, &argv)?,
+            Asked::Welcome => self.welcome(client)?,
             Asked::Close => self.close(focused()?)?,
             Asked::Focus(Focus::Terminal(terminal)) => {
                 if !self.layout(workstream)?.holds(terminal) {
@@ -787,10 +790,10 @@ impl Layouts {
     fn stepped(
         &self,
         workstream: WorkstreamId,
-        from: TerminalId,
+        from: ViewId,
         step: Step,
         size: Size,
-    ) -> Result<TerminalId, String> {
+    ) -> Result<ViewId, String> {
         let tree = self.layout(workstream)?.tree().ok_or("the layout holds no terminal")?;
         let to = match step {
             Step::Direction(direction) => tree.neighbour(from, direction, size),
@@ -799,7 +802,7 @@ impl Layouts {
         to.ok_or_else(|| "no other terminal is there".to_owned())
     }
 
-    fn focus(&mut self, client: ClientId, terminal: TerminalId) -> Result<(), String> {
+    fn focus(&mut self, client: ClientId, terminal: ViewId) -> Result<(), String> {
         let workstream = self.clients[&client].workstream;
         let full = self.layout(workstream)?.full();
         if full.is_some_and(|full| full != terminal) {
@@ -860,7 +863,7 @@ impl Layouts {
         let folder = listed_cwd.unwrap_or(home);
         let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
         let made = Terminal::new(terminal, folder, runs);
-        self.changed(Change::Open { workstream, terminal: made, placed, size })?;
+        self.changed(Change::Open { workstream, view: View::Terminal(made), placed, size })?;
         let opened = match argv.split_first() {
             None => Opened::Shell(&self.shell),
             Some((program, rest)) => Opened::Command { program, args: rest },
@@ -880,9 +883,34 @@ impl Layouts {
         Ok(())
     }
 
+    fn welcome(&mut self, client: ClientId) -> Result<(), String> {
+        let Client { workstream, focus, .. } = self.clients[&client];
+        let size = self.size_of(client);
+        let view = self.store.fresh().map_err(said)?;
+        let projects = self.kept()?;
+        let (_, shown) = projects.find(workstream).ok_or("the workstream is gone")?;
+        let placed = match (shown.layout().tree(), focus) {
+            (None, _) => Placed::Alone,
+            (Some(tree), Some(at)) => {
+                let room = tree.room_beside(at, view, size);
+                let (towards, _) = room.ok_or_else(|| format!("view {at} has no room beside it"))?;
+                Placed::Beside { at, towards }
+            },
+            (Some(tree), None) => {
+                let room = tree.room_beside_largest(view, size);
+                let (at, towards, _) = room.ok_or("no view has room for another")?;
+                Placed::Beside { at, towards }
+            },
+        };
+        self.changed(Change::Open { workstream, view: View::Welcome(view), placed, size })?;
+        self.client(client).focus = Some(view);
+        self.last_focus.insert(workstream, view);
+        Ok(())
+    }
+
     fn made(
         &mut self,
-        terminal: TerminalId,
+        terminal: ViewId,
         key: TerminalKey,
         sized: Option<Size>,
         remade: Option<Remade>,
@@ -935,21 +963,21 @@ impl Layouts {
         };
         let known = &self.known;
         let held = |terminal| projects.holding(terminal).is_some();
-        let settled = |terminal: TerminalId| {
+        let settled = |terminal: ViewId| {
             known.get(&terminal).is_some_and(|known| {
                 known.remade.as_ref().is_none_or(|it| it.at.elapsed() >= RESTORE_SETTLE)
             })
         };
         self.restore_attempts.retain(|terminal| held(terminal) && !settled(terminal));
         let attempts = &self.restore_attempts;
-        let wanted = |terminal: &TerminalId| {
+        let wanted = |terminal: &ViewId| {
             !known.contains_key(terminal) && attempts.wanted(*terminal)
         };
         let ids = || projects.terminals().map(|(_, terminal)| layout::Leaf::id(terminal));
         if !ids().any(|terminal| wanted(&terminal)) {
             return;
         }
-        let lost: BTreeSet<TerminalId> = ids().filter(wanted).collect();
+        let lost: BTreeSet<ViewId> = ids().filter(wanted).collect();
         assert!(!lost.is_empty(), "a round begins with a terminal lost");
         self.restore_last_at = Some(Instant::now());
         let tags = match self.mux.tags() {
@@ -1000,7 +1028,7 @@ impl Layouts {
         assert!(remade <= RESTORES_PER_PASS, "a pass restores no more than its share");
     }
 
-    fn remade(&mut self, terminal: TerminalId) -> Result<(), String> {
+    fn remade(&mut self, terminal: ViewId) -> Result<(), String> {
         let projects = self.kept()?;
         let (held_in, held) = projects.holding(terminal).ok_or("no layout holds it")?;
         let (project, workstream) = projects.find(held_in.id()).expect("a layout's workstream is");
@@ -1058,7 +1086,7 @@ impl Layouts {
     fn type_due(&mut self) {
         let Layouts { known, listed, mux, troubles, .. } = self;
         let now = Instant::now();
-        let mut pastes_due: Vec<(TerminalId, TerminalKey, Line)> = Vec::new();
+        let mut pastes_due: Vec<(ViewId, TerminalKey, Line)> = Vec::new();
         for (terminal, known) in known.iter_mut() {
             let Some(remade) = &mut known.remade else {
                 continue;
@@ -1091,7 +1119,12 @@ impl Layouts {
         }
     }
 
-    fn close(&mut self, terminal: TerminalId) -> Result<(), String> {
+    fn close(&mut self, terminal: ViewId) -> Result<(), String> {
+        let projects = self.kept()?;
+        let (_, view) = projects.holding_view(terminal).ok_or("no layout holds the view")?;
+        if let View::Welcome(_) = view {
+            return self.closed(terminal);
+        }
         let key = match self.known.get(&terminal) {
             Some(known) => Some(known.key),
             None => self.mux.tagged(&tag(terminal)).map_err(|failure| {
@@ -1104,9 +1137,9 @@ impl Layouts {
         self.closed(terminal)
     }
 
-    fn closed(&mut self, terminal: TerminalId) -> Result<(), String> {
+    fn closed(&mut self, terminal: ViewId) -> Result<(), String> {
         let projects = self.kept()?;
-        let (held_in, _) = projects.holding(terminal).ok_or("no layout holds the terminal")?;
+        let (held_in, _) = projects.holding_view(terminal).ok_or("no layout holds the view")?;
         let workstream = held_in.id();
         let tree = held_in.layout().tree().expect("a layout that holds a terminal is laid");
         let heir = tree.heir(terminal);
@@ -1122,9 +1155,9 @@ impl Layouts {
             };
         }
         let projects = self.kept()?;
-        assert!(projects.holding(terminal).is_none(), "terminal {terminal} left its layout");
+        assert!(projects.holding_view(terminal).is_none(), "view {terminal} left its layout");
         if let Some(heir) = heir {
-            assert!(projects.holding(heir).is_some(), "terminal {heir} took the room it left");
+            assert!(projects.holding_view(heir).is_some(), "view {heir} took the room it left");
         } else {
             let emptied = projects.find(workstream).is_some_and(|(_, it)| it.layout().is_empty());
             assert!(emptied, "workstream {workstream} stays, empty, after its last terminal");
@@ -1148,7 +1181,7 @@ impl Layouts {
             self.listed = by_key(terminals);
             return;
         };
-        let mut found: BTreeMap<TerminalId, (TerminalKey, Option<Size>)> = BTreeMap::new();
+        let mut found: BTreeMap<ViewId, (TerminalKey, Option<Size>)> = BTreeMap::new();
         for listed in &terminals {
             let Some(terminal) = tagged(&listed.tag) else {
                 continue;
@@ -1166,8 +1199,8 @@ impl Layouts {
             }
             found.insert(terminal, (listed.key, listed.size));
         }
-        let ended: Vec<TerminalId> = if whole {
-            let gone = |(terminal, known): &(&TerminalId, &Known)| {
+        let ended: Vec<ViewId> = if whole {
+            let gone = |(terminal, known): &(&ViewId, &Known)| {
                 !found.contains_key(*terminal) && known.heard == Heard::Seen
             };
             self.known.iter().filter(gone).map(|(terminal, _)| *terminal).collect()
@@ -1176,7 +1209,7 @@ impl Layouts {
             self.troubles.say(unread.to_owned());
             Vec::new()
         };
-        let owners: BTreeMap<TerminalKey, TerminalId> =
+        let owners: BTreeMap<TerminalKey, ViewId> =
             found.iter().map(|(terminal, (key, _))| (*key, *terminal)).collect();
         self.known.retain(|terminal, known| {
             owners.get(&known.key).is_none_or(|owner| owner == terminal)
@@ -1276,7 +1309,7 @@ impl Layouts {
         }
     }
 
-    fn rehome(&mut self, terminal: TerminalId) {
+    fn rehome(&mut self, terminal: ViewId) {
         let Some(projects) = self.store.projects() else {
             return;
         };
@@ -1308,7 +1341,7 @@ impl Layouts {
         }
     }
 
-    fn moved(&mut self, terminal: TerminalId, to: WorkstreamId) -> Result<(), String> {
+    fn moved(&mut self, terminal: ViewId, to: WorkstreamId) -> Result<(), String> {
         let projects = self.kept()?;
         let (held_in, _) = projects.holding(terminal).ok_or("no layout holds it")?;
         let from = held_in.id();
@@ -1358,7 +1391,7 @@ impl Layouts {
             };
             (id, located)
         };
-        let now: BTreeMap<TerminalId, Located> = projects.terminals().map(located).collect();
+        let now: BTreeMap<ViewId, Located> = projects.terminals().map(located).collect();
         if self.told.as_ref() == Some(&now) {
             return;
         }
@@ -1467,7 +1500,7 @@ struct Fit {
 fn fit<'a>(
     shown: impl Iterator<Item = &'a Client>,
     layout: &Layout,
-    known: &BTreeMap<TerminalId, Known>,
+    known: &BTreeMap<ViewId, Known>,
 ) -> Option<Fit> {
     shown.fold(None, |fitted, client| {
         let outside = !inside(client, layout, known);
@@ -1480,12 +1513,12 @@ fn fit<'a>(
     })
 }
 
-fn inside(client: &Client, layout: &Layout, known: &BTreeMap<TerminalId, Known>) -> bool {
+fn inside(client: &Client, layout: &Layout, known: &BTreeMap<ViewId, Known>) -> bool {
     let holds = |runs_in| known.iter().any(|(id, it)| it.key == runs_in && layout.holds(*id));
     client.runs_in.is_some_and(holds)
 }
 
-fn placed(layout: &Layout, terminal: TerminalId, size: Size) -> Option<Size> {
+fn placed(layout: &Layout, terminal: ViewId, size: Size) -> Option<Size> {
     let tree = layout.tree()?;
     let fitted = tree.fitted(size);
     let inner = if layout.full() == Some(terminal) {
@@ -1587,7 +1620,7 @@ fn by_key(terminals: Vec<server::Terminal>) -> BTreeMap<TerminalKey, server::Ter
     listed
 }
 
-fn arrival(workstream: &Workstream, last: Option<TerminalId>) -> Option<TerminalId> {
+fn arrival(workstream: &Workstream, last: Option<ViewId>) -> Option<ViewId> {
     let layout = workstream.layout();
     if let Some(full) = layout.full() {
         return Some(full);
@@ -1595,22 +1628,22 @@ fn arrival(workstream: &Workstream, last: Option<TerminalId>) -> Option<Terminal
     if let Some(last) = last.filter(|last| layout.holds(*last)) {
         return Some(last);
     }
-    layout.terminals().next().map(layout::Leaf::id)
+    layout.views().next().map(layout::Leaf::id)
 }
 
-fn tag(terminal: TerminalId) -> Vec<u8> {
+fn tag(terminal: ViewId) -> Vec<u8> {
     format!("{TAG}{terminal}").into_bytes()
 }
 
-fn tagged(tag: &[u8]) -> Option<TerminalId> {
+fn tagged(tag: &[u8]) -> Option<ViewId> {
     std::str::from_utf8(tag).ok()?.strip_prefix(TAG)?.parse().ok()
 }
 
 fn laid(
     workstream: &Workstream,
     size: Size,
-    focus: Option<TerminalId>,
-    known: &BTreeMap<TerminalId, Known>,
+    focus: Option<ViewId>,
+    known: &BTreeMap<ViewId, Known>,
     looked: bool,
 ) -> api::ShowResponse {
     let layout = workstream.layout();
@@ -1620,16 +1653,17 @@ fn laid(
     let (fitted, panes) = match layout.tree() {
         None => (size, Vec::new()),
         Some(tree) => {
-            let panes = tree.laid(size).into_iter().map(|(terminal, rect)| {
+            let panes = tree.laid(size).into_iter().map(|(view, rect)| {
                 use show_response::pane::Found;
-                let terminal = layout::Leaf::id(terminal);
-                let found = match known.get(&terminal) {
-                    Some(known) => Found::Key(api::TerminalKey {
+                let terminal = layout::Leaf::id(view);
+                let found = match (view, known.get(&terminal)) {
+                    (View::Welcome(_), _) => Found::Welcome(()),
+                    (View::Terminal(_), Some(known)) => Found::Key(api::TerminalKey {
                         id: known.key.id.get(),
                         made_at: Some(known.key.made.into()),
                     }),
-                    None if looked => Found::Lost(()),
-                    None => Found::Looking(()),
+                    (View::Terminal(_), None) if looked => Found::Lost(()),
+                    (View::Terminal(_), None) => Found::Looking(()),
                 };
                 show_response::Pane {
                     terminal: terminal.get(),
@@ -1857,7 +1891,7 @@ mod tests {
 
     #[test]
     fn a_terminal_that_fails_to_restore_is_given_up_after_its_attempts() {
-        let (failing, other) = (TerminalId::of(7).unwrap(), TerminalId::of(8).unwrap());
+        let (failing, other) = (ViewId::of(7).unwrap(), ViewId::of(8).unwrap());
         let mut attempts = Attempts::default();
         for attempt in 1..RESTORE_ATTEMPTS_MAX {
             assert!(attempts.wanted(failing));
@@ -1874,7 +1908,7 @@ mod tests {
 
     #[test]
     fn a_crash_soon_after_a_restore_counts_as_a_failed_attempt() {
-        let (crashing, other) = (TerminalId::of(7).unwrap(), TerminalId::of(8).unwrap());
+        let (crashing, other) = (ViewId::of(7).unwrap(), ViewId::of(8).unwrap());
         let mut attempts = Attempts::default();
         let said = attempts.failed(crashing, "no folder");
         assert!(said.contains("attempt 1 of"), "{said}");
@@ -1947,7 +1981,7 @@ mod tests {
 
     #[test]
     fn a_tag_names_the_terminal_of_a_layout() {
-        let id = TerminalId::of(0x1f).unwrap();
+        let id = ViewId::of(0x1f).unwrap();
         assert_eq!(tagged(format!("{TAG}{id}").as_bytes()), Some(id));
         for refused in [&b"luneta terminal 1f"[..], b"terminal 000000000000001f", b"\xff", b""] {
             assert_eq!(tagged(refused), None, "{refused:?}");
@@ -1958,7 +1992,7 @@ mod tests {
     fn a_show_word_reads_into_what_it_asks() {
         use show_request::{focus, open, resize, Event};
         let terminal = Event::Focus(show_request::Focus { to: Some(focus::To::Terminal(3)) });
-        let three = TerminalId::of(3).unwrap();
+        let three = ViewId::of(3).unwrap();
         assert_eq!(Asked::of_api(terminal), Ok(Asked::Focus(Focus::Terminal(three))));
         let right = show_request::Towards::Right.into();
         let open = show_request::Open { beside: Some(open::Beside::Towards(right)), argv: vec![] };

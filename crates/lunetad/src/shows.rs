@@ -12,7 +12,7 @@ use crate::api::{self, show_request, show_response};
 use crate::folder::Folder;
 use crate::mux::TerminalKey;
 use crate::remote::Destination;
-use crate::projects::{Size, TerminalId, WorkstreamId, FRAME_CELLS, PANES_MAX};
+use crate::projects::{Size, ViewId, WorkstreamId, FRAME_CELLS, PANES_MAX};
 use crate::streams::{self, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
@@ -43,11 +43,12 @@ pub enum Found {
     Key(TerminalKey),
     Lost,
     Looking,
+    Welcome,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pane {
-    pub terminal: TerminalId,
+    pub terminal: ViewId,
     pub rect: Rect,
     pub found: Found,
 }
@@ -57,7 +58,7 @@ impl Pane {
     pub fn key(&self) -> Option<TerminalKey> {
         match self.found {
             Found::Key(key) => Some(key),
-            Found::Lost | Found::Looking => None,
+            Found::Lost | Found::Looking | Found::Welcome => None,
         }
     }
 }
@@ -160,7 +161,7 @@ impl Laid {
 
 fn pane(pane: show_response::Pane) -> Result<Pane, String> {
     use show_response::pane::Found as Said;
-    let terminal = TerminalId::of(pane.terminal).ok_or("a layout lays out terminal 0")?;
+    let terminal = ViewId::of(pane.terminal).ok_or("a layout lays out terminal 0")?;
     let rect = pane.rect.ok_or_else(|| format!("terminal {terminal} has no place"))?;
     let side = |cells: u32| u16::try_from(cells).ok();
     let sides = (side(rect.column), side(rect.row), side(rect.columns), side(rect.rows));
@@ -175,6 +176,7 @@ fn pane(pane: show_response::Pane) -> Result<Pane, String> {
         Said::Key(key) => Found::Key(TerminalKey::of(&key)?),
         Said::Lost(()) => Found::Lost,
         Said::Looking(()) => Found::Looking,
+        Said::Welcome(()) => Found::Welcome,
     };
     Ok(Pane { terminal, rect, found })
 }
@@ -230,8 +232,9 @@ pub enum Asked {
     Size(Size),
     Go(WorkstreamId),
     Open { beside: Beside, argv: Vec<String> },
+    Welcome,
     Close,
-    Focus(TerminalId),
+    Focus(ViewId),
     Step(Direction),
     Resize(Growth),
     Fullscreen,
@@ -252,6 +255,7 @@ impl Asked {
                 };
                 Event::Open(show_request::Open { beside: Some(beside), argv })
             },
+            Asked::Welcome => Event::Welcome(()),
             Asked::Close => Event::Close(()),
             Asked::Focus(terminal) => {
                 let to = show_request::focus::To::Terminal(terminal.get());

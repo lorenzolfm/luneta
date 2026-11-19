@@ -1067,6 +1067,7 @@ message ShowRequest {
     Resize resize = 7;
     Move move = 8;
     google.protobuf.Empty fullscreen = 9;
+    google.protobuf.Empty welcome = 10;
   }
 
   message Hello {
@@ -1184,6 +1185,7 @@ message ShowResponse {
       TerminalKey key = 3;
       google.protobuf.Empty lost = 4;
       google.protobuf.Empty looking = 5;
+      google.protobuf.Empty welcome = 6;
     }
   }
 

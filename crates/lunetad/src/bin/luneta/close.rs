@@ -5,7 +5,7 @@ use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
 use lunetad::mux::{OwnKey, TabId};
-use lunetad::projects::{ProjectId, TerminalId, WorkstreamId};
+use lunetad::projects::{ProjectId, ViewId, WorkstreamId};
 use lunetad::seats::Where;
 
 use crate::sidebar::{Listed, PaneKey, Place};
@@ -38,12 +38,12 @@ pub enum Scope {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Deletes {
     Pane { pane: PaneKey, closes: Closes },
-    Workstream { workstream: WorkstreamId, panes: Vec<u32>, seen: Vec<TerminalId> },
+    Workstream { workstream: WorkstreamId, panes: Vec<u32>, seen: Vec<ViewId> },
     Project {
         key: OwnKey,
         project: ProjectId,
         workstreams: Vec<WorkstreamId>,
-        seen: Vec<TerminalId>,
+        seen: Vec<ViewId>,
     },
 }
 
@@ -118,14 +118,14 @@ pub enum Act {
         whose: Whose,
         workstream: WorkstreamId,
         panes: Vec<u32>,
-        seen: Vec<TerminalId>,
+        seen: Vec<ViewId>,
     },
     Project {
         session: SessionName,
         key: OwnKey,
         project: ProjectId,
         workstreams: Vec<WorkstreamId>,
-        seen: Vec<TerminalId>,
+        seen: Vec<ViewId>,
     },
     Kill { session: SessionName, whose: Whose },
     Leave { session: SessionName, started: SystemTime, to: Place },
@@ -272,12 +272,12 @@ impl Plan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ends {
-    pub seen: Vec<TerminalId>,
+    pub seen: Vec<ViewId>,
     ending: Result<Ending, Untold>,
 }
 
 impl Ends {
-    pub fn of(seen: &[TerminalId], doing: Result<&[Doing], Untold>) -> Ends {
+    pub fn of(seen: &[ViewId], doing: Result<&[Doing], Untold>) -> Ends {
         let mut seen = seen.to_vec();
         seen.sort_unstable();
         Ends { seen, ending: doing.map(|doing| Ending::of(doing.iter().copied())) }
@@ -366,7 +366,7 @@ mod tests {
         let busy = vec![(4, Doing::Busy)];
         let key = project.own_key().unwrap();
         let workstreams = vec![WorkstreamId::of(31).unwrap()];
-        let seen = vec![TerminalId::of(4).unwrap()];
+        let seen = vec![ViewId::of(4).unwrap()];
         let project_id = ProjectId::of(6).unwrap();
         let deletes = || Deletes::Project {
             key,
@@ -393,7 +393,7 @@ mod tests {
     fn a_workstream_s_delete_asks_first_only_for_an_agent_at_work_in_its_panes() {
         let luneta = luneta();
         let workstream = WorkstreamId::of(31).unwrap();
-        let seen = vec![TerminalId::of(4).unwrap(), TerminalId::of(5).unwrap()];
+        let seen = vec![ViewId::of(4).unwrap(), ViewId::of(5).unwrap()];
         let deletes = || Deletes::Workstream { workstream, panes: vec![4, 5], seen: seen.clone() };
         let planned = |agents| plan(&subject(&luneta, Seat::In, deletes(), agents));
         assert_eq!(planned(vec![(6, Doing::Busy), (4, Doing::Idle)]).question(), None);

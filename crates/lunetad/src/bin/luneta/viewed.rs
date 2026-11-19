@@ -5,13 +5,13 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::vte::ansi::CursorShape;
-use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use lunetad::folder;
 use lunetad::mux::own::api::{self, typed};
 use lunetad::mux::own::frames::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Size, TerminalId, WorkstreamId};
+use lunetad::projects::{Size, ViewId, WorkstreamId};
 use lunetad::{
     Asked, Beside, Direction, Found, Heard, Laid, Pane, Rect as Placed, Show, Where,
 };
@@ -38,6 +38,11 @@ const LOOKING: &str = "looking for it in luneta-mux";
 
 const HERE: &str = "luneta runs here";
 
+const WELCOME: [&str; 4] =
+    ["Welcome", "", "This view runs no terminal.", "d d  close it   Ctrl hjkl  another view"];
+
+const CLOSE: char = 'd';
+
 #[must_use]
 pub fn layout_size(columns: NonZeroU16, rows: NonZeroU16) -> Size {
     let rows = rows.get().saturating_sub(TAB_BAR_ROWS).max(1);
@@ -55,7 +60,7 @@ pub struct Tab {
 enum Moused {
     Nothing,
     Go(WorkstreamId),
-    Focus(TerminalId),
+    Focus(ViewId),
     Sent(TerminalKey, api::Mouse),
 }
 
@@ -77,7 +82,7 @@ struct Layout {
     screens: BTreeMap<TerminalKey, Screen>,
     pointer: Pointer,
     tabs: Vec<Tab>,
-    titles: BTreeMap<TerminalId, String>,
+    titles: BTreeMap<ViewId, String>,
 }
 
 impl Layout {
@@ -97,8 +102,12 @@ impl Layout {
         self.laid.as_ref()
     }
 
-    fn focused(&self) -> Option<TerminalId> {
+    fn focused(&self) -> Option<ViewId> {
         self.laid()?.focused().map(|pane| pane.terminal)
+    }
+
+    fn welcomes(&self) -> bool {
+        self.laid().and_then(Laid::focused).is_some_and(|pane| pane.found == Found::Welcome)
     }
 
     fn focused_key(&self) -> Option<TerminalKey> {
@@ -369,6 +378,13 @@ impl Layout {
                 },
                 Found::Lost => LOST,
                 Found::Looking => LOOKING,
+                Found::Welcome => {
+                    let style = Style::new().fg(if mine { gruvbox::GREEN } else { gruvbox::GREY });
+                    for (line, y) in WELCOME.iter().zip(seen.top()..seen.bottom()) {
+                        buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
+                    }
+                    continue;
+                },
             };
             let style = Style::new().fg(gruvbox::GREY);
             buffer.set_stringn(seen.x, seen.y, said, usize::from(seen.width), style);
@@ -425,6 +441,7 @@ pub struct Viewed {
     watchers: u64,
     watched_at: Option<Instant>,
     opened: BTreeSet<WorkstreamId>,
+    closing: Option<ViewId>,
     events: Sender<Event>,
 }
 
@@ -455,6 +472,7 @@ impl Viewed {
             watchers: 0,
             watched_at: None,
             opened: BTreeSet::new(),
+            closing: None,
             events: events.clone(),
         };
         viewed.shown();
@@ -497,8 +515,12 @@ impl Viewed {
     }
 
     #[must_use]
-    pub fn focused(&self) -> Option<TerminalId> {
+    pub fn focused(&self) -> Option<ViewId> {
         self.layout.focused()
+    }
+
+    pub fn welcomes(&self) -> bool {
+        self.layout.welcomes()
     }
 
     pub fn heard(&mut self, heard: Heard) -> Heeded {
@@ -658,12 +680,17 @@ impl Viewed {
         self.ask(Asked::Open { beside: Beside::Largest, argv });
     }
 
+    pub fn welcome(&mut self) {
+        self.opened.insert(self.layout.workstream);
+        self.ask(Asked::Welcome);
+    }
+
     pub fn open_beside_focused(&mut self, argv: Vec<String>) {
         self.opened.insert(self.layout.workstream);
         self.ask(Asked::Open { beside: Beside::Focused, argv });
     }
 
-    pub fn tabs(&mut self, tabs: Vec<Tab>, titles: BTreeMap<TerminalId, String>) {
+    pub fn tabs(&mut self, tabs: Vec<Tab>, titles: BTreeMap<ViewId, String>) {
         self.layout.tabs = tabs;
         self.layout.titles = titles;
     }
@@ -693,6 +720,17 @@ impl Viewed {
 
     pub fn key(&mut self, key: &KeyEvent) {
         self.unselect();
+        if self.layout.welcomes() {
+            let focused = self.layout.focused();
+            let closes = key.code == KeyCode::Char(CLOSE) && key.modifiers.is_empty();
+            let closing = std::mem::take(&mut self.closing);
+            if closes && closing.is_some() && closing == focused {
+                self.ask(Asked::Close);
+            } else if closes {
+                self.closing = focused;
+            }
+            return;
+        }
         if let Some(key) = key_said(key) {
             self.type_focused(typed::Event::Key(key));
         }
@@ -799,8 +837,8 @@ mod tests {
         WorkstreamId::of(id).unwrap()
     }
 
-    fn terminal(id: u64) -> TerminalId {
-        TerminalId::of(id).unwrap()
+    fn terminal(id: u64) -> ViewId {
+        ViewId::of(id).unwrap()
     }
 
     fn pane(terminal: u64, rect: (u32, u32, u32, u32), found: Option<u32>) -> show_response::Pane {

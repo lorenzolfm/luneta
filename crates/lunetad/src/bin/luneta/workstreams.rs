@@ -12,7 +12,7 @@ use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::{ChangeProjectsRequest, On, Version, WatchRequest};
 use lunetad::mux::own::TerminalKey;
-use lunetad::projects::{Name, ProjectId, Size, TerminalId, WorkstreamId};
+use lunetad::projects::{Name, ProjectId, Size, ViewId, WorkstreamId};
 use lunetad::{Asked, Beside, Heard};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
@@ -178,12 +178,12 @@ pub fn closed(
     path: &Path,
     machine: &Machine,
     workstream: WorkstreamId,
-    seen: &[TerminalId],
+    seen: &[ViewId],
 ) -> Result<(), String> {
     changed_on(path, on(machine), close(workstream, seen)).map(drop).map_err(Unmade::said)
 }
 
-fn close(workstream: WorkstreamId, seen: &[TerminalId]) -> Change {
+fn close(workstream: WorkstreamId, seen: &[ViewId]) -> Change {
     let (workstream, seen) = (workstream.get(), seen.iter().map(|it| it.get()).collect());
     Change::CloseWorkstream(CloseWorkstream { workstream, seen })
 }
@@ -193,7 +193,7 @@ pub fn closed_project(
     machine: &Machine,
     project: ProjectId,
     workstreams: &[WorkstreamId],
-    seen: &[TerminalId],
+    seen: &[ViewId],
 ) -> Result<(), String> {
     let project = project.get();
     let workstreams = workstreams.iter().map(|it| it.get()).collect();
@@ -385,7 +385,7 @@ fn changed_there(machine: &Machine, change: Change) -> Result<(), String> {
 pub fn closed_there(
     machine: &Machine,
     workstream: WorkstreamId,
-    seen: &[TerminalId],
+    seen: &[ViewId],
 ) -> Result<(), String> {
     changed_there(machine, close(workstream, seen))
 }
@@ -407,7 +407,7 @@ pub fn renamed_workstream(
 
 pub fn renamed_terminal(
     machine: &Machine,
-    terminal: TerminalId,
+    terminal: ViewId,
     to: Option<&Name>,
 ) -> Result<(), String> {
     let (terminal, to) = (terminal.get(), to.map(spelled));
