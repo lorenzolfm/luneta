@@ -44,6 +44,23 @@ fn watched(host: &Host, dir: &str) -> (u64, String) {
     (id, folder)
 }
 
+struct Scratch {
+    _kept: tempfile::TempDir,
+    real: PathBuf,
+}
+
+impl Scratch {
+    fn path(&self) -> &Path {
+        &self.real
+    }
+}
+
+fn scratch() -> Scratch {
+    let kept = tempfile::tempdir().unwrap();
+    let real = kept.path().canonicalize().unwrap();
+    Scratch { _kept: kept, real }
+}
+
 fn forgotten(host: &Host, project: u64) {
     asked(host, Change::ForgetProject(ForgetProject { project })).unwrap();
 }
@@ -102,7 +119,7 @@ fn changed_every_way(dir: &Path, origin: &Path) {
 #[test]
 fn git_says_how_each_project_s_folder_stands() {
     let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
+    let dirs = scratch();
     let (tree, plain, detached) =
         (dirs.path().join("tree"), dirs.path().join("plain"), dirs.path().join("detached"));
     let origin = dirs.path().join("origin.git");
@@ -158,7 +175,7 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
         Path::new(dir)
     }
     let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
+    let dirs = scratch();
     let dirs = dirs.path().canonicalize().unwrap();
     let (origin, work, other) =
         (dirs.join("origin.git"), dirs.join("work"), dirs.join("other"));
@@ -220,7 +237,7 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
 #[test]
 fn what_git_said_stands_once_it_will_not_read_the_repository() {
     let host = Host::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let dir = dir.path().canonicalize().unwrap();
     assert!(git(&dir, &["init", "-q", "-b", "main"]));
     commit(&dir, "file", "text\n");
@@ -273,7 +290,7 @@ fn shows_at_once(
 
 fn says_at_once_as_a_checkout_changes(format: &str) {
     let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
+    let dirs = scratch();
     let path = |name: &str| dirs.path().join(name);
     let (origin, repo, elsewhere) = (path("origin.git"), path("repo"), path("elsewhere"));
     let (tree, beside) = (path("tree"), path("beside"));
@@ -360,7 +377,7 @@ fn git_says_at_once_as_a_checkout_changes_that_keeps_its_refs_in_a_reftable() {
 #[test]
 fn git_says_at_once_as_a_repository_made_in_another_changes() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     let (top, src) = (tree.path(), tree.path().join("src"));
     fs::create_dir(&src).unwrap();
     let cwd = src.display().to_string();
@@ -379,7 +396,7 @@ fn git_says_at_once_as_a_repository_made_in_another_changes() {
 #[test]
 fn a_git_folder_that_does_not_read_leaves_the_checkout_it_is_in_watched() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     let (top, src) = (tree.path(), tree.path().join("src"));
     fs::create_dir(&src).unwrap();
     let cwd = src.display().to_string();
@@ -402,7 +419,7 @@ fn a_git_folder_that_does_not_read_leaves_the_checkout_it_is_in_watched() {
 #[test]
 fn git_says_at_once_as_a_repository_begins_where_there_was_none() {
     let host = Host::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let cwd = dir.path().display().to_string();
     let _daemon = start(host.vars()).unwrap();
     watched(&host, &cwd);
@@ -419,7 +436,7 @@ fn git_says_at_once_as_a_repository_begins_where_there_was_none() {
 fn git_says_at_once_as_a_repository_begins_in_a_directory_made_again() {
     let host = Host::new();
     let noted = host.note_git();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let work = dir.path().join("work");
     fs::create_dir(&work).unwrap();
     let cwd = work.display().to_string();
@@ -439,7 +456,7 @@ fn git_says_at_once_as_a_repository_begins_in_a_directory_made_again() {
 #[test]
 fn a_checkout_taken_away_is_said_of_no_more() {
     let host = Host::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let work = dir.path().join("work");
     fs::create_dir(&work).unwrap();
     assert!(git(&work, &["init", "-q", "-b", "main"]));
@@ -460,7 +477,7 @@ fn a_checkout_taken_away_is_said_of_no_more() {
 fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     let host = Host::new();
     let noted = host.note_git();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     let top = tree.path();
     assert!(git(top, &["init", "-q", "-b", "main"]));
     let cwd = top.join(".git").display().to_string();
@@ -484,7 +501,7 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
 #[test]
 fn git_says_at_once_as_a_directory_moved_into_a_checkout_changes() {
     let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
+    let dirs = scratch();
     let path = |name: &str| dirs.path().join(name);
     let top = path("repo");
     fs::create_dir_all(top.join("src")).unwrap();
@@ -513,7 +530,7 @@ fn git_says_at_once_as_a_directory_moved_into_a_checkout_changes() {
 fn a_build_in_what_git_ignores_has_git_asked_nothing() {
     let host = Host::new();
     let noted = host.note_git();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     let top = tree.path();
     assert!(git(top, &["init", "-q", "-b", "main"]));
     commit(top, ".gitignore", "/target/\n");
@@ -546,7 +563,7 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
 #[test]
 fn git_runs_no_command_a_repository_names() {
     let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
+    let dirs = scratch();
     let (top, ran) = (dirs.path().join("tree"), dirs.path().join("ran"));
     fs::create_dir(&top).unwrap();
     assert!(git(&top, &["init", "-q", "-b", "main"]));
@@ -565,7 +582,7 @@ fn git_runs_no_command_a_repository_names() {
 #[test]
 fn the_behind_count_is_of_what_the_remote_has() {
     let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
+    let dirs = scratch();
     let path = |name: &str| dirs.path().join(name);
     let (origin, tree, elsewhere, ran) =
         (path("origin.git"), path("tree"), path("elsewhere"), path("ran"));
@@ -625,7 +642,7 @@ fn the_behind_count_is_of_what_the_remote_has() {
 #[test]
 fn the_fetch_runs_no_command_a_repository_names() {
     let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
+    let dirs = scratch();
     let path = |name: &str| dirs.path().join(name);
     let (origin, tree, elsewhere, ran) =
         (path("origin.git"), path("tree"), path("elsewhere"), path("ran"));
@@ -659,7 +676,7 @@ fn the_fetch_runs_no_command_a_repository_names() {
 #[test]
 fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
+    let dirs = scratch();
     let (tree, twin, other) =
         (dirs.path().join("tree"), dirs.path().join("twin"), dirs.path().join("other"));
     fs::create_dir(&tree).unwrap();
@@ -728,7 +745,7 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
 #[test]
 fn a_branch_gh_hangs_on_holds_up_no_other() {
     let host = Host::new();
-    let dirs = tempfile::tempdir().unwrap();
+    let dirs = scratch();
     let (stuck, other) = (dirs.path().join("a"), dirs.path().join("b"));
     for (dir, branch) in [(&stuck, "stuck"), (&other, "main")] {
         fs::create_dir(dir).unwrap();
@@ -757,7 +774,7 @@ fn a_branch_gh_hangs_on_holds_up_no_other() {
 #[test]
 fn pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     assert!(git(tree.path(), &["init", "-q", "-b", "main"]));
     commit(tree.path(), "README", "start\n");
     let page = "https://github.com/owner/repo/pull/7";
@@ -828,7 +845,7 @@ fn pull(number: u32, state: &str) -> serde_json::Value {
 #[test]
 fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     forked_tree(tree.path());
     assert!(git(tree.path(), &["remote", "add", "upstream", "https://github.com/upstream/repo.git"]));
     let unnamed = ["current", "from_parent", "from_local", "merge_only"];
@@ -913,7 +930,7 @@ fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
 #[test]
 fn a_closed_pull_request_in_a_fork_gives_way_to_its_parent_s() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     forked_tree(tree.path());
     for branch in ["merged", "alone"] {
         assert!(git(tree.path(), &["branch", branch]));
@@ -955,7 +972,7 @@ fn a_closed_pull_request_in_a_fork_gives_way_to_its_parent_s() {
 #[test]
 fn a_fork_s_default_branch_shows_no_merged_pull_request_of_its_parent() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     forked_tree(tree.path());
     assert!(git(tree.path(), &["branch", "trunk"]));
     for branch in ["main", "trunk"] {
@@ -987,7 +1004,7 @@ fn a_fork_s_default_branch_shows_no_merged_pull_request_of_its_parent() {
 #[test]
 fn a_fork_s_default_branch_keeps_what_the_fork_says_over_its_parent_s_closed_one() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     forked_tree(tree.path());
     pushes_to_origin(tree.path(), "main");
     host.gh.fork_of("upstream", "repo");
@@ -1018,7 +1035,7 @@ fn on_pull_ref(dir: &Path, branch: &str, remote: Option<&str>, number: u32) {
 #[test]
 fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_parent() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     let dir = tree.path();
     forked_tree(dir);
     assert!(git(dir, &["remote", "add", "theirs", "https://github.com/Upstream/Repo.git"]));
@@ -1087,7 +1104,7 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
 #[test]
 fn a_fork_s_parent_is_looked_up_again_as_its_remotes_change() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     forked_tree(tree.path());
     for branch in ["second", "third", "same"] {
         assert!(git(tree.path(), &["branch", branch]));
@@ -1131,7 +1148,7 @@ fn a_fork_s_parent_is_looked_up_again_as_its_remotes_change() {
 #[test]
 fn a_checkout_during_an_ask_of_a_fork_s_parent_is_no_trouble() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     forked_tree(tree.path());
     pushes_to_origin(tree.path(), "main");
     assert!(git(tree.path(), &["branch", "fold"]));
@@ -1155,7 +1172,7 @@ fn a_checkout_during_an_ask_of_a_fork_s_parent_is_no_trouble() {
 #[test]
 fn what_goes_wrong_in_a_fork_s_parent_names_it_and_leaves_what_the_fork_said() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     forked_tree(tree.path());
     pushes_to_origin(tree.path(), "main");
     host.gh.fork_of("upstream", "repo");
@@ -1180,7 +1197,7 @@ fn what_goes_wrong_in_a_fork_s_parent_names_it_and_leaves_what_the_fork_said() {
 #[test]
 fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     forked_tree(tree.path());
     assert!(git(tree.path(), &["branch", "theirs"]));
     assert!(git(tree.path(), &["branch", "ours"]));
@@ -1231,7 +1248,7 @@ fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
 #[test]
 fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() {
     let host = Host::new();
-    let tree = tempfile::tempdir().unwrap();
+    let tree = scratch();
     assert!(git(tree.path(), &["init", "-q", "-b", "main"]));
     commit(tree.path(), "README", "start\n");
     assert!(git(tree.path(), &["branch", "fold"]));
@@ -1278,7 +1295,7 @@ fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     assert_eq!(same.version, Some(version));
     assert!(took >= Duration::from_secs(3), "{took:?}");
 
-    let play = tempfile::tempdir().unwrap();
+    let play = scratch();
     let play = play.path().join("play");
     fs::create_dir(&play).unwrap();
     let (changed, took) = thread::scope(|scope| {
