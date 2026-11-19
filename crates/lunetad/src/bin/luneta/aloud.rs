@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -56,6 +57,15 @@ impl Button {
             Button::GoOn => PLAY,
             Button::Stop => STOP,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NothingToRead;
+
+impl fmt::Display for NothingToRead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("nothing to read aloud: select some text in a view first")
     }
 }
 
@@ -343,13 +353,13 @@ impl Aloud {
         self.go_on();
     }
 
-    pub fn key(&mut self, selected: Option<&str>) -> Result<(), &'static str> {
+    pub fn key(&mut self, selected: Option<&str>) -> Result<(), NothingToRead> {
         if self.queue.busy() {
             self.press(if self.queue.paused { Button::GoOn } else { Button::Pause });
             return Ok(());
         }
         let selected = selected.map(plain).filter(|text| !text.is_empty());
-        let text = selected.ok_or("nothing to read aloud: select some text in a view first")?;
+        let text = selected.ok_or(NothingToRead)?;
         let came = Some(SystemTime::now());
         self.queue.after(Waiting { whose: Whose::Selection, text, came });
         self.go_on();

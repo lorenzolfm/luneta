@@ -12,6 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::alerts::Key;
+use crate::aloud::NothingToRead;
 use crate::host::Event;
 use crate::machines::Machine;
 
@@ -55,6 +56,7 @@ enum Line {
     Looks(Vec<Key>),
     Clicked(Key),
     Selected(String),
+    NothingToRead,
     Stopped,
     Dictating(bool),
 }
@@ -74,6 +76,7 @@ impl Line {
                 let selected = SELECTION.decode(words.next().unwrap_or_default()).ok()?;
                 Line::Selected(String::from_utf8(selected).ok()?)
             },
+            "nothing-to-read" => Line::NothingToRead,
             "stopped" => Line::Stopped,
             "dictating" => Line::Dictating(true),
             "dictated" => Line::Dictating(false),
@@ -92,6 +95,7 @@ impl Line {
             },
             Line::Clicked(key) => format!("clicked {}\n", group(key)),
             Line::Selected(selected) => format!("selected {}\n", SELECTION.encode(selected)),
+            Line::NothingToRead => "nothing-to-read\n".to_owned(),
             Line::Stopped => "stopped\n".to_owned(),
             Line::Dictating(true) => "dictating\n".to_owned(),
             Line::Dictating(false) => "dictated\n".to_owned(),
@@ -177,7 +181,8 @@ fn hear(number: u64, stream: UnixStream, events: &Sender<Event>) {
     for line in lines(stream) {
         let event = match line {
             Line::Clicked(key) => Event::Clicked(key),
-            Line::Selected(selected) => Event::ReadAloud(selected),
+            Line::Selected(selected) => Event::ReadAloud { from: number, selected },
+            Line::NothingToRead => continue,
             Line::Stopped => Event::StopAloud,
             Line::Unfocuses => Event::Peers(Heard::Peer(number, Peered::Unfocuses)),
             Line::Focused => Event::Peers(Heard::Peer(number, Peered::Focused)),
@@ -296,7 +301,15 @@ impl Peers {
         let Some(Last { number, .. }) = self.last else {
             return false;
         };
-        let line = Line::Clicked(key.clone()).said();
+        self.tell(number, &Line::Clicked(key.clone()))
+    }
+
+    pub fn nothing_to_read(&mut self, number: u64) {
+        self.tell(number, &Line::NothingToRead);
+    }
+
+    fn tell(&mut self, number: u64, line: &Line) -> bool {
+        let line = line.said();
         let told = (self.peers.get_mut(&number))
             .is_some_and(|peer| peer.stream.write_all(line.as_bytes()).is_ok());
         if !told {
@@ -392,9 +405,18 @@ fn talk(
         let (gone, events) = (Arc::clone(&gone), events.clone());
         thread::spawn(move || {
             for line in lines(reads) {
-                if let Line::Clicked(key) = line
-                    && events.send(Event::Clicked(key)).is_err()
-                {
+                let event = match line {
+                    Line::Clicked(key) => Event::Clicked(key),
+                    Line::NothingToRead => Event::Notice(NothingToRead.to_string()),
+                    Line::Unfocuses
+                    | Line::Focused
+                    | Line::Unfocused
+                    | Line::Looks(_)
+                    | Line::Selected(_)
+                    | Line::Stopped
+                    | Line::Dictating(_) => continue,
+                };
+                if events.send(event).is_err() {
                     break;
                 }
             }
@@ -478,6 +500,7 @@ mod tests {
             Line::Looks(vec![key(41), far(7)]),
             Line::Selected(String::new()),
             Line::Selected("two words\nand a line é".to_owned()),
+            Line::NothingToRead,
             Line::Stopped,
             Line::Dictating(true),
             Line::Dictating(false),
@@ -634,6 +657,50 @@ mod tests {
         drop((said, listener));
         reaching.stopped();
         assert_eq!(note(&heard), NO_READER);
+    }
+
+    fn came(heard: &Receiver<Event>, peers: &mut Peers) -> u64 {
+        loop {
+            let (number, peered) = next(heard);
+            let came = matches!(peered, Peered::Came(_));
+            peers.heard(number, peered);
+            if came {
+                return number;
+            }
+        }
+    }
+
+    fn read_aloud(heard: &Receiver<Event>) -> (u64, String) {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            let event = heard.recv_timeout(left).expect("the luneta holding the lock hears it");
+            if let Event::ReadAloud { from, selected } = event {
+                return (from, selected);
+            }
+        }
+    }
+
+    #[test]
+    fn the_luneta_that_holds_the_lock_tells_only_the_one_that_asked_it_has_nothing_to_read() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let socket = folder.path().join(SOCKET);
+        let (events, heard) = mpsc::channel();
+        listen(&socket, events).expect("it listens");
+        let mut peers = Peers::default();
+        let (asks, asker) = mpsc::channel();
+        let asking = Reaching::to(socket.clone(), false, asks);
+        let number = came(&heard, &mut peers);
+        let (other, otherwise) = mpsc::channel();
+        let _another = Reaching::to(socket, false, other);
+        assert_ne!(came(&heard, &mut peers), number);
+
+        asking.selected("");
+        assert_eq!(read_aloud(&heard), (number, String::new()));
+        peers.nothing_to_read(number);
+        assert_eq!(note(&asker), NothingToRead.to_string());
+        let told = otherwise.recv_timeout(Duration::from_millis(300));
+        assert!(told.is_err(), "the other luneta is told nothing");
     }
 
     fn socket_after_waiting(path: &Path, change: impl FnOnce()) -> Result<PathBuf, String> {

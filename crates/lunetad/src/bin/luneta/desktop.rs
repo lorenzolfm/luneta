@@ -219,6 +219,13 @@ impl Desktop {
             Role::Peer(_) | Role::Undecided | Role::Elsewhere => false,
         }
     }
+
+    pub fn nothing_to_read(&mut self, number: u64) {
+        match &mut self.role {
+            Role::Holder { peers, .. } => peers.nothing_to_read(number),
+            Role::Peer(_) | Role::Undecided | Role::Elsewhere => {},
+        }
+    }
 }
 
 impl Drop for Desktop {
