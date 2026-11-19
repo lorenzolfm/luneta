@@ -402,6 +402,39 @@ fn a_named_luneta_refuses_a_name_two_projects_share() {
 }
 
 #[test]
+fn a_named_luneta_in_a_clone_shows_the_worktree_of_the_branch_no_project_is_named() {
+    if !makes_shells() {
+        return;
+    }
+    let owned = Owned::new();
+    let main = work_in(&owned, "luneta");
+    let clone = main.path.parent().unwrap().to_owned();
+    git(&clone.join(".bare"), &["update-ref", "refs/remotes/origin/main", "main"]);
+    let window = Window::open(&owned.host, &main, &["foo"]);
+    let foo = clone.join("foo");
+    eventually("luneta shows foo, the worktree it made", || shown(&owned, &foo));
+    drop(window);
+    let head = fs::read_to_string(clone.join(".bare/worktrees/foo/HEAD")).unwrap();
+    assert_eq!(head, "ref: refs/heads/foo\n", "on a branch of its own");
+    let names: Vec<String> = projects_of(&owned).into_iter().map(|it| it.name).collect();
+    assert_eq!(names, ["luneta"], "no project is made of foo");
+}
+
+#[test]
+fn a_named_luneta_in_a_folder_project_says_the_folder_is_its_one_worktree() {
+    let owned = Owned::new();
+    let vault = directory("Vault");
+    project(&owned.host, Path::new(&real(&vault.path)), None);
+    let output = luneta(owned.host.vars(), &vault.path).arg("foo").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let refusal = String::from_utf8(output.stderr).unwrap();
+    let said = "foo names no project, and Vault is a folder, and its own is its one worktree";
+    assert!(refusal.contains(said), "{refusal}");
+    let projects = projects_of(&owned);
+    assert_eq!(projects.len(), 1, "no project is made of foo: {projects:?}");
+}
+
+#[test]
 fn a_luneta_whose_terminal_variables_name_no_terminal_opens_nothing() {
     let owned = Owned::new();
     let main = work_in(&owned, "named");

@@ -20,6 +20,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use lunetad::links::Branch;
 use lunetad::projects::{self, Name, ProjectId, Seen, Used, ViewId};
 use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
@@ -268,7 +269,7 @@ pub enum Picked {
     Nothing,
     Close,
     Go { on: Machine, place: Place },
-    Add { on: Machine, project: ProjectRow, folder: Directory, name: Option<Name> },
+    Add { on: Machine, project: ProjectRow, folder: Directory },
     Make { on: Machine, session: SessionName, cwd: Directory },
     Plan { on: Machine, session: Listed, deletes: Deletes },
     Delete { on: Machine, act: Act },
@@ -387,7 +388,7 @@ pub enum Key {
     Machine { on: Machine },
     Agent { on: Machine, place: ViewPlace },
     Dir { on: Machine, path: Directory, session: SessionName },
-    New { on: Machine, project: ProjectRow, folder: Directory, name: Name },
+    New { on: Machine, project: ProjectRow, branch: Branch },
     Action(Action, Run),
 }
 
@@ -1055,7 +1056,7 @@ impl Picker {
             },
             Key::Project { on, project, folder } | Key::Unopened { on, project, folder } => {
                 let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
-                Picked::Add { on, project, folder, name: None }
+                Picked::Add { on, project, folder }
             },
             Key::Machine { .. } => Picked::Nothing,
             Key::Agent { on, place } => {
@@ -1064,9 +1065,9 @@ impl Picker {
             Key::Dir { on, path, session } => {
                 Picked::Make { on: on.clone(), session: session.clone(), cwd: path.clone() }
             },
-            Key::New { on, project, folder, name } => {
-                let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
-                Picked::Add { on, project, folder, name: Some(name.clone()) }
+            Key::New { on, project, branch } => {
+                let done = Done::Worktree(on.clone(), project.id(), branch.clone());
+                Picked::Done { done, origin: self.palette.origin }
             },
             Key::Action(action, run) => {
                 let (action, run) = (*action, run.clone());
@@ -1154,7 +1155,7 @@ impl Picker {
         ranked.sort_by_key(|(tier, kind, _)| (*tier, *kind));
         let mut rows: Vec<Row> = ranked.into_iter().map(|(.., row)| row).collect();
         if rows.is_empty()
-            && let Some(key) = self.new_key()
+            && let Some(Ok(key)) = self.new_key()
         {
             rows.push(Row::plain(key, self.term.clone()));
         }
@@ -1190,11 +1191,13 @@ impl Picker {
         Some((on, self.housed(on, &place.project)?))
     }
 
-    fn new_key(&self) -> Option<Key> {
+    fn new_key(&self) -> Option<Result<Key, String>> {
         let (on, housed) = self.here_project()?;
-        let name = Name::parse(&self.term).ok()?;
-        let (on, project, folder) = (on.clone(), housed.project.clone(), (&housed.dir).into());
-        Some(Key::New { on, project, folder, name })
+        if let Some(why) = housed.unopened.refuses_new_worktree(&housed.project) {
+            return Some(Err(why));
+        }
+        let (on, project) = (on.clone(), housed.project.clone());
+        Some(Branch::parse(&self.term).map(|branch| Key::New { on, project, branch }))
     }
 
     fn delete(&mut self) -> Picked {
@@ -1340,7 +1343,7 @@ impl Picker {
         let mut worktrees = self.worktree_rows(finder.as_ref());
         if worktrees.is_empty()
             && self.scope.is_none()
-            && let Some(key) = self.new_key()
+            && let Some(Ok(key)) = self.new_key()
         {
             worktrees.push(Row::plain(key, self.term.clone()));
         }
@@ -1772,9 +1775,12 @@ impl Picker {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let Some(row) = self.rows().selected() else {
             let mut lines = vec![Line::styled(" nothing highlighted", grey)];
-            if self.list == List::Worktrees && self.here_project().is_some() {
+            let makes = |(_, housed): (_, &Housed)| {
+                housed.unopened.refuses_new_worktree(&housed.project).is_none()
+            };
+            if self.list == List::Worktrees && self.here_project().is_some_and(makes) {
                 lines.push(Line::default());
-                lines.push(Line::styled(" type a name to make a worktree of it", grey));
+                lines.push(Line::styled(" type a branch to make its worktree", grey));
             }
             framed(buffer, area, "Preview", "", lines);
             return;
@@ -1789,12 +1795,12 @@ impl Picker {
                 self.draw_contents(buffer, area, &row.name, on, path);
                 return;
             },
-            Key::New { project, folder, name, .. } => {
+            Key::New { project, branch, .. } => {
                 let project = project.listed().name();
                 let words = format!(
-                    "no worktree matches: Enter makes one named {}, in {project}'s folder, \
-                     {folder}, and goes to it",
-                    name.as_str(),
+                    "no worktree matches: Enter makes the worktree of branch {branch} in \
+                     {project}, as n w does, and goes to it. A branch git has is checked out, \
+                     and any other is made from the default branch",
                 );
                 let lines = said(vec![Span::styled(" new", grey)], &words);
                 framed(buffer, area, &row.name, "", lines);
@@ -1931,14 +1937,14 @@ impl Picker {
                 })),
                 Key::Agent { on, .. } => Ok(there("Go to agent", on)),
                 Key::Dir { on, session, .. } => Ok(there(&format!("Make \"{session}\""), on)),
-                Key::New { project, name, .. } => {
+                Key::New { project, branch, .. } => {
                     let project = project.listed().name();
-                    Ok(format!("New worktree \"{}\" in {project}", name.as_str()))
+                    Ok(format!("New worktree \"{branch}\" in {project}"))
                 },
                 Key::Action(..) => Ok("Run".to_owned()),
             },
             None if self.list == List::Worktrees && !self.term.is_empty() => {
-                Name::parse(&self.term).map(|_| String::new())
+                self.new_key().map_or(Ok(String::new()), |key| key.map(|_| String::new()))
             },
             None => Ok(String::new()),
         };
@@ -2708,7 +2714,6 @@ mod tests {
             on: Machine::Local,
             project: project("notes", 2),
             folder: directory("/home/you/notes"),
-            name: None,
         };
         assert_eq!(press(&mut picker, KeyCode::Enter), added);
 
@@ -2743,7 +2748,6 @@ mod tests {
             on: Machine::Local,
             project: project("luneta", 1),
             folder: directory("/home/you/luneta/spike"),
-            name: None,
         };
         assert_eq!(press(&mut picker, KeyCode::Enter), opens);
     }
@@ -2869,7 +2873,7 @@ mod tests {
     }
 
     #[test]
-    fn what_is_typed_narrows_the_list_and_enter_makes_a_worktree_no_row_matches() {
+    fn what_is_typed_narrows_the_list_and_enter_makes_the_worktree_of_a_branch_no_row_matches() {
         let mut picker = opened(works());
         typed(&mut picker, "api");
         assert_eq!(rows(&picker), ["web › api"]);
@@ -2885,17 +2889,29 @@ mod tests {
         assert!(said(&picker).contains(words), "{}", said(&picker));
         let (_, preview) = parts();
         let shown = text(&drawn(&picker), preview).join(" ");
-        assert!(shown.contains("named zzz, in luneta's folder, /home/you/luneta"), "{shown}");
-        let added = Picked::Add {
-            on: Machine::Local,
-            project: project("luneta", 1),
-            folder: directory("/home/you/luneta"),
-            name: Some(Name::parse("zzz").unwrap()),
-        };
-        assert_eq!(press(&mut picker, KeyCode::Enter), added);
-        typed(&mut picker, " ");
-        assert_eq!(list(&picker).0, [r#"no match for "zzz ""#]);
-        assert!(said(&picker).contains("begins or ends with a space"), "{}", said(&picker));
+        assert!(shown.contains("the worktree of branch zzz in luneta, as n w does"), "{shown}");
+        let branch = Branch::parse("zzz").unwrap();
+        let luneta = project("luneta", 1).id();
+        let done = Done::Worktree(Machine::Local, luneta, branch);
+        let made = Picked::Done { done, origin: Origin::Views };
+        assert_eq!(press(&mut picker, KeyCode::Enter), made);
+        typed(&mut picker, "#3");
+        assert_eq!(list(&picker).0, [r#"no match for "zzz#3""#]);
+        let numbered = "zzz#3 names an issue or a pull request: paste its link";
+        assert!(said(&picker).contains(numbered), "{}", said(&picker));
+        let shown = text(&drawn(&picker), preview).join(" ");
+        assert!(shown.contains("type a branch to make its worktree"), "{shown}");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+
+        let mut folder = works();
+        folder.shelves[0].projects[0].unopened = Unopened::Folder;
+        let mut picker = opened(folder);
+        typed(&mut picker, "zzz");
+        assert_eq!(list(&picker).0, [r#"no match for "zzz""#]);
+        let refused = projects::folder_has_one_worktree("luneta");
+        assert!(said(&picker).contains(&refused), "{}", said(&picker));
+        let shown = text(&drawn(&picker), preview).join(" ");
+        assert!(!shown.contains("type a branch"), "a folder makes no worktree: {shown}");
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
 
         let mut picker = opened(Listing { shown: None, ..works() });
@@ -3833,10 +3849,10 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), close);
         retyped(&mut picker, "zzz");
         let made = press(&mut picker, KeyCode::Enter);
-        let Picked::Add { name: Some(name), project, .. } = &made else {
+        let Picked::Done { done: Done::Worktree(_, project, branch), .. } = &made else {
             panic!("nothing found offers to make what was typed: {made:?}");
         };
-        assert_eq!((name.as_str(), project), ("zzz", &fix().project));
+        assert_eq!((branch.as_str(), *project), ("zzz", fix().project.id()));
     }
 
     #[test]

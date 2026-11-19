@@ -75,10 +75,12 @@ use lunetad::{folder, release, SessionName};
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[arg(
-        help = "The session to attach to, made in this directory if none runs by that name. \
-                Without one, luneta joins a session that runs: the one named for this directory, \
-                as the picker names it, or else the one you looked at last, or else the newest. \
-                It makes the one named for this directory only where none runs"
+        value_name = "NAME",
+        help = "A project's name, to show it wherever luneta starts. In a project of a clone wt \
+                made, a name no project has is a branch: luneta shows its worktree, made as \
+                `n w` makes one if there is none. Outside every project, a project of that name \
+                is made of this directory. Without a name, luneta shows the worktree of this \
+                directory, or else the one you used last"
     )]
     session: Option<String>,
     #[command(subcommand)]
