@@ -16,7 +16,7 @@ use super::{Below, Change, Closing, Dir, Holds, Id, Line, Name, Project, Project
 use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, Used, View, ViewId};
 use super::{Layout, Workstream, WorkstreamId, Worktree};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
-use super::{SPOT_LOOK, TERMINALS_MAX, WORKSTREAMS_MAX};
+use super::{SPOT_LOOK, VIEWS_MAX, WORKSTREAMS_MAX};
 use crate::agent::Harness;
 use crate::api;
 use crate::core::Command;
@@ -67,7 +67,7 @@ const FILE_BYTES_MAX: usize = 32 * 1024 * 1024;
 
 const _: () = assert!(
     (PROJECTS_MAX + WORKSTREAMS_MAX) * ENTRY_BYTES_MAX
-        + TERMINALS_MAX * TERMINAL_BYTES_MAX
+        + VIEWS_MAX * TERMINAL_BYTES_MAX
         + WORKSTREAMS_MAX * NODES_MAX * SPLIT_BYTES_MAX
         <= FILE_BYTES_MAX
 );
@@ -672,8 +672,8 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     if workstreams().count() > WORKSTREAMS_MAX {
         return Err(format!("it holds over {WORKSTREAMS_MAX} workstreams"));
     }
-    if nodes().filter(|node| matches!(node, KeptNode::Terminal(_))).count() > TERMINALS_MAX {
-        return Err(format!("it holds over {TERMINALS_MAX} terminals"));
+    if nodes().filter(|node| !matches!(node, KeptNode::Split(_))).count() > VIEWS_MAX {
+        return Err(format!("it holds over {VIEWS_MAX} views"));
     }
     if version <= LAID_AS_VIEW && workstreams().any(|it| it.layout.is_some()) {
         return Err(format!("it is of version {version}, which keeps layouts as \"view\""));
@@ -735,18 +735,18 @@ fn root_projects(
     root: &mut impl FnMut(&Dir) -> Result<Option<Spot>, String>,
     draw: &mut impl FnMut() -> io::Result<Id>,
 ) -> Result<Vec<Project>, String> {
-    let terminal_count = |workstreams: &mut dyn Iterator<Item = &Workstream>| -> usize {
+    let view_count = |workstreams: &mut dyn Iterator<Item = &Workstream>| -> usize {
         workstreams.map(|it| it.layout.len()).sum()
     };
-    let terminals: usize =
-        unrooted.iter().map(|it| terminal_count(&mut it.workstreams.iter().map(|(_, it)| it))).sum();
+    let views: usize =
+        unrooted.iter().map(|it| view_count(&mut it.workstreams.iter().map(|(_, it)| it))).sum();
     let mut taken: BTreeSet<Id> = BTreeSet::new();
     for project in &unrooted {
         let workstreams = project.workstreams.iter().map(|(_, it)| it);
         let layouts = workstreams.clone().map(|it| &it.layout);
-        let terminals = layouts.flat_map(|layout| layout.terminals().map(|it| it.id().id()));
+        let views = layouts.flat_map(|layout| layout.views().map(|it| it.id().id()));
         let ids = std::iter::once(project.id.id()).chain(workstreams.map(|it| it.id.id()));
-        for id in ids.chain(terminals) {
+        for id in ids.chain(views) {
             if !taken.insert(id) {
                 return Err(format!("the id {id} comes twice"));
             }
@@ -792,8 +792,8 @@ fn root_projects(
     }
     let shaped = gathered.into_iter().map(|it| shape(it, &mut fresh));
     let projects: Vec<Project> = shaped.collect::<Result<_, _>>()?;
-    let rooted: usize = projects.iter().map(|it| terminal_count(&mut it.workstreams())).sum();
-    assert_eq!(rooted, terminals, "rooting keeps every terminal");
+    let rooted: usize = projects.iter().map(|it| view_count(&mut it.workstreams())).sum();
+    assert_eq!(rooted, views, "rooting keeps every view");
     Ok(projects)
 }
 
@@ -905,14 +905,14 @@ fn one_of(
 }
 
 fn join(held: &mut Workstream, other: Workstream) -> Result<(), String> {
-    let terminals = held.layout.len() + other.layout.len();
+    let views = held.layout.len() + other.layout.len();
     let layout = std::mem::take(&mut held.layout).joined(other.layout)?;
     if other.used > held.used {
         *held = Workstream { layout, ..other };
     } else {
         held.layout = layout;
     }
-    assert_eq!(held.layout.len(), terminals, "workstreams joined keep every terminal");
+    assert_eq!(held.layout.len(), views, "workstreams joined keep every view");
     Ok(())
 }
 
@@ -1632,6 +1632,19 @@ mod tests {
     }
 
     #[test]
+    fn a_welcome_view_counts_toward_the_views_a_file_may_hold() {
+        let welcome = |at: usize| format!(r#"{{"welcome": {{"id": "{:016x}"}}}}"#, at + 3);
+        let many: Vec<String> = (0..=VIEWS_MAX).map(welcome).collect();
+        let text = format!(
+            r#"{{"version": 8, "projects": [{{"id": "0000000000000001", "name": "a", "dir": "/a",
+            "holds": {{"clone": [{{"id": "0000000000000002", "worktree": "b",
+            "layout": {{"tree": [{}]}}}}]}}}}]}}"#,
+            many.join(", ")
+        );
+        assert_eq!(parse(&text), Err(format!("it holds over {VIEWS_MAX} views")));
+    }
+
+    #[test]
     fn a_line_left_unrun_is_kept_apart_from_a_command_and_only_from_version_3() {
         let text = |version: u32, runs: &str| {
             format!(
@@ -1642,7 +1655,7 @@ mod tests {
             )
         };
         let unrun = parse(&text(3, r#"{"unrun": "make test"}"#)).unwrap();
-        let (_, held) = unrun.holding(ViewId::of(3).unwrap()).unwrap();
+        let (_, held) = unrun.holding_terminal(ViewId::of(3).unwrap()).unwrap();
         assert_eq!(held.runs(), &Runs::Unrun(Line::parse("make test").unwrap()));
         assert!(written(&unrun).contains(r#""unrun": "make test""#), "{}", written(&unrun));
         assert_eq!(parse(&written(&unrun)), Ok(unrun.clone()));
@@ -1665,7 +1678,7 @@ mod tests {
         };
         let (name, used) = (r#""name": "tests","#, r#", "used_millis": 1763460000123"#);
         let kept = parse(&text(4, name, used)).unwrap();
-        let (workstream, held) = kept.holding(ViewId::of(3).unwrap()).unwrap();
+        let (workstream, held) = kept.holding_terminal(ViewId::of(3).unwrap()).unwrap();
         assert_eq!(held.name().map(Name::as_str), Some("tests"));
         assert_eq!(workstream.used(), Some(Used::of_millis(1_763_460_000_123)));
         let again = written(&kept);
@@ -1736,7 +1749,7 @@ mod tests {
                 "view": {"full": "0000000000000003",
                 "tree": [{"terminal": {"id": "0000000000000003", "folder": "/a",
                 "runs": "shell"}}]}}]}]}"#,
-                "a layout of one terminal shows it whole already",
+                "a layout of one view shows it whole already",
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",

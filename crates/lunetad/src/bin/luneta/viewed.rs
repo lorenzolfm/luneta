@@ -83,6 +83,7 @@ struct Layout {
     pointer: Pointer,
     tabs: Vec<Tab>,
     titles: BTreeMap<ViewId, String>,
+    closing: Option<ViewId>,
 }
 
 impl Layout {
@@ -95,6 +96,7 @@ impl Layout {
             pointer: Pointer::Free,
             tabs: Vec::new(),
             titles: BTreeMap::new(),
+            closing: None,
         }
     }
 
@@ -103,11 +105,25 @@ impl Layout {
     }
 
     fn focused(&self) -> Option<ViewId> {
-        self.laid()?.focused().map(|pane| pane.terminal)
+        self.laid()?.focused().map(|pane| pane.view)
     }
 
     fn welcomes(&self) -> bool {
         self.laid().and_then(Laid::focused).is_some_and(|pane| pane.found == Found::Welcome)
+    }
+
+    fn closes(&mut self, key: &KeyEvent) -> bool {
+        assert!(self.welcomes(), "only a welcome view is closed by its keys");
+        let focused = self.focused().expect("a welcome view welcomes when focused");
+        let closing = self.closing.take();
+        if key.code != KeyCode::Char(CLOSE) || !key.modifiers.is_empty() {
+            return false;
+        }
+        if closing == Some(focused) {
+            return true;
+        }
+        self.closing = Some(focused);
+        false
     }
 
     fn focused_key(&self) -> Option<TerminalKey> {
@@ -136,8 +152,9 @@ impl Layout {
         if laid.workstream() != self.workstream {
             return false;
         }
-        if self.focused() != laid.focused().map(|pane| pane.terminal) {
+        if self.focused() != laid.focused().map(|pane| pane.view) {
             self.pointer = Pointer::Free;
+            self.closing = None;
         }
         let empty = laid.is_empty();
         self.laid = Some(laid);
@@ -235,7 +252,7 @@ impl Layout {
             .drawn()
             .into_iter()
             .find(|(_, placed)| pane_rect(Rect::default(), *placed).contains(spot))
-            .map(|(pane, _)| pane.terminal);
+            .map(|(pane, _)| pane.view);
         if down
             && let Some(under) = under
             && Some(under) != self.focused()
@@ -355,10 +372,10 @@ impl Layout {
         let pointed = hover.and_then(|at| self.pointed(at));
         let mut cursor = None;
         for (pane, placed) in self.drawn() {
-            let mine = Some(pane.terminal) == focused;
+            let mine = Some(pane.view) == focused;
             let outer = pane_rect(panes, placed);
             let colour = if mine { gruvbox::GREEN } else { gruvbox::GREY };
-            let title = self.titles.get(&pane.terminal).map_or("", String::as_str);
+            let title = self.titles.get(&pane.view).map_or("", String::as_str);
             border(buffer, panes, outer, title, Style::new().fg(colour));
             let seen = screen_rect(outer).intersection(panes);
             if seen.is_empty() {
@@ -441,7 +458,6 @@ pub struct Viewed {
     watchers: u64,
     watched_at: Option<Instant>,
     opened: BTreeSet<WorkstreamId>,
-    closing: Option<ViewId>,
     events: Sender<Event>,
 }
 
@@ -472,7 +488,6 @@ impl Viewed {
             watchers: 0,
             watched_at: None,
             opened: BTreeSet::new(),
-            closing: None,
             events: events.clone(),
         };
         viewed.shown();
@@ -721,13 +736,8 @@ impl Viewed {
     pub fn key(&mut self, key: &KeyEvent) {
         self.unselect();
         if self.layout.welcomes() {
-            let focused = self.layout.focused();
-            let closes = key.code == KeyCode::Char(CLOSE) && key.modifiers.is_empty();
-            let closing = std::mem::take(&mut self.closing);
-            if closes && closing.is_some() && closing == focused {
+            if self.layout.closes(key) {
                 self.ask(Asked::Close);
-            } else if closes {
-                self.closing = focused;
             }
             return;
         }
@@ -849,7 +859,7 @@ mod tests {
             None => Said::Lost(()),
         };
         show_response::Pane {
-            terminal,
+            view: terminal,
             rect: Some(show_response::Rect { column, row, columns, rows }),
             found: Some(found),
         }
@@ -1053,10 +1063,36 @@ mod tests {
 
     fn laid_in(id: u64, panes: Vec<show_response::Pane>) -> Heard {
         use show_response::laid::Shown as Said;
-        let shown = panes.first().map(|pane| Said::Tiled(pane.terminal));
+        let shown = panes.first().map(|pane| Said::Tiled(pane.view));
         let size = Some(show_request::Size { columns: 20, rows: 4 });
         let said = show_response::Laid { workstream: id, size, panes, shown };
         Heard::Laid(Laid::heard(said).unwrap())
+    }
+
+    #[test]
+    fn d_twice_in_a_row_closes_the_welcome_view_and_anything_between_starts_over() {
+        use show_response::pane::Found as Said;
+        let welcome = |at: (u32, u32, u32, u32)| {
+            let mut it = pane(12, at, None);
+            it.found = Some(Said::Welcome(()));
+            it
+        };
+        let panes = || vec![pane(11, (0, 0, 10, 4), Some(1)), welcome((10, 0, 10, 4))];
+        let mut layout = Layout::new(workstream(1), None);
+        assert!(!layout.laid_out(laid(panes(), 12, false)));
+        let typed = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let d = typed(KeyCode::Char(CLOSE));
+        assert!(!layout.closes(&d));
+        assert!(layout.closes(&d), "d d closes it");
+        assert!(!layout.closes(&d));
+        assert!(!layout.closes(&typed(KeyCode::Char('x'))));
+        assert!(!layout.closes(&d), "another key between the two starts over");
+        assert!(!layout.closes(&KeyEvent::new(KeyCode::Char(CLOSE), KeyModifiers::CONTROL)));
+        assert!(!layout.closes(&d), "Ctrl d is no d");
+        assert!(!layout.laid_out(laid(panes(), 11, false)));
+        assert!(!layout.laid_out(laid(panes(), 12, false)));
+        assert!(!layout.closes(&d), "a focus gone elsewhere and back starts over");
+        assert!(layout.closes(&d));
     }
 
     #[test]

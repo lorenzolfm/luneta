@@ -22,7 +22,7 @@ use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE
 use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
 use crate::projects::{Layout, Made, Project, ProjectId, Projects, Ran, Runs, Spot};
 use crate::projects::{Session, Size, Store, Terminal, Used, View, ViewId, Workstream};
-use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
+use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, VIEWS_MAX};
 use crate::projects::{Worktree, WORKSTREAMS_MAX};
 use crate::shells::Doing;
 use crate::shows::direction_said;
@@ -63,9 +63,9 @@ const SHELLS: [&str; 9] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "
 const _: () = assert!(ANSWERS_MAX > 1);
 const _: () = assert!(RESTORE_ATTEMPTS_MAX > 0);
 const _: () = assert!(RESTORES_PER_PASS > 0);
-const _: () = assert!(RESTORES_PER_PASS <= TERMINALS_MAX);
+const _: () = assert!(RESTORES_PER_PASS <= VIEWS_MAX);
 const _: () = assert!(REHOMES_PER_PASS > 0);
-const _: () = assert!(REHOMES_PER_PASS <= TERMINALS_MAX);
+const _: () = assert!(REHOMES_PER_PASS <= VIEWS_MAX);
 const _: () = assert!(RESTORE_SETTLE.as_nanos() > RESTORE_PAUSE.as_nanos());
 const _: () = assert!(TYPING_WAIT.as_nanos() < TYPING_WAIT_MAX.as_nanos());
 const _: () = assert!(UNSHOWN_SIZE.columns.get() <= SIDE_MAX);
@@ -126,7 +126,7 @@ enum Done {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Step(Step),
-    Terminal(ViewId),
+    View(ViewId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,8 +167,8 @@ impl Asked {
                         Focus::Step(Step::Direction(direction_of(direction)?))
                     },
                     To::Order(order) => Focus::Step(Step::Order(order_of(order)?)),
-                    To::Terminal(terminal) => {
-                        Focus::Terminal(id("focus", terminal).map(ViewId::new)?)
+                    To::View(view) => {
+                        Focus::View(id("focus", view).map(ViewId::new)?)
                     },
                 })
             },
@@ -388,7 +388,7 @@ impl Attempts {
 
     fn retain(&mut self, unsettled: impl Fn(ViewId) -> bool) {
         self.failures.retain(|terminal, _| unsettled(*terminal));
-        assert!(self.failures.len() <= TERMINALS_MAX, "no more failures than terminals");
+        assert!(self.failures.len() <= VIEWS_MAX, "no more failures than terminals");
     }
 }
 
@@ -496,7 +496,7 @@ impl Layouts {
                 let layouts = layouts.map(Workstream::layout);
                 let terminals = layouts.flat_map(Layout::terminals).map(layout::Leaf::id);
                 self.unhomed.extend(terminals);
-                assert!(self.unhomed.len() <= TERMINALS_MAX, "only held terminals wait for a home");
+                assert!(self.unhomed.len() <= VIEWS_MAX, "only held terminals wait for a home");
             },
             Command::Unreached { since } => {
                 let gone = |known: &Known| match known.heard {
@@ -559,7 +559,7 @@ impl Layouts {
         let terminals = layouts.flat_map(Layout::terminals).map(layout::Leaf::id);
         let terminals: Vec<ViewId> = terminals.collect();
         assert!(workstreams.len() <= WORKSTREAMS_MAX, "a project holds at most {WORKSTREAMS_MAX}");
-        assert!(terminals.len() <= TERMINALS_MAX, "a project holds at most {TERMINALS_MAX} terminals");
+        assert!(terminals.len() <= VIEWS_MAX, "a project holds at most {VIEWS_MAX} views");
         let held_workstreams: BTreeSet<WorkstreamId> = workstreams.iter().copied().collect();
         let held_terminals: BTreeSet<ViewId> = terminals.iter().copied().collect();
         if held_workstreams != *seen_workstreams || held_terminals != *seen {
@@ -605,7 +605,7 @@ impl Layouts {
     }
 
     fn close_terminals(&mut self, terminals: &[ViewId]) -> Result<(), Failed> {
-        assert!(terminals.len() <= TERMINALS_MAX, "at most {TERMINALS_MAX} terminals are kept");
+        assert!(terminals.len() <= VIEWS_MAX, "at most {VIEWS_MAX} views are kept");
         let unclosed = |failure: Failure| Failed::Unclosed(failure.to_string());
         let unseen = terminals.iter().any(|terminal| !self.known.contains_key(terminal));
         let tags = if unseen { self.mux.tags().map_err(unclosed)? } else { Vec::new() };
@@ -645,7 +645,8 @@ impl Layouts {
             assert!(!focused, "closed workstream {workstream} has no focus");
         }
         for terminal in terminals {
-            assert!(projects.holding(*terminal).is_none(), "terminal {terminal} left its layout");
+            let held = projects.holding_view(*terminal);
+            assert!(held.is_none(), "terminal {terminal} left its layout");
             assert!(!self.known.contains_key(terminal), "terminal {terminal} is known no more");
         }
     }
@@ -710,7 +711,7 @@ impl Layouts {
         let workstream = self.clients[&client].workstream;
         let size = self.size_of(client);
         let focus = self.clients[&client].focus;
-        let focused = || focus.ok_or_else(|| "the layout holds no terminal".to_owned());
+        let focused = || focus.ok_or_else(|| "the layout holds no view".to_owned());
         match asked {
             Asked::Size(size) => self.client(client).size = size,
             Asked::Go(to) => {
@@ -725,11 +726,11 @@ impl Layouts {
             Asked::Open { beside, argv } => self.open(client, beside, &argv)?,
             Asked::Welcome => self.welcome(client)?,
             Asked::Close => self.close(focused()?)?,
-            Asked::Focus(Focus::Terminal(terminal)) => {
-                if !self.layout(workstream)?.holds(terminal) {
-                    return Err(format!("the layout holds no terminal {terminal}"));
+            Asked::Focus(Focus::View(view)) => {
+                if !self.layout(workstream)?.holds(view) {
+                    return Err(format!("the layout holds no view {view}"));
                 }
-                self.focus(client, terminal)?;
+                self.focus(client, view)?;
             },
             Asked::Focus(Focus::Step(Step::Direction(direction))) => {
                 let tree = self.layout(workstream)?.tree();
@@ -747,18 +748,18 @@ impl Layouts {
                 self.focus(client, to)?;
             },
             Asked::Resize { sides, growth } => {
-                let Some(terminal) = focus else {
+                let Some(view) = focus else {
                     return Ok(Done::Quiet);
                 };
                 let layout = self.layout(workstream)?;
                 let moves = layout.full().is_none()
                     && layout.tree().is_some_and(|tree| {
-                        tree.clone().resize(terminal, sides, growth, size)
+                        tree.clone().resize(view, sides, growth, size)
                     });
                 if !moves {
                     return Ok(Done::Quiet);
                 }
-                self.changed(Change::Resize { terminal, sides, growth, size })?;
+                self.changed(Change::Resize { view, sides, growth, size })?;
             },
             Asked::Move(step) => {
                 let one = focused()?;
@@ -794,7 +795,7 @@ impl Layouts {
         step: Step,
         size: Size,
     ) -> Result<ViewId, String> {
-        let tree = self.layout(workstream)?.tree().ok_or("the layout holds no terminal")?;
+        let tree = self.layout(workstream)?.tree().ok_or("the layout holds no view")?;
         let to = match step {
             Step::Direction(direction) => tree.neighbour(from, direction, size),
             Step::Order(order) => tree.in_order(from, order),
@@ -802,14 +803,14 @@ impl Layouts {
         to.ok_or_else(|| "no other terminal is there".to_owned())
     }
 
-    fn focus(&mut self, client: ClientId, terminal: ViewId) -> Result<(), String> {
+    fn focus(&mut self, client: ClientId, view: ViewId) -> Result<(), String> {
         let workstream = self.clients[&client].workstream;
         let full = self.layout(workstream)?.full();
-        if full.is_some_and(|full| full != terminal) {
+        if full.is_some_and(|full| full != view) {
             self.changed(Change::Fill { workstream, full: None })?;
         }
-        self.client(client).focus = Some(terminal);
-        self.last_focus.insert(workstream, terminal);
+        self.client(client).focus = Some(view);
+        self.last_focus.insert(workstream, view);
         Ok(())
     }
 
@@ -832,28 +833,10 @@ impl Layouts {
         let terminal = self.store.fresh().map_err(said)?;
         let projects = self.kept()?;
         let (project, shown) = projects.find(workstream).ok_or("the workstream is gone")?;
-        let (placed, inner) = match (shown.layout().tree(), beside) {
-            (None, _) => (Placed::Alone, layout::lone(size)),
-            (Some(_), Beside::Alone) => return Ok(()),
-            (Some(tree), Beside::Towards(towards)) => {
-                let at = focus.ok_or("the layout holds no terminal to open beside")?;
-                let room = tree.room(at, towards, terminal, size);
-                let inner = room.ok_or_else(|| format!("terminal {at} has no room beside it"))?;
-                (Placed::Beside { at, towards }, inner)
-            },
-            (Some(tree), Beside::Focused) => {
-                let at = focus.ok_or("the layout holds no terminal to open beside")?;
-                let room = tree.room_beside(at, terminal, size);
-                let roomless = || format!("terminal {at} has no room beside it");
-                let (towards, inner) = room.ok_or_else(roomless)?;
-                (Placed::Beside { at, towards }, inner)
-            },
-            (Some(tree), Beside::Largest) => {
-                let room = tree.room_beside_largest(terminal, size);
-                let (at, towards, inner) = room.ok_or("no terminal has room for another")?;
-                (Placed::Beside { at, towards }, inner)
-            },
-        };
+        if beside == Beside::Alone && !shown.layout().is_empty() {
+            return Ok(());
+        }
+        let (placed, inner) = placement(shown.layout(), focus, beside, terminal, size)?;
         let home = project.folder(shown.id()).ok_or("its project holds it not")?;
         let listed_cwd = focus
             .and_then(|focus| self.known.get(&focus))
@@ -887,22 +870,16 @@ impl Layouts {
         let Client { workstream, focus, .. } = self.clients[&client];
         let size = self.size_of(client);
         let view = self.store.fresh().map_err(said)?;
+        assert!(!self.known.contains_key(&view), "a fresh view runs in no luneta-mux terminal");
         let projects = self.kept()?;
         let (_, shown) = projects.find(workstream).ok_or("the workstream is gone")?;
-        let placed = match (shown.layout().tree(), focus) {
-            (None, _) => Placed::Alone,
-            (Some(tree), Some(at)) => {
-                let room = tree.room_beside(at, view, size);
-                let (towards, _) = room.ok_or_else(|| format!("view {at} has no room beside it"))?;
-                Placed::Beside { at, towards }
-            },
-            (Some(tree), None) => {
-                let room = tree.room_beside_largest(view, size);
-                let (at, towards, _) = room.ok_or("no view has room for another")?;
-                Placed::Beside { at, towards }
-            },
-        };
+        let beside = if focus.is_some() { Beside::Focused } else { Beside::Largest };
+        let (placed, _) = placement(shown.layout(), focus, beside, view, size)?;
         self.changed(Change::Open { workstream, view: View::Welcome(view), placed, size })?;
+        let projects = self.kept()?;
+        let held_in = projects.holding_view(view).map(|(it, _)| it.id());
+        assert_eq!(held_in, Some(workstream), "welcome view {view} opened in its workstream");
+        assert!(projects.holding_terminal(view).is_none(), "welcome view {view} runs no terminal");
         self.client(client).focus = Some(view);
         self.last_focus.insert(workstream, view);
         Ok(())
@@ -962,7 +939,7 @@ impl Layouts {
             return;
         };
         let known = &self.known;
-        let held = |terminal| projects.holding(terminal).is_some();
+        let held = |terminal| projects.holding_terminal(terminal).is_some();
         let settled = |terminal: ViewId| {
             known.get(&terminal).is_some_and(|known| {
                 known.remade.as_ref().is_none_or(|it| it.at.elapsed() >= RESTORE_SETTLE)
@@ -1015,7 +992,8 @@ impl Layouts {
             if self.known.contains_key(&terminal) {
                 continue;
             }
-            let held = self.store.projects().is_some_and(|it| it.holding(terminal).is_some());
+            let held = |it: &Projects| it.holding_terminal(terminal).is_some();
+            let held = self.store.projects().is_some_and(held);
             if !held {
                 continue;
             }
@@ -1030,7 +1008,7 @@ impl Layouts {
 
     fn remade(&mut self, terminal: ViewId) -> Result<(), String> {
         let projects = self.kept()?;
-        let (held_in, held) = projects.holding(terminal).ok_or("no layout holds it")?;
+        let (held_in, held) = projects.holding_terminal(terminal).ok_or("no layout holds it")?;
         let (project, workstream) = projects.find(held_in.id()).expect("a layout's workstream is");
         let workstream_folder = project.folder(workstream.id()).ok_or("its project holds it not")?;
         let kept_folder = held.folder().clone();
@@ -1119,51 +1097,52 @@ impl Layouts {
         }
     }
 
-    fn close(&mut self, terminal: ViewId) -> Result<(), String> {
+    fn close(&mut self, view: ViewId) -> Result<(), String> {
         let projects = self.kept()?;
-        let (_, view) = projects.holding_view(terminal).ok_or("no layout holds the view")?;
-        if let View::Welcome(_) = view {
-            return self.closed(terminal);
+        let (_, held) = projects.holding_view(view).ok_or("no layout holds the view")?;
+        if let View::Welcome(_) = held {
+            assert!(!self.known.contains_key(&view), "welcome view {view} runs in no terminal");
+            return self.closed(view);
         }
-        let key = match self.known.get(&terminal) {
+        let key = match self.known.get(&view) {
             Some(known) => Some(known.key),
-            None => self.mux.tagged(&tag(terminal)).map_err(|failure| {
-                format!("terminal {terminal} is not looked for in luneta-mux: {failure}")
+            None => self.mux.tagged(&tag(view)).map_err(|failure| {
+                format!("terminal {view} is not looked for in luneta-mux: {failure}")
             })?,
         };
         if let Some(key) = key {
             self.mux.closed(key).map_err(|failure| failure.to_string())?;
         }
-        self.closed(terminal)
+        self.closed(view)
     }
 
-    fn closed(&mut self, terminal: ViewId) -> Result<(), String> {
+    fn closed(&mut self, view: ViewId) -> Result<(), String> {
         let projects = self.kept()?;
-        let (held_in, _) = projects.holding_view(terminal).ok_or("no layout holds the view")?;
+        let (held_in, _) = projects.holding_view(view).ok_or("no layout holds the view")?;
         let workstream = held_in.id();
-        let tree = held_in.layout().tree().expect("a layout that holds a terminal is laid");
-        let heir = tree.heir(terminal);
-        self.followed(Change::Close { terminal })?;
-        self.known.remove(&terminal);
-        for client in self.clients.values_mut().filter(|client| client.focus == Some(terminal)) {
+        let tree = held_in.layout().tree().expect("a layout that holds a view is laid");
+        let heir = tree.heir(view);
+        self.followed(Change::Close { view })?;
+        self.known.remove(&view);
+        for client in self.clients.values_mut().filter(|client| client.focus == Some(view)) {
             client.focus = heir;
         }
-        if self.last_focus.get(&workstream) == Some(&terminal) {
+        if self.last_focus.get(&workstream) == Some(&view) {
             match heir {
                 Some(heir) => self.last_focus.insert(workstream, heir),
                 None => self.last_focus.remove(&workstream),
             };
         }
         let projects = self.kept()?;
-        assert!(projects.holding_view(terminal).is_none(), "view {terminal} left its layout");
+        assert!(projects.holding_view(view).is_none(), "view {view} left its layout");
         if let Some(heir) = heir {
             assert!(projects.holding_view(heir).is_some(), "view {heir} took the room it left");
         } else {
             let emptied = projects.find(workstream).is_some_and(|(_, it)| it.layout().is_empty());
-            assert!(emptied, "workstream {workstream} stays, empty, after its last terminal");
+            assert!(emptied, "workstream {workstream} stays, empty, after its last view");
         }
-        let focused = self.clients.values().any(|client| client.focus == Some(terminal));
-        assert!(!focused, "no client focuses terminal {terminal}, which closed");
+        let focused = self.clients.values().any(|client| client.focus == Some(view));
+        assert!(!focused, "no client focuses view {view}, which closed");
         Ok(())
     }
 
@@ -1186,9 +1165,9 @@ impl Layouts {
             let Some(terminal) = tagged(&listed.tag) else {
                 continue;
             };
-            if projects.holding(terminal).is_none() {
+            if projects.holding_terminal(terminal).is_none() {
                 let id = listed.key.id;
-                let unheld = format!("terminal {id} is tagged {terminal}, which no layout holds");
+                let unheld = format!("terminal {id} is tagged {terminal}, no terminal of a layout");
                 self.troubles.say(unheld);
                 continue;
             }
@@ -1256,7 +1235,7 @@ impl Layouts {
             let Some(listed) = listed.get(&known.key) else {
                 continue;
             };
-            let Some((_, held)) = projects.holding(*terminal) else {
+            let Some((_, held)) = projects.holding_terminal(*terminal) else {
                 continue;
             };
             let folder = Dir::parse(&listed.cwd).unwrap_or_else(|_| held.folder().clone());
@@ -1284,7 +1263,7 @@ impl Layouts {
                 ran.push(Ran { terminal: *terminal, folder, runs });
             }
         }
-        assert!(ran.len() <= TERMINALS_MAX, "a read runs no more terminals than are held");
+        assert!(ran.len() <= VIEWS_MAX, "a read runs no more terminals than are held");
         if ran.is_empty() {
             return;
         }
@@ -1299,8 +1278,8 @@ impl Layouts {
         let Some(projects) = self.store.projects() else {
             return;
         };
-        self.unhomed.retain(|terminal| projects.holding(*terminal).is_some());
-        assert!(self.unhomed.len() <= TERMINALS_MAX, "only held terminals wait for a home");
+        self.unhomed.retain(|terminal| projects.holding_terminal(*terminal).is_some());
+        assert!(self.unhomed.len() <= VIEWS_MAX, "only held terminals wait for a home");
         for _ in 0..REHOMES_PER_PASS {
             let Some(terminal) = self.unhomed.pop_first() else {
                 return;
@@ -1313,7 +1292,8 @@ impl Layouts {
         let Some(projects) = self.store.projects() else {
             return;
         };
-        let (_, held) = projects.holding(terminal).expect("a terminal waiting for a home is held");
+        let held = projects.holding_terminal(terminal);
+        let (_, held) = held.expect("a terminal waiting for a home is held");
         let folder = held.folder().clone();
         let stays = format!("terminal {terminal}, gone to {}, stays", folder.as_str());
         let spot = match Spot::of(&folder, FOLDER_LOOK) {
@@ -1343,7 +1323,7 @@ impl Layouts {
 
     fn moved(&mut self, terminal: ViewId, to: WorkstreamId) -> Result<(), String> {
         let projects = self.kept()?;
-        let (held_in, _) = projects.holding(terminal).ok_or("no layout holds it")?;
+        let (held_in, _) = projects.holding_terminal(terminal).ok_or("no layout holds it")?;
         let from = held_in.id();
         let heir = held_in.layout().tree().and_then(|tree| tree.heir(terminal));
         let (_, target) = projects.find(to).ok_or_else(|| format!("no workstream {to}"))?;
@@ -1369,7 +1349,7 @@ impl Layouts {
             self.went(to);
         }
         let projects = self.store.projects().expect("projects just changed are kept");
-        let held_in = projects.holding(terminal).map(|(it, _)| it.id());
+        let held_in = projects.holding_terminal(terminal).map(|(it, _)| it.id());
         assert_eq!(held_in, Some(to), "terminal {terminal} moved to workstream {to}");
         assert!(!self.clients.values().any(follows), "no client of {from} focuses {terminal}");
         Ok(())
@@ -1620,6 +1600,39 @@ fn by_key(terminals: Vec<server::Terminal>) -> BTreeMap<TerminalKey, server::Ter
     listed
 }
 
+fn placement(
+    layout: &Layout,
+    focus: Option<ViewId>,
+    beside: Beside,
+    new: ViewId,
+    size: Size,
+) -> Result<(Placed, Size), String> {
+    let Some(tree) = layout.tree() else {
+        return Ok((Placed::Alone, layout::lone(size)));
+    };
+    assert!(!tree.holds(new), "view {new} is placed in a layout that holds it");
+    let focused = || focus.ok_or("the layout holds no view to open beside");
+    let roomless = |at: ViewId| format!("view {at} has no room beside it");
+    match beside {
+        Beside::Alone => unreachable!("a view opened alone is opened only in an empty layout"),
+        Beside::Towards(towards) => {
+            let at = focused()?;
+            let inner = tree.room(at, towards, new, size).ok_or_else(|| roomless(at))?;
+            Ok((Placed::Beside { at, towards }, inner))
+        },
+        Beside::Focused => {
+            let at = focused()?;
+            let (towards, inner) = tree.room_beside(at, new, size).ok_or_else(|| roomless(at))?;
+            Ok((Placed::Beside { at, towards }, inner))
+        },
+        Beside::Largest => {
+            let room = tree.room_beside_largest(new, size);
+            let (at, towards, inner) = room.ok_or("no view has room for another")?;
+            Ok((Placed::Beside { at, towards }, inner))
+        },
+    }
+}
+
 fn arrival(workstream: &Workstream, last: Option<ViewId>) -> Option<ViewId> {
     let layout = workstream.layout();
     if let Some(full) = layout.full() {
@@ -1648,16 +1661,19 @@ fn laid(
 ) -> api::ShowResponse {
     let layout = workstream.layout();
     if let Some(focus) = focus {
-        assert!(layout.holds(focus), "a client focuses terminal {focus} of the layout it shows");
+        assert!(layout.holds(focus), "a client focuses view {focus} of the layout it shows");
     }
     let (fitted, panes) = match layout.tree() {
         None => (size, Vec::new()),
         Some(tree) => {
             let panes = tree.laid(size).into_iter().map(|(view, rect)| {
                 use show_response::pane::Found;
-                let terminal = layout::Leaf::id(view);
-                let found = match (view, known.get(&terminal)) {
-                    (View::Welcome(_), _) => Found::Welcome(()),
+                let id = layout::Leaf::id(view);
+                let found = match (view, known.get(&id)) {
+                    (View::Welcome(_), found) => {
+                        assert!(found.is_none(), "welcome view {id} runs in no terminal");
+                        Found::Welcome(())
+                    },
                     (View::Terminal(_), Some(known)) => Found::Key(api::TerminalKey {
                         id: known.key.id.get(),
                         made_at: Some(known.key.made.into()),
@@ -1666,7 +1682,7 @@ fn laid(
                     (View::Terminal(_), None) => Found::Looking(()),
                 };
                 show_response::Pane {
-                    terminal: terminal.get(),
+                    view: id.get(),
                     rect: Some(show_response::Rect {
                         column: rect.column.into(),
                         row: rect.row.into(),
@@ -1991,9 +2007,9 @@ mod tests {
     #[test]
     fn a_show_word_reads_into_what_it_asks() {
         use show_request::{focus, open, resize, Event};
-        let terminal = Event::Focus(show_request::Focus { to: Some(focus::To::Terminal(3)) });
+        let terminal = Event::Focus(show_request::Focus { to: Some(focus::To::View(3)) });
         let three = ViewId::of(3).unwrap();
-        assert_eq!(Asked::of_api(terminal), Ok(Asked::Focus(Focus::Terminal(three))));
+        assert_eq!(Asked::of_api(terminal), Ok(Asked::Focus(Focus::View(three))));
         let right = show_request::Towards::Right.into();
         let open = show_request::Open { beside: Some(open::Beside::Towards(right)), argv: vec![] };
         let towards = Beside::Towards(Towards::Right);

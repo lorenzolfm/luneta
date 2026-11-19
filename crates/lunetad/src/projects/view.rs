@@ -215,11 +215,11 @@ impl Layout {
         self.tree().is_some_and(|tree| tree.holds(terminal))
     }
 
-    pub(super) fn terminal_mut(&mut self, terminal: ViewId) -> Result<&mut Terminal, String> {
-        let view = self.0.as_mut().and_then(|laid| laid.tree.get_mut(terminal));
-        match view.ok_or_else(|| format!("the layout holds no view {terminal}"))? {
-            View::Terminal(held) => Ok(held),
-            View::Welcome(_) => Err(format!("view {terminal} runs no terminal")),
+    pub(super) fn terminal_mut(&mut self, view: ViewId) -> Option<&mut Terminal> {
+        let laid = self.0.as_mut().expect("a layout asked for its view is laid");
+        match laid.tree.get_mut(view).expect("its layout holds the view") {
+            View::Terminal(held) => Some(held),
+            View::Welcome(_) => None,
         }
     }
 
@@ -235,47 +235,47 @@ impl Layout {
             (None, Placed::Alone) => {
                 self.0 = Some(Laid { tree: Tree::one(view), full: None });
             },
-            (Some(_), Placed::Alone) => return Err("the layout holds terminals already".to_owned()),
+            (Some(_), Placed::Alone) => return Err("the layout holds views already".to_owned()),
             (None, Placed::Beside { at, .. }) => {
-                return Err(format!("the layout is empty, and so holds no terminal {at}"));
+                return Err(format!("the layout is empty, and so holds no view {at}"));
             },
             (Some(laid), Placed::Beside { at, towards }) => {
                 if !laid.tree.holds(at) {
-                    return Err(format!("the layout holds no terminal {at}"));
+                    return Err(format!("the layout holds no view {at}"));
                 }
                 if laid.tree.len() >= PANES_MAX {
-                    let most = format!("the layout holds {PANES_MAX} terminals, as many as it may");
+                    let most = format!("the layout holds {PANES_MAX} views, as many as it may");
                     return Err(most);
                 }
                 if laid.tree.room(at, towards, id, size).is_none() {
-                    return Err(format!("terminal {at} has no room for another beside it"));
+                    return Err(format!("view {at} has no room for another beside it"));
                 }
                 laid.tree.split(at, towards, view, size);
                 laid.full = None;
             },
         }
-        assert!(self.holds(id), "terminal {id} is in the layout it opened in");
-        assert_eq!(self.len(), count + 1, "a layout opens one terminal at a time");
+        assert!(self.holds(id), "view {id} is in the layout it opened in");
+        assert_eq!(self.len(), count + 1, "a layout opens one view at a time");
         Ok(())
     }
 
-    pub(super) fn closed(&mut self, terminal: ViewId) -> Option<ViewId> {
-        let laid = self.0.as_mut().expect("a closed terminal is in the layout");
-        let heir = match laid.tree.remove(terminal) {
+    pub(super) fn closed(&mut self, view: ViewId) -> Option<ViewId> {
+        let laid = self.0.as_mut().expect("a closed view is in the layout");
+        let heir = match laid.tree.remove(view) {
             Removed::Last => {
                 self.0 = None;
                 None
             },
             Removed::Out { heir, .. } => {
-                if laid.full == Some(terminal) || laid.tree.len() == 1 {
+                if laid.full == Some(view) || laid.tree.len() == 1 {
                     laid.full = None;
                 }
                 Some(heir)
             },
         };
-        assert!(!self.holds(terminal), "terminal {terminal} left its layout");
+        assert!(!self.holds(view), "view {view} left its layout");
         if let Some(heir) = heir {
-            assert!(self.holds(heir), "terminal {heir} took the room of terminal {terminal}");
+            assert!(self.holds(heir), "view {heir} took the room of view {view}");
         }
         heir
     }
@@ -284,7 +284,7 @@ impl Layout {
         let Some(laid) = &mut self.0 else {
             return match full {
                 None => Ok(()),
-                Some(full) => Err(format!("the layout is empty, and so holds no terminal {full}")),
+                Some(full) => Err(format!("the layout is empty, and so holds no view {full}")),
             };
         };
         if let Some(full) = full {
@@ -296,25 +296,25 @@ impl Layout {
 
     pub(super) fn resized(
         &mut self,
-        terminal: ViewId,
+        view: ViewId,
         sides: Sides,
         growth: layout::Growth,
         size: Size,
     ) -> Result<(), String> {
-        let laid = self.0.as_mut().expect("a resized terminal is in the layout");
+        let laid = self.0.as_mut().expect("a resized view is in the layout");
         if laid.full.is_some() {
-            return Err("a layout one terminal fills is resized by none".to_owned());
+            return Err("a layout one view fills is resized by none".to_owned());
         }
-        if !laid.tree.resize(terminal, sides, growth, size) {
-            return Err(format!("no border of terminal {terminal} moves that way"));
+        if !laid.tree.resize(view, sides, growth, size) {
+            return Err(format!("no border of view {view} moves that way"));
         }
         Ok(())
     }
 
     pub(super) fn swapped(&mut self, one: ViewId, other: ViewId) -> Result<(), String> {
-        let laid = self.0.as_mut().expect("swapped terminals are in the layout");
+        let laid = self.0.as_mut().expect("swapped views are in the layout");
         if laid.full.is_some() {
-            return Err("a layout one terminal fills moves none of them".to_owned());
+            return Err("a layout one view fills moves none of them".to_owned());
         }
         laid.tree.swap(one, other);
         Ok(())
@@ -323,10 +323,10 @@ impl Layout {
 
 fn fills(tree: &Tree<View>, full: ViewId) -> Result<(), String> {
     if !tree.holds(full) {
-        return Err(format!("the layout holds no terminal {full}"));
+        return Err(format!("the layout holds no view {full}"));
     }
     if tree.len() == 1 {
-        return Err("a layout of one terminal shows it whole already".to_owned());
+        return Err("a layout of one view shows it whole already".to_owned());
     }
     Ok(())
 }
