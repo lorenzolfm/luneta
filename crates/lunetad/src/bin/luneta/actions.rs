@@ -13,6 +13,9 @@ pub const MENU: Chord = (KeyCode::Char('a'), KeyModifiers::ALT);
 
 pub const PALETTE: Chord = (KeyCode::Char('k'), KeyModifiers::SUPER);
 
+pub const PALETTE_IN_GHOSTTY: [&str; 2] =
+    ["For Cmd k, Ghostty's config:", "keybind = cmd+k=unbind"];
+
 pub const WORKTREES: Chord = (KeyCode::Char('j'), KeyModifiers::SUPER);
 
 pub const LEFT: Chord = (KeyCode::Char('h'), KeyModifiers::CONTROL);
@@ -367,6 +370,14 @@ impl Action {
     #[must_use]
     pub const fn key(self) -> Key {
         self.spec().key
+    }
+
+    #[must_use]
+    pub const fn notes(self) -> &'static [&'static str] {
+        match self {
+            Action::Palette => &PALETTE_IN_GHOSTTY,
+            _ => &[],
+        }
     }
 
     #[must_use]

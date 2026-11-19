@@ -2376,22 +2376,37 @@ pub struct AllKeys {
     room: Cell<usize>,
 }
 
+struct KeysRow {
+    keys: String,
+    does: String,
+    notes: &'static [&'static str],
+}
+
+impl KeysRow {
+    fn of(action: Action, keys: String) -> KeysRow {
+        KeysRow { keys, does: action.name().to_owned(), notes: action.notes() }
+    }
+}
+
 impl AllKeys {
-    fn groups() -> [(&'static str, Vec<(String, String)>); 5] {
-        let named = |keys: &[(Label, &str)]| -> Vec<(String, String)> {
-            keys.iter().map(|(label, does)| (label.to_string(), (*does).to_owned())).collect()
+    fn groups() -> [(&'static str, Vec<KeysRow>); 5] {
+        let named = |keys: &[(Label, &str)]| -> Vec<KeysRow> {
+            let row = |(label, does): &(Label, &str)| KeysRow {
+                keys: label.to_string(),
+                does: (*does).to_owned(),
+                notes: &[],
+            };
+            keys.iter().map(row).collect()
         };
-        let typed = |(action, path): (Action, &'static [char])| {
-            (typed_path(path), action.name().to_owned())
-        };
+        let typed =
+            |(action, path): (Action, &'static [char])| KeysRow::of(action, typed_path(path));
         let sidebar = Action::row().map(typed);
         let menu = Action::menu().map(typed);
-        let mut menu: Vec<(String, String)> = menu.collect();
+        let mut menu: Vec<KeysRow> = menu.collect();
         menu.extend(named(&MENU_MOVES));
-        let pasted = Action::pasted();
-        let pasted = pasted.map(|(action, key)| (key.to_string(), action.name().to_owned()));
+        let pasted = Action::pasted().map(|(action, key)| KeysRow::of(action, key.to_string()));
         let anywhere = Action::anywhere().map(|(action, (code, modifiers))| {
-            (Label::Key(code, modifiers).to_string(), action.name().to_owned())
+            KeysRow::of(action, Label::Key(code, modifiers).to_string())
         });
         [
             ("Move", named(&MOVES)),
@@ -2408,8 +2423,11 @@ impl AllKeys {
         let mut rows = Vec::new();
         for (name, keys) in AllKeys::groups() {
             rows.push(Line::from(vec![Span::raw(" "), Span::styled(name, bold)]));
-            let column = keys.iter().map(|(keys, _)| keys.width()).max().unwrap_or(0);
-            rows.extend(keys.iter().map(|(keys, does)| keys_line_of(keys, column, does, inner)));
+            let column = keys.iter().map(|row| row.keys.width()).max().unwrap_or(0);
+            for row in keys {
+                rows.push(keys_line_of(&row.keys, column, &row.does, inner));
+                rows.extend(row.notes.iter().map(|note| note_line(note, inner)));
+            }
         }
         rows
     }
@@ -2498,6 +2516,13 @@ fn keys_line_of(keys: &str, column: usize, does: &str, inner: usize) -> Line<'st
         Span::raw(" ".repeat(pad)),
         Span::styled(sidebar::cut(does, room), Style::new().fg(NAME)),
     ])
+}
+
+fn note_line(note: &str, inner: usize) -> Line<'static> {
+    let indent = "  ";
+    let room = inner.saturating_sub(indent.width());
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    Line::from(vec![Span::raw(indent), Span::styled(sidebar::cut(note, room), dim)])
 }
 
 fn all_keys_line(inner: usize) -> Line<'static> {
