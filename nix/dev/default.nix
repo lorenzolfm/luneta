@@ -102,6 +102,7 @@ pkgs.writeShellApplication {
         exit 2
       fi
       export DEV_HERE="$PWD"
+      export DEV_PATH="$PATH"
       cd "$root"
     }
 
