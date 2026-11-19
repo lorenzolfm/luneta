@@ -1206,8 +1206,8 @@ pub enum Wants {
     Nothing,
     Cloned(ProjectId),
     Keep(Harness),
-    Skills { cwd: String, agent: Harness },
-    Refind { cwd: String, agent: Harness },
+    Skills { cwd: Directory, agent: Harness },
+    Refind { cwd: Directory, agent: Harness },
     Plan { session: Listed, scope: Scope },
     Prunes { dir: Directory },
     Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
@@ -1460,7 +1460,7 @@ impl Menu {
             Offer::SearchSkills(row) => match row.beside() {
                 Ok(Beside { cwd, .. }) => {
                     keys.search = Some(Search::new());
-                    let wants = Wants::Skills { cwd: cwd.into(), agent: keys.agent.harness() };
+                    let wants = Wants::Skills { cwd, agent: keys.agent.harness() };
                     stays(Stage::Choosing(keys), wants)
                 },
                 Err(reason) => wrong(reason),
@@ -1546,7 +1546,7 @@ impl Menu {
                 {
                     search.refind();
                     let wants = match row.beside() {
-                        Ok(Beside { cwd, .. }) => Wants::Refind { cwd: cwd.into(), agent },
+                        Ok(Beside { cwd, .. }) => Wants::Refind { cwd, agent },
                         Err(_) => Wants::Keep(agent),
                     };
                     stays(Stage::Choosing(keys), wants)
@@ -4014,7 +4014,7 @@ mod tests {
     fn slash_searches_the_skills_and_enter_starts_an_agent_on_the_one_picked() {
         let (menu, _) = stays(opened(view_row(), None));
         let (mut menu, wants) = stays(menu.key(&char('/')));
-        assert_eq!(wants, Wants::Skills { cwd: "/w/luneta/main".to_owned(), agent: CLAUDE });
+        assert_eq!(wants, Wants::Skills { cwd: main_dir(), agent: CLAUDE });
         assert_eq!(
             text(&menu.lines(31, 6, 0).0)[..3],
             ["─ Skills ──────── luneta/main ─", " _", " finding skills…"]
@@ -4041,8 +4041,7 @@ mod tests {
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         let (menu, _) = stays(menu.key(&char('t')));
         let (mut menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
-        let cwd = "/w/luneta/main".to_owned();
-        assert_eq!(wants, Wants::Refind { cwd, agent: Harness::Pi });
+        assert_eq!(wants, Wants::Refind { cwd: main_dir(), agent: Harness::Pi });
         assert_eq!(text(&menu.lines(31, 6, 0).0)[..3], [
             "─ Skills ──────── luneta/main ─",
             " t_",

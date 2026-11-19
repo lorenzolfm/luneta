@@ -4,6 +4,7 @@ use std::thread;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 pub use lunetad::skills::{Name, Runs, Skill};
+use lunetad::Directory;
 
 use crate::agents::Harness;
 use crate::away::{self, Away};
@@ -12,15 +13,15 @@ use crate::machines::Machine;
 
 pub fn find(
     on: &Machine,
-    cwd: &str,
+    cwd: &Directory,
     harness: Harness,
     events: &Sender<Event>,
     said: impl FnOnce(Result<Vec<Skill>, String>) -> Event + Send + 'static,
 ) {
-    let (on, cwd, events) = (on.clone(), cwd.to_owned(), events.clone());
+    let (on, cwd, events) = (on.clone(), cwd.clone(), events.clone());
     thread::spawn(move || {
         let skills = match &on {
-            Machine::Local => lunetad::skills::found_in(&cwd, harness),
+            Machine::Local => lunetad::skills::found_in(cwd.as_str(), harness),
             Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
                 .and_then(|mut away| away.skills(&cwd, harness)),
         };

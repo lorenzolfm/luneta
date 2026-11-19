@@ -2191,12 +2191,19 @@ impl App {
         true
     }
 
-    fn nameable(&self, number: u64, under: &Where) -> Skills {
+    fn nameable(&mut self, number: u64, under: &Where) -> Skills {
         let Where::Session(Some(agent)) = under else {
             return Skills::Found(Vec::new());
         };
+        let dir = match &agent.dir {
+            Ok(dir) => dir,
+            Err(why) => {
+                self.sidebar.notify(why.clone());
+                return Skills::Failed(why.clone());
+            },
+        };
         let said = move |skills| Event::Nameable { number, skills };
-        skills::find(&agent.on, &agent.dir, agent.harness, &self.events, said);
+        skills::find(&agent.on, dir, agent.harness, &self.events, said);
         Skills::Finding
     }
 
