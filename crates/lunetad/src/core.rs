@@ -97,7 +97,6 @@ pub fn start(wakes: Wakes) -> io::Result<SyncSender<Command>> {
     Ok(send)
 }
 
-#[expect(clippy::large_enum_variant, reason = "core holds HOSTS_MAX of them at the most")]
 enum Remote {
     Far(Destination, Reached),
     Here(Destination),
