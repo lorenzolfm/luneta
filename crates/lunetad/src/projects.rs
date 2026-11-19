@@ -43,11 +43,9 @@ pub const PATH_BYTES_MAX: usize = 4096;
 
 pub const USED_MILLIS_MAX: u64 = u64::MAX / 2;
 
-const READ_MILLIS_MAX: u64 = USED_MILLIS_MAX / 2;
-
 const CLOCK_MILLIS_MAX: u64 = 253_402_300_799_999;
 
-const _: () = assert!(CLOCK_MILLIS_MAX < READ_MILLIS_MAX);
+const _: () = assert!(CLOCK_MILLIS_MAX < USED_MILLIS_MAX);
 
 const FRESH_TRIES: u32 = 8;
 
@@ -189,10 +187,10 @@ impl Used {
     }
 
     pub fn read(millis: u64) -> Result<Used, String> {
-        if millis <= READ_MILLIS_MAX {
+        if millis <= USED_MILLIS_MAX {
             Ok(Used(millis))
         } else {
-            Err(format!("a use at {millis} ms is past {READ_MILLIS_MAX} ms"))
+            Err(format!("a use at {millis} ms is past {USED_MILLIS_MAX} ms"))
         }
     }
 
@@ -2491,8 +2489,8 @@ mod tests {
         assert_eq!((Used::at(at).millis(), Used::of_millis(1_234).time()), (1_234, at));
         let far = SystemTime::UNIX_EPOCH + Duration::from_millis(u64::MAX);
         assert_eq!(Used::at(far).millis(), CLOCK_MILLIS_MAX, "a clock past 9999 is held there");
-        assert_eq!(Used::read(READ_MILLIS_MAX), Ok(Used::of_millis(READ_MILLIS_MAX)));
-        let past = Used::read(READ_MILLIS_MAX + 1).unwrap_err();
+        assert_eq!(Used::read(USED_MILLIS_MAX), Ok(Used::of_millis(USED_MILLIS_MAX)));
+        let past = Used::read(USED_MILLIS_MAX + 1).unwrap_err();
         assert!(past.contains("is past"), "{past}");
         (projects, _) = change(&projects, went(two, 1)).unwrap();
         (projects, _) = change(&projects, went(one, USED_MILLIS_MAX)).unwrap();
