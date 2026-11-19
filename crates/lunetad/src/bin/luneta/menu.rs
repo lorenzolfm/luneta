@@ -813,7 +813,7 @@ pub struct ViewRow {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cwd {
-    Unknown,
+    Unsaid,
     At(Directory),
     Unread { why: String },
 }
@@ -822,7 +822,7 @@ impl Cwd {
     #[must_use]
     pub fn of(said: Option<String>) -> Cwd {
         match said.map(Directory::parse) {
-            None => Cwd::Unknown,
+            None => Cwd::Unsaid,
             Some(Ok(dir)) => Cwd::At(dir),
             Some(Err(why)) => Cwd::Unread { why },
         }
@@ -832,7 +832,7 @@ impl Cwd {
     pub fn at(&self) -> Option<&Directory> {
         match self {
             Cwd::At(dir) => Some(dir),
-            Cwd::Unknown | Cwd::Unread { .. } => None,
+            Cwd::Unsaid | Cwd::Unread { .. } => None,
         }
     }
 }
@@ -1120,7 +1120,7 @@ impl ViewRow {
         let view = self.view;
         let cwd = match &self.cwd {
             Cwd::At(cwd) => cwd.clone(),
-            Cwd::Unknown => {
+            Cwd::Unsaid => {
                 return Err(format!(
                     "menu: luneta does not know yet where view {view} works; try again in a moment"
                 ));
@@ -3337,7 +3337,7 @@ mod tests {
             refused(pull_row(State::Open, None)),
             wrong("menu: view 4's lunetad does not say the page of #328, as an older one does not")
         );
-        let unsaid = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unknown, ..row() });
+        let unsaid = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
         assert!(matches!(refused(unsaid), Done::Wrong(_)));
     }
 
@@ -3408,7 +3408,7 @@ mod tests {
             assert_eq!(closed(menu.key(&char('i'))), Done::Issue(repository));
         }
         let unrepositoried = Target::View(Machine::Local, ViewRow { repository: None, ..row() });
-        let nowhere = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unknown, ..row() });
+        let nowhere = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
         for row in [session_row(), Target::Machine(Machine::Local), unrepositoried, nowhere] {
             assert!(Menu::open(1, row.clone(), Some('i'), PICKED).is_none(), "{row:?}");
             let (menu, _) = stays(opened(row.clone(), None));
@@ -3721,7 +3721,7 @@ mod tests {
         assert!(menu.sweeping() && menu.turning());
 
         let outside = Target::View(Machine::Local, ViewRow { repository: None, ..row() });
-        let unplaced = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unknown, ..row() });
+        let unplaced = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
         for target in [outside, unplaced, project_on(Machine::Local), remote_header()] {
             let (menu, _) = stays(opened(target.clone(), Some('d')));
             let (menu, wants) = stays(menu.key(&char('m')));
@@ -3990,8 +3990,8 @@ mod tests {
 
     #[test]
     fn a_menu_that_cannot_open_beside_its_row_says_why() {
-        let unknown = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unknown, ..row() });
-        let (menu, _) = stays(opened(unknown, None));
+        let unsaid = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
+        let (menu, _) = stays(opened(unsaid, None));
         let done = closed(menu.key(&char('/')));
         assert!(matches!(done, Done::Wrong(why) if why.contains("where view 4 works")));
         let relative = ViewRow { cwd: Cwd::of(Some("w".to_owned())), ..own_row() };
