@@ -759,7 +759,7 @@ struct KnownWorktree {
     used: Option<SystemTime>,
     views: Vec<View>,
     terminals: Vec<ViewId>,
-    in_views: Vec<(u32, ViewId)>,
+    by_terminal: Vec<(u32, ViewId)>,
 }
 
 impl Known {
@@ -778,7 +778,7 @@ impl Known {
                 Some((*id, view_of(it, worktree, tab)?))
             });
             let held: Vec<(ViewId, View)> = held.collect();
-            let in_views = held.iter().map(|(id, view)| (view.id, *id)).collect();
+            let by_terminal = held.iter().map(|(id, view)| (view.id, *id)).collect();
             let views = held.into_iter().map(|(_, view)| view).collect();
             let seen = worktree.seen.and_then(projects::Seen::of_api);
             let seen = seen.expect("lunetad says a worktree's stage luneta knows");
@@ -788,7 +788,7 @@ impl Known {
             let folder = Dir::parse(&worktree.folder);
             let folder = folder.expect("lunetad says a worktree's folder as a folder it keeps");
             let name = worktree.name.clone();
-            Some(KnownWorktree { place, name, folder, seen, used, views, terminals, in_views })
+            Some(KnownWorktree { place, name, folder, seen, used, views, terminals, by_terminal })
         });
         let worktrees: Vec<KnownWorktree> = worktrees.collect();
         let order = rows.iter().filter_map(|it| WorktreeId::of(it.id)).collect();
@@ -3285,7 +3285,7 @@ impl Sidebar {
         let ViewKey::Terminal(key) = view;
         let mut known = shelf(&self.shelves, machine).iter();
         let worktrees = &known.find(|it| it.listed() == listed)?.worktrees;
-        let mut held = worktrees.iter().flat_map(|worktree| &worktree.in_views);
+        let mut held = worktrees.iter().flat_map(|worktree| &worktree.by_terminal);
         held.find(|(id, _)| *id == key.id.get()).map(|(_, terminal)| *terminal)
     }
 

@@ -84,14 +84,14 @@ impl Project {
         held.find_map(|(_, key)| *key)
     }
 
-    fn holding(&self, view: NonZeroU32) -> Option<(WorktreeId, ViewId, TerminalKey)> {
+    fn holding(&self, terminal: NonZeroU32) -> Option<(WorktreeId, ViewId, TerminalKey)> {
         let held = self.worktrees().iter().flat_map(|worktree| {
             let keyed = worktree.terminals.iter().filter_map(|(id, key)| Some((*id, (*key)?)));
             keyed.map(|(id, key)| (worktree.id, id, key))
         });
-        let mut on_view = held.filter(|(_, _, key)| key.id == view);
-        let first = on_view.next()?;
-        on_view.next().is_none().then_some(first)
+        let mut on_terminal = held.filter(|(_, _, key)| key.id == terminal);
+        let first = on_terminal.next()?;
+        on_terminal.next().is_none().then_some(first)
     }
 }
 
