@@ -60,35 +60,35 @@ enum Fetch {
 }
 
 #[derive(Debug)]
+#[expect(clippy::large_enum_variant, reason = "a home holds one, which goes from Not to As once")]
+enum Named {
+    Not { asks: u64 },
+    As { name: String, dir: String, ask: Ask },
+}
+
+#[derive(Debug)]
 pub struct Home {
     number: u64,
     on: Machine,
     project: ProjectId,
-    name: String,
-    dir: String,
-    known: bool,
+    named: Named,
     listing: Listing,
     fetch: Fetch,
     cursor: usize,
     marked: BTreeSet<Item>,
-    ask: Ask,
 }
 
 impl Home {
     pub fn new(number: u64, asks: u64, on: Machine, project: ProjectId) -> Home {
-        let ask = Ask::homed(asks, &on, "", "");
         Home {
             number,
             on,
             project,
-            name: String::new(),
-            dir: String::new(),
-            known: false,
+            named: Named::Not { asks },
             listing: Listing::Asking,
             fetch: Fetch::Due,
             cursor: 0,
             marked: BTreeSet::new(),
-            ask,
         }
     }
 
@@ -104,21 +104,31 @@ impl Home {
         self.project
     }
 
-    pub fn ask_number(&self) -> u64 {
-        self.ask.number()
+    pub fn ask_number(&self) -> Option<u64> {
+        match &self.named {
+            Named::Not { .. } => None,
+            Named::As { ask, .. } => Some(ask.number()),
+        }
     }
 
     pub fn named(&mut self, name: &str, dir: &str) {
-        self.known = true;
-        if self.name != name || self.dir != dir {
-            name.clone_into(&mut self.name);
-            dir.clone_into(&mut self.dir);
-            self.ask.rehome(&self.on, dir, name);
+        match &mut self.named {
+            Named::Not { asks } => {
+                let ask = Ask::homed(*asks, &self.on, dir, name);
+                self.named = Named::As { name: name.to_owned(), dir: dir.to_owned(), ask };
+            },
+            Named::As { name: named, dir: homed, ask } => {
+                if named != name || homed != dir {
+                    name.clone_into(named);
+                    dir.clone_into(homed);
+                    ask.rehome(&self.on, dir, name);
+                }
+            },
         }
     }
 
     pub fn known(&self) -> bool {
-        self.known
+        matches!(self.named, Named::As { .. })
     }
 
     pub fn asks(&mut self, now: Instant) -> bool {
@@ -176,7 +186,10 @@ impl Home {
                 self.step_up();
             },
             _ => {
-                return match self.ask.key(key) {
+                let Named::As { ask, .. } = &mut self.named else {
+                    return Keyed::Nothing;
+                };
+                return match ask.key(key) {
                     ask::Keyed::Nothing => Keyed::Nothing,
                     ask::Keyed::Send => Keyed::Send,
                     ask::Keyed::Close => Keyed::StartOver,
@@ -220,25 +233,36 @@ impl Home {
 
     pub fn send(&mut self, events: &Sender<Event>) {
         let marked = self.marks();
-        self.ask.send(marked, events);
+        let Named::As { ask, .. } = &mut self.named else {
+            unreachable!("only the prompt of a home that knows its folder says Send");
+        };
+        ask.send(marked, events);
     }
 
     pub fn start_over(&mut self, asks: u64) {
-        assert!(asks > self.ask.number(), "a new talk is numbered past the one it replaces");
-        self.ask = Ask::homed(asks, &self.on, &self.dir, &self.name);
+        let Named::As { name, dir, ask } = &mut self.named else {
+            unreachable!("only the prompt of a home that knows its folder says Start over");
+        };
+        assert!(asks > ask.number(), "a new talk is numbered past the one it replaces");
+        *ask = Ask::homed(asks, &self.on, dir, name);
         self.marked.clear();
     }
 
     pub fn heard(&mut self, heard: Heard) {
-        self.ask.heard(heard);
+        let Named::As { ask, .. } = &mut self.named else {
+            unreachable!("luneta hears only a prompt it numbered, and an unnamed home has none");
+        };
+        ask.heard(heard);
     }
 
     pub fn paste(&mut self, text: &str) {
-        self.ask.paste(text);
+        if let Named::As { ask, .. } = &mut self.named {
+            ask.paste(text);
+        }
     }
 
     pub fn turning(&self) -> bool {
-        self.ask.turning()
+        matches!(&self.named, Named::As { ask, .. } if ask.turning())
     }
 
     pub fn draw(&self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
@@ -253,9 +277,12 @@ impl Home {
         else {
             return;
         };
+        let Named::As { dir, ask, .. } = &self.named else {
+            return self.draw_lists(buffer, area);
+        };
         let most = (area.height / 2).max(ASK_ROWS_MIN).min(area.height);
         let room = usize::from(most.saturating_sub(3));
-        let mut talk = self.ask.talked(inner, now);
+        let mut talk = ask.talked(inner, now);
         if talk.len() > room {
             let kept = room.saturating_sub(1);
             talk.drain(..talk.len() - kept);
@@ -268,8 +295,8 @@ impl Home {
         assert!(rows <= area.height, "the prompt's box fits in the home");
         let asked = Rect::new(area.x, area.bottom() - rows, area.width, rows);
         let right = match &self.on {
-            Machine::Local => sidebar::short_cwd(&self.dir),
-            Machine::Remote(on) => format!("{} on {on}", sidebar::short_cwd(&self.dir)),
+            Machine::Local => sidebar::short_cwd(dir),
+            Machine::Remote(on) => format!("{} on {on}", sidebar::short_cwd(dir)),
         };
         menu::boxed(buffer, asked, &menu::rule(ASK_TITLE, &right, inner), &talk);
         let lists = Rect::new(area.x, area.y, area.width, area.height - rows);
@@ -277,7 +304,7 @@ impl Home {
     }
 
     fn hints(&self) -> Vec<(Hint, &'static str)> {
-        if self.ask.turning() {
+        if self.turning() {
             return vec![(Hint::Moves, "Move"), (Hint::Tab, "Mark"), (Hint::Esc, "Stop")];
         }
         vec![(Hint::Moves, "Move"), (Hint::Tab, "Mark"), (Hint::Enter, "Send"), (Hint::Esc, "Start over")]
@@ -286,11 +313,15 @@ impl Home {
     fn draw_lists(&self, buffer: &mut Buffer, area: Rect) {
         let width = usize::from(area.width);
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let mut head = vec![Line::from(vec![
-            Span::raw(" "),
-            Span::styled(self.name.clone(), Style::new().fg(gruvbox::FG1).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {}", sidebar::short_cwd(&self.dir)), dim),
-        ])];
+        let head = match &self.named {
+            Named::As { name, dir, .. } => Line::from(vec![
+                Span::raw(" "),
+                Span::styled(name.clone(), Style::new().fg(gruvbox::FG1).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {}", sidebar::short_cwd(dir)), dim),
+            ]),
+            Named::Not { .. } => Line::styled(" …", dim),
+        };
+        let mut head = vec![head];
         let (lines, at) = self.list_lines(width);
         if let Listing::Listed { stale: Some(why), .. } = &self.listing {
             let why = format!(" not listed again: {why}");
@@ -524,6 +555,23 @@ mod tests {
     }
 
     #[test]
+    fn a_home_takes_no_prompt_until_it_knows_its_project_s_folder() {
+        let mut home = Home::new(1, 1, Machine::Local, ProjectId::of(3).unwrap());
+        assert_eq!((home.known(), home.ask_number()), (false, None));
+        for typed in "go".chars() {
+            assert_eq!(home.key(&key(KeyCode::Char(typed))), Keyed::Nothing);
+        }
+        assert_eq!(home.key(&key(KeyCode::Enter)), Keyed::Nothing, "with no folder, nothing is sent");
+        let unnamed = shown(&home, 60, 14);
+        assert_eq!(unnamed[..3], [" …", "", "   asking gh for the open issues and pull requests…"]);
+        assert!(unnamed[3..].iter().all(String::is_empty), "and no prompt shows: {unnamed:?}");
+        home.named("luneta", "/w/luneta");
+        assert_eq!((home.known(), home.ask_number()), (true, Some(1)));
+        let named = shown(&home, 60, 14);
+        assert!(named.contains(&"│ › _                                                      │".to_owned()), "{named:?}");
+    }
+
+    #[test]
     fn esc_starts_the_talk_over_and_forgets_the_marks() {
         let (mut home, now) = (home(), Instant::now());
         home.asks(now);
@@ -532,7 +580,7 @@ mod tests {
         home.key(&key(KeyCode::Char('x')));
         assert_eq!(home.key(&key(KeyCode::Esc)), Keyed::StartOver);
         home.start_over(2);
-        assert_eq!((home.ask_number(), home.marks()), (2, Marked::default()));
+        assert_eq!((home.ask_number(), home.marks()), (Some(2), Marked::default()));
         assert!(shown(&home, 60, 14).contains(&"│ › _                                                      │".to_owned()));
     }
 }

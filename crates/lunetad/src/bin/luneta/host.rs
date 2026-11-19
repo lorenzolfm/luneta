@@ -1005,7 +1005,7 @@ impl App {
                     && ask.number() == number
                 {
                     ask.heard(heard);
-                } else if let Some(home) = self.home_mut().filter(|it| it.ask_number() == number) {
+                } else if let Some(home) = self.home_mut().filter(|it| it.ask_number() == Some(number)) {
                     home.heard(heard);
                 }
             },
