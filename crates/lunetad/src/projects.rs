@@ -926,7 +926,7 @@ impl Projects {
                     Some(within) => changed.worktree_in(project, within, name, &mut draw)?,
                     None => None,
                 };
-                Some(Made::Worktree(made.ok_or_else(|| held.unplaced(&spot))?))
+                Some(self.made(made.ok_or_else(|| held.unplaced(&spot))?))
             },
             Change::Start { spot, name } => {
                 let (project, within) = match self.inside(&spot) {
@@ -935,7 +935,7 @@ impl Projects {
                 };
                 let made = changed.worktree_in(project, within, None, &mut draw)?;
                 let last = || changed.project_of(project).and_then(Project::last_used);
-                Some(made.or_else(last).map_or(Made::Project(project), Made::Worktree))
+                Some(made.or_else(last).map_or(Made::Project(project), |it| self.made(it)))
             },
             Change::Pull { spot, project, name } => {
                 let (project, within) = match self.inside(&spot) {
@@ -944,7 +944,7 @@ impl Projects {
                 };
                 let made = changed.worktree_in(project, within, Some(name), &mut draw)?;
                 let held = changed.project_of(project).ok_or_else(|| unknown("project", project))?;
-                Some(Made::Worktree(made.ok_or_else(|| held.unplaced(&spot))?))
+                Some(self.made(made.ok_or_else(|| held.unplaced(&spot))?))
             },
             Change::Join { spot } => {
                 let (project, within) = match self.inside(&spot) {
@@ -953,9 +953,7 @@ impl Projects {
                 };
                 let joined = changed.worktree_in(project, within, None, &mut draw)?;
                 let held = changed.project_of(project).ok_or_else(|| unknown("project", project))?;
-                let joined = joined.ok_or_else(|| held.unplaced(&spot))?;
-                let found = self.find(joined).is_some();
-                Some(if found { Made::Found(joined) } else { Made::Worktree(joined) })
+                Some(self.made(joined.ok_or_else(|| held.unplaced(&spot))?))
             },
             Change::Listed { root, subfolders, seen } => {
                 changed.worktrees_listed(&root, &subfolders, &seen, &mut draw)?;
@@ -1335,6 +1333,13 @@ impl Projects {
         self.worktrees().find(|(_, it)| it.id == worktree)
     }
 
+    fn made(&self, worktree: WorktreeId) -> Made {
+        match self.find(worktree) {
+            Some(_) => Made::Found(worktree),
+            None => Made::Worktree(worktree),
+        }
+    }
+
     #[must_use]
     pub fn home(&self, terminal: ViewId, spot: &Spot) -> Home {
         let Some((from, _)) = self.holding_terminal(terminal) else {
@@ -1674,10 +1679,10 @@ mod tests {
         let root = projects.project_of(project).unwrap().dir().as_str().to_owned();
         let below = at.strip_prefix(&root).and_then(|it| it.strip_prefix('/')).unwrap();
         let added = add_in(project, spot_at(&root, below));
-        let Made::Worktree(made) = add(projects, added) else {
-            panic!("an added worktree is made");
+        let (Made::Worktree(it) | Made::Found(it)) = add(projects, added) else {
+            panic!("a worktree added is made or found");
         };
-        made
+        it
     }
 
     #[test]
@@ -1795,8 +1800,12 @@ mod tests {
         let folders: Vec<Dir> = projects.worktree_folders().collect();
         assert_eq!(folders, ["/w/luneta/feat", "/w/luneta/main"].map(dir));
         let main = at(&projects, "/w/luneta/main").unwrap();
-        assert_eq!(worktree(&mut projects, luneta, "/w/luneta/main"), main, "one per folder");
-        let fix = worktree(&mut projects, luneta, "/w/luneta/fix");
+        let (_, found) = change(&projects, add_in(luneta, spot_at("/w/luneta", "main"))).unwrap();
+        assert_eq!(found, Some(Made::Found(main)), "one per folder");
+        let Made::Worktree(fix) = add(&mut projects, add_in(luneta, spot_at("/w/luneta", "fix")))
+        else {
+            panic!("a worktree git lists that has no row yet is made");
+        };
         assert_eq!(at(&projects, "/w/luneta/fix"), Some(fix));
         assert_eq!(projects.all()[0].worktrees().count(), 3);
         let root = add_in(luneta, clone_of("/w/luneta", &[]));
@@ -1825,7 +1834,7 @@ mod tests {
         assert_eq!(held.folder(own), Some(dir("/w/vault")));
         let below = add_in(vault, folder("/w/vault/notes"));
         let (same, found) = change(&projects, below).unwrap();
-        assert_eq!((same == projects, found), (true, Some(Made::Worktree(own))));
+        assert_eq!((same == projects, found), (true, Some(Made::Found(own))));
         let outside = add_in(vault, folder("/w/elo"));
         assert!(change(&projects, outside).unwrap_err().contains("is not in /w/vault"));
         let forget = change(&projects, Change::ForgetWorktree { worktree: own });
@@ -1843,12 +1852,12 @@ mod tests {
         let feat = at(&projects, "/w/luneta/feat").unwrap();
         let main = at(&projects, "/w/luneta/main").unwrap();
         let (same, found) = change(&projects, start("/w/luneta")).unwrap();
-        let first = (true, Some(Made::Worktree(feat)));
+        let first = (true, Some(Made::Found(feat)));
         assert_eq!((same == projects, found), first, "none used: the first");
         let went = Change::Went { worktree: main, at: Used::of_millis(5) };
         projects = change(&projects, went).unwrap().0;
         let (same, found) = change(&projects, start("/w/luneta")).unwrap();
-        assert_eq!((same == projects, found), (true, Some(Made::Worktree(main))));
+        assert_eq!((same == projects, found), (true, Some(Made::Found(main))));
     }
 
     #[test]
@@ -1858,7 +1867,7 @@ mod tests {
         let main = at(&projects, "/w/luneta/main").unwrap();
         let start = |root: &str, at: &str| Change::Start { spot: spot_at(root, at), name: None };
         let (same, found) = change(&projects, start("/w/luneta", "main")).unwrap();
-        assert_eq!((same == projects, found), (true, Some(Made::Worktree(main))));
+        assert_eq!((same == projects, found), (true, Some(Made::Found(main))));
         let feat = add(&mut projects, start("/w/luneta", "feat"));
         assert_eq!(Some(feat), at(&projects, "/w/luneta/feat").map(Made::Worktree));
         assert_eq!(projects.all().len(), 1);
@@ -1879,7 +1888,7 @@ mod tests {
             panic!("a start in a folder of no project makes its project");
         };
         let inside = Change::Start { spot: folder("/w/vault/notes"), name: None };
-        assert_eq!(change(&projects, inside).unwrap().1, Some(Made::Worktree(notes)));
+        assert_eq!(change(&projects, inside).unwrap().1, Some(Made::Found(notes)));
         let refused = refused(&projects, Change::Start { spot: folder("/w"), name: None });
         let Err(Refused::Nests(said)) = refused else {
             panic!("a start in a folder that holds a project is refused: {refused:?}");

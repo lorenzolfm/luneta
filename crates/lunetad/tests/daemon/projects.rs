@@ -380,15 +380,15 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
         projects.flat_map(folders).collect::<Vec<_>>()
     };
 
-    let Some(Made::Worktree(feat)) = start("luneta/feat") else {
+    let Some(Made::Found(feat)) = start("luneta/feat") else {
         panic!("a start in a worktree of a project far keeps goes to it there");
     };
     let listed = folders();
     let main = listed.iter().find(|(_, it)| *it == text(&real.join("luneta/main"))).unwrap().0;
     let want = [(feat, text(&real.join("luneta/feat"))), (main, text(&real.join("luneta/main")))];
     assert_eq!(listed, want, "one for each worktree of project {luneta}");
-    assert_eq!(start("luneta/feat"), Some(Made::Worktree(feat)), "the same one again");
-    assert_eq!(start("luneta"), Some(Made::Worktree(feat)), "its clone's root opens the first");
+    assert_eq!(start("luneta/feat"), Some(Made::Found(feat)), "the same one again");
+    assert_eq!(start("luneta"), Some(Made::Found(feat)), "its clone's root opens the first");
     worktree_added(&real.join("luneta"), "pr-7");
 
     let pull = Pull {
@@ -397,8 +397,8 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
         project: "cloned".to_owned(),
         name: "pr-7".to_owned(),
     };
-    let Some(Made::Worktree(pr)) = asked(Change::Pull(pull)) else {
-        panic!("a pull makes a worktree");
+    let Some(Made::Worktree(pr) | Made::Found(pr)) = asked(Change::Pull(pull)) else {
+        panic!("a pull goes to the worktree, made by it or by the sweep");
     };
     assert!(folders().contains(&(pr, text(&real.join("luneta/pr-7")))), "in project luneta");
 

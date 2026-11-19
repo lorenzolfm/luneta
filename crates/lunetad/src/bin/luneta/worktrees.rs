@@ -149,8 +149,10 @@ fn zero(made: &str) -> String {
 
 fn worktree_made(made: Option<Made>) -> Result<WorktreeId, String> {
     match made {
-        Some(Made::Worktree(made)) => WorktreeId::of(made).ok_or_else(|| zero("worktree")),
-        made => Err(format!("lunetad made no worktree but {made:?}")),
+        Some(Made::Worktree(it) | Made::Found(it)) => {
+            WorktreeId::of(it).ok_or_else(|| zero("worktree"))
+        },
+        made => Err(format!("lunetad found no worktree but {made:?}")),
     }
 }
 

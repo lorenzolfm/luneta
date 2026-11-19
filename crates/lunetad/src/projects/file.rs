@@ -1882,8 +1882,8 @@ mod tests {
         let made = store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
         let Some(Made::Project(project)) = made else { panic!("/a is made") };
         let add = add_in(project, alone("/a/b"));
-        let Some(Made::Worktree(worktree)) = store.change(add).unwrap() else {
-            panic!("/a/b is made");
+        let Some(Made::Found(worktree)) = store.change(add).unwrap() else {
+            panic!("/a/b is in /a's own worktree");
         };
         let terminal = TerminalViewId::new(ViewId::of(7).unwrap());
         let terminal = Terminal::new(terminal, dir("/a"), Runs::Shell);
@@ -1994,8 +1994,8 @@ mod tests {
         let project = store.change(Change::AddProject { spot: alone("/a"), name: None });
         let Some(Made::Project(project)) = project.unwrap() else { panic!("/a is made") };
         let add = add_in(project, alone("/a/b"));
-        let Some(Made::Worktree(worktree)) = store.change(add).unwrap() else {
-            panic!("/a/b is made");
+        let Some(Made::Found(worktree)) = store.change(add).unwrap() else {
+            panic!("/a/b is in /a's own worktree");
         };
         let size = super::super::Size::of(80, 24).unwrap();
         let [one, two] = [store.fresh().unwrap(), ViewId::of(u64::MAX).unwrap()];
