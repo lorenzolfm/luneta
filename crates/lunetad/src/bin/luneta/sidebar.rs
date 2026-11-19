@@ -371,6 +371,14 @@ impl Spot {
             Spot::Local(place) | Spot::Remote(_, place) => Some(place),
         }
     }
+
+    fn placed(self) -> Option<(Machine, Place)> {
+        match self {
+            Spot::Machine(_) => None,
+            Spot::Local(place) => Some((Machine::Local, place)),
+            Spot::Remote(destination, place) => Some((Machine::Remote(destination), place)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3799,17 +3807,16 @@ impl Sidebar {
         let Some(spot) = self.cursor.clone() else {
             return Asked::Nothing;
         };
-        let on = spot.machine();
-        match spot {
-            Spot::Machine(_) => {
-                self.toggle();
-                Asked::Nothing
-            },
-            Spot::Local(place) | Spot::Remote(_, place) => {
-                self.close_search();
-                Asked::Go { on, place }
-            },
-        }
+        let Some((on, place)) = spot.placed() else {
+            self.toggle();
+            return Asked::Nothing;
+        };
+        self.go_to(on, place)
+    }
+
+    fn go_to(&mut self, on: Machine, place: Place) -> Asked {
+        self.close_search();
+        Asked::Go { on, place }
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
@@ -3917,36 +3924,30 @@ impl Sidebar {
             return Asked::Take;
         };
         let row = &self.rows[index];
-        let spot = row.spot();
-        let typed = matches!(self.search, Some(Search::Typed { .. }));
-        if matches!(row, Row::Machine { .. }) {
-            if !typed {
-                self.cursor = Some(spot);
-                self.toggle();
-            }
-            return Asked::Take;
-        }
+        let (spot, stops) = (row.spot(), row.stops());
         let triangle = match row {
             Row::Project { .. } => Some(2),
             Row::Worktree { .. } => Some(3),
             Row::Machine { .. } | Row::Pane { .. } => None,
         };
-        if let Some(triangle) = triangle {
-            let on_triangle = at.x.saturating_sub(area.x) <= triangle;
-            if on_triangle && !typed {
+        let typed = matches!(self.search, Some(Search::Typed { .. }));
+        let Some((on, place)) = spot.clone().placed() else {
+            if !typed {
                 self.cursor = Some(spot);
                 self.toggle();
-                return Asked::Take;
             }
-            if !row.stops() {
-                return Asked::Take;
-            }
+            return Asked::Take;
+        };
+        let on_triangle = triangle.is_some_and(|triangle| at.x.saturating_sub(area.x) <= triangle);
+        if on_triangle && !typed {
+            self.cursor = Some(spot);
+            self.toggle();
+            return Asked::Take;
         }
-        self.cursor = Some(spot);
-        match self.go() {
-            Asked::Nothing => Asked::Take,
-            asked => asked,
+        if stops {
+            self.cursor = Some(spot);
         }
+        self.go_to(on, place)
     }
 
     fn line_of(&self, y: u16, area: Rect) -> Option<usize> {
@@ -5667,6 +5668,31 @@ mod tests {
     }
 
     #[test]
+    fn a_click_on_a_worktree_with_views_goes_to_it_and_on_its_triangle_folds_it() {
+        let mut sidebar = fresh();
+        let fix = worktree_of(31, "fix", "/w/fix", &[1, 2]);
+        let main = worktree_of(32, "main", "/w/main", &[3]);
+        let projects = vec![a_project(7, "luneta", vec![fix, main])];
+        sidebar.heard(Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) });
+        let area = Rect::new(0, 0, 32, 12);
+        let lines = screen(&mut sidebar, false, area.width, area.height);
+        let fix = ["  ▾ fix", " ╭   \u{e795} w/fix", " ╰   \u{e795} w/fix"];
+        assert_eq!(lines[5..10], [&fix[..], &["  ▾ main", "     \u{e795} w/main"]].concat());
+        let project = project_row("luneta", 7);
+        let worktree = |id| {
+            let worktree = WorktreeId::of(id).unwrap();
+            go_here(Place::Worktree(WorktreePlace { project: project.clone(), worktree }))
+        };
+        assert_eq!(click(&mut sidebar, 10, 8, area), worktree(32));
+        assert_eq!(click(&mut sidebar, 10, 5, area), worktree(31));
+        assert_eq!(click(&mut sidebar, 2, 8, area), Asked::Take);
+        let main = Fold::Worktree(&Machine::Local, WorktreeId::of(32).unwrap());
+        assert!(sidebar.folds.contains(main));
+        screen(&mut sidebar, false, area.width, area.height);
+        assert_eq!(click(&mut sidebar, 10, 8, area), worktree(32));
+    }
+
+    #[test]
     fn a_worktree_s_row_deletes_the_worktree_with_its_panes() {
         let mut sidebar = fresh();
         let fix = worktree_of(31, "fix", "/w/fix", &[1, 2]);
@@ -6270,11 +6296,11 @@ mod tests {
         screen(&mut sidebar, false, area.width, area.height);
         let pane = pane_of("older", 10, 2);
         assert_eq!(click(&mut sidebar, 10, 8, area), go_here(pane));
-        assert_eq!(click(&mut sidebar, 10, 4, area), Asked::Take);
+        let older = Place::Session(listed("older", 10));
+        assert_eq!(click(&mut sidebar, 10, 4, area), go_here(older.clone()));
         assert!(!folded(&sidebar, "older"));
         assert_eq!(click(&mut sidebar, 1, 4, area), Asked::Take);
         assert!(folded(&sidebar, "older"));
-        let older = Place::Session(listed("older", 10));
         assert_eq!(click(&mut sidebar, 10, 4, area), go_here(older));
     }
 
@@ -6291,7 +6317,8 @@ mod tests {
         assert!(sidebar.search.is_some());
         type_in(&mut sidebar, "older");
         screen(&mut sidebar, true, area.width, area.height);
-        assert_eq!(click(&mut sidebar, 1, 4, area), Asked::Take);
+        let older = go_here(Place::Session(listed("older", 10)));
+        assert_eq!(click(&mut sidebar, 1, 4, area), older, "a typed search folds nothing");
         assert!(!folded(&sidebar, "older"));
     }
 

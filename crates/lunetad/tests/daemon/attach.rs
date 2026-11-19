@@ -263,6 +263,80 @@ fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_worktree_beside_but_not_past_the_proj
 }
 
 #[test]
+fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view_s_row_to_it() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    let first = eventually("luneta shows work", || shown(&owned, &dir.path)).id;
+    window.send(SPLIT);
+    let split = eventually("two frames are drawn beside each other", || seam(&window));
+    let side = |window: &Window| if window.cursor().1 >= split { "right" } else { "left" };
+    eventually("the pane opened has the keys", || (side(&window) == "right").then_some(()));
+    let project = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().id;
+    let root = dir.path.parent().unwrap();
+    worktree_added(root, "docs");
+    let second = worktree(&owned.host, project, &root.join("docs"));
+    eventually("the tab bar lists docs", || window.shows("docs").then_some(()));
+    let used = |id: u64| used(&owned, id);
+    window.send(RIGHT);
+    eventually("Ctrl l goes to docs", || (used(second) > used(first)).then_some(()));
+    let main = sidebar_row(&window, "▾ main");
+    let back_on = |window: &Window, to: &str| {
+        let back = used(first) > used(second) && seam(window) == Some(split);
+        (back && side(window) == to).then_some(())
+    };
+    click(&mut window, main);
+    eventually("a click on main's row goes back to the pane it left", || back_on(&window, "right"));
+    let left = sidebar_row(&window, "╭");
+    assert!(left > main, "main's first pane sits below its row: {:?}", window.screen());
+    click(&mut window, left);
+    eventually("a click on a pane's row focuses it", || (side(&window) == "left").then_some(()));
+    let docs = sidebar_row(&window, "▾ docs");
+    click(&mut window, docs);
+    eventually("a click on docs's row goes there", || (used(second) > used(first)).then_some(()));
+    click(&mut window, main);
+    eventually("main's row goes to the pane focused last", || back_on(&window, "left"));
+}
+
+#[test]
+fn a_click_on_a_project_s_row_goes_to_its_worktree_used_last() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    let main = eventually("luneta shows work", || shown(&owned, &dir.path)).id;
+    let id_of = |name: &str| projects_of(&owned).into_iter().find(|it| it.name == name).unwrap().id;
+    let root = dir.path.parent().unwrap();
+    worktree_added(root, "docs");
+    let docs = worktree(&owned.host, id_of("work"), &root.join("docs"));
+    let far = work_in(&owned, "other");
+    let other = worktree(&owned.host, id_of("other"), &far.path);
+    let used = |id: u64| used(&owned, id);
+    window.send(RIGHT);
+    eventually("Ctrl l goes to docs", || (used(docs) > used(main)).then_some(()));
+    let row = sidebar_row(&window, "▾ other");
+    click(&mut window, row);
+    eventually("a click on other's row goes there", || (used(other) > used(docs)).then_some(()));
+    let row = sidebar_row(&window, "▾ work");
+    click(&mut window, row);
+    eventually("a click on work's row goes to docs, the worktree used last there", || {
+        (used(docs) > used(other)).then_some(())
+    });
+}
+
+fn sidebar_row(window: &Window, text: &str) -> usize {
+    eventually(&format!("the sidebar shows {text:?}"), || {
+        window.screen().iter().position(|line| {
+            let sidebar: String = line.chars().take_while(|it| *it != '│').collect();
+            sidebar.contains(text)
+        })
+    })
+}
+
+fn click(window: &mut Window, row: usize) {
+    window.send(&[mouse(0, (row, 10), 'M'), mouse(0, (row, 10), 'm')].concat());
+}
+
+#[test]
 fn a_worktree_s_last_pane_closed_takes_luneta_to_the_one_used_before_with_no_note() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");

@@ -298,7 +298,7 @@ fn holds(dir: &str, folder: &Path) -> bool {
     folder.starts_with(dir)
 }
 
-fn last_used(project: &Project) -> Option<WorktreeId> {
+pub fn last_used(project: &Project) -> Option<WorktreeId> {
     let mut last: Option<&Worktree> = None;
     for worktree in project.worktrees() {
         if last.is_none_or(|last| worktree.used > last.used) {

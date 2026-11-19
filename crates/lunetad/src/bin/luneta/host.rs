@@ -2163,9 +2163,9 @@ impl App {
             if project.worktrees().iter().any(|it| shows(it.id)) {
                 return Ok(());
             }
-            let first = project.worktrees().first();
-            let first = first.ok_or_else(|| format!("{session} holds no worktree"))?;
-            self.go_worktree(machine, first.id, None);
+            let last = worktrees::last_used(project);
+            let last = last.ok_or_else(|| format!("{session} holds no worktree"))?;
+            self.go_worktree(machine, last, None);
             return Ok(());
         };
         let pane = OwnPane::new(key, pane).ok_or("a view of id 0")?;
