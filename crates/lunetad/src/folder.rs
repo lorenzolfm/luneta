@@ -24,11 +24,14 @@ impl fmt::Display for Unfound {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             #[cfg(not(target_os = "macos"))]
-            Unfound::Unset => f.write_str("neither XDG_RUNTIME_DIR nor TMPDIR is set"),
+            Unfound::Unset => {
+                f.write_str("neither XDG_RUNTIME_DIR nor TMPDIR is set to an absolute path")
+            },
             #[cfg(target_os = "macos")]
             Unfound::Unnamed(error) => write!(
                 f,
-                "XDG_RUNTIME_DIR is not set, and macOS names no temporary folder of yours: {error}"
+                "XDG_RUNTIME_DIR is not set to an absolute path, and macOS names no temporary \
+                 folder of yours: {error}"
             ),
         }
     }
@@ -51,22 +54,18 @@ pub fn find_in(environ: &[OsString]) -> Result<PathBuf, Unfound> {
 }
 
 fn find_by(var: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, Unfound> {
-    let set = |name| var(name).filter(|root| !root.is_empty());
+    let set = |name| var(name).filter(|root| Path::new(root).is_absolute());
+    #[cfg(not(target_os = "macos"))]
+    let outside_runtime = || set("TMPDIR").ok_or(Unfound::Unset);
+    #[cfg(target_os = "macos")]
+    let outside_runtime = || user_temp().map_err(Unfound::Unnamed);
     let root = match set("XDG_RUNTIME_DIR") {
         Some(root) => root,
-        None => outside_runtime(|| set("TMPDIR"))?,
+        None => outside_runtime()?,
     };
-    Ok(PathBuf::from(root).join("luneta"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn outside_runtime(temp: impl FnOnce() -> Option<OsString>) -> Result<OsString, Unfound> {
-    temp().ok_or(Unfound::Unset)
-}
-
-#[cfg(target_os = "macos")]
-fn outside_runtime(_shell_s: impl FnOnce() -> Option<OsString>) -> Result<OsString, Unfound> {
-    user_temp().map_err(Unfound::Unnamed)
+    let folder = PathBuf::from(root).join("luneta");
+    assert!(folder.is_absolute(), "lunetad's folder is absolute: {}", folder.display());
+    Ok(folder)
 }
 
 #[cfg(target_os = "macos")]
@@ -80,16 +79,22 @@ fn user_temp() -> Result<OsString, io::Error> {
     let mut buffer = [0_u8; PATH_BYTES_MAX];
     #[expect(
         unsafe_code,
-        reason = "confstr is C, which libc only declares. It writes no more than the \
-                  `buffer.len()` bytes it is given"
+        reason = "errno and confstr are C, which libc only declares. confstr writes no more \
+                  than the `buffer.len()` bytes it is given"
     )]
     let needed = unsafe {
+        *libc::__error() = 0;
         libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buffer.as_mut_ptr().cast(), buffer.len())
     };
     if needed == 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(0) {
+            return Err(io::Error::new(ErrorKind::NotFound, "confstr has no DARWIN_USER_TEMP_DIR"));
+        }
+        return Err(error);
     }
     assert!(needed <= buffer.len(), "macOS names a folder longer than PATH_MAX");
+    assert_eq!(buffer[needed - 1], 0, "confstr ends what it names with a NUL");
     let root = &buffer[..needed - 1];
     assert!(root.starts_with(b"/"), "macOS names a temporary folder that is not absolute");
     assert!(!root.contains(&0), "macOS names a temporary folder with a NUL in it");
@@ -183,4 +188,27 @@ fn check(folder: &Path) -> Result<(), Refusal> {
         return Err(Refusal::Open(folder.to_owned()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn environ(entries: &[&str]) -> Vec<OsString> {
+        entries.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn a_relative_folder_in_the_variables_is_no_folder() {
+        let relative = find_in(&environ(&["XDG_RUNTIME_DIR=run/user/1000", "TMPDIR=tmp"]));
+        let past_relative = find_in(&environ(&["XDG_RUNTIME_DIR=run", "TMPDIR=/tmp/a"]));
+        if cfg!(target_os = "macos") {
+            let user_s = find_in(&[]).unwrap();
+            assert_eq!(relative.unwrap(), user_s);
+            assert_eq!(past_relative.unwrap(), user_s);
+        } else {
+            assert!(relative.is_err(), "{relative:?}");
+            assert_eq!(past_relative.unwrap(), Path::new("/tmp/a/luneta"));
+        }
+    }
 }
