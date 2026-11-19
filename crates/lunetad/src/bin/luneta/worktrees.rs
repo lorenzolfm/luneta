@@ -560,12 +560,24 @@ impl Landed {
 
 pub fn worked_in(path: &Path, folder: &Path, argv: Vec<String>) -> Result<Landed, String> {
     let folder = folder.to_str().ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
-    let change = Change::Join(Join { folder: folder.to_owned(), argv });
-    let joined = changed_on(path, None, change).and_then(landed);
-    joined.map_err(|unmade| match unmade {
+    joined(path, folder, argv).map_err(|unmade| match unmade {
         Unmade::Nests(why) | Unmade::Failed(why) => why,
         Unmade::InDoubt(why) => format!("{why}, so lunetad may keep {folder} as a worktree"),
     })
+}
+
+pub fn joined_as(
+    path: &Path,
+    folder: &Directory,
+    tab: &str,
+    argv: Vec<String>,
+) -> Result<Landed, String> {
+    joined(path, folder.as_str(), argv).map_err(|unmade| unmade.said_unopened(folder, tab))
+}
+
+fn joined(path: &Path, folder: &str, argv: Vec<String>) -> Result<Landed, Unmade> {
+    let change = Change::Join(Join { folder: folder.to_owned(), argv });
+    changed_on(path, None, change).and_then(landed)
 }
 
 pub fn dirs(path: &Path) -> Result<Vec<String>, String> {

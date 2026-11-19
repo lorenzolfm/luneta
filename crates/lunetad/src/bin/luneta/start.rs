@@ -164,9 +164,10 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
         What::Branch(branch) => {
             let repo = utf8(&cwd)?;
             links::held_by_no_folder(repo, &worktrees::plain(path)?)?;
-            let folder = worktrees::real(&links::made(repo, &Of::Branch(branch))?)?;
-            let worktree = worktrees::worked_in(path, &folder, Vec::new())?.worktree();
-            Ok(Started::Worktree { worktree, folder, left: Left::Done })
+            let folder = worktrees::real(&links::made(repo, &Of::Branch(branch.clone()))?)?;
+            let at = Directory::parse(utf8(&folder)?.to_owned())?;
+            let landed = worktrees::joined_as(path, &at, branch.as_str(), Vec::new())?;
+            Ok(Started::Worktree { worktree: landed.worktree(), folder, left: Left::Done })
         },
         What::Issue(number) => linked(path, &cwd, &numbered(number, &cwd)?),
         What::Link(link) => linked(path, &cwd, &link),
@@ -191,7 +192,8 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
         },
         (Kind::Issue, Some(_)) | (Kind::Pull, _) => Vec::new(),
     };
-    let landed = worktrees::worked_in(path, &folder, agent.clone())?;
+    let at = Directory::parse(ready.folder.clone())?;
+    let landed = worktrees::joined_as(path, &at, &link.tab(), agent.clone())?;
     let worktree = landed.worktree();
     let left = match (link.kind(), landed, off) {
         (Kind::Pull, _, _)
