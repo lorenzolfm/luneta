@@ -40,6 +40,8 @@ pub const OPEN: char = 'o';
 
 pub const SKILLS: char = 'c';
 
+pub const QUIT: char = 'q';
+
 pub const MENU_GROUPS: [(char, &str); 4] =
     [(SKILLS, "Skills"), ('n', "New"), ('d', "Delete"), ('b', "Brief")];
 
@@ -77,6 +79,7 @@ pub enum Reach {
 pub enum Key {
     Menu(&'static [char]),
     Row(&'static [char]),
+    RowAndMenu(&'static [char]),
     Pasted(char),
     Chord(Chord),
 }
@@ -135,6 +138,7 @@ actions! {
     OpenPull,
     OpenWorktree,
     YankPull,
+    Quit,
     PastedWorktree,
     PastedReview,
     PastedTackle,
@@ -294,6 +298,10 @@ impl Action {
             Action::YankPull => {
                 spec("PR link", &["copy", "url"], Key::Row(&[YANK, YANK_PULL]), CHECKED_OUT, Any)
             },
+            Action::Quit => {
+                let quit = Key::RowAndMenu(&[QUIT]);
+                spec("Quit luneta", &["detach", "exit", "leave"], quit, EVERY, Any)
+            },
             Action::PastedWorktree => {
                 spec("worktree", &["checkout", "branch"], Key::Pasted('w'), EVERY, Any)
             },
@@ -367,14 +375,14 @@ impl Action {
 
     pub fn menu() -> impl Iterator<Item = (Action, &'static [char])> {
         Action::ALL.into_iter().filter_map(|action| match action.key() {
-            Key::Menu(path) => Some((action, path)),
+            Key::Menu(path) | Key::RowAndMenu(path) => Some((action, path)),
             Key::Row(_) | Key::Pasted(_) | Key::Chord(_) => None,
         })
     }
 
     pub fn row() -> impl Iterator<Item = (Action, &'static [char])> {
         Action::ALL.into_iter().filter_map(|action| match action.key() {
-            Key::Row(path) => Some((action, path)),
+            Key::Row(path) | Key::RowAndMenu(path) => Some((action, path)),
             Key::Menu(_) | Key::Pasted(_) | Key::Chord(_) => None,
         })
     }
@@ -382,14 +390,14 @@ impl Action {
     pub fn pasted() -> impl Iterator<Item = (Action, char)> {
         Action::ALL.into_iter().filter_map(|action| match action.key() {
             Key::Pasted(key) => Some((action, key)),
-            Key::Menu(_) | Key::Row(_) | Key::Chord(_) => None,
+            Key::Menu(_) | Key::Row(_) | Key::RowAndMenu(_) | Key::Chord(_) => None,
         })
     }
 
     pub fn anywhere() -> impl Iterator<Item = (Action, Chord)> {
         Action::ALL.into_iter().filter_map(|action| match action.key() {
             Key::Chord(chord) => Some((action, chord)),
-            Key::Menu(_) | Key::Row(_) | Key::Pasted(_) => None,
+            Key::Menu(_) | Key::Row(_) | Key::RowAndMenu(_) | Key::Pasted(_) => None,
         })
     }
 }
@@ -429,6 +437,10 @@ const _: () = {
             Key::Row(path) => {
                 let row = "a sidebar path is a key, or a named group's key then one of its own";
                 assert!(grouped(path, &ROW_GROUPS), "{}", row);
+            },
+            Key::RowAndMenu(path) => {
+                let both = "a path of the sidebar and the menu is a key of no group in either";
+                assert!(grouped(path, &ROW_GROUPS) && grouped(path, &MENU_GROUPS), "{}", both);
             },
             Key::Pasted(_) | Key::Chord(_) => {},
         }

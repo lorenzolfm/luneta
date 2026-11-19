@@ -659,6 +659,7 @@ enum Offer<'t> {
     Brief(brief::Scope),
     Ask,
     FileIssue(Repository),
+    Quit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -767,6 +768,7 @@ impl Target {
             (Action::BriefHighlighted, _) => Offer::Brief(brief::Scope::Highlighted),
             (Action::Ask, _) => Offer::Ask,
             (Action::FileIssue, _) => Offer::FileIssue(self.repository()?),
+            (Action::Quit, _) => Offer::Quit,
             _ => return None,
         };
         Some(offer)
@@ -1018,6 +1020,7 @@ pub enum Done {
     Welcome { on: Machine, session: Listed, pane: PaneKey },
     Project { on: Machine, folder: String, name: Option<projects::Name> },
     Rename(Machine, Rename),
+    Quit,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1339,6 +1342,7 @@ impl Menu {
             Offer::Brief(scope) => Did::Closed(Done::Brief(target.brief(scope))),
             Offer::Ask => Did::Closed(Done::Ask(target.clone())),
             Offer::FileIssue(repository) => Did::Closed(Done::Issue(repository)),
+            Offer::Quit => Did::Closed(Done::Quit),
         }
     }
 
@@ -2733,6 +2737,7 @@ mod tests {
                 " r  Rename the view",
                 " d  Delete ▸",
                 " b  Brief ▸",
+                " q  Quit luneta",
                 " <ESC> - Close",
             ]
         );
@@ -2763,6 +2768,7 @@ mod tests {
                 " v  Reorder",
                 " o  Open ▸",
                 " y  Yank ▸",
+                " q  Quit luneta",
                 " a  Ask",
                 " i  File issue",
                 " c  Skills ▸",
@@ -2772,14 +2778,14 @@ mod tests {
                 " b  Brief ▸",
             ]
         );
-        assert_eq!(text(&legend(Some(&project_on(Machine::Local)), 31, 15).0)[6..], [
+        assert_eq!(text(&legend(Some(&project_on(Machine::Local)), 31, 15).0)[7..], [
             " a  Ask",
             " n  New ▸",
             " r  Rename the project",
             " d  Delete ▸",
             " b  Brief ▸",
         ]);
-        assert_eq!(text(&legend(None, 31, 15).0).len(), 6);
+        assert_eq!(text(&legend(None, 31, 15).0).len(), 7);
         assert_eq!(Top::of('m'), Some(Top::Menu));
         assert_eq!(Top::of('/'), Some(Top::Command(Action::Search)));
         assert_eq!(Top::of('u'), Some(Top::Command(Action::Unread)));
@@ -3171,6 +3177,22 @@ mod tests {
     }
 
     #[test]
+    fn q_quits_luneta_from_the_menu_of_any_row_on_any_machine() {
+        let vps = Machine::Remote("me@vps".parse().unwrap());
+        let rows = [
+            own_pane(),
+            Target::Pane(vps.clone(), own_row()),
+            worktree_on(vps),
+            project_on(Machine::Local),
+            local_header(),
+            remote_header(),
+        ];
+        for row in rows {
+            assert_eq!(closed(opened(row.clone(), Some('q'))), Done::Quit, "{row:?}");
+        }
+    }
+
+    #[test]
     fn n_p_makes_a_project_of_the_row_s_folder_or_one_typed() {
         let typed = |menu: Menu, text: &str| {
             text.chars().fold(menu, |menu, c| stays(menu.key(&char(c))).0)
@@ -3328,6 +3350,7 @@ mod tests {
             " r  Rename the view",
             " d  Delete ▸",
             " b  Brief ▸",
+            " q  Quit luneta",
             " <ESC> - Close",
         ]);
         let (_, wants) = stays(stays(opened(pane.clone(), Some('c'))).0.key(&char('t')));
@@ -3615,6 +3638,7 @@ mod tests {
             " r  Rename the project",
             " d  Delete ▸",
             " b  Brief ▸",
+            " q  Quit luneta",
             " <ESC> - Close",
         ]);
         assert_eq!(at(project_on(Machine::Local), Some('d')), [
@@ -3634,6 +3658,7 @@ mod tests {
             " r  Rename the worktree",
             " d  Delete ▸",
             " b  Brief ▸",
+            " q  Quit luneta",
             " <ESC> - Close",
         ]);
         assert_eq!(at(worktree_on(Machine::Local), Some('d')), [
@@ -3651,6 +3676,7 @@ mod tests {
             " n  New ▸",
             " d  Delete ▸",
             " b  Brief ▸",
+            " q  Quit luneta",
             " <ESC> - Close",
         ]);
         assert_eq!(at(local_header(), Some('n')), [
@@ -3982,7 +4008,6 @@ mod tests {
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
         assert_eq!(floated(drawing(&menu), 50, 12), [
             "z".repeat(50),
-            "z".repeat(50),
             format!("{}┌─ luneta ─ luneta/main ─┐", "z".repeat(24)),
             boxed(" /  Search skills"),
             boxed(" a  Ask"),
@@ -3991,6 +4016,7 @@ mod tests {
             boxed(" n  New ▸"),
             boxed(" d  Delete ▸"),
             boxed(" b  Brief ▸"),
+            boxed(" q  Quit luneta"),
             boxed(" <ESC> - Close"),
             format!("{}└{}┘", "z".repeat(24), "─".repeat(24)),
         ]);

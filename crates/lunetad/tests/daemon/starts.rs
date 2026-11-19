@@ -450,6 +450,33 @@ fn the_log_says_luneta_ended_by_a_signal() {
 }
 
 #[test]
+fn q_in_the_sidebar_quits_luneta_and_its_terminal_runs_on_for_the_next_one() {
+    if !makes_shells() {
+        return;
+    }
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    let ids = |worktree: api::Worktree| -> Vec<u64> {
+        worktree.terminals.iter().map(|it| it.id).collect()
+    };
+    let terminals = ids(eventually("luneta shows work", || shown(&owned, &dir.path)));
+    window.send("printf 'be%s\\n' fore-42\r");
+    eventually("the terminal runs what was typed", || window.shows("before-42").then_some(()));
+    window.send("\x01q");
+    let status = window.luneta.ended_within(ENDS).expect("q ended luneta");
+    assert_eq!(status.code(), Some(0), "{}", window.screen().join("\n"));
+    let log = log_of(&owned.host);
+    assert!(log.contains("ends: asked to quit"), "{log}");
+    let kept = shown(&owned, &dir.path).expect("the worktree keeps its terminal");
+    assert_eq!(ids(kept), terminals);
+    let again = Window::open(&owned.host, &dir, &[]);
+    eventually("the next luneta shows the same terminal", || {
+        again.shows("before-42").then_some(())
+    });
+}
+
+#[test]
 fn a_daemon_that_goes_away_is_started_again_in_moments() {
     let mut owned = Owned::new();
     let dir = work_in(&owned, "work");

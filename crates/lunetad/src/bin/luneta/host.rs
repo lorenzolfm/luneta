@@ -129,6 +129,8 @@ const UNSHOWN_CURSOR: (CursorShape, bool) = (CursorShape::HollowBlock, false);
 
 const CLIENT: u64 = 1;
 
+const QUIT: &str = "asked to quit";
+
 pub enum Event {
     Input(Input),
     Answered(Answer),
@@ -376,6 +378,7 @@ struct App {
     naming: Naming,
     alerts: Alerts,
     desktop: Desktop,
+    quit: bool,
 }
 
 pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
@@ -613,6 +616,7 @@ fn run_in(
         naming: Naming::Idle,
         alerts: Alerts::new(focused),
         desktop,
+        quit: false,
     };
     app.watch();
     if let Some(root) = root {
@@ -716,10 +720,17 @@ fn run_loop(
             },
         }
         for _ in 1..FRAME_EVENTS_MAX {
+            if app.quit {
+                break;
+            }
             let Some(event) = inbox.try_next() else {
                 break;
             };
             app.handle(event, terminal)?;
+        }
+        if app.quit {
+            say_ends(QUIT);
+            return Ok(());
         }
         app.ticked(Instant::now());
         app.alerting(Instant::now());
@@ -1710,6 +1721,7 @@ impl App {
                     },
                 }
             },
+            Asked::Quit => self.quit = true,
         }
     }
 
