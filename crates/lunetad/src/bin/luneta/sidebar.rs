@@ -3153,7 +3153,13 @@ impl Sidebar {
             Pending::Nothing | Pending::Legend | Pending::AllKeys(_) => false,
             Pending::First { .. } | Pending::Group { .. } => true,
         };
-        self.menu.is_some() || self.search.is_some() || chord
+        let moving = match &self.moving {
+            Moving::Still | Moving::Swept(..) => false,
+            Moving::Selected(_) | Moving::Down { .. } | Moving::Lifted(_) | Moving::Sweeping(_) => {
+                true
+            },
+        };
+        self.menu.is_some() || self.search.is_some() || chord || moving
     }
 
     pub fn chose(&mut self, menu: u64, choice: Choice, now: SystemTime) -> Asked {
@@ -9304,6 +9310,29 @@ mod tests {
         sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), area);
         sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
+    }
+
+    #[test]
+    fn a_row_reordered_by_v_or_dragged_holds_the_keys_until_it_lands() {
+        let mut sidebar = searched();
+        sidebar.focus(Keys::Sidebar);
+        assert!(!sidebar.holds_input());
+        sidebar.cursor = Some(Spot::Local(Place::Session(listed("bipa", 10))));
+        type_in(&mut sidebar, "v");
+        assert!(sidebar.holds_input(), "v reorders");
+        sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000));
+        assert!(!sidebar.holds_input(), "Esc ends the reorder");
+
+        let area = Rect::new(0, 0, 32, 26);
+        let (listed, _) = drawn_rows(&mut sidebar);
+        let left = MouseButton::Left;
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 10), area);
+        assert!(sidebar.holds_input(), "the press");
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area);
+        assert_ne!(drawn_rows(&mut sidebar).0, listed, "a row is lifted");
+        assert!(sidebar.holds_input(), "the drag");
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
+        assert!(!sidebar.holds_input(), "the row landed");
     }
 
     #[test]
