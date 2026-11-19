@@ -149,6 +149,7 @@ pub enum Event {
     Reached { claude_folder: Option<PathBuf> },
     Daemon(Result<Host, String>),
     Notice(String),
+    Unclosed { on: Machine, act: Act, why: String },
     Moved { ticket: u64, kept: Option<Version> },
     Unmoved { on: Machine, ticket: u64, order: Reorder, unmoved: Unmoved },
     Copy(Clip),
@@ -947,6 +948,9 @@ impl App {
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Notice(notice) => self.sidebar.notify(notice),
+            Event::Unclosed { on, act, why } => {
+                self.sidebar.unclosed(&on, &act, format!("menu: not closed: {why}"));
+            },
             Event::Moved { ticket, kept } => self.sidebar.moved(ticket, kept),
             Event::Unmoved { on, ticket, order, unmoved } => {
                 let note = match unmoved {
@@ -2004,20 +2008,21 @@ impl App {
         match act {
             Act::Worktree { worktree, seen, .. } => {
                 let (worktree, seen) = (*worktree, seen.clone());
-                self.project_act_delete(on, Doomed::Worktree { worktree, seen });
+                self.project_act_delete(on, act, Doomed::Worktree { worktree, seen });
             },
             Act::Project { project, worktrees, seen, .. } => {
                 let (project, worktrees, seen) = (*project, worktrees.clone(), seen.clone());
-                self.project_act_delete(on, Doomed::Project { project, worktrees, seen });
+                self.project_act_delete(on, act, Doomed::Project { project, worktrees, seen });
             },
             Act::View { view: ViewKey::Terminal(key), .. } => {
-                self.project_act_delete(on, Doomed::View(*key));
+                self.project_act_delete(on, act, Doomed::View(*key));
             },
         }
     }
 
-    fn project_act_delete(&mut self, on: &Machine, doomed: Doomed) {
+    fn project_act_delete(&mut self, on: &Machine, act: &Act, doomed: Doomed) {
         let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
+        let act = act.clone();
         self.keep_change(thread::spawn(move || {
             let closed = caught(|| match &doomed {
                 Doomed::View(key) => worktrees::closed_view(&lunetad, &on, *key),
@@ -2029,7 +2034,7 @@ impl App {
                 },
             });
             if let Err(why) = closed {
-                let _ = events.send(Event::Notice(format!("menu: not closed: {why}")));
+                let _ = events.send(Event::Unclosed { on, act, why });
             }
         }));
     }
