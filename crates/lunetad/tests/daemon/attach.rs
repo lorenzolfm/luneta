@@ -83,7 +83,7 @@ fn luneta_shows_its_worktree_and_what_its_shell_prints() {
 }
 
 #[test]
-fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
+fn the_menu_opens_a_view_beside_the_one_luneta_shows_and_closes_it() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
@@ -101,12 +101,12 @@ fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
         (tops == 2).then_some(())
     });
     window.send(CLOSE);
-    let id = eventually("the pane luneta is on closes", || {
+    let id = eventually("the view luneta is on closes", || {
         let worktree = shown(&owned, &dir.path)?;
         (worktree.terminals.len() == 1).then_some(worktree.id)
     });
     window.send(CLOSE);
-    eventually("the worktree goes with its last pane, and luneta leaves it", || {
+    eventually("the worktree goes with its last view, and luneta leaves it", || {
         let projects = projects_of(&owned);
         let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
         let gone = worktrees.all(|it| it.id != id);
@@ -195,9 +195,9 @@ fn a_view_opened_from_the_sidebar_or_its_menu_takes_the_keys() {
         window.send(&format!("printf 'own-%s\\n' {count}\r"));
         let (row, column) = window.spot_of(&format!("own-{count}"));
         let printer = drawn.iter().filter(|top| top.0 < row && top.1 < column).max();
-        let printer = printer.expect("a drawn pane holds what was printed");
+        let printer = printer.expect("a drawn view holds what was printed");
         let new = !before.contains(printer);
-        assert!(new, "the new pane printed it at {row},{column}: {drawn:?} after {before:?}");
+        assert!(new, "the new view printed it at {row},{column}: {drawn:?} after {before:?}");
         before = drawn;
     }
     window.send(&format!("{SIDEBAR}nh"));
@@ -264,7 +264,7 @@ fn a_menu_opened_while_a_project_is_made_keeps_the_keys() {
 }
 
 #[test]
-fn ctrl_h_and_ctrl_l_move_between_panes_and_alt_equals_and_minus_resize_the_focused_one() {
+fn ctrl_h_and_ctrl_l_move_between_views_and_alt_equals_and_minus_resize_the_focused_one() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
@@ -275,14 +275,14 @@ fn ctrl_h_and_ctrl_l_move_between_panes_and_alt_equals_and_minus_resize_the_focu
     let side = |window: &Window| if window.cursor().1 >= split { "right" } else { "left" };
     for (key, to) in [(LEFT, "left"), (RIGHT, "right"), (LEFT, "left")] {
         window.send(key);
-        eventually(&format!("the cursor is in the {to} pane"), || {
+        eventually(&format!("the cursor is in the {to} view"), || {
             (side(&window) == to).then_some(())
         });
     }
     window.send(GROW);
-    let grown = eventually("the left pane grows", || seam(&window).filter(|at| *at > split));
+    let grown = eventually("the left view grows", || seam(&window).filter(|at| *at > split));
     window.send(SHRINK);
-    eventually("the left pane shrinks", || seam(&window).filter(|at| *at < grown));
+    eventually("the left view shrinks", || seam(&window).filter(|at| *at < grown));
     assert_eq!(side(&window), "left", "{:?}", window.screen());
 }
 
@@ -316,7 +316,7 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
     let side = |window: &Window| if window.cursor().1 >= split { "right" } else { "left" };
-    eventually("the pane opened has the keys", || (side(&window) == "right").then_some(()));
+    eventually("the view opened has the keys", || (side(&window) == "right").then_some(()));
     let project = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().id;
     let root = dir.path.parent().unwrap();
     worktree_added(root, "docs");
@@ -331,16 +331,16 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
         (back && side(window) == to).then_some(())
     };
     click(&mut window, main);
-    eventually("a click on main's row goes back to the pane it left", || back_on(&window, "right"));
+    eventually("a click on main's row goes back to the view it left", || back_on(&window, "right"));
     let left = sidebar_row(&window, "╭");
-    assert!(left > main, "main's first pane sits below its row: {:?}", window.screen());
+    assert!(left > main, "main's first view sits below its row: {:?}", window.screen());
     click(&mut window, left);
-    eventually("a click on a pane's row focuses it", || (side(&window) == "left").then_some(()));
+    eventually("a click on a view's row focuses it", || (side(&window) == "left").then_some(()));
     let docs = sidebar_row(&window, "▾ docs");
     click(&mut window, docs);
     eventually("a click on docs's row goes there", || (used(second) > used(first)).then_some(()));
     click(&mut window, main);
-    eventually("main's row goes to the pane focused last", || back_on(&window, "left"));
+    eventually("main's row goes to the view focused last", || back_on(&window, "left"));
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn click(window: &mut Window, row: usize) {
 }
 
 #[test]
-fn a_worktree_s_last_pane_closed_takes_luneta_to_the_one_used_before_with_no_note() {
+fn a_worktree_s_last_view_closed_takes_luneta_to_the_one_used_before_with_no_note() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
@@ -397,7 +397,7 @@ fn a_worktree_s_last_pane_closed_takes_luneta_to_the_one_used_before_with_no_not
     window.send(RIGHT);
     eventually("Ctrl l goes to docs", || used(&owned, gone).is_some().then_some(()));
     window.send(CLOSE);
-    eventually("docs goes with its last pane, and luneta goes back to main", || {
+    eventually("docs goes with its last view, and luneta goes back to main", || {
         let projects = projects_of(&owned);
         let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
         (worktrees.all(|it| it.id != gone) && window.shows(PRINTED)).then_some(())

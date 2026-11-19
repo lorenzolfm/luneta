@@ -273,7 +273,7 @@ message Remote {
   }
 }
 
-message Pane {
+message View {
   uint32 id = 1;
   uint32 tab = 2;
   string tab_name = 3;
@@ -888,15 +888,15 @@ message ShowResponse {
   message Laid {
     fixed64 worktree = 1;
     ShowRequest.Size size = 2;
-    repeated Pane panes = 3;
+    repeated View views = 3;
     oneof shown {
       fixed64 tiled = 4;
       fixed64 full = 5;
     }
   }
 
-  message Pane {
-    fixed64 view = 1;
+  message View {
+    fixed64 id = 1;
     Rect rect = 2;
     oneof found {
       TerminalKey key = 3;

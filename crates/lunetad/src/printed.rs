@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn without_the_command_s_line_all_the_pane_holds_is_kept() {
+    fn without_the_command_s_line_all_the_view_holds_is_kept() {
         assert_eq!(kept("out\nmore\n➜\n", "make"), Printed::Top(Some(vec!["out", "more"])));
         assert_eq!(kept("\n➜\n", "make"), Printed::Top(None));
         let dump = "\nluneta on main\n➜ make\nbuilt\n\nluneta on main took 3s\n➜\n";
@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn what_a_pane_printed_is_kept_in_a_file_of_this_user_s_alone() {
+    fn what_a_view_printed_is_kept_in_a_file_of_this_user_s_alone() {
         let root = tempfile::tempdir().expect("a folder");
         let runtime = root.path().join("luneta");
         let now = SystemTime::now();

@@ -34,7 +34,7 @@ const MAIN: &str = "it is the repository's main worktree";
 const LOCKED: &str = "it is locked";
 const HOLDS_ANOTHER: &str = "another worktree is in it";
 const CHANGED: &str = "it has modified or untracked files";
-const A_PANE: &str = "it has a pane";
+const A_VIEW: &str = "it has a view";
 const AN_AGENT: &str = "an agent works in it";
 const RUNS_HERE: &str = "this runs from it";
 const DEFAULT: &str = "it is the default branch";
@@ -164,7 +164,7 @@ pub fn name_of(path: &str) -> &str {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Occupied {
-    panes: Vec<PathBuf>,
+    views: Vec<PathBuf>,
     agents: Vec<PathBuf>,
 }
 
@@ -173,12 +173,12 @@ impl Occupied {
         let unread = seats::unread(host.unread, &host.unread_files);
         let unread = unread.map_err(|unplaced| unplaced.to_string())?;
         let terminals = terminals(host)?;
-        for seats::Unread { pid, pane } in unread {
-            match pane {
+        for seats::Unread { pid, terminal } in unread {
+            match terminal {
                 None => {
                     return Err(format!(
                         "lunetad cannot read the session file of agent {pid}, which runs in no \
-                         pane"
+                         terminal"
                     ));
                 },
                 Some(key) if !terminals.iter().any(|(it, _)| *it == Some(key)) => {
@@ -190,9 +190,9 @@ impl Occupied {
                 Some(_) => {},
             }
         }
-        let panes = terminals.into_iter().map(|(_, folder)| folder).collect();
+        let views = terminals.into_iter().map(|(_, folder)| folder).collect();
         let agents = host.agents.iter().map(|agent| PathBuf::from(&agent.cwd)).collect();
-        Ok(Occupied { panes, agents })
+        Ok(Occupied { views, agents })
     }
 
     fn why_in(&self, folder: &Path) -> Option<&'static str> {
@@ -200,8 +200,8 @@ impl Occupied {
         let holds = |dir: &PathBuf| {
             dir.starts_with(folder) || real.as_ref().is_some_and(|real| dir.starts_with(real))
         };
-        if self.panes.iter().any(holds) {
-            return Some(A_PANE);
+        if self.views.iter().any(holds) {
+            return Some(A_VIEW);
         }
         self.agents.iter().any(holds).then_some(AN_AGENT)
     }
@@ -676,7 +676,7 @@ pub fn deleted_as_agreed(
     occupied: impl Fn() -> Result<Occupied, String>,
     here: Option<&Path>,
 ) -> Result<Pruned, String> {
-    let now = occupied().map_err(|why| format!("luneta cannot tell its panes: {why}"))?;
+    let now = occupied().map_err(|why| format!("luneta cannot tell its views: {why}"))?;
     let planned = plan(dir, &now, here)?;
     if planned.plan.deletes() != *agreed {
         return Ok(Pruned::Changed(planned.plan));
@@ -706,7 +706,7 @@ fn stands_as_planned(
     occupied: &impl Fn() -> Result<Occupied, String>,
     here: Option<&Path>,
 ) -> Result<(), String> {
-    let occupied = occupied().map_err(|why| format!("luneta cannot tell its panes: {why}"))?;
+    let occupied = occupied().map_err(|why| format!("luneta cannot tell its views: {why}"))?;
     let all = worktrees(common)?;
     let listed = all
         .iter()
@@ -1029,7 +1029,7 @@ mod tests {
         ]));
         let occupied = Occupied::of(&host).unwrap();
         for held in ["/w/a", "/w/b", "/w/c"] {
-            assert_eq!(occupied.why_in(Path::new(held)), Some(A_PANE), "{held}");
+            assert_eq!(occupied.why_in(Path::new(held)), Some(A_VIEW), "{held}");
         }
         assert_eq!(occupied.why_in(Path::new("/w/d")), None);
         let unkept = viewed(api::projects::Held::Unkept("a newer file".to_owned()));
@@ -1074,10 +1074,8 @@ mod tests {
         let zero = api::TerminalKey { id: 0, made_at: Some(prost_types::Timestamp::default()) };
         let unkeyed = api::UnreadFile { terminal: Some(zero), ..file() };
         assert_eq!(Occupied::of(&files(1, vec![unkeyed])), Err(unplaced.to_owned()));
-        assert_eq!(
-            Occupied::of(&files(1, vec![file()])),
-            Err("lunetad cannot read the session file of agent 9, which runs in no pane".to_owned())
-        );
+        let unseated = "lunetad cannot read the session file of agent 9, which runs in no terminal";
+        assert_eq!(Occupied::of(&files(1, vec![file()])), Err(unseated.to_owned()));
     }
 
     fn pulled(author: Option<&str>, head: &str) -> Pulled {
@@ -1226,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_that_comes_as_its_far_branch_goes_keeps_the_worktree() {
+    fn a_view_that_comes_as_its_far_branch_goes_keeps_the_worktree() {
         let scratch = tempfile::tempdir().unwrap();
         let scratch = scratch.path().canonicalize().unwrap();
         let (up, repository, folder) = (scratch.join("up"), scratch.join("r"), scratch.join("w"));
@@ -1243,12 +1241,12 @@ mod tests {
         let head = listed.iter().find(|listed| listed.path == at).unwrap().head.clone();
 
         let occupied = || {
-            let panes = if remote_heads(common, "origin")?.contains_key("fix") {
+            let views = if remote_heads(common, "origin")?.contains_key("fix") {
                 Vec::new()
             } else {
                 vec![folder.clone()]
             };
-            Ok(Occupied { panes, agents: Vec::new() })
+            Ok(Occupied { views, agents: Vec::new() })
         };
         let goes = Goes {
             head,
@@ -1256,7 +1254,7 @@ mod tests {
         };
         let planned = Planned { plan: plan_of(vec![goes]), common: common.to_owned() };
         let outcomes = deleted(planned, occupied, None);
-        let why = "it has a pane; its branch on origin has gone";
+        let why = "it has a view; its branch on origin has gone";
         assert_eq!(outcomes[0].came, Came::Stays(why.to_owned()));
         assert!(folder.join(".git").is_file());
         let heads = remote_heads(common, "origin").unwrap();
@@ -1278,7 +1276,7 @@ mod tests {
             goes("/w/b", Pushed::Goes(on_origin("x")), Some(7)),
             goes("/w/c", Pushed::Stays("moved".to_owned()), Some(0)),
         ];
-        let kept = vec![Kept { folder: "/w/d".to_owned(), number: 2, why: "pane".to_owned() }];
+        let kept = vec![Kept { folder: "/w/d".to_owned(), number: 2, why: "view".to_owned() }];
         let unasked = vec![Unasked { folder: "/w/e".to_owned(), why: "gh".to_owned() }];
         let plan = Plan { repository: "/w".to_owned(), goes, kept, unasked };
         assert_eq!(Plan::from(PrunesResponse::from(&plan)), plan);

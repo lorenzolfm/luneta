@@ -13,14 +13,14 @@ use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Size, ViewId, WorktreeId};
 use lunetad::{
-    Asked, Beside, Direction, Found, Heard, Laid, Pane, Rect as Placed, Show, Where,
+    Asked, Beside, Direction, Found, Heard, Laid, View, Rect as Placed, Show, Where,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 
 use crate::attached::{
-    below_bar, border, draw_screen, draw_tab_spans, key_said, link, mouse_said, on_panes,
+    below_bar, border, draw_screen, draw_tab_spans, key_said, link, mouse_said, on_views,
     screen_rect, selects, span_under, spot_in, tab_spans, text, within, Pointer, Screen,
     Selection, Spot, TAB_BAR_ROWS,
 };
@@ -112,11 +112,11 @@ impl Layout {
     }
 
     fn focused(&self) -> Option<ViewId> {
-        self.laid()?.focused().map(|pane| pane.view)
+        self.laid()?.focused().map(|view| view.id)
     }
 
     fn welcomes(&self) -> bool {
-        self.laid().and_then(Laid::focused).is_some_and(|pane| pane.found == Found::Welcome)
+        self.laid().and_then(Laid::focused).is_some_and(|view| view.found == Found::Welcome)
     }
 
     fn closes(&mut self, key: &KeyEvent, input: u64) -> Option<ViewId> {
@@ -183,7 +183,7 @@ impl Layout {
         if laid.worktree() != self.worktree {
             return false;
         }
-        if self.focused() != laid.focused().map(|pane| pane.view) {
+        if self.focused() != laid.focused().map(|view| view.id) {
             self.pointer = Pointer::Free;
             if matches!(self.closing, Closing::Armed { .. }) {
                 self.closing = Closing::Unarmed;
@@ -243,13 +243,13 @@ impl Layout {
         Ok(())
     }
 
-    fn drawn(&self) -> Vec<(&Pane, Placed)> {
+    fn drawn(&self) -> Vec<(&View, Placed)> {
         self.laid().map_or_default(Laid::drawn)
     }
 
     fn focused_screen(&self) -> Option<(Rect, TerminalKey, &Screen)> {
         let (_, placed) = self.laid()?.focused_at()?;
-        let inner = screen_rect(pane_rect(Rect::default(), placed));
+        let inner = screen_rect(view_rect(Rect::default(), placed));
         if inner.is_empty() {
             return None;
         }
@@ -273,7 +273,7 @@ impl Layout {
             }
             self.pointer = Pointer::Free;
         }
-        let Some(spot) = on_panes(at) else {
+        let Some(spot) = on_views(at) else {
             let spans = tab_spans(self.named_tabs(), width);
             let tab = down.then(|| span_under(&spans, at.column)).flatten();
             return match tab {
@@ -284,8 +284,8 @@ impl Layout {
         let under = self
             .drawn()
             .into_iter()
-            .find(|(_, placed)| pane_rect(Rect::default(), *placed).contains(spot))
-            .map(|(pane, _)| pane.view);
+            .find(|(_, placed)| view_rect(Rect::default(), *placed).contains(spot))
+            .map(|(view, _)| view.id);
         if down
             && let Some(under) = under
             && Some(under) != self.focused()
@@ -330,13 +330,13 @@ impl Layout {
         let Some((inner, _, screen)) = self.focused_screen() else {
             return false;
         };
-        let inside = on_panes(at).is_some_and(|at| inner.contains(at));
+        let inside = on_views(at).is_some_and(|at| inner.contains(at));
         inside && selects(screen.tracks_mouse, mouse)
     }
 
     fn select_from(&mut self, at: Spot) {
         self.pointer = Pointer::Free;
-        let (Some((inner, _, screen)), Some(at)) = (self.focused_screen(), on_panes(at)) else {
+        let (Some((inner, _, screen)), Some(at)) = (self.focused_screen(), on_views(at)) else {
             return;
         };
         let at = spot_in(inner, at);
@@ -378,7 +378,7 @@ impl Layout {
 
     fn pointed(&self, at: Spot) -> Option<Selection> {
         let (inner, _, screen) = self.focused_screen()?;
-        let at = on_panes(at).filter(|at| inner.contains(*at))?;
+        let at = on_views(at).filter(|at| inner.contains(*at))?;
         if screen.tracks_mouse {
             return None;
         }
@@ -398,23 +398,23 @@ impl Layout {
             }
         }
         let bar = Rect { height: area.height.min(TAB_BAR_ROWS), ..area };
-        let panes = Rect { y: area.y + bar.height, height: area.height - bar.height, ..area };
+        let views = Rect { y: area.y + bar.height, height: area.height - bar.height, ..area };
         draw_tab_spans(buffer, bar, &tab_spans(self.named_tabs(), bar.width), self.worktree);
         let focused = self.focused();
         let selection = self.pointer.selection();
         let pointed = hover.and_then(|at| self.pointed(at));
         let mut cursor = None;
-        for (pane, placed) in self.drawn() {
-            let mine = Some(pane.view) == focused;
-            let outer = pane_rect(panes, placed);
+        for (view, placed) in self.drawn() {
+            let mine = Some(view.id) == focused;
+            let outer = view_rect(views, placed);
             let colour = if mine { gruvbox::GREEN } else { gruvbox::GREY };
-            let title = self.titles.get(&pane.view).map_or("", String::as_str);
-            border(buffer, panes, outer, title, Style::new().fg(colour));
-            let seen = screen_rect(outer).intersection(panes);
+            let title = self.titles.get(&view.id).map_or("", String::as_str);
+            border(buffer, views, outer, title, Style::new().fg(colour));
+            let seen = screen_rect(outer).intersection(views);
             if seen.is_empty() {
                 continue;
             }
-            let said = match pane.found {
+            let said = match view.found {
                 Found::Key(key) if Some(key) == self.runs_in => HERE,
                 Found::Key(key) => {
                     if let Some(screen) = self.screens.get(&key) {
@@ -457,9 +457,9 @@ impl Layout {
     }
 }
 
-fn pane_rect(panes: Rect, rect: Placed) -> Rect {
-    let column = panes.x.checked_add(rect.column).expect("a pane's column is a terminal column");
-    let row = panes.y.checked_add(rect.row).expect("a pane's row is a terminal row");
+fn view_rect(views: Rect, rect: Placed) -> Rect {
+    let column = views.x.checked_add(rect.column).expect("a view's column is a terminal column");
+    let row = views.y.checked_add(rect.row).expect("a view's row is a terminal row");
     Rect::new(column, row, rect.columns, rect.rows)
 }
 
@@ -895,15 +895,15 @@ mod tests {
         ViewId::of(id).unwrap()
     }
 
-    fn pane(terminal: u64, rect: (u32, u32, u32, u32), found: Option<u32>) -> show_response::Pane {
-        use show_response::pane::Found as Said;
+    fn view(terminal: u64, rect: (u32, u32, u32, u32), found: Option<u32>) -> show_response::View {
+        use show_response::view::Found as Said;
         let (column, row, columns, rows) = rect;
         let found = match found {
             Some(id) => Said::Key(api_key(id)),
             None => Said::Lost(()),
         };
-        show_response::Pane {
-            view: terminal,
+        show_response::View {
+            id: terminal,
             rect: Some(show_response::Rect { column, row, columns, rows }),
             found: Some(found),
         }
@@ -913,19 +913,19 @@ mod tests {
         lunetad::api::TerminalKey::from(key(id))
     }
 
-    fn laid(panes: Vec<show_response::Pane>, focused: u64, full: bool) -> Laid {
+    fn laid(views: Vec<show_response::View>, focused: u64, full: bool) -> Laid {
         use show_response::laid::Shown as Said;
         Laid::heard(show_response::Laid {
             worktree: 1,
             size: Some(show_request::Size { columns: 20, rows: 4 }),
-            panes,
+            views,
             shown: Some(if full { Said::Full(focused) } else { Said::Tiled(focused) }),
         })
         .unwrap()
     }
 
-    fn halves() -> Vec<show_response::Pane> {
-        vec![pane(11, (0, 0, 10, 4), Some(1)), pane(12, (10, 0, 10, 4), Some(2))]
+    fn halves() -> Vec<show_response::View> {
+        vec![view(11, (0, 0, 10, 4), Some(1)), view(12, (10, 0, 10, 4), Some(2))]
     }
 
     fn split_layout() -> Layout {
@@ -1003,7 +1003,7 @@ mod tests {
         assert_eq!(row(&buffer, 1, 0, 20), "╭ p2 ──────────────╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
         let mut here = Layout::new(worktree(1), Some(key(2)));
-        let lost = vec![pane(11, (0, 0, 10, 4), None), pane(12, (10, 0, 10, 4), Some(2))];
+        let lost = vec![view(11, (0, 0, 10, 4), None), view(12, (10, 0, 10, 4), Some(2))];
         here.laid_out(laid(lost, 11, false));
         assert_eq!(here.wanted(), BTreeSet::new(), "luneta never shows the terminal it runs in");
         here.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
@@ -1078,7 +1078,7 @@ mod tests {
         let taken = "where the program takes the mouse, none shows";
         assert_eq!(layout.pointed(spot(2, 2)), None, "{taken}");
         layout.framed(&whole(1, &["x a/b.rs"], None)).unwrap();
-        let past = "past a screen shorter than its pane, none shows";
+        let past = "past a screen shorter than its view, none shows";
         assert_eq!(layout.pointed(spot(3, 8)), None, "{past}");
         layout.select_from(spot(3, 8));
         assert_eq!(layout.selected(), None, "nor does a click there copy");
@@ -1096,7 +1096,7 @@ mod tests {
         let frame = Frame::new(key(1), size, changed, None, false).unwrap();
         let why = layout.framed(&frame).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 8x2");
-        layout.laid_out(laid(vec![pane(12, (0, 0, 20, 4), Some(2))], 12, false));
+        layout.laid_out(laid(vec![view(12, (0, 0, 20, 4), Some(2))], 12, false));
         assert_eq!(layout.screens.keys().copied().collect::<Vec<_>>(), [key(2)]);
         layout.framed(&whole(1, &["no"], None)).unwrap();
         let lacked = "a terminal its layout lacks gets no screen";
@@ -1105,25 +1105,25 @@ mod tests {
         assert_eq!(layout.focused(), None, "a layout of another worktree lays out nothing here");
     }
 
-    fn laid_in(id: u64, panes: Vec<show_response::Pane>) -> Heard {
+    fn laid_in(id: u64, views: Vec<show_response::View>) -> Heard {
         use show_response::laid::Shown as Said;
-        let shown = panes.first().map(|pane| Said::Tiled(pane.view));
+        let shown = views.first().map(|view| Said::Tiled(view.id));
         let size = Some(show_request::Size { columns: 20, rows: 4 });
-        let said = show_response::Laid { worktree: id, size, panes, shown };
+        let said = show_response::Laid { worktree: id, size, views, shown };
         Heard::Laid(Laid::heard(said).unwrap())
     }
 
     #[test]
     fn d_twice_in_a_row_closes_the_welcome_view_and_anything_between_starts_over() {
-        use show_response::pane::Found as Said;
+        use show_response::view::Found as Said;
         let welcome = |at: (u32, u32, u32, u32)| {
-            let mut it = pane(12, at, None);
+            let mut it = view(12, at, None);
             it.found = Some(Said::Welcome(()));
             it
         };
-        let panes = || vec![pane(11, (0, 0, 10, 4), Some(1)), welcome((10, 0, 10, 4))];
+        let views = || vec![view(11, (0, 0, 10, 4), Some(1)), welcome((10, 0, 10, 4))];
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid(panes(), 12, false)));
+        assert!(!layout.laid_out(laid(views(), 12, false)));
         let typed = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let d = typed(KeyCode::Char(CLOSE));
         let welcome = Some(ViewId::of(12).unwrap());
@@ -1135,8 +1135,8 @@ mod tests {
         let ctrl_d = KeyEvent::new(KeyCode::Char(CLOSE), KeyModifiers::CONTROL);
         assert_eq!(layout.closes(&ctrl_d, 6), None);
         assert_eq!(layout.closes(&d, 7), None, "Ctrl d is no d");
-        assert!(!layout.laid_out(laid(panes(), 11, false)));
-        assert!(!layout.laid_out(laid(panes(), 12, false)));
+        assert!(!layout.laid_out(laid(views(), 11, false)));
+        assert!(!layout.laid_out(laid(views(), 12, false)));
         assert_eq!(layout.closes(&d, 8), None, "a focus gone elsewhere and back starts over");
         assert_eq!(layout.closes(&d, 9), welcome);
         assert_eq!(layout.closes(&d, 10), None);
@@ -1147,12 +1147,12 @@ mod tests {
 
     #[test]
     fn a_held_d_closes_no_welcome_view_and_after_d_d_reaches_no_view() {
-        use show_response::pane::Found as Said;
-        let mut welcome = pane(12, (10, 0, 10, 4), None);
+        use show_response::view::Found as Said;
+        let mut welcome = view(12, (10, 0, 10, 4), None);
         welcome.found = Some(Said::Welcome(()));
-        let panes = || vec![pane(11, (0, 0, 10, 4), Some(1)), welcome];
+        let views = || vec![view(11, (0, 0, 10, 4), Some(1)), welcome];
         let mut layout = Layout::new(worktree(1), None);
-        layout.laid_out(laid(panes(), 12, false));
+        layout.laid_out(laid(views(), 12, false));
         let kind = |kind| KeyEvent::new_with_kind(KeyCode::Char(CLOSE), KeyModifiers::NONE, kind);
         let (d, held) = (kind(KeyEventKind::Press), kind(KeyEventKind::Repeat));
         assert_eq!(layout.closes(&d, 1), None);
@@ -1162,7 +1162,7 @@ mod tests {
         }
         assert_eq!(layout.closes(&d, 6), None);
         assert_eq!(layout.closes(&d, 7), Some(ViewId::of(12).unwrap()));
-        assert!(!layout.laid_out(laid(vec![pane(11, (0, 0, 20, 4), Some(1))], 11, false)));
+        assert!(!layout.laid_out(laid(vec![view(11, (0, 0, 20, 4), Some(1))], 11, false)));
         assert!(layout.held_after_close(&held), "the d held after the close is dropped");
         assert!(layout.held_after_close(&held));
         assert!(!layout.held_after_close(&d), "a d pressed again reaches the terminal");
@@ -1178,13 +1178,13 @@ mod tests {
         let folder = unserved.path().to_owned();
         let mut viewed =
             Viewed::start(1, folder, Machine::Local, worktree(1), size, greeting, None, &events);
-        let one = || vec![pane(11, (0, 0, 20, 4), Some(1))];
+        let one = || vec![view(11, (0, 0, 20, 4), Some(1))];
         assert!(matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Quiet), "first, it opens");
         assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Quiet));
         let emptied = viewed.heard(laid_in(1, Vec::new()));
         assert!(matches!(emptied, Heeded::Emptied), "its last terminal closed, luneta leaves it");
         viewed.go(&Machine::Local, worktree(2));
-        let two = vec![pane(21, (0, 0, 20, 4), Some(2))];
+        let two = vec![view(21, (0, 0, 20, 4), Some(2))];
         assert!(matches!(viewed.heard(laid_in(2, two)), Heeded::Quiet));
         viewed.go(&Machine::Local, worktree(1));
         let back = viewed.heard(laid_in(1, Vec::new()));

@@ -6,7 +6,7 @@ use crate::process;
 
 pub mod own;
 
-pub use own::{OwnClientId, OwnId, OwnKey, OwnMade, OwnPane, TerminalKey};
+pub use own::{OwnClientId, OwnId, OwnKey, OwnMade, OwnTerminal, TerminalKey};
 
 #[derive(Debug)]
 pub enum Failure {
@@ -36,7 +36,7 @@ pub enum Runs<'a> {
 }
 
 #[must_use]
-pub fn pane_of(pid: u32) -> Option<TerminalKey> {
+pub fn terminal_of(pid: u32) -> Option<TerminalKey> {
     own::terminal_in(&process::environ(pid)?)
 }
 
@@ -63,7 +63,7 @@ mod tests {
         assert_eq!(own::terminal_in(&environ(&terminal)), Some(key));
         assert_eq!(own::terminal_in(&environ(&["HOME=/h"])), None);
         let old = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_MADE=60", "LUNETA_MUX_PANE=12"];
-        assert_eq!(own::terminal_in(&environ(&old)), None, "an own session's pane is no pane now");
+        assert_eq!(own::terminal_in(&environ(&old)), None, "an old own session names no terminal");
     }
 
     #[test]

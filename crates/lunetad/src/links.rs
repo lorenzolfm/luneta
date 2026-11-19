@@ -531,10 +531,10 @@ pub enum Readied {
 impl Ready<usize> {
     pub fn placed<P: Clone>(self, among: &[P]) -> Result<Ready<P>, usize> {
         let Ready { at, folder, branch, moved_off, work } = self;
-        let pane = |at: usize| among.get(at).cloned().ok_or(at);
+        let view = |at: usize| among.get(at).cloned().ok_or(at);
         let at = match at {
-            At::There(at) => At::There(pane(at)?),
-            At::Session(at) => At::Session(pane(at)?),
+            At::There(at) => At::There(view(at)?),
+            At::Session(at) => At::Session(view(at)?),
             At::Clone { cwd, name } => At::Clone { cwd, name },
         };
         Ok(Ready { at, folder, branch, moved_off, work })
@@ -633,9 +633,9 @@ impl Pasted {
             return Err("at_head: only a pull request has a head".to_owned());
         }
         if worked.len() > WORKED_MAX {
-            return Err(format!("worked: more than {WORKED_MAX} panes"));
+            return Err(format!("worked: more than {WORKED_MAX} views"));
         }
-        let pane = |AskedWorked { dir, pull, here }| {
+        let view = |AskedWorked { dir, pull, here }| {
             if !dir.starts_with('/') {
                 return Err(format!("worked: {dir:?} is no absolute path"));
             }
@@ -645,18 +645,18 @@ impl Pasted {
                 .map_err(|page| format!("worked: {page:?} is no pull request's page"))?;
             Ok(Worked { dir, pull, here })
         };
-        let worked = worked.into_iter().map(pane).collect::<Result<_, String>>()?;
+        let worked = worked.into_iter().map(view).collect::<Result<_, String>>()?;
         Ok((on, Pasted { work, wanted, worked, reads_moved_off }))
     }
 
     #[must_use]
     pub fn asked(&self, on: Option<On>) -> PasteRequest {
-        let pane = |Worked { dir, pull, here }: &Worked| AskedWorked {
+        let view = |Worked { dir, pull, here }: &Worked| AskedWorked {
             dir: dir.clone(),
             pull: pull.as_ref().map(Link::url),
             here: *here,
         };
-        let worked = self.worked.iter().map(pane).collect();
+        let worked = self.worked.iter().map(view).collect();
         let work = match &self.work {
             Work::Link(link) => paste_request::Work::Link(link.url()),
             Work::File(File { path, from, .. }) => {
@@ -1514,7 +1514,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_goes_to_the_pane_with_the_branch_or_else_a_session_of_the_repository() {
+    fn a_key_goes_to_the_view_with_the_branch_or_else_a_session_of_the_repository() {
         let remotes = |dir: &str| match dir {
             "/cdk/main" | "/cdk/2736" => Some(by_wt(Remote::Other)),
             "/cdk-upstream/master" => Some(by_wt(Remote::Origin)),
@@ -1700,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_is_asked_of_a_link_and_of_panes_by_their_absolute_paths() {
+    fn a_paste_is_asked_of_a_link_and_of_views_by_their_absolute_paths() {
         let cdk = "https://github.com/cashubtc/cdk/pull/2736";
         let worked = vec![worked("/w/cdk/main", Some(cdk), true), worked("/dots", None, false)];
         let pasted = Pasted::new(Work::Link(issue()), worked);
@@ -1715,17 +1715,17 @@ mod tests {
             "link: \"github.com/cashubtc\" is no link of a pull request or of an issue on \
              github.com"
         );
-        let pane = |dir: &str, pull: Option<&str>| AskedWorked {
+        let view = |dir: &str, pull: Option<&str>| AskedWorked {
             dir: dir.to_owned(),
             pull: pull.map(str::to_owned),
             here: false,
         };
-        let relative = asked(vec![pane("w/cdk", None)]);
+        let relative = asked(vec![view("w/cdk", None)]);
         assert_eq!(refused(relative), "worked: \"w/cdk\" is no absolute path");
-        let unpaged = asked(vec![pane("/w/cdk", Some("main"))]);
+        let unpaged = asked(vec![view("/w/cdk", Some("main"))]);
         assert_eq!(refused(unpaged), "worked: \"main\" is no pull request's page");
-        let many = asked(vec![pane("/w", None); 1025]);
-        assert_eq!(refused(many), "worked: more than 1024 panes");
+        let many = asked(vec![view("/w", None); 1025]);
+        assert_eq!(refused(many), "worked: more than 1024 views");
         assert_eq!(
             refused(PasteRequest { work: None, ..asked(Vec::new()) }),
             "it says neither a link nor a file"
@@ -2058,13 +2058,13 @@ mod tests {
     }
 
     #[test]
-    fn a_place_names_the_pane_luneta_said_of_it() {
+    fn a_place_names_the_view_luneta_said_of_it() {
         fn ready<P>(at: At<P>) -> Ready<P> {
             let work = Readied::File { real: "/w/plan.md".to_owned() };
             Ready { at, folder: "/w".to_owned(), branch: None, moved_off: false, work }
         }
-        let panes = ["dots:1", "cdk:4"];
-        assert_eq!(ready(At::Session(1)).placed(&panes), Ok(ready(At::Session("cdk:4"))));
-        assert_eq!(ready(At::There(2)).placed(&panes), Err(2));
+        let views = ["dots:1", "cdk:4"];
+        assert_eq!(ready(At::Session(1)).placed(&views), Ok(ready(At::Session("cdk:4"))));
+        assert_eq!(ready(At::There(2)).placed(&views), Err(2));
     }
 }

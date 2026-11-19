@@ -19,7 +19,7 @@ use crate::asked::{self, Dumped, Opens, Size, Tag, TerminalKey, ViewerHeard};
 use crate::folder::Claim;
 use crate::id::ClientId;
 use crate::mux::Mux;
-use crate::pane::{CLIENT_MESSAGES, ToPane, UNREAD_BYTES_MAX, ViewerOut};
+use crate::terminal::{CLIENT_MESSAGES, ToTerminal, UNREAD_BYTES_MAX, ViewerOut};
 use crate::pty;
 
 pub const FIRST_TERMINAL: Duration = Duration::from_secs(30);
@@ -46,7 +46,7 @@ impl mux_server::Mux for Service {
         let key = TerminalKey::parse("terminal", request.terminal)?;
         let handle = self.mux.terminal(key)?;
         let (answer, answered) = oneshot::channel();
-        handle.send(ToPane::Dump(dumped, answer)).await;
+        handle.send(ToTerminal::Dump(dumped, answer)).await;
         let gone = || Status::not_found(format!("terminal {} ended", key.id));
         let text = answered.await.map_err(|_| gone())??;
         Ok(Response::new(api::DumpResponse { text }))
@@ -146,7 +146,7 @@ async fn listen_to_viewer(
             ViewerHeard::Showing(keys) => mux.show(client, &keys).unwrap_or_else(|all| vec![all]),
             ViewerHeard::Typed(terminal, input) => match mux.typed(client, terminal) {
                 Ok(handle) => {
-                    handle.send(ToPane::Input(client, input)).await;
+                    handle.send(ToTerminal::Input(client, input)).await;
                     Vec::new()
                 },
                 Err(refusal) => vec![refusal],

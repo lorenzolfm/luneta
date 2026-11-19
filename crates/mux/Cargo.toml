@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 publish = false
-description = "luneta's own multiplexer: a server that holds the pseudoterminals of its sessions and reads each pane's program as Ghostty does"
+description = "luneta's own multiplexer: a server that holds the pseudoterminals of its sessions and reads each terminal's program as Ghostty does"
 
 [dependencies]
 luneta-protocol = { path = "../protocol" }

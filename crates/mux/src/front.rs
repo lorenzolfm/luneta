@@ -35,7 +35,7 @@ impl Front {
     }
 
     #[must_use]
-    pub fn of_pane(pty: &Pty, program: u32, group: Group) -> Front {
+    pub fn of_terminal(pty: &Pty, program: u32, group: Group) -> Front {
         let modes = pty.modes().ok();
         let processes = tree(program);
         let front = in_front(&processes, group);

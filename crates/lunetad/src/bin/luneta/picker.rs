@@ -33,7 +33,7 @@ use crate::screen;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::sidebar::{
-    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PaneKey, PanePlace, Place,
+    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, ViewKey, ViewPlace, Place,
     ProjectRow, WorktreePlace,
 };
 use crate::spots::{Drawn, Spots};
@@ -111,7 +111,7 @@ pub struct Worktree {
     pub branch: Option<String>,
     pub seen: Seen,
     pub used: Option<SystemTime>,
-    pub terminals: Vec<PaneKey>,
+    pub terminals: Vec<ViewKey>,
     pub held: Vec<ViewId>,
     pub waiting: usize,
     pub ending: Result<Vec<close::Doing>, Untold>,
@@ -120,27 +120,27 @@ pub struct Worktree {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Here {
     Session { on: Machine, session: String },
-    Pane { on: Machine, place: PanePlace },
+    View { on: Machine, place: ViewPlace },
 }
 
 impl Here {
     pub fn on(&self) -> &Machine {
         match self {
-            Here::Session { on, .. } | Here::Pane { on, .. } => on,
+            Here::Session { on, .. } | Here::View { on, .. } => on,
         }
     }
 
     pub fn session(&self) -> &str {
         match self {
             Here::Session { session, .. } => session,
-            Here::Pane { place, .. } => place.session.name().as_str(),
+            Here::View { place, .. } => place.session.name().as_str(),
         }
     }
 
-    pub fn pane(&self) -> Option<&PanePlace> {
+    pub fn view(&self) -> Option<&ViewPlace> {
         match self {
             Here::Session { .. } => None,
-            Here::Pane { place, .. } => Some(place),
+            Here::View { place, .. } => Some(place),
         }
     }
 }
@@ -152,7 +152,7 @@ pub struct Runs {
 
 #[derive(Clone, Debug)]
 pub struct Seated {
-    pub place: PanePlace,
+    pub place: ViewPlace,
     pub label: String,
     pub mark: Mark,
     pub status: String,
@@ -211,7 +211,7 @@ pub enum Heard {
     Peek {
         on: Machine,
         session: Listed,
-        asked: Option<PaneKey>,
+        asked: Option<ViewKey>,
         peek: Result<(u32, String), String>,
     },
     Renamed { from: String, to: Name, renamed: Result<(), String> },
@@ -222,7 +222,7 @@ pub enum Heard {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
-    Peek { on: Machine, session: Listed, asked: Option<PaneKey> },
+    Peek { on: Machine, session: Listed, asked: Option<ViewKey> },
     Rename { on: Machine, renames: Renames, to: Name },
     Close { on: Machine, place: WorktreePlace, name: String, seen: Vec<ViewId> },
     Dirs { on: Machine, ask: u64 },
@@ -249,7 +249,7 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
     let hear: Box<dyn FnOnce() -> Heard + Send> = match ask {
         Ask::Peek { on, session, asked } => {
             let terminal = match asked {
-                Some(pane) => projected::route(&on, pane),
+                Some(view) => projected::route(&on, view),
                 None => projected.whole(&on, &session),
             };
             Box::new(move || {
@@ -314,7 +314,7 @@ pub enum Key {
     Project { on: Machine, project: ProjectRow, folder: Directory },
     Unopened { on: Machine, project: ProjectRow, folder: Directory },
     Machine { on: Machine },
-    Agent { on: Machine, place: PanePlace },
+    Agent { on: Machine, place: ViewPlace },
     Dir { on: Machine, path: Directory, session: SessionName },
     New { on: Machine, project: ProjectRow, folder: Directory, name: Name },
 }
@@ -384,8 +384,8 @@ impl Rows {
 enum Stage {
     Search,
     Rename { on: Machine, renames: Renames, input: String },
-    Planning { on: Machine, place: PanePlace, agreed: Option<Plan> },
-    Asking { on: Machine, place: PanePlace, plan: Plan, asks: String },
+    Planning { on: Machine, place: ViewPlace, agreed: Option<Plan> },
+    Asking { on: Machine, place: ViewPlace, plan: Plan, asks: String },
     Closing { on: Machine, place: WorktreePlace, name: String, ends: Ends, asks: String },
 }
 
@@ -460,7 +460,7 @@ impl Contents {
     }
 }
 
-type Looked = (Machine, Listed, Option<PaneKey>);
+type Looked = (Machine, Listed, Option<ViewKey>);
 
 type Located = (Machine, Directory);
 
@@ -599,13 +599,13 @@ impl Picker {
         self.listing.shown.as_ref().is_some_and(|(at, shown)| at == on && shown == place)
     }
 
-    fn focus(&self, on: &Machine, worktree: &Worktree) -> Option<PaneKey> {
-        let here = self.here_pane(on).map(|place| place.pane);
-        let focused = here.filter(|pane| worktree.terminals.contains(pane));
+    fn focus(&self, on: &Machine, worktree: &Worktree) -> Option<ViewKey> {
+        let here = self.here_view(on).map(|place| place.view);
+        let focused = here.filter(|view| worktree.terminals.contains(view));
         focused.or_else(|| worktree.terminals.first().copied())
     }
 
-    fn seated(&self, on: &Machine, place: &PanePlace) -> Option<&Seated> {
+    fn seated(&self, on: &Machine, place: &ViewPlace) -> Option<&Seated> {
         self.runs(on)?.agents.iter().find(|seated| seated.place == *place)
     }
 
@@ -915,7 +915,7 @@ impl Picker {
             },
             Key::Machine { .. } => Picked::Nothing,
             Key::Agent { on, place } => {
-                Picked::Go { on: on.clone(), place: Place::Pane(place.clone()) }
+                Picked::Go { on: on.clone(), place: Place::View(place.clone()) }
             },
             Key::Dir { on, path, session } => {
                 Picked::Make { on: on.clone(), session: session.clone(), cwd: path.clone() }
@@ -982,8 +982,8 @@ impl Picker {
         self.asking.push(Ask::Close { on, place, name, seen: ends.seen });
     }
 
-    fn plan(&mut self, on: Machine, place: PanePlace, agreed: Option<Plan>) -> Picked {
-        let deletes = Deletes::Pane(place.pane);
+    fn plan(&mut self, on: Machine, place: ViewPlace, agreed: Option<Plan>) -> Picked {
+        let deletes = Deletes::View(place.view);
         let picked = Picked::Plan { on: on.clone(), session: place.session.clone(), deletes };
         self.stage = Stage::Planning { on, place, agreed };
         picked
@@ -1152,7 +1152,7 @@ impl Picker {
     }
 
     fn agent_rows(&self, finder: Option<&Finder<'_>>, on: &Machine, runs: &Runs) -> Vec<Row> {
-        let yours = self.here_pane(on);
+        let yours = self.here_view(on);
         let agents = runs.agents.iter().filter(|seated| Some(&seated.place) != yours);
         let agents: Vec<(String, Vec<Option<&str>>, Key)> = agents
             .map(|seated| {
@@ -1206,7 +1206,7 @@ impl Picker {
                 focus.map(|focus| Preview::Screen(looked(focus)))
             },
             Some(Key::Agent { on, place }) => {
-                Some(Preview::Screen((on.clone(), place.session.clone(), Some(place.pane))))
+                Some(Preview::Screen((on.clone(), place.session.clone(), Some(place.view))))
             },
             Some(Key::Dir { on, path, .. }) => Some(Preview::Dir((on.clone(), path.clone()))),
             Some(Key::Unopened { on, folder, .. }) => {
@@ -1324,14 +1324,14 @@ impl Picker {
         Some(here.session())
     }
 
-    fn here_pane(&self, on: &Machine) -> Option<&PanePlace> {
-        self.listing.here.as_ref().filter(|here| here.on() == on)?.pane()
+    fn here_view(&self, on: &Machine) -> Option<&ViewPlace> {
+        self.listing.here.as_ref().filter(|here| here.on() == on)?.view()
     }
 
     fn yours(&self) -> Option<(&Seated, &[Seated])> {
         let here = self.listing.here.as_ref()?;
-        let (pane, agents) = (here.pane()?, &self.runs(here.on())?.agents);
-        Some((agents.iter().find(|seated| seated.place == *pane)?, agents))
+        let (view, agents) = (here.view()?, &self.runs(here.on())?.agents);
+        Some((agents.iter().find(|seated| seated.place == *view)?, agents))
     }
 
     fn row_line(&self, row: &Row, width: usize, frame: usize, now: SystemTime) -> Line<'static> {
@@ -1571,7 +1571,7 @@ impl Picker {
                         Span::styled(seated.dir.clone(), grey),
                     ]);
                 }
-                let looked = (on.clone(), place.session.clone(), Some(place.pane));
+                let looked = (on.clone(), place.session.clone(), Some(place.view));
                 (String::new(), Line::from(caption), looked)
             },
         };
@@ -1738,11 +1738,11 @@ fn agent_name(agents: &[Seated], seated: &Seated) -> String {
     let alike = agents.iter().filter(|other| other.label == seated.label);
     let sessions: HashSet<&SessionName> =
         alike.clone().map(|other| other.place.session.name()).collect();
-    let (session, pane) = (seated.place.session.name(), seated.place.pane);
+    let (session, view) = (seated.place.session.name(), seated.place.view);
     match (alike.count(), sessions.len()) {
         (0 | 1, _) => seated.label.clone(),
-        (_, 1) => format!("{}:{pane}", seated.label),
-        _ => format!("{} ({session}:{pane})", seated.label),
+        (_, 1) => format!("{}:{view}", seated.label),
+        _ => format!("{} ({session}:{view})", seated.label),
     }
 }
 
@@ -2006,15 +2006,15 @@ mod tests {
         Listed::new_project(name, id)
     }
 
-    fn seated(name: &str, started: u64, pane: u32, label: &str, mark: Mark) -> Seated {
+    fn seated(name: &str, started: u64, view: u32, label: &str, mark: Mark) -> Seated {
         Seated {
-            place: PanePlace { session: listed(name, started), pane: PaneKey::terminal(pane) },
+            place: ViewPlace { session: listed(name, started), view: ViewKey::terminal(view) },
             label: label.to_owned(),
             mark,
             status: "idle".to_owned(),
             since: Some(now() - Duration::from_mins(1)),
             dir: "luneta/main".to_owned(),
-            pid: pane,
+            pid: view,
             transcript: None,
             doing: crate::alerts::Doing::Idle,
         }
@@ -2062,7 +2062,7 @@ mod tests {
             branch: None,
             seen: Seen::Read(projects::Stage::Working),
             used: used.map(|at| UNIX_EPOCH + Duration::from_secs(at)),
-            terminals: terminals.iter().map(|id| PaneKey::terminal(*id)).collect(),
+            terminals: terminals.iter().map(|id| ViewKey::terminal(*id)).collect(),
             held: held(terminals),
             waiting: 0,
             ending: Ok(Vec::new()),
@@ -2109,9 +2109,9 @@ mod tests {
             housed("notes", 2, Vec::new()),
             housed("web", 3, vec![worktree(api(), "api", Some(40), &[4])]),
         ];
-        let at = PanePlace { session: fix().project.listed().clone(), pane: PaneKey::terminal(3) };
+        let at = ViewPlace { session: fix().project.listed().clone(), view: ViewKey::terminal(3) };
         Listing {
-            here: Some(Here::Pane { on: Machine::Local, place: at }),
+            here: Some(Here::View { on: Machine::Local, place: at }),
             shown: Some((Machine::Local, fix())),
             shelves: vec![shelved(Machine::Local, projects)],
             ..Listing::default()
@@ -2692,10 +2692,10 @@ mod tests {
     #[test]
     fn the_preview_shows_the_terminal_luneta_is_on_else_the_worktree_s_first() {
         let mut picker = opened(works());
-        let peek = |session: Listed, pane| Ask::Peek {
+        let peek = |session: Listed, view| Ask::Peek {
             on: Machine::Local,
             session,
-            asked: Some(PaneKey::terminal(pane)),
+            asked: Some(ViewKey::terminal(view)),
         };
         let due = picker.due().unwrap();
         picker.ticked(due.checked_sub(Duration::from_millis(1)).unwrap());
@@ -2724,7 +2724,7 @@ mod tests {
         let mut picker = opened(works());
         let dumped = (1..=40).map(|n| format!("\x1b[mline {n}")).collect::<Vec<_>>().join("\n");
         let peek = Ok((4, format!("{dumped}\n\n\n")));
-        let (session, asked) = (api().project.listed().clone(), Some(PaneKey::terminal(4)));
+        let (session, asked) = (api().project.listed().clone(), Some(ViewKey::terminal(4)));
         picker.heard(Heard::Peek { on: Machine::Local, session, asked, peek });
         let buffer = drawn(&picker);
         let area = Picker::area(Rect::new(0, 0, 200, 50));
@@ -2749,7 +2749,7 @@ mod tests {
         let mut picker = opened(machines());
         picker.ticked(picker.due().unwrap());
         let session = place("api", 4, 1).project.listed().clone();
-        let asked = Some(PaneKey::terminal(6));
+        let asked = Some(ViewKey::terminal(6));
         assert_eq!(picker.asks(), [Ask::Peek { on: nixos(), session: session.clone(), asked }]);
         let peek = |on, session, screen: &str| {
             let peek = Ok((6, screen.to_owned()));
@@ -2766,7 +2766,7 @@ mod tests {
     fn a_preview_that_failed_is_asked_for_again_as_the_highlight_comes_back() {
         let mut picker = opened(works());
         picker.ticked(picker.due().unwrap());
-        let (session, asked) = (api().project.listed().clone(), Some(PaneKey::terminal(4)));
+        let (session, asked) = (api().project.listed().clone(), Some(ViewKey::terminal(4)));
         let peek = || Ask::Peek { on: Machine::Local, session: session.clone(), asked };
         assert_eq!(picker.asks(), [peek()]);
         let failed = Err("luneta-mux did not answer".to_owned());
@@ -2797,7 +2797,7 @@ mod tests {
     fn the_keys_that_open_each_list_go_to_it_and_ctrl_j_goes_to_none() {
         let mut picker = Picker::open(1, List::Agents, Listing::default(), Machine::Local);
         control(&mut picker, 'j');
-        assert_eq!(picker.list, List::Agents, "Ctrl j is the panes' Down");
+        assert_eq!(picker.list, List::Agents, "Ctrl j is the views' Down");
         picker.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SUPER));
         assert_eq!(picker.list, List::Worktrees);
         control(&mut picker, 'd');
@@ -2816,9 +2816,9 @@ mod tests {
         let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
         picker.asks();
         let c = listed("c", 30);
-        let deletes = || Deletes::Pane(PaneKey::terminal(4));
+        let deletes = || Deletes::View(ViewKey::terminal(4));
         let planning = Picked::Plan { on: Machine::Local, session: c.clone(), deletes: deletes() };
-        let act = || Act::Pane { session: c.name().clone(), pane: PaneKey::terminal(4) };
+        let act = || Act::View { session: c.name().clone(), view: ViewKey::terminal(4) };
         let plan = |doing: Doing| Plan::of(act(), Ok(&[(4, doing)]));
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
         assert_eq!(picker.planned(Ok(plan(Doing::Busy))), Picked::Nothing);
@@ -2840,14 +2840,14 @@ mod tests {
     }
 
     #[test]
-    fn del_on_an_agent_plans_closing_its_pane_and_asks_nothing_of_another_thread() {
+    fn del_on_an_agent_plans_closing_its_view_and_asks_nothing_of_another_thread() {
         let listing = Listing {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
         let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
         picker.asks();
-        let deletes = Deletes::Pane(PaneKey::terminal(4));
+        let deletes = Deletes::View(ViewKey::terminal(4));
         let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), deletes };
         assert_eq!(press(&mut picker, KeyCode::Delete), plan);
         assert_eq!(picker.asks(), []);
@@ -2855,9 +2855,9 @@ mod tests {
 
     #[test]
     fn agents_named_alike_are_told_apart_and_yours_is_pinned_over_them() {
-        let place = PanePlace { session: listed("work", 20), pane: PaneKey::terminal(9) };
+        let place = ViewPlace { session: listed("work", 20), view: ViewKey::terminal(9) };
         let listing = Listing {
-            here: Some(Here::Pane { on: Machine::Local, place }),
+            here: Some(Here::View { on: Machine::Local, place }),
             local: agents(vec![
                 seated("work", 20, 9, "mine", Mark::Busy),
                 seated("work", 20, 1, "fix", Mark::Waiting),
@@ -2886,9 +2886,9 @@ mod tests {
 
     #[test]
     fn a_search_weighs_an_agent_by_its_name_or_its_directory_whichever_fits_best() {
-        let at = |pane, label, dir: &str| Seated {
+        let at = |view, label, dir: &str| Seated {
             dir: dir.to_owned(),
-            ..seated("work", 20, pane, label, Mark::Idle)
+            ..seated("work", 20, view, label, Mark::Idle)
         };
         let listing = Listing {
             local: agents(vec![
@@ -3133,13 +3133,13 @@ mod tests {
 
     #[test]
     fn luneta_s_agent_on_another_machine_is_pinned_over_that_machine_s_rows() {
-        let at = |pane| PanePlace { session: listed("api", 40), pane };
+        let at = |view| ViewPlace { session: listed("api", 40), view };
         let there = agents(vec![
             seated("api", 40, 9, "mine", Mark::Busy),
             seated("api", 40, 2, "fix", Mark::Idle),
         ]);
         let listing = Listing {
-            here: Some(Here::Pane { on: nixos(), place: at(PaneKey::terminal(9)) }),
+            here: Some(Here::View { on: nixos(), place: at(ViewKey::terminal(9)) }),
             local: agents(vec![seated("api", 30, 1, "fix", Mark::Idle)]),
             ..on_nixos(there)
         };
@@ -3157,9 +3157,9 @@ mod tests {
         let named: Vec<String> = lines[1..].iter().map(name).collect();
         assert_eq!(named, ["── desk", "fix", "── nixos", "fix"]);
         press(&mut picker, KeyCode::Down);
-        let fix = Picked::Go { on: nixos(), place: Place::Pane(at(PaneKey::terminal(2))) };
+        let fix = Picked::Go { on: nixos(), place: Place::View(at(ViewKey::terminal(2))) };
         assert_eq!(press(&mut picker, KeyCode::Enter), fix);
-        let deletes = Deletes::Pane(PaneKey::terminal(2));
+        let deletes = Deletes::View(ViewKey::terminal(2));
         let plan = Picked::Plan { on: nixos(), session: listed("api", 40), deletes };
         assert_eq!(press(&mut picker, KeyCode::Delete), plan);
     }
@@ -3174,11 +3174,11 @@ mod tests {
     }
 
     #[test]
-    fn a_peek_at_another_machine_s_pane_is_not_done_yet() {
+    fn a_peek_at_another_machine_s_view_is_not_done_yet() {
         let projected = Projected::default();
         let session = Listed::new_project("work", 7);
         let far = Machine::Remote("far".parse().unwrap());
-        let peek = Ask::Peek { on: far, session, asked: Some(PaneKey::terminal(4)) };
+        let peek = Ask::Peek { on: far, session, asked: Some(ViewKey::terminal(4)) };
         let peeked = asked(peek, &projected);
         let Heard::Peek { peek, .. } = peeked else {
             panic!("a peek is answered with a screen");

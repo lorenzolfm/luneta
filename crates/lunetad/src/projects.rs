@@ -25,7 +25,7 @@ mod view;
 
 pub use file::{forget, holder, kept, take, Changed, Elsewhere, Failed, Forgotten, Lock, Revision};
 pub use file::{Store, Unheld};
-pub use layout::{Size, FRAME_CELLS, PANES_MAX};
+pub use layout::{Size, FRAME_CELLS, LAYOUT_VIEWS_MAX};
 pub use spot::{Spot, CLONE_WORKTREES_MAX, LOOK as SPOT_LOOK};
 pub use view::{quoted, Argv, Layout, Line, Opens, Placed, Runs, Session, Terminal, TerminalViewId};
 pub use view::View;
@@ -2210,10 +2210,10 @@ mod tests {
         let luneta = clone(&mut projects, "/c", &[]);
         let size = Size::of(1000, 1000).unwrap();
         let mut next = 1_000_000;
-        let rows = VIEWS_MAX / PANES_MAX;
+        let rows = VIEWS_MAX / LAYOUT_VIEWS_MAX;
         for at in 0..rows {
             let main = worktree(&mut projects, luneta, &format!("/c/w{at}"));
-            for _ in 1..PANES_MAX {
+            for _ in 1..LAYOUT_VIEWS_MAX {
                 let view = ViewId::of(next).unwrap();
                 next += 1;
                 let tree = layout(&projects, main).tree().unwrap();
@@ -2300,11 +2300,11 @@ mod tests {
         assert!(refused.unwrap_err().contains("holds views already"), "it opens with one");
         let right = Placed::Beside { at: one, towards: layout::Towards::Right };
         let two = opened(&mut projects, main, 101, right);
-        assert_eq!(layout(&projects, main).tree().unwrap().panes(), [one, two]);
+        assert_eq!(layout(&projects, main).tree().unwrap().views(), [one, two]);
         assert_eq!(projects.holding_terminal(two).map(|(it, _)| it.id()), Some(main));
 
         (projects, _) = change(&projects, Change::Swap { one, other: two }).unwrap();
-        assert_eq!(layout(&projects, main).tree().unwrap().panes(), [two, one]);
+        assert_eq!(layout(&projects, main).tree().unwrap().views(), [two, one]);
         let fill = |full| Change::Fill { worktree: main, full };
         (projects, _) = change(&projects, fill(Some(two))).unwrap();
         assert_eq!(layout(&projects, main).full(), Some(two));
@@ -2367,8 +2367,8 @@ mod tests {
         let made;
         (projects, made) = change(&projects, moving(two, MoveTo::Worktree(feat))).unwrap();
         assert_eq!(made, Some(Made::Found(feat)), "a move into a worktree there finds it");
-        assert_eq!(layout(&projects, main).tree().unwrap().panes(), [one]);
-        assert_eq!(layout(&projects, feat).tree().unwrap().panes(), [three, two]);
+        assert_eq!(layout(&projects, main).tree().unwrap().views(), [one]);
+        assert_eq!(layout(&projects, feat).tree().unwrap().views(), [three, two]);
         let (_, moved) = projects.holding_terminal(two).unwrap();
         assert_eq!(moved.name().map(Name::as_str), Some("tests"), "a terminal moves whole");
         let again = change(&projects, moving(two, MoveTo::Worktree(feat)));
@@ -2382,7 +2382,7 @@ mod tests {
         let Some(Made::Worktree(fix)) = made else {
             panic!("a move to a worktree with no row makes its row, not {made:?}");
         };
-        assert_eq!(layout(&projects, fix).tree().unwrap().panes(), [one], "holding the one moved");
+        assert_eq!(layout(&projects, fix).tree().unwrap().views(), [one], "holding the one moved");
         assert!(projects.find(main).is_none(), "a worktree goes with its last terminal moved out");
         let outside = MoveTo::Made { project: luneta, spot: spot_at("/w/elo", "main") };
         assert!(change(&projects, moving(two, outside)).unwrap_err().contains("in no worktree"));
@@ -2686,7 +2686,7 @@ mod tests {
         let size = Size::of(80, 24).unwrap();
         let open = Change::Open { worktree: main, view: View::Welcome(welcome), placed, size };
         (projects, _) = change(&projects, open).unwrap();
-        assert_eq!(layout(&projects, main).tree().unwrap().panes(), [one, welcome]);
+        assert_eq!(layout(&projects, main).tree().unwrap().views(), [one, welcome]);
         let terminals = projects.terminals().map(|(_, it)| it.id().view());
         let terminals: Vec<ViewId> = terminals.collect();
         assert_eq!(terminals, [one], "a welcome view is no terminal");
@@ -2698,7 +2698,7 @@ mod tests {
         assert!(change(&projects, twice).unwrap_err().contains("is taken"));
 
         (projects, _) = change(&projects, Change::Close { view: one }).unwrap();
-        assert_eq!(layout(&projects, main).tree().unwrap().panes(), [welcome]);
+        assert_eq!(layout(&projects, main).tree().unwrap().views(), [welcome]);
         (projects, _) = change(&projects, Change::Close { view: welcome }).unwrap();
         assert!(layout(&projects, main).is_empty(), "a worktree stays with its last view gone");
     }

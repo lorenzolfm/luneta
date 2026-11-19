@@ -8,21 +8,21 @@ use lunetad::projects::{ProjectId, ViewId, WorktreeId};
 use lunetad::seats::Unread;
 use lunetad::SessionName;
 
-use crate::sidebar::{Listed, PaneKey};
+use crate::sidebar::{Listed, ViewKey};
 
 const UNTOLD: &str = "luneta cannot tell which agents it ends";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
-    Pane(PaneKey),
+    View(ViewKey),
     Worktree(WorktreeId),
     Project,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Deletes {
-    Pane(PaneKey),
-    Worktree { worktree: WorktreeId, panes: Vec<u32>, seen: Vec<ViewId> },
+    View(ViewKey),
+    Worktree { worktree: WorktreeId, views: Vec<u32>, seen: Vec<ViewId> },
     Project {
         key: OwnKey,
         project: ProjectId,
@@ -74,7 +74,7 @@ pub fn unread_in<'a>(
     unread: &'a [Unread],
     held: &'a [TerminalKey],
 ) -> impl Iterator<Item = (u32, Doing)> + 'a {
-    let placed = unread.iter().filter_map(|file| file.pane);
+    let placed = unread.iter().filter_map(|file| file.terminal);
     let held = placed.filter(move |key| held.contains(key));
     held.map(|key| (key.id.get(), Doing::Unknown))
 }
@@ -88,8 +88,8 @@ pub struct Subject<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    Pane { session: SessionName, pane: PaneKey },
-    Worktree { session: SessionName, worktree: WorktreeId, panes: Vec<u32>, seen: Vec<ViewId> },
+    View { session: SessionName, view: ViewKey },
+    Worktree { session: SessionName, worktree: WorktreeId, views: Vec<u32>, seen: Vec<ViewId> },
     Project {
         session: SessionName,
         key: OwnKey,
@@ -102,16 +102,16 @@ pub enum Act {
 impl Act {
     fn what(&self) -> String {
         match self {
-            Act::Pane { .. } => "Close the view".to_owned(),
+            Act::View { .. } => "Close the view".to_owned(),
             Act::Worktree { .. } => "Close the worktree".to_owned(),
             Act::Project { session, .. } => format!("Delete project {session}"),
         }
     }
 
-    pub fn takes(&self, pane: u32) -> bool {
+    pub fn takes(&self, view: u32) -> bool {
         match self {
-            Act::Pane { pane: closed, .. } => pane == closed.id(),
-            Act::Worktree { panes, .. } => panes.contains(&pane),
+            Act::View { view: closed, .. } => view == closed.terminal_id(),
+            Act::Worktree { views, .. } => views.contains(&view),
             Act::Project { .. } => true,
         }
     }
@@ -126,10 +126,10 @@ pub struct Plan {
 pub fn plan(subject: &Subject) -> Plan {
     let session = subject.session.name().clone();
     let act = match &subject.deletes {
-        Deletes::Pane(pane) => Act::Pane { session, pane: *pane },
-        Deletes::Worktree { worktree, panes, seen } => {
-            let (worktree, panes, seen) = (*worktree, panes.clone(), seen.clone());
-            Act::Worktree { session, worktree, panes, seen }
+        Deletes::View(view) => Act::View { session, view: *view },
+        Deletes::Worktree { worktree, views, seen } => {
+            let (worktree, views, seen) = (*worktree, views.clone(), seen.clone());
+            Act::Worktree { session, worktree, views, seen }
         },
         Deletes::Project { key, project, worktrees, seen } => {
             let (worktrees, seen) = (worktrees.clone(), seen.clone());
@@ -189,7 +189,7 @@ impl Ending {
 impl Plan {
     pub fn of(act: Act, agents: Result<&[(u32, Doing)], Untold>) -> Self {
         let ending = agents.map(|agents| {
-            Ending::of(agents.iter().filter(|(pane, _)| act.takes(*pane)).map(|(_, doing)| *doing))
+            Ending::of(agents.iter().filter(|(view, _)| act.takes(*view)).map(|(_, doing)| *doing))
         });
         Plan { act, ending }
     }
@@ -238,16 +238,16 @@ mod tests {
         Subject { session, deletes, agents: Ok(agents) }
     }
 
-    fn pane() -> Deletes {
-        Deletes::Pane(PaneKey::terminal(4))
+    fn view() -> Deletes {
+        Deletes::View(ViewKey::terminal(4))
     }
 
     #[test]
-    fn a_pane_closes_alone() {
+    fn a_view_closes_alone() {
         let luneta = luneta();
-        let planned = plan(&subject(&luneta, pane(), Vec::new())).act;
+        let planned = plan(&subject(&luneta, view(), Vec::new())).act;
         let session = luneta.name().clone();
-        assert_eq!(planned, Act::Pane { session, pane: PaneKey::terminal(4) });
+        assert_eq!(planned, Act::View { session, view: ViewKey::terminal(4) });
     }
 
     #[test]
@@ -273,17 +273,17 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_s_delete_asks_first_only_for_an_agent_at_work_in_its_panes() {
+    fn a_worktree_s_delete_asks_first_only_for_an_agent_at_work_in_its_views() {
         let luneta = luneta();
         let worktree = WorktreeId::of(31).unwrap();
         let seen = vec![ViewId::of(4).unwrap(), ViewId::of(5).unwrap()];
-        let deletes = || Deletes::Worktree { worktree, panes: vec![4, 5], seen: seen.clone() };
+        let deletes = || Deletes::Worktree { worktree, views: vec![4, 5], seen: seen.clone() };
         let planned = |agents| plan(&subject(&luneta, deletes(), agents));
         assert_eq!(planned(vec![(6, Doing::Busy), (4, Doing::Idle)]).question(), None);
         let asks = planned(vec![(5, Doing::Waiting)]).question();
         assert_eq!(asks.as_deref(), Some("Close the worktree? 1 agent, 1 waiting"));
         let session = luneta.name().clone();
-        let act = Act::Worktree { session, worktree, panes: vec![4, 5], seen: seen.clone() };
+        let act = Act::Worktree { session, worktree, views: vec![4, 5], seen: seen.clone() };
         assert_eq!(planned(Vec::new()).act, act);
     }
 
@@ -299,8 +299,8 @@ mod tests {
         let luneta = luneta();
         let question =
             |deletes: Deletes| plan(&subject(&luneta, deletes, agents.clone())).question();
-        assert_eq!(question(pane()), None);
-        let unknown = Deletes::Pane(PaneKey::terminal(7));
+        assert_eq!(question(view()), None);
+        let unknown = Deletes::View(ViewKey::terminal(7));
         assert_eq!(question(unknown), Some("Close the view? 1 agent, 1 unknown".to_owned()));
     }
 }

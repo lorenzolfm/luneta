@@ -233,7 +233,7 @@ fn topical(agent: &Agent) -> Option<SessionId> {
     let word = agent.harness.to_api().prompt_word();
     let at_prompt = agent.entrypoint.as_ref().map(Said::as_str) == word;
     let given = agent.name.as_ref().is_some_and(Name::given);
-    if agent.pane.is_none() || !at_prompt || given {
+    if agent.terminal.is_none() || !at_prompt || given {
         return None;
     }
     SessionId::parse(agent.session_id.as_str())
@@ -374,7 +374,7 @@ mod tests {
             started_at: Some(began() + Duration::from_secs(1)),
             name: None,
             entrypoint: Some(Said::new("cli".to_owned()).unwrap()),
-            pane: Some(TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(60) }),
+            terminal: Some(TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(60) }),
         }
     }
 
@@ -576,13 +576,13 @@ mod tests {
     #[test]
     fn a_prompt_that_names_no_subject_makes_the_call_after_an_agent_was_away() {
         let busy = [agent(ID, Status::Busy, 2)];
-        let no_pane = [Agent { pane: None, ..agent(ID, Status::Busy, 2) }];
+        let unseated = [Agent { terminal: None, ..agent(ID, Status::Busy, 2) }];
         let projects = Projects::new();
         let mut topics = with_a_topic(&projects, &busy);
-        assert_eq!(topics.look(&no_pane, true), []);
+        assert_eq!(topics.look(&unseated, true), []);
         projects.prompted(ID, "now the tabs");
         projects.prompted(ID, "yes");
-        assert_eq!(topics.look(&no_pane, true), []);
+        assert_eq!(topics.look(&unseated, true), []);
         assert_eq!(topics.look(&busy, true).len(), 1);
     }
 
@@ -609,17 +609,17 @@ mod tests {
         let mut topics = with_a_topic(&projects, &busy);
         projects.prompted(ID, "now the tabs");
         assert_eq!(topics.look(&busy, true).len(), 1);
-        projects.prompted(ID, "and the panes");
+        projects.prompted(ID, "and the views");
         assert_eq!(topics.look(&busy, true), []);
         topics.wrote(failed());
         let due = topics.look(&busy, true);
         let [Due { prompt, .. }] = due.as_slice() else {
             panic!("{due:?}");
         };
-        assert!(prompt.contains("last asked it: and the panes"), "{prompt}");
+        assert!(prompt.contains("last asked it: and the views"), "{prompt}");
         projects.prompted(ID, "yes");
         assert_eq!(topics.look(&busy, true), []);
-        topics.wrote(said(ID, "Pane layout"));
+        topics.wrote(said(ID, "View layout"));
         assert_eq!(topics.look(&busy, true), []);
     }
 
@@ -630,7 +630,7 @@ mod tests {
         let mut topics = with_a_topic(&projects, &busy);
         projects.prompted(ID, "now the tabs");
         assert_eq!(topics.look(&busy, true).len(), 1);
-        projects.prompted(ID, "and the panes");
+        projects.prompted(ID, "and the views");
         assert_eq!(topics.look(&busy, true), []);
 
         assert_eq!(topics.look(&busy, false), []);
@@ -729,7 +729,7 @@ mod tests {
         topics.wrote(said(quiet, "Tab order"));
 
         projects.prompted(asked, "now the tabs");
-        projects.prompted(asked, "and the panes");
+        projects.prompted(asked, "and the views");
         assert_eq!(topics.look(&agents, false), []);
         assert_eq!(topics.look(&agents, false), []);
         projects.add(quiet, &json!({"type": "last-prompt", "lastPrompt": "sort the tabs"}));
@@ -739,7 +739,7 @@ mod tests {
             panic!("{due:?}");
         };
         assert_eq!(id.as_str(), asked);
-        assert!(prompt.contains("The developer last asked it: and the panes"), "{prompt}");
+        assert!(prompt.contains("The developer last asked it: and the views"), "{prompt}");
     }
 
     #[test]
@@ -913,7 +913,7 @@ mod tests {
             (Agent { name: named(Some(Source::User)), ..agent(ID, Status::Busy, 2) }, false),
             (Agent { name: named(Some(Source::Peer)), ..agent(ID, Status::Busy, 2) }, false),
             (Agent { name: named(None), ..agent(ID, Status::Busy, 2) }, false),
-            (Agent { pane: None, ..agent(ID, Status::Busy, 2) }, false),
+            (Agent { terminal: None, ..agent(ID, Status::Busy, 2) }, false),
             (Agent { entrypoint: word("sdk-cli"), ..agent(ID, Status::Busy, 2) }, false),
             (Agent { entrypoint: None, ..agent(ID, Status::Busy, 2) }, false),
             (agent("no-uuid-here", Status::Busy, 2), false),

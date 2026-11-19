@@ -14,7 +14,7 @@ use crate::api;
 use crate::claude::Scan;
 use crate::github::Found;
 use crate::mux::own::server::{self, Is};
-use crate::panes::{self, Titled};
+use crate::titles::{self, Titled};
 use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage, Subfolder};
 use crate::projects::{ViewId, Worktree, WorktreeId, CLONE_WORKTREES_MAX};
 use crate::remote::{Destination, Named, Reached};
@@ -435,7 +435,7 @@ impl Known {
                 Some(Is::Ended) => (None, None, true),
                 None => (None, None, false),
             };
-            let titled = listed.and_then(|listed| panes::titled(&listed.title));
+            let titled = listed.and_then(|listed| titles::titled(&listed.title));
             api::Terminal {
                 id: id.get(),
                 found: Some(told),

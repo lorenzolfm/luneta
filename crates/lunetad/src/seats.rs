@@ -37,7 +37,7 @@ pub fn unread(told: u32, files: &[UnreadFile]) -> Result<Vec<Unread>, Unplaced> 
     let mut placed = Vec::with_capacity(files.len());
     for file in files {
         match file.terminal.as_ref().map(TerminalKey::of).transpose() {
-            Ok(pane) => placed.push(Unread { pid: file.pid, pane }),
+            Ok(terminal) => placed.push(Unread { pid: file.pid, terminal }),
             Err(_) => unplaced += 1,
         }
     }
@@ -72,7 +72,10 @@ mod tests {
     fn a_file_is_where_its_process_runs_unless_lunetad_cannot_follow_it() {
         let said = api::TerminalKey::from(key(3, 60));
         let placed = [UnreadFile { terminal: Some(said), ..file(10) }, file(11)];
-        let seats = vec![Unread { pid: 10, pane: Some(key(3, 60)) }, Unread { pid: 11, pane: None }];
+        let seats = vec![
+            Unread { pid: 10, terminal: Some(key(3, 60)) },
+            Unread { pid: 11, terminal: None },
+        ];
         assert_eq!(unread(2, &placed), Ok(seats));
         assert_eq!(unread(0, &[]), Ok(Vec::new()));
 
@@ -88,7 +91,7 @@ mod tests {
             |key: api::TerminalKey| UnreadFile { terminal: Some(key), ..file(10) };
         let said = api::TerminalKey::from(key(7, 60));
         let placed = [in_terminal(said)];
-        assert_eq!(unread(1, &placed), Ok(vec![Unread { pid: 10, pane: Some(key(7, 60)) }]));
+        assert_eq!(unread(1, &placed), Ok(vec![Unread { pid: 10, terminal: Some(key(7, 60)) }]));
 
         let zero = in_terminal(api::TerminalKey { id: 0, ..said });
         let unmade = in_terminal(api::TerminalKey { made_at: None, ..said });

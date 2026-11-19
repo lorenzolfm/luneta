@@ -108,7 +108,7 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
         Ok(Heard::Laid(laid)) if !laid.is_empty() => Some(laid),
         Ok(_) | Err(_) => None,
     });
-    let key = laid.focused().and_then(lunetad::Pane::key).expect("a terminal of the mux's");
+    let key = laid.focused().and_then(lunetad::View::key).expect("a terminal of the mux's");
     let inside = [
         ("LUNETA_MUX_TERMINAL", key.id.to_string()),
         ("LUNETA_MUX_TERMINAL_MADE", key.made.nanos().to_string()),

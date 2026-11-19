@@ -9,7 +9,7 @@ mod front;
 mod id;
 mod marks;
 mod mux;
-mod pane;
 mod process;
 mod pty;
 mod ran;
+mod terminal;

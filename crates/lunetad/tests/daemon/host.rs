@@ -42,7 +42,7 @@ impl<'a> Vars<'a> {
             "CLAUDE_CONFIG_DIR",
             "PI_CODING_AGENT_DIR",
         ];
-        let panes = [
+        let views = [
             "LUNETA_MUX_SESSION",
             "LUNETA_MUX_MADE",
             "LUNETA_MUX_PANE",
@@ -50,7 +50,7 @@ impl<'a> Vars<'a> {
             "LUNETA_MUX_TERMINAL_MADE",
         ];
         let turns = ["LUNETA_TURN", "LUNETA_TURN_BEFORE"];
-        for name in names.into_iter().chain(panes).chain(turns) {
+        for name in names.into_iter().chain(views).chain(turns) {
             command.env_remove(name);
         }
         let set = [

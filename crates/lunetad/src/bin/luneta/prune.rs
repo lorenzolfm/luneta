@@ -238,10 +238,10 @@ mod tests {
         assert_eq!(note(&[outcome("a", Came::Gone)]), None);
         let said = note(&[
             outcome("a", Came::Gone),
-            outcome("b", Came::Stays("it has a pane".to_owned())),
+            outcome("b", Came::Stays("it has a view".to_owned())),
             outcome("c", Came::WentBut("its branch on origin stays: no key".to_owned())),
         ]);
-        let want = "menu: deleted 2 of 3 worktrees; b stays: it has a pane; c went, but its branch \
+        let want = "menu: deleted 2 of 3 worktrees; b stays: it has a view; c went, but its branch \
                     on origin stays: no key";
         assert_eq!(said.as_deref(), Some(want));
     }
@@ -273,7 +273,7 @@ mod tests {
             kept: vec![prunes::Kept {
                 folder: "/w/k".to_owned(),
                 number: 8,
-                why: "it has a pane".to_owned(),
+                why: "it has a view".to_owned(),
             }],
             unasked: vec![prunes::Unasked {
                 folder: "/w/u".to_owned(),
@@ -286,7 +286,7 @@ mod tests {
                 "delete one       #7  4 KB  branch one, and one on origin",
                 "delete two-long  #7  ?  branch two-long; what is pushed of it stays: moved",
                 "delete tre       #7  4 KB  branch tre",
-                "keep k #8: it has a pane",
+                "keep k #8: it has a view",
                 "keep u: gh failed",
             ]
         );

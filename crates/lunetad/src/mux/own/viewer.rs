@@ -16,7 +16,7 @@ use super::server::{connect, refused, runtime, socket, Reached};
 use super::TerminalKey;
 use crate::api::{frames_request, On, FramesRequest};
 use crate::folder::Folder;
-use crate::projects::PANES_MAX;
+use crate::projects::LAYOUT_VIEWS_MAX;
 use crate::remote::Destination;
 use crate::streams::{self, Inbox, Next, Outbox};
 
@@ -26,7 +26,7 @@ pub const FRAMES_MAX: usize = 64;
 
 const SAID_MAX: usize = 1024;
 
-const _: () = assert!(PANES_MAX <= SHOWN_MAX);
+const _: () = assert!(LAYOUT_VIEWS_MAX <= SHOWN_MAX);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Greeting {

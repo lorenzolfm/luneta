@@ -24,7 +24,7 @@ pub fn said(terminal: TerminalKey, view: &View, before: Option<&View>, flags: Fl
                 .enumerate()
                 .filter(|(_, (line, before))| line != before)
                 .map(|(index, (line, _))| api::Row {
-                    index: u32::try_from(index).expect("a pane's rows are counted in a u16"),
+                    index: u32::try_from(index).expect("a terminal's rows are counted in a u16"),
                     line: Some(line_said(line)),
                 })
                 .collect();
@@ -35,7 +35,7 @@ pub fn said(terminal: TerminalKey, view: &View, before: Option<&View>, flags: Fl
         }),
     };
     let count =
-        |count: usize| u32::try_from(count).expect("a pane's scrollback is counted in a u32");
+        |count: usize| u32::try_from(count).expect("a terminal's scrollback is counted in a u32");
     api::Frame {
         terminal: Some(terminal.said()),
         size: Some(size.said()),

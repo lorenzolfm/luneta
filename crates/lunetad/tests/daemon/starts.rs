@@ -342,7 +342,7 @@ fn a_bare_luneta_in_a_project_shows_the_worktree_of_its_folder() {
 }
 
 #[test]
-fn a_new_worktree_on_a_pane_in_a_folder_of_a_project_shows_that_folder_in_the_project() {
+fn a_new_worktree_on_a_view_in_a_folder_of_a_project_shows_that_folder_in_the_project() {
     if !makes_shells() {
         return;
     }
@@ -354,11 +354,11 @@ fn a_new_worktree_on_a_pane_in_a_folder_of_a_project_shows_that_folder_in_the_pr
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
     window.send(SPLIT);
-    eventually("a second pane opens in work", || {
+    eventually("a second view opens in work", || {
         (shown(&owned, &dir.path)?.terminals.len() == 2).then_some(())
     });
     window.send(CD_FEAT);
-    eventually("the pane works in feat", || window.shows(" work/feat ").then_some(()));
+    eventually("the view works in feat", || window.shows(" work/feat ").then_some(()));
     window.send("\x1b[97;3unw");
     eventually("luneta shows feat", || shown(&owned, &feat));
     let projects = projects_of(&owned);

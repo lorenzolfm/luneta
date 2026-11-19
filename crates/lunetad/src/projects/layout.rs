@@ -9,7 +9,7 @@ pub const COLUMNS_MIN: u16 = 5;
 
 pub const ROWS_MIN: u16 = 3;
 
-pub const PANES_MAX: usize = 64;
+pub const LAYOUT_VIEWS_MAX: usize = 64;
 
 pub const SIDE_MAX: u16 = 1000;
 
@@ -17,14 +17,14 @@ pub const SHARES: u32 = 1_000_000;
 
 const STEP_PERCENT: u32 = 5;
 
-pub const NODES_MAX: usize = 2 * PANES_MAX - 1;
+pub const NODES_MAX: usize = 2 * LAYOUT_VIEWS_MAX - 1;
 
 const ROOT: usize = 0;
 
 const _: () = assert!(COLUMNS_MIN > 2 * FRAME_CELLS);
 const _: () = assert!(ROWS_MIN > 2 * FRAME_CELLS);
-const _: () = assert!(PANES_MAX * COLUMNS_MIN as usize <= SIDE_MAX as usize);
-const _: () = assert!(PANES_MAX * ROWS_MIN as usize <= SIDE_MAX as usize);
+const _: () = assert!(LAYOUT_VIEWS_MAX * COLUMNS_MIN as usize <= SIDE_MAX as usize);
+const _: () = assert!(LAYOUT_VIEWS_MAX * ROWS_MIN as usize <= SIDE_MAX as usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {
@@ -152,10 +152,10 @@ impl Rect {
 
     #[must_use]
     pub fn inner(self) -> Size {
-        assert!(self.columns >= COLUMNS_MIN, "{self:?} is narrower than a pane");
-        assert!(self.rows >= ROWS_MIN, "{self:?} is shorter than a pane");
+        assert!(self.columns >= COLUMNS_MIN, "{self:?} is narrower than a view");
+        assert!(self.rows >= ROWS_MIN, "{self:?} is shorter than a view");
         let side = |side: u16| {
-            NonZeroU16::new(side - 2 * FRAME_CELLS).expect("a pane holds its frame and a cell")
+            NonZeroU16::new(side - 2 * FRAME_CELLS).expect("a view holds its frame and a cell")
         };
         Size { columns: side(self.columns), rows: side(self.rows) }
     }
@@ -208,7 +208,7 @@ struct Least {
 }
 
 impl Least {
-    const PANE: Least = Least { columns: COLUMNS_MIN, rows: ROWS_MIN };
+    const VIEW: Least = Least { columns: COLUMNS_MIN, rows: ROWS_MIN };
 
     fn along(self, towards: Towards) -> u16 {
         match towards {
@@ -237,11 +237,11 @@ impl Least {
 
     fn raised(self, size: Size) -> Size {
         let raised = |cells: NonZeroU16, least: u16| {
-            cells.max(NonZeroU16::new(least).expect("a pane is a cell or more each way"))
+            cells.max(NonZeroU16::new(least).expect("a view is a cell or more each way"))
         };
         let raised =
             Size { columns: raised(size.columns, self.columns), rows: raised(size.rows, self.rows) };
-        assert!(self.fits(raised), "{raised:?} holds the panes of the tree");
+        assert!(self.fits(raised), "{raised:?} holds the views of the tree");
         raised
     }
 }
@@ -271,7 +271,7 @@ impl<L: Leaf + Eq> Eq for Tree<L> {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Node<L> {
-    Pane(L),
+    View(L),
     Split(Split),
 }
 
@@ -285,7 +285,7 @@ struct Split {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preordered<L> {
     Split { towards: Towards, share: u32 },
-    Pane(L),
+    View(L),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -296,18 +296,18 @@ pub enum Removed<L> {
 
 #[must_use]
 pub fn lone(size: Size) -> Size {
-    Rect::whole(Least::PANE.raised(size)).inner()
+    Rect::whole(Least::VIEW.raised(size)).inner()
 }
 
 impl<L: Leaf> Tree<L> {
     #[must_use]
-    pub fn one(pane: L) -> Tree<L> {
-        Tree { nodes: vec![Node::Pane(pane)] }
+    pub fn one(view: L) -> Tree<L> {
+        Tree { nodes: vec![Node::View(view)] }
     }
 
     pub fn of_preorder(preorder: Vec<Preordered<L>>) -> Result<Tree<L>, String> {
         if preorder.len() > NODES_MAX {
-            return Err(format!("a layout holds at most {PANES_MAX} terminals"));
+            return Err(format!("a layout holds at most {LAYOUT_VIEWS_MAX} views"));
         }
         let mut nodes: Vec<Option<Node<L>>> = Vec::with_capacity(preorder.len());
         nodes.push(None);
@@ -317,7 +317,7 @@ impl<L: Leaf> Tree<L> {
                 return Err("a layout holds nodes after its last terminal".to_owned());
             };
             nodes[slot] = Some(match found {
-                Preordered::Pane(leaf) => Node::Pane(leaf),
+                Preordered::View(leaf) => Node::View(leaf),
                 Preordered::Split { towards, share } => {
                     if share > SHARES {
                         return Err(format!("a split's share of {share} is over {SHARES}"));
@@ -335,11 +335,11 @@ impl<L: Leaf> Tree<L> {
         let filled = "a preorder that ends with no open slot fills every node";
         let nodes: Vec<Node<L>> = nodes.into_iter().map(|node| node.expect(filled)).collect();
         let tree = Tree { nodes };
-        let mut panes = tree.panes();
-        let count = panes.len();
-        panes.sort_unstable();
-        panes.dedup();
-        if panes.len() != count {
+        let mut views = tree.views();
+        let count = views.len();
+        views.sort_unstable();
+        views.dedup();
+        if views.len() != count {
             return Err("a layout holds a terminal twice".to_owned());
         }
         tree.assert_shaped();
@@ -354,7 +354,7 @@ impl<L: Leaf> Tree<L> {
         for _ in 0..self.nodes.len() {
             let node = stack.pop().expect("a tree visits each of its nodes once");
             match &self.nodes[node] {
-                Node::Pane(leaf) => preorder.push(Preordered::Pane(leaf)),
+                Node::View(leaf) => preorder.push(Preordered::View(leaf)),
                 Node::Split(split) => {
                     preorder.push(Preordered::Split { towards: split.towards, share: split.share });
                     stack.push(split.second());
@@ -372,7 +372,7 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn panes(&self) -> Vec<ViewId> {
+    pub fn views(&self) -> Vec<ViewId> {
         self.leaves().map(Leaf::id).collect()
     }
 
@@ -381,29 +381,29 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn holds(&self, pane: ViewId) -> bool {
-        self.leaf(pane).is_some()
+    pub fn holds(&self, view: ViewId) -> bool {
+        self.leaf(view).is_some()
     }
 
     #[must_use]
-    pub fn get(&self, pane: ViewId) -> Option<&L> {
-        Some(self.leaf_at(self.leaf(pane)?))
+    pub fn get(&self, view: ViewId) -> Option<&L> {
+        Some(self.leaf_at(self.leaf(view)?))
     }
 
-    pub fn get_mut(&mut self, pane: ViewId) -> Option<&mut L> {
-        let node = self.leaf(pane)?;
+    pub fn get_mut(&mut self, view: ViewId) -> Option<&mut L> {
+        let node = self.leaf(view)?;
         match &mut self.nodes[node] {
-            Node::Pane(leaf) => Some(leaf),
-            Node::Split(_) => unreachable!("node {node} is a pane's leaf"),
+            Node::View(leaf) => Some(leaf),
+            Node::Split(_) => unreachable!("node {node} is a view's leaf"),
         }
     }
 
     #[must_use]
     pub fn into_lone(mut self) -> L {
-        assert_eq!(self.nodes.len(), 1, "a lone pane's tree holds only it");
+        assert_eq!(self.nodes.len(), 1, "a lone view's tree holds only it");
         match self.nodes.pop() {
-            Some(Node::Pane(leaf)) => leaf,
-            Some(Node::Split(_)) | None => unreachable!("the root of a tree of one is a pane"),
+            Some(Node::View(leaf)) => leaf,
+            Some(Node::Split(_)) | None => unreachable!("the root of a tree of one is a view"),
         }
     }
 
@@ -435,15 +435,15 @@ impl<L: Leaf> Tree<L> {
         new: ViewId,
         size: Size,
     ) -> Option<Size> {
-        if self.len() >= PANES_MAX {
+        if self.len() >= LAYOUT_VIEWS_MAX {
             return None;
         }
         let size = self.fitted(size);
         let mut grown = self.shape();
         grown.grafted(at, towards, new);
         grown.leasts()[ROOT].fits(size).then(|| {
-            let laid = grown.rects(size).into_iter().find(|(pane, _)| *pane == new);
-            laid.expect("a grafted pane is laid out").1.inner()
+            let laid = grown.rects(size).into_iter().find(|(view, _)| *view == new);
+            laid.expect("a grafted view is laid out").1.inner()
         })
     }
 
@@ -454,7 +454,7 @@ impl<L: Leaf> Tree<L> {
         new: ViewId,
         size: Size,
     ) -> Option<(Towards, Size)> {
-        let (_, rect) = self.rects(size).into_iter().find(|(pane, _)| *pane == at)?;
+        let (_, rect) = self.rects(size).into_iter().find(|(view, _)| *view == at)?;
         let towards = rect.longer();
         [towards, towards.across()]
             .into_iter()
@@ -476,71 +476,71 @@ impl<L: Leaf> Tree<L> {
         let id = new.id();
         let size = self.fitted(size);
         self.grafted(at, towards, new);
-        assert!(self.leasts()[ROOT].fits(size), "pane {id} has room in {size:?}");
+        assert!(self.leasts()[ROOT].fits(size), "view {id} has room in {size:?}");
     }
 
     #[must_use]
     pub fn largest(&self, size: Size) -> (ViewId, Towards) {
         let rects = self.rects(size);
-        let (pane, rect) = rects
+        let (view, rect) = rects
             .iter()
             .enumerate()
             .max_by_key(|(place, (_, rect))| (rect.area(), Reverse(*place)))
             .map(|(_, found)| *found)
-            .expect("a tree holds a pane");
-        (pane, rect.longer())
+            .expect("a tree holds a view");
+        (view, rect.longer())
     }
 
     #[must_use]
-    pub fn heir(&self, pane: ViewId) -> Option<ViewId> {
-        let node = self.leaf(pane).expect("a pane with an heir is in the tree");
+    pub fn heir(&self, view: ViewId) -> Option<ViewId> {
+        let node = self.leaf(view).expect("a view with an heir is in the tree");
         let (_, sibling) = self.halves_of(node)?;
-        let panes = self.panes();
-        let place = panes.iter().position(|found| *found == pane);
-        let place = place.expect("a pane of the tree is in its order");
-        let heir = if sibling > node { panes[place + 1] } else { panes[place - 1] };
-        assert_ne!(heir, pane, "a pane is no heir of itself");
+        let views = self.views();
+        let place = views.iter().position(|found| *found == view);
+        let place = place.expect("a view of the tree is in its order");
+        let heir = if sibling > node { views[place + 1] } else { views[place - 1] };
+        assert_ne!(heir, view, "a view is no heir of itself");
         Some(heir)
     }
 
-    pub fn remove(&mut self, pane: ViewId) -> Removed<L> {
-        let node = self.leaf(pane).expect("a removed pane is in the tree");
-        let Some(heir) = self.heir(pane) else {
-            assert_eq!(self.nodes.len(), 1, "the root is a pane only in a tree of one");
+    pub fn remove(&mut self, view: ViewId) -> Removed<L> {
+        let node = self.leaf(view).expect("a removed view is in the tree");
+        let Some(heir) = self.heir(view) else {
+            assert_eq!(self.nodes.len(), 1, "the root is a view only in a tree of one");
             return Removed::Last;
         };
-        let (parent, sibling) = self.halves_of(node).expect("a pane with an heir has a parent");
+        let (parent, sibling) = self.halves_of(node).expect("a view with an heir has a parent");
         let Node::Split(split) = self.nodes[parent] else {
             unreachable!("node {parent} is a parent, so a split");
         };
         self.nodes.swap(parent, sibling);
         let gone = self.compact(split.halves, node);
         self.assert_shaped();
-        assert!(!self.holds(pane), "pane {pane} left the tree");
-        assert!(self.holds(heir), "pane {heir} took its sibling's room");
+        assert!(!self.holds(view), "view {view} left the tree");
+        assert!(self.holds(heir), "view {heir} took its sibling's room");
         Removed::Out { gone, heir }
     }
 
     pub fn swap(&mut self, one: ViewId, other: ViewId) {
-        let one = self.leaf(one).expect("a swapped pane is in the tree");
-        let other = self.leaf(other).expect("a swapped pane is in the tree");
+        let one = self.leaf(one).expect("a swapped view is in the tree");
+        let other = self.leaf(other).expect("a swapped view is in the tree");
         self.nodes.swap(one, other);
     }
 
     #[must_use]
     pub fn neighbour(
         &self,
-        pane: ViewId,
+        view: ViewId,
         direction: Direction,
         size: Size,
     ) -> Option<ViewId> {
         let rects = self.rects(size);
-        let from = rects.iter().find(|(found, _)| *found == pane);
-        let (_, from) = *from.expect("a pane of the tree is laid out");
+        let from = rects.iter().find(|(found, _)| *found == view);
+        let (_, from) = *from.expect("a view of the tree is laid out");
         rects
             .iter()
             .enumerate()
-            .filter(|(_, (other, _))| *other != pane)
+            .filter(|(_, (other, _))| *other != view)
             .filter_map(|(place, (other, rect))| {
                 Some((touching(from, *rect, direction)?, Reverse(place), *other))
             })
@@ -549,32 +549,32 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn in_order(&self, pane: ViewId, order: Order) -> Option<ViewId> {
-        let panes = self.panes();
-        let place = panes.iter().position(|found| *found == pane);
-        let place = place.expect("a pane of the tree is in its order");
-        (panes.len() > 1).then(|| panes[order.stepped(place, panes.len())])
+    pub fn in_order(&self, view: ViewId, order: Order) -> Option<ViewId> {
+        let views = self.views();
+        let place = views.iter().position(|found| *found == view);
+        let place = place.expect("a view of the tree is in its order");
+        (views.len() > 1).then(|| views[order.stepped(place, views.len())])
     }
 
     #[must_use]
-    pub fn resize(&mut self, pane: ViewId, sides: Sides, growth: Growth, size: Size) -> bool {
+    pub fn resize(&mut self, view: ViewId, sides: Sides, growth: Growth, size: Size) -> bool {
         let before = self.rects(size);
         let moved = match sides {
-            Sides::One(direction) => self.border_moved(pane, direction, growth, size),
+            Sides::One(direction) => self.border_moved(view, direction, growth, size),
             Sides::Every => {
                 let moved = Direction::ALL
-                    .map(|direction| self.border_moved(pane, direction, growth, size));
+                    .map(|direction| self.border_moved(view, direction, growth, size));
                 moved.contains(&true)
             },
         };
         let after = self.rects(size);
         if !moved {
-            assert_eq!(after, before, "a resize that moves no border moves no pane");
+            assert_eq!(after, before, "a resize that moves no border moves no view");
             return false;
         }
         let rect_of = |rects: &[(ViewId, Rect)]| {
-            let found = rects.iter().find(|(id, _)| *id == pane);
-            found.map(|(_, rect)| *rect).expect("a resized pane is in the tree")
+            let found = rects.iter().find(|(id, _)| *id == view);
+            found.map(|(_, rect)| *rect).expect("a resized view is in the tree")
         };
         let (was, now) = (rect_of(&before), rect_of(&after));
         match growth {
@@ -592,7 +592,7 @@ impl<L: Leaf> Tree<L> {
 
     fn border_moved(
         &mut self,
-        pane: ViewId,
+        view: ViewId,
         direction: Direction,
         growth: Growth,
         size: Size,
@@ -601,7 +601,7 @@ impl<L: Leaf> Tree<L> {
         let leasts = self.leasts();
         let rects = self.node_rects(&leasts, self.fitted(size));
         let parents = self.parents();
-        let mut node = self.leaf(pane).expect("a resized pane is in the tree");
+        let mut node = self.leaf(view).expect("a resized view is in the tree");
         for _ in 0..self.nodes.len() {
             let Some(parent) = parents[node] else {
                 return false;
@@ -622,21 +622,21 @@ impl<L: Leaf> Tree<L> {
 
     fn shape(&self) -> Tree<ViewId> {
         let nodes = self.nodes.iter().map(|node| match node {
-            Node::Pane(leaf) => Node::Pane(leaf.id()),
+            Node::View(leaf) => Node::View(leaf.id()),
             Node::Split(split) => Node::Split(*split),
         });
         Tree { nodes: nodes.collect() }
     }
 
     fn grafted(&mut self, at: ViewId, towards: Towards, new: L) {
-        assert!(!self.holds(new.id()), "pane {} is split into a tree that holds it", new.id());
-        assert!(self.nodes.len() + 2 <= NODES_MAX, "a tree holds at most {PANES_MAX} panes");
-        let node = self.leaf(at).expect("a split pane is in the tree");
+        assert!(!self.holds(new.id()), "view {} is split into a tree that holds it", new.id());
+        assert!(self.nodes.len() + 2 <= NODES_MAX, "a tree holds at most {LAYOUT_VIEWS_MAX} views");
+        let node = self.leaf(at).expect("a split view is in the tree");
         let halves = self.nodes.len();
         let split = Node::Split(Split { towards, share: SHARES / 2, halves });
         let old = std::mem::replace(&mut self.nodes[node], split);
         self.nodes.push(old);
-        self.nodes.push(Node::Pane(new));
+        self.nodes.push(Node::View(new));
         self.assert_shaped();
     }
 
@@ -655,14 +655,14 @@ impl<L: Leaf> Tree<L> {
         Some((parent, split.first()))
     }
 
-    fn leaf(&self, pane: ViewId) -> Option<usize> {
-        self.nodes.iter().position(|node| matches!(node, Node::Pane(leaf) if leaf.id() == pane))
+    fn leaf(&self, view: ViewId) -> Option<usize> {
+        self.nodes.iter().position(|node| matches!(node, Node::View(leaf) if leaf.id() == view))
     }
 
     fn leaf_at(&self, node: usize) -> &L {
         match &self.nodes[node] {
-            Node::Pane(leaf) => leaf,
-            Node::Split(_) => unreachable!("node {node} is laid out as a pane"),
+            Node::View(leaf) => leaf,
+            Node::Split(_) => unreachable!("node {node} is laid out as a view"),
         }
     }
 
@@ -673,7 +673,7 @@ impl<L: Leaf> Tree<L> {
         for _ in 0..self.nodes.len() {
             let node = stack.pop().expect("a tree visits each of its nodes once");
             match &self.nodes[node] {
-                Node::Pane(_) => order.push(node),
+                Node::View(_) => order.push(node),
                 Node::Split(split) => {
                     stack.push(split.second());
                     stack.push(split.first());
@@ -700,7 +700,7 @@ impl<L: Leaf> Tree<L> {
     }
 
     fn leasts(&self) -> Vec<Least> {
-        let mut leasts = vec![Least::PANE; self.nodes.len()];
+        let mut leasts = vec![Least::VIEW; self.nodes.len()];
         for (node, found) in self.nodes.iter().enumerate().rev() {
             if let Node::Split(split) = found {
                 assert!(split.halves > node, "node {} comes after its parent {node}", split.halves);
@@ -712,7 +712,7 @@ impl<L: Leaf> Tree<L> {
 
     fn node_rects(&self, leasts: &[Least], size: Size) -> Vec<Rect> {
         assert_eq!(leasts.len(), self.nodes.len(), "a least size for every node");
-        assert!(leasts[ROOT].fits(size), "{size:?} holds the panes of the tree");
+        assert!(leasts[ROOT].fits(size), "{size:?} holds the views of the tree");
         let mut rects = vec![Rect::whole(size); self.nodes.len()];
         for (node, found) in self.nodes.iter().enumerate() {
             if let Node::Split(split) = found {
@@ -735,9 +735,9 @@ impl<L: Leaf> Tree<L> {
         let mut kept = Vec::with_capacity(count - 2);
         for (node, found) in std::mem::take(&mut self.nodes).into_iter().enumerate() {
             match found {
-                Node::Pane(leaf) if node == leaving => gone = Some(leaf),
+                Node::View(leaf) if node == leaving => gone = Some(leaf),
                 _ if node == halves || node == halves + 1 => {},
-                pane @ Node::Pane(_) => kept.push(pane),
+                view @ Node::View(_) => kept.push(view),
                 Node::Split(split) => {
                     kept.push(Node::Split(Split { halves: shifted(split.halves), ..split }));
                 },
@@ -745,7 +745,7 @@ impl<L: Leaf> Tree<L> {
         }
         assert_eq!(kept.len() + 2, count, "two nodes left the tree");
         self.nodes = kept;
-        gone.expect("the leaving pane was one of the two halves")
+        gone.expect("the leaving view was one of the two halves")
     }
 
     fn assert_shaped(&self) {
@@ -755,11 +755,11 @@ impl<L: Leaf> Tree<L> {
         assert!(parents[ROOT].is_none(), "the root has no parent");
         let hung = parents.iter().skip(1).all(Option::is_some);
         assert!(hung, "every node but the root hangs from a split");
-        let mut panes = self.panes();
-        let count = panes.len();
-        panes.sort_unstable();
-        panes.dedup();
-        assert_eq!(panes.len(), count, "a tree holds each pane once");
+        let mut views = self.views();
+        let count = views.len();
+        views.sort_unstable();
+        views.dedup();
+        assert_eq!(views.len(), count, "a tree holds each view once");
     }
 }
 
@@ -823,18 +823,18 @@ fn assert_tiled<L: Leaf>(laid: &[(&L, Rect)], size: Size) {
     let (columns, rows) = size.get();
     let mut area = 0;
     for (place, (leaf, rect)) in laid.iter().enumerate() {
-        let pane = leaf.id();
-        assert!(rect.right() <= columns, "pane {pane} at {rect:?} is off a layout of {size:?}");
-        assert!(rect.bottom() <= rows, "pane {pane} at {rect:?} is off a layout of {size:?}");
-        assert!(rect.columns >= COLUMNS_MIN, "pane {pane} at {rect:?} is narrower than a pane");
-        assert!(rect.rows >= ROWS_MIN, "pane {pane} at {rect:?} is shorter than a pane");
+        let view = leaf.id();
+        assert!(rect.right() <= columns, "view {view} at {rect:?} is off a layout of {size:?}");
+        assert!(rect.bottom() <= rows, "view {view} at {rect:?} is off a layout of {size:?}");
+        assert!(rect.columns >= COLUMNS_MIN, "view {view} at {rect:?} is narrower than a view");
+        assert!(rect.rows >= ROWS_MIN, "view {view} at {rect:?} is shorter than a view");
         for (other, over) in &laid[place + 1..] {
             let other = other.id();
-            assert!(!rect.overlaps(*over), "pane {other} at {over:?} is over pane {pane}");
+            assert!(!rect.overlaps(*over), "view {other} at {over:?} is over view {view}");
         }
         area += rect.area();
     }
-    assert_eq!(area, Rect::whole(size).area(), "the panes tile a layout of {size:?}");
+    assert_eq!(area, Rect::whole(size).area(), "the views tile a layout of {size:?}");
 }
 
 fn touching(from: Rect, to: Rect, direction: Direction) -> Option<u16> {
@@ -864,7 +864,7 @@ fn touching(from: Rect, to: Rect, direction: Direction) -> Option<u16> {
 mod tests {
     use super::*;
 
-    fn pane(id: u64) -> ViewId {
+    fn view(id: u64) -> ViewId {
         ViewId::of(id).unwrap()
     }
 
@@ -877,9 +877,9 @@ mod tests {
     }
 
     fn three(at: Size) -> Tree<ViewId> {
-        let mut tree = Tree::one(pane(1));
-        tree.split(pane(1), Towards::Right, pane(2), at);
-        tree.split(pane(2), Towards::Down, pane(3), at);
+        let mut tree = Tree::one(view(1));
+        tree.split(view(1), Towards::Right, view(2), at);
+        tree.split(view(2), Towards::Down, view(3), at);
         tree
     }
 
@@ -898,16 +898,16 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_of_as_many_panes_as_it_may_has_room_for_none() {
+    fn a_tree_of_as_many_views_as_it_may_has_room_for_none() {
         let at = size(SIDE_MAX, SIDE_MAX);
-        let mut tree = Tree::one(pane(1));
-        for new in 2..=u64::try_from(PANES_MAX).unwrap() {
-            let (beside, towards, _) = tree.room_beside_largest(pane(new), at).unwrap();
-            tree.split(beside, towards, pane(new), at);
+        let mut tree = Tree::one(view(1));
+        for new in 2..=u64::try_from(LAYOUT_VIEWS_MAX).unwrap() {
+            let (beside, towards, _) = tree.room_beside_largest(view(new), at).unwrap();
+            tree.split(beside, towards, view(new), at);
         }
-        assert_eq!(tree.len(), PANES_MAX);
-        assert_eq!(tree.room_beside_largest(pane(1000), at), None);
-        assert_eq!(tree.room(pane(1), Towards::Right, pane(1000), at), None);
+        assert_eq!(tree.len(), LAYOUT_VIEWS_MAX);
+        assert_eq!(tree.room_beside_largest(view(1000), at), None);
+        assert_eq!(tree.room(view(1), Towards::Right, view(1000), at), None);
     }
 
     #[test]
@@ -921,9 +921,9 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_pane_takes_the_layout_and_its_frame_takes_a_cell_each_side() {
-        let tree = Tree::one(pane(1));
-        assert_eq!(tree.rects(size(80, 24)), [(pane(1), rect(0, 0, 80, 24))]);
+    fn a_lone_view_takes_the_layout_and_its_frame_takes_a_cell_each_side() {
+        let tree = Tree::one(view(1));
+        assert_eq!(tree.rects(size(80, 24)), [(view(1), rect(0, 0, 80, 24))]);
         assert_eq!(rect(0, 0, 80, 24).inner(), size(78, 22));
         assert_eq!(rect(0, 0, COLUMNS_MIN, ROWS_MIN).inner(), size(3, 1));
         assert_eq!(lone(size(80, 24)), size(78, 22));
@@ -932,17 +932,17 @@ mod tests {
     }
 
     #[test]
-    fn splits_halve_the_pane_split_and_tile_the_layout() {
+    fn splits_halve_the_view_split_and_tile_the_layout() {
         let tree = three(size(80, 24));
         assert_eq!(
             tree.rects(size(80, 24)),
             [
-                (pane(1), rect(0, 0, 40, 24)),
-                (pane(2), rect(40, 0, 40, 12)),
-                (pane(3), rect(40, 12, 40, 12)),
+                (view(1), rect(0, 0, 40, 24)),
+                (view(2), rect(40, 0, 40, 12)),
+                (view(3), rect(40, 12, 40, 12)),
             ]
         );
-        assert_eq!(tree.panes(), [pane(1), pane(2), pane(3)]);
+        assert_eq!(tree.views(), [view(1), view(2), view(3)]);
         assert_eq!(tree.len(), 3);
         for (columns, rows) in [(80, 24), (81, 25), (11, 7), (10, 6), (200, 60)] {
             assert_eq!(tree.fitted(size(columns, rows)), size(columns, rows));
@@ -951,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_too_small_for_its_panes_is_fitted_up_to_them() {
+    fn a_layout_too_small_for_its_views_is_fitted_up_to_them() {
         let tree = three(size(80, 24));
         for (asked, fitted) in [((4, 2), (10, 6)), ((9, 40), (10, 40)), ((80, 24), (80, 24))] {
             assert_eq!(tree.fitted(size(asked.0, asked.1)), size(fitted.0, fitted.1));
@@ -960,80 +960,80 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_has_room_only_where_the_layout_holds_it() {
+    fn a_view_has_room_only_where_the_layout_holds_it() {
         let at = size(10, 6);
         let tree = three(at);
-        assert_eq!(tree.room(pane(1), Towards::Down, pane(4), at), Some(size(3, 1)));
-        assert_eq!(tree.room(pane(1), Towards::Right, pane(4), at), None);
-        let beside = tree.room_beside_largest(pane(4), at);
-        assert_eq!(beside, Some((pane(1), Towards::Down, size(3, 1))));
-        let full = Tree::one(pane(1));
-        assert_eq!(full.room_beside_largest(pane(2), size(COLUMNS_MIN, ROWS_MIN)), None);
+        assert_eq!(tree.room(view(1), Towards::Down, view(4), at), Some(size(3, 1)));
+        assert_eq!(tree.room(view(1), Towards::Right, view(4), at), None);
+        let beside = tree.room_beside_largest(view(4), at);
+        assert_eq!(beside, Some((view(1), Towards::Down, size(3, 1))));
+        let full = Tree::one(view(1));
+        assert_eq!(full.room_beside_largest(view(2), size(COLUMNS_MIN, ROWS_MIN)), None);
         let taller = size(COLUMNS_MIN, 2 * ROWS_MIN);
-        let beside = full.room_beside_largest(pane(2), taller);
-        assert_eq!(beside, Some((pane(1), Towards::Down, size(3, 1))));
+        let beside = full.room_beside_largest(view(2), taller);
+        assert_eq!(beside, Some((view(1), Towards::Down, size(3, 1))));
     }
 
     #[test]
-    fn a_pane_opens_beside_one_on_its_longer_side_or_else_across() {
+    fn a_view_opens_beside_one_on_its_longer_side_or_else_across() {
         let at = size(80, 24);
         let tree = three(at);
-        assert_eq!(tree.room_beside(pane(1), pane(4), at), Some((Towards::Down, size(38, 10))));
-        assert_eq!(tree.room_beside(pane(2), pane(4), at), Some((Towards::Right, size(18, 10))));
-        let wide = Tree::one(pane(1));
-        let beside = wide.room_beside(pane(1), pane(2), at);
+        assert_eq!(tree.room_beside(view(1), view(4), at), Some((Towards::Down, size(38, 10))));
+        assert_eq!(tree.room_beside(view(2), view(4), at), Some((Towards::Right, size(18, 10))));
+        let wide = Tree::one(view(1));
+        let beside = wide.room_beside(view(1), view(2), at);
         assert_eq!(beside, Some((Towards::Right, size(38, 22))));
         let low = size(2 * COLUMNS_MIN, ROWS_MIN);
-        assert_eq!(wide.room_beside(pane(1), pane(2), low), Some((Towards::Right, size(3, 1))));
-        assert_eq!(wide.room_beside(pane(9), pane(2), at), None);
-        assert_eq!(wide.room_beside(pane(1), pane(2), size(COLUMNS_MIN, ROWS_MIN)), None);
+        assert_eq!(wide.room_beside(view(1), view(2), low), Some((Towards::Right, size(3, 1))));
+        assert_eq!(wide.room_beside(view(9), view(2), at), None);
+        assert_eq!(wide.room_beside(view(1), view(2), size(COLUMNS_MIN, ROWS_MIN)), None);
     }
 
     #[test]
-    fn the_largest_pane_is_split_along_its_longer_side() {
+    fn the_largest_view_is_split_along_its_longer_side() {
         let tree = three(size(80, 24));
-        assert_eq!(tree.largest(size(80, 24)), (pane(1), Towards::Down));
-        assert_eq!(tree.largest(size(200, 24)), (pane(1), Towards::Right));
-        assert_eq!(Tree::one(pane(4)).largest(size(80, 24)), (pane(4), Towards::Right));
-        let mut even = Tree::one(pane(1));
-        even.split(pane(1), Towards::Right, pane(2), size(80, 24));
-        assert_eq!(even.largest(size(80, 24)).0, pane(1));
+        assert_eq!(tree.largest(size(80, 24)), (view(1), Towards::Down));
+        assert_eq!(tree.largest(size(200, 24)), (view(1), Towards::Right));
+        assert_eq!(Tree::one(view(4)).largest(size(80, 24)), (view(4), Towards::Right));
+        let mut even = Tree::one(view(1));
+        even.split(view(1), Towards::Right, view(2), size(80, 24));
+        assert_eq!(even.largest(size(80, 24)).0, view(1));
     }
 
     #[test]
-    fn a_removed_pane_leaves_its_room_to_its_sibling() {
+    fn a_removed_view_leaves_its_room_to_its_sibling() {
         let at = size(80, 24);
         let mut tree = three(at);
-        assert_eq!([1, 2, 3].map(|id| tree.heir(pane(id))), [2, 3, 2].map(|id| Some(pane(id))));
-        assert_eq!(tree.remove(pane(2)), Removed::Out { gone: pane(2), heir: pane(3) });
-        assert_eq!(tree.rects(at)[1], (pane(3), rect(40, 0, 40, 24)));
-        assert_eq!(tree.remove(pane(3)), Removed::Out { gone: pane(3), heir: pane(1) });
-        assert_eq!(tree, Tree::one(pane(1)));
-        assert_eq!(tree.heir(pane(1)), None);
-        assert_eq!(tree.remove(pane(1)), Removed::Last);
-        assert_eq!(tree.into_lone(), pane(1));
+        assert_eq!([1, 2, 3].map(|id| tree.heir(view(id))), [2, 3, 2].map(|id| Some(view(id))));
+        assert_eq!(tree.remove(view(2)), Removed::Out { gone: view(2), heir: view(3) });
+        assert_eq!(tree.rects(at)[1], (view(3), rect(40, 0, 40, 24)));
+        assert_eq!(tree.remove(view(3)), Removed::Out { gone: view(3), heir: view(1) });
+        assert_eq!(tree, Tree::one(view(1)));
+        assert_eq!(tree.heir(view(1)), None);
+        assert_eq!(tree.remove(view(1)), Removed::Last);
+        assert_eq!(tree.into_lone(), view(1));
         let mut tree = three(at);
-        assert_eq!(tree.remove(pane(1)), Removed::Out { gone: pane(1), heir: pane(2) });
-        assert_eq!(tree.panes(), [pane(2), pane(3)]);
+        assert_eq!(tree.remove(view(1)), Removed::Out { gone: view(1), heir: view(2) });
+        assert_eq!(tree.views(), [view(2), view(3)]);
         let rects = tree.rects(at);
-        assert_eq!(rects, [(pane(2), rect(0, 0, 80, 12)), (pane(3), rect(0, 12, 80, 12))]);
+        assert_eq!(rects, [(view(2), rect(0, 0, 80, 12)), (view(3), rect(0, 12, 80, 12))]);
     }
 
     #[test]
-    fn a_tree_of_many_panes_keeps_its_order_and_tiles_as_panes_leave() {
+    fn a_tree_of_many_views_keeps_its_order_and_tiles_as_views_leave() {
         let at = size(400, 200);
-        let mut tree = Tree::one(pane(1));
+        let mut tree = Tree::one(view(1));
         for id in 2..=64 {
-            let (largest, towards, _) = tree.room_beside_largest(pane(id), at).unwrap();
-            tree.split(largest, towards, pane(id), at);
+            let (largest, towards, _) = tree.room_beside_largest(view(id), at).unwrap();
+            tree.split(largest, towards, view(id), at);
             tiles(&tree, at);
         }
-        let mut order = tree.panes();
-        assert_eq!(order.len(), PANES_MAX);
+        let mut order = tree.views();
+        assert_eq!(order.len(), LAYOUT_VIEWS_MAX);
         for id in (1..=64).step_by(3) {
-            assert!(matches!(tree.remove(pane(id)), Removed::Out { gone, .. } if gone == pane(id)));
-            order.retain(|kept| *kept != pane(id));
-            assert_eq!(tree.panes(), order, "the panes left keep their order");
+            assert!(matches!(tree.remove(view(id)), Removed::Out { gone, .. } if gone == view(id)));
+            order.retain(|kept| *kept != view(id));
+            assert_eq!(tree.views(), order, "the views left keep their order");
             tiles(&tree, at);
         }
         for kept in order.iter().take(order.len() - 1) {
@@ -1044,80 +1044,80 @@ mod tests {
     }
 
     #[test]
-    fn a_neighbour_is_the_pane_that_shares_the_most_of_that_edge() {
+    fn a_neighbour_is_the_view_that_shares_the_most_of_that_edge() {
         let at = size(80, 24);
         let tree = three(at);
-        assert_eq!(tree.neighbour(pane(1), Direction::Right, at), Some(pane(2)));
-        assert_eq!(tree.neighbour(pane(3), Direction::Left, at), Some(pane(1)));
-        assert_eq!(tree.neighbour(pane(2), Direction::Down, at), Some(pane(3)));
-        assert_eq!(tree.neighbour(pane(3), Direction::Up, at), Some(pane(2)));
-        assert_eq!(tree.neighbour(pane(1), Direction::Left, at), None);
-        assert_eq!(tree.neighbour(pane(1), Direction::Up, at), None);
-        assert_eq!(tree.in_order(pane(3), Order::Next), Some(pane(1)));
-        assert_eq!(tree.in_order(pane(1), Order::Previous), Some(pane(3)));
-        assert_eq!(Tree::one(pane(1)).in_order(pane(1), Order::Next), None);
+        assert_eq!(tree.neighbour(view(1), Direction::Right, at), Some(view(2)));
+        assert_eq!(tree.neighbour(view(3), Direction::Left, at), Some(view(1)));
+        assert_eq!(tree.neighbour(view(2), Direction::Down, at), Some(view(3)));
+        assert_eq!(tree.neighbour(view(3), Direction::Up, at), Some(view(2)));
+        assert_eq!(tree.neighbour(view(1), Direction::Left, at), None);
+        assert_eq!(tree.neighbour(view(1), Direction::Up, at), None);
+        assert_eq!(tree.in_order(view(3), Order::Next), Some(view(1)));
+        assert_eq!(tree.in_order(view(1), Order::Previous), Some(view(3)));
+        assert_eq!(Tree::one(view(1)).in_order(view(1), Order::Next), None);
     }
 
     #[test]
     fn a_resize_moves_the_nearest_border_on_that_side() {
         let at = size(80, 24);
         let mut tree = three(at);
-        assert!(tree.resize(pane(3), Sides::One(Direction::Left), Growth::Grow, at));
+        assert!(tree.resize(view(3), Sides::One(Direction::Left), Growth::Grow, at));
         assert_eq!(tree.rects(at)[0].1, rect(0, 0, 36, 24));
-        assert!(tree.resize(pane(3), Sides::One(Direction::Up), Growth::Grow, at));
+        assert!(tree.resize(view(3), Sides::One(Direction::Up), Growth::Grow, at));
         assert_eq!(tree.rects(at)[2].1, rect(36, 11, 44, 13));
-        assert!(tree.resize(pane(1), Sides::One(Direction::Right), Growth::Shrink, at));
+        assert!(tree.resize(view(1), Sides::One(Direction::Right), Growth::Shrink, at));
         assert_eq!(tree.rects(at)[0].1, rect(0, 0, 32, 24));
-        assert!(!tree.resize(pane(1), Sides::One(Direction::Left), Growth::Grow, at));
-        assert!(!tree.resize(pane(2), Sides::One(Direction::Up), Growth::Grow, at));
+        assert!(!tree.resize(view(1), Sides::One(Direction::Left), Growth::Grow, at));
+        assert!(!tree.resize(view(2), Sides::One(Direction::Up), Growth::Grow, at));
         tiles(&tree, at);
     }
 
     #[test]
-    fn a_resize_on_every_side_moves_each_border_the_pane_has() {
+    fn a_resize_on_every_side_moves_each_border_the_view_has() {
         let at = size(80, 24);
         let mut tree = three(at);
-        assert!(tree.resize(pane(3), Sides::Every, Growth::Grow, at));
+        assert!(tree.resize(view(3), Sides::Every, Growth::Grow, at));
         assert_eq!(tree.rects(at)[0].1, rect(0, 0, 36, 24));
         assert_eq!(tree.rects(at)[2].1, rect(36, 11, 44, 13));
         tiles(&tree, at);
-        assert!(tree.resize(pane(3), Sides::Every, Growth::Shrink, at));
+        assert!(tree.resize(view(3), Sides::Every, Growth::Shrink, at));
         assert_eq!(tree, three(at), "a shrink takes back the grow on every side");
-        assert!(tree.resize(pane(1), Sides::Every, Growth::Grow, at));
+        assert!(tree.resize(view(1), Sides::Every, Growth::Grow, at));
         assert_eq!(tree.rects(at)[0].1, rect(0, 0, 44, 24));
-        let mut lone = Tree::one(pane(1));
-        assert!(!lone.resize(pane(1), Sides::Every, Growth::Grow, at));
+        let mut lone = Tree::one(view(1));
+        assert!(!lone.resize(view(1), Sides::Every, Growth::Grow, at));
     }
 
     #[test]
-    fn a_border_stops_where_a_pane_would_be_too_small() {
+    fn a_border_stops_where_a_view_would_be_too_small() {
         let at = size(20, 5);
-        let mut tree = Tree::one(pane(1));
-        tree.split(pane(1), Towards::Right, pane(2), at);
-        while tree.resize(pane(1), Sides::One(Direction::Right), Growth::Grow, at) {}
+        let mut tree = Tree::one(view(1));
+        tree.split(view(1), Towards::Right, view(2), at);
+        while tree.resize(view(1), Sides::One(Direction::Right), Growth::Grow, at) {}
         assert_eq!(tree.rects(at)[1].1, rect(15, 0, COLUMNS_MIN, 5));
-        assert!(!tree.resize(pane(1), Sides::One(Direction::Right), Growth::Grow, at));
+        assert!(!tree.resize(view(1), Sides::One(Direction::Right), Growth::Grow, at));
         let narrow = size(2 * COLUMNS_MIN, 5);
-        assert!(!tree.resize(pane(2), Sides::One(Direction::Left), Growth::Grow, narrow));
+        assert!(!tree.resize(view(2), Sides::One(Direction::Left), Growth::Grow, narrow));
     }
 
     #[test]
-    fn a_swap_trades_two_panes_places() {
+    fn a_swap_trades_two_views_places() {
         let mut tree = three(size(80, 24));
-        tree.swap(pane(1), pane(3));
-        assert_eq!(tree.panes(), [pane(3), pane(2), pane(1)]);
-        let mut lone = Tree::one(pane(1));
-        lone.swap(pane(1), pane(1));
-        assert_eq!(lone, Tree::one(pane(1)));
+        tree.swap(view(1), view(3));
+        assert_eq!(tree.views(), [view(3), view(2), view(1)]);
+        let mut lone = Tree::one(view(1));
+        lone.swap(view(1), view(1));
+        assert_eq!(lone, Tree::one(view(1)));
     }
 
     #[test]
     fn a_tree_holds_its_leaves_and_lends_them() {
         let mut tree = three(size(80, 24));
-        assert_eq!(tree.get(pane(2)), Some(&pane(2)));
-        assert_eq!(tree.get(pane(9)), None);
-        assert_eq!(tree.get_mut(pane(3)).copied(), Some(pane(3)));
-        assert_eq!(tree.leaves().copied().collect::<Vec<_>>(), [pane(1), pane(2), pane(3)]);
+        assert_eq!(tree.get(view(2)), Some(&view(2)));
+        assert_eq!(tree.get(view(9)), None);
+        assert_eq!(tree.get_mut(view(3)).copied(), Some(view(3)));
+        assert_eq!(tree.leaves().copied().collect::<Vec<_>>(), [view(1), view(2), view(3)]);
         assert!(rect(0, 0, 4, 4).overlaps(rect(3, 3, 4, 4)));
         assert!(!rect(0, 0, 4, 4).overlaps(rect(4, 0, 4, 4)));
     }
@@ -1126,14 +1126,14 @@ mod tests {
     fn a_tree_reads_back_from_its_preorder_whatever_its_history() {
         let at = size(80, 24);
         let mut tree = three(at);
-        tree.split(pane(1), Towards::Down, pane(4), at);
-        assert!(tree.resize(pane(4), Sides::One(Direction::Up), Growth::Grow, at));
-        assert!(matches!(tree.remove(pane(2)), Removed::Out { .. }));
+        tree.split(view(1), Towards::Down, view(4), at);
+        assert!(tree.resize(view(4), Sides::One(Direction::Up), Growth::Grow, at));
+        assert!(matches!(tree.remove(view(2)), Removed::Out { .. }));
         let preorder: Vec<Preordered<ViewId>> = tree
             .preorder()
             .into_iter()
             .map(|node| match node {
-                Preordered::Pane(leaf) => Preordered::Pane(*leaf),
+                Preordered::View(leaf) => Preordered::View(*leaf),
                 Preordered::Split { towards, share } => Preordered::Split { towards, share },
             })
             .collect();
@@ -1142,9 +1142,9 @@ mod tests {
         let want = [
             split(Towards::Right),
             grown,
-            Preordered::Pane(pane(1)),
-            Preordered::Pane(pane(4)),
-            Preordered::Pane(pane(3)),
+            Preordered::View(view(1)),
+            Preordered::View(view(4)),
+            Preordered::View(view(3)),
         ];
         assert_eq!(preorder, want);
         let read = Tree::of_preorder(preorder).unwrap();
@@ -1156,7 +1156,7 @@ mod tests {
     #[test]
     fn a_preorder_that_is_no_tree_is_refused() {
         let split = Preordered::Split { towards: Towards::Right, share: SHARES / 2 };
-        let leaf = |id| Preordered::Pane(pane(id));
+        let leaf = |id| Preordered::View(view(id));
         let over = Preordered::Split { towards: Towards::Right, share: SHARES + 1 };
         let refused: [(Vec<Preordered<ViewId>>, &str); 5] = [
             (vec![], "lacks a half"),
@@ -1170,6 +1170,6 @@ mod tests {
             assert!(read.as_ref().unwrap_err().contains(why), "{preorder:?}: {read:?}");
         }
         let many = (0..=NODES_MAX).map(|_| split).collect();
-        assert!(Tree::of_preorder(many).unwrap_err().contains("at most 64 terminals"));
+        assert!(Tree::of_preorder(many).unwrap_err().contains("at most 64 views"));
     }
 }

@@ -20,7 +20,6 @@ pub mod log;
 pub mod mux;
 pub mod names;
 mod owns;
-mod panes;
 mod pi;
 pub mod printed;
 mod process;
@@ -37,6 +36,7 @@ mod streams;
 pub mod skills;
 pub mod state;
 pub mod terminate;
+mod titles;
 mod topics;
 pub mod transcripts;
 mod layouts;
@@ -53,7 +53,7 @@ pub use luneta_protocol::release;
 pub use process::var;
 pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
 pub use shows::{
-    show, Asked, Beside, Direction, Found, Growth, Heard, Laid, Pane, Rect, Show, Where,
+    show, Asked, Beside, Direction, Found, Growth, Heard, Laid, View, Rect, Show, Where,
 };
 pub use remote::{
     named_by as hosts_named, parsed as hosts_parsed, sharing, Destination, Parsed as HostsParsed,

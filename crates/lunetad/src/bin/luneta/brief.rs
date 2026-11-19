@@ -79,8 +79,8 @@ impl Over {
             Over::Sessions { .. } => true,
             Over::Machine(on, _) => note.on == *on,
             Over::Session(on, session) => note.on == *on && note.session == *session,
-            Over::Agent(on, session, pane) => {
-                note.on == *on && note.session == *session && note.pane == *pane
+            Over::Agent(on, session, view) => {
+                note.on == *on && note.session == *session && note.view == *view
             },
         }
     }
@@ -152,7 +152,7 @@ fn machine_named(on: &Machine) -> String {
 pub struct Note {
     pub on: Machine,
     pub session: SessionName,
-    pub pane: u32,
+    pub view: u32,
     pub name: String,
     pub status: String,
     pub since: Option<SystemTime>,
@@ -199,7 +199,7 @@ impl Brief {
             .collect();
         for (note, alike) in notes.iter_mut().zip(alike) {
             if alike {
-                note.name = format!("{}:{}", note.name, note.pane);
+                note.name = format!("{}:{}", note.name, note.view);
             }
         }
         let Some(first) = notes.first() else {
@@ -614,15 +614,15 @@ mod tests {
 
     use super::*;
 
-    fn note(session: &str, pane: u32, name: &str, transcript: Option<&str>) -> Note {
+    fn note(session: &str, view: u32, name: &str, transcript: Option<&str>) -> Note {
         Note {
             on: Machine::Local,
             session: named(session),
-            pane,
+            view,
             name: name.to_owned(),
             status: "idle".to_owned(),
             since: Some(SystemTime::UNIX_EPOCH),
-            branch: (pane == 4).then(|| "feat/fold".to_owned()),
+            branch: (view == 4).then(|| "feat/fold".to_owned()),
             cwd: format!("/w/{session}"),
             transcript: transcript.map_or(Transcript::Unnamed, |id| {
                 Transcript::Named(SessionId::parse(id).expect("a UUID"))
@@ -771,7 +771,7 @@ Its transcript is unknown: Claude Code names none for it.
         let note = |(n, id): (usize, &String)| Note {
             on: Machine::Local,
             session: named("a"),
-            pane: n as u32,
+            view: n as u32,
             name: format!("agent {n}"),
             status: "busy".to_owned(),
             since: None,
@@ -802,10 +802,10 @@ Its transcript is unknown: Claude Code names none for it.
 
     #[test]
     fn a_brief_says_how_many_agents_it_has_no_room_for() {
-        let note = |session: &str, pane: usize, name: String| Note {
+        let note = |session: &str, view: usize, name: String| Note {
             on: Machine::Local,
             session: named(session),
-            pane: pane as u32,
+            view: view as u32,
             name,
             status: "busy".to_owned(),
             since: None,
@@ -813,9 +813,9 @@ Its transcript is unknown: Claude Code names none for it.
             cwd: "/w".to_owned(),
             transcript: Transcript::Unnamed,
         };
-        let session = |pane: usize| if pane < MAX_NOTES { "a" } else { "b" };
-        let many = (0..MAX_NOTES + 2).map(|pane| note(session(pane), pane, format!("agent {pane}")));
-        let long = |session: &str, pane: usize| note(session, pane, "x".repeat(NOTES_BYTES / 2));
+        let session = |view: usize| if view < MAX_NOTES { "a" } else { "b" };
+        let many = (0..MAX_NOTES + 2).map(|view| note(session(view), view, format!("agent {view}")));
+        let long = |session: &str, view: usize| note(session, view, "x".repeat(NOTES_BYTES / 2));
         for (notes, told, said) in [
             (many.collect(), MAX_NOTES, "The notes leave out 2 more agents for room, in session b."),
             (vec![long("a", 0), long("b", 1)], 1, "leave out 1 more agent for room, in session b."),
@@ -931,10 +931,10 @@ Its transcript was not read: me@vps: lunetad did not answer in 6s
 
     #[test]
     fn a_brief_tells_of_an_agent_of_another_harness_without_its_transcript() {
-        let of = |pane: u32, name: &str, transcript: Transcript| Note {
+        let of = |view: u32, name: &str, transcript: Transcript| Note {
             on: Machine::Local,
             session: named("a"),
-            pane,
+            view,
             name: name.to_owned(),
             status: "idle".to_owned(),
             since: None,

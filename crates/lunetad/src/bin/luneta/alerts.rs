@@ -13,7 +13,7 @@ use crate::brief;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::picker::{Here, Seated};
-use crate::sidebar::{Listed, PanePlace};
+use crate::sidebar::{Listed, ViewPlace};
 
 pub const HELD: Duration = Duration::from_secs(6);
 
@@ -179,7 +179,7 @@ impl State {
 #[derive(Debug)]
 struct Followed {
     state: State,
-    place: PanePlace,
+    place: ViewPlace,
     label: String,
     transcript: Option<SessionId>,
 }
@@ -295,7 +295,7 @@ impl Alerts {
     }
 
     pub fn at(&self, here: Option<&Here>) -> Vec<Key> {
-        let Some(Here::Pane { on, place }) = here else {
+        let Some(Here::View { on, place }) = here else {
             return Vec::new();
         };
         let mut keys: Vec<Key> = (self.followed.iter())
@@ -384,7 +384,7 @@ impl Alerts {
         }
     }
 
-    pub fn clicked(&mut self, key: &Key) -> Option<PanePlace> {
+    pub fn clicked(&mut self, key: &Key) -> Option<ViewPlace> {
         let followed = self.followed.get_mut(key)?;
         followed.state.down();
         Some(followed.place.clone())
@@ -558,14 +558,14 @@ mod tests {
     use lunetad::Destination;
 
     use super::*;
-    use crate::sidebar::{Mark, PaneKey};
+    use crate::sidebar::{Mark, ViewKey};
 
     fn work() -> Listed {
         Listed::new_project("work", 10)
     }
 
-    fn place(pane: u32) -> PanePlace {
-        PanePlace { session: work(), pane: PaneKey::terminal(pane) }
+    fn place(view: u32) -> ViewPlace {
+        ViewPlace { session: work(), view: ViewKey::terminal(view) }
     }
 
     fn seated(pid: u32, doing: Doing) -> Seated {
@@ -758,15 +758,15 @@ mod tests {
     }
 
     #[test]
-    fn looking_at_an_agent_s_pane_takes_its_notification_down() {
+    fn looking_at_an_agent_s_view_takes_its_notification_down() {
         let mut alerts = Alerts::default();
         let now = Instant::now();
         let busy = |pid| seated(pid, Doing::Busy);
         alerts.heard(here(vec![busy(1), busy(2)]), now);
         let waiting = |pid, since| seated(pid, waits(Wait::Input, since));
         alerts.heard(here(vec![waiting(1, 2), waiting(2, 2)]), now);
-        let on = |pane| Here::Pane { on: Machine::Local, place: place(pane) };
-        let elsewhere = Here::Pane { on: Machine::Remote(nixos()), place: place(2) };
+        let on = |view| Here::View { on: Machine::Local, place: place(view) };
+        let elsewhere = Here::View { on: Machine::Remote(nixos()), place: place(2) };
         assert_eq!(alerts.at(Some(&elsewhere)), []);
         let in_a_session = Here::Session { on: Machine::Local, session: "work".to_owned() };
         assert_eq!(alerts.at(Some(&in_a_session)), []);

@@ -48,22 +48,22 @@ impl TryFrom<String> for Session {
 #[serde(into = "String", try_from = "String")]
 pub struct Key {
     pub session: Session,
-    pub pane: u32,
+    pub view: u32,
 }
 
 impl Key {
     fn name(self) -> String {
-        format!("{}-{}", self.session.name(), self.pane)
+        format!("{}-{}", self.session.name(), self.view)
     }
 
     fn read(name: &str) -> Option<Self> {
-        let (session, pane) = name.rsplit_once('-')?;
-        let key = Key { session: Session::read(session)?, pane: pane.parse().ok()? };
+        let (session, view) = name.rsplit_once('-')?;
+        let key = Key { session: Session::read(session)?, view: view.parse().ok()? };
         (key.name() == name).then_some(key)
     }
 
     fn of_file(name: &str) -> Option<Self> {
-        Key::read(name.split_once('.').map_or(name, |(pane, _)| pane))
+        Key::read(name.split_once('.').map_or(name, |(view, _)| view))
     }
 }
 
@@ -161,8 +161,8 @@ impl Ledger {
     }
 
     pub fn latest(&self, session: Session) -> Option<SystemTime> {
-        let panes = Key { session, pane: u32::MIN }..=Key { session, pane: u32::MAX };
-        self.moments.range(panes).map(|(_, moment)| *moment).max()
+        let views = Key { session, view: u32::MIN }..=Key { session, view: u32::MAX };
+        self.moments.range(views).map(|(_, moment)| *moment).max()
     }
 
     pub fn sessions(&self) -> impl Iterator<Item = Session> + '_ {
@@ -270,8 +270,8 @@ mod tests {
         Session::Project(ProjectId::of(project).unwrap())
     }
 
-    fn key(project: u64, pane: u32) -> Key {
-        Key { session: session(project), pane }
+    fn key(project: u64, view: u32) -> Key {
+        Key { session: session(project), view }
     }
 
     fn keys(ledger: &Ledger) -> Vec<Key> {
@@ -300,11 +300,11 @@ mod tests {
     }
 
     #[test]
-    fn only_a_pane_s_file_that_reads_as_a_moment_is_one() {
+    fn only_a_view_s_file_that_reads_as_a_moment_is_one() {
         let scratch = tempfile::tempdir().unwrap();
         let mut ledger = Ledger::within(scratch.path().to_owned());
         ledger.set(key(10, 1), Some(at(5)));
-        let name = |pane| key(10, pane).name();
+        let name = |view| key(10, view).name();
         let other = |name: String| fs::write(scratch.path().join(name), "5").unwrap();
         fs::write(scratch.path().join(name(2)), "\n").unwrap();
         other(format!("{}.{}", name(3), state::unfinished()));
@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn a_project_s_panes_are_named_for_its_id() {
+    fn a_project_s_views_are_named_for_its_id() {
         let project = session(0x2a);
         assert_eq!(project.name(), "project-000000000000002a");
         assert_eq!(Session::read("project-000000000000002a"), Some(project));
@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn two_lunetas_writing_one_pane_at_once_both_go_on_sharing() {
+    fn two_lunetas_writing_one_view_at_once_both_go_on_sharing() {
         let scratch = tempfile::tempdir().unwrap();
         let start = std::sync::Arc::new(std::sync::Barrier::new(2));
         let writers: Vec<_> = (0..2)
@@ -366,14 +366,14 @@ mod tests {
     }
 
     #[test]
-    fn a_session_s_last_moment_is_the_last_of_its_panes() {
+    fn a_session_s_last_moment_is_the_last_of_its_views() {
         let mut ledger = Ledger::default();
         let (session_of, twin) = (session(10), session(11));
         assert_eq!(ledger.latest(session_of), None);
-        ledger.set(Key { session: session_of, pane: u32::MIN }, Some(at(7)));
-        ledger.set(Key { session: session_of, pane: 5 }, Some(at(9)));
-        ledger.set(Key { session: session_of, pane: u32::MAX }, Some(at(8)));
-        ledger.set(Key { session: twin, pane: 1 }, Some(at(20)));
+        ledger.set(Key { session: session_of, view: u32::MIN }, Some(at(7)));
+        ledger.set(Key { session: session_of, view: 5 }, Some(at(9)));
+        ledger.set(Key { session: session_of, view: u32::MAX }, Some(at(8)));
+        ledger.set(Key { session: twin, view: 1 }, Some(at(20)));
         assert_eq!(ledger.latest(session_of), Some(at(9)));
     }
 
@@ -381,7 +381,7 @@ mod tests {
     fn a_session_forgotten_takes_its_moments_and_leaves_the_rest() {
         let scratch = tempfile::tempdir().unwrap();
         let mut here = Ledger::within(scratch.path().to_owned());
-        let twin = Key { session: session(11), pane: 1 };
+        let twin = Key { session: session(11), view: 1 };
         here.set(key(10, 1), Some(at(5)));
         here.set(twin, Some(at(5)));
         here.set(key(20, 1), Some(at(6)));
