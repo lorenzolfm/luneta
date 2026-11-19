@@ -43,11 +43,9 @@ pub const PATH_BYTES_MAX: usize = 4096;
 
 pub const USED_MILLIS_MAX: u64 = u64::MAX / 2;
 
-const READ_MILLIS_MAX: u64 = USED_MILLIS_MAX / 2;
-
 const CLOCK_MILLIS_MAX: u64 = 253_402_300_799_999;
 
-const _: () = assert!(CLOCK_MILLIS_MAX < READ_MILLIS_MAX);
+const _: () = assert!(CLOCK_MILLIS_MAX < USED_MILLIS_MAX);
 
 const FRESH_TRIES: u32 = 8;
 
@@ -189,10 +187,10 @@ impl Used {
     }
 
     pub fn read(millis: u64) -> Result<Used, String> {
-        if millis <= READ_MILLIS_MAX {
+        if millis <= USED_MILLIS_MAX {
             Ok(Used(millis))
         } else {
-            Err(format!("a use at {millis} ms is past {READ_MILLIS_MAX} ms"))
+            Err(format!("a use at {millis} ms is past {USED_MILLIS_MAX} ms"))
         }
     }
 
@@ -200,6 +198,17 @@ impl Used {
     fn of_millis(millis: u64) -> Used {
         assert!(millis <= USED_MILLIS_MAX, "a use at {millis} ms is past {USED_MILLIS_MAX} ms");
         Used(millis)
+    }
+
+    pub fn of_api(at: prost_types::Timestamp) -> Result<Used, String> {
+        let time = SystemTime::try_from(at).map_err(|why| format!("a use at no time: {why}"))?;
+        let since = time.duration_since(UNIX_EPOCH).map_err(|_| "a use before 1970".to_owned())?;
+        let millis = u64::try_from(since.as_millis()).ok().filter(|it| *it <= USED_MILLIS_MAX);
+        let millis = millis.ok_or_else(|| format!("a use past {USED_MILLIS_MAX} ms"))?;
+        if Duration::from_millis(millis) != since {
+            return Err(format!("a use at {since:?} past 1970 is no whole millisecond"));
+        }
+        Ok(Used(millis))
     }
 
     #[must_use]
@@ -445,15 +454,7 @@ impl Project {
     }
 
     fn last_used(&self) -> Option<WorktreeId> {
-        let mut last: Option<&Worktree> = None;
-        for worktree in self.worktrees() {
-            if last.is_none_or(|last| worktree.used > last.used) {
-                last = Some(worktree);
-            }
-        }
-        let held = self.worktrees().next().is_some();
-        assert_eq!(last.is_some(), held, "a project's worktree is last");
-        last.map(Worktree::id)
+        last_used(self.worktrees().map(|it| (it.id, it.used)))
     }
 
     fn within(&self, spot: &Spot) -> Option<Within> {
@@ -481,6 +482,23 @@ impl Project {
     fn view_count(&self) -> usize {
         self.worktrees().map(|it| it.layout.len()).sum()
     }
+}
+
+#[must_use]
+pub fn last_used(
+    uses: impl IntoIterator<Item = (WorktreeId, Option<Used>)>,
+) -> Option<WorktreeId> {
+    let mut last: Option<(WorktreeId, Option<Used>)> = None;
+    let mut count = 0;
+    for (worktree, used) in uses {
+        count += 1;
+        assert!(count <= WORKTREES_MAX, "{count} worktrees are given, over {WORKTREES_MAX}");
+        if last.is_none_or(|(_, used_last)| used > used_last) {
+            last = Some((worktree, used));
+        }
+    }
+    assert_eq!(last.is_some(), count > 0, "one of the worktrees given is the one used last");
+    last.map(|(worktree, _)| worktree)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2471,8 +2489,8 @@ mod tests {
         assert_eq!((Used::at(at).millis(), Used::of_millis(1_234).time()), (1_234, at));
         let far = SystemTime::UNIX_EPOCH + Duration::from_millis(u64::MAX);
         assert_eq!(Used::at(far).millis(), CLOCK_MILLIS_MAX, "a clock past 9999 is held there");
-        assert_eq!(Used::read(READ_MILLIS_MAX), Ok(Used::of_millis(READ_MILLIS_MAX)));
-        let past = Used::read(READ_MILLIS_MAX + 1).unwrap_err();
+        assert_eq!(Used::read(USED_MILLIS_MAX), Ok(Used::of_millis(USED_MILLIS_MAX)));
+        let past = Used::read(USED_MILLIS_MAX + 1).unwrap_err();
         assert!(past.contains("is past"), "{past}");
         (projects, _) = change(&projects, went(two, 1)).unwrap();
         (projects, _) = change(&projects, went(one, USED_MILLIS_MAX)).unwrap();
@@ -2480,6 +2498,45 @@ mod tests {
         assert!(refused.contains("no worktree is used past"), "{refused}");
         let (same, _) = change(&projects, went(one, 1)).unwrap();
         assert_eq!(same, projects, "the worktree used last is gone to still");
+    }
+
+    #[test]
+    fn a_use_said_over_the_api_is_read_back_as_the_millisecond_it_was() {
+        let used = Used::of_millis(1_763_460_000_123);
+        assert_eq!(Used::of_api(used.time().into()), Ok(used));
+        let at = |seconds, nanos| prost_types::Timestamp { seconds, nanos };
+        let between = Used::of_api(at(1, 500)).unwrap_err();
+        assert!(between.contains("no whole millisecond"), "{between}");
+        let before = Used::of_api(at(-1, 0)).unwrap_err();
+        assert!(before.contains("before 1970"), "{before}");
+        let latest = Used::of_millis(USED_MILLIS_MAX);
+        assert_eq!(Used::of_api(latest.time().into()), Ok(latest), "the latest a use is kept at");
+        let later = SystemTime::UNIX_EPOCH + Duration::from_millis(USED_MILLIS_MAX + 1);
+        let past = Used::of_api(later.into()).unwrap_err();
+        assert!(past.contains("a use past"), "{past}");
+    }
+
+    #[test]
+    fn the_newest_use_is_the_last_none_is_older_than_any_and_a_tie_goes_to_the_first() {
+        let worktree = |id: usize| WorktreeId::of(u64::try_from(id).unwrap()).unwrap();
+        let (one, two) = (worktree(1), worktree(2));
+        let used = |millis| Some(Used::of_millis(millis));
+        assert_eq!(last_used([]), None);
+        assert_eq!(last_used([(one, used(4)), (two, used(5))]), Some(two));
+        assert_eq!(last_used([(one, used(5)), (two, used(4))]), Some(one));
+        assert_eq!(last_used([(one, None), (two, used(0))]), Some(two));
+        assert_eq!(last_used([(one, used(0)), (two, None)]), Some(one));
+        assert_eq!(last_used([(one, used(5)), (two, used(5))]), Some(one));
+        assert_eq!(last_used([(one, None), (two, None)]), Some(one));
+        let kept = (1..=WORKTREES_MAX).map(|id| (worktree(id), None));
+        assert_eq!(last_used(kept), Some(one), "as many as are kept");
+    }
+
+    #[test]
+    #[should_panic(expected = "worktrees are given, over")]
+    fn more_worktrees_than_are_kept_are_never_given_to_pick_from() {
+        let worktree = |id: usize| WorktreeId::of(u64::try_from(id).unwrap()).unwrap();
+        let _ = last_used((1..=WORKTREES_MAX + 1).map(|id| (worktree(id), None)));
     }
 
     #[test]

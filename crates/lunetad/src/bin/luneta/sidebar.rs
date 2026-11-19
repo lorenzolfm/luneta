@@ -21,7 +21,7 @@ use lunetad::issues::{Filed, Unfiled};
 use lunetad::links::{self, Branch};
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnTerminal};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, Dir, ProjectId, ViewId, WorktreeId, CLONE_WORKTREES_MAX};
+use lunetad::projects::{self, Dir, ProjectId, Used, ViewId, WorktreeId, CLONE_WORKTREES_MAX};
 use lunetad::prunes;
 use lunetad::seats::{self, seated, Unread};
 use lunetad::transcripts::SessionId;
@@ -756,7 +756,7 @@ struct KnownWorktree {
     name: String,
     folder: Dir,
     seen: projects::Seen,
-    used: Option<SystemTime>,
+    used: Option<Used>,
     views: Vec<View>,
     terminals: Vec<ViewId>,
     by_terminal: Vec<(u32, ViewId)>,
@@ -783,7 +783,7 @@ impl Known {
             let seen = worktree.seen.and_then(projects::Seen::of_api);
             let seen = seen.expect("lunetad says a worktree's stage luneta knows");
             let used = worktree.used_at.map(|at| {
-                SystemTime::try_from(at).expect("lunetad says a worktree's last use as a time")
+                Used::of_api(at).expect("lunetad says a worktree's last use as one it keeps")
             });
             let folder = Dir::parse(&worktree.folder);
             let folder = folder.expect("lunetad says a worktree's folder as a folder it keeps");

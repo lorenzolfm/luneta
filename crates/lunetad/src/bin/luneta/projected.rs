@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
-use std::time::SystemTime;
 
 use lunetad::api::projects::Held;
 use lunetad::api::{self, remote, terminal, Host};
+use lunetad::log;
 use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnTerminal};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{ProjectId, Used, ViewId, WorktreeId, WORKTREES_MAX};
 use lunetad::Destination;
 
 use crate::host::NOT_YET;
@@ -22,7 +22,7 @@ pub struct Worktree {
     pub tab: u32,
     pub terminals: Vec<(ViewId, Option<TerminalKey>)>,
     pub titles: BTreeMap<ViewId, String>,
-    pub used: Option<SystemTime>,
+    pub used: Option<Used>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +72,10 @@ impl Project {
         }
     }
 
+    pub fn uses(&self) -> impl Iterator<Item = (WorktreeId, Option<Used>)> + '_ {
+        self.worktrees().iter().map(|it| (it.id, it.used))
+    }
+
     #[must_use]
     pub fn own_of(&self, terminal: ViewId) -> Option<OwnTerminal> {
         let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
@@ -101,17 +105,17 @@ impl Projected {
         let named = machines::named_once(&host.remotes);
         for (remote, destination) in host.remotes.iter().zip(named) {
             if let Some(remote::Reached::Host(far)) = &remote.reached {
-                let projects = kept(far.projects.as_ref());
-                let projects: Vec<Project> =
-                    projects.iter().filter_map(|it| project(it).ok()).collect();
+                let projects = listed(kept(far.projects.as_ref())).unwrap_or_else(|why| {
+                    log::say(&format!("{}'s projects: {why}", remote.destination));
+                    Vec::new()
+                });
                 if let Some(destination) = destination {
                     let held = far_projects.insert(destination, projects);
                     assert!(held.is_none(), "named_once names each machine once");
                 }
             }
         }
-        let here = kept(host.projects.as_ref());
-        let here = here.iter().map(project).collect::<Result<Vec<Project>, _>>()?;
+        let here = listed(kept(host.projects.as_ref()))?;
         Ok(Projected { here, far: far_projects })
     }
 
@@ -195,6 +199,16 @@ impl Projected {
     }
 }
 
+pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
+    let projects = kept.iter().map(project).collect::<Result<Vec<Project>, String>>()?;
+    let count: usize = projects.iter().map(|it| it.worktrees().len()).sum();
+    if count <= WORKTREES_MAX {
+        Ok(projects)
+    } else {
+        Err(format!("they hold {count} worktrees, over the {WORKTREES_MAX} kept"))
+    }
+}
+
 fn kept(projects: Option<&api::Projects>) -> &[api::Project] {
     match projects.and_then(|projects| projects.held.as_ref()) {
         Some(Held::Kept(kept)) => &kept.projects,
@@ -214,7 +228,7 @@ fn title_of(terminal: &api::Terminal) -> Option<String> {
     topic.or_else(|| terminal.command.clone())
 }
 
-pub fn project(project: &api::Project) -> Result<Project, String> {
+fn project(project: &api::Project) -> Result<Project, String> {
     let named = &project.name;
     let id = ProjectId::of(project.id).ok_or_else(|| format!("project {named} has id 0"))?;
     let worktree = |(worktree, tab): (&api::Worktree, u32)| -> Result<Worktree, String> {
@@ -233,7 +247,7 @@ pub fn project(project: &api::Project) -> Result<Project, String> {
             }
         }
         let (name, folder) = (worktree.name.clone(), worktree.folder.clone());
-        let used = worktree.used_at.map(SystemTime::try_from).transpose();
+        let used = worktree.used_at.map(Used::of_api).transpose();
         let used = used.map_err(|why| format!("worktree {named}'s last use: {why}"))?;
         Ok(Worktree { id, name, folder, tab, terminals, titles, used })
     };
@@ -440,6 +454,45 @@ mod tests {
         rows(kept(&mut host))[0].terminals[0].found = Some(terminal::Found::Key(unmade));
         let refused = Projected::adapted(&host).unwrap_err();
         assert!(refused.starts_with("terminal "), "{refused}");
+    }
+
+    #[test]
+    fn a_machine_that_lists_more_worktrees_than_lunetad_keeps_is_refused_its_projects() {
+        let listing = |count: usize| {
+            let mut host = host();
+            let row = |id| api::Worktree { id: u64::try_from(id).unwrap(), ..Default::default() };
+            *rows(kept(&mut host)) = (1..=count).map(row).collect();
+            host.projects
+        };
+        let most = Host { projects: listing(WORKTREES_MAX), ..Host::default() };
+        let most = Projected::adapted(&most).unwrap();
+        assert_eq!(most.projects(&Machine::Local)[0].worktrees().len(), WORKTREES_MAX);
+        let over = Host { projects: listing(WORKTREES_MAX + 1), ..Host::default() };
+        let refused = Projected::adapted(&over).unwrap_err();
+        assert!(refused.contains(&format!("over the {WORKTREES_MAX} kept")), "{refused}");
+        let far = api::remote::Host { projects: listing(WORKTREES_MAX + 1), ..Default::default() };
+        let reached = Some(remote::Reached::Host(far));
+        let remotes = vec![api::Remote { destination: "nixos".to_owned(), reached }];
+        let projected = Projected::adapted(&Host { remotes, ..Host::default() }).unwrap();
+        let nixos = Machine::Remote("nixos".parse().unwrap());
+        assert!(projected.reaches(&nixos), "a machine that lists too many is reached still");
+        assert!(projected.projects(&nixos).is_empty(), "with no project to go to");
+    }
+
+    #[test]
+    fn a_machine_that_lists_a_project_luneta_cannot_read_is_reached_with_none_of_them() {
+        let mut far = host();
+        let readable = kept(&mut far).clone();
+        let unread = api::Project { id: 0, ..readable.clone() };
+        let held = Held::Kept(Kept { projects: vec![readable, unread], version: None });
+        let projects = Some(api::Projects { held: Some(held) });
+        let far = api::remote::Host { projects, ..Default::default() };
+        let reached = Some(remote::Reached::Host(far));
+        let remotes = vec![api::Remote { destination: "nixos".to_owned(), reached }];
+        let projected = Projected::adapted(&Host { remotes, ..Host::default() }).unwrap();
+        let nixos = Machine::Remote("nixos".parse().unwrap());
+        assert!(projected.reaches(&nixos), "a machine luneta cannot read is reached still");
+        assert!(projected.projects(&nixos).is_empty(), "with none of its projects, not some");
     }
 
     #[test]

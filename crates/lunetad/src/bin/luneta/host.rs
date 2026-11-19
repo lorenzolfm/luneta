@@ -28,7 +28,7 @@ use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnTerminal};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Name, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::links::Unready;
 use lunetad::{Destination, Direction, Directory, Growth, SessionName};
@@ -2181,7 +2181,7 @@ impl App {
             if project.worktrees().iter().any(|it| shows(it.id)) {
                 return Ok(());
             }
-            let last = worktrees::last_used(project);
+            let last = projects::last_used(project.uses());
             let last = last.ok_or_else(|| format!("{session} holds no worktree"))?;
             self.go_worktree(machine, last, None);
             return Ok(());
@@ -2237,7 +2237,7 @@ impl App {
             let worktrees = projects.flat_map(projected::Project::worktrees);
             let open = worktrees.filter(|it| !it.terminals.is_empty());
             let others = open.filter(|it| *machine != on || it.id != left);
-            others.max_by_key(|it| it.used).map(|it| it.id)
+            projects::last_used(others.map(|it| (it.id, it.used)))
         };
         let other = held(&on).map(|id| (on.clone(), id));
         let other = other.or_else(|| held(&Machine::Local).map(|id| (Machine::Local, id)));

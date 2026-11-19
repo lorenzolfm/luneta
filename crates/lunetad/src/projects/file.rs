@@ -1202,7 +1202,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::mpsc::{self, Receiver};
 
-    use super::super::{Opens, Placed, ProjectId};
+    use super::super::{Opens, Placed, ProjectId, USED_MILLIS_MAX};
     use super::*;
 
     fn add_in(project: ProjectId, spot: Spot) -> Change {
@@ -1955,6 +1955,40 @@ mod tests {
         store.change(Change::AddProject { spot: alone("/c"), name: None }).unwrap();
         let [kept] = heard(&commands).try_into().unwrap();
         assert_eq!(kept.map(|kept| kept.all().len()), Ok(2));
+    }
+
+    #[test]
+    fn a_use_stepped_up_to_the_latest_kept_is_read_back_from_the_file() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = file_in(&scratch);
+        let (core, _commands) = channel();
+        let mut store = store_at(Ok(file.clone()), core.clone());
+        let luneta = Change::AddProject { spot: clone_of("/w/luneta", &[]), name: None };
+        let Some(Made::Project(luneta)) = store.change(luneta).unwrap() else {
+            panic!("luneta is made");
+        };
+        let mut worktree = |at| match store.change(add_in(luneta, spot_at("/w/luneta", at))) {
+            Ok(Some(Made::Worktree(worktree))) => worktree,
+            made => panic!("{at} is made: {made:?}"),
+        };
+        let (one, two) = (worktree("one"), worktree("two"));
+        let went = |worktree, millis| Change::Went { worktree, at: Used::of_millis(millis) };
+        store.change(went(one, USED_MILLIS_MAX - 1)).unwrap();
+        store.flush().unwrap();
+        store.change(went(two, 1)).unwrap();
+        store.flush().unwrap();
+        let Err(Failed::Refused(why)) = store.change(went(one, 1)) else {
+            panic!("a go steps past the latest use kept");
+        };
+        assert!(why.contains("no worktree is used past"), "{why}");
+        store.flush().unwrap();
+
+        drop(store);
+        let again = store_at(Ok(file), core);
+        assert_eq!(again.unkept(), None);
+        let used = |worktree| again.projects().unwrap().find(worktree).unwrap().1.used();
+        assert_eq!(used(one), Some(Used::of_millis(USED_MILLIS_MAX - 1)));
+        assert_eq!(used(two), Some(Used::of_millis(USED_MILLIS_MAX)));
     }
 
     #[test]

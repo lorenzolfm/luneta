@@ -19,7 +19,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use lunetad::projects::{self, Name, ProjectId, Seen, ViewId};
+use lunetad::projects::{self, Name, ProjectId, Seen, Used, ViewId};
 use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
 use lunetad::{eza, screens, Destination, Directory, SessionName};
@@ -110,7 +110,7 @@ pub struct Worktree {
     pub folder: projects::Dir,
     pub branch: Option<String>,
     pub seen: Seen,
-    pub used: Option<SystemTime>,
+    pub used: Option<Used>,
     pub terminals: Vec<ViewKey>,
     pub held: Vec<ViewId>,
     pub waiting: usize,
@@ -464,7 +464,7 @@ type Looked = (Machine, Listed, Option<ViewKey>);
 
 type Located = (Machine, Directory);
 
-type Found<'a> = (Option<SystemTime>, String, Option<&'a str>, String, Key);
+type Found<'a> = (Option<Used>, String, Option<&'a str>, String, Key);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Preview {
@@ -2061,7 +2061,7 @@ mod tests {
             folder: projects::Dir::parse(&format!("/home/you/{name}")).unwrap(),
             branch: None,
             seen: Seen::Read(projects::Stage::Working),
-            used: used.map(|at| UNIX_EPOCH + Duration::from_secs(at)),
+            used: used.map(|at| Used::read(at * 1_000).unwrap()),
             terminals: terminals.iter().map(|id| ViewKey::terminal(*id)).collect(),
             held: held(terminals),
             waiting: 0,
@@ -2272,7 +2272,7 @@ mod tests {
 
         let mut later = works();
         let shelf = &mut later.shelves[0].projects[0].worktrees;
-        shelf[0].used = Some(UNIX_EPOCH + Duration::from_secs(60));
+        shelf[0].used = Some(Used::read(60_000).unwrap());
         picker.listed(later);
         assert_eq!(rows(&picker)[..3], ["luneta › main", "luneta › fix", "web › api"]);
         assert_eq!(lit(&picker), "notes");

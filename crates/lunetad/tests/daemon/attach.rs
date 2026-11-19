@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -6,8 +7,9 @@ use lunetad::api::terminal::Found;
 
 use crate::host::{eventually, LUNETA};
 use crate::own::Owned;
-use crate::projects::worktree;
-use crate::starts::{directory, mouse, projects_of, shown, work_in, Window, SPLIT, UNSHOWN};
+use crate::projects::{project, worktree};
+use crate::starts::{cloned, directory, mouse, projects_of, shown, work_in, Window, SPLIT};
+use crate::starts::UNSHOWN;
 use crate::worktree::worktree_added;
 
 const TYPED: &str = "printf 'own-%s\\n' 42\r";
@@ -365,6 +367,47 @@ fn a_click_on_a_project_s_row_goes_to_its_worktree_used_last() {
     click(&mut window, row);
     eventually("a click on work's row goes to docs, the worktree used last there", || {
         (used(docs) > used(other)).then_some(())
+    });
+}
+
+#[test]
+fn a_tie_for_the_worktree_used_last_goes_to_the_first_listed_wherever_luneta_picks_one() {
+    let owned = Owned::new();
+    let opened = |name: &str| {
+        let clone = cloned(name, &["two"]);
+        let root = fs::canonicalize(&clone.path).unwrap();
+        let made = project(&owned.host, &root, None);
+        let worktrees = ["main", "two"].map(|it| worktree(&owned.host, made, &root.join(it)));
+        (clone, worktrees)
+    };
+    let (work, [one, two]) = opened("work");
+    let (_other, [three, four]) = opened("other");
+    let (_named, [five, six]) = opened("named");
+    let projects = projects_of(&owned);
+    let listed = projects.iter().flat_map(|it| it.worktrees().unwrap()).map(|it| it.id);
+    assert_eq!(listed.collect::<Vec<u64>>(), [one, two, three, four, five, six]);
+    let gone_to = || {
+        let all = [one, two, three, four, five, six].into_iter();
+        all.filter(|it| used(&owned, *it).is_some()).collect::<Vec<u64>>()
+    };
+    assert!(gone_to().is_empty(), "a worktree made over lunetad's API is gone to never");
+    let mut window = Window::open(&owned.host, &work, &[]);
+    eventually("lunetad's start at work's root goes to its first", || {
+        (gone_to() == [one]).then_some(())
+    });
+    window.send(CLOSE);
+    eventually("one's last pane closed, luneta goes to the first open of those left", || {
+        (gone_to() == [two]).then_some(())
+    });
+    let row = sidebar_row(&window, "▾ other");
+    click(&mut window, row);
+    eventually("a click on other's row goes to its first", || {
+        (gone_to() == [two, three]).then_some(())
+    });
+    drop(window);
+    let _window = Window::open(&owned.host, &directory("anywhere"), &["named"]);
+    eventually("a luneta started by the project's name goes to its first", || {
+        (gone_to() == [two, three, five]).then_some(())
     });
 }
 

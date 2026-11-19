@@ -13,7 +13,7 @@ use lunetad::api::make_worktree_response::Landed as Answered;
 use lunetad::api::projects::Held;
 use lunetad::api::{ChangeProjectsRequest, MakeWorktreeRequest, On, Version, WatchRequest};
 use lunetad::mux::own::TerminalKey;
-use lunetad::projects::{Name, ProjectId, Size, ViewId, WorktreeId};
+use lunetad::projects::{self, Name, ProjectId, Size, ViewId, WorktreeId};
 use lunetad::links::{self, Branch, Unready};
 use lunetad::{Asked, Beside, Heard};
 use tonic::transport::Channel;
@@ -23,7 +23,7 @@ use lunetad::Directory;
 
 use crate::daemon;
 use crate::machines::Machine;
-use crate::projected::{self, Project, Worktree};
+use crate::projected::{self, Project};
 use crate::sidebar::Reorder;
 
 const ASKING: Duration = Duration::from_secs(15);
@@ -113,7 +113,7 @@ pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
         let request = WatchRequest { after: None, kept: None, shown: false };
         let host = daemon.watch(request).await.map_err(|status| status.message().to_owned())?;
         match host.into_inner().projects.and_then(|projects| projects.held) {
-            Some(Held::Kept(kept)) => kept.projects.iter().map(projected::project).collect(),
+            Some(Held::Kept(kept)) => projected::listed(&kept.projects),
             Some(Held::Unkept(why)) => Err(format!("lunetad keeps no projects: {why}")),
             None => Err("lunetad is older than its projects".to_owned()),
         }
@@ -298,17 +298,6 @@ fn holds(dir: &str, folder: &Path) -> bool {
     folder.starts_with(dir)
 }
 
-pub fn last_used(project: &Project) -> Option<WorktreeId> {
-    let mut last: Option<&Worktree> = None;
-    for worktree in project.worktrees() {
-        if last.is_none_or(|last| worktree.used > last.used) {
-            last = Some(worktree);
-        }
-    }
-    assert_eq!(last.is_some(), !project.worktrees().is_empty(), "a project's worktree is last");
-    last.map(|it| it.id)
-}
-
 fn at_folder(path: &Path, project: &Project, folder: &str) -> Result<Landing, Tried> {
     assert!(holds(&project.dir, Path::new(folder)), "{folder} is in {}", project.dir);
     let started = in_kept(path, project.id, started_at(path, folder))?;
@@ -327,7 +316,7 @@ fn chosen(
         match named[..] {
             [] => {},
             [one] => {
-                let last = last_used(one).map(Landed::Found);
+                let last = projects::last_used(one.uses()).map(Landed::Found);
                 let landing = last.map_or(Landing::Unopened(one.id), Landing::Worktree);
                 return Some(Ok(landing));
             },
@@ -376,7 +365,8 @@ fn started(
     let Some(name) = name else {
         let last = |project: &&Project| seen(project.id);
         let held = projects.iter().filter(|project| !project.worktrees().is_empty());
-        let found = held.max_by_key(last).and_then(last_used).map(Landed::Found);
+        let found = held.max_by_key(last).and_then(|it| projects::last_used(it.uses()));
+        let found = found.map(Landed::Found);
         return Ok(found.map(Landing::Worktree));
     };
     let unmade = match add_project(path, folder, Some(name)) {
