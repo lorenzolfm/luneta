@@ -167,12 +167,25 @@ impl Marked {
         issues: impl IntoIterator<Item = NonZeroU32>,
         pulls: impl IntoIterator<Item = NonZeroU32>,
     ) -> Result<Marked, String> {
-        let (issues, pulls): (BTreeSet<_>, BTreeSet<_>) = (issues.into_iter().collect(), pulls.into_iter().collect());
-        if issues.len() > work::LISTED_MAX || pulls.len() > work::LISTED_MAX {
-            let most = work::LISTED_MAX;
-            return Err(format!("marked: at most {most} issues and {most} pull requests"));
-        }
+        let issues = Marked::of_kind("issues", issues)?;
+        let pulls = Marked::of_kind("pull requests", pulls)?;
         Ok(Marked { issues, pulls })
+    }
+
+    fn of_kind(
+        kind: &str,
+        numbers: impl IntoIterator<Item = NonZeroU32>,
+    ) -> Result<BTreeSet<NonZeroU32>, String> {
+        let mut marked = BTreeSet::new();
+        for number in numbers {
+            if marked.len() == work::LISTED_MAX {
+                return Err(format!("marked: at most {} {kind}", work::LISTED_MAX));
+            }
+            if !marked.insert(number) {
+                return Err(format!("marked: #{number} is among the {kind} twice"));
+            }
+        }
+        Ok(marked)
     }
 
     fn read(issues: Vec<u32>, pulls: Vec<u32>) -> Result<Marked, String> {
@@ -548,6 +561,16 @@ mod tests {
     }
 
     #[test]
+    fn marks_go_to_the_most_listed_and_none_twice() {
+        let numbers = |numbers: std::ops::RangeInclusive<u32>| numbers.map(|it| NonZeroU32::new(it).unwrap());
+        assert!(Marked::new(numbers(1..=50), numbers(1..=50)).is_ok());
+        let refused = Err("marked: at most 50 issues".to_owned());
+        assert_eq!(Marked::new(numbers(1..=51), numbers(1..=1)), refused);
+        let twice = Marked::new(numbers(1..=1), [NonZeroU32::MIN, NonZeroU32::MIN]);
+        assert_eq!(twice, Err("marked: #1 is among the pull requests twice".to_owned()));
+    }
+
+    #[test]
     fn what_the_user_marked_goes_with_the_turn_before_their_words() {
         let told = |marked: Marked| told(&marked, "tackle these");
         let said = told(marked(&[14, 12], &[20]));
@@ -592,6 +615,7 @@ mod tests {
             AskRequest { turn: 7, before: Some(7), ..request() },
             AskRequest { marked_issues: vec![12, 0], ..request() },
             AskRequest { marked_pulls: (1..=51).collect(), ..request() },
+            AskRequest { marked_issues: vec![12, 12], ..request() },
         ];
         for request in invalid {
             assert!(Asked::of(request.clone()).is_err(), "{request:?}");

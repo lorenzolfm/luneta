@@ -19,6 +19,8 @@ pub const LABELS_MAX: usize = 16;
 
 pub const TITLE_BYTES_MAX: usize = 1024;
 
+pub const NAME_BYTES_MAX: usize = 256;
+
 pub const PATIENCE: Duration = Duration::from_secs(30);
 
 const ISSUES: [&str; 4] = ["issue", "list", "--state", "open"];
@@ -53,16 +55,27 @@ pub struct Work {
 
 impl Work {
     pub fn new(issues: Vec<Issue>, pulls: Vec<Pull>) -> Result<Work, String> {
-        if issues.len() > LISTED_MAX || pulls.len() > LISTED_MAX {
-            return Err(format!("at most {LISTED_MAX} issues and {LISTED_MAX} pull requests"));
+        if issues.len() > LISTED_MAX {
+            return Err(format!("at most {LISTED_MAX} issues"));
         }
-        let titles = issues.iter().map(|it| &it.title).chain(pulls.iter().map(|it| &it.title));
-        if let Some(title) = titles.into_iter().find(|title| title.len() > TITLE_BYTES_MAX) {
-            let start: String = title.chars().take(20).collect();
-            return Err(format!("{start}… is a title longer than {TITLE_BYTES_MAX} bytes"));
+        if pulls.len() > LISTED_MAX {
+            return Err(format!("at most {LISTED_MAX} pull requests"));
         }
-        if let Some(issue) = issues.iter().find(|issue| issue.labels.len() > LABELS_MAX) {
-            return Err(format!("#{} has more than {LABELS_MAX} labels", issue.number));
+        for issue in &issues {
+            titled(issue.number, &issue.title)?;
+            if issue.labels.len() > LABELS_MAX {
+                return Err(format!("#{} has more than {LABELS_MAX} labels", issue.number));
+            }
+            for label in &issue.labels {
+                named(issue.number, "a label", label)?;
+            }
+        }
+        for pull in &pulls {
+            titled(pull.number, &pull.title)?;
+            named(pull.number, "its branch", &pull.branch)?;
+            if let Some(author) = &pull.author {
+                named(pull.number, "its author", author)?;
+            }
         }
         Ok(Work { issues, pulls })
     }
@@ -147,18 +160,43 @@ pub fn listed(dir: &Dir) -> Result<Work, String> {
     let issues = gh::<ListedIssue>(dir.as_str(), &ISSUES, ISSUE_FIELDS);
     let pulls = pulls.join().unwrap_or_else(|panic| panic::resume_unwind(panic));
     let issues = issues?.into_iter().map(|ListedIssue { number, title, labels }| {
-        let labels = labels.into_iter().take(LABELS_MAX).map(|label| label.name).collect();
+        let labels = labels.into_iter().map(|label| cut(label.name, NAME_BYTES_MAX));
+        let labels = labels.filter(|label| !label.is_empty()).take(LABELS_MAX).collect();
         Issue { number, title: cut(title, TITLE_BYTES_MAX), labels }
     });
-    let pulls = pulls?.into_iter().map(|pull| Pull {
-        number: pull.number,
-        title: cut(pull.title, TITLE_BYTES_MAX),
-        draft: pull.is_draft,
-        branch: pull.head_ref_name,
-        author: pull.author.map(|author| author.login).filter(|login| !login.is_empty()),
+    let pulls = pulls?.into_iter().map(|pull| {
+        if pull.head_ref_name.is_empty() {
+            return Err(format!("gh lists pull request #{} with no branch", pull.number));
+        }
+        let author = pull.author.map(|author| cut(author.login, NAME_BYTES_MAX));
+        Ok(Pull {
+            number: pull.number,
+            title: cut(pull.title, TITLE_BYTES_MAX),
+            draft: pull.is_draft,
+            branch: cut(pull.head_ref_name, NAME_BYTES_MAX),
+            author: author.filter(|login| !login.is_empty()),
+        })
     });
-    let work = Work::new(issues.collect(), pulls.collect());
-    Ok(work.expect("gh's lists are cut to LISTED_MAX, their titles to TITLE_BYTES_MAX and labels to LABELS_MAX"))
+    let pulls = pulls.collect::<Result<Vec<_>, String>>()?;
+    let work = Work::new(issues.collect(), pulls);
+    Ok(work.expect("gh's lists are cut to their most, and their names to NAME_BYTES_MAX, none empty"))
+}
+
+fn titled(number: NonZeroU32, title: &str) -> Result<(), String> {
+    if title.len() <= TITLE_BYTES_MAX {
+        return Ok(());
+    }
+    Err(format!("#{number} has a title longer than {TITLE_BYTES_MAX} bytes"))
+}
+
+fn named(number: NonZeroU32, what: &str, name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err(format!("#{number}: {what} is empty"));
+    }
+    if name.len() > NAME_BYTES_MAX {
+        return Err(format!("#{number}: {what} is longer than {NAME_BYTES_MAX} bytes"));
+    }
+    Ok(())
 }
 
 fn gh<T: DeserializeOwned>(dir: &str, asked: &[&str], fields: &str) -> Result<Vec<T>, String> {
@@ -211,10 +249,36 @@ mod tests {
         said.issues[0].number = 0;
         assert_eq!(Work::of(said), Err("an issue or pull request of number 0".to_owned()));
         let many = (1..=51).map(|at| issue(at, "many")).collect();
-        let refused = "at most 50 issues and 50 pull requests";
-        assert_eq!(Work::new(many, vec![]), Err(refused.to_owned()));
+        assert_eq!(Work::new(many, vec![]), Err("at most 50 issues".to_owned()));
         let long = issue(7, &"é".repeat(TITLE_BYTES_MAX));
-        assert!(Work::new(vec![long], vec![]).unwrap_err().ends_with("longer than 1024 bytes"));
+        let refused = Err("#7 has a title longer than 1024 bytes".to_owned());
+        assert_eq!(Work::new(vec![long], vec![]), refused);
+    }
+
+    #[test]
+    fn work_holds_no_name_that_is_empty_or_past_its_most() {
+        let pull = |branch: &str, author: Option<&str>| Pull {
+            number: NonZeroU32::new(9).unwrap(),
+            title: "t".to_owned(),
+            draft: false,
+            branch: branch.to_owned(),
+            author: author.map(str::to_owned),
+        };
+        let long = "b".repeat(NAME_BYTES_MAX + 1);
+        let refused = [
+            (pull("", None), "#9: its branch is empty"),
+            (pull(&long, None), "#9: its branch is longer than 256 bytes"),
+            (pull("b", Some("")), "#9: its author is empty"),
+        ];
+        for (pull, why) in refused {
+            assert_eq!(Work::new(vec![], vec![pull]), Err(why.to_owned()));
+        }
+        let labelled = |label: &str| Issue { labels: vec![label.to_owned()], ..issue(4, "t") };
+        assert_eq!(Work::new(vec![labelled("")], vec![]), Err("#4: a label is empty".to_owned()));
+        let refused = Err("#4: a label is longer than 256 bytes".to_owned());
+        assert_eq!(Work::new(vec![labelled(&long)], vec![]), refused);
+        let most = "b".repeat(NAME_BYTES_MAX);
+        assert!(Work::new(vec![labelled(&most)], vec![pull(&most, Some(&most))]).is_ok());
     }
 
     #[test]
