@@ -97,7 +97,7 @@
     luneta_folder() {
       local root
       if [[ ''${XDG_RUNTIME_DIR-} == /* ]]; then
-        echo "$XDG_RUNTIME_DIR/luneta"
+        echo "''${XDG_RUNTIME_DIR%/}/luneta"
       elif [ "$(uname)" = Darwin ]; then
         root="$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)"
         root="''${root%/}"

@@ -86,6 +86,7 @@
             fileset = pkgs.lib.fileset.unions [
               cargoFiles
               ./.config/nextest.toml
+              ./nix/dev/installed.nix
             ];
           };
 
