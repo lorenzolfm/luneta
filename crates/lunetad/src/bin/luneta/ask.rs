@@ -17,7 +17,7 @@ use crate::due::Due;
 use crate::gruvbox;
 use crate::host::Event;
 use crate::machines::Machine;
-use crate::menu::{self, Hint, ViewRow, ProjectTarget, Target};
+use crate::menu::{self, Cwd, Hint, ViewRow, ProjectTarget, Target};
 use crate::sidebar::{self, ACCENT};
 
 const TITLE: &str = "Ask";
@@ -47,6 +47,7 @@ enum Said {
 enum Works {
     Here(PathBuf),
     There { on: Destination, cwd: Option<Directory> },
+    Unread { why: String },
 }
 
 #[derive(Debug)]
@@ -63,12 +64,17 @@ pub struct Ask {
 
 impl Ask {
     pub fn new(number: u64, target: &Target, dir: &Path) -> Self {
-        let works = match target.machine() {
-            Machine::Local => {
+        let works = match (target, target.machine()) {
+            (Target::View(_, ViewRow { view, cwd: Cwd::Unread { why }, .. }), _) => {
+                Works::Unread { why: format!("where view {view} works, {why}") }
+            },
+            (_, Machine::Local) => {
                 let cwd = target.cwd().map(|cwd| PathBuf::from(cwd.as_str()));
                 Works::Here(cwd.unwrap_or_else(|| dir.to_owned()))
             },
-            Machine::Remote(on) => Works::There { on: on.clone(), cwd: target.cwd().cloned() },
+            (_, Machine::Remote(on)) => {
+                Works::There { on: on.clone(), cwd: target.cwd().cloned() }
+            },
         };
         Ask {
             number,
@@ -130,17 +136,19 @@ impl Ask {
             return;
         }
         let turn = Turn::after(self.turned);
-        let (on, cwd) = match &self.works {
-            Works::Here(cwd) => (None, Some(cwd.clone())),
+        let placed = match &self.works {
+            Works::Here(cwd) => Ok((None, Some(cwd.clone()))),
             Works::There { on, cwd } => {
-                (Some(on.clone()), cwd.as_ref().map(|cwd| PathBuf::from(cwd.as_str())))
+                Ok((Some(on.clone()), cwd.as_ref().map(|cwd| PathBuf::from(cwd.as_str()))))
             },
+            Works::Unread { why } => Err(why.clone()),
         };
-        let resumed = self.session.clone();
-        let highlighted = self.highlighted.clone();
-        let asked = Asked::new(cwd, &words, resumed, highlighted, turn);
+        let (resumed, highlighted) = (self.session.clone(), self.highlighted.clone());
+        let asked = placed.and_then(|(on, cwd)| {
+            Ok((on, Asked::new(cwd, &words, resumed, highlighted, turn)?))
+        });
         self.talk.push(Said::You(words));
-        let asked = match asked {
+        let (on, asked) = match asked {
             Ok(asked) => asked,
             Err(why) => return self.talk.push(Said::Wrong(format!("ask: {why}"))),
         };
@@ -220,6 +228,7 @@ impl Ask {
                 format!("{} on {on}", sidebar::short_cwd(cwd.as_str()))
             },
             Works::There { on, cwd: None } => format!("~ on {on}"),
+            Works::Unread { .. } => String::new(),
         };
         brief::boxed(buffer, over, TITLE, &right, &lines);
     }
@@ -291,7 +300,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::menu::{Cwd, ViewRow, Ran};
+    use crate::menu::{ViewRow, Ran};
     use crate::sidebar::{Listed, ViewKey, ProjectRow};
 
     fn listed() -> Listed {
@@ -323,6 +332,11 @@ mod tests {
 
     fn view_row() -> Target {
         view_row_on(Machine::Local)
+    }
+
+    fn unread_on(machine: Machine) -> Target {
+        let Target::View(on, row) = view_row_on(machine) else { unreachable!("a view's row") };
+        Target::View(on, ViewRow { cwd: Cwd::of(Some("w".to_owned())), ..row })
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -515,24 +529,21 @@ mod tests {
         let row = "is the header of this machine: \"this\"";
         assert!(header.highlighted.contains(row), "{}", header.highlighted);
 
-        let unread = |on: Machine| {
-            let Target::View(on, row) = view_row_on(on) else { unreachable!("a view's row") };
-            Target::View(on, ViewRow { cwd: Cwd::of(Some("w".to_owned())), ..row })
-        };
-        let view = Ask::new(6, &unread(Machine::Local), Path::new("/w"));
-        assert_eq!(view.works, Works::Here(PathBuf::from("/w")));
-        assert!(view.highlighted.contains("is view luneta:4, on branch"), "{}", view.highlighted);
-        assert_eq!(Ask::new(7, &unread(nixos()), Path::new("/w")).works, there(None));
+        let why = "where view 4 works, \"w\" is no absolute path".to_owned();
+        for on in [Machine::Local, nixos()] {
+            let unread = Ask::new(6, &unread_on(on), Path::new("/w"));
+            assert_eq!(unread.works, Works::Unread { why: why.clone() });
+            assert_eq!(top(&unread), "┌─ Ask ────────────────────────────────┐");
+        }
     }
 
     #[test]
     fn a_turn_that_is_none_says_why() {
-        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
-        ask.works = Works::Here(PathBuf::from("w"));
+        let mut ask = Ask::new(1, &unread_on(Machine::Local), Path::new("/w"));
         typed(&mut ask, "close it");
         let (events, _heard) = mpsc::channel();
         ask.send(&events);
-        let wrong = "ask: cwd: w is no absolute path".to_owned();
+        let wrong = "ask: where view 4 works, \"w\" is no absolute path".to_owned();
         assert_eq!(ask.talk, [Said::You("close it".to_owned()), Said::Wrong(wrong)]);
         assert!(!ask.turning());
         assert_eq!(ask.turned, None);
