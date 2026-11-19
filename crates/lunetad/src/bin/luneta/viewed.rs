@@ -61,6 +61,7 @@ enum Moused {
 
 pub enum Heeded {
     Quiet,
+    Followed,
     Edged(Direction),
     Sent(WorkstreamId),
     Note(String),
@@ -109,6 +110,16 @@ impl View {
         self.laid = None;
         self.screens.clear();
         self.pointer = Pointer::Free;
+    }
+
+    fn followed(&mut self, laid: &Laid) -> bool {
+        let arrived = self.laid.is_some();
+        let follows = arrived && laid.workstream() != self.workstream;
+        if follows {
+            self.workstream = laid.workstream();
+            self.pointer = Pointer::Free;
+        }
+        follows
     }
 
     fn laid_out(&mut self, laid: Laid) -> bool {
@@ -493,11 +504,15 @@ impl Viewed {
         match heard {
             Heard::Laid(laid) => {
                 self.laid_in = Some(laid.workstream());
+                let followed = self.view.followed(&laid);
+                if followed {
+                    self.opened.insert(self.view.workstream);
+                }
                 if self.view.laid_out(laid) && self.opened.insert(self.view.workstream) {
                     self.ask(Asked::Open { beside: Beside::Alone, argv: Vec::new() });
                 }
                 self.watch();
-                Heeded::Quiet
+                if followed { Heeded::Followed } else { Heeded::Quiet }
             },
             Heard::Edged { workstream, direction } => {
                 self.view.edged(workstream, direction).map_or(Heeded::Quiet, Heeded::Edged)

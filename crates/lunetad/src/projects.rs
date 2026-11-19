@@ -468,6 +468,7 @@ pub enum Change {
     Open { workstream: WorkstreamId, terminal: Terminal, placed: Placed, size: Size },
     Close { terminal: TerminalId },
     Unopen { terminal: TerminalId },
+    Move { terminal: TerminalId, to: WorkstreamId, size: Size },
     Resize {
         terminal: TerminalId,
         sides: layout::Sides,
@@ -630,7 +631,8 @@ impl Change {
             | Change::RenameTerminal { .. }
             | Change::Open { .. }
             | Change::Close { .. }
-            | Change::Unopen { .. } => true,
+            | Change::Unopen { .. }
+            | Change::Move { .. } => true,
             Change::Went { .. }
             | Change::Resize { .. }
             | Change::Swap { .. }
@@ -638,6 +640,13 @@ impl Change {
             | Change::Ran(_) => false,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Home {
+    Stays,
+    In(WorkstreamId),
+    Made { project: ProjectId, folder: Dir },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -989,6 +998,35 @@ impl Projects {
                 assert!(!changed.holds(terminal.0), "terminal {terminal} left its view");
                 None
             },
+            Change::Move { terminal, to, size } => {
+                let held_in = self.holding(terminal).map(|(workstream, _)| workstream.id());
+                let from = held_in.ok_or_else(|| unknown("terminal", terminal))?;
+                if from == to {
+                    return Err(format!("terminal {terminal} is in workstream {to} already"));
+                }
+                let (_, target) = self.find(to).ok_or_else(|| unknown("workstream", to))?;
+                let placed = match target.view.tree() {
+                    None => Placed::Alone,
+                    Some(tree) => {
+                        let room = tree.room_beside_largest(terminal, size);
+                        let roomless = || format!("workstream {to} has no room for {terminal}");
+                        let (at, towards, _) = room.ok_or_else(roomless)?;
+                        Placed::Beside { at, towards }
+                    },
+                };
+                let (project, at) = changed.workstream(from)?;
+                let view = &mut project.workstreams[at].view;
+                let moved = view.terminal_mut(terminal).expect("its view holds it").clone();
+                if view.closed(terminal).is_none() {
+                    project.workstreams.remove(at);
+                    assert!(changed.find(from).is_none(), "{from} goes with its last");
+                }
+                let (project, at) = changed.workstream(to)?;
+                project.workstreams[at].view.opened(moved, placed, size)?;
+                let held_in = changed.holding(terminal).map(|(workstream, _)| workstream.id());
+                assert_eq!(held_in, Some(to), "terminal {terminal} moved to workstream {to}");
+                None
+            },
             Change::Resize { terminal, sides, growth, size } => {
                 changed.view_of(terminal)?.resized(terminal, sides, growth, size)?;
                 None
@@ -1108,6 +1146,35 @@ impl Projects {
     #[must_use]
     pub fn find(&self, workstream: WorkstreamId) -> Option<(&Project, &Workstream)> {
         self.workstreams().find(|(_, it)| it.id == workstream)
+    }
+
+    #[must_use]
+    pub fn home(&self, terminal: TerminalId, cwd: &Dir, top: Option<&Dir>) -> Home {
+        let Some((from, _)) = self.holding(terminal) else {
+            return Home::Stays;
+        };
+        let fits = |folder: &Dir| {
+            folder.below(cwd).is_some() && top.is_none_or(|top| top.below(folder).is_some())
+        };
+        let (project, _) = self.find(from.id).expect("a view's workstream is held");
+        if fits(&project.folder(from)) {
+            return Home::Stays;
+        }
+        let homes = self.workstreams().filter(|(project, it)| fits(&project.folder(it)));
+        let deepest = |(project, it): &(&Project, &Workstream)| {
+            (project.folder(it).as_str().len(), it.used)
+        };
+        if let Some((_, home)) = homes.max_by_key(deepest) {
+            assert_ne!(home.id, from.id, "a terminal's own workstream that fits keeps it");
+            return Home::In(home.id);
+        }
+        let Some(top) = top else {
+            return Home::Stays;
+        };
+        match self.projects.iter().find(|project| project.dir.below(top).is_some()) {
+            Some(project) => Home::Made { project: project.id, folder: top.clone() },
+            None => Home::Stays,
+        }
     }
 
     #[must_use]
@@ -1876,6 +1943,72 @@ mod tests {
         assert_eq!(projects.terminals().count(), 0);
         let gone = change(&projects, Change::Close { terminal: two });
         assert!(gone.unwrap_err().contains("no terminal has the id"));
+    }
+
+    #[test]
+    fn a_moved_terminal_leaves_its_view_whole_for_another_and_its_workstream_if_last() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        let feat = workstream(&mut projects, luneta, "/w/luneta/feat");
+        let one = opened(&mut projects, main, 100, Placed::Alone);
+        let right = Placed::Beside { at: one, towards: layout::Towards::Right };
+        let two = opened(&mut projects, main, 101, right);
+        let name = Some(Name::parse("tests").unwrap());
+        (projects, _) = change(&projects, Change::RenameTerminal { terminal: two, to: name }).unwrap();
+        let size = Size::of(80, 24).unwrap();
+        let moving = |terminal, to| Change::Move { terminal, to, size };
+        (projects, _) = change(&projects, moving(two, feat)).unwrap();
+        assert_eq!(view(&projects, main).tree().unwrap().panes(), [one]);
+        assert_eq!(view(&projects, feat).tree().unwrap().panes(), [two]);
+        let (_, moved) = projects.holding(two).unwrap();
+        assert_eq!(moved.name().map(Name::as_str), Some("tests"), "a terminal moves whole");
+        assert!(change(&projects, moving(two, feat)).unwrap_err().contains("already"));
+        let nowhere = WorkstreamId::of(99).unwrap();
+        assert!(change(&projects, moving(two, nowhere)).unwrap_err().contains("no workstream"));
+
+        (projects, _) = change(&projects, moving(one, feat)).unwrap();
+        assert_eq!(view(&projects, feat).tree().unwrap().panes(), [two, one]);
+        let left = projects.all()[0].workstreams().iter().map(|it| it.id);
+        assert_eq!(left.collect::<Vec<_>>(), [feat], "a workstream goes with its last terminal");
+    }
+
+    #[test]
+    fn a_terminal_s_home_is_the_deepest_workstream_in_its_worktree_that_holds_its_folder() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let own = workstream(&mut projects, luneta, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        let src = workstream(&mut projects, luneta, "/w/luneta/main/src");
+        let feat = workstream(&mut projects, luneta, "/w/luneta/feat");
+        let again = workstream(&mut projects, luneta, "/w/luneta/feat");
+        let went = Change::Went { workstream: feat, at: Used::of_millis(5_000) };
+        (projects, _) = change(&projects, went).unwrap();
+        let terminal = opened(&mut projects, main, 100, Placed::Alone);
+        let home = |cwd: &str, top: Option<&str>| {
+            projects.home(terminal, &dir(cwd), top.map(dir).as_ref())
+        };
+        let main_top = Some("/w/luneta/main");
+        assert_eq!(home("/w/luneta/main", main_top), Home::Stays);
+        assert_eq!(home("/w/luneta/main/docs", main_top), Home::Stays);
+        assert_eq!(home("/w/luneta/main/src/lib", main_top), Home::Stays, "its own fits still");
+        let feat_top = Some("/w/luneta/feat");
+        assert_eq!(home("/w/luneta/feat/src", feat_top), Home::In(feat), "the one used last");
+        assert_ne!(feat, again);
+        let made = Home::Made { project: luneta, folder: dir("/w/luneta/fix") };
+        assert_eq!(home("/w/luneta/fix/src", Some("/w/luneta/fix")), made);
+        assert_eq!(home("/w/luneta", None), Home::In(own), "no worktree: the folders alone");
+        assert_eq!(home("/w/luneta/.bare", None), Home::In(own));
+        assert_eq!(home("/home/me", None), Home::Stays, "outside every project");
+        assert_eq!(home("/home/me/elo", Some("/home/me/elo")), Home::Stays);
+
+        let deep = opened(&mut projects, src, 101, Placed::Alone);
+        let top = Some(dir("/w/luneta/main"));
+        let deep_home = |cwd: &str| projects.home(deep, &dir(cwd), top.as_ref());
+        assert_eq!(deep_home("/w/luneta/main/src/lib"), Home::Stays);
+        assert_eq!(deep_home("/w/luneta/main/docs"), Home::In(main), "out of its folder");
+        let gone = TerminalId::of(7).unwrap();
+        assert_eq!(projects.home(gone, &dir("/w/luneta/feat"), None), Home::Stays);
     }
 
     #[test]

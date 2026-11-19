@@ -2122,6 +2122,12 @@ impl App {
     fn heeded(&mut self, heeded: Heeded) {
         match heeded {
             Heeded::Quiet => {},
+            Heeded::Followed => {
+                let right = self.shown();
+                let (on, workstream) = (right.machine().clone(), right.workstream());
+                let (tabs, titles) = self.projected.tabs(&on, workstream);
+                self.shown().tabs(tabs, titles);
+            },
             Heeded::Edged(direction) => self.cross(direction),
             Heeded::Sent(workstream) => {
                 let Some(right) = &self.right else {
