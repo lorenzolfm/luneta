@@ -5,7 +5,7 @@ use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
 use lunetad::mux::{OwnKey, TabId};
-use lunetad::projects::{ProjectId, ViewId, WorkstreamId};
+use lunetad::projects::{ProjectId, ViewId, WorktreeId};
 use lunetad::seats::Where;
 
 use crate::sidebar::{Listed, PaneKey, Place};
@@ -31,18 +31,18 @@ impl Whose {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     Pane(PaneKey),
-    Workstream(WorkstreamId),
+    Worktree(WorktreeId),
     Project,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Deletes {
     Pane { pane: PaneKey, closes: Closes },
-    Workstream { workstream: WorkstreamId, panes: Vec<u32>, seen: Vec<ViewId> },
+    Worktree { worktree: WorktreeId, panes: Vec<u32>, seen: Vec<ViewId> },
     Project {
         key: OwnKey,
         project: ProjectId,
-        workstreams: Vec<WorkstreamId>,
+        worktrees: Vec<WorktreeId>,
         seen: Vec<ViewId>,
     },
 }
@@ -113,10 +113,10 @@ pub struct Subject<'a> {
 pub enum Act {
     Pane { session: SessionName, whose: Whose, pane: PaneKey },
     Tab { session: SessionName, whose: Whose, tab: TabId, panes: Vec<u32> },
-    Workstream {
+    Worktree {
         session: SessionName,
         whose: Whose,
-        workstream: WorkstreamId,
+        worktree: WorktreeId,
         panes: Vec<u32>,
         seen: Vec<ViewId>,
     },
@@ -124,7 +124,7 @@ pub enum Act {
         session: SessionName,
         key: OwnKey,
         project: ProjectId,
-        workstreams: Vec<WorkstreamId>,
+        worktrees: Vec<WorktreeId>,
         seen: Vec<ViewId>,
     },
     Kill { session: SessionName, whose: Whose },
@@ -136,7 +136,7 @@ impl Act {
         match self {
             Act::Pane { whose, .. }
             | Act::Tab { whose, .. }
-            | Act::Workstream { whose, .. }
+            | Act::Worktree { whose, .. }
             | Act::Kill { whose, .. } => *whose,
             Act::Project { key, .. } => Whose::Own(*key),
             Act::Leave { started, .. } => Whose::Zellij(*started),
@@ -151,7 +151,7 @@ impl Act {
         match self {
             Act::Pane { .. } => "Close the view".to_owned(),
             Act::Tab { .. } => "Close its tab".to_owned(),
-            Act::Workstream { .. } => "Close the workstream".to_owned(),
+            Act::Worktree { .. } => "Close the worktree".to_owned(),
             Act::Project { session, .. } => format!("Delete project {session}"),
             Act::Kill { session, .. } | Act::Leave { session, .. } => {
                 format!("Delete session {session}")
@@ -162,7 +162,7 @@ impl Act {
     pub fn takes(&self, pane: u32) -> bool {
         match self {
             Act::Pane { pane: closed, .. } => pane == closed.id(),
-            Act::Tab { panes, .. } | Act::Workstream { panes, .. } => panes.contains(&pane),
+            Act::Tab { panes, .. } | Act::Worktree { panes, .. } => panes.contains(&pane),
             Act::Project { .. } | Act::Kill { .. } | Act::Leave { .. } => true,
         }
     }
@@ -183,13 +183,13 @@ pub fn plan(subject: &Subject) -> Plan {
         Deletes::Pane { closes: Closes::Tab { id, panes }, .. } => {
             Act::Tab { session, whose, tab: *id, panes: panes.clone() }
         },
-        Deletes::Workstream { workstream, panes, seen } => {
-            let (workstream, panes, seen) = (*workstream, panes.clone(), seen.clone());
-            Act::Workstream { session, whose, workstream, panes, seen }
+        Deletes::Worktree { worktree, panes, seen } => {
+            let (worktree, panes, seen) = (*worktree, panes.clone(), seen.clone());
+            Act::Worktree { session, whose, worktree, panes, seen }
         },
-        Deletes::Project { key, project, workstreams, seen } => {
-            let (workstreams, seen) = (workstreams.clone(), seen.clone());
-            Act::Project { session, key: *key, project: *project, workstreams, seen }
+        Deletes::Project { key, project, worktrees, seen } => {
+            let (worktrees, seen) = (worktrees.clone(), seen.clone());
+            Act::Project { session, key: *key, project: *project, worktrees, seen }
         },
         Deletes::Pane { closes: Closes::Session, .. } => {
             match (subject.seat, whose, subject.refuge.clone()) {
@@ -365,13 +365,13 @@ mod tests {
         let project = Listed::new_project("luneta", 6);
         let busy = vec![(4, Doing::Busy)];
         let key = project.own_key().unwrap();
-        let workstreams = vec![WorkstreamId::of(31).unwrap()];
+        let worktrees = vec![WorktreeId::of(31).unwrap()];
         let seen = vec![ViewId::of(4).unwrap()];
         let project_id = ProjectId::of(6).unwrap();
         let deletes = || Deletes::Project {
             key,
             project: project_id,
-            workstreams: workstreams.clone(),
+            worktrees: worktrees.clone(),
             seen: seen.clone(),
         };
         for seat in [Seat::In, Seat::Elsewhere] {
@@ -380,7 +380,7 @@ mod tests {
                 session: project.name().clone(),
                 key,
                 project: project_id,
-                workstreams: workstreams.clone(),
+                worktrees: worktrees.clone(),
                 seen: seen.clone(),
             };
             assert_eq!(planned.act, act, "an own project is deleted with what was seen of it");
@@ -390,18 +390,18 @@ mod tests {
     }
 
     #[test]
-    fn a_workstream_s_delete_asks_first_only_for_an_agent_at_work_in_its_panes() {
+    fn a_worktree_s_delete_asks_first_only_for_an_agent_at_work_in_its_panes() {
         let luneta = luneta();
-        let workstream = WorkstreamId::of(31).unwrap();
+        let worktree = WorktreeId::of(31).unwrap();
         let seen = vec![ViewId::of(4).unwrap(), ViewId::of(5).unwrap()];
-        let deletes = || Deletes::Workstream { workstream, panes: vec![4, 5], seen: seen.clone() };
+        let deletes = || Deletes::Worktree { worktree, panes: vec![4, 5], seen: seen.clone() };
         let planned = |agents| plan(&subject(&luneta, Seat::In, deletes(), agents));
         assert_eq!(planned(vec![(6, Doing::Busy), (4, Doing::Idle)]).question(), None);
         let asks = planned(vec![(5, Doing::Waiting)]).question();
-        assert_eq!(asks.as_deref(), Some("Close the workstream? 1 agent, 1 waiting"));
+        assert_eq!(asks.as_deref(), Some("Close the worktree? 1 agent, 1 waiting"));
         let (session, whose) = (luneta.name().clone(), luneta.whose());
         let panes = vec![4, 5];
-        let act = Act::Workstream { session, whose, workstream, panes, seen: seen.clone() };
+        let act = Act::Worktree { session, whose, worktree, panes, seen: seen.clone() };
         assert_eq!(planned(Vec::new()).act, act, "the seat in the project leaves nothing");
     }
 

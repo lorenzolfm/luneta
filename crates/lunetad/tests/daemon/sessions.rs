@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lunetad::api::checkout::Head;
-use lunetad::api::work_tree::{NoCheckout, Stands};
+use lunetad::api::git_status::{NoCheckout, Stands};
 use lunetad::api::refuge_response::{Ended, Went};
 use lunetad::api::{
     self, Branch, Changes, Checkout, ListClientsRequest, PullRequestState, RefugeRequest,
@@ -542,7 +542,7 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     let _daemon = start(host.vars()).unwrap();
 
     let trees = eventually("git says how all three stand", || {
-        let trees = host.host().work_trees;
+        let trees = host.host().git_statuses;
         (trees.len() == 3).then_some(trees)
     });
     let stands = |dir: &str| trees.iter().find(|tree| tree.dir == dir).unwrap().stands.clone();
@@ -569,7 +569,7 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
 
     host.zellij.list("work", &json!([in_dir(1, &tree), in_dir(3, &detached)]));
     eventually("what git said of plain goes", || {
-        let trees = host.host().work_trees;
+        let trees = host.host().git_statuses;
         trees.iter().all(|tree| tree.dir != plain).then_some(())
     });
 }
@@ -613,7 +613,7 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     let mut daemon = start(host.vars()).unwrap();
 
     let changed = |dir: &str| {
-        host.host().work_trees.iter().find(|tree| tree.dir == dir).and_then(|tree| {
+        host.host().git_statuses.iter().find(|tree| tree.dir == dir).and_then(|tree| {
             match tree.stands.as_ref()? {
                 Stands::Checkout(Checkout { head: Some(Head::Branch(branch)), .. }) => {
                     let changed = branch.changed.as_ref()?;
@@ -672,7 +672,7 @@ fn luneta_sessions_names_the_repository_each_pane_works_in() {
     host.zellij.list("work", &json!(panes));
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
-    eventually("git says of all five", || (host.host().work_trees.len() == 5).then_some(()));
+    eventually("git says of all five", || (host.host().git_statuses.len() == 5).then_some(()));
 
     let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
     let said = String::from_utf8(said.stdout).unwrap();
@@ -733,7 +733,7 @@ fn luneta_sessions_says_nothing_of_a_directory_git_will_not_read() {
     host.zellij.list("work", &json!(panes));
     let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
-    eventually("git says of the last", || (!host.host().work_trees.is_empty()).then_some(()));
+    eventually("git says of the last", || (!host.host().git_statuses.is_empty()).then_some(()));
 
     let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
     let said = String::from_utf8(said.stdout).unwrap();
@@ -782,7 +782,7 @@ fn what_git_said_stands_once_it_will_not_read_the_repository() {
 }
 
 fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
-    let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
+    let tree = host.host().git_statuses.into_iter().find(|tree| tree.dir == cwd)?;
     match tree.stands? {
         Stands::Checkout(checkout) => Some(checkout),
         Stands::Outside(()) | Stands::NoCheckout(_) => None,
@@ -791,7 +791,7 @@ fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
 
 fn in_no_work_tree(host: &Host, cwd: &str) {
     eventually("git says the directory is in no work tree", || {
-        let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
+        let tree = host.host().git_statuses.into_iter().find(|tree| tree.dir == cwd)?;
         (tree.stands == Some(Stands::Outside(()))).then_some(())
     });
 }
@@ -1015,7 +1015,7 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     let repository = fs::canonicalize(top).unwrap().display().to_string();
     let of_its_clone = Some(Stands::NoCheckout(NoCheckout { repository }));
     eventually("git says it is no checkout of its clone", || {
-        let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
+        let tree = host.host().git_statuses.into_iter().find(|tree| tree.dir == cwd)?;
         (tree.stands == of_its_clone).then_some(())
     });
 
@@ -1803,7 +1803,7 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
     let mut daemon = start(host.vars()).unwrap();
     let seen = || {
         let host = host.host();
-        let tree = host.work_trees.iter().find(|tree| tree.dir == cwd);
+        let tree = host.git_statuses.iter().find(|tree| tree.dir == cwd);
         let branch = match tree.and_then(|tree| tree.stands.as_ref()) {
             Some(Stands::Checkout(Checkout { head: Some(Head::Branch(branch)), .. })) => {
                 Some(branch.name.clone())

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use luneta_protocol::git::{self, Changed, Head, WorkTree};
+use luneta_protocol::git::{self, Changed, GitStatus, Head};
 use luneta_protocol::said::Said;
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
@@ -72,13 +72,13 @@ fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Stood {
         None => holder_of(dir)?,
     };
     let Some(repository) = repository else {
-        return Ok((WorkTree::Outside, None));
+        return Ok((GitStatus::Outside, None));
     };
     match (said, placed) {
-        (Ok(stdout), _) => WorkTree::parse(&String::from_utf8_lossy(&stdout), repository)
+        (Ok(stdout), _) => GitStatus::parse(&String::from_utf8_lossy(&stdout), repository)
             .map(|mut tree| {
                 let uncounted = match &mut tree {
-                    WorkTree::Checkout { head: Head::Branch { name, changed, .. }, .. } => {
+                    GitStatus::Checkout { head: Head::Branch { name, changed, .. }, .. } => {
                         counted(dir, name.as_str(), changed)
                     },
                     _ => None,
@@ -86,14 +86,14 @@ fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Stood {
                 (tree, uncounted)
             })
             .map_err(|why| format!("git status in {dir} said {why}")),
-        (Err(_), Placed::Outside(_)) => Ok((WorkTree::NoCheckout { repository }, None)),
+        (Err(_), Placed::Outside(_)) => Ok((GitStatus::NoCheckout { repository }, None)),
         (Err(why), Placed::In(_) | Placed::Unsaid) => {
             Err(format!("git status in {dir} said {why}"))
         },
     }
 }
 
-type Stood = Result<(WorkTree, Option<String>), String>;
+type Stood = Result<(GitStatus, Option<String>), String>;
 
 fn counted(dir: &str, branch: &str, count: &mut Option<Changed>) -> Option<String> {
     let (changed, why) = match changed(dir, branch) {
@@ -750,7 +750,7 @@ pub fn follow(
                 }
                 asked.insert(dir.clone(), Asked { ended, took, changed: moved, placed, trouble });
                 if let Ok((tree, _)) = said
-                    && core.send(core::Command::WorkTree { dir, tree }).is_err()
+                    && core.send(core::Command::GitStatus { dir, tree }).is_err()
                 {
                     return;
                 }

@@ -130,12 +130,12 @@ struct Here {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Kept {
     projects: usize,
-    workstreams: usize,
+    worktrees: usize,
 }
 
 impl Kept {
     fn of(projects: &Projects) -> Kept {
-        Kept { projects: projects.all().len(), workstreams: projects.workstreams().count() }
+        Kept { projects: projects.all().len(), worktrees: projects.worktrees().count() }
     }
 }
 
@@ -292,9 +292,9 @@ fn listed(parts: &[String]) -> String {
 
 fn kept_said(kept: Kept) -> String {
     let projects = counted(kept.projects, "project", "projects");
-    match kept.workstreams {
+    match kept.worktrees {
         0 => projects,
-        n => format!("{projects} and {}", counted(n, "workstream", "workstreams")),
+        n => format!("{projects} and {}", counted(n, "worktree", "worktrees")),
     }
 }
 
@@ -690,16 +690,16 @@ mod tests {
             served: vec![PathBuf::from("/run/user/1000/luneta")],
         };
         let agents = Counted::Agents(Agents { count: 3, busy: 1 });
-        let projects = Ok(Kept { projects: 4, workstreams: 9 });
+        let projects = Ok(Kept { projects: 4, worktrees: 9 });
         let here = Here { running: running.clone(), agents, projects };
         assert_eq!(
             here.says(),
             "ends 2 lunetas, 1 luneta command, lunetad and luneta-mux, and 3 agents with them, 1 \
-             busy; forgets 4 projects and 9 workstreams"
+             busy; forgets 4 projects and 9 worktrees"
         );
 
         let agents = Counted::Uncounted("lunetad did not answer".to_owned());
-        let projects = Ok(Kept { projects: 1, workstreams: 0 });
+        let projects = Ok(Kept { projects: 1, worktrees: 0 });
         let here = Here { running, agents, projects };
         assert_eq!(
             here.says(),
@@ -718,7 +718,7 @@ mod tests {
         );
 
         let running = Running { lunetas: vec![luneta(1, &[])], ..Running::default() };
-        let projects = Ok(Kept { projects: 0, workstreams: 0 });
+        let projects = Ok(Kept { projects: 0, worktrees: 0 });
         let here = Here { running, agents: Counted::Unasked, projects };
         assert_eq!(here.says(), "ends 1 luneta; keeps no project to forget");
     }
@@ -727,7 +727,7 @@ mod tests {
     fn a_plan_s_key_holds_whether_an_agent_is_busy_or_a_command_runs() {
         let lunetas = vec![luneta(1, &[])];
         let running = Running { lunetas, lunetads: vec![id(2)], ..Running::default() };
-        let projects = Ok(Kept { projects: 1, workstreams: 0 });
+        let projects = Ok(Kept { projects: 1, worktrees: 0 });
         let agents = Counted::Agents(Agents { count: 1, busy: 0 });
         let idle = Here { running, agents, projects };
         let busy = Here { agents: Counted::Agents(Agents { count: 1, busy: 1 }), ..idle.clone() };
@@ -739,7 +739,7 @@ mod tests {
         let mut fronted = idle.clone();
         fronted.running.lunetas.push(luneta(8, &[]));
         let more = Here { agents: Counted::Agents(Agents { count: 2, busy: 0 }), ..idle.clone() };
-        let kept = Here { projects: Ok(Kept { projects: 1, workstreams: 1 }), ..idle.clone() };
+        let kept = Here { projects: Ok(Kept { projects: 1, worktrees: 1 }), ..idle.clone() };
         let uncounted = Here { agents: Counted::Uncounted("no".to_owned()), ..idle.clone() };
         let unasked = Here { agents: Counted::Unasked, ..idle.clone() };
         for changed in [fronted, more, kept, uncounted, unasked] {

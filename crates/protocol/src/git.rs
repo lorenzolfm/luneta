@@ -22,7 +22,7 @@ pub fn command(dir: &str) -> [&str; 12] {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorkTree {
+pub enum GitStatus {
     Outside,
     NoCheckout { repository: Said },
     Checkout { repository: Option<Said>, head: Head, changes: Changes, stashes: u32 },
@@ -81,18 +81,18 @@ pub struct Changes {
     pub untracked: u32,
 }
 
-impl WorkTree {
+impl GitStatus {
     #[must_use]
-    pub fn to_api(&self, dir: &str) -> v1::WorkTree {
+    pub fn to_api(&self, dir: &str) -> v1::GitStatus {
         let stands = match self {
-            WorkTree::Outside => v1::work_tree::Stands::Outside(()),
-            WorkTree::NoCheckout { repository } => {
-                v1::work_tree::Stands::NoCheckout(v1::work_tree::NoCheckout {
+            GitStatus::Outside => v1::git_status::Stands::Outside(()),
+            GitStatus::NoCheckout { repository } => {
+                v1::git_status::Stands::NoCheckout(v1::git_status::NoCheckout {
                     repository: repository.as_str().to_owned(),
                 })
             },
-            WorkTree::Checkout { repository, head, changes, stashes } => {
-                v1::work_tree::Stands::Checkout(v1::Checkout {
+            GitStatus::Checkout { repository, head, changes, stashes } => {
+                v1::git_status::Stands::Checkout(v1::Checkout {
                     head: Some(head.to_api()),
                     changes: Some(changes.to_api()),
                     stashes: *stashes,
@@ -100,24 +100,24 @@ impl WorkTree {
                 })
             },
         };
-        v1::WorkTree { dir: dir.to_owned(), stands: Some(stands) }
+        v1::GitStatus { dir: dir.to_owned(), stands: Some(stands) }
     }
 
     #[must_use]
-    pub fn of_api(tree: &v1::WorkTree) -> Option<Self> {
+    pub fn of_api(tree: &v1::GitStatus) -> Option<Self> {
         let checkout = match tree.stands.as_ref()? {
-            v1::work_tree::Stands::Outside(()) => return Some(WorkTree::Outside),
-            v1::work_tree::Stands::NoCheckout(it) => {
+            v1::git_status::Stands::Outside(()) => return Some(GitStatus::Outside),
+            v1::git_status::Stands::NoCheckout(it) => {
                 let repository = Said::new(it.repository.clone())?;
-                return Some(WorkTree::NoCheckout { repository });
+                return Some(GitStatus::NoCheckout { repository });
             },
-            v1::work_tree::Stands::Checkout(checkout) => checkout,
+            v1::git_status::Stands::Checkout(checkout) => checkout,
         };
         let repository = match &checkout.repository {
             Some(repository) => Some(Said::new(repository.clone())?),
             None => None,
         };
-        Some(WorkTree::Checkout {
+        Some(GitStatus::Checkout {
             repository,
             head: Head::of_api(checkout.head.as_ref()?)?,
             changes: Changes::of_api(checkout.changes.as_ref()?),
@@ -144,7 +144,7 @@ impl WorkTree {
             }
         }
         let head = head.ok_or("no line that says what is checked out")?;
-        Ok(WorkTree::Checkout { repository: Some(repository), head, changes, stashes })
+        Ok(GitStatus::Checkout { repository: Some(repository), head, changes, stashes })
     }
 }
 
@@ -250,7 +250,7 @@ impl Changes {
 
 #[cfg(test)]
 mod tests {
-    use super::{v1, Changed, Changes, Head, Said, WorkTree};
+    use super::{v1, Changed, Changes, GitStatus, Head, Said};
 
     fn repo() -> Said {
         Said::new("/w/repo".to_owned()).unwrap()
@@ -271,13 +271,14 @@ mod tests {
             "",
         ];
         for line in unread {
-            assert!(WorkTree::parse(&format!("{head}{line}\n"), repo()).is_err(), "{line:?}");
+            assert!(GitStatus::parse(&format!("{head}{line}\n"), repo()).is_err(), "{line:?}");
         }
         for status in ["? new\n", "# branch.head (detached)\n# branch.ab +1 -0\n"] {
-            assert!(WorkTree::parse(status, repo()).is_err(), "{status:?}");
+            assert!(GitStatus::parse(status, repo()).is_err(), "{status:?}");
         }
-        let tree = WorkTree::parse(&format!("{head}# branch.to-come 1\n? new\n"), repo()).unwrap();
-        let WorkTree::Checkout { head: Head::Branch { name, upstream: None, .. }, changes, .. } = tree
+        let tree = GitStatus::parse(&format!("{head}# branch.to-come 1\n? new\n"), repo()).unwrap();
+        let GitStatus::Checkout { head: Head::Branch { name, upstream: None, .. }, changes, .. } =
+            tree
         else {
             panic!("main, with no upstream: {tree:?}");
         };
@@ -296,11 +297,11 @@ mod tests {
              1 .D N... 100644 100644 000000 a a gone.rs\n? new\n",
             "# branch.head (detached)\n1 .T N... 100644 100644 120000 a a link\n",
         ];
-        let mut trees: Vec<WorkTree> =
-            statuses.iter().map(|status| WorkTree::parse(status, repo()).unwrap()).collect();
-        trees.push(WorkTree::Outside);
-        trees.push(WorkTree::NoCheckout { repository: repo() });
-        trees.push(WorkTree::Checkout {
+        let mut trees: Vec<GitStatus> =
+            statuses.iter().map(|status| GitStatus::parse(status, repo()).unwrap()).collect();
+        trees.push(GitStatus::Outside);
+        trees.push(GitStatus::NoCheckout { repository: repo() });
+        trees.push(GitStatus::Checkout {
             repository: None,
             head: Head::Detached,
             changes: Changes::default(),
@@ -309,18 +310,18 @@ mod tests {
         let name = Said::new("fold".to_owned()).unwrap();
         let changed = Changed::new(120, 34);
         let head = Head::Branch { name, upstream: None, changed };
-        trees.push(WorkTree::Checkout {
+        trees.push(GitStatus::Checkout {
             repository: None,
             head,
             changes: Changes::default(),
             stashes: 0,
         });
         for tree in trees {
-            assert_eq!(WorkTree::of_api(&tree.to_api("/w/repo")).as_ref(), Some(&tree));
+            assert_eq!(GitStatus::of_api(&tree.to_api("/w/repo")).as_ref(), Some(&tree));
         }
 
         let checkout = |head, changes| {
-            Some(v1::work_tree::Stands::Checkout(v1::Checkout {
+            Some(v1::git_status::Stands::Checkout(v1::Checkout {
                 head,
                 changes,
                 stashes: 0,
@@ -334,8 +335,8 @@ mod tests {
         let none = v1::Changed { added: 0, deleted: 0 };
         let head = v1::Branch { name: "fold".to_owned(), upstream: None, changed: Some(none) };
         let stands = checkout(Some(v1::checkout::Head::Branch(head)), Some(v1::Changes::default()));
-        let tree = WorkTree::of_api(&v1::WorkTree { dir: "/w/repo".to_owned(), stands });
-        let Some(WorkTree::Checkout { head: Head::Branch { changed, .. }, .. }) = tree else {
+        let tree = GitStatus::of_api(&v1::GitStatus { dir: "/w/repo".to_owned(), stands });
+        let Some(GitStatus::Checkout { head: Head::Branch { changed, .. }, .. }) = tree else {
             panic!("fold: {tree:?}");
         };
         assert_eq!(changed, None);
@@ -344,19 +345,19 @@ mod tests {
             checkout(None, Some(v1::Changes::default())),
             checkout(branch("main"), None),
             checkout(branch(""), Some(v1::Changes::default())),
-            Some(v1::work_tree::Stands::Checkout(v1::Checkout {
+            Some(v1::git_status::Stands::Checkout(v1::Checkout {
                 head: branch("main"),
                 changes: Some(v1::Changes::default()),
                 stashes: 0,
                 repository: Some(String::new()),
             })),
-            Some(v1::work_tree::Stands::NoCheckout(v1::work_tree::NoCheckout {
+            Some(v1::git_status::Stands::NoCheckout(v1::git_status::NoCheckout {
                 repository: String::new(),
             })),
         ];
         for stands in unread {
-            let tree = v1::WorkTree { dir: "/w/repo".to_owned(), stands };
-            assert_eq!(WorkTree::of_api(&tree), None, "{tree:?}");
+            let tree = v1::GitStatus { dir: "/w/repo".to_owned(), stands };
+            assert_eq!(GitStatus::of_api(&tree), None, "{tree:?}");
         }
     }
 }

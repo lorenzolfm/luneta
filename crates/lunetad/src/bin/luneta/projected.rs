@@ -6,7 +6,7 @@ use lunetad::api::projects::Held;
 use lunetad::api::{self, agent, remote, terminal, Host};
 use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{ProjectId, ViewId, WorkstreamId};
+use lunetad::projects::{ProjectId, ViewId, WorktreeId};
 use lunetad::{Destination, SessionName};
 
 use crate::close::Whose;
@@ -16,8 +16,8 @@ use crate::sidebar::{Listed, PaneKey};
 use crate::viewed::Tab;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Workstream {
-    pub id: WorkstreamId,
+pub struct Worktree {
+    pub id: WorktreeId,
     pub name: String,
     pub folder: String,
     pub tab: u32,
@@ -32,7 +32,7 @@ pub struct Project {
     pub key: OwnKey,
     pub name: String,
     pub dir: String,
-    pub workstreams: Vec<Workstream>,
+    pub worktrees: Vec<Worktree>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,20 +82,20 @@ pub fn key_of(project: ProjectId) -> OwnKey {
 impl Project {
     #[must_use]
     pub fn pane_of(&self, terminal: ViewId) -> Option<OwnPane> {
-        let mut held = self.workstreams.iter().flat_map(|it| &it.terminals);
+        let mut held = self.worktrees.iter().flat_map(|it| &it.terminals);
         let (_, key) = held.find(|(id, _)| *id == terminal)?;
         Some(OwnPane { session: self.key, id: key.as_ref()?.id })
     }
 
     fn first_keyed(&self) -> Option<TerminalKey> {
-        let mut held = self.workstreams.iter().flat_map(|it| &it.terminals);
+        let mut held = self.worktrees.iter().flat_map(|it| &it.terminals);
         held.find_map(|(_, key)| *key)
     }
 
-    fn holding(&self, pane: NonZeroU32) -> Option<(WorkstreamId, ViewId, TerminalKey)> {
-        let held = self.workstreams.iter().flat_map(|workstream| {
-            let keyed = workstream.terminals.iter().filter_map(|(id, key)| Some((*id, (*key)?)));
-            keyed.map(|(id, key)| (workstream.id, id, key))
+    fn holding(&self, pane: NonZeroU32) -> Option<(WorktreeId, ViewId, TerminalKey)> {
+        let held = self.worktrees.iter().flat_map(|worktree| {
+            let keyed = worktree.terminals.iter().filter_map(|(id, key)| Some((*id, (*key)?)));
+            keyed.map(|(id, key)| (worktree.id, id, key))
         });
         let mut on_pane = held.filter(|(_, _, key)| key.id == pane);
         let first = on_pane.next()?;
@@ -152,10 +152,10 @@ impl Projected {
     pub fn holding(
         &self,
         on: &Machine,
-        workstream: WorkstreamId,
-    ) -> Option<(&Project, &Workstream)> {
+        worktree: WorktreeId,
+    ) -> Option<(&Project, &Worktree)> {
         self.projects(on).iter().find_map(|project| {
-            let found = project.workstreams.iter().find(|it| it.id == workstream)?;
+            let found = project.worktrees.iter().find(|it| it.id == worktree)?;
             Some((project, found))
         })
     }
@@ -164,23 +164,23 @@ impl Projected {
     pub fn tabs_beside(
         &self,
         on: &Machine,
-        workstream: WorkstreamId,
-    ) -> (Option<WorkstreamId>, Option<WorkstreamId>) {
+        worktree: WorktreeId,
+    ) -> (Option<WorktreeId>, Option<WorktreeId>) {
         let held = self.projects(on).iter().find_map(|project| {
-            Some((project, project.workstreams.iter().position(|it| it.id == workstream)?))
+            Some((project, project.worktrees.iter().position(|it| it.id == worktree)?))
         });
         let Some((project, at)) = held else {
             return (None, None);
         };
-        let before = at.checked_sub(1).and_then(|it| project.workstreams.get(it));
-        let after = project.workstreams.get(at + 1);
+        let before = at.checked_sub(1).and_then(|it| project.worktrees.get(it));
+        let after = project.worktrees.get(at + 1);
         (before.map(|it| it.id), after.map(|it| it.id))
     }
 
     #[must_use]
-    pub fn of_pane(&self, on: &Machine, pane: OwnPane) -> Option<(WorkstreamId, ViewId)> {
-        let (workstream, terminal, _) = self.project(on, pane.session)?.holding(pane.id)?;
-        Some((workstream, terminal))
+    pub fn of_pane(&self, on: &Machine, pane: OwnPane) -> Option<(WorktreeId, ViewId)> {
+        let (worktree, terminal, _) = self.project(on, pane.session)?.holding(pane.id)?;
+        Some((worktree, terminal))
     }
 
     pub fn whole(&self, on: &Machine, session: &Listed) -> Result<Route<Option<u32>>, String> {
@@ -200,13 +200,13 @@ impl Projected {
     pub fn tabs(
         &self,
         on: &Machine,
-        workstream: WorkstreamId,
+        worktree: WorktreeId,
     ) -> (Vec<Tab>, BTreeMap<ViewId, String>) {
-        let Some((project, shown)) = self.holding(on, workstream) else {
+        let Some((project, shown)) = self.holding(on, worktree) else {
             return (Vec::new(), BTreeMap::new());
         };
-        let tab = |it: &Workstream| Tab { workstream: it.id, name: it.name.clone() };
-        (project.workstreams.iter().map(tab).collect(), shown.titles.clone())
+        let tab = |it: &Worktree| Tab { worktree: it.id, name: it.name.clone() };
+        (project.worktrees.iter().map(tab).collect(), shown.titles.clone())
     }
 }
 
@@ -221,7 +221,7 @@ fn seat(projects: &[Project], agents: &mut [api::Agent], unread_files: &mut [api
     let seat = |key: &api::TerminalKey| {
         let key = TerminalKey::of(key).ok()?;
         projects.iter().find_map(|project| {
-            let holds = project.workstreams.iter().flat_map(|it| &it.terminals);
+            let holds = project.worktrees.iter().flat_map(|it| &it.terminals);
             let held = holds.filter_map(|(_, held)| *held).any(|held| held == key);
             held.then(|| api::Own::from(OwnPane { session: project.key, id: key.id }))
         })
@@ -258,33 +258,33 @@ fn title_of(terminal: &api::Terminal) -> Option<String> {
 pub fn project(project: &api::Project) -> Result<Project, String> {
     let named = &project.name;
     let id = ProjectId::of(project.id).ok_or_else(|| format!("project {named} has id 0"))?;
-    let workstream = |(workstream, tab): (&api::Workstream, u32)| {
-        let (named, of) = (&workstream.name, &project.name);
-        let id = WorkstreamId::of(workstream.id);
-        let id = id.ok_or_else(|| format!("workstream {named} of project {of} has id 0"))?;
+    let worktree = |(worktree, tab): (&api::Worktree, u32)| {
+        let (named, of) = (&worktree.name, &project.name);
+        let id = WorktreeId::of(worktree.id);
+        let id = id.ok_or_else(|| format!("worktree {named} of project {of} has id 0"))?;
         let mut terminals = Vec::new();
         let mut titles = BTreeMap::new();
-        for terminal in &workstream.terminals {
+        for terminal in &worktree.terminals {
             let held = ViewId::of(terminal.id);
-            let held = held.ok_or_else(|| format!("a terminal of workstream {named} has id 0"))?;
+            let held = held.ok_or_else(|| format!("a terminal of worktree {named} has id 0"))?;
             let key = found_key(terminal).map_err(|why| format!("terminal {held}: {why}"))?;
             terminals.push((held, key));
             if let Some(title) = title_of(terminal) {
                 titles.insert(held, title);
             }
         }
-        let (name, folder) = (workstream.name.clone(), workstream.folder.clone());
-        let used = workstream.used_at.map(SystemTime::try_from).transpose();
-        let used = used.map_err(|why| format!("workstream {named}'s last use: {why}"))?;
-        Ok(Workstream { id, name, folder, tab, terminals, titles, used })
+        let (name, folder) = (worktree.name.clone(), worktree.folder.clone());
+        let used = worktree.used_at.map(SystemTime::try_from).transpose();
+        let used = used.map_err(|why| format!("worktree {named}'s last use: {why}"))?;
+        Ok(Worktree { id, name, folder, tab, terminals, titles, used })
     };
-    let workstreams = project.workstreams.iter().zip(0..).map(workstream);
+    let worktrees = project.worktrees.iter().zip(0..).map(worktree);
     Ok(Project {
         id,
         key: key_of(id),
         name: project.name.clone(),
         dir: project.dir.clone(),
-        workstreams: workstreams.collect::<Result<_, String>>()?,
+        worktrees: worktrees.collect::<Result<_, String>>()?,
     })
 }
 
@@ -313,7 +313,7 @@ mod tests {
     }
 
     fn host() -> Host {
-        let first = api::Workstream {
+        let first = api::Worktree {
             id: 11,
             name: "main".to_owned(),
             folder: "/w/a".to_owned(),
@@ -321,19 +321,19 @@ mod tests {
                 terminal(21, terminal::Found::Key(key(4)), Some("Fixing")),
                 terminal(22, terminal::Found::Lost(()), None),
             ],
-            ..api::Workstream::default()
+            ..api::Worktree::default()
         };
-        let second = api::Workstream {
+        let second = api::Worktree {
             id: 12,
             name: "docs".to_owned(),
             terminals: vec![terminal(23, terminal::Found::Key(key(5)), None)],
-            ..api::Workstream::default()
+            ..api::Worktree::default()
         };
         let project = api::Project {
             id: 7,
             name: "bitwarden backup".to_owned(),
             dir: "/w".to_owned(),
-            workstreams: vec![first, second],
+            worktrees: vec![first, second],
             ..api::Project::default()
         };
         let kept = Held::Kept(Kept { projects: vec![project], version: None });
@@ -348,8 +348,8 @@ mod tests {
         api::Host { projects, sessions: vec![own], agents: vec![agent, stray], ..Host::default() }
     }
 
-    fn workstream(id: u64) -> WorkstreamId {
-        WorkstreamId::of(id).unwrap()
+    fn worktree(id: u64) -> WorktreeId {
+        WorktreeId::of(id).unwrap()
     }
 
     #[test]
@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(far.agents[1].pane, host.agents[1].pane);
         let (here, nixos) = (Machine::Local, Machine::Remote("nixos".parse().unwrap()));
         let pane = OwnPane { session: project_key, id: NonZeroU32::new(5).unwrap() };
-        let held = Some((workstream(12), ViewId::of(23).unwrap()));
+        let held = Some((worktree(12), ViewId::of(23).unwrap()));
         assert_eq!((projected.of_pane(&here, pane), projected.of_pane(&nixos, pane)), (held, held));
         let names = |on| -> Vec<&str> {
             projected.projects(on).iter().map(|it| it.name.as_str()).collect()
@@ -393,16 +393,16 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_or_tab_of_a_project_row_leads_back_to_its_workstream_and_terminal() {
+    fn a_pane_or_tab_of_a_project_row_leads_back_to_its_worktree_and_terminal() {
         let projected = Projected::adapted(&mut host()).unwrap();
         let project_key = key_of(ProjectId::of(7).unwrap());
         let pane = OwnPane { session: project_key, id: NonZeroU32::new(4).unwrap() };
         let terminal = ViewId::of(21).unwrap();
-        assert_eq!(projected.of_pane(&Machine::Local, pane), Some((workstream(11), terminal)));
+        assert_eq!(projected.of_pane(&Machine::Local, pane), Some((worktree(11), terminal)));
         let project = &projected.projects(&Machine::Local)[0];
         assert_eq!(project.pane_of(terminal), Some(pane));
         assert_eq!(project.pane_of(ViewId::of(22).unwrap()), None, "a lost one is no pane");
-        let (tabs, titles) = projected.tabs(&Machine::Local, workstream(11));
+        let (tabs, titles) = projected.tabs(&Machine::Local, worktree(11));
         let names: Vec<&str> = tabs.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["main", "docs"]);
         assert_eq!(titles.get(&terminal).map(String::as_str), Some("Fixing"));
@@ -411,13 +411,13 @@ mod tests {
     }
 
     #[test]
-    fn the_tabs_beside_a_workstream_are_the_ones_before_and_after_it_and_none_past_the_ends() {
+    fn the_tabs_beside_a_worktree_are_the_ones_before_and_after_it_and_none_past_the_ends() {
         let projected = Projected::adapted(&mut host()).unwrap();
-        let (main, docs) = (workstream(11), workstream(12));
+        let (main, docs) = (worktree(11), worktree(12));
         let here = Machine::Local;
         assert_eq!(projected.tabs_beside(&here, main), (None, Some(docs)));
         assert_eq!(projected.tabs_beside(&here, docs), (Some(main), None));
-        assert_eq!(projected.tabs_beside(&here, workstream(99)), (None, None));
+        assert_eq!(projected.tabs_beside(&here, worktree(99)), (None, None));
         let far = Machine::Remote("far".parse().unwrap());
         assert_eq!(projected.tabs_beside(&far, main), (None, None), "far keeps no project");
     }
@@ -436,13 +436,13 @@ mod tests {
         let made_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
         let remade = api::TerminalKey { id: 4, made_at };
         let again = terminal(24, terminal::Found::Key(remade), None);
-        kept(&mut host).workstreams[1].terminals.push(again);
+        kept(&mut host).worktrees[1].terminals.push(again);
         let projected = Projected::adapted(&mut host).unwrap();
         let project_key = key_of(ProjectId::of(7).unwrap());
         let pane = OwnPane { session: project_key, id: NonZeroU32::new(4).unwrap() };
         assert_eq!(projected.of_pane(&Machine::Local, pane), None);
         let five = OwnPane { session: project_key, id: NonZeroU32::new(5).unwrap() };
-        let held = Some((workstream(12), ViewId::of(23).unwrap()));
+        let held = Some((worktree(12), ViewId::of(23).unwrap()));
         assert_eq!(projected.of_pane(&Machine::Local, five), held);
     }
 
@@ -470,8 +470,8 @@ mod tests {
         assert_eq!(projected.whole(&here, &gone), unkept);
 
         let mut looking = host();
-        for workstream in &mut kept(&mut looking).workstreams {
-            for terminal in &mut workstream.terminals {
+        for worktree in &mut kept(&mut looking).worktrees {
+            for terminal in &mut worktree.terminals {
                 terminal.found = Some(terminal::Found::Looking(()));
             }
         }
@@ -481,11 +481,11 @@ mod tests {
     }
 
     #[test]
-    fn a_project_workstream_or_terminal_of_id_0_or_a_key_unread_is_refused() {
+    fn a_project_worktree_or_terminal_of_id_0_or_a_key_unread_is_refused() {
         let zeroed: [fn(&mut api::Project); 3] = [
             |project| project.id = 0,
-            |project| project.workstreams[1].id = 0,
-            |project| project.workstreams[0].terminals[1].id = 0,
+            |project| project.worktrees[1].id = 0,
+            |project| project.worktrees[0].terminals[1].id = 0,
         ];
         for zero in zeroed {
             let mut host = host();
@@ -495,7 +495,7 @@ mod tests {
         }
         let mut host = host();
         let unmade = api::TerminalKey { id: 4, made_at: None };
-        kept(&mut host).workstreams[0].terminals[0].found = Some(terminal::Found::Key(unmade));
+        kept(&mut host).worktrees[0].terminals[0].found = Some(terminal::Found::Key(unmade));
         let refused = Projected::adapted(&mut host).unwrap_err();
         assert!(refused.starts_with("terminal "), "{refused}");
     }

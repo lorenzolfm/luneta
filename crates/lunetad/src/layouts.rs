@@ -22,9 +22,9 @@ use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE
 use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
 use crate::projects::{Layout, Made, Project, ProjectId, Projects, Ran, Runs, Spot};
 use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
-use crate::projects::Workstream;
-use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, VIEWS_MAX};
-use crate::projects::{Worktree, WORKSTREAMS_MAX};
+use crate::projects::Worktree;
+use crate::projects::{WorktreeId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, VIEWS_MAX};
+use crate::projects::{Subfolder, WORKTREES_MAX};
 use crate::shells::Doing;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
@@ -80,7 +80,7 @@ pub struct ClientId(u64);
 pub enum Command {
     Change { change: Ask, answer: oneshot::Sender<Result<Changed, Failed>> },
     Came {
-        workstream: WorkstreamId,
+        worktree: WorktreeId,
         size: Size,
         runs_in: Option<TerminalKey>,
         again: bool,
@@ -93,14 +93,14 @@ pub enum Command {
     Emptied { since: Instant },
     Crashed,
     Unreached { since: Instant },
-    Worktrees { root: Dir, worktrees: BTreeSet<Worktree>, seen: BTreeSet<WorkstreamId> },
-    Rooted { root: Dir, worktrees: BTreeSet<Worktree> },
+    Worktrees { root: Dir, subfolders: BTreeSet<Subfolder>, seen: BTreeSet<WorktreeId> },
+    Rooted { root: Dir, subfolders: BTreeSet<Subfolder> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Asked {
     Size(Size),
-    Go(WorkstreamId),
+    Go(WorktreeId),
     Open { beside: Beside, argv: Vec<String> },
     Welcome,
     Close(ViewId),
@@ -142,7 +142,7 @@ impl Asked {
         Ok(match event {
             Event::Hello(_) => return Err("a hello comes only first".to_owned()),
             Event::Size(size) => Asked::Size(size_of(Some(size))?),
-            Event::Go(workstream) => Asked::Go(id("go", workstream).map(WorkstreamId::new)?),
+            Event::Go(worktree) => Asked::Go(id("go", worktree).map(WorktreeId::new)?),
             Event::Open(show_request::Open { beside, argv }) => {
                 use show_request::open::Beside as Said;
                 let beside = match beside.ok_or("open: it says no side to open beside")? {
@@ -291,7 +291,7 @@ struct Layouts {
     known: BTreeMap<TerminalViewId, Known>,
     listed: BTreeMap<TerminalKey, server::Terminal>,
     looked: bool,
-    last_focus: BTreeMap<WorkstreamId, ViewId>,
+    last_focus: BTreeMap<WorktreeId, ViewId>,
     unhomed: BTreeSet<TerminalViewId>,
     restore_round: BTreeSet<TerminalViewId>,
     restore_last_at: Option<Instant>,
@@ -302,7 +302,7 @@ struct Layouts {
 }
 
 struct Client {
-    workstream: WorkstreamId,
+    worktree: WorktreeId,
     size: Size,
     runs_in: Option<TerminalKey>,
     focus: Option<ViewId>,
@@ -426,19 +426,19 @@ impl Layouts {
             Command::Change { change, answer } => {
                 let changed = match change {
                     Ask::Change(change) => self.store.change(change),
-                    Ask::CloseWorkstream { workstream, seen } => {
-                        self.close_workstream(workstream, &seen)
+                    Ask::CloseWorktree { worktree, seen } => {
+                        self.close_worktree(worktree, &seen)
                     },
-                    Ask::CloseProject { project, workstreams, seen } => {
-                        self.close_project(project, &workstreams, &seen)
+                    Ask::CloseProject { project, worktrees, seen } => {
+                        self.close_project(project, &worktrees, &seen)
                     },
-                    Ask::Bring { workstream, from } => self.bring(workstream, from),
+                    Ask::Bring { worktree, from } => self.bring(worktree, from),
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|made| Changed { made, kept }));
             },
-            Command::Came { workstream, size, runs_in, again, out, answer } => {
-                let _ = answer.send(self.came(workstream, size, runs_in, again, out));
+            Command::Came { worktree, size, runs_in, again, out, answer } => {
+                let _ = answer.send(self.came(worktree, size, runs_in, again, out));
             },
             Command::Asked { client, asked } => {
                 if !self.clients.contains_key(&client) {
@@ -447,9 +447,9 @@ impl Layouts {
                 let event = match asked.and_then(|asked| self.asked(client, asked)) {
                     Ok(Done::Quiet) => return,
                     Ok(Done::Edged(direction)) => {
-                        let workstream = self.clients[&client].workstream.get();
+                        let worktree = self.clients[&client].worktree.get();
                         let direction = direction_said(direction).into();
-                        show_response::Event::Edged(show_response::Edged { workstream, direction })
+                        show_response::Event::Edged(show_response::Edged { worktree, direction })
                     },
                     Err(why) => show_response::Event::Refused(why),
                 };
@@ -475,15 +475,15 @@ impl Layouts {
                 self.known.clear();
                 self.listed.clear();
             },
-            Command::Worktrees { root, worktrees, seen } => {
-                let listed = Change::Listed { root: root.clone(), worktrees, seen };
+            Command::Worktrees { root, subfolders, seen } => {
+                let listed = Change::Listed { root: root.clone(), subfolders, seen };
                 if let Err(why) = self.followed(listed) {
                     let root = root.as_str();
                     self.troubles.say(format!("{root}: its worktrees are not kept: {why}"));
                 }
             },
-            Command::Rooted { root, worktrees } => {
-                let rooted = Change::Rooted { root: root.clone(), worktrees };
+            Command::Rooted { root, subfolders } => {
+                let rooted = Change::Rooted { root: root.clone(), subfolders };
                 if let Err(why) = self.followed(rooted) {
                     let root = root.as_str();
                     self.troubles.say(format!("{root}: it is not kept as a clone: {why}"));
@@ -493,8 +493,8 @@ impl Layouts {
                     return;
                 };
                 let held = projects.all().iter().find(|it| *it.dir() == root);
-                let layouts = held.into_iter().flat_map(Project::workstreams);
-                let layouts = layouts.map(Workstream::layout);
+                let layouts = held.into_iter().flat_map(Project::worktrees);
+                let layouts = layouts.map(Worktree::layout);
                 let terminals = layouts.flat_map(Layout::terminals).map(Terminal::id);
                 self.unhomed.extend(terminals);
                 assert!(self.unhomed.len() <= VIEWS_MAX, "only held terminals wait for a home");
@@ -514,7 +514,7 @@ impl Layouts {
 
     fn came(
         &mut self,
-        workstream: WorkstreamId,
+        worktree: WorktreeId,
         size: Size,
         runs_in: Option<TerminalKey>,
         again: bool,
@@ -525,46 +525,46 @@ impl Layouts {
             return Err(Status::resource_exhausted(many));
         }
         let projects = self.kept().map_err(Status::failed_precondition)?;
-        let Some((_, shown)) = projects.find(workstream) else {
-            return Err(Status::not_found(format!("no workstream has the id {workstream}")));
+        let Some((_, shown)) = projects.find(worktree) else {
+            return Err(Status::not_found(format!("no worktree has the id {worktree}")));
         };
-        let focus = arrival(shown, self.last_focus.get(&workstream).copied());
+        let focus = arrival(shown, self.last_focus.get(&worktree).copied());
         self.arrivals += 1;
         let id = ClientId(self.arrivals);
-        let client = Client { workstream, size, runs_in, focus, out, said: None };
+        let client = Client { worktree, size, runs_in, focus, out, said: None };
         assert!(self.clients.insert(id, client).is_none(), "a client comes once");
         if !again {
-            self.went(workstream);
+            self.went(worktree);
         }
         Ok(id)
     }
 
-    fn went(&mut self, workstream: WorkstreamId) {
-        let went = Change::Went { workstream, at: Used::at(SystemTime::now()) };
+    fn went(&mut self, worktree: WorktreeId) {
+        let went = Change::Went { worktree, at: Used::at(SystemTime::now()) };
         if let Err(why) = self.changed(went) {
-            self.troubles.say(format!("workstream {workstream}'s use is not kept: {why}"));
+            self.troubles.say(format!("worktree {worktree}'s use is not kept: {why}"));
         }
     }
 
     fn close_project(
         &mut self,
         project: ProjectId,
-        seen_workstreams: &BTreeSet<WorkstreamId>,
+        seen_worktrees: &BTreeSet<WorktreeId>,
         seen: &BTreeSet<ViewId>,
     ) -> Result<Option<Made>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no project has the id {project}"));
         let held = projects.project_of(project).ok_or_else(unknown)?;
-        let workstreams: Vec<WorkstreamId> = held.workstreams().map(Workstream::id).collect();
-        let layouts = held.workstreams().map(Workstream::layout);
+        let worktrees: Vec<WorktreeId> = held.worktrees().map(Worktree::id).collect();
+        let layouts = held.worktrees().map(Worktree::layout);
         let terminals = layouts.flat_map(Layout::terminals).map(Terminal::id);
         let terminals: Vec<TerminalViewId> = terminals.collect();
-        assert!(workstreams.len() <= WORKSTREAMS_MAX, "a project holds at most {WORKSTREAMS_MAX}");
+        assert!(worktrees.len() <= WORKTREES_MAX, "a project holds at most {WORKTREES_MAX}");
         assert!(terminals.len() <= VIEWS_MAX, "a project holds at most {VIEWS_MAX} views");
-        let held_workstreams: BTreeSet<WorkstreamId> = workstreams.iter().copied().collect();
+        let held_worktrees: BTreeSet<WorktreeId> = worktrees.iter().copied().collect();
         let held_terminals: BTreeSet<ViewId> = terminals.iter().map(|it| it.view()).collect();
-        if held_workstreams != *seen_workstreams || held_terminals != *seen {
-            let changed = format!("project {project}'s workstreams or terminals are not those seen");
+        if held_worktrees != *seen_worktrees || held_terminals != *seen {
+            let changed = format!("project {project}'s worktrees or terminals are not those seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
         }
         self.close_terminals(&terminals)?;
@@ -573,35 +573,35 @@ impl Layouts {
         }
         let projects = self.store.projects().expect("projects just changed are kept");
         assert!(projects.project_of(project).is_none(), "project {project} is closed");
-        for workstream in &workstreams {
-            assert!(projects.find(*workstream).is_none(), "workstream {workstream} goes with it");
+        for worktree in &worktrees {
+            assert!(projects.find(*worktree).is_none(), "worktree {worktree} goes with it");
         }
-        self.forget_closed(&workstreams, &terminals);
+        self.forget_closed(&worktrees, &terminals);
         Ok(None)
     }
 
-    fn close_workstream(
+    fn close_worktree(
         &mut self,
-        workstream: WorkstreamId,
+        worktree: WorktreeId,
         seen: &BTreeSet<ViewId>,
     ) -> Result<Option<Made>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
-        let unknown = || Failed::Refused(format!("no workstream has the id {workstream}"));
-        let (_, shown) = projects.find(workstream).ok_or_else(unknown)?;
+        let unknown = || Failed::Refused(format!("no worktree has the id {worktree}"));
+        let (_, shown) = projects.find(worktree).ok_or_else(unknown)?;
         let terminals: Vec<TerminalViewId> = shown.layout().terminals().map(Terminal::id).collect();
         if terminals.iter().map(|it| it.view()).collect::<BTreeSet<_>>() != *seen {
-            let changed = format!("workstream {workstream}'s terminals are not the ones seen");
+            let changed = format!("worktree {worktree}'s terminals are not the ones seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
         }
         assert!(terminals.len() <= PANES_MAX, "a layout holds at most {PANES_MAX} terminals");
         self.close_terminals(&terminals)?;
-        if let Some(why) = self.store.closed(Closing::Workstream(workstream))? {
+        if let Some(why) = self.store.closed(Closing::Worktree(worktree))? {
             self.unwritten(&why);
         }
         let projects = self.store.projects().expect("projects just changed are kept");
-        let emptied = projects.find(workstream).is_some_and(|(_, it)| it.layout().is_empty());
-        assert!(emptied, "workstream {workstream} is closed, and stays empty");
-        self.forget_closed(&[workstream], &terminals);
+        let emptied = projects.find(worktree).is_some_and(|(_, it)| it.layout().is_empty());
+        assert!(emptied, "worktree {worktree} is closed, and stays empty");
+        self.forget_closed(&[worktree], &terminals);
         Ok(None)
     }
 
@@ -633,17 +633,17 @@ impl Layouts {
         Ok(())
     }
 
-    fn forget_closed(&mut self, workstreams: &[WorkstreamId], terminals: &[TerminalViewId]) {
+    fn forget_closed(&mut self, worktrees: &[WorktreeId], terminals: &[TerminalViewId]) {
         for terminal in terminals {
             self.known.remove(terminal);
         }
-        for workstream in workstreams {
-            self.last_focus.remove(workstream);
+        for worktree in worktrees {
+            self.last_focus.remove(worktree);
         }
         let projects = self.store.projects().expect("projects just changed are kept");
-        for workstream in workstreams {
-            let focused = self.last_focus.contains_key(workstream);
-            assert!(!focused, "closed workstream {workstream} has no focus");
+        for worktree in worktrees {
+            let focused = self.last_focus.contains_key(worktree);
+            assert!(!focused, "closed worktree {worktree} has no focus");
         }
         for terminal in terminals {
             let held = projects.holding_view(terminal.view());
@@ -654,31 +654,31 @@ impl Layouts {
 
     fn bring(
         &mut self,
-        workstream: WorkstreamId,
+        worktree: WorktreeId,
         from: TerminalKey,
     ) -> Result<Option<Made>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
-        if projects.find(workstream).is_none() {
-            return Err(Failed::Refused(format!("no workstream has the id {workstream}")));
+        if projects.find(worktree).is_none() {
+            return Err(Failed::Refused(format!("no worktree has the id {worktree}")));
         }
         let held = self.known.iter().find(|(_, known)| known.key == from);
         let Some((&held, _)) = held else {
             return Ok(None);
         };
-        let sent = api::ShowResponse { event: Some(show_response::Event::Sent(workstream.get())) };
+        let sent = api::ShowResponse { event: Some(show_response::Event::Sent(worktree.get())) };
         let on = self.clients.iter().filter(|(_, it)| it.focus == Some(held.view()));
         let on = on.map(|(id, _)| *id);
         let on: Vec<ClientId> = on.collect();
         let mut taken = false;
         for client in on {
             let it = &self.clients[&client];
-            if it.workstream == workstream || told(&it.out, sent.clone()) {
+            if it.worktree == worktree || told(&it.out, sent.clone()) {
                 taken = true;
             } else {
                 self.clients.remove(&client);
             }
         }
-        Ok(taken.then_some(Made::Taken(workstream)))
+        Ok(taken.then_some(Made::Taken(worktree)))
     }
 
     fn kept(&self) -> Result<&Projects, String> {
@@ -710,7 +710,7 @@ impl Layouts {
     }
 
     fn asked(&mut self, client: ClientId, asked: Asked) -> Result<Done, String> {
-        let workstream = self.clients[&client].workstream;
+        let worktree = self.clients[&client].worktree;
         let size = self.size_of(client);
         let focus = self.clients[&client].focus;
         let focused = || focus.ok_or_else(|| "the layout holds no view".to_owned());
@@ -718,29 +718,29 @@ impl Layouts {
             Asked::Size(size) => self.client(client).size = size,
             Asked::Go(to) => {
                 let projects = self.kept()?;
-                let (_, shown) = projects.find(to).ok_or_else(|| format!("no workstream {to}"))?;
+                let (_, shown) = projects.find(to).ok_or_else(|| format!("no worktree {to}"))?;
                 let focus = arrival(shown, self.last_focus.get(&to).copied());
                 let moved = self.client(client);
-                moved.workstream = to;
+                moved.worktree = to;
                 moved.focus = focus;
                 self.went(to);
             },
             Asked::Open { beside, argv } => self.open(client, beside, &argv)?,
             Asked::Welcome => self.welcome(client)?,
             Asked::Close(view) => {
-                if !self.layout(workstream)?.holds(view) {
+                if !self.layout(worktree)?.holds(view) {
                     return Ok(Done::Quiet);
                 }
                 self.close(view)?;
             },
             Asked::Focus(Focus::View(view)) => {
-                if !self.layout(workstream)?.holds(view) {
+                if !self.layout(worktree)?.holds(view) {
                     return Err(format!("the layout holds no view {view}"));
                 }
                 self.focus(client, view)?;
             },
             Asked::Focus(Focus::Step(Step::Direction(direction))) => {
-                let tree = self.layout(workstream)?.tree();
+                let tree = self.layout(worktree)?.tree();
                 let beside = tree.zip(focus).and_then(|(tree, from)| {
                     tree.neighbour(from, direction, size)
                 });
@@ -751,14 +751,14 @@ impl Layouts {
             },
             Asked::Focus(Focus::Step(step @ Step::Order(_))) => {
                 let from = focused()?;
-                let to = self.stepped(workstream, from, step, size)?;
+                let to = self.stepped(worktree, from, step, size)?;
                 self.focus(client, to)?;
             },
             Asked::Resize { sides, growth } => {
                 let Some(view) = focus else {
                     return Ok(Done::Quiet);
                 };
-                let layout = self.layout(workstream)?;
+                let layout = self.layout(worktree)?;
                 let moves = layout.full().is_none()
                     && layout.tree().is_some_and(|tree| {
                         tree.clone().resize(view, sides, growth, size)
@@ -770,15 +770,15 @@ impl Layouts {
             },
             Asked::Move(step) => {
                 let one = focused()?;
-                let other = self.stepped(workstream, one, step, size)?;
+                let other = self.stepped(worktree, one, step, size)?;
                 self.changed(Change::Swap { one, other })?;
             },
             Asked::Fullscreen => {
-                let full = match self.layout(workstream)?.full() {
+                let full = match self.layout(worktree)?.full() {
                     Some(_) => None,
                     None => Some(focused()?),
                 };
-                self.changed(Change::Fill { workstream, full })?;
+                self.changed(Change::Fill { worktree, full })?;
             },
         }
         Ok(Done::Quiet)
@@ -788,21 +788,21 @@ impl Layouts {
         self.clients.get_mut(&client).expect("a client asked is held")
     }
 
-    fn layout(&self, workstream: WorkstreamId) -> Result<&Layout, String> {
+    fn layout(&self, worktree: WorktreeId) -> Result<&Layout, String> {
         let projects = self.kept()?;
-        let found = projects.find(workstream).ok_or_else(|| format!("no workstream {workstream}"));
+        let found = projects.find(worktree).ok_or_else(|| format!("no worktree {worktree}"));
         let (_, found) = found?;
         Ok(found.layout())
     }
 
     fn stepped(
         &self,
-        workstream: WorkstreamId,
+        worktree: WorktreeId,
         from: ViewId,
         step: Step,
         size: Size,
     ) -> Result<ViewId, String> {
-        let tree = self.layout(workstream)?.tree().ok_or("the layout holds no view")?;
+        let tree = self.layout(worktree)?.tree().ok_or("the layout holds no view")?;
         let to = match step {
             Step::Direction(direction) => tree.neighbour(from, direction, size),
             Step::Order(order) => tree.in_order(from, order),
@@ -811,22 +811,22 @@ impl Layouts {
     }
 
     fn focus(&mut self, client: ClientId, view: ViewId) -> Result<(), String> {
-        let workstream = self.clients[&client].workstream;
-        let full = self.layout(workstream)?.full();
+        let worktree = self.clients[&client].worktree;
+        let full = self.layout(worktree)?.full();
         if full.is_some_and(|full| full != view) {
-            self.changed(Change::Fill { workstream, full: None })?;
+            self.changed(Change::Fill { worktree, full: None })?;
         }
         self.client(client).focus = Some(view);
-        self.last_focus.insert(workstream, view);
+        self.last_focus.insert(worktree, view);
         Ok(())
     }
 
     fn size_of(&self, client: ClientId) -> Size {
-        let Client { workstream, size, .. } = self.clients[&client];
-        let Some((_, found)) = self.store.projects().and_then(|it| it.find(workstream)) else {
+        let Client { worktree, size, .. } = self.clients[&client];
+        let Some((_, found)) = self.store.projects().and_then(|it| it.find(worktree)) else {
             return size;
         };
-        let shown = self.clients.values().filter(|it| it.workstream == workstream);
+        let shown = self.clients.values().filter(|it| it.worktree == worktree);
         fit(shown, found.layout(), &self.known).map_or(size, |fit| fit.size)
     }
 
@@ -835,11 +835,11 @@ impl Layouts {
             [] => Runs::Shell,
             _ => Runs::Command(Line::parse(&quoted(argv)).map_err(|why| format!("open: {why}"))?),
         };
-        let Client { workstream, focus, .. } = self.clients[&client];
+        let Client { worktree, focus, .. } = self.clients[&client];
         let size = self.size_of(client);
         let terminal = self.store.fresh_terminal().map_err(said)?;
         let projects = self.kept()?;
-        let (project, shown) = projects.find(workstream).ok_or("the workstream is gone")?;
+        let (project, shown) = projects.find(worktree).ok_or("the worktree is gone")?;
         if beside == Beside::Alone && !shown.layout().is_empty() {
             return Ok(());
         }
@@ -854,7 +854,7 @@ impl Layouts {
         let folder = listed_cwd.unwrap_or(home);
         let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
         let made = Terminal::new(terminal, folder, runs);
-        self.changed(Change::Open { workstream, view: View::Terminal(made), placed, size })?;
+        self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
         let opened = match argv.split_first() {
             None => Opened::Shell(&self.shell),
             Some((program, rest)) => Opened::Command { program, args: rest },
@@ -870,25 +870,25 @@ impl Layouts {
         };
         self.made(terminal, key, Some(inner), None);
         self.client(client).focus = Some(terminal.view());
-        self.last_focus.insert(workstream, terminal.view());
+        self.last_focus.insert(worktree, terminal.view());
         Ok(())
     }
 
     fn welcome(&mut self, client: ClientId) -> Result<(), String> {
-        let Client { workstream, focus, .. } = self.clients[&client];
+        let Client { worktree, focus, .. } = self.clients[&client];
         let size = self.size_of(client);
         let view = self.store.fresh().map_err(said)?;
         let projects = self.kept()?;
-        let (_, shown) = projects.find(workstream).ok_or("the workstream is gone")?;
+        let (_, shown) = projects.find(worktree).ok_or("the worktree is gone")?;
         let beside = if focus.is_some() { Beside::Focused } else { Beside::Largest };
         let (placed, _) = placement(shown.layout(), focus, beside, view, size)?;
-        self.changed(Change::Open { workstream, view: View::Welcome(view), placed, size })?;
+        self.changed(Change::Open { worktree, view: View::Welcome(view), placed, size })?;
         let projects = self.kept()?;
         let held_in = projects.holding_view(view).map(|(it, _)| it.id());
-        assert_eq!(held_in, Some(workstream), "welcome view {view} opened in its workstream");
+        assert_eq!(held_in, Some(worktree), "welcome view {view} opened in its worktree");
         assert!(projects.holding_terminal(view).is_none(), "welcome view {view} runs no terminal");
         self.client(client).focus = Some(view);
-        self.last_focus.insert(workstream, view);
+        self.last_focus.insert(worktree, view);
         Ok(())
     }
 
@@ -1020,22 +1020,22 @@ impl Layouts {
         let projects = self.kept()?;
         let held = projects.holding_terminal(terminal.view());
         let (held_in, held) = held.ok_or("no layout holds it")?;
-        let (project, workstream) = projects.find(held_in.id()).expect("a layout's workstream is");
-        let workstream_folder = project.folder(workstream.id()).ok_or("its project holds it not")?;
+        let (project, worktree) = projects.find(held_in.id()).expect("a layout's worktree is");
+        let worktree_folder = project.folder(worktree.id()).ok_or("its project holds it not")?;
         let kept_folder = held.folder().clone();
         let runs = held.runs().clone();
-        let layout = workstream.layout();
-        let shown = self.clients.values().filter(|it| it.workstream == held_in.id());
+        let layout = worktree.layout();
+        let shown = self.clients.values().filter(|it| it.worktree == held_in.id());
         let size = fit(shown, layout, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
         let inner = placed(layout, terminal.view(), size);
         let inner = inner.expect("a layout lays out the terminals it holds");
         let folder = if is_folder(&kept_folder)? {
             kept_folder
-        } else if is_folder(&workstream_folder)? {
-            workstream_folder
+        } else if is_folder(&worktree_folder)? {
+            worktree_folder
         } else {
-            let (kept, theirs) = (kept_folder.as_str(), workstream_folder.as_str());
-            return Err(format!("neither {kept} nor its workstream's {theirs} is a folder"));
+            let (kept, theirs) = (kept_folder.as_str(), worktree_folder.as_str());
+            return Err(format!("neither {kept} nor its worktree's {theirs} is a folder"));
         };
         let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
         let args: Vec<String>;
@@ -1130,7 +1130,7 @@ impl Layouts {
     fn closed(&mut self, view: ViewId) -> Result<(), String> {
         let projects = self.kept()?;
         let (held_in, _) = projects.holding_view(view).ok_or("no layout holds the view")?;
-        let workstream = held_in.id();
+        let worktree = held_in.id();
         let tree = held_in.layout().tree().expect("a layout that holds a view is laid");
         let heir = tree.heir(view);
         let terminal = projects.holding_terminal(view).map(|(_, it)| it.id());
@@ -1141,10 +1141,10 @@ impl Layouts {
         for client in self.clients.values_mut().filter(|client| client.focus == Some(view)) {
             client.focus = heir;
         }
-        if self.last_focus.get(&workstream) == Some(&view) {
+        if self.last_focus.get(&worktree) == Some(&view) {
             match heir {
-                Some(heir) => self.last_focus.insert(workstream, heir),
-                None => self.last_focus.remove(&workstream),
+                Some(heir) => self.last_focus.insert(worktree, heir),
+                None => self.last_focus.remove(&worktree),
             };
         }
         let projects = self.kept()?;
@@ -1152,8 +1152,8 @@ impl Layouts {
         if let Some(heir) = heir {
             assert!(projects.holding_view(heir).is_some(), "view {heir} took the room it left");
         } else {
-            let emptied = projects.find(workstream).is_some_and(|(_, it)| it.layout().is_empty());
-            assert!(emptied, "workstream {workstream} stays, empty, after its last view");
+            let emptied = projects.find(worktree).is_some_and(|(_, it)| it.layout().is_empty());
+            assert!(emptied, "worktree {worktree} stays, empty, after its last view");
         }
         let focused = self.clients.values().any(|client| client.focus == Some(view));
         assert!(!focused, "no client focuses view {view}, which closed");
@@ -1320,11 +1320,11 @@ impl Layouts {
             Home::Stays => return,
             Home::In(to) => to,
             Home::Made { project, spot } => {
-                let unmade = format!("no workstream is made at {}", spot.place().as_str());
-                let add = Change::AddWorkstream { project, spot, name: None };
+                let unmade = format!("no worktree is made at {}", spot.place().as_str());
+                let add = Change::AddWorktree { project, spot, name: None };
                 match self.store.change(add) {
-                    Ok(Some(Made::Workstream(made))) => made,
-                    Ok(_) => unreachable!("a workstream added is made"),
+                    Ok(Some(Made::Worktree(made))) => made,
+                    Ok(_) => unreachable!("a worktree added is made"),
                     Err(failed) => {
                         return self.troubles.say(format!("{stays}: {unmade}: {}", said(failed)));
                     },
@@ -1336,21 +1336,21 @@ impl Layouts {
         }
     }
 
-    fn moved(&mut self, terminal: TerminalViewId, to: WorkstreamId) -> Result<(), String> {
+    fn moved(&mut self, terminal: TerminalViewId, to: WorktreeId) -> Result<(), String> {
         let projects = self.kept()?;
         let view = terminal.view();
         let (held_in, _) = projects.holding_terminal(view).ok_or("no layout holds it")?;
         let from = held_in.id();
         let heir = held_in.layout().tree().and_then(|tree| tree.heir(view));
-        let (_, target) = projects.find(to).ok_or_else(|| format!("no workstream {to}"))?;
-        let follows = |client: &Client| client.workstream == from && client.focus == Some(view);
-        let shown = self.clients.values().filter(|it| it.workstream == to || follows(it));
+        let (_, target) = projects.find(to).ok_or_else(|| format!("no worktree {to}"))?;
+        let follows = |client: &Client| client.worktree == from && client.focus == Some(view);
+        let shown = self.clients.values().filter(|it| it.worktree == to || follows(it));
         let size = fit(shown, target.layout(), &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
         self.changed(Change::Move { terminal, to, size })?;
         let mut followed = false;
         for client in self.clients.values_mut() {
             if follows(client) {
-                client.workstream = to;
+                client.worktree = to;
                 followed = true;
             }
         }
@@ -1366,7 +1366,7 @@ impl Layouts {
         }
         let projects = self.store.projects().expect("projects just changed are kept");
         let held_in = projects.holding_terminal(view).map(|(it, _)| it.id());
-        assert_eq!(held_in, Some(to), "terminal {terminal} moved to workstream {to}");
+        assert_eq!(held_in, Some(to), "terminal {terminal} moved to worktree {to}");
         assert!(!self.clients.values().any(follows), "no client of {from} focuses {terminal}");
         Ok(())
     }
@@ -1375,7 +1375,7 @@ impl Layouts {
         let Some(projects) = self.store.projects() else {
             return;
         };
-        let located = |(_, terminal): (&Workstream, &Terminal)| {
+        let located = |(_, terminal): (&Worktree, &Terminal)| {
             let id = terminal.id();
             let located = match self.known.get(&id) {
                 Some(known) => {
@@ -1409,8 +1409,8 @@ impl Layouts {
         };
         let mut gone = Vec::new();
         for (id, client) in clients.iter_mut() {
-            let Some((_, shown)) = projects.find(client.workstream) else {
-                let forgotten = format!("workstream {} is forgotten", client.workstream);
+            let Some((_, shown)) = projects.find(client.worktree) else {
+                let forgotten = format!("worktree {} is forgotten", client.worktree);
                 let _ = client.out.try_send(Err(Status::not_found(forgotten)));
                 gone.push(*id);
                 continue;
@@ -1419,26 +1419,26 @@ impl Layouts {
             if let Some(full) = layout.full() {
                 client.focus = Some(full);
             } else if !client.focus.is_some_and(|focus| layout.holds(focus)) {
-                client.focus = arrival(shown, last_focus.get(&client.workstream).copied());
+                client.focus = arrival(shown, last_focus.get(&client.worktree).copied());
             }
         }
         for id in gone {
             clients.remove(&id);
         }
-        last_focus.retain(|workstream, terminal| {
-            projects.find(*workstream).is_some_and(|(_, it)| it.layout().holds(*terminal))
+        last_focus.retain(|worktree, terminal| {
+            projects.find(*worktree).is_some_and(|(_, it)| it.layout().holds(*terminal))
         });
-        let workstreams: BTreeSet<_> = clients.values().map(|it| it.workstream).collect();
-        let mut fits: BTreeMap<WorkstreamId, Fit> = BTreeMap::new();
-        for workstream in workstreams {
-            let (_, found) = projects.find(workstream).expect("a client's workstream is held");
-            let shown = clients.values().filter(|it| it.workstream == workstream);
+        let worktrees: BTreeSet<_> = clients.values().map(|it| it.worktree).collect();
+        let mut fits: BTreeMap<WorktreeId, Fit> = BTreeMap::new();
+        for worktree in worktrees {
+            let (_, found) = projects.find(worktree).expect("a client's worktree is held");
+            let shown = clients.values().filter(|it| it.worktree == worktree);
             let fitted = fit(shown, found.layout(), known);
-            let fitted = fitted.expect("a workstream shown has a client");
-            fits.insert(workstream, fitted);
+            let fitted = fitted.expect("a worktree shown has a client");
+            fits.insert(worktree, fitted);
         }
-        for (&workstream, &Fit { size, outside }) in &fits {
-            let (_, found) = projects.find(workstream).expect("a client's workstream is held");
+        for (&worktree, &Fit { size, outside }) in &fits {
+            let (_, found) = projects.find(worktree).expect("a client's worktree is held");
             let Some(tree) = found.layout().tree() else {
                 continue;
             };
@@ -1454,7 +1454,7 @@ impl Layouts {
                     continue;
                 };
                 let runs_in = |it: &Client| {
-                    it.workstream == workstream && it.runs_in == Some(known.key)
+                    it.worktree == worktree && it.runs_in == Some(known.key)
                 };
                 let pinned = !outside && clients.values().any(runs_in);
                 if known.sized == Some(wanted) || pinned {
@@ -1470,9 +1470,9 @@ impl Layouts {
         }
         let mut slow = Vec::new();
         for (id, client) in clients.iter_mut() {
-            let found = projects.find(client.workstream);
-            let (_, found) = found.expect("a client's workstream is held");
-            let size = fits[&client.workstream].size;
+            let found = projects.find(client.worktree);
+            let (_, found) = found.expect("a client's worktree is held");
+            let size = fits[&client.worktree].size;
             let laid = laid(found, size, client.focus, known, *looked);
             if client.said.as_ref() == Some(&laid) {
                 continue;
@@ -1652,8 +1652,8 @@ fn placement(
     }
 }
 
-fn arrival(workstream: &Workstream, last: Option<ViewId>) -> Option<ViewId> {
-    let layout = workstream.layout();
+fn arrival(worktree: &Worktree, last: Option<ViewId>) -> Option<ViewId> {
+    let layout = worktree.layout();
     if let Some(full) = layout.full() {
         return Some(full);
     }
@@ -1672,13 +1672,13 @@ fn tagged(tag: &[u8]) -> Option<ViewId> {
 }
 
 fn laid(
-    workstream: &Workstream,
+    worktree: &Worktree,
     size: Size,
     focus: Option<ViewId>,
     known: &BTreeMap<TerminalViewId, Known>,
     looked: bool,
 ) -> api::ShowResponse {
-    let layout = workstream.layout();
+    let layout = worktree.layout();
     if let Some(focus) = focus {
         assert!(layout.holds(focus), "a client focuses view {focus} of the layout it shows");
     }
@@ -1716,7 +1716,7 @@ fn laid(
     assert_eq!(panes.len(), layout.len(), "a layout lays out each of its terminals");
     let (columns, rows) = fitted.get();
     let laid = show_response::Laid {
-        workstream: workstream.id().get(),
+        worktree: worktree.id().get(),
         size: Some(show_request::Size { columns: columns.into(), rows: rows.into() }),
         panes,
         shown: match (layout.full(), focus) {
@@ -2067,7 +2067,7 @@ mod tests {
                 beside: largest(),
                 argv: vec!["x".to_owned(); ARGV_MAX + 1],
             }),
-            Event::Hello(show_request::Hello { workstream: 1, ..Default::default() }),
+            Event::Hello(show_request::Hello { worktree: 1, ..Default::default() }),
         ];
         for event in refused {
             assert!(Asked::of_api(event.clone()).is_err(), "{event:?}");

@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lunetad::api::change_projects_request::{
-    AddProject, AddWorkstream, Change, Pull, ReorderProjects, ReorderWorkstreams, Start,
+    AddProject, AddWorktree, Change, Pull, ReorderProjects, ReorderWorktrees, Start,
 };
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::projects::{Held, Kept};
-use lunetad::api::workstream::Seen;
+use lunetad::api::worktree::Seen;
 use lunetad::api::{self, ChangeProjectsRequest, ChangeProjectsResponse as Answered, On, Stage};
 use lunetad::api::Version;
 use tonic::{Code, Status};
@@ -22,7 +22,7 @@ pub fn asked(host: &Host, change: Change) -> Result<Option<u64>, Status> {
 
 fn asked_on(host: &Host, on: Option<&str>, change: Change) -> Result<Option<u64>, Status> {
     let made = |made| match made {
-        Made::Project(id) | Made::Workstream(id) | Made::Found(id) | Made::Taken(id) => id,
+        Made::Project(id) | Made::Worktree(id) | Made::Found(id) | Made::Taken(id) => id,
     };
     answered_on(host, on, change).map(|answered| answered.made.map(made))
 }
@@ -52,10 +52,10 @@ pub fn project(host: &Host, dir: &Path, name: Option<&str>) -> u64 {
     changed(host, Change::AddProject(add)).unwrap()
 }
 
-pub fn workstream(host: &Host, project: u64, folder: &Path) -> u64 {
+pub fn worktree(host: &Host, project: u64, folder: &Path) -> u64 {
     let folder = folder.to_str().unwrap().to_owned();
-    let add = AddWorkstream { project, folder, name: None };
-    changed(host, Change::AddWorkstream(add)).unwrap()
+    let add = AddWorktree { project, folder, name: None };
+    changed(host, Change::AddWorktree(add)).unwrap()
 }
 
 pub fn kept(host: &Host) -> PathBuf {
@@ -80,7 +80,7 @@ fn text(path: &Path) -> String {
 }
 
 #[test]
-fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again() {
+fn projects_and_worktrees_are_watched_and_come_back_when_lunetad_starts_again() {
     let host = Host::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = fs::canonicalize(scratch.path()).unwrap();
@@ -90,9 +90,9 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
     let daemon = start(host.vars()).unwrap();
 
     let luneta = project(&host, &clone, None);
-    let main = workstream(&host, luneta, &clone.join("main"));
+    let main = worktree(&host, luneta, &clone.join("main"));
     let backup = project(&host, &vault, Some("bitwarden backup"));
-    let notes = workstream(&host, backup, &vault.join("notes"));
+    let notes = worktree(&host, backup, &vault.join("notes"));
     let want = Held::Kept(Kept {
         version: None,
         projects: vec![
@@ -101,7 +101,7 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
                 name: "luneta".to_owned(),
                 dir: text(&clone),
                 missing: false,
-                workstreams: vec![api::Workstream {
+                worktrees: vec![api::Worktree {
                     id: main,
                     name: "main".to_owned(),
                     renamed: false,
@@ -116,7 +116,7 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
                 name: "bitwarden backup".to_owned(),
                 dir: text(&vault),
                 missing: false,
-                workstreams: vec![api::Workstream {
+                worktrees: vec![api::Worktree {
                     id: notes,
                     name: "Vault".to_owned(),
                     renamed: false,
@@ -150,7 +150,7 @@ fn a_folder_that_goes_is_kept_and_said_to_be_missing() {
     fs::create_dir_all(&below).unwrap();
     let _daemon = start(host.vars()).unwrap();
     let notes = project(&host, &top, None);
-    assert_eq!(workstream(&host, notes, &below), workstream(&host, notes, &top), "one, its own");
+    assert_eq!(worktree(&host, notes, &below), worktree(&host, notes, &top), "one, its own");
     let seen = |host: &Host| {
         let Held::Kept(Kept { projects, .. }) = held(host) else {
             panic!("the projects are kept");
@@ -158,7 +158,7 @@ fn a_folder_that_goes_is_kept_and_said_to_be_missing() {
         let [project] = projects.as_slice() else {
             panic!("{projects:?}");
         };
-        (project.missing, project.workstreams[0].seen)
+        (project.missing, project.worktrees[0].seen)
     };
     let no_branch = Some(Seen::Stage(Stage::NoBranch.into()));
 
@@ -170,8 +170,8 @@ fn a_folder_that_goes_is_kept_and_said_to_be_missing() {
     let back = || (seen(&host) == (false, no_branch)).then_some(());
     eventually("the folder is back", back);
     let nowhere = text(&scratch.join("nowhere"));
-    let add = AddWorkstream { project: notes, folder: nowhere, name: None };
-    let refused = changed(&host, Change::AddWorkstream(add)).unwrap_err();
+    let add = AddWorktree { project: notes, folder: nowhere, name: None };
+    let refused = changed(&host, Change::AddWorktree(add)).unwrap_err();
     assert_eq!(refused.code(), Code::InvalidArgument);
     assert!(refused.message().starts_with("folder: "), "{}", refused.message());
     let inside = AddProject { dir: text(&below), name: None };
@@ -197,7 +197,7 @@ fn a_clone_s_worktrees_made_or_removed_outside_luneta_come_and_go_on_the_sweep()
             panic!("{projects:?}");
         };
         assert_eq!((project.id, project.dir.as_str()), (luneta, text(&clone).as_str()));
-        project.workstreams.iter().map(|it| it.folder.clone()).collect::<Vec<_>>()
+        project.worktrees.iter().map(|it| it.folder.clone()).collect::<Vec<_>>()
     };
     assert_eq!(folders(&host), [text(&clone.join("main"))], "a project is its clone's");
 
@@ -226,7 +226,7 @@ fn a_folder_s_project_becomes_its_clone_s_when_wt_clones_into_its_folder() {
             panic!("{projects:?}");
         };
         assert_eq!((project.id, project.dir.as_str()), (luneta, text(&folder).as_str()));
-        let rows = project.workstreams.iter().map(|it| (it.id, it.folder.clone()));
+        let rows = project.worktrees.iter().map(|it| (it.id, it.folder.clone()));
         rows.collect::<Vec<_>>()
     };
     let [(own, at)] = rows(&host).try_into().unwrap();
@@ -243,7 +243,7 @@ fn a_folder_s_project_becomes_its_clone_s_when_wt_clones_into_its_folder() {
         let kept = held.iter().any(|(id, _)| *id == own);
         (kept && folders == both).then_some(())
     };
-    eventually("the project is its clone's, its workstream on a worktree", || rooted(&host));
+    eventually("the project is its clone's, and its worktree one of git's", || rooted(&host));
 }
 
 #[test]
@@ -335,13 +335,13 @@ fn a_reorder_made_on_a_stale_order_is_refused_here_and_on_another_machine() {
         let shown = eventually(&format!("{on:?} shows the version {landed:?}"), shown);
         assert_eq!(shown, [a, b, c], "{on:?}: the version a move is kept at shows it");
 
-        let main = workstream(keeper, a, &dir("a/main"));
-        let one = workstream(keeper, a, &dir("a/one"));
-        let two = workstream(keeper, a, &dir("a/two"));
+        let main = worktree(keeper, a, &dir("a/main"));
+        let one = worktree(keeper, a, &dir("a/one"));
+        let two = worktree(keeper, a, &dir("a/two"));
         let swap = |seen: Vec<u64>| {
-            let workstreams = vec![main, two, one];
-            let swap = ReorderWorkstreams { project: a, workstreams, seen };
-            asked_on(&here, on, Change::ReorderWorkstreams(swap))
+            let worktrees = vec![main, two, one];
+            let swap = ReorderWorktrees { project: a, worktrees, seen };
+            asked_on(&here, on, Change::ReorderWorktrees(swap))
         };
         swap(vec![main, one, two]).unwrap();
         let stale = swap(vec![main, one, two]).unwrap_err();
@@ -376,19 +376,19 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     let folders = || {
         let Held::Kept(kept) = held(&far) else { panic!("far keeps its projects") };
         let projects = kept.projects.into_iter();
-        let folders = |it: api::Project| it.workstreams.into_iter().map(|it| (it.id, it.folder));
+        let folders = |it: api::Project| it.worktrees.into_iter().map(|it| (it.id, it.folder));
         projects.flat_map(folders).collect::<Vec<_>>()
     };
 
-    let Some(Made::Workstream(feat)) = start("luneta/feat") else {
-        panic!("a start in a worktree of a project far keeps goes to a workstream there");
+    let Some(Made::Worktree(feat)) = start("luneta/feat") else {
+        panic!("a start in a worktree of a project far keeps goes to it there");
     };
     let listed = folders();
     let main = listed.iter().find(|(_, it)| *it == text(&real.join("luneta/main"))).unwrap().0;
     let want = [(feat, text(&real.join("luneta/feat"))), (main, text(&real.join("luneta/main")))];
     assert_eq!(listed, want, "one for each worktree of project {luneta}");
-    assert_eq!(start("luneta/feat"), Some(Made::Workstream(feat)), "the same one again");
-    assert_eq!(start("luneta"), Some(Made::Workstream(feat)), "its clone's root opens the first");
+    assert_eq!(start("luneta/feat"), Some(Made::Worktree(feat)), "the same one again");
+    assert_eq!(start("luneta"), Some(Made::Worktree(feat)), "its clone's root opens the first");
     worktree_added(&real.join("luneta"), "pr-7");
 
     let pull = Pull {
@@ -397,16 +397,16 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
         project: "cloned".to_owned(),
         name: "pr-7".to_owned(),
     };
-    let Some(Made::Workstream(pr)) = asked(Change::Pull(pull)) else {
-        panic!("a pull makes a workstream");
+    let Some(Made::Worktree(pr)) = asked(Change::Pull(pull)) else {
+        panic!("a pull makes a worktree");
     };
     assert!(folders().contains(&(pr, text(&real.join("luneta/pr-7")))), "in project luneta");
 
-    let Some(Made::Workstream(elo)) = start("elo") else {
-        panic!("a start in no project makes one and goes to its workstream");
+    let Some(Made::Worktree(elo)) = start("elo") else {
+        panic!("a start in no project makes one and goes to its worktree");
     };
     let Held::Kept(kept) = held(&far) else { panic!("far keeps its projects") };
-    let held_in = |it: &&api::Project| it.workstreams.iter().any(|it| it.id == elo);
+    let held_in = |it: &&api::Project| it.worktrees.iter().any(|it| it.id == elo);
     let made = kept.projects.iter().find(held_in).expect("far keeps elo");
     assert_eq!(made.dir, text(&real.join("elo")));
     let holds = Start { folder: text(&link), name: None };

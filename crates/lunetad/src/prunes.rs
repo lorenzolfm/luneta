@@ -246,7 +246,7 @@ fn terminals(host: &api::Host) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, St
         },
         Some(Held::Kept(kept)) => kept,
     };
-    let workstreams = kept.projects.iter().flat_map(|project| &project.workstreams);
+    let worktrees = kept.projects.iter().flat_map(|project| &project.worktrees);
     let terminal = |terminal: &api::Terminal| {
         let key = match &terminal.found {
             Some(Found::Key(key)) => TerminalKey::of(key).ok(),
@@ -254,7 +254,7 @@ fn terminals(host: &api::Host) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, St
         };
         (key, PathBuf::from(&terminal.folder))
     };
-    Ok(workstreams.flat_map(|workstream| &workstream.terminals).map(terminal).collect())
+    Ok(worktrees.flat_map(|worktree| &worktree.terminals).map(terminal).collect())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1054,8 +1054,8 @@ mod tests {
     }
 
     fn kept(terminals: Vec<api::Terminal>) -> api::projects::Held {
-        let workstream = api::Workstream { terminals, ..api::Workstream::default() };
-        let project = api::Project { workstreams: vec![workstream], ..api::Project::default() };
+        let worktree = api::Worktree { terminals, ..api::Worktree::default() };
+        let project = api::Project { worktrees: vec![worktree], ..api::Project::default() };
         api::projects::Held::Kept(api::projects::Kept { projects: vec![project], version: None })
     }
 

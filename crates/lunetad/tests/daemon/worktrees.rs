@@ -5,12 +5,12 @@ use std::sync::mpsc;
 
 use lunetad::api::projects::Held;
 use lunetad::api::Project;
-use lunetad::projects::{Size, WorkstreamId};
+use lunetad::projects::{Size, WorktreeId};
 use lunetad::{Asked, Beside, Heard, Where};
 
 use crate::host::{eventually, folder_in, script, Host, LUNETA};
 use crate::own::Owned;
-use crate::projects::{project, workstream};
+use crate::projects::{project, worktree};
 use crate::worktree::{cloned_as_wt, git};
 
 fn started(host: &Host, from: &Path, what: &str, env: &[(&str, String)]) -> Output {
@@ -42,8 +42,8 @@ fn projects(host: &Host) -> Vec<Project> {
 
 fn folders(host: &Host) -> Vec<(String, String, Vec<String>)> {
     let folders = |project: Project| {
-        let workstreams = project.workstreams.into_iter().map(|it| it.folder).collect();
-        (project.name, project.dir, workstreams)
+        let worktrees = project.worktrees.into_iter().map(|it| it.folder).collect();
+        (project.name, project.dir, worktrees)
     };
     projects(host).into_iter().map(folders).collect()
 }
@@ -53,7 +53,7 @@ fn shown(dir: &Path) -> String {
 }
 
 #[test]
-fn a_folder_starts_the_workstream_of_its_project_or_of_one_made_of_it() {
+fn a_folder_starts_the_worktree_of_its_project_or_of_one_made_of_it() {
     let owned = Owned::new();
     let home = fs::canonicalize(owned.host.home.path()).unwrap();
     let (work, docs) = (home.join("work"), home.join("work/docs"));
@@ -64,7 +64,7 @@ fn a_folder_starts_the_workstream_of_its_project_or_of_one_made_of_it() {
     assert!(made.stderr.is_empty(), "{}", String::from_utf8_lossy(&made.stderr));
     let work_s = work.display().to_string();
     let made = vec![("work".to_owned(), work_s.clone(), vec![work_s.clone()])];
-    assert_eq!(folders(&owned.host), made, "a folder's project holds one workstream there");
+    assert_eq!(folders(&owned.host), made, "a folder's project holds one worktree there");
     assert_eq!(said(&started(&owned.host, &work, "docs", &[])), shown(&docs));
     assert_eq!(folders(&owned.host), made, "a folder in it starts that one");
     assert_eq!(said(&started(&owned.host, &docs, "..", &[])), shown(&work));
@@ -89,12 +89,12 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
     assert!(feat.join(".git").is_file(), "wt made the worktree");
     let worktrees = [&feat, &main].map(|it| it.display().to_string()).to_vec();
     let made = vec![("n".to_owned(), clone.display().to_string(), worktrees)];
-    assert_eq!(folders(&owned.host), made, "a workstream for each of its clone's worktrees");
+    assert_eq!(folders(&owned.host), made, "one for each of its clone's worktrees");
     assert_eq!(said(&started(&owned.host, &main, "feat", &[])), shown(&feat));
-    assert_eq!(folders(&owned.host), made, "the worktree's workstream is started again");
+    assert_eq!(folders(&owned.host), made, "the worktree is started again");
 
-    let workstreams = &projects(&owned.host)[0].workstreams;
-    let [there, here] = [0, 1].map(|at| WorkstreamId::of(workstreams[at].id).unwrap());
+    let worktrees = &projects(&owned.host)[0].worktrees;
+    let [there, here] = [0, 1].map(|at| WorktreeId::of(worktrees[at].id).unwrap());
     let folder = folder_in(owned.host.runtime.path()).unwrap();
     let (heard, hearing) = mpsc::channel();
     let size = Size::of(80, 24).unwrap();
@@ -112,7 +112,7 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
         ("LUNETA_MUX_TERMINAL_MADE", key.made.nanos().to_string()),
     ];
     assert_eq!(said(&started(&owned.host, &main, "feat", &inside)), shown(&feat));
-    let sent = eventually("luneta is sent to the workstream started", || {
+    let sent = eventually("luneta is sent to the worktree started", || {
         match hearing.try_recv() {
             Ok(Heard::Sent(to)) => Some(to),
             Ok(_) | Err(_) => None,
@@ -145,7 +145,7 @@ fn a_project_asked_for_at_a_worktree_is_its_clone_s_and_a_branch_joins_it() {
     cloned_as_wt(&scratch, &up, &clone);
     let (main, feat) = (clone.join("main"), clone.join("feat"));
     let made = project(host, &main, None);
-    workstream(host, made, &main);
+    worktree(host, made, &main);
     let rooted = vec![("n".to_owned(), clone.display().to_string(), vec![main.display().to_string()])];
     assert_eq!(folders(host), rooted, "a project is made at its clone's root");
     let docs = clone.join("docs");
@@ -158,7 +158,7 @@ fn a_project_asked_for_at_a_worktree_is_its_clone_s_and_a_branch_joins_it() {
     assert_eq!(said(&started(host, &main, "feat", &[])), shown(&feat));
     let all = [&main, &docs, &feat].map(|it| it.display().to_string()).to_vec();
     assert_eq!(folders(host), vec![("n".to_owned(), clone.display().to_string(), all)]);
-    assert_eq!(projects(host)[0].id, made, "the workstream joins the project there was");
+    assert_eq!(projects(host)[0].id, made, "the worktree joins the project there was");
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     let worktrees = [&issue, &clone.join("main")].map(|it| it.display().to_string()).to_vec();
     let made = vec![("n".to_owned(), clone.display().to_string(), worktrees)];
     assert_eq!(folders(host), made);
-    let terminals = || projects(host)[0].workstreams[0].terminals.len();
+    let terminals = || projects(host)[0].worktrees[0].terminals.len();
     assert_eq!(terminals(), 1);
 
     let link = "https://github.com/o/n/issues/7";
@@ -198,12 +198,12 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     host.gh.issue(9, "https://github.com/o/n/issues/9");
     let nine = clone.join("issue-9");
     git(&bare, &["worktree", "add", "-q", "-b", "issue-9", "../issue-9", "main"]);
-    let empty = workstream(host, projects(host)[0].id, &nine);
+    let empty = worktree(host, projects(host)[0].id, &nine);
     fs::remove_file(&asked).unwrap();
     assert_eq!(said(&started(host, &clone.join("main"), "#9", &[])), shown(&nine));
     let agent = eventually("an agent starts where none was", || fs::read_to_string(&asked).ok());
     assert_eq!(agent, "Tackle https://github.com/o/n/issues/9\n");
-    let mut held = projects(host).into_iter().flat_map(|it| it.workstreams);
-    let there = held.find(|it| it.id == empty).expect("the empty workstream is the one started");
+    let mut held = projects(host).into_iter().flat_map(|it| it.worktrees);
+    let there = held.find(|it| it.id == empty).expect("the empty worktree is the one started");
     assert_eq!(there.terminals.len(), 1);
 }

@@ -3,26 +3,26 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use super::{Dir, Worktree, WORKSTREAMS_MAX};
+use super::{Dir, Subfolder, WORKTREES_MAX};
 use crate::git::{self, Common};
 use crate::program::{self, Ran};
 
-pub const WORKTREES_MAX: usize = 256;
+pub const CLONE_WORKTREES_MAX: usize = 256;
 
 pub const LOOK: Duration = Duration::from_secs(2);
 
-const LISTED_MAX: usize = 2 * WORKTREES_MAX;
+const LISTED_MAX: usize = 2 * CLONE_WORKTREES_MAX;
 
 const BARE: &str = ".bare";
 
-const _: () = assert!(WORKTREES_MAX <= WORKSTREAMS_MAX);
+const _: () = assert!(CLONE_WORKTREES_MAX <= WORKTREES_MAX);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Spot(Place);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Place {
-    Clone { root: Dir, worktree: Option<Worktree>, worktrees: BTreeSet<Worktree> },
+    Clone { root: Dir, subfolder: Option<Subfolder>, subfolders: BTreeSet<Subfolder> },
     Folder { asked: Dir, dir: Dir },
 }
 
@@ -38,24 +38,32 @@ impl Spot {
         };
         let top = toplevel(folder, until, look)?;
         if let Some(root) = root_of(&common) {
-            let worktrees = listed(&root, until, look)?;
-            let worktree = top.and_then(|top| root.worktree(&top));
-            let worktree = worktree.filter(|it| worktrees.contains(it));
-            return Ok(Spot::in_clone(root, worktree, worktrees));
+            let subfolders = listed(&root, until, look)?;
+            let subfolder = top.and_then(|top| root.subfolder(&top));
+            let subfolder = subfolder.filter(|it| subfolders.contains(it));
+            return Ok(Spot::in_clone(root, subfolder, subfolders));
         }
         let dir = top.filter(|top| top.below(folder).is_some());
         Ok(Spot::in_folder(folder.clone(), dir.unwrap_or_else(|| folder.clone())))
     }
 
     #[must_use]
-    pub fn in_clone(root: Dir, worktree: Option<Worktree>, worktrees: BTreeSet<Worktree>) -> Spot {
-        let count = worktrees.len();
-        assert!(count <= WORKTREES_MAX, "{} holds {count} worktrees, over {WORKTREES_MAX}", root.0);
-        if let Some(worktree) = &worktree {
-            let one = worktrees.contains(worktree);
-            assert!(one, "worktree {} is one of {}'s", worktree.as_str(), root.0);
+    pub fn in_clone(
+        root: Dir,
+        subfolder: Option<Subfolder>,
+        subfolders: BTreeSet<Subfolder>,
+    ) -> Spot {
+        let count = subfolders.len();
+        assert!(
+            count <= CLONE_WORKTREES_MAX,
+            "{} holds {count} worktrees, over {CLONE_WORKTREES_MAX}",
+            root.0
+        );
+        if let Some(subfolder) = &subfolder {
+            let one = subfolders.contains(subfolder);
+            assert!(one, "worktree {} is one of {}'s", subfolder.as_str(), root.0);
         }
-        Spot(Place::Clone { root, worktree, worktrees })
+        Spot(Place::Clone { root, subfolder, subfolders })
     }
 
     #[must_use]
@@ -67,8 +75,8 @@ impl Spot {
     #[must_use]
     pub fn place(&self) -> Dir {
         match &self.0 {
-            Place::Clone { root, worktree: Some(worktree), .. } => root.at(worktree),
-            Place::Clone { root, worktree: None, .. } => root.clone(),
+            Place::Clone { root, subfolder: Some(subfolder), .. } => root.at(subfolder),
+            Place::Clone { root, subfolder: None, .. } => root.clone(),
             Place::Folder { asked, .. } => asked.clone(),
         }
     }
@@ -82,24 +90,24 @@ impl Spot {
     }
 
     #[must_use]
-    pub fn worktree(&self) -> Option<&Worktree> {
+    pub fn subfolder(&self) -> Option<&Subfolder> {
         match &self.0 {
-            Place::Clone { worktree, .. } => worktree.as_ref(),
+            Place::Clone { subfolder, .. } => subfolder.as_ref(),
             Place::Folder { .. } => None,
         }
     }
 
     #[must_use]
-    pub fn worktrees(&self) -> Option<&BTreeSet<Worktree>> {
+    pub fn subfolders(&self) -> Option<&BTreeSet<Subfolder>> {
         match &self.0 {
-            Place::Clone { worktrees, .. } => Some(worktrees),
+            Place::Clone { subfolders, .. } => Some(subfolders),
             Place::Folder { .. } => None,
         }
     }
 
     #[must_use]
     pub fn is_clone(&self) -> bool {
-        self.worktrees().is_some()
+        self.subfolders().is_some()
     }
 }
 
@@ -108,11 +116,11 @@ pub fn holds_bare(folder: &Dir) -> bool {
     Path::new(folder.as_str()).join(BARE).is_dir()
 }
 
-pub fn worktrees(root: &Dir, look: Duration) -> Result<BTreeSet<Worktree>, String> {
+pub fn subfolders(root: &Dir, look: Duration) -> Result<BTreeSet<Subfolder>, String> {
     listed(root, Instant::now() + look, look)
 }
 
-fn listed(root: &Dir, until: Instant, look: Duration) -> Result<BTreeSet<Worktree>, String> {
+fn listed(root: &Dir, until: Instant, look: Duration) -> Result<BTreeSet<Subfolder>, String> {
     let mut git = Command::new("git");
     git::local(&mut git).args(["-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false"]);
     git.arg(format!("--git-dir={}/{BARE}", root.0)).current_dir("/");
@@ -160,7 +168,7 @@ fn root_of(common: &str) -> Option<Dir> {
     Dir::parse(root).ok()
 }
 
-fn porcelain(root: &Dir, said: &[u8]) -> Result<BTreeSet<Worktree>, String> {
+fn porcelain(root: &Dir, said: &[u8]) -> Result<BTreeSet<Subfolder>, String> {
     let said = std::str::from_utf8(said).map_err(|_| "git listed a worktree that is not UTF-8")?;
     let mut found: Vec<(Dir, bool)> = Vec::new();
     for line in said.split('\0') {
@@ -181,11 +189,12 @@ fn porcelain(root: &Dir, said: &[u8]) -> Result<BTreeSet<Worktree>, String> {
         }
     }
     let kept = found.into_iter().filter(|(_, kept)| *kept);
-    let worktrees: BTreeSet<Worktree> = kept.filter_map(|(dir, _)| root.worktree(&dir)).collect();
-    if worktrees.len() > WORKTREES_MAX {
-        return Err(format!("{} holds over {WORKTREES_MAX} worktrees", root.0));
+    let subfolders: BTreeSet<Subfolder> =
+        kept.filter_map(|(dir, _)| root.subfolder(&dir)).collect();
+    if subfolders.len() > CLONE_WORKTREES_MAX {
+        return Err(format!("{} holds over {CLONE_WORKTREES_MAX} worktrees", root.0));
     }
-    Ok(worktrees)
+    Ok(subfolders)
 }
 
 #[cfg(test)]
@@ -199,8 +208,8 @@ mod tests {
         Dir::parse(text).unwrap()
     }
 
-    fn worktree(text: &str) -> Worktree {
-        Worktree::parse(text).unwrap()
+    fn subfolder(text: &str) -> Subfolder {
+        Subfolder::parse(text).unwrap()
     }
 
     #[test]
@@ -218,7 +227,7 @@ mod tests {
             worktree /w/luneta/gone\0HEAD 2\0prunable gitdir file points to non-existent location\0\0\
             worktree /elsewhere/x\0HEAD 3\0detached\0\0\
             worktree /w/luneta/issue-7\0HEAD 4\0branch refs/heads/issue-7\0locked\0\0";
-        let want = BTreeSet::from([worktree("issue-7"), worktree("main")]);
+        let want = BTreeSet::from([subfolder("issue-7"), subfolder("main")]);
         assert_eq!(porcelain(&dir("/w/luneta"), said), Ok(want));
     }
 
@@ -228,9 +237,9 @@ mod tests {
         let said: String = (0..=LISTED_MAX).map(entry).collect();
         let refused = porcelain(&dir("/w/luneta"), said.as_bytes()).unwrap_err();
         assert!(refused.contains(&format!("over {LISTED_MAX} worktrees")), "{refused}");
-        let said: String = (0..=WORKTREES_MAX).map(entry).collect();
+        let said: String = (0..=CLONE_WORKTREES_MAX).map(entry).collect();
         let refused = porcelain(&dir("/w/luneta"), said.as_bytes()).unwrap_err();
-        assert!(refused.contains(&format!("over {WORKTREES_MAX} worktrees")), "{refused}");
+        assert!(refused.contains(&format!("over {CLONE_WORKTREES_MAX} worktrees")), "{refused}");
     }
 
     fn git(dir: &Path, args: &[&str]) {
@@ -260,9 +269,9 @@ mod tests {
         fs::create_dir_all(plain.join("src")).unwrap();
         fs::create_dir_all(alone.join("notes")).unwrap();
 
-        let worktrees = BTreeSet::from([worktree("main")]);
+        let subfolders = BTreeSet::from([subfolder("main")]);
         let clone_at = |at: Option<&str>| {
-            Spot::in_clone(real(&clone), at.map(worktree), worktrees.clone())
+            Spot::in_clone(real(&clone), at.map(subfolder), subfolders.clone())
         };
         let of = |folder: &Dir| Spot::of(folder, LOOK);
         assert_eq!(of(&real(&clone)), Ok(clone_at(None)));
@@ -287,7 +296,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "is one of /w/luneta's")]
     fn a_clone_s_spot_is_in_one_of_its_worktrees_or_none() {
-        let _ = Spot::in_clone(dir("/w/luneta"), Some(worktree("main")), BTreeSet::new());
+        let _ = Spot::in_clone(dir("/w/luneta"), Some(subfolder("main")), BTreeSet::new());
     }
 
     #[test]

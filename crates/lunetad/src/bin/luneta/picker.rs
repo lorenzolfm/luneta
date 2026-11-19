@@ -35,11 +35,11 @@ use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::sidebar::{
     self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PaneKey, PanePlace, Place,
-    ProjectRow, WorkstreamPlace,
+    ProjectRow, WorktreePlace,
 };
 use crate::spots::{Drawn, Spots};
 use crate::projected::{self, Projected, Route};
-use crate::workstreams;
+use crate::worktrees;
 use crate::zellij::{self, Closes, SessionName};
 
 const TITLE: &str = "luneta";
@@ -63,7 +63,7 @@ const MIN_ACTION: usize = 12;
 #[derive(Debug, Default)]
 pub struct Listing {
     pub here: Option<Here>,
-    pub shown: Option<(Machine, WorkstreamPlace)>,
+    pub shown: Option<(Machine, WorktreePlace)>,
     pub local: Runs,
     pub remotes: Vec<(Destination, Runs)>,
     pub shelves: Vec<Shelved>,
@@ -82,12 +82,12 @@ pub struct Shelved {
 pub struct Housed {
     pub project: ProjectRow,
     pub dir: projects::Dir,
-    pub workstreams: Vec<Streamed>,
+    pub worktrees: Vec<Tree>,
 }
 
 #[derive(Clone, Debug)]
-pub struct Streamed {
-    pub place: WorkstreamPlace,
+pub struct Tree {
+    pub place: WorktreePlace,
     pub name: String,
     pub folder: projects::Dir,
     pub branch: Option<String>,
@@ -147,7 +147,7 @@ pub struct Seated {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum List {
-    Workstreams,
+    Worktrees,
     Agents,
     Dirs,
 }
@@ -155,23 +155,23 @@ pub enum List {
 impl List {
     fn next(self) -> List {
         match self {
-            List::Workstreams => List::Agents,
+            List::Worktrees => List::Agents,
             List::Agents => List::Dirs,
-            List::Dirs => List::Workstreams,
+            List::Dirs => List::Worktrees,
         }
     }
 
     fn back(self) -> List {
         match self {
-            List::Workstreams => List::Dirs,
-            List::Agents => List::Workstreams,
+            List::Worktrees => List::Dirs,
+            List::Agents => List::Worktrees,
             List::Dirs => List::Agents,
         }
     }
 
     fn title(self) -> &'static str {
         match self {
-            List::Workstreams => "Workstreams",
+            List::Worktrees => "Worktrees",
             List::Agents => "Agents",
             List::Dirs => "Directories",
         }
@@ -210,21 +210,21 @@ pub enum Ask {
     Peek { on: Machine, session: Listed, asked: Option<PaneKey> },
     Closes { on: Machine, place: PanePlace },
     Rename { on: Machine, renames: Renames, to: Name },
-    Close { on: Machine, place: WorkstreamPlace, name: String, seen: Vec<ViewId> },
+    Close { on: Machine, place: WorktreePlace, name: String, seen: Vec<ViewId> },
     Dirs { on: Machine, ask: u64 },
     List { on: Machine, path: Directory },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Renames {
-    Workstream { place: WorkstreamPlace, name: String },
+    Worktree { place: WorktreePlace, name: String },
     Project(ProjectRow),
 }
 
 impl Renames {
     fn name(&self) -> &str {
         match self {
-            Renames::Workstream { name, .. } => name,
+            Renames::Worktree { name, .. } => name,
             Renames::Project(project) => project.listed().name().as_str(),
         }
     }
@@ -282,17 +282,17 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
         },
         Ask::Rename { on, renames, to } => Box::new(move || {
             let renamed = match &renames {
-                Renames::Workstream { place, .. } => {
-                    workstreams::renamed_workstream(&on, place.workstream, Some(&to))
+                Renames::Worktree { place, .. } => {
+                    worktrees::renamed_worktree(&on, place.worktree, Some(&to))
                 },
                 Renames::Project(project) => {
-                    workstreams::renamed_project(&on, project.id(), &to)
+                    worktrees::renamed_project(&on, project.id(), &to)
                 },
             };
             Heard::Renamed { from: renames.name().to_owned(), to, renamed }
         }),
         Ask::Close { on, place, name, seen } => Box::new(move || {
-            let closed = workstreams::closed_there(&on, place.workstream, &seen);
+            let closed = worktrees::closed_there(&on, place.worktree, &seen);
             Heard::Closed { name, closed }
         }),
         Ask::Dirs { on, ask } => Box::new(move || {
@@ -331,7 +331,7 @@ pub enum Pick {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Key {
-    Workstream { on: Machine, place: WorkstreamPlace },
+    Worktree { on: Machine, place: WorktreePlace },
     Project { on: Machine, project: ProjectRow, folder: Directory },
     Machine { on: Machine },
     Agent { on: Machine, place: PanePlace },
@@ -406,7 +406,7 @@ enum Stage {
     Rename { on: Machine, renames: Renames, input: String },
     Planning { on: Machine, place: PanePlace, agreed: Option<Plan> },
     Asking { on: Machine, place: PanePlace, plan: Plan, asks: String },
-    Closing { on: Machine, place: WorkstreamPlace, name: String, ends: Ends, asks: String },
+    Closing { on: Machine, place: WorktreePlace, name: String, ends: Ends, asks: String },
 }
 
 struct Shot {
@@ -515,7 +515,7 @@ pub struct Picker {
     exited_asked: u64,
     visited: HashMap<Machine, Visited>,
     dirs_asked: u64,
-    workstreams: Rows,
+    worktrees: Rows,
     agents: Rows,
     dirs: Rows,
     peeks: HashMap<Looked, Peek>,
@@ -539,7 +539,7 @@ impl Picker {
             exited_asked: 0,
             visited: HashMap::new(),
             dirs_asked: 0,
-            workstreams: Rows::default(),
+            worktrees: Rows::default(),
             agents: Rows::default(),
             dirs: Rows::default(),
             peeks: HashMap::new(),
@@ -603,14 +603,14 @@ impl Picker {
         projects.iter().find(|housed| housed.project.id() == project.id())
     }
 
-    fn streamed(&self, on: &Machine, place: &WorkstreamPlace) -> Option<&Streamed> {
-        let workstreams = &self.housed(on, &place.project)?.workstreams;
-        workstreams.iter().find(|streamed| streamed.place.workstream == place.workstream)
+    fn tree(&self, on: &Machine, place: &WorktreePlace) -> Option<&Tree> {
+        let worktrees = &self.housed(on, &place.project)?.worktrees;
+        worktrees.iter().find(|tree| tree.place.worktree == place.worktree)
     }
 
-    fn row_streamed(&self, on: &Machine, place: &WorkstreamPlace) -> &Streamed {
-        let streamed = self.streamed(on, place);
-        streamed.expect("a workstream's row is rebuilt with the listing that holds it")
+    fn row_tree(&self, on: &Machine, place: &WorktreePlace) -> &Tree {
+        let tree = self.tree(on, place);
+        tree.expect("a worktree's row is rebuilt with the listing that holds it")
     }
 
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
@@ -618,14 +618,14 @@ impl Picker {
         Some(format!("lunetad does not reach {} now", self.machine_name(on)))
     }
 
-    fn is_shown(&self, on: &Machine, place: &WorkstreamPlace) -> bool {
+    fn is_shown(&self, on: &Machine, place: &WorktreePlace) -> bool {
         self.listing.shown.as_ref().is_some_and(|(at, shown)| at == on && shown == place)
     }
 
-    fn focus(&self, on: &Machine, streamed: &Streamed) -> Option<PaneKey> {
+    fn focus(&self, on: &Machine, tree: &Tree) -> Option<PaneKey> {
         let here = self.here_pane(on).map(|place| place.pane);
-        let focused = here.filter(|pane| streamed.terminals.contains(pane));
-        focused.or_else(|| streamed.terminals.first().copied())
+        let focused = here.filter(|pane| tree.terminals.contains(pane));
+        focused.or_else(|| tree.terminals.first().copied())
     }
 
     fn seated(&self, on: &Machine, place: &PanePlace) -> Option<&Seated> {
@@ -899,7 +899,7 @@ impl Picker {
 
     fn rows(&self) -> &Rows {
         match self.list {
-            List::Workstreams => &self.workstreams,
+            List::Worktrees => &self.worktrees,
             List::Agents => &self.agents,
             List::Dirs => &self.dirs,
         }
@@ -907,7 +907,7 @@ impl Picker {
 
     fn rows_mut(&mut self) -> &mut Rows {
         match self.list {
-            List::Workstreams => &mut self.workstreams,
+            List::Worktrees => &mut self.worktrees,
             List::Agents => &mut self.agents,
             List::Dirs => &mut self.dirs,
         }
@@ -927,7 +927,7 @@ impl Picker {
                 Picked::Nothing
             },
             KeyCode::Char('j') if held_super => {
-                self.list = List::Workstreams;
+                self.list = List::Worktrees;
                 Picked::Nothing
             },
             KeyCode::Char('b') if control => {
@@ -972,9 +972,9 @@ impl Picker {
             return Picked::Nothing;
         };
         match &row.key {
-            Key::Workstream { on, place } if self.is_shown(on, place) => Picked::Close,
-            Key::Workstream { on, place } => {
-                Picked::Go { on: on.clone(), place: Place::Workstream(place.clone()) }
+            Key::Worktree { on, place } if self.is_shown(on, place) => Picked::Close,
+            Key::Worktree { on, place } => {
+                Picked::Go { on: on.clone(), place: Place::Worktree(place.clone()) }
             },
             Key::Project { on, project, folder } => {
                 let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
@@ -1011,14 +1011,14 @@ impl Picker {
             return Picked::Nothing;
         };
         match key {
-            Key::Workstream { on, place } => {
-                let name = self.row_streamed(&on, &place).name.clone();
+            Key::Worktree { on, place } => {
+                let name = self.row_tree(&on, &place).name.clone();
                 self.close(on, place, name, None);
                 Picked::Nothing
             },
             Key::Project { project, .. } => {
                 let name = project.listed().name();
-                self.error = Some(format!("{name} holds no workstream to close"));
+                self.error = Some(format!("{name} holds no worktree to close"));
                 Picked::Nothing
             },
             Key::Agent { on, place } => self.plan(on, place, None),
@@ -1026,18 +1026,18 @@ impl Picker {
         }
     }
 
-    fn close(&mut self, on: Machine, place: WorkstreamPlace, name: String, agreed: Option<&Ends>) {
-        let Some(streamed) = self.streamed(&on, &place) else {
+    fn close(&mut self, on: Machine, place: WorktreePlace, name: String, agreed: Option<&Ends>) {
+        let Some(tree) = self.tree(&on, &place) else {
             self.error = Some(format!("{name} is listed no more"));
             return;
         };
-        let ends = Ends::of(&streamed.held, streamed.ending.as_deref().map_err(|untold| *untold));
+        let ends = Ends::of(&tree.held, tree.ending.as_deref().map_err(|untold| *untold));
         if let Some(why) = self.out_of_reach(&on) {
             self.error = Some(format!("{name} stays: {why}"));
             return;
         }
         if agreed != Some(&ends)
-            && let Some(asks) = ends.question(&format!("Close workstream {name}"))
+            && let Some(asks) = ends.question(&format!("Close worktree {name}"))
         {
             self.stage = Stage::Closing { on, place, name, ends, asks };
             return;
@@ -1052,13 +1052,13 @@ impl Picker {
     }
 
     fn rename(&mut self) {
-        if self.list != List::Workstreams {
+        if self.list != List::Worktrees {
             return;
         }
-        let (on, renames) = match self.workstreams.selected().map(|row| &row.key) {
-            Some(Key::Workstream { on, place }) => {
-                let name = self.row_streamed(on, place).name.clone();
-                (on.clone(), Renames::Workstream { place: place.clone(), name })
+        let (on, renames) = match self.worktrees.selected().map(|row| &row.key) {
+            Some(Key::Worktree { on, place }) => {
+                let name = self.row_tree(on, place).name.clone();
+                (on.clone(), Renames::Worktree { place: place.clone(), name })
             },
             Some(Key::Project { on, project, .. }) => {
                 (on.clone(), Renames::Project(project.clone()))
@@ -1102,14 +1102,14 @@ impl Picker {
 
     fn rename_to(&self, on: &Machine, renames: &Renames, name: &str) -> Result<Name, String> {
         let name = match renames {
-            Renames::Workstream { .. } => Name::parse(name)?,
+            Renames::Worktree { .. } => Name::parse(name)?,
             Renames::Project(_) => Name::of_project(name)?,
         };
         if name.as_str() == renames.name() {
             return Err("already called that".to_owned());
         }
         let listed = match renames {
-            Renames::Workstream { place, .. } => self.streamed(on, place).is_some(),
+            Renames::Worktree { place, .. } => self.tree(on, place).is_some(),
             Renames::Project(project) => self.housed(on, project).is_some(),
         };
         if !listed {
@@ -1140,29 +1140,29 @@ impl Picker {
             let rule = ruled.then(|| self.machine_name(&on));
             grouped(&mut agents, self.agent_rows(finder.as_ref(), &on, runs), rule);
         }
-        let mut workstreams = self.workstream_rows(finder.as_ref());
-        if workstreams.is_empty()
+        let mut worktrees = self.worktree_rows(finder.as_ref());
+        if worktrees.is_empty()
             && let Some(key) = self.new_key()
         {
-            workstreams.push(Row::plain(key, self.term.clone()));
+            worktrees.push(Row::plain(key, self.term.clone()));
         }
         let (dirs, aimed) = self.dir_rows();
-        let workstream_start = match workstreams.first().map(|row| &row.key) {
-            Some(Key::Workstream { on, place }) if self.is_shown(on, place) => {
+        let worktree_start = match worktrees.first().map(|row| &row.key) {
+            Some(Key::Worktree { on, place }) if self.is_shown(on, place) => {
                 usize::from(self.term.is_empty())
             },
             Some(_) | None => 0,
         };
         let held = |rows: &Rows| rows.selected().map(|row| row.key.clone()).filter(|_| !snap);
-        let (held_workstream, held_agent) = (held(&self.workstreams), held(&self.agents));
+        let (held_worktree, held_agent) = (held(&self.worktrees), held(&self.agents));
         let held_dir = held(&self.dirs).filter(|_| !self.aiming);
-        self.workstreams.replace(workstreams, held_workstream.as_ref(), workstream_start);
+        self.worktrees.replace(worktrees, held_worktree.as_ref(), worktree_start);
         self.agents.replace(agents, held_agent.as_ref(), 0);
         self.dirs.replace(dirs, held_dir.as_ref(), aimed.unwrap_or(0));
         self.follow();
     }
 
-    fn workstream_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
+    fn worktree_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
         let tagged = self.tagged();
         let mut found = Vec::new();
         let mut machines = Vec::new();
@@ -1173,17 +1173,17 @@ impl Picker {
             }
             for housed in &shelved.projects {
                 let project = housed.project.listed().name().as_str();
-                if housed.workstreams.is_empty() {
+                if housed.worktrees.is_empty() {
                     let (row, folder) = (housed.project.clone(), (&housed.dir).into());
                     let key = Key::Project { on: on.clone(), project: row, folder };
                     let dir = sidebar::short_cwd(housed.dir.as_str());
                     found.push((None, project.to_owned(), None, dir, key));
                 }
-                for streamed in &housed.workstreams {
-                    let name = format!("{project} › {}", streamed.name);
-                    let folder = sidebar::short_cwd(streamed.folder.as_str());
-                    let key = Key::Workstream { on: on.clone(), place: streamed.place.clone() };
-                    found.push((streamed.used, name, streamed.branch.as_deref(), folder, key));
+                for tree in &housed.worktrees {
+                    let name = format!("{project} › {}", tree.name);
+                    let folder = sidebar::short_cwd(tree.folder.as_str());
+                    let key = Key::Worktree { on: on.clone(), place: tree.place.clone() };
+                    found.push((tree.used, name, tree.branch.as_deref(), folder, key));
                 }
             }
         }
@@ -1247,8 +1247,8 @@ impl Picker {
 
     fn follow(&mut self) {
         let preview = match self.rows().selected().map(|row| &row.key) {
-            Some(Key::Workstream { on, place }) => {
-                let focus = self.focus(on, self.row_streamed(on, place));
+            Some(Key::Worktree { on, place }) => {
+                let focus = self.focus(on, self.row_tree(on, place));
                 let looked = |focus| (on.clone(), place.project.listed().clone(), Some(focus));
                 focus.map(|focus| Preview::Screen(looked(focus)))
             },
@@ -1290,7 +1290,7 @@ impl Picker {
             notes.extend(menu::wrap(why, width, error));
         }
         match self.list {
-            List::Workstreams => {},
+            List::Worktrees => {},
             List::Agents => {
                 if let Some(why) = &self.listing.away {
                     let why = format!("lunetad does not answer: {why}");
@@ -1383,16 +1383,16 @@ impl Picker {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let grey = Style::new().fg(gruvbox::GREY);
         let (lead, name_style, right) = match &row.key {
-            Key::Workstream { on, place } => {
-                let streamed = self.row_streamed(on, place);
+            Key::Worktree { on, place } => {
+                let tree = self.row_tree(on, place);
                 let away = self.shelved(on).and_then(|shelved| shelved.away);
                 let mut right = Vec::new();
-                if streamed.waiting > 0 {
+                if tree.waiting > 0 {
                     let (dot, style) = Mark::Waiting.glyph(frame);
-                    right.push(Span::styled(format!("{dot}{} ", streamed.waiting), style));
+                    right.push(Span::styled(format!("{dot}{} ", tree.waiting), style));
                 }
                 right.extend(self.tag(on, away));
-                let (stage, colour) = staged(streamed.seen);
+                let (stage, colour) = staged(tree.seen);
                 let style = if away.is_some() { dim } else { Style::new().fg(colour) };
                 right.push(Span::styled(stage, style));
                 let style = match away {
@@ -1407,7 +1407,7 @@ impl Picker {
             Key::Project { on, .. } => {
                 let away = self.shelved(on).and_then(|shelved| shelved.away);
                 let mut right = self.tag(on, away);
-                right.push(Span::styled("no workstream", grey));
+                right.push(Span::styled("no worktree", grey));
                 (None, if away.is_some() { dim } else { bold }, right)
             },
             Key::Machine { on } => {
@@ -1440,7 +1440,7 @@ impl Picker {
             Key::Dir { path, .. } => return dir_line(row, path.as_str(), width),
             Key::New { .. } => {
                 let lead = Span::styled("+", Style::new().fg(gruvbox::GREEN));
-                (Some(lead), bold, vec![Span::styled("new workstream", grey)])
+                (Some(lead), bold, vec![Span::styled("new worktree", grey)])
             },
         };
         let right_width: usize = right.iter().map(|span| span.content.width()).sum();
@@ -1454,7 +1454,7 @@ impl Picker {
         }
         spans.extend(name);
         let gap = width.saturating_sub(1 + lead_width + named + right_width + 1);
-        if matches!(&row.key, Key::Workstream { on, place } if self.is_shown(on, place)) {
+        if matches!(&row.key, Key::Worktree { on, place } if self.is_shown(on, place)) {
             let here = Span::styled(" here", Style::new().fg(ACCENT));
             let rule = gap.saturating_sub(1 + here.width() + 1);
             spans.push(Span::raw(" "));
@@ -1490,8 +1490,8 @@ impl Picker {
             return format!("no match for \"{}\"", self.term);
         }
         match self.list {
-            List::Workstreams if self.listing.away.is_some() => "no workstreams".to_owned(),
-            List::Workstreams => "lunetad keeps no workstream yet".to_owned(),
+            List::Worktrees if self.listing.away.is_some() => "no worktrees".to_owned(),
+            List::Worktrees => "lunetad keeps no worktree yet".to_owned(),
             List::Agents if self.listing.away.is_some() => "no agents".to_owned(),
             List::Agents if self.yours().is_some() => "no other agents".to_owned(),
             List::Agents => "no agents running".to_owned(),
@@ -1515,9 +1515,9 @@ impl Picker {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let Some(row) = self.rows().selected() else {
             let mut lines = vec![Line::styled(" nothing highlighted", grey)];
-            if self.list == List::Workstreams && self.here_project().is_some() {
+            if self.list == List::Worktrees && self.here_project().is_some() {
                 lines.push(Line::default());
-                lines.push(Line::styled(" type a name to make a workstream of it", grey));
+                lines.push(Line::styled(" type a name to make a worktree of it", grey));
             }
             framed(buffer, area, "Preview", "", lines);
             return;
@@ -1535,7 +1535,7 @@ impl Picker {
             Key::New { project, folder, name, .. } => {
                 let project = project.listed().name();
                 let words = format!(
-                    "no workstream matches: Enter makes one named {}, in {project}'s folder, \
+                    "no worktree matches: Enter makes one named {}, in {project}'s folder, \
                      {folder}, and goes to it",
                     name.as_str(),
                 );
@@ -1546,8 +1546,8 @@ impl Picker {
             Key::Project { on, folder, .. } => {
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
-                caption.push(Span::styled("no workstream", grey));
-                let words = format!("Enter starts a workstream in {folder}");
+                caption.push(Span::styled("no worktree", grey));
+                let words = format!("Enter starts a worktree in {folder}");
                 framed(buffer, area, &row.name, "", said(caption, &words));
                 return;
             },
@@ -1559,16 +1559,16 @@ impl Picker {
                 framed(buffer, area, &row.name, "", said(Vec::new(), &words));
                 return;
             },
-            Key::Workstream { on, place } => {
-                let streamed = self.row_streamed(on, place);
-                let count = streamed.terminals.len();
+            Key::Worktree { on, place } => {
+                let tree = self.row_tree(on, place);
+                let count = tree.terminals.len();
                 let right =
                     if count == 1 { "1 terminal".to_owned() } else { format!("{count} terminals") };
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
                 let room = inner.saturating_sub(1 + caption.iter().map(Span::width).sum::<usize>());
-                caption.push(Span::styled(sidebar::tail(streamed.folder.as_str(), room), grey));
-                let Some(focus) = self.focus(on, streamed) else {
+                caption.push(Span::styled(sidebar::tail(tree.folder.as_str(), room), grey));
+                let Some(focus) = self.focus(on, tree) else {
                     let lines = said(caption, "it holds no terminal to look at");
                     framed(buffer, area, &row.name, &right, lines);
                     return;
@@ -1660,11 +1660,11 @@ impl Picker {
     fn prompt(&self, width: usize) -> Line<'static> {
         let action = match self.rows().selected() {
             Some(row) => match &row.key {
-                Key::Workstream { on, place } if self.is_shown(on, place) => {
+                Key::Worktree { on, place } if self.is_shown(on, place) => {
                     Ok("you are in it".to_owned())
                 },
-                Key::Workstream { on, .. } => Ok(there("Go", on)),
-                Key::Project { on, .. } => Ok(there("Start a workstream", on)),
+                Key::Worktree { on, .. } => Ok(there("Go", on)),
+                Key::Project { on, .. } => Ok(there("Start a worktree", on)),
                 Key::Machine { on } => Err(self.out_of_reach(on).unwrap_or_else(|| {
                     format!("{} keeps no project", self.machine_name(on))
                 })),
@@ -1675,10 +1675,10 @@ impl Picker {
                 Key::Dir { session: Err(why), .. } => Err((*why).to_owned()),
                 Key::New { project, name, .. } => {
                     let project = project.listed().name();
-                    Ok(format!("New workstream \"{}\" in {project}", name.as_str()))
+                    Ok(format!("New worktree \"{}\" in {project}", name.as_str()))
                 },
             },
-            None if self.list == List::Workstreams && !self.term.is_empty() => {
+            None if self.list == List::Worktrees && !self.term.is_empty() => {
                 Name::parse(&self.term).map(|_| String::new())
             },
             None => Ok(String::new()),
@@ -1702,10 +1702,10 @@ impl Picker {
             },
             (Stage::Planning { .. }, _) => vec![(Hint::Esc, "Give up")],
             (Stage::Rename { .. }, _) => vec![(Hint::Enter, "Rename"), (Hint::Esc, "Cancel")],
-            (Stage::Search, List::Workstreams) => vec![
+            (Stage::Search, List::Worktrees) => vec![
                 (Hint::Moves, "Move"),
                 (Hint::Enter, "Go"),
-                (Hint::Tab, List::Workstreams.next().title()),
+                (Hint::Tab, List::Worktrees.next().title()),
                 (Hint::Ctrl('r'), "Rename"),
                 (Hint::Delete, "Close it"),
                 (Hint::Esc, "Close"),
@@ -1739,10 +1739,10 @@ impl Picker {
             let mut lines = vec![Line::default()];
             let mut what = there(&format!("renaming \"{}\"", renames.name()), on);
             match renames {
-                Renames::Workstream { place, .. } if self.is_shown(on, place) => {
-                    what.push_str(", the workstream you are in");
+                Renames::Worktree { place, .. } if self.is_shown(on, place) => {
+                    what.push_str(", the worktree you are in");
                 },
-                Renames::Workstream { .. } => {},
+                Renames::Worktree { .. } => {},
                 Renames::Project(_) => what.push_str(", a project"),
             }
             lines.extend(menu::wrap(&what, inner, Style::new().fg(gruvbox::GREY)));
@@ -1995,7 +1995,7 @@ impl Layout {
 mod tests {
     use std::time::UNIX_EPOCH;
 
-    use lunetad::projects::WorkstreamId;
+    use lunetad::projects::WorktreeId;
     use ratatui::layout::Position;
 
     use super::*;
@@ -2062,18 +2062,18 @@ mod tests {
         ProjectRow::new(name, id)
     }
 
-    fn place(project: &str, id: u64, workstream: u64) -> WorkstreamPlace {
-        let workstream = WorkstreamId::of(id * 10 + workstream).unwrap();
-        WorkstreamPlace { project: self::project(project, id), workstream }
+    fn place(project: &str, id: u64, worktree: u64) -> WorktreePlace {
+        let worktree = WorktreeId::of(id * 10 + worktree).unwrap();
+        WorktreePlace { project: self::project(project, id), worktree }
     }
 
-    fn stream(
-        place: WorkstreamPlace,
+    fn tree(
+        place: WorktreePlace,
         name: &str,
         used: Option<u64>,
         terminals: &[u32],
-    ) -> Streamed {
-        Streamed {
+    ) -> Tree {
+        Tree {
             place,
             name: name.to_owned(),
             folder: projects::Dir::parse(&format!("/home/you/{name}")).unwrap(),
@@ -2091,32 +2091,32 @@ mod tests {
         terminals.iter().map(|id| ViewId::of(u64::from(*id)).unwrap()).collect()
     }
 
-    fn housed(name: &str, id: u64, workstreams: Vec<Streamed>) -> Housed {
+    fn housed(name: &str, id: u64, worktrees: Vec<Tree>) -> Housed {
         let dir = projects::Dir::parse(&format!("/home/you/{name}")).unwrap();
-        Housed { project: project(name, id), dir, workstreams }
+        Housed { project: project(name, id), dir, worktrees }
     }
 
     fn shelved(on: Machine, projects: Vec<Housed>) -> Shelved {
         Shelved { on, away: None, projects }
     }
 
-    fn fix() -> WorkstreamPlace {
+    fn fix() -> WorktreePlace {
         place("luneta", 1, 2)
     }
 
-    fn api() -> WorkstreamPlace {
+    fn api() -> WorktreePlace {
         place("web", 3, 1)
     }
 
-    fn main_place() -> WorkstreamPlace {
+    fn main_place() -> WorktreePlace {
         place("luneta", 1, 1)
     }
 
     fn luneta() -> Housed {
         housed("luneta", 1, vec![
-            stream(main_place(), "main", Some(30), &[1, 2]),
-            stream(fix(), "fix", Some(50), &[5, 3]),
-            stream(place("luneta", 1, 3), "docs", None, &[]),
+            tree(main_place(), "main", Some(30), &[1, 2]),
+            tree(fix(), "fix", Some(50), &[5, 3]),
+            tree(place("luneta", 1, 3), "docs", None, &[]),
         ])
     }
 
@@ -2124,7 +2124,7 @@ mod tests {
         let projects = vec![
             luneta(),
             housed("notes", 2, Vec::new()),
-            housed("web", 3, vec![stream(api(), "api", Some(40), &[4])]),
+            housed("web", 3, vec![tree(api(), "api", Some(40), &[4])]),
         ];
         let at = PanePlace { session: fix().project.listed().clone(), pane: PaneKey::terminal(3) };
         Listing {
@@ -2136,7 +2136,7 @@ mod tests {
     }
 
     fn opened(listing: Listing) -> Picker {
-        let mut picker = Picker::open(1, List::Workstreams, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Worktrees, listing, Machine::Local);
         picker.heard(kept_here(Ok(Vec::new())));
         picker.asks();
         picker
@@ -2248,8 +2248,8 @@ mod tests {
         named(&lit.unwrap_or_default())
     }
 
-    fn go(on: Machine, place: WorkstreamPlace) -> Picked {
-        Picked::Go { on, place: Place::Workstream(place) }
+    fn go(on: Machine, place: WorktreePlace) -> Picked {
+        Picked::Go { on, place: Place::Worktree(place) }
     }
 
     fn down_to(picker: &mut Picker, row: &str) {
@@ -2263,8 +2263,8 @@ mod tests {
     }
 
     #[test]
-    fn the_workstreams_go_by_their_last_use_and_an_empty_project_is_one_row() {
-        let mut picker = Picker::open(1, List::Workstreams, works(), Machine::Local);
+    fn the_worktrees_go_by_their_last_use_and_an_empty_project_is_one_row() {
+        let mut picker = Picker::open(1, List::Worktrees, works(), Machine::Local);
         let on = Machine::Local;
         let asks = vec![Ask::Exited { on: on.clone(), ask: 1 }, Ask::Dirs { on, ask: 1 }];
         assert_eq!(picker.asks(), asks);
@@ -2272,7 +2272,7 @@ mod tests {
         assert_eq!(rows(&picker), shown);
         let (lines, _) = list(&picker);
         assert!(lines[0].contains("─ here") && lines[0].ends_with("working"), "{lines:?}");
-        assert!(lines[4].ends_with("no workstream"), "{lines:?}");
+        assert!(lines[4].ends_with("no worktree"), "{lines:?}");
         assert_eq!(lit(&picker), "web › api");
         assert!(said(&picker).contains("<ENTER> Go"), "{}", said(&picker));
         assert_eq!(press(&mut picker, KeyCode::Enter), go(Machine::Local, api()));
@@ -2280,7 +2280,7 @@ mod tests {
         assert!(said(&picker).contains("you are in it"), "{}", said(&picker));
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Close);
         down_to(&mut picker, "notes");
-        assert!(said(&picker).contains("<ENTER> Start a workstream"), "{}", said(&picker));
+        assert!(said(&picker).contains("<ENTER> Start a worktree"), "{}", said(&picker));
         let added = Picked::Add {
             on: Machine::Local,
             project: project("notes", 2),
@@ -2290,7 +2290,7 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), added);
 
         let mut later = works();
-        let shelf = &mut later.shelves[0].projects[0].workstreams;
+        let shelf = &mut later.shelves[0].projects[0].worktrees;
         shelf[0].used = Some(UNIX_EPOCH + Duration::from_secs(60));
         picker.listed(later);
         assert_eq!(rows(&picker)[..3], ["luneta › main", "luneta › fix", "web › api"]);
@@ -2354,7 +2354,7 @@ mod tests {
     }
 
     fn busy(mut listing: Listing) -> Listing {
-        let shelf = &mut listing.shelves[0].projects[0].workstreams;
+        let shelf = &mut listing.shelves[0].projects[0].worktrees;
         shelf[0].ending = Ok(vec![Doing::Busy, Doing::Idle]);
         shelf[2].ending = Ok(vec![Doing::Unknown]);
         listing
@@ -2385,7 +2385,7 @@ mod tests {
     }
 
     #[test]
-    fn what_is_typed_narrows_the_list_and_enter_makes_a_workstream_no_row_matches() {
+    fn what_is_typed_narrows_the_list_and_enter_makes_a_worktree_no_row_matches() {
         let mut picker = opened(works());
         typed(&mut picker, "api");
         assert_eq!(rows(&picker), ["web › api"]);
@@ -2394,10 +2394,10 @@ mod tests {
         assert_eq!(lit(&picker), "luneta › fix");
         retyped(&mut picker, "zzz");
         let (lines, lit) = list(&picker);
-        let new = lines[0].starts_with("+ zzz ") && lines[0].ends_with(" new workstream");
+        let new = lines[0].starts_with("+ zzz ") && lines[0].ends_with(" new worktree");
         assert!(new, "{lines:?}");
         assert_eq!(lit.as_ref(), lines.first());
-        let words = r#"<ENTER> New workstream "zzz" in luneta"#;
+        let words = r#"<ENTER> New worktree "zzz" in luneta"#;
         assert!(said(&picker).contains(words), "{}", said(&picker));
         let (_, preview) = parts();
         let shown = text(&drawn(&picker), preview).join(" ");
@@ -2425,20 +2425,20 @@ mod tests {
             let rule = Rect::new(results.x - 1, results.y - 1, results.width + 2, 1);
             text(&buffer, rule)[0].starts_with(&format!("┌─ {title} ─"))
         };
-        assert!(titled(&picker, "Workstreams"));
+        assert!(titled(&picker, "Worktrees"));
         for title in ["Agents", "Directories"] {
             press(&mut picker, KeyCode::Tab);
             assert!(titled(&picker, title), "{title}");
             assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
         }
-        for title in ["Agents", "Workstreams", "Directories"] {
+        for title in ["Agents", "Worktrees", "Directories"] {
             press(&mut picker, KeyCode::BackTab);
             assert!(titled(&picker, title), "{title}");
         }
     }
 
     #[test]
-    fn del_closes_a_workstream_and_asks_first_where_an_agent_at_work_or_unread_files_end() {
+    fn del_closes_a_worktree_and_asks_first_where_an_agent_at_work_or_unread_files_end() {
         let mut picker = opened(busy(works()));
         assert_eq!(lit(&picker), "web › api");
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
@@ -2450,7 +2450,7 @@ mod tests {
         down_to(&mut picker, "luneta › main");
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
         assert_eq!(picker.asks(), [] as [Ask; 0]);
-        let asks = "Close workstream main? 2 agents, 1 busy";
+        let asks = "Close worktree main? 2 agents, 1 busy";
         assert!(said(&picker).contains(asks), "{}", said(&picker));
         press(&mut picker, KeyCode::Char('n'));
         assert!(!said(&picker).contains(asks), "{}", said(&picker));
@@ -2465,10 +2465,10 @@ mod tests {
 
         down_to(&mut picker, "luneta › docs");
         press(&mut picker, KeyCode::Delete);
-        let asks = "Close workstream docs? 1 agent, 1 unknown";
+        let asks = "Close worktree docs? 1 agent, 1 unknown";
         assert!(said(&picker).contains(asks), "{}", said(&picker));
         let mut gone = busy(works());
-        gone.shelves[0].projects[0].workstreams.pop();
+        gone.shelves[0].projects[0].worktrees.pop();
         picker.listed(gone);
         press(&mut picker, KeyCode::Char('y'));
         assert_eq!(picker.asks(), [] as [Ask; 0]);
@@ -2476,35 +2476,35 @@ mod tests {
 
         down_to(&mut picker, "notes");
         press(&mut picker, KeyCode::Delete);
-        assert!(said(&picker).contains("notes holds no workstream to close"), "{}", said(&picker));
+        assert!(said(&picker).contains("notes holds no worktree to close"), "{}", said(&picker));
 
         let mut untold = works();
-        untold.shelves[0].projects[2].workstreams[0].ending = Err(Untold::Away);
+        untold.shelves[0].projects[2].worktrees[0].ending = Err(Untold::Away);
         let mut picker = opened(untold);
         press(&mut picker, KeyCode::Delete);
-        let asks = "Close workstream api? luneta cannot tell which agents";
+        let asks = "Close worktree api? luneta cannot tell which agents";
         assert!(said(&picker).contains(asks), "{}", said(&picker));
     }
 
     #[test]
-    fn a_yes_to_closing_a_workstream_asks_again_when_what_would_end_changed_since() {
+    fn a_yes_to_closing_a_worktree_asks_again_when_what_would_end_changed_since() {
         let mut picker = opened(busy(works()));
         down_to(&mut picker, "luneta › main");
         press(&mut picker, KeyCode::Delete);
-        let busy_asks = "Close workstream main? 2 agents, 1 busy";
+        let busy_asks = "Close worktree main? 2 agents, 1 busy";
         assert!(said(&picker).contains(busy_asks), "{}", said(&picker));
         let mut untold = busy(works());
-        let shelf = &mut untold.shelves[0].projects[0].workstreams;
-        let main = shelf.iter_mut().find(|streamed| streamed.name == "main").unwrap();
+        let shelf = &mut untold.shelves[0].projects[0].worktrees;
+        let main = shelf.iter_mut().find(|tree| tree.name == "main").unwrap();
         main.ending = Err(Untold::Away);
         picker.listed(untold);
         press(&mut picker, KeyCode::Char('y'));
         assert_eq!(picker.asks(), [] as [Ask; 0]);
-        let untold_asks = "Close workstream main? luneta cannot tell which agents";
+        let untold_asks = "Close worktree main? luneta cannot tell which agents";
         assert!(said(&picker).contains(untold_asks), "{}", said(&picker));
         let mut grown = busy(works());
-        let shelf = &mut grown.shelves[0].projects[0].workstreams;
-        let main = shelf.iter_mut().find(|streamed| streamed.name == "main").unwrap();
+        let shelf = &mut grown.shelves[0].projects[0].worktrees;
+        let main = shelf.iter_mut().find(|tree| tree.name == "main").unwrap();
         (main.ending, main.held) = (Err(Untold::Away), held(&[2, 9, 1]));
         picker.listed(grown);
         press(&mut picker, KeyCode::Char('y'));
@@ -2516,7 +2516,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_renames_the_highlighted_workstream_or_empty_project() {
+    fn ctrl_r_renames_the_highlighted_worktree_or_empty_project() {
         let mut picker = opened(works());
         control(&mut picker, 'r');
         assert!(said(&picker).contains(r#"renaming "api""#), "{}", said(&picker));
@@ -2530,7 +2530,7 @@ mod tests {
         retyped(&mut picker, "gateway");
         assert!(said(&picker).contains("<ENTER> Rename"), "{}", said(&picker));
         press(&mut picker, KeyCode::Enter);
-        let renames = Renames::Workstream { place: api(), name: "api".to_owned() };
+        let renames = Renames::Worktree { place: api(), name: "api".to_owned() };
         let to = Name::parse("gateway").unwrap();
         assert_eq!(picker.asks(), [Ask::Rename { on: Machine::Local, renames, to: to.clone() }]);
         assert!(!said(&picker).contains("renaming"), "{}", said(&picker));
@@ -2540,7 +2540,7 @@ mod tests {
 
         press(&mut picker, KeyCode::Up);
         control(&mut picker, 'r');
-        let yours = r#"renaming "fix", the workstream you are in"#;
+        let yours = r#"renaming "fix", the worktree you are in"#;
         assert!(said(&picker).contains(yours), "{}", said(&picker));
         press(&mut picker, KeyCode::Esc);
         down_to(&mut picker, "notes");
@@ -2560,7 +2560,7 @@ mod tests {
         control(&mut picker, 'r');
         typed(&mut picker, "docs-2");
         let mut gone = works();
-        gone.shelves[0].projects[0].workstreams.pop();
+        gone.shelves[0].projects[0].worktrees.pop();
         picker.listed(gone);
         press(&mut picker, KeyCode::Enter);
         assert_eq!(picker.asks(), [] as [Ask; 0]);
@@ -2571,10 +2571,10 @@ mod tests {
         let mut far = shelved(Machine::Remote("far".parse().unwrap()), vec![housed(
             "old",
             5,
-            vec![stream(place("old", 5, 1), "stale", Some(10), &[7])],
+            vec![tree(place("old", 5, 1), "stale", Some(10), &[7])],
         )]);
         far.away = Some("unreachable");
-        let gateway = stream(place("api", 4, 1), "gateway", Some(60), &[6]);
+        let gateway = tree(place("api", 4, 1), "gateway", Some(60), &[6]);
         let shelves = vec![
             shelved(Machine::Local, vec![luneta()]),
             shelved(nixos(), vec![housed("api", 4, vec![gateway])]),
@@ -2588,7 +2588,7 @@ mod tests {
     }
 
     #[test]
-    fn every_machine_s_workstreams_are_listed_an_unreachable_one_s_greyed() {
+    fn every_machine_s_worktrees_are_listed_an_unreachable_one_s_greyed() {
         let mut picker = opened(machines());
         let shown = [
             "api › gateway",
@@ -2625,7 +2625,7 @@ mod tests {
         assert!(said(&picker).contains(r#"renaming "gateway" on nixos"#), "{}", said(&picker));
         typed(&mut picker, "gw");
         press(&mut picker, KeyCode::Enter);
-        let renames = Renames::Workstream { place: gateway, name: "gateway".to_owned() };
+        let renames = Renames::Worktree { place: gateway, name: "gateway".to_owned() };
         let to = Name::parse("gw").unwrap();
         assert_eq!(picker.asks(), [Ask::Rename { on: nixos(), renames, to }]);
 
@@ -2649,7 +2649,7 @@ mod tests {
     }
 
     #[test]
-    fn the_preview_shows_the_terminal_luneta_is_on_else_the_workstream_s_first() {
+    fn the_preview_shows_the_terminal_luneta_is_on_else_the_worktree_s_first() {
         let mut picker = opened(works());
         let peek = |session: Listed, pane| Ask::Peek {
             on: Machine::Local,
@@ -2704,7 +2704,7 @@ mod tests {
     }
 
     #[test]
-    fn the_preview_of_another_machine_s_workstream_is_its_screen_there() {
+    fn the_preview_of_another_machine_s_worktree_is_its_screen_there() {
         let mut picker = opened(machines());
         picker.ticked(picker.due().unwrap());
         let session = place("api", 4, 1).project.listed().clone();
@@ -2758,7 +2758,7 @@ mod tests {
         control(&mut picker, 'j');
         assert_eq!(picker.list, List::Agents, "Ctrl j is the panes' Down");
         picker.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SUPER));
-        assert_eq!(picker.list, List::Workstreams);
+        assert_eq!(picker.list, List::Worktrees);
         control(&mut picker, 'd');
         assert_eq!(picker.list, List::Dirs);
         control(&mut picker, 'b');

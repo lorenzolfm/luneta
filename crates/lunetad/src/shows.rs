@@ -12,7 +12,7 @@ use crate::api::{self, show_request, show_response};
 use crate::folder::Folder;
 use crate::mux::TerminalKey;
 use crate::remote::Destination;
-use crate::projects::{Size, ViewId, WorkstreamId, FRAME_CELLS, PANES_MAX};
+use crate::projects::{Size, ViewId, WorktreeId, FRAME_CELLS, PANES_MAX};
 use crate::streams::{self, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
@@ -72,15 +72,15 @@ struct Showing {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Laid {
-    workstream: WorkstreamId,
+    worktree: WorktreeId,
     size: Size,
     shown: Option<Showing>,
 }
 
 impl Laid {
     #[must_use]
-    pub fn workstream(&self) -> WorkstreamId {
-        self.workstream
+    pub fn worktree(&self) -> WorktreeId {
+        self.worktree
     }
 
     #[must_use]
@@ -135,7 +135,7 @@ impl Laid {
 
     pub fn heard(laid: show_response::Laid) -> Result<Laid, String> {
         use show_response::laid::Shown as Said;
-        let workstream = WorkstreamId::of(laid.workstream).ok_or("a layout of workstream 0")?;
+        let worktree = WorktreeId::of(laid.worktree).ok_or("a layout of worktree 0")?;
         let size = laid.size.ok_or("a layout of no size")?;
         let size = Size::of(size.columns, size.rows).map_err(|why| format!("a layout's {why}"))?;
         if laid.panes.len() > PANES_MAX {
@@ -144,7 +144,7 @@ impl Laid {
         let mut others = laid.panes.into_iter().map(pane).collect::<Result<Vec<Pane>, String>>()?;
         tiles(&others, size)?;
         let (focused, full) = match laid.shown {
-            None if others.is_empty() => return Ok(Laid { workstream, size, shown: None }),
+            None if others.is_empty() => return Ok(Laid { worktree, size, shown: None }),
             None => return Err("a layout of terminals focuses none".to_owned()),
             Some(Said::Tiled(focused)) => (focused, false),
             Some(Said::Full(_)) if others.len() == 1 => {
@@ -155,7 +155,7 @@ impl Laid {
         let at = others.iter().position(|pane| pane.view.get() == focused);
         let unheld = || format!("a layout focuses terminal {focused:016x}, which it lays out not");
         let focused = others.remove(at.ok_or_else(unheld)?);
-        Ok(Laid { workstream, size, shown: Some(Showing { focused, others, full }) })
+        Ok(Laid { worktree, size, shown: Some(Showing { focused, others, full }) })
     }
 }
 
@@ -213,8 +213,8 @@ fn tiles(panes: &[Pane], size: Size) -> Result<(), String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
     Laid(Laid),
-    Edged { workstream: WorkstreamId, direction: Direction },
-    Sent(WorkstreamId),
+    Edged { worktree: WorktreeId, direction: Direction },
+    Sent(WorktreeId),
     Refused(String),
     Forgotten(String),
     Lost(String),
@@ -230,7 +230,7 @@ pub enum Beside {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Asked {
     Size(Size),
-    Go(WorkstreamId),
+    Go(WorktreeId),
     Open { beside: Beside, argv: Vec<String> },
     Welcome,
     Close(ViewId),
@@ -245,7 +245,7 @@ impl Asked {
         use show_request::Event;
         let event = match self {
             Asked::Size(size) => Event::Size(size_said(size)),
-            Asked::Go(workstream) => Event::Go(workstream.get()),
+            Asked::Go(worktree) => Event::Go(worktree.get()),
             Asked::Open { beside, argv } => {
                 use show_request::open::Beside as Said;
                 let beside = match beside {
@@ -280,10 +280,10 @@ impl Asked {
 }
 
 fn edged_heard(edged: &show_response::Edged) -> Result<Heard, String> {
-    let workstream = WorkstreamId::of(edged.workstream).ok_or("an edge of workstream 0")?;
+    let worktree = WorktreeId::of(edged.worktree).ok_or("an edge of worktree 0")?;
     let direction = crate::layouts::direction_of(edged.direction);
     let direction = direction.map_err(|why| format!("an edge: {why}"))?;
-    Ok(Heard::Edged { workstream, direction })
+    Ok(Heard::Edged { worktree, direction })
 }
 
 pub(crate) fn direction_said(direction: Direction) -> show_request::Direction {
@@ -338,7 +338,7 @@ impl Where {
 pub fn show<Told: FnMut(Heard) + Send + 'static>(
     folder: Folder,
     at: Where,
-    workstream: WorkstreamId,
+    worktree: WorktreeId,
     size: Size,
     again: bool,
     told: Told,
@@ -355,7 +355,7 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
             Where::Here { runs_in } => (runs_in.map(said), None),
             Where::On(on) => (None, Some(api::On { destination: on.to_string() })),
         };
-        let hello = show_request::Hello { workstream: workstream.get(), size, runs_in, again, on };
+        let hello = show_request::Hello { worktree: worktree.get(), size, runs_in, again, on };
         let last = match built {
             Ok(runtime) => runtime.block_on(stream(&folder, hello, inbox, &mut told)),
             Err(error) => Heard::Lost(format!("no runtime: {error}")),
@@ -414,10 +414,10 @@ async fn stream(
                     return Heard::Lost(format!("lunetad said what luneta cannot follow: {why}"));
                 },
             },
-            Some(show_response::Event::Sent(workstream)) => match WorkstreamId::of(workstream) {
-                Some(workstream) => told(Heard::Sent(workstream)),
+            Some(show_response::Event::Sent(worktree)) => match WorktreeId::of(worktree) {
+                Some(worktree) => told(Heard::Sent(worktree)),
                 None => {
-                    return Heard::Lost("lunetad sent luneta's layout to workstream 0".to_owned());
+                    return Heard::Lost("lunetad sent luneta's layout to worktree 0".to_owned());
                 },
             },
             Some(show_response::Event::Refused(why)) => told(Heard::Refused(why)),
@@ -465,7 +465,7 @@ mod tests {
 
     fn laid(panes: Vec<show_response::Pane>, shown: Option<Said>) -> show_response::Laid {
         show_response::Laid {
-            workstream: 9,
+            worktree: 9,
             size: Some(show_request::Size { columns: 80, rows: 24 }),
             panes,
             shown,
@@ -504,21 +504,21 @@ mod tests {
     }
 
     #[test]
-    fn an_edge_reads_with_its_workstream_and_a_direction_it_knows() {
-        let edged = |workstream, direction| show_response::Edged { workstream, direction };
+    fn an_edge_reads_with_its_worktree_and_a_direction_it_knows() {
+        let edged = |worktree, direction| show_response::Edged { worktree, direction };
         let left = show_request::Direction::Left.into();
         let heard = edged_heard(&edged(2, left));
-        let workstream = WorkstreamId::of(2).unwrap();
-        assert_eq!(heard, Ok(Heard::Edged { workstream, direction: Direction::Left }));
-        assert!(edged_heard(&edged(0, left)).is_err(), "workstream 0");
+        let worktree = WorktreeId::of(2).unwrap();
+        assert_eq!(heard, Ok(Heard::Edged { worktree, direction: Direction::Left }));
+        assert!(edged_heard(&edged(0, left)).is_err(), "worktree 0");
         assert!(edged_heard(&edged(2, 0)).is_err(), "no direction");
         assert!(edged_heard(&edged(2, 9)).is_err(), "an unknown direction");
     }
 
     #[test]
-    fn a_layout_ends_forgotten_only_when_lunetad_finds_no_workstream() {
-        let forgotten = Status::not_found("workstream 9 is forgotten");
-        assert_eq!(ended(&forgotten), Heard::Forgotten("workstream 9 is forgotten".to_owned()));
+    fn a_layout_ends_forgotten_only_when_lunetad_finds_no_worktree() {
+        let forgotten = Status::not_found("worktree 9 is forgotten");
+        assert_eq!(ended(&forgotten), Heard::Forgotten("worktree 9 is forgotten".to_owned()));
         let gone = Status::unavailable("the layouts have stopped");
         assert_eq!(ended(&gone), Heard::Lost("the layouts have stopped".to_owned()));
         assert_eq!(ended(&Status::internal("")), Heard::Lost("Internal error".to_owned()));
@@ -545,7 +545,7 @@ mod tests {
             laid(halves(), Some(full(3))),
             laid(one, Some(full(1))),
             laid(Vec::new(), Some(tiled(1))),
-            show_response::Laid { workstream: 0, ..laid(halves(), Some(tiled(1))) },
+            show_response::Laid { worktree: 0, ..laid(halves(), Some(tiled(1))) },
             show_response::Laid { size: None, ..laid(halves(), Some(tiled(1))) },
         ] {
             assert!(Laid::heard(refused.clone()).is_err(), "{refused:?}");

@@ -276,8 +276,8 @@ fn highlighted(target: &Target) -> String {
         Target::Project(_, ProjectTarget { project, .. }) => {
             format!("project {}", project.listed().name())
         },
-        Target::Workstream(_, row) => {
-            format!("workstream {} of project {}", row.name, row.place.project.listed().name())
+        Target::Worktree(_, row) => {
+            format!("worktree {} of project {}", row.name, row.place.project.listed().name())
         },
         Target::Pane(_, PaneRow { session, pane, .. }) => format!("view {}:{pane}", session.name()),
         Target::Machine(_) => "the header of this machine".to_owned(),
