@@ -32,6 +32,7 @@ pub struct Running {
     pub lunetas: Vec<Luneta>,
     pub lunetads: Vec<Id>,
     pub muxes: Vec<Id>,
+    pub served: Vec<PathBuf>,
 }
 
 impl Running {
@@ -46,11 +47,27 @@ impl Running {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Folders {
+    here: PathBuf,
+    holder: Option<PathBuf>,
+}
+
+impl Folders {
+    #[must_use]
+    pub fn of(here: &Path) -> Folders {
+        let holder = projects::holder().filter(|holder| !same(holder, here));
+        Folders { here: here.to_owned(), holder }
+    }
+
+    fn each(&self) -> Vec<&Path> {
+        std::iter::once(self.here.as_path()).chain(self.holder.as_deref()).collect()
+    }
+}
+
 #[must_use]
-pub fn running(folder: &Path) -> Running {
-    let holder = projects::holder();
-    let folders: Vec<&Path> = std::iter::once(folder).chain(holder.as_deref()).collect();
-    running_of(process::mine(&[LUNETA, LUNETAD, MUX]), &folders, std::process::id())
+pub fn running(folders: &Folders) -> Running {
+    running_of(process::mine(&[LUNETA, LUNETAD, MUX]), &folders.each(), std::process::id())
 }
 
 fn running_of(found: Vec<process::Found>, folders: &[&Path], me: u32) -> Running {
@@ -62,13 +79,19 @@ fn running_of(found: Vec<process::Found>, folders: &[&Path], me: u32) -> Running
         let Some(theirs) = listened_in(&found) else {
             continue;
         };
-        if folders.iter().any(|folder| same(&theirs, folder)) {
-            match found.name.as_str() {
-                LUNETA => running.lunetas.push(Luneta { id: found.id, argv: found.argv }),
-                LUNETAD => running.lunetads.push(found.id),
-                MUX => running.muxes.push(found.id),
-                _ => {},
-            }
+        let Some(&folder) = folders.iter().find(|folder| same(&theirs, folder)) else {
+            continue;
+        };
+        match found.name.as_str() {
+            LUNETA => running.lunetas.push(Luneta { id: found.id, argv: found.argv }),
+            LUNETAD => {
+                running.lunetads.push(found.id);
+                if !running.served.iter().any(|served| served == folder) {
+                    running.served.push(folder.to_owned());
+                }
+            },
+            MUX => running.muxes.push(found.id),
+            _ => {},
         }
     }
     running.lunetas.sort_unstable_by(|a, b| a.id.cmp(&b.id));
@@ -214,6 +237,7 @@ mod tests {
             found(4, LUNETAD, &["XDG_RUNTIME_DIR=/tmp/other"]),
         ];
         let running = running_of(listed, &[folder, holder], 0);
+        assert_eq!(running.served, [holder.to_owned()]);
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
         let front_ends = pids(running.luneta_ids());
         let (daemons, muxes) = (pids(running.lunetads), pids(running.muxes));
