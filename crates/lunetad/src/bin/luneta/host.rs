@@ -1890,8 +1890,7 @@ impl App {
                 let lunetad = self.lunetad.clone();
                 self.naming_on(move || {
                     let made = caught(NAMING_PANICKED, || {
-                        let first = command.clone();
-                        let made = worktrees::pulled(&lunetad, &on, &cwd, &name, first)?;
+                        let made = worktrees::pulled(&lunetad, &on, &cwd, &name, command.clone())?;
                         Ok(Pulled { on, worktree: made, argv: command })
                     });
                     Made::Pulled { menu, made }

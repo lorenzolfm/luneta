@@ -457,8 +457,7 @@ pub fn pulled(
     name: &str,
     argv: Vec<String>,
 ) -> Result<Landed, String> {
-    let (folder, name_of) = (cwd.to_string(), name.to_owned());
-    let change = Change::Pull(Pull { folder, name: name_of, argv });
+    let change = Change::Pull(Pull { folder: cwd.to_string(), name: name.to_owned(), argv });
     let pulled = changed_on(path, on(machine), change).and_then(landed);
     pulled.map_err(|unchanged| said_unopened(unchanged, cwd, name))
 }

@@ -754,7 +754,7 @@ fn ready(
             let work = Readied::Link(link.clone());
             return Ok(Ready { at: At::There(at), folder, branch, moved_off: false, work });
         },
-        Some(Found::Session(at)) => worked[at].dir.clone(),
+        Some(Found::InClone(at)) => worked[at].dir.clone(),
         None => match clone(link, &mut repository_of)? {
             Some(dir) => dir,
             None => return Err(no_clone(link, &seen)),
@@ -837,7 +837,7 @@ struct MovedOff {
 impl MovedOff {
     fn ready(self, worked: &[Worked], work: Readied) -> Ready<usize> {
         let MovedOff { folder, on: branch } = self;
-        let at = at(&folder, worked);
+        let at = opened_in(&folder, worked);
         Ready { at, folder, branch, moved_off: true, work }
     }
 }
@@ -884,11 +884,11 @@ fn made_worktree(
     work: Readied,
 ) -> Result<Ready<usize>, Unready> {
     let folder = worktree(dir, of)?;
-    let at = at(&folder, worked);
+    let at = opened_in(&folder, worked);
     Ok(Ready { at, branch: branch(&folder), moved_off: false, folder, work })
 }
 
-fn at(folder: &str, worked: &[Worked]) -> At<usize> {
+fn opened_in(folder: &str, worked: &[Worked]) -> At<usize> {
     let in_it = worked.iter().enumerate().filter(|(_, it)| it.dir == folder);
     match in_it.min_by_key(|(at, it)| (!it.here, *at)) {
         Some((at, _)) => At::There(at),
@@ -899,7 +899,7 @@ fn at(folder: &str, worked: &[Worked]) -> At<usize> {
 #[derive(Debug, PartialEq, Eq)]
 enum Found {
     There(usize),
-    Session(usize),
+    InClone(usize),
 }
 
 fn found(
@@ -913,17 +913,11 @@ fn found(
     if let Some((at, _)) = there {
         return Some(Found::There(at));
     }
-    let by_wt = |dir: &str| repository_of(dir).filter(|it| it.layout == Layout::Wt).map(|it| it.by);
-    session_among(worked, by_wt).map(Found::Session)
-}
-
-fn session_among<R: Ord>(
-    worked: &[Worked],
-    mut rank: impl FnMut(&str) -> Option<R>,
-) -> Option<usize> {
-    let ranked = worked.iter().enumerate();
-    let ranked = ranked.filter_map(|(at, it)| Some((!it.here, rank(&it.dir)?, at)));
-    ranked.min().map(|(_, _, at)| at)
+    let in_clone = worked.iter().enumerate().filter_map(|(at, it)| {
+        let repository = repository_of(&it.dir).filter(|of| of.layout == Layout::Wt)?;
+        Some((!it.here, repository.by, at))
+    });
+    in_clone.min().map(|(_, _, at)| Found::InClone(at))
 }
 
 fn clone(
@@ -1495,16 +1489,16 @@ mod tests {
             worked("/cdk/main", None, false),
             worked("/cdk-upstream/master", None, false),
         ];
-        assert_eq!(found(&link(), &away, remotes), Some(Found::Session(2)));
+        assert_eq!(found(&link(), &away, remotes), Some(Found::InClone(2)));
         let here = [
             worked("/cdk/main", None, false),
             worked("/dots", None, true),
             worked("/cdk/main", None, true),
             worked("/cdk-upstream/master", None, false),
         ];
-        assert_eq!(found(&link(), &here, remotes), Some(Found::Session(2)));
+        assert_eq!(found(&link(), &here, remotes), Some(Found::InClone(2)));
         let by_git = [worked("/cdk-git", None, true), worked("/cdk/main", None, false)];
-        assert_eq!(found(&link(), &by_git, remotes), Some(Found::Session(1)));
+        assert_eq!(found(&link(), &by_git, remotes), Some(Found::InClone(1)));
         assert_eq!(found(&link(), &by_git[..1], remotes), None);
         let checked_out = [
             worked("/cdk/main", None, true),
@@ -1513,7 +1507,7 @@ mod tests {
         ];
         assert_eq!(found(&link(), &checked_out, remotes), Some(Found::There(2)));
         let fork = [worked("/cdk/main", Some(&fork), true)];
-        assert_eq!(found(&link(), &fork, remotes), Some(Found::Session(0)));
+        assert_eq!(found(&link(), &fork, remotes), Some(Found::InClone(0)));
     }
 
     #[test]
