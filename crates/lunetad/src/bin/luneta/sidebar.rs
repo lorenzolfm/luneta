@@ -1150,7 +1150,6 @@ pub enum Asked {
     Make {
         menu: u64,
         on: Machine,
-        project: Option<SessionName>,
         cwd: Directory,
         name: String,
         command: Vec<String>,
@@ -3772,8 +3771,8 @@ impl Sidebar {
                 Asked::Printed { menu: number, on, session, view, ended }
             },
             Wants::Checks { page } => Asked::Checks { menu: number, on, page },
-            Wants::Make { project, cwd, name, command } => {
-                Asked::Make { menu: number, on, project, cwd, name, command }
+            Wants::Make { cwd, name, command } => {
+                Asked::Make { menu: number, on, cwd, name, command }
             },
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
             Wants::Rebase { dir, branch } => Asked::Rebase { menu: number, on, dir, branch },
@@ -9059,14 +9058,13 @@ mod tests {
         let pull = Asked::Pull { menu: 1, on, work, wanted, worked, others, plain_here };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
 
-        let at = At::Clone { cwd: directory("/w/n"), name: session_name("newer-2") };
+        let at = At::Unopened;
         let work = Readied::Link(link);
         let folder = "/w/n/feat".to_owned();
         let ready = Ready { at, folder, branch: None, moved_off: false, work };
         let asked = Asked::Make {
             menu: 1,
             on: Machine::Local,
-            project: Some(session_name("newer-2")),
             cwd: directory("/w/n/feat"),
             name: "#5".to_owned(),
             command: Vec::new(),
@@ -9094,7 +9092,7 @@ mod tests {
         };
         let ready = || {
             let work = Readied::Link(link());
-            let at = At::Session((own_listed("older", 1), view_key(1, 1)));
+            let at = At::Unopened;
             let folder = "/w/luneta/feat".to_owned();
             Ready { at, folder, branch: None, moved_off: false, work }
         };
@@ -9139,35 +9137,6 @@ mod tests {
         let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready: there() }));
         assert_eq!(asked, Asked::Nothing);
         assert_eq!(sidebar.notice.as_deref(), Some("menu: older:4 has it; nobody went"));
-    }
-
-    #[test]
-    fn a_worktree_a_pasted_link_s_key_made_by_a_session_opens_by_its_folder() {
-        let mut sidebar = own_two_sessions();
-        sidebar.focus(Keys::Sidebar);
-        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
-        let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
-            panic!("no job for the key");
-        };
-        let number = sidebar.open().map_or(0, Menu::number);
-        let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
-        let work = Readied::Link(link);
-        let at = At::Session((own_listed("older", 1), view_key(1, 1)));
-        let folder = "/w/luneta/feat".to_owned();
-        let ready = Ready { at, folder: folder.clone(), branch: None, moved_off: false, work };
-        let asked = Asked::Make {
-            menu: number,
-            on: Machine::Local,
-            project: None,
-            cwd: directory(&folder),
-            name: "#5".to_owned(),
-            command: Vec::new(),
-        };
-        assert_eq!(sidebar.pulled(number, Ok(Found { on: Machine::Local, ready })), asked);
-        assert_eq!(sidebar.made_for(number), Some(Held::Open), "the menu waits for it");
-        assert!(sidebar.open().is_none());
-        sidebar.focus(Keys::Terminal);
-        assert!(sidebar.working.is_empty());
     }
 
     #[test]
@@ -9268,7 +9237,7 @@ mod tests {
         assert!(sidebar.working.is_empty());
         assert_eq!(sidebar.open().map(Menu::number), Some(2));
         let work = Readied::Link(Link::parse(page).unwrap());
-        let at = At::Session((own_listed("older", 1), view_key(1, 1)));
+        let at = At::Unopened;
         let folder = "/w/luneta/issue-6".to_owned();
         let ready = Ready { at, folder, branch: None, moved_off: false, work };
         let asked = sidebar.pulled(2, Ok(Found { on: Machine::Local, ready }));
@@ -9332,7 +9301,7 @@ mod tests {
                 panic!("no job for the key");
             };
             assert_eq!(wanted, Wanted::AsItIs);
-            let at = At::Session((own_listed("older", 1), view_key(1, 1)));
+            let at = At::Unopened;
             let (folder, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
             let branch = branch.map(str::to_owned);
             let ready = Ready { at, folder: folder.to_owned(), branch, moved_off, work };
@@ -9366,7 +9335,7 @@ mod tests {
             let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
                 panic!("no job for the key");
             };
-            let at = At::Session((listed("older", 10), view_key(10, 1)));
+            let at = At::Unopened;
             let branch = Some("dev-docs".to_owned());
             let (folder, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
             let ready = Ready { at, folder: folder.to_owned(), branch, moved_off: true, work };
@@ -9508,8 +9477,7 @@ mod tests {
             let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
             (sidebar, number, asked)
         };
-        let made = At::Clone { cwd: directory("/w/n"), name: session_name("luneta") };
-        let (mut sidebar, number, asked) = left(made);
+        let (mut sidebar, number, asked) = left(At::Unopened);
         assert!(matches!(asked, Asked::Make { menu, .. } if menu == number), "{asked:?}");
         assert_eq!(sidebar.made_for(number), Some(Held::Kept));
         assert!(sidebar.working.is_empty());
@@ -9526,7 +9494,7 @@ mod tests {
             panic!("no job for the key");
         };
         sidebar.focus(Keys::Terminal);
-        let at = At::Session((listed("older", 10), view_key(10, 1)));
+        let at = At::Unopened;
         let branch = Some("dev-docs".to_owned());
         let (folder, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
         let ready = Ready { at, folder: folder.to_owned(), branch, moved_off: true, work };
@@ -11134,7 +11102,7 @@ mod tests {
         let (menu, on_it, work, plain_here) = (number, on.clone(), asked, Vec::new());
         let pull = Asked::Pull { menu, on: on_it, work, wanted, worked, others, plain_here };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
-        let at = At::Clone { cwd: directory("/w/n"), name: session_name("main") };
+        let at = At::Unopened;
         let folder = "/w/n/feat".to_owned();
         let of_link = Readied::Link(link);
         let ready = Ready { at, folder, branch: None, moved_off: false, work: of_link };
@@ -11177,7 +11145,7 @@ mod tests {
         ]);
 
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
-        let at = At::Session((own_listed("work", 1), view_key(1, 3)));
+        let at = At::Unopened;
         let folder = "/w/b/feat".to_owned();
         let of_link = Readied::Link(link);
         let ready = Ready { at, folder, branch: None, moved_off: false, work: of_link };

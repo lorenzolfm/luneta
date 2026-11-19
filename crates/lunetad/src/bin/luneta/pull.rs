@@ -199,7 +199,7 @@ mod tests {
     fn there(at: usize) -> links::Ready<usize> {
         let work = Readied::Link(Link::parse("https://github.com/cashubtc/cdk/pull/5").unwrap());
         let folder = "/w/x".to_owned();
-        links::Ready { at: At::Session(at), folder, branch: None, moved_off: false, work }
+        links::Ready { at: At::There(at), folder, branch: None, moved_off: false, work }
     }
 
     fn nowhere() -> Result<links::Ready<usize>, Unready> {
@@ -233,7 +233,7 @@ mod tests {
         let (found, asked) = asking(&link(), others, |_| Ok(there(0)));
         let Found { on, ready } = found.unwrap();
         assert_eq!((on, asked), (Machine::Local, vec![Machine::Local]));
-        assert_eq!(ready.at, At::Session((view(1, "/m").session, ViewKey::terminal(1))));
+        assert_eq!(ready.at, At::There((view(1, "/m").session, ViewKey::terminal(1))));
     }
 
     #[test]
@@ -248,7 +248,7 @@ mod tests {
         });
         let Found { on, ready } = found.unwrap();
         assert_eq!(on, Machine::Remote(vps()));
-        assert_eq!(ready.at, At::Session((view(9, "/w").session, ViewKey::terminal(9))));
+        assert_eq!(ready.at, At::There((view(9, "/w").session, ViewKey::terminal(9))));
         let order = vec![Machine::Local, Machine::Remote(far()), Machine::Remote(vps())];
         assert_eq!(asked, order);
     }

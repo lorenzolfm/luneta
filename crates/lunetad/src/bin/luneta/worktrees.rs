@@ -19,7 +19,7 @@ use lunetad::mux::own::TerminalKey;
 use lunetad::projects::{self, Name, Plain, ProjectId, Size, ViewId, WorktreeId};
 use lunetad::links::{self, Branch, Unready};
 use lunetad::work::{self, Listed};
-use lunetad::{Asked, Beside, Daemon, Heard, SessionName};
+use lunetad::{Asked, Beside, Daemon, Heard};
 use tonic::{Code, Status};
 
 use lunetad::Directory;
@@ -453,13 +453,12 @@ pub fn made_at(
 pub fn pulled(
     path: &Path,
     machine: &Machine,
-    project: Option<&SessionName>,
     cwd: &Directory,
     name: &str,
     argv: Vec<String>,
 ) -> Result<Landed, String> {
-    let (folder, project) = (cwd.to_string(), project.map(ToString::to_string));
-    let change = Change::Pull(Pull { folder, project, name: name.to_owned(), argv });
+    let (folder, name_of) = (cwd.to_string(), name.to_owned());
+    let change = Change::Pull(Pull { folder, name: name_of, argv });
     let pulled = changed_on(path, on(machine), change).and_then(landed);
     pulled.map_err(|unchanged| said_unopened(unchanged, cwd, name))
 }
