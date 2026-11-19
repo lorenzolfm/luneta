@@ -9,7 +9,6 @@ use lunetad::api::change_projects_request::RenameProject;
 use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorktrees};
 use lunetad::api::change_projects_request::{Bring, Join, RenameTerminal};
 use lunetad::api::change_projects_response::Made;
-use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::make_worktree_response::Landed as Answered;
 use lunetad::api::projects::Held;
 use lunetad::api::{self, ChangeProjectsRequest, MakeWorktreeRequest, On, Version, WatchRequest};
@@ -17,8 +16,7 @@ use lunetad::changes::Unchanged;
 use lunetad::mux::own::TerminalKey;
 use lunetad::projects::{self, Name, Plain, ProjectId, Size, ViewId, WorktreeId};
 use lunetad::links::{self, Branch, Unready};
-use lunetad::{Asked, Beside, Heard, SessionName};
-use tonic::transport::Channel;
+use lunetad::{Asked, Beside, Daemon, Heard, SessionName};
 use tonic::{Code, Status};
 
 use lunetad::Directory;
@@ -29,8 +27,6 @@ use crate::projected::{self, Project};
 use crate::sidebar::Reorder;
 
 const ASKING: Duration = Duration::from_secs(15);
-
-type Daemon = DaemonClient<Channel>;
 
 enum Unmade {
     Nests(String),
@@ -138,7 +134,7 @@ async fn answered_within<T, E>(
     late: impl FnOnce(String) -> E,
 ) -> Result<T, E> {
     let answered = tokio::time::timeout(within, answer).await;
-    answered.map_err(|_| late(format!("lunetad did not answer in {}s", within.as_secs())))?
+    answered.map_err(|_| late(lunetad::unanswered(within)))?
 }
 
 pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
@@ -671,8 +667,9 @@ mod tests {
         assert_eq!(said(&nests), "no project made: /a/b is inside /a");
         let doubt = Status::unavailable("it dropped");
         assert_eq!(said(&doubt), "it dropped, so the project may be made");
-        let timed_out = Status::cancelled("Timeout expired");
-        assert_eq!(said(&timed_out), "Timeout expired, so the project may be made");
+        let timed_out = Status::deadline_exceeded("lunetad did not answer in 5s");
+        let late = "lunetad did not answer in 5s, so the project may be made";
+        assert_eq!(said(&timed_out), late);
 
         let folder = Directory::parse("/w/cdk/issue-5".to_owned()).unwrap();
         let unopened = |status: &Status| Unmade::of(status).said_unopened(&folder, "#5");

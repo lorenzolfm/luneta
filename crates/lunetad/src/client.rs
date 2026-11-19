@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 use std::io::{self, ErrorKind};
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
@@ -11,7 +12,8 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::time::{timeout_at, Instant};
 use tonic::transport::{Channel, Endpoint, Error, Uri};
-use tower::service_fn;
+use tonic::Status;
+use tower::{service_fn, BoxError, Service};
 
 use crate::api::daemon_client::DaemonClient;
 use crate::folder::Folder;
@@ -34,11 +36,54 @@ const _: () = assert!(QUIET.as_millis() + ROUND_TRIP.as_millis() < ANSWER_THROUG
 
 const SAID_MAX: u64 = 4096;
 
-pub async fn connect(folder: &Folder) -> Result<DaemonClient<Channel>, Error> {
+pub type Daemon = DaemonClient<Within<Channel>>;
+
+#[derive(Clone, Debug)]
+pub struct Within<S> {
+    inner: S,
+    answer: Duration,
+}
+
+impl<S> Within<S> {
+    pub(crate) fn new(inner: S, answer: Duration) -> Within<S> {
+        assert!(!answer.is_zero(), "a call waits some time for its answer");
+        Within { inner, answer }
+    }
+}
+
+impl<S: Service<R>, R> Service<R> for Within<S>
+where
+    S::Error: Into<BoxError>,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn Future<Output = Result<S::Response, BoxError>> + Send>>;
+
+    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
+        self.inner.poll_ready(context).map_err(Into::into)
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        let (answer, asked) = (self.answer, self.inner.call(request));
+        Box::pin(async move {
+            match tokio::time::timeout(answer, asked).await {
+                Ok(answered) => answered.map_err(Into::into),
+                Err(_) => Err(Status::deadline_exceeded(unanswered(answer)).into()),
+            }
+        })
+    }
+}
+
+#[must_use]
+pub fn unanswered(within: Duration) -> String {
+    format!("lunetad did not answer in {}s", within.as_secs_f64())
+}
+
+pub async fn connect(folder: &Folder) -> Result<Daemon, Error> {
     let mut socket = Some(folder.socket());
     let channel = Endpoint::from_static("http://lunetad")
         .connect_timeout(CONNECT)
-        .timeout(ANSWER)
         .connect_with_connector(service_fn(move |_: Uri| {
             let socket = socket.take();
             async move {
@@ -47,13 +92,12 @@ pub async fn connect(folder: &Folder) -> Result<DaemonClient<Channel>, Error> {
             }
         }))
         .await?;
-    Ok(DaemonClient::new(channel))
+    Ok(DaemonClient::new(Within::new(channel, ANSWER)))
 }
 
-pub async fn through(command: std::process::Command) -> Result<DaemonClient<Channel>, Error> {
+pub async fn through(command: std::process::Command) -> Result<Daemon, Error> {
     let mut command = Some(command);
     let channel = Endpoint::from_static("http://lunetad")
-        .timeout(ANSWER_THROUGH)
         .http2_keep_alive_interval(QUIET)
         .keep_alive_timeout(ROUND_TRIP)
         .keep_alive_while_idle(true)
@@ -65,7 +109,7 @@ pub async fn through(command: std::process::Command) -> Result<DaemonClient<Chan
             }
         }))
         .await?;
-    Ok(DaemonClient::new(channel))
+    Ok(DaemonClient::new(Within::new(channel, ANSWER_THROUGH)))
 }
 
 fn went() -> io::Error {
@@ -178,4 +222,34 @@ fn mine(stream: UnixStream) -> io::Result<UnixStream> {
         return Err(io::Error::new(ErrorKind::PermissionDenied, refusal));
     }
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+    use std::time::Duration;
+
+    use tonic::body::Body;
+    use tonic::codegen::http::{Request, Response};
+    use tonic::Code;
+    use tower::{service_fn, BoxError};
+
+    use super::{unanswered, Within};
+    use crate::api::daemon_client::DaemonClient;
+
+    #[test]
+    fn a_call_past_its_answer_says_lunetad_did_not_answer_in_time() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let silent = service_fn(|_: Request<Body>| pending::<Result<Response<Body>, BoxError>>());
+        let mut daemon = DaemonClient::new(Within::new(silent, Duration::from_secs(1)));
+        let late = runtime.block_on(daemon.info(())).unwrap_err();
+        let said = (late.code(), late.message());
+        assert_eq!(said, (Code::DeadlineExceeded, "lunetad did not answer in 1s"));
+    }
+
+    #[test]
+    fn a_bound_in_part_of_a_second_is_said_exactly() {
+        assert_eq!(unanswered(Duration::from_millis(1500)), "lunetad did not answer in 1.5s");
+        assert_eq!(unanswered(Duration::from_millis(250)), "lunetad did not answer in 0.25s");
+    }
 }

@@ -3,7 +3,6 @@ use std::future::Future;
 use std::pin::pin;
 use std::time::{Duration, Instant};
 
-use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_checks_response::{self, failed};
 use lunetad::api::{
     AskResponse, IssueRepositoriesRequest, KeepChecksRequest, ListContentsRequest,
@@ -20,12 +19,11 @@ use lunetad::rebases::{self, Rebased, Unrebased};
 use lunetad::skills::{Name, Runs, Skill};
 use lunetad::transcripts::{Reading, SessionId};
 use lunetad::zoxide::Dir;
-use lunetad::{log, Destination, Directory, SessionName};
+use lunetad::{log, Daemon, Destination, Directory, SessionName};
 use tokio::runtime::Runtime;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 use tokio_stream::{Stream, StreamExt as _};
-use tonic::transport::Channel;
 use tonic::{Code, Response, Status, Streaming};
 
 use crate::agents::Harness;
@@ -37,7 +35,7 @@ const SLOW: Duration = Duration::from_secs(1);
 
 pub struct Away {
     runtime: Runtime,
-    daemon: DaemonClient<Channel>,
+    daemon: Daemon,
     on: Destination,
     patience: Duration,
 }
@@ -270,7 +268,7 @@ impl Away {
         On { destination: self.on.to_string() }
     }
 
-    fn ask<T, F>(&mut self, asked: impl FnOnce(DaemonClient<Channel>) -> F) -> Result<T, String>
+    fn ask<T, F>(&mut self, asked: impl FnOnce(Daemon) -> F) -> Result<T, String>
     where
         F: Future<Output = Result<tonic::Response<T>, Status>>,
     {
@@ -279,7 +277,7 @@ impl Away {
 
     fn answer<T, F>(
         &mut self,
-        asked: impl FnOnce(DaemonClient<Channel>) -> F,
+        asked: impl FnOnce(Daemon) -> F,
     ) -> Result<Result<T, Status>, String>
     where
         F: Future<Output = Result<tonic::Response<T>, Status>>,

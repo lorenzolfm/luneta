@@ -20,13 +20,13 @@ use tokio::task;
 use tokio::time::timeout;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tokio_stream::{Stream, StreamExt as _};
-use tonic::transport::{Channel, Server};
+use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
+use tower::layer::layer_fn;
 
 use crate::api::change_projects_request::{self, AddWorktree};
 use crate::api::change_projects_response;
 use crate::api::make_worktree_response::Landed;
-use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
 use crate::api::keep_image_request::{Image, Part};
 use crate::api::keep_checks_response::{self, Failed as FailedCheck};
@@ -206,7 +206,7 @@ pub async fn serve(
         Server::builder()
             .max_concurrent_streams(QUESTIONS_MAX)
             .initial_stream_window_size(IN_FLIGHT)
-            .timeout(client::ANSWER)
+            .layer(layer_fn(|routes| client::Within::new(routes, client::ANSWER)))
             .add_service(DaemonServer::new(host))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
     );
@@ -1031,14 +1031,14 @@ fn unfinished(error: &task::JoinError) -> Status {
 }
 
 impl Host {
-    async fn bridged(&self, on: Option<api::On>) -> Result<Option<DaemonClient<Channel>>, Status> {
+    async fn bridged(&self, on: Option<api::On>) -> Result<Option<client::Daemon>, Status> {
         Ok(self.bridge(on).await?.map(|(_, bridging)| bridging.daemon))
     }
 
     async fn bridged_held(
         &self,
         on: Option<api::On>,
-    ) -> Result<Option<(DaemonClient<Channel>, OwnedSemaphorePermit)>, Status> {
+    ) -> Result<Option<(client::Daemon, OwnedSemaphorePermit)>, Status> {
         let Some((destination, Bridging { daemon, held })) = self.bridge(on).await? else {
             return Ok(None);
         };

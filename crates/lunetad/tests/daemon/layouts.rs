@@ -12,18 +12,17 @@ use lunetad::api::change_projects_request::{
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::projects::Held;
 use lunetad::api::{terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Worktree};
-use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{frames_request, On, FramesRequest};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
 use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
 use lunetad::projects::{Size, WorktreeId};
 use lunetad::folder::Folder;
+use lunetad::Daemon;
 use lunetad::release;
 use lunetad::{Asked, Beside, Destination, Heard, Where, BRIDGE_HELD_MAX};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::Channel;
 use tonic::{Code, Status, Streaming};
 
 use crate::agents::file_of_pid;
@@ -1550,7 +1549,7 @@ fn a_layout_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
 }
 
 async fn shown_through(
-    daemon: &mut DaemonClient<Channel>,
+    daemon: &mut Daemon,
     worktree: u64,
 ) -> Result<(mpsc::Sender<ShowRequest>, Streaming<ShowResponse>), Status> {
     let on = Some(On { destination: "far".to_owned() });

@@ -10,13 +10,11 @@ use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::InfoResponse;
 use lunetad::folder::{self, Folder, ANOTHER_RUNS, LOG};
-use lunetad::program;
+use lunetad::{program, Daemon};
 use lunetad::release::{self, Build, Of, Other, OWN};
 use rustix::process::{Pid, Signal};
-use tonic::transport::Channel;
 
 use crate::commands::causes;
 
@@ -36,7 +34,7 @@ pub const NONE_RUNS: u8 = 5;
 
 pub struct Current {
     pub folder: Folder,
-    pub daemon: DaemonClient<Channel>,
+    pub daemon: Daemon,
     pub info: InfoResponse,
 }
 
@@ -69,7 +67,7 @@ impl From<Unreached> for String {
     }
 }
 
-pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
+pub async fn running(path: &Path) -> Result<Daemon, Unreached> {
     let mut daemon = of_any_build(path).await?;
     let info = daemon.info(()).await;
     let info = info.map_err(|status| Unreached::Failed(causes(&status)))?.into_inner();
@@ -79,7 +77,7 @@ pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
     }
 }
 
-pub async fn of_any_build(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
+pub async fn of_any_build(path: &Path) -> Result<Daemon, Unreached> {
     let refused = |refusal: folder::Refusal| Unreached::Failed(refusal.to_string());
     let folder = folder::open(path).map_err(refused)?;
     let folder = folder.ok_or_else(|| Unreached::NoneRuns(path.to_owned()))?;
