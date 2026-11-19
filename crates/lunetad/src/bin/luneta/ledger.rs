@@ -4,7 +4,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use lunetad::projects::ProjectId;
+use lunetad::projects::{ProjectId, ViewId};
 use serde::{Deserialize, Serialize};
 
 use crate::state;
@@ -48,7 +48,7 @@ impl TryFrom<String> for Session {
 #[serde(into = "String", try_from = "String")]
 pub struct Key {
     pub session: Session,
-    pub view: u32,
+    pub view: ViewId,
 }
 
 impl Key {
@@ -81,12 +81,12 @@ impl TryFrom<String> for Key {
     }
 }
 
-fn swept_of_sessions(dir: &Path) {
+fn swept_of_old_names(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        if entry.file_name().to_str().is_none_or(|name| !name.starts_with(PROJECT_PREFIX)) {
+        if entry.file_name().to_str().and_then(Key::of_file).is_none() {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -128,7 +128,7 @@ impl Ledger {
     pub fn within(dir: PathBuf) -> Self {
         let shared = match fs::create_dir_all(&dir) {
             Ok(()) => {
-                swept_of_sessions(&dir);
+                swept_of_old_names(&dir);
                 Shared::Through(dir)
             },
             Err(error) => Shared::Lost(format!("{}: {error}", dir.display())),
@@ -161,7 +161,9 @@ impl Ledger {
     }
 
     pub fn latest(&self, session: Session) -> Option<SystemTime> {
-        let views = Key { session, view: u32::MIN }..=Key { session, view: u32::MAX };
+        let first = ViewId::of(1).expect("1 is a view's id");
+        let last = ViewId::of(u64::MAX).expect("u64::MAX is a view's id");
+        let views = Key { session, view: first }..=Key { session, view: last };
         self.moments.range(views).map(|(_, moment)| *moment).max()
     }
 
@@ -241,12 +243,16 @@ impl Ledger {
 
 fn write(dir: &Path, unfinished: &str, key: Key, moment: Option<SystemTime>) -> Result<(), String> {
     let name = key.name();
+    assert_eq!(Key::of_file(&name), Some(key), "a ledger opening never sweeps a view's file");
     let file = dir.join(&name);
     let kept = match moment {
         Some(moment) => {
             let unnamed = || format!("{}: a moment from before 1970 or after 2554", dir.display());
             let nanos = nanos(moment).ok_or_else(unnamed)?;
-            let unfinished = dir.join(format!("{name}.{unfinished}"));
+            let unfinished = format!("{name}.{unfinished}");
+            let swept = Key::of_file(&unfinished);
+            assert_eq!(swept, Some(key), "a ledger opening never sweeps a file half written");
+            let unfinished = dir.join(unfinished);
             fs::write(&unfinished, format!("{nanos}\n"))
                 .and_then(|()| fs::rename(&unfinished, &file))
         },
@@ -270,8 +276,8 @@ mod tests {
         Session::Project(ProjectId::of(project).unwrap())
     }
 
-    fn key(project: u64, view: u32) -> Key {
-        Key { session: session(project), view }
+    fn key(project: u64, view: u64) -> Key {
+        Key { session: session(project), view: ViewId::of(view).unwrap() }
     }
 
     fn keys(ledger: &Ledger) -> Vec<Key> {
@@ -287,15 +293,16 @@ mod tests {
         let precise = at(100) + Duration::from_nanos(123_456_789);
 
         here.set(key(10, 3), Some(precise));
-        here.set(key(20, 0), Some(at(7)));
+        here.set(key(20, u64::MAX), Some(at(7)));
         assert!(there.reload());
-        assert_eq!((there.get(key(10, 3)), there.get(key(20, 0))), (Some(precise), Some(at(7))));
+        let both = (there.get(key(10, 3)), there.get(key(20, u64::MAX)));
+        assert_eq!(both, (Some(precise), Some(at(7))));
         assert_eq!(Ledger::within(dir.clone()).get(key(10, 3)), Some(precise));
 
         there.set(key(10, 3), None);
         here.set(key(10, 3), None);
         assert!(!here.reload());
-        assert_eq!((here.get(key(10, 3)), here.get(key(20, 0))), (None, Some(at(7))));
+        assert_eq!((here.get(key(10, 3)), here.get(key(20, u64::MAX))), (None, Some(at(7))));
         assert_eq!((here.lost(), there.lost()), (None, None));
     }
 
@@ -312,22 +319,29 @@ mod tests {
         other(format!("+{}", name(5)));
         other(format!("0{}", name(6)));
         other(format!("{PROJECT_PREFIX}{}-7", nanos(at(10)).unwrap()));
+        other(format!("{}-8", session(10).name()));
         ledger.reload();
         assert_eq!(keys(&ledger), [key(10, 1)]);
     }
 
     #[test]
-    fn an_old_session_s_files_are_swept_when_a_ledger_opens() {
+    fn files_of_an_old_name_are_swept_when_a_ledger_opens() {
         let scratch = tempfile::tempdir().unwrap();
-        let old = scratch.path().join(format!("{}-1-3", nanos(at(10)).unwrap()));
-        let own = scratch.path().join(format!("own-{}-1-3", nanos(at(10)).unwrap()));
-        let half = scratch.path().join(format!("own-10-1-3.{}", state::unfinished()));
-        for file in [&old, &own, &half] {
+        let file = |name: String| scratch.path().join(name);
+        let old = file(format!("{}-1-3", nanos(at(10)).unwrap()));
+        let own = file(format!("own-{}-1-3", nanos(at(10)).unwrap()));
+        let half = file(format!("own-10-1-3.{}", state::unfinished()));
+        let by_mux_id = file(format!("{}-3", session(10).name()));
+        let half_by_mux_id = file(format!("{}-3.{}", session(10).name(), state::unfinished()));
+        let writing = file(format!("{}.{}", key(10, 2).name(), state::unfinished()));
+        let swept = [&old, &own, &half, &by_mux_id, &half_by_mux_id];
+        for file in swept.into_iter().chain([&writing]) {
             fs::write(file, "5").unwrap();
         }
         let mut ledger = Ledger::within(scratch.path().to_owned());
         ledger.set(key(10, 1), Some(at(5)));
-        assert_eq!((old.exists(), own.exists(), half.exists()), (false, false, false));
+        assert_eq!(swept.map(|file| file.exists()), [false; 5]);
+        assert!(writing.exists());
         assert_eq!(Ledger::within(scratch.path().to_owned()).get(key(10, 1)), Some(at(5)));
         assert_eq!(Session::read(&format!("{}-1", nanos(at(10)).unwrap())), None);
     }
@@ -338,6 +352,15 @@ mod tests {
         assert_eq!(project.name(), "project-000000000000002a");
         assert_eq!(Session::read("project-000000000000002a"), Some(project));
         assert_eq!(Session::read("project-2a"), None);
+    }
+
+    #[test]
+    fn a_view_is_named_for_its_project_s_id_and_its_own() {
+        let name = "project-000000000000002a-00000000000000ff";
+        assert_eq!(key(0x2a, 0xff).name(), name);
+        assert_eq!(Key::read(name), Some(key(0x2a, 0xff)));
+        assert_eq!(Key::read("project-000000000000002a-255"), None);
+        assert_eq!(Key::read("project-000000000000002a-0000000000000000"), None);
     }
 
     #[test]
@@ -370,10 +393,11 @@ mod tests {
         let mut ledger = Ledger::default();
         let (session_of, twin) = (session(10), session(11));
         assert_eq!(ledger.latest(session_of), None);
-        ledger.set(Key { session: session_of, view: u32::MIN }, Some(at(7)));
-        ledger.set(Key { session: session_of, view: 5 }, Some(at(9)));
-        ledger.set(Key { session: session_of, view: u32::MAX }, Some(at(8)));
-        ledger.set(Key { session: twin, view: 1 }, Some(at(20)));
+        let view = |session, view| Key { session, view: ViewId::of(view).unwrap() };
+        ledger.set(view(session_of, 1), Some(at(7)));
+        ledger.set(view(session_of, 5), Some(at(9)));
+        ledger.set(view(session_of, u64::MAX), Some(at(8)));
+        ledger.set(view(twin, 1), Some(at(20)));
         assert_eq!(ledger.latest(session_of), Some(at(9)));
     }
 
@@ -381,7 +405,7 @@ mod tests {
     fn a_session_forgotten_takes_its_moments_and_leaves_the_rest() {
         let scratch = tempfile::tempdir().unwrap();
         let mut here = Ledger::within(scratch.path().to_owned());
-        let twin = Key { session: session(11), view: 1 };
+        let twin = key(11, 1);
         here.set(key(10, 1), Some(at(5)));
         here.set(twin, Some(at(5)));
         here.set(key(20, 1), Some(at(6)));
