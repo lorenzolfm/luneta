@@ -4,7 +4,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::{Dir, Subfolder, WORKTREES_MAX};
-use crate::git::{self, Common, BARE};
+use crate::git::{self, Common};
 use crate::program::{self, Ran};
 
 pub const CLONE_WORKTREES_MAX: usize = 256;
@@ -12,6 +12,8 @@ pub const CLONE_WORKTREES_MAX: usize = 256;
 pub const LOOK: Duration = Duration::from_secs(2);
 
 const LISTED_MAX: usize = 2 * CLONE_WORKTREES_MAX;
+
+const BARE: &str = ".bare";
 
 const _: () = assert!(CLONE_WORKTREES_MAX <= WORKTREES_MAX);
 
@@ -35,7 +37,7 @@ impl Spot {
             },
         };
         let top = toplevel(folder, until, look)?;
-        if let Some(root) = root_of(&common) {
+        if let Some(root) = clone_root(&common) {
             let subfolders = listed(&root, until, look)?;
             let subfolder = top.and_then(|top| root.subfolder(&top));
             let subfolder = subfolder.filter(|it| subfolders.contains(it));
@@ -161,8 +163,10 @@ fn ran(git: &mut Command, asked: &str, until: Instant, look: Duration) -> Result
     ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
 
-fn root_of(common: &str) -> Option<Dir> {
-    Dir::parse(git::clone_root(common)?).ok()
+#[must_use]
+pub fn clone_root(common: &str) -> Option<Dir> {
+    let root = common.strip_suffix(BARE)?.strip_suffix('/')?;
+    Dir::parse(root).ok()
 }
 
 fn porcelain(root: &Dir, said: &[u8]) -> Result<BTreeSet<Subfolder>, String> {
@@ -211,10 +215,11 @@ mod tests {
 
     #[test]
     fn a_clone_s_root_is_the_folder_that_holds_its_bare_repository() {
-        assert_eq!(root_of("/w/luneta/.bare"), Some(dir("/w/luneta")));
-        assert_eq!(root_of("/w/luneta/.git"), None);
-        assert_eq!(root_of("/w/luneta.bare"), None);
-        assert_eq!(root_of("/.bare"), None);
+        assert_eq!(clone_root("/w/luneta/.bare"), Some(dir("/w/luneta")));
+        assert_eq!(clone_root("/w/luneta/.git"), None);
+        assert_eq!(clone_root("/w/luneta.bare"), None);
+        assert_eq!(clone_root("/.bare"), None);
+        assert_eq!(clone_root("/w/lun\teta/.bare"), None);
     }
 
     #[test]

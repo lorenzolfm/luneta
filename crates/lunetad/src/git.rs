@@ -29,8 +29,6 @@ const TREE_DIRS_MAX: usize = 4096;
 
 const _: () = assert!(program::SAID_MAX <= u32::MAX as u64);
 
-pub const BARE: &str = ".bare";
-
 pub const REPOSITORY_VARS: [&str; 6] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -167,11 +165,6 @@ pub fn directory_gone(stderr: &[u8]) -> bool {
 pub fn one_line(said: Vec<u8>) -> Option<String> {
     let said = String::from_utf8(said).ok()?;
     Some(said.strip_suffix('\n')?.to_owned()).filter(|said| !said.is_empty())
-}
-
-#[must_use]
-pub fn clone_root(common: &str) -> Option<&str> {
-    common.strip_suffix(BARE)?.strip_suffix('/').filter(|root| !root.is_empty())
 }
 
 pub fn holder(common: &str) -> Option<String> {

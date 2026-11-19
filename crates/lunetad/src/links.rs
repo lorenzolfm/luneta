@@ -18,7 +18,7 @@ use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response;
 use crate::api::{On, PasteRequest, PasteResponse};
 use crate::client::Daemon;
-use crate::git::{self, directory_gone, one_line, Common, BARE};
+use crate::git::{self, directory_gone, one_line, Common};
 use crate::program::{self, Ran};
 use crate::projects::{self, Dir, Holders, Name, Spot, SPOT_LOOK};
 use crate::{zoxide, Destination, Directory};
@@ -874,7 +874,7 @@ fn moved_off(dir: &str, own: &str) -> Result<Option<MovedOff>, String> {
 }
 
 fn wt_makes(common: &str, branch: &str) -> Option<String> {
-    git::clone_root(common).map(|root| format!("{root}/{branch}"))
+    projects::clone_root(common).map(|root| format!("{}/{branch}", root.as_str()))
 }
 
 fn sits_off<'a>(listed: &'a str, there: &str, own: &str) -> Option<&'a str> {
@@ -965,7 +965,7 @@ fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
              in its .git; wt clone it first"
         )),
         (None, Some(dir), _) => Unready::Failed(format!(
-            "{dir} is in a bare clone of {repository} that is not a {BARE}, and wt would make \
+            "{dir} is in a bare clone of {repository} that is not a .bare, and wt would make \
              the worktree inside it; wt clone it first"
         )),
         (None, None, Some(dir)) => Unready::Failed(format!(
@@ -1061,7 +1061,7 @@ fn layout(dir: &str) -> Layout {
     git::local(git.args(["-C", dir, "config", "--type=bool", "--get", "core.bare"]));
     match said(&mut git).as_deref() {
         Some("true") => match common_dir(dir) {
-            Common::Of(common) if git::clone_root(&common).is_some() => Layout::Wt,
+            Common::Of(common) if projects::clone_root(&common).is_some() => Layout::Wt,
             Common::Of(_) => Layout::GitBare,
             Common::NoRepository | Common::Unsaid(_) => Layout::Unsaid,
         },
@@ -1267,7 +1267,7 @@ fn wt_made(dir: &str) -> Result<(), String> {
     match layout(dir) {
         Layout::Wt => Ok(()),
         Layout::GitBare => Err(format!(
-            "{dir} is in a bare repository that is not a {BARE}, and wt would make the worktree \
+            "{dir} is in a bare repository that is not a .bare, and wt would make the worktree \
              inside it; wt clone it first"
         )),
         Layout::Git => Err(format!(
