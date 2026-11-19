@@ -117,7 +117,7 @@ const NAME_KEPT: usize = 12;
 const LONG: Duration = Duration::from_secs(1);
 
 const NO_HERE_VIEW: &str =
-    "menu: luneta does not know yet which view its client is on; try again in a moment";
+    "menu: the focused view holds no terminal, or luneta has not heard which one yet";
 
 const PALETTE_ROW_GONE: &str =
     "palette: the highlighted row changed while the palette was open, so nothing ran";
