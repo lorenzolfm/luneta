@@ -20,9 +20,9 @@ use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
 use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
-use crate::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Runs, Spot};
+use crate::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
 use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
-use crate::projects::{Holds, Name, Worktree};
+use crate::projects::{Holds, Name, Spot, Worktree};
 use crate::projects::{WorktreeId, FRAME_CELLS, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
 use crate::projects::{quoted, Opens, Subfolder, WORKTREES_MAX};
 use crate::shells::Doing;
@@ -837,6 +837,10 @@ impl Layouts {
         self.store.change(change).map(drop).map_err(said)
     }
 
+    fn relaid(&mut self, relaid: Relaid) -> Result<(), String> {
+        self.store.relaid(relaid).map_err(said)
+    }
+
     fn followed(&mut self, change: Change) -> Result<(), String> {
         if let Some(why) = self.store.followed(change).map_err(said)? {
             self.unwritten(&why);
@@ -911,7 +915,7 @@ impl Layouts {
                 if !moves {
                     return Ok(Done::Quiet);
                 }
-                self.changed(Change::Resize { view, sides, growth, size })?;
+                self.relaid(Relaid::Resize { view, sides, growth, size })?;
             },
             Asked::Move(step) => {
                 let one = focused()?;
@@ -923,7 +927,7 @@ impl Layouts {
                     Some(_) => None,
                     None => Some(focused()?),
                 };
-                self.changed(Change::Fill { worktree, full })?;
+                self.relaid(Relaid::Fill { worktree, full })?;
             },
         }
         Ok(Done::Quiet)
@@ -957,7 +961,7 @@ impl Layouts {
 
     fn focus(&mut self, client: ClientId, view: ViewId) -> Result<(), String> {
         let worktree = self.clients[&client].worktree;
-        self.changed(Change::Focus { view })?;
+        self.relaid(Relaid::Focus { view })?;
         self.client(client).focus = Some(view);
         let layout = self.layout(worktree)?;
         assert_eq!(layout.last_focus(), Some(view), "view {view} is its worktree's last focus");

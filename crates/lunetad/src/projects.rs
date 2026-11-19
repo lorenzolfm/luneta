@@ -588,16 +588,20 @@ pub enum Change {
     Close { view: ViewId },
     Unopen { terminal: TerminalViewId },
     Move { terminal: TerminalViewId, to: MoveTo, size: Size, focused: bool },
+    Swap { one: ViewId, other: ViewId },
+    Ran(Vec<Ran>),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Relaid {
     Resize {
         view: ViewId,
         sides: layout::Sides,
         growth: layout::Growth,
         size: Size,
     },
-    Swap { one: ViewId, other: ViewId },
     Fill { worktree: WorktreeId, full: Option<ViewId> },
     Focus { view: ViewId },
-    Ran(Vec<Ran>),
 }
 
 #[derive(Debug)]
@@ -625,15 +629,6 @@ pub struct Ran {
 pub enum Closing {
     Worktree(WorktreeId),
     Project(ProjectId),
-}
-
-impl Closing {
-    #[must_use]
-    pub fn listing_shows(self) -> bool {
-        match self {
-            Closing::Worktree(_) | Closing::Project(_) => true,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -781,39 +776,7 @@ impl Change {
             | Change::Close { .. }
             | Change::Unopen { .. }
             | Change::Move { .. } => true,
-            Change::Went { .. }
-            | Change::Resize { .. }
-            | Change::Swap { .. }
-            | Change::Fill { .. }
-            | Change::Focus { .. }
-            | Change::Ran(_) => false,
-        }
-    }
-
-    #[must_use]
-    pub fn listing_shows(&self) -> bool {
-        match self {
-            Change::AddProject { .. }
-            | Change::AddWorktree { .. }
-            | Change::Start { .. }
-            | Change::Pull { .. }
-            | Change::Join { .. }
-            | Change::Listed { .. }
-            | Change::Rooted { .. }
-            | Change::RenameProject { .. }
-            | Change::RenameWorktree { .. }
-            | Change::ReorderProjects { .. }
-            | Change::ReorderWorktrees { .. }
-            | Change::ForgetProject { .. }
-            | Change::Went { .. }
-            | Change::RenameTerminal { .. }
-            | Change::Open { .. }
-            | Change::Close { .. }
-            | Change::Unopen { .. }
-            | Change::Move { .. }
-            | Change::Swap { .. }
-            | Change::Ran(_) => true,
-            Change::Resize { .. } | Change::Fill { .. } | Change::Focus { .. } => false,
+            Change::Went { .. } | Change::Swap { .. } | Change::Ran(_) => false,
         }
     }
 }
@@ -1189,24 +1152,12 @@ impl Projects {
                 assert_eq!(held_in, Some(to), "terminal {terminal} moved to worktree {to}");
                 Some(self.made(to))
             },
-            Change::Resize { view, sides, growth, size } => {
-                changed.layout_of(view)?.resized(view, sides, growth, size)?;
-                None
-            },
             Change::Swap { one, other } => {
                 let layout = changed.layout_of(one)?;
                 if !layout.holds(other) {
                     return Err(format!("terminals {one} and {other} are in two layouts"));
                 }
                 layout.swapped(one, other)?;
-                None
-            },
-            Change::Fill { worktree, full } => {
-                changed.worktree_mut(worktree)?.layout.filled(full)?;
-                None
-            },
-            Change::Focus { view } => {
-                changed.layout_of(view)?.focused(view);
                 None
             },
             Change::Ran(ran) => {
@@ -1218,6 +1169,21 @@ impl Projects {
         };
         Projects::kept_as(&changed);
         Ok((changed, made))
+    }
+
+    pub fn relaid(&self, relaid: Relaid) -> Result<Projects, String> {
+        let mut changed = self.clone();
+        match relaid {
+            Relaid::Resize { view, sides, growth, size } => {
+                changed.layout_of(view)?.resized(view, sides, growth, size)?;
+            },
+            Relaid::Fill { worktree, full } => changed.worktree_mut(worktree)?.layout.filled(full)?,
+            Relaid::Focus { view } => changed.layout_of(view)?.focused(view),
+        }
+        Projects::kept_as(&changed);
+        let alike = self.alike_but_laid_out(&changed);
+        assert!(alike, "a layout relaid holds the views it held, and the projects are as they were");
+        Ok(changed)
     }
 
     pub fn closed(&self, closing: Closing) -> Result<Projects, String> {
@@ -2402,27 +2368,27 @@ mod tests {
 
         (projects, _) = change(&projects, Change::Swap { one, other: two }).unwrap();
         assert_eq!(layout(&projects, main).tree().unwrap().views(), [two, one]);
-        let fill = |full| Change::Fill { worktree: main, full };
-        (projects, _) = change(&projects, fill(Some(two))).unwrap();
+        let fill = |full| Relaid::Fill { worktree: main, full };
+        projects = projects.relaid(fill(Some(two))).unwrap();
         assert_eq!(layout(&projects, main).full(), Some(two));
         let swap = change(&projects, Change::Swap { one, other: two });
         assert!(swap.unwrap_err().contains("moves none"), "a full layout moves no terminal");
         let (sides, grow) = (layout::Sides::One(layout::Direction::Left), layout::Growth::Grow);
         let size = Size::of(80, 24).unwrap();
-        let resize = Change::Resize { view: one, sides, growth: grow, size };
-        assert!(change(&projects, resize).unwrap_err().contains("resized by none"));
+        let resize = Relaid::Resize { view: one, sides, growth: grow, size };
+        assert!(projects.relaid(resize).unwrap_err().contains("resized by none"));
         let gone = ViewId::of(7).unwrap();
-        assert!(change(&projects, fill(Some(gone))).unwrap_err().contains("holds no view"));
+        assert!(projects.relaid(fill(Some(gone))).unwrap_err().contains("holds no view"));
 
         (projects, _) = change(&projects, Change::Close { view: two }).unwrap();
         assert_eq!(layout(&projects, main).full(), None, "a layout of one fills itself with none");
-        assert!(change(&projects, fill(Some(one))).unwrap_err().contains("whole already"));
+        assert!(projects.relaid(fill(Some(one))).unwrap_err().contains("whole already"));
         (projects, _) = change(&projects, Change::Close { view: one }).unwrap();
         assert!(projects.find(main).is_none(), "a worktree goes with its last terminal");
     }
 
     #[test]
-    fn only_a_change_no_listing_shows_leaves_the_projects_alike_but_laid_out() {
+    fn a_layout_relaid_is_alike_but_laid_out_and_a_change_is_not() {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let main = worktree(&mut projects, luneta, "/w/luneta/main");
@@ -2431,11 +2397,19 @@ mod tests {
         let two = opened(&mut projects, main, 101, right);
         let (sides, growth) = (layout::Sides::One(layout::Direction::Left), layout::Growth::Grow);
         let size = Size::of(80, 24).unwrap();
+        let relaid = [
+            Relaid::Focus { view: one },
+            Relaid::Resize { view: two, sides, growth, size },
+            Relaid::Fill { worktree: main, full: Some(two) },
+        ];
+        for relaid in relaid {
+            let said = format!("{relaid:?}");
+            let changed = projects.relaid(relaid).unwrap();
+            assert_ne!(changed, projects, "{said} changes the projects");
+            assert!(projects.alike_but_laid_out(&changed), "{said}");
+        }
         let name = |name: &str| Some(Name::parse(name).unwrap());
         let asks = [
-            Change::Focus { view: one },
-            Change::Resize { view: two, sides, growth, size },
-            Change::Fill { worktree: main, full: Some(two) },
             Change::Swap { one, other: two },
             Change::RenameTerminal { terminal: two, to: name("vim") },
             Change::RenameWorktree { worktree: main, to: name("trunk") },
@@ -2444,14 +2418,11 @@ mod tests {
         ];
         for asked in asks {
             let said = format!("{asked:?}");
-            let shows = asked.listing_shows();
             let (changed, _) = change(&projects, asked).unwrap();
-            assert_ne!(changed, projects, "{said} changes the projects");
-            assert_eq!(projects.alike_but_laid_out(&changed), !shows, "{said}");
+            assert!(!projects.alike_but_laid_out(&changed), "{said}");
         }
-        let closing = Closing::Worktree(main);
-        let closed = projects.closed(closing).unwrap();
-        assert_eq!(projects.alike_but_laid_out(&closed), !closing.listing_shows(), "{closing:?}");
+        let closed = projects.closed(Closing::Worktree(main)).unwrap();
+        assert!(!projects.alike_but_laid_out(&closed), "a closing takes views and a row");
     }
 
     #[test]
@@ -2530,11 +2501,11 @@ mod tests {
         let right = Placed::Beside { at: one, towards: layout::Towards::Right };
         let two = opened(&mut projects, main, 101, right);
         assert_eq!(last_focus(&projects, main), Some(two), "a view opened takes the focus");
-        (projects, _) = change(&projects, Change::Focus { view: one }).unwrap();
+        projects = projects.relaid(Relaid::Focus { view: one }).unwrap();
         assert_eq!(last_focus(&projects, main), Some(one));
         let down = Placed::Beside { at: two, towards: layout::Towards::Down };
         let three = opened(&mut projects, main, 102, down);
-        (projects, _) = change(&projects, Change::Focus { view: two }).unwrap();
+        projects = projects.relaid(Relaid::Focus { view: two }).unwrap();
 
         (projects, _) = change(&projects, Change::Close { view: two }).unwrap();
         assert_eq!(last_focus(&projects, main), Some(three), "a closed view's heir takes it");
@@ -2544,27 +2515,27 @@ mod tests {
         (projects, _) = change(&projects, unfollowed).unwrap();
         assert_eq!(last_focus(&projects, main), Some(one), "and a moved view's heir");
         assert_eq!(last_focus(&projects, feat), None, "a moved view takes no focus where it goes");
-        (projects, _) = change(&projects, Change::Focus { view: four }).unwrap();
+        projects = projects.relaid(Relaid::Focus { view: four }).unwrap();
         let followed = Change::Move { terminal, to: MoveTo::Worktree(main), size, focused: true };
         (projects, _) = change(&projects, followed).unwrap();
         let both = (last_focus(&projects, main), last_focus(&projects, feat));
         assert_eq!(both, (Some(three), Some(four)), "unless a client followed it there");
 
-        let fill = |full| Change::Fill { worktree: main, full };
+        let fill = |full| Relaid::Fill { worktree: main, full };
         let shown = |projects: &Projects| {
             (layout(projects, main).full(), last_focus(projects, main))
         };
-        (projects, _) = change(&projects, Change::Focus { view: one }).unwrap();
-        (projects, _) = change(&projects, fill(Some(three))).unwrap();
+        projects = projects.relaid(Relaid::Focus { view: one }).unwrap();
+        projects = projects.relaid(fill(Some(three))).unwrap();
         assert_eq!(shown(&projects), (Some(three), Some(three)), "a view that fills is the focus");
-        (projects, _) = change(&projects, fill(None)).unwrap();
+        projects = projects.relaid(fill(None)).unwrap();
         assert_eq!(shown(&projects), (None, Some(three)), "and stays it once tiled again");
-        (projects, _) = change(&projects, fill(Some(three))).unwrap();
-        (projects, _) = change(&projects, Change::Focus { view: three }).unwrap();
+        projects = projects.relaid(fill(Some(three))).unwrap();
+        projects = projects.relaid(Relaid::Focus { view: three }).unwrap();
         assert_eq!(shown(&projects), (Some(three), Some(three)), "a focus on it keeps it full");
-        (projects, _) = change(&projects, Change::Focus { view: one }).unwrap();
+        projects = projects.relaid(Relaid::Focus { view: one }).unwrap();
         assert_eq!(shown(&projects), (None, Some(one)), "and a focus on another tiles the rest");
-        let gone = change(&projects, Change::Focus { view: two });
+        let gone = projects.relaid(Relaid::Focus { view: two });
         assert!(gone.unwrap_err().contains("has the id"), "a view gone takes no focus");
     }
 

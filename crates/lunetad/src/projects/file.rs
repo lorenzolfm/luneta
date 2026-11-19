@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Closing, Dir, Holds, Id, Line, Name, Project, Projects};
-use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, TerminalViewId, Used};
-use super::{View, ViewId};
+use super::{Made, ProjectId, Refused, Relaid, Runs, Session, Spot, Terminal, TerminalViewId};
+use super::{Used, View, ViewId};
 use super::{Layout, Subfolder, Worktree, WorktreeId};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{SPOT_LOOK, VIEWS_MAX, WORKTREES_MAX};
@@ -408,7 +408,6 @@ impl Store {
 
     pub fn change(&mut self, change: Change) -> Result<Option<Made>, Failed> {
         let at_once = change.kept_at_once();
-        let listed = change.listing_shows();
         let (changed, made) = self.applied(change)?;
         if self.projects() == Some(&changed) {
             return Ok(made);
@@ -416,23 +415,34 @@ impl Store {
         if at_once {
             self.written_as(&changed)?;
         }
-        self.took(changed, listed)?;
+        self.took(changed)?;
         Ok(made)
     }
 
+    pub fn relaid(&mut self, relaid: Relaid) -> Result<(), Failed> {
+        let changed = self.kept()?.relaid(relaid).map_err(Failed::Refused)?;
+        let Keeping::Kept { projects, .. } = &mut self.keeping else {
+            unreachable!("projects relaid are kept");
+        };
+        if *projects == changed {
+            return Ok(());
+        }
+        *projects = changed;
+        self.tell()
+    }
+
     pub fn followed(&mut self, change: Change) -> Result<Option<String>, Failed> {
-        let listed = change.listing_shows();
         let (changed, made) = self.applied(change)?;
         assert!(made.is_none(), "a change that follows the mux or git hands back nothing made");
-        self.follows(changed, listed)
+        self.follows(changed)
     }
 
     pub fn closed(&mut self, closing: Closing) -> Result<Option<String>, Failed> {
         let changed = self.kept()?.closed(closing).map_err(Failed::Refused)?;
-        self.follows(changed, closing.listing_shows())
+        self.follows(changed)
     }
 
-    fn follows(&mut self, changed: Projects, listed: bool) -> Result<Option<String>, Failed> {
+    fn follows(&mut self, changed: Projects) -> Result<Option<String>, Failed> {
         if self.projects() == Some(&changed) {
             return Ok(None);
         }
@@ -441,7 +451,7 @@ impl Store {
             Err(Failed::Unwritten(why)) => Some(why),
             Err(failed) => return Err(failed),
         };
-        self.took(changed, listed)?;
+        self.took(changed)?;
         Ok(unwritten)
     }
 
@@ -460,17 +470,12 @@ impl Store {
         })
     }
 
-    fn took(&mut self, changed: Projects, listed: bool) -> Result<(), Failed> {
+    fn took(&mut self, changed: Projects) -> Result<(), Failed> {
         let Keeping::Kept { projects, .. } = &mut self.keeping else {
             unreachable!("projects changed are kept");
         };
-        if listed {
-            self.revision = self.revision.next();
-        } else {
-            let laid_out = projects.alike_but_laid_out(&changed);
-            assert!(laid_out, "a change no listing shows changes only how views are laid out");
-        }
         *projects = changed;
+        self.revision = self.revision.next();
         self.tell()
     }
 
@@ -1517,9 +1522,8 @@ mod tests {
             let open = Change::Open { worktree, view: View::Terminal(terminal), placed, size };
             (projects, _) = projects.changed(open, &mut draw).unwrap();
         }
-        (projects, _) = projects.changed(Change::Focus { view: shell }, &mut draw).unwrap();
-        let fill = Change::Fill { worktree, full: Some(vim) };
-        (projects, _) = projects.changed(fill, &mut draw).unwrap();
+        projects = projects.relaid(Relaid::Focus { view: shell }).unwrap();
+        projects = projects.relaid(Relaid::Fill { worktree, full: Some(vim) }).unwrap();
         let want = r#"{
   "version": 10,
   "projects": [
@@ -1594,7 +1598,7 @@ mod tests {
         }
         let vim_full = r#""full": "0000000000000005""#;
         let shell_focused = r#""last_focus": "0000000000000003""#;
-        let (tiled, _) = projects.changed(Change::Focus { view: shell }, &mut draw).unwrap();
+        let tiled = projects.relaid(Relaid::Focus { view: shell }).unwrap();
         let on_shell = want.replace(vim_full, shell_focused);
         assert_eq!(written(&tiled), on_shell, "a focus on another view tiles the layout");
         assert_eq!(parse(&on_shell), Ok(tiled));
@@ -2165,7 +2169,7 @@ mod tests {
         let read = || parse(&fs::read_to_string(&file).unwrap()).unwrap();
         let full = |projects: &Projects| projects.find(worktree).unwrap().1.layout().full();
 
-        store.change(Change::Fill { worktree, full: Some(two) }).unwrap();
+        store.relaid(Relaid::Fill { worktree, full: Some(two) }).unwrap();
         assert_eq!(full(store.projects().unwrap()), Some(two));
         assert_eq!(full(&read()), None, "a fill waits for the flush");
         let told = heard(&commands).pop().unwrap().unwrap();
@@ -2173,7 +2177,7 @@ mod tests {
         store.flush().unwrap();
         assert_eq!(full(&read()), Some(two));
 
-        store.change(Change::Fill { worktree, full: None }).unwrap();
+        store.relaid(Relaid::Fill { worktree, full: None }).unwrap();
         store.change(Change::RenameProject { project, to: Name::parse("b").unwrap() }).unwrap();
         let kept = *store.projects().unwrap() == read();
         assert!(kept, "a change kept at once takes the rest along");
@@ -2182,7 +2186,7 @@ mod tests {
     }
 
     #[test]
-    fn a_change_no_listing_shows_sends_watchers_no_new_listing() {
+    fn a_layout_relaid_sends_watchers_no_new_listing() {
         use super::super::layout::{Direction, Growth, Sides};
         use crate::core::{self, Wakes};
 
@@ -2212,16 +2216,16 @@ mod tests {
         let before = (listing(), store.revision());
 
         let (sides, growth) = (Sides::One(Direction::Left), Growth::Grow);
-        let unlisted = [
-            Change::Focus { view: one },
-            Change::Resize { view: two, sides, growth, size },
-            Change::Fill { worktree, full: Some(two) },
-            Change::Fill { worktree, full: None },
+        let relaid = [
+            Relaid::Focus { view: one },
+            Relaid::Resize { view: two, sides, growth, size },
+            Relaid::Fill { worktree, full: Some(two) },
+            Relaid::Fill { worktree, full: None },
         ];
-        for change in unlisted {
-            let said = format!("{change:?}");
+        for relaid in relaid {
+            let said = format!("{relaid:?}");
             let was = store.projects().unwrap().clone();
-            store.change(change).unwrap();
+            store.relaid(relaid).unwrap();
             assert_ne!(store.projects(), Some(&was), "{said} changes the projects");
             assert_eq!((listing(), store.revision()), before, "{said} sends no new listing");
         }
