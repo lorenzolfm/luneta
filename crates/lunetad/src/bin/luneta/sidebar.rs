@@ -3924,31 +3924,26 @@ impl Sidebar {
             return Asked::Take;
         };
         let row = &self.rows[index];
-        let spot = row.spot();
-        let typed = matches!(self.search, Some(Search::Typed { .. }));
-        if matches!(row, Row::Machine { .. }) {
-            if !typed {
-                self.cursor = Some(spot);
-                self.toggle();
-            }
-            return Asked::Take;
-        }
+        let (spot, stops) = (row.spot(), row.stops());
         let triangle = match row {
             Row::Project { .. } => Some(2),
             Row::Worktree { .. } => Some(3),
             Row::Machine { .. } | Row::Pane { .. } => None,
         };
-        if let Some(triangle) = triangle {
-            let on_triangle = at.x.saturating_sub(area.x) <= triangle;
-            if on_triangle && !typed {
+        let typed = matches!(self.search, Some(Search::Typed { .. }));
+        let Some((on, place)) = spot.clone().placed() else {
+            if !typed {
                 self.cursor = Some(spot);
                 self.toggle();
-                return Asked::Take;
             }
+            return Asked::Take;
+        };
+        let on_triangle = triangle.is_some_and(|triangle| at.x.saturating_sub(area.x) <= triangle);
+        if on_triangle && !typed {
+            self.cursor = Some(spot);
+            self.toggle();
+            return Asked::Take;
         }
-        let stops = row.stops();
-        let placed = spot.clone().placed();
-        let (on, place) = placed.expect("a project's, a worktree's or a view's row has a place");
         if stops {
             self.cursor = Some(spot);
         }
