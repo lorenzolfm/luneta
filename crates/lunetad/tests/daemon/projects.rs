@@ -329,26 +329,37 @@ fn an_old_file_forgets_the_worktrees_it_kept_with_no_view_and_is_written_again()
 }
 
 #[test]
-fn a_worktree_whose_first_terminal_does_not_start_is_not_made() {
+fn a_worktree_whose_first_terminal_does_not_start_is_not_made_nor_a_project_made_with_it() {
     let owned = crate::own::Owned::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = fs::canonicalize(scratch.path()).unwrap();
     let (up, clone) = (scratch.join("up"), scratch.join("luneta"));
     cloned_as_wt(&scratch, &up, &clone);
     worktree_added(&clone, "two");
+    let elo = scratch.join("elo");
+    cloned_as_wt(&scratch, &scratch.join("elo-up"), &elo);
+    let plain = scratch.join("plain");
+    fs::create_dir(&plain).unwrap();
     let luneta = project(&owned.host, &clone, None);
     let main = worktree(&owned.host, luneta, &clone.join("main"));
     let stalled = owned.stall_mux();
-    let folder = text(&clone.join("two"));
     let argv = FIRST.map(str::to_owned).to_vec();
-    let add = AddWorktree { project: luneta, folder, name: None, argv };
-    let refused = changed(&owned.host, Change::AddWorktree(add)).unwrap_err();
-    assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
-    assert!(refused.message().contains("no terminal opens in worktree"), "{}", refused.message());
+    let add = AddWorktree { project: luneta, folder: text(&clone.join("two")), name: None, argv };
+    let start = |folder: &Path| Change::Start(Start { folder: text(folder), name: None });
+    for change in [Change::AddWorktree(add), start(&plain), start(&elo.join("main"))] {
+        let refused = changed(&owned.host, change).unwrap_err();
+        assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
+        let said = refused.message();
+        assert!(said.contains("no terminal opens in worktree"), "{said}");
+    }
     drop(stalled);
     let Held::Kept(Kept { projects, .. }) = held(&owned.host) else { panic!("projects are kept") };
+    let ids: Vec<u64> = projects.iter().map(|it| it.id).collect();
+    assert_eq!(ids, [luneta], "a project made with a worktree that did not open goes with it");
     let rows: Vec<u64> = projects[0].worktrees().unwrap().iter().map(|it| it.id).collect();
     assert_eq!(rows, [main], "no worktree stays with no view");
+    let two = worktree(&owned.host, luneta, &clone.join("two"));
+    assert_ne!(two, main, "and lunetad opens one again once the mux answers");
 }
 
 #[test]

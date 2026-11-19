@@ -586,32 +586,55 @@ impl Layouts {
     }
 
     fn changed_opening(&mut self, change: Change) -> Result<Option<Made>, Failed> {
-        let opens = change.opens().cloned();
+        let Some(opens) = change.opens().cloned() else {
+            return self.store.change(change);
+        };
+        let held: BTreeSet<ProjectId> = self.store.projects().map_or_default(|projects| {
+            projects.all().iter().map(Project::id).collect()
+        });
         let made = self.store.change(change)?;
-        if let (Some(opens), Some(Made::Worktree(worktree))) = (opens, made) {
-            self.first_made(worktree, &opens).map_err(Failed::Unopened)?;
+        if let Some(Made::Worktree(worktree)) = made {
+            self.first_made(worktree, &opens, &held).map_err(Failed::Unopened)?;
         }
         Ok(made)
     }
 
-    fn first_made(&mut self, worktree: WorktreeId, opens: &Opens) -> Result<(), String> {
-        let (terminal, folder, inner) = {
+    fn first_made(
+        &mut self,
+        worktree: WorktreeId,
+        opens: &Opens,
+        held: &BTreeSet<ProjectId>,
+    ) -> Result<(), String> {
+        let (project, terminal, folder, inner) = {
             let projects = self.kept()?;
-            let (_, made) = projects.find(worktree).expect("a worktree just made is held");
+            let (project, made) = projects.find(worktree).expect("a worktree just made is held");
             let mut terminals = made.layout().terminals();
             let first = terminals.next().expect("a worktree is made with its first terminal");
             assert!(terminals.next().is_none(), "a worktree is made with one terminal");
             let inner = placed(made.layout(), first.id().view(), UNSHOWN_SIZE);
             let inner = inner.expect("a layout lays out the terminal it holds");
-            (first.id(), first.folder().clone(), inner)
+            (project.id(), first.id(), first.folder().clone(), inner)
         };
         let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
-        if let Err(failure) = self.spawned(terminal, &cwd, opens, inner) {
-            let projects = self.store.projects().expect("projects just changed are kept");
-            assert!(projects.find(worktree).is_none(), "worktree {worktree} goes unopened");
-            return Err(format!("no terminal opens in worktree {worktree}: {failure}"));
+        let Err(failure) = self.spawned(terminal, &cwd, opens, inner) else {
+            return Ok(());
+        };
+        let unopened = format!("no terminal opens in worktree {worktree}: {failure}");
+        let projects = self.store.projects().expect("projects just changed are kept");
+        if projects.holding_view(terminal.view()).is_some() {
+            return Err(unopened);
         }
-        Ok(())
+        let made_with_it = !held.contains(&project);
+        if made_with_it && let Err(why) = self.followed(Change::ForgetProject { project }) {
+            let stays = format!("project {project}, made with worktree {worktree}, stays");
+            self.troubles.say(format!("{stays}: {why}"));
+            return Err(unopened);
+        }
+        let projects = self.store.projects().expect("projects just changed are kept");
+        assert!(projects.find(worktree).is_none(), "worktree {worktree} goes unopened");
+        let stays = projects.project_of(project).is_some();
+        assert_eq!(stays, !made_with_it, "project {project} goes if it was made with the worktree");
+        Err(unopened)
     }
 
     fn spawned(
