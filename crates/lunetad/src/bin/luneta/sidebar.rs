@@ -2116,13 +2116,12 @@ impl Sidebar {
         let agent = seated.get(&place.view.key())?;
         let view = self.view_of(self.on(), &place.session, place.view.terminal_id())?;
         let harness = agents::of(agent).filter(|_| agent.at_a_prompt())?;
-        let number = place.view.terminal_id();
         let dir = Directory::parse(agent_dir(agent, view).to_owned())
-            .map_err(|why| format!("skills: where view {number} works, {why}"));
+            .map_err(|why| format!("skills: where view {} works, {why}", place.view));
         Some(HereAgent {
             on: self.on().clone(),
             session: place.session.name().clone(),
-            view: number,
+            view: place.view.terminal_id(),
             dir,
             harness,
         })
