@@ -1004,12 +1004,14 @@ impl Projects {
         self.projects.iter().find_map(|project| Some((project.id, project.within(spot)?)))
     }
 
-    fn swallowing(&self, spot: &Spot) -> Option<Plain> {
-        if !spot.is_clone() {
-            return None;
+    fn swallower(&self, spot: &Spot) -> Option<Plain> {
+        if spot.is_clone() {
+            let (project, _) = self.inside(spot)?;
+            let holding = self.project_of(project).expect("the project a spot is inside is held");
+            holding.plain()
+        } else {
+            None
         }
-        let (project, _) = self.inside(spot)?;
-        self.project_of(project)?.plain()
     }
 
     fn stale(&self, change: &Change) -> Option<String> {
@@ -1073,7 +1075,7 @@ impl Projects {
                 Some(self.landed(&mut changed, made, &opens, &mut draw)?)
             },
             Change::Join { spot, opens } => {
-                if let Some(plain) = self.swallowing(&spot) {
+                if let Some(plain) = self.swallower(&spot) {
                     return Err(held_by_folder(&spot.place(), &plain));
                 }
                 let (project, within) = match self.inside(&spot) {
@@ -1083,6 +1085,10 @@ impl Projects {
                 let joined = changed.worktree_in(project, within, None, &mut draw)?;
                 let held = changed.project_of(project).ok_or_else(|| unknown("project", project))?;
                 let joined = joined.ok_or_else(|| held.unplaced(&spot))?;
+                if spot.is_clone() {
+                    let at = held.folder(joined);
+                    assert_eq!(at, Some(spot.place()), "a clone's worktree is joined at its folder");
+                }
                 Some(self.landed(&mut changed, joined, &opens, &mut draw)?)
             },
             Change::Listed { root, subfolders, seen } => {
