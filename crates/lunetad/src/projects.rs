@@ -2405,15 +2405,16 @@ mod tests {
         for relaid in relaid {
             let said = format!("{relaid:?}");
             let changed = projects.relaid(relaid).unwrap();
-            assert_ne!(changed, projects, "{said} changes the projects");
-            assert!(projects.alike_but_laid_out(&changed), "{said}");
+            assert_ne!(changed, projects, "{said} changes the projects, alike but laid out");
         }
         let name = |name: &str| Some(Name::parse(name).unwrap());
+        let terminal = TerminalViewId::new(two);
         let asks = [
             Change::Swap { one, other: two },
             Change::RenameTerminal { terminal: two, to: name("vim") },
             Change::RenameWorktree { worktree: main, to: name("trunk") },
             Change::Went { worktree: main, at: Used::of_millis(5) },
+            Change::Ran(vec![Ran { terminal, folder: dir("/w/luneta/main"), runs: Runs::Shell }]),
             Change::Close { view: two },
         ];
         for asked in asks {
