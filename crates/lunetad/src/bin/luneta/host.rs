@@ -68,7 +68,8 @@ use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
 use crate::sidebar::{
-    self, Asked, Floating, HereAgent, Holding, Keys, Listed, ViewKey, Place, Reorder, Sidebar,
+    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Sidebar, ViewKey,
+    ViewPlace,
 };
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
@@ -2167,30 +2168,32 @@ impl App {
                 right.machine() == machine && right.worktree() == worktree
             })
         };
-        if let Place::Worktree(place) = place {
-            let held = project.worktrees().iter().any(|it| it.id == place.worktree);
-            if !held {
-                return Err(format!("{session} holds no such worktree"));
-            }
-            if !shows(place.worktree) {
-                self.go_worktree(machine, place.worktree, None);
-            }
-            return Ok(());
+        match place {
+            Place::Session(_) => {
+                if project.worktrees().iter().any(|it| shows(it.id)) {
+                    return Ok(());
+                }
+                let last = projects::last_used(project.uses());
+                let last = last.ok_or_else(|| format!("{session} holds no worktree"))?;
+                self.go_worktree(machine, last, None);
+            },
+            Place::Worktree(place) => {
+                let held = project.worktrees().iter().any(|it| it.id == place.worktree);
+                if !held {
+                    return Err(format!("{session} holds no such worktree"));
+                }
+                if !shows(place.worktree) {
+                    self.go_worktree(machine, place.worktree, None);
+                }
+            },
+            Place::View(ViewPlace { view: ViewKey::Terminal(terminal_key), .. }) => {
+                let own = OwnTerminal { session: listed.own_key(), id: terminal_key.id };
+                let (worktree, terminal) = self.projected.of_own(machine, own).ok_or_else(|| {
+                    format!("lunetad lists no view {} in {session}", own.id)
+                })?;
+                self.go_worktree(machine, worktree, Some(terminal));
+            },
         }
-        let Some(id) = place.terminal_id() else {
-            if project.worktrees().iter().any(|it| shows(it.id)) {
-                return Ok(());
-            }
-            let last = projects::last_used(project.uses());
-            let last = last.ok_or_else(|| format!("{session} holds no worktree"))?;
-            self.go_worktree(machine, last, None);
-            return Ok(());
-        };
-        let own = OwnTerminal::new(listed.own_key(), id).ok_or("a view of id 0")?;
-        let (worktree, terminal) = self.projected.of_own(machine, own).ok_or_else(|| {
-            format!("lunetad lists no view {} in {session}", own.id)
-        })?;
-        self.go_worktree(machine, worktree, Some(terminal));
         Ok(())
     }
 
