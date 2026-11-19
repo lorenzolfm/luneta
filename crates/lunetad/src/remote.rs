@@ -459,8 +459,7 @@ async fn watched(
     folder: PathBuf,
 ) {
     let destination = bridged.destination.clone();
-    let mut daemon = None;
-    let mut matched = None;
+    let mut connected = None;
     let mut seen = Seen::Reaching { since: SystemTime::now() };
     let said = Arc::default();
     loop {
@@ -469,18 +468,13 @@ async fn watched(
         }
         bridged.awake();
         let question = standing.borrow().question(seen.after());
-        let reached = (&mut daemon, &mut matched);
-        let asked = asked(&destination, reached, question, &said, &folder).await;
+        let asked = asked(&destination, &mut connected, question, &said, &folder).await;
         let (version, host) = match asked {
             Ok(answered) => answered,
             Err(why) => {
-                matched = None;
-                if why.1 == Stopped::Unmatched {
-                    daemon = None;
-                }
                 let logged = matches!(&seen, Seen::Unreached { why: logged, .. } if *logged == why);
                 seen = seen.failed(why);
-                bridged.agree(&seen, daemon.as_ref());
+                bridged.agree(&seen, connected.as_ref().map(|it| &it.daemon));
                 if let Seen::Unreached { why: (why, _), .. } = &seen
                     && !logged
                 {
@@ -502,7 +496,7 @@ async fn watched(
         let told_already = seen.after() == Some(version);
         let projects = host.projects.clone();
         seen = Seen::Answered { after: version, at: SystemTime::now(), projects };
-        bridged.agree(&seen, daemon.as_ref());
+        bridged.agree(&seen, connected.as_ref().map(|it| &it.daemon));
         if told_already {
             continue;
         }
@@ -589,41 +583,51 @@ fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached)
     core.send(Command::Remote { destination: destination.clone(), reached }).is_ok()
 }
 
+struct Connected {
+    daemon: DaemonClient<Channel>,
+    matched: Option<u32>,
+}
+
 async fn asked(
     destination: &Destination,
-    (daemon, matched): (&mut Option<DaemonClient<Channel>>, &mut Option<u32>),
+    connected: &mut Option<Connected>,
     question: api::WatchRequest,
     said: &Arc<Mutex<Said>>,
     folder: &Path,
 ) -> Result<(api::Version, api::Host), (String, Stopped)> {
-    let daemon = if let Some(daemon) = daemon {
-        daemon
+    let Connected { daemon, matched } = if let Some(it) = connected {
+        it
     } else {
         let reached = client::through(ssh(destination, said, folder)).await;
-        daemon.insert(reached.map_err(|error| unreached(&error))?)
+        let daemon = reached.map_err(|error| unreached(&error))?;
+        connected.insert(Connected { daemon, matched: None })
     };
-    let pid = if let Some(pid) = *matched {
+    let pid = if let Some(pid) = matched.take() {
         pid
     } else {
         let info = daemon.info(()).await.map_err(|status| unreached(&status))?.into_inner();
         if !release::is_own(&info.version, info.built) {
+            *connected = None;
             return Err((unmatched(&info), Stopped::Unmatched));
         }
-        *matched.insert(info.pid)
+        info.pid
     };
     let watched = daemon.watch(question).await;
     let host = watched.map_err(|status| unreached(&status))?.into_inner();
     let unversioned = "an answer with no version, which this lunetad does not read";
     let version = host.version.ok_or_else(|| (unversioned.to_owned(), Stopped::Lost))?;
     if version.pid != pid {
+        *connected = None;
         let other = version.pid;
         let why = format!("lunetad (pid {other}) answered in the place of pid {pid}");
         return Err((why, Stopped::Lost));
     }
+    *matched = Some(pid);
     Ok((version, host))
 }
 
 fn unmatched(info: &api::InfoResponse) -> String {
+    assert!(!release::is_own(&info.version, info.built), "only another build is unmatched");
     let theirs = release::spelled(&info.version, info.built);
     let (pid, own) = (info.pid, release::SAID.as_str());
     format!("lunetad {theirs} (pid {pid}) is another build than this one, {own}")

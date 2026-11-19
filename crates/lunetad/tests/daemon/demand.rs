@@ -535,7 +535,7 @@ fn stand_in_lunetad() {
     });
 }
 
-fn build_of(said: String) -> (String, Option<u64>) {
+pub fn build_of(said: String) -> (String, Option<u64>) {
     match said.split_once('+') {
         Some((version, built)) => (version.to_owned(), Some(built.parse().unwrap())),
         None => (said, None),

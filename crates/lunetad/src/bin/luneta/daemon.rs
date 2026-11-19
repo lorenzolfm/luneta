@@ -73,7 +73,7 @@ impl From<Unreached> for String {
 }
 
 pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
-    let mut daemon = answering(path).await?;
+    let mut daemon = of_any_build(path).await?;
     let info = daemon.info(()).await;
     let info = info.map_err(|status| Unreached::Failed(causes(&status)))?.into_inner();
     if !release::is_own(&info.version, info.built) {
@@ -82,7 +82,7 @@ pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
     Ok(daemon)
 }
 
-pub async fn answering(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
+pub async fn of_any_build(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
     let refused = |refusal: folder::Refusal| Unreached::Failed(refusal.to_string());
     let folder = folder::open(path).map_err(refused)?;
     let folder = folder.ok_or_else(|| Unreached::NoneRuns(path.to_owned()))?;
@@ -206,6 +206,7 @@ pub async fn current(path: &Path) -> Result<Current, String> {
 }
 
 pub fn unmatched(info: &InfoResponse) -> String {
+    assert!(!release::is_own(&info.version, info.built), "only another build is unmatched");
     let (theirs, pid) = (release::spelled(&info.version, info.built), info.pid);
     let (daemon, own) = (format!("lunetad {theirs} (pid {pid})"), release::SAID.as_str());
     if newer(info) {
@@ -221,6 +222,7 @@ fn newer(info: &InfoResponse) -> bool {
 }
 
 fn kept(info: &InfoResponse, starting: Option<Build>) -> String {
+    assert!(!release::is_own(&info.version, info.built), "only another build is kept");
     let (theirs, pid) = (release::spelled(&info.version, info.built), info.pid);
     if newer(info) {
         let unmatched = unmatched(info);

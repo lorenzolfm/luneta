@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -6,15 +7,23 @@ use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
 use lunetad::mux::own::api::mux_client::MuxClient;
-use lunetad::mux::own::api::{self as mux_api, ListRequest, Listing};
+use lunetad::mux::own::api::{self as mux_api, InfoRequest, InfoResponse, ListRequest, Listing};
 use lunetad::mux::own::server;
+use tempfile::TempDir;
 use tokio_stream::wrappers::UnixListenerStream;
+use tonic::codegen::{http, Body, BoxFuture, Context, Poll, Service, StdError};
+use tonic::server::{Grpc, NamedService, UnaryService};
 use tonic::service::Routes;
 use tonic::transport::{Channel, Endpoint, Server, Uri};
+use tonic::Status;
+use tonic_prost::ProstCodec;
 
-use crate::host::{eventually, start, Daemon, Host, Running, LUNETAD};
+use crate::demand::build_of;
+use crate::host::{eventually, script, start, start_as, Daemon, Host, Running, LUNETAD};
 
 const STAND_IN_MUX: &str = "LUNETA_TEST_STAND_IN_MUX_FOLDER";
+
+const STAND_IN_SAYS: &str = "LUNETA_TEST_STAND_IN_MUX_SAYS";
 
 const LOCK: &str = "mux.lock";
 
@@ -83,6 +92,12 @@ impl Owned {
     pub fn start_daemon(&mut self) {
         assert!(self.daemon.is_none(), "one daemon runs at a time");
         self.daemon = Some(start(self.host.vars()).unwrap());
+    }
+
+    pub fn start_daemon_from(&mut self, lunetad: &Path) {
+        assert!(self.daemon.is_none(), "one daemon runs at a time");
+        let lunetad = self.host.vars().command(lunetad.to_str().unwrap());
+        self.daemon = Some(start_as(lunetad).unwrap());
     }
 
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
@@ -156,10 +171,13 @@ impl Owned {
         listening.and_then(rustix::process::Pid::from_raw)
     }
 
-    pub fn stand_in_mux(&self) -> Running {
+    pub fn stand_in_mux(&self, says: Option<&str>) -> Running {
         let mut command = Command::new(env::current_exe().unwrap());
         command.args(["own::stand_in_mux", "--exact", "--ignored"]);
         command.env(STAND_IN_MUX, self.host.folder()).stdout(Stdio::null()).stderr(Stdio::null());
+        if let Some(says) = says {
+            command.env(STAND_IN_SAYS, says);
+        }
         let stand_in = Running::spawn(&mut command);
         let pid = rustix::process::Pid::from_raw(i32::try_from(stand_in.pid()).unwrap());
         eventually("the stand-in luneta-mux listens", || (self.mux_pid() == pid).then_some(()));
@@ -167,12 +185,27 @@ impl Owned {
     }
 }
 
+pub fn beside_a_stand_in_mux(says: &str) -> TempDir {
+    let beside = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    fs::hard_link(LUNETAD, beside.path().join("lunetad")).unwrap();
+    let test = env::current_exe().unwrap();
+    let test = test.display();
+    let runs = format!(
+        "{STAND_IN_MUX}=\"$1\" {STAND_IN_SAYS}='{says}' exec '{test}' own::stand_in_mux --exact \
+         --ignored\n"
+    );
+    script(&beside.path().join("luneta-mux"), &runs);
+    beside
+}
+
 #[test]
-#[ignore = "the stand-in for a luneta-mux older than its Info, which a test runs as a process"]
+#[ignore = "the stand-in for a luneta-mux of another build, which a test runs as a process"]
 fn stand_in_mux() {
     let Some(folder) = env::var_os(STAND_IN_MUX).map(PathBuf::from) else {
         return;
     };
+    let says = env::var(STAND_IN_SAYS).ok().map(build_of);
+    let says = says.map(|(version, built)| InfoResponse { version, built });
     let lock = OpenOptions::new().create(true).truncate(false).write(true).open(folder.join(LOCK));
     let lock = lock.unwrap();
     lock.lock().unwrap();
@@ -182,11 +215,55 @@ fn stand_in_mux() {
     runtime.block_on(async {
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         Server::builder()
-            .add_routes(Routes::default())
+            .add_routes(Routes::new(StandIn(says)))
             .serve_with_incoming(UnixListenerStream::new(listener))
             .await
             .unwrap();
     });
+}
+
+#[derive(Clone)]
+struct StandIn(Option<InfoResponse>);
+
+impl NamedService for StandIn {
+    const NAME: &'static str = "luneta.mux.v1.Mux";
+}
+
+impl<B> Service<http::Request<B>> for StandIn
+where
+    B: Body + Send + 'static,
+    B::Error: Into<StdError> + Send + 'static,
+{
+    type Response = http::Response<tonic::body::Body>;
+    type Error = Infallible;
+    type Future = BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<B>) -> Self::Future {
+        let info = request.uri().path() == "/luneta.mux.v1.Mux/Info";
+        let says = self.0.clone().filter(|_| info);
+        Box::pin(async move {
+            let Some(says) = says else {
+                return Ok(Status::unimplemented("a stand-in luneta-mux").into_http());
+            };
+            Ok(Grpc::new(ProstCodec::default()).unary(Says(says), request).await)
+        })
+    }
+}
+
+struct Says(InfoResponse);
+
+impl UnaryService<InfoRequest> for Says {
+    type Response = InfoResponse;
+    type Future = BoxFuture<tonic::Response<InfoResponse>, Status>;
+
+    fn call(&mut self, _: tonic::Request<InfoRequest>) -> Self::Future {
+        let says = self.0.clone();
+        Box::pin(async move { Ok(tonic::Response::new(says)) })
+    }
 }
 
 pub struct StalledMux(rustix::process::Pid);

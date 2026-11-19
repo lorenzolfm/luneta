@@ -244,7 +244,7 @@ fn version(spelled: &str) -> Result<Version, String> {
 
 pub fn run(command: &Command, folder: &Path) -> ExitCode {
     match command {
-        Command::Info => ask(folder, daemon::answering(folder), info),
+        Command::Info => ask(folder, daemon::of_any_build(folder), info),
         Command::Agents => ask(folder, daemon::running(folder), agents),
         Command::Sessions => ask(folder, daemon::running(folder), sessions),
         Command::Watch { after } => {

@@ -3,7 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{self, Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -56,6 +56,8 @@ const AGAIN: Duration = Duration::from_millis(100);
 
 static MATCHED: AtomicU32 = AtomicU32::new(0);
 
+static STARTED: AtomicU32 = AtomicU32::new(0);
+
 pub(super) struct Unmatched {
     pid: Option<u32>,
     build: Option<String>,
@@ -83,27 +85,22 @@ struct Server {
     client: MuxClient<Channel>,
 }
 
-enum Reach {
-    Server(Server),
-    Unreached(Runtime),
-    Unmatched(Runtime, Unmatched),
-}
-
 impl Server {
     fn reached() -> Result<Option<Server>, Failure> {
         match Server::reached_on(runtime()?, Some(ANSWER))? {
-            Reach::Server(server) => Ok(Some(server)),
-            Reach::Unreached(_) => Ok(None),
-            Reach::Unmatched(_, unmatched) => Err(Failure::Own(unmatched.to_string())),
+            (runtime, Reached::Matched(client)) => Ok(Some(Server { runtime, client })),
+            (_, Reached::Unreached) => Ok(None),
+            (_, Reached::Unmatched(unmatched)) => Err(Failure::Own(unmatched.to_string())),
         }
     }
 
-    fn reached_on(runtime: Runtime, answer: Option<Duration>) -> Result<Reach, Failure> {
+    fn reached_on(
+        runtime: Runtime,
+        answer: Option<Duration>,
+    ) -> Result<(Runtime, Reached), Failure> {
         let socket = socket()?;
         match runtime.block_on(connect(&socket, answer)) {
-            Ok(Reached::Matched(client)) => Ok(Reach::Server(Server { runtime, client })),
-            Ok(Reached::Unreached) => Ok(Reach::Unreached(runtime)),
-            Ok(Reached::Unmatched(unmatched)) => Ok(Reach::Unmatched(runtime, unmatched)),
+            Ok(reached) => Ok((runtime, reached)),
             Err(error) => Err(Failure::Own(format!("{}: {error}", socket.display()))),
         }
     }
@@ -113,9 +110,9 @@ impl Server {
         answer: Option<Duration>,
     ) -> Result<Result<Server, Runtime>, Failure> {
         match Server::reached_on(runtime, answer)? {
-            Reach::Server(server) => Ok(Ok(server)),
-            Reach::Unreached(runtime) => Ok(Err(runtime)),
-            Reach::Unmatched(runtime, unmatched) => {
+            (runtime, Reached::Matched(client)) => Ok(Ok(Server { runtime, client })),
+            (runtime, Reached::Unreached) => Ok(Err(runtime)),
+            (runtime, Reached::Unmatched(unmatched)) => {
                 stop(&runtime, &unmatched)?;
                 Ok(Err(runtime))
             },
@@ -140,6 +137,12 @@ impl Server {
 fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
     let unstopped = |why: String| Failure::Own(format!("{unmatched}, and is not stopped: {why}"));
     let pid = unmatched.pid.ok_or_else(|| unstopped("the kernel names no pid for it".to_owned()))?;
+    assert_ne!(pid, process::id(), "lunetad is never the luneta-mux it stops");
+    if STARTED.load(Ordering::Relaxed) == pid {
+        let from = program();
+        let from = from.display();
+        return Err(Failure::Own(format!("{unmatched}, though lunetad started it from {from}")));
+    }
     let id = i32::try_from(pid).ok().and_then(Pid::from_raw);
     let id = id.ok_or_else(|| unstopped(format!("{pid} is no pid")))?;
     match rustix::process::kill_process(id, Signal::TERM) {
@@ -148,16 +151,20 @@ fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
     }
     log::say(&format!("{unmatched}, and is stopped"));
     let socket = socket()?;
-    let deadline = Instant::now() + STOPPING;
+    let stopped = Instant::now();
+    let deadline = stopped + STOPPING;
     loop {
-        match runtime.block_on(connect(&socket, Some(ANSWER))) {
-            Ok(Reached::Unmatched(still)) if still.pid == unmatched.pid => {},
+        let left = deadline.saturating_duration_since(Instant::now());
+        let answered = match runtime.block_on(connect(&socket, Some(left.min(ANSWER)))) {
+            Ok(Reached::Unmatched(still)) if still.pid == unmatched.pid => {
+                "it still answers".to_owned()
+            },
             Ok(Reached::Unreached | Reached::Matched(_) | Reached::Unmatched(_)) => return Ok(()),
-            Err(_) => {},
-        }
+            Err(error) => format!("its socket says {error}"),
+        };
         if Instant::now() >= deadline {
-            let secs = STOPPING.as_secs();
-            let runs = format!("{unmatched}, and still runs {secs}s after it was stopped");
+            let waited = stopped.elapsed().as_millis();
+            let runs = format!("{unmatched}, and {waited}ms after it was stopped {answered}");
             return Err(Failure::Own(runs));
         }
         thread::sleep(LOOK);
@@ -213,9 +220,10 @@ pub(super) async fn connect(socket: &Path, answer: Option<Duration>) -> io::Resu
     if pid.is_some_and(|pid| MATCHED.load(Ordering::Relaxed) == pid) {
         return Ok(Reached::Matched(client));
     }
-    let asked = tokio::time::timeout(ANSWER, client.info(api::InfoRequest {})).await;
+    let within = answer.unwrap_or(ANSWER);
+    let asked = tokio::time::timeout(within, client.info(api::InfoRequest {})).await;
     let late = || {
-        let late = format!("luneta-mux did not say its build in {}ms", ANSWER.as_millis());
+        let late = format!("luneta-mux did not say its build in {}ms", within.as_millis());
         io::Error::new(ErrorKind::TimedOut, late)
     };
     let build = match asked.map_err(|_| late())? {
@@ -223,6 +231,7 @@ pub(super) async fn connect(socket: &Path, answer: Option<Duration>) -> io::Resu
             let api::InfoResponse { version, built } = info.into_inner();
             if release::is_own(&version, built) {
                 if let Some(pid) = pid {
+                    assert_ne!(pid, 0, "MATCHED holds 0 for no pid, so no pid named is 0");
                     MATCHED.store(pid, Ordering::Relaxed);
                 }
                 return Ok(Reached::Matched(client));
@@ -307,7 +316,7 @@ fn doing(is: &api::ran::Is) -> Result<Doing, String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Followed {
     Unreached { at: Instant },
-    Stopped,
+    Unmatched,
     Emptied { since: Instant },
     LetGo,
 }
@@ -317,11 +326,11 @@ pub fn followed(
 ) -> Result<Followed, Failure> {
     let at = Instant::now();
     let server = match Server::reached_on(runtime()?, None)? {
-        Reach::Server(server) => server,
-        Reach::Unreached(_) => return Ok(Followed::Unreached { at }),
-        Reach::Unmatched(runtime, unmatched) => {
+        (runtime, Reached::Matched(client)) => Server { runtime, client },
+        (_, Reached::Unreached) => return Ok(Followed::Unreached { at }),
+        (runtime, Reached::Unmatched(unmatched)) => {
             stop(&runtime, &unmatched)?;
-            return Ok(Followed::Stopped);
+            return Ok(Followed::Unmatched);
         },
     };
     let since = Instant::now();
@@ -617,15 +626,9 @@ fn listened(
 ) -> Result<Result<Server, Runtime>, Failure> {
     loop {
         runtime = match Server::reached_on(runtime, Some(ANSWER))? {
-            Reach::Server(server) => return Ok(Ok(server)),
-            Reach::Unreached(runtime) => runtime,
-            Reach::Unmatched(_, unmatched) if unmatched.pid == Some(started.child.id()) => {
-                let from = program();
-                let from = from.display();
-                let started = format!("{unmatched}, though lunetad started it from {from}");
-                return Err(Failure::Own(started));
-            },
-            Reach::Unmatched(runtime, unmatched) => {
+            (runtime, Reached::Matched(client)) => return Ok(Ok(Server { runtime, client })),
+            (runtime, Reached::Unreached) => runtime,
+            (runtime, Reached::Unmatched(unmatched)) => {
                 stop(&runtime, &unmatched)?;
                 runtime
             },
@@ -672,7 +675,9 @@ impl Started {
         command.current_dir("/").stdin(Stdio::null()).stdout(Stdio::null());
         let spawned = command.spawn();
         let unstarted = |error| Failure::Own(format!("{}: {error}", program.display()));
-        Ok(Started { child: spawned.map_err(unstarted)?, reaper })
+        let child = spawned.map_err(unstarted)?;
+        STARTED.store(child.id(), Ordering::Relaxed);
+        Ok(Started { child, reaper })
     }
 
     fn reaped(self) {

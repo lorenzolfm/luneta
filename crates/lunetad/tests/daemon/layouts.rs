@@ -28,7 +28,7 @@ use tonic::{Code, Status, Streaming};
 
 use crate::agents::file_of_pid;
 use crate::host::{eventually, folder_in, script, start, Host};
-use crate::own::Owned;
+use crate::own::{self, Owned};
 use crate::projects::{self, asked, kept, project, worktree};
 use crate::remote::{hosts, reached, FakeSsh};
 use crate::starts::{directory, makes_shells, mouse, projects_of, Window};
@@ -1090,7 +1090,7 @@ fn lunetad_stops_a_luneta_mux_that_says_no_build_and_restores_its_terminals() {
     drop(shown);
     owned.stop_daemon();
     owned.kill_mux();
-    let mut older = owned.stand_in_mux();
+    let mut older = owned.stand_in_mux(None);
     owned.start_daemon();
     let stopped = older.ended_within(Duration::from_secs(5));
     let stopped = stopped.expect("lunetad stops the luneta-mux that says no build");
@@ -1107,6 +1107,49 @@ fn lunetad_stops_a_luneta_mux_that_says_no_build_and_restores_its_terminals() {
     let said = format!("luneta-mux (pid {pid}) says no build, as one older than {own} does");
     let log = logged(&owned);
     assert!(log.contains(&format!("{said}, and is stopped")), "{log}");
+}
+
+#[test]
+fn lunetad_stops_a_luneta_mux_of_another_build_and_names_both() {
+    let mut owned = Owned::new();
+    owned.stop_daemon();
+    owned.kill_mux();
+    let theirs = another_build();
+    let mut other = owned.stand_in_mux(Some(&theirs));
+    owned.start_daemon();
+    let stopped = other.ended_within(Duration::from_secs(5));
+    let stopped = stopped.expect("lunetad stops the luneta-mux of another build");
+    assert_eq!(stopped.signal(), Some(rustix::process::Signal::TERM.as_raw()));
+    let (pid, own) = (other.pid(), release::SAID.as_str());
+    let said = format!("luneta-mux {theirs} (pid {pid}) is another build than {own}, and is stopped");
+    eventually("lunetad says why it stopped it", || logged(&owned).contains(&said).then_some(()));
+}
+
+#[test]
+fn lunetad_stops_no_luneta_mux_it_started_of_another_build_and_names_its_path() {
+    let mut owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    heard_in_below(&owned, &mut shown, "sleep 603");
+    drop(shown);
+    owned.stop_daemon();
+    owned.kill_mux();
+    let beside = own::beside_a_stand_in_mux(&another_build());
+    owned.start_daemon_from(&beside.path().join("lunetad"));
+    let own = release::SAID.as_str();
+    let from = fs::canonicalize(beside.path()).unwrap().join("luneta-mux");
+    let from = from.display();
+    let refused = format!("is another build than {own}, though lunetad started it from {from}");
+    eventually("lunetad says the luneta-mux it started is another build", || {
+        logged(&owned).contains(&refused).then_some(())
+    });
+    let log = logged(&owned);
+    assert!(!log.contains(&format!("is another build than {own}, and is stopped")), "{log}");
+}
+
+fn another_build() -> String {
+    let built = release::BUILT.map_or(1, |built| built + 1);
+    release::spelled(release::VERSION, Some(built))
 }
 
 #[test]
