@@ -308,7 +308,8 @@ fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     let beside = elsewhere.path().join("lunetad");
     script(&beside, other);
     let said = refused(&host, &elsewhere.path().join("luneta"));
-    let kept = format!("but {} is 0.0.0, no newer, so luneta leaves it be", beside.display());
+    let real = beside.canonicalize().unwrap();
+    let kept = format!("but {} is 0.0.0, no newer, so luneta leaves it be", real.display());
     assert!(said.contains(&format!("lunetad {OLDER} (pid {})", older.pid())), "{said}");
     assert!(said.contains(&kept), "{said}");
     assert_eq!(older.ended_within(Duration::ZERO), None);
