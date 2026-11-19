@@ -1,5 +1,6 @@
 use std::io;
 use std::num::NonZeroU32;
+use std::panic;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -144,28 +145,29 @@ pub fn listed(dir: &Dir) -> Result<Work, String> {
         .spawn(move || gh::<ListedPull>(&folder, &PULLS, PULL_FIELDS))
         .map_err(|error| format!("no thread to list pull requests in: {error}"))?;
     let issues = gh::<ListedIssue>(dir.as_str(), &ISSUES, ISSUE_FIELDS);
-    let pulls = pulls.join().unwrap_or_else(|_| Err("listing pull requests panicked".to_owned()));
+    let pulls = pulls.join().unwrap_or_else(|panic| panic::resume_unwind(panic));
     let issues = issues?.into_iter().map(|ListedIssue { number, title, labels }| {
         let labels = labels.into_iter().take(LABELS_MAX).map(|label| label.name).collect();
-        Issue { number, title: cut(title), labels }
+        Issue { number, title: cut(title, TITLE_BYTES_MAX), labels }
     });
     let pulls = pulls?.into_iter().map(|pull| Pull {
         number: pull.number,
-        title: cut(pull.title),
+        title: cut(pull.title, TITLE_BYTES_MAX),
         draft: pull.is_draft,
         branch: pull.head_ref_name,
         author: pull.author.map(|author| author.login).filter(|login| !login.is_empty()),
     });
-    Work::new(issues.collect(), pulls.collect())
+    let work = Work::new(issues.collect(), pulls.collect());
+    Ok(work.expect("gh's lists are cut to LISTED_MAX, their titles to TITLE_BYTES_MAX and labels to LABELS_MAX"))
 }
 
 fn gh<T: DeserializeOwned>(dir: &str, asked: &[&str], fields: &str) -> Result<Vec<T>, String> {
     let said = asked.join(" ");
     let limit = LISTED_MAX.to_string();
-    let mut gh = Command::new("gh");
-    gh.args(asked).args(["--limit", &limit, "--json", fields]).current_dir(dir);
-    git::local(&mut gh);
-    let ran = program::run(&mut gh, PATIENCE).map_err(|error| match error.kind() {
+    let mut listing = Command::new("gh");
+    listing.args(asked).args(["--limit", &limit, "--json", fields]).current_dir(dir);
+    git::local(&mut listing);
+    let ran = program::run(&mut listing, PATIENCE).map_err(|error| match error.kind() {
         io::ErrorKind::NotFound => "gh is not on the PATH".to_owned(),
         _ => format!("gh {said} could not be run: {error}"),
     })?;
@@ -175,15 +177,10 @@ fn gh<T: DeserializeOwned>(dir: &str, asked: &[&str], fields: &str) -> Result<Ve
     Ok(listed.into_iter().take(LISTED_MAX).collect())
 }
 
-fn cut(title: String) -> String {
-    if title.len() <= TITLE_BYTES_MAX {
-        return title;
-    }
-    let mut end = TITLE_BYTES_MAX;
-    while !title.is_char_boundary(end) {
-        end -= 1;
-    }
-    title[..end].to_owned()
+fn cut(mut text: String, most: usize) -> String {
+    let end = text.floor_char_boundary(most);
+    text.truncate(end);
+    text
 }
 
 #[cfg(test)]
@@ -223,9 +220,9 @@ mod tests {
     #[test]
     fn a_long_title_is_cut_where_a_character_ends() {
         let title = format!("a{}", "é".repeat(TITLE_BYTES_MAX));
-        let cut = cut(title);
+        let cut = cut(title, TITLE_BYTES_MAX);
         assert_eq!(cut.len(), TITLE_BYTES_MAX - 1);
         assert!(cut.ends_with('é'));
-        assert_eq!(super::cut("short".to_owned()), "short");
+        assert_eq!(super::cut("short".to_owned(), TITLE_BYTES_MAX), "short");
     }
 }

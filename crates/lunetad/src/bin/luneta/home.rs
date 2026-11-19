@@ -196,7 +196,9 @@ impl Home {
     }
 
     fn mark(&mut self) {
-        let Some(item) = self.items().get(self.cursor).copied() else {
+        let items = self.items();
+        let Some(item) = items.get(self.cursor).copied() else {
+            assert!(items.is_empty(), "the cursor is on a listed row while there is one");
             return;
         };
         if !self.marked.remove(&item) {
@@ -263,6 +265,7 @@ impl Home {
         }
         talk.push(menu::keys_line(inner, &self.hints()));
         let rows = u16::try_from(talk.len() + 2).map_or(most, |rows| rows.min(most));
+        assert!(rows <= area.height, "the prompt's box fits in the home");
         let asked = Rect::new(area.x, area.bottom() - rows, area.width, rows);
         let right = match &self.on {
             Machine::Local => sidebar::short_cwd(&self.dir),
@@ -318,8 +321,8 @@ impl Home {
             Listing::Listed { work, .. } => work,
         };
         let numbered = |number: NonZeroU32| format!("#{number}");
-        let wide = work.issues().iter().map(|it| it.number).chain(work.pulls().iter().map(|it| it.number));
-        let wide = wide.map(|number| numbered(number).len()).max().unwrap_or(0);
+        let numbers = work.issues().iter().map(|it| it.number).chain(work.pulls().iter().map(|it| it.number));
+        let number_width = numbers.map(|number| numbered(number).len()).max().unwrap_or(0);
         let (mut lines, mut at, mut item) = (Vec::new(), None, 0);
         let heading = |title: &str, count: usize| {
             Line::from(vec![
@@ -336,7 +339,7 @@ impl Home {
             at = at.or(here.then_some(lines.len()));
             let marked = self.marked.contains(&Item::Pull(pull.number));
             let side = if pull.draft { format!("{} · draft", pull.branch) } else { pull.branch.clone() };
-            lines.push(row(width, (here, marked), (&numbered(pull.number), wide), &pull.title, &side));
+            lines.push(row(width, (here, marked), (&numbered(pull.number), number_width), &pull.title, &side));
             item += 1;
         }
         lines.push(Line::default());
@@ -349,7 +352,7 @@ impl Home {
             at = at.or(here.then_some(lines.len()));
             let marked = self.marked.contains(&Item::Issue(issue.number));
             let side = issue.labels.join(", ");
-            lines.push(row(width, (here, marked), (&numbered(issue.number), wide), &issue.title, &side));
+            lines.push(row(width, (here, marked), (&numbered(issue.number), number_width), &issue.title, &side));
             item += 1;
         }
         (lines, at)
@@ -359,7 +362,7 @@ impl Home {
 fn row(
     width: usize,
     (here, marked): (bool, bool),
-    (number, wide): (&str, usize),
+    (number, number_width): (&str, usize),
     title: &str,
     side: &str,
 ) -> Line<'static> {
@@ -370,8 +373,8 @@ fn row(
     } else {
         Span::styled(UNMARKED, dim)
     };
-    let number = Span::styled(format!(" {number:<wide$}  "), Style::new().fg(gruvbox::YELLOW));
-    let lead = 3 + 1 + wide + 3;
+    let number = Span::styled(format!(" {number:<number_width$}  "), Style::new().fg(gruvbox::YELLOW));
+    let lead = margin.width() + mark.width() + number.width();
     let room = width.saturating_sub(lead + 1);
     let side_room = if side.is_empty() { 0 } else { (side.width() + 2).min(room / 3) };
     let title_room = room.saturating_sub(side_room);

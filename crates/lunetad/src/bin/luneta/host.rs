@@ -399,6 +399,13 @@ enum Right {
     Home(Home),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Homed {
+    Named,
+    Unknown,
+    Gone,
+}
+
 struct App {
     right: Option<Right>,
     homes: u64,
@@ -908,7 +915,7 @@ impl App {
                     let (tabs, titles) = self.projected.tabs(right.machine(), right.worktree());
                     right.tabs(tabs, titles);
                 }
-                if self.home_went() {
+                if self.name_home() == Some(Homed::Gone) {
                     self.leave_view();
                 }
                 self.sidebar.heard(host);
@@ -1464,26 +1471,26 @@ impl App {
         self.asks += 1;
         let home = Home::new(self.homes, self.asks, on.clone(), project);
         self.right = Some(Right::Home(home));
-        self.home_went();
+        let homed = self.name_home();
+        let fresh = matches!(homed, Some(Homed::Named | Homed::Unknown));
+        assert!(fresh, "a home just made was never named, so it has not gone: {homed:?}");
         self.ask_work(Instant::now());
         self.seat();
     }
 
-    fn home_went(&mut self) -> bool {
-        let Some(Right::Home(home)) = &self.right else {
-            return false;
+    #[must_use]
+    fn name_home(&mut self) -> Option<Homed> {
+        let Some(Right::Home(home)) = &mut self.right else {
+            return None;
         };
-        let known = self.projected.project(home.machine(), projected::key_of(home.project()));
-        let known = known.map(|project| (project.name.clone(), project.dir.clone()));
-        let Some(home) = self.home_mut() else {
-            return false;
-        };
-        match known {
-            Some((name, dir)) => {
-                home.named(&name, &dir);
-                false
+        let key = projected::key_of(home.project());
+        match self.projected.project(home.machine(), key) {
+            Some(project) => {
+                home.named(&project.name, &project.dir);
+                Some(Homed::Named)
             },
-            None => home.known(),
+            None if home.known() => Some(Homed::Gone),
+            None => Some(Homed::Unknown),
         }
     }
 
