@@ -4852,14 +4852,18 @@ struct RowLines<'a> {
 fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines<'_> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
-        Row::Machine { name, away, heads: Heads::Nothing, .. } => {
+        Row::Machine { machine, name, away, heads: Heads::Nothing } => {
             let (word, since) = away.as_ref().map_or((NO_PROJECTS, None), Away::said);
             let age = since.map_or_default(|since| age(since, now));
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
             let room = width.saturating_sub(MACHINE_LEAD + reserve + 1);
             let word = format!(" · {word}");
+            let (name, word) = match machine {
+                Machine::Local => (name.clone(), word),
+                Machine::Remote(_) => (format!("{name}{word}"), String::new()),
+            };
             let named = room.saturating_sub(word.width()).max(room.min(1));
-            let shown = cut(name, named);
+            let shown = cut(&name, named);
             let worded = room - shown.width();
             let said = format!("{shown}{}", cut(&word, worded));
             assert!(said.width() <= room, "a machine's name and word fit their room");
@@ -4875,7 +4879,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 Span::styled(age, dim),
             ]);
             let cuts = [
-                cut_at(0, MACHINE_LEAD, name, named),
+                cut_at(0, MACHINE_LEAD, &name, named),
                 cut_at(0, MACHINE_LEAD + cells(&shown), &word, worded),
             ];
             let cuts = cuts.into_iter().flatten().collect();
@@ -10795,11 +10799,19 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_with_no_projects_cuts_its_long_name_and_still_says_so() {
+    fn this_machine_cuts_its_long_name_to_say_no_projects_and_another_keeps_its_name() {
         let mut sidebar = Sidebar { this: "Mac-1763578123456".to_owned(), ..fresh() };
-        sidebar.hear(host(Vec::new(), Vec::new()));
+        let remotes = ["lorenzo@nixos", "me@vps-frankfurt"].map(|it| remote(it, down(100)));
+        sidebar.hear(Host { remotes: remotes.to_vec(), ..host(Vec::new(), Vec::new()) });
         let lines = screen(&mut sidebar, false, 32, 8);
-        assert_eq!(lines[HEADER], " ▸ \u{f108} Mac-176357… · no projects");
+        assert_eq!(
+            lines[HEADER..HEADER + 3],
+            [
+                " ▸ \u{f108} Mac-176357… · no projects",
+                " ▸ \u{f108} lorenzo@nixos · unrea… 1m",
+                " ▸ \u{f108} me@vps-frankfurt · un… 1m",
+            ]
+        );
     }
 
     #[test]
