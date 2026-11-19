@@ -27,7 +27,9 @@ use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
+use lunetad::asks::Marked;
 use lunetad::rebases::{Rebased, Unrebased};
+use lunetad::work::Work;
 use lunetad::{Destination, Direction, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -40,6 +42,7 @@ use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange};
 use crate::ask::{self, Ask, Keyed};
+use crate::home::{self, Home};
 use crate::attached;
 use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
@@ -73,10 +76,11 @@ use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::projected::{self, Projected};
 use crate::viewed::{self, Heeded, Viewed};
-use crate::worktrees::{self, Landed, Landing, Unmoved};
+use crate::worktrees::{self, Arrival, Landed, Landing, Unmoved};
 use crate::width::Width;
 
 pub enum Made {
+    Project { on: Machine, made: Result<ProjectId, String> },
     Worktree { on: Machine, made: Result<Landing, String>, argv: Vec<String> },
     Pulled { menu: u64, made: Result<Pulled, String> },
 }
@@ -122,6 +126,8 @@ const NAMING_PANICKED: &str = "luneta could not name the session: naming it pani
 pub const NOT_YET: &str = "luneta does not do that to a worktree yet";
 
 const WELCOME_MENU: &str = "the menu is for terminals: d d closes this welcome view";
+
+const HOME_MENU: &str = "the menu is for terminals: the project's is on its row in the sidebar";
 
 const UNSHOWN: [&str; 2] =
     ["No worktree to show yet.", "o w on a project's row opens one."];
@@ -177,6 +183,7 @@ pub enum Event {
     Folds,
     News,
     Agent,
+    Work { number: u64, listed: Result<Work, String> },
     Alerted(alerts::Read),
     Clicked(alerts::Key),
     #[cfg(not(target_os = "macos"))]
@@ -387,8 +394,14 @@ impl Inbox {
     }
 }
 
+enum Right {
+    Worktree(Viewed),
+    Home(Home),
+}
+
 struct App {
-    right: Option<Viewed>,
+    right: Option<Right>,
+    homes: u64,
     shown_number_dropped: u64,
     runs_in: Option<TerminalKey>,
     projected: Projected,
@@ -585,7 +598,7 @@ fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
 
 fn run_in(
     terminal: &mut DefaultTerminal,
-    (start, runs_in): (Option<Landing>, Option<TerminalKey>),
+    (start, runs_in): (Option<Arrival>, Option<TerminalKey>),
     news: News,
     folder: Result<PathBuf, String>,
     unkept: Option<String>,
@@ -645,12 +658,13 @@ fn run_in(
     let lunetad = daemon.clone().unwrap_or_default();
     let (size, greeting, here) = (layout_size(areas.1), greeting(colours), Machine::Local);
     let (start, root) = match start {
-        Some(Landing::Worktree(start)) => (Some(start.worktree()), None),
-        Some(Landing::Unopened(root)) => (None, Some(root)),
+        Some(Arrival::Worktree(start)) => (Some(start), None),
+        Some(Arrival::Home(root)) => (None, Some(root)),
         None => (None, None),
     };
     let right = start.map(|start| {
-        Viewed::start(1, lunetad.clone(), here, start, size, greeting, runs_in, &events)
+        let viewed = Viewed::start(1, lunetad.clone(), here, start, size, greeting, runs_in, &events);
+        Right::Worktree(viewed)
     });
     let focus = Focus::on(if right.is_some() { Side::Session } else { Side::Sidebar });
     sidebar.focus(focus.keys());
@@ -659,6 +673,7 @@ fn run_in(
     let focused = true;
     let mut app = App {
         right,
+        homes: 0,
         shown_number_dropped: 0,
         runs_in,
         projected: Projected::default(),
@@ -709,7 +724,8 @@ fn run_in(
     };
     app.watch();
     if let Some(root) = root {
-        app.open_worktree(Machine::Local, root);
+        app.go_home(&Machine::Local, root);
+        app.give(Focus::on(Side::Session));
     }
     let ran = run_loop(terminal, &mut app, inbox);
     sent.extend(app.sent());
@@ -866,15 +882,20 @@ impl App {
             Event::Answered(answer) => self.answered(answer, terminal)?,
             Event::InputEnded(error) => return Err(error),
             Event::Shown(number, heard) => {
-                if let Some(right) = self.right.as_mut().filter(|it| it.number() == number) {
+                if let Some(right) = self.viewed_mut().filter(|it| it.number() == number) {
                     let heeded = right.heard(heard);
                     self.heeded(heeded);
                 }
             },
             Event::Seen { number, watcher, seen } => {
-                if let Some(right) = self.right.as_mut().filter(|it| it.number() == number) {
+                if let Some(right) = self.viewed_mut().filter(|it| it.number() == number) {
                     let heeded = right.seen(watcher, seen);
                     self.heeded(heeded);
+                }
+            },
+            Event::Work { number, listed } => {
+                if let Some(home) = self.home_mut().filter(|it| it.number() == number) {
+                    home.listed(listed, Instant::now());
                 }
             },
             Event::Reached { claude_folder } => self.claude_folder = claude_folder,
@@ -883,9 +904,12 @@ impl App {
                     self.sidebar.notify(format!("lunetad's projects: {why}"));
                     Projected::default()
                 });
-                if let Some(right) = &mut self.right {
+                if let Some(Right::Worktree(right)) = &mut self.right {
                     let (tabs, titles) = self.projected.tabs(right.machine(), right.worktree());
                     right.tabs(tabs, titles);
+                }
+                if self.home_went() {
+                    self.leave_view();
                 }
                 self.sidebar.heard(host);
                 self.seat();
@@ -974,6 +998,8 @@ impl App {
                     && ask.number() == number
                 {
                     ask.heard(heard);
+                } else if let Some(home) = self.home_mut().filter(|it| it.ask_number() == number) {
+                    home.heard(heard);
                 }
             },
             Event::Remotes { number, remotes } => {
@@ -1066,7 +1092,8 @@ impl App {
             Some(Over::Issue(issue)) => issue.turning(),
             Some(Over::Picker(_)) | None => false,
         };
-        over || self.sidebar.turning()
+        let home = matches!(&self.right, Some(Right::Home(home)) if home.turning());
+        over || home || self.sidebar.turning()
     }
 
     fn due(&self) -> Option<Instant> {
@@ -1075,7 +1102,11 @@ impl App {
             _ => None,
         };
         let shows = self.sidebar.due(SystemTime::now()).map(|left| Instant::now() + left);
-        picker.into_iter().chain(self.alerts.due()).chain(shows).min()
+        let home = match &self.right {
+            Some(Right::Home(home)) => home.due(),
+            Some(Right::Worktree(_)) | None => None,
+        };
+        picker.into_iter().chain(self.alerts.due()).chain(shows).chain(home).min()
     }
 
     fn alerting(&mut self, now: Instant) {
@@ -1123,8 +1154,10 @@ impl App {
             picker.ticked(now);
         }
         self.ask_picker();
-        if let Some(right) = &mut self.right {
-            right.ticked();
+        match &mut self.right {
+            Some(Right::Worktree(right)) => right.ticked(),
+            Some(Right::Home(_)) => self.ask_work(now),
+            None => {},
         }
     }
 
@@ -1285,7 +1318,9 @@ impl App {
     fn chord(&mut self, chord: Chord) -> bool {
         if chord == MENU {
             self.let_go();
-            if self.right.as_ref().is_some_and(Viewed::welcomes) {
+            if matches!(&self.right, Some(Right::Home(_))) {
+                self.sidebar.float_note(HOME_MENU.to_owned());
+            } else if self.viewed().is_some_and(Viewed::welcomes) {
                 self.sidebar.float_note(WELCOME_MENU.to_owned());
             } else {
                 self.sidebar.float_menu();
@@ -1327,7 +1362,7 @@ impl App {
     }
 
     fn palette(&self) -> Palette {
-        let welcomes = self.right.as_ref().is_some_and(Viewed::welcomes);
+        let welcomes = self.viewed().is_some_and(Viewed::welcomes);
         let (aim, origin) = match self.focus.side {
             Side::Sidebar => (self.sidebar.aimed_row(), Origin::Sidebar),
             Side::Session | Side::Collapsed if welcomes => {
@@ -1339,27 +1374,127 @@ impl App {
     }
 
     fn key_to_session(&mut self, key: &KeyEvent) {
-        if let Some(right) = &mut self.right {
-            right.key(key, self.inputs);
+        let keyed = match &mut self.right {
+            Some(Right::Worktree(right)) => return right.key(key, self.inputs),
+            Some(Right::Home(home)) => home.key(key),
+            None => return,
+        };
+        match keyed {
+            home::Keyed::Nothing => {},
+            home::Keyed::Send => self.converse_home(),
+            home::Keyed::StartOver => {
+                self.asks += 1;
+                let asks = self.asks;
+                if let Some(home) = self.home_mut() {
+                    home.start_over(asks);
+                }
+            },
         }
     }
 
     fn paste(&mut self, text: &str) {
-        if let Some(right) = &mut self.right {
-            right.paste(text);
+        match &mut self.right {
+            Some(Right::Worktree(right)) => right.paste(text),
+            Some(Right::Home(home)) => home.paste(text),
+            None => {},
         }
     }
 
     fn tell_focus(&mut self, has: bool) {
-        if let Some(right) = &mut self.right {
+        if let Some(right) = self.viewed_mut() {
             right.focus(has);
         }
     }
 
     fn ask_right(&self, asked: lunetad::Asked) {
-        if let Some(right) = &self.right {
+        if let Some(right) = self.viewed() {
             right.ask(asked);
         }
+    }
+
+    fn viewed(&self) -> Option<&Viewed> {
+        match &self.right {
+            Some(Right::Worktree(right)) => Some(right),
+            Some(Right::Home(_)) | None => None,
+        }
+    }
+
+    fn viewed_mut(&mut self) -> Option<&mut Viewed> {
+        match &mut self.right {
+            Some(Right::Worktree(right)) => Some(right),
+            Some(Right::Home(_)) | None => None,
+        }
+    }
+
+    fn home_mut(&mut self) -> Option<&mut Home> {
+        match &mut self.right {
+            Some(Right::Home(home)) => Some(home),
+            Some(Right::Worktree(_)) | None => None,
+        }
+    }
+
+    fn converse_home(&mut self) {
+        if let Some(Right::Home(home)) = &mut self.right {
+            home.send(&self.events);
+        }
+    }
+
+    fn ask_work(&mut self, now: Instant) {
+        let Some(home) = self.home_mut() else {
+            return;
+        };
+        if !home.asks(now) {
+            return;
+        }
+        let (number, on, project) = (home.number(), home.machine().clone(), home.project());
+        let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
+        thread::spawn(move || {
+            let listed = caught(|| worktrees::work(&lunetad, &on, project));
+            let _ = events.send(Event::Work { number, listed });
+        });
+    }
+
+    fn go_home(&mut self, on: &Machine, project: ProjectId) {
+        let shown = |home: &Home| home.machine() == on && home.project() == project;
+        if matches!(&self.right, Some(Right::Home(home)) if shown(home)) {
+            return;
+        }
+        self.drop_shown();
+        self.homes += 1;
+        self.asks += 1;
+        let home = Home::new(self.homes, self.asks, on.clone(), project);
+        self.right = Some(Right::Home(home));
+        self.home_went();
+        self.ask_work(Instant::now());
+        self.seat();
+    }
+
+    fn home_went(&mut self) -> bool {
+        let Some(Right::Home(home)) = &self.right else {
+            return false;
+        };
+        let known = self.projected.project(home.machine(), projected::key_of(home.project()));
+        let known = known.map(|project| (project.name.clone(), project.dir.clone()));
+        let Some(home) = self.home_mut() else {
+            return false;
+        };
+        match known {
+            Some((name, dir)) => {
+                home.named(&name, &dir);
+                false
+            },
+            None => home.known(),
+        }
+    }
+
+    fn drop_shown(&mut self) {
+        if let Some(Right::Worktree(right)) = self.right.take() {
+            let number = right.number();
+            let dropped = self.shown_number_dropped;
+            assert!(number > dropped, "a shown number grows past the last dropped");
+            self.shown_number_dropped = number;
+        }
+        assert!(self.right.is_none(), "luneta shows nothing on the right once it dropped it");
     }
 
     fn key_for_image(&mut self, key: &KeyEvent) -> bool {
@@ -1592,7 +1727,7 @@ impl App {
     fn session_mouse(&mut self, mouse: MouseEvent) {
         let at = self.session_cell(mouse);
         let width = self.areas.1.width;
-        let Some(right) = &mut self.right else {
+        let Some(right) = self.viewed_mut() else {
             return;
         };
         if let Some(worktree) = right.mouse(mouse, at, width) {
@@ -1610,7 +1745,7 @@ impl App {
 
     fn select(&mut self, mouse: MouseEvent) -> bool {
         let at = self.session_cell(mouse);
-        let Some(own) = &mut self.right else {
+        let Some(Right::Worktree(own)) = &mut self.right else {
             return false;
         };
         match (mouse.kind, self.held) {
@@ -1711,7 +1846,7 @@ impl App {
                 self.naming_on(move || {
                     let made = || worktrees::project_made(&on, &folder, name.as_ref());
                     let made = caught(made).map_err(|why| format!("menu: {why}"));
-                    Made::Worktree { on, made, argv: Vec::new() }
+                    Made::Project { on, made }
                 });
                 self.leave();
             },
@@ -1986,7 +2121,7 @@ impl App {
 
     fn converse(&mut self) {
         if let Some(Over::Ask(ask)) = &mut self.focus.over {
-            ask.send(&self.events);
+            ask.send(Marked::default(), &self.events);
         }
     }
 
@@ -2146,7 +2281,7 @@ impl App {
     }
 
     fn cross(&mut self, direction: Direction) {
-        let Some(right) = &self.right else {
+        let Some(right) = self.viewed() else {
             return;
         };
         let on = right.machine().clone();
@@ -2181,19 +2316,12 @@ impl App {
             return Err(format!("{session} is no project lunetad keeps"));
         };
         let shows = |worktree| {
-            self.right.as_ref().is_some_and(|right| {
+            self.viewed().is_some_and(|right| {
                 right.machine() == machine && right.worktree() == worktree
             })
         };
         match place {
-            Place::Session(_) => {
-                if project.worktrees().iter().any(|it| shows(it.id)) {
-                    return Ok(());
-                }
-                let last = projects::last_used(project.uses());
-                let last = last.ok_or_else(|| format!("{session} holds no worktree"))?;
-                self.go_worktree(machine, last, None);
-            },
+            Place::Session(_) => self.go_home(machine, project.id),
             Place::Worktree(place) => {
                 let held = project.worktrees().iter().any(|it| it.id == place.worktree);
                 if !held {
@@ -2219,16 +2347,17 @@ impl App {
         worktree: WorktreeId,
         terminal: Option<ViewId>,
     ) {
-        if let Some(right) = &mut self.right {
+        if let Some(right) = self.viewed_mut() {
             right.go(on, worktree);
         } else {
+            self.drop_shown();
             let (size, greeting) = (layout_size(self.areas.1), greeting(self.colours));
             let (folder, events) = (self.lunetad.clone(), &self.events);
             let (number, on) = (self.shown_number_dropped + 1, on.clone());
             let runs_in = self.runs_in;
             let started =
                 Viewed::start(number, folder, on, worktree, size, greeting, runs_in, events);
-            self.right = Some(started);
+            self.right = Some(Right::Worktree(started));
         }
         let right = self.shown();
         assert_eq!(right.machine(), on, "luneta shows the machine it went to");
@@ -2243,19 +2372,20 @@ impl App {
     }
 
     fn shown(&mut self) -> &mut Viewed {
-        self.right.as_mut().expect("luneta went to a worktree")
+        self.viewed_mut().expect("luneta went to a worktree")
     }
 
     fn leave_view(&mut self) {
-        let Some(right) = &self.right else {
-            return;
+        let (on, left) = match &self.right {
+            Some(Right::Worktree(right)) => (right.machine().clone(), Some(right.worktree())),
+            Some(Right::Home(home)) => (home.machine().clone(), None),
+            None => return,
         };
-        let (on, left) = (right.machine().clone(), right.worktree());
         let held = |machine: &Machine| {
             let projects = self.projected.projects(machine).iter();
             let worktrees = projects.flat_map(projected::Project::worktrees);
             let open = worktrees.filter(|it| !it.terminals.is_empty());
-            let others = open.filter(|it| *machine != on || it.id != left);
+            let others = open.filter(|it| *machine != on || Some(it.id) != left);
             projects::last_used(others.map(|it| (it.id, it.used)))
         };
         let other = held(&on).map(|id| (on.clone(), id));
@@ -2267,20 +2397,22 @@ impl App {
     }
 
     fn unview(&mut self) {
-        if let Some(right) = self.right.take() {
-            let number = right.number();
-            let dropped = self.shown_number_dropped;
-            assert!(number > dropped, "a shown number grows past the last dropped");
-            self.shown_number_dropped = number;
-        }
+        self.drop_shown();
         self.sidebar.unseat();
         self.give(Focus::on(Side::Sidebar));
         assert_eq!(self.focus.side, Side::Sidebar, "with no worktree shown, no keys go to it");
     }
 
     fn seat(&mut self) {
-        let Some(right) = &self.right else {
-            return;
+        let right = match &self.right {
+            None => return,
+            Some(Right::Home(home)) => {
+                let (on, project) = (home.machine().clone(), projected::key_of(home.project()));
+                self.sidebar.showing_home(on, project);
+                self.seated = None;
+                return;
+            },
+            Some(Right::Worktree(right)) => right,
         };
         let (on, worktree) = (right.machine().clone(), right.worktree());
         let Some((project, _)) = self.projected.holding(&on, worktree) else {
@@ -2301,7 +2433,7 @@ impl App {
             },
             Heeded::Edged(direction) => self.cross(direction),
             Heeded::Sent(worktree) => {
-                let Some(right) = &self.right else {
+                let Some(right) = self.viewed() else {
                     return;
                 };
                 let on = right.machine().clone();
@@ -2359,10 +2491,14 @@ impl App {
                 self.go_opening(&on, made, argv);
                 self.give_opened(Opener::LetGo);
             },
-            Made::Worktree { on, made: Ok(Landing::Unopened(project)), .. } => {
-                self.open_worktree(on, project);
+            Made::Project { on, made: Ok(project) }
+            | Made::Worktree { on, made: Ok(Landing::Unopened(project)), .. } => {
+                self.go_home(&on, project);
+                self.give_opened(Opener::LetGo);
             },
-            Made::Worktree { made: Err(why), .. } => self.sidebar.notify(why),
+            Made::Project { made: Err(why), .. } | Made::Worktree { made: Err(why), .. } => {
+                self.sidebar.notify(why);
+            },
             Made::Pulled { menu, made } => self.pulled_made(menu, made),
         }
     }
@@ -2520,7 +2656,7 @@ impl App {
             let (sidebar, right) = areas(frame.area(), own);
             self.areas = (sidebar, right);
             let size = window(right);
-            if let Some(right) = &mut self.right {
+            if let Some(right) = self.viewed_mut() {
                 right.resize(size.columns, size.lines);
             }
             let buffer = frame.buffer_mut();
@@ -2535,11 +2671,16 @@ impl App {
             let uncovered = |at: &Position| !covered && right.contains(*at);
             let spot = |at: Position| attached::Spot { row: at.y - right.y, column: at.x - right.x };
             let hover = self.pointer.filter(uncovered).map(spot);
-            let cursor = if let Some(shown) = &self.right {
-                shown.draw(buffer, right, hover)
-            } else {
-                draw_unshown(buffer, right);
-                None
+            let cursor = match &self.right {
+                Some(Right::Worktree(shown)) => shown.draw(buffer, right, hover),
+                Some(Right::Home(home)) => {
+                    home.draw(buffer, right, now);
+                    None
+                },
+                None => {
+                    draw_unshown(buffer, right);
+                    None
+                },
             };
             let drawn = match &self.focus.over {
                 Some(Over::Brief(briefing)) => {
@@ -2584,7 +2725,7 @@ impl App {
             }
             self.drawn = drawn;
         })?;
-        let cursor = self.right.as_ref().map_or(UNSHOWN_CURSOR, Viewed::cursor_style);
+        let cursor = self.viewed().map_or(UNSHOWN_CURSOR, Viewed::cursor_style);
         if self.cursor != Some(cursor) {
             self.cursor = Some(cursor);
             execute!(terminal.backend_mut(), cursor_style(cursor))?;

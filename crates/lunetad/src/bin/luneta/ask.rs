@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lunetad::asks::{self, Asked, Step, Turn};
+use lunetad::asks::{self, Asked, Marked, Step, Turn};
 use lunetad::transcripts::SessionId;
 use lunetad::{Destination, Directory};
 use ratatui::buffer::Buffer;
@@ -88,6 +88,37 @@ impl Ask {
         }
     }
 
+    pub fn homed(number: u64, on: &Machine, dir: &str, project: &str) -> Self {
+        let works = match on {
+            Machine::Local => Works::Here(PathBuf::from(dir)),
+            Machine::Remote(on) => Works::There { on: on.clone(), cwd: Some(dir.to_owned()) },
+        };
+        let highlighted = format!(
+            "The user asks from the work view of project {project}, in {dir}, which lists the \
+             project's open issues and pull requests on GitHub: \"this project\" means it, and \
+             you run in its folder."
+        );
+        Ask {
+            number,
+            works,
+            highlighted,
+            session: None,
+            turned: None,
+            talk: Vec::new(),
+            typed: String::new(),
+            turn: None,
+        }
+    }
+
+    pub fn rehome(&mut self, on: &Machine, dir: &str, project: &str) {
+        if self.session.is_some() || self.turn.is_some() {
+            return;
+        }
+        let Ask { works, highlighted, .. } = Ask::homed(self.number, on, dir, project);
+        self.works = works;
+        self.highlighted = highlighted;
+    }
+
     pub fn number(&self) -> u64 {
         self.number
     }
@@ -127,7 +158,7 @@ impl Ask {
         self.typed.push_str(&text);
     }
 
-    pub fn send(&mut self, events: &Sender<Event>) {
+    pub fn send(&mut self, marked: Marked, events: &Sender<Event>) {
         if self.turn.is_some() {
             return;
         }
@@ -145,7 +176,8 @@ impl Ask {
         };
         let (resumed, highlighted) = (self.session.clone(), self.highlighted.clone());
         let asked = placed.and_then(|(on, cwd)| {
-            Ok((on, Asked::new(cwd, &words, resumed, highlighted, turn)?))
+            let asked = Asked::new(cwd, &words, resumed, highlighted, turn)?;
+            Ok((on, asked.marking(marked)))
         });
         self.talk.push(Said::You(words));
         let (on, asked) = match asked {
@@ -201,6 +233,10 @@ impl Ask {
 
     pub fn turning(&self) -> bool {
         self.turn.is_some()
+    }
+
+    pub fn talked(&self, inner: usize, now: SystemTime) -> Vec<Line<'static>> {
+        self.lines(inner, sidebar::frame(now))
     }
 
     pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
@@ -542,7 +578,7 @@ mod tests {
         let mut ask = Ask::new(1, &unread_on(Machine::Local), Path::new("/w"));
         typed(&mut ask, "close it");
         let (events, _heard) = mpsc::channel();
-        ask.send(&events);
+        ask.send(Marked::default(), &events);
         let wrong = "ask: where view 4 works, \"w\" is no absolute path".to_owned();
         assert_eq!(ask.talk, [Said::You("close it".to_owned()), Said::Wrong(wrong)]);
         assert!(!ask.turning());

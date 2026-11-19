@@ -292,7 +292,9 @@ fn a_worktree_opened_or_made_while_luneta_shows_none_takes_the_keys() {
     unshow(&mut window);
     let erased = "\x7f".repeat(root.chars().count());
     window.send(&format!("np{erased}{}\r\r", other.path.display()));
-    typed_in(&mut window, &other.path, 2);
+    eventually("the new project's home shows", || window.shows("Issues · 0").then_some(()));
+    window.send("own-2");
+    eventually("its prompt takes the keys", || window.shows("› own-2_").then_some(()));
 }
 
 #[test]
@@ -305,10 +307,9 @@ fn a_menu_opened_while_a_project_is_made_keeps_the_keys() {
     let other = directory("other");
     let erased = "\x7f".repeat(dir.path.display().to_string().chars().count());
     window.send(&format!("{SIDEBAR}np{erased}{}\r\r{SIDEBAR}n", other.path.display()));
-    eventually(&format!("luneta shows {}", other.path.display()), || {
-        let terminals = shown(&owned, &other.path)?.terminals;
-        let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
-        (found.count() == 1 && tops(&window).len() == 1).then_some(())
+    let named = format!(" other  {}", other.path.parent().unwrap().file_name().unwrap().display());
+    eventually("luneta shows the new project's home", || {
+        (window.shows(&named) && window.shows("Issues · 0")).then_some(())
     });
     eventually("the menu opened meanwhile stays open", || window.shows("─ New ─").then_some(()));
 }
@@ -394,27 +395,26 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
 }
 
 #[test]
-fn a_click_on_a_project_s_row_goes_to_its_worktree_used_last() {
+fn a_click_on_a_project_s_row_goes_to_its_home_and_one_on_a_worktree_s_back() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     let main = eventually("luneta shows work", || shown(&owned, &dir.path)).id;
-    let id_of = |name: &str| projects_of(&owned).into_iter().find(|it| it.name == name).unwrap().id;
+    let project = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().id;
     let root = dir.path.parent().unwrap();
     worktree_added(root, "docs");
-    let docs = worktree(&owned.host, id_of("work"), &root.join("docs"));
-    let far = work_in(&owned, "other");
-    let other = worktree(&owned.host, id_of("other"), &far.path);
+    let docs = worktree(&owned.host, project, &root.join("docs"));
     let used = |id: u64| used(&owned, id);
     window.send(RIGHT);
     eventually("Ctrl l goes to docs", || (used(docs) > used(main)).then_some(()));
-    let row = sidebar_row(&window, "▾ other");
-    click(&mut window, row);
-    eventually("a click on other's row goes there", || (used(other) > used(docs)).then_some(()));
     let row = sidebar_row(&window, "▾ work");
     click(&mut window, row);
-    eventually("a click on work's row goes to docs, the worktree used last there", || {
-        (used(docs) > used(other)).then_some(())
+    eventually("a click on work's row shows its home", || window.shows("Issues · 0").then_some(()));
+    assert!(used(docs) > used(main), "the home goes to no worktree");
+    let row = sidebar_row(&window, "▾ main");
+    click(&mut window, row);
+    eventually("a click on main's row goes there, out of the home", || {
+        (used(main) > used(docs) && !window.shows("Issues · 0")).then_some(())
     });
 }
 

@@ -285,21 +285,50 @@ fn a_bare_luneta_in_a_project_s_own_folder_shows_its_worktree_used_last() {
 }
 
 #[test]
-fn a_bare_luneta_at_a_clone_s_root_with_none_open_lists_its_worktrees_to_open() {
+fn a_bare_luneta_at_a_clone_s_root_shows_its_home_and_asks_the_agent_of_what_is_marked() {
     let owned = Owned::new();
     let dir = cloned("project", &["one", "two"]);
-    project(&owned.host, Path::new(&real(&dir.path)), None);
-    let window = Window::open(&owned.host, &dir, &[]);
-    eventually("luneta lists the clone's worktrees, none open", || {
-        (window.shows("project › one") && window.shows("not open")).then_some(())
+    let root = real(&dir.path);
+    project(&owned.host, Path::new(&root), None);
+    let issues = serde_json::json!([
+        {"number": 507, "title": "Open a project on a home view", "labels": [{"name": "enhancement"}]},
+        {"number": 498, "title": "Menu says no project", "labels": []},
+    ]);
+    let pulls = serde_json::json!([
+        {"number": 524, "title": "Say view, not pane", "isDraft": true, "headRefName": "issue-511",
+         "author": {"login": "o"}},
+    ]);
+    owned.host.gh.work(&issues, &pulls);
+    let home = owned.host.home.path().display().to_string();
+    let claude = format!(
+        r#"pwd -P > "{home}/asked-in"
+cat > "{home}/words"
+echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"Started both."}}'
+"#
+    );
+    script(&owned.host.bin().join("claude"), &claude);
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows the project's open issues and pull requests", || {
+        let listed = ["#507", "Open a project on a home view", "enhancement", "#524", "issue-511"];
+        listed.iter().all(|it| window.shows(it)).then_some(())
     });
+    assert!(window.shows("Issues · 2") && window.shows("Pull requests · 1"));
     let projects = projects_of(&owned);
-    let opened = projects[0].worktrees().unwrap();
-    assert!(opened.is_empty(), "none opens until one is picked: {projects:?}");
+    assert!(projects[0].worktrees().unwrap().is_empty(), "no worktree opens: {projects:?}");
+    window.send("\t\t\ttackle these\r");
+    eventually("the agent's answer shows in the home", || window.shows("Started both.").then_some(()));
+    let asked_in = fs::read_to_string(owned.host.home.path().join("asked-in")).unwrap();
+    assert_eq!(asked_in.trim(), root, "the agent works in the project's folder");
+    let words = fs::read_to_string(owned.host.home.path().join("words")).unwrap();
+    let marked = "[luneta: in the project's work view the user marked issues #498 and #507, and \
+                  pull request #524:";
+    assert!(words.contains(marked), "{words}");
+    assert!(words.ends_with("\n\ntackle these"), "{words}");
 }
 
 #[test]
-fn a_clone_s_root_picked_from_the_folders_lists_its_worktrees_to_open() {
+fn a_clone_s_root_picked_from_the_folders_shows_its_home() {
     let owned = Owned::new();
     let dir = cloned("project", &["one", "two"]);
     let root = real(&dir.path);
@@ -311,8 +340,8 @@ fn a_clone_s_root_picked_from_the_folders_lists_its_worktrees_to_open() {
     let tmp = dir.path.parent().unwrap().file_name().unwrap().to_str().unwrap().to_owned();
     eventually("the folders list the clone's root", || window.shows(&tmp).then_some(()));
     window.send("\r");
-    eventually("luneta lists the clone's worktrees, none open", || {
-        (window.shows("project › one") && window.shows("not open")).then_some(())
+    eventually("luneta shows the project's home", || {
+        (window.shows("Issues · 0") && window.shows("no open pull requests")).then_some(())
     });
     let projects = projects_of(&owned);
     let opened = projects[0].worktrees().unwrap();

@@ -2004,6 +2004,14 @@ impl Sidebar {
         self.rebuild();
     }
 
+    pub fn showing_home(&mut self, on: Machine, session: OwnKey) {
+        let home = |seat: &Sitting| seat.on == on && seat.own.session() == session;
+        let homed = self.seat.as_ref().is_some_and(|seat| home(seat) && seat.shown.is_none());
+        if !homed {
+            self.attaching(on, session);
+        }
+    }
+
     pub fn unseat(&mut self) {
         if self.seat.take().is_some() {
             self.rebuild();

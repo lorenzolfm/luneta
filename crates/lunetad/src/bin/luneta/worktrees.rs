@@ -11,11 +11,13 @@ use lunetad::api::change_projects_request::{Bring, Join, RenameTerminal};
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::make_worktree_response::Landed as Answered;
 use lunetad::api::projects::Held;
-use lunetad::api::{self, ChangeProjectsRequest, MakeWorktreeRequest, On, Version, WatchRequest};
+use lunetad::api::{self, ChangeProjectsRequest, ListWorkRequest, MakeWorktreeRequest, On};
+use lunetad::api::{Version, WatchRequest};
 use lunetad::changes::Unchanged;
 use lunetad::mux::own::TerminalKey;
 use lunetad::projects::{self, Name, Plain, ProjectId, Size, ViewId, WorktreeId};
 use lunetad::links::{self, Branch, Unready};
+use lunetad::work::{self, Work};
 use lunetad::{Asked, Beside, Daemon, Heard, SessionName};
 use tonic::{Code, Status};
 
@@ -27,6 +29,8 @@ use crate::projected::{self, Holds, Project};
 use crate::sidebar::Reorder;
 
 const ASKING: Duration = Duration::from_secs(15);
+
+const WORK_PATIENCE: Duration = work::PATIENCE.saturating_add(ASKING);
 
 enum Unmade {
     Nests(String),
@@ -236,6 +240,18 @@ pub fn branched(
     })
 }
 
+pub fn work(path: &Path, machine: &Machine, project: ProjectId) -> Result<Work, String> {
+    let request = ListWorkRequest { on: on(machine), project: project.get() };
+    let asking = async |daemon: &mut Daemon| {
+        let said = |status: Status| status.message().to_owned();
+        let mut answer = daemon.list_work(request).await.map_err(said)?.into_inner();
+        let listed = answer.message().await.map_err(said)?;
+        let listed = listed.ok_or("lunetad ended its answer with no list")?;
+        Work::of(listed)
+    };
+    asked_or(path, WORK_PATIENCE, asking, |late| late)
+}
+
 fn unbranched(status: &Status) -> Unready {
     let why = status.message().to_owned();
     match status.code() {
@@ -355,16 +371,12 @@ fn chosen(
     name: Option<&str>,
     cwd: &Path,
     folder: &str,
-) -> Option<Result<Landing, Tried>> {
+) -> Option<Result<Arrival, Tried>> {
     if let Some(name) = name {
         let named: Vec<&Project> = projects.iter().filter(|project| project.name == name).collect();
         match named[..] {
             [] => {},
-            [one] => {
-                let last = projects::last_used(one.uses()).map(Landed::Found);
-                let landing = last.map_or(Landing::Unopened(one.id), Landing::Worktree);
-                return Some(Ok(landing));
-            },
+            [one] => return Some(Ok(Arrival::Home(one.id))),
             [..] => {
                 let dirs: Vec<&str> = named.iter().map(|project| project.dir.as_str()).collect();
                 let dirs = dirs.join(", ");
@@ -375,10 +387,11 @@ fn chosen(
         }
     }
     let holding = projects.iter().find(|project| holds(&project.dir, cwd))?;
-    Some(match name {
+    let landed = match name {
         Some(name) => branched_in(path, holding, name),
         None => at_folder(path, holding, folder),
-    })
+    };
+    Some(landed.map(Arrival::of))
 }
 
 fn branched_in(path: &Path, holding: &Project, name: &str) -> Result<Landing, Tried> {
@@ -395,12 +408,27 @@ fn branched_in(path: &Path, holding: &Project, name: &str) -> Result<Landing, Tr
     made.map(Landing::Worktree).map_err(Tried::Failed)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arrival {
+    Worktree(WorktreeId),
+    Home(ProjectId),
+}
+
+impl Arrival {
+    fn of(landing: Landing) -> Arrival {
+        match landing {
+            Landing::Worktree(landed) => Arrival::Worktree(landed.worktree()),
+            Landing::Unopened(project) => Arrival::Home(project),
+        }
+    }
+}
+
 pub fn start(
     path: &Path,
     name: Option<&str>,
     cwd: &Path,
     seen: impl Fn(ProjectId) -> Option<SystemTime>,
-) -> Result<Option<Landing>, String> {
+) -> Result<Option<Arrival>, String> {
     let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
     let name = name.map(str::trim);
     twice(|| started(path, name, cwd, folder, &seen))
@@ -412,7 +440,7 @@ fn started(
     cwd: &Path,
     folder: &str,
     seen: &impl Fn(ProjectId) -> Option<SystemTime>,
-) -> Result<Option<Landing>, Tried> {
+) -> Result<Option<Arrival>, Tried> {
     let projects = kept(path)?;
     if let Some(chosen) = chosen(path, &projects, name, cwd, folder) {
         return chosen.map(Some);
@@ -421,8 +449,7 @@ fn started(
         let last = |project: &&Project| seen(project.id);
         let held = projects.iter().filter(|project| !project.worktrees().is_empty());
         let found = held.max_by_key(last).and_then(|it| projects::last_used(it.uses()));
-        let found = found.map(Landed::Found);
-        return Ok(found.map(Landing::Worktree));
+        return Ok(found.map(Arrival::Worktree));
     };
     let unmade = match add_project(path, folder, Some(name)) {
         Ok(_) => None,
@@ -516,6 +543,7 @@ pub fn renamed_terminal(
     changed_there(machine, Change::RenameTerminal(RenameTerminal { terminal, to }))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Landing {
     Worktree(Landed),
     Unopened(ProjectId),
@@ -525,14 +553,14 @@ pub fn project_made(
     machine: &Machine,
     folder: &str,
     name: Option<&Name>,
-) -> Result<Landing, String> {
+) -> Result<ProjectId, String> {
     let (dir, name) = (folder.to_owned(), name.map(spelled));
     let made = made_there(machine, Change::AddProject(AddProject { dir, name }));
     let project = made.and_then(project_of).map_err(|unmade| unmade.said_of("project"))?;
     let start = Start { folder: folder.to_owned(), name: None };
     let started = made_there(machine, Change::Start(start)).and_then(|made| match made {
-        Some(Made::Project(root)) if root == project.get() => Ok(Landing::Unopened(project)),
-        made => landed(made).map(Landing::Worktree),
+        Some(Made::Project(root)) if root == project.get() => Ok(project),
+        made => landed(made).map(|_| project),
     });
     let unstarted = |unmade: Unmade| {
         format!("{folder} is project {project}: {}", unmade.said_of("worktree"))
