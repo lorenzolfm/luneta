@@ -246,7 +246,11 @@ fn terminals(host: &api::Host) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, St
         },
         Some(Held::Kept(kept)) => kept,
     };
-    let worktrees = kept.projects.iter().flat_map(|project| &project.worktrees);
+    let mut worktrees = Vec::new();
+    for project in &kept.projects {
+        let unsaid = || format!("lunetad says not what project {} holds", project.name);
+        worktrees.extend(project.worktrees().ok_or_else(unsaid)?);
+    }
     let terminal = |terminal: &api::Terminal| {
         let key = match &terminal.found {
             Some(Found::Key(key)) => TerminalKey::of(key).ok(),
@@ -254,7 +258,7 @@ fn terminals(host: &api::Host) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, St
         };
         (key, PathBuf::from(&terminal.folder))
     };
-    Ok(worktrees.flat_map(|worktree| &worktree.terminals).map(terminal).collect())
+    Ok(worktrees.into_iter().flat_map(|worktree| &worktree.terminals).map(terminal).collect())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1055,7 +1059,8 @@ mod tests {
 
     fn kept(terminals: Vec<api::Terminal>) -> api::projects::Held {
         let worktree = api::Worktree { terminals, ..api::Worktree::default() };
-        let project = api::Project { worktrees: vec![worktree], ..api::Project::default() };
+        let holds = Some(api::project::Holds::Folder(worktree));
+        let project = api::Project { name: "luneta".to_owned(), holds, ..api::Project::default() };
         api::projects::Held::Kept(api::projects::Kept { projects: vec![project], version: None })
     }
 
@@ -1083,6 +1088,13 @@ mod tests {
         let unkept = viewed(api::projects::Held::Unkept("a newer file".to_owned()));
         let why = "lunetad keeps no layouts, and may leave out a terminal: a newer file";
         assert_eq!(Occupied::of(&unkept), Err(why.to_owned()));
+        let mut unsaid = kept(Vec::new());
+        let api::projects::Held::Kept(held) = &mut unsaid else {
+            panic!("the projects are kept");
+        };
+        held.projects[0].holds = None;
+        let why = "lunetad says not what project luneta holds";
+        assert_eq!(Occupied::of(&viewed(unsaid)), Err(why.to_owned()));
     }
 
     #[test]

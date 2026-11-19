@@ -82,7 +82,7 @@ fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
     window.send(CLOSE);
     eventually("the worktree stays, with no pane, and luneta leaves it", || {
         let projects = projects_of(&owned);
-        let mut worktrees = projects.iter().flat_map(|it| &it.worktrees);
+        let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
         let emptied = worktrees.any(|it| it.id == id && it.terminals.is_empty());
         (emptied && window.shows(UNSHOWN)).then_some(())
     });
@@ -148,7 +148,7 @@ fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_worktree_beside_but_not_past_the_proj
     eventually("the tab bar lists docs", || window.shows("docs").then_some(()));
     let used = |id: u64| {
         let projects = projects_of(&owned);
-        let found = projects.iter().flat_map(|it| &it.worktrees).find(|it| it.id == id);
+        let found = projects.iter().flat_map(|it| it.worktrees().unwrap()).find(|it| it.id == id);
         found.and_then(|it| it.used_at).map(|at| (at.seconds, at.nanos))
     };
     window.send(LEFT);
@@ -173,7 +173,7 @@ fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
     let projects = projects_of(owned);
     let made: Vec<_> = projects.iter().filter(|project| project.name == name).collect();
     assert_eq!(made.len(), 1, "{projects:?}");
-    assert_eq!(made[0].worktrees.len(), 1, "{projects:?}");
+    assert_eq!(made[0].worktrees().unwrap().len(), 1, "{projects:?}");
 }
 
 #[test]

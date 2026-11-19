@@ -68,6 +68,16 @@ impl v1::Session {
     }
 }
 
+impl v1::Project {
+    #[must_use]
+    pub fn worktrees(&self) -> Option<&[v1::Worktree]> {
+        match self.holds.as_ref()? {
+            v1::project::Holds::Folder(own) => Some(std::slice::from_ref(own)),
+            v1::project::Holds::Clone(clone) => Some(&clone.worktrees),
+        }
+    }
+}
+
 impl v1::Harness {
     #[must_use]
     pub fn prompt_word(self) -> Option<&'static str> {

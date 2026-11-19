@@ -242,10 +242,11 @@ fn real(path: &Path) -> String {
 
 pub fn shown(owned: &Owned, folder: &Path) -> Option<api::Worktree> {
     let folder = real(folder);
-    let worktrees = projects_of(owned).into_iter().flat_map(|project| project.worktrees);
+    let projects = projects_of(owned);
+    let worktrees = projects.iter().flat_map(|project| project.worktrees().unwrap());
     let mut held = worktrees.filter(|worktree| worktree.folder == folder);
     let found = |terminal: &api::Terminal| matches!(terminal.found, Some(Found::Key(_)));
-    held.find(|worktree| worktree.terminals.iter().any(found))
+    held.find(|worktree| worktree.terminals.iter().any(found)).cloned()
 }
 
 #[test]
@@ -257,7 +258,7 @@ fn a_bare_luneta_makes_the_project_of_its_directory_and_shows_its_one_worktree()
     let projects = projects_of(&owned);
     let made: Vec<(&str, &str, usize)> = projects
         .iter()
-        .map(|project| (project.name.as_str(), project.dir.as_str(), project.worktrees.len()))
+        .map(|it| (it.name.as_str(), it.dir.as_str(), it.worktrees().unwrap().len()))
         .collect();
     assert_eq!(made, [("project", real(&dir.path).as_str(), 1)]);
 }
@@ -279,7 +280,8 @@ fn a_bare_luneta_in_a_project_s_own_folder_shows_its_worktree_used_last() {
     let shown = eventually("luneta shows two again", || shown(&owned, &folders[1]));
     assert_eq!(shown.terminals.len(), 1, "{:?}", projects_of(&owned));
     assert!(self::shown(&owned, &folders[0]).is_none(), "one, used never, stays empty");
-    let worktrees = projects_of(&owned).iter().map(|it| it.worktrees.len()).sum::<usize>();
+    let counted = |it: &api::Project| it.worktrees().unwrap().len();
+    let worktrees = projects_of(&owned).iter().map(counted).sum::<usize>();
     assert_eq!(worktrees, 3, "no worktree is made at the clone's root");
 }
 
@@ -325,7 +327,8 @@ fn a_new_worktree_on_a_pane_in_a_folder_of_a_project_shows_that_folder_in_the_pr
     let folders: Vec<(&str, Vec<&str>)> = projects
         .iter()
         .map(|project| {
-            let folders = project.worktrees.iter().map(|it| it.folder.as_str()).collect();
+            let worktrees = project.worktrees().unwrap();
+            let folders = worktrees.iter().map(|it| it.folder.as_str()).collect();
             (project.name.as_str(), folders)
         })
         .collect();

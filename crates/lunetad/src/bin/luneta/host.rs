@@ -2055,7 +2055,7 @@ impl App {
             })
         };
         if let Place::Worktree(place) = place {
-            let held = project.worktrees.iter().any(|it| it.id == place.worktree);
+            let held = project.worktrees().iter().any(|it| it.id == place.worktree);
             if !held {
                 return Err(format!("{session} holds no such worktree"));
             }
@@ -2065,10 +2065,10 @@ impl App {
             return Ok(());
         }
         let Some(pane) = place.pane() else {
-            if project.worktrees.iter().any(|it| shows(it.id)) {
+            if project.worktrees().iter().any(|it| shows(it.id)) {
                 return Ok(());
             }
-            let first = project.worktrees.first();
+            let first = project.worktrees().first();
             let first = first.ok_or_else(|| format!("{session} holds no worktree"))?;
             self.go_worktree(machine, first.id, None);
             return Ok(());
@@ -2121,7 +2121,7 @@ impl App {
         let (on, left) = (right.machine().clone(), right.worktree());
         let held = |machine: &Machine| {
             let projects = self.projected.projects(machine).iter();
-            let worktrees = projects.flat_map(|it| &it.worktrees);
+            let worktrees = projects.flat_map(projected::Project::worktrees);
             let open = worktrees.filter(|it| !it.terminals.is_empty());
             let others = open.filter(|it| *machine != on || it.id != left);
             others.max_by_key(|it| it.used).map(|it| it.id)

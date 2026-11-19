@@ -42,7 +42,7 @@ fn projects(host: &Host) -> Vec<Project> {
 
 fn folders(host: &Host) -> Vec<(String, String, Vec<String>)> {
     let folders = |project: Project| {
-        let worktrees = project.worktrees.into_iter().map(|it| it.folder).collect();
+        let worktrees = project.worktrees().unwrap().iter().map(|it| it.folder.clone()).collect();
         (project.name, project.dir, worktrees)
     };
     projects(host).into_iter().map(folders).collect()
@@ -93,7 +93,8 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
     assert_eq!(said(&started(&owned.host, &main, "feat", &[])), shown(&feat));
     assert_eq!(folders(&owned.host), made, "the worktree is started again");
 
-    let worktrees = &projects(&owned.host)[0].worktrees;
+    let projects = projects(&owned.host);
+    let worktrees = projects[0].worktrees().unwrap();
     let [there, here] = [0, 1].map(|at| WorktreeId::of(worktrees[at].id).unwrap());
     let folder = folder_in(owned.host.runtime.path()).unwrap();
     let (heard, hearing) = mpsc::channel();
@@ -186,7 +187,7 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     let worktrees = [&issue, &clone.join("main")].map(|it| it.display().to_string()).to_vec();
     let made = vec![("n".to_owned(), clone.display().to_string(), worktrees)];
     assert_eq!(folders(host), made);
-    let terminals = || projects(host)[0].worktrees[0].terminals.len();
+    let terminals = || projects(host)[0].worktrees().unwrap()[0].terminals.len();
     assert_eq!(terminals(), 1);
 
     let link = "https://github.com/o/n/issues/7";
@@ -203,7 +204,8 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     assert_eq!(said(&started(host, &clone.join("main"), "#9", &[])), shown(&nine));
     let agent = eventually("an agent starts where none was", || fs::read_to_string(&asked).ok());
     assert_eq!(agent, "Tackle https://github.com/o/n/issues/9\n");
-    let mut held = projects(host).into_iter().flat_map(|it| it.worktrees);
+    let projects = projects(host);
+    let mut held = projects.iter().flat_map(|it| it.worktrees().unwrap());
     let there = held.find(|it| it.id == empty).expect("the empty worktree is the one started");
     assert_eq!(there.terminals.len(), 1);
 }

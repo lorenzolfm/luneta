@@ -15,8 +15,8 @@ use crate::claude::Scan;
 use crate::github::Found;
 use crate::mux::own::server::{self, Is};
 use crate::panes::{self, Pane, Titled};
-use crate::projects::{Dir, Name, Project, Projects, Revision, Seen, Stage, ViewId, Worktree};
-use crate::projects::WorktreeId;
+use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage, ViewId};
+use crate::projects::{Worktree, WorktreeId};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::{Doing, Shell};
@@ -514,28 +514,34 @@ impl Known {
                 return api::Projects { held: Some(unkept) };
             },
         };
-        let worktrees = |project: &Project| {
-            let built = project.placed().map(|(folder, worktree)| {
-                let branch = self.branch(folder.as_str());
-                let renamed = worktree.renamed().map(Name::as_str);
-                api::Worktree {
-                    id: worktree.id().get(),
-                    name: renamed.or(branch).unwrap_or_else(|| folder.last()).to_owned(),
-                    renamed: renamed.is_some(),
-                    seen: Some(self.seen(&folder).to_api()),
-                    folder: folder.as_str().to_owned(),
-                    terminals: self.built_terminals(worktree),
-                    used_at: worktree.used().map(|used| used.time().into()),
-                }
-            });
-            built.collect()
+        let worktree = |folder: Dir, worktree: &Worktree| {
+            let branch = self.branch(folder.as_str());
+            let renamed = worktree.renamed().map(Name::as_str);
+            api::Worktree {
+                id: worktree.id().get(),
+                name: renamed.or(branch).unwrap_or_else(|| folder.last()).to_owned(),
+                renamed: renamed.is_some(),
+                seen: Some(self.seen(&folder).to_api()),
+                folder: folder.as_str().to_owned(),
+                terminals: self.built_terminals(worktree),
+                used_at: worktree.used().map(|used| used.time().into()),
+            }
+        };
+        let holds = |project: &Project| match project.holds() {
+            Holds::Folder(own) => api::project::Holds::Folder(worktree(project.dir().clone(), own)),
+            Holds::Clone(rows) => {
+                let rows = rows.iter().map(|(subfolder, it)| {
+                    worktree(project.dir().at(subfolder), it)
+                });
+                api::project::Holds::Clone(api::project::Clone { worktrees: rows.collect() })
+            },
         };
         let project = |project: &Project| api::Project {
             id: project.id().get(),
             name: project.name().as_str().to_owned(),
             dir: project.dir().as_str().to_owned(),
             missing: self.missing.contains(project.dir()),
-            worktrees: worktrees(project),
+            holds: Some(holds(project)),
         };
         let projects = projects.all().iter().map(project).collect();
         let kept = api::projects::Kept { projects, version: Some(self.revision.to_api()) };

@@ -793,7 +793,8 @@ struct KnownWorktree {
 impl Known {
     fn of(said: &api::Project) -> Option<Known> {
         let project = ProjectRow::of_api(said)?;
-        let worktrees = said.worktrees.iter().zip(0..).filter_map(|(worktree, tab)| {
+        let rows = said.worktrees()?;
+        let worktrees = rows.iter().zip(0..).filter_map(|(worktree, tab)| {
             let id = WorktreeId::of(worktree.id)?;
             let place = WorktreePlace { project: project.clone(), worktree: id };
             let terminals = worktree.terminals.iter().map(|terminal| {
@@ -818,7 +819,7 @@ impl Known {
             Some(KnownWorktree { place, name, folder, seen, used, panes, terminals, in_panes })
         });
         let worktrees = worktrees.collect();
-        let order = said.worktrees.iter().filter_map(|it| WorktreeId::of(it.id)).collect();
+        let order = rows.iter().filter_map(|it| WorktreeId::of(it.id)).collect();
         let dir = Dir::parse(&said.dir).expect("lunetad says a project's folder as one it keeps");
         Some(Known { project, dir, worktrees, order })
     }
@@ -5243,7 +5244,7 @@ mod tests {
                 name: session.name.clone(),
                 dir: "/w".to_owned(),
                 missing: false,
-                worktrees,
+                holds: Some(api::project::Holds::Clone(api::project::Clone { worktrees })),
             }
         };
         let projects = sessions.iter().map(project).collect();
@@ -5438,7 +5439,8 @@ mod tests {
 
     fn a_project(id: u64, name: &str, worktrees: Vec<api::Worktree>) -> api::Project {
         let (name, dir) = (name.to_owned(), "/w".to_owned());
-        api::Project { id, name, dir, missing: false, worktrees }
+        let holds = Some(api::project::Holds::Clone(api::project::Clone { worktrees }));
+        api::Project { id, name, dir, missing: false, holds }
     }
 
     #[test]

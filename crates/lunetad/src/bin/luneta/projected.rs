@@ -27,12 +27,18 @@ pub struct Worktree {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Holds {
+    Folder(Worktree),
+    Clone(Vec<Worktree>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
     pub id: ProjectId,
     pub key: OwnKey,
     pub name: String,
     pub dir: String,
-    pub worktrees: Vec<Worktree>,
+    pub holds: Holds,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,19 +87,27 @@ pub fn key_of(project: ProjectId) -> OwnKey {
 
 impl Project {
     #[must_use]
+    pub fn worktrees(&self) -> &[Worktree] {
+        match &self.holds {
+            Holds::Folder(own) => std::slice::from_ref(own),
+            Holds::Clone(rows) => rows,
+        }
+    }
+
+    #[must_use]
     pub fn pane_of(&self, terminal: ViewId) -> Option<OwnPane> {
-        let mut held = self.worktrees.iter().flat_map(|it| &it.terminals);
+        let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
         let (_, key) = held.find(|(id, _)| *id == terminal)?;
         Some(OwnPane { session: self.key, id: key.as_ref()?.id })
     }
 
     fn first_keyed(&self) -> Option<TerminalKey> {
-        let mut held = self.worktrees.iter().flat_map(|it| &it.terminals);
+        let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
         held.find_map(|(_, key)| *key)
     }
 
     fn holding(&self, pane: NonZeroU32) -> Option<(WorktreeId, ViewId, TerminalKey)> {
-        let held = self.worktrees.iter().flat_map(|worktree| {
+        let held = self.worktrees().iter().flat_map(|worktree| {
             let keyed = worktree.terminals.iter().filter_map(|(id, key)| Some((*id, (*key)?)));
             keyed.map(|(id, key)| (worktree.id, id, key))
         });
@@ -155,7 +169,7 @@ impl Projected {
         worktree: WorktreeId,
     ) -> Option<(&Project, &Worktree)> {
         self.projects(on).iter().find_map(|project| {
-            let found = project.worktrees.iter().find(|it| it.id == worktree)?;
+            let found = project.worktrees().iter().find(|it| it.id == worktree)?;
             Some((project, found))
         })
     }
@@ -167,13 +181,14 @@ impl Projected {
         worktree: WorktreeId,
     ) -> (Option<WorktreeId>, Option<WorktreeId>) {
         let held = self.projects(on).iter().find_map(|project| {
-            Some((project, project.worktrees.iter().position(|it| it.id == worktree)?))
+            Some((project, project.worktrees().iter().position(|it| it.id == worktree)?))
         });
         let Some((project, at)) = held else {
             return (None, None);
         };
-        let before = at.checked_sub(1).and_then(|it| project.worktrees.get(it));
-        let after = project.worktrees.get(at + 1);
+        let worktrees = project.worktrees();
+        let before = at.checked_sub(1).and_then(|it| worktrees.get(it));
+        let after = worktrees.get(at + 1);
         (before.map(|it| it.id), after.map(|it| it.id))
     }
 
@@ -206,7 +221,7 @@ impl Projected {
             return (Vec::new(), BTreeMap::new());
         };
         let tab = |it: &Worktree| Tab { worktree: it.id, name: it.name.clone() };
-        (project.worktrees.iter().map(tab).collect(), shown.titles.clone())
+        (project.worktrees().iter().map(tab).collect(), shown.titles.clone())
     }
 }
 
@@ -221,7 +236,7 @@ fn seat(projects: &[Project], agents: &mut [api::Agent], unread_files: &mut [api
     let seat = |key: &api::TerminalKey| {
         let key = TerminalKey::of(key).ok()?;
         projects.iter().find_map(|project| {
-            let holds = project.worktrees.iter().flat_map(|it| &it.terminals);
+            let holds = project.worktrees().iter().flat_map(|it| &it.terminals);
             let held = holds.filter_map(|(_, held)| *held).any(|held| held == key);
             held.then(|| api::Own::from(OwnPane { session: project.key, id: key.id }))
         })
@@ -258,7 +273,7 @@ fn title_of(terminal: &api::Terminal) -> Option<String> {
 pub fn project(project: &api::Project) -> Result<Project, String> {
     let named = &project.name;
     let id = ProjectId::of(project.id).ok_or_else(|| format!("project {named} has id 0"))?;
-    let worktree = |(worktree, tab): (&api::Worktree, u32)| {
+    let worktree = |(worktree, tab): (&api::Worktree, u32)| -> Result<Worktree, String> {
         let (named, of) = (&worktree.name, &project.name);
         let id = WorktreeId::of(worktree.id);
         let id = id.ok_or_else(|| format!("worktree {named} of project {of} has id 0"))?;
@@ -278,14 +293,15 @@ pub fn project(project: &api::Project) -> Result<Project, String> {
         let used = used.map_err(|why| format!("worktree {named}'s last use: {why}"))?;
         Ok(Worktree { id, name, folder, tab, terminals, titles, used })
     };
-    let worktrees = project.worktrees.iter().zip(0..).map(worktree);
-    Ok(Project {
-        id,
-        key: key_of(id),
-        name: project.name.clone(),
-        dir: project.dir.clone(),
-        worktrees: worktrees.collect::<Result<_, String>>()?,
-    })
+    let holds = match project.holds.as_ref() {
+        Some(api::project::Holds::Folder(own)) => Holds::Folder(worktree((own, 0))?),
+        Some(api::project::Holds::Clone(clone)) => {
+            let rows = clone.worktrees.iter().zip(0..).map(worktree);
+            Holds::Clone(rows.collect::<Result<_, String>>()?)
+        },
+        None => return Err(format!("project {named} says not what it holds")),
+    };
+    Ok(Project { id, key: key_of(id), name: project.name.clone(), dir: project.dir.clone(), holds })
 }
 
 #[cfg(test)]
@@ -329,11 +345,12 @@ mod tests {
             terminals: vec![terminal(23, terminal::Found::Key(key(5)), None)],
             ..api::Worktree::default()
         };
+        let worktrees = vec![first, second];
         let project = api::Project {
             id: 7,
             name: "bitwarden backup".to_owned(),
             dir: "/w".to_owned(),
-            worktrees: vec![first, second],
+            holds: Some(api::project::Holds::Clone(api::project::Clone { worktrees })),
             ..api::Project::default()
         };
         let kept = Held::Kept(Kept { projects: vec![project], version: None });
@@ -430,13 +447,20 @@ mod tests {
         &mut kept.projects[0]
     }
 
+    fn rows(project: &mut api::Project) -> &mut Vec<api::Worktree> {
+        let Some(api::project::Holds::Clone(clone)) = &mut project.holds else {
+            panic!("the project is a clone");
+        };
+        &mut clone.worktrees
+    }
+
     #[test]
     fn a_pane_two_terminals_claim_leads_to_neither() {
         let mut host = host();
         let made_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
         let remade = api::TerminalKey { id: 4, made_at };
         let again = terminal(24, terminal::Found::Key(remade), None);
-        kept(&mut host).worktrees[1].terminals.push(again);
+        rows(kept(&mut host))[1].terminals.push(again);
         let projected = Projected::adapted(&mut host).unwrap();
         let project_key = key_of(ProjectId::of(7).unwrap());
         let pane = OwnPane { session: project_key, id: NonZeroU32::new(4).unwrap() };
@@ -470,7 +494,7 @@ mod tests {
         assert_eq!(projected.whole(&here, &gone), unkept);
 
         let mut looking = host();
-        for worktree in &mut kept(&mut looking).worktrees {
+        for worktree in rows(kept(&mut looking)) {
             for terminal in &mut worktree.terminals {
                 terminal.found = Some(terminal::Found::Looking(()));
             }
@@ -484,8 +508,8 @@ mod tests {
     fn a_project_worktree_or_terminal_of_id_0_or_a_key_unread_is_refused() {
         let zeroed: [fn(&mut api::Project); 3] = [
             |project| project.id = 0,
-            |project| project.worktrees[1].id = 0,
-            |project| project.worktrees[0].terminals[1].id = 0,
+            |project| rows(project)[1].id = 0,
+            |project| rows(project)[0].terminals[1].id = 0,
         ];
         for zero in zeroed {
             let mut host = host();
@@ -495,8 +519,28 @@ mod tests {
         }
         let mut host = host();
         let unmade = api::TerminalKey { id: 4, made_at: None };
-        kept(&mut host).worktrees[0].terminals[0].found = Some(terminal::Found::Key(unmade));
+        rows(kept(&mut host))[0].terminals[0].found = Some(terminal::Found::Key(unmade));
         let refused = Projected::adapted(&mut host).unwrap_err();
         assert!(refused.starts_with("terminal "), "{refused}");
+    }
+
+    #[test]
+    fn a_project_holds_its_folder_or_its_clone_s_worktrees_and_says_which() {
+        let mut folder = host();
+        let own = rows(kept(&mut folder)).remove(0);
+        kept(&mut folder).holds = Some(api::project::Holds::Folder(own));
+        let projected = Projected::adapted(&mut folder).unwrap();
+        let project = &projected.projects(&Machine::Local)[0];
+        let Holds::Folder(own) = &project.holds else {
+            panic!("a folder holds its own worktree: {:?}", project.holds);
+        };
+        assert_eq!((own.id, project.worktrees().len()), (worktree(11), 1));
+        let clone = Projected::adapted(&mut host()).unwrap();
+        let ids: Vec<WorktreeId> =
+            clone.projects(&Machine::Local)[0].worktrees().iter().map(|it| it.id).collect();
+        assert_eq!(ids, [worktree(11), worktree(12)]);
+        kept(&mut folder).holds = None;
+        let refused = Projected::adapted(&mut folder).unwrap_err();
+        assert_eq!(refused, "project bitwarden backup says not what it holds");
     }
 }

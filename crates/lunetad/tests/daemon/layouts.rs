@@ -263,9 +263,8 @@ fn watched_worktree(owned: &Owned, worktree: u64) -> Option<Worktree> {
     let Some(Held::Kept(kept)) = host.projects.and_then(|projects| projects.held) else {
         panic!("lunetad keeps no projects");
     };
-    let worktrees = kept.projects.into_iter().flat_map(|project| project.worktrees);
-    let mut worktrees = worktrees.filter(|it| it.id == worktree);
-    worktrees.next()
+    let mut worktrees = kept.projects.iter().flat_map(|project| project.worktrees().unwrap());
+    worktrees.find(|it| it.id == worktree).cloned()
 }
 
 fn watched(owned: &Owned, worktree: u64) -> Vec<Terminal> {
@@ -1435,16 +1434,16 @@ fn luneta_shows_another_machine_s_worktree_types_there_and_opens_a_terminal_besi
     });
     let far_terminal = |owned: &Owned| {
         let projects = projects_of(owned);
-        let worktrees = projects.into_iter().flat_map(|project| project.worktrees);
-        let terminals = worktrees.flat_map(|worktree| worktree.terminals);
-        terminals.into_iter().any(|it| it.id == terminal)
+        let worktrees = projects.iter().flat_map(|project| project.worktrees().unwrap());
+        let mut terminals = worktrees.flat_map(|worktree| &worktree.terminals);
+        terminals.any(|it| it.id == terminal)
     };
     assert!(far_terminal(&far), "the terminal typed into is far's");
 
     let far_terminals = || {
         let projects = projects_of(&far);
-        let worktrees = projects.into_iter().flat_map(|project| project.worktrees);
-        let held = worktrees.into_iter().find(|it| it.id == worktree);
+        let mut worktrees = projects.iter().flat_map(|project| project.worktrees().unwrap());
+        let held = worktrees.find(|it| it.id == worktree);
         held.map_or(0, |it| it.terminals.len())
     };
     window.send("\x1ba");

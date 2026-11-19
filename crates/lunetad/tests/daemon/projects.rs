@@ -6,6 +6,7 @@ use lunetad::api::change_projects_request::{
     AddProject, AddWorktree, Change, Pull, ReorderProjects, ReorderWorktrees, Start,
 };
 use lunetad::api::change_projects_response::Made;
+use lunetad::api::project::{self, Holds};
 use lunetad::api::projects::{Held, Kept};
 use lunetad::api::worktree::Seen;
 use lunetad::api::{self, ChangeProjectsRequest, ChangeProjectsResponse as Answered, On, Stage};
@@ -101,22 +102,24 @@ fn projects_and_worktrees_are_watched_and_come_back_when_lunetad_starts_again() 
                 name: "luneta".to_owned(),
                 dir: text(&clone),
                 missing: false,
-                worktrees: vec![api::Worktree {
-                    id: main,
-                    name: "main".to_owned(),
-                    renamed: false,
-                    folder: text(&clone.join("main")),
-                    seen: Some(Seen::Stage(Stage::Working.into())),
-                    terminals: Vec::new(),
-                    used_at: None,
-                }],
+                holds: Some(Holds::Clone(project::Clone {
+                    worktrees: vec![api::Worktree {
+                        id: main,
+                        name: "main".to_owned(),
+                        renamed: false,
+                        folder: text(&clone.join("main")),
+                        seen: Some(Seen::Stage(Stage::Working.into())),
+                        terminals: Vec::new(),
+                        used_at: None,
+                    }],
+                })),
             },
             api::Project {
                 id: backup,
                 name: "bitwarden backup".to_owned(),
                 dir: text(&vault),
                 missing: false,
-                worktrees: vec![api::Worktree {
+                holds: Some(Holds::Folder(api::Worktree {
                     id: notes,
                     name: "Vault".to_owned(),
                     renamed: false,
@@ -124,7 +127,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_lunetad_starts_again() 
                     seen: Some(Seen::Stage(Stage::NoBranch.into())),
                     terminals: Vec::new(),
                     used_at: None,
-                }],
+                })),
             },
         ],
     });
@@ -158,7 +161,7 @@ fn a_folder_that_goes_is_kept_and_said_to_be_missing() {
         let [project] = projects.as_slice() else {
             panic!("{projects:?}");
         };
-        (project.missing, project.worktrees[0].seen)
+        (project.missing, project.worktrees().unwrap()[0].seen)
     };
     let no_branch = Some(Seen::Stage(Stage::NoBranch.into()));
 
@@ -197,7 +200,7 @@ fn a_clone_s_worktrees_made_or_removed_outside_luneta_come_and_go_on_the_sweep()
             panic!("{projects:?}");
         };
         assert_eq!((project.id, project.dir.as_str()), (luneta, text(&clone).as_str()));
-        project.worktrees.iter().map(|it| it.folder.clone()).collect::<Vec<_>>()
+        project.worktrees().unwrap().iter().map(|it| it.folder.clone()).collect::<Vec<_>>()
     };
     assert_eq!(folders(&host), [text(&clone.join("main"))], "a project is its clone's");
 
@@ -226,7 +229,7 @@ fn a_folder_s_project_becomes_its_clone_s_when_wt_clones_into_its_folder() {
             panic!("{projects:?}");
         };
         assert_eq!((project.id, project.dir.as_str()), (luneta, text(&folder).as_str()));
-        let rows = project.worktrees.iter().map(|it| (it.id, it.folder.clone()));
+        let rows = project.worktrees().unwrap().iter().map(|it| (it.id, it.folder.clone()));
         rows.collect::<Vec<_>>()
     };
     let [(own, at)] = rows(&host).try_into().unwrap();
@@ -375,9 +378,8 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     };
     let folders = || {
         let Held::Kept(kept) = held(&far) else { panic!("far keeps its projects") };
-        let projects = kept.projects.into_iter();
-        let folders = |it: api::Project| it.worktrees.into_iter().map(|it| (it.id, it.folder));
-        projects.flat_map(folders).collect::<Vec<_>>()
+        let worktrees = kept.projects.iter().flat_map(|it| it.worktrees().unwrap());
+        worktrees.map(|it| (it.id, it.folder.clone())).collect::<Vec<_>>()
     };
 
     let Some(Made::Found(feat)) = start("luneta/feat") else {
@@ -406,7 +408,7 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
         panic!("a start in no project makes one and goes to its worktree");
     };
     let Held::Kept(kept) = held(&far) else { panic!("far keeps its projects") };
-    let held_in = |it: &&api::Project| it.worktrees.iter().any(|it| it.id == elo);
+    let held_in = |it: &&api::Project| it.worktrees().unwrap().iter().any(|it| it.id == elo);
     let made = kept.projects.iter().find(held_in).expect("far keeps elo");
     assert_eq!(made.dir, text(&real.join("elo")));
     let holds = Start { folder: text(&link), name: None };

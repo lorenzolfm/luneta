@@ -901,7 +901,14 @@ message Project {
   string name = 2;
   string dir = 3;
   bool missing = 4;
-  repeated Worktree worktrees = 5;
+  oneof holds {
+    Worktree folder = 5;
+    Clone clone = 6;
+  }
+
+  message Clone {
+    repeated Worktree worktrees = 1;
+  }
 }
 
 message Worktree {

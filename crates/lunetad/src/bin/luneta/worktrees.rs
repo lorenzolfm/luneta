@@ -257,12 +257,12 @@ fn holds(dir: &str, folder: &Path) -> bool {
 
 fn last_used(project: &Project) -> Option<WorktreeId> {
     let mut last: Option<&Worktree> = None;
-    for worktree in &project.worktrees {
+    for worktree in project.worktrees() {
         if last.is_none_or(|last| worktree.used > last.used) {
             last = Some(worktree);
         }
     }
-    assert_eq!(last.is_some(), !project.worktrees.is_empty(), "a project's worktree is last");
+    assert_eq!(last.is_some(), !project.worktrees().is_empty(), "a project's worktree is last");
     last.map(|it| it.id)
 }
 
@@ -467,10 +467,10 @@ pub fn dirs(path: &Path) -> Result<Vec<String>, String> {
 
 pub fn folder_of(path: &Path, worktree: WorktreeId) -> Result<PathBuf, String> {
     let projects = kept(path)?;
-    let mut worktrees = projects.into_iter().flat_map(|project| project.worktrees);
+    let mut worktrees = projects.iter().flat_map(Project::worktrees);
     let found = worktrees.find(|it| it.id == worktree);
     let found = found.ok_or_else(|| format!("lunetad keeps no worktree {worktree}"))?;
-    Ok(PathBuf::from(found.folder))
+    Ok(PathBuf::from(&found.folder))
 }
 
 pub enum Went {
