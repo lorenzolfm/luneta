@@ -3945,18 +3945,14 @@ impl Sidebar {
                 self.toggle();
                 return Asked::Take;
             }
-            if !row.stops() {
-                let Some((on, place)) = spot.placed() else {
-                    return Asked::Take;
-                };
-                return self.go_to(on, place);
-            }
         }
-        self.cursor = Some(spot);
-        match self.go() {
-            Asked::Nothing => Asked::Take,
-            asked => asked,
+        let stops = row.stops();
+        let placed = spot.clone().placed();
+        let (on, place) = placed.expect("a project's, a worktree's or a view's row has a place");
+        if stops {
+            self.cursor = Some(spot);
         }
+        self.go_to(on, place)
     }
 
     fn line_of(&self, y: u16, area: Rect) -> Option<usize> {

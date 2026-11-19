@@ -2169,13 +2169,11 @@ impl App {
             return Ok(());
         }
         let Some(pane) = place.pane() else {
-            let worktrees = project.worktrees();
-            if worktrees.iter().any(|it| shows(it.id)) {
+            if project.worktrees().iter().any(|it| shows(it.id)) {
                 return Ok(());
             }
-            let used = worktrees.iter().filter(|it| it.used.is_some()).max_by_key(|it| it.used);
-            let last = used.or(worktrees.first());
-            let last = last.ok_or_else(|| format!("{session} holds no worktree"))?.id;
+            let last = worktrees::last_used(project);
+            let last = last.ok_or_else(|| format!("{session} holds no worktree"))?;
             self.go_worktree(machine, last, None);
             return Ok(());
         };
