@@ -489,7 +489,7 @@ impl Keeping {
             Ok(Read { projects, rooted: true }) => match write(&file, &projects) {
                 Ok(()) => {
                     let written = projects.clone();
-                    Keeping::Kept { file, projects, written, _lock: lock }
+                    Keeping::Kept { file, projects, written }
                 },
                 Err(error) => {
                     Keeping::Unkept(left(&file, &format!("rooted, it is unwritten: {error}")))
