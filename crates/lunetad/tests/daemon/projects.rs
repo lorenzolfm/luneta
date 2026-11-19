@@ -692,11 +692,13 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
     reached(&here, "far", |_| true);
     let scratch = tempfile::tempdir().unwrap();
     let scratch = fs::canonicalize(scratch.path()).unwrap();
-    let (clone, vault) = (scratch.join("luneta"), scratch.join("Vault"));
+    let (clone, vault, notes) = (scratch.join("luneta"), scratch.join("Vault"), scratch.join("notes"));
     cloned_as_wt(&scratch, &scratch.join("up"), &clone);
     fs::create_dir_all(&vault).unwrap();
+    fs::create_dir_all(&notes).unwrap();
     let luneta = project(&far, &clone, None);
     let backup = project(&far, &vault, None);
+    let notes = project(&far, &notes, None);
     let issues = serde_json::json!([
         {"number": 507, "title": "Open a project on a home view", "labels": [{"name": "enhancement"}]},
         {"number": 498, "title": "Menu says no project", "labels": []},
@@ -753,7 +755,7 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
     assert!(far.gh.worked().iter().any(|it| it.starts_with(&format!("{} ", text(&vault)))));
 
     far.gh.refuse_work("none of the git remotes configured for this repository point to a known GitHub host");
-    let refused = work_on(&here, Some("far"), luneta).unwrap_err();
+    let refused = work_on(&here, Some("far"), notes).unwrap_err();
     assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
     let said = "gh issue list --state open: none of the git remotes configured for this \
                 repository point to a known GitHub host";
@@ -763,4 +765,24 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
     assert_eq!((refused.code(), refused.message()), unnamed);
     let refused = work_on(&here, Some("far"), u64::MAX).unwrap_err();
     assert_eq!(refused.code(), Code::NotFound, "{refused:?}");
+}
+
+#[test]
+fn a_folder_s_work_is_listed_once_for_all_who_ask_within_a_while() {
+    let host = Host::new();
+    let _lunetad = start(host.vars()).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let notes = fs::canonicalize(scratch.path()).unwrap().join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    let notes = project(&host, &notes, None);
+    host.gh.slow_work();
+    thread::scope(|scope| {
+        let asks: Vec<_> = (0..3).map(|_| scope.spawn(|| work_on(&host, None, notes))).collect();
+        for ask in asks {
+            assert!(ask.join().unwrap().is_ok());
+        }
+    });
+    assert_eq!(host.gh.worked().len(), 2, "one issue list and one pull request list for all three");
+    work_on(&host, None, notes).unwrap();
+    assert_eq!(host.gh.worked().len(), 2, "and the next ask is answered from what they listed");
 }

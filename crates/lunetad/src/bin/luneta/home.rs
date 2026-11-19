@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lunetad::asks::Marked;
 use lunetad::projects::ProjectId;
-use lunetad::work::Work;
+use lunetad::work::{self, Work};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -21,6 +21,8 @@ use crate::menu::{self, Hint};
 use crate::sidebar::{self, ACCENT};
 
 pub const AGAIN: Duration = Duration::from_secs(60);
+
+const _: () = assert!(work::FRESH.as_millis() < AGAIN.as_millis());
 
 const ASK_TITLE: &str = "Ask";
 

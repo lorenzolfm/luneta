@@ -30,7 +30,7 @@ use crate::sidebar::Reorder;
 
 const ASKING: Duration = Duration::from_secs(15);
 
-const WORK_PATIENCE: Duration = work::PATIENCE.saturating_add(ASKING);
+const WORK_PATIENCE: Duration = work::ANSWERED_MAX.saturating_add(ASKING);
 
 enum Unmade {
     Nests(String),

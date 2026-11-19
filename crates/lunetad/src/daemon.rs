@@ -188,7 +188,8 @@ pub async fn serve(
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
-    let host = Host { started, claude_folder, core, watchers, bridges, layouts };
+    let listings = Arc::new(work::Listings::default());
+    let host = Host { started, claude_folder, core, watchers, bridges, layouts, listings };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     let ended = async move {
@@ -392,6 +393,7 @@ struct Host {
     watchers: Arc<Watchers>,
     bridges: Arc<Bridges>,
     layouts: SyncSender<layouts::Command>,
+    listings: Arc<work::Listings>,
 }
 
 #[tonic::async_trait]
@@ -841,10 +843,10 @@ impl Daemon for Host {
             let answer = daemon.list_work(asked).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let layouts = self.layouts.clone();
+        let (layouts, listings) = (self.layouts.clone(), Arc::clone(&self.listings));
         let answer = late(move || {
             let root = rooted(&layouts, project)?;
-            let work = work::listed(root.dir()).map_err(Status::failed_precondition)?;
+            let work = listings.list(root.dir()).map_err(Status::failed_precondition)?;
             Ok(work.answer())
         });
         Ok(Response::new(Box::pin(answer)))

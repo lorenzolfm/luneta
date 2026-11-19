@@ -1,16 +1,18 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroU32;
 use std::panic;
 use std::process::Command;
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use crate::api::list_work_response::{Issue as SaidIssue, Pull as SaidPull};
 use crate::api::ListWorkResponse;
-use crate::projects::Dir;
+use crate::projects::{Dir, PROJECTS_MAX};
 use crate::{git, program};
 
 pub const LISTED_MAX: usize = 50;
@@ -22,6 +24,12 @@ pub const TITLE_BYTES_MAX: usize = 1024;
 pub const NAME_BYTES_MAX: usize = 256;
 
 pub const PATIENCE: Duration = Duration::from_secs(30);
+
+pub const ANSWERED_MAX: Duration = PATIENCE.saturating_mul(2);
+
+pub const FRESH: Duration = Duration::from_secs(15);
+
+const LISTINGS_MAX: usize = PROJECTS_MAX;
 
 const ISSUES: [&str; 4] = ["issue", "list", "--state", "open"];
 
@@ -123,6 +131,99 @@ impl Work {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct Listings {
+    slots: Mutex<Slots>,
+    done: Condvar,
+}
+
+impl Listings {
+    pub fn list(&self, dir: &Dir) -> Result<Work, String> {
+        let slots = locked(&self.slots);
+        let waited = self.done.wait_timeout_while(slots, PATIENCE, |slots| slots.running(dir));
+        let (mut slots, waited) = waited.unwrap_or_else(PoisonError::into_inner);
+        if waited.timed_out() {
+            let (dir, waited) = (dir.as_str(), PATIENCE.as_secs());
+            return Err(format!("gh has listed the work in {dir} for over {waited}s"));
+        }
+        let now = Instant::now();
+        if let Some(listed) = slots.fresh(dir, now) {
+            return listed;
+        }
+        slots.run(dir, now)?;
+        drop(slots);
+        let listed = panic::catch_unwind(|| listed_by_gh(dir));
+        let kept = listed.as_ref().ok().map(|listed| (Instant::now(), listed.clone()));
+        locked(&self.slots).ran(dir, kept);
+        self.done.notify_all();
+        listed.unwrap_or_else(|panic| panic::resume_unwind(panic))
+    }
+}
+
+#[derive(Debug, Default)]
+struct Slots {
+    slots: BTreeMap<Dir, Slot>,
+}
+
+#[derive(Debug)]
+enum Slot {
+    Running,
+    Listed { at: Instant, listed: Result<Work, String> },
+}
+
+impl Slots {
+    fn running(&self, dir: &Dir) -> bool {
+        matches!(self.slots.get(dir), Some(Slot::Running))
+    }
+
+    fn fresh(&self, dir: &Dir, now: Instant) -> Option<Result<Work, String>> {
+        match self.slots.get(dir)? {
+            Slot::Listed { at, listed } if fresh(*at, now) => Some(listed.clone()),
+            Slot::Listed { .. } => None,
+            Slot::Running => unreachable!("a listing that runs is waited for before it is read"),
+        }
+    }
+
+    fn run(&mut self, dir: &Dir, now: Instant) -> Result<(), String> {
+        self.slots.retain(|_, slot| match slot {
+            Slot::Running => true,
+            Slot::Listed { at, .. } => fresh(*at, now),
+        });
+        if self.slots.len() == LISTINGS_MAX {
+            let listed = self.slots.iter().filter_map(|(dir, slot)| match slot {
+                Slot::Listed { at, .. } => Some((*at, dir)),
+                Slot::Running => None,
+            });
+            let Some((_, oldest)) = listed.min() else {
+                let most = format!("{LISTINGS_MAX} folders at once, its most");
+                return Err(format!("lunetad lists the work of {most}"));
+            };
+            let oldest = oldest.clone();
+            self.slots.remove(&oldest);
+        }
+        assert!(self.slots.len() < LISTINGS_MAX, "a listing has room to run");
+        let was = self.slots.insert(dir.clone(), Slot::Running);
+        assert!(was.is_none(), "a folder is listed once at a time, and its stale listing went");
+        Ok(())
+    }
+
+    fn ran(&mut self, dir: &Dir, kept: Option<(Instant, Result<Work, String>)>) {
+        let was = self.slots.remove(dir);
+        assert!(matches!(was, Some(Slot::Running)), "only a listing that runs ends");
+        if let Some((at, listed)) = kept {
+            self.slots.insert(dir.clone(), Slot::Listed { at, listed });
+        }
+    }
+}
+
+fn fresh(at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(at) < FRESH
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[derive(Deserialize)]
 struct ListedIssue {
     number: NonZeroU32,
@@ -151,7 +252,7 @@ struct Author {
     login: String,
 }
 
-pub fn listed(dir: &Dir) -> Result<Work, String> {
+fn listed_by_gh(dir: &Dir) -> Result<Work, String> {
     let folder = dir.as_str().to_owned();
     let pulls = thread::Builder::new()
         .name("work-pulls".to_owned())
@@ -279,6 +380,54 @@ mod tests {
         assert_eq!(Work::new(vec![labelled(&long)], vec![]), refused);
         let most = "b".repeat(NAME_BYTES_MAX);
         assert!(Work::new(vec![labelled(&most)], vec![pull(&most, Some(&most))]).is_ok());
+    }
+
+    fn dir(path: &str) -> Dir {
+        Dir::parse(path).unwrap()
+    }
+
+    #[test]
+    fn a_listing_is_kept_a_while_and_none_is_kept_of_one_that_panicked() {
+        let (mut slots, now, luneta) = (Slots::default(), Instant::now(), dir("/w/luneta"));
+        assert_eq!(slots.fresh(&luneta, now), None);
+        slots.run(&luneta, now).unwrap();
+        assert!(slots.running(&luneta));
+        let work = Ok(Work::new(vec![issue(1, "one")], vec![]).unwrap());
+        slots.ran(&luneta, Some((now, work.clone())));
+        assert!(!slots.running(&luneta));
+        assert_eq!(slots.fresh(&luneta, now + FRESH.saturating_sub(Duration::from_millis(1))), Some(work));
+        assert_eq!(slots.fresh(&luneta, now + FRESH), None);
+        let refused = Err("gh is not on the PATH".to_owned());
+        slots.run(&luneta, now + FRESH).unwrap();
+        slots.ran(&luneta, Some((now + FRESH, refused.clone())));
+        assert_eq!(slots.fresh(&luneta, now + FRESH), Some(refused), "a refusal is kept as long");
+        slots.run(&luneta, now + FRESH * 2).unwrap();
+        slots.ran(&luneta, None);
+        assert!(!slots.running(&luneta));
+        assert_eq!(slots.fresh(&luneta, now + FRESH * 2), None);
+    }
+
+    #[test]
+    fn listings_make_room_by_what_is_stale_then_the_oldest_but_never_a_running_one() {
+        let (mut slots, now) = (Slots::default(), Instant::now());
+        let dirs: Vec<Dir> = (0..=LISTINGS_MAX).map(|at| dir(&format!("/w/{at}"))).collect();
+        let after = |millis: usize| now + Duration::from_millis(u64::try_from(millis).unwrap());
+        for (at, dir) in dirs[..LISTINGS_MAX].iter().enumerate() {
+            slots.run(dir, after(at)).unwrap();
+            slots.ran(dir, Some((after(at), Ok(Work::default()))));
+        }
+        slots.run(&dirs[LISTINGS_MAX], after(LISTINGS_MAX)).unwrap();
+        assert_eq!(slots.fresh(&dirs[0], after(LISTINGS_MAX)), None, "the oldest made room");
+        assert_eq!(slots.fresh(&dirs[1], after(LISTINGS_MAX)), Some(Ok(Work::default())));
+        assert_eq!(slots.slots.len(), LISTINGS_MAX);
+        slots.run(&dirs[0], now + FRESH * 2).unwrap();
+        assert_eq!(slots.slots.len(), 2, "the stale went, and the two running stay");
+        let mut running = Slots::default();
+        for dir in &dirs[..LISTINGS_MAX] {
+            running.run(dir, now).unwrap();
+        }
+        let refused = Err("lunetad lists the work of 64 folders at once, its most".to_owned());
+        assert_eq!(running.run(&dirs[LISTINGS_MAX], now), refused);
     }
 
     #[test]

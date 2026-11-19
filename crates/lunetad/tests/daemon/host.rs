@@ -131,6 +131,7 @@ if [ "$1 $2" = "label list" ] || [ "$1 $2 $3 $4" = "issue list --author @me" ]; 
 fi
 if [ "$1 $2 $3 $4" = "issue list --state open" ] || [ "$1 $2 $3 $4" = "pr list --state open" ]; then
     echo "$(pwd -P) $*" >> "$pulls/worked"
+    [ -f "$pulls/work-slow" ] && sleep 1
     if [ -f "$pulls/work-fails" ]; then
         cat "$pulls/work-fails" >&2
         exit 1
@@ -307,6 +308,10 @@ exec cat "$said"
     pub fn work(&self, issues: &serde_json::Value, pulls: &serde_json::Value) {
         fs::write(self.pulls.join("work-issue"), issues.to_string()).unwrap();
         fs::write(self.pulls.join("work-pr"), pulls.to_string()).unwrap();
+    }
+
+    pub fn slow_work(&self) {
+        fs::write(self.pulls.join("work-slow"), "").unwrap();
     }
 
     pub fn refuse_work(&self, why: &str) {
