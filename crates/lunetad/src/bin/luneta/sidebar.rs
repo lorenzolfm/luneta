@@ -3382,19 +3382,31 @@ impl Sidebar {
     }
 
     pub fn aimed_row(&self) -> Aim {
-        self.target().map_or(Aim::Unplaced(PALETTE_NO_ROW), |row| Aim::At(Rc::new(row)))
+        match self.target() {
+            Some(row) => Aim::At { target: Rc::new(row), worktree: None },
+            None => Aim::Unplaced(PALETTE_NO_ROW),
+        }
     }
 
     pub fn aimed_view(&self) -> Aim {
-        let place = self.here_place().ok();
-        let target = place.and_then(|place| self.target_at(self.on(), Place::View(place)));
-        target.map_or(Aim::Unplaced(PALETTE_UNPLACED), |view| Aim::At(Rc::new(view)))
+        let view = self.here_place().ok().and_then(|place| self.here_target(Place::View(place)));
+        let worktree = self.here_worktree().map(Place::Worktree);
+        let worktree = worktree.and_then(|place| self.here_target(place));
+        match view {
+            Some(target) => Aim::At { target, worktree },
+            None => Aim::Unplaced(PALETTE_UNPLACED),
+        }
     }
 
     pub fn aimed_worktree(&self) -> Aim {
-        let place = self.here_worktree();
-        let target = place.and_then(|place| self.target_at(self.on(), Place::Worktree(place)));
-        target.map_or(Aim::Unplaced(PALETTE_UNPLACED), |worktree| Aim::At(Rc::new(worktree)))
+        match self.here_worktree().and_then(|place| self.here_target(Place::Worktree(place))) {
+            Some(target) => Aim::At { target, worktree: None },
+            None => Aim::Unplaced(PALETTE_UNPLACED),
+        }
+    }
+
+    fn here_target(&self, place: Place) -> Option<Rc<Target>> {
+        self.target_at(self.on(), place).map(Rc::new)
     }
 
     pub fn act_on_row(&mut self, target: &Target, action: Action, now: SystemTime) -> Asked {
@@ -9261,7 +9273,7 @@ mod tests {
         assert_eq!(sidebar.aimed_view(), unplaced, "no view is shown yet");
         assert_eq!(sidebar.aimed_worktree(), unplaced, "no worktree is shown yet");
         sit(&mut sidebar, &view_of("older", 10, 1));
-        let Aim::At(target) = sidebar.aimed_view() else {
+        let Aim::At { target, .. } = sidebar.aimed_view() else {
             panic!("the palette aims at the view shown");
         };
         let Target::View(_, row) = target.as_ref() else {
@@ -9269,20 +9281,24 @@ mod tests {
         };
         assert_eq!(row.view, view_key(10, 1));
         sidebar.showing(tab_of(10, 0));
-        let Aim::At(welcome) = sidebar.aimed_worktree() else {
+        let Aim::At { target: welcome, .. } = sidebar.aimed_worktree() else {
             panic!("over a welcome view, the palette aims at its worktree");
         };
         let Target::Worktree(_, worktree) = welcome.as_ref() else {
             panic!("over a welcome view, the palette aims at its worktree: {welcome:?}");
         };
         assert_eq!(worktree.place.worktree, tab_of(10, 0));
+        let Aim::At { worktree: Some(beside), .. } = sidebar.aimed_view() else {
+            panic!("over a view, the palette aims at its worktree too");
+        };
+        assert_eq!(beside, welcome, "the view's worktree is the one shown");
         let asked = sidebar.act_in_menu(&target, Action::CloseView, Origin::Views);
         assert_eq!(asked, Asked::Nothing, "a view's close is planned before it is asked");
         assert_eq!(sidebar.holding(), Holding::Afloat, "over the views, its menu floats");
         sidebar.close_menu();
 
         sidebar.focus(Keys::Sidebar);
-        let Aim::At(target) = sidebar.aimed_row() else {
+        let Aim::At { target, .. } = sidebar.aimed_row() else {
             panic!("in the sidebar, it aims at the highlighted row");
         };
         assert_eq!(Some(target.as_ref()), sidebar.target().as_ref(), "it aims at the row");
@@ -9303,7 +9319,7 @@ mod tests {
         sidebar.cursor = None;
         assert_eq!(sidebar.aimed_row(), Aim::Unplaced(PALETTE_NO_ROW));
         sidebar.cursor = Some(bipa.clone());
-        let Aim::At(target) = sidebar.aimed_row() else {
+        let Aim::At { target, .. } = sidebar.aimed_row() else {
             panic!("the palette aims at the highlighted row");
         };
         sidebar.key(&char('j'), moment(160_000));

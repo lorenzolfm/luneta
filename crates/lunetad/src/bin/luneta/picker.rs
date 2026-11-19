@@ -191,7 +191,7 @@ pub struct Seated {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Aim {
-    At(Rc<Target>),
+    At { target: Rc<Target>, worktree: Option<Rc<Target>> },
     Unplaced(&'static str),
 }
 
@@ -1114,13 +1114,18 @@ impl Picker {
         let Palette { aim, origin } = &self.palette;
         match (action.key(), aim, origin) {
             (actions::Key::Chord(chord), ..) => Some(Run::Chord(chord)),
-            (actions::Key::Menu(_) | actions::Key::RowAndMenu(_), Aim::At(target), _) => {
-                target.fits(action).then(|| Run::Menu(Rc::clone(target)))
+            (
+                actions::Key::Menu(_) | actions::Key::RowAndMenu(_),
+                Aim::At { target, worktree },
+                _,
+            ) => {
+                let mut targets = std::iter::once(target).chain(worktree);
+                targets.find(|it| it.fits(action)).map(|it| Run::Menu(Rc::clone(it)))
             },
-            (actions::Key::Row(_), Aim::At(target), Origin::Sidebar) => {
+            (actions::Key::Row(_), Aim::At { target, .. }, Origin::Sidebar) => {
                 action.fits(target.noun()).then(|| Run::Row(Rc::clone(target)))
             },
-            (actions::Key::Row(_), Aim::At(_), Origin::Views)
+            (actions::Key::Row(_), Aim::At { .. }, Origin::Views)
             | (
                 actions::Key::Menu(_) | actions::Key::RowAndMenu(_) | actions::Key::Row(_),
                 Aim::Unplaced(_),
@@ -1143,17 +1148,22 @@ impl Picker {
         let mut found: Vec<(Tier, Fit, Row)> =
             fitting.filter_map(|(action, run)| found_action(finder, &term, action, run)).collect();
         found.sort_by_key(|(tier, fit, _)| (*tier, Reverse(*fit)));
-        let ahead = found.iter().take_while(|(tier, ..)| *tier < Tier::Fuzzy).count();
-        let mut found = found.into_iter().map(|(.., row)| row);
-        let mut rows: Vec<Row> = found.by_ref().take(ahead).collect();
-        rows.extend(worktrees);
-        rows.extend(found);
+        let actions = found.into_iter().map(|(tier, _, row)| (tier, Kind::Action, row));
+        let places = worktrees.map(|row| (tier_of(&term, &row.name), Kind::Place, row));
+        let mut ranked: Vec<(Tier, Kind, Row)> = actions.chain(places).collect();
+        ranked.sort_by_key(|(tier, kind, _)| (*tier, *kind));
+        let mut rows: Vec<Row> = ranked.into_iter().map(|(.., row)| row).collect();
+        if rows.is_empty()
+            && let Some(key) = self.new_key()
+        {
+            rows.push(Row::plain(key, self.term.clone()));
+        }
         rows
     }
 
     fn aimed_at(&self) -> String {
         let target = match &self.palette.aim {
-            Aim::At(target) => target.as_ref(),
+            Aim::At { target, .. } => target.as_ref(),
             Aim::Unplaced(_) => return List::Actions.title().to_owned(),
         };
         let named = match target {
@@ -2020,6 +2030,12 @@ enum Tier {
     Fuzzy,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Kind {
+    Action,
+    Place,
+}
+
 fn titled(action: Action) -> String {
     let name = action.name();
     let mut chars = name.chars();
@@ -2028,17 +2044,20 @@ fn titled(action: Action) -> String {
 
 fn tier(finder: &Finder<'_>, term: &str, text: &str) -> Option<(Tier, Fit, Vec<usize>)> {
     let (fit, hits) = finder.find(text, &[])?;
+    Some((tier_of(term, text), fit, hits))
+}
+
+fn tier_of(term: &str, text: &str) -> Tier {
     let lower = text.to_lowercase();
     let words = lower.match_indices([' ', '/', '-']).map(|(at, _)| at + 1);
     let starts = std::iter::once(0).chain(words).any(|at| lower[at..].starts_with(term));
-    let tier = if lower == term {
+    if lower == term || lower.rsplit(" › ").next() == Some(term) {
         Tier::Exact
     } else if starts {
         Tier::Prefix
     } else {
         Tier::Fuzzy
-    };
-    Some((tier, fit, hits))
+    }
 }
 
 fn found_action(
@@ -2333,7 +2352,7 @@ mod tests {
 
     use super::*;
     use crate::close::Doing;
-    use crate::menu::{ViewRow, Ran};
+    use crate::menu::{Ran, ViewRow, WorktreeRow};
     use crate::spots::Hit;
 
     const NOW: Duration = Duration::from_secs(1000);
@@ -2458,12 +2477,28 @@ mod tests {
         }
     }
 
-    fn aimless() -> Palette {
-        Palette { aim: Aim::At(Rc::new(Target::Machine(Machine::Local))), origin: Origin::Views }
+    fn at_host() -> Palette {
+        let target = Rc::new(Target::Machine(Machine::Local));
+        Palette { aim: Aim::At { target, worktree: None }, origin: Origin::Views }
     }
 
     fn at_fix(origin: Origin) -> Palette {
-        Palette { aim: Aim::At(Rc::new(fix_view())), origin }
+        let worktree = match origin {
+            Origin::Views => Some(Rc::new(fix_worktree())),
+            Origin::Sidebar => None,
+        };
+        Palette { aim: Aim::At { target: Rc::new(fix_view()), worktree }, origin }
+    }
+
+    fn fix_worktree() -> Target {
+        let row = WorktreeRow {
+            place: fix(),
+            name: "fix".to_owned(),
+            folder: "/home/you/fix".to_owned(),
+            branch: None,
+            repository: None,
+        };
+        Target::Worktree(Machine::Local, row)
     }
 
     fn fix_view() -> Target {
@@ -2526,7 +2561,7 @@ mod tests {
     }
 
     fn opened(listing: Listing) -> Picker {
-        let mut picker = Picker::open(1, List::Worktrees, listing, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Worktrees, listing, Machine::Local, at_host());
         picker.asks();
         picker
     }
@@ -2653,7 +2688,7 @@ mod tests {
 
     #[test]
     fn the_worktrees_go_by_their_last_use_and_an_empty_project_is_one_row() {
-        let mut picker = Picker::open(1, List::Worktrees, works(), Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Worktrees, works(), Machine::Local, at_host());
         let on = Machine::Local;
         assert_eq!(picker.asks(), [Ask::Dirs { on, ask: 1 }]);
         let shown = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
@@ -2717,19 +2752,19 @@ mod tests {
     fn o_w_lists_the_worktrees_of_its_project_alone_that_are_not_open() {
         let luneta = project("luneta", 1).id();
         let listing = with_unopened(works());
-        let mut picker = Picker::opening(1, listing, (Machine::Local, luneta), aimless());
+        let mut picker = Picker::opening(1, listing, (Machine::Local, luneta), at_host());
         assert_eq!(rows(&picker), ["luneta › old", "luneta › spike"]);
         typed(&mut picker, "zzz");
         assert_eq!(rows(&picker), ["no match for \"zzz\""], "no worktree is made of what is typed");
         let mut all_open = works();
         let web = with_unopened(works()).shelves[0].projects[2].unopened.clone();
         all_open.shelves[0].projects[2].unopened = web;
-        let picker = Picker::opening(2, all_open, (Machine::Local, luneta), aimless());
+        let picker = Picker::opening(2, all_open, (Machine::Local, luneta), at_host());
         assert_eq!(rows(&picker), ["every worktree is open"]);
         let said_of = |number: u64, unopened: Unopened| {
             let mut listing = works();
             listing.shelves[0].projects[0].unopened = unopened;
-            let picker = Picker::opening(number, listing, (Machine::Local, luneta), aimless());
+            let picker = Picker::opening(number, listing, (Machine::Local, luneta), at_host());
             rows(&picker)
         };
         let unlisted = Unopened::Unlisted("not listed yet".to_owned());
@@ -2745,7 +2780,7 @@ mod tests {
         let old = projects::Dir::parse("/home/you/luneta/old").unwrap();
         listing.shelves[0].projects[0].unopened = Unopened::Listed(vec![old]);
         let luneta = project("luneta", 1).id();
-        let picker = Picker::opening(1, listing, (Machine::Local, luneta), aimless());
+        let picker = Picker::opening(1, listing, (Machine::Local, luneta), at_host());
         assert_eq!(rows(&picker), ["luneta › old"]);
     }
 
@@ -2826,7 +2861,7 @@ mod tests {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, at_host());
         assert!(matches!(press(&mut picker, KeyCode::Delete), Picked::Plan { .. }));
         let (rows, give_up) = clicks(&picker, "<ESC>");
         assert!(!rows.is_empty() && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
@@ -3208,7 +3243,7 @@ mod tests {
     #[test]
     fn the_keys_that_open_each_list_go_to_it_and_ctrl_j_goes_to_none() {
         let none = Listing::default();
-        let mut picker = Picker::open(1, List::Agents, none, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Agents, none, Machine::Local, at_host());
         control(&mut picker, 'j');
         assert_eq!(picker.list, List::Agents, "Ctrl j is the views' Down");
         picker.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SUPER));
@@ -3226,7 +3261,7 @@ mod tests {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, at_host());
         picker.asks();
         let c = listed("c", 30);
         let deletes = || Deletes::View(ViewKey::terminal(4));
@@ -3258,7 +3293,7 @@ mod tests {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, at_host());
         picker.asks();
         let deletes = Deletes::View(ViewKey::terminal(4));
         let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), deletes };
@@ -3280,7 +3315,7 @@ mod tests {
             ]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, at_host());
         let (lines, lit) = list(&picker);
         assert!(lines[0].starts_with("mine ─") && lines[0].ends_with("─ here"), "{lines:?}");
         let name = |line: &String| {
@@ -3312,7 +3347,7 @@ mod tests {
             ]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, at_host());
         typed(&mut picker, "mux");
         let rows = found(&picker);
         let shown = [("mux panics", "mux"), ("Zero-length lines in jobs", ""), ("fix", "")];
@@ -3330,7 +3365,7 @@ mod tests {
             shelves: vec![shelved(Machine::Local, projects)],
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local, at_host());
         assert_eq!(list(&picker).0, ["asking zoxide…"]);
         picker.heard(heard_here(Ok(vec![
             visited("/home/you/luneta", "luneta"),
@@ -3361,7 +3396,7 @@ mod tests {
             shelves: vec![shelved(Machine::Local, vec![housed("luneta", 1, Vec::new())])],
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local, at_host());
         picker.heard(heard_here(Ok(vec![
             visited("/home/you/notes", "notes"),
             visited("/home/you/luneta", "luneta"),
@@ -3372,7 +3407,7 @@ mod tests {
     #[test]
     fn a_search_finds_a_directory_by_its_path_or_its_name() {
         let far = "/home/you/Projects/misc/far/away/down/luneta/main";
-        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local, at_host());
         picker.heard(heard_here(Ok(vec![
             visited(far, "luneta-main"),
             visited("/home/you/luneta", "luneta"),
@@ -3424,7 +3459,7 @@ mod tests {
 
     #[test]
     fn every_machine_s_directories_go_under_its_rule_this_one_s_first() {
-        let mut picker = Picker::open(1, List::Dirs, two_machines(), Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), Machine::Local, at_host());
         let dirs = |on: Machine, ask: u64| Ask::Dirs { on, ask };
         assert_eq!(picker.asks(), [dirs(Machine::Local, 1), dirs(nixos(), 2)]);
         let api = "/home/me/Projects/api";
@@ -3465,7 +3500,7 @@ mod tests {
             let dirs = vec![visited("/home/me/api", "api"), visited("/home/me/blog", "blog")];
             Heard::Dirs { on: nixos(), ask: 2, visited: Ok(dirs) }
         };
-        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), aimless());
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), at_host());
         picker.heard(here());
         assert_eq!(lit(&picker), "notes");
         picker.heard(there());
@@ -3474,18 +3509,18 @@ mod tests {
         picker.listed(two_machines());
         assert_eq!(lit(&picker), "blog");
 
-        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), aimless());
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), at_host());
         picker.heard(there());
         picker.heard(here());
         assert_eq!(lit(&picker), "api");
 
-        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), aimless());
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), at_host());
         picker.heard(here());
         press(&mut picker, KeyCode::Up);
         picker.heard(there());
         assert_eq!(lit(&picker), "notes");
 
-        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), aimless());
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), at_host());
         picker.heard(heard_here(Ok(vec![visited("/home/you/luneta", "luneta")])));
         let dirs = vec![visited("/home/me/api", "api"), visited("/home/me/luneta", "luneta")];
         picker.heard(Heard::Dirs { on: nixos(), ask: 2, visited: Ok(dirs) });
@@ -3500,7 +3535,7 @@ mod tests {
         let dirs_asks = |picker: &mut Picker| -> Vec<Ask> {
             picker.asks().into_iter().filter(|ask| matches!(ask, Ask::Dirs { .. })).collect()
         };
-        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local, at_host());
         assert_eq!(dirs_asks(&mut picker), [Ask::Dirs { on: Machine::Local, ask: 1 }]);
         picker.listed(two_machines());
         assert_eq!(dirs_asks(&mut picker), [Ask::Dirs { on: nixos(), ask: 2 }]);
@@ -3530,7 +3565,7 @@ mod tests {
 
     #[test]
     fn the_directories_say_why_zoxide_listed_none() {
-        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local, at_host());
         picker.heard(heard_here(Err("zoxide is not on the PATH".to_owned())));
         assert_eq!(list(&picker).0, ["zoxide is not on the PATH", "no directories"]);
     }
@@ -3539,7 +3574,7 @@ mod tests {
     fn a_project_of_another_machine_takes_no_name_here() {
         let shelves = vec![shelved(nixos(), vec![housed("api", 1, Vec::new())])];
         let listing = Listing { shelves, ..two_machines() };
-        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local, at_host());
         picker.heard(heard_here(Ok(vec![visited("/home/you/api", "api")])));
         assert_eq!(grouped(&picker), ["── desk", "api"]);
     }
@@ -3556,7 +3591,7 @@ mod tests {
             local: agents(vec![seated("api", 30, 1, "fix", Mark::Idle)]),
             ..on_nixos(there)
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, at_host());
         picker.asks();
         let (lines, _) = list(&picker);
         assert!(lines[0].starts_with("mine ─") && lines[0].ends_with("─ here"), "{lines:?}");
@@ -3608,11 +3643,19 @@ mod tests {
         let by_use = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
         assert_eq!(worktrees, by_use);
         assert_eq!(actions[..3], ["Search skills", "Ask", "/thermo-nuclear-review"]);
-        for fitting in ["Rename the view…", "Close the view", "New worktree…", "Pick a worktree"] {
+        let fitting = [
+            "Rename the view…",
+            "Close the view",
+            "Rename the worktree…",
+            "Close the worktree",
+            "New worktree…",
+            "Pick a worktree",
+        ];
+        for fitting in fitting {
             assert!(actions.iter().any(|action| action == fitting), "{fitting}: {actions:?}");
         }
         let unfitting = [
-            "Rename the worktree…",
+            "Rename the project…",
             "Forget the machine",
             "Search",
             "Hold to dictate",
@@ -3627,6 +3670,8 @@ mod tests {
         for fitting in ["Search", "Unread", "Rename the view…"] {
             assert!(every.iter().any(|action| action == fitting), "{fitting}: {every:?}");
         }
+        let worktree = "Rename the worktree…";
+        assert!(!every.iter().any(|action| action == worktree), "the row alone: {every:?}");
     }
 
     #[test]
@@ -3658,12 +3703,16 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_word_ranks_actions_named_by_it_over_worktrees_and_worktrees_over_loose_matches() {
+    fn a_typed_word_ranks_what_it_names_then_what_it_starts_then_loose_matches() {
         let mut picker = palette(Origin::Views);
         typed(&mut picker, "fix");
         let (shown, _) = shown_actions(&picker);
         let shown: Vec<String> = shown.iter().map(|line| named(line)).collect();
-        assert_eq!(shown[..3], ["Fix the last command", "Fix the failing checks", "luneta › fix"]);
+        assert_eq!(shown[..3], ["luneta › fix", "Fix the last command", "Fix the failing checks"]);
+        retyped(&mut picker, "fix the");
+        let (shown, _) = shown_actions(&picker);
+        let shown: Vec<String> = shown.iter().map(|line| named(line)).collect();
+        assert_eq!(shown[..2], ["Fix the last command", "Fix the failing checks"]);
         retyped(&mut picker, "ask");
         assert_eq!(keyed_action(&picker).0, "Ask");
         retyped(&mut picker, "kill");
@@ -3776,11 +3825,24 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_action_from_a_view_runs_on_its_worktree_and_nothing_found_offers_one() {
+        let mut picker = palette(Origin::Views);
+        typed(&mut picker, "close the worktree");
+        let (target, origin) = (fix_worktree(), Origin::Views);
+        let close = Picked::Menu { target, origin, action: Action::CloseWorktree };
+        assert_eq!(press(&mut picker, KeyCode::Enter), close);
+        retyped(&mut picker, "zzz");
+        let made = press(&mut picker, KeyCode::Enter);
+        let Picked::Add { name: Some(name), project, .. } = &made else {
+            panic!("nothing found offers to make what was typed: {made:?}");
+        };
+        assert_eq!((name.as_str(), project), ("zzz", &fix().project));
+    }
+
+    #[test]
     fn the_palette_asks_for_no_preview_of_a_worktree_it_lights() {
         let mut picker = palette(Origin::Views);
         typed(&mut picker, "fix");
-        press(&mut picker, KeyCode::Down);
-        press(&mut picker, KeyCode::Down);
         assert_eq!(keyed_action(&picker).0, "luneta › fix");
         assert_eq!(picker.due(), None, "the Actions list draws no preview to ask for");
     }

@@ -1004,20 +1004,23 @@ pub enum Origin {
 
 #[must_use]
 pub fn spelled(action: Action, origin: Origin) -> String {
-    let path = |path: &[char]| path.iter().map(char::to_string).collect::<Vec<_>>().join(" ");
     let (code, modifiers) = actions::MENU;
     let menu = Label::Key(code, modifiers);
     match (action.key(), origin) {
         (Key::Menu(keys) | Key::RowAndMenu(keys), Origin::Views) => {
-            format!("{menu} {}", path(keys))
+            format!("{menu} {}", typed_path(keys))
         },
         (Key::Menu(keys @ [first, ..]), Origin::Sidebar) if Top::of(*first).is_some() => {
-            format!("m {}", path(keys))
+            format!("m {}", typed_path(keys))
         },
-        (Key::Menu(keys) | Key::RowAndMenu(keys) | Key::Row(keys), _) => path(keys),
+        (Key::Menu(keys) | Key::RowAndMenu(keys) | Key::Row(keys), _) => typed_path(keys),
         (Key::Pasted(key), _) => key.to_string(),
         (Key::Chord((code, modifiers)), _) => Label::Key(code, modifiers).to_string(),
     }
+}
+
+fn typed_path(path: &[char]) -> String {
+    path.iter().map(char::to_string).collect::<Vec<_>>().join(" ")
 }
 
 fn started(keys: &Keys, row: &ViewRow, skill: &str) -> Result<Wants, String> {
@@ -2295,12 +2298,11 @@ impl AllKeys {
         let named = |keys: &[(Label, &str)]| -> Vec<(String, String)> {
             keys.iter().map(|(label, does)| (label.to_string(), (*does).to_owned())).collect()
         };
-        let spelled = |path: &[char]| {
-            let keys: Vec<String> = path.iter().map(char::to_string).collect();
-            keys.join(" ")
+        let typed = |(action, path): (Action, &'static [char])| {
+            (typed_path(path), action.name().to_owned())
         };
-        let sidebar = Action::row().map(|(action, path)| (spelled(path), action.name().to_owned()));
-        let menu = Action::menu().map(|(action, path)| (spelled(path), action.name().to_owned()));
+        let sidebar = Action::row().map(typed);
+        let menu = Action::menu().map(typed);
         let mut menu: Vec<(String, String)> = menu.collect();
         menu.extend(named(&MENU_MOVES));
         let pasted = Action::pasted();
