@@ -1038,15 +1038,6 @@ fn machines<'a>(host: &'a Host, shelves: &'a [Shelf]) -> Machines<'a> {
     Machines { here, others, left_out }
 }
 
-fn opens_own(asking: Held, on: &Machine, wants: Wants) -> Result<Asked, Wants> {
-    match wants {
-        Wants::Open { session, cwd, opens, .. } => {
-            Ok(Asked::Open { asking, on: on.clone(), key: session.own_key(), cwd, opens })
-        },
-        wants => Err(wants),
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum Asked {
     Nothing,
@@ -3473,10 +3464,10 @@ impl Sidebar {
             },
         };
         let (number, on) = (menu.number(), menu.target().machine().clone());
-        let wants = match opens_own(taken.held(), &on, wants) {
-            Ok(asked) => return asked,
-            Err(wants) => wants,
-        };
+        if let Wants::Open { session, cwd, opens, .. } = wants {
+            let asking = taken.held();
+            return Asked::Open { asking, on, key: session.own_key(), cwd, opens };
+        }
         match taken {
             Taken::Open(placed) => self.put(menu, placed),
             Taken::Kept => {

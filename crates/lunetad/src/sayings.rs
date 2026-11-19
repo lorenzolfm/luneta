@@ -10,11 +10,6 @@ pub const STALE: Duration = Duration::from_mins(2);
 
 const KEPT: usize = 16;
 
-#[must_use]
-pub fn asked(text: String) -> api::Utterance {
-    api::Utterance { text }
-}
-
 #[derive(Debug)]
 pub enum ToSay {
     InTurn(Spoken),

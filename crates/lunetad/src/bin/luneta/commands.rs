@@ -14,13 +14,13 @@ use lunetad::api::projects::Held;
 use lunetad::api::remote::Reached;
 use lunetad::api::say::Does;
 use lunetad::api::{
-    Agent, ListAgentsResponse, Say, SayRequest, Status, Version, WatchRequest,
+    Agent, ListAgentsResponse, Say, SayRequest, Status, Utterance, Version, WatchRequest,
 };
 use lunetad::folder::SOCKET;
 use lunetad::mux::{OwnId, OwnPane, TerminalKey};
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
-use lunetad::sayings::{self, BYTES_MAX};
+use lunetad::sayings::BYTES_MAX;
 use lunetad::{release, Destination};
 use prost::Message as _;
 use tonic::transport::Channel;
@@ -239,7 +239,7 @@ fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
                 return ExitCode::FAILURE;
             },
         };
-        let utterance = sayings::asked(text);
+        let utterance = Utterance { text };
         if now { Does::Now(utterance) } else { Does::InTurn(utterance) }
     };
     let say = Some(Say { does: Some(does) });

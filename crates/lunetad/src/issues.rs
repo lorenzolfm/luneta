@@ -274,7 +274,7 @@ impl Filing {
         claude.args(["--no-session-persistence", "--output-format", "json"]);
         claude.arg("--json-schema").arg(schema(labels));
         claude.arg("--append-system-prompt").arg(SYSTEM);
-        mux::in_no_pane(&mut claude);
+        mux::own::in_no_pane(&mut claude);
         git::local(&mut claude);
         claude.current_dir(self.dir.as_str());
         claude

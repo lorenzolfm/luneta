@@ -1,7 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
-use std::process::Command;
 
 use crate::process;
 
@@ -45,10 +44,6 @@ fn value_in<'a>(environ: &'a [OsString], name: &str) -> Option<&'a [u8]> {
     environ.iter().find_map(|entry| {
         entry.as_bytes().strip_prefix(name.as_bytes())?.strip_prefix(b"=")
     })
-}
-
-pub fn in_no_pane(command: &mut Command) {
-    own::in_no_pane(command);
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ use std::fmt;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::path::{Component, Path, PathBuf};
 
-use lunetad::asks::{self, Turn, BEFORE_VAR, TURN_VAR};
+use lunetad::asks::{Turn, BEFORE_VAR, TURN_VAR};
 use lunetad::{prunes, var, Directory};
 
 use crate::machines::Machine;
@@ -46,7 +46,7 @@ pub fn agreed(spelled: &str) -> Result<Agreed, String> {
 }
 
 pub fn turn_here() -> Result<Option<Turn>, String> {
-    asks::turn_in(var(TURN_VAR)?.as_deref(), var(BEFORE_VAR)?.as_deref())
+    Turn::read(var(TURN_VAR)?.as_deref(), var(BEFORE_VAR)?.as_deref())
 }
 
 pub fn directory(cwd: Option<&Path>) -> Result<Directory, String> {

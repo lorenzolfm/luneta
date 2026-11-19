@@ -22,7 +22,7 @@ pub fn one_answer(model: &str, system: &str, prompt: &str) -> io::Result<(Comman
     let mut claude = Command::new("claude");
     claude.args(["-p", "--model", model, "--tools", "", "--safe-mode"]);
     claude.args(["--no-session-persistence", "--system-prompt", system]);
-    mux::in_no_pane(&mut claude);
+    mux::own::in_no_pane(&mut claude);
     Ok((claude, program::saying(prompt)?))
 }
 

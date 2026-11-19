@@ -193,7 +193,10 @@ impl Occupied {
                          terminal no layout holds"
                     ));
                 },
-                UnreadSeat::Terminal(_) | UnreadSeat::Unplaced => {},
+                UnreadSeat::Terminal(_) => {},
+                UnreadSeat::Unplaced => {
+                    unreachable!("seats::unread refuses a file it cannot place")
+                },
             }
         }
         let panes = terminals.into_iter().map(|(_, folder)| folder).collect();

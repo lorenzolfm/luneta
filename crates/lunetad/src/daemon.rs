@@ -97,6 +97,9 @@ const IN_FLIGHT: u32 = 128 * 1024;
 
 const ALONE: Duration = Duration::from_secs(30);
 
+const _: () =
+    assert!(ALONE.as_secs() > SWEEP.as_secs(), "lunetad is alone over more than one look");
+
 const DRAIN: Duration = client::ANSWER;
 
 pub struct Claim {

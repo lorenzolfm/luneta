@@ -91,7 +91,7 @@ impl Turn {
         };
     }
 
-    fn read(key: Option<&str>, before: Option<&str>) -> Result<Option<Turn>, String> {
+    pub fn read(key: Option<&str>, before: Option<&str>) -> Result<Option<Turn>, String> {
         let read = |name, spelled: &str| {
             let read = u64::from_str_radix(spelled, 16);
             read.map_err(|_| format!("{name} is no key of a turn of luneta's ask box"))
@@ -105,10 +105,6 @@ impl Turn {
             },
         }
     }
-}
-
-pub fn turn_in(key: Option<&str>, before: Option<&str>) -> Result<Option<Turn>, String> {
-    Turn::read(key, before)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,7 +216,7 @@ impl Asked {
             claude.args(["--resume", session.as_str()]);
         }
         claude.arg("--allowedTools").args(ALLOWED);
-        mux::in_no_pane(&mut claude);
+        mux::own::in_no_pane(&mut claude);
         git::local(&mut claude);
         self.turn.name_in(&mut claude);
         if let Some(path) = env::current_exe().ok().and_then(|exe| path_with(&exe)) {
@@ -456,14 +452,14 @@ mod tests {
         for turn in [first, turn()] {
             let claude = Asked::new(None, "yes", None, String::new(), turn).unwrap().claude();
             let [key, before] = [TURN_VAR, BEFORE_VAR].map(|name| var(&claude, name));
-            assert_eq!(turn_in(key.as_deref(), before.as_deref()), Ok(Some(turn)));
+            assert_eq!(Turn::read(key.as_deref(), before.as_deref()), Ok(Some(turn)));
         }
-        assert_eq!(turn_in(None, None), Ok(None));
+        assert_eq!(Turn::read(None, None), Ok(None));
     }
 
     #[test]
     fn the_agent_s_commands_read_no_turn_the_box_could_not_name() {
-        assert_eq!(turn_in(Some("ff"), Some("0a")), Ok(Some(turn())));
+        assert_eq!(Turn::read(Some("ff"), Some("0a")), Ok(Some(turn())));
         for (key, before) in [
             (Some(""), None),
             (Some("forged"), None),
@@ -471,7 +467,7 @@ mod tests {
             (None, Some("ff")),
             (Some("ff"), Some("ff")),
         ] {
-            assert!(turn_in(key, before).is_err(), "{key:?} {before:?}");
+            assert!(Turn::read(key, before).is_err(), "{key:?} {before:?}");
         }
     }
 

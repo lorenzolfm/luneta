@@ -23,8 +23,8 @@ use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
 use super::frames::colours;
-use super::TerminalKey;
-use crate::mux::{in_no_pane, Failure, Runs};
+use super::{in_no_pane, TerminalKey};
+use crate::mux::{Failure, Runs};
 use crate::projects::{Line, Size, VIEWS_MAX};
 use crate::shells::{Doing, Front};
 use crate::{folder, log, release, Directory};
