@@ -37,12 +37,11 @@ in
       case "$ran" in
         0)
           echo "dev uninstall: ending lunetad $build (pid $pid), so the next luneta starts its own" >&2
-          end_daemon
+          end_daemon "$pid"
           ;;
         5) ;;
         *)
-          echo "dev uninstall: luneta info: ''${said#luneta: }" >&2
-          exit 1
+          end_holder "so the next luneta starts its own"
           ;;
       esac
     fi

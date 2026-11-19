@@ -67,15 +67,15 @@ in
     case "$ran" in
       0)
         echo "dev install: ending lunetad $build (pid $pid), for a luneta to start yours" >&2
-        end_daemon
+        end_daemon "$pid"
         ended=yes
         ;;
       5)
         echo "dev install: ''${said#luneta: }, so the next luneta starts yours" >&2
         ;;
       *)
-        echo "dev install: luneta info: ''${said#luneta: }" >&2
-        exit 1
+        end_holder "for a luneta to start yours"
+        ended=yes
         ;;
     esac
 

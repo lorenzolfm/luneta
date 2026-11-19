@@ -5,6 +5,7 @@
     pkgs.fish
     pkgs.flock
     pkgs.gawk
+    pkgs.lsof
     pkgs.procps
   ];
   text = ''
@@ -88,18 +89,41 @@
 
     end_daemon() {
       local ending
-      mapfile -t ending < <(identified "$pid")
+      mapfile -t ending < <(identified "$@")
       wait "$!"
       stop "''${ending[@]}"
     }
 
-    muxes() {
+    luneta_folder() {
       local folder
       folder="$(fish --no-config -c "source shell/luneta.fish; __luneta_folder")"
       [[ $folder == /* ]] || {
         echo "dev ${name}: __luneta_folder names '$folder', no absolute folder" >&2
         return 1
       }
+      echo "$folder"
+    }
+
+    holders() {
+      lsof -w -t -a -c lunetad -- "$1/lunetad.lock" || true
+    }
+
+    end_holder() {
+      local folder holding
+      folder="$(luneta_folder)"
+      mapfile -t holding < <(holders "$folder")
+      wait "$!"
+      if [ "''${#holding[@]}" -eq 0 ]; then
+        echo "dev ${name}: luneta info: ''${said#luneta: }" >&2
+        exit 1
+      fi
+      echo "dev ${name}: luneta info: ''${said#luneta: }, but lunetad (pid ''${holding[*]}) holds $folder: ending it, $1" >&2
+      end_daemon "''${holding[@]}"
+    }
+
+    muxes() {
+      local folder
+      folder="$(luneta_folder)"
       ps -ww -u "$(id -u)" -o pid= -o args= |
         awk -v folder="$folder" '$2 ~ /(^|\/)luneta-mux$/ && NF == 3 && $3 == folder { print $1 }'
     }
