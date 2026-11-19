@@ -688,18 +688,18 @@ mod tests {
         let (events, heard) = mpsc::channel();
         listen(&socket, events).expect("it listens");
         let mut peers = Peers::default();
-        let (asks, asker) = mpsc::channel();
-        let asking = Reaching::to(socket.clone(), false, asks);
-        let number = came(&heard, &mut peers);
-        let (other, otherwise) = mpsc::channel();
-        let _another = Reaching::to(socket, false, other);
-        assert_ne!(came(&heard, &mut peers), number);
+        let (asker_events, asker_heard) = mpsc::channel();
+        let asker = Reaching::to(socket.clone(), false, asker_events);
+        let asker_number = came(&heard, &mut peers);
+        let (other_events, other_heard) = mpsc::channel();
+        let _other = Reaching::to(socket, false, other_events);
+        assert_ne!(came(&heard, &mut peers), asker_number);
 
-        asking.selected("");
-        assert_eq!(read_aloud(&heard), (number, String::new()));
-        peers.nothing_to_read(number);
-        assert_eq!(note(&asker), NothingToRead.to_string());
-        let told = otherwise.recv_timeout(Duration::from_millis(300));
+        asker.selected("");
+        assert_eq!(read_aloud(&heard), (asker_number, String::new()));
+        peers.nothing_to_read(asker_number);
+        assert_eq!(note(&asker_heard), NothingToRead.to_string());
+        let told = other_heard.recv_timeout(Duration::from_millis(300));
         assert!(told.is_err(), "the other luneta is told nothing");
     }
 
