@@ -64,7 +64,7 @@ pub struct Bound {
 pub enum Found {
     Ours,
     Gone,
-    Another,
+    Replaced,
 }
 
 impl Bound {
@@ -91,7 +91,7 @@ impl Bound {
             {
                 Ok(Found::Ours)
             },
-            Ok(_) => Ok(Found::Another),
+            Ok(_) => Ok(Found::Replaced),
             Err(error)
                 if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
             {

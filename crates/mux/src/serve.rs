@@ -215,7 +215,7 @@ async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
                 continue;
             },
             Ok(Found::Gone) => "is gone",
-            Ok(Found::Another) => "is another's now",
+            Ok(Found::Replaced) => "is another file now",
             Err(error) => {
                 if !unsure {
                     let socket = bound.socket().display();
