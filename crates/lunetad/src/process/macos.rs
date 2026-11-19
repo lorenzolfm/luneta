@@ -1,6 +1,5 @@
 use std::ffi::OsString;
 use std::io;
-use std::os::unix::ffi::OsStringExt;
 use std::ptr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -59,21 +58,8 @@ pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
     assert!(size <= procargs.len(), "sysctl wrote {size} bytes into {}", procargs.len());
     procargs.truncate(size);
     let short = "KERN_PROCARGS2 holds fewer arguments than its argc";
-    environ_in(&procargs).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, short))
-}
-
-fn environ_in(procargs: &[u8]) -> Option<Vec<OsString>> {
-    let (count, strings) = procargs.split_first_chunk::<{ size_of::<libc::c_int>() }>()?;
-    let argument_count = usize::try_from(libc::c_int::from_ne_bytes(*count)).ok()?;
-    let path_end = strings.iter().position(|byte| *byte == 0).unwrap_or(strings.len());
-    let padded = &strings[path_end..];
-    let arguments_start = padded.iter().position(|byte| *byte != 0).unwrap_or(padded.len());
-    let mut each = padded[arguments_start..].split(|byte| *byte == 0);
-    for _ in 0..argument_count {
-        each.next()?;
-    }
-    let entries = each.take_while(|entry| !entry.is_empty());
-    Some(entries.map(|entry| OsString::from_vec(entry.to_vec())).collect())
+    super::environ_in_procargs(&procargs)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, short))
 }
 
 #[must_use]

@@ -1,6 +1,8 @@
 use std::env;
 use std::ffi::OsString;
 use std::io;
+#[cfg(any(target_os = "macos", test))]
+use std::os::unix::ffi::OsStringExt as _;
 
 use rustix::io::Errno;
 use rustix::process::Pid;
@@ -47,6 +49,21 @@ pub fn var(name: &str) -> Result<Option<String>, String> {
         Err(env::VarError::NotPresent) => Ok(None),
         Err(env::VarError::NotUnicode(_)) => Err(format!("{name} does not read")),
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn environ_in_procargs(procargs: &[u8]) -> Option<Vec<OsString>> {
+    let (count, strings) = procargs.split_first_chunk::<{ size_of::<i32>() }>()?;
+    let argument_count = usize::try_from(i32::from_ne_bytes(*count)).ok()?;
+    let path_end = strings.iter().position(|byte| *byte == 0).unwrap_or(strings.len());
+    let padded = &strings[path_end..];
+    let arguments_start = padded.iter().position(|byte| *byte != 0).unwrap_or(padded.len());
+    let mut each = padded[arguments_start..].split(|byte| *byte == 0);
+    for _ in 0..argument_count {
+        each.next()?;
+    }
+    let entries = each.skip_while(|entry| entry.is_empty()).take_while(|entry| !entry.is_empty());
+    Some(entries.map(|entry| OsString::from_vec(entry.to_vec())).collect())
 }
 
 pub fn ends(pid: u32) -> io::Result<()> {
@@ -117,11 +134,41 @@ mod tests {
         let read = super::environ(child.id());
         child.kill().unwrap();
         child.wait().unwrap();
-        let mut read = read.expect("this user's process has an environment that reads");
-        read.sort_unstable();
+        let read = read.expect("this user's process has an environment that reads");
+        assert!(read.len() >= 2, "{read:?}");
+        let mut given = read[..2].to_vec();
+        given.sort_unstable();
         let mut path_given = OsString::from("PATH=");
         path_given.push(path);
-        assert_eq!(read, [OsString::from("LUNETA_GIVEN=a b=c"), path_given]);
+        assert_eq!(given, [OsString::from("LUNETA_GIVEN=a b=c"), path_given], "{read:?}");
+    }
+
+    fn procargs(argument_count: i32, strings: &[&str]) -> Vec<u8> {
+        let mut procargs = argument_count.to_ne_bytes().to_vec();
+        for string in strings {
+            procargs.extend_from_slice(string.as_bytes());
+            procargs.push(0);
+        }
+        procargs
+    }
+
+    #[test]
+    fn an_environment_starts_after_as_many_arguments_as_argc() {
+        let read = |argument_count, strings: &[&str]| {
+            let read = super::environ_in_procargs(&procargs(argument_count, strings));
+            read.map(|entries| entries.into_iter().map(|it| it.into_string().unwrap()).collect())
+        };
+        let laid = ["/bin/sleep", "", "", "sleep", "60", "A=b", "PATH=/bin", "", "", "ptr_munge="];
+        assert_eq!(read(2, &laid), Some(vec!["A=b".to_owned(), "PATH=/bin".to_owned()]));
+        let empty_argument = ["/bin/echo", "", "echo", "", "x", "A=b", "", "main_stack="];
+        let as_given = Some(vec!["A=b".to_owned()]);
+        assert_eq!(read(3, &empty_argument), as_given, "an empty argument is one");
+        let titled = [&["/usr/bin/node", "", "claude"][..], &[""; 17], &["A=b", ""]].concat();
+        assert_eq!(read(3, &titled), as_given, "a title leaves zeros where its arguments were");
+        assert_eq!(read(0, &["/bin/true", "", "", ""]), Some(Vec::new()));
+        assert_eq!(read(5, &["/bin/sleep", "", "sleep", "60"]), None, "fewer than its argc");
+        assert_eq!(read(-1, &["/bin/sleep"]), None);
+        assert_eq!(super::environ_in_procargs(&[1, 0]), None, "no argc");
     }
 
     #[test]
