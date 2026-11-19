@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,16 @@ pub enum Session {
 
 const PROJECT_PREFIX: &str = "project-";
 
-impl Session {
+pub trait Mark: Copy + Ord + Debug {
+    fn name(self) -> String;
+    fn read(name: &str) -> Option<Self>;
+}
+
+fn of_file<M: Mark>(name: &str) -> Option<M> {
+    M::read(name.split_once('.').map_or(name, |(mark, _)| mark))
+}
+
+impl Mark for Session {
     fn name(self) -> String {
         match self {
             Session::Project(project) => format!("{PROJECT_PREFIX}{project}"),
@@ -51,7 +61,7 @@ pub struct Key {
     pub view: ViewId,
 }
 
-impl Key {
+impl Mark for Key {
     fn name(self) -> String {
         format!("{}-{}", self.session.name(), self.view)
     }
@@ -60,10 +70,6 @@ impl Key {
         let (session, view) = name.rsplit_once('-')?;
         let key = Key { session: Session::read(session)?, view: view.parse().ok()? };
         (key.name() == name).then_some(key)
-    }
-
-    fn of_file(name: &str) -> Option<Self> {
-        Key::read(name.split_once('.').map_or(name, |(view, _)| view))
     }
 }
 
@@ -81,12 +87,12 @@ impl TryFrom<String> for Key {
     }
 }
 
-fn swept_of_old_names(dir: &Path) {
+fn swept_of_old_names<M: Mark>(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        if entry.file_name().to_str().and_then(Key::of_file).is_none() {
+        if entry.file_name().to_str().and_then(of_file::<M>).is_none() {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -106,14 +112,14 @@ enum Shared {
     Alone,
 }
 
-pub struct Ledger {
-    moments: BTreeMap<Key, SystemTime>,
-    leftovers: BTreeSet<Session>,
+pub struct Ledger<M> {
+    moments: BTreeMap<M, SystemTime>,
+    leftovers: BTreeSet<M>,
     shared: Shared,
     unfinished: String,
 }
 
-impl Default for Ledger {
+impl<M> Default for Ledger<M> {
     fn default() -> Self {
         Ledger {
             moments: BTreeMap::new(),
@@ -124,11 +130,11 @@ impl Default for Ledger {
     }
 }
 
-impl Ledger {
+impl<M: Mark> Ledger<M> {
     pub fn within(dir: PathBuf) -> Self {
         let shared = match fs::create_dir_all(&dir) {
             Ok(()) => {
-                swept_of_old_names(&dir);
+                swept_of_old_names::<M>(&dir);
                 Shared::Through(dir)
             },
             Err(error) => Shared::Lost(format!("{}: {error}", dir.display())),
@@ -156,30 +162,23 @@ impl Ledger {
         }
     }
 
-    pub fn get(&self, key: Key) -> Option<SystemTime> {
-        self.moments.get(&key).copied()
+    pub fn get(&self, mark: M) -> Option<SystemTime> {
+        self.moments.get(&mark).copied()
     }
 
-    pub fn latest(&self, session: Session) -> Option<SystemTime> {
-        let first = ViewId::of(1).expect("1 is a view's id");
-        let last = ViewId::of(u64::MAX).expect("u64::MAX is a view's id");
-        let views = Key { session, view: first }..=Key { session, view: last };
-        self.moments.range(views).map(|(_, moment)| *moment).max()
+    pub fn kept(&self) -> impl Iterator<Item = M> + '_ {
+        self.moments.keys().chain(&self.leftovers).copied()
     }
 
-    pub fn sessions(&self) -> impl Iterator<Item = Session> + '_ {
-        self.moments.keys().map(|key| key.session).chain(self.leftovers.iter().copied())
-    }
-
-    pub fn set(&mut self, key: Key, moment: Option<SystemTime>) {
+    pub fn set(&mut self, mark: M, moment: Option<SystemTime>) {
         if let Shared::Through(dir) = &self.shared
-            && let Err(why) = write(dir, &self.unfinished, key, moment)
+            && let Err(why) = write(dir, &self.unfinished, mark, moment)
         {
             self.shared = Shared::Lost(why);
         }
         match moment {
-            Some(moment) => self.moments.insert(key, moment),
-            None => self.moments.remove(&key),
+            Some(moment) => self.moments.insert(mark, moment),
+            None => self.moments.remove(&mark),
         };
     }
 
@@ -197,15 +196,15 @@ impl Ledger {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            let kept = Key::read(name).and_then(|key| {
+            let kept = M::read(name).and_then(|mark| {
                 let nanos = fs::read_to_string(entry.path()).ok()?.trim_end().parse().ok()?;
-                Some((key, moment(nanos)))
+                Some((mark, moment(nanos)))
             });
             match kept {
-                Some((key, moment)) => {
-                    moments.insert(key, moment);
+                Some((mark, moment)) => {
+                    moments.insert(mark, moment);
                 },
-                None => leftovers.extend(Key::of_file(name).map(|key| key.session)),
+                None => leftovers.extend(of_file::<M>(name)),
             }
         }
         self.leftovers = leftovers;
@@ -216,13 +215,17 @@ impl Ledger {
         true
     }
 
-    pub fn forget(&mut self, gone: &BTreeSet<Session>) {
-        let keys: Vec<Key> =
-            self.moments.keys().filter(|key| gone.contains(&key.session)).copied().collect();
-        for key in keys {
-            self.set(key, None);
+    pub fn forget(&mut self, gone: &BTreeSet<M>) {
+        if gone.is_empty() {
+            return;
         }
-        self.leftovers.retain(|session| !gone.contains(session));
+        for mark in gone {
+            if self.moments.contains_key(mark) {
+                self.set(*mark, None);
+            }
+        }
+        self.leftovers.retain(|mark| !gone.contains(mark));
+        assert!(self.kept().all(|mark| !gone.contains(&mark)), "a ledger keeps no mark it forgot");
         let Shared::Through(dir) = &self.shared else {
             return;
         };
@@ -234,24 +237,29 @@ impl Ledger {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if Key::of_file(name).is_some_and(|key| gone.contains(&key.session)) {
+            if of_file::<M>(name).is_some_and(|mark| gone.contains(&mark)) {
                 let _ = fs::remove_file(entry.path());
             }
         }
     }
 }
 
-fn write(dir: &Path, unfinished: &str, key: Key, moment: Option<SystemTime>) -> Result<(), String> {
-    let name = key.name();
-    assert_eq!(Key::of_file(&name), Some(key), "a ledger opening never sweeps a view's file");
+fn write<M: Mark>(
+    dir: &Path,
+    unfinished: &str,
+    mark: M,
+    moment: Option<SystemTime>,
+) -> Result<(), String> {
+    let name = mark.name();
+    assert_eq!(of_file(&name), Some(mark), "a ledger opening never sweeps a mark's file");
     let file = dir.join(&name);
     let kept = match moment {
         Some(moment) => {
             let unnamed = || format!("{}: a moment from before 1970 or after 2554", dir.display());
             let nanos = nanos(moment).ok_or_else(unnamed)?;
             let unfinished = format!("{name}.{unfinished}");
-            let swept = Key::of_file(&unfinished);
-            assert_eq!(swept, Some(key), "a ledger opening never sweeps a file half written");
+            let swept = of_file(&unfinished);
+            assert_eq!(swept, Some(mark), "a ledger opening never sweeps a file half written");
             let unfinished = dir.join(unfinished);
             fs::write(&unfinished, format!("{nanos}\n"))
                 .and_then(|()| fs::rename(&unfinished, &file))
@@ -280,7 +288,7 @@ mod tests {
         Key { session: session(project), view: ViewId::of(view).unwrap() }
     }
 
-    fn keys(ledger: &Ledger) -> Vec<Key> {
+    fn keys(ledger: &Ledger<Key>) -> Vec<Key> {
         ledger.moments.keys().copied().collect()
     }
 
@@ -389,40 +397,42 @@ mod tests {
     }
 
     #[test]
-    fn a_session_s_last_moment_is_the_last_of_its_views() {
-        let mut ledger = Ledger::default();
-        let (session_of, twin) = (session(10), session(11));
-        assert_eq!(ledger.latest(session_of), None);
-        let view = |session, view| Key { session, view: ViewId::of(view).unwrap() };
-        ledger.set(view(session_of, 1), Some(at(7)));
-        ledger.set(view(session_of, 5), Some(at(9)));
-        ledger.set(view(session_of, u64::MAX), Some(at(8)));
-        ledger.set(view(twin, 1), Some(at(20)));
-        assert_eq!(ledger.latest(session_of), Some(at(9)));
+    fn a_project_s_ledger_sweeps_the_files_of_its_views() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = |name: String| scratch.path().join(name);
+        let (view, project) = (file(key(10, 1).name()), file(session(20).name()));
+        let half = file(format!("{}.{}", key(10, 2).name(), state::unfinished()));
+        for file in [&view, &project, &half] {
+            fs::write(file, "5\n").unwrap();
+        }
+        let ledger: Ledger<Session> = Ledger::within(scratch.path().to_owned());
+        assert_eq!([&view, &project, &half].map(|file| file.exists()), [false, true, false]);
+        assert_eq!(ledger.kept().collect::<Vec<_>>(), [session(20)]);
+        assert_eq!(ledger.get(session(20)), Some(moment(5)));
     }
 
     #[test]
-    fn a_session_forgotten_takes_its_moments_and_leaves_the_rest() {
+    fn a_view_forgotten_takes_its_moments_and_leaves_the_rest() {
         let scratch = tempfile::tempdir().unwrap();
         let mut here = Ledger::within(scratch.path().to_owned());
-        let twin = key(11, 1);
-        here.set(key(10, 1), Some(at(5)));
-        here.set(twin, Some(at(5)));
-        here.set(key(20, 1), Some(at(6)));
-        let left = [key(10, 2), key(20, 2)]
+        let (gone, sibling, other) = (key(10, 1), key(10, 2), key(20, 1));
+        for key in [gone, sibling, other] {
+            here.set(key, Some(at(5)));
+        }
+        let left = [gone, sibling]
             .map(|key| scratch.path().join(format!("{}.{}", key.name(), state::unfinished())));
         for file in &left {
             fs::write(file, "5").unwrap();
         }
-        here.forget(&BTreeSet::from([session(10)]));
+        here.forget(&BTreeSet::from([gone]));
         for ledger in [&here, &Ledger::within(scratch.path().to_owned())] {
-            assert_eq!(keys(ledger), [twin, key(20, 1)]);
+            assert_eq!(keys(ledger), [sibling, other]);
         }
         assert_eq!(left.map(|file| file.exists()), [false, true]);
     }
 
     #[test]
-    fn a_session_only_leftovers_are_named_for_is_one_to_forget() {
+    fn a_view_only_leftovers_are_named_for_is_one_to_forget() {
         let scratch = tempfile::tempdir().unwrap();
         let mut ledger = Ledger::within(scratch.path().to_owned());
         let half = format!("{}.{}", key(30, 1).name(), state::unfinished());
@@ -430,10 +440,10 @@ mod tests {
         fs::write(&half, "5").unwrap();
         fs::write(&empty, "").unwrap();
         ledger.reload();
-        let gone = BTreeSet::from([session(30), session(40)]);
-        assert_eq!(ledger.sessions().collect::<BTreeSet<_>>(), gone);
+        let gone = BTreeSet::from([key(30, 1), key(40, 1)]);
+        assert_eq!(ledger.kept().collect::<BTreeSet<_>>(), gone);
         ledger.forget(&gone);
-        assert_eq!((half.exists(), empty.exists(), ledger.sessions().count()), (false, false, 0));
+        assert_eq!((half.exists(), empty.exists(), ledger.kept().count()), (false, false, 0));
     }
 
     #[test]

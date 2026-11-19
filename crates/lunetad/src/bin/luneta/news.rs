@@ -15,11 +15,12 @@ const DWELL: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub struct News {
-    seen: Ledger,
-    been: Ledger,
-    unread: Ledger,
+    seen: Ledger<Key>,
+    stayed: Ledger<Session>,
+    unread: Ledger<Key>,
     dwelling: Option<(Key, SystemTime, Instant)>,
-    missing: Missing,
+    projects_missing: Missing<Session>,
+    views_missing: Missing<Key>,
 }
 
 impl News {
@@ -27,7 +28,7 @@ impl News {
         match folder::make(runtime) {
             Ok(folder) => News {
                 seen: Ledger::within(folder.path().join("seen")),
-                been: Ledger::within(folder.path().join("been")),
+                stayed: Ledger::within(folder.path().join("stayed")),
                 unread: Ledger::within(folder.path().join("unread")),
                 ..News::default()
             },
@@ -36,16 +37,20 @@ impl News {
     }
 
     pub fn unshared(why: &str) -> Self {
-        let unshared = || Ledger::unshared(why.to_owned());
-        News { seen: unshared(), been: unshared(), unread: unshared(), ..News::default() }
+        News {
+            seen: Ledger::unshared(why.to_owned()),
+            stayed: Ledger::unshared(why.to_owned()),
+            unread: Ledger::unshared(why.to_owned()),
+            ..News::default()
+        }
     }
 
     pub fn lost(&self) -> Option<&str> {
-        self.seen.lost().or(self.been.lost()).or(self.unread.lost())
+        self.seen.lost().or(self.stayed.lost()).or(self.unread.lost())
     }
 
     pub fn reload(&mut self) -> bool {
-        self.been.reload();
+        self.stayed.reload();
         let seen = self.seen.reload();
         self.unread.reload() || seen
     }
@@ -59,7 +64,7 @@ impl News {
     }
 
     pub fn last_seen(&self, session: Session) -> Option<SystemTime> {
-        self.been.latest(session)
+        self.stayed.get(session)
     }
 
     pub fn mark_unread(&mut self, key: Key, now: SystemTime) {
@@ -101,8 +106,8 @@ impl News {
         finished: Option<SystemTime>,
         now: SystemTime,
     ) -> bool {
-        if self.been.get(key).is_none_or(|been| been < since) {
-            self.been.set(key, Some(now));
+        if self.stayed.get(key.session).is_none_or(|stayed| stayed < since) {
+            self.stayed.set(key.session, Some(now));
         }
         let mut changed = self.saw(key, finished, now);
         if self.unread.get(key).is_some_and(|marked| marked < since) {
@@ -121,19 +126,17 @@ impl News {
     }
 
     pub fn listed(&mut self, live: Option<&Lists>, at: Instant) {
-        let ledgers = [&self.seen, &self.been, &self.unread];
-        let kept: BTreeSet<Session> = ledgers.into_iter().flat_map(Ledger::sessions).collect();
-        let gone = self.missing.gone(&kept, live, at);
-        if gone.is_empty() {
-            return;
-        }
+        let kept: BTreeSet<Session> = self.stayed.kept().collect();
+        let gone = self.projects_missing.gone(&kept, live, at);
+        self.stayed.forget(&gone);
+        let kept: BTreeSet<Key> = self.seen.kept().chain(self.unread.kept()).collect();
+        let gone = self.views_missing.gone(&kept, live, at);
         self.seen.forget(&gone);
-        self.been.forget(&gone);
         self.unread.forget(&gone);
     }
 
     fn dirs(&self) -> Vec<&Path> {
-        [self.seen.dir(), self.been.dir(), self.unread.dir()].into_iter().flatten().collect()
+        [self.seen.dir(), self.stayed.dir(), self.unread.dir()].into_iter().flatten().collect()
     }
 }
 
@@ -189,6 +192,12 @@ mod tests {
 
     fn new(news: &News) -> [bool; 2] {
         [1, 2].map(|id| news.is_new(view(id), finished(view(id))))
+    }
+
+    fn listing(session: Session, views: &[u64]) -> Lists {
+        let mut live = Lists::default();
+        live.lists(&Machine::Local, [(session, views.iter().map(|view| id(*view)))], true);
+        live
     }
 
     #[test]
@@ -281,12 +290,7 @@ mod tests {
         dwell(&mut news, Some(view(1)), at(200));
         dwell(&mut news, Some(view(1)), at(201));
         news.mark_unread(view(2), at(201));
-        let listing = |session: Session| {
-            let mut live = Lists::default();
-            live.lists(&Machine::Local, [session], true);
-            live
-        };
-        let (live, other) = (listing(session(10)), listing(session(20)));
+        let (live, other) = (listing(session(10), &[1, 2]), listing(session(20), &[1]));
         news.listed(Some(&other), steady(at(210)));
         news.listed(Some(&live), steady(at(215)));
         news.listed(Some(&other), steady(at(220)));
@@ -301,6 +305,29 @@ mod tests {
         assert_eq!(new(&news), [true, true]);
         assert!(!news.is_unread(view(2)));
         assert_eq!(news.last_seen(session(10)), None);
+    }
+
+    #[test]
+    fn a_view_closed_takes_its_marks_and_leaves_its_project_s_moment() {
+        let scratch = tempfile::tempdir().unwrap();
+        let runtime = scratch.path().join("luneta");
+        let mut news = News::within(&runtime);
+        dwell(&mut news, Some(view(1)), at(200));
+        dwell(&mut news, Some(view(1)), at(201));
+        news.mark_unread(view(1), at(202));
+        news.mark_unread(view(2), at(202));
+        let mut open = listing(session(10), &[2]);
+        open.unreached(&Machine::Remote("me@vps".parse().unwrap()));
+        news.listed(Some(&open), steady(at(210)));
+        news.listed(Some(&open), steady(at(219)));
+        assert_eq!((new(&news), news.is_unread(view(1))), ([false, true], true));
+
+        news.listed(Some(&open), steady(at(220)));
+        for news in [&news, &News::within(&runtime)] {
+            assert_eq!(new(news), [true, true]);
+            assert_eq!([1, 2].map(|id| news.is_unread(view(id))), [false, true]);
+            assert_eq!(news.last_seen(session(10)), Some(at(201)));
+        }
     }
 
     #[test]

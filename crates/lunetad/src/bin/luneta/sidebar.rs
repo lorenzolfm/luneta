@@ -862,6 +862,10 @@ impl Known {
         self.project.listed()
     }
 
+    fn terminals(&self) -> impl Iterator<Item = ViewId> {
+        self.worktrees.iter().flat_map(|worktree| worktree.terminals.iter().copied())
+    }
+
     fn kept_views(&self) -> impl Iterator<Item = &(ViewId, View)> {
         self.worktrees.iter().flat_map(|worktree| &worktree.views)
     }
@@ -1746,13 +1750,14 @@ impl Sidebar {
         let mut live = Lists::default();
         for (machine, seen) in machines(host, &self.shelves).each() {
             let Ok(seen) = seen else {
-                live.lists(&machine, [], false);
+                live.unreached(&machine);
                 continue;
             };
             let whole = self.shelves.iter().any(|it| {
                 it.machine == machine && it.kept && it.unlisted == 0
             });
-            live.lists(&machine, seen.projects.iter().map(|known| known.listed().kept), whole);
+            let listed = seen.projects.iter().map(|known| (known.listed().kept, known.terminals()));
+            live.lists(&machine, listed, whole);
         }
         Some(live)
     }
@@ -7347,6 +7352,53 @@ mod tests {
         let fish = ViewPlace::new(own_listed("s", 1), ViewKey::Terminal(fish));
         sit(&mut sidebar, &Place::View(fish));
         assert_eq!(rows(&mut sidebar)[6..], marked);
+    }
+
+    fn looked_for(mut host: Host, terminal: u64) -> Host {
+        let projects = host.projects.as_mut().and_then(|projects| projects.held.as_mut());
+        let Some(api::projects::Held::Kept(kept)) = projects else {
+            panic!("kept projects");
+        };
+        for project in &mut kept.projects {
+            let Some(api::project::Holds::Clone(clone)) = &mut project.holds else {
+                panic!("a clone");
+            };
+            let held = clone.worktrees.iter_mut().flat_map(|worktree| &mut worktree.terminals);
+            for held in held.filter(|held| held.id == terminal) {
+                held.found = Some(api::terminal::Found::Looking(()));
+            }
+        }
+        host
+    }
+
+    #[test]
+    fn a_view_lunetad_looks_for_keeps_its_marks_and_one_it_drops_loses_them() {
+        let mut sidebar = fresh();
+        let s = |nvim: bool| {
+            let views = [view(2, 0, "/w/c", "nvim src/main.rs"), view(3, 0, "/w/a", "fish")];
+            let views = views.into_iter().filter(|view| nvim || view.id != 2).collect();
+            host(vec![own_session("s", 1, views)], Vec::new())
+        };
+        sidebar.hear(s(true));
+        sit(&mut sidebar, &own_view_of("s", 1, 3));
+        let rows = |sidebar: &mut Sidebar| seen_at(sidebar, true, 32, 9, moment(160_000)).0;
+        let unmarked = rows(&mut sidebar);
+        sidebar.key(&char('k'), moment(160_000));
+        sidebar.key(&char('u'), moment(160_000));
+        let marked = rows(&mut sidebar);
+        assert_ne!(marked, unmarked);
+
+        sidebar.hear(looked_for(s(true), 2));
+        tick(&mut sidebar, 160_000);
+        tick(&mut sidebar, 171_000);
+        sidebar.hear(s(true));
+        assert_eq!(rows(&mut sidebar), marked);
+
+        sidebar.hear(s(false));
+        tick(&mut sidebar, 172_000);
+        tick(&mut sidebar, 182_000);
+        sidebar.hear(s(true));
+        assert_eq!(rows(&mut sidebar), unmarked);
     }
 
     #[test]
