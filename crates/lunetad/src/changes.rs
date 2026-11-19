@@ -27,6 +27,14 @@ impl Unchanged {
             _ => Unchanged::InDoubt(why),
         }
     }
+
+    #[must_use]
+    pub fn said(self, refused: &str, in_doubt: &str) -> String {
+        match self {
+            Unchanged::Refused(why) | Unchanged::Nests(why) => format!("{refused}: {why}"),
+            Unchanged::InDoubt(why) => format!("{why}, so {in_doubt}"),
+        }
+    }
 }
 
 #[must_use]
@@ -96,5 +104,13 @@ mod tests {
         }
         let older = Status::unimplemented(why());
         assert_eq!(Unchanged::of(&older), Unchanged::Refused(why()), "a lunetad older than it");
+    }
+
+    #[test]
+    fn only_what_kept_nothing_is_said_unchanged() {
+        let said = |unchanged: Unchanged| unchanged.said("not closed", "it may be closed");
+        assert_eq!(said(Unchanged::Refused("w".to_owned())), "not closed: w");
+        assert_eq!(said(Unchanged::Nests("w".to_owned())), "not closed: w");
+        assert_eq!(said(Unchanged::InDoubt("w".to_owned())), "w, so it may be closed");
     }
 }

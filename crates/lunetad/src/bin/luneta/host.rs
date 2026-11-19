@@ -21,6 +21,7 @@ use crossterm::event::{
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use crossterm::{execute, queue};
 use lunetad::api::{Host, Version};
+use lunetad::changes::Unchanged;
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
@@ -76,7 +77,7 @@ use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::projected::{self, Projected};
 use crate::viewed::{self, Heeded, Viewed};
-use crate::worktrees::{self, Arrival, Landed, Landing, Unmoved};
+use crate::worktrees::{self, Arrival, Landed, Landing};
 use crate::width::Width;
 
 pub enum Made {
@@ -150,7 +151,7 @@ pub enum Event {
     Notice(String),
     Unclosed { on: Machine, act: Act, ticket: u64, why: String },
     Moved { ticket: u64, kept: Option<Version> },
-    Unmoved { on: Machine, ticket: u64, order: Reorder, unmoved: Unmoved },
+    Unmoved { on: Machine, ticket: u64, order: Reorder, unmoved: Unchanged },
     Copy(Clip),
     Image(Went),
     ImageSlow(Destination),
@@ -792,7 +793,7 @@ impl Mover {
                     continue;
                 }
                 let asked = AssertUnwindSafe(|| worktrees::reordered(&lunetad, &on, &order));
-                let unsure = |_| Err(Unmoved::Unsure(MOVE_PANICKED.to_owned()));
+                let unsure = |_| Err(Unchanged::InDoubt(MOVE_PANICKED.to_owned()));
                 let event = match panic::catch_unwind(asked).unwrap_or_else(unsure) {
                     Ok(kept) => Event::Moved { ticket, kept },
                     Err(unmoved) => {
@@ -948,13 +949,13 @@ impl App {
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Notice(notice) => self.sidebar.notify(notice),
             Event::Unclosed { on, act, ticket, why } => {
-                self.sidebar.unclosed(&on, &act, ticket, format!("menu: not closed: {why}"));
+                self.sidebar.unclosed(&on, &act, ticket, format!("menu: {why}"));
             },
             Event::Moved { ticket, kept } => self.sidebar.moved(ticket, kept),
             Event::Unmoved { on, ticket, order, unmoved } => {
                 let note = match unmoved {
-                    Unmoved::Refused(why) => format!("not moved: {why}"),
-                    Unmoved::Unsure(why) => format!("may have moved: {why}"),
+                    Unchanged::Refused(why) | Unchanged::Nests(why) => format!("not moved: {why}"),
+                    Unchanged::InDoubt(why) => format!("may have moved: {why}"),
                 };
                 self.sidebar.unmoved(&on, ticket, &order, note);
             },
@@ -1869,18 +1870,19 @@ impl App {
             },
             Asked::Rename { on, rename } => {
                 self.change(on, RENAME_PANICKED, move |on| {
-                    let renamed = match &rename {
+                    let (renamed, noun) = match &rename {
                         Rename::Terminal(terminal, to) => {
-                            worktrees::renamed_terminal(on, *terminal, to.as_ref())
+                            (worktrees::renamed_terminal(on, *terminal, to.as_ref()), "view")
                         },
                         Rename::Worktree(worktree, to) => {
-                            worktrees::renamed_worktree(on, *worktree, to.as_ref())
+                            (worktrees::renamed_worktree(on, *worktree, to.as_ref()), "worktree")
                         },
                         Rename::Project(project, to) => {
-                            worktrees::renamed_project(on, *project, to)
+                            (worktrees::renamed_project(on, *project, to), "project")
                         },
                     };
-                    renamed.map_err(|why| format!("not renamed: {why}"))
+                    let maybe = format!("the {noun} may be renamed");
+                    renamed.map_err(|unchanged| unchanged.said("not renamed", &maybe))
                 });
             },
             Asked::Make { menu, on, project, cwd, name, command } => {
@@ -2007,16 +2009,21 @@ impl App {
     fn project_act(&mut self, on: Machine, act: Act, ticket: u64) {
         let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
         self.keep_change(thread::spawn(move || {
-            let closed = caught(CLOSE_PANICKED, || match &act {
-                Act::View { view: ViewKey::Terminal(key), .. } => {
-                    worktrees::closed_view(&lunetad, &on, *key)
-                },
-                Act::Worktree { worktree, seen, .. } => {
-                    worktrees::closed(&lunetad, &on, *worktree, seen)
-                },
-                Act::Project { project, worktrees, seen, .. } => {
-                    worktrees::closed_project(&lunetad, &on, *project, worktrees, seen)
-                },
+            let closed = caught(CLOSE_PANICKED, || {
+                let (closed, noun) = match &act {
+                    Act::View { view: ViewKey::Terminal(key), .. } => {
+                        (worktrees::closed_view(&lunetad, &on, *key), "view")
+                    },
+                    Act::Worktree { worktree, seen, .. } => {
+                        (worktrees::closed(&lunetad, &on, *worktree, seen), "worktree")
+                    },
+                    Act::Project { project, worktrees: held, seen, .. } => {
+                        let closed = worktrees::closed_project(&lunetad, &on, *project, held, seen);
+                        (closed, "project")
+                    },
+                };
+                let maybe = format!("the {noun} may be closed");
+                closed.map_err(|unchanged| unchanged.said("not closed", &maybe))
             });
             if let Err(why) = closed {
                 let _ = events.send(Event::Unclosed { on, act, ticket, why });

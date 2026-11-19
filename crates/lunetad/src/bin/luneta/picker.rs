@@ -20,6 +20,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use lunetad::changes::Unchanged;
 use lunetad::links::Branch;
 use lunetad::projects::{self, Name, ProjectId, Seen, Used, ViewId};
 use lunetad::transcripts::SessionId;
@@ -286,8 +287,8 @@ pub enum Heard {
         asked: Option<ViewKey>,
         peek: Result<(u32, String), String>,
     },
-    Renamed { from: String, to: Name, renamed: Result<(), String> },
-    Closed { name: String, closed: Result<(), String> },
+    Renamed { from: String, to: Name, renamed: Result<(), Unchanged> },
+    Closed { name: String, closed: Result<(), Unchanged> },
     Dirs { on: Machine, ask: u64, visited: Result<Vec<Dir>, String> },
     Listed { on: Machine, path: Directory, listed: Result<String, String> },
 }
@@ -753,13 +754,17 @@ impl Picker {
                 self.peeks.insert((on, session, asked), peek);
             },
             Heard::Renamed { from, to, renamed } => {
-                if let Err(why) = renamed {
-                    self.error = Some(format!("{from} is not called {}: {why}", to.as_str()));
+                if let Err(unchanged) = renamed {
+                    let to = to.as_str();
+                    let refused = format!("{from} is not called {to}");
+                    let maybe = format!("{from} may be called {to}");
+                    self.error = Some(unchanged.said(&refused, &maybe));
                 }
             },
             Heard::Closed { name, closed } => {
-                if let Err(why) = closed {
-                    self.error = Some(format!("{name} stays: {why}"));
+                if let Err(unchanged) = closed {
+                    let maybe = format!("{name} may be closed");
+                    self.error = Some(unchanged.said(&format!("{name} stays"), &maybe));
                 }
             },
             Heard::Dirs { on, ask, visited } => {
@@ -3107,10 +3112,15 @@ mod tests {
         press(&mut picker, KeyCode::Delete);
         press(&mut picker, KeyCode::Char('y'));
         assert_eq!(picker.asks(), [close(main_place(), "main", &[1, 2])]);
-        let closed = Err("luneta-mux did not answer".to_owned());
+        let closed = Err(Unchanged::Refused("no layout holds the view 3".to_owned()));
         picker.heard(Heard::Closed { name: "main".to_owned(), closed });
-        let stays = "main stays: luneta-mux did not answer";
+        let stays = "main stays: no layout holds the view 3";
         assert!(said(&picker).contains(stays), "{}", said(&picker));
+        let late = Err(Unchanged::InDoubt("lunetad did not answer in 15s".to_owned()));
+        picker.heard(Heard::Closed { name: "main".to_owned(), closed: late });
+        let maybe = "lunetad did not answer in 15s, so main may be closed";
+        assert!(said(&picker).contains(maybe), "{}", said(&picker));
+        assert!(!said(&picker).contains("stays"), "{}", said(&picker));
 
         down_to(&mut picker, "luneta › docs");
         press(&mut picker, KeyCode::Delete);
@@ -3183,9 +3193,14 @@ mod tests {
         let to = Name::parse("gateway").unwrap();
         assert_eq!(picker.asks(), [Ask::Rename { on: Machine::Local, renames, to: to.clone() }]);
         assert!(!said(&picker).contains("renaming"), "{}", said(&picker));
-        let refused = Err("lunetad: no".to_owned());
-        picker.heard(Heard::Renamed { from: "api".to_owned(), to, renamed: refused });
+        let refused = Err(Unchanged::Refused("lunetad: no".to_owned()));
+        let heard = |renamed| Heard::Renamed { from: "api".to_owned(), to: to.clone(), renamed };
+        picker.heard(heard(refused));
         assert!(said(&picker).contains("api is not called gateway: lunetad: no"));
+        picker.heard(heard(Err(Unchanged::InDoubt("it dropped".to_owned()))));
+        let maybe = "it dropped, so api may be called gateway";
+        assert!(said(&picker).contains(maybe), "{}", said(&picker));
+        assert!(!said(&picker).contains("not called"), "{}", said(&picker));
 
         press(&mut picker, KeyCode::Up);
         control(&mut picker, 'r');

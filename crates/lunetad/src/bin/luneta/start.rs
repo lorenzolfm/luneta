@@ -135,8 +135,9 @@ fn went(path: &Path, worktree: WorktreeId) -> bool {
             eprintln!("luneta: no luneta is on this terminal, so none went there");
             true
         },
-        Err(why) => {
-            eprintln!("luneta: started, and went nowhere: {why}");
+        Err(unchanged) => {
+            let said = unchanged.said("went nowhere", "luneta may have gone to the worktree");
+            eprintln!("luneta: started, and {said}");
             false
         },
     }
