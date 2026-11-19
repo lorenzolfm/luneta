@@ -13,26 +13,41 @@ use crate::host::Event;
 use crate::machines::Machine;
 use crate::state;
 
+const LOCAL: &str = "-";
+
 #[derive(Clone, Copy, Debug)]
 pub enum Fold<'a> {
+    Machine(&'a Machine),
     Project(&'a Machine, ProjectId),
     Worktree(&'a Machine, WorktreeId),
 }
 
 impl Fold<'_> {
     fn file(self) -> (Kept, String) {
-        let (machine, name) = match self {
-            Fold::Project(machine, project) => (machine, format!("project-{:016x}", project.get())),
-            Fold::Worktree(machine, worktree) => {
-                (machine, format!("worktree-{:016x}", worktree.get()))
+        match self {
+            Fold::Machine(Machine::Local) => (Kept::Machines, LOCAL.to_owned()),
+            Fold::Machine(Machine::Remote(destination)) => {
+                let name = spelled(destination);
+                assert!(!name.contains(':'), "a machine's file is apart from its projects'");
+                assert_ne!(name, LOCAL, "another machine's file is apart from this one's");
+                (Kept::Machines, name)
             },
-        };
-        match machine {
-            Machine::Local => (Kept::Sessions, name),
-            Machine::Remote(destination) => {
-                (Kept::Machines, format!("{}:{name}", spelled(destination)))
+            Fold::Project(machine, project) => {
+                kept_on(machine, format!("project-{:016x}", project.get()))
+            },
+            Fold::Worktree(machine, worktree) => {
+                kept_on(machine, format!("worktree-{:016x}", worktree.get()))
             },
         }
+    }
+}
+
+fn kept_on(machine: &Machine, name: String) -> (Kept, String) {
+    match machine {
+        Machine::Local => (Kept::Sessions, name),
+        Machine::Remote(destination) => {
+            (Kept::Machines, format!("{}:{name}", spelled(destination)))
+        },
     }
 }
 
@@ -246,6 +261,23 @@ mod tests {
         assert!(!next.contains(worktree(7)));
         assert!(!next.contains(Fold::Project(&dot, seven)));
         assert!(next.contains(Fold::Worktree(&dot, WorktreeId::of(7).unwrap())));
+        assert_eq!(next.lost(), None);
+    }
+
+    #[test]
+    fn a_machine_s_fold_lasts_and_folds_neither_another_machine_nor_its_projects() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut here = within(scratch.path());
+        let vps = Machine::Remote("me@vps:22".parse().unwrap());
+
+        assert!(here.set(Fold::Machine(&Machine::Local), true));
+        assert!(here.set(Fold::Machine(&vps), true));
+        assert!(here.set(Fold::Machine(&vps), false));
+        let next = within(scratch.path());
+        assert!(next.contains(Fold::Machine(&Machine::Local)));
+        assert!(!next.contains(Fold::Machine(&vps)));
+        assert!(!next.contains(project(1)));
+        assert!(!next.contains(Fold::Project(&vps, ProjectId::of(1).unwrap())));
         assert_eq!(next.lost(), None);
     }
 
