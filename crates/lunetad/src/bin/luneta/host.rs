@@ -30,7 +30,7 @@ use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::rebases::{Rebased, Unrebased};
-use lunetad::{Destination, Direction, Growth, SessionName};
+use lunetad::{Destination, Direction, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -441,7 +441,7 @@ struct App {
     quit_asked: bool,
 }
 
-pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
+pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
     let unkept = log::start(Process::Luneta).err();
     let dir = match env::current_dir() {
         Ok(dir) => dir,
@@ -459,7 +459,6 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
         Ok(cwd) => cwd,
         Err(why) => return did_not_start(&format!("no directory to start in: {why}")),
     };
-    let named = session.map(SessionName::as_str);
     let seen = |project| {
         news.last_seen(crate::ledger::Session::Project(project))
     };

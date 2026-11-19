@@ -410,14 +410,14 @@ fn a_named_luneta_in_a_clone_shows_the_worktree_of_the_branch_no_project_is_name
     let main = work_in(&owned, "luneta");
     let clone = main.path.parent().unwrap().to_owned();
     git(&clone.join(".bare"), &["update-ref", "refs/remotes/origin/main", "main"]);
-    let window = Window::open(&owned.host, &main, &["foo"]);
-    let foo = clone.join("foo");
-    eventually("luneta shows foo, the worktree it made", || shown(&owned, &foo));
+    let window = Window::open(&owned.host, &main, &["fix/foo"]);
+    let fix = clone.join("fix-foo");
+    eventually("luneta shows fix-foo, the worktree it made", || shown(&owned, &fix));
     drop(window);
-    let head = fs::read_to_string(clone.join(".bare/worktrees/foo/HEAD")).unwrap();
-    assert_eq!(head, "ref: refs/heads/foo\n", "on a branch of its own");
+    let head = fs::read_to_string(clone.join(".bare/worktrees/fix-foo/HEAD")).unwrap();
+    assert_eq!(head, "ref: refs/heads/fix/foo\n", "on a branch of its own");
     let names: Vec<String> = projects_of(&owned).into_iter().map(|it| it.name).collect();
-    assert_eq!(names, ["luneta"], "no project is made of foo");
+    assert_eq!(names, ["luneta"], "no project is made of fix/foo");
 }
 
 #[test]
