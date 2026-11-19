@@ -41,6 +41,9 @@ pub enum Added {
 }
 
 pub fn add(destination: &Destination) -> Result<Added, String> {
+    if destination.is_here() {
+        return Err(format!("{destination}: {}", lunetad::THIS_MACHINE));
+    }
     add_to(&file()?, destination)
 }
 

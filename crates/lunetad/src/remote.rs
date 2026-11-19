@@ -5,6 +5,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, BufRead as _, BufReader, ErrorKind, PipeWriter, Read as _};
 use std::iter;
+use std::net::IpAddr;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
@@ -35,6 +36,8 @@ pub const FILE: &str = "hosts";
 
 pub const HOSTS_MAX: usize = 16;
 
+pub const THIS_MACHINE: &str = "it is this machine, which luneta lists first";
+
 pub const HELD_MAX: usize = 12;
 
 const AGAIN_MAX: Duration = Duration::from_secs(30);
@@ -42,6 +45,10 @@ const AGAIN_MAX: Duration = Duration::from_secs(30);
 const SAID_MAX: u64 = 4096;
 
 const HEARD_BEFORE: Duration = Duration::from_secs(1);
+
+const HEARD_LAST: Duration = HEARD_BEFORE.saturating_add(HEARD_BEFORE);
+
+const SSH_SAID_MAX: usize = 240;
 
 const SHARED_FOR: u32 = 60;
 
@@ -64,6 +71,37 @@ impl Destination {
             },
             _ if status.message().is_empty() => format!("{self}: lunetad: {}", status.code()),
             _ => format!("{self}: {}", status.message()),
+        }
+    }
+
+    #[must_use]
+    pub fn is_here(&self) -> bool {
+        self.is_on(&rustix::system::uname().nodename().to_string_lossy())
+    }
+
+    fn is_on(&self, node: &str) -> bool {
+        let host = self.host();
+        let host = host.strip_suffix('.').unwrap_or(host);
+        let short = node.split('.').next().unwrap_or_default();
+        let named = |name: &str| !name.is_empty() && host.eq_ignore_ascii_case(name);
+        let last = host.rsplit('.').next().unwrap_or_default();
+        let loopback = host.parse::<IpAddr>().is_ok_and(|address| {
+            let address = address.to_canonical();
+            address.is_loopback() || address.is_unspecified()
+        });
+        named(node) || named(short) || last.eq_ignore_ascii_case("localhost") || loopback
+    }
+
+    fn host(&self) -> &str {
+        let Some(uri) = self.0.strip_prefix("ssh://") else {
+            let host = self.0.rsplit_once('@').map_or(self.0.as_str(), |(_, host)| host);
+            return host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host);
+        };
+        let authority = uri.split('/').next().unwrap_or_default();
+        let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+        match host.strip_prefix('[') {
+            Some(bracketed) => bracketed.split_once(']').map_or(bracketed, |(host, _)| host),
+            None => host.split_once(':').map_or(host, |(host, _)| host),
         }
     }
 }
@@ -95,7 +133,7 @@ impl fmt::Display for Destination {
 pub enum Reached {
     Reaching,
     Host(remote::Host),
-    Unreached { since: SystemTime, why: String, stopped: Stopped, projects: Option<api::Projects> },
+    Unreached { since: SystemTime, failed: Failed, projects: Option<api::Projects> },
 }
 
 impl Reached {
@@ -103,12 +141,13 @@ impl Reached {
         let reached = match self {
             Reached::Reaching => remote::Reached::Reaching(()),
             Reached::Host(host) => remote::Reached::Host(host.clone()),
-            Reached::Unreached { since, why, stopped, projects } => {
+            Reached::Unreached { since, failed, projects } => {
                 remote::Reached::Unreached(remote::Unreached {
                     since: Some((*since).into()),
-                    why: why.clone(),
-                    stopped: Some(stopped.to_api()),
+                    why: failed.why.clone(),
+                    stopped: Some(failed.stopped.to_api()),
                     projects: projects.clone(),
+                    ssh_said: failed.ssh_said.clone().unwrap_or_default(),
                 })
             },
         };
@@ -260,6 +299,23 @@ pub struct Named {
     pub unread: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failed {
+    why: String,
+    stopped: Stopped,
+    ssh_said: Option<String>,
+}
+
+impl Failed {
+    fn of(why: String, stopped: Stopped) -> Self {
+        Failed { why, stopped, ssh_said: None }
+    }
+
+    fn logged_as(&self, other: &Failed) -> bool {
+        self.why == other.why && self.stopped == other.stopped
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stopped {
     Unstarted,
@@ -269,6 +325,7 @@ pub enum Stopped {
     Lost,
     Unwatched,
     Unmatched,
+    Here,
 }
 
 impl Stopped {
@@ -292,12 +349,13 @@ impl Stopped {
             Stopped::Lost => unreached::Stopped::Lost(()),
             Stopped::Unwatched => unreached::Stopped::Unwatched(()),
             Stopped::Unmatched => unreached::Stopped::Unmatched(()),
+            Stopped::Here => unreached::Stopped::Here(()),
         }
     }
 }
 
-fn unreached(error: &(dyn Error + 'static)) -> (String, Stopped) {
-    (causes(error), Stopped::of(error))
+fn unreached(error: &(dyn Error + 'static)) -> Failed {
+    Failed::of(causes(error), Stopped::of(error))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -350,6 +408,7 @@ pub fn follow(
     let mut told = Named::default();
     let mut watched: Vec<(Destination, oneshot::Sender<()>)> = Vec::new();
     let mut unwatched: HashMap<Destination, SystemTime> = HashMap::new();
+    let mut here: Vec<Destination> = Vec::new();
     let mut unwatchable = Troubles::default();
     let mut begun: u64 = 0;
     let tell = move |named: Option<Named>| {
@@ -364,10 +423,24 @@ pub fn follow(
             let machines = &named.machines;
             watched.retain(|(destination, _)| machines.contains(destination));
             unwatched.retain(|destination, _| machines.contains(destination));
+            here.retain(|destination| machines.contains(destination));
             told = named;
         }
         for destination in &told.machines {
-            if watched.iter().any(|(watched, _)| watched == destination) {
+            let watching = watched.iter().any(|(watched, _)| watched == destination);
+            if watching || here.contains(destination) {
+                continue;
+            }
+            if destination.is_here() {
+                log::say(&format!("{destination}: {THIS_MACHINE}, so no ssh runs to it"));
+                let failed = Failed::of(THIS_MACHINE.to_owned(), Stopped::Here);
+                let since = SystemTime::now();
+                let reached = Reached::Unreached { since, failed, projects: None };
+                let remote = Command::Remote { destination: destination.clone(), reached };
+                if core.send(remote).is_err() {
+                    return false;
+                }
+                here.push(destination.clone());
                 continue;
             }
             let bridges = Arc::clone(&bridges);
@@ -383,8 +456,8 @@ pub fn follow(
                     let since = unwatched.entry(destination.clone());
                     let since = *since.or_insert_with(SystemTime::now);
                     let why = format!("it is not watched: {error}");
-                    let stopped = Stopped::Unwatched;
-                    let reached = Reached::Unreached { since, why, stopped, projects: None };
+                    let failed = Failed::of(why, Stopped::Unwatched);
+                    let reached = Reached::Unreached { since, failed, projects: None };
                     let destination = destination.clone();
                     if core.send(Command::Remote { destination, reached }).is_err() {
                         return false;
@@ -499,14 +572,17 @@ async fn watched(
         let asked = asked(&bridged, &seen, &mut connected, question, &said, &folder).await;
         let (version, host) = match asked {
             Ok(answered) => answered,
-            Err(why) => {
-                let logged = matches!(&seen, Seen::Unreached { why: logged, .. } if *logged == why);
-                seen = seen.failed(why);
+            Err(failed) => {
+                let logged = match &seen {
+                    Seen::Unreached { failed: logged, .. } => logged.logged_as(&failed),
+                    Seen::Reaching { .. } | Seen::Answered { .. } | Seen::Broke { .. } => false,
+                };
+                seen = seen.failed(failed);
                 bridged.agree(&seen, connected.as_ref());
-                if let Seen::Unreached { why: (why, _), .. } = &seen
+                if let Seen::Unreached { failed, .. } = &seen
                     && !logged
                 {
-                    log::say(&format!("{destination}: unreached: {why}"));
+                    log::say(&format!("{destination}: unreached: {}", failed.why));
                 }
                 if let Some(reached) = seen.unreached()
                     && !told(&core, &destination, reached)
@@ -559,12 +635,7 @@ enum Seen {
     Reaching { since: SystemTime },
     Answered { after: api::Version, at: SystemTime, projects: Option<api::Projects> },
     Broke { after: api::Version, at: SystemTime, projects: Option<api::Projects> },
-    Unreached {
-        since: SystemTime,
-        failures: u32,
-        why: (String, Stopped),
-        projects: Option<api::Projects>,
-    },
+    Unreached { since: SystemTime, failures: u32, failed: Failed, projects: Option<api::Projects> },
 }
 
 impl Seen {
@@ -583,23 +654,23 @@ impl Seen {
         }
     }
 
-    fn failed(self, why: (String, Stopped)) -> Seen {
+    fn failed(self, failed: Failed) -> Seen {
         let failures = self.failures().saturating_add(1);
         match self {
             Seen::Answered { after, at, projects } => Seen::Broke { after, at, projects },
-            Seen::Reaching { since } => Seen::Unreached { since, failures, why, projects: None },
+            Seen::Reaching { since } => Seen::Unreached { since, failures, failed, projects: None },
             Seen::Broke { at: since, projects, .. } | Seen::Unreached { since, projects, .. } => {
-                Seen::Unreached { since, failures, why, projects }
+                Seen::Unreached { since, failures, failed, projects }
             },
         }
     }
 
     fn unreached(&self) -> Option<Reached> {
-        let Seen::Unreached { since, why: (why, stopped), projects, .. } = self else {
+        let Seen::Unreached { since, failed, projects, .. } = self else {
             return None;
         };
-        let (since, why, stopped, projects) = (*since, why.clone(), *stopped, projects.clone());
-        Some(Reached::Unreached { since, why, stopped, projects })
+        let (since, failed, projects) = (*since, failed.clone(), projects.clone());
+        Some(Reached::Unreached { since, failed, projects })
     }
 }
 
@@ -614,7 +685,7 @@ async fn asked(
     question: api::WatchRequest,
     said: &Arc<Mutex<Said>>,
     folder: &Path,
-) -> Result<(api::Version, api::Host), (String, Stopped)> {
+) -> Result<(api::Version, api::Host), Failed> {
     let daemon = if let Some(daemon) = connected {
         daemon
     } else {
@@ -627,7 +698,8 @@ async fn asked(
     let answered = watched.map_err(|status| unreached(&status)).and_then(|host| {
         let host = host.into_inner();
         let unversioned = "an answer with no version, which this lunetad does not read";
-        let version = host.version.ok_or_else(|| (unversioned.to_owned(), Stopped::Lost))?;
+        let version =
+            host.version.ok_or_else(|| Failed::of(unversioned.to_owned(), Stopped::Lost))?;
         Ok((version, host))
     });
     if answered.is_err() {
@@ -640,13 +712,25 @@ async fn matched(
     destination: &Destination,
     said: &Arc<Mutex<Said>>,
     folder: &Path,
-) -> Result<DaemonClient<Channel>, (String, Stopped)> {
-    let reached = client::through(ssh(destination, said, folder)).await;
-    let mut daemon = reached.map_err(|error| unreached(&error))?;
+) -> Result<DaemonClient<Channel>, Failed> {
+    let (ssh, last) = ssh(destination, said, folder);
+    let mut daemon = match client::through(ssh).await {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            let mut failed = unreached(&error);
+            if let Some(last) = last {
+                let last = tokio::time::timeout(HEARD_LAST, last).await;
+                failed.ssh_said = last.ok().and_then(Result::ok);
+            }
+            return Err(failed);
+        },
+    };
     let info = daemon.info(()).await.map_err(|status| unreached(&status))?.into_inner();
     match release::of(&info.version, info.built) {
         release::Of::Own => Ok(daemon),
-        release::Of::Other(other) => Err((unmatched(&other, info.pid), Stopped::Unmatched)),
+        release::Of::Other(other) => {
+            Err(Failed::of(unmatched(&other, info.pid), Stopped::Unmatched))
+        },
     }
 }
 
@@ -655,14 +739,19 @@ fn unmatched(other: &release::Other, pid: u32) -> String {
     format!("lunetad {other} (pid {pid}) is another build than this one, {own}")
 }
 
-fn ssh(destination: &Destination, said: &Arc<Mutex<Said>>, folder: &Path) -> Process {
+fn ssh(
+    destination: &Destination,
+    said: &Arc<Mutex<Said>>,
+    folder: &Path,
+) -> (Process, Option<oneshot::Receiver<String>>) {
     let mut ssh = Process::new("ssh");
     ssh.args(["-T", "-o", "BatchMode=yes"]).args(sharing(folder, destination));
     ssh.args([&destination.0, "luneta", "bridge"]);
-    if let Ok(saying) = heard(&destination.0, said) {
-        ssh.stderr(saying);
-    }
-    ssh
+    let Ok((saying, last)) = heard(&destination.0, said) else {
+        return (ssh, None);
+    };
+    ssh.stderr(saying);
+    (ssh, Some(last))
 }
 
 #[derive(Default)]
@@ -671,9 +760,13 @@ struct Said {
     last: Option<mpsc::Receiver<()>>,
 }
 
-fn heard(destination: &str, said: &Arc<Mutex<Said>>) -> io::Result<PipeWriter> {
+fn heard(
+    destination: &str,
+    said: &Arc<Mutex<Said>>,
+) -> io::Result<(PipeWriter, oneshot::Receiver<String>)> {
     let (heard, saying) = io::pipe()?;
     let (ends, ended) = mpsc::channel::<()>();
+    let (says_last, last) = oneshot::channel();
     let before = locked(said).last.replace(ended);
     let (destination, said) = (destination.to_owned(), Arc::clone(said));
     thread::Builder::new().name(format!("ssh {destination}")).spawn(move || {
@@ -683,6 +776,7 @@ fn heard(destination: &str, said: &Arc<Mutex<Said>>) -> io::Result<PipeWriter> {
         let mut heard = BufReader::new(heard);
         let mut line = Vec::new();
         let mut lines = HashSet::new();
+        let mut last = None;
         loop {
             line.clear();
             match (&mut heard).take(SAID_MAX).read_until(b'\n', &mut line) {
@@ -690,7 +784,11 @@ fn heard(destination: &str, said: &Arc<Mutex<Said>>) -> io::Result<PipeWriter> {
                 Ok(_) => {},
             }
             let line = String::from_utf8_lossy(&line).trim_end().to_owned();
-            if line.is_empty() || !lines.insert(line.clone()) {
+            if line.is_empty() {
+                continue;
+            }
+            last = Some(shown(&line));
+            if !lines.insert(line.clone()) {
                 continue;
             }
             if !locked(&said).lines.contains(&line) {
@@ -698,9 +796,21 @@ fn heard(destination: &str, said: &Arc<Mutex<Said>>) -> io::Result<PipeWriter> {
             }
         }
         locked(&said).lines = lines;
+        if let Some(last) = last {
+            let _ = says_last.send(last);
+        }
         drop(ends);
     })?;
-    Ok(saying)
+    Ok((saying, last))
+}
+
+fn shown(line: &str) -> String {
+    let mut shown: String = line.chars().filter(|char| !char.is_control()).collect();
+    if let Some((cut, _)) = shown.char_indices().nth(SSH_SAID_MAX) {
+        shown.truncate(cut);
+        shown.push('…');
+    }
+    shown
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -729,12 +839,12 @@ mod tests {
         Seen::Answered { after: api::Version { pid: 1, seq: 1 }, at: SystemTime::now(), projects }
     }
 
-    fn refused() -> (String, Stopped) {
-        ("ssh: Connection refused".to_owned(), Stopped::Ended(Some(255)))
+    fn refused() -> Failed {
+        Failed::of("ssh: Connection refused".to_owned(), Stopped::Ended(Some(255)))
     }
 
     fn lost() -> Seen {
-        Seen::Unreached { since: SystemTime::now(), failures: 2, why: refused(), projects: None }
+        Seen::Unreached { since: SystemTime::now(), failures: 2, failed: refused(), projects: None }
     }
 
     fn named_in(text: &str) -> (Vec<String>, u32) {
@@ -751,6 +861,56 @@ mod tests {
         let (named, unread) = named_in(text);
         assert_eq!(named, ["nixos", "me@vps", "ssh://me@vps:22"]);
         assert_eq!(unread, 2);
+    }
+
+    #[test]
+    fn a_destination_names_this_machine_by_its_node_name_or_a_loopback_name() {
+        let here = [
+            "nixos",
+            "NixOS",
+            "lorenzo@nixos",
+            "nixos.lan",
+            "nixos.",
+            "me@host@nixos",
+            "ssh://lorenzo@nixos:2222",
+            "ssh://nixos/",
+            "localhost",
+            "root@LOCALHOST",
+            "box.localhost",
+            "127.0.0.2",
+            "lorenzo@[::1]",
+            "ssh://[::ffff:127.0.0.1]:22",
+            "0.0.0.0",
+        ];
+        for destination in here {
+            let named: Destination = destination.parse().unwrap();
+            assert!(named.is_on("nixos.lan"), "{destination} is this machine");
+        }
+        let elsewhere = [
+            "nixos-2",
+            "nixos.example.com",
+            "me@vps",
+            "ssh://nixos@vps:22",
+            "localhost-box",
+            "10.0.1.1",
+            "[::2]",
+            "lan",
+        ];
+        for destination in elsewhere {
+            let named: Destination = destination.parse().unwrap();
+            assert!(!named.is_on("nixos.lan"), "{destination} is another machine");
+        }
+        assert!(!"x".parse::<Destination>().unwrap().is_on(""));
+    }
+
+    #[test]
+    fn what_ssh_says_is_shown_without_its_controls_and_up_to_a_bound() {
+        assert_eq!(shown("\u{1b}[31mPermission denied\u{7}"), "[31mPermission denied");
+        let long = "a".repeat(SSH_SAID_MAX + 9);
+        let cut = shown(&long);
+        assert_eq!(cut.chars().count(), SSH_SAID_MAX + 1);
+        assert!(cut.ends_with('…'), "{cut}");
+        assert_eq!(shown(&"a".repeat(SSH_SAID_MAX)), "a".repeat(SSH_SAID_MAX));
     }
 
     #[test]

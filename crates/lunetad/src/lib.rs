@@ -57,6 +57,6 @@ pub use shows::{
 };
 pub use remote::{
     named_by as hosts_named, parsed as hosts_parsed, sharing, Destination, Parsed as HostsParsed,
-    FILE as HOSTS_FILE, HELD_MAX as BRIDGE_HELD_MAX, HOSTS_MAX,
+    FILE as HOSTS_FILE, HELD_MAX as BRIDGE_HELD_MAX, HOSTS_MAX, THIS_MACHINE,
 };
 pub use names::{SessionName, NAME_BYTES_MAX as SESSION_NAME_BYTES_MAX};
