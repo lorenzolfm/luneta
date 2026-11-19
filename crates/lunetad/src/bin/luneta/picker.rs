@@ -1435,6 +1435,9 @@ impl Picker {
                 let project = housed.project.listed().name().as_str();
                 unopened_found.extend(unopened_of(on, housed));
                 if let Some(lone) = Lone::of(housed) {
+                    assert!(housed.worktrees.is_empty(), "{project} alone has no worktree open");
+                    let unopened = housed.unopened.folders();
+                    assert!(unopened.is_empty(), "{project} alone lists no worktree not open");
                     let (on, row) = (on.clone(), housed.project.clone());
                     let key = Key::Project { on, project: row, lone };
                     let dir = sidebar::short_cwd(housed.dir.as_str());
