@@ -33,7 +33,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::actions::{Action, Command, QUIT};
+use crate::actions::{self, Action, Command, QUIT};
 use crate::agents::{self, Kept};
 use crate::alerts::{self, Reach};
 use crate::aloud;
@@ -49,8 +49,8 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::{self, Machine};
 use crate::menu::{
-    self, AllKeys, Briefed, Choice, Did, Done, Hint, Label, Menu, Opens, ViewRow, ProjectTarget,
-    Ran, Rename, Target, Top, Wants, WorktreeRow,
+    self, AllKeys, Briefed, Choice, Did, Done, Hint, Label, Menu, Opens, Origin, ViewRow,
+    ProjectTarget, Ran, Rename, Target, Top, Wants, WorktreeRow,
 };
 use crate::news::News;
 use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
@@ -1153,6 +1153,15 @@ enum Placed {
 enum Taken {
     Open(Placed),
     Kept,
+}
+
+impl Placed {
+    fn of(origin: Origin) -> Placed {
+        match origin {
+            Origin::Sidebar => Placed::Sidebar(Pause::Nothing),
+            Origin::Views => Placed::Afloat,
+        }
+    }
 }
 
 impl Taken {
@@ -3361,6 +3370,58 @@ impl Sidebar {
         self.end_mode();
         self.let_go();
         self.put(Menu::new(self.menus, target, agent), Placed::Afloat);
+    }
+
+    pub fn aimed(&self, origin: Origin) -> Target {
+        let target = match origin {
+            Origin::Sidebar => self.target(),
+            Origin::Views => {
+                let place = self.here_place().ok();
+                place.and_then(|place| self.target_at(self.on(), Place::View(place)))
+            },
+        };
+        target.unwrap_or_else(|| Target::Machine(self.on().clone()))
+    }
+
+    pub fn act(
+        &mut self,
+        target: &Target,
+        action: Action,
+        origin: Origin,
+        now: SystemTime,
+    ) -> Asked {
+        self.notice = None;
+        self.end_mode();
+        match (Command::of(action), action.key()) {
+            (Some(Command::Search), _) => self.find(String::new()),
+            (Some(Command::Unread), _) => self.toggle_unread(now),
+            (Some(Command::Reorder), _) => self.select(),
+            (Some(Command::Quit), _) => return Asked::Quit,
+            (None, actions::Key::Row(_)) => return self.row_action(action, now),
+            (
+                None,
+                actions::Key::Menu(_)
+                | actions::Key::RowAndMenu(_)
+                | actions::Key::Pasted(_)
+                | actions::Key::Chord(_),
+            ) => {
+                self.menus += 1;
+                let agent = self.agent_for(target);
+                let Some(did) = Menu::acting(self.menus, target, action, agent) else {
+                    return Asked::Nothing;
+                };
+                if origin == Origin::Views {
+                    self.let_go();
+                }
+                return self.menu_did(Placed::of(origin), did);
+            },
+        }
+        Asked::Nothing
+    }
+
+    pub fn chained(&mut self, done: Done, origin: Origin) -> Asked {
+        self.notice = None;
+        self.menu_did(Placed::of(origin), Did::Closed(done))
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -7700,7 +7761,7 @@ mod tests {
         assert_eq!(sidebar.key(&char('y'), now), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now + PAUSE);
         let rule = format!("─ Yank {}", "─".repeat(24));
-        assert_eq!(lines[22..], [rule, " p  PR link".to_owned()]);
+        assert_eq!(lines[22..], [rule, " p  Yank the PR link".to_owned()]);
 
         assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
         let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now);
@@ -7770,7 +7831,7 @@ mod tests {
         sidebar.key(&char('?'), now);
         assert_eq!(sidebar.keys_clicked(Keyed::Legend, &char('y'), now), Asked::Nothing);
         let clicked = clicks(&mut sidebar, 18);
-        assert_eq!(clicked[1], (" p  PR link".to_owned(), Some(on_legend('p'))));
+        assert_eq!(clicked[1], (" p  Yank the PR link".to_owned(), Some(on_legend('p'))));
         let copied = sidebar.keys_clicked(Keyed::Legend, &char('p'), now);
         assert_eq!(copied, Asked::Copy(link()));
     }
@@ -8050,7 +8111,7 @@ mod tests {
             (" a  Ask", Some(on_legend('a'))),
             (" c  Skills ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
-            (" r  Rename the view", Some(on_legend('r'))),
+            (" r  Rename the view…", Some(on_legend('r'))),
             (" d  Delete ▸", Some(on_legend('d'))),
             (" b  Brief ▸", Some(on_legend('b'))),
         ]);
@@ -8062,9 +8123,9 @@ mod tests {
             ("─ New ─────────── luneta/main ─", None),
             (" v  new view", Some(on_menu(KeyCode::Char('v')))),
             (" h  new welcome view", Some(on_menu(KeyCode::Char('h')))),
-            (" w  new worktree", Some(on_menu(KeyCode::Char('w')))),
-            (" p  new project", Some(on_menu(KeyCode::Char('p')))),
-            (" m  new machine", Some(on_menu(KeyCode::Char('m')))),
+            (" w  new worktree…", Some(on_menu(KeyCode::Char('w')))),
+            (" p  new project…", Some(on_menu(KeyCode::Char('p')))),
+            (" m  new machine…", Some(on_menu(KeyCode::Char('m')))),
             (" <BS> - Back, <ESC> - Close", Some(on_menu(KeyCode::Backspace))),
         ]);
     }
@@ -8201,7 +8262,7 @@ mod tests {
         sidebar.close_menu();
         sidebar.key(&char('?'), now);
         sidebar.key(&char('y'), now);
-        assert!(shows_at(&mut sidebar, now, " p  PR link"));
+        assert!(shows_at(&mut sidebar, now, " p  Yank the PR link"));
         sidebar.key(&KeyEvent::from(KeyCode::Esc), now);
 
         sidebar.key(&char('?'), now);
@@ -8228,11 +8289,11 @@ mod tests {
         for line in [
             " g g    First row",
             " ?      All keys",
-            " y p  Yank PR link",
+            " y p  Yank the PR link",
             " n v  new view",
             " d d  close the view",
             " d d  close the worktree",
-            " r    Rename the project",
+            " r    Rename the project…",
             " w  worktree",
             " BS   back a group",
             " Ctrl a       Sidebar or views",
@@ -8427,9 +8488,9 @@ mod tests {
             "─ New ─────────── luneta/main ─",
             " v  new view",
             " h  new welcome view",
-            " w  new worktree",
-            " p  new project",
-            " m  new machine",
+            " w  new worktree…",
+            " p  new project…",
+            " m  new machine…",
             " <BS> - Back, <ESC> - Close",
         ]);
         let (project, branch) = (ProjectId::of(1).unwrap(), Branch::parse("feat").unwrap());
@@ -9169,6 +9230,34 @@ mod tests {
         assert_eq!((floated(&sidebar).as_deref(), sidebar.notice.as_deref()), (None, Some(wrong)));
         float_a_menu(&mut sidebar);
         assert!(sidebar.notice.is_none());
+    }
+
+    #[test]
+    fn the_palette_aims_at_the_view_or_the_row_and_runs_its_action_where_it_opened() {
+        let mut sidebar = two_sessions();
+        let nowhere = Target::Machine(Machine::Local);
+        assert_eq!(sidebar.aimed(Origin::Views), nowhere, "no view is shown yet");
+        sit(&mut sidebar, &view_of("older", 10, 1));
+        let target = sidebar.aimed(Origin::Views);
+        let Target::View(_, row) = &target else {
+            panic!("the palette aims at the view shown: {target:?}");
+        };
+        assert_eq!(row.view, view_key(10, 1));
+        let asked = sidebar.act(&target, Action::CloseView, Origin::Views, moment(160_000));
+        assert_eq!(asked, Asked::Nothing, "a view's close is planned before it is asked");
+        assert_eq!(sidebar.holding(), Holding::Afloat, "over the views, its menu floats");
+        sidebar.close_menu();
+
+        sidebar.focus(Keys::Sidebar);
+        let target = sidebar.aimed(Origin::Sidebar);
+        assert_eq!(Some(&target), sidebar.target().as_ref(), "in the sidebar, it aims at the row");
+        sidebar.act(&target, Action::NewMachine, Origin::Sidebar, moment(160_000));
+        assert_eq!(sidebar.holding(), Holding::Menu, "in the sidebar, its menu opens there");
+        sidebar.act(&target, Action::Search, Origin::Sidebar, moment(160_000));
+        assert_eq!(sidebar.holding(), Holding::Search, "a sidebar key's action runs as its key");
+        let vps: Destination = "me@vps".parse().unwrap();
+        let asked = sidebar.chained(Done::Ssh(vps.clone()), Origin::Sidebar);
+        assert_eq!(asked, Asked::Ssh(vps));
     }
 
     #[test]

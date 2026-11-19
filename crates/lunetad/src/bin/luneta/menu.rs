@@ -569,6 +569,116 @@ fn own_folder() -> String {
     here.and_then(|here| here.to_str().map(str::to_owned)).unwrap_or_else(|| "~".to_owned())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chain {
+    typing: Typing,
+    typed: String,
+    wrong: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Chained {
+    Typing(Chain),
+    Back,
+    Close,
+    Done(Done),
+}
+
+impl Chain {
+    fn new(typing: Typing, typed: String) -> Chain {
+        Chain { typing, typed, wrong: None }
+    }
+
+    #[must_use]
+    pub fn of(target: &Target, action: Action) -> Option<Chain> {
+        Chain::offered(target, &target.offer(action)?)
+    }
+
+    fn offered(target: &Target, offer: &Offer<'_>) -> Option<Chain> {
+        let typing = match offer {
+            Offer::NewWorktree(project) => Typing::Branch(*project),
+            Offer::NewProject => return Some(Chain::new(Typing::Folder, target.folder_hint())),
+            Offer::NewMachine => Typing::Machine,
+            Offer::Rename(renames) => Typing::Rename(*renames),
+            Offer::SearchSkills(_)
+            | Offer::Skill(..)
+            | Offer::Last(..)
+            | Offer::FixChecks(_)
+            | Offer::NewView(_)
+            | Offer::NewWelcome(_)
+            | Offer::CloseView(_)
+            | Offer::CloseWorktree(_)
+            | Offer::DeleteProject(_)
+            | Offer::ForgetMachine(_)
+            | Offer::DeleteMerged(_)
+            | Offer::Brief(_)
+            | Offer::Ask
+            | Offer::FileIssue(_)
+            | Offer::Quit => return None,
+        };
+        Some(Chain::new(typing, String::new()))
+    }
+
+    #[must_use]
+    pub fn key(mut self, key: &KeyEvent, on: &Machine) -> Chained {
+        match type_key(key, &mut self.typed) {
+            Typed::Close => Chained::Close,
+            Typed::Back => match self.typing {
+                Typing::Name(folder) => Chained::Typing(Chain::new(Typing::Folder, folder)),
+                Typing::Machine | Typing::Folder | Typing::Branch(_) | Typing::Rename(_) => {
+                    Chained::Back
+                },
+            },
+            Typed::Typing => {
+                self.wrong = None;
+                Chained::Typing(self)
+            },
+            Typed::Enter => match self.typing.clone().typed(&self.typed, on) {
+                Entered::Done(done) => Chained::Done(done),
+                Entered::Next(typing) => Chained::Typing(Chain::new(typing, String::new())),
+                Entered::Wrong(why) => {
+                    self.wrong = Some(why);
+                    Chained::Typing(self)
+                },
+            },
+        }
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        self.typed.extend(text.chars().filter(|c| !c.is_control()));
+        self.wrong = None;
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &'static str {
+        self.typing.title()
+    }
+
+    #[must_use]
+    pub fn enter(&self) -> &'static str {
+        self.typing.enter()
+    }
+
+    #[must_use]
+    pub fn typed(&self) -> &str {
+        &self.typed
+    }
+
+    pub fn said(&self) -> Result<&'static str, &str> {
+        self.wrong.as_deref().map_or(Ok(self.typing.hint()), Err)
+    }
+
+    #[must_use]
+    pub fn right(&self) -> String {
+        match &self.typing {
+            Typing::Name(folder) => sidebar::short_cwd(folder),
+            Typing::Machine | Typing::Folder | Typing::Branch(_) | Typing::Rename(_) => {
+                String::new()
+            },
+        }
+    }
+}
+
 enum Typed {
     Typing,
     Enter,
@@ -713,7 +823,8 @@ impl Target {
         }
     }
 
-    fn noun(&self) -> Noun {
+    #[must_use]
+    pub fn noun(&self) -> Noun {
         match self {
             Target::Project(..) => Noun::Project,
             Target::Worktree(..) => Noun::Worktree,
@@ -722,7 +833,8 @@ impl Target {
         }
     }
 
-    fn fits(&self, action: Action) -> bool {
+    #[must_use]
+    pub fn fits(&self, action: Action) -> bool {
         self.offer(action).is_some()
     }
 
@@ -855,6 +967,30 @@ impl Target {
                 Briefed::Session(machine.clone(), session.name().clone())
             },
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Sidebar,
+    Views,
+}
+
+#[must_use]
+pub fn spelled(action: Action, origin: Origin) -> String {
+    let path = |path: &[char]| path.iter().map(char::to_string).collect::<Vec<_>>().join(" ");
+    let (code, modifiers) = actions::MENU;
+    let menu = Label::Key(code, modifiers);
+    match (action.key(), origin) {
+        (Key::Menu(keys) | Key::RowAndMenu(keys), Origin::Views) => {
+            format!("{menu} {}", path(keys))
+        },
+        (Key::Menu(keys @ [first, ..]), Origin::Sidebar) if Top::of(*first).is_some() => {
+            format!("m {}", path(keys))
+        },
+        (Key::Menu(keys) | Key::RowAndMenu(keys) | Key::Row(keys), _) => path(keys),
+        (Key::Pasted(key), _) => key.to_string(),
+        (Key::Chord((code, modifiers)), _) => Label::Key(code, modifiers).to_string(),
     }
 }
 
@@ -1048,7 +1184,7 @@ enum Stage {
     Reading { keys: Keys, last: Last, beside: Beside, ended: Ended },
     Fetching { keys: Keys, beside: Beside, page: PullPage },
     Pull { work: Work, agent: Harness, step: Step },
-    Typing { keys: Keys, typing: Typing, typed: String, wrong: Option<String> },
+    Typing { keys: Keys, chain: Chain },
 }
 
 enum Step {
@@ -1091,6 +1227,11 @@ impl Menu {
     pub fn new(number: u64, target: Target, agent: Picked) -> Menu {
         let keys = Keys::new(&target, agent);
         Menu { number, target, stage: Stage::Choosing(keys) }
+    }
+
+    pub fn acting(number: u64, target: &Target, action: Action, agent: Picked) -> Option<Did> {
+        let offer = target.offer(action)?;
+        Some(Menu::act(number, target, Keys::new(target, agent), offer))
     }
 
     pub fn pull(number: u64, target: Target, work: Work, agent: Harness) -> Menu {
@@ -1205,11 +1346,10 @@ impl Menu {
     }
 
     pub fn paste(&mut self, text: &str) -> bool {
-        let Stage::Typing { typed, wrong, .. } = &mut self.stage else {
+        let Stage::Typing { chain, .. } = &mut self.stage else {
             return false;
         };
-        typed.extend(text.chars().filter(|c| !c.is_control()));
-        *wrong = None;
+        chain.paste(text);
         true
     }
 
@@ -1217,10 +1357,7 @@ impl Menu {
         let stays = |stage: Stage, wants: Wants| {
             Did::Stays(Menu { number, target: target.clone(), stage }, wants)
         };
-        let typing = |keys: Keys, typing: Typing| {
-            let stage = Stage::Typing { keys, typing, typed: String::new(), wrong: None };
-            stays(stage, Wants::Nothing)
-        };
+        let chained = Chain::offered(target, &offer);
         let deleting = |keys: Keys, action: Action, session: &Listed, scope: Scope| {
             let (key, session) = (yes_key(action), session.clone());
             let wants = Wants::Plan { session: session.clone(), scope };
@@ -1269,17 +1406,13 @@ impl Menu {
                 Did::Closed(Done::Welcome { on, session: row.session.clone(), view: row.view })
             },
             Offer::NewWorktree(project) => {
-                let typing = Typing::Branch(project);
-                let stage = Stage::Typing { keys, typing, typed: String::new(), wrong: None };
-                stays(stage, Wants::Cloned(project))
+                let chain = chained.expect("a new worktree is typed in a chain");
+                stays(Stage::Typing { keys, chain }, Wants::Cloned(project))
             },
-            Offer::NewProject => {
-                let typed = target.folder_hint();
-                let stage = Stage::Typing { keys, typing: Typing::Folder, typed, wrong: None };
-                stays(stage, Wants::Nothing)
+            Offer::NewProject | Offer::NewMachine | Offer::Rename(_) => {
+                let chain = chained.expect("a project, a machine and a name are typed in a chain");
+                stays(Stage::Typing { keys, chain }, Wants::Nothing)
             },
-            Offer::NewMachine => typing(keys, Typing::Machine),
-            Offer::Rename(renames) => typing(keys, Typing::Rename(renames)),
             Offer::CloseView(row) => {
                 deleting(keys, Action::CloseView, &row.session, Scope::View(row.view))
             },
@@ -1336,23 +1469,11 @@ impl Menu {
                     None => stays(Stage::Choosing(keys), Wants::Nothing),
                 },
             },
-            Stage::Typing { keys, typing, mut typed, .. } => match type_key(key, &mut typed) {
-                Typed::Close => Did::Closed(Done::Nothing),
-                Typed::Back => stays(Stage::Choosing(keys), Wants::Nothing),
-                Typed::Typing => {
-                    stays(Stage::Typing { keys, typing, typed, wrong: None }, Wants::Nothing)
-                },
-                Typed::Enter => match typing.clone().typed(&typed, target.machine()) {
-                    Entered::Done(done) => Did::Closed(done),
-                    Entered::Next(typing) => {
-                        let typed = String::new();
-                        stays(Stage::Typing { keys, typing, typed, wrong: None }, Wants::Nothing)
-                    },
-                    Entered::Wrong(why) => {
-                        let wrong = Some(why);
-                        stays(Stage::Typing { keys, typing, typed, wrong }, Wants::Nothing)
-                    },
-                },
+            Stage::Typing { keys, chain } => match chain.key(key, target.machine()) {
+                Chained::Close => Did::Closed(Done::Nothing),
+                Chained::Back => stays(Stage::Choosing(keys), Wants::Nothing),
+                Chained::Typing(chain) => stays(Stage::Typing { keys, chain }, Wants::Nothing),
+                Chained::Done(done) => Did::Closed(done),
             },
             Stage::Planning { .. }
             | Stage::Sweeping { .. }
@@ -1804,27 +1925,26 @@ impl Menu {
                 let body = swept_lines(plan, width, body_room);
                 (title(keys), plan.repository_name().to_owned(), body, keyed(width, hints))
             },
-            Stage::Typing { typing, typed, wrong, .. } => {
-                let typed = sidebar::tail(&format!("{typed}_"), width.saturating_sub(2));
+            Stage::Typing { chain, .. } => {
+                let typed = sidebar::tail(&format!("{}_", chain.typed()), width.saturating_sub(2));
                 let mut body = vec![Line::from(vec![
                     Span::raw(" "),
                     Span::styled(typed, Style::new().fg(ACCENT)),
                 ])];
-                match wrong {
-                    Some(wrong) => body.extend(wrap(wrong, width, Style::new().fg(gruvbox::RED))),
-                    None => body.extend(wrap(typing.hint(), width, Style::new().fg(NAME))),
-                }
-                let keys = [(Hint::Enter, typing.enter()), (Hint::Esc, "Back")];
-                let right = match typing {
-                    Typing::Name(folder) => sidebar::short_cwd(folder),
-                    Typing::Machine | Typing::Folder | Typing::Branch(_) | Typing::Rename(_) => {
-                        String::new()
-                    },
-                };
-                (typing.title().to_owned(), right, body, keyed(width, &keys))
+                body.extend(chain_said(chain, width));
+                let keys = [(Hint::Enter, chain.enter()), (Hint::Esc, "Back")];
+                (chain.title().to_owned(), chain.right(), body, keyed(width, &keys))
             },
         };
         Shown { title, right, body, spots, footer, keys }
+    }
+}
+
+#[must_use]
+pub fn chain_said(chain: &Chain, width: usize) -> Vec<Line<'static>> {
+    match chain.said() {
+        Ok(hint) => wrap(hint, width, Style::new().fg(NAME)),
+        Err(wrong) => wrap(wrong, width, Style::new().fg(gruvbox::RED)),
     }
 }
 
@@ -2153,15 +2273,7 @@ impl AllKeys {
             let keys: Vec<String> = path.iter().map(char::to_string).collect();
             keys.join(" ")
         };
-        let sidebar = Action::row().map(|(action, path)| {
-            let group = path.first().filter(|_| path.len() > 1);
-            let group = group.and_then(|group| actions::group_name(&ROW_GROUPS, *group));
-            let does = group.map_or_else(
-                || action.name().to_owned(),
-                |group| format!("{group} {}", action.name()),
-            );
-            (spelled(path), does)
-        });
+        let sidebar = Action::row().map(|(action, path)| (spelled(path), action.name().to_owned()));
         let menu = Action::menu().map(|(action, path)| (spelled(path), action.name().to_owned()));
         let mut menu: Vec<(String, String)> = menu.collect();
         menu.extend(named(&MENU_MOVES));
@@ -2610,9 +2722,9 @@ mod tests {
                 "─ New ─────────── luneta/main ─",
                 " v  new view",
                 " h  new welcome view",
-                " w  new worktree",
-                " p  new project",
-                " m  new machine",
+                " w  new worktree…",
+                " p  new project…",
+                " m  new machine…",
                 " <BS> - Back, <ESC> - Close",
             ]
         );
@@ -2657,7 +2769,7 @@ mod tests {
         let refused = |typed: &str| {
             let menu = typed.chars().fold(asked(own_view()), |menu, c| stays(menu.key(&char(c))).0);
             let (menu, _) = stays(menu.key(&enter));
-            let Stage::Typing { wrong: Some(wrong), .. } = &menu.stage else {
+            let Stage::Typing { chain: Chain { wrong: Some(wrong), .. }, .. } = &menu.stage else {
                 panic!("{typed:?} keeps the box open, saying why");
             };
             (wrong.clone(), menu)
@@ -2681,7 +2793,7 @@ mod tests {
                 " i  File issue",
                 " c  Skills ▸",
                 " n  New ▸",
-                " r  Rename the view",
+                " r  Rename the view…",
                 " d  Delete ▸",
                 " b  Brief ▸",
                 " q  Quit luneta",
@@ -2720,7 +2832,7 @@ mod tests {
                 " i  File issue",
                 " c  Skills ▸",
                 " n  New ▸",
-                " r  Rename the view",
+                " r  Rename the view…",
                 " d  Delete ▸",
                 " b  Brief ▸",
             ]
@@ -2728,7 +2840,7 @@ mod tests {
         assert_eq!(text(&legend(Some(&project_on(Machine::Local)), 31, 15).0)[7..], [
             " a  Ask",
             " n  New ▸",
-            " r  Rename the project",
+            " r  Rename the project…",
             " d  Delete ▸",
             " b  Brief ▸",
         ]);
@@ -3087,9 +3199,9 @@ mod tests {
             text(&menu.lines(31, 9, 0).0),
             [
                 "─ Brief ───────────────────────",
-                " z  Every session",
-                " s  This session",
-                " h  Highlighted",
+                " z  Brief every session",
+                " s  Brief this session",
+                " h  Brief the highlighted",
                 " <BS> - Back, <ESC> - Close",
             ]
         );
@@ -3135,7 +3247,7 @@ mod tests {
             text.chars().fold(menu, |menu, c| stays(menu.key(&char(c))).0)
         };
         let shown = |menu: &Menu| match &menu.stage {
-            Stage::Typing { typed, .. } => typed.clone(),
+            Stage::Typing { chain, .. } => chain.typed.clone(),
             _ => panic!("no box to type in"),
         };
         let cleared = |menu: Menu| {
@@ -3171,8 +3283,12 @@ mod tests {
             " _",
             " its name; with none, it is",
         ]);
+        let (back, _) = stays(menu.key(&KeyEvent::from(KeyCode::Esc)));
+        let folder = ["─ New project ─────────────────", " ~/notes_"];
+        assert_eq!(text(&back.lines(31, 9, 0).0)[..2], folder, "Esc goes back to the folder typed");
+        let (menu, _) = stays(back.key(&enter));
         let (menu, _) = stays(typed(menu, "api/v2").key(&enter));
-        let Stage::Typing { wrong: Some(wrong), .. } = &menu.stage else {
+        let Stage::Typing { chain: Chain { wrong: Some(wrong), .. }, .. } = &menu.stage else {
             panic!("a project's name the sidebar cannot list keeps its box open, saying why");
         };
         assert!(wrong.contains("names no project"), "{wrong}");
@@ -3213,13 +3329,14 @@ mod tests {
         ]);
         let long = "x".repeat(projects::NAME_CHARS_MAX + 1);
         let (menu, _) = stays(renamed(worktree_on(Machine::Local), &long));
-        let Stage::Typing { typed, wrong: Some(wrong), .. } = &menu.stage else {
+        let Stage::Typing { chain: Chain { typed, wrong: Some(wrong), .. }, .. } = &menu.stage
+        else {
             panic!("a name too long keeps its box open, saying why");
         };
         assert_eq!(*typed, long);
         assert!(wrong.contains("longer than 64 characters"), "{wrong}");
         let (menu, _) = stays(renamed(session_row(), "api/v2"));
-        let Stage::Typing { wrong: Some(wrong), .. } = &menu.stage else {
+        let Stage::Typing { chain: Chain { wrong: Some(wrong), .. }, .. } = &menu.stage else {
             panic!("a project's name the sidebar cannot list keeps its box open, saying why");
         };
         assert!(wrong.contains("names no project"), "{wrong}");
@@ -3284,7 +3401,7 @@ mod tests {
             " i  File issue",
             " c  Skills ▸",
             " n  New ▸",
-            " r  Rename the view",
+            " r  Rename the view…",
             " d  Delete ▸",
             " b  Brief ▸",
             " q  Quit luneta",
@@ -3299,9 +3416,9 @@ mod tests {
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..6], [
             " v  new view",
             " h  new welcome view",
-            " w  new worktree",
-            " p  new project",
-            " m  new machine",
+            " w  new worktree…",
+            " p  new project…",
+            " m  new machine…",
         ]);
         let (menu, _) = stays(opened(view.clone(), Some('d')));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
@@ -3576,7 +3693,7 @@ mod tests {
         assert_eq!(at(session_row(), None), [
             " a  Ask",
             " n  New ▸",
-            " r  Rename the project",
+            " r  Rename the project…",
             " d  Delete ▸",
             " b  Brief ▸",
             " q  Quit luneta",
@@ -3587,16 +3704,16 @@ mod tests {
             " <BS> - Back, <ESC> - Close",
         ]);
         assert_eq!(at(session_row(), Some('n')), [
-            " w  new worktree",
-            " p  new project",
-            " m  new machine",
+            " w  new worktree…",
+            " p  new project…",
+            " m  new machine…",
             " <BS> - Back, <ESC> - Close",
         ]);
         assert_eq!(at(worktree_on(Machine::Local), None), [
             " a  Ask",
             " i  File issue",
             " n  New ▸",
-            " r  Rename the worktree",
+            " r  Rename the worktree…",
             " d  Delete ▸",
             " b  Brief ▸",
             " q  Quit luneta",
@@ -3621,8 +3738,8 @@ mod tests {
             " <ESC> - Close",
         ]);
         assert_eq!(at(local_header(), Some('n')), [
-            " p  new project",
-            " m  new machine",
+            " p  new project…",
+            " m  new machine…",
             " <BS> - Back, <ESC> - Close",
         ]);
         assert!(Menu::open(1, local_header(), Some('d'), PICKED).is_none());

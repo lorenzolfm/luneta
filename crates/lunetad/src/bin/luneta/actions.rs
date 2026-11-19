@@ -11,6 +11,8 @@ pub const COLLAPSE: Chord = (KeyCode::Char('q'), KeyModifiers::CONTROL);
 
 pub const MENU: Chord = (KeyCode::Char('a'), KeyModifiers::ALT);
 
+pub const PALETTE: Chord = (KeyCode::Char('k'), KeyModifiers::SUPER);
+
 pub const WORKTREES: Chord = (KeyCode::Char('j'), KeyModifiers::SUPER);
 
 pub const LEFT: Chord = (KeyCode::Char('h'), KeyModifiers::CONTROL);
@@ -143,6 +145,7 @@ actions! {
     Shrink,
     Collapse,
     Menu,
+    Palette,
     Worktrees,
     Agents,
     Dirs,
@@ -235,23 +238,23 @@ impl Action {
             },
             Action::NewWorktree => {
                 let keywords = &["branch", "tab", "task"];
-                spec("new worktree", keywords, menu(&['n', 'w']), IN_A_PROJECT)
+                spec("new worktree…", keywords, menu(&['n', 'w']), IN_A_PROJECT)
             },
             Action::NewProject => {
-                spec("new project", &["folder", "directory", "add"], menu(&['n', 'p']), EVERY)
+                spec("new project…", &["folder", "directory", "add"], menu(&['n', 'p']), EVERY)
             },
             Action::NewMachine => {
-                spec("new machine", &["ssh", "host", "remote"], menu(&['n', 'm']), EVERY)
+                spec("new machine…", &["ssh", "host", "remote"], menu(&['n', 'm']), EVERY)
             },
             Action::RenameView => {
                 let keywords = &["name", "pane", "terminal", "title"];
-                spec("Rename the view", keywords, menu(&['r']), VIEW)
+                spec("Rename the view…", keywords, menu(&['r']), VIEW)
             },
             Action::RenameWorktree => {
-                spec("Rename the worktree", &["name", "title"], menu(&['r']), WORKTREE)
+                spec("Rename the worktree…", &["name", "title"], menu(&['r']), WORKTREE)
             },
             Action::RenameProject => {
-                spec("Rename the project", &["name", "title"], menu(&['r']), PROJECT)
+                spec("Rename the project…", &["name", "title"], menu(&['r']), PROJECT)
             },
             Action::CloseView => {
                 let keywords = &["pane", "kill", "exit", "terminal"];
@@ -280,13 +283,14 @@ impl Action {
                 CHECKED_OUT,
             ),
             Action::BriefEvery => {
-                spec("Every session", &["summary", "all"], menu(&['b', 'z']), EVERY)
+                spec("Brief every session", &["summary", "all"], menu(&['b', 'z']), EVERY)
             },
             Action::BriefThis => {
-                spec("This session", &["summary", "project"], menu(&['b', 's']), EVERY)
+                spec("Brief this session", &["summary", "project"], menu(&['b', 's']), EVERY)
             },
             Action::BriefHighlighted => {
-                spec("Highlighted", &["summary", "row", "agent"], menu(&['b', 'h']), EVERY)
+                let keywords = &["summary", "row", "agent"];
+                spec("Brief the highlighted", keywords, menu(&['b', 'h']), EVERY)
             },
             Action::Search => spec("Search", &["find", "filter"], Key::Row(&['/']), EVERY),
             Action::Unread => spec("Unread", &["mark", "read", "dot"], Key::Row(&['u']), VIEW),
@@ -294,14 +298,16 @@ impl Action {
                 spec("Reorder", &["move", "select"], Key::Row(&['v']), IN_A_PROJECT)
             },
             Action::OpenPull => {
-                spec("PR", &["browser", "pull request"], Key::Row(&[OPEN, 'p']), CHECKED_OUT)
+                let keywords = &["browser", "pull request"];
+                spec("Open the PR", keywords, Key::Row(&[OPEN, 'p']), CHECKED_OUT)
             },
             Action::OpenWorktree => {
                 let keywords = &["checkout", "branch", "unopened"];
-                spec("Worktree", keywords, Key::Row(&[OPEN, 'w']), IN_A_PROJECT)
+                spec("Open a worktree", keywords, Key::Row(&[OPEN, 'w']), IN_A_PROJECT)
             },
             Action::YankPull => {
-                spec("PR link", &["copy", "url"], Key::Row(&[YANK, YANK_PULL]), CHECKED_OUT)
+                let yank = Key::Row(&[YANK, YANK_PULL]);
+                spec("Yank the PR link", &["copy", "url"], yank, CHECKED_OUT)
             },
             Action::Quit => {
                 let quit = Key::RowAndMenu(&[QUIT]);
@@ -330,6 +336,9 @@ impl Action {
             Action::Shrink => anywhere("Shrink the view", &["resize", "smaller"], SHRINK),
             Action::Collapse => anywhere("Collapse sidebar", &["hide", "fold"], COLLAPSE),
             Action::Menu => anywhere("Menu over views", &["which-key", "actions"], MENU),
+            Action::Palette => {
+                anywhere("Pick an action", &["palette", "command", "run"], PALETTE)
+            },
             Action::Worktrees => {
                 anywhere("Pick a worktree", &["finder", "switch"], WORKTREES)
             },
@@ -354,6 +363,11 @@ impl Action {
     #[must_use]
     pub fn fits(self, noun: Noun) -> bool {
         self.spec().nouns.contains(&noun)
+    }
+
+    #[must_use]
+    pub const fn in_palette(self) -> bool {
+        !matches!(self.key(), Key::Pasted(_)) && !matches!(self, Action::Dictate | Action::Palette)
     }
 
     #[must_use]

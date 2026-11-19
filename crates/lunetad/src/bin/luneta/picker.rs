@@ -24,6 +24,7 @@ use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
 use lunetad::{eza, screens, Destination, Directory, SessionName};
 
+use crate::actions::{self, Action, Spec};
 use crate::alerts::Doing;
 use crate::away::{self, Away};
 use crate::close::{self, Act, Deletes, Ends, Plan, Untold};
@@ -31,7 +32,7 @@ use crate::gruvbox;
 use crate::host::Event;
 use crate::screen;
 use crate::machines::Machine;
-use crate::menu::{self, Hint};
+use crate::menu::{self, Chain, Chained, Done, Hint, Origin, Target};
 use crate::sidebar::{
     self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, ViewKey, ViewPlace, Place,
     ProjectRow, WorktreePlace,
@@ -59,6 +60,10 @@ const MIN_HALF: u16 = 26;
 const MIN_ACTION: usize = 12;
 
 const UNOPENED: &str = "not open";
+
+const PALETTE_ROWS: u16 = 8;
+
+const PALETTE_WIDTHS: (u16, u16) = (48, 80);
 
 #[derive(Debug, Default)]
 pub struct Listing {
@@ -163,8 +168,15 @@ pub struct Seated {
     pub doing: Doing,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Palette {
+    pub target: Target,
+    pub origin: Origin,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum List {
+    Actions,
     Worktrees,
     Agents,
     Dirs,
@@ -173,15 +185,17 @@ pub enum List {
 impl List {
     fn next(self) -> List {
         match self {
+            List::Actions => List::Worktrees,
             List::Worktrees => List::Agents,
             List::Agents => List::Dirs,
-            List::Dirs => List::Worktrees,
+            List::Dirs => List::Actions,
         }
     }
 
     fn back(self) -> List {
         match self {
-            List::Worktrees => List::Dirs,
+            List::Actions => List::Dirs,
+            List::Worktrees => List::Actions,
             List::Agents => List::Worktrees,
             List::Dirs => List::Agents,
         }
@@ -189,6 +203,7 @@ impl List {
 
     fn title(self) -> &'static str {
         match self {
+            List::Actions => "Actions",
             List::Worktrees => "Worktrees",
             List::Agents => "Agents",
             List::Dirs => "Directories",
@@ -205,6 +220,8 @@ pub enum Picked {
     Make { on: Machine, session: SessionName, cwd: Directory },
     Plan { on: Machine, session: Listed, deletes: Deletes },
     Delete { on: Machine, act: Act },
+    Act { target: Target, origin: Origin, action: Action },
+    Done { done: Done, origin: Origin },
 }
 
 pub enum Heard {
@@ -317,6 +334,7 @@ pub enum Key {
     Agent { on: Machine, place: ViewPlace },
     Dir { on: Machine, path: Directory, session: SessionName },
     New { on: Machine, project: ProjectRow, folder: Directory, name: Name },
+    Action(Action),
 }
 
 #[derive(Clone, Debug)]
@@ -387,6 +405,7 @@ enum Stage {
     Planning { on: Machine, place: ViewPlace, agreed: Option<Plan> },
     Asking { on: Machine, place: ViewPlace, plan: Plan, asks: String },
     Closing { on: Machine, place: WorktreePlace, name: String, ends: Ends, asks: String },
+    Chain(Chain),
 }
 
 struct Shot {
@@ -499,17 +518,30 @@ pub struct Picker {
     aim: Machine,
     aiming: bool,
     scope: Option<(Machine, ProjectId)>,
+    palette: Palette,
+    actions: Rows,
 }
 
 impl Picker {
-    pub fn opening(number: u64, listing: Listing, on: Machine, project: ProjectId) -> Picker {
-        let mut picker = Picker::open(number, List::Worktrees, listing, on.clone());
+    pub fn opening(
+        number: u64,
+        listing: Listing,
+        (on, project): (Machine, ProjectId),
+        palette: Palette,
+    ) -> Picker {
+        let mut picker = Picker::open(number, List::Worktrees, listing, on.clone(), palette);
         picker.scope = Some((on, project));
         picker.rebuild(true);
         picker
     }
 
-    pub fn open(number: u64, list: List, listing: Listing, aim: Machine) -> Picker {
+    pub fn open(
+        number: u64,
+        list: List,
+        listing: Listing,
+        aim: Machine,
+        palette: Palette,
+    ) -> Picker {
         let mut picker = Picker {
             number,
             list,
@@ -529,6 +561,8 @@ impl Picker {
             aim,
             aiming: true,
             scope: None,
+            palette,
+            actions: Rows::default(),
         };
         picker.ask_dirs();
         picker.rebuild(true);
@@ -687,6 +721,19 @@ impl Picker {
                 }
                 Picked::Nothing
             },
+            Stage::Chain(_) if (key.code, key.modifiers) == actions::PALETTE => Picked::Close,
+            Stage::Chain(chain) => {
+                let on = self.palette.target.machine().clone();
+                match chain.key(key, &on) {
+                    Chained::Typing(chain) => {
+                        self.stage = Stage::Chain(chain);
+                        Picked::Nothing
+                    },
+                    Chained::Back => Picked::Nothing,
+                    Chained::Close => Picked::Close,
+                    Chained::Done(done) => Picked::Done { done, origin: self.palette.origin },
+                }
+            },
         };
         self.follow();
         picked
@@ -701,6 +748,7 @@ impl Picker {
                 self.rebuild(true);
             },
             Stage::Rename { input, .. } => input.push_str(&text),
+            Stage::Chain(chain) => chain.paste(&text),
             Stage::Planning { .. } | Stage::Asking { .. } | Stage::Closing { .. } => {},
         }
     }
@@ -794,16 +842,32 @@ impl Picker {
         )
     }
 
+    fn compact(over: Rect) -> Rect {
+        let (fewest, most) = PALETTE_WIDTHS;
+        let width = (over.width * 3 / 5).clamp(over.width.min(fewest), over.width.min(most));
+        let height = (2 + PALETTE_ROWS + 2 + INPUT_HEIGHT + 1).min(over.height);
+        let x = over.x + (over.width - width) / 2;
+        let y = (over.y + over.height / 5).min(over.bottom() - height);
+        Rect::new(x, y, width, height)
+    }
+
     pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) -> Drawn {
-        let area = Picker::area(over);
+        let palette = self.list == List::Actions;
+        let area = if palette { Picker::compact(over) } else { Picker::area(over) };
         let (Some(width), Some(height)) = (area.width.checked_sub(2), area.height.checked_sub(2))
         else {
             return Drawn::Picker { number: self.number, area, spots: Spots::default() };
         };
         framed(buffer, area, TITLE, "", Vec::new());
         let layout = Layout::of(Rect::new(area.x + 1, area.y + 1, width, height));
+        let layout =
+            if palette { Layout { results: layout.full, preview: None, ..layout } } else { layout };
         if let Stage::Rename { on, renames, input } = &self.stage {
             let spots = self.draw_rename(buffer, &layout, on, renames, input);
+            return Drawn::Picker { number: self.number, area, spots };
+        }
+        if let Stage::Chain(chain) = &self.stage {
+            let spots = self.draw_chain(buffer, &layout, chain);
             return Drawn::Picker { number: self.number, area, spots };
         }
         let mut spots = Spots::default();
@@ -821,9 +885,21 @@ impl Picker {
             self.draw_preview(buffer, preview, now);
         }
         let prompt = self.prompt(usize::from(layout.input.width.saturating_sub(2)));
-        draw_input(buffer, &layout, self.list.title(), prompt);
+        let title = if palette { self.aimed_at() } else { self.list.title().to_owned() };
+        draw_input(buffer, &layout, &title, prompt);
         spots.extend(self.draw_help(buffer, layout.help));
         Drawn::Picker { number: self.number, area, spots }
+    }
+
+    fn draw_chain(&self, buffer: &mut Buffer, layout: &Layout, chain: &Chain) -> Spots<Pick> {
+        if let Some(full) = layout.full {
+            let inner = usize::from(full.width.saturating_sub(2));
+            framed(buffer, full, chain.title(), &chain.right(), menu::chain_said(chain, inner));
+        }
+        let width = usize::from(layout.input.width.saturating_sub(2));
+        let prompt = typed(chain.typed(), Ok(chain.enter().to_owned()), width);
+        draw_input(buffer, layout, &self.aimed_at(), prompt);
+        self.draw_help(buffer, layout.help)
     }
 
     fn picks(&self) -> bool {
@@ -832,6 +908,7 @@ impl Picker {
 
     fn rows(&self) -> &Rows {
         match self.list {
+            List::Actions => &self.actions,
             List::Worktrees => &self.worktrees,
             List::Agents => &self.agents,
             List::Dirs => &self.dirs,
@@ -840,6 +917,7 @@ impl Picker {
 
     fn rows_mut(&mut self) -> &mut Rows {
         match self.list {
+            List::Actions => &mut self.actions,
             List::Worktrees => &mut self.worktrees,
             List::Agents => &mut self.agents,
             List::Dirs => &mut self.dirs,
@@ -849,6 +927,13 @@ impl Picker {
     fn search_key(&mut self, key: &KeyEvent) -> Picked {
         let control = key.modifiers == KeyModifiers::CONTROL;
         let held_super = key.modifiers == KeyModifiers::SUPER;
+        if (key.code, key.modifiers) == actions::PALETTE {
+            if self.list == List::Actions {
+                return Picked::Close;
+            }
+            self.list = List::Actions;
+            return Picked::Nothing;
+        }
         match key.code {
             KeyCode::Esc => Picked::Close,
             KeyCode::Tab => {
@@ -924,7 +1009,96 @@ impl Picker {
                 let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
                 Picked::Add { on, project, folder, name: Some(name.clone()) }
             },
+            Key::Action(action) => {
+                let action = *action;
+                self.act(action)
+            },
         }
+    }
+
+    fn act(&mut self, action: Action) -> Picked {
+        let list = match action {
+            Action::Worktrees => Some(List::Worktrees),
+            Action::Agents => Some(List::Agents),
+            Action::Dirs => Some(List::Dirs),
+            _ => None,
+        };
+        if let Some(list) = list {
+            self.list = list;
+            return Picked::Nothing;
+        }
+        if let Some(why) = self.refused(action) {
+            self.error = Some(why);
+            return Picked::Nothing;
+        }
+        let Palette { target, origin } = &self.palette;
+        if let Some(chain) = Chain::of(target, action) {
+            self.stage = Stage::Chain(chain);
+            return Picked::Nothing;
+        }
+        Picked::Act { target: target.clone(), origin: *origin, action }
+    }
+
+    fn refused(&self, action: Action) -> Option<String> {
+        if action != Action::NewWorktree {
+            return None;
+        }
+        let target = &self.palette.target;
+        let housed = self.housed(target.machine(), &target.project()?)?;
+        let name = housed.project.listed().name();
+        (housed.unopened == Unopened::Folder).then(|| projects::folder_has_one_worktree(name))
+    }
+
+    fn offers(&self, action: Action) -> bool {
+        let Palette { target, origin } = &self.palette;
+        action.in_palette()
+            && match action.key() {
+                actions::Key::Menu(_) | actions::Key::RowAndMenu(_) => target.fits(action),
+                actions::Key::Row(_) => *origin == Origin::Sidebar && action.fits(target.noun()),
+                actions::Key::Chord(_) => true,
+                actions::Key::Pasted(_) => false,
+            }
+    }
+
+    fn action_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
+        let fitting = Action::ALL.into_iter().filter(|action| self.offers(*action));
+        let worktrees = self.listed_worktrees(finder);
+        let worktrees = worktrees.into_iter().filter(|row| !matches!(row.key, Key::Machine { .. }));
+        let Some(finder) = finder else {
+            let rows = fitting.map(|action| Row::plain(Key::Action(action), titled(action)));
+            return rows.chain(worktrees).collect();
+        };
+        let term = self.term.to_lowercase();
+        let mut found: Vec<(Tier, Fit, Row)> =
+            fitting.filter_map(|action| found_action(finder, &term, action)).collect();
+        found.sort_by_key(|(tier, fit, _)| (*tier, Reverse(*fit)));
+        let ahead = found.iter().take_while(|(tier, ..)| *tier != Tier::Fuzzy).count();
+        let mut found = found.into_iter().map(|(.., row)| row);
+        let mut rows: Vec<Row> = found.by_ref().take(ahead).collect();
+        rows.extend(worktrees);
+        rows.extend(found);
+        rows
+    }
+
+    fn aimed_at(&self) -> String {
+        let target = &self.palette.target;
+        let named = match target {
+            Target::View(on, row) => {
+                let project = row.session.name();
+                let housed = self.housed(on, &ProjectRow::of(row.session.clone()));
+                let mut worktrees = housed.iter().flat_map(|housed| &housed.worktrees);
+                match worktrees.find(|worktree| worktree.terminals.contains(&row.view)) {
+                    Some(worktree) => format!("{project} › {} · view {}", worktree.name, row.view),
+                    None => format!("{project} · view {}", row.view),
+                }
+            },
+            Target::Worktree(_, row) => {
+                format!("{} › {}", row.place.project.listed().name(), row.name)
+            },
+            Target::Project(_, project) => project.project.listed().name().to_string(),
+            Target::Machine(on) => return self.machine_name(on),
+        };
+        there(&named, target.machine())
     }
 
     fn here_project(&self) -> Option<(&Machine, &Housed)> {
@@ -959,7 +1133,9 @@ impl Picker {
                 self.error = Some("a worktree not open has no views to close".to_owned());
                 Picked::Nothing
             },
-            Key::Machine { .. } | Key::Dir { .. } | Key::New { .. } => Picked::Nothing,
+            Key::Machine { .. } | Key::Dir { .. } | Key::New { .. } | Key::Action(_) => {
+                Picked::Nothing
+            },
         }
     }
 
@@ -1006,7 +1182,8 @@ impl Picker {
                 | Key::Agent { .. }
                 | Key::Dir { .. }
                 | Key::New { .. }
-                | Key::Unopened { .. },
+                | Key::Unopened { .. }
+                | Key::Action(_),
             )
             | None => return,
         };
@@ -1084,6 +1261,7 @@ impl Picker {
             worktrees.push(Row::plain(key, self.term.clone()));
         }
         let (dirs, aimed) = self.dir_rows();
+        let actions = self.action_rows(finder.as_ref());
         let worktree_start = match worktrees.first().map(|row| &row.key) {
             Some(Key::Worktree { on, place }) if self.is_shown(on, place) => {
                 usize::from(self.term.is_empty())
@@ -1093,6 +1271,8 @@ impl Picker {
         let held = |rows: &Rows| rows.selected().map(|row| row.key.clone()).filter(|_| !snap);
         let (held_worktree, held_agent) = (held(&self.worktrees), held(&self.agents));
         let held_dir = held(&self.dirs).filter(|_| !self.aiming);
+        let held_action = held(&self.actions);
+        self.actions.replace(actions, held_action.as_ref(), 0);
         self.worktrees.replace(worktrees, held_worktree.as_ref(), worktree_start);
         self.agents.replace(agents, held_agent.as_ref(), 0);
         self.dirs.replace(dirs, held_dir.as_ref(), aimed.unwrap_or(0));
@@ -1103,6 +1283,10 @@ impl Picker {
         if let Some((on, project)) = &self.scope {
             return self.worktree_rows_scoped(finder, on, *project);
         }
+        self.listed_worktrees(finder)
+    }
+
+    fn listed_worktrees(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
         let tagged = self.tagged();
         let mut found = Vec::new();
         let mut unopened_found = Vec::new();
@@ -1212,7 +1396,8 @@ impl Picker {
             Some(Key::Unopened { on, folder, .. }) => {
                 Some(Preview::Dir((on.clone(), folder.clone())))
             },
-            Some(Key::Project { .. } | Key::Machine { .. } | Key::New { .. }) | None => None,
+            Some(Key::Project { .. } | Key::Machine { .. } | Key::New { .. } | Key::Action(_))
+            | None => None,
         };
         match (preview, &self.wanted) {
             (Some(preview), Some((wanted, _))) if preview == *wanted => {},
@@ -1246,7 +1431,7 @@ impl Picker {
             notes.extend(menu::wrap(why, width, error));
         }
         match self.list {
-            List::Worktrees => {},
+            List::Actions | List::Worktrees => {},
             List::Agents => {
                 if let Some(why) = &self.listing.away {
                     let why = format!("lunetad does not answer: {why}");
@@ -1404,6 +1589,10 @@ impl Picker {
                 let lead = Span::styled("+", Style::new().fg(gruvbox::GREEN));
                 (Some(lead), bold, vec![Span::styled("new worktree", grey)])
             },
+            Key::Action(action) => {
+                let key = menu::spelled(*action, self.palette.origin);
+                (None, Style::new().fg(gruvbox::FG1), vec![Span::styled(key, dim)])
+            },
         };
         let right_width: usize = right.iter().map(|span| span.content.width()).sum();
         let lead_width = lead.as_ref().map_or(0, |lead| lead.content.width() + 1);
@@ -1466,6 +1655,7 @@ impl Picker {
             return format!("no match for \"{}\"", self.term);
         }
         match self.list {
+            List::Actions => "no action fits here".to_owned(),
             List::Worktrees if let Some(scope) = &self.scope => self.scoped_empty(scope),
             List::Worktrees if self.listing.away.is_some() => "no worktrees".to_owned(),
             List::Worktrees => "lunetad keeps no worktree yet".to_owned(),
@@ -1553,6 +1743,7 @@ impl Picker {
                 let looked = (on.clone(), place.project.listed().clone(), Some(focus));
                 (right, Line::from(caption), looked)
             },
+            Key::Action(_) => unreachable!("the palette draws no preview"),
             Key::Agent { on, place } => {
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
@@ -1652,6 +1843,7 @@ impl Picker {
                     let project = project.listed().name();
                     Ok(format!("New worktree \"{}\" in {project}", name.as_str()))
                 },
+                Key::Action(_) => Ok("Run".to_owned()),
             },
             None if self.list == List::Worktrees && !self.term.is_empty() => {
                 Name::parse(&self.term).map(|_| String::new())
@@ -1677,6 +1869,13 @@ impl Picker {
             },
             (Stage::Planning { .. }, _) => vec![(Hint::Esc, "Give up")],
             (Stage::Rename { .. }, _) => vec![(Hint::Enter, "Rename"), (Hint::Esc, "Cancel")],
+            (Stage::Chain(chain), _) => vec![(Hint::Enter, chain.enter()), (Hint::Esc, "Back")],
+            (Stage::Search, List::Actions) => vec![
+                (Hint::Moves, "Move"),
+                (Hint::Enter, "Run"),
+                (Hint::Tab, List::Actions.next().title()),
+                (Hint::Esc, "Close"),
+            ],
             (Stage::Search, List::Worktrees) => vec![
                 (Hint::Moves, "Move"),
                 (Hint::Enter, "Go"),
@@ -1727,6 +1926,55 @@ impl Picker {
         let action = self.rename_to(on, renames, input).map(|_| there("Rename", on));
         draw_input(buffer, layout, "Rename", typed(input, action, width));
         self.draw_help(buffer, layout.help)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Tier {
+    Exact,
+    Prefix,
+    Fuzzy,
+}
+
+fn titled(action: Action) -> String {
+    let name = action.name();
+    let mut chars = name.chars();
+    chars.next().map_or_default(|first| first.to_uppercase().chain(chars).collect())
+}
+
+fn tier(finder: &Finder<'_>, term: &str, text: &str) -> Option<(Tier, Fit, Vec<usize>)> {
+    let (fit, hits) = finder.find(text, &[])?;
+    let lower = text.to_lowercase();
+    let starts = lower.split([' ', '/', '-']).any(|word| word.starts_with(term));
+    let tier = if lower == term {
+        Tier::Exact
+    } else if starts {
+        Tier::Prefix
+    } else {
+        Tier::Fuzzy
+    };
+    Some((tier, fit, hits))
+}
+
+fn found_action(finder: &Finder<'_>, term: &str, action: Action) -> Option<(Tier, Fit, Row)> {
+    let Spec { keywords, .. } = action.spec();
+    let title = titled(action);
+    let named = tier(finder, term, &title);
+    let keyword = keywords.iter().filter_map(|it| Some((tier(finder, term, it)?, *it)));
+    let keyword = keyword.min_by_key(|((tier, fit, _), _)| (*tier, Reverse(*fit)));
+    let key = Key::Action(action);
+    let by_keyword = keyword.as_ref().map(|((tier, ..), _)| *tier);
+    match named {
+        Some((by_name, fit, hits)) if by_keyword.is_none_or(|by_keyword| by_name <= by_keyword) => {
+            Some((by_name, fit, Row { key, name: title, hits, rules: Rules::default() }))
+        },
+        Some(_) | None => {
+            let ((tier, fit, hits), keyword) = keyword?;
+            let shift = title.chars().count() + 2;
+            let hits = hits.into_iter().map(|hit| hit + shift).collect();
+            let name = format!("{title} ({keyword})");
+            Some((tier, fit, Row { key, name, hits, rules: Rules::default() }))
+        },
     }
 }
 
@@ -1994,6 +2242,7 @@ mod tests {
 
     use super::*;
     use crate::close::Doing;
+    use crate::menu::{ViewRow, Ran};
     use crate::spots::Hit;
 
     const NOW: Duration = Duration::from_secs(1000);
@@ -2118,8 +2367,71 @@ mod tests {
         }
     }
 
+    fn aimless() -> Palette {
+        Palette { target: Target::Machine(Machine::Local), origin: Origin::Views }
+    }
+
+    fn at_fix(origin: Origin) -> Palette {
+        let row = ViewRow {
+            session: fix().project.listed().clone(),
+            view: ViewKey::terminal(3),
+            terminal: ViewId::of(3),
+            cwd: Some("/home/you/fix".to_owned()),
+            branch: None,
+            repository: None,
+            pull_request: None,
+            ran: Ran::Unhooked,
+        };
+        Palette { target: Target::View(Machine::Local, row), origin }
+    }
+
+    fn palette_on(listing: Listing, palette: Palette) -> Picker {
+        let mut picker = Picker::open(1, List::Actions, listing, Machine::Local, palette);
+        picker.asks();
+        picker
+    }
+
+    fn palette(origin: Origin) -> Picker {
+        palette_on(works(), at_fix(origin))
+    }
+
+    fn shown_actions(picker: &Picker) -> (Vec<String>, Option<String>) {
+        let buffer = drawn(picker);
+        let area = Picker::compact(Rect::new(0, 0, 200, 50));
+        let inside = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
+        let results = Layout::of(inside).full.unwrap();
+        let results = results.inner(Margin::new(1, 1));
+        let lines = text(&buffer, results);
+        let lit = (results.y..results.bottom()).position(|y| buffer[(results.x, y)].bg == LIT);
+        let lit = lit.map(|at| lines[at].clone());
+        (lines.into_iter().filter(|line| !line.is_empty()).collect(), lit)
+    }
+
+    fn keyed_action(picker: &Picker) -> (String, String) {
+        let lit = shown_actions(picker).1.unwrap_or_default();
+        let key = lit.rsplit("  ").next().unwrap_or("").trim().to_owned();
+        (named(&lit), key)
+    }
+
+    fn every_action(picker: &mut Picker) -> Vec<String> {
+        let mut every = vec![keyed_action(picker).0];
+        for _ in 0..80 {
+            press(picker, KeyCode::Down);
+            let (lit, _) = keyed_action(picker);
+            if every.last() == Some(&lit) {
+                return every;
+            }
+            every.push(lit);
+        }
+        panic!("the palette's rows never end: {every:?}");
+    }
+
+    fn super_k(picker: &mut Picker) -> Picked {
+        picker.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::SUPER))
+    }
+
     fn opened(listing: Listing) -> Picker {
-        let mut picker = Picker::open(1, List::Worktrees, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Worktrees, listing, Machine::Local, aimless());
         picker.asks();
         picker
     }
@@ -2246,7 +2558,7 @@ mod tests {
 
     #[test]
     fn the_worktrees_go_by_their_last_use_and_an_empty_project_is_one_row() {
-        let mut picker = Picker::open(1, List::Worktrees, works(), Machine::Local);
+        let mut picker = Picker::open(1, List::Worktrees, works(), Machine::Local, aimless());
         let on = Machine::Local;
         assert_eq!(picker.asks(), [Ask::Dirs { on, ask: 1 }]);
         let shown = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
@@ -2309,19 +2621,20 @@ mod tests {
     #[test]
     fn o_w_lists_the_worktrees_of_its_project_alone_that_are_not_open() {
         let luneta = project("luneta", 1).id();
-        let mut picker = Picker::opening(1, with_unopened(works()), Machine::Local, luneta);
+        let listing = with_unopened(works());
+        let mut picker = Picker::opening(1, listing, (Machine::Local, luneta), aimless());
         assert_eq!(rows(&picker), ["luneta › old", "luneta › spike"]);
         typed(&mut picker, "zzz");
         assert_eq!(rows(&picker), ["no match for \"zzz\""], "no worktree is made of what is typed");
         let mut all_open = works();
         let web = with_unopened(works()).shelves[0].projects[2].unopened.clone();
         all_open.shelves[0].projects[2].unopened = web;
-        let picker = Picker::opening(2, all_open, Machine::Local, luneta);
+        let picker = Picker::opening(2, all_open, (Machine::Local, luneta), aimless());
         assert_eq!(rows(&picker), ["every worktree is open"]);
         let said_of = |number: u64, unopened: Unopened| {
             let mut listing = works();
             listing.shelves[0].projects[0].unopened = unopened;
-            let picker = Picker::opening(number, listing, Machine::Local, luneta);
+            let picker = Picker::opening(number, listing, (Machine::Local, luneta), aimless());
             rows(&picker)
         };
         let unlisted = Unopened::Unlisted("not listed yet".to_owned());
@@ -2337,7 +2650,7 @@ mod tests {
         let old = projects::Dir::parse("/home/you/luneta/old").unwrap();
         listing.shelves[0].projects[0].unopened = Unopened::Listed(vec![old]);
         let luneta = project("luneta", 1).id();
-        let picker = Picker::opening(1, listing, Machine::Local, luneta);
+        let picker = Picker::opening(1, listing, (Machine::Local, luneta), aimless());
         assert_eq!(rows(&picker), ["luneta › old"]);
     }
 
@@ -2418,7 +2731,7 @@ mod tests {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
         assert!(matches!(press(&mut picker, KeyCode::Delete), Picked::Plan { .. }));
         let (rows, give_up) = clicks(&picker, "<ESC>");
         assert!(!rows.is_empty() && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
@@ -2472,10 +2785,14 @@ mod tests {
             assert!(titled(&picker, title), "{title}");
             assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
         }
-        for title in ["Agents", "Worktrees", "Directories"] {
+        for title in ["Agents", "Worktrees"] {
             press(&mut picker, KeyCode::BackTab);
             assert!(titled(&picker, title), "{title}");
         }
+        press(&mut picker, KeyCode::BackTab);
+        assert!(said(&picker).contains("─ Actions"), "{}", said(&picker));
+        press(&mut picker, KeyCode::BackTab);
+        assert!(titled(&picker, "Directories"));
     }
 
     #[test]
@@ -2795,7 +3112,8 @@ mod tests {
 
     #[test]
     fn the_keys_that_open_each_list_go_to_it_and_ctrl_j_goes_to_none() {
-        let mut picker = Picker::open(1, List::Agents, Listing::default(), Machine::Local);
+        let none = Listing::default();
+        let mut picker = Picker::open(1, List::Agents, none, Machine::Local, aimless());
         control(&mut picker, 'j');
         assert_eq!(picker.list, List::Agents, "Ctrl j is the views' Down");
         picker.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SUPER));
@@ -2813,7 +3131,7 @@ mod tests {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
         picker.asks();
         let c = listed("c", 30);
         let deletes = || Deletes::View(ViewKey::terminal(4));
@@ -2845,7 +3163,7 @@ mod tests {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
         picker.asks();
         let deletes = Deletes::View(ViewKey::terminal(4));
         let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), deletes };
@@ -2867,7 +3185,7 @@ mod tests {
             ]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
         let (lines, lit) = list(&picker);
         assert!(lines[0].starts_with("mine ─") && lines[0].ends_with("─ here"), "{lines:?}");
         let name = |line: &String| {
@@ -2899,7 +3217,7 @@ mod tests {
             ]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
         typed(&mut picker, "mux");
         let rows = found(&picker);
         let shown = [("mux panics", "mux"), ("Zero-length lines in jobs", ""), ("fix", "")];
@@ -2917,7 +3235,7 @@ mod tests {
             shelves: vec![shelved(Machine::Local, projects)],
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local, aimless());
         assert_eq!(list(&picker).0, ["asking zoxide…"]);
         picker.heard(heard_here(Ok(vec![
             visited("/home/you/luneta", "luneta"),
@@ -2948,7 +3266,7 @@ mod tests {
             shelves: vec![shelved(Machine::Local, vec![housed("luneta", 1, Vec::new())])],
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local, aimless());
         picker.heard(heard_here(Ok(vec![
             visited("/home/you/notes", "notes"),
             visited("/home/you/luneta", "luneta"),
@@ -2959,7 +3277,7 @@ mod tests {
     #[test]
     fn a_search_finds_a_directory_by_its_path_or_its_name() {
         let far = "/home/you/Projects/misc/far/away/down/luneta/main";
-        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local);
+        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local, aimless());
         picker.heard(heard_here(Ok(vec![
             visited(far, "luneta-main"),
             visited("/home/you/luneta", "luneta"),
@@ -3011,7 +3329,7 @@ mod tests {
 
     #[test]
     fn every_machine_s_directories_go_under_its_rule_this_one_s_first() {
-        let mut picker = Picker::open(1, List::Dirs, two_machines(), Machine::Local);
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), Machine::Local, aimless());
         let dirs = |on: Machine, ask: u64| Ask::Dirs { on, ask };
         assert_eq!(picker.asks(), [dirs(Machine::Local, 1), dirs(nixos(), 2)]);
         let api = "/home/me/Projects/api";
@@ -3052,7 +3370,7 @@ mod tests {
             let dirs = vec![visited("/home/me/api", "api"), visited("/home/me/blog", "blog")];
             Heard::Dirs { on: nixos(), ask: 2, visited: Ok(dirs) }
         };
-        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos());
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), aimless());
         picker.heard(here());
         assert_eq!(lit(&picker), "notes");
         picker.heard(there());
@@ -3061,18 +3379,18 @@ mod tests {
         picker.listed(two_machines());
         assert_eq!(lit(&picker), "blog");
 
-        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos());
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), aimless());
         picker.heard(there());
         picker.heard(here());
         assert_eq!(lit(&picker), "api");
 
-        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos());
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), aimless());
         picker.heard(here());
         press(&mut picker, KeyCode::Up);
         picker.heard(there());
         assert_eq!(lit(&picker), "notes");
 
-        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos());
+        let mut picker = Picker::open(1, List::Dirs, two_machines(), nixos(), aimless());
         picker.heard(heard_here(Ok(vec![visited("/home/you/luneta", "luneta")])));
         let dirs = vec![visited("/home/me/api", "api"), visited("/home/me/luneta", "luneta")];
         picker.heard(Heard::Dirs { on: nixos(), ask: 2, visited: Ok(dirs) });
@@ -3087,7 +3405,7 @@ mod tests {
         let dirs_asks = |picker: &mut Picker| -> Vec<Ask> {
             picker.asks().into_iter().filter(|ask| matches!(ask, Ask::Dirs { .. })).collect()
         };
-        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local);
+        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local, aimless());
         assert_eq!(dirs_asks(&mut picker), [Ask::Dirs { on: Machine::Local, ask: 1 }]);
         picker.listed(two_machines());
         assert_eq!(dirs_asks(&mut picker), [Ask::Dirs { on: nixos(), ask: 2 }]);
@@ -3117,7 +3435,7 @@ mod tests {
 
     #[test]
     fn the_directories_say_why_zoxide_listed_none() {
-        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local);
+        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local, aimless());
         picker.heard(heard_here(Err("zoxide is not on the PATH".to_owned())));
         assert_eq!(list(&picker).0, ["zoxide is not on the PATH", "no directories"]);
     }
@@ -3126,7 +3444,7 @@ mod tests {
     fn a_project_of_another_machine_takes_no_name_here() {
         let shelves = vec![shelved(nixos(), vec![housed("api", 1, Vec::new())])];
         let listing = Listing { shelves, ..two_machines() };
-        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local, aimless());
         picker.heard(heard_here(Ok(vec![visited("/home/you/api", "api")])));
         assert_eq!(grouped(&picker), ["── desk", "api"]);
     }
@@ -3143,7 +3461,7 @@ mod tests {
             local: agents(vec![seated("api", 30, 1, "fix", Mark::Idle)]),
             ..on_nixos(there)
         };
-        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, aimless());
         picker.asks();
         let (lines, _) = list(&picker);
         assert!(lines[0].starts_with("mine ─") && lines[0].ends_with("─ here"), "{lines:?}");
@@ -3184,5 +3502,164 @@ mod tests {
             panic!("a peek is answered with a screen");
         };
         assert_eq!(peek, Err(crate::host::NOT_YET.to_owned()));
+    }
+
+    #[test]
+    fn the_palette_lists_the_actions_fitting_its_view_then_the_worktrees_by_their_last_use() {
+        let mut picker = palette(Origin::Views);
+        let every = every_action(&mut picker);
+        let worktrees = every.iter().position(|row| row.contains(" › ")).unwrap();
+        let (actions, worktrees) = every.split_at(worktrees);
+        let by_use = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
+        assert_eq!(worktrees, by_use);
+        assert_eq!(actions[..3], ["Search skills", "Ask", "/thermo-nuclear-review"]);
+        for fitting in ["Rename the view…", "Close the view", "New worktree…", "Pick a worktree"] {
+            assert!(actions.iter().any(|action| action == fitting), "{fitting}: {actions:?}");
+        }
+        let unfitting = [
+            "Rename the worktree…",
+            "Forget the machine",
+            "Search",
+            "Hold to dictate",
+            "Pick an action",
+            "Tackle",
+        ];
+        for unfitting in unfitting {
+            assert!(!actions.iter().any(|action| action == unfitting), "{unfitting}: {actions:?}");
+        }
+        let mut picker = palette(Origin::Sidebar);
+        let every = every_action(&mut picker);
+        for fitting in ["Search", "Unread", "Rename the view…"] {
+            assert!(every.iter().any(|action| action == fitting), "{fitting}: {every:?}");
+        }
+    }
+
+    #[test]
+    fn each_action_shows_its_key_as_it_is_typed_where_the_palette_opened() {
+        let key = |origin: Origin, query: &str| {
+            let mut picker = palette(origin);
+            typed(&mut picker, query);
+            keyed_action(&picker)
+        };
+        let views = [
+            ("new view", "New view", "Alt a n v"),
+            ("search skills", "Search skills", "Alt a /"),
+            ("quit", "Quit luneta", "Alt a q"),
+            ("pick a worktree", "Pick a worktree", "Super j"),
+            ("view left", "View left, or the worktree before", "Ctrl h"),
+        ];
+        for (query, name, spelled) in views {
+            assert_eq!(key(Origin::Views, query), (name.to_owned(), spelled.to_owned()));
+        }
+        let sidebar = [
+            ("new view", "New view", "n v"),
+            ("search skills", "Search skills", "m /"),
+            ("quit", "Quit luneta", "q"),
+            ("unread", "Unread", "u"),
+        ];
+        for (query, name, spelled) in sidebar {
+            assert_eq!(key(Origin::Sidebar, query), (name.to_owned(), spelled.to_owned()));
+        }
+    }
+
+    #[test]
+    fn a_typed_word_ranks_actions_named_by_it_over_worktrees_and_worktrees_over_loose_matches() {
+        let mut picker = palette(Origin::Views);
+        typed(&mut picker, "fix");
+        let (shown, _) = shown_actions(&picker);
+        let shown: Vec<String> = shown.iter().map(|line| named(line)).collect();
+        assert_eq!(shown[..3], ["Fix the last command", "Fix the failing checks", "luneta › fix"]);
+        retyped(&mut picker, "ask");
+        assert_eq!(keyed_action(&picker).0, "Ask");
+        retyped(&mut picker, "kill");
+        let lit = shown_actions(&picker).1.unwrap_or_default();
+        assert_eq!(named(&lit), "Close the view (kill)");
+        let buffer = drawn(&picker);
+        let area = Picker::compact(Rect::new(0, 0, 200, 50));
+        let line = |y| text(&buffer, Rect::new(area.x, y, area.width, 1)).remove(0);
+        let row = (area.y..area.bottom()).find(|y| line(*y).contains("(kill)"));
+        let row = row.expect("the row is drawn");
+        let lit: String = (area.x..area.right())
+            .map(|x| &buffer[(x, row)])
+            .filter(|cell| cell.fg == ACCENT)
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert_eq!(lit, "kill", "the keyword that matched is lit");
+    }
+
+    #[test]
+    fn an_action_that_asks_a_name_asks_it_in_the_palette_and_backspace_goes_back() {
+        let mut picker = palette(Origin::Views);
+        typed(&mut picker, "rename");
+        assert_eq!(keyed_action(&picker).0, "Rename the view…");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        let asked = said(&picker);
+        assert!(asked.contains("─ Rename ─"), "{asked}");
+        assert!(asked.contains("its new name; with none, it goes back"), "{asked}");
+        let target = "luneta › fix · view 3";
+        assert!(asked.contains(target), "the target is named over the input: {asked}");
+        assert_eq!(press(&mut picker, KeyCode::Backspace), Picked::Nothing);
+        assert_eq!(keyed_action(&picker).0, "Rename the view…", "back on the list, as typed");
+        press(&mut picker, KeyCode::Enter);
+        typed(&mut picker, "logs");
+        press(&mut picker, KeyCode::Esc);
+        assert_eq!(keyed_action(&picker).0, "Rename the view…", "Esc goes back too");
+        press(&mut picker, KeyCode::Enter);
+        typed(&mut picker, "logs");
+        let logs = Some(Name::parse("logs").unwrap());
+        let rename = menu::Rename::Terminal(ViewId::of(3).unwrap(), logs);
+        let done = Done::Rename(Machine::Local, rename);
+        let origin = Origin::Views;
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Done { done, origin });
+        press(&mut picker, KeyCode::Enter);
+        assert_eq!(super_k(&mut picker), Picked::Close, "the key again closes it, chained or not");
+    }
+
+    #[test]
+    fn a_new_project_goes_back_from_its_name_to_the_folder_typed() {
+        let mut picker = palette(Origin::Views);
+        typed(&mut picker, "new project");
+        press(&mut picker, KeyCode::Enter);
+        assert!(said(&picker).contains("/home/you/fix"), "the folder starts as the view's");
+        press(&mut picker, KeyCode::Enter);
+        assert!(said(&picker).contains("its name; with none"), "{}", said(&picker));
+        press(&mut picker, KeyCode::Esc);
+        assert!(said(&picker).contains("/home/you/fix"), "{}", said(&picker));
+        assert!(said(&picker).contains("the folder it holds"), "{}", said(&picker));
+    }
+
+    #[test]
+    fn enter_on_an_action_hands_it_on_with_the_palette_s_target() {
+        let mut picker = palette(Origin::Views);
+        typed(&mut picker, "close the view");
+        let Palette { target, origin } = at_fix(Origin::Views);
+        let act = Picked::Act { target, origin, action: Action::CloseView };
+        assert_eq!(press(&mut picker, KeyCode::Enter), act);
+        retyped(&mut picker, "pick an agent");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert!(said(&picker).contains("─ Agents"), "the finder's own list opens in the box");
+
+        let mut listing = works();
+        listing.shelves[0].projects[0].unopened = Unopened::Folder;
+        let mut picker = palette_on(listing, at_fix(Origin::Views));
+        typed(&mut picker, "new worktree");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        let refused = projects::folder_has_one_worktree(fix().project.listed().name());
+        assert!(said(&picker).contains(&refused), "{}", said(&picker));
+    }
+
+    #[test]
+    fn super_k_opens_the_palette_from_another_list_and_closes_it_and_tab_cycles_all_four() {
+        let mut picker = palette(Origin::Views);
+        assert_eq!(super_k(&mut picker), Picked::Close);
+        assert_eq!(press(&mut palette(Origin::Views), KeyCode::Esc), Picked::Close);
+        let aimed = at_fix(Origin::Views);
+        let mut picker = Picker::open(1, List::Worktrees, works(), Machine::Local, aimed);
+        assert_eq!(super_k(&mut picker), Picked::Nothing);
+        assert!(said(&picker).contains("─ Actions"), "{}", said(&picker));
+        for list in ["Worktrees", "Agents", "Directories", "Actions"] {
+            press(&mut picker, KeyCode::Tab);
+            assert!(said(&picker).contains(&format!("─ {list}")), "{list}: {}", said(&picker));
+        }
     }
 }
