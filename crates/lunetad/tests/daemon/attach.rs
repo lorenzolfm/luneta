@@ -28,6 +28,12 @@ const SIDEBAR: &str = "\x1b[97;5u";
 
 const MENU: &str = "\x1b[97;3u";
 
+const ESC: &str = "\x1b[27u";
+
+const MENU_SHOWS: &str = "n  New ▸";
+
+const FOR_TERMINALS: &str = "the menu is for terminals";
+
 const WELCOMES: &str = "d d  close it";
 
 
@@ -129,6 +135,32 @@ fn the_menu_opens_a_welcome_view_beside_the_terminal_and_d_d_in_it_closes_it() {
         (frames(&window) == Some(1) && !window.shows("runs no terminal")).then_some(())
     });
     assert_eq!(ids(), terminals);
+}
+
+#[test]
+fn the_menu_and_its_note_over_the_view_give_the_keys_back_as_they_close() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    assert!(!window.shows(MENU_SHOWS), "no menu is open yet");
+    window.send(MENU);
+    window.spot_of(MENU_SHOWS);
+    window.send(ESC);
+    eventually("Esc closes the menu", || (!window.shows(MENU_SHOWS)).then_some(()));
+    window.send(TYPED);
+    window.spot_of(PRINTED);
+    window.send(WELCOME);
+    window.spot_of(WELCOMES);
+    window.send(MENU);
+    window.spot_of(FOR_TERMINALS);
+    window.send("x");
+    eventually("a key closes the note", || (!window.shows(FOR_TERMINALS)).then_some(()));
+    window.send("dd");
+    eventually("the welcome view has the keys again", || {
+        (!window.shows(WELCOMES)).then_some(())
+    });
 }
 
 #[test]

@@ -67,7 +67,9 @@ use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
-use crate::sidebar::{self, Asked, HereAgent, Keys, Listed, PaneKey, Place, Reorder, Sidebar};
+use crate::sidebar::{
+    self, Asked, Floating, HereAgent, Holding, Keys, Listed, PaneKey, Place, Reorder, Sidebar,
+};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
@@ -227,23 +229,19 @@ impl Focus {
     fn on(side: Side) -> Focus {
         Focus { side, over: None }
     }
+}
 
-    fn session(&self) -> bool {
-        match (self.side, &self.over) {
-            (Side::Session | Side::Collapsed, None) => true,
-            (Side::Sidebar, None) | (_, Some(_)) => false,
-        }
-    }
+#[derive(Clone, Copy, Debug)]
+enum Holder<'a> {
+    Terminal,
+    Sidebar(Holding),
+    Box(&'a Over),
+}
 
-    fn session_told(&self) -> bool {
-        match (self.side, &self.over) {
-            (
-                Side::Session | Side::Collapsed,
-                None | Some(Over::Dictation(_, Where::Session(_))),
-            ) => true,
-            (Side::Sidebar, _) | (_, Some(_)) => false,
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reported {
+    Focused,
+    Unfocused,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,8 +262,6 @@ impl Side {
 
 #[derive(Debug)]
 enum Over {
-    Menu,
-    Note(String),
     Brief(Briefing),
     Ask(Ask),
     Issue(Issue),
@@ -350,6 +346,7 @@ struct App {
     held: Held,
     last_press: LastPress,
     focus: Focus,
+    told: Reported,
     focused: bool,
     burst: Option<Burst>,
     settling: Settling,
@@ -616,6 +613,7 @@ fn run_in(
         held: Held::Nothing,
         last_press: LastPress::Elsewhere,
         focus: Focus::on(keys),
+        told: if keys == Side::Session { Reported::Focused } else { Reported::Unfocused },
         focused,
         burst: None,
         settling: Settling::default(),
@@ -1020,7 +1018,7 @@ impl App {
                 dictation.turning() || matches!(under, Where::Issue(issue) if issue.turning())
             },
             Some(Over::Issue(issue)) => issue.turning(),
-            Some(Over::Menu | Over::Picker(_) | Over::Note(_)) | None => false,
+            Some(Over::Picker(_)) | None => false,
         };
         over || self.sidebar.turning()
     }
@@ -1095,10 +1093,7 @@ impl App {
 
     fn settle(&mut self) {
         self.ask_picker();
-        if matches!(self.focus.over, Some(Over::Menu)) && self.sidebar.floating().is_none() {
-            let over = self.sidebar.said().map(Over::Note);
-            self.give(Focus { side: self.focus.side, over });
-        }
+        self.tell();
     }
 
     fn watch(&mut self) {
@@ -1124,10 +1119,12 @@ impl App {
                 Some(Over::Ask(ask)) => ask.paste(&text),
                 Some(Over::Issue(issue)) => issue.paste(&text),
                 Some(Over::Picker(picker)) => picker.paste(&text),
-                Some(Over::Menu) => self.sidebar.paste(&text),
-                Some(Over::Brief(_) | Over::Note(_) | Over::Dictation(..)) => {},
-                None if self.focus.side == Side::Sidebar => self.sidebar.paste(&text),
-                None => self.paste(&text),
+                Some(Over::Brief(_) | Over::Dictation(..)) => {},
+                None => match self.holder() {
+                    Holder::Sidebar(_) => self.sidebar.paste(&text),
+                    Holder::Terminal => self.paste(&text),
+                    Holder::Box(_) => unreachable!("a box takes the paste"),
+                },
             },
             Input::FocusGained => self.focus_window(true),
             Input::FocusLost => self.focus_window(false),
@@ -1197,7 +1194,11 @@ impl App {
                 }
                 return;
             },
-            Some(Over::Menu) => {
+            Some(Over::Dictation(..)) => return,
+            None => {},
+        }
+        match self.sidebar.floating() {
+            Some(Floating::Menu(_)) => {
                 if chord == MENU {
                     self.sidebar.close_menu();
                 } else {
@@ -1206,28 +1207,24 @@ impl App {
                 }
                 return;
             },
-            Some(Over::Note(_)) => {
+            Some(Floating::Note(_)) => {
                 if key.kind == KeyEventKind::Repeat {
                     return;
                 }
-                self.give(Focus::on(self.focus.side));
+                self.sidebar.close_note();
                 if chord != MENU {
                     return;
                 }
             },
-            Some(Over::Dictation(..)) => return,
             None => {},
         }
         if chord == MENU {
-            let over = if self.right.as_ref().is_some_and(Viewed::welcomes) {
-                Over::Note(WELCOME_MENU.to_owned())
-            } else {
-                match self.sidebar.float_menu() {
-                    Ok(()) => Over::Menu,
-                    Err(why) => Over::Note(why.to_owned()),
-                }
-            };
-            self.give(Focus { side: self.focus.side, over: Some(over) });
+            self.let_go();
+            if self.right.as_ref().is_some_and(Viewed::welcomes) {
+                self.sidebar.float_note(WELCOME_MENU.to_owned());
+            } else if let Err(why) = self.sidebar.float_menu() {
+                self.sidebar.float_note(why.to_owned());
+            }
             return;
         }
         let list = match chord {
@@ -1249,8 +1246,8 @@ impl App {
             return;
         }
         if chord == SWAP {
-            let other = if self.focus.session() { Side::Sidebar } else { Side::Session };
-            self.give(Focus::on(other));
+            let on_terminal = matches!(self.holder(), Holder::Terminal);
+            self.give(Focus::on(if on_terminal { Side::Sidebar } else { Side::Session }));
             return;
         }
         if chord == COLLAPSE {
@@ -1267,14 +1264,18 @@ impl App {
             self.ask_right(lunetad::Asked::Resize(change));
             return;
         }
-        if self.focus.session() && !self.sidebar.pressed() {
-            if chord == images::KEY && self.key_for_image(key) {
-                return;
-            }
-            self.key_to_session(key);
-        } else {
-            let asked = self.sidebar.key(key, SystemTime::now());
-            self.follow(asked);
+        match self.holder() {
+            Holder::Terminal if !self.sidebar.pressed() => {
+                if chord == images::KEY && self.key_for_image(key) {
+                    return;
+                }
+                self.key_to_session(key);
+            },
+            Holder::Terminal | Holder::Sidebar(_) => {
+                let asked = self.sidebar.key(key, SystemTime::now());
+                self.follow(asked);
+            },
+            Holder::Box(_) => unreachable!("a box takes the key"),
         }
     }
 
@@ -1320,7 +1321,8 @@ impl App {
         self.sidebar.image_going(None);
         match went {
             Went::NoImage { key, on } => {
-                if self.focus.session() && self.sidebar.far_agent() == Some(&on) {
+                let on_terminal = matches!(self.holder(), Holder::Terminal);
+                if on_terminal && self.sidebar.far_agent() == Some(&on) {
                     self.key_to_session(&key);
                 }
             },
@@ -1337,11 +1339,13 @@ impl App {
 
     fn image_not_pasted(&mut self, why: &str) {
         let note = format!("image not pasted: {why}");
-        if self.focus.side == Side::Collapsed && self.focus.over.is_none() {
-            log::say(&note);
-            self.give(Focus { side: Side::Collapsed, over: Some(Over::Note(note)) });
-        } else {
-            self.sidebar.notify(note);
+        match (self.holder(), self.focus.side) {
+            (Holder::Terminal, Side::Collapsed) => {
+                log::say(&note);
+                self.sidebar.float_note(note);
+            },
+            (Holder::Terminal, Side::Session | Side::Sidebar)
+            | (Holder::Sidebar(_) | Holder::Box(_), _) => self.sidebar.notify(note),
         }
     }
 
@@ -1350,7 +1354,7 @@ impl App {
         self.pointer = Some(at);
         let down = matches!(mouse.kind, MouseEventKind::Down(_));
         let under = matches!(self.held, Held::Session | Held::Selecting);
-        if self.focus.over.is_some() && under && !down {
+        if self.covered() && under && !down {
             if !self.select(mouse) {
                 if let MouseEventKind::Up(_) = mouse.kind {
                     self.held = Held::Nothing;
@@ -1418,7 +1422,10 @@ impl App {
                 }
                 return;
             },
-            Some(Over::Menu) => {
+            None => {},
+        }
+        match self.sidebar.floating() {
+            Some(Floating::Menu(_)) => {
                 if down && off {
                     self.let_go();
                     self.held = Held::Taken;
@@ -1426,11 +1433,11 @@ impl App {
                 }
                 return;
             },
-            Some(Over::Note(_)) => {
+            Some(Floating::Note(_)) => {
                 if down {
                     self.let_go();
                     self.held = Held::Taken;
-                    self.give(Focus::on(self.focus.side));
+                    self.sidebar.close_note();
                 }
                 return;
             },
@@ -1495,7 +1502,7 @@ impl App {
                 let asked = self.sidebar.keys_clicked(keyed, &key, SystemTime::now());
                 self.follow(asked);
             },
-            Hit::Menu(menu, choice) if matches!(self.focus.over, None | Some(Over::Menu)) => {
+            Hit::Menu(menu, choice) if self.focus.over.is_none() => {
                 let asked = self.sidebar.chose(menu, choice, SystemTime::now());
                 self.follow(asked);
             },
@@ -1944,7 +1951,6 @@ impl App {
     }
 
     fn file_issue(&mut self) {
-        let had = self.focus.session_told();
         let open = self.focus.over.take_if(|over| matches!(over, Over::Issue(_)));
         let Some(Over::Issue(issue)) = open else {
             return;
@@ -1953,20 +1959,19 @@ impl App {
             self.sidebar.filing(number, &to.to_string());
             self.keep_change(filing);
         }
-        self.give_from(had, Focus::on(self.focus.side));
+        self.give(Focus::on(self.focus.side));
     }
 
     fn close_issue(&mut self) {
-        let had = self.focus.session_told();
         let open = self.focus.over.take_if(|over| matches!(over, Over::Issue(_)));
         if let Some(Over::Issue(issue)) = open {
             issue.close(&mut self.unfiled);
         }
-        self.give_from(had, Focus::on(self.focus.side));
+        self.give(Focus::on(self.focus.side));
     }
 
     fn dictate(&mut self) -> bool {
-        let (on_session, had) = (self.focus.session(), self.focus.session_told());
+        let on_session = matches!(self.holder(), Holder::Terminal);
         let under = match self.focus.over.take() {
             None if on_session => Where::Session(self.sidebar.here_agent()),
             Some(Over::Ask(ask)) if !ask.turning() => Where::Ask(ask),
@@ -1989,7 +1994,7 @@ impl App {
             Dictation::fetching(number, self.fetching.get_or_insert_with(fetching).got)
         };
         let over = Some(Over::Dictation(dictation, under));
-        self.give_from(had, Focus { side: self.focus.side, over });
+        self.give(Focus { side: self.focus.side, over });
         true
     }
 
@@ -2036,7 +2041,6 @@ impl App {
     }
 
     fn undictate(&mut self, dictated: Option<Dictated>) {
-        let had = self.focus.session_told();
         let open = self.focus.over.take_if(|over| matches!(over, Over::Dictation(..)));
         let Some(Over::Dictation(_, under)) = open else {
             return;
@@ -2044,7 +2048,7 @@ impl App {
         let side = self.focus.side;
         match under {
             Where::Session(agent) => {
-                self.give_from(had, Focus::on(side));
+                self.give(Focus::on(side));
                 let Some(dictated) = dictated else {
                     return;
                 };
@@ -2063,7 +2067,7 @@ impl App {
                 if let Some(dictated) = &dictated {
                     ask.dictated(&dictated.written.to_string());
                 }
-                self.give_from(had, Focus { side, over: Some(Over::Ask(ask)) });
+                self.give(Focus { side, over: Some(Over::Ask(ask)) });
                 if dictated.is_some_and(|dictated| dictated.sends) {
                     self.converse();
                 }
@@ -2073,7 +2077,7 @@ impl App {
                     issue.dictated(&dictated.written.to_string());
                 }
                 let sends = dictated.is_some_and(|dictated| dictated.sends) && issue.ready();
-                self.give_from(had, Focus { side, over: Some(Over::Issue(issue)) });
+                self.give(Focus { side, over: Some(Over::Issue(issue)) });
                 if sends {
                     self.file_issue();
                 }
@@ -2373,27 +2377,93 @@ impl App {
 
     fn give_opened(&mut self, opener: Opener) {
         assert!(self.right.is_some(), "luneta shows the view it opened");
-        let held = self.focus.over.is_some() || self.sidebar.holds_input();
-        match (opener, held) {
+        match (opener, self.holder()) {
             (Opener::Holds, _) => {
                 self.leave();
-                let menu = matches!(self.focus.over, Some(Over::Menu));
-                assert!(!menu, "the menu that opened the view holds the keys no longer");
+                let afloat = matches!(self.holder(), Holder::Sidebar(Holding::Afloat));
+                assert!(!afloat, "the menu that opened the view holds the keys no longer");
             },
-            (Opener::LetGo, false) => {
+            (Opener::LetGo, Holder::Terminal | Holder::Sidebar(Holding::Nothing)) => {
                 self.give(Focus::on(self.focus.side.session()));
-                assert!(self.focus.session(), "the opened view takes the keys");
+                let taken = matches!(self.holder(), Holder::Terminal);
+                assert!(taken, "the opened view takes the keys");
             },
-            (Opener::LetGo, true) => {},
+            (
+                Opener::LetGo,
+                Holder::Sidebar(
+                    Holding::Chord
+                    | Holding::Search
+                    | Holding::Reorder
+                    | Holding::Menu
+                    | Holding::Afloat
+                    | Holding::Press,
+                )
+                | Holder::Box(_),
+            ) => {},
+        }
+    }
+
+    fn holder(&self) -> Holder<'_> {
+        if let Some(over) = &self.focus.over {
+            return Holder::Box(over);
+        }
+        match (self.sidebar.holding(), self.focus.side) {
+            (holding @ Holding::Afloat, _) | (holding, Side::Sidebar) => Holder::Sidebar(holding),
+            (
+                Holding::Nothing
+                | Holding::Chord
+                | Holding::Search
+                | Holding::Reorder
+                | Holding::Menu
+                | Holding::Press,
+                Side::Session | Side::Collapsed,
+            ) => Holder::Terminal,
+        }
+    }
+
+    fn covered(&self) -> bool {
+        match self.holder() {
+            Holder::Box(_) | Holder::Sidebar(Holding::Afloat) => true,
+            Holder::Terminal
+            | Holder::Sidebar(
+                Holding::Nothing
+                | Holding::Chord
+                | Holding::Search
+                | Holding::Reorder
+                | Holding::Menu
+                | Holding::Press,
+            ) => false,
+        }
+    }
+
+    fn tells(&self) -> Reported {
+        match self.holder() {
+            Holder::Terminal | Holder::Box(Over::Dictation(_, Where::Session(_))) => {
+                Reported::Focused
+            },
+            Holder::Sidebar(_)
+            | Holder::Box(
+                Over::Brief(_)
+                | Over::Ask(_)
+                | Over::Issue(_)
+                | Over::Picker(_)
+                | Over::Dictation(..),
+            ) => Reported::Unfocused,
+        }
+    }
+
+    fn tell(&mut self) {
+        let told = self.tells();
+        if told == self.told {
+            return;
+        }
+        self.told = told;
+        if self.focused {
+            self.tell_focus(told == Reported::Focused);
         }
     }
 
     fn give(&mut self, focus: Focus) {
-        let had = self.focus.session_told();
-        self.give_from(had, focus);
-    }
-
-    fn give_from(&mut self, had: bool, focus: Focus) {
         let focus = match focus.side {
             Side::Session | Side::Collapsed if self.right.is_none() => {
                 Focus { side: Side::Sidebar, ..focus }
@@ -2404,16 +2474,13 @@ impl App {
             self.let_go();
             self.sidebar.let_go();
         }
-        let has = focus.session_told();
         self.sidebar.focus(match (&focus.over, focus.side) {
             (None, Side::Sidebar) => Keys::Sidebar,
-            (Some(Over::Menu), side) => Keys::Menu { lent: side == Side::Sidebar },
             (
                 Some(
                     Over::Brief(_)
                     | Over::Ask(_)
                     | Over::Issue(_)
-                    | Over::Note(_)
                     | Over::Picker(_)
                     | Over::Dictation(..),
                 ),
@@ -2425,7 +2492,6 @@ impl App {
                     Over::Brief(_)
                     | Over::Ask(_)
                     | Over::Issue(_)
-                    | Over::Note(_)
                     | Over::Picker(_)
                     | Over::Dictation(..),
                 ),
@@ -2434,23 +2500,13 @@ impl App {
         });
         self.focus = focus;
         self.hold_aloud();
-        if self.focused && has != had {
-            self.tell_focus(has);
-        }
+        self.tell();
     }
 
     fn leave(&mut self) {
-        let leaves = match &self.focus.over {
-            None => self.focus.side == Side::Sidebar,
-            Some(Over::Menu) => true,
-            Some(
-                Over::Brief(_)
-                | Over::Ask(_)
-                | Over::Issue(_)
-                | Over::Note(_)
-                | Over::Picker(_)
-                | Over::Dictation(..),
-            ) => false,
+        let leaves = match self.holder() {
+            Holder::Sidebar(_) => true,
+            Holder::Terminal | Holder::Box(_) => false,
         };
         if leaves {
             self.give(Focus::on(self.focus.side.session()));
@@ -2468,7 +2524,7 @@ impl App {
             self.pointer = None;
             self.sidebar.let_go();
         }
-        if self.focus.session_told() {
+        if self.told == Reported::Focused {
             self.tell_focus(focused);
         }
     }
@@ -2514,7 +2570,8 @@ impl App {
                 self.sidebar.draw(buffer, sidebar, now)
             };
             self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
-            let uncovered = |at: &Position| self.focus.over.is_none() && right.contains(*at);
+            let covered = self.covered();
+            let uncovered = |at: &Position| !covered && right.contains(*at);
             let spot = |at: Position| attached::Spot { row: at.y - right.y, column: at.x - right.x };
             let hover = self.pointer.filter(uncovered).map(spot);
             let cursor = if let Some(shown) = &self.right {
@@ -2546,21 +2603,20 @@ impl App {
                     dictation.draw(buffer, right, (now, Instant::now()));
                     Drawn::Nothing
                 },
-                Some(Over::Note(note)) => {
-                    menu::draw_note(buffer, right, note);
-                    Drawn::Nothing
+                None => match self.sidebar.floating() {
+                    Some(Floating::Menu(menu)) => menu.draw(buffer, right, now),
+                    Some(Floating::Note(note)) => {
+                        menu::draw_note(buffer, right, note);
+                        Drawn::Nothing
+                    },
+                    None => beside,
                 },
-                Some(Over::Menu) => {
-                    let floating = self.sidebar.floating();
-                    floating.map_or_default(|menu| menu.draw(buffer, right, now))
-                },
-                None => beside,
             };
             if let Some(pointer) = self.pointer {
                 drawn.light(buffer, pointer);
                 self.sidebar.aloud_buttons().light(buffer, pointer);
             }
-            if self.focus.session()
+            if matches!(self.holder(), Holder::Terminal)
                 && let Some(cursor) = cursor
             {
                 frame.set_cursor_position(cursor);
