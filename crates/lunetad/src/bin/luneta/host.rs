@@ -1770,11 +1770,12 @@ impl App {
         };
         self.go_worktree(on, worktree, Some(terminal));
         self.shown().welcome();
-        self.leave();
+        self.give_opened(Some(sidebar::Held::Open));
     }
 
     fn project_open(&mut self, menu: u64, on: &Machine, key: OwnKey, open: &Open) {
-        let opening = self.sidebar.opening_for(menu);
+        let asking = self.sidebar.opening_for(menu);
+        let asking = asking.expect("the menu that asked to open waits for it, open or kept");
         let Some(project) = self.projected.project(on, key) else {
             return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());
         };
@@ -1787,7 +1788,7 @@ impl App {
                 };
                 self.go_worktree(on, worktree, Some(terminal));
                 self.shown().open_beside_focused(command.clone());
-                self.give_opened(opening);
+                self.give_opened(Some(asking));
             },
             Open::Tab { tab, .. } => {
                 let (lunetad, id, on) = (self.lunetad.clone(), project.id, on.clone());
@@ -2289,21 +2290,27 @@ impl App {
     }
 
     fn pulled_made(&mut self, menu: u64, made: Result<Pulled, String>) {
-        let held = self.sidebar.made_for(menu);
+        let asking = self.sidebar.made_for(menu);
         let made = match made {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: no session made: {why}")),
         };
         let Pulled { on, worktree, argv } = made;
         self.go_opening(&on, worktree, argv);
-        self.give_opened(held);
+        self.give_opened(asking);
     }
 
-    fn give_opened(&mut self, held: Option<sidebar::Held>) {
-        match (held, &self.focus.over) {
-            (Some(sidebar::Held::Open), _) => self.leave(),
+    fn give_opened(&mut self, asking: Option<sidebar::Held>) {
+        assert!(self.right.is_some(), "luneta shows the view it opened");
+        match (asking, &self.focus.over) {
+            (Some(sidebar::Held::Open), _) => {
+                self.leave();
+                let menu = matches!(self.focus.over, Some(Over::Menu));
+                assert!(!menu, "the menu that opened the view holds the keys no longer");
+            },
             (Some(sidebar::Held::Kept) | None, None) => {
                 self.give(Focus::on(self.focus.side.session()));
+                assert!(self.focus.session(), "the opened view takes the keys");
             },
             (Some(sidebar::Held::Kept) | None, Some(_)) => {},
         }

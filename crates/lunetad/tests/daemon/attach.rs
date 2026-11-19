@@ -138,6 +138,7 @@ fn a_view_opened_from_the_sidebar_or_its_menu_takes_the_keys() {
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    let mut before = tops(&window);
     for (keys, count) in [(format!("{SIDEBAR}nv"), 2), (format!("{SIDEBAR}{MENU}nv"), 3)] {
         window.send(&keys);
         let drawn = eventually(&format!("{count} terminals are drawn"), || {
@@ -147,10 +148,12 @@ fn a_view_opened_from_the_sidebar_or_its_menu_takes_the_keys() {
             (found.count() == count && drawn.len() == count).then_some(drawn)
         });
         window.send(&format!("printf 'own-%s\\n' {count}\r"));
-        let (_, column) = window.spot_of(&format!("own-{count}"));
-        if count == 2 {
-            assert!(column > drawn[1].1, "the new pane, right of the old, printed it: {drawn:?}");
-        }
+        let (row, column) = window.spot_of(&format!("own-{count}"));
+        let printer = drawn.iter().filter(|top| top.0 < row && top.1 < column).max();
+        let printer = printer.expect("a drawn pane holds what was printed");
+        let new = !before.contains(printer);
+        assert!(new, "the new pane printed it at {row},{column}: {drawn:?} after {before:?}");
+        before = drawn;
     }
     window.send(&format!("{SIDEBAR}nh"));
     eventually("a welcome view is drawn", || {
