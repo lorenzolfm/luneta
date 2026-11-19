@@ -119,8 +119,8 @@ fn in_a_bare_repository_that_is_not_a_dot_bare_none_is_made_and_why_comes_last_o
     assert!(!refused.status.success());
     assert_eq!(refused.stdout, b"");
     let why = format!(
-        "luneta: {} is in a bare repository that is not a .bare, and luneta makes worktrees only \
-         beside one; wt clone it first",
+        "luneta: {} is in a bare repository that is not a .bare, and wt would make the worktree \
+         inside it; wt clone it first",
         bare.display()
     );
     assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
