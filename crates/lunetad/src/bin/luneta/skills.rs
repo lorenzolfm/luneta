@@ -44,6 +44,7 @@ pub enum Skills {
 }
 
 pub struct Search {
+    cwd: Directory,
     term: String,
     skills: Skills,
     found: Vec<Found>,
@@ -51,8 +52,13 @@ pub struct Search {
 }
 
 impl Search {
-    pub fn new() -> Self {
-        Search { term: String::new(), skills: Skills::Finding, found: Vec::new(), selected: 0 }
+    pub fn new(cwd: Directory) -> Self {
+        let (term, found) = (String::new(), Vec::new());
+        Search { cwd, term, skills: Skills::Finding, found, selected: 0 }
+    }
+
+    pub fn cwd(&self) -> &Directory {
+        &self.cwd
     }
 
     pub fn term(&self) -> &str {
@@ -169,7 +175,7 @@ mod tests {
 
     #[test]
     fn a_search_narrows_the_skills_to_the_best_match_first() {
-        let mut search = Search::new();
+        let mut search = Search::new(Directory::parse("/w/luneta".to_owned()).unwrap());
         search.push('r');
         search.push('e');
         assert_eq!(search.count(), 0);

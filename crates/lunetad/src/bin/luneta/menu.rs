@@ -1459,7 +1459,7 @@ impl Menu {
         match offer {
             Offer::SearchSkills(row) => match row.beside() {
                 Ok(Beside { cwd, .. }) => {
-                    keys.search = Some(Search::new());
+                    keys.search = Some(Search::new(cwd.clone()));
                     let wants = Wants::Skills { cwd, agent: keys.agent.harness() };
                     stays(Stage::Choosing(keys), wants)
                 },
@@ -1541,14 +1541,9 @@ impl Menu {
         match stage {
             Stage::Choosing(mut keys) => match (keys.key(key), &target) {
                 (Pressed::Close, _) => Did::Closed(Done::Nothing),
-                (Pressed::Switched(agent), Target::View(_, row))
-                    if let Some(search) = &mut keys.search =>
-                {
+                (Pressed::Switched(agent), _) if let Some(search) = &mut keys.search => {
                     search.refind();
-                    let wants = match row.beside() {
-                        Ok(Beside { cwd, .. }) => Wants::Refind { cwd, agent },
-                        Err(_) => Wants::Keep(agent),
-                    };
+                    let wants = Wants::Refind { cwd: search.cwd().clone(), agent };
                     stays(Stage::Choosing(keys), wants)
                 },
                 (Pressed::Switched(agent), _) => stays(Stage::Choosing(keys), Wants::Keep(agent)),
