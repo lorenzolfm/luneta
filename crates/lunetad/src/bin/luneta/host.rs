@@ -68,7 +68,7 @@ use crate::picker::{self, List, Palette, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found};
 use crate::sidebar::{
-    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat, Sidebar,
+    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat, Sidebar, Sitting,
     ViewKey, ViewPlace,
 };
 use crate::skills::{self, Skill, Skills};
@@ -1486,8 +1486,7 @@ impl App {
         let Some(Right::Home(home)) = &mut self.right else {
             return None;
         };
-        let key = projected::key_of(home.project());
-        match self.projected.project(home.machine(), key) {
+        match self.projected.project(home.machine(), home.project()) {
             Some(project) => {
                 home.named(&project.name, &project.dir);
                 Some(Homed::Named)
@@ -2417,9 +2416,8 @@ impl App {
         let right = match &self.right {
             None => return,
             Some(Right::Home(home)) => {
-                let (on, project) = (home.machine().clone(), projected::key_of(home.project()));
-                self.sidebar.showing_home(on, project);
-                self.seated = None;
+                let (on, project) = (home.machine().clone(), home.project());
+                self.sidebar.sit(Seat { on, project, at: Sitting::Home });
                 return;
             },
             Some(Right::Worktree(right)) => right,
@@ -2429,7 +2427,8 @@ impl App {
             return;
         };
         let terminal = right.focused().and_then(|focused| project.terminal_key(focused));
-        self.sidebar.sit(Seat { on, project: project.id, worktree, terminal });
+        let at = Sitting::Worktree { worktree, terminal };
+        self.sidebar.sit(Seat { on, project: project.id, at });
     }
 
     fn heeded(&mut self, heeded: Heeded) {
