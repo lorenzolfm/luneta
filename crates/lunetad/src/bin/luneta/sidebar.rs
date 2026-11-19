@@ -276,11 +276,11 @@ impl fmt::Display for ViewKey {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Sitting {
-    on: Machine,
-    project: ProjectId,
-    terminal: Option<TerminalKey>,
-    shown: Option<WorktreeId>,
+pub struct Seat {
+    pub on: Machine,
+    pub project: ProjectId,
+    pub worktree: WorktreeId,
+    pub terminal: Option<TerminalKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1255,7 +1255,7 @@ pub struct Sidebar {
     host: Option<Host>,
     this: String,
     away: Option<String>,
-    seat: Option<Sitting>,
+    seat: Option<Seat>,
     seat_name: Option<String>,
     folds: Folds,
     news: News,
@@ -1946,9 +1946,25 @@ impl Sidebar {
         self.working.remove(&menu).map(|it| (it, Taken::Kept, seen))
     }
 
-    pub fn sit_in(&mut self, on: Machine, project: ProjectId) {
-        self.seat = Some(Sitting { on, project, terminal: None, shown: None });
-        self.unfold_project(project);
+    pub fn sit(&mut self, seat: Seat) {
+        let was = self.seat.take().filter(|was| was.on == seat.on && was.project == seat.project);
+        let unmoved = was.as_ref() == Some(&seat);
+        let (project, worktree, terminal) = (seat.project, seat.worktree, seat.terminal);
+        self.seat = Some(seat);
+        if unmoved {
+            return;
+        }
+        if was.is_none() {
+            self.unfold_project(project);
+        }
+        if was.as_ref().map(|was| was.worktree) != Some(worktree) {
+            let on = self.on().clone();
+            self.folds.set(Fold::Worktree(&on, worktree), false);
+        }
+        let moved = was.and_then(|was| was.terminal) != terminal;
+        if moved && let Some(terminal) = terminal {
+            self.unfold_home(project, terminal);
+        }
         self.rebuild();
     }
 
@@ -1959,26 +1975,14 @@ impl Sidebar {
         assert!(self.seat.is_none(), "luneta sits nowhere when it shows no worktree");
     }
 
-    pub fn sit_at(&mut self, terminal: TerminalKey) {
-        let seat = self.seat.as_mut().expect("luneta sits at a terminal of the project it sits in");
-        seat.terminal = Some(terminal);
-        let project = seat.project;
-        if let Some(place) = self.view_place(project, terminal) {
-            let on = self.on().clone();
-            let spot = Spot::on(&on, Place::View(place));
-            if let Some(Place::Worktree(home)) = self.homes.get(&spot).and_then(Spot::place) {
-                self.folds.set(Fold::Worktree(&on, home.worktree), false);
-            }
-        }
-        self.rebuild();
-    }
-
-    pub fn showing(&mut self, worktree: WorktreeId) {
-        let seat = self.seat.as_mut().expect("luneta shows a worktree where it sits");
-        if seat.shown != Some(worktree) {
-            seat.shown = Some(worktree);
-            self.folds.set(Fold::Worktree(&seat.on, worktree), false);
-            self.rebuild();
+    fn unfold_home(&mut self, project: ProjectId, terminal: TerminalKey) {
+        let Some(place) = self.view_place(project, terminal) else {
+            return;
+        };
+        let on = self.on().clone();
+        let spot = Spot::on(&on, Place::View(place));
+        if let Some(Place::Worktree(home)) = self.homes.get(&spot).and_then(Spot::place) {
+            self.folds.set(Fold::Worktree(&on, home.worktree), false);
         }
     }
 
@@ -1986,14 +1990,8 @@ impl Sidebar {
         self.seat.as_ref().map(|seat| seat.project)
     }
 
-    #[must_use]
-    pub fn seated_on(&self, on: &Machine) -> Option<ProjectId> {
+    fn seated_on(&self, on: &Machine) -> Option<ProjectId> {
         self.seat.as_ref().filter(|seat| seat.on == *on).map(|seat| seat.project)
-    }
-
-    #[must_use]
-    pub fn seated_at(&self) -> Option<TerminalKey> {
-        self.seat.as_ref()?.terminal
     }
 
     pub fn own_title(&self) -> Option<&str> {
@@ -2016,9 +2014,10 @@ impl Sidebar {
     }
 
     fn here_worktree(&self) -> Option<WorktreePlace> {
-        let known = self.known_of(self.seated_in()?)?;
-        let shown = self.seat.as_ref()?.shown?;
-        let worktree = known.worktrees.iter().find(|worktree| worktree.place.worktree == shown)?;
+        let seat = self.seat.as_ref()?;
+        let known = self.known_of(seat.project)?;
+        let mut worktrees = known.worktrees.iter();
+        let worktree = worktrees.find(|worktree| worktree.place.worktree == seat.worktree)?;
         Some(worktree.place.clone())
     }
 
@@ -5875,10 +5874,18 @@ mod tests {
         let Place::View(ViewPlace { session, view }) = place else {
             panic!("luneta sits on a view: {place:?}");
         };
-        if sidebar.seated_in() != Some(session.project()) {
-            sidebar.sit_in(Machine::Local, session.project());
-        }
-        sidebar.sit_at(view.key());
+        let (project, terminal) = (session.project(), view.key());
+        let known = sidebar.known_of(project).expect("luneta sits in a project it knows");
+        let mut worktrees = known.worktrees.iter();
+        let home = worktrees.find(|it| it.views.iter().any(|it| keyed(it) == Some(terminal)));
+        let worktree = home.expect("a worktree holds the view luneta sits on").place.worktree;
+        sidebar.sit(Seat { on: Machine::Local, project, worktree, terminal: Some(terminal) });
+    }
+
+    fn seat_in(project: u64, view: Option<u32>) -> Seat {
+        let terminal = view.map(|view| view_key(project, view).key());
+        let (worktree, project) = (tab_of(project, 0), ProjectId::of(project).unwrap());
+        Seat { on: Machine::Local, project, worktree, terminal }
     }
 
     fn kept(projects: Vec<api::Project>) -> api::Projects {
@@ -6405,7 +6412,7 @@ mod tests {
 
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         let (lines, lit) = seen(&mut sidebar, false, 32, 13);
-        assert_eq!(lines[7..10], ["  ▾ Tab #2", "       main", nvim]);
+        assert_eq!(lines[7..10], ["▌ ▾ Tab #2", "▌      main", nvim]);
         assert_eq!(lit, [7, 8, 9]);
         let (_, lit) = seen(&mut sidebar, true, 32, 7);
         assert_eq!(lit, [4, 5, 6]);
@@ -6557,10 +6564,22 @@ mod tests {
         assert_eq!(sidebar.own_title(), None);
         sit(&mut sidebar, &own_view_of("older", 1, 1));
         assert_eq!(sidebar.own_title(), Some("older"));
-        sidebar.sit_in(Machine::Local, ProjectId::of(3).unwrap());
+        sidebar.sit(seat_in(3, None));
         assert_eq!(sidebar.own_title(), Some("older"));
         sit(&mut sidebar, &own_view_of("young", 2, 1));
         assert_eq!(sidebar.own_title(), Some("young"));
+    }
+
+    #[test]
+    fn luneta_shown_another_worktree_of_its_project_is_on_no_view_until_it_focuses_one() {
+        let mut sidebar = own_two_sessions();
+        let older = |view| ViewPlace { session: own_listed("older", 1), view: view_key(1, view) };
+        sit(&mut sidebar, &Place::View(older(1)));
+        assert_eq!(sidebar.here_place(), Ok(older(1)));
+        sidebar.sit(Seat { worktree: tab_of(1, 1), ..seat_in(1, None) });
+        assert_eq!(sidebar.here_place(), Err(NO_HERE_VIEW), "not the view of the worktree left");
+        sit(&mut sidebar, &Place::View(older(2)));
+        assert_eq!(sidebar.here_place(), Ok(older(2)));
     }
 
     #[test]
@@ -6577,7 +6596,7 @@ mod tests {
         sit(&mut sidebar, &older(1));
         assert!(!folded(&sidebar, "older"));
         let mut sidebar = away();
-        sidebar.sit_in(Machine::Local, ProjectId::of(1).unwrap());
+        sidebar.sit(seat_in(1, None));
         assert!(!folded(&sidebar, "older"));
     }
 
@@ -8713,7 +8732,7 @@ mod tests {
         };
         let deleted = delete_here(project_deleted("own", 1, &[], &[]));
         assert_eq!(remove(&mut sidebar), deleted);
-        sidebar.sit_in(Machine::Local, ProjectId::of(2).unwrap());
+        sidebar.sit(seat_in(2, None));
         assert_eq!(remove(&mut sidebar), deleted);
     }
 
@@ -8723,9 +8742,9 @@ mod tests {
         let views = || vec![view(1, 0, "/w/luneta/main", "fish")];
         let sessions = vec![own_session("twin", 1, views()), own_session("newest", 2, Vec::new())];
         sidebar.hear(host(sessions, Vec::new()));
-        sidebar.sit_in(Machine::Local, ProjectId::of(1).unwrap());
+        sidebar.sit(seat_in(1, None));
         assert_eq!(sidebar.here_place(), Err(NO_HERE_VIEW));
-        sidebar.sit_at(view_key(1, 1).key());
+        sidebar.sit(seat_in(1, Some(1)));
         let twin = Listed::new_project("twin", 1);
         let here = ViewPlace { session: twin.clone(), view: view_key(1, 1) };
         assert_eq!(sidebar.here_place(), Ok(here));
@@ -8743,8 +8762,7 @@ mod tests {
         let views = || vec![view(1, 0, "/w/luneta/main", "fish")];
         let sessions = vec![own_session("twin", 1, views()), own_session("newest", 2, Vec::new())];
         sidebar.hear(host(sessions, Vec::new()));
-        sidebar.sit_in(Machine::Local, ProjectId::of(1).unwrap());
-        sidebar.sit_at(view_key(1, 1).key());
+        sidebar.sit(seat_in(1, Some(1)));
         sidebar.unseat();
         assert_eq!(sidebar.seated_in(), None);
         let (twin, view) = (Listed::new_project("twin", 1), view_key(1, 1));
@@ -9292,7 +9310,7 @@ mod tests {
             stands: Some(api::git_status::Stands::Checkout(checkout)),
         }];
         sidebar.hear(host);
-        sidebar.sit_in(Machine::Local, ProjectId::of(1).unwrap());
+        sidebar.sit(seat_in(1, None));
         sidebar.float_menu();
         assert!(matches!(sidebar.floating(), Some(Floating::Note(NO_HERE_VIEW))));
         sidebar.close_note();
@@ -9430,7 +9448,6 @@ mod tests {
             panic!("the palette aims at the view shown: {target:?}");
         };
         assert_eq!(row.view, view_key(10, 1));
-        sidebar.showing(tab_of(10, 0));
         let Aim::At { target: welcome, .. } = sidebar.aimed_worktree() else {
             panic!("over a welcome view, the palette aims at its worktree");
         };
@@ -10841,8 +10858,8 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         let there = listed("main", 20);
-        sidebar.sit_in(Machine::Remote(nixos()), there.project());
-        sidebar.showing(tab_of(20, 0));
+        let (on, project, worktree) = (Machine::Remote(nixos()), there.project(), tab_of(20, 0));
+        sidebar.sit(Seat { on, project, worktree, terminal: None });
         let project = ProjectRow::of(there);
         let place = WorktreePlace { project, worktree: tab_of(20, 0) };
         assert_eq!(sidebar.listing().shown, Some((Machine::Remote(nixos()), place)));

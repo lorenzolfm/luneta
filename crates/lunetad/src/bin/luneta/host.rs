@@ -66,8 +66,8 @@ use crate::picker::{self, List, Palette, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
 use crate::sidebar::{
-    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Sidebar, ViewKey,
-    ViewPlace,
+    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat, Sidebar,
+    ViewKey, ViewPlace,
 };
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
@@ -2301,18 +2301,8 @@ impl App {
         let Some((project, _)) = self.projected.holding(&on, worktree) else {
             return;
         };
-        let id = project.id;
         let terminal = right.focused().and_then(|focused| project.terminal_key(focused));
-        if self.sidebar.seated_on(&on) != Some(id) {
-            self.sidebar.sit_in(on.clone(), id);
-        }
-        assert_eq!(self.sidebar.seated_on(&on), Some(id), "the sidebar sits where luneta shows");
-        self.sidebar.showing(worktree);
-        if let Some(terminal) = terminal
-            && self.sidebar.seated_at() != Some(terminal)
-        {
-            self.sidebar.sit_at(terminal);
-        }
+        self.sidebar.sit(Seat { on, project: project.id, worktree, terminal });
     }
 
     fn heeded(&mut self, heeded: Heeded) {
