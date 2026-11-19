@@ -3,7 +3,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::Deref;
 
 use base64::Engine as _;
-use lunetad::links::Link;
+use lunetad::links::{Kind, Link};
 
 use crate::sidebar::cut;
 use crate::sweep::cells;
@@ -55,10 +55,12 @@ impl Copies {
     pub fn clip(&mut self, out: &mut impl io::Write, clip: Clip) -> io::Result<Option<Copied>> {
         match clip {
             Clip::Pull(link) => {
+                assert_eq!(link.kind(), Kind::Pull, "a row keeps only its pull request's link");
                 write(out, &link.url())?;
                 Ok(Some(Copied::Pull(link.number())))
             },
             Clip::Filed(link) => {
+                assert_eq!(link.kind(), Kind::Issue, "an issue is filed only with an issue's link");
                 write(out, &link.url())?;
                 Ok(None)
             },
@@ -83,6 +85,8 @@ fn write(out: &mut impl io::Write, text: &str) -> io::Result<()> {
 
 fn osc52(text: &str) -> String {
     let text = base64::engine::general_purpose::STANDARD.encode(text);
+    let spelled = |byte: u8| byte.is_ascii_alphanumeric() || b"+/=".contains(&byte);
+    assert!(text.bytes().all(spelled), "a copy can't end its escape early");
     format!("\x1b]52;c;{text}\x07")
 }
 
@@ -100,9 +104,9 @@ impl Copied {
 }
 
 impl Text {
-    fn of(text: &Excerpt) -> Text {
-        let lines = NonZeroUsize::new(text.lines().count()).expect("an excerpt has a line");
-        let first = text.lines().map(shown).find(|line| !line.is_empty());
+    fn of(excerpt: &Excerpt) -> Text {
+        let lines = NonZeroUsize::new(excerpt.lines().count()).expect("an excerpt has a line");
+        let first = excerpt.lines().map(shown).find(|line| !line.is_empty());
         let fits = |first: &str| first.chars().count() <= SHOWN_CHARS_MAX;
         assert!(first.as_deref().is_none_or(fits), "a note keeps only what it can show");
         let drawn = |first: &str| !first.chars().any(char::is_control);
