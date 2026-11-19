@@ -49,7 +49,7 @@ use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::checks;
-use crate::close::{Act, Whose};
+use crate::close::Act;
 use crate::desktop::{self, Desktop, Reader, Told};
 use crate::dictation::{self, Dictated, Dictation};
 use crate::folds::{self, Folds};
@@ -97,6 +97,21 @@ enum Doomed {
 enum Naming {
     Idle,
     Busy,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Opener {
+    Holds,
+    LetGo,
+}
+
+impl Opener {
+    fn of(asking: sidebar::Held) -> Opener {
+        match asking {
+            sidebar::Held::Open => Opener::Holds,
+            sidebar::Held::Kept => Opener::LetGo,
+        }
+    }
 }
 
 const NAMING: &str = "menu: luneta names a session already: try again once it has made it";
@@ -1576,13 +1591,11 @@ impl App {
                     zellij::stays(&session, &self.events);
                 },
             },
-            Asked::Open { menu, on, whose: Whose::Own(key), open } => {
-                self.project_open(menu, &on, key, &open);
+            Asked::Open { asking, on, key, open } => self.project_open(asking, &on, key, &open),
+            Asked::OpenZellij { menu, on, open } => zellij::open(menu, &on, open, &self.events),
+            Asked::Welcome { asking, on, session, pane } => {
+                self.welcome(asking, &on, &session, pane);
             },
-            Asked::Open { menu, on, whose: Whose::Zellij(_), open } => {
-                zellij::open(menu, &on, open, &self.events);
-            },
-            Asked::Welcome { on, session, pane } => self.welcome(&on, &session, pane),
             Asked::NewWorktree { on, project, branch } => {
                 self.make_worktree(on, move |lunetad, on| {
                     worktrees::branched(lunetad, on, project, &branch).map(Landing::Worktree)
@@ -1757,7 +1770,7 @@ impl App {
         }));
     }
 
-    fn welcome(&mut self, on: &Machine, session: &Listed, pane: PaneKey) {
+    fn welcome(&mut self, asking: sidebar::Held, on: &Machine, session: &Listed, pane: PaneKey) {
         let Some(key) = session.own_key() else {
             return self.sidebar.notify(format!("menu: {}", menu::OWN_ONLY));
         };
@@ -1770,12 +1783,10 @@ impl App {
         };
         self.go_worktree(on, worktree, Some(terminal));
         self.shown().welcome();
-        self.give_opened(Some(sidebar::Held::Open));
+        self.give_opened(Opener::of(asking));
     }
 
-    fn project_open(&mut self, menu: u64, on: &Machine, key: OwnKey, open: &Open) {
-        let asking = self.sidebar.opening_for(menu);
-        let asking = asking.expect("the menu that asked to open waits for it, open or kept");
+    fn project_open(&mut self, asking: sidebar::Held, on: &Machine, key: OwnKey, open: &Open) {
         let Some(project) = self.projected.project(on, key) else {
             return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());
         };
@@ -1788,7 +1799,7 @@ impl App {
                 };
                 self.go_worktree(on, worktree, Some(terminal));
                 self.shown().open_beside_focused(command.clone());
-                self.give_opened(Some(asking));
+                self.give_opened(Opener::of(asking));
             },
             Open::Tab { tab, .. } => {
                 let (lunetad, id, on) = (self.lunetad.clone(), project.id, on.clone());
@@ -2269,7 +2280,7 @@ impl App {
         match made {
             Made::Worktree { on, made: Ok(Landing::Worktree(made)), argv } => {
                 self.go_opening(&on, made, argv);
-                self.give_opened(None);
+                self.give_opened(Opener::LetGo);
             },
             Made::Worktree { on, made: Ok(Landing::Unopened(project)), .. } => {
                 self.open_worktree(on, project);
@@ -2290,30 +2301,30 @@ impl App {
     }
 
     fn pulled_made(&mut self, menu: u64, made: Result<Pulled, String>) {
-        let asking = self.sidebar.made_for(menu);
+        let opener = self.sidebar.made_for(menu).map_or(Opener::LetGo, Opener::of);
         let made = match made {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: no session made: {why}")),
         };
         let Pulled { on, worktree, argv } = made;
         self.go_opening(&on, worktree, argv);
-        self.give_opened(asking);
+        self.give_opened(opener);
     }
 
-    fn give_opened(&mut self, asking: Option<sidebar::Held>) {
+    fn give_opened(&mut self, opener: Opener) {
         assert!(self.right.is_some(), "luneta shows the view it opened");
         let held = self.focus.over.is_some() || self.sidebar.holds_input();
-        match (asking, held) {
-            (Some(sidebar::Held::Open), _) => {
+        match (opener, held) {
+            (Opener::Holds, _) => {
                 self.leave();
                 let menu = matches!(self.focus.over, Some(Over::Menu));
                 assert!(!menu, "the menu that opened the view holds the keys no longer");
             },
-            (Some(sidebar::Held::Kept) | None, false) => {
+            (Opener::LetGo, false) => {
                 self.give(Focus::on(self.focus.side.session()));
                 assert!(self.focus.session(), "the opened view takes the keys");
             },
-            (Some(sidebar::Held::Kept) | None, true) => {},
+            (Opener::LetGo, true) => {},
         }
     }
 
