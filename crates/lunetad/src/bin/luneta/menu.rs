@@ -482,7 +482,7 @@ pub enum Rename {
 #[expect(clippy::large_enum_variant, reason = "one is made on each Enter, and goes at once")]
 enum Entered {
     Done(Done),
-    Next(Typing),
+    Folder(String),
     Wrong(String),
 }
 
@@ -528,7 +528,7 @@ impl Typing {
                 Err(why) => Entered::Wrong(format!("not a destination: {why}")),
             },
             Typing::Folder => match folder_typed(typed) {
-                Ok(folder) => Entered::Next(Typing::Name(folder)),
+                Ok(folder) => Entered::Folder(folder),
                 Err(why) => Entered::Wrong(why),
             },
             Typing::Name(folder) => match named(projects::Name::of_project) {
@@ -644,10 +644,8 @@ impl Chain {
             },
             Typed::Enter => match self.typing.clone().typed(&self.typed, on) {
                 Entered::Done(done) => Chained::Done(done),
-                Entered::Next(typing) => {
-                    assert!(matches!(self.typing, Typing::Folder), "only a folder steps on");
-                    assert!(matches!(typing, Typing::Name(_)), "a folder's next step is its name");
-                    Chained::Typing(Chain::new(typing, String::new()))
+                Entered::Folder(folder) => {
+                    Chained::Typing(Chain::new(Typing::Name(folder), String::new()))
                 },
                 Entered::Wrong(why) => {
                     self.wrong = Some(why);
