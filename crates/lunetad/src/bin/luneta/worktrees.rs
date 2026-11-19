@@ -183,7 +183,7 @@ pub fn branched(
             "lunetad ended its answer with no worktree".to_owned()
         })
     };
-    landed(asked_or(path, links::PATIENCE, asking, |late| late)?)
+    landed(asked_or(path, links::WORKTREE_PATIENCE, asking, |late| late)?)
 }
 
 fn started_at(path: &Path, folder: &str) -> Result<Option<Landed>, String> {

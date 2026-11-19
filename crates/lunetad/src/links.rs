@@ -35,6 +35,8 @@ const ASKING: Duration = Duration::from_secs(30);
 
 pub const PATIENCE: Duration = Duration::from_secs(3 * MAKING.as_secs() + ASKING.as_secs() + 60);
 
+pub const WORKTREE_PATIENCE: Duration = Duration::from_secs(MAKING.as_secs() + 60);
+
 const WORKED_MAX: usize = 1024;
 
 const ORIGIN: &str = "origin";
@@ -1118,7 +1120,7 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
 
 pub fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
     let mut luneta = Command::new(luneta()?);
-    git::local(luneta.args(["worktree", "--repo", dir, &of.to_string()]));
+    git::local(luneta.args(["worktree", "--repo", dir, "--", &of.to_string()]));
     let ran = program::run_alone(&mut luneta, MAKING)
         .map_err(|error| format!("luneta worktree could not be run: {error}"))?;
     worktree_said(ran)

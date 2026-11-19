@@ -1561,7 +1561,7 @@ impl Picker {
         };
         let name = housed.project.listed().name();
         match &housed.unopened {
-            Unopened::Folder => format!("{name} is a folder, and its own is its one worktree"),
+            Unopened::Folder => projects::folder_has_one_worktree(name),
             Unopened::Unlisted(why) => format!("{name}'s worktrees: {why}"),
             Unopened::Listed(_) => "every worktree is open".to_owned(),
         }

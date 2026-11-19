@@ -3246,9 +3246,9 @@ impl Sidebar {
                 let mut known = shelf(&self.shelves, &on).iter();
                 let known = known.find(|it| it.project.id() == project);
                 if let Some(known) = known.filter(|it| it.unopened == Unopened::Folder) {
-                    let name = known.listed().name().to_string();
+                    let refused = projects::folder_has_one_worktree(known.listed().name());
                     self.drop_menu(number);
-                    self.say(format!("menu: {name} is a folder, and its own is its one worktree"));
+                    self.say(format!("menu: {refused}"));
                 }
                 Asked::Nothing
             },

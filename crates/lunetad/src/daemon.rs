@@ -1150,7 +1150,7 @@ impl Daemon for Host {
         }
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
         let layouts = self.layouts.clone();
-        let changed = task::spawn_blocking(move || changed(&layouts, change));
+        let changed = task::spawn_blocking(move || change_answered(&layouts, change));
         Ok(Response::new(changed.await.map_err(|error| unfinished(&error))??))
     }
 
@@ -1162,14 +1162,11 @@ impl Daemon for Host {
         request: Request<MakeWorktreeRequest>,
     ) -> Result<Response<Self::MakeWorktreeStream>, Status> {
         let MakeWorktreeRequest { on, project, branch } = request.into_inner();
+        let branch = asked_branch(&branch)?;
         if let Some(mut daemon) = self.bridged(on)? {
             let asked = MakeWorktreeRequest { on: None, project, branch };
             let answer = daemon.make_worktree(asked).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
-        }
-        let branch = branch.trim().to_owned();
-        if branch.is_empty() {
-            return Err(Status::invalid_argument("it names no branch"));
         }
         let held = self.watched(None).await?.projects.and_then(|projects| projects.held);
         let kept = match held {
@@ -1182,16 +1179,19 @@ impl Daemon for Host {
         let kept = kept.into_iter().find(|it| it.id == project);
         let kept = kept.ok_or_else(|| Status::not_found(format!("no project {project:016x}")))?;
         if !matches!(kept.holds, Some(api::project::Holds::Clone(_))) {
-            let name = &kept.name;
-            return Err(Status::failed_precondition(format!(
-                "{name} is a folder, and its own is its one worktree"
-            )));
+            let refused = projects::folder_has_one_worktree(&kept.name);
+            return Err(Status::failed_precondition(refused));
         }
         let (root, layouts) = (kept.dir, self.layouts.clone());
         let answer = late(move || {
+            use change_projects_response::Made as Answered;
             let folder = links::worktree(&root, &Of::Branch(branch)).map_err(unready)?;
             let add = AddWorktree { project, folder, name: None, argv: Vec::new() };
-            changed(&layouts, change_projects_request::Change::AddWorktree(add))
+            let add = change_projects_request::Change::AddWorktree(add);
+            let added = change_answered(&layouts, add)?;
+            let landed = matches!(added.made, Some(Answered::Worktree(_) | Answered::Found(_)));
+            assert!(landed, "an added worktree is made or found, not {:?}", added.made);
+            Ok(added)
         });
         Ok(Response::new(Box::pin(answer)))
     }
@@ -1372,7 +1372,20 @@ fn asked_open(request: OpenRequest) -> Result<(Option<api::On>, Open), Status> {
     Ok((on, open))
 }
 
-fn changed(
+fn asked_branch(branch: &str) -> Result<String, Status> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err(Status::invalid_argument("it names no branch"));
+    }
+    match Of::parse(branch).map_err(Status::invalid_argument)? {
+        Of::Branch(branch) => Ok(branch),
+        Of::Pull(link) => Err(Status::invalid_argument(format!(
+            "{link} is a pull request: paste its link to make its worktree"
+        ))),
+    }
+}
+
+fn change_answered(
     layouts: &SyncSender<layouts::Command>,
     change: change_projects_request::Change,
 ) -> Result<ChangeProjectsResponse, Status> {

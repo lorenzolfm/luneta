@@ -588,6 +588,11 @@ fn a_branch_s_worktree_is_made_in_a_clone_on_its_machine_and_opens_with_a_shell(
     assert_eq!(refused.message(), "Vault is a folder, and its own is its one worktree");
     let refused = branched_on(&here, "far", luneta, "a..b").unwrap_err();
     assert!(refused.message().contains("a..b is not a valid branch name"), "{refused:?}");
+    let refused = branched_on(&here, "far", luneta, "--help").unwrap_err();
+    assert!(refused.message().contains("--help is not a valid branch name"), "{refused:?}");
+    let refused = branched_on(&here, "far", luneta, "https://github.com/o/r/pull/3").unwrap_err();
+    let pasted = "o/r#3 is a pull request: paste its link to make its worktree";
+    assert_eq!((refused.code(), refused.message()), (Code::InvalidArgument, pasted));
     let refused = branched_on(&here, "far", luneta, "  ").unwrap_err();
     assert_eq!((refused.code(), refused.message()), (Code::InvalidArgument, "it names no branch"));
     let refused = branched_on(&here, "far", u64::MAX, "feat").unwrap_err();
