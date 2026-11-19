@@ -350,7 +350,7 @@ mod tests {
             id: 7,
             name: "bitwarden backup".to_owned(),
             dir: "/w".to_owned(),
-            holds: Some(api::project::Holds::Clone(api::project::Clone { worktrees, unopened: Vec::new() })),
+            holds: Some(api::project::Holds::Clone(api::project::Clone { worktrees, listing: None })),
             ..api::Project::default()
         };
         let kept = Held::Kept(Kept { projects: vec![project], version: None });

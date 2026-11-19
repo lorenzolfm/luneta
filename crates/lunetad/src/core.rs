@@ -16,7 +16,7 @@ use crate::github::Found;
 use crate::mux::own::server::{self, Is};
 use crate::panes::{self, Pane, Titled};
 use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage, Subfolder};
-use crate::projects::{ViewId, Worktree, WorktreeId};
+use crate::projects::{ViewId, Worktree, WorktreeId, CLONE_WORKTREES_MAX};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::{Doing, Shell};
@@ -49,6 +49,12 @@ pub struct Branch {
     pub name: Said,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Listing {
+    Listed(BTreeSet<Subfolder>),
+    Unlisted(String),
+}
+
 pub enum Command {
     Agents(Scan),
     PiAgents(Vec<Agent>),
@@ -63,7 +69,7 @@ pub enum Command {
     Hosts(Named),
     Projects { projects: Result<Projects, String>, revision: Revision },
     Missing(BTreeSet<Dir>),
-    Listed(BTreeMap<Dir, BTreeSet<Subfolder>>),
+    Listed(BTreeMap<Dir, Listing>),
     Remote { destination: Destination, reached: Reached },
     Say { said: ToSay, at: SystemTime, answer: oneshot::Sender<Result<(), String>> },
     Sessions(oneshot::Sender<Vec<Addressed>>),
@@ -128,7 +134,7 @@ struct Known {
     projects: Result<Projects, String>,
     revision: Revision,
     missing: BTreeSet<Dir>,
-    listed: BTreeMap<Dir, BTreeSet<Subfolder>>,
+    listed: BTreeMap<Dir, Listing>,
     words: u64,
     told: HashMap<Id, u64>,
     host: api::Host,
@@ -535,11 +541,11 @@ impl Known {
         let holds = |project: &Project| match project.holds() {
             Holds::Folder(own) => api::project::Holds::Folder(worktree(project.dir().clone(), own)),
             Holds::Clone(rows) => {
-                let unopened = self.unopened(project.dir(), rows);
+                let listing = Some(self.listing(project.dir(), rows));
                 let rows = rows.iter().map(|(subfolder, it)| {
                     worktree(project.dir().at(subfolder), it)
                 });
-                api::project::Holds::Clone(api::project::Clone { worktrees: rows.collect(), unopened })
+                api::project::Holds::Clone(api::project::Clone { worktrees: rows.collect(), listing })
             },
         };
         let project = |project: &Project| api::Project {
@@ -554,14 +560,18 @@ impl Known {
         api::Projects { held: Some(api::projects::Held::Kept(kept)) }
     }
 
-    fn unopened(&self, dir: &Dir, rows: &[(Subfolder, Worktree)]) -> Vec<String> {
-        let Some(listed) = self.listed.get(dir) else {
-            return Vec::new();
+    fn listing(&self, dir: &Dir, rows: &[(Subfolder, Worktree)]) -> api::project::clone::Listing {
+        use api::project::clone::Listing as Said;
+        let listed = match self.listed.get(dir) {
+            None => return Said::Unlisted("not listed yet".to_owned()),
+            Some(Listing::Unlisted(why)) => return Said::Unlisted(why.clone()),
+            Some(Listing::Listed(listed)) => listed,
         };
         let opened: BTreeSet<&Subfolder> = rows.iter().map(|(subfolder, _)| subfolder).collect();
         let unopened = listed.iter().filter(|it| !opened.contains(it));
-        let folder = |it: &Subfolder| dir.at(it).as_str().to_owned();
-        unopened.map(folder).collect()
+        let subfolders: Vec<String> = unopened.map(|it| it.as_str().to_owned()).collect();
+        assert!(subfolders.len() <= CLONE_WORKTREES_MAX, "a clone lists so many worktrees at most");
+        Said::Unopened(api::project::Unopened { subfolders })
     }
 
     fn built_terminals(&self, worktree: &Worktree) -> Vec<api::Terminal> {

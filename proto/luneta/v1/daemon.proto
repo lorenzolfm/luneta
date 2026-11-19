@@ -908,7 +908,14 @@ message Project {
 
   message Clone {
     repeated Worktree worktrees = 1;
-    repeated string unopened = 2;
+    oneof listing {
+      string unlisted = 2;
+      Unopened unopened = 3;
+    }
+  }
+
+  message Unopened {
+    repeated string subfolders = 1;
   }
 }
 

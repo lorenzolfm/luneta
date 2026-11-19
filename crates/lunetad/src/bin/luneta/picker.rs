@@ -85,7 +85,24 @@ pub struct Housed {
     pub project: ProjectRow,
     pub dir: projects::Dir,
     pub worktrees: Vec<Worktree>,
-    pub unopened: Vec<projects::Dir>,
+    pub unopened: Unopened,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unopened {
+    Folder,
+    Unlisted(String),
+    Listed(Vec<projects::Dir>),
+}
+
+impl Unopened {
+    #[must_use]
+    pub fn folders(&self) -> &[projects::Dir] {
+        match self {
+            Unopened::Listed(folders) => folders,
+            Unopened::Folder | Unopened::Unlisted(_) => &[],
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1204,7 +1221,7 @@ impl Picker {
             for housed in &shelved.projects {
                 let project = housed.project.listed().name().as_str();
                 unopened_found.extend(unopened_of(on, housed));
-                if housed.worktrees.is_empty() && housed.unopened.is_empty() {
+                if housed.worktrees.is_empty() && housed.unopened.folders().is_empty() {
                     let (row, folder) = (housed.project.clone(), (&housed.dir).into());
                     let key = Key::Project { on: on.clone(), project: row, folder };
                     let dir = sidebar::short_cwd(housed.dir.as_str());
@@ -1536,12 +1553,26 @@ impl Picker {
         vec![tag, Span::raw("  ")]
     }
 
+    fn scoped_empty(&self, (on, project): &(Machine, ProjectId)) -> String {
+        let shelved = self.listing.shelves.iter().filter(|shelved| shelved.on == *on);
+        let mut housed = shelved.flat_map(|shelved| &shelved.projects);
+        let Some(housed) = housed.find(|housed| housed.project.id() == *project) else {
+            return "lunetad keeps that project no more".to_owned();
+        };
+        let name = housed.project.listed().name();
+        match &housed.unopened {
+            Unopened::Folder => format!("{name} is a folder, and its own is its one worktree"),
+            Unopened::Unlisted(why) => format!("{name}'s worktrees: {why}"),
+            Unopened::Listed(_) => "every worktree is open".to_owned(),
+        }
+    }
+
     fn empty(&self) -> String {
         if !self.term.is_empty() {
             return format!("no match for \"{}\"", self.term);
         }
         match self.list {
-            List::Worktrees if self.scope.is_some() => "every worktree is open".to_owned(),
+            List::Worktrees if let Some(scope) = &self.scope => self.scoped_empty(scope),
             List::Worktrees if self.listing.away.is_some() => "no worktrees".to_owned(),
             List::Worktrees => "lunetad keeps no worktree yet".to_owned(),
             List::Agents if self.listing.away.is_some() => "no agents".to_owned(),
@@ -1834,7 +1865,7 @@ fn grouped(into: &mut Vec<Row>, mut rows: Vec<Row>, rule: Option<String>) -> Opt
 
 fn unopened_of<'a>(on: &'a Machine, housed: &'a Housed) -> impl Iterator<Item = Found<'a>> {
     let project = housed.project.listed().name().as_str();
-    housed.unopened.iter().map(move |unopened| {
+    housed.unopened.folders().iter().map(move |unopened| {
         let name = format!("{project} › {}", unopened.last());
         let folder = sidebar::short_cwd(unopened.as_str());
         let (row, at) = (housed.project.clone(), unopened.into());
@@ -2165,7 +2196,7 @@ mod tests {
 
     fn housed(name: &str, id: u64, worktrees: Vec<Worktree>) -> Housed {
         let dir = projects::Dir::parse(&format!("/home/you/{name}")).unwrap();
-        Housed { project: project(name, id), dir, worktrees, unopened: Vec::new() }
+        Housed { project: project(name, id), dir, worktrees, unopened: Unopened::Listed(Vec::new()) }
     }
 
     fn shelved(on: Machine, projects: Vec<Housed>) -> Shelved {
@@ -2373,8 +2404,8 @@ mod tests {
         let folder = |at: &str| projects::Dir::parse(at).unwrap();
         let projects = &mut listing.shelves[0].projects;
         let luneta = |it: &str| folder(&format!("/home/you/luneta/{it}"));
-        projects[0].unopened = vec![luneta("old"), luneta("spike")];
-        projects[2].unopened = vec![folder("/home/you/web/legacy")];
+        projects[0].unopened = Unopened::Listed(vec![luneta("old"), luneta("spike")]);
+        projects[2].unopened = Unopened::Listed(vec![folder("/home/you/web/legacy")]);
         listing
     }
 
@@ -2411,13 +2442,25 @@ mod tests {
         let mut picker = Picker::opening(2, all_open, Machine::Local, luneta);
         picker.heard(kept_here(Ok(Vec::new())));
         assert_eq!(rows(&picker), ["every worktree is open"]);
+        let said_of = |number: u64, unopened: Unopened| {
+            let mut listing = works();
+            listing.shelves[0].projects[0].unopened = unopened;
+            let mut picker = Picker::opening(number, listing, Machine::Local, luneta);
+            picker.heard(kept_here(Ok(Vec::new())));
+            rows(&picker)
+        };
+        let unlisted = Unopened::Unlisted("not listed yet".to_owned());
+        let said = "luneta's worktrees: not listed yet";
+        assert_eq!(said_of(3, unlisted), [said], "a clone not listed yet is not said all open");
+        let said = "luneta is a folder, and its own is its one worktree";
+        assert_eq!(said_of(4, Unopened::Folder), [said]);
     }
 
     #[test]
     fn o_w_lists_no_other_machine_even_one_that_keeps_no_project() {
         let mut listing = machines();
         let old = projects::Dir::parse("/home/you/luneta/old").unwrap();
-        listing.shelves[0].projects[0].unopened = vec![old];
+        listing.shelves[0].projects[0].unopened = Unopened::Listed(vec![old]);
         let luneta = project("luneta", 1).id();
         let mut picker = Picker::opening(1, listing, Machine::Local, luneta);
         picker.heard(kept_here(Ok(Vec::new())));

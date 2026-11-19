@@ -1536,15 +1536,21 @@ pub fn follow(
                 return;
             };
             let mut listed = BTreeMap::new();
-            for (root, seen) in clones.into_iter().filter(|(root, _)| !missing.contains(root)) {
+            for (root, seen) in clones {
+                if missing.contains(&root) {
+                    let gone = format!("{} is missing", root.as_str());
+                    listed.insert(root, core::Listing::Unlisted(gone));
+                    continue;
+                }
                 let subfolders = match spot::subfolders(&root, SPOT_LOOK) {
                     Ok(subfolders) => subfolders,
                     Err(why) => {
                         troubles.say(format!("{}: its worktrees are not listed: {why}", root.0));
+                        listed.insert(root, core::Listing::Unlisted(why));
                         continue;
                     },
                 };
-                listed.insert(root.clone(), subfolders.clone());
+                listed.insert(root.clone(), core::Listing::Listed(subfolders.clone()));
                 if layouts.send(layouts::Command::Worktrees { root, subfolders, seen }).is_err() {
                     return;
                 }

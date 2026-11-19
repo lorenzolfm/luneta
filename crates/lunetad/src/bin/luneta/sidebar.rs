@@ -53,7 +53,7 @@ use crate::menu::{
     Ran, Rename, Target, Top, Wants, WorktreeRow,
 };
 use crate::news::News;
-use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Worktree};
+use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
 use crate::printed::Printed;
 use crate::projected;
 use crate::prune;
@@ -776,7 +776,7 @@ struct Known {
     dir: Dir,
     worktrees: Vec<KnownWorktree>,
     order: Vec<WorktreeId>,
-    unopened: Vec<Dir>,
+    unopened: Unopened,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -826,22 +826,28 @@ impl Known {
         Some(Known { project, dir, worktrees, order, unopened })
     }
 
-    fn unopened_of(said: &api::Project, dir: &Dir, worktrees: &[KnownWorktree]) -> Vec<Dir> {
-        let listed = match &said.holds {
-            Some(api::project::Holds::Clone(clone)) => clone.unopened.as_slice(),
-            Some(api::project::Holds::Folder(_)) | None => &[],
+    fn unopened_of(said: &api::Project, dir: &Dir, worktrees: &[KnownWorktree]) -> Unopened {
+        use api::project::clone::Listing as Said;
+        let clone = match &said.holds {
+            Some(api::project::Holds::Clone(clone)) => clone,
+            Some(api::project::Holds::Folder(_)) | None => return Unopened::Folder,
+        };
+        let listed = match &clone.listing {
+            Some(Said::Unopened(listed)) => &listed.subfolders,
+            Some(Said::Unlisted(why)) => return Unopened::Unlisted(why.clone()),
+            None => return Unopened::Unlisted("lunetad says nothing of them".to_owned()),
         };
         let max = CLONE_WORKTREES_MAX;
         assert!(listed.len() <= max, "a clone lists at most {max} worktrees");
         let open: BTreeSet<&Dir> = worktrees.iter().map(|it| &it.folder).collect();
         let unopened = listed.iter().map(|it| {
-            let folder = Dir::parse(it);
-            let folder = folder.expect("lunetad says a worktree not open as a folder it lists");
-            assert!(dir.subfolder(&folder).is_some(), "{it} is a worktree of {}", dir.as_str());
+            let subfolder = projects::Subfolder::parse(it);
+            let subfolder = subfolder.expect("lunetad says a worktree not open as a subfolder");
+            let folder = dir.at(&subfolder);
             assert!(!open.contains(&folder), "{it} is said not open, so no open worktree is there");
             folder
         });
-        unopened.collect()
+        Unopened::Listed(unopened.collect())
     }
 
     fn listed(&self) -> &Listed {
@@ -5482,7 +5488,7 @@ mod tests {
     }
 
     fn clone_of(worktrees: Vec<api::Worktree>) -> api::project::Clone {
-        api::project::Clone { worktrees, unopened: Vec::new() }
+        api::project::Clone { worktrees, listing: None }
     }
 
     fn a_project(id: u64, name: &str, worktrees: Vec<api::Worktree>) -> api::Project {

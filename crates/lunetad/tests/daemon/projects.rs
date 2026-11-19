@@ -6,6 +6,7 @@ use lunetad::api::change_projects_request::{
     AddProject, AddWorktree, Change, Pull, ReorderProjects, ReorderWorktrees, Start,
 };
 use lunetad::api::change_projects_response::Made;
+use lunetad::api::project::clone::Listing;
 use lunetad::api::project::{self, Holds};
 use lunetad::api::projects::{Held, Kept};
 use lunetad::api::worktree::Seen;
@@ -57,6 +58,16 @@ pub fn worktree(host: &Host, project: u64, folder: &Path) -> u64 {
     let folder = folder.to_str().unwrap().to_owned();
     let add = AddWorktree { project, folder, name: None };
     changed(host, Change::AddWorktree(add)).unwrap()
+}
+
+pub fn unopened_in(project: &api::Project) -> Option<Vec<String>> {
+    let Some(Holds::Clone(clone)) = &project.holds else {
+        return None;
+    };
+    let Some(Listing::Unopened(unopened)) = &clone.listing else {
+        return None;
+    };
+    Some(unopened.subfolders.iter().map(|it| format!("{}/{it}", project.dir)).collect())
 }
 
 pub fn kept(host: &Host) -> PathBuf {
@@ -112,7 +123,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_lunetad_starts_again() 
                         terminals: Vec::new(),
                         used_at: None,
                     }],
-                    unopened: Vec::new(),
+                    listing: Some(Listing::Unopened(project::Unopened { subfolders: Vec::new() })),
                 })),
             },
             api::Project {
@@ -202,11 +213,7 @@ fn a_clone_s_worktrees_made_or_removed_outside_luneta_are_listed_unopened_on_the
         };
         assert_eq!((project.id, project.dir.as_str()), (luneta, text(&clone).as_str()));
         let opened = project.worktrees().unwrap().iter().map(|it| it.folder.clone());
-        let unopened = match &project.holds {
-            Some(Holds::Clone(clone)) => clone.unopened.clone(),
-            Some(Holds::Folder(_)) | None => Vec::new(),
-        };
-        (opened.collect::<Vec<_>>(), unopened)
+        (opened.collect::<Vec<_>>(), unopened_in(project).unwrap_or_default())
     };
     let (main, feat) = (text(&clone.join("main")), text(&clone.join("feat-2")));
     let none = Vec::<String>::new;
@@ -260,10 +267,8 @@ fn a_folder_s_project_becomes_its_clone_s_when_wt_clones_into_its_folder() {
             panic!("the projects are kept");
         };
         let other: Vec<&String> = both.iter().filter(|it| **it != at).collect();
-        let Some(Holds::Clone(clone)) = &projects[0].holds else {
-            return None;
-        };
-        (clone.unopened.iter().collect::<Vec<_>>() == other).then_some(())
+        let listed = unopened_in(&projects[0])?;
+        (listed.iter().collect::<Vec<_>>() == other).then_some(())
     };
     eventually("git's other worktree is listed, not opened", || unopened(&host));
 }
