@@ -8626,7 +8626,7 @@ mod tests {
         assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
         assert!(!shows_at(&mut sidebar, now, "─ All keys ─"));
         assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
-        let every = screen(&mut sidebar, true, 32, 80);
+        let every = screen(&mut sidebar, true, 32, 120);
         let start = every.iter().position(|line| line.starts_with("─ All keys ─")).unwrap();
         let listed = &every[start + 1..every.len() - 1];
         let names: Vec<&str> =
@@ -8650,6 +8650,9 @@ mod tests {
         let group = |name: &str| listed.iter().position(|line| line == name).unwrap();
         let sidebar_s = &listed[group(" Sidebar")..group(" Menu")];
         assert!(sidebar_s.iter().any(|line| line == " q    Quit luneta"), "{sidebar_s:#?}");
+        let palette = group(" Super k      Pick an action");
+        let ghostty = ["  For Cmd k, Ghostty's config:", "  keybind = cmd+k=unbind"];
+        assert_eq!(listed[palette + 1..palette + 3], ghostty, "{listed:#?}");
         assert_eq!(every.last().map(String::as_str), Some(" <↓↑> - Scroll, <ESC> - Close"));
 
         let total = listed.len();

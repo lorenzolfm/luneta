@@ -13,6 +13,15 @@ pub const MENU: Chord = (KeyCode::Char('a'), KeyModifiers::ALT);
 
 pub const PALETTE: Chord = (KeyCode::Char('k'), KeyModifiers::SUPER);
 
+pub const PALETTE_GHOSTTY_SETUP: [&str; 2] =
+    ["For Cmd k, Ghostty's config:", "keybind = cmd+k=unbind"];
+
+const _: () = {
+    let spelled = "PALETTE_GHOSTTY_SETUP spells the palette's chord as Super k, Cmd on a Mac";
+    assert!(matches!(PALETTE.0, KeyCode::Char('k')), "{}", spelled);
+    assert!(PALETTE.1.bits() == KeyModifiers::SUPER.bits(), "{}", spelled);
+};
+
 pub const WORKTREES: Chord = (KeyCode::Char('j'), KeyModifiers::SUPER);
 
 pub const LEFT: Chord = (KeyCode::Char('h'), KeyModifiers::CONTROL);
@@ -367,6 +376,14 @@ impl Action {
     #[must_use]
     pub const fn key(self) -> Key {
         self.spec().key
+    }
+
+    #[must_use]
+    pub const fn setup(self) -> &'static [&'static str] {
+        match self {
+            Action::Palette => &PALETTE_GHOSTTY_SETUP,
+            _ => &[],
+        }
     }
 
     #[must_use]
