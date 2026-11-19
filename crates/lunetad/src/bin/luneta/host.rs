@@ -29,6 +29,7 @@ use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
+use lunetad::links::Unready;
 use lunetad::{Destination, Direction, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -1834,13 +1835,14 @@ impl App {
                     let named = name.as_ref().map(Name::as_str);
                     let at = (project, folder.as_str());
                     let added = worktrees::add_worktree(lunetad, on, at, named, Vec::new());
-                    added.map(Landing::Worktree)
+                    added.map(Landing::Worktree).map_err(Unready::Failed)
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Make { on, session, cwd } => {
                 self.make_worktree(on, Asker::Picker, move |lunetad, on| {
                     worktrees::made_at(lunetad, on, &cwd, Some(session.as_str()))
+                        .map_err(Unready::Failed)
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
@@ -2230,15 +2232,19 @@ impl App {
         &mut self,
         on: Machine,
         asker: Asker,
-        made: impl FnOnce(&Path, &Machine) -> Result<Landing, String> + Send + 'static,
+        made: impl FnOnce(&Path, &Machine) -> Result<Landing, Unready> + Send + 'static,
     ) {
         if self.refuse_naming(None) {
             return;
         }
         let lunetad = self.lunetad.clone();
         self.naming_on(move || {
-            let made = caught(|| made(&lunetad, &on));
-            let made = made.map_err(|why| format!("no worktree made: {why}"));
+            let made = caught(|| Ok(made(&lunetad, &on)));
+            let made = made.unwrap_or_else(|panicked| Err(Unready::Failed(panicked)));
+            let made = made.map_err(|why| match why {
+                Unready::Nowhere(why) | Unready::Failed(why) => format!("no worktree made: {why}"),
+                Unready::InDoubt(why) => why,
+            });
             Made::Worktree { on, made, argv: Vec::new(), asker }
         });
     }

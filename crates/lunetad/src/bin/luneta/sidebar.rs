@@ -19,7 +19,7 @@ use lunetad::api::shell::Doing;
 use lunetad::api::{self, Agent, Front, Harness, Host, Pane, Saying, Shell, Status, UnreadFile};
 use lunetad::asks::User;
 use lunetad::issues::{Filed, Unfiled};
-use lunetad::links;
+use lunetad::links::{self, Branch};
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Dir, ProjectId, ViewId, WorktreeId, CLONE_WORKTREES_MAX};
@@ -1083,7 +1083,7 @@ pub enum Asked {
     Closes { menu: u64, on: Machine, session: Listed, pane: PaneKey },
     Delete { on: Machine, act: Act },
     Open { menu: u64, on: Machine, whose: Whose, open: Open },
-    NewWorktree { on: Machine, project: ProjectId, branch: String },
+    NewWorktree { on: Machine, project: ProjectId, branch: Branch },
     Welcome { on: Machine, session: Listed, pane: PaneKey },
     AddProject { on: Machine, folder: String, name: Option<projects::Name> },
     Rename { on: Machine, rename: Rename },
@@ -8036,14 +8036,14 @@ mod tests {
             " m  new machine",
             " <BS> - Back, <ESC> - Close",
         ]);
-        let (project, branch) = (ProjectId::of(1).unwrap(), "feat".to_owned());
+        let (project, branch) = (ProjectId::of(1).unwrap(), Branch::parse("feat").unwrap());
         let made = Asked::NewWorktree { on: Machine::Local, project, branch };
         assert_eq!(branched(&mut sidebar, "feat"), made);
         assert!(sidebar.menu.is_none());
 
         sidebar.cursor = Some(Spot::Local(own_pane_of("young", 2, 1)));
         type_in(&mut sidebar, "n");
-        let (project, branch) = (ProjectId::of(2).unwrap(), "fix".to_owned());
+        let (project, branch) = (ProjectId::of(2).unwrap(), Branch::parse("fix").unwrap());
         let made = Asked::NewWorktree { on: Machine::Local, project, branch };
         assert_eq!(branched(&mut sidebar, "fix"), made);
         sidebar.focus(Keys::Zellij);
@@ -8693,7 +8693,7 @@ mod tests {
 
         let (older, cwd) = (session_name("older"), directory("/w/luneta/main"));
         type_in(&mut sidebar, "n");
-        let (project, branch) = (ProjectId::of(1).unwrap(), "feat".to_owned());
+        let (project, branch) = (ProjectId::of(1).unwrap(), Branch::parse("feat").unwrap());
         let made = Asked::NewWorktree { on: Machine::Local, project, branch };
         assert_eq!(branched(&mut sidebar, "feat"), made);
         assert!(sidebar.floating().is_none());
@@ -10026,12 +10026,12 @@ mod tests {
         };
         sidebar.cursor = Some(Spot::Local(Place::Worktree(tab(10))));
         type_in(&mut sidebar, "n");
-        let (project, branch) = (ProjectId::of(10).unwrap(), "feat".to_owned());
+        let (project, branch) = (ProjectId::of(10).unwrap(), Branch::parse("feat").unwrap());
         let made = Asked::NewWorktree { on: Machine::Local, project, branch };
         assert_eq!(branched(&mut sidebar, "feat"), made);
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Worktree(tab(20))));
         type_in(&mut sidebar, "n");
-        let (project, branch) = (ProjectId::of(20).unwrap(), "feat".to_owned());
+        let (project, branch) = (ProjectId::of(20).unwrap(), Branch::parse("feat").unwrap());
         let far = Asked::NewWorktree { on: Machine::Remote(nixos()), project, branch };
         assert_eq!(branched(&mut sidebar, "feat"), far);
     }

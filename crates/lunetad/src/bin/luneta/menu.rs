@@ -6,6 +6,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::said::Said;
+use lunetad::links::Branch;
 use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::{Destination, Directory};
@@ -530,9 +531,9 @@ impl Typing {
                 Ok(name) => Entered::Done(Done::Project { on: on.clone(), folder, name }),
                 Err(why) => Entered::Wrong(why),
             },
-            Typing::Branch(project) => match typed.trim() {
-                "" => Entered::Wrong("a worktree is made for a branch: type one".to_owned()),
-                branch => Entered::Done(Done::Worktree(on.clone(), project, branch.to_owned())),
+            Typing::Branch(project) => match Branch::parse(typed) {
+                Ok(branch) => Entered::Done(Done::Worktree(on.clone(), project, branch)),
+                Err(why) => Entered::Wrong(why),
             },
             Typing::Rename(asked) => match (asked, named(asked.parse())) {
                 (_, Err(why)) => Entered::Wrong(why),
@@ -1013,7 +1014,7 @@ pub enum Done {
     Issue(Repository),
     Ssh(Destination),
     Forget(Destination),
-    Worktree(Machine, ProjectId, String),
+    Worktree(Machine, ProjectId, Branch),
     Welcome { on: Machine, session: Listed, pane: PaneKey },
     Project { on: Machine, folder: String, name: Option<projects::Name> },
     Rename(Machine, Rename),
@@ -2684,7 +2685,7 @@ mod tests {
             closed(menu.key(&enter))
         };
         let (id, here) = (project().id(), || Machine::Local);
-        let branch = || "feat/x".to_owned();
+        let branch = || Branch::parse("feat/x").unwrap();
         assert_eq!(made(own_pane(), "feat/x"), Done::Worktree(here(), id, branch()));
         assert_eq!(made(worktree_on(here()), " feat/x "), Done::Worktree(here(), id, branch()));
         assert_eq!(made(session_row(), "feat/x"), Done::Worktree(here(), id, branch()));
@@ -2699,11 +2700,17 @@ mod tests {
             " _",
             " its branch: one git has is",
         ]);
-        let (menu, _) = stays(stays(menu.key(&char(' '))).0.key(&enter));
-        let Stage::Typing { wrong: Some(wrong), .. } = &menu.stage else {
-            panic!("no branch keeps the box open, saying why");
+        let refused = |typed: &str| {
+            let menu = typed.chars().fold(asked(own_pane()), |menu, c| stays(menu.key(&char(c))).0);
+            let (menu, _) = stays(menu.key(&enter));
+            let Stage::Typing { wrong: Some(wrong), .. } = &menu.stage else {
+                panic!("{typed:?} keeps the box open, saying why");
+            };
+            (wrong.clone(), menu)
         };
-        assert_eq!(wrong, "a worktree is made for a branch: type one");
+        assert_eq!(refused(" ").0, "it names no branch");
+        let (wrong, menu) = refused("#12");
+        assert_eq!(wrong, "#12 names an issue or a pull request: paste its link");
         let back = stays(menu.key(&KeyEvent::from(KeyCode::Esc))).0;
         assert!(matches!(back.stage, Stage::Choosing(_)), "Esc goes back to the keys");
         let (menu, _) = stays(opened(pane_row(), Some('n')));

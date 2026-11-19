@@ -9,11 +9,13 @@ use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorktrees};
 use lunetad::api::change_projects_request::{Bring, Join, RenameTerminal};
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::make_worktree_response::Landed as Answered;
 use lunetad::api::projects::Held;
 use lunetad::api::{ChangeProjectsRequest, MakeWorktreeRequest, On, Version, WatchRequest};
 use lunetad::mux::own::TerminalKey;
 use lunetad::projects::{Name, ProjectId, Size, ViewId, WorktreeId};
-use lunetad::{links, Asked, Beside, Heard};
+use lunetad::links::{self, Branch, Unready};
+use lunetad::{Asked, Beside, Heard};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
@@ -172,18 +174,34 @@ pub fn branched(
     path: &Path,
     machine: &Machine,
     project: ProjectId,
-    branch: &str,
-) -> Result<Landed, String> {
-    let (on, project, branch) = (on(machine), project.get(), branch.to_owned());
+    branch: &Branch,
+) -> Result<Landed, Unready> {
+    let (on, project, branch) = (on(machine), project.get(), branch.as_str().to_owned());
     let request = MakeWorktreeRequest { on, project, branch };
-    let said = |status: Status| status.message().to_owned();
     let asking = async |daemon: &mut Daemon| {
-        let mut answer = daemon.make_worktree(request).await.map_err(said)?.into_inner();
-        answer.message().await.map_err(said)?.map(|answered| answered.made).ok_or_else(|| {
-            "lunetad ended its answer with no worktree".to_owned()
-        })
+        let unready = |status: Status| unbranched(&status);
+        let mut answer = daemon.make_worktree(request).await.map_err(unready)?.into_inner();
+        let answered = answer.message().await.map_err(unready)?;
+        let unsaid = || Unready::InDoubt("lunetad ended its answer with no worktree".to_owned());
+        let id = |id| WorktreeId::of(id).ok_or_else(|| Unready::InDoubt(zero("worktree")));
+        match answered.and_then(|answered| answered.landed).ok_or_else(unsaid)? {
+            Answered::Made(made) => id(made).map(Landed::Made),
+            Answered::Found(found) => id(found).map(Landed::Found),
+        }
     };
-    landed(asked_or(path, links::WORKTREE_PATIENCE, asking, |late| late)?)
+    let late = |late: String| Unready::InDoubt(format!("{late}, so the worktree may be made"));
+    asked_or(path, links::WORKTREE_PATIENCE, asking, late)
+}
+
+fn unbranched(status: &Status) -> Unready {
+    let why = status.message().to_owned();
+    match status.code() {
+        Code::NotFound => Unready::Nowhere(why),
+        Code::InvalidArgument | Code::FailedPrecondition | Code::Unimplemented => {
+            Unready::Failed(why)
+        },
+        _ => Unready::InDoubt(why),
+    }
 }
 
 fn started_at(path: &Path, folder: &str) -> Result<Option<Landed>, String> {

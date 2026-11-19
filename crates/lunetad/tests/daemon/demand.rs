@@ -567,7 +567,7 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in keeps no projects"))
     }
 
-    type MakeWorktreeStream = tokio_stream::Empty<Result<api::ChangeProjectsResponse, Status>>;
+    type MakeWorktreeStream = tokio_stream::Empty<Result<api::MakeWorktreeResponse, Status>>;
 
     async fn make_worktree(
         &self,
