@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use luneta_mux::api;
 use rustix::process::{Pid, test_kill_process};
+use tonic::Code;
 
 use crate::host::{LUNETA_MUX, PATIENCE, Server, listed, new_terminal, run, script, shell, size};
 
@@ -51,8 +52,19 @@ fn a_server_whose_folder_goes_ends_and_so_do_its_terminals_programs() {
         new_terminal(&mut mux, shell(), b"shell", size(20, 4)).await;
         let programs = programs(&listed(&mut mux).await);
         assert_eq!(programs.len(), 2);
-        drop(mux);
+        let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         fs::remove_dir_all(server.socket().parent().unwrap()).unwrap();
+        let ending = loop {
+            match watch.message().await {
+                Ok(Some(_)) => {},
+                Ok(None) => panic!("the watch ended as if every terminal had ended"),
+                Err(ending) => break ending,
+            }
+        };
+        let socket = server.socket();
+        let gone = format!("{} is gone, so nothing reaches luneta-mux again", socket.display());
+        assert_eq!((ending.code(), ending.message()), (Code::Unavailable, gone.as_str()));
+        drop((watch, mux));
         assert!(server.ended().await.success());
         for program in programs {
             ended(program).await;

@@ -1083,6 +1083,22 @@ fn a_layout_restores_its_terminals_when_the_mux_dies() {
 }
 
 #[test]
+fn a_layout_restores_its_terminals_when_the_mux_s_socket_goes() {
+    let owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    let terminal = heard_in_below(&owned, &mut shown, "sleep 602");
+    let socket = owned.socket();
+    let laid = restored_after(&mut shown, || fs::remove_file(&socket).unwrap());
+    assert_eq!(laid.views.iter().map(|view| view.id).collect::<Vec<_>>(), [terminal]);
+    let listing = owned.listing();
+    assert!(tagged(&listing, terminal).is_some(), "the new mux holds the terminal");
+    let gone = format!("{} is gone, so nothing reaches luneta-mux again", socket.display());
+    let log = logged(&owned);
+    assert!(log.contains(&gone), "{log}");
+}
+
+#[test]
 fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_second_crash() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
@@ -1371,9 +1387,13 @@ fn where_a_terminal_is_and_what_it_runs_reach_the_file() {
 }
 
 fn restored_after_kill(owned: &Owned, shown: &mut Shown) -> Laid {
+    restored_after(shown, || owned.kill_mux())
+}
+
+fn restored_after(shown: &mut Shown, lost: impl FnOnce()) -> Laid {
     let laid = shown.laid.clone().expect("a layout was heard");
     let before: Vec<Option<TerminalKey>> = laid.views.iter().map(key).collect();
-    owned.kill_mux();
+    lost();
     shown.until("the terminals restored", |laid| {
         let found: Vec<Option<TerminalKey>> = laid.views.iter().map(key).collect();
         found.len() == before.len()

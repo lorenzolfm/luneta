@@ -1,4 +1,5 @@
 {
+  pkgs,
   compileEnv,
   testRun,
   testKit,
@@ -8,13 +9,13 @@
   name = "test";
   usage = "[args...]";
   help = "the tests on nextest, then the doctests; -P quick leaves out the two that wait 30s and more; fails if the tests leave a luneta-mux running";
-  tools = testKit;
+  tools = testKit ++ [ pkgs.jq ];
   text = ''
     ${compileEnv}
     case "''${TERM:-dumb}" in
       dumb) export NEXTEST_SHOW_PROGRESS="''${NEXTEST_SHOW_PROGRESS:-counter}" ;;
     esac
-    target="''${CARGO_TARGET_DIR:-target}"
+    target="$(cargo metadata --locked --no-deps --format-version 1 | jq -r .target_directory)"
     resolved="$(realpath -m -- "$target")/"
     given="$(realpath -ms -- "$target")/"
     muxes() {

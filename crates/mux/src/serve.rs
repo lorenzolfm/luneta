@@ -17,7 +17,7 @@ use crate::api::{self, mux_server};
 use crate::asked::{self, Dumped, Opens, Size, Tag, TerminalKey, ViewerHeard};
 use crate::folder::{Bound, Claim, Found};
 use crate::id::ClientId;
-use crate::mux::Mux;
+use crate::mux::{Ending, Listed, Mux};
 use crate::terminal::{CLIENT_MESSAGES, ToTerminal, UNREAD_BYTES_MAX, ViewerOut};
 use crate::pty;
 
@@ -62,7 +62,11 @@ impl mux_server::Mux for Service {
     type WatchStream = Pin<Box<dyn Stream<Item = Result<api::Listing, Status>> + Send>>;
 
     async fn watch(&self, _: Request<api::WatchRequest>) -> Answer<Self::WatchStream> {
-        let listings = WatchStream::new(self.mux.watched()).map_while(|listing| listing.map(Ok));
+        let listings = WatchStream::new(self.mux.watched()).map_while(|listed| match listed {
+            Listed::Holds(listing) => Some(Ok(listing)),
+            Listed::Ended(Ending::Emptied) => None,
+            Listed::Ended(Ending::Unreached(why)) => Some(Err(Status::unavailable(why))),
+        });
         Ok(Response::new(Box::pin(listings)))
     }
 
@@ -206,33 +210,31 @@ async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
     let mut unsure = false;
     loop {
         tokio::time::sleep(SOCKET_LOOK).await;
-        if watched.borrow().is_none() {
+        if matches!(*watched.borrow(), Listed::Ended(_)) {
             return;
         }
+        let socket = bound.socket().display();
         let why = match bound.found() {
             Ok(Found::Ours) => {
                 unsure = false;
                 continue;
             },
-            Ok(Found::Gone) => "is gone",
-            Ok(Found::Replaced) => "is another file now",
+            Ok(Found::Gone) => format!("{socket} is gone"),
+            Ok(Found::Replaced) => format!("{socket} is another file now"),
             Err(error) => {
                 if !unsure {
-                    let socket = bound.socket().display();
-                    eprintln!("luneta-mux: {socket} could not be looked at, so it runs on: {error}");
+                    eprintln!("luneta-mux: {socket} is not looked at, so it runs on: {error}");
                 }
                 unsure = true;
                 continue;
             },
         };
-        let closed = mux.end();
-        assert!(watched.borrow().is_none(), "the listing ends with the server");
-        let terminals = if closed == 1 { "terminal" } else { "terminals" };
-        eprintln!(
-            "luneta-mux: {} {why}, so nothing reaches this server again: it closed its {closed} \
-             {terminals} and ends",
-            bound.socket().display()
-        );
+        let why = format!("{why}, so nothing reaches luneta-mux again");
+        if let Some(closed) = mux.end_unreached(why.clone()) {
+            let terminals = if closed == 1 { "terminal" } else { "terminals" };
+            eprintln!("luneta-mux: {why}: it closed its {closed} {terminals} and ends");
+        }
+        assert!(matches!(*watched.borrow(), Listed::Ended(_)), "the listing ends with the server");
         return;
     }
 }
@@ -254,7 +256,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     });
     tokio::spawn(end_once_unreached(Arc::clone(&mux), bound.clone()));
     let ended = async move {
-        while watched.borrow_and_update().is_some() {
+        while matches!(*watched.borrow_and_update(), Listed::Holds(_)) {
             if watched.changed().await.is_err() {
                 break;
             }

@@ -19,7 +19,19 @@ const _: () = assert!(SHOWN_MAX <= TERMINALS_MAX);
 
 pub struct Mux {
     model: Mutex<Model>,
-    listing: watch::Sender<Option<api::Listing>>,
+    listing: watch::Sender<Listed>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Listed {
+    Holds(api::Listing),
+    Ended(Ending),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ending {
+    Emptied,
+    Unreached(String),
 }
 
 #[derive(Default)]
@@ -27,7 +39,7 @@ struct Model {
     last: Ids,
     terminals: Vec<Terminal>,
     viewing: BTreeMap<ClientId, Viewing>,
-    ended: bool,
+    ending: Option<Ending>,
 }
 
 #[derive(Default)]
@@ -63,11 +75,11 @@ struct Viewing {
 impl Mux {
     #[must_use]
     pub fn new() -> Arc<Mux> {
-        let (listing, _) = watch::channel(Some(api::Listing::default()));
+        let (listing, _) = watch::channel(Listed::Holds(api::Listing::default()));
         Arc::new(Mux { model: Mutex::new(Model::default()), listing })
     }
 
-    pub fn watched(&self) -> watch::Receiver<Option<api::Listing>> {
+    pub fn watched(&self) -> watch::Receiver<Listed> {
         self.listing.subscribe()
     }
 
@@ -75,8 +87,8 @@ impl Mux {
         self.change(Model::end_if_empty);
     }
 
-    pub fn end(&self) -> usize {
-        self.change(Model::end)
+    pub fn end_unreached(&self, why: String) -> Option<usize> {
+        self.change(|model| model.end_unreached(why))
     }
 
     fn lock(&self) -> MutexGuard<'_, Model> {
@@ -86,15 +98,18 @@ impl Mux {
     fn change<T>(&self, change: impl FnOnce(&mut Model) -> T) -> T {
         let mut model = self.lock();
         let changed = change(&mut model);
-        if model.ended {
+        if model.ending.is_some() {
             assert!(model.terminals.is_empty(), "the server ended with a terminal");
             assert!(model.viewing.is_empty(), "the server ended with a viewer");
         }
         model.settle();
-        let listing = (!model.ended).then(|| model.listing());
+        let listed = match &model.ending {
+            None => Listed::Holds(model.listing()),
+            Some(ending) => Listed::Ended(ending.clone()),
+        };
         self.listing.send_if_modified(|said| {
-            let modified = *said != listing;
-            *said = listing;
+            let modified = *said != listed;
+            *said = listed;
             modified
         });
         changed
@@ -237,27 +252,40 @@ impl Mux {
 
 impl Model {
     fn refuse_if_ended(&self) -> Result<(), Status> {
-        if self.ended {
-            return Err(Status::unavailable("luneta-mux is ending, as nothing is left in it"));
+        match &self.ending {
+            None => Ok(()),
+            Some(Ending::Emptied) => {
+                Err(Status::unavailable("luneta-mux is ending, as nothing is left in it"))
+            },
+            Some(Ending::Unreached(why)) => {
+                Err(Status::unavailable(format!("luneta-mux is ending: {why}")))
+            },
         }
-        Ok(())
     }
 
     fn end_if_empty(&mut self) {
-        if self.terminals.is_empty() {
-            self.ended = true;
-            self.viewing.clear();
+        if self.ending.is_none() && self.terminals.is_empty() {
+            self.end_as(Ending::Emptied);
         }
     }
 
-    fn end(&mut self) -> usize {
+    fn end_unreached(&mut self, why: String) -> Option<usize> {
+        if self.ending.is_some() {
+            return None;
+        }
         let closed = self.terminals.len();
         for terminal in self.terminals.drain(..) {
             terminal.handle.close();
         }
-        self.end_if_empty();
-        assert!(self.ended, "the server ends once it holds no terminal");
-        closed
+        self.end_as(Ending::Unreached(why));
+        Some(closed)
+    }
+
+    fn end_as(&mut self, ending: Ending) {
+        assert!(self.ending.is_none(), "a server ends once");
+        assert!(self.terminals.is_empty(), "a server ends once it holds no terminal");
+        self.ending = Some(ending);
+        self.viewing.clear();
     }
 
     fn index_of(&self, terminal: TerminalId) -> Option<usize> {
