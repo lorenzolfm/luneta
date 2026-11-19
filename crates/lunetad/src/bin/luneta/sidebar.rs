@@ -8457,6 +8457,7 @@ mod tests {
             let own = Listed::new_project("own", 1);
             sidebar.cursor = Some(Spot::Local(Place::Session(own)));
             type_in(sidebar, "d");
+            assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing, "it asks first");
             sidebar.key(&char('d'), moment(160_000))
         };
         let deleted = delete_here(project_deleted("own", 1, &[], &[]));
@@ -8484,6 +8485,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.cursor = Some(Spot::Local(Place::Session(twin)));
         type_in(&mut sidebar, "d");
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing, "it asks first");
         let deleted = project_deleted("twin", 1, &[1000], &[1]);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted));
     }
@@ -9474,7 +9476,7 @@ mod tests {
     }
 
     #[test]
-    fn a_delete_closes_the_view_and_the_highlight_goes_past_it() {
+    fn a_delete_goes_past_the_view_to_a_project_s_row_whose_delete_asks_first() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         sidebar.step(2);
@@ -9493,6 +9495,14 @@ mod tests {
             vec![agent("older", 1, Status::Waiting, Some("fold"))],
         ));
         assert_eq!(cursor(&sidebar), Some(Place::Session(listed("newer", 20))));
+        type_in(&mut sidebar, "d");
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
+        let lines = screen(&mut sidebar, true, 40, 16);
+        assert_eq!(lines[14], " Delete project newer? no agent", "{lines:?}");
+        let asked = sidebar.key(&char('d'), moment(160_000));
+        let newer = matches!(&asked, Asked::Delete { act: Act::Project { session, .. }, .. }
+            if session.as_str() == "newer");
+        assert!(newer, "{asked:?}");
     }
 
     #[test]

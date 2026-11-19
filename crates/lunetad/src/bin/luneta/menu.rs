@@ -3859,7 +3859,7 @@ mod tests {
     }
 
     #[test]
-    fn d_d_on_a_project_deletes_it_with_its_worktrees_asking_first_for_an_agent_at_work() {
+    fn d_d_on_a_project_deletes_it_with_its_worktrees_always_asking_first() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let worktrees = vec![worktree()];
         let deletes = || Deletes::Project {
@@ -3893,6 +3893,10 @@ mod tests {
             let done = closed(menu.planned(Ok(planned(vec![(4, Doing::Busy)]))));
             assert_eq!(done, Done::Act(on.clone(), act.clone()));
             let (menu, _) = stays(opened(project_on(on.clone()), Some('d')));
+            let (menu, _) = stays(menu.key(&char('d')));
+            let (menu, _) = stays(menu.planned(Ok(planned(Vec::new()))));
+            let asks = text(&menu.lines(31, 9, 0).0)[1..3].to_vec();
+            assert_eq!(asks, [" Delete project luneta? no", " agent"]);
             let (menu, _) = stays(menu.key(&char('d')));
             assert_eq!(closed(menu.planned(Ok(planned(Vec::new())))), Done::Act(on, act.clone()));
         }
