@@ -380,6 +380,12 @@ impl Subfolder {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    #[must_use]
+    pub fn named_for(&self, branch: &str) -> bool {
+        let wt_named = branch.bytes().map(|byte| if byte == b'/' { b'-' } else { byte });
+        self.as_str().bytes().eq(wt_named)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1918,6 +1924,16 @@ mod tests {
         }
         assert_eq!(Below::parse(""), Ok(Below::OWN));
         assert!(Below::parse("/a").is_err());
+    }
+
+    #[test]
+    fn a_subfolder_is_named_for_the_branch_wt_makes_it_for() {
+        for (subfolder, branch) in [("main", "main"), ("fix-x", "fix/x"), ("fix-x", "fix-x")] {
+            assert!(tree(subfolder).named_for(branch), "{subfolder} for {branch}");
+        }
+        for (subfolder, branch) in [("issue-489", "other"), ("fix-x", "fix/y"), ("fix", "fix/x")] {
+            assert!(!tree(subfolder).named_for(branch), "{subfolder} not for {branch}");
+        }
     }
 
     #[test]

@@ -203,6 +203,39 @@ fn projects_and_worktrees_are_watched_and_come_back_when_lunetad_starts_again() 
 }
 
 #[test]
+fn a_clone_s_worktree_is_named_for_its_folder_unless_its_branch_is_the_one_wt_makes_it_for() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (up, clone, notes) = (scratch.join("up"), scratch.join("luneta"), scratch.join("notes"));
+    cloned_as_wt(&scratch, &up, &clone);
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "-b", "fix/x", "../fix-x"]);
+    git(&scratch, &["init", "-q", "-b", "main", &text(&notes)]);
+    git(&notes, &["commit", "-q", "--allow-empty", "-m", "one"]);
+    let _daemon = start(host.vars()).unwrap();
+    let luneta = project(&host, &clone, None);
+    worktree(&host, luneta, &clone.join("main"));
+    worktree(&host, luneta, &clone.join("fix-x"));
+    let folder = project(&host, &notes, None);
+    worktree(&host, folder, &notes);
+    let named = |want: [&str; 3]| {
+        let Held::Kept(Kept { projects, .. }) = held(&host) else {
+            panic!("the projects are kept");
+        };
+        let worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
+        let names: Vec<&str> = worktrees.map(|it| it.name.as_str()).collect();
+        (names == want).then_some(())
+    };
+
+    let branched = "each is named for the branch its folder is for";
+    eventually(branched, || named(["main", "fix/x", "main"]));
+    git(&clone.join("fix-x"), &["switch", "-q", "-c", "other"]);
+    git(&notes, &["switch", "-q", "-c", "other"]);
+    let switched = "the clone's is named for its folder, the folder's for its branch";
+    eventually(switched, || named(["main", "fix-x", "other"]));
+}
+
+#[test]
 fn a_folder_that_goes_is_kept_and_said_to_be_missing() {
     let host = Host::new();
     let scratch = tempfile::tempdir().unwrap();
