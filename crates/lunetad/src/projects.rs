@@ -756,6 +756,33 @@ impl Change {
             | Change::Ran(_) => false,
         }
     }
+
+    #[must_use]
+    pub fn listing_shows(&self) -> bool {
+        match self {
+            Change::AddProject { .. }
+            | Change::AddWorktree { .. }
+            | Change::Start { .. }
+            | Change::Pull { .. }
+            | Change::Join { .. }
+            | Change::Listed { .. }
+            | Change::Rooted { .. }
+            | Change::RenameProject { .. }
+            | Change::RenameWorktree { .. }
+            | Change::ReorderProjects { .. }
+            | Change::ReorderWorktrees { .. }
+            | Change::ForgetProject { .. }
+            | Change::Went { .. }
+            | Change::RenameTerminal { .. }
+            | Change::Open { .. }
+            | Change::Close { .. }
+            | Change::Unopen { .. }
+            | Change::Move { .. }
+            | Change::Swap { .. }
+            | Change::Ran(_) => true,
+            Change::Resize { .. } | Change::Fill { .. } | Change::Focus { .. } => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

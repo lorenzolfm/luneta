@@ -408,6 +408,7 @@ impl Store {
 
     pub fn change(&mut self, change: Change) -> Result<Option<Made>, Failed> {
         let at_once = change.kept_at_once();
+        let listed = change.listing_shows();
         let (changed, made) = self.applied(change)?;
         if self.projects() == Some(&changed) {
             return Ok(made);
@@ -415,22 +416,23 @@ impl Store {
         if at_once {
             self.written_as(&changed)?;
         }
-        self.took(changed)?;
+        self.took(changed, listed)?;
         Ok(made)
     }
 
     pub fn followed(&mut self, change: Change) -> Result<Option<String>, Failed> {
+        let listed = change.listing_shows();
         let (changed, made) = self.applied(change)?;
         assert!(made.is_none(), "a change that follows the mux or git hands back nothing made");
-        self.follows(changed)
+        self.follows(changed, listed)
     }
 
     pub fn closed(&mut self, closing: Closing) -> Result<Option<String>, Failed> {
         let changed = self.kept()?.closed(closing).map_err(Failed::Refused)?;
-        self.follows(changed)
+        self.follows(changed, true)
     }
 
-    fn follows(&mut self, changed: Projects) -> Result<Option<String>, Failed> {
+    fn follows(&mut self, changed: Projects, listed: bool) -> Result<Option<String>, Failed> {
         if self.projects() == Some(&changed) {
             return Ok(None);
         }
@@ -439,7 +441,7 @@ impl Store {
             Err(Failed::Unwritten(why)) => Some(why),
             Err(failed) => return Err(failed),
         };
-        self.took(changed)?;
+        self.took(changed, listed)?;
         Ok(unwritten)
     }
 
@@ -458,12 +460,14 @@ impl Store {
         })
     }
 
-    fn took(&mut self, changed: Projects) -> Result<(), Failed> {
+    fn took(&mut self, changed: Projects, listed: bool) -> Result<(), Failed> {
         let Keeping::Kept { projects, .. } = &mut self.keeping else {
             unreachable!("projects changed are kept");
         };
         *projects = changed;
-        self.revision = self.revision.next();
+        if listed {
+            self.revision = self.revision.next();
+        }
         self.tell()
     }
 
@@ -2172,5 +2176,56 @@ mod tests {
         assert!(kept, "a change kept at once takes the rest along");
         store.flush().unwrap();
         assert_eq!(read(), *store.projects().unwrap());
+    }
+
+    #[test]
+    fn a_change_no_listing_shows_sends_watchers_no_new_listing() {
+        use super::super::layout::{Direction, Growth, Sides};
+        use crate::core::{self, Wakes};
+
+        let scratch = tempfile::tempdir().unwrap();
+        let (git, _git) = mpsc::sync_channel(1);
+        let (github, _github) = mpsc::sync_channel(1);
+        let core = core::start(Wakes { git, github }).unwrap();
+        let mut store = store_at(Ok(file_in(&scratch)), core.clone());
+        let project = store.change(Change::AddProject { spot: alone("/a"), name: None });
+        let Some(Made::Project(project)) = project.unwrap() else { panic!("/a is made") };
+        let Some(Made::Found(worktree)) = store.change(add_in(project, alone("/a/b"))).unwrap()
+        else {
+            panic!("/a/b is in /a's own worktree");
+        };
+        let size = super::super::Size::of(80, 24).unwrap();
+        let [one, two] = [store.fresh().unwrap(), ViewId::of(u64::MAX).unwrap()];
+        let opened = |id, placed| {
+            let terminal = Terminal::new(TerminalViewId::new(id), dir("/a"), Runs::Shell);
+            Change::Open { worktree, view: View::Terminal(terminal), placed, size }
+        };
+        store.change(opened(one, Placed::Alone)).unwrap();
+        store.change(opened(two, Placed::Beside { at: one, towards: Towards::Right })).unwrap();
+        let listing = || {
+            let watched = core::ask(&core, |answer| Command::Watch { after: None, answer });
+            watched.flatten().expect("the core answers a watch at once").version
+        };
+        let before = (listing(), store.revision());
+
+        let (sides, growth) = (Sides::One(Direction::Left), Growth::Grow);
+        let unlisted = [
+            Change::Focus { view: one },
+            Change::Resize { view: two, sides, growth, size },
+            Change::Fill { worktree, full: Some(two) },
+            Change::Fill { worktree, full: None },
+        ];
+        for change in unlisted {
+            let said = format!("{change:?}");
+            let was = store.projects().unwrap().clone();
+            store.change(change).unwrap();
+            assert_ne!(store.projects(), Some(&was), "{said} changes the projects");
+            assert_eq!((listing(), store.revision()), before, "{said} sends no new listing");
+        }
+
+        store.change(Change::Swap { one, other: two }).unwrap();
+        let (version, revision) = (listing(), store.revision());
+        assert_ne!(version, before.0, "a swap sends watchers a new listing");
+        assert_eq!(revision, before.1.next(), "a swap is a revision of the projects");
     }
 }
