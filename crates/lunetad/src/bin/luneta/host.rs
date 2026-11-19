@@ -29,7 +29,7 @@ use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
-use lunetad::{Destination, Direction, Directory, Growth, SessionName};
+use lunetad::{Destination, Direction, Growth, SessionName};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -55,7 +55,7 @@ use crate::images::{self, Went};
 use crate::input;
 use crate::issue::{self, Issue};
 use crate::machines::{self, Added, Machine};
-use crate::menu::{self, Choice, Opens, Origin, Rename};
+use crate::menu::{self, Choice, Origin, Rename};
 use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
@@ -115,7 +115,7 @@ impl Opener {
     }
 }
 
-const NAMING: &str = "menu: luneta names a session already: try again once it has made it";
+const NAMING: &str = "luneta names a session already: try again once it has made it";
 
 const NAMING_PANICKED: &str = "luneta could not name the session: naming it panicked";
 
@@ -1689,8 +1689,8 @@ impl App {
                 self.leave();
             },
             Asked::Delete { on, act } => self.project_act(&on, &act),
-            Asked::Open { asking, on, project, cwd, opens } => {
-                self.project_open(asking, &on, project, &cwd, &opens);
+            Asked::Open { asking, on, project, beside, command } => {
+                self.project_open(asking, &on, project, beside, command);
             },
             Asked::Welcome { asking, on, session, view } => {
                 self.welcome(asking, &on, &session, view);
@@ -1702,7 +1702,7 @@ impl App {
                 self.leave();
             },
             Asked::AddProject { on, folder, name } => {
-                if self.refuse_naming(None) {
+                if self.refuse_naming(None, |busy| format!("menu: {busy}")) {
                     return;
                 }
                 self.naming_on(move || {
@@ -1728,23 +1728,24 @@ impl App {
                     renamed.map_err(|why| format!("not renamed: {why}"))
                 });
             },
-            Asked::Make { menu, on, session, holder, cwd, name, command } => {
-                if self.refuse_naming(Some(menu)) {
+            Asked::Make { menu, on, project, cwd, name, command } => {
+                let busy = |busy: &str| format!("menu: {}", worktrees::unopened(&cwd, &name, busy));
+                if self.refuse_naming(Some(menu), busy) {
                     return;
                 }
                 let lunetad = self.lunetad.clone();
                 self.naming_on(move || {
                     let made = caught(|| {
-                        let (session, at) = (session.as_str(), (&holder, &cwd));
-                        let first = command.clone();
-                        let made = worktrees::pulled(&lunetad, &on, session, at, &name, first)?;
+                        let (project, first) = (project.as_ref(), command.clone());
+                        let made = worktrees::pulled(&lunetad, &on, project, &cwd, &name, first)?;
                         Ok(Pulled { on, worktree: made, argv: command })
                     });
                     Made::Pulled { menu, made }
                 });
             },
-            Asked::Pull { menu, on, work, wanted, worked, others } => {
-                pull::prepare(menu, on, work, wanted, worked, others, &self.events);
+            Asked::Pull { menu, on, work, wanted, worked, others, plain_here } => {
+                let asking = pull::Asking { on, work, wanted, worked, others, plain_here };
+                pull::prepare(menu, asking, &self.events);
             },
             Asked::Prunes { menu, on, dir } => prune::plan(menu, on, dir, &self.events),
             Asked::Prune { menu, on, dir, agreed } => {
@@ -1890,40 +1891,18 @@ impl App {
         asking: sidebar::Held,
         on: &Machine,
         project: ProjectId,
-        cwd: &Directory,
-        opens: &Opens,
+        beside: ViewKey,
+        command: Vec<String>,
     ) {
         let Some(project) = self.projected.project(on, project) else {
             return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());
         };
-        match opens {
-            Opens::View { beside, command } => {
-                let Some((worktree, terminal)) = project.view_of(beside.key()) else {
-                    return self.sidebar.notify(format!("menu: lunetad lists no view {beside}"));
-                };
-                self.go_worktree(on, worktree, Some(terminal));
-                self.shown().open_beside_focused(command.clone());
-                self.give_opened(Opener::of(asking));
-            },
-            Opens::Tab { name, command } => {
-                let (lunetad, id, on) = (self.lunetad.clone(), project.id, on.clone());
-                let (cwd, name, argv) = (cwd.clone(), name.clone(), command.clone());
-                if self.refuse_naming(None) {
-                    return;
-                }
-                self.naming_on(move || {
-                    let made = caught(|| {
-                        let named = name.as_deref();
-                        let folder = cwd.as_str();
-                        let (at, first) = ((id, folder), argv.clone());
-                        let added = worktrees::add_worktree(&lunetad, &on, at, named, first);
-                        added.map(Landing::Worktree)
-                    });
-                    let made = made.map_err(|why| format!("menu: {why}"));
-                    Made::Worktree { on, made, argv }
-                });
-            },
-        }
+        let Some((worktree, terminal)) = project.view_of(beside.key()) else {
+            return self.sidebar.notify(format!("menu: lunetad lists no view {beside}"));
+        };
+        self.go_worktree(on, worktree, Some(terminal));
+        self.shown().open_beside_focused(command);
+        self.give_opened(Opener::of(asking));
     }
 
     fn open_worktree(&mut self, on: Machine, project: ProjectId) {
@@ -2336,7 +2315,7 @@ impl App {
         on: Machine,
         made: impl FnOnce(&Path, &Machine) -> Result<Landing, String> + Send + 'static,
     ) {
-        if self.refuse_naming(None) {
+        if self.refuse_naming(None, |busy| format!("menu: {busy}")) {
             return;
         }
         let lunetad = self.lunetad.clone();
@@ -2346,11 +2325,11 @@ impl App {
         });
     }
 
-    fn refuse_naming(&mut self, menu: Option<u64>) -> bool {
+    fn refuse_naming(&mut self, menu: Option<u64>, said: impl FnOnce(&str) -> String) -> bool {
         if self.naming == Naming::Idle {
             return false;
         }
-        self.sidebar.notify(NAMING.to_owned());
+        self.sidebar.notify(said(NAMING));
         if let Some(menu) = menu {
             self.sidebar.drop_menu(menu);
         }

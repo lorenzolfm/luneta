@@ -11,11 +11,11 @@ use lunetad::api::change_projects_response::Made;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::make_worktree_response::Landed as Answered;
 use lunetad::api::projects::Held;
-use lunetad::api::{ChangeProjectsRequest, MakeWorktreeRequest, On, Version, WatchRequest};
+use lunetad::api::{self, ChangeProjectsRequest, MakeWorktreeRequest, On, Version, WatchRequest};
 use lunetad::mux::own::TerminalKey;
-use lunetad::projects::{self, Name, ProjectId, Size, ViewId, WorktreeId};
+use lunetad::projects::{self, Name, Plain, ProjectId, Size, ViewId, WorktreeId};
 use lunetad::links::{self, Branch, Unready};
-use lunetad::{Asked, Beside, Heard};
+use lunetad::{Asked, Beside, Heard, SessionName};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
@@ -62,6 +62,13 @@ impl Unmade {
         match self {
             Unmade::Nests(why) | Unmade::Failed(why) => format!("no {what} made: {why}"),
             Unmade::InDoubt(why) => format!("{why}, so the {what} may be made"),
+        }
+    }
+
+    fn said_unopened(self, folder: &Directory, tab: &str) -> String {
+        match self {
+            Unmade::Nests(why) | Unmade::Failed(why) => unopened(folder, tab, &why),
+            Unmade::InDoubt(why) => format!("{why}, so {folder}, {tab}'s worktree, may be opened"),
         }
     }
 }
@@ -145,11 +152,19 @@ async fn answered_within<T, E>(
 }
 
 pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
+    projected::listed(&kept_as_said(path)?)
+}
+
+pub fn plain(path: &Path) -> Result<Vec<Plain>, String> {
+    Plain::of_api(&kept_as_said(path)?)
+}
+
+fn kept_as_said(path: &Path) -> Result<Vec<api::Project>, String> {
     asked(path, async |daemon| {
         let request = WatchRequest { after: None, kept: None, shown: false };
         let host = daemon.watch(request).await.map_err(|status| status.message().to_owned())?;
         match host.into_inner().projects.and_then(|projects| projects.held) {
-            Some(Held::Kept(kept)) => projected::listed(&kept.projects),
+            Some(Held::Kept(kept)) => Ok(kept.projects),
             Some(Held::Unkept(why)) => Err(format!("lunetad keeps no projects: {why}")),
             None => Err("lunetad is older than its projects".to_owned()),
         }
@@ -444,16 +459,19 @@ pub fn made_at(
 pub fn pulled(
     path: &Path,
     machine: &Machine,
-    project: &str,
-    (holder, cwd): (&Directory, &Directory),
+    project: Option<&SessionName>,
+    cwd: &Directory,
     name: &str,
     argv: Vec<String>,
 ) -> Result<Landed, String> {
-    let (holder, folder) = (holder.to_string(), cwd.to_string());
-    let (project, name) = (project.to_owned(), name.to_owned());
-    let change = Change::Pull(Pull { holder, folder, project, name, argv });
+    let (folder, project) = (cwd.to_string(), project.map(ToString::to_string));
+    let change = Change::Pull(Pull { folder, project, name: name.to_owned(), argv });
     let pulled = changed_on(path, on(machine), change).and_then(landed);
-    pulled.map_err(|unmade| unmade.said_of("session"))
+    pulled.map_err(|unmade| unmade.said_unopened(cwd, name))
+}
+
+pub fn unopened(folder: &Directory, tab: &str, why: &str) -> String {
+    format!("{folder} is {tab}'s worktree, and it is not opened: {why}")
 }
 
 pub fn real(cwd: &Path) -> Result<PathBuf, String> {
@@ -652,6 +670,13 @@ mod tests {
         }
         let timed_out = Status::cancelled("Timeout expired");
         assert_eq!(said(&timed_out), "Timeout expired, so the project may be made");
+
+        let folder = Directory::parse("/w/cdk/issue-5".to_owned()).unwrap();
+        let unopened = |status: &Status| Unmade::of(status).said_unopened(&folder, "#5");
+        let left = "/w/cdk/issue-5 is #5's worktree, and it is not opened: it said no";
+        assert_eq!(unopened(&refusals[1]), left, "a pull refused leaves the worktree made");
+        let doubt = "it dropped, so /w/cdk/issue-5, #5's worktree, may be opened";
+        assert_eq!(unopened(&doubts[0]), doubt, "a pull answered late may have opened it");
         for status in &refusals {
             assert!(matches!(Unmoved::of(status), Unmoved::Refused(_)), "{status:?}");
         }

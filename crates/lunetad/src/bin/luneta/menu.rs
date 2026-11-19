@@ -1024,10 +1024,9 @@ fn typed_path(path: &[char]) -> String {
 }
 
 fn started(keys: &Keys, row: &ViewRow, skill: &str) -> Result<Wants, String> {
-    let Beside { session, view, cwd } = row.beside()?;
+    let Beside { session, view, .. } = row.beside()?;
     let command = agents::on_skill(keys.agent.harness(), skill, None);
-    let opens = Opens::View { beside: view, command };
-    Ok(Wants::Open { session, view, cwd, opens })
+    Ok(Wants::Open { session, view, command })
 }
 
 const ASKS_FIRST: [Action; 4] =
@@ -1129,12 +1128,6 @@ impl ViewRow {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Opens {
-    View { beside: ViewKey, command: Vec<String> },
-    Tab { name: Option<String>, command: Vec<String> },
-}
-
 #[expect(clippy::large_enum_variant, reason = "it lasts a key; a box would allocate on each")]
 pub enum Did {
     Stays(Menu, Wants),
@@ -1151,17 +1144,11 @@ pub enum Wants {
     Plan { session: Listed, scope: Scope },
     Prunes { dir: Directory },
     Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
-    Open { session: Listed, view: ViewKey, cwd: Directory, opens: Opens },
+    Open { session: Listed, view: ViewKey, command: Vec<String> },
     Pull(Work, Wanted),
     Printed { session: Listed, view: ViewKey, ended: Ended },
     Checks { page: PullPage },
-    Make {
-        session: SessionName,
-        holder: Directory,
-        cwd: Directory,
-        name: String,
-        command: Vec<String>,
-    },
+    Make { project: Option<SessionName>, cwd: Directory, name: String, command: Vec<String> },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1224,7 +1211,7 @@ enum Step {
 enum Wait {
     Pulling(Pull),
     Opening,
-    Making(SessionName),
+    Making(Option<SessionName>),
 }
 
 impl Wait {
@@ -1234,8 +1221,8 @@ impl Wait {
                 Wanted::AtHead => format!("Syncing {}…", work.tab()),
                 Wanted::AsItIs => format!("Making a worktree of {}…", work.tab()),
             },
-            Wait::Opening => format!("Opening {}…", work.tab()),
-            Wait::Making(session) => format!("Making session {session}…"),
+            Wait::Opening | Wait::Making(None) => format!("Opening {}…", work.tab()),
+            Wait::Making(Some(session)) => format!("Making session {session}…"),
         }
     }
 }
@@ -1325,11 +1312,8 @@ impl Menu {
         }
     }
 
-    pub fn made(&self) -> Option<&SessionName> {
-        match &self.stage {
-            Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => Some(session),
-            _ => None,
-        }
+    pub fn opens_pulled(&self) -> bool {
+        matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Making(_)), .. })
     }
 
     pub fn making(&self) -> Option<&Work> {
@@ -1423,10 +1407,10 @@ impl Menu {
                 Err(reason) => wrong(reason),
             },
             Offer::NewView(row) => match row.beside() {
-                Ok(Beside { session, view, cwd }) => {
-                    let opens = Opens::View { beside: view, command: Vec::new() };
+                Ok(Beside { session, view, .. }) => {
+                    let command = Vec::new();
                     let stage = Stage::Opening { keys };
-                    stays(stage, Wants::Open { session, view, cwd, opens })
+                    stays(stage, Wants::Open { session, view, command })
                 },
                 Err(reason) => wrong(reason),
             },
@@ -1639,43 +1623,33 @@ impl Menu {
             Ok(dir) => dir,
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
         };
-        let opening = |session: Listed, view: ViewKey, opens: Opens| {
-            let (cwd, branch, ran) = (Some(folder.clone()), branch.clone(), Ran::Unhooked);
-            let row = ViewRow {
-                session: session.clone(),
-                view,
-                terminal: None,
-                cwd,
-                branch,
-                repository: None,
-                pull_request: None,
-                ran,
-            };
-            let target = Target::View(on.clone(), row);
-            let step = Step::Waiting(Wait::Opening);
-            let stage = Stage::Pull { work: work.clone(), agent, step };
-            let cwd = dir.clone();
-            Did::Stays(Menu { number, target, stage }, Wants::Open { session, view, cwd, opens })
-        };
-        match (at, pull) {
+        assert_eq!(command.is_empty(), pull == Pull::Worktree, "w opens a shell, an agent its own");
+        let project = match (at, pull) {
             (At::There((session, view)), Pull::Worktree) => {
-                Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })))
+                return Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })));
             },
             (At::There((session, view)), Pull::Agent) => {
-                let opens = Opens::View { beside: view, command };
-                opening(session, view, opens)
+                let row = ViewRow {
+                    session: session.clone(),
+                    view,
+                    terminal: None,
+                    cwd: Some(folder),
+                    branch,
+                    repository: None,
+                    pull_request: None,
+                    ran: Ran::Unhooked,
+                };
+                let target = Target::View(on, row);
+                let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Opening) };
+                let wants = Wants::Open { session, view, command };
+                return Did::Stays(Menu { number, target, stage }, wants);
             },
-            (At::Session((session, view)), _) => {
-                let opens = Opens::Tab { name: Some(work.tab()), command };
-                opening(session, view, opens)
-            },
-            (At::Clone { cwd: holder, name }, _) => {
-                let (session, cwd, tab) = (name.clone(), dir, work.tab());
-                let wants = Wants::Make { session, holder, cwd, name: tab, command };
-                let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(name)) };
-                Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
-            },
-        }
+            (At::Session(_), _) => None,
+            (At::Clone { cwd: _, name }, _) => Some(name),
+        };
+        let wants = Wants::Make { project: project.clone(), cwd: dir, name: work.tab(), command };
+        let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(project)) };
+        Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
     }
 
     pub fn off_branch(&self, found: &Result<Found, String>) -> Option<String> {
@@ -1698,7 +1672,7 @@ impl Menu {
 
     pub fn printed(self, printed: Result<Printed, String>) -> Did {
         let Menu { number, target, stage } = self;
-        let Stage::Reading { keys, last, beside: Beside { session, view, cwd }, ended } = stage
+        let Stage::Reading { keys, last, beside: Beside { session, view, .. }, ended } = stage
         else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
@@ -1718,15 +1692,14 @@ impl Menu {
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
         let command = agents::on_words(keys.agent.harness(), prompt, &files);
-        let opens = Opens::View { beside: view, command };
         let stage = Stage::Opening { keys };
-        let wants = Wants::Open { session, view, cwd, opens };
+        let wants = Wants::Open { session, view, command };
         Did::Stays(Menu { number, target, stage }, wants)
     }
 
     pub fn checked(self, checks: Result<Failing, String>) -> Did {
         let Menu { number: menu, target, stage } = self;
-        let Stage::Fetching { keys, beside: Beside { session, view, cwd }, page } = stage else {
+        let Stage::Fetching { keys, beside: Beside { session, view, .. }, page } = stage else {
             return Did::Stays(Menu { number: menu, target, stage }, Wants::Nothing);
         };
         let number = page.number();
@@ -1748,9 +1721,8 @@ impl Menu {
         }
         let prompt = checks::prompt(&page, &failing);
         let command = agents::on_words(keys.agent.harness(), prompt, &checks::files(&failing));
-        let opens = Opens::View { beside: view, command };
         let stage = Stage::Opening { keys };
-        let wants = Wants::Open { session, view, cwd, opens };
+        let wants = Wants::Open { session, view, command };
         Did::Stays(Menu { number: menu, target, stage }, wants)
     }
 
@@ -2695,12 +2667,8 @@ mod tests {
         KeyEvent::from(KeyCode::Char(key))
     }
 
-    fn opens_beside(command: Vec<String>) -> Opens {
-        Opens::View { beside: ViewKey::terminal(4), command }
-    }
-
-    fn beside_row(opens: Opens) -> Wants {
-        Wants::Open { session: listed(), view: ViewKey::terminal(4), cwd: main_dir(), opens }
+    fn beside_row(command: Vec<String>) -> Wants {
+        Wants::Open { session: listed(), view: ViewKey::terminal(4), command }
     }
 
     fn opened(target: Target, key: Option<char>) -> Did {
@@ -2761,10 +2729,9 @@ mod tests {
             ]
         );
         let (menu, wants) = stays(menu.key(&char('v')));
-        let cwd = main_dir();
-        let opens = opens_beside(Vec::new());
+        let command = Vec::new();
         let (session, view) = (project().listed().clone(), ViewKey::terminal(4));
-        assert_eq!(wants, Wants::Open { session, view, cwd: cwd.clone(), opens });
+        assert_eq!(wants, Wants::Open { session, view, command });
         let (menu, wants) = stays(menu.key(&char('v')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
@@ -2843,9 +2810,8 @@ mod tests {
     fn an_own_session_s_view_opens_its_agents_beside_it() {
         let (_, wants) = stays(stays(opened(own_view(), Some('c'))).0.key(&char('t')));
         let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec();
-        let opens = opens_beside(command);
         let (session, view) = (project().listed().clone(), ViewKey::terminal(4));
-        assert_eq!(wants, Wants::Open { session, view, cwd: main_dir(), opens });
+        assert_eq!(wants, Wants::Open { session, view, command });
     }
 
     #[test]
@@ -2942,7 +2908,7 @@ mod tests {
         );
         let (_, wants) = stays(menu.key(&char('t')));
         let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned);
-        assert_eq!(wants, beside_row(opens_beside(command.to_vec())));
+        assert_eq!(wants, beside_row(command.to_vec()));
 
         let (menu, _) = stays(opened(view_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
@@ -2954,7 +2920,7 @@ mod tests {
         ]);
         let (_, wants) = stays(menu.key(&char('t')));
         let command = ["pi", "/skill:thermo-nuclear-review"].map(str::to_owned);
-        assert_eq!(wants, beside_row(opens_beside(command.to_vec())));
+        assert_eq!(wants, beside_row(command.to_vec()));
     }
 
     #[test]
@@ -3031,16 +2997,16 @@ mod tests {
                       printed is in /run/luneta/printed/1.txt.";
         let read = "Read(//run/luneta/printed/1.txt)";
         let command = ["claude", "--allowedTools", read, "--", prompt];
-        let opens = opens_beside(command.map(str::to_owned).to_vec());
-        assert_eq!(wants, beside_row(opens));
+        let command = command.map(str::to_owned).to_vec();
+        assert_eq!(wants, beside_row(command));
 
         let pi = Picked::ByView(Harness::Pi);
         let (menu, _) = stays(Menu::open(1, ended_row(), Some('c'), pi).unwrap());
         let (menu, _) = stays(menu.key(&char('e')));
         let kept = Kept { file: "/run/luneta/printed/1.txt".to_owned(), lines: 3, left_out: 0 };
         let (_, wants) = stays(menu.printed(Ok(Printed::After(kept))));
-        let opens = opens_beside(vec!["pi".to_owned(), prompt.to_owned()]);
-        assert_eq!(wants, beside_row(opens));
+        let command = vec!["pi".to_owned(), prompt.to_owned()];
+        assert_eq!(wants, beside_row(command));
 
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, _) = stays(menu.key(&char('f')));
@@ -3048,8 +3014,7 @@ mod tests {
         let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
                       nothing.";
         let command = vec!["claude".to_owned(), prompt.to_owned()];
-        let opens = opens_beside(command);
-        assert_eq!(wants, beside_row(opens));
+        assert_eq!(wants, beside_row(command));
 
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, _) = stays(menu.key(&char('f')));
@@ -3095,8 +3060,8 @@ mod tests {
         let prompt = checks::prompt(&PullPage::parse(PULL).unwrap(), &failing(2, 0));
         let read = "Read(//run/luneta/checks/1.log)";
         let command = ["claude", "--allowedTools", read, "--", &prompt];
-        let opens = opens_beside(command.map(str::to_owned).to_vec());
-        assert_eq!(wants, beside_row(opens));
+        let command = command.map(str::to_owned).to_vec();
+        assert_eq!(wants, beside_row(command));
 
         let fetched = |checks: Result<Failing, String>| {
             let (menu, _) = stays(opened(pull_row(State::Open, Some(PULL)), Some('c')));
@@ -3441,9 +3406,8 @@ mod tests {
         ]);
         let (_, wants) = stays(stays(opened(view.clone(), Some('c'))).0.key(&char('t')));
         let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec();
-        let opens = opens_beside(command);
         let (session, at) = (project().listed().clone(), ViewKey::terminal(4));
-        assert_eq!(wants, Wants::Open { session, view: at, cwd: main_dir(), opens });
+        assert_eq!(wants, Wants::Open { session, view: at, command });
         let (menu, _) = stays(opened(view.clone(), Some('n')));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..6], [
             " v  new view",
@@ -3838,8 +3802,7 @@ mod tests {
         ]);
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
         let command = agents::on_skill(CLAUDE, "tigerstyle", None);
-        let opens = opens_beside(command);
-        assert_eq!(wants, beside_row(opens));
+        assert_eq!(wants, beside_row(command));
     }
 
     #[test]
@@ -3862,7 +3825,7 @@ mod tests {
         assert_eq!(text(&menu.lines(31, 6, 0).0)[4], " \u{f03ff} pi  <TAB> another agent");
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
         let command = agents::on_skill(Harness::Pi, "tdd", None);
-        assert_eq!(wants, beside_row(opens_beside(command)));
+        assert_eq!(wants, beside_row(command));
     }
 
     #[test]
@@ -3883,8 +3846,7 @@ mod tests {
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         let (menu, wants) = stays(menu.pick(&skill("code-review")));
         let command = agents::on_skill(CLAUDE, "code-review", None);
-        let opens = opens_beside(command);
-        assert_eq!(wants, beside_row(opens));
+        assert_eq!(wants, beside_row(command));
         assert_eq!(menu.lines(31, 6, 0).1.at(Position::new(4, 3)), None);
         let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
         assert_eq!(wants, Wants::Nothing);
@@ -4256,12 +4218,10 @@ mod tests {
         let session = || At::Session((other.clone(), ViewKey::terminal(7)));
         for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
             let (menu, wants) = stays(pulling(key).pulled(ready(session())));
-            let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-            let cwd = directory(&folder);
-            let view = ViewKey::terminal(7);
-            assert_eq!(wants, Wants::Open { session: other.clone(), view, cwd, opens });
-            let Target::View(_, row) = menu.target() else { panic!("not a view's row") };
-            assert_eq!((&row.session, row.view), (&other, ViewKey::terminal(7)));
+            let (cwd, name) = (directory(&folder), "#2736".to_owned());
+            assert_eq!(wants, Wants::Make { project: None, cwd, name, command });
+            assert_eq!(menu.target(), &Target::Machine(Machine::Local), "not the session's row");
+            assert!(menu.opens_pulled());
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
@@ -4269,10 +4229,10 @@ mod tests {
         let place = Place::View(ViewPlace { session: other.clone(), view: ViewKey::terminal(9) });
         assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(Machine::Local, place));
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
-        let opens = Opens::View { beside: ViewKey::terminal(9), command: review };
-        let cwd = directory(&folder);
+        assert!(!menu.opens_pulled(), "a view beside another opens at once, with no pull");
+        let command = review;
         let view = ViewKey::terminal(9);
-        assert_eq!(wants, Wants::Open { session: other.clone(), view, cwd, opens });
+        assert_eq!(wants, Wants::Open { session: other.clone(), view, command });
         let Target::View(_, row) = menu.target() else { panic!("not a view's row") };
         assert_eq!((&row.session, row.view), (&other, ViewKey::terminal(9)));
     }
@@ -4300,9 +4260,8 @@ mod tests {
             "/skill:thermo-nuclear-review https://github.com/cashubtc/cdk/pull/2736",
         ];
         let command = review.map(str::to_owned).to_vec();
-        let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-        let cwd = directory(&folder);
-        assert_eq!(wants, Wants::Open { session: other, view: ViewKey::terminal(7), cwd, opens });
+        let (cwd, name) = (directory(&folder), "#2736".to_owned());
+        assert_eq!(wants, Wants::Make { project: None, cwd, name, command });
     }
 
     #[test]
@@ -4336,9 +4295,8 @@ mod tests {
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
         let tackle = ["claude", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
         let command = tackle.map(str::to_owned).to_vec();
-        let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-        let cwd = directory(&folder);
-        assert_eq!(wants, Wants::Open { session: other, view: ViewKey::terminal(7), cwd, opens });
+        let (cwd, name) = (directory(&folder), "#2736".to_owned());
+        assert_eq!(wants, Wants::Make { project: None, cwd, name, command });
     }
 
     #[test]
@@ -4422,19 +4380,17 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command };
-        let session = other.clone();
-        let cwd = directory(folder);
-        assert_eq!(wants, Wants::Open { session, view: ViewKey::terminal(7), cwd, opens });
+        let made = |command| {
+            let (cwd, name) = (directory(folder), "sync-rework".to_owned());
+            Wants::Make { project: None, cwd, name, command }
+        };
+        assert_eq!(wants, made(command));
 
         let pressed = |key: char| {
             stays(Menu::pull(1, view_row(), file(), CLAUDE).key(&char(key))).0
         };
         let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
-        let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command: Vec::new() };
-        let session = other.clone();
-        let cwd = directory(folder);
-        assert_eq!(wants, Wants::Open { session, view: ViewKey::terminal(7), cwd, opens });
+        assert_eq!(wants, made(Vec::new()));
 
         assert_eq!(
             closed(pressed('w').pulled(Err("no such file".to_owned()))),
@@ -4453,14 +4409,13 @@ mod tests {
         assert_eq!(
             wants,
             Wants::Make {
-                session: name.clone(),
-                holder: directory("/w/cdk"),
+                project: Some(name),
                 cwd: directory("/w/cdk/feat-x"),
                 name: "#2736".to_owned(),
                 command: Vec::new(),
             }
         );
-        assert_eq!(menu.made(), Some(&name));
+        assert!(menu.opens_pulled());
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Making session cdk…");
         assert!(menu.turning());
         let why = "no session works in cashubtc/cdk".to_owned();
@@ -4486,8 +4441,7 @@ mod tests {
         assert_eq!(closed(pulling_on(row(), 'w').pulled(there)), Done::Go(vps(), place));
         let at = At::Session((other, ViewKey::terminal(7)));
         let (menu, _) = stays(pulling_on(row(), 'w').pulled(ready(at)));
-        let Target::View(machine, row) = menu.target() else { panic!("not a view's row") };
-        assert_eq!((machine, row.view), (&vps(), ViewKey::terminal(7)));
+        assert_eq!(menu.target(), &Target::Machine(vps()), "the machine that found it");
         let name = SessionName::parse("cdk").unwrap();
         let clone = At::Clone { cwd: directory("/w/cdk"), name };
         let header = Target::Machine(vps());

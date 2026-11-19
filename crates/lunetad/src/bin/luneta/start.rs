@@ -183,7 +183,8 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let others = dirs.map(|dir| Worked { dir, pull: None, here: false }).collect::<Vec<_>>();
     let here = Worked { dir, pull: None, here: true };
     let worked = std::iter::once(here).chain(others).collect();
-    let ready = Pasted::new(Work::Link(link.clone()), worked).ready().map_err(said)?;
+    let plain = worktrees::plain(path)?;
+    let ready = Pasted::new(Work::Link(link.clone()), worked).ready(&plain).map_err(said)?;
     let folder = PathBuf::from(&ready.folder);
     let off = Work::Link(link.clone()).off_branch(ready.branch.as_deref());
     let off = off.filter(|_| ready.moved_off);

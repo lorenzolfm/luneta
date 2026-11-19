@@ -533,9 +533,8 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     worktree_added(&real.join("luneta"), "pr-7");
 
     let pull = Pull {
-        holder: text(&link.join("elsewhere")),
         folder: text(&link.join("luneta/pr-7")),
-        project: "cloned".to_owned(),
+        project: Some("cloned".to_owned()),
         name: "pr-7".to_owned(),
         argv: FIRST.map(str::to_owned).to_vec(),
     };
@@ -543,6 +542,21 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
         panic!("a pull goes to the worktree, made by it or by the sweep");
     };
     assert!(folders().contains(&(pr, text(&real.join("luneta/pr-7")))), "in project luneta");
+    cloned_as_wt(&real, &real.join("up-cdk"), &real.join("cdk"));
+    worktree_added(&real.join("cdk"), "fix");
+    let unnamed = Pull {
+        folder: text(&link.join("cdk/fix")),
+        project: None,
+        name: "fix".to_owned(),
+        argv: FIRST.map(str::to_owned).to_vec(),
+    };
+    let Some(Made::Worktree(fix) | Made::Found(fix)) = asked(Change::Pull(unnamed)) else {
+        panic!("a pull that names no project goes to the worktree too");
+    };
+    let Held::Kept(kept) = held(&far) else { panic!("far keeps its projects") };
+    let held_in = |it: &&api::Project| it.worktrees().unwrap().iter().any(|it| it.id == fix);
+    let made = kept.projects.iter().find(held_in).expect("far keeps cdk/fix");
+    assert_eq!((made.name.as_str(), made.dir.clone()), ("cdk", text(&real.join("cdk"))));
 
     let Some(Made::Worktree(elo)) = start("elo") else {
         panic!("a start in no project makes one and goes to its worktree");

@@ -495,8 +495,40 @@ impl Project {
         }
     }
 
+    #[must_use]
+    pub fn plain(&self) -> Option<Plain> {
+        match self.holds {
+            Holds::Folder(_) => Some(Plain { dir: self.dir.clone(), name: self.name.0.clone() }),
+            Holds::Clone(_) => None,
+        }
+    }
+
     fn view_count(&self) -> usize {
         self.worktrees().map(|it| it.layout.len()).sum()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Plain {
+    pub dir: Dir,
+    pub name: String,
+}
+
+impl Plain {
+    pub fn of_api(projects: &[api::Project]) -> Result<Vec<Plain>, String> {
+        let mut plain = Vec::new();
+        for project in projects {
+            match &project.holds {
+                Some(api::project::Holds::Folder(_)) => {
+                    let dir = Dir::parse(&project.dir);
+                    let dir = dir.map_err(|why| format!("project {}: {why}", project.name))?;
+                    plain.push(Plain { dir, name: project.name.clone() });
+                },
+                Some(api::project::Holds::Clone(_)) => {},
+                None => return Err(format!("lunetad says not what project {} holds", project.name)),
+            }
+        }
+        Ok(plain)
     }
 }
 
@@ -569,7 +601,7 @@ pub enum Change {
     AddProject { spot: Spot, name: Option<Name> },
     AddWorktree { project: ProjectId, spot: Spot, name: Option<Name>, opens: Opens },
     Start { spot: Spot, name: Option<Name>, opens: Opens },
-    Pull { spot: Spot, project: Name, name: Name, opens: Opens },
+    Pull { spot: Spot, project: Option<Name>, name: Name, opens: Opens },
     Join { spot: Spot, opens: Opens },
     Listed { root: Dir, subfolders: BTreeSet<Subfolder>, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, subfolders: BTreeSet<Subfolder> },
@@ -671,9 +703,13 @@ impl Ask {
                 name: named.as_deref().map(Name::of_project).transpose().map_err(field("name"))?,
                 opens: Opens::Shell,
             },
-            Asked::Pull(asked::Pull { holder: _, folder, project, name, argv }) => Change::Pull {
+            Asked::Pull(asked::Pull { folder, project, name, argv }) => Change::Pull {
                 spot: spot(&folder).map_err(field("folder"))?,
-                project: Name::of_project(&project).map_err(field("project"))?,
+                project: project
+                    .as_deref()
+                    .map(Name::of_project)
+                    .transpose()
+                    .map_err(field("project"))?,
                 name: Name::parse(&name).map_err(field("name"))?,
                 opens: Opens::of(argv).map_err(field("argv"))?,
             },
@@ -1015,11 +1051,17 @@ impl Projects {
             Change::Pull { spot, project, name, opens } => {
                 let (project, within) = match self.inside(&spot) {
                     Some(found) => found,
-                    None => changed.made_inside(&spot, Some(project), &mut draw)?,
+                    None => changed.made_inside(&spot, project, &mut draw)?,
                 };
                 let made = changed.worktree_in(project, within, Some(name), &mut draw)?;
                 let held = changed.project_of(project).ok_or_else(|| unknown("project", project))?;
                 let made = made.ok_or_else(|| held.unplaced(&spot))?;
+                let place = spot.place();
+                if held.folder(made).as_ref() != Some(&place) {
+                    let plain = held.plain();
+                    let plain = plain.expect("a clone's worktree is at the folder pulled");
+                    return Err(held_by_folder(&place, &plain));
+                }
                 Some(self.landed(&mut changed, made, &opens, &mut draw)?)
             },
             Change::Join { spot, opens } => {
@@ -1597,6 +1639,14 @@ pub fn folder_has_one_worktree(name: impl fmt::Display) -> String {
     format!("{name} is a folder, and its own is its one worktree")
 }
 
+#[must_use]
+pub fn held_by_folder(place: &Dir, folder: &Plain) -> String {
+    let Plain { dir, name } = folder;
+    assert!(dir.below(place).is_some(), "{} holds {}", dir.0, place.0);
+    let one = folder_has_one_worktree(name);
+    format!("{} is in {}, project {name}'s folder; {one}", place.0, dir.0)
+}
+
 fn unknown(what: &str, id: impl fmt::Display) -> String {
     format!("no {what} has the id {id}")
 }
@@ -2098,7 +2148,7 @@ mod tests {
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let pull = |root: &str| Change::Pull {
             spot: spot_at(root, "pr-7"),
-            project: name("cloned"),
+            project: Some(name("cloned")),
             name: name("pr-7"),
             opens: Opens::Shell,
         };
@@ -2114,10 +2164,59 @@ mod tests {
         let (project, worktree) = projects.find(made).unwrap();
         assert_eq!((project.name(), project.dir()), (&name("cloned"), &dir("/w/elo")));
         assert_eq!(project.folder(worktree.id()), Some(dir("/w/elo/pr-7")));
-        let (project, name) = (name("w"), name("pr-7"));
+        let (project, name_of) = (Some(name("w")), name("pr-7"));
         let spot = spot_at("/w", "pr-7");
-        let around = Change::Pull { spot, project, name, opens: Opens::Shell };
+        let around = Change::Pull { spot, project, name: name_of, opens: Opens::Shell };
         assert!(matches!(refused(&projects, around), Err(Refused::Nests(_))));
+
+        let unnamed = Change::Pull {
+            spot: spot_at("/w/cdk", "fix"),
+            project: None,
+            name: name("fix"),
+            opens: Opens::Shell,
+        };
+        let Made::Worktree(fix) = add(&mut projects, unnamed) else {
+            panic!("a pull that names no project makes one");
+        };
+        let (project, _) = projects.find(fix).unwrap();
+        assert_eq!((project.name(), project.dir()), (&name("cdk"), &dir("/w/cdk")), "its clone's");
+    }
+
+    #[test]
+    fn a_listing_s_plain_projects_are_its_folders_and_one_it_reads_not_refuses_it() {
+        let folder = |name: &str, dir: &str| api::Project {
+            name: name.to_owned(),
+            dir: dir.to_owned(),
+            holds: Some(api::project::Holds::Folder(api::Worktree::default())),
+            ..api::Project::default()
+        };
+        let clone = api::project::Holds::Clone(api::project::Clone::default());
+        let luneta = api::Project { holds: Some(clone), ..folder("luneta", "/w/luneta") };
+        let plain = Plain::of_api(&[folder("notes", "/n"), luneta.clone()]).unwrap();
+        assert_eq!(plain, [Plain { dir: dir("/n"), name: "notes".to_owned() }]);
+        let unsaid = api::Project { holds: None, ..luneta };
+        let said = Plain::of_api(&[folder("notes", "/n"), unsaid]);
+        assert_eq!(said, Err("lunetad says not what project luneta holds".to_owned()));
+        let relative = Plain::of_api(&[folder("notes", "n")]).unwrap_err();
+        assert!(relative.starts_with("project notes: "), "{relative}");
+    }
+
+    #[test]
+    fn a_pull_into_a_clone_inside_a_folder_s_project_is_refused_and_changes_nothing() {
+        let mut projects = Projects::default();
+        let notes = project(&mut projects, "/n");
+        let before = projects.clone();
+        let pull = Change::Pull {
+            spot: spot_at("/n/cdk", "fix"),
+            project: Some(name("cdk")),
+            name: name("fix"),
+            opens: Opens::of(vec!["claude".to_owned()]).unwrap(),
+        };
+        let said = change(&projects, pull).unwrap_err();
+        let one = "n is a folder, and its own is its one worktree";
+        assert_eq!(said, format!("/n/cdk/fix is in /n, project n's folder; {one}"));
+        assert_eq!(projects, before, "the folder's worktree is neither renamed nor opened");
+        assert_eq!(projects.project_of(notes).unwrap().worktrees().count(), 1);
     }
 
     #[test]
