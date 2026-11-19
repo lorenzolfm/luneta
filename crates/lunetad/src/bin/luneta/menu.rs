@@ -602,9 +602,14 @@ impl Chain {
         Chain::offered(target, &target.offer(action)?)
     }
 
+    #[must_use]
+    pub fn branch(project: ProjectId) -> Chain {
+        Chain::new(Typing::Branch(project), String::new())
+    }
+
     fn offered(target: &Target, offer: &Offer<'_>) -> Option<Chain> {
         let typing = match offer {
-            Offer::NewWorktree(project) => Typing::Branch(*project),
+            Offer::NewWorktree(project) => return Some(Chain::branch(*project)),
             Offer::NewProject => return Some(Chain::new(Typing::Folder, target.folder_hint())),
             Offer::NewMachine => Typing::Machine,
             Offer::Rename(renames) => Typing::Rename(*renames),
