@@ -15,7 +15,7 @@ pub enum Copied {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Text {
     lines: NonZeroUsize,
-    first: String,
+    first: Option<String>,
 }
 
 impl Copied {
@@ -35,29 +35,32 @@ impl Text {
     fn of(text: &str) -> Text {
         assert!(!text.is_empty(), "a sweep, a selection and a link each copy something");
         let lines = NonZeroUsize::new(text.lines().count()).expect("a text with something has a line");
-        let first = text.lines().map(shown).find(|line| !line.is_empty()).unwrap_or_default();
-        assert!(first.chars().count() <= SHOWN_CHARS_MAX, "a note keeps only what it can show");
-        assert!(!first.chars().any(char::is_control), "a note draws no control character");
+        let first = text.lines().map(shown).find(|line| !line.is_empty());
+        let fits = |first: &str| first.chars().count() <= SHOWN_CHARS_MAX;
+        assert!(first.as_deref().is_none_or(fits), "a note keeps only what it can show");
+        let drawn = |first: &str| !first.chars().any(char::is_control);
+        assert!(first.as_deref().is_none_or(drawn), "a note draws no control character");
         Text { lines, first }
     }
 
     fn said(&self, room: usize) -> String {
         let lines = self.lines.get();
-        let counted = match (lines, self.first.is_empty()) {
-            (1, false) => "copied".to_owned(),
-            (1, true) => "copied 1 blank line".to_owned(),
-            (_, false) => format!("copied {lines} lines"),
-            (_, true) => format!("copied {lines} blank lines"),
+        let Some(first) = &self.first else {
+            return match lines {
+                1 => "copied 1 blank line".to_owned(),
+                _ => format!("copied {lines} blank lines"),
+            };
         };
-        if self.first.is_empty() {
-            return counted;
-        }
+        let counted = match lines {
+            1 => "copied".to_owned(),
+            _ => format!("copied {lines} lines"),
+        };
         let quoted = |kept: &str| format!("{counted} \"{kept}\"");
         let Some(left) = room.checked_sub(quoted("").width()) else {
             return counted;
         };
-        let kept = cut(&self.first, left);
-        if quotes_some(&kept, &self.first) {
+        let kept = cut(first, left);
+        if quotes_some(&kept, first) {
             let said = quoted(&kept);
             assert!(said.width() <= room, "a quote is cut to the room it has");
             said
@@ -113,7 +116,7 @@ mod tests {
         let copied = Copied::text("\n   \n  fn main() {\n      run();\n  }\n");
         assert_eq!(copied, Copied::Text(Text {
             lines: NonZeroUsize::new(5).unwrap(),
-            first: "fn main() {".to_owned()
+            first: Some("fn main() {".to_owned())
         }));
         assert_eq!(copied.said(40), "copied 5 lines \"fn main() {\"");
         assert_eq!(copied.said(24), "copied 5 lines \"fn mai…\"");
@@ -137,7 +140,7 @@ mod tests {
         let Copied::Text(Text { first, .. }) = Copied::text(&long) else {
             panic!("a text is copied as text");
         };
-        assert_eq!(first, "a".repeat(SHOWN_CHARS_MAX));
+        assert_eq!(first, Some("a".repeat(SHOWN_CHARS_MAX)));
     }
 
     #[test]
