@@ -246,6 +246,29 @@ fn luneta_terminate_says_each_line_of_the_hosts_file_that_names_no_machine() {
     assert!(unread.ends_with("\"three more words\" is more than one word"), "{unread}");
 }
 
+#[test]
+fn luneta_terminate_skips_a_hosts_line_that_names_this_machine_and_runs_no_ssh_to_it() {
+    let host = Host::new();
+    let ssh = FakeSsh::new(host.bin());
+    let node = rustix::system::uname().nodename().to_string_lossy().into_owned();
+    let named = format!("me@{node}");
+    hosts(&host, &format!("{named}\nlocalhost\n"));
+    let skipped = |line: &str| format!("{line}: skipped, as {}", lunetad::THIS_MACHINE);
+    let skipped = [skipped(&named), skipped("localhost")];
+
+    let planned = terminate(host.vars(), None);
+    assert_eq!(planned.code, Some(3), "{}", planned.stderr);
+    assert_eq!(here(&planned.lines[0]), "nothing of luneta runs; keeps no project to forget");
+    assert_eq!(planned.lines[1..], skipped, "{:?}", planned.lines);
+
+    let ended = terminate(host.vars(), Some(&plan_in(&planned)));
+    assert_eq!(ended.code, Some(0), "{}", ended.stderr);
+    assert_eq!(ended.lines[1..], skipped, "{:?}", ended.lines);
+    for line in [named.as_str(), "localhost"] {
+        assert_eq!(ssh.runs(line), 0, "no ssh runs to {line}");
+    }
+}
+
 fn here_ending(vars: Vars, key: &str, set: &[(&str, &str)]) -> Said {
     let mut command = vars.command(LUNETA);
     command.args(["terminate", "--here", "--ending", key]).stdin(Stdio::null());

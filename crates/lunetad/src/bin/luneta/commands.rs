@@ -291,12 +291,14 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
             ExitCode::SUCCESS
         },
         Ok(Some(Reached::Unreached(unreached))) => {
-            let log = lunetad::state::path(lunetad::log::NAME);
-            let log = log.map_or_else(|_| lunetad::log::NAME.to_owned(), |log| {
-                log.display().to_string()
-            });
             eprintln!("luneta: {destination}: unreached: {}", unreached.why);
-            eprintln!("luneta: what ssh said of it is in {log}");
+            if let Some(said) = &unreached.ssh_said {
+                eprintln!("luneta: ssh said \"{said}\"");
+            }
+            ExitCode::FAILURE
+        },
+        Ok(Some(Reached::Here(()))) => {
+            eprintln!("luneta: {destination}: {}", lunetad::THIS_MACHINE);
             ExitCode::FAILURE
         },
         Ok(Some(Reached::Reaching(())) | None) => {

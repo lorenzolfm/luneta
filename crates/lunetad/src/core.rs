@@ -17,7 +17,7 @@ use crate::mux::own::server::{self, Is};
 use crate::titles::{self, Titled};
 use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage, Subfolder};
 use crate::projects::{ViewId, Worktree, WorktreeId, CLONE_WORKTREES_MAX};
-use crate::remote::{Destination, Named, Reached};
+use crate::remote::{Destination, Line, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::Doing;
 use crate::transcripts::SessionId;
@@ -97,6 +97,23 @@ pub fn start(wakes: Wakes) -> io::Result<SyncSender<Command>> {
     Ok(send)
 }
 
+enum Remote {
+    Far(Destination, Reached),
+    Here(Destination),
+}
+
+impl Remote {
+    fn to_api(&self) -> api::Remote {
+        match self {
+            Remote::Far(destination, reached) => reached.to_api(destination),
+            Remote::Here(destination) => api::Remote {
+                destination: destination.to_string(),
+                reached: Some(api::remote::Reached::Here(())),
+            },
+        }
+    }
+}
+
 struct Known {
     found: Scan,
     pi: Vec<Agent>,
@@ -104,7 +121,7 @@ struct Known {
     statuses: BTreeMap<String, GitStatus>,
     pull_requests: BTreeMap<String, Found>,
     topics: HashMap<SessionId, Said>,
-    remotes: Vec<(Destination, Reached)>,
+    remotes: Vec<Remote>,
     unread_hosts: u32,
     projects: Result<Projects, String>,
     revision: Revision,
@@ -187,8 +204,11 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             Command::Listed(now) if now == known.listed => continue,
             Command::Listed(now) => known.listed = now,
             Command::Remote { destination, reached } => {
-                let Some((_, was)) = known.remotes.iter_mut().find(|(it, _)| *it == destination)
-                else {
+                let far = known.remotes.iter_mut().find_map(|remote| match remote {
+                    Remote::Far(far, was) if *far == destination => Some(was),
+                    Remote::Far(..) | Remote::Here(_) => None,
+                });
+                let Some(was) = far else {
                     continue;
                 };
                 *was = reached;
@@ -253,16 +273,23 @@ fn wake(thread: &SyncSender<()>) {
 
 impl Known {
     fn named(&mut self, now: Named) {
-        let unique: HashSet<&Destination> = now.machines.iter().collect();
-        assert_eq!(unique.len(), now.machines.len(), "a machine is named twice");
+        let unique: HashSet<&Destination> = now.lines.iter().map(Line::destination).collect();
+        assert_eq!(unique.len(), now.lines.len(), "a machine is named twice");
         self.unread_hosts = now.unread;
-        let mut before = mem::take(&mut self.remotes);
-        for destination in now.machines {
-            let reached = match before.iter().position(|(was, _)| *was == destination) {
-                Some(at) => before.swap_remove(at).1,
-                None => Reached::Reaching,
+        let before = mem::take(&mut self.remotes).into_iter().filter_map(|remote| match remote {
+            Remote::Far(destination, reached) => Some((destination, reached)),
+            Remote::Here(_) => None,
+        });
+        let mut before: HashMap<Destination, Reached> = before.collect();
+        for line in now.lines {
+            let remote = match line {
+                Line::Far(destination) => {
+                    let reached = before.remove(&destination).unwrap_or(Reached::Reaching);
+                    Remote::Far(destination, reached)
+                },
+                Line::Here(destination) => Remote::Here(destination),
             };
-            self.remotes.push((destination, reached));
+            self.remotes.push(remote);
         }
     }
 
@@ -339,8 +366,7 @@ impl Known {
             .filter(|(dir, found)| self.branch(dir) == Some(&found.branch))
             .map(|(dir, found)| found.pull_request.to_api(dir))
             .collect();
-        let remotes =
-            self.remotes.iter().map(|(destination, reached)| reached.to_api(destination)).collect();
+        let remotes = self.remotes.iter().map(Remote::to_api).collect();
         api::Host {
             version: None,
             git_statuses: self.statuses.iter().map(|(dir, status)| status.to_api(dir)).collect(),
@@ -496,5 +522,39 @@ impl Known {
         } else {
             let _ = answer.send(None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_line_naming_this_machine_takes_no_word_of_a_watch_until_it_names_another() {
+        let wake = || mpsc::sync_channel(1).0;
+        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let machine = |name: &str| name.parse::<Destination>().unwrap();
+        let hosts = |lines| Command::Hosts(Named { lines, unread: 0 });
+        let heard = |name: &str| Command::Remote {
+            destination: machine(name),
+            reached: Reached::Host(api::remote::Host::default()),
+        };
+        let told = || {
+            let host = ask(&core, |answer| Command::Watch { after: None, answer });
+            let remotes = host.flatten().unwrap().remotes.into_iter();
+            remotes.map(|remote| (remote.destination, remote.reached.unwrap())).collect::<Vec<_>>()
+        };
+        let said = |name: &str, reached| (name.to_owned(), reached);
+        let host = || api::remote::Reached::Host(api::remote::Host::default());
+        let (here, reaching) = (api::remote::Reached::Here(()), api::remote::Reached::Reaching(()));
+
+        core.send(hosts(vec![Line::Here(machine("nixos")), Line::Far(machine("vps"))])).unwrap();
+        assert_eq!(told(), [said("nixos", here.clone()), said("vps", reaching.clone())]);
+        core.send(heard("nixos")).unwrap();
+        core.send(heard("vps")).unwrap();
+        assert_eq!(told(), [said("nixos", here), said("vps", host())]);
+
+        core.send(hosts(vec![Line::Far(machine("nixos")), Line::Far(machine("vps"))])).unwrap();
+        assert_eq!(told(), [said("nixos", reaching), said("vps", host())]);
     }
 }

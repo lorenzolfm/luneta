@@ -709,7 +709,13 @@ enum Under {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Away {
     Reaching,
-    Unreached { since: Option<SystemTime>, word: &'static str, why: String },
+    Here,
+    Unreached {
+        since: Option<SystemTime>,
+        word: &'static str,
+        why: String,
+        ssh_said: Option<String>,
+    },
 }
 
 impl Away {
@@ -730,12 +736,14 @@ impl Away {
             None => "unreached",
         };
         let since = unreached.since.and_then(|at| SystemTime::try_from(at).ok());
-        Away::Unreached { since, word, why: unreached.why.clone() }
+        let ssh_said = unreached.ssh_said.clone();
+        Away::Unreached { since, word, why: unreached.why.clone(), ssh_said }
     }
 
     fn said(&self) -> (&'static str, Option<SystemTime>) {
         match self {
             Away::Reaching => ("reaching…", None),
+            Away::Here => ("this machine", None),
             Away::Unreached { since, word, .. } => (word, *since),
         }
     }
@@ -945,7 +953,7 @@ fn shelves(host: &Host) -> Vec<Shelf> {
         let projects = match &remote.reached {
             Some(Reached::Host(host)) => host.projects.as_ref(),
             Some(Reached::Unreached(unreached)) => unreached.projects.as_ref(),
-            Some(Reached::Reaching(())) | None => None,
+            Some(Reached::Reaching(()) | Reached::Here(())) | None => None,
         };
         shelves.push(shelved(Machine::Remote(destination), projects));
     }
@@ -1034,6 +1042,7 @@ fn machines<'a>(host: &'a Host, shelves: &'a [Shelf]) -> Machines<'a> {
                 sayings: &host.sayings,
             }),
             Some(Reached::Reaching(())) => Err(Away::Reaching),
+            Some(Reached::Here(())) => Err(Away::Here),
             Some(Reached::Unreached(unreached)) => Err(Away::of(unreached)),
             None => Err(Away::Unreached {
                 since: None,
@@ -1041,6 +1050,7 @@ fn machines<'a>(host: &'a Host, shelves: &'a [Shelf]) -> Machines<'a> {
                 why: "lunetad says how it stands in words this luneta cannot read, as a newer \
                       lunetad's"
                     .to_owned(),
+                ssh_said: None,
             }),
         };
         others.push((destination, seen));
@@ -4497,9 +4507,13 @@ impl Sidebar {
         }
         let machine = self.cursor.as_ref()?.machine();
         match self.machine_row(&machine) {
-            (name, Some(Away::Unreached { why, .. }), _) => {
-                Some(format!("{name}: {why}; what ssh said is in {}", lunetad::log::NAME))
+            (name, Some(Away::Unreached { why, ssh_said: Some(said), .. }), _) => {
+                Some(format!("{name}: {why}; ssh said \"{said}\""))
             },
+            (name, Some(Away::Unreached { why, ssh_said: None, .. }), _) => {
+                Some(format!("{name}: {why}"))
+            },
+            (name, Some(Away::Here), _) => Some(format!("{name}: {}", lunetad::THIS_MACHINE)),
             (_, None | Some(Away::Reaching), _) => None,
         }
     }
@@ -5832,8 +5846,8 @@ mod tests {
         let buffer = drawn(&mut sidebar, false, 32, 13);
         assert_eq!([buffer[(10, 7)].fg, buffer[(13, 7)].fg], [ERROR, ERROR]);
         sidebar.focus(Keys::Sidebar);
-        let why = "ssh: Could not resolve hostname vps";
-        let said = format!("nixos: {why}; what ssh said is in {}", lunetad::log::NAME);
+        let why = "it ended before it reached lunetad (exit status: 255)";
+        let said = format!("nixos: {why}; ssh said \"ssh: Could not resolve hostname vps\"");
         for spot in [
             Spot::Machine(Machine::Remote(nixos())),
             Spot::Remote(nixos(), Place::Session(listed("main", 20))),
@@ -9853,11 +9867,12 @@ mod tests {
     fn down(since: i64) -> Reached {
         Reached::Unreached(remote::Unreached {
             since: Some(Timestamp { seconds: since, nanos: 0 }),
-            why: "ssh: Could not resolve hostname vps".to_owned(),
+            why: "it ended before it reached lunetad (exit status: 255)".to_owned(),
             stopped: Some(remote::unreached::Stopped::Ended(remote::unreached::Ended {
                 code: Some(255),
             })),
             projects: None,
+            ssh_said: Some("ssh: Could not resolve hostname vps".to_owned()),
         })
     }
 
@@ -10417,14 +10432,29 @@ mod tests {
         sidebar.hear(machines());
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "Gk");
-        let why = " me@vps: ssh: Could not resolve hostname vps; what ssh said is in luneta.log";
-        let says = |sidebar: &mut Sidebar| screen(sidebar, true, 96, 24).contains(&why.to_owned());
+        let why = " me@vps: it ended before it reached lunetad (exit status: 255); ssh said \"ssh: \
+                   Could not resolve hostname vps\"";
+        let says = |sidebar: &mut Sidebar| screen(sidebar, true, 128, 24).contains(&why.to_owned());
         assert!(says(&mut sidebar));
         type_in(&mut sidebar, "j");
         assert!(!says(&mut sidebar));
         type_in(&mut sidebar, "k");
         sidebar.focus(Keys::Terminal);
-        assert!(!screen(&mut sidebar, false, 96, 24).contains(&why.to_owned()));
+        assert!(!screen(&mut sidebar, false, 128, 24).contains(&why.to_owned()));
+    }
+
+    #[test]
+    fn a_machine_named_as_another_that_is_this_one_says_so_on_its_header() {
+        let mut sidebar = fresh();
+        let mut host = machines();
+        host.remotes[1] = remote("me@mac", Reached::Here(()));
+        sidebar.hear(host);
+        let lines = screen(&mut sidebar, false, 32, 14);
+        assert_eq!(lines[11], " ▸ \u{f108} me@mac · this machine", "{lines:?}");
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Machine(Machine::Remote("me@mac".parse().unwrap())));
+        let said = format!("me@mac: {}", lunetad::THIS_MACHINE);
+        assert_eq!(sidebar.unreached(), Some(said));
     }
 
     #[test]
