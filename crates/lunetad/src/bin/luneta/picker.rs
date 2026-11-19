@@ -2494,7 +2494,7 @@ mod tests {
         let row = WorktreeRow {
             place: fix(),
             name: "fix".to_owned(),
-            folder: "/home/you/fix".to_owned(),
+            folder: directory("/home/you/fix"),
             branch: None,
             repository: None,
         };

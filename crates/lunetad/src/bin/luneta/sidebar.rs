@@ -3398,10 +3398,10 @@ impl Sidebar {
         let mut known = shelf(&self.shelves, machine).iter();
         let known = known.find(|it| it.project.id() == place.project.id())?;
         let worktree = known.worktrees.iter().find(|worktree| worktree.place == place)?;
-        let (name, folder) = (worktree.name.clone(), worktree.folder.as_str().to_owned());
+        let (name, folder) = (worktree.name.clone(), Directory::from(&worktree.folder));
         let seen = self.seen(machine);
         let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
-        let status = statuses.into_iter().find(|status| status.dir == folder);
+        let status = statuses.into_iter().find(|status| status.dir == folder.as_str());
         let status = status.and_then(GitStatus::of_api);
         let branch = status.as_ref().and_then(|status| checkout(status, None)).map(|it| it.branch);
         let repository = status.as_ref().and_then(repository_of);
