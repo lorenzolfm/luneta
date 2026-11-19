@@ -9073,6 +9073,8 @@ mod tests {
         assert_eq!(sidebar.made_for(1), Some(Held::Open));
         assert!(sidebar.open().is_none());
         assert_eq!(sidebar.made_for(1), None);
+        sidebar.focus(Keys::Terminal);
+        assert!(sidebar.working.is_empty());
     }
 
     #[test]
@@ -11074,7 +11076,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_pasted_on_another_machine_s_row_makes_its_session_there() {
+    fn a_link_pasted_on_another_machine_s_row_makes_its_worktree_there() {
         let mut sidebar = fresh();
         let mut host = machines();
         let work = || session("work", 20, vec![view(3, 0, "/w/b", "fish")]);

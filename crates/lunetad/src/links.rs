@@ -1474,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_goes_to_the_view_with_the_branch_or_else_a_session_of_the_repository() {
+    fn a_key_goes_to_the_view_with_the_branch_or_else_a_view_in_a_clone_of_the_repository() {
         let remotes = |dir: &str| match dir {
             "/cdk/main" | "/cdk/2736" => Some(by_wt(Remote::Other)),
             "/cdk-upstream/master" => Some(by_wt(Remote::Origin)),

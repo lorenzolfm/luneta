@@ -4454,7 +4454,7 @@ mod tests {
             let (menu, wants) = stays(pulling(key).pulled(ready(At::Unopened)));
             let (cwd, name) = (directory(&folder), "#2736".to_owned());
             assert_eq!(wants, Wants::Make { cwd, name, command });
-            assert_eq!(menu.target(), &Target::Machine(Machine::Local), "not the session's row");
+            assert_eq!(menu.target(), &Target::Machine(Machine::Local), "no view is in it");
             assert!(menu.opens_pulled());
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
