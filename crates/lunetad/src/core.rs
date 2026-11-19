@@ -15,8 +15,7 @@ use crate::claude::Scan;
 use crate::github::Found;
 use crate::mux::own::server::{self, Is};
 use crate::panes::{self, Pane, Titled};
-use crate::projects::layout::Leaf as _;
-use crate::projects::{Dir, Name, Project, Projects, Revision, Seen, Stage, TerminalId, Workstream};
+use crate::projects::{Dir, Name, Project, Projects, Revision, Seen, Stage, ViewId, Workstream};
 use crate::projects::WorkstreamId;
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
@@ -56,7 +55,7 @@ pub enum Command {
     Sockets { sockets: Vec<Socket>, unread: u32 },
     Panes { asked: Asked, panes: Vec<Pane> },
     Clients { asked: Asked, clients: Listed },
-    Terminals(BTreeMap<TerminalId, Located>),
+    Terminals(BTreeMap<ViewId, Located>),
     WorkTree { dir: String, tree: WorkTree },
     PullRequests(BTreeMap<String, Found>),
     Shells(Vec<Shell>),
@@ -116,7 +115,7 @@ struct Known {
     pi: Vec<Agent>,
     sessions: Sessions,
     unread_sockets: u32,
-    terminals: BTreeMap<TerminalId, Located>,
+    terminals: BTreeMap<ViewId, Located>,
     panes: HashMap<Id, Vec<Pane>>,
     clients: HashMap<Id, Listed>,
     trees: BTreeMap<String, WorkTree>,
@@ -546,7 +545,7 @@ impl Known {
     fn built_terminals(&self, workstream: &Workstream) -> Vec<api::Terminal> {
         use api::terminal::Found as Told;
         let built = workstream.layout().terminals().map(|terminal| {
-            let id = terminal.id();
+            let id = terminal.id().view();
             let found = self.terminals.get(&id).unwrap_or(&Located::Looking);
             let (told, listed) = match found {
                 Located::Shown(Shown { key, listed }) => {

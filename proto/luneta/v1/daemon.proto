@@ -1062,11 +1062,12 @@ message ShowRequest {
     Size size = 2;
     fixed64 go = 3;
     Open open = 4;
-    google.protobuf.Empty close = 5;
+    fixed64 close = 5;
     Focus focus = 6;
     Resize resize = 7;
     Move move = 8;
     google.protobuf.Empty fullscreen = 9;
+    google.protobuf.Empty welcome = 10;
   }
 
   message Hello {
@@ -1096,7 +1097,7 @@ message ShowRequest {
     oneof to {
       Direction direction = 1;
       Order order = 2;
-      fixed64 terminal = 3;
+      fixed64 view = 3;
     }
   }
 
@@ -1178,12 +1179,13 @@ message ShowResponse {
   }
 
   message Pane {
-    fixed64 terminal = 1;
+    fixed64 view = 1;
     Rect rect = 2;
     oneof found {
       TerminalKey key = 3;
       google.protobuf.Empty lost = 4;
       google.protobuf.Empty looking = 5;
+      google.protobuf.Empty welcome = 6;
     }
   }
 

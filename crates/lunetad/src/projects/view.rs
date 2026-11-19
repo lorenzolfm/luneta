@@ -1,15 +1,37 @@
+use std::fmt;
+
 use crate::agent::Harness;
 
 use super::layout::{self, Leaf, Preordered, Removed, Sides, Towards, Tree, PANES_MAX, SHARES};
-use super::{Dir, Name, Size, TerminalId};
+use super::{Dir, Name, Size, ViewId};
 
 pub const LINE_BYTES_MAX: usize = 1024;
 
 pub const SESSION_BYTES_MAX: usize = 128;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TerminalViewId(ViewId);
+
+impl TerminalViewId {
+    pub(super) fn new(view: ViewId) -> TerminalViewId {
+        TerminalViewId(view)
+    }
+
+    #[must_use]
+    pub fn view(self) -> ViewId {
+        self.0
+    }
+}
+
+impl fmt::Display for TerminalViewId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Terminal {
-    id: TerminalId,
+    id: TerminalViewId,
     folder: Dir,
     runs: Runs,
     name: Option<Name>,
@@ -17,8 +39,13 @@ pub struct Terminal {
 
 impl Terminal {
     #[must_use]
-    pub fn new(id: TerminalId, folder: Dir, runs: Runs) -> Terminal {
+    pub fn new(id: TerminalViewId, folder: Dir, runs: Runs) -> Terminal {
         Terminal { id, folder, runs, name: None }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> TerminalViewId {
+        self.id
     }
 
     #[must_use]
@@ -51,9 +78,28 @@ impl Terminal {
     }
 }
 
-impl Leaf for Terminal {
-    fn id(&self) -> TerminalId {
-        self.id
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum View {
+    Terminal(Terminal),
+    Welcome(ViewId),
+}
+
+impl View {
+    #[must_use]
+    pub fn terminal(&self) -> Option<&Terminal> {
+        match self {
+            View::Terminal(terminal) => Some(terminal),
+            View::Welcome(_) => None,
+        }
+    }
+}
+
+impl Leaf for View {
+    fn id(&self) -> ViewId {
+        match self {
+            View::Terminal(terminal) => terminal.id.view(),
+            View::Welcome(id) => *id,
+        }
     }
 }
 
@@ -116,23 +162,23 @@ pub struct Layout(Option<Laid>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Laid {
-    tree: Tree<Terminal>,
-    full: Option<TerminalId>,
+    tree: Tree<View>,
+    full: Option<ViewId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placed {
     Alone,
-    Beside { at: TerminalId, towards: Towards },
+    Beside { at: ViewId, towards: Towards },
 }
 
 impl Layout {
     pub fn read(
-        preorder: Vec<Preordered<Terminal>>,
-        full: Option<TerminalId>,
+        preorder: Vec<Preordered<View>>,
+        full: Option<ViewId>,
     ) -> Result<Layout, String> {
         if preorder.is_empty() {
-            return Err("a layout holds no terminal, and so is kept as no layout".to_owned());
+            return Err("a layout holds no view, and so is kept as no layout".to_owned());
         }
         let tree = Tree::of_preorder(preorder)?;
         if let Some(full) = full {
@@ -145,25 +191,25 @@ impl Layout {
         let (Some(one), Some(other)) = (self.tree(), other.tree()) else {
             return Ok(if self.is_empty() { other } else { self });
         };
-        let owned = |node: Preordered<&Terminal>| match node {
+        let owned = |node: Preordered<&View>| match node {
             Preordered::Split { towards, share } => Preordered::Split { towards, share },
-            Preordered::Pane(terminal) => Preordered::Pane(terminal.clone()),
+            Preordered::Pane(view) => Preordered::Pane(view.clone()),
         };
         let split = Preordered::Split { towards: Towards::Right, share: SHARES / 2 };
         let halves = one.preorder().into_iter().chain(other.preorder()).map(owned);
         let joined = Layout::read(std::iter::once(split).chain(halves).collect(), None)?;
         let both = one.len() + other.len();
-        assert_eq!(joined.len(), both, "a joined layout holds both layouts' terminals");
+        assert_eq!(joined.len(), both, "a joined layout holds both layouts' views");
         Ok(joined)
     }
 
     #[must_use]
-    pub fn tree(&self) -> Option<&Tree<Terminal>> {
+    pub fn tree(&self) -> Option<&Tree<View>> {
         self.0.as_ref().map(|laid| &laid.tree)
     }
 
     #[must_use]
-    pub fn full(&self) -> Option<TerminalId> {
+    pub fn full(&self) -> Option<ViewId> {
         self.0.as_ref().and_then(|laid| laid.full)
     }
 
@@ -177,81 +223,89 @@ impl Layout {
         self.0.is_none()
     }
 
-    pub fn terminals(&self) -> impl Iterator<Item = &Terminal> {
+    pub fn views(&self) -> impl Iterator<Item = &View> {
         self.tree().into_iter().flat_map(Tree::leaves)
     }
 
+    pub fn terminals(&self) -> impl Iterator<Item = &Terminal> {
+        self.views().filter_map(View::terminal)
+    }
+
     #[must_use]
-    pub fn holds(&self, terminal: TerminalId) -> bool {
+    pub fn holds(&self, terminal: ViewId) -> bool {
         self.tree().is_some_and(|tree| tree.holds(terminal))
     }
 
-    pub(super) fn terminal_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
-        self.0.as_mut()?.tree.get_mut(terminal)
+    pub(super) fn terminal_mut(&mut self, terminal: TerminalViewId) -> &mut Terminal {
+        let laid = self.0.as_mut().expect("a layout asked for its terminal is laid");
+        match laid.tree.get_mut(terminal.view()).expect("its layout holds the terminal") {
+            View::Terminal(held) => held,
+            View::Welcome(_) => unreachable!("terminal {terminal} is made only as a terminal"),
+        }
     }
 
     pub(super) fn opened(
         &mut self,
-        terminal: Terminal,
+        view: View,
         placed: Placed,
         size: Size,
     ) -> Result<(), String> {
-        let id = terminal.id;
+        let id = view.id();
         let count = self.len();
         match (&mut self.0, placed) {
             (None, Placed::Alone) => {
-                self.0 = Some(Laid { tree: Tree::one(terminal), full: None });
+                self.0 = Some(Laid { tree: Tree::one(view), full: None });
             },
-            (Some(_), Placed::Alone) => return Err("the layout holds terminals already".to_owned()),
+            (Some(_), Placed::Alone) => return Err("the layout holds views already".to_owned()),
             (None, Placed::Beside { at, .. }) => {
-                return Err(format!("the layout is empty, and so holds no terminal {at}"));
+                return Err(format!("the layout is empty, and so holds no view {at}"));
             },
             (Some(laid), Placed::Beside { at, towards }) => {
                 if !laid.tree.holds(at) {
-                    return Err(format!("the layout holds no terminal {at}"));
+                    return Err(format!("the layout holds no view {at}"));
                 }
                 if laid.tree.len() >= PANES_MAX {
-                    let most = format!("the layout holds {PANES_MAX} terminals, as many as it may");
+                    let most = format!("the layout holds {PANES_MAX} views, as many as it may");
                     return Err(most);
                 }
                 if laid.tree.room(at, towards, id, size).is_none() {
-                    return Err(format!("terminal {at} has no room for another beside it"));
+                    return Err(format!("view {at} has no room for another beside it"));
                 }
-                laid.tree.split(at, towards, terminal, size);
+                laid.tree.split(at, towards, view, size);
                 laid.full = None;
             },
         }
-        assert!(self.holds(id), "terminal {id} is in the layout it opened in");
-        assert_eq!(self.len(), count + 1, "a layout opens one terminal at a time");
+        assert!(self.holds(id), "view {id} is in the layout it opened in");
+        assert_eq!(self.len(), count + 1, "a layout opens one view at a time");
         Ok(())
     }
 
-    pub(super) fn closed(&mut self, terminal: TerminalId) -> Option<TerminalId> {
-        let laid = self.0.as_mut().expect("a closed terminal is in the layout");
-        let heir = match laid.tree.remove(terminal) {
+    pub(super) fn closed(&mut self, view: ViewId) -> Option<ViewId> {
+        let laid = self.0.as_mut().expect("a closed view is in the layout");
+        let heir = match laid.tree.remove(view) {
             Removed::Last => {
                 self.0 = None;
                 None
             },
             Removed::Out { heir, .. } => {
-                if laid.full == Some(terminal) || laid.tree.len() == 1 {
+                if laid.full == Some(view) || laid.tree.len() == 1 {
                     laid.full = None;
                 }
                 Some(heir)
             },
         };
-        assert!(!self.holds(terminal), "terminal {terminal} left its layout");
+        assert!(!self.holds(view), "view {view} left its layout");
         if let Some(heir) = heir {
-            assert!(self.holds(heir), "terminal {heir} took the room of terminal {terminal}");
+            assert!(self.holds(heir), "view {heir} took the room of view {view}");
         }
         heir
     }
 
-    pub(super) fn filled(&mut self, full: Option<TerminalId>) -> Result<(), String> {
+    pub(super) fn filled(&mut self, full: Option<ViewId>) -> Result<(), String> {
         let Some(laid) = &mut self.0 else {
             return match full {
                 None => Ok(()),
-                Some(full) => Err(format!("the layout is empty, and so holds no terminal {full}")),
+                Some(full) => Err(format!("the layout is empty, and so holds no view {full}")),
             };
         };
         if let Some(full) = full {
@@ -263,37 +317,37 @@ impl Layout {
 
     pub(super) fn resized(
         &mut self,
-        terminal: TerminalId,
+        view: ViewId,
         sides: Sides,
         growth: layout::Growth,
         size: Size,
     ) -> Result<(), String> {
-        let laid = self.0.as_mut().expect("a resized terminal is in the layout");
+        let laid = self.0.as_mut().expect("a resized view is in the layout");
         if laid.full.is_some() {
-            return Err("a layout one terminal fills is resized by none".to_owned());
+            return Err("a layout one view fills is resized by none".to_owned());
         }
-        if !laid.tree.resize(terminal, sides, growth, size) {
-            return Err(format!("no border of terminal {terminal} moves that way"));
+        if !laid.tree.resize(view, sides, growth, size) {
+            return Err(format!("no border of view {view} moves that way"));
         }
         Ok(())
     }
 
-    pub(super) fn swapped(&mut self, one: TerminalId, other: TerminalId) -> Result<(), String> {
-        let laid = self.0.as_mut().expect("swapped terminals are in the layout");
+    pub(super) fn swapped(&mut self, one: ViewId, other: ViewId) -> Result<(), String> {
+        let laid = self.0.as_mut().expect("swapped views are in the layout");
         if laid.full.is_some() {
-            return Err("a layout one terminal fills moves none of them".to_owned());
+            return Err("a layout one view fills moves none of them".to_owned());
         }
         laid.tree.swap(one, other);
         Ok(())
     }
 }
 
-fn fills(tree: &Tree<Terminal>, full: TerminalId) -> Result<(), String> {
+fn fills(tree: &Tree<View>, full: ViewId) -> Result<(), String> {
     if !tree.holds(full) {
-        return Err(format!("the layout holds no terminal {full}"));
+        return Err(format!("the layout holds no view {full}"));
     }
     if tree.len() == 1 {
-        return Err("a layout of one terminal shows it whole already".to_owned());
+        return Err("a layout of one view shows it whole already".to_owned());
     }
     Ok(())
 }

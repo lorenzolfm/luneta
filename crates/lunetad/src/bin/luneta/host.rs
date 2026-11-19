@@ -27,7 +27,7 @@ use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Name, ProjectId, TerminalId, WorkstreamId};
+use lunetad::projects::{Name, ProjectId, ViewId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::{Destination, Direction, Directory, Growth};
 use ratatui::backend::CrosstermBackend;
@@ -65,7 +65,7 @@ use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
-use crate::sidebar::{self, Asked, HereAgent, Keys, PaneKey, Place, Reorder, Sidebar};
+use crate::sidebar::{self, Asked, HereAgent, Keys, Listed, PaneKey, Place, Reorder, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
@@ -88,8 +88,8 @@ pub struct Pulled {
 
 #[derive(Debug)]
 enum Doomed {
-    Workstream { workstream: WorkstreamId, seen: Vec<TerminalId> },
-    Project { project: ProjectId, workstreams: Vec<WorkstreamId>, seen: Vec<TerminalId> },
+    Workstream { workstream: WorkstreamId, seen: Vec<ViewId> },
+    Project { project: ProjectId, workstreams: Vec<WorkstreamId>, seen: Vec<ViewId> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +103,8 @@ const NAMING: &str = "menu: luneta names a session already: try again once it ha
 const NAMING_PANICKED: &str = "menu: luneta could not name the session: naming it panicked";
 
 pub const NOT_YET: &str = "luneta does not do that to a workstream yet";
+
+const WELCOME_MENU: &str = "the menu is for terminals: d d closes this welcome view";
 
 const UNSHOWN: [&str; 2] =
     ["No workstream to show yet.", "The menu on a project's row makes one."];
@@ -337,6 +339,7 @@ struct App {
     issues: u64,
     unfiled: issue::Kept,
     pickers: u64,
+    inputs: u64,
     dictations: u64,
     image: images::Going,
     repeats: dictation::Repeats,
@@ -568,6 +571,7 @@ fn run_in(
         issues: 0,
         unfiled: issue::Kept::default(),
         pickers: 0,
+        inputs: 0,
         dictations: 0,
         image: images::Going::default(),
         repeats: dictation::Repeats::of(dictation::KEY),
@@ -1025,6 +1029,15 @@ impl App {
     }
 
     fn input(&mut self, input: Input) {
+        let heard = match &input {
+            Input::Key(key) => key.kind != KeyEventKind::Release,
+            Input::Mouse(mouse) => mouse.kind != MouseEventKind::Moved,
+            Input::Paste(_) | Input::FocusGained | Input::FocusLost => true,
+            Input::Resize(..) => false,
+        };
+        if heard {
+            self.inputs += 1;
+        }
         match input {
             Input::Key(key) => self.key(&key),
             Input::Mouse(mouse) => self.mouse(mouse),
@@ -1127,9 +1140,13 @@ impl App {
             None => {},
         }
         if chord == MENU {
-            let over = match self.sidebar.float_menu() {
-                Ok(()) => Over::Menu,
-                Err(why) => Over::Note(why.to_owned()),
+            let over = if self.right.as_ref().is_some_and(Viewed::welcomes) {
+                Over::Note(WELCOME_MENU.to_owned())
+            } else {
+                match self.sidebar.float_menu() {
+                    Ok(()) => Over::Menu,
+                    Err(why) => Over::Note(why.to_owned()),
+                }
             };
             self.give(Focus { side: self.focus.side, over: Some(over) });
             return;
@@ -1184,7 +1201,7 @@ impl App {
 
     fn key_to_session(&mut self, key: &KeyEvent) {
         if let Some(right) = &mut self.right {
-            right.key(key);
+            right.key(key, self.inputs);
         }
     }
 
@@ -1555,6 +1572,7 @@ impl App {
             Asked::Open { menu, on, whose: Whose::Zellij(_), open } => {
                 zellij::open(menu, &on, open, &self.events);
             },
+            Asked::Welcome { on, session, pane } => self.welcome(&on, &session, pane),
             Asked::NewWorkstream { on, project, folder } => {
                 self.make_workstream(on, folder, move |lunetad, on, folder| {
                     let folder = folder.as_str();
@@ -1727,6 +1745,21 @@ impl App {
                 let _ = events.send(Event::Notice(format!("menu: not closed: {why}")));
             }
         }));
+    }
+
+    fn welcome(&mut self, on: &Machine, session: &Listed, pane: PaneKey) {
+        let Some(key) = session.own_key() else {
+            return self.sidebar.notify(format!("menu: {}", menu::OWN_ONLY));
+        };
+        let held = self.projected.project(on, key).and_then(|project| {
+            let pane = OwnPane::new(project.key, pane.id())?;
+            self.projected.of_pane(on, pane)
+        });
+        let Some((workstream, terminal)) = held else {
+            return self.sidebar.notify(format!("menu: lunetad lists no view {}", pane.id()));
+        };
+        self.go_workstream(on, workstream, Some(terminal));
+        self.shown().welcome();
     }
 
     fn project_open(&mut self, menu: u64, on: &Machine, key: OwnKey, open: &Open) {
@@ -2052,7 +2085,7 @@ impl App {
         &mut self,
         on: &Machine,
         workstream: WorkstreamId,
-        terminal: Option<TerminalId>,
+        terminal: Option<ViewId>,
     ) {
         if let Some(right) = &mut self.right {
             right.go(on, workstream);

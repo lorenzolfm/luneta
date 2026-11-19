@@ -22,7 +22,7 @@ use super::api::{self, mux_client::MuxClient};
 use super::frames::colours;
 use super::TerminalKey;
 use crate::mux::{in_no_pane, Failure, Runs};
-use crate::projects::{Line, Size, TERMINALS_MAX};
+use crate::projects::{Line, Size, VIEWS_MAX};
 use crate::shells::{Doing, Front};
 use crate::{folder, log, Directory};
 
@@ -360,7 +360,7 @@ impl Terminals {
     pub fn typed(&self, pastes: &[(TerminalKey, &Line)]) -> Result<(), Failure> {
         use api::from_viewer::Event;
         assert!(!pastes.is_empty(), "a paste is asked for");
-        assert!(pastes.len() <= TERMINALS_MAX, "no more pastes than terminals");
+        assert!(pastes.len() <= VIEWS_MAX, "no more pastes than terminals");
         let said = |event| api::FromViewer { event: Some(event) };
         let hello = api::Greeting { colours: Some(colours(None, None)), runs_in: None };
         let terminals = pastes.iter().map(|(key, _)| key.said()).collect();

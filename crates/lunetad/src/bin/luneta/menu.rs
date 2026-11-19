@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::said::Said;
-use lunetad::projects::{self, ProjectId, TerminalId, WorkstreamId};
+use lunetad::projects::{self, ProjectId, ViewId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::{Destination, Directory};
 use luneta_protocol::shell::Ending;
@@ -448,7 +448,7 @@ enum Typing {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Renames {
-    Terminal(TerminalId),
+    Terminal(ViewId),
     Workstream(WorkstreamId),
     Project(ProjectId),
 }
@@ -464,7 +464,7 @@ impl Renames {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rename {
-    Terminal(TerminalId, Option<projects::Name>),
+    Terminal(ViewId, Option<projects::Name>),
     Workstream(WorkstreamId, Option<projects::Name>),
     Project(ProjectId, projects::Name),
 }
@@ -634,6 +634,7 @@ enum Offer<'t> {
     Last(&'t PaneRow, Last),
     FixChecks(&'t PaneRow),
     NewView(&'t PaneRow),
+    NewWelcome(&'t PaneRow),
     NewWorkstream(ProjectId),
     NewProject,
     NewMachine,
@@ -661,7 +662,7 @@ pub struct WorkstreamRow {
 pub struct PaneRow {
     pub session: Listed,
     pub pane: PaneKey,
-    pub terminal: Option<TerminalId>,
+    pub terminal: Option<ViewId>,
     pub cwd: Option<String>,
     pub branch: Option<String>,
     pub repository: Option<String>,
@@ -723,6 +724,7 @@ impl Target {
             (Action::ExplainLast, Target::Pane(_, row)) => Offer::Last(row, Last::Explain),
             (Action::FixChecks, Target::Pane(_, row)) => Offer::FixChecks(row),
             (Action::NewView, Target::Pane(_, row)) => Offer::NewView(row),
+            (Action::NewWelcome, Target::Pane(_, row)) => Offer::NewWelcome(row),
             (Action::NewWorkstream, _) => Offer::NewWorkstream(self.project()?.id()),
             (Action::NewProject, _) => Offer::NewProject,
             (Action::NewMachine, _) => Offer::NewMachine,
@@ -1010,6 +1012,7 @@ pub enum Done {
     Ssh(Destination),
     Forget(Destination),
     Workstream(Machine, ProjectId, Directory),
+    Welcome { on: Machine, session: Listed, pane: PaneKey },
     Project { on: Machine, folder: String, name: Option<projects::Name> },
     Rename(Machine, Rename),
 }
@@ -1298,6 +1301,10 @@ impl Menu {
                     stays(stage, Wants::Open { session, pane, cwd, opens })
                 },
                 Err(reason) => wrong(reason),
+            },
+            Offer::NewWelcome(row) => {
+                let on = target.machine().clone();
+                Did::Closed(Done::Welcome { on, session: row.session.clone(), pane: row.pane })
             },
             Offer::NewWorkstream(project) => match target.folder() {
                 Ok(folder) => {
@@ -2543,8 +2550,8 @@ mod tests {
         ProjectRow::of(Listed::new_project("luneta", 3)).unwrap()
     }
 
-    fn terminal() -> TerminalId {
-        TerminalId::of(9).unwrap()
+    fn terminal() -> ViewId {
+        ViewId::of(9).unwrap()
     }
 
     fn own_row() -> PaneRow {
@@ -2637,6 +2644,7 @@ mod tests {
             [
                 "─ New ─────────── luneta/main ─",
                 " v  new view",
+                " h  new welcome view",
                 " w  new workstream",
                 " p  new project",
                 " m  new machine",
@@ -3285,8 +3293,9 @@ mod tests {
         let (session, at) = (project().listed().clone(), PaneKey::terminal(4));
         assert_eq!(wants, Wants::Open { session, pane: at, cwd: main_dir(), opens });
         let (menu, _) = stays(opened(pane.clone(), Some('n')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..5], [
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..6], [
             " v  new view",
+            " h  new welcome view",
             " w  new workstream",
             " p  new project",
             " m  new machine",
@@ -3833,8 +3842,8 @@ mod tests {
         Act::Workstream { session, whose, workstream: workstream(), panes, seen }
     }
 
-    fn workstream_seen() -> Vec<TerminalId> {
-        vec![TerminalId::of(4).unwrap(), TerminalId::of(5).unwrap()]
+    fn workstream_seen() -> Vec<ViewId> {
+        vec![ViewId::of(4).unwrap(), ViewId::of(5).unwrap()]
     }
 
     #[test]

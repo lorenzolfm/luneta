@@ -13,10 +13,11 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Closing, Dir, Holds, Id, Line, Name, Project, Projects};
-use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, TerminalId, Used};
+use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, TerminalViewId, Used};
+use super::{View, ViewId};
 use super::{Layout, Workstream, WorkstreamId, Worktree};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
-use super::{SPOT_LOOK, TERMINALS_MAX, WORKSTREAMS_MAX};
+use super::{SPOT_LOOK, VIEWS_MAX, WORKSTREAMS_MAX};
 use crate::agent::Harness;
 use crate::api;
 use crate::core::Command;
@@ -35,7 +36,7 @@ const SAID_TRIES: u32 = 20;
 
 const SAID_PAUSE: Duration = Duration::from_millis(10);
 
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 
 const WITHOUT_LAYOUTS: u32 = 1;
 
@@ -46,6 +47,8 @@ const WITHOUT_NAMES_OR_USE: u32 = 3;
 const UNROOTED: u32 = 5;
 
 const LAID_AS_VIEW: u32 = 6;
+
+const WITHOUT_WELCOMES: u32 = 7;
 
 const CHAR_BYTES_MAX: usize = 4;
 
@@ -65,7 +68,7 @@ const FILE_BYTES_MAX: usize = 32 * 1024 * 1024;
 
 const _: () = assert!(
     (PROJECTS_MAX + WORKSTREAMS_MAX) * ENTRY_BYTES_MAX
-        + TERMINALS_MAX * TERMINAL_BYTES_MAX
+        + VIEWS_MAX * TERMINAL_BYTES_MAX
         + WORKSTREAMS_MAX * NODES_MAX * SPLIT_BYTES_MAX
         <= FILE_BYTES_MAX
 );
@@ -177,6 +180,13 @@ struct KeptLayout {
 enum KeptNode {
     Split(KeptSplit),
     Terminal(KeptTerminal),
+    Welcome(KeptWelcome),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptWelcome {
+    id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -373,14 +383,18 @@ impl Store {
         }
     }
 
-    pub fn fresh(&self) -> Result<TerminalId, Failed> {
+    pub fn fresh(&self) -> Result<ViewId, Failed> {
         match &self.keeping {
             Keeping::Kept { projects, .. } => {
                 let fresh = projects.fresh(&mut Id::random);
-                fresh.map(TerminalId::new).map_err(Failed::Refused)
+                fresh.map(ViewId::new).map_err(Failed::Refused)
             },
             Keeping::Unkept(why) => Err(Failed::NotKept(why.clone())),
         }
+    }
+
+    pub fn fresh_terminal(&self) -> Result<TerminalViewId, Failed> {
+        self.fresh().map(TerminalViewId::new)
     }
 
     pub fn change(&mut self, change: Change) -> Result<Option<Made>, Failed> {
@@ -663,8 +677,8 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     if workstreams().count() > WORKSTREAMS_MAX {
         return Err(format!("it holds over {WORKSTREAMS_MAX} workstreams"));
     }
-    if nodes().filter(|node| matches!(node, KeptNode::Terminal(_))).count() > TERMINALS_MAX {
-        return Err(format!("it holds over {TERMINALS_MAX} terminals"));
+    if nodes().filter(|node| !matches!(node, KeptNode::Split(_))).count() > VIEWS_MAX {
+        return Err(format!("it holds over {VIEWS_MAX} views"));
     }
     if version <= LAID_AS_VIEW && workstreams().any(|it| it.layout.is_some()) {
         return Err(format!("it is of version {version}, which keeps layouts as \"view\""));
@@ -678,6 +692,9 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     let unrun = |node: &KeptNode| {
         matches!(node, KeptNode::Terminal(KeptTerminal { runs: KeptRuns::Unrun(_), .. }))
     };
+    if version <= WITHOUT_WELCOMES && nodes().any(|it| matches!(it, KeptNode::Welcome(_))) {
+        return Err(format!("it is of version {version}, which holds no welcome"));
+    }
     if version <= WITHOUT_UNRUN && nodes().any(unrun) {
         return Err(format!("it is of version {version}, which holds no line left unrun"));
     }
@@ -723,18 +740,18 @@ fn root_projects(
     root: &mut impl FnMut(&Dir) -> Result<Option<Spot>, String>,
     draw: &mut impl FnMut() -> io::Result<Id>,
 ) -> Result<Vec<Project>, String> {
-    let terminal_count = |workstreams: &mut dyn Iterator<Item = &Workstream>| -> usize {
+    let view_count = |workstreams: &mut dyn Iterator<Item = &Workstream>| -> usize {
         workstreams.map(|it| it.layout.len()).sum()
     };
-    let terminals: usize =
-        unrooted.iter().map(|it| terminal_count(&mut it.workstreams.iter().map(|(_, it)| it))).sum();
+    let views: usize =
+        unrooted.iter().map(|it| view_count(&mut it.workstreams.iter().map(|(_, it)| it))).sum();
     let mut taken: BTreeSet<Id> = BTreeSet::new();
     for project in &unrooted {
         let workstreams = project.workstreams.iter().map(|(_, it)| it);
         let layouts = workstreams.clone().map(|it| &it.layout);
-        let terminals = layouts.flat_map(|layout| layout.terminals().map(|it| it.id().id()));
+        let views = layouts.flat_map(|layout| layout.views().map(|it| it.id().id()));
         let ids = std::iter::once(project.id.id()).chain(workstreams.map(|it| it.id.id()));
-        for id in ids.chain(terminals) {
+        for id in ids.chain(views) {
             if !taken.insert(id) {
                 return Err(format!("the id {id} comes twice"));
             }
@@ -780,8 +797,8 @@ fn root_projects(
     }
     let shaped = gathered.into_iter().map(|it| shape(it, &mut fresh));
     let projects: Vec<Project> = shaped.collect::<Result<_, _>>()?;
-    let rooted: usize = projects.iter().map(|it| terminal_count(&mut it.workstreams())).sum();
-    assert_eq!(rooted, terminals, "rooting keeps every terminal");
+    let rooted: usize = projects.iter().map(|it| view_count(&mut it.workstreams())).sum();
+    assert_eq!(rooted, views, "rooting keeps every view");
     Ok(projects)
 }
 
@@ -893,14 +910,14 @@ fn one_of(
 }
 
 fn join(held: &mut Workstream, other: Workstream) -> Result<(), String> {
-    let terminals = held.layout.len() + other.layout.len();
+    let views = held.layout.len() + other.layout.len();
     let layout = std::mem::take(&mut held.layout).joined(other.layout)?;
     if other.used > held.used {
         *held = Workstream { layout, ..other };
     } else {
         held.layout = layout;
     }
-    assert_eq!(held.layout.len(), terminals, "workstreams joined keep every terminal");
+    assert_eq!(held.layout.len(), views, "workstreams joined keep every view");
     Ok(())
 }
 
@@ -1033,7 +1050,12 @@ impl KeptLayout {
             KeptNode::Split(KeptSplit { towards, share }) => {
                 Ok(Preordered::Split { towards: towards.read(), share })
             },
-            KeptNode::Terminal(terminal) => terminal.read().map(Preordered::Pane),
+            KeptNode::Terminal(terminal) => {
+                terminal.read().map(|terminal| Preordered::Pane(View::Terminal(terminal)))
+            },
+            KeptNode::Welcome(KeptWelcome { id }) => {
+                id.parse().map(|id| Preordered::Pane(View::Welcome(id)))
+            },
         });
         Layout::read(tree.collect::<Result<_, String>>()?, full)
     }
@@ -1043,7 +1065,12 @@ impl KeptLayout {
             Preordered::Split { towards, share } => {
                 KeptNode::Split(KeptSplit { towards: KeptTowards::of(towards), share })
             },
-            Preordered::Pane(terminal) => KeptNode::Terminal(KeptTerminal::of(terminal)),
+            Preordered::Pane(View::Terminal(terminal)) => {
+                KeptNode::Terminal(KeptTerminal::of(terminal))
+            },
+            Preordered::Pane(View::Welcome(id)) => {
+                KeptNode::Welcome(KeptWelcome { id: id.to_string() })
+            },
         });
         let full = layout.full().map(|full| full.to_string());
         Some(KeptLayout { full, tree: tree.collect() })
@@ -1068,7 +1095,7 @@ impl KeptTowards {
 
 impl KeptTerminal {
     fn read(self) -> Result<Terminal, String> {
-        let id: TerminalId = self.id.parse()?;
+        let id = TerminalViewId::new(self.id.parse()?);
         let why = |why: String| format!("terminal {id}: {why}");
         let folder = Dir::parse(&self.folder).map_err(why)?;
         let name = self.name.as_deref().map(Name::parse).transpose().map_err(why)?;
@@ -1323,7 +1350,7 @@ mod tests {
         let change = Change::AddProject { spot: alone("/home/me/Vault"), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
         let want = r#"{
-  "version": 7,
+  "version": 8,
   "projects": [
     {
       "id": "0000000000000001",
@@ -1358,9 +1385,11 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        let six = want.replace(r#""version": 7"#, r#""version": 6"#);
-        assert_eq!(parse(&six), Ok(projects.clone()));
-        let before = want.replace(r#""version": 7"#, r#""version": 5"#);
+        for before in [6, 7] {
+            let before = want.replace(r#""version": 8"#, &format!(r#""version": {before}"#));
+            assert_eq!(parse(&before), Ok(projects.clone()));
+        }
+        let before = want.replace(r#""version": 8"#, r#""version": 5"#);
         assert!(parse(&before).unwrap_err().contains("unknown field `holds`"));
     }
 
@@ -1374,7 +1403,7 @@ mod tests {
         (projects, _) = projects.changed(change, &mut draw).unwrap();
         let workstream = WorkstreamId::new(ids[1]);
         let size = super::super::Size::of(80, 24).unwrap();
-        let [shell, vim, agent] = [4, 5, 6].map(|id| TerminalId::of(id).unwrap());
+        let [shell, vim, agent] = [4, 5, 6].map(|id| ViewId::of(id).unwrap());
         let runs = [
             (shell, Runs::Shell, Placed::Alone),
             (vim, Runs::Command(Line::parse("vim notes").unwrap()), Placed::Beside {
@@ -1391,14 +1420,14 @@ mod tests {
             ),
         ];
         for (id, runs, placed) in runs {
-            let terminal = Terminal::new(id, dir("/w/luneta/top"), runs);
-            let open = Change::Open { workstream, terminal, placed, size };
+            let terminal = Terminal::new(TerminalViewId::new(id), dir("/w/luneta/top"), runs);
+            let open = Change::Open { workstream, view: View::Terminal(terminal), placed, size };
             (projects, _) = projects.changed(open, &mut draw).unwrap();
         }
         let fill = Change::Fill { workstream, full: Some(vim) };
         (projects, _) = projects.changed(fill, &mut draw).unwrap();
         let want = r#"{
-  "version": 7,
+  "version": 8,
   "projects": [
     {
       "id": "0000000000000001",
@@ -1463,20 +1492,43 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        let viewed = want.replace(r#""version": 7"#, r#""version": 6"#);
+        let seven = want.replace(r#""version": 8"#, r#""version": 7"#);
+        assert_eq!(parse(&seven), Ok(projects.clone()));
+        let viewed = want.replace(r#""version": 8"#, r#""version": 6"#);
         let viewed = viewed.replace(r#""layout": {"#, r#""view": {"#);
         assert_eq!(parse(&viewed), Ok(projects));
-        let unviewed = want.replace(r#""version": 7"#, r#""version": 6"#);
+        let unviewed = want.replace(r#""version": 8"#, r#""version": 6"#);
         let refused = "it is of version 6, which keeps layouts as \"view\"";
         assert_eq!(parse(&unviewed), Err(refused.to_owned()));
         let relaid = want.replace(r#""layout": {"#, r#""view": {"#);
-        let refused = "it is of version 7, which keeps layouts as \"layout\"";
+        let refused = "it is of version 8, which keeps layouts as \"layout\"";
         assert_eq!(parse(&relaid), Err(refused.to_owned()));
         let before = r#"{"version": 1, "projects": [{"id": "0000000000000001", "name": "luneta",
             "dir": "/w/luneta", "workstreams": [{"id": "0000000000000002", "below": "top",
             "view": {"tree": [{"terminal": {"id": "0000000000000004", "folder": "/w/luneta/top",
             "runs": "shell"}}]}}]}]}"#;
         assert_eq!(parse(before), Err("it is of version 1, which holds no layouts".to_owned()));
+    }
+
+    #[test]
+    fn a_welcome_view_is_kept_by_its_id_alone_and_only_from_version_8() {
+        let text = |version: u32| {
+            format!(
+                r#"{{"version": {version}, "projects": [{{"id": "0000000000000001", "name": "a",
+                "dir": "/a", "holds": {{"clone": [{{"id": "0000000000000002", "worktree": "b",
+                "layout": {{"tree": [{{"split": {{"towards": "right", "share": 500000}}}},
+                {{"terminal": {{"id": "0000000000000003", "folder": "/a/b", "runs": "shell"}}}},
+                {{"welcome": {{"id": "0000000000000004"}}}}]}}}}]}}}}]}}"#
+            )
+        };
+        let projects = parse(&text(8)).unwrap();
+        let (_, workstream) = projects.find(WorkstreamId::of(2).unwrap()).unwrap();
+        let views: Vec<&View> = workstream.layout().views().collect();
+        assert!(matches!(views[..], [View::Terminal(_), View::Welcome(id)] if id.get() == 4));
+        assert_eq!(parse(&written(&projects)), Ok(projects.clone()));
+        assert!(written(&projects).contains(r#""welcome": {"#));
+        let refused = "it is of version 7, which holds no welcome";
+        assert_eq!(parse(&text(7)), Err(refused.to_owned()));
     }
 
     #[test]
@@ -1585,6 +1637,19 @@ mod tests {
     }
 
     #[test]
+    fn a_welcome_view_counts_toward_the_views_a_file_may_hold() {
+        let welcome = |at: usize| format!(r#"{{"welcome": {{"id": "{:016x}"}}}}"#, at + 3);
+        let many: Vec<String> = (0..=VIEWS_MAX).map(welcome).collect();
+        let text = format!(
+            r#"{{"version": 8, "projects": [{{"id": "0000000000000001", "name": "a", "dir": "/a",
+            "holds": {{"clone": [{{"id": "0000000000000002", "worktree": "b",
+            "layout": {{"tree": [{}]}}}}]}}}}]}}"#,
+            many.join(", ")
+        );
+        assert_eq!(parse(&text), Err(format!("it holds over {VIEWS_MAX} views")));
+    }
+
+    #[test]
     fn a_line_left_unrun_is_kept_apart_from_a_command_and_only_from_version_3() {
         let text = |version: u32, runs: &str| {
             format!(
@@ -1595,7 +1660,7 @@ mod tests {
             )
         };
         let unrun = parse(&text(3, r#"{"unrun": "make test"}"#)).unwrap();
-        let (_, held) = unrun.holding(TerminalId::of(3).unwrap()).unwrap();
+        let (_, held) = unrun.holding_terminal(ViewId::of(3).unwrap()).unwrap();
         assert_eq!(held.runs(), &Runs::Unrun(Line::parse("make test").unwrap()));
         assert!(written(&unrun).contains(r#""unrun": "make test""#), "{}", written(&unrun));
         assert_eq!(parse(&written(&unrun)), Ok(unrun.clone()));
@@ -1618,7 +1683,7 @@ mod tests {
         };
         let (name, used) = (r#""name": "tests","#, r#", "used_millis": 1763460000123"#);
         let kept = parse(&text(4, name, used)).unwrap();
-        let (workstream, held) = kept.holding(TerminalId::of(3).unwrap()).unwrap();
+        let (workstream, held) = kept.holding_terminal(ViewId::of(3).unwrap()).unwrap();
         assert_eq!(held.name().map(Name::as_str), Some("tests"));
         assert_eq!(workstream.used(), Some(Used::of_millis(1_763_460_000_123)));
         let again = written(&kept);
@@ -1641,7 +1706,7 @@ mod tests {
         let project = r#"{"id": "0000000000000001", "name": "a", "dir": "/a"}"#;
         let refused = [
             ("{", "EOF"),
-            (r#"{"version": 8, "projects": []}"#, "version 8, and this lunetad reads only 1 to 7"),
+            (r#"{"version": 9, "projects": []}"#, "version 9, and this lunetad reads only 1 to 8"),
             (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),
             (
@@ -1689,13 +1754,13 @@ mod tests {
                 "view": {"full": "0000000000000003",
                 "tree": [{"terminal": {"id": "0000000000000003", "folder": "/a",
                 "runs": "shell"}}]}}]}]}"#,
-                "a layout of one terminal shows it whole already",
+                "a layout of one view shows it whole already",
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
                 "workstreams": [{"id": "0000000000000002", "below": "b",
                 "view": {"tree": []}}]}]}"#,
-                "workstream 0000000000000002's layout: a layout holds no terminal",
+                "workstream 0000000000000002's layout: a layout holds no view",
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
@@ -1813,9 +1878,11 @@ mod tests {
         let Some(Made::Workstream(workstream)) = store.change(add).unwrap() else {
             panic!("/a/b is made");
         };
-        let terminal = Terminal::new(TerminalId::of(7).unwrap(), dir("/a"), Runs::Shell);
+        let terminal = TerminalViewId::new(ViewId::of(7).unwrap());
+        let terminal = Terminal::new(terminal, dir("/a"), Runs::Shell);
         let (placed, size) = (Placed::Alone, super::super::Size::of(80, 24).unwrap());
-        store.change(Change::Open { workstream, terminal, placed, size }).unwrap();
+        let view = View::Terminal(terminal);
+        store.change(Change::Open { workstream, view, placed, size }).unwrap();
         let written = fs::read_to_string(&file).unwrap();
         heard(&commands);
 
@@ -1924,10 +1991,10 @@ mod tests {
             panic!("/a/b is made");
         };
         let size = super::super::Size::of(80, 24).unwrap();
-        let [one, two] = [store.fresh().unwrap(), TerminalId::of(u64::MAX).unwrap()];
+        let [one, two] = [store.fresh().unwrap(), ViewId::of(u64::MAX).unwrap()];
         let opened = |id, placed| {
-            let terminal = Terminal::new(id, dir("/a"), Runs::Shell);
-            Change::Open { workstream, terminal, placed, size }
+            let terminal = Terminal::new(TerminalViewId::new(id), dir("/a"), Runs::Shell);
+            Change::Open { workstream, view: View::Terminal(terminal), placed, size }
         };
         store.change(opened(one, Placed::Alone)).unwrap();
         let beside = Placed::Beside { at: one, towards: Towards::Right };

@@ -5,13 +5,13 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::vte::ansi::CursorShape;
-use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use lunetad::folder;
 use lunetad::mux::own::api::{self, typed};
 use lunetad::mux::own::frames::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Size, TerminalId, WorkstreamId};
+use lunetad::projects::{Size, ViewId, WorkstreamId};
 use lunetad::{
     Asked, Beside, Direction, Found, Heard, Laid, Pane, Rect as Placed, Show, Where,
 };
@@ -38,6 +38,11 @@ const LOOKING: &str = "looking for it in luneta-mux";
 
 const HERE: &str = "luneta runs here";
 
+const WELCOME: [&str; 4] =
+    ["Welcome", "", "This view runs no terminal.", "d d  close it   Ctrl hjkl  another view"];
+
+const CLOSE: char = 'd';
+
 #[must_use]
 pub fn layout_size(columns: NonZeroU16, rows: NonZeroU16) -> Size {
     let rows = rows.get().saturating_sub(TAB_BAR_ROWS).max(1);
@@ -55,7 +60,7 @@ pub struct Tab {
 enum Moused {
     Nothing,
     Go(WorkstreamId),
-    Focus(TerminalId),
+    Focus(ViewId),
     Sent(TerminalKey, api::Mouse),
 }
 
@@ -77,7 +82,15 @@ struct Layout {
     screens: BTreeMap<TerminalKey, Screen>,
     pointer: Pointer,
     tabs: Vec<Tab>,
-    titles: BTreeMap<TerminalId, String>,
+    titles: BTreeMap<ViewId, String>,
+    closing: Closing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Closing {
+    Unarmed,
+    Armed { view: ViewId, input: u64 },
+    Closed,
 }
 
 impl Layout {
@@ -90,6 +103,7 @@ impl Layout {
             pointer: Pointer::Free,
             tabs: Vec::new(),
             titles: BTreeMap::new(),
+            closing: Closing::Unarmed,
         }
     }
 
@@ -97,8 +111,41 @@ impl Layout {
         self.laid.as_ref()
     }
 
-    fn focused(&self) -> Option<TerminalId> {
-        self.laid()?.focused().map(|pane| pane.terminal)
+    fn focused(&self) -> Option<ViewId> {
+        self.laid()?.focused().map(|pane| pane.view)
+    }
+
+    fn welcomes(&self) -> bool {
+        self.laid().and_then(Laid::focused).is_some_and(|pane| pane.found == Found::Welcome)
+    }
+
+    fn closes(&mut self, key: &KeyEvent, input: u64) -> Option<ViewId> {
+        assert!(self.welcomes(), "only a welcome view is closed by its keys");
+        let focused = self.focused().expect("a welcome view welcomes when focused");
+        let closing = std::mem::replace(&mut self.closing, Closing::Unarmed);
+        let pressed = key.kind == KeyEventKind::Press && key.modifiers.is_empty();
+        if !pressed || key.code != KeyCode::Char(CLOSE) {
+            return None;
+        }
+        let next = |armed: u64| armed.checked_add(1) == Some(input);
+        let twice = matches!(closing, Closing::Armed { view, input } if view == focused && next(input));
+        if twice {
+            self.closing = Closing::Closed;
+            return Some(focused);
+        }
+        self.closing = Closing::Armed { view: focused, input };
+        None
+    }
+
+    fn held_after_close(&mut self, key: &KeyEvent) -> bool {
+        if self.closing != Closing::Closed {
+            return false;
+        }
+        let held = key.kind == KeyEventKind::Repeat && key.code == KeyCode::Char(CLOSE);
+        if !held {
+            self.closing = Closing::Unarmed;
+        }
+        held
     }
 
     fn focused_key(&self) -> Option<TerminalKey> {
@@ -127,8 +174,11 @@ impl Layout {
         if laid.workstream() != self.workstream {
             return false;
         }
-        if self.focused() != laid.focused().map(|pane| pane.terminal) {
+        if self.focused() != laid.focused().map(|pane| pane.view) {
             self.pointer = Pointer::Free;
+            if matches!(self.closing, Closing::Armed { .. }) {
+                self.closing = Closing::Unarmed;
+            }
         }
         let empty = laid.is_empty();
         self.laid = Some(laid);
@@ -226,7 +276,7 @@ impl Layout {
             .drawn()
             .into_iter()
             .find(|(_, placed)| pane_rect(Rect::default(), *placed).contains(spot))
-            .map(|(pane, _)| pane.terminal);
+            .map(|(pane, _)| pane.view);
         if down
             && let Some(under) = under
             && Some(under) != self.focused()
@@ -346,10 +396,10 @@ impl Layout {
         let pointed = hover.and_then(|at| self.pointed(at));
         let mut cursor = None;
         for (pane, placed) in self.drawn() {
-            let mine = Some(pane.terminal) == focused;
+            let mine = Some(pane.view) == focused;
             let outer = pane_rect(panes, placed);
             let colour = if mine { gruvbox::GREEN } else { gruvbox::GREY };
-            let title = self.titles.get(&pane.terminal).map_or("", String::as_str);
+            let title = self.titles.get(&pane.view).map_or("", String::as_str);
             border(buffer, panes, outer, title, Style::new().fg(colour));
             let seen = screen_rect(outer).intersection(panes);
             if seen.is_empty() {
@@ -369,6 +419,13 @@ impl Layout {
                 },
                 Found::Lost => LOST,
                 Found::Looking => LOOKING,
+                Found::Welcome => {
+                    let style = Style::new().fg(if mine { gruvbox::GREEN } else { gruvbox::GREY });
+                    for (line, y) in WELCOME.iter().zip(seen.top()..seen.bottom()) {
+                        buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
+                    }
+                    continue;
+                },
             };
             let style = Style::new().fg(gruvbox::GREY);
             buffer.set_stringn(seen.x, seen.y, said, usize::from(seen.width), style);
@@ -497,8 +554,12 @@ impl Viewed {
     }
 
     #[must_use]
-    pub fn focused(&self) -> Option<TerminalId> {
+    pub fn focused(&self) -> Option<ViewId> {
         self.layout.focused()
+    }
+
+    pub fn welcomes(&self) -> bool {
+        self.layout.welcomes()
     }
 
     pub fn heard(&mut self, heard: Heard) -> Heeded {
@@ -658,12 +719,17 @@ impl Viewed {
         self.ask(Asked::Open { beside: Beside::Largest, argv });
     }
 
+    pub fn welcome(&mut self) {
+        self.opened.insert(self.layout.workstream);
+        self.ask(Asked::Welcome);
+    }
+
     pub fn open_beside_focused(&mut self, argv: Vec<String>) {
         self.opened.insert(self.layout.workstream);
         self.ask(Asked::Open { beside: Beside::Focused, argv });
     }
 
-    pub fn tabs(&mut self, tabs: Vec<Tab>, titles: BTreeMap<TerminalId, String>) {
+    pub fn tabs(&mut self, tabs: Vec<Tab>, titles: BTreeMap<ViewId, String>) {
         self.layout.tabs = tabs;
         self.layout.titles = titles;
     }
@@ -691,8 +757,17 @@ impl Viewed {
         }
     }
 
-    pub fn key(&mut self, key: &KeyEvent) {
+    pub fn key(&mut self, key: &KeyEvent, input: u64) {
         self.unselect();
+        if self.layout.held_after_close(key) {
+            return;
+        }
+        if self.layout.welcomes() {
+            if let Some(view) = self.layout.closes(key, input) {
+                self.ask(Asked::Close(view));
+            }
+            return;
+        }
         if let Some(key) = key_said(key) {
             self.type_focused(typed::Event::Key(key));
         }
@@ -799,8 +874,8 @@ mod tests {
         WorkstreamId::of(id).unwrap()
     }
 
-    fn terminal(id: u64) -> TerminalId {
-        TerminalId::of(id).unwrap()
+    fn terminal(id: u64) -> ViewId {
+        ViewId::of(id).unwrap()
     }
 
     fn pane(terminal: u64, rect: (u32, u32, u32, u32), found: Option<u32>) -> show_response::Pane {
@@ -811,7 +886,7 @@ mod tests {
             None => Said::Lost(()),
         };
         show_response::Pane {
-            terminal,
+            view: terminal,
             rect: Some(show_response::Rect { column, row, columns, rows }),
             found: Some(found),
         }
@@ -1015,10 +1090,66 @@ mod tests {
 
     fn laid_in(id: u64, panes: Vec<show_response::Pane>) -> Heard {
         use show_response::laid::Shown as Said;
-        let shown = panes.first().map(|pane| Said::Tiled(pane.terminal));
+        let shown = panes.first().map(|pane| Said::Tiled(pane.view));
         let size = Some(show_request::Size { columns: 20, rows: 4 });
         let said = show_response::Laid { workstream: id, size, panes, shown };
         Heard::Laid(Laid::heard(said).unwrap())
+    }
+
+    #[test]
+    fn d_twice_in_a_row_closes_the_welcome_view_and_anything_between_starts_over() {
+        use show_response::pane::Found as Said;
+        let welcome = |at: (u32, u32, u32, u32)| {
+            let mut it = pane(12, at, None);
+            it.found = Some(Said::Welcome(()));
+            it
+        };
+        let panes = || vec![pane(11, (0, 0, 10, 4), Some(1)), welcome((10, 0, 10, 4))];
+        let mut layout = Layout::new(workstream(1), None);
+        assert!(!layout.laid_out(laid(panes(), 12, false)));
+        let typed = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let d = typed(KeyCode::Char(CLOSE));
+        let welcome = Some(ViewId::of(12).unwrap());
+        assert_eq!(layout.closes(&d, 1), None);
+        assert_eq!(layout.closes(&d, 2), welcome, "d d closes it, by its id");
+        assert_eq!(layout.closes(&d, 3), None);
+        assert_eq!(layout.closes(&typed(KeyCode::Char('x')), 4), None);
+        assert_eq!(layout.closes(&d, 5), None, "another key between the two starts over");
+        let ctrl_d = KeyEvent::new(KeyCode::Char(CLOSE), KeyModifiers::CONTROL);
+        assert_eq!(layout.closes(&ctrl_d, 6), None);
+        assert_eq!(layout.closes(&d, 7), None, "Ctrl d is no d");
+        assert!(!layout.laid_out(laid(panes(), 11, false)));
+        assert!(!layout.laid_out(laid(panes(), 12, false)));
+        assert_eq!(layout.closes(&d, 8), None, "a focus gone elsewhere and back starts over");
+        assert_eq!(layout.closes(&d, 9), welcome);
+        assert_eq!(layout.closes(&d, 10), None);
+        let elsewhere = "an input luneta takes itself between the two starts over";
+        assert_eq!(layout.closes(&d, 12), None, "{elsewhere}");
+        assert_eq!(layout.closes(&d, 13), welcome);
+    }
+
+    #[test]
+    fn a_held_d_closes_no_welcome_view_and_after_d_d_reaches_no_view() {
+        use show_response::pane::Found as Said;
+        let mut welcome = pane(12, (10, 0, 10, 4), None);
+        welcome.found = Some(Said::Welcome(()));
+        let panes = || vec![pane(11, (0, 0, 10, 4), Some(1)), welcome];
+        let mut layout = Layout::new(workstream(1), None);
+        layout.laid_out(laid(panes(), 12, false));
+        let kind = |kind| KeyEvent::new_with_kind(KeyCode::Char(CLOSE), KeyModifiers::NONE, kind);
+        let (d, held) = (kind(KeyEventKind::Press), kind(KeyEventKind::Repeat));
+        assert_eq!(layout.closes(&d, 1), None);
+        for input in 2..6 {
+            assert!(!layout.held_after_close(&held));
+            assert_eq!(layout.closes(&held, input), None, "a held d is no d d");
+        }
+        assert_eq!(layout.closes(&d, 6), None);
+        assert_eq!(layout.closes(&d, 7), Some(ViewId::of(12).unwrap()));
+        assert!(!layout.laid_out(laid(vec![pane(11, (0, 0, 20, 4), Some(1))], 11, false)));
+        assert!(layout.held_after_close(&held), "the d held after the close is dropped");
+        assert!(layout.held_after_close(&held));
+        assert!(!layout.held_after_close(&d), "a d pressed again reaches the terminal");
+        assert!(!layout.held_after_close(&held));
     }
 
     #[test]
