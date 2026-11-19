@@ -6,7 +6,7 @@ in
 {
   inherit name;
   usage = "[--mux]";
-  help = "take dev install's build out of ~/.cargo/bin and stop its lunetad; --mux luneta-mux too";
+  help = "take dev install's build out of ~/.cargo/bin and end the lunetad that runs; --mux luneta-mux too";
   inherit (installed) tools;
   inheritPath = true;
   text = ''
@@ -15,22 +15,38 @@ in
     if [ -d "$bin" ]; then
       bin="$(cd "$bin" && pwd -P)"
     fi
+    if [ -d "$builds" ]; then
+      builds="$(cd "$builds" && pwd -P)"
+      exec 9>"$builds/.lock"
+      flock 9
+    fi
+
     removed=()
-    for ((index = ''${#programs[@]} - 1; index >= 0; index--)); do
-      program="''${programs[index]}"
-      if [ -e "$bin/$program" ]; then
+    for program in "''${programs[@]}"; do
+      if [ "$(readlink "$bin/$program")" = "$builds/current/$program" ]; then
         rm -f "$bin/$program"
         removed+=("$program")
       fi
     done
     echo "dev uninstall: took ''${removed[*]:-nothing} out of $bin" >&2
 
-    mapfile -t daemons < <(processes | awk -v program="$bin/lunetad" '$2 == program { print $1 }')
-    wait "$!"
-    if [ "''${#daemons[@]}" -gt 0 ]; then
-      echo "dev uninstall: stopping lunetad (pid ''${daemons[*]}), so the next luneta starts its own" >&2
-      stop "''${daemons[@]}"
+    luneta="$builds/current/luneta"
+    if [ -f "$luneta" ]; then
+      rm -f "$builds/current/lunetad" "$builds/current/luneta-mux"
+      info "$luneta"
+      case "$ran" in
+        0)
+          echo "dev uninstall: ending lunetad $build (pid $pid), so the next luneta starts its own" >&2
+          end_daemon
+          ;;
+        5) ;;
+        *)
+          echo "dev uninstall: luneta info: ''${said#luneta: }" >&2
+          exit 1
+          ;;
+      esac
     fi
+    rm -rf "$builds"
 
     if [ -n "$mux" ]; then
       end_mux
