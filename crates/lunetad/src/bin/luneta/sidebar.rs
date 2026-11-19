@@ -88,6 +88,7 @@ const NEW: &str = "•";
 const UNFOLDED: &str = "▾";
 const FOLDED: &str = "▸";
 const RULE: &str = "─";
+const MACHINE_RULE: &str = "═";
 const MISSING: &str = " missing";
 const NO_PROJECTS: &str = "no projects";
 const COMPUTER: &str = "\u{f108}";
@@ -571,12 +572,12 @@ enum Row {
     Machine {
         machine: Machine,
         name: String,
-        stands: Stands,
+        away: Option<Away>,
+        heads: Heads,
     },
     Project {
         machine: Machine,
         project: ProjectRow,
-        tag: Option<Tag>,
         hits: Vec<usize>,
         under: Under,
         here: bool,
@@ -614,16 +615,10 @@ enum Row {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Stands {
-    Away(Away),
-    Empty,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Tag {
-    name: String,
-    away: Option<Away>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Heads {
+    Nothing,
+    Projects { folded: bool, here: bool, waiting: usize, dot: bool, busy: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -723,8 +718,9 @@ impl Row {
 
     fn stops(&self) -> bool {
         match self {
+            Row::Machine { heads: Heads::Projects { folded, .. }, .. } => *folded,
             Row::Project { under, .. } | Row::Worktree { under, .. } => *under != Under::Rows,
-            Row::Machine { .. } | Row::Pane { .. } => true,
+            Row::Machine { heads: Heads::Nothing, .. } | Row::Pane { .. } => true,
         }
     }
 }
@@ -1380,6 +1376,7 @@ fn spanned_rows<T>(spans: &[(T, Range<usize>)]) -> Vec<Range<usize>> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Folding {
+    Machine,
     Project(ProjectId),
     Worktree(WorktreeId),
 }
@@ -2117,7 +2114,6 @@ impl Sidebar {
         let mut due: Option<SystemTime> = None;
         let listed = machines(host, &self.shelves);
         let unlisted_machines = listed.left_out;
-        let tagged = !listed.others.is_empty();
         let unlisted = self.shelves.iter().map(|shelf| shelf.unlisted).sum();
         let (term, seek) = match &mut self.search {
             Some(Search::Typed { term, seek }) => (Some(term.as_str()), std::mem::take(seek)),
@@ -2142,21 +2138,21 @@ impl Sidebar {
                 Machine::Remote(destination) => destination.to_string(),
             };
             let projects = shelf(&self.shelves, &machine);
-            let (heard, lost) = match reached {
+            let (heard, away) = match reached {
                 Ok(heard) => (Some(heard), None),
-                Err(lost) => (None, Some(lost)),
+                Err(away) => (None, Some(away)),
             };
             if projects.is_empty() {
-                let stands = match lost {
-                    Some(away) => Some(Stands::Away(away)),
-                    None => tagged.then_some(Stands::Empty),
-                };
-                if let Some(stands) = stands.filter(|_| finder.is_none()) {
-                    rows.push(Row::Machine { machine, name, stands });
+                if finder.is_none() {
+                    rows.push(Row::Machine { machine, name, away, heads: Heads::Nothing });
                 }
                 continue;
             }
-            let tag = tagged.then(|| Tag { name: name.clone(), away: lost.clone() });
+            let listing = finder.is_some() || !self.folds.contains(Fold::Machine(&machine));
+            let machine_at = rows.len();
+            let heads = Heads::Nothing;
+            rows.push(Row::Machine { machine: machine.clone(), name, away, heads });
+            let (mut machine_tally, mut machine_here) = (Tally::default(), false);
             let agents = heard.as_ref().map_or_default(Seen::seated);
             let statuses: HashMap<&str, &lunetad::api::GitStatus> = heard
                 .iter()
@@ -2220,6 +2216,11 @@ impl Sidebar {
                 }
                 let tally = Tally::sum(worktrees.iter().map(|(_, _, tally)| *tally));
                 let project_here = on && Self::seats_here(own_seat, listed);
+                machine_tally = Tally::sum([machine_tally, tally].into_iter());
+                machine_here |= project_here;
+                if !listing {
+                    continue;
+                }
                 let (named, name_hits) = finder
                     .as_ref()
                     .and_then(|finder| finder.session(listed.name.as_str()))
@@ -2228,7 +2229,6 @@ impl Sidebar {
                 rows.push(Row::Project {
                     machine: machine.clone(),
                     project: known.project.clone(),
-                    tag: tag.clone(),
                     hits: name_hits.unwrap_or_default(),
                     under: Under::Empty,
                     here: project_here,
@@ -2368,6 +2368,19 @@ impl Sidebar {
                     *was = under;
                 }
             }
+            if finder.is_some() && rows.len() == machine_at + 1 {
+                rows.truncate(machine_at);
+                continue;
+            }
+            if let Row::Machine { heads, .. } = &mut rows[machine_at] {
+                *heads = Heads::Projects {
+                    folded: !listing,
+                    here: machine_here,
+                    waiting: machine_tally.waiting,
+                    dot: machine_tally.dots > 0,
+                    busy: machine_tally.busy > 0,
+                };
+            }
         }
         self.rows = rows;
         self.homes = homes;
@@ -2420,10 +2433,11 @@ impl Sidebar {
 
 
     fn folding(&self, spot: &Spot) -> Option<Folding> {
-        match spot.place()? {
-            Place::Session(session) => Some(Folding::Project(session.project()?)),
-            Place::Worktree(place) => Some(Folding::Worktree(place.worktree)),
-            Place::Pane(_) => match self.homes.get(spot)?.place()? {
+        match spot.place() {
+            None => Some(Folding::Machine),
+            Some(Place::Session(session)) => Some(Folding::Project(session.project()?)),
+            Some(Place::Worktree(place)) => Some(Folding::Worktree(place.worktree)),
+            Some(Place::Pane(_)) => match self.homes.get(spot)?.place()? {
                 Place::Worktree(place) => Some(Folding::Worktree(place.worktree)),
                 Place::Session(_) | Place::Pane(_) => None,
             },
@@ -2432,6 +2446,7 @@ impl Sidebar {
 
     fn folded(&self, machine: &Machine, folding: Folding) -> bool {
         match folding {
+            Folding::Machine => self.folds.contains(Fold::Machine(machine)),
             Folding::Project(project) => self.folds.contains(Fold::Project(machine, project)),
             Folding::Worktree(worktree) => {
                 self.folds.contains(Fold::Worktree(machine, worktree))
@@ -2527,14 +2542,28 @@ impl Sidebar {
             return;
         };
         let machine = spot.machine();
-        let bare = |row: &Row| {
-            matches!(row, Row::Worktree { under, .. } if *under != Under::Rows)
+        let bare = |row: &Row| match row {
+            Row::Project { under, .. } | Row::Worktree { under, .. } => *under != Under::Rows,
+            Row::Machine { .. } | Row::Pane { .. } => false,
         };
         if folded && self.row_of(&spot).is_some_and(|at| bare(&self.rows[at])) {
-            let project = spot.place().and_then(|place| place.listed().project());
-            folding = project.map_or(folding, Folding::Project);
+            folding = match folding {
+                Folding::Worktree(_) => {
+                    let project = spot.place().and_then(|place| place.listed().project());
+                    project.map_or(folding, Folding::Project)
+                },
+                Folding::Project(_) | Folding::Machine => Folding::Machine,
+            };
+        }
+        let header = Spot::Machine(machine.clone());
+        let heads_nothing = |row: &Row| matches!(row, Row::Machine { heads: Heads::Nothing, .. });
+        if folding == Folding::Machine
+            && self.row_of(&header).is_none_or(|at| heads_nothing(&self.rows[at]))
+        {
+            return;
         }
         let (fold, row) = match folding {
+            Folding::Machine => (Fold::Machine(&machine), Some(header)),
             Folding::Project(project) => (Fold::Project(&machine, project), project_of(&spot)),
             Folding::Worktree(worktree) => {
                 (Fold::Worktree(&machine, worktree), self.worktree_of(&spot))
@@ -4022,9 +4051,11 @@ impl Sidebar {
                 Style::new().add_modifier(Modifier::DIM),
             ));
         } else if self.rows.is_empty() {
-            let typed = matches!(self.search, Some(Search::Typed { .. }));
-            let none = if typed { " no match" } else { " no projects" };
-            lines.push(Line::styled(none, Style::new().add_modifier(Modifier::DIM)));
+            assert!(
+                matches!(self.search, Some(Search::Typed { .. })),
+                "only a search hides this machine's row"
+            );
+            lines.push(Line::styled(" no match", Style::new().add_modifier(Modifier::DIM)));
         }
         let lit = match (&landing, highlight) {
             (Some((_, lifted)), _) => Some((lifted.clone(), None, LIT)),
@@ -4340,12 +4371,12 @@ impl Sidebar {
         if self.keys != Keys::Sidebar {
             return None;
         }
-        match &self.rows[self.cursor_index()?] {
-            Row::Machine { name, stands: Stands::Away(Away::Unreached { why, .. }), .. }
-            | Row::Project {
-                tag: Some(Tag { name, away: Some(Away::Unreached { why, .. }) }), ..
-            } => Some(format!("{name}: {why}; what ssh said is in {}", lunetad::log::NAME)),
-            Row::Machine { .. }
+        let header = Spot::Machine(self.cursor.as_ref()?.machine());
+        match &self.rows[self.row_of(&header)?] {
+            Row::Machine { name, away: Some(Away::Unreached { why, .. }), .. } => {
+                Some(format!("{name}: {why}; what ssh said is in {}", lunetad::log::NAME))
+            },
+            Row::Machine { away: None | Some(Away::Reaching), .. }
             | Row::Project { .. }
             | Row::Worktree { .. }
             | Row::Pane { .. } => None,
@@ -4697,11 +4728,8 @@ struct RowLines<'a> {
 fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines<'_> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
-        Row::Machine { name, stands, .. } => {
-            let (word, since) = match stands {
-                Stands::Away(away) => away.said(),
-                Stands::Empty => (NO_PROJECTS, None),
-            };
+        Row::Machine { name, away, heads: Heads::Nothing, .. } => {
+            let (word, since) = away.as_ref().map_or((NO_PROJECTS, None), Away::said);
             let age = since.map_or_default(|since| age(since, now));
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
             let whole = format!("{name} · {word}");
@@ -4721,27 +4749,56 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let cuts = cut_at(0, 5, &whole, room).into_iter().collect();
             RowLines { lines: vec![line], number: None, cuts }
         },
-        Row::Project { project, tag, hits, under, here, colour, waiting, dot, busy, .. } => {
+        Row::Machine {
+            name, away, heads: Heads::Projects { folded, here, waiting, dot, busy }, ..
+        } => {
+            let badge = badge(*waiting, *folded && *dot, *folded && *busy, frame);
+            let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
+            let (word, since) = away.as_ref().map(Away::said).unzip();
+            let word = word.map_or_default(|word| format!(" · {word}"));
+            let age = since.flatten().map_or_default(|since| age(since, now));
+            let aged = if age.is_empty() { 0 } else { age.width() + 1 };
+            let room = width.saturating_sub(6 + aged + reserve + 1);
+            let cuts = cut_at(0, 5, name, room).into_iter().collect();
+            let bold = Style::new().add_modifier(Modifier::BOLD);
+            let shown = cut(name, room);
+            let word = cut(&word, room.saturating_sub(shown.width()));
+            let said = shown.width() + word.width();
+            let rule = width.saturating_sub(5 + said + 1 + aged + reserve + 1);
+            let rule_style = if *here && *folded { Style::new().fg(ACCENT) } else { dim };
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(if *folded { FOLDED } else { UNFOLDED }, dim),
+                Span::raw(" "),
+                Span::styled(COMPUTER, bold),
+                Span::raw(" "),
+                Span::styled(shown, bold),
+                Span::styled(word, Style::new().fg(ERROR)),
+                Span::raw(" "),
+                Span::styled(MACHINE_RULE.repeat(rule), rule_style),
+            ];
+            if !age.is_empty() {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(age, dim));
+            }
+            if let Some(badge) = badge {
+                spans.push(Span::raw(" "));
+                spans.push(badge);
+            }
+            RowLines { lines: vec![Line::from(spans)], number: None, cuts }
+        },
+        Row::Project { project, hits, under, here, colour, waiting, dot, busy, .. } => {
             let session = project.listed();
             let folded = *under == Under::Folded;
             let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
             let chip = Style::new().fg(gruvbox::BG0).bg(*colour);
-            let tag = tag.as_ref().map(|tag| match &tag.away {
-                Some(away) => {
-                    (format!(" {} · {} ", tag.name, away.said().0), Style::new().fg(ERROR))
-                },
-                None => (format!(" {} ", tag.name), dim),
-            });
             let fixed = 4 + reserve + 1;
             let room = width.saturating_sub(fixed);
             let bold = chip.add_modifier(Modifier::BOLD);
             let (name, named) = lit(session.name.as_str(), room, Keep::Start, hits, bold);
             let cuts = cut_at(0, 3, session.name.as_str(), room).into_iter().collect();
-            let left = room.saturating_sub(named);
-            let tag = tag.map(|(text, style)| (cut(&text, left), style));
-            let tagged = tag.as_ref().map_or(0, |(text, _)| text.width());
-            let rule = left.saturating_sub(tagged);
+            let rule = room.saturating_sub(named);
             let rule_style = if *here { Style::new().fg(ACCENT) } else { dim };
             let mut spans = vec![
                 Span::raw(" "),
@@ -4750,9 +4807,6 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             ];
             spans.extend(name);
             spans.push(Span::styled(" ", chip));
-            if let Some((text, style)) = tag {
-                spans.push(Span::styled(text, style));
-            }
             spans.push(Span::styled(RULE.repeat(rule), rule_style));
             if let Some(badge) = badge {
                 spans.push(Span::raw(" "));
@@ -5613,9 +5667,9 @@ mod tests {
         sidebar.heard(Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) });
         let rows = rows_shown(&mut sidebar);
         assert_eq!([rows[1].as_str(), rows[3].as_str()], ["  ▾ fix missing", "  ▾ main"]);
-        let buffer = drawn(&mut sidebar, false, 32, 9);
-        let missing = (0..32).find(|x| buffer[(*x, 4)].symbol() == "m").unwrap();
-        assert_eq!(buffer[(missing + 1, 4)].fg, ERROR);
+        let buffer = drawn(&mut sidebar, false, 32, 10);
+        let missing = (0..32).find(|x| buffer[(*x, 5)].symbol() == "m").unwrap();
+        assert_eq!(buffer[(missing + 1, 5)].fg, ERROR);
     }
 
     #[test]
@@ -5630,37 +5684,47 @@ mod tests {
         let mut host = host(vec![here], Vec::new());
         host.remotes = vec![remote("nixos", unreached), remote("pi", Reached::Reaching(()))];
         sidebar.hear(host);
-        let lines = screen(&mut sidebar, false, 32, 12);
+        let lines = screen(&mut sidebar, false, 32, 13);
         assert_eq!(
-            lines[3..10],
+            lines[3..12],
             [
-                " ▾ here  mac ─────────────────",
+                " ▾ \u{f108} mac ═════════════════════",
+                " ▾ here ──────────────────────",
                 "  ▾ Tab #1",
                 "     \u{e795} w/a",
-                " ▾ main  nixos · unreachable ─",
+                " ▾ \u{f108} nixos · unreachable ══ 1m",
+                " ▾ main ──────────────────────",
                 "  ▾ fix",
                 "     \u{e795} w/b",
                 " ▸ \u{f108} pi · reaching…",
             ]
         );
-        let buffer = drawn(&mut sidebar, false, 32, 12);
-        assert_eq!(buffer[(10, 6)].fg, ERROR);
+        let buffer = drawn(&mut sidebar, false, 32, 13);
+        assert_eq!([buffer[(10, 7)].fg, buffer[(13, 7)].fg], [ERROR, ERROR]);
         sidebar.focus(Keys::Sidebar);
-        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
         let why = "ssh: Could not resolve hostname vps";
         let said = format!("nixos: {why}; what ssh said is in {}", lunetad::log::NAME);
-        assert_eq!(sidebar.unreached(), Some(said));
+        for spot in [
+            Spot::Machine(Machine::Remote(nixos())),
+            Spot::Remote(nixos(), Place::Session(listed("main", 20))),
+        ] {
+            sidebar.cursor = Some(spot);
+            assert_eq!(sidebar.unreached(), Some(said.clone()));
+        }
+        sidebar.cursor = Some(Spot::Local(Place::Session(listed("here", 10))));
+        assert_eq!(sidebar.unreached(), None);
     }
 
     #[test]
     fn projects_hold_their_worktrees_and_those_their_panes() {
         let mut sidebar = two_sessions();
         assert_eq!(
-            screen(&mut sidebar, false, 32, 9),
+            screen(&mut sidebar, false, 32, 10),
             [
                 "─ luneta ──────────────────────",
                 "─ 2 projects ───────────── ●1 ─",
                 "",
+                " ▾ \u{f108} mac ══════════════════ ●1",
                 " ▾ older ────────────────── ●1",
                 "  ▾ Tab #1                  ●1",
                 "   ● \u{ec82} fold                 1m",
@@ -5730,17 +5794,17 @@ mod tests {
         };
         let mut sidebar = fresh();
         sidebar.hear(listing(&[("a", 1), ("b", 2), ("c", 9)]));
-        let buffer = drawn(&mut sidebar, false, 32, 16);
+        let buffer = drawn(&mut sidebar, false, 32, 17);
         let (y, p, a) = (gruvbox::YELLOW, gruvbox::PURPLE, gruvbox::AQUA);
-        assert_eq!([chip(&buffer, 3), chip(&buffer, 7), chip(&buffer, 11)], [y, p, a]);
-        assert_eq!(buffer[(3, 3)].fg, gruvbox::BG0);
-        assert_eq!([bracket(&buffer, 5), bracket(&buffer, 6)], [y, y]);
-        assert_eq!([bracket(&buffer, 13), bracket(&buffer, 14)], [a, a]);
+        assert_eq!([chip(&buffer, 4), chip(&buffer, 8), chip(&buffer, 12)], [y, p, a]);
+        assert_eq!(buffer[(3, 4)].fg, gruvbox::BG0);
+        assert_eq!([bracket(&buffer, 6), bracket(&buffer, 7)], [y, y]);
+        assert_eq!([bracket(&buffer, 14), bracket(&buffer, 15)], [a, a]);
 
         let mut there = fresh();
         there.hear(listing(&[("e", 4), ("c", 9)]));
-        let buffer = drawn(&mut there, false, 32, 16);
-        assert_eq!([chip(&buffer, 3), chip(&buffer, 7)], [gruvbox::ORANGE, a]);
+        let buffer = drawn(&mut there, false, 32, 17);
+        assert_eq!([chip(&buffer, 4), chip(&buffer, 8)], [gruvbox::ORANGE, a]);
     }
 
     #[test]
@@ -5914,12 +5978,12 @@ mod tests {
         let long = session(&"w".repeat(66), 50, vec![]);
         let sessions = vec![unstarted, session("y", 20, vec![]), unsocketed, misnamed, long];
         sidebar.hear(host(sessions, Vec::new()));
-        let lines = screen(&mut sidebar, false, 60, 8);
+        let lines = screen(&mut sidebar, false, 60, 9);
         assert_eq!(lines[1], format!("─ 2 projects {}", "─".repeat(46)));
-        assert_eq!(lines[3], format!(" ▾ y {}", "─".repeat(53)));
-        assert!(lines[4].starts_with(" ▾ wwww"), "{:?}", lines[4]);
-        assert_eq!(lines[6], " lunetad: 3 projects with an id of 0 or a name luneta refu");
-        assert_eq!(lines[7], " ses, not listed");
+        assert_eq!(lines[4], format!(" ▾ y {}", "─".repeat(53)));
+        assert!(lines[5].starts_with(" ▾ wwww"), "{:?}", lines[5]);
+        assert_eq!(lines[7], " lunetad: 3 projects with an id of 0 or a name luneta refu");
+        assert_eq!(lines[8], " ses, not listed");
     }
 
     #[test]
@@ -5948,8 +6012,8 @@ mod tests {
 
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         let (lines, lit) = seen(&mut sidebar, false, 32, 13);
-        assert_eq!(lines[6..9], ["  ▾ Tab #2", "       main", nvim]);
-        assert_eq!(lit, [6, 7, 8]);
+        assert_eq!(lines[7..10], ["  ▾ Tab #2", "       main", nvim]);
+        assert_eq!(lit, [7, 8, 9]);
         let (_, lit) = seen(&mut sidebar, true, 32, 7);
         assert_eq!(lit, [4, 5, 6]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
@@ -6012,7 +6076,7 @@ mod tests {
         sidebar.key(&g, moment(160_000));
         assert_eq!(cursor(&sidebar), first);
         sidebar.key(&g, moment(160_000));
-        assert_eq!(click(&mut sidebar, 1, 8, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 9, area), Asked::Take);
         let folded = Some(Place::Session(listed("newer", 20)));
         sidebar.key(&g, moment(160_000));
         assert_eq!(cursor(&sidebar), folded);
@@ -6054,11 +6118,11 @@ mod tests {
         let older = Place::Session(listed("older", 10));
         assert_eq!(cursor(&sidebar), Some(older.clone()));
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(older));
-        let lines = screen(&mut sidebar, false, 32, 6);
-        assert!(lines[3].starts_with(" ▸ older"), "{lines:?}");
-        assert!(lines[4].starts_with(" ▾ newer"), "{lines:?}");
+        let lines = screen(&mut sidebar, false, 32, 7);
+        assert!(lines[4].starts_with(" ▸ older"), "{lines:?}");
+        assert!(lines[5].starts_with(" ▾ newer"), "{lines:?}");
         sidebar.key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), moment(160_000));
-        assert_eq!(sidebar.rows.len(), 7, "the worktree folded first stays folded");
+        assert_eq!(sidebar.rows.len(), 8, "the worktree folded first stays folded");
     }
 
     #[test]
@@ -6137,32 +6201,32 @@ mod tests {
     #[test]
     fn a_click_goes_to_a_pane_and_folds_on_the_triangle() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 10);
+        let area = Rect::new(0, 0, 32, 11);
         screen(&mut sidebar, false, area.width, area.height);
         let pane = pane_of("older", 10, 2);
-        assert_eq!(click(&mut sidebar, 10, 7, area), go_here(pane));
-        assert_eq!(click(&mut sidebar, 10, 3, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 10, 8, area), go_here(pane));
+        assert_eq!(click(&mut sidebar, 10, 4, area), Asked::Take);
         assert!(!folded(&sidebar, "older"));
-        assert_eq!(click(&mut sidebar, 1, 3, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 4, area), Asked::Take);
         assert!(folded(&sidebar, "older"));
         let older = Place::Session(listed("older", 10));
-        assert_eq!(click(&mut sidebar, 10, 3, area), go_here(older));
+        assert_eq!(click(&mut sidebar, 10, 4, area), go_here(older));
     }
 
     #[test]
     fn a_click_on_the_triangle_folds_until_a_search_is_typed() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 10);
+        let area = Rect::new(0, 0, 32, 11);
         sidebar.key(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), moment(160_000));
         screen(&mut sidebar, true, area.width, area.height);
-        assert_eq!(click(&mut sidebar, 1, 3, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 4, area), Asked::Take);
         assert!(folded(&sidebar, "older"));
-        assert_eq!(click(&mut sidebar, 1, 3, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 4, area), Asked::Take);
         assert!(!folded(&sidebar, "older"));
         assert!(sidebar.search.is_some());
         type_in(&mut sidebar, "older");
         screen(&mut sidebar, true, area.width, area.height);
-        assert_eq!(click(&mut sidebar, 1, 3, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 4, area), Asked::Take);
         assert!(!folded(&sidebar, "older"));
     }
 
@@ -6172,10 +6236,10 @@ mod tests {
         let mut starting = session("x", 10, Vec::new());
         starting.panes = None;
         sidebar.hear(host(vec![starting], Vec::new()));
-        let area = Rect::new(0, 0, 32, 5);
+        let area = Rect::new(0, 0, 32, 6);
         screen(&mut sidebar, false, area.width, area.height);
         let x = Place::Session(listed("x", 10));
-        assert_eq!(click(&mut sidebar, 10, 3, area), go_here(x.clone()));
+        assert_eq!(click(&mut sidebar, 10, 4, area), go_here(x.clone()));
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(x));
     }
@@ -6252,9 +6316,9 @@ mod tests {
             )],
             vec![agent("s", 1, Status::Idle, Some("fold"))],
         ));
-        let lines = screen(&mut sidebar, false, 32, 12);
+        let lines = screen(&mut sidebar, false, 32, 13);
         assert_eq!(
-            lines[5..],
+            lines[6..],
             [
                 "  •✓ \u{ec82} fold                 1m",
                 "  ▾ Tab #2",
@@ -6278,9 +6342,9 @@ mod tests {
         let agents = vec![of(1, Some(Harness::Pi.into())), of(2, None), of(3, Some(99))];
         sidebar.hear(host(vec![session("s", 10, panes)], agents));
         let start = |line: &String| line.chars().take(8).collect::<String>();
-        let lines = screen(&mut sidebar, false, 32, 12);
+        let lines = screen(&mut sidebar, false, 32, 13);
         assert_eq!(
-            [5, 7, 9].map(|at| start(&lines[at])),
+            [6, 8, 10].map(|at| start(&lines[at])),
             ["  •✓ \u{f03ff} x", "  •✓ \u{ec82} x", "  •✓ \u{e6ae} x"]
         );
     }
@@ -6297,9 +6361,9 @@ mod tests {
         let agents = words.into_iter().zip(1..).map(|(word, id)| says(id, word)).collect();
         sidebar.hear(host(vec![session("s", 10, panes)], agents));
         let start = |line: &String| line.chars().take(8).collect::<String>();
-        let lines = screen(&mut sidebar, false, 32, 13);
+        let lines = screen(&mut sidebar, false, 32, 14);
         assert_eq!(
-            [5, 7, 9, 11].map(|at| start(&lines[at])),
+            [6, 8, 10, 12].map(|at| start(&lines[at])),
             ["   C \u{ec82} x", "   S \u{ec82} x", "   ? \u{ec82} x", "   ? \u{ec82} x"]
         );
     }
@@ -6307,9 +6371,9 @@ mod tests {
     #[test]
     fn a_pane_with_no_agent_in_it_is_dimmed() {
         let mut sidebar = two_sessions();
-        let buffer = drawn(&mut sidebar, false, 32, 9);
+        let buffer = drawn(&mut sidebar, false, 32, 10);
         let dim = |y: u16| [5_u16, 7].map(|x| buffer[(x, y)].modifier.contains(Modifier::DIM));
-        assert_eq!((dim(5), dim(7)), ([false, false], [true, true]));
+        assert_eq!((dim(6), dim(8)), ([false, false], [true, true]));
     }
 
     #[test]
@@ -6481,11 +6545,12 @@ mod tests {
             Vec::new(),
         ));
         assert_eq!(
-            screen(&mut sidebar, false, 32, 14),
+            screen(&mut sidebar, false, 32, 15),
             [
                 "─ luneta ──────────────────────",
                 "─ 1 project ──────── ●1 •3 ⠋1 ─",
                 "",
+                " ▾ \u{f108} mac ══════════════════ ●1",
                 " ▾ s ────────────────────── ●1",
                 "  ▾ Tab #1                  ●1",
                 " ╭ ⠋ \u{e795} cargo build --rele… 59s",
@@ -6516,7 +6581,7 @@ mod tests {
     }
 
     fn dimmed(sidebar: &mut Sidebar, x: u16, y: u16, now: SystemTime) -> bool {
-        drawn_at(sidebar, false, 32, 7, now)[(x, y)].modifier.contains(Modifier::DIM)
+        drawn_at(sidebar, false, 32, 8, now)[(x, y)].modifier.contains(Modifier::DIM)
     }
 
     #[test]
@@ -6549,7 +6614,7 @@ mod tests {
         ));
         let lines = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, false, 32, 9, now).0
+            seen_at(sidebar, false, 32, 10, now).0
         };
         assert_eq!(
             lines(&mut sidebar, moment(160_000)),
@@ -6557,6 +6622,7 @@ mod tests {
                 "─ luneta ──────────────────────",
                 "─ 1 project ────────────── •2 ─",
                 "",
+                " ▾ \u{f108} mac ═════════════════════",
                 " ▾ s ─────────────────────────",
                 "  ▾ Tab #1",
                 " ╭•✓ \u{ec82} fold                 1m",
@@ -6565,32 +6631,33 @@ mod tests {
                 "     \u{e795} w/a",
             ]
         );
-        assert!(!dimmed(&mut sidebar, 3, 5, moment(160_000)));
+        assert!(!dimmed(&mut sidebar, 3, 6, moment(160_000)));
         assert_eq!(sidebar.listing().local.agents[0].mark, Mark::Finished);
         sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
-        assert!(lines(&mut sidebar, moment(160_000))[4].ends_with(" •"));
+        assert!(lines(&mut sidebar, moment(160_000))[5].ends_with(" •"));
         sidebar.key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), moment(160_000));
 
         let s = |pane| own_pane_of("s", 1, pane);
         sit(&mut sidebar, &s(2));
-        assert_eq!(lines(&mut sidebar, moment(160_000))[6], "▌╰   \u{e795} luneta/main");
+        assert_eq!(lines(&mut sidebar, moment(160_000))[7], "▌╰   \u{e795} luneta/main");
         sit(&mut sidebar, &s(1));
         lines(&mut sidebar, moment(160_500));
         lines(&mut sidebar, moment(161_500));
         sit(&mut sidebar, &s(3));
         assert_eq!(
-            lines(&mut sidebar, moment(162_000))[..7],
+            lines(&mut sidebar, moment(162_000))[..8],
             [
                 "─ luneta ──────────────────────",
                 "─ 1 project ────────────── •1 ─",
                 "",
+                " ▾ \u{f108} mac ═════════════════════",
                 " ▾ s ─────────────────────────",
                 "  ▾ Tab #1",
                 " ╭ ✓ \u{ec82} fold                 1m",
                 " ╰•✓ \u{e795} cargo test          31s",
             ]
         );
-        assert!(dimmed(&mut sidebar, 3, 5, moment(162_000)));
+        assert!(dimmed(&mut sidebar, 3, 6, moment(162_000)));
         assert_eq!(sidebar.listing().local.agents[0].mark, Mark::Idle);
 
         sit(&mut sidebar, &s(2));
@@ -6599,7 +6666,7 @@ mod tests {
         sit(&mut sidebar, &s(3));
         let seen = lines(&mut sidebar, moment(164_500));
         assert_eq!(seen[1], format!("─ 1 project {}", "─".repeat(19)));
-        assert_eq!(seen[6], " ╰   \u{e795} luneta/main");
+        assert_eq!(seen[7], " ╰   \u{e795} luneta/main");
     }
 
     #[test]
@@ -6654,7 +6721,7 @@ mod tests {
 
     fn agent_row(sidebar: &mut Sidebar, now: SystemTime, watched: bool) -> String {
         sidebar.ticked(now, steady(now), watched);
-        seen_at(sidebar, false, 32, 9, now).0[5].clone()
+        seen_at(sidebar, false, 32, 10, now).0[6].clone()
     }
 
     #[test]
@@ -6686,7 +6753,7 @@ mod tests {
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let row = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, true, 32, 9, now).0[5].clone()
+            seen_at(sidebar, true, 32, 10, now).0[6].clone()
         };
         let (new, seen) =
             ("  •✓ \u{ec82} fold                 1m", "   ✓ \u{ec82} fold                 1m");
@@ -6699,7 +6766,7 @@ mod tests {
         assert_eq!(row(&mut sidebar, moment(161_000)), new);
         sidebar.key(&key('u'), moment(161_000));
         assert_eq!(row(&mut sidebar, moment(161_000)), seen);
-        assert!(dimmed(&mut sidebar, 3, 4, moment(161_000)));
+        assert!(dimmed(&mut sidebar, 3, 5, moment(161_000)));
     }
 
     #[test]
@@ -6717,12 +6784,12 @@ mod tests {
         sit(&mut sidebar, &own_pane_of("a", 2, 1));
         let lines = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, false, 32, 9, now).0
+            seen_at(sidebar, false, 32, 10, now).0
         };
         lines(&mut sidebar, moment(160_000));
         let lines = lines(&mut sidebar, moment(161_000));
         assert_eq!(
-            [&lines[5], &lines[8]],
+            [&lines[6], &lines[9]],
             ["▌  ✓ \u{ec82} fold                 1m", "  •✓ \u{ec82} fold                 1m"]
         );
     }
@@ -6784,7 +6851,7 @@ mod tests {
         let make = in_shell(1, going("make", 159, Front::Working));
         sidebar.hear(host(vec![session("s", 10, vec![make])], Vec::new()));
         let at = |millis| SystemTime::UNIX_EPOCH + Duration::from_millis(millis);
-        let row = |sidebar: &mut Sidebar, now| seen_at(sidebar, false, 32, 6, now).0[5].clone();
+        let row = |sidebar: &mut Sidebar, now| seen_at(sidebar, false, 32, 7, now).0[6].clone();
         assert_eq!(row(&mut sidebar, at(160_500)), "     \u{e795} luneta/main");
         assert!(!sidebar.turning());
         assert_eq!(row(&mut sidebar, at(161_000)), "   ⠋ \u{e795} make                 1s");
@@ -6825,14 +6892,14 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(host);
 
-        let buffer = drawn(&mut sidebar, false, 32, 16);
+        let buffer = drawn(&mut sidebar, false, 32, 17);
         let line = |y: u16| {
             let line: String = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
             line.trim_end().to_owned()
         };
         let number = |y: u16| (0..32).find(|x| buffer[(*x, y)].symbol() == "#");
         let colour = |y: u16| number(y).map(|x| buffer[(x, y)].fg);
-        let branches: Vec<String> = [5, 8, 11, 14].into_iter().map(line).collect();
+        let branches: Vec<String> = [6, 9, 12, 15].into_iter().map(line).collect();
         assert_eq!(
             branches,
             [
@@ -6842,9 +6909,9 @@ mod tests {
                 "       old",
             ]
         );
-        assert_eq!(colour(5), Some(gruvbox::GREEN));
-        assert_eq!(colour(8), Some(gruvbox::PURPLE));
-        assert_eq!(colour(11), Some(gruvbox::GREY));
+        assert_eq!(colour(6), Some(gruvbox::GREEN));
+        assert_eq!(colour(9), Some(gruvbox::PURPLE));
+        assert_eq!(colour(12), Some(gruvbox::GREY));
     }
 
     #[test]
@@ -6881,12 +6948,12 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(host);
 
-        let buffer = drawn(&mut sidebar, false, 34, 22);
+        let buffer = drawn(&mut sidebar, false, 34, 23);
         let line = |y: u16| {
             let line: String = (0..33).map(|x| buffer[(x, y)].symbol()).collect();
             line.trim_end().to_owned()
         };
-        let branches: Vec<String> = (0..6).map(|pane| line(5 + pane * 3)).collect();
+        let branches: Vec<String> = (0..6).map(|pane| line(6 + pane * 3)).collect();
         assert_eq!(
             branches,
             [
@@ -6902,7 +6969,7 @@ mod tests {
             let x = (from..34).find(|x| buffer[(*x, y)].symbol() == mark).expect("the mark");
             buffer[(x, y)].fg
         };
-        let first = 5;
+        let first = 6;
         let added = (0..34).find(|x| buffer[(*x, first)].symbol() == "+").expect("the mark");
         assert_eq!(buffer[(added, first)].fg, gruvbox::GREEN);
         assert_eq!(colour(first, added, "-"), gruvbox::RED);
@@ -6941,12 +7008,12 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(host);
 
-        let buffer = drawn(&mut sidebar, false, 32, 24);
+        let buffer = drawn(&mut sidebar, false, 32, 25);
         let line = |y: u16| {
             let line: String = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
             line.trim_end().to_owned()
         };
-        let branches: Vec<String> = [5, 8, 11, 14, 17, 20, 23].into_iter().map(line).collect();
+        let branches: Vec<String> = [6, 9, 12, 15, 18, 21, 24].into_iter().map(line).collect();
         assert_eq!(
             branches,
             [
@@ -6963,10 +7030,10 @@ mod tests {
             let x = (0..32).find(|x| buffer[(*x, y)].symbol() == mark).expect("the mark");
             buffer[(x, y)].fg
         };
-        assert_eq!(mark(5, "✗"), gruvbox::RED);
-        assert_eq!(mark(8, "●"), gruvbox::YELLOW);
-        assert_eq!(mark(11, "✓"), gruvbox::GREEN);
-        assert_eq!(mark(23, "●"), gruvbox::GREY);
+        assert_eq!(mark(6, "✗"), gruvbox::RED);
+        assert_eq!(mark(9, "●"), gruvbox::YELLOW);
+        assert_eq!(mark(12, "✓"), gruvbox::GREEN);
+        assert_eq!(mark(24, "●"), gruvbox::GREY);
     }
 
     #[test]
@@ -7345,7 +7412,7 @@ mod tests {
     fn an_issue_shows_in_the_notes_as_it_is_filed_and_then_what_came_of_it() {
         let mut sidebar = two_sessions();
         let notes = |sidebar: &mut Sidebar, at| {
-            let (lines, _) = seen_at(sidebar, false, 32, 16, at);
+            let (lines, _) = seen_at(sidebar, false, 32, 17, at);
             let first = lines.iter().rposition(String::is_empty).map_or(0, |at| at + 1);
             lines[first..].to_vec()
         };
@@ -7511,9 +7578,9 @@ mod tests {
             let area = Rect::new(0, 0, 32, 24);
             let mut buffer = Buffer::empty(area);
             let drawn = sidebar.draw(&mut buffer, area, now);
-            let line: String = (0..31).map(|x| buffer[(x, 5)].symbol()).collect();
+            let line: String = (0..31).map(|x| buffer[(x, 6)].symbol()).collect();
             assert!(line.contains("fix #5"), "{said:?}: {line}");
-            assert!(number_spot(&drawn, 5).is_empty(), "{said:?}");
+            assert!(number_spot(&drawn, 6).is_empty(), "{said:?}");
 
             let note = "#5: lunetad says no link of it on github.com";
             sidebar.key(&char('y'), now);
@@ -7628,13 +7695,13 @@ mod tests {
                 let start = u16::try_from(start.expect(number)).unwrap();
                 (start..start + u16::try_from(number.len()).unwrap()).collect::<Vec<_>>()
             };
-            assert_eq!(number_spot(&drawn, 5), columns(5, "#246"));
-            for (y, why) in [(8, "old: no link"), (11, "gone: closed"), (14, "none: no number")] {
+            assert_eq!(number_spot(&drawn, 6), columns(6, "#246"));
+            for (y, why) in [(9, "old: no link"), (12, "gone: closed"), (15, "none: no number")] {
                 assert!(number_spot(&drawn, y).is_empty(), "{why}");
             }
-            assert_eq!(number_spot(&drawn, 17), columns(17, "#4321"));
-            assert_eq!(number_spot(&drawn, 20), columns(20, "#12"));
-            let on = drawn.at(Position::new(columns(5, "#246")[0], 5));
+            assert_eq!(number_spot(&drawn, 18), columns(18, "#4321"));
+            assert_eq!(number_spot(&drawn, 21), columns(21, "#12"));
+            let on = drawn.at(Position::new(columns(6, "#246")[0], 6));
             assert_eq!(on, Some(Hit::Number(link())));
         }
     }
@@ -7643,26 +7710,26 @@ mod tests {
     fn a_number_out_of_sight_takes_no_click() {
         let mut sidebar = pulls();
         sidebar.focus(Keys::Zellij);
-        let area = Rect::new(0, 0, 32, 7);
+        let area = Rect::new(0, 0, 32, 8);
         let mut buffer = Buffer::empty(area);
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
-        assert_eq!(number_spot(&drawn, 5).len(), "#246".len());
+        assert_eq!(number_spot(&drawn, 6).len(), "#246".len());
 
-        sidebar.top = 4;
+        sidebar.top = 5;
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
-        assert_eq!((0..7).flat_map(|y| number_spot(&drawn, y)).count(), 0);
+        assert_eq!((0..8).flat_map(|y| number_spot(&drawn, y)).count(), 0);
 
         sidebar.top = 0;
         sidebar.notify("something went wrong".to_owned());
-        let short = Rect::new(0, 0, 32, 6);
+        let short = Rect::new(0, 0, 32, 7);
         let drawn = sidebar.draw(&mut Buffer::empty(short), short, moment(160_000));
-        assert_eq!(number_spot(&drawn, 5), [] as [u16; 0]);
+        assert_eq!(number_spot(&drawn, 6), [] as [u16; 0]);
         sidebar.notice = None;
 
         let area = Rect::new(0, 0, 32, 24);
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 6), area), Asked::Take);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 5), area);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 7), area), Asked::Take);
         let mut buffer = Buffer::empty(area);
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
         assert_eq!((0..24).flat_map(|y| number_spot(&drawn, y)).count(), 0);
@@ -9291,14 +9358,14 @@ mod tests {
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         let lift_notes = |sidebar: &mut Sidebar| {
-            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 10), area);
-            sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area);
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
+            sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 5), area);
             assert_ne!(drawn_rows(sidebar).0, listed);
         };
         lift_notes(&mut sidebar);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 40, 4), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 40, 5), area);
         assert_eq!(drawn_rows(&mut sidebar), (listed.clone(), (7..10).collect()));
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 40, 4), area);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 40, 5), area);
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
         lift_notes(&mut sidebar);
@@ -9307,8 +9374,8 @@ mod tests {
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
         lift_notes(&mut sidebar);
-        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), area);
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
+        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 5), area);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 5), area);
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
     }
 
@@ -9342,17 +9409,17 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 10), area);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
         type_in(&mut sidebar, "vn");
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area);
-        let asked = sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 3), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area);
+        let asked = sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
         let order = projects(&[10, 20, 30], &[20, 10, 30]);
         assert_eq!(asked, Asked::Move { on: Machine::Local, order, ticket: 1 });
         assert!(sidebar.menu.is_none());
 
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 5), area);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
         assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000)), Asked::Nothing);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 5), area), Asked::Nothing);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 6), area), Asked::Nothing);
     }
 
     #[test]
@@ -9402,19 +9469,19 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         framed(&mut sidebar, area);
         let here = sidebar.cursor.clone();
-        assert_eq!(swept(&mut sidebar, area, (7, 5), (13, 5)), copied("a-p-i-x"));
-        assert_eq!(swept(&mut sidebar, area, (13, 5), (9, 5)), copied("p-i-x"));
-        dragged(&mut sidebar, area, (7, 5), (9, 5));
-        let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 13, 5), area);
+        assert_eq!(swept(&mut sidebar, area, (7, 6), (13, 6)), copied("a-p-i-x"));
+        assert_eq!(swept(&mut sidebar, area, (13, 6), (9, 6)), copied("p-i-x"));
+        dragged(&mut sidebar, area, (7, 6), (9, 6));
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 13, 6), area);
         assert_eq!(up, copied("a-p-i-x"));
         assert_eq!(swept(&mut sidebar, area, (2, 0), (8, 0)), copied("luneta"));
         assert_eq!(sidebar.cursor, here);
 
-        dragged(&mut sidebar, area, (9, 5), (11, 5));
+        dragged(&mut sidebar, area, (9, 6), (11, 6));
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 40, 7), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 40, 8), area);
         assert!(sidebar.pressed());
-        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 40, 7), area);
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 40, 8), area);
         assert_eq!(up, copied("p-i-x\n  ▾ Tab #2\n       dda-bank-slip"));
         assert!(!sidebar.pressed());
 
@@ -9428,10 +9495,10 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         framed(&mut sidebar, area);
         let api = || go_here(pane_of("bipa", 10, 1));
-        assert_eq!(swept(&mut sidebar, area, (10, 5), (11, 5)), api());
-        assert_eq!(swept(&mut sidebar, area, (10, 5), (9, 5)), api());
-        assert_eq!(swept(&mut sidebar, area, (10, 5), (12, 5)), copied("-i-"));
-        assert_eq!(swept(&mut sidebar, area, (10, 5), (11, 6)), Asked::Nothing);
+        assert_eq!(swept(&mut sidebar, area, (10, 6), (11, 6)), api());
+        assert_eq!(swept(&mut sidebar, area, (10, 6), (9, 6)), api());
+        assert_eq!(swept(&mut sidebar, area, (10, 6), (12, 6)), copied("-i-"));
+        assert_eq!(swept(&mut sidebar, area, (10, 6), (11, 7)), Asked::Nothing);
     }
 
     #[test]
@@ -9440,19 +9507,19 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 3, 3), area);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 6, 3), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 7, 4), area), Asked::Nothing);
-        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 7, 4), area);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 3, 4), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 6, 4), area);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 7, 5), area), Asked::Nothing);
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 7, 5), area);
         assert_eq!(up, copied(&format!("bipa {}\n  ▾ Tab", "─".repeat(22))));
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
-        assert_eq!(swept(&mut sidebar, area, (3, 3), (6, 3)), copied("bipa"));
+        assert_eq!(swept(&mut sidebar, area, (3, 4), (6, 4)), copied("bipa"));
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 10), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 11, 10), area), Asked::Nothing);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 11, 11), area), Asked::Take);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 11, 11), area), Asked::Nothing);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 11, 12), area), Asked::Take);
     }
 
     #[test]
@@ -9460,14 +9527,14 @@ mod tests {
         let mut sidebar = searched();
         let area = Rect::new(0, 0, 32, 26);
         assert_eq!(reversed(&framed(&mut sidebar, area)), []);
-        dragged(&mut sidebar, area, (7, 5), (9, 5));
-        let cells = [(7, 5), (8, 5), (9, 5)];
+        dragged(&mut sidebar, area, (7, 6), (9, 6));
+        let cells = [(7, 6), (8, 6), (9, 6)];
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
 
-        let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 9, 5), area);
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 9, 6), area);
         assert_eq!(up, copied("a-p"));
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
-        sidebar.mouse(mouse(MouseEventKind::Moved, 20, 12), area);
+        sidebar.mouse(mouse(MouseEventKind::Moved, 20, 13), area);
         sidebar.hear(searched().host.unwrap());
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
         sidebar.hear(first_pane_is(1, "a-p-i-y"));
@@ -9529,7 +9596,7 @@ mod tests {
             let mut sidebar = searched();
             sidebar.notify("first word".to_owned());
             framed(&mut sidebar, area);
-            assert_eq!(swept(&mut sidebar, area, (7, 5), (9, 5)), copied("a-p"));
+            assert_eq!(swept(&mut sidebar, area, (7, 6), (9, 6)), copied("a-p"));
             moved(&mut sidebar);
             assert_eq!(reversed(&framed(&mut sidebar, area)), [], "case {case}");
         }
@@ -9544,19 +9611,19 @@ mod tests {
                 sidebar.key(&esc, moment(160_000));
             },
             &|sidebar| {
-                sidebar.mouse(mouse(MouseEventKind::Moved, 9, 5), area);
+                sidebar.mouse(mouse(MouseEventKind::Moved, 9, 6), area);
             },
         ];
         for (case, let_go) in lets_go.iter().enumerate() {
             let mut sidebar = searched();
             sidebar.notify("a note".to_owned());
             framed(&mut sidebar, area);
-            dragged(&mut sidebar, area, (7, 5), (9, 5));
+            dragged(&mut sidebar, area, (7, 6), (9, 6));
             let_go(&mut sidebar);
             assert!(!sidebar.pressed(), "case {case}");
             assert_eq!(sidebar.notice.as_deref(), Some("a note"), "case {case}");
             assert_eq!(reversed(&framed(&mut sidebar, area)), [], "case {case}");
-            let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 9, 5), area);
+            let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 9, 6), area);
             assert_eq!(up, Asked::Nothing, "case {case}");
         }
     }
@@ -9590,18 +9657,19 @@ mod tests {
         let area = Rect::new(0, 0, 24, 14);
         framed(&mut sidebar, area);
         for (line, from, whole) in [
-            (3, 3, long.to_owned()),
-            (5, 7, format!("{long} #246")),
-            (6, 7, long.to_owned()),
-            (7, 5, "me@a-host-too-long-for-the-sidebar · unreachable 1m".to_owned()),
+            (3, 5, long.to_owned()),
+            (4, 3, long.to_owned()),
+            (6, 7, format!("{long} #246")),
+            (7, 7, long.to_owned()),
+            (8, 5, "me@a-host-too-long-for-the-sidebar · unreachable 1m".to_owned()),
         ] {
             assert_eq!(swept(&mut sidebar, area, (from, line), (22, line)), copied(&whole));
         }
-        assert_eq!(swept(&mut sidebar, area, (7, 6), (11, 6)), copied("a-tex"));
+        assert_eq!(swept(&mut sidebar, area, (7, 7), (11, 7)), copied("a-tex"));
 
         sidebar.mouse(mouse(MouseEventKind::ScrollDown, 7, 5), area);
         framed(&mut sidebar, area);
-        assert_eq!(swept(&mut sidebar, area, (7, 3), (22, 3)), copied(long));
+        assert_eq!(swept(&mut sidebar, area, (7, 4), (22, 4)), copied(long));
     }
 
     #[test]
@@ -9611,7 +9679,7 @@ mod tests {
         sidebar.hear(host(vec![session("s", 10, vec![pane(1, 1, "/w/a", long)])], Vec::new()));
         let area = Rect::new(0, 0, 24, 14);
         framed(&mut sidebar, area);
-        assert_eq!(swept(&mut sidebar, area, (7, 5), (22, 5)), copied(long));
+        assert_eq!(swept(&mut sidebar, area, (7, 6), (22, 6)), copied(long));
     }
 
     #[test]
@@ -9622,7 +9690,7 @@ mod tests {
         let area = Rect::new(0, 0, 24, 14);
         framed(&mut sidebar, area);
         let whole = "w/a-directory-too-long-for-the-sidebarecho hidden[201~end";
-        assert_eq!(swept(&mut sidebar, area, (7, 5), (22, 5)), copied(whole));
+        assert_eq!(swept(&mut sidebar, area, (7, 6), (22, 6)), copied(whole));
     }
 
     #[test]
@@ -9630,9 +9698,9 @@ mod tests {
         let mut sidebar = searched();
         let area = Rect::new(0, 0, 32, 7);
         let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 7)[HEADER].clone();
-        assert_eq!(first(&mut sidebar), format!(" ▾ bipa {}", "─".repeat(22)));
+        assert_eq!(first(&mut sidebar), format!(" ▾ \u{f108} mac {}", "═".repeat(21)));
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 3), area);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 6), area);
         let start = steady(moment(160_000));
         let tick = |sidebar: &mut Sidebar, millis: u64| {
@@ -9649,8 +9717,9 @@ mod tests {
         let end = sidebar.scrolling();
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area);
         let bipa = format!(" ▾ bipa {}", "─".repeat(22));
-        let lifted = ["  ▾ Tab #1", "  ▾ Tab #1", "     \u{e795} me/Documents", bipa.as_str()];
-        assert_eq!(firsts[..4], lifted, "one line a SCROLL, bipa carried along");
+        let notes = format!(" ▾ notes {}", "─".repeat(21));
+        let lifted = [&notes, &notes, "  ▾ Tab #1", "     \u{e795} me/Documents", &bipa];
+        assert_eq!(firsts[..5], lifted, "one line a SCROLL, bipa carried along");
         assert!(!end, "it stops at the last row");
         assert_eq!(tick(&mut sidebar, 1260), "       a-p-i-x");
     }
@@ -9704,19 +9773,21 @@ mod tests {
     }
 
     #[test]
-    fn each_project_is_tagged_with_its_machine_this_one_s_first() {
+    fn each_machine_is_a_row_with_its_projects_under_it_this_one_s_first() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         assert_eq!(
-            screen(&mut sidebar, false, 32, 12),
+            screen(&mut sidebar, false, 32, 14),
             [
                 "─ luneta ──────────────────────",
                 "─ 2 projects ───────────── ●1 ─",
                 "",
-                " ▾ main  mac ─────────────────",
+                " ▾ \u{f108} mac ═════════════════════",
+                " ▾ main ──────────────────────",
                 "  ▾ Tab #1",
                 "     \u{e795} w/a",
-                " ▾ main  nixos ──────────── ●1",
+                " ▾ \u{f108} nixos ════════════════ ●1",
+                " ▾ main ─────────────────── ●1",
                 "  ▾ Tab #1                  ●1",
                 "   ● \u{ec82} fix                  1m",
                 " ▸ \u{f108} me@vps · unreachable   1m",
@@ -9724,9 +9795,60 @@ mod tests {
                 "",
             ]
         );
-        let buffer = drawn(&mut sidebar, false, 32, 12);
+        let buffer = drawn(&mut sidebar, false, 32, 14);
         let dim = |y: u16| buffer[(3, y)].modifier.contains(Modifier::DIM);
-        assert_eq!((dim(6), dim(9)), (false, true));
+        assert_eq!((dim(7), dim(11)), (false, true));
+    }
+
+    #[test]
+    fn a_machine_folds_its_projects_away_and_unfolds_them() {
+        let mut sidebar = fresh();
+        sidebar.hear(machines());
+        sidebar.focus(Keys::Sidebar);
+        let nixos_machine = Machine::Remote(nixos());
+        let header = Spot::Machine(nixos_machine.clone());
+        let project = Spot::Remote(nixos(), Place::Session(listed("main", 20)));
+        sidebar.cursor = Some(Spot::Remote(nixos(), pane_of("main", 20, 1)));
+        type_in(&mut sidebar, "hh");
+        assert_eq!(sidebar.cursor, Some(project.clone()));
+        assert!(!sidebar.folds.contains(Fold::Machine(&nixos_machine)));
+        type_in(&mut sidebar, "h");
+        assert!(sidebar.folds.contains(Fold::Machine(&nixos_machine)));
+        assert_eq!(sidebar.cursor, Some(header.clone()));
+        let folded = [
+            " ▾ \u{f108} mac ═════════════════════",
+            " ▾ main ──────────────────────",
+            "  ▾ Tab #1",
+            "     \u{e795} w/a",
+            " ▸ \u{f108} nixos ════════════════ ●1",
+            " ▸ \u{f108} me@vps · unreachable   1m",
+            " ▸ \u{f108} pi · reaching…",
+        ];
+        assert_eq!(screen(&mut sidebar, false, 32, 14)[3..10], folded);
+        assert!(sidebar.row_of(&project).is_none(), "its projects go with it");
+        assert!(!sidebar.folds.contains(Fold::Machine(&Machine::Local)));
+
+        type_in(&mut sidebar, "l");
+        assert!(!sidebar.folds.contains(Fold::Machine(&nixos_machine)));
+        assert!(sidebar.row_of(&project).is_some());
+        sidebar.cursor = Some(header.clone());
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Nothing);
+        assert!(sidebar.folds.contains(Fold::Machine(&nixos_machine)));
+        let area = Rect::new(0, 0, 32, 14);
+        assert_eq!(click(&mut sidebar, 20, 7, area), Asked::Take);
+        assert!(!sidebar.folds.contains(Fold::Machine(&nixos_machine)));
+        assert_eq!(click(&mut sidebar, 20, 3, area), Asked::Take);
+        assert!(sidebar.folds.contains(Fold::Machine(&Machine::Local)));
+        let lines = screen(&mut sidebar, false, 32, 14);
+        assert_eq!(lines[3], " ▸ \u{f108} mac ═════════════════════");
+        assert_eq!(lines[4], " ▾ \u{f108} nixos ════════════════ ●1");
+
+        let vps = Machine::Remote("me@vps".parse().unwrap());
+        sidebar.cursor = Some(Spot::Machine(vps.clone()));
+        sidebar.key(&enter, moment(160_000));
+        assert!(!sidebar.folds.contains(Fold::Machine(&vps)));
+        assert_eq!(sidebar.cursor, Some(Spot::Machine(vps)), "it has no projects to fold");
     }
 
     #[test]
@@ -9863,12 +9985,12 @@ mod tests {
 
         let area = Rect::new(0, 0, 32, 26);
         let lines = screen(&mut sidebar, true, area.width, area.height);
-        assert_eq!(lines[8], "  •✓ \u{ec82} fix                  1m");
-        assert_eq!(click(&mut sidebar, 10, 8, area), there);
+        assert_eq!(lines[10], "  •✓ \u{ec82} fix                  1m");
+        assert_eq!(click(&mut sidebar, 10, 10, area), there);
 
         type_in(&mut sidebar, "u");
         let lines = screen(&mut sidebar, true, area.width, area.height);
-        assert_eq!(lines[8], "   ✓ \u{ec82} fix                  1m");
+        assert_eq!(lines[10], "   ✓ \u{ec82} fix                  1m");
 
         sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
         let pasted = sidebar.menu.as_ref().map(Menu::target);
@@ -10140,12 +10262,12 @@ mod tests {
         host.remotes.push(remote("nixos", down(100)));
         host.remotes.push(remote("-oProxyCommand=sh", down(100)));
         sidebar.hear(host);
-        let lines = screen(&mut sidebar, false, 32, 16);
-        let headers = lines.iter().filter(|line| line.starts_with(" ▾ main  nixos")).count();
+        let lines = screen(&mut sidebar, false, 32, 18);
+        let headers = lines.iter().filter(|line| line.starts_with(" ▾ \u{f108} nixos ")).count();
         assert_eq!(headers, 1);
         assert!(!lines.iter().any(|line| line.contains("ProxyCommand")));
         assert_eq!(
-            lines[13..],
+            lines[15..],
             [
                 " lunetad: 2 machines with a de",
                 " stination luneta does not rea",
@@ -10437,7 +10559,7 @@ mod tests {
             let at = lines.iter().position(|line| line.contains(name)).unwrap();
             u16::try_from(at).unwrap()
         };
-        let (dev, first) = (row(" dev "), row(" main  nixos"));
+        let (dev, first) = (row(" dev "), row("\u{f108} nixos ") + 1);
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, dev), area);
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, first), area), Asked::Take);
@@ -10451,19 +10573,21 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         let main = ProjectId::of(20).unwrap();
+        sidebar.folds.set(Fold::Machine(&Machine::Remote(nixos())), true);
         sidebar.folds.set(Fold::Project(&Machine::Remote(nixos()), main), true);
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "/fix");
         let lines = screen(&mut sidebar, true, 32, 26);
         assert_eq!(
-            lines[HEADER..HEADER + 3],
+            lines[HEADER..HEADER + 4],
             [
-                " ▾ main  nixos ──────────── ●1",
+                " ▾ \u{f108} nixos ════════════════ ●1",
+                " ▾ main ─────────────────── ●1",
                 "  ▾ Tab #1                  ●1",
                 "   ● \u{ec82} fix                  1m",
             ]
         );
-        assert_eq!(lines[HEADER + 3], "");
+        assert_eq!(lines[HEADER + 4], "");
     }
 
     #[test]
@@ -10476,7 +10600,7 @@ mod tests {
                 if sessions { up(vec![main], vec![idle]) } else { up(Vec::new(), Vec::new()) };
             Host { remotes: vec![remote("nixos", nixos)], ..host(Vec::new(), Vec::new()) }
         };
-        let row = |sidebar: &mut Sidebar| screen(sidebar, false, 32, 8)[6].clone();
+        let row = |sidebar: &mut Sidebar| screen(sidebar, false, 32, 9)[7].clone();
         let seen = "   ✓ \u{ec82} fix                  1m";
         let new = "  •✓ \u{ec82} fix                  1m";
         sidebar.hear(reached(true));
