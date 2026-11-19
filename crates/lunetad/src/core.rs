@@ -389,12 +389,11 @@ impl Known {
                 return api::Projects { held: Some(unkept) };
             },
         };
-        let worktree = |folder: Dir, worktree: &Worktree| {
-            let branch = self.branch(folder.as_str());
+        let worktree = |folder: Dir, given: &str, worktree: &Worktree| {
             let renamed = worktree.renamed().map(Name::as_str);
             api::Worktree {
                 id: worktree.id().get(),
-                name: renamed.or(branch).unwrap_or_else(|| folder.last()).to_owned(),
+                name: renamed.unwrap_or(given).to_owned(),
                 renamed: renamed.is_some(),
                 seen: Some(self.seen(&folder).to_api()),
                 folder: folder.as_str().to_owned(),
@@ -403,11 +402,20 @@ impl Known {
             }
         };
         let holds = |project: &Project| match project.holds() {
-            Holds::Folder(own) => api::project::Holds::Folder(worktree(project.dir().clone(), own)),
+            Holds::Folder(own) => {
+                let dir = project.dir();
+                let given = self.branch(dir.as_str()).unwrap_or_else(|| dir.last());
+                api::project::Holds::Folder(worktree(dir.clone(), given, own))
+            },
             Holds::Clone(rows) => {
                 let listing = Some(self.listing(project.dir(), rows));
                 let rows = rows.iter().map(|(subfolder, it)| {
-                    worktree(project.dir().at(subfolder), it)
+                    let folder = project.dir().at(subfolder);
+                    let given = match self.branch(folder.as_str()) {
+                        Some(branch) if subfolder.named_for(branch) => branch,
+                        Some(_) | None => subfolder.as_str(),
+                    };
+                    worktree(folder, given, it)
                 });
                 let clone = api::project::Clone { worktrees: rows.collect(), listing };
                 api::project::Holds::Clone(clone)
