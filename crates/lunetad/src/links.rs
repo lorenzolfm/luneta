@@ -35,6 +35,8 @@ const ASKING: Duration = Duration::from_secs(30);
 
 pub const PATIENCE: Duration = Duration::from_secs(3 * MAKING.as_secs() + ASKING.as_secs() + 60);
 
+pub const WORKTREE_PATIENCE: Duration = Duration::from_secs(MAKING.as_secs() + 60);
+
 const WORKED_MAX: usize = 1024;
 
 const ORIGIN: &str = "origin";
@@ -108,7 +110,7 @@ impl Link {
 
     fn wt(&self) -> Of {
         match self.branch() {
-            Some(branch) => Of::Branch(branch),
+            Some(branch) => Of::Branch(Branch(branch)),
             None => Of::Pull(self.clone()),
         }
     }
@@ -319,9 +321,39 @@ fn on_github(text: &str) -> Option<&str> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Branch(String);
+
+impl Branch {
+    pub fn parse(text: &str) -> Result<Branch, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("it names no branch".to_owned());
+        }
+        let numbered = text.rsplit_once('#').is_some_and(|(_, number)| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if numbered {
+            return Err(format!("{text} names an issue or a pull request: paste its link"));
+        }
+        Ok(Branch(text.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Branch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Of {
     Pull(Link),
-    Branch(String),
+    Branch(Branch),
 }
 
 impl Of {
@@ -330,7 +362,7 @@ impl Of {
             if text.contains("://") || on_github(text).is_some() {
                 return Err(format!("{} is no pull request's link on {GITHUB}", text.trim()));
             }
-            return Ok(Of::Branch(text.to_owned()));
+            return Branch::parse(text).map(Of::Branch);
         };
         match link.wt() {
             Of::Branch(branch) => {
@@ -345,7 +377,7 @@ impl fmt::Display for Of {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Of::Pull(link) => f.write_str(&link.url()),
-            Of::Branch(branch) => f.write_str(branch),
+            Of::Branch(branch) => f.write_str(branch.as_str()),
         }
     }
 }
@@ -803,7 +835,7 @@ fn ready_file(
         return moved.ready(going, worked, work);
     }
     base(&repository, ORIGIN, &branch)?;
-    made_worktree(&repository, &Of::Branch(branch), going, worked, work)
+    made_worktree(&repository, &Of::Branch(Branch(branch)), going, worked, work)
 }
 
 struct MovedOff {
@@ -1116,9 +1148,9 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
 
-fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
+pub fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
     let mut luneta = Command::new(luneta()?);
-    git::local(luneta.args(["worktree", "--repo", dir, &of.to_string()]));
+    git::local(luneta.args(["worktree", "--repo", dir, "--", &of.to_string()]));
     let ran = program::run_alone(&mut luneta, MAKING)
         .map_err(|error| format!("luneta worktree could not be run: {error}"))?;
     worktree_said(ran)
@@ -1390,7 +1422,7 @@ mod tests {
         assert_eq!(issue().to_string(), "cashubtc/cdk#2736");
         assert_eq!(issue().url(), "https://github.com/cashubtc/cdk/issues/2736");
         assert_eq!(issue().tab(), "#2736");
-        assert_eq!(issue().wt(), Of::Branch("issue-2736".to_owned()));
+        assert_eq!(issue().wt(), Of::Branch(Branch("issue-2736".to_owned())));
         assert!(issue().is(&link()));
         assert_eq!(Link::parse("https://github.com/cashubtc/cdk/issues/0"), None);
     }
@@ -1406,6 +1438,13 @@ mod tests {
             assert_eq!(handed(text), Ok(link().url()), "{text:?}");
         }
         assert_eq!(handed("feat/of"), Ok("feat/of".to_owned()));
+        assert_eq!(handed(" feat/of\n"), Ok("feat/of".to_owned()), "trimmed");
+        assert_eq!(handed("feat#"), Ok("feat#".to_owned()), "git takes a # with no number");
+        assert_eq!(handed("  "), Err("it names no branch".to_owned()));
+        for text in ["#12", "cashubtc/cdk#2736", "fix#3"] {
+            let said = format!("{text} names an issue or a pull request: paste its link");
+            assert_eq!(handed(text), Err(said), "luneta reads {text} as a number on GitHub");
+        }
         assert_eq!(
             Of::parse("github.com/cashubtc/cdk/issues/2736"),
             Err("cashubtc/cdk#2736 is an issue: make the worktree of its branch, issue-2736"

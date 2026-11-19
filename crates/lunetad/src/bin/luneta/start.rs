@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Duration;
 
-use lunetad::links::{self, Kind, Link, Of, Pasted, Unready, Work, Worked};
+use lunetad::links::{self, Branch, Kind, Link, Of, Pasted, Unready, Work, Worked};
 use lunetad::mux::own::terminal_here;
 use lunetad::program;
 use lunetad::projects::{Dir, WorktreeId};
@@ -23,7 +23,7 @@ const TACKLE: &str = "Tackle";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum What {
     Folder(PathBuf),
-    Branch(String),
+    Branch(Branch),
     Issue(NonZeroU32),
     Link(Link),
 }
@@ -67,7 +67,7 @@ impl What {
         if pathlike || text == "." || text == ".." {
             return Err(format!("{} is no folder", dir.display()));
         }
-        Ok(What::Branch(text.to_owned()))
+        Branch::parse(text).map(What::Branch)
     }
 }
 
@@ -243,8 +243,9 @@ mod tests {
         assert_eq!(read("main"), Ok(What::Folder(PathBuf::from("/w/luneta/main"))));
         assert_eq!(read("/w"), Ok(What::Folder(PathBuf::from("/w"))));
         assert_eq!(read(" . "), Ok(What::Folder(PathBuf::from("/w/luneta/."))));
-        assert_eq!(read("feat/sidebar"), Ok(What::Branch("feat/sidebar".to_owned())));
-        assert_eq!(read("issue-448"), Ok(What::Branch("issue-448".to_owned())));
+        let branch = |text: &str| Ok(What::Branch(Branch::parse(text).unwrap()));
+        assert_eq!(read("feat/sidebar"), branch("feat/sidebar"));
+        assert_eq!(read("issue-448"), branch("issue-448"));
         assert_eq!(read("~"), Ok(What::Folder(PathBuf::from("/w"))), "~ is home");
         assert_eq!(read("~/luneta"), Ok(What::Folder(PathBuf::from("/w/luneta"))));
     }
@@ -270,6 +271,9 @@ mod tests {
         let wrong = "https://github.com/lorenzolfm/luneta/commits";
         let said = format!("{wrong} is no link of an issue or a pull request on github.com");
         assert_eq!(read(wrong), Err(said));
+        let named = "lorenzolfm/luneta#448";
+        let said = format!("{named} names an issue or a pull request: paste its link");
+        assert_eq!(read(named), Err(said), "the name luneta gives a link is no branch");
         assert!(read("  ").unwrap_err().starts_with("nothing to start"));
     }
 }

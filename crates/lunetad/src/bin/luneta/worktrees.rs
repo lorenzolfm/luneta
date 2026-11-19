@@ -9,10 +9,12 @@ use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorktrees};
 use lunetad::api::change_projects_request::{Bring, Join, RenameTerminal};
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::make_worktree_response::Landed as Answered;
 use lunetad::api::projects::Held;
-use lunetad::api::{ChangeProjectsRequest, On, Version, WatchRequest};
+use lunetad::api::{ChangeProjectsRequest, MakeWorktreeRequest, On, Version, WatchRequest};
 use lunetad::mux::own::TerminalKey;
 use lunetad::projects::{Name, ProjectId, Size, ViewId, WorktreeId};
+use lunetad::links::{self, Branch, Unready};
 use lunetad::{Asked, Beside, Heard};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
@@ -86,11 +88,12 @@ fn asked<T, E: From<String>>(
     path: &Path,
     asking: impl AsyncFnOnce(&mut Daemon) -> Result<T, E>,
 ) -> Result<T, E> {
-    asked_or(path, asking, E::from)
+    asked_or(path, ASKING, asking, E::from)
 }
 
 fn asked_or<T, E: From<String>>(
     path: &Path,
+    within: Duration,
     asking: impl AsyncFnOnce(&mut Daemon) -> Result<T, E>,
     late: impl FnOnce(String) -> E,
 ) -> Result<T, E> {
@@ -100,8 +103,8 @@ fn asked_or<T, E: From<String>>(
         .map_err(|error| E::from(format!("no runtime: {error}")))?;
     runtime.block_on(async {
         let mut daemon = daemon::current(path).await.map_err(E::from)?.daemon;
-        let answered = tokio::time::timeout(ASKING, asking(&mut daemon)).await;
-        answered.map_err(|_| late(format!("lunetad did not answer in {}s", ASKING.as_secs())))?
+        let answered = tokio::time::timeout(within, asking(&mut daemon)).await;
+        answered.map_err(|_| late(format!("lunetad did not answer in {}s", within.as_secs())))?
     })
 }
 
@@ -165,6 +168,40 @@ pub fn add_worktree(
     let (project, folder, name) = (project.get(), folder.to_owned(), name.map(str::to_owned));
     let change = Change::AddWorktree(AddWorktree { project, folder, name, argv });
     landed(changed_on(path, on(machine), change).map_err(Unmade::said)?)
+}
+
+pub fn branched(
+    path: &Path,
+    machine: &Machine,
+    project: ProjectId,
+    branch: &Branch,
+) -> Result<Landed, Unready> {
+    let (on, project, branch) = (on(machine), project.get(), branch.as_str().to_owned());
+    let request = MakeWorktreeRequest { on, project, branch };
+    let asking = async |daemon: &mut Daemon| {
+        let unready = |status: Status| unbranched(&status);
+        let mut answer = daemon.make_worktree(request).await.map_err(unready)?.into_inner();
+        let answered = answer.message().await.map_err(unready)?;
+        let unsaid = || Unready::InDoubt("lunetad ended its answer with no worktree".to_owned());
+        let id = |id| WorktreeId::of(id).ok_or_else(|| Unready::InDoubt(zero("worktree")));
+        match answered.and_then(|answered| answered.landed).ok_or_else(unsaid)? {
+            Answered::Made(made) => id(made).map(Landed::Made),
+            Answered::Found(found) => id(found).map(Landed::Found),
+        }
+    };
+    let late = |late: String| Unready::InDoubt(format!("{late}, so the worktree may be made"));
+    asked_or(path, links::WORKTREE_PATIENCE, asking, late)
+}
+
+fn unbranched(status: &Status) -> Unready {
+    let why = status.message().to_owned();
+    match status.code() {
+        Code::NotFound => Unready::Nowhere(why),
+        Code::InvalidArgument | Code::FailedPrecondition | Code::Unimplemented => {
+            Unready::Failed(why)
+        },
+        _ => Unready::InDoubt(why),
+    }
 }
 
 fn started_at(path: &Path, folder: &str) -> Result<Option<Landed>, String> {
@@ -247,7 +284,7 @@ pub fn reordered(path: &Path, machine: &Machine, order: &Reorder) -> Result<Opti
         Ok(answered) => Ok(answered.into_inner().kept),
         Err(status) => Err(Unmoved::of(&status)),
     };
-    asked_or(path, asking, Unmoved::Unsure)
+    asked_or(path, ASKING, asking, Unmoved::Unsure)
 }
 
 fn holds(dir: &str, folder: &Path) -> bool {

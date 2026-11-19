@@ -222,7 +222,8 @@ impl Action {
                 spec("new welcome view", &["home", "start", "greeting"], new, VIEW, Any)
             },
             Action::NewWorktree => {
-                spec("new worktree", &["tab", "task"], menu(&['n', 'w']), IN_A_PROJECT, Any)
+                let keywords = &["branch", "tab", "task"];
+                spec("new worktree", keywords, menu(&['n', 'w']), IN_A_PROJECT, Any)
             },
             Action::NewProject => {
                 spec("new project", &["folder", "directory", "add"], menu(&['n', 'p']), EVERY, Any)

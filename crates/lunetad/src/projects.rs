@@ -1524,6 +1524,11 @@ fn nested(dir: &Dir, other: &Project) -> String {
     format!("{} holds {other_dir}, project {name}'s folder", dir.0)
 }
 
+#[must_use]
+pub fn folder_has_one_worktree(name: impl fmt::Display) -> String {
+    format!("{name} is a folder, and its own is its one worktree")
+}
+
 fn unknown(what: &str, id: impl fmt::Display) -> String {
     format!("no {what} has the id {id}")
 }

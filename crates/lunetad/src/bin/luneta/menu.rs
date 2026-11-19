@@ -6,6 +6,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::said::Said;
+use lunetad::links::Branch;
 use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::{Destination, Directory};
@@ -114,6 +115,7 @@ pub const TITLE: &str = "luneta";
 const SEARCH_TITLE: &str = "Skills";
 const SSH_TITLE: &str = "ssh";
 const PROJECT_TITLE: &str = "New project";
+const WORKTREE_TITLE: &str = "New worktree";
 const RENAME_TITLE: &str = "Rename";
 
 const NEXT_DOES: [&str; 2] = ["another agent", "another"];
@@ -438,11 +440,15 @@ const UNRENAME_HINT: &str = "its new name; with none, it goes back to the name l
 
 const RENAME_HINT: &str = "its new name";
 
+const BRANCH_HINT: &str = "its branch: one git has is checked out, and any other is made from the \
+                           default branch";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Typing {
     Machine,
     Folder,
     Name(String),
+    Branch(ProjectId),
     Rename(Renames),
 }
 
@@ -481,6 +487,7 @@ impl Typing {
         match self {
             Typing::Machine => SSH_TITLE,
             Typing::Folder | Typing::Name(_) => PROJECT_TITLE,
+            Typing::Branch(_) => WORKTREE_TITLE,
             Typing::Rename(_) => RENAME_TITLE,
         }
     }
@@ -490,6 +497,7 @@ impl Typing {
             Typing::Machine => SSH_HINT,
             Typing::Folder => FOLDER_HINT,
             Typing::Name(_) => PROJECT_NAME_HINT,
+            Typing::Branch(_) => BRANCH_HINT,
             Typing::Rename(Renames::Terminal(_) | Renames::Worktree(_)) => UNRENAME_HINT,
             Typing::Rename(Renames::Project(_)) => RENAME_HINT,
         }
@@ -499,7 +507,7 @@ impl Typing {
         match self {
             Typing::Machine => "Add",
             Typing::Folder => "Next",
-            Typing::Name(_) => "Make",
+            Typing::Name(_) | Typing::Branch(_) => "Make",
             Typing::Rename(_) => "Rename",
         }
     }
@@ -521,6 +529,10 @@ impl Typing {
             },
             Typing::Name(folder) => match named(projects::Name::of_project) {
                 Ok(name) => Entered::Done(Done::Project { on: on.clone(), folder, name }),
+                Err(why) => Entered::Wrong(why),
+            },
+            Typing::Branch(project) => match Branch::parse(typed) {
+                Ok(branch) => Entered::Done(Done::Worktree(on.clone(), project, branch)),
                 Err(why) => Entered::Wrong(why),
             },
             Typing::Rename(asked) => match (asked, named(asked.parse())) {
@@ -814,16 +826,6 @@ impl Target {
         })
     }
 
-    fn folder(&self) -> Result<Directory, String> {
-        let folder = match self {
-            Target::Pane(_, row) => return row.beside().map(|beside| beside.cwd),
-            Target::Worktree(_, row) => row.folder.clone(),
-            Target::Project(_, project) => project.dir.clone(),
-            Target::Machine(_) => return Err("menu: a machine's row has no folder".to_owned()),
-        };
-        Directory::parse(folder).map_err(|why| format!("menu: {why}"))
-    }
-
     pub fn branch(&self) -> Option<&str> {
         match self {
             Target::Project(..) | Target::Machine(_) => None,
@@ -981,6 +983,7 @@ pub enum Did {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Wants {
     Nothing,
+    Cloned(ProjectId),
     Keep(Harness),
     Skills { cwd: String, agent: Harness },
     Refind { cwd: String, agent: Harness },
@@ -1011,7 +1014,7 @@ pub enum Done {
     Issue(Repository),
     Ssh(Destination),
     Forget(Destination),
-    Worktree(Machine, ProjectId, Directory),
+    Worktree(Machine, ProjectId, Branch),
     Welcome { on: Machine, session: Listed, pane: PaneKey },
     Project { on: Machine, folder: String, name: Option<projects::Name> },
     Rename(Machine, Rename),
@@ -1306,11 +1309,10 @@ impl Menu {
                 let on = target.machine().clone();
                 Did::Closed(Done::Welcome { on, session: row.session.clone(), pane: row.pane })
             },
-            Offer::NewWorktree(project) => match target.folder() {
-                Ok(folder) => {
-                    Did::Closed(Done::Worktree(target.machine().clone(), project, folder))
-                },
-                Err(reason) => wrong(reason),
+            Offer::NewWorktree(project) => {
+                let typing = Typing::Branch(project);
+                let stage = Stage::Typing { keys, typing, typed: String::new(), wrong: None };
+                stays(stage, Wants::Cloned(project))
             },
             Offer::NewProject => {
                 let typed = target.folder_hint();
@@ -1855,7 +1857,9 @@ impl Menu {
                 let keys = [(Hint::Enter, typing.enter()), (Hint::Esc, "Back")];
                 let right = match typing {
                     Typing::Name(folder) => sidebar::short_cwd(folder),
-                    Typing::Machine | Typing::Folder | Typing::Rename(_) => String::new(),
+                    Typing::Machine | Typing::Folder | Typing::Branch(_) | Typing::Rename(_) => {
+                        String::new()
+                    },
                 };
                 (typing.title().to_owned(), right, body, keyed(width, &keys))
             },
@@ -2669,17 +2673,46 @@ mod tests {
     }
 
     #[test]
-    fn n_w_makes_a_worktree_of_the_row_s_project_in_the_row_s_folder_on_its_machine() {
-        let made = |target: Target| closed(stays(opened(target, Some('n'))).0.key(&char('w')));
+    fn n_w_asks_for_a_branch_and_makes_its_worktree_in_the_row_s_project_on_its_machine() {
+        let enter = KeyEvent::from(KeyCode::Enter);
+        let asked = |target: Target| {
+            let (menu, wants) = stays(stays(opened(target, Some('n'))).0.key(&char('w')));
+            assert_eq!(wants, Wants::Cloned(project().id()));
+            menu
+        };
+        let made = |target: Target, typed: &str| {
+            let menu = typed.chars().fold(asked(target), |menu, c| stays(menu.key(&char(c))).0);
+            closed(menu.key(&enter))
+        };
         let (id, here) = (project().id(), || Machine::Local);
-        assert_eq!(made(own_pane()), Done::Worktree(here(), id, main_dir()));
-        assert_eq!(made(worktree_on(here())), Done::Worktree(here(), id, main_dir()));
-        assert_eq!(made(session_row()), Done::Worktree(here(), id, directory("/w/luneta")));
+        let branch = || Branch::parse("feat/x").unwrap();
+        assert_eq!(made(own_pane(), "feat/x"), Done::Worktree(here(), id, branch()));
+        assert_eq!(made(worktree_on(here()), " feat/x "), Done::Worktree(here(), id, branch()));
+        assert_eq!(made(session_row(), "feat/x"), Done::Worktree(here(), id, branch()));
         let vps = || Machine::Remote("me@vps".parse().unwrap());
-        assert_eq!(made(Target::Pane(vps(), own_row())), Done::Worktree(vps(), id, main_dir()));
-        assert_eq!(made(worktree_on(vps())), Done::Worktree(vps(), id, main_dir()));
-        let far = directory("/w/luneta");
-        assert_eq!(made(project_on(vps())), Done::Worktree(vps(), id, far));
+        let far = Target::Pane(vps(), own_row());
+        assert_eq!(made(far, "feat/x"), Done::Worktree(vps(), id, branch()));
+        assert_eq!(made(worktree_on(vps()), "feat/x"), Done::Worktree(vps(), id, branch()));
+        assert_eq!(made(project_on(vps()), "feat/x"), Done::Worktree(vps(), id, branch()));
+        let menu = asked(own_pane());
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[..3], [
+            "─ New worktree ────────────────",
+            " _",
+            " its branch: one git has is",
+        ]);
+        let refused = |typed: &str| {
+            let menu = typed.chars().fold(asked(own_pane()), |menu, c| stays(menu.key(&char(c))).0);
+            let (menu, _) = stays(menu.key(&enter));
+            let Stage::Typing { wrong: Some(wrong), .. } = &menu.stage else {
+                panic!("{typed:?} keeps the box open, saying why");
+            };
+            (wrong.clone(), menu)
+        };
+        assert_eq!(refused(" ").0, "it names no branch");
+        let (wrong, menu) = refused("#12");
+        assert_eq!(wrong, "#12 names an issue or a pull request: paste its link");
+        let back = stays(menu.key(&KeyEvent::from(KeyCode::Esc))).0;
+        assert!(matches!(back.stage, Stage::Choosing(_)), "Esc goes back to the keys");
         let (menu, _) = stays(opened(pane_row(), Some('n')));
         let lines = text(&menu.lines(31, 9, 0).0);
         assert!(!lines.contains(&" w  new worktree".to_owned()), "a zellij pane's: {lines:?}");
@@ -3655,7 +3688,7 @@ mod tests {
         let relative = Target::Pane(Machine::Local, relative);
         let (menu, _) = stays(opened(relative, Some('n')));
         let why = "menu: where view 4 works, \"w\" is no absolute path".to_owned();
-        assert_eq!(closed(menu.key(&char('w'))), Done::Wrong(why));
+        assert_eq!(closed(menu.key(&char('v'))), Done::Wrong(why));
     }
 
     fn skills(names: &[&str]) -> Vec<Skill> {

@@ -22,7 +22,7 @@ use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE
 use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
 use crate::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Runs, Spot};
 use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
-use crate::projects::Worktree;
+use crate::projects::{Holds, Name, Worktree};
 use crate::projects::{WorktreeId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, VIEWS_MAX};
 use crate::projects::{quoted, Opens, Subfolder, WORKTREES_MAX};
 use crate::shells::Doing;
@@ -95,6 +95,14 @@ pub enum Command {
     Unreached { since: Instant },
     Worktrees { root: Dir, subfolders: BTreeSet<Subfolder>, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, subfolders: BTreeSet<Subfolder> },
+    CloneRoot { project: ProjectId, answer: oneshot::Sender<Result<Dir, NotCloned>> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotCloned {
+    Unkept(String),
+    Unknown,
+    Folder(Name),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -495,6 +503,9 @@ impl Layouts {
                     self.troubles.say(format!("{root}: its worktrees are not kept: {why}"));
                 }
             },
+            Command::CloneRoot { project, answer } => {
+                let _ = answer.send(self.clone_root(project));
+            },
             Command::Rooted { root, subfolders } => {
                 let rooted = Change::Rooted { root: root.clone(), subfolders };
                 if let Err(why) = self.followed(rooted) {
@@ -799,6 +810,15 @@ impl Layouts {
             }
         }
         Ok(taken.then_some(Made::Taken(worktree)))
+    }
+
+    fn clone_root(&self, project: ProjectId) -> Result<Dir, NotCloned> {
+        let projects = self.kept().map_err(NotCloned::Unkept)?;
+        let held = projects.project_of(project).ok_or(NotCloned::Unknown)?;
+        match held.holds() {
+            Holds::Clone(_) => Ok(held.dir().clone()),
+            Holds::Folder(_) => Err(NotCloned::Folder(held.name().clone())),
+        }
     }
 
     fn kept(&self) -> Result<&Projects, String> {
