@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::io::{self, Write as _};
+use std::iter;
 use std::num::NonZeroU16;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -128,6 +129,12 @@ const UNSHOWN: [&str; 2] =
 const UNSHOWN_CURSOR: (CursorShape, bool) = (CursorShape::HollowBlock, false);
 
 const CLIENT: u64 = 1;
+
+const ASKED_TO_QUIT: &str = "asked to quit";
+
+const SLOW_END: Duration = Duration::from_secs(1);
+
+const WAITS: &str = "ends once the changes it sent are done; Ctrl c ends it now";
 
 pub enum Event {
     Input(Input),
@@ -335,7 +342,7 @@ struct App {
     projected: Projected,
     seated: Option<OwnPane>,
     lunetad: PathBuf,
-    movers: HashMap<Machine, SyncSender<Move>>,
+    movers: HashMap<Machine, Mover>,
     sidebar: Sidebar,
     areas: (Rect, Rect),
     width: Width,
@@ -376,6 +383,7 @@ struct App {
     naming: Naming,
     alerts: Alerts,
     desktop: Desktop,
+    quit_asked: bool,
 }
 
 pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
@@ -421,6 +429,7 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
     let mut inbox = Inbox::new(inbox);
     input::read(events.clone());
     let answers = answers::ask(&mut inbox);
+    let mut sent = Vec::new();
     let ran = execute!(
         io::stdout(),
         EnableMouseCapture,
@@ -445,6 +454,7 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
             answers.kitty,
             events,
             &mut inbox,
+            &mut sent,
         )
     });
     if let Err(error) = &ran {
@@ -459,6 +469,15 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
         log::say(&format!("its terminal was not put back: {error}"));
     }
     let mut said = io::stderr();
+    wait_for(sent, SLOW_END, || {
+        log::say(WAITS);
+        let _ = writeln!(said, "luneta: {WAITS}");
+    });
+    for event in iter::from_fn(|| inbox.try_next()) {
+        if let Event::Filed { to, words, filed, .. } = event {
+            let _ = writeln!(said, "{}", issue::on_quit(&to, &words, &filed));
+        }
+    }
     match hidden.and(ran).and_then(|failed| put.map(|()| failed)) {
         Ok(None) => ExitCode::SUCCESS,
         Ok(Some(failed)) => {
@@ -480,6 +499,22 @@ fn did_not_start(why: &str) -> ExitCode {
 
 fn say_ends(why: &str) {
     log::say(&format!("ends: {why}"));
+}
+
+fn wait_for(sent: Vec<JoinHandle<()>>, slow: Duration, said: impl FnOnce()) {
+    let (ended, ending) = mpsc::channel();
+    thread::spawn(move || {
+        for change in sent {
+            if change.join().is_err() {
+                log::say("a change luneta sent panicked");
+            }
+        }
+        let _ = ended.send(());
+    });
+    if ending.recv_timeout(slow).is_err() {
+        said();
+        let _ = ending.recv();
+    }
 }
 
 fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
@@ -505,6 +540,7 @@ fn run_in(
     releases: bool,
     events: Sender<Event>,
     inbox: &mut Inbox,
+    sent: &mut Vec<JoinHandle<()>>,
 ) -> io::Result<Option<String>> {
     let (width, width_unread) = Width::kept();
     let folds = Folds::shared();
@@ -613,15 +649,14 @@ fn run_in(
         naming: Naming::Idle,
         alerts: Alerts::new(focused),
         desktop,
+        quit_asked: false,
     };
     app.watch();
     if let Some(root) = root {
         app.open_worktree(Machine::Local, root);
     }
     let ran = run_loop(terminal, &mut app, inbox);
-    for change in app.changes.drain(..) {
-        let _ = change.join();
-    }
+    sent.extend(app.sent());
     ran?;
     Ok(app.failure())
 }
@@ -647,30 +682,42 @@ struct Move {
 
 const MOVE_PANICKED: &str = "luneta could not ask lunetad for the move: asking panicked";
 
-fn moves_on(lunetad: &Path, on: &Machine, events: &Sender<Event>) -> SyncSender<Move> {
-    let (moves, asked) = mpsc::sync_channel::<Move>(sidebar::MOVES_MAX);
-    let (lunetad, on, events) = (lunetad.to_owned(), on.clone(), events.clone());
-    thread::spawn(move || {
-        let mut stopped = Stopped::default();
-        for Move { ticket, order } in asked {
-            if stopped.holds(ticket) {
-                continue;
+struct Mover {
+    moves: SyncSender<Move>,
+    moving: JoinHandle<()>,
+}
+
+impl Mover {
+    fn on(lunetad: &Path, on: &Machine, events: &Sender<Event>) -> Mover {
+        let (moves, asked) = mpsc::sync_channel::<Move>(sidebar::MOVES_MAX);
+        let (lunetad, on, events) = (lunetad.to_owned(), on.clone(), events.clone());
+        let moving = thread::spawn(move || {
+            let mut stopped = Stopped::default();
+            for Move { ticket, order } in asked {
+                if stopped.holds(ticket) {
+                    continue;
+                }
+                let asked = AssertUnwindSafe(|| worktrees::reordered(&lunetad, &on, &order));
+                let unsure = |_| Err(Unmoved::Unsure(MOVE_PANICKED.to_owned()));
+                let event = match panic::catch_unwind(asked).unwrap_or_else(unsure) {
+                    Ok(kept) => Event::Moved { ticket, kept },
+                    Err(unmoved) => {
+                        stopped.stop(ticket);
+                        Event::Unmoved { on: on.clone(), ticket, order, unmoved }
+                    },
+                };
+                if events.send(event).is_err() {
+                    return;
+                }
             }
-            let asked = AssertUnwindSafe(|| worktrees::reordered(&lunetad, &on, &order));
-            let unsure = |_| Err(Unmoved::Unsure(MOVE_PANICKED.to_owned()));
-            let event = match panic::catch_unwind(asked).unwrap_or_else(unsure) {
-                Ok(kept) => Event::Moved { ticket, kept },
-                Err(unmoved) => {
-                    stopped.stop(ticket);
-                    Event::Unmoved { on: on.clone(), ticket, order, unmoved }
-                },
-            };
-            if events.send(event).is_err() {
-                return;
-            }
-        }
-    });
-    moves
+        });
+        Mover { moves, moving }
+    }
+
+    fn stopped(self) -> JoinHandle<()> {
+        drop(self.moves);
+        self.moving
+    }
 }
 
 #[derive(Default)]
@@ -716,10 +763,17 @@ fn run_loop(
             },
         }
         for _ in 1..FRAME_EVENTS_MAX {
+            if app.quit_asked {
+                break;
+            }
             let Some(event) = inbox.try_next() else {
                 break;
             };
             app.handle(event, terminal)?;
+        }
+        if app.quit_asked {
+            say_ends(ASKED_TO_QUIT);
+            return Ok(());
         }
         app.ticked(Instant::now());
         app.alerting(Instant::now());
@@ -1577,11 +1631,12 @@ impl App {
             Asked::Delete { on, act } => match act {
                 Act::Worktree { .. } | Act::Project { .. } => self.project_act(&on, &act),
                 Act::Pane { session, whose, pane } => {
-                    zellij::close(&on, session, whose, Close::Pane(pane.id()), &self.events);
+                    let close = Close::Pane(pane.id());
+                    self.keep_change(zellij::close(&on, session, whose, close, &self.events));
                 },
                 Act::Tab { session, whose, tab, panes } => {
                     let close = Close::Tab { id: tab, panes };
-                    zellij::close(&on, session, whose, close, &self.events);
+                    self.keep_change(zellij::close(&on, session, whose, close, &self.events));
                 },
                 Act::Kill { session, whose } => {
                     self.keep_change(zellij::kill(&on, session, whose, &self.events));
@@ -1592,7 +1647,9 @@ impl App {
                 },
             },
             Asked::Open { asking, on, key, open } => self.project_open(asking, &on, key, &open),
-            Asked::OpenZellij { menu, on, open } => zellij::open(menu, &on, open, &self.events),
+            Asked::OpenZellij { menu, on, open } => {
+                self.keep_change(zellij::open(menu, &on, open, &self.events));
+            },
             Asked::Welcome { asking, on, session, pane } => {
                 self.welcome(asking, &on, &session, pane);
             },
@@ -1696,19 +1753,25 @@ impl App {
             Asked::Move { on, order, ticket } => {
                 let (lunetad, events) = (&self.lunetad, &self.events);
                 let mover = self.movers.entry(on.clone());
-                let mover = mover.or_insert_with(|| moves_on(lunetad, &on, events));
-                match mover.try_send(Move { ticket, order }) {
+                let mover = mover.or_insert_with(|| Mover::on(lunetad, &on, events));
+                match mover.moves.try_send(Move { ticket, order }) {
                     Ok(()) => {},
                     Err(TrySendError::Full(Move { ticket, order })) => {
                         let why = format!("{} moves are on their way already", sidebar::MOVES_MAX);
                         self.sidebar.unsent(ticket, &order, &why);
                     },
                     Err(TrySendError::Disconnected(Move { ticket, order })) => {
-                        self.movers.remove(&on);
+                        if let Some(mover) = self.movers.remove(&on) {
+                            self.keep_change(mover.stopped());
+                        }
                         let why = "the moves have stopped: move it again";
                         self.sidebar.unsent(ticket, &order, why);
                     },
                 }
+            },
+            Asked::Quit => {
+                assert!(!self.quit_asked, "luneta follows nothing once asked to quit");
+                self.quit_asked = true;
             },
         }
     }
@@ -1731,6 +1794,11 @@ impl App {
         self.changes.push(change);
     }
 
+    fn sent(&mut self) -> Vec<JoinHandle<()>> {
+        let movers = self.movers.drain().map(|(_, mover)| mover.stopped());
+        movers.chain(self.changes.drain(..)).collect()
+    }
+
     fn project_act(&mut self, on: &Machine, act: &Act) {
         match (on, act) {
             (_, Act::Worktree { worktree, seen, .. }) => {
@@ -1743,11 +1811,11 @@ impl App {
             },
             (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) => {
                 let (terminal, events) = (*terminal, self.events.clone());
-                thread::spawn(move || {
+                self.keep_change(thread::spawn(move || {
                     if let Err(failure) = lunetad::mux::own::server::Terminals.closed(terminal) {
                         let _ = events.send(Event::Notice(format!("menu: not closed: {failure}")));
                     }
-                });
+                }));
             },
             _ => self.sidebar.notify(format!("menu: {NOT_YET}")),
         }
@@ -1890,8 +1958,9 @@ impl App {
         let Some(Over::Issue(issue)) = open else {
             return;
         };
-        if let Some((number, to)) = issue.send(&self.events, &mut self.unfiled) {
+        if let Some((number, to, filing)) = issue.send(&self.events, &mut self.unfiled) {
             self.sidebar.filing(number, &to.to_string());
+            self.keep_change(filing);
         }
         self.give_from(had, Focus::on(self.focus.side));
     }
@@ -2271,7 +2340,7 @@ impl App {
         assert_eq!(self.naming, Naming::Idle, "luneta names one session at a time");
         self.naming = Naming::Busy;
         let events = self.events.clone();
-        thread::spawn(move || drop(events.send(Event::Named(made()))));
+        self.keep_change(thread::spawn(move || drop(events.send(Event::Named(made())))));
     }
 
     fn named(&mut self, made: Made) {
@@ -2597,6 +2666,25 @@ mod tests {
     use ratatui::{TerminalOptions, Viewport};
 
     use super::*;
+
+    #[test]
+    fn the_end_waits_for_the_changes_sent_and_says_so_only_once_it_is_slow() {
+        let mut said = 0;
+        wait_for(vec![thread::spawn(|| {})], Duration::from_secs(60), || said += 1);
+        assert_eq!(said, 0);
+        let (go, gate) = mpsc::channel::<()>();
+        let (done, ended) = mpsc::channel();
+        let slow = thread::spawn(move || {
+            let _ = gate.recv();
+            let _ = done.send(());
+        });
+        wait_for(vec![slow], Duration::ZERO, || {
+            said += 1;
+            let _ = go.send(());
+        });
+        assert_eq!(said, 1);
+        assert_eq!(ended.try_recv(), Ok(()), "the end outlasts the slow change");
+    }
 
     #[test]
     fn alt_equals_or_plus_grows_with_or_without_shift_and_alt_minus_shrinks() {

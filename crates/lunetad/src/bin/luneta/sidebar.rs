@@ -34,7 +34,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::actions::Action;
+use crate::actions::{Action, Command, QUIT};
 use crate::agents::{self, Kept};
 use crate::alerts::{self, Reach};
 use crate::aloud;
@@ -1124,6 +1124,7 @@ pub enum Asked {
     Ssh(Destination),
     Forget(Destination),
     Move { on: Machine, order: Reorder, ticket: u64 },
+    Quit,
 }
 
 impl Asked {
@@ -1157,7 +1158,8 @@ impl Asked {
             | Asked::Issue(_)
             | Asked::Ssh(_)
             | Asked::Forget(_)
-            | Asked::Move { .. } => None,
+            | Asked::Move { .. }
+            | Asked::Quit => None,
         }
     }
 }
@@ -2691,10 +2693,12 @@ impl Sidebar {
                 Some(Top::Fold(Some(folded))) => self.fold(folded),
                 Some(Top::Fold(None)) => self.toggle(),
                 Some(Top::Menu) => return self.open_menu(None),
-                Some(Top::Command(Action::Search)) => self.find(String::new()),
-                Some(Top::Command(Action::Unread)) => self.toggle_unread(now),
-                Some(Top::Command(Action::Reorder)) => self.select(),
-                Some(Top::Command(_) | Top::Shift(_)) => {},
+                Some(Top::Command(Command::Search)) => self.find(String::new()),
+                Some(Top::Command(Command::Unread)) => self.toggle_unread(now),
+                Some(Top::Command(Command::Reorder)) => self.select(),
+                Some(Top::Command(Command::Quit)) if pending.shows().is_some() => {},
+                Some(Top::Command(Command::Quit)) => return Asked::Quit,
+                Some(Top::Shift(_)) => {},
                 None => {
                     let asked = self.open_menu(Some(c));
                     if let Some(menu) = &self.menu {
@@ -2729,7 +2733,9 @@ impl Sidebar {
         let by = match key.code {
             KeyCode::Down | KeyCode::Char('j') => 1,
             KeyCode::Up | KeyCode::Char('k') => -1,
-            KeyCode::Esc | KeyCode::Char(menu::ALL_KEYS) => return Some(Asked::Nothing),
+            KeyCode::Esc | KeyCode::Char(menu::ALL_KEYS | QUIT) => {
+                return Some(Asked::Nothing);
+            },
             _ => return None,
         };
         all.scroll(by);
@@ -2816,7 +2822,8 @@ impl Sidebar {
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
                 Some(Top::Shift(by)) => return Some(self.shift(by)),
-                Some(Top::Command(Action::Reorder)) => self.widen(),
+                Some(Top::Command(Command::Reorder)) => self.widen(),
+                Some(Top::Command(Command::Quit)) => self.unselect(),
                 _ => {
                     self.unselect();
                     return None;
@@ -3306,6 +3313,7 @@ impl Sidebar {
                     Done::Issue(repository) => Asked::Issue(repository),
                     Done::Ssh(destination) => Asked::Ssh(destination),
                     Done::Forget(destination) => Asked::Forget(destination),
+                    Done::Quit => Asked::Quit,
                 };
             },
         };
@@ -7844,9 +7852,9 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.key(&char('?'), moment(160_000));
         let clicked = clicks(&mut sidebar, 0);
-        assert!(clicked[..8].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
+        assert!(clicked[..7].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
         let legend: Vec<(&str, Option<Hit>)> =
-            clicked[8..].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
+            clicked[7..].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         let rule = format!("─ luneta {}", "─".repeat(22));
         assert_eq!(legend, [
             (rule.as_str(), None),
@@ -7855,6 +7863,7 @@ mod tests {
             (" v  Reorder", Some(on_legend('v'))),
             (" o  Open ▸", Some(on_legend('o'))),
             (" y  Yank ▸", Some(on_legend('y'))),
+            (" q  Quit luneta", Some(on_legend('q'))),
             (" a  Ask", Some(on_legend('a'))),
             (" c  Skills ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
@@ -7875,6 +7884,41 @@ mod tests {
             (" m  new machine", Some(on_menu(KeyCode::Char('m')))),
             (" <BS> - Back, <ESC> - Close", Some(on_menu(KeyCode::Backspace))),
         ]);
+    }
+
+    #[test]
+    fn q_quits_with_no_row_to_act_on_and_from_the_menu_but_is_typed_in_a_search() {
+        let now = moment(160_000);
+        let mut unheard = fresh();
+        unheard.focus(Keys::Sidebar);
+        assert_eq!(unheard.key(&char('q'), now), Asked::Quit);
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        assert_eq!(sidebar.key(&char('q'), now), Asked::Quit);
+        sidebar.key(&char('m'), now);
+        assert_eq!(sidebar.key(&char('q'), now), Asked::Quit);
+        sidebar.key(&char('/'), now);
+        assert_eq!(sidebar.key(&char('q'), now), Asked::Nothing);
+    }
+
+    #[test]
+    fn q_closes_a_group_the_list_of_all_keys_and_a_move_as_esc_does_but_quits_from_the_legend() {
+        let now = moment(160_000);
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        for opens in ["o", "y", "g", "??"] {
+            for key in opens.chars() {
+                sidebar.key(&char(key), now);
+            }
+            assert_eq!(sidebar.key(&char('q'), now), Asked::Nothing, "{opens}");
+            assert_eq!(sidebar.key(&char('q'), now), Asked::Quit, "{opens} is closed");
+        }
+        sidebar.key(&char('?'), now);
+        assert_eq!(sidebar.key(&char('q'), now), Asked::Quit, "the legend lists q");
+        let (mut moving, _) = bipa_selected();
+        assert_eq!(moving.key(&char('q'), now), Asked::Nothing);
+        assert!(matches!(moving.moving, Moving::Still), "{:?}", moving.moving);
+        assert_eq!(moving.key(&char('q'), now), Asked::Quit);
     }
 
     #[test]
@@ -8007,6 +8051,9 @@ mod tests {
         ] {
             assert!(listed.iter().any(|shown| shown == line), "{line:?} in {listed:#?}");
         }
+        let group = |name: &str| listed.iter().position(|line| line == name).unwrap();
+        let sidebar_s = &listed[group(" Sidebar")..group(" Menu")];
+        assert!(sidebar_s.iter().any(|line| line == " q    Quit luneta"), "{sidebar_s:#?}");
         assert_eq!(every.last().map(String::as_str), Some(" <↓↑> - Scroll, <ESC> - Close"));
 
         let total = listed.len();

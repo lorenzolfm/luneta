@@ -40,6 +40,8 @@ pub const OPEN: char = 'o';
 
 pub const SKILLS: char = 'c';
 
+pub const QUIT: char = 'q';
+
 pub const MENU_GROUPS: [(char, &str); 4] =
     [(SKILLS, "Skills"), ('n', "New"), ('d', "Delete"), ('b', "Brief")];
 
@@ -77,6 +79,7 @@ pub enum Reach {
 pub enum Key {
     Menu(&'static [char]),
     Row(&'static [char]),
+    RowAndMenu(&'static [char]),
     Pasted(char),
     Chord(Chord),
 }
@@ -135,6 +138,7 @@ actions! {
     OpenPull,
     OpenWorktree,
     YankPull,
+    Quit,
     PastedWorktree,
     PastedReview,
     PastedTackle,
@@ -153,6 +157,27 @@ actions! {
     Dictate,
     ReadAloud,
     StopAloud,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    Search,
+    Unread,
+    Reorder,
+    Quit,
+}
+
+impl Command {
+    #[must_use]
+    pub const fn of(action: Action) -> Option<Command> {
+        match action {
+            Action::Search => Some(Command::Search),
+            Action::Unread => Some(Command::Unread),
+            Action::Reorder => Some(Command::Reorder),
+            Action::Quit => Some(Command::Quit),
+            _ => None,
+        }
+    }
 }
 
 const fn spec(
@@ -294,6 +319,10 @@ impl Action {
             Action::YankPull => {
                 spec("PR link", &["copy", "url"], Key::Row(&[YANK, YANK_PULL]), CHECKED_OUT, Any)
             },
+            Action::Quit => {
+                let quit = Key::RowAndMenu(&[QUIT]);
+                spec("Quit luneta", &["detach", "exit", "leave"], quit, EVERY, Any)
+            },
             Action::PastedWorktree => {
                 spec("worktree", &["checkout", "branch"], Key::Pasted('w'), EVERY, Any)
             },
@@ -367,14 +396,14 @@ impl Action {
 
     pub fn menu() -> impl Iterator<Item = (Action, &'static [char])> {
         Action::ALL.into_iter().filter_map(|action| match action.key() {
-            Key::Menu(path) => Some((action, path)),
+            Key::Menu(path) | Key::RowAndMenu(path) => Some((action, path)),
             Key::Row(_) | Key::Pasted(_) | Key::Chord(_) => None,
         })
     }
 
     pub fn row() -> impl Iterator<Item = (Action, &'static [char])> {
         Action::ALL.into_iter().filter_map(|action| match action.key() {
-            Key::Row(path) => Some((action, path)),
+            Key::Row(path) | Key::RowAndMenu(path) => Some((action, path)),
             Key::Menu(_) | Key::Pasted(_) | Key::Chord(_) => None,
         })
     }
@@ -382,14 +411,14 @@ impl Action {
     pub fn pasted() -> impl Iterator<Item = (Action, char)> {
         Action::ALL.into_iter().filter_map(|action| match action.key() {
             Key::Pasted(key) => Some((action, key)),
-            Key::Menu(_) | Key::Row(_) | Key::Chord(_) => None,
+            Key::Menu(_) | Key::Row(_) | Key::RowAndMenu(_) | Key::Chord(_) => None,
         })
     }
 
     pub fn anywhere() -> impl Iterator<Item = (Action, Chord)> {
         Action::ALL.into_iter().filter_map(|action| match action.key() {
             Key::Chord(chord) => Some((action, chord)),
-            Key::Menu(_) | Key::Row(_) | Key::Pasted(_) => None,
+            Key::Menu(_) | Key::Row(_) | Key::RowAndMenu(_) | Key::Pasted(_) => None,
         })
     }
 }
@@ -421,7 +450,11 @@ const fn grouped(path: &[char], groups: &[(char, &str)]) -> bool {
 const _: () = {
     let mut at = 0;
     while at < Action::ALL.len() {
-        match Action::ALL[at].key() {
+        let action = Action::ALL[at];
+        let alone = matches!(action.key(), Key::Row([_]) | Key::RowAndMenu(_));
+        let command = "a key of the sidebar's own is a command's key, and a command's is its own";
+        assert!(alone == Command::of(action).is_some(), "{}", command);
+        match action.key() {
             Key::Menu(path) => {
                 let menu = "a menu path is a key, or a named group's key then one of its own";
                 assert!(grouped(path, &MENU_GROUPS), "{}", menu);
@@ -429,6 +462,14 @@ const _: () = {
             Key::Row(path) => {
                 let row = "a sidebar path is a key, or a named group's key then one of its own";
                 assert!(grouped(path, &ROW_GROUPS), "{}", row);
+            },
+            Key::RowAndMenu(path) => {
+                let one = "a path of the sidebar and the menu is one key";
+                assert!(path.len() == 1, "{}", one);
+                let row = "a key of the sidebar and the menu opens no group of the sidebar";
+                assert!(!is_group(&ROW_GROUPS, path[0]), "{}", row);
+                let menu = "a key of the sidebar and the menu opens no group of the menu";
+                assert!(!is_group(&MENU_GROUPS, path[0]), "{}", menu);
             },
             Key::Pasted(_) | Key::Chord(_) => {},
         }
@@ -447,9 +488,13 @@ mod tests {
 
     #[test]
     fn two_actions_on_one_key_fit_no_row_alike() {
+        let menu = |action: Action| Action::menu().find(|(it, _)| *it == action).map(|it| it.1);
+        let row = |action: Action| Action::row().find(|(it, _)| *it == action).map(|it| it.1);
         for (at, one) in Action::ALL.into_iter().enumerate() {
             for other in Action::ALL.into_iter().skip(at + 1) {
-                if one.key() == other.key() {
+                let in_the_menu = menu(one).is_some_and(|path| menu(other) == Some(path));
+                let in_the_sidebar = row(one).is_some_and(|path| row(other) == Some(path));
+                if one.key() == other.key() || in_the_menu || in_the_sidebar {
                     assert!(!overlap(one, other), "{one:?} and {other:?} on {:?}", one.key());
                 }
             }
