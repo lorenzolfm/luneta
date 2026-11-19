@@ -42,6 +42,8 @@ const OLDER: &str = "0.0.1";
 
 const NEWER: &str = "99.0.0";
 
+const NONE_RUNS: i32 = 5;
+
 const STAND_IN: &str = "LUNETA_TEST_STAND_IN_FOLDER";
 
 const STAND_IN_VERSION: &str = "LUNETA_TEST_STAND_IN_VERSION";
@@ -161,7 +163,7 @@ fn the_cli_says_that_no_daemon_runs_and_starts_none() {
         for command in ["info", "agents", "sessions"] {
             let output = answered(host.vars().command(LUNETA).arg(command));
             let said = String::from_utf8_lossy(&output.stderr);
-            assert!(!output.status.success(), "{command}: {said}");
+            assert_eq!(output.status.code(), Some(NONE_RUNS), "{command}: {said}");
             let none = format!("luneta: no lunetad runs in {}", host.folder().display());
             assert!(said.contains(&none), "{command}: {said}");
         }
