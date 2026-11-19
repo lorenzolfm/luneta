@@ -1105,8 +1105,10 @@ impl KeptLayout {
                 KeptNode::Welcome(KeptWelcome { id: id.to_string() })
             },
         });
-        let full = layout.full().map(|full| full.to_string());
-        let last_focus = layout.last_focus().map(|focus| focus.to_string());
+        let (full, last_focus) = match layout.full() {
+            Some(full) => (Some(full.to_string()), None),
+            None => (None, layout.last_focus().map(|focus| focus.to_string())),
+        };
         Some(KeptLayout { full, last_focus, tree: tree.collect() })
     }
 }
@@ -1525,7 +1527,6 @@ mod tests {
             "worktree": "top",
             "layout": {
               "full": "0000000000000005",
-              "last_focus": "0000000000000003",
               "tree": [
                 {
                   "split": {
@@ -1578,24 +1579,33 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
+        let (_, top) = projects.find(worktree).unwrap();
+        assert_eq!(top.layout().last_focus(), Some(vim), "a full view is the last focus");
+        for before in [7, 8, 9] {
+            let before = want.replace(r#""version": 10"#, &format!(r#""version": {before}"#));
+            assert_eq!(parse(&before), Ok(projects.clone()), "and is read so from older files");
+        }
+        let vim_full = r#""full": "0000000000000005""#;
+        let shell_focused = r#""last_focus": "0000000000000003""#;
+        let (tiled, _) = projects.changed(Change::Focus { view: shell }, &mut draw).unwrap();
+        let on_shell = want.replace(vim_full, shell_focused);
+        assert_eq!(written(&tiled), on_shell, "a focus on another view tiles the layout");
+        assert_eq!(parse(&on_shell), Ok(tiled));
         let astray = r#""last_focus": "0000000000000009""#;
-        let focused = r#""last_focus": "0000000000000003""#;
-        let refused = parse(&want.replace(focused, astray)).unwrap_err();
+        let refused = parse(&want.replace(vim_full, astray)).unwrap_err();
         assert!(refused.contains("holds no view 0000000000000009 to focus"), "{refused}");
-        let unfocused = want.replace(&format!("\n              {focused},"), "");
-        let read = parse(&unfocused).unwrap();
-        let (_, top) = read.find(worktree).unwrap();
-        assert_eq!(top.layout().last_focus(), None, "a layout kept with no last focus has none");
+        let both = want.replace(vim_full, &format!("{vim_full},\n              {shell_focused}"));
+        let refused = parse(&both).unwrap_err();
+        assert!(refused.contains("and so is focused on no other view"), "{refused}");
         for before in [7, 8, 9] {
             let version = format!(r#""version": {before}"#);
-            assert_eq!(parse(&unfocused.replace(r#""version": 10"#, &version)), Ok(read.clone()));
             let refused = format!("it is of version {before}, which keeps no last focus");
-            assert_eq!(parse(&want.replace(r#""version": 10"#, &version)), Err(refused));
+            assert_eq!(parse(&on_shell.replace(r#""version": 10"#, &version)), Err(refused));
         }
-        let viewed = unfocused.replace(r#""version": 10"#, r#""version": 6"#);
+        let viewed = want.replace(r#""version": 10"#, r#""version": 6"#);
         let viewed = viewed.replace(r#""layout": {"#, r#""view": {"#);
-        assert_eq!(parse(&viewed), Ok(read));
-        let unviewed = unfocused.replace(r#""version": 10"#, r#""version": 6"#);
+        assert_eq!(parse(&viewed), Ok(projects));
+        let unviewed = want.replace(r#""version": 10"#, r#""version": 6"#);
         let refused = "it is of version 6, which keeps layouts as \"view\"";
         assert_eq!(parse(&unviewed), Err(refused.to_owned()));
         let relaid = want.replace(r#""layout": {"#, r#""view": {"#);

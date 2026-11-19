@@ -957,14 +957,12 @@ impl Layouts {
 
     fn focus(&mut self, client: ClientId, view: ViewId) -> Result<(), String> {
         let worktree = self.clients[&client].worktree;
-        let full = self.layout(worktree)?.full();
-        if full.is_some_and(|full| full != view) {
-            self.changed(Change::Fill { worktree, full: None })?;
-        }
         self.changed(Change::Focus { view })?;
         self.client(client).focus = Some(view);
-        let last_focus = self.layout(worktree).map(Layout::last_focus);
-        assert_eq!(last_focus, Ok(Some(view)), "view {view} is its worktree's last focus");
+        let layout = self.layout(worktree)?;
+        assert_eq!(layout.last_focus(), Some(view), "view {view} is its worktree's last focus");
+        let full = layout.full();
+        assert!(full.is_none_or(|full| full == view), "a focus on view {view} tiles the rest");
         Ok(())
     }
 
@@ -1784,7 +1782,7 @@ fn placement(
 fn arrival(worktree: &Worktree) -> Option<ViewId> {
     let layout = worktree.layout();
     let first = || layout.views().next().map(layout::Leaf::id);
-    let arrived = layout.full().or(layout.last_focus()).or_else(first);
+    let arrived = layout.last_focus().or_else(first);
     let held = arrived.is_none_or(|view| layout.holds(view));
     assert!(held, "a client arrives on a view of worktree {}", worktree.id());
     arrived

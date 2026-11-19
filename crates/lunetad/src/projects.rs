@@ -2449,6 +2449,21 @@ mod tests {
         (projects, _) = change(&projects, followed).unwrap();
         let both = (last_focus(&projects, main), last_focus(&projects, feat));
         assert_eq!(both, (Some(three), Some(four)), "unless a client followed it there");
+
+        let fill = |full| Change::Fill { worktree: main, full };
+        let shown = |projects: &Projects| {
+            (layout(projects, main).full(), last_focus(projects, main))
+        };
+        (projects, _) = change(&projects, Change::Focus { view: one }).unwrap();
+        (projects, _) = change(&projects, fill(Some(three))).unwrap();
+        assert_eq!(shown(&projects), (Some(three), Some(three)), "a view that fills is the focus");
+        (projects, _) = change(&projects, fill(None)).unwrap();
+        assert_eq!(shown(&projects), (None, Some(three)), "and stays it once tiled again");
+        (projects, _) = change(&projects, fill(Some(three))).unwrap();
+        (projects, _) = change(&projects, Change::Focus { view: three }).unwrap();
+        assert_eq!(shown(&projects), (Some(three), Some(three)), "a focus on it keeps it full");
+        (projects, _) = change(&projects, Change::Focus { view: one }).unwrap();
+        assert_eq!(shown(&projects), (None, Some(one)), "and a focus on another tiles the rest");
         let gone = change(&projects, Change::Focus { view: two });
         assert!(gone.unwrap_err().contains("has the id"), "a view gone takes no focus");
     }
