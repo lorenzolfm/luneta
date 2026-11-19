@@ -425,10 +425,10 @@ fn a_named_luneta_in_a_folder_project_says_the_folder_is_its_one_worktree() {
     let owned = Owned::new();
     let vault = directory("Vault");
     project(&owned.host, Path::new(&real(&vault.path)), None);
-    let output = luneta(owned.host.vars(), &vault.path).arg("foo").output().unwrap();
+    let output = luneta(owned.host.vars(), &vault.path).arg(" foo ").output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     let refusal = String::from_utf8(output.stderr).unwrap();
-    let said = "foo names no project, and Vault is a folder, and its own is its one worktree";
+    let said = ": foo names no project, and Vault is a folder, and its own is its one worktree";
     assert!(refusal.contains(said), "{refusal}");
     let projects = projects_of(&owned);
     assert_eq!(projects.len(), 1, "no project is made of foo: {projects:?}");

@@ -392,7 +392,7 @@ fn branched_in(path: &Path, holding: &Project, name: &str) -> Result<Landing, Tr
     }
     let branch = Branch::parse(name).map_err(|why| format!("no worktree made: {why}"))?;
     let made = branched(path, &Machine::Local, holding.id, &branch);
-    in_kept(path, holding.id, made).map(Landing::Worktree)
+    made.map(Landing::Worktree).map_err(Tried::Failed)
 }
 
 pub fn start(
@@ -402,6 +402,7 @@ pub fn start(
     seen: impl Fn(ProjectId) -> Option<SystemTime>,
 ) -> Result<Option<Landing>, String> {
     let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
+    let name = name.map(str::trim);
     twice(|| started(path, name, cwd, folder, &seen))
 }
 
