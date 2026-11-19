@@ -267,7 +267,7 @@ message Remote {
       google.protobuf.Empty here = 11;
     }
     Projects projects = 9;
-    string ssh_said = 12;
+    optional string ssh_said = 12;
 
     message Ended {
       optional int32 code = 1;

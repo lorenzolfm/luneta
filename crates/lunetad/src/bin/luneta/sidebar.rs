@@ -735,10 +735,8 @@ impl Away {
             Some(Stopped::Here(())) => "this machine",
             None => "unreached",
         };
-        let timed = !matches!(unreached.stopped, Some(Stopped::Here(())));
-        let since = unreached.since.filter(|_| timed);
-        let since = since.and_then(|at| SystemTime::try_from(at).ok());
-        let ssh_said = Some(unreached.ssh_said.clone()).filter(|said| !said.is_empty());
+        let since = unreached.since.and_then(|at| SystemTime::try_from(at).ok());
+        let ssh_said = unreached.ssh_said.clone();
         Away::Unreached { since, word, why: unreached.why.clone(), ssh_said }
     }
 
@@ -9871,7 +9869,7 @@ mod tests {
                 code: Some(255),
             })),
             projects: None,
-            ssh_said: "ssh: Could not resolve hostname vps".to_owned(),
+            ssh_said: Some("ssh: Could not resolve hostname vps".to_owned()),
         })
     }
 
@@ -10447,11 +10445,11 @@ mod tests {
         let mut sidebar = fresh();
         let mut host = machines();
         let here = Reached::Unreached(remote::Unreached {
-            since: Some(Timestamp { seconds: 100, nanos: 0 }),
+            since: None,
             why: lunetad::THIS_MACHINE.to_owned(),
             stopped: Some(remote::unreached::Stopped::Here(())),
             projects: None,
-            ssh_said: String::new(),
+            ssh_said: None,
         });
         host.remotes[1] = remote("me@mac", here);
         sidebar.hear(host);

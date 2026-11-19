@@ -292,8 +292,8 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
         },
         Ok(Some(Reached::Unreached(unreached))) => {
             eprintln!("luneta: {destination}: unreached: {}", unreached.why);
-            if !unreached.ssh_said.is_empty() {
-                eprintln!("luneta: ssh said \"{}\"", unreached.ssh_said);
+            if let Some(said) = &unreached.ssh_said {
+                eprintln!("luneta: ssh said \"{said}\"");
             }
             ExitCode::FAILURE
         },

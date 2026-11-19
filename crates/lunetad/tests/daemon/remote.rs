@@ -256,7 +256,7 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
             let ended = Stopped::Ended(unreached::Ended { code: Some(255) });
             assert_eq!(unreached.stopped, Some(ended), "{}", unreached.why);
             let said = "ssh: Could not resolve hostname nowhere: Name or service not known";
-            assert_eq!(unreached.ssh_said, said, "{}", unreached.why);
+            assert_eq!(unreached.ssh_said.as_deref(), Some(said), "{}", unreached.why);
         },
         other => panic!("nowhere is {other:?}"),
     }
@@ -279,9 +279,16 @@ fn a_hosts_file_line_that_names_this_machine_says_so_and_runs_no_ssh() {
         let unreached = unreached(&here, destination);
         assert_eq!(unreached.stopped, Some(Stopped::Here(())), "{}", unreached.why);
         assert_eq!(unreached.why, lunetad::THIS_MACHINE);
-        assert_eq!(unreached.ssh_said, "");
+        assert_eq!(unreached.ssh_said, None);
+        assert_eq!(unreached.since, None, "this machine has no time it went unreached");
         assert_eq!(ssh.runs(destination), 0, "no ssh runs to {destination}");
     }
+    let output = here.vars().command(LUNETA).arg("sessions").output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let said = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = said.lines().collect();
+    let line = |machine: &str| format!("{machine}/  (unreached: {})", lunetad::THIS_MACHINE);
+    assert_eq!(lines[..2], [line(&named), line("localhost")], "{said}");
 }
 
 #[test]

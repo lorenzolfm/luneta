@@ -46,9 +46,11 @@ const SAID_MAX: u64 = 4096;
 
 const HEARD_BEFORE: Duration = Duration::from_secs(1);
 
-const HEARD_LAST: Duration = HEARD_BEFORE.saturating_add(HEARD_BEFORE);
+const HEARD_LAST: Duration = Duration::from_secs(2);
 
-const SSH_SAID_MAX: usize = 240;
+const _: () = assert!(HEARD_LAST.as_millis() > HEARD_BEFORE.as_millis());
+
+const SSH_SAID_CHARS_MAX: usize = 240;
 
 const SHARED_FOR: u32 = 60;
 
@@ -134,6 +136,7 @@ pub enum Reached {
     Reaching,
     Host(remote::Host),
     Unreached { since: SystemTime, failed: Failed, projects: Option<api::Projects> },
+    Here,
 }
 
 impl Reached {
@@ -142,14 +145,26 @@ impl Reached {
             Reached::Reaching => remote::Reached::Reaching(()),
             Reached::Host(host) => remote::Reached::Host(host.clone()),
             Reached::Unreached { since, failed, projects } => {
+                if let Some(said) = &failed.ssh_said {
+                    let stopped = failed.stopped;
+                    assert!(!said.is_empty(), "{destination}: ssh said a line with nothing in it");
+                    assert!(stopped.is_unbridged(), "{destination}: {stopped:?} with {said:?}");
+                }
                 remote::Reached::Unreached(remote::Unreached {
                     since: Some((*since).into()),
                     why: failed.why.clone(),
                     stopped: Some(failed.stopped.to_api()),
                     projects: projects.clone(),
-                    ssh_said: failed.ssh_said.clone().unwrap_or_default(),
+                    ssh_said: failed.ssh_said.clone(),
                 })
             },
+            Reached::Here => remote::Reached::Unreached(remote::Unreached {
+                since: None,
+                why: THIS_MACHINE.to_owned(),
+                stopped: Some(unreached::Stopped::Here(())),
+                projects: None,
+                ssh_said: None,
+            }),
         };
         api::Remote { destination: destination.0.clone(), reached: Some(reached) }
     }
@@ -325,7 +340,6 @@ pub enum Stopped {
     Lost,
     Unwatched,
     Unmatched,
-    Here,
 }
 
 impl Stopped {
@@ -340,6 +354,13 @@ impl Stopped {
         }
     }
 
+    fn is_unbridged(self) -> bool {
+        match self {
+            Stopped::Unstarted | Stopped::Ended(_) | Stopped::Said | Stopped::Silent => true,
+            Stopped::Lost | Stopped::Unwatched | Stopped::Unmatched => false,
+        }
+    }
+
     fn to_api(self) -> unreached::Stopped {
         match self {
             Stopped::Unstarted => unreached::Stopped::Unstarted(()),
@@ -349,7 +370,6 @@ impl Stopped {
             Stopped::Lost => unreached::Stopped::Lost(()),
             Stopped::Unwatched => unreached::Stopped::Unwatched(()),
             Stopped::Unmatched => unreached::Stopped::Unmatched(()),
-            Stopped::Here => unreached::Stopped::Here(()),
         }
     }
 }
@@ -433,14 +453,13 @@ pub fn follow(
             }
             if destination.is_here() {
                 log::say(&format!("{destination}: {THIS_MACHINE}, so no ssh runs to it"));
-                let failed = Failed::of(THIS_MACHINE.to_owned(), Stopped::Here);
-                let since = SystemTime::now();
-                let reached = Reached::Unreached { since, failed, projects: None };
+                let reached = Reached::Here;
                 let remote = Command::Remote { destination: destination.clone(), reached };
                 if core.send(remote).is_err() {
                     return false;
                 }
                 here.push(destination.clone());
+                assert!(here.len() <= HOSTS_MAX, "{} machines are this one", here.len());
                 continue;
             }
             let bridges = Arc::clone(&bridges);
@@ -718,9 +737,17 @@ async fn matched(
         Ok(daemon) => daemon,
         Err(error) => {
             let mut failed = unreached(&error);
-            if let Some(last) = last {
-                let last = tokio::time::timeout(HEARD_LAST, last).await;
-                failed.ssh_said = last.ok().and_then(Result::ok);
+            if failed.stopped.is_unbridged()
+                && let Some(last) = last
+            {
+                match tokio::time::timeout(HEARD_LAST, last).await {
+                    Ok(said) => failed.ssh_said = said.ok(),
+                    Err(_) => log::say(&format!(
+                        "{destination}: ssh's stderr was open {}s after it failed, so what it said \
+                         last is not shown",
+                        HEARD_LAST.as_secs()
+                    )),
+                }
             }
             return Err(failed);
         },
@@ -787,7 +814,10 @@ fn heard(
             if line.is_empty() {
                 continue;
             }
-            last = Some(shown(&line));
+            let cleaned = shown(&line);
+            if !cleaned.is_empty() {
+                last = Some(cleaned);
+            }
             if !lines.insert(line.clone()) {
                 continue;
             }
@@ -805,11 +835,13 @@ fn heard(
 }
 
 fn shown(line: &str) -> String {
-    let mut shown: String = line.chars().filter(|char| !char.is_control()).collect();
-    if let Some((cut, _)) = shown.char_indices().nth(SSH_SAID_MAX) {
-        shown.truncate(cut);
+    let mut kept = line.chars().filter(|char| !char.is_control());
+    let mut shown: String = kept.by_ref().take(SSH_SAID_CHARS_MAX).collect();
+    if kept.next().is_some() {
+        shown.pop();
         shown.push('…');
     }
+    assert!(shown.chars().count() <= SSH_SAID_CHARS_MAX, "{shown:?} is past the bound");
     shown
 }
 
@@ -827,6 +859,7 @@ fn again(failures: u32) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
     use std::time::Duration;
 
     use super::*;
@@ -901,16 +934,37 @@ mod tests {
             assert!(!named.is_on("nixos.lan"), "{destination} is another machine");
         }
         assert!(!"x".parse::<Destination>().unwrap().is_on(""));
+        for destination in ["nixos", "me@nixos", "NIXOS."] {
+            let named: Destination = destination.parse().unwrap();
+            assert!(named.is_on("nixos"), "{destination} is this machine");
+        }
+        assert!(!"nixos.lan".parse::<Destination>().unwrap().is_on("nixos"));
     }
 
     #[test]
     fn what_ssh_says_is_shown_without_its_controls_and_up_to_a_bound() {
         assert_eq!(shown("\u{1b}[31mPermission denied\u{7}"), "[31mPermission denied");
-        let long = "a".repeat(SSH_SAID_MAX + 9);
-        let cut = shown(&long);
-        assert_eq!(cut.chars().count(), SSH_SAID_MAX + 1);
-        assert!(cut.ends_with('…'), "{cut}");
-        assert_eq!(shown(&"a".repeat(SSH_SAID_MAX)), "a".repeat(SSH_SAID_MAX));
+        assert_eq!(shown("\u{1b}\u{7}"), "");
+        for long in [SSH_SAID_CHARS_MAX + 1, SSH_SAID_CHARS_MAX + 9] {
+            let cut = shown(&"a".repeat(long));
+            assert_eq!(cut, format!("{}…", "a".repeat(SSH_SAID_CHARS_MAX - 1)));
+        }
+        let most = "é".repeat(SSH_SAID_CHARS_MAX);
+        assert_eq!(shown(&most), most);
+    }
+
+    #[test]
+    fn the_line_ssh_said_last_is_the_last_with_something_shown_in_it() {
+        let said = Arc::new(Mutex::new(Said::default()));
+        let (mut saying, last) = heard("nixos", &said).unwrap();
+        saying.write_all(b"Warning: added\r\nPermission denied (publickey).\r\n\x1b\n\n").unwrap();
+        drop(saying);
+        assert_eq!(last.blocking_recv().unwrap(), "Permission denied (publickey).");
+
+        let (mut saying, last) = heard("nixos", &said).unwrap();
+        saying.write_all(b"\x07\n").unwrap();
+        drop(saying);
+        assert!(last.blocking_recv().is_err(), "a line of controls alone is no line");
     }
 
     #[test]
