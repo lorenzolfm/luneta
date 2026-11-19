@@ -1,7 +1,8 @@
 use std::ffi::OsString;
 use std::fmt;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, ParseIntError};
 use std::process::Command;
+use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::mux::value_in;
@@ -148,15 +149,29 @@ const TERMINAL_MADE_VAR: &str = "LUNETA_MUX_TERMINAL_MADE";
 
 const TERMINAL_VARS: [&str; 2] = [TERMINAL_VAR, TERMINAL_MADE_VAR];
 
-pub(crate) fn terminal_in(environ: &[OsString]) -> Option<TerminalKey> {
-    let text = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok();
-    let id = NonZeroU32::new(text(TERMINAL_VAR)?.parse().ok()?)?;
-    let made = OwnMade::from_nanos(text(TERMINAL_MADE_VAR)?.parse().ok()?);
-    Some(TerminalKey { id, made })
+pub(crate) fn terminal_in(environ: &[OsString]) -> Result<Option<TerminalKey>, String> {
+    if TERMINAL_VARS.iter().all(|name| value_in(environ, name).is_none()) {
+        return Ok(None);
+    }
+    let key = number_in(environ, TERMINAL_VAR).and_then(|id| {
+        let made = number_in(environ, TERMINAL_MADE_VAR)?;
+        Ok(TerminalKey { id, made: OwnMade::from_nanos(made) })
+    });
+    let unnamed =
+        |why: String| format!("{TERMINAL_VAR} and {TERMINAL_MADE_VAR} name no terminal: {why}");
+    key.map(Some).map_err(unnamed)
 }
 
-#[must_use]
-pub fn terminal_here() -> Option<TerminalKey> {
+fn number_in<T>(environ: &[OsString], name: &str) -> Result<T, String>
+where
+    T: FromStr<Err = ParseIntError>,
+{
+    let value = value_in(environ, name).ok_or_else(|| format!("{name} is unset"))?;
+    let text = String::from_utf8_lossy(value);
+    text.parse().map_err(|error| format!("{name}={text:?}: {error}"))
+}
+
+pub fn terminal_here() -> Result<Option<TerminalKey>, String> {
     terminal_in(&environ())
 }
 
@@ -179,6 +194,8 @@ pub(crate) fn in_no_terminal(command: &mut Command) {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::ffi::OsStringExt;
+
     use super::*;
 
     #[test]
@@ -188,18 +205,38 @@ mod tests {
         };
         let all = environ(&["LUNETA_MUX_TERMINAL=7", "HOME=/h", "LUNETA_MUX_TERMINAL_MADE=60"]);
         let key = TerminalKey { id: NonZeroU32::new(7).unwrap(), made: OwnMade::from_nanos(60) };
-        assert_eq!(terminal_in(&all), Some(key));
+        assert_eq!(terminal_in(&all), Ok(Some(key)));
+        assert_eq!(terminal_in(&environ(&["HOME=/h"])), Ok(None));
         let made = "LUNETA_MUX_TERMINAL_MADE=60";
         let unnamed = [
-            environ(&[made]),
-            environ(&["LUNETA_MUX_TERMINAL=7"]),
-            environ(&["LUNETA_MUX_TERMINAL=7", "LUNETA_MUX_TERMINAL_MADE=-1"]),
-            environ(&["LUNETA_MUX_TERMINAL=0", made]),
-            environ(&["LUNETA_MUX_TERMINAL=4294967296", made]),
-            environ(&["LUNETA_MUX_TERMINAL=", made]),
+            (environ(&[made]), "LUNETA_MUX_TERMINAL is unset"),
+            (environ(&["LUNETA_MUX_TERMINAL=7"]), "LUNETA_MUX_TERMINAL_MADE is unset"),
+            (
+                environ(&["LUNETA_MUX_TERMINAL=7", "LUNETA_MUX_TERMINAL_MADE=-1"]),
+                "LUNETA_MUX_TERMINAL_MADE=\"-1\": invalid digit found in string",
+            ),
+            (
+                environ(&["LUNETA_MUX_TERMINAL=0", made]),
+                "LUNETA_MUX_TERMINAL=\"0\": number would be zero for non-zero type",
+            ),
+            (
+                environ(&["LUNETA_MUX_TERMINAL=4294967296", made]),
+                "LUNETA_MUX_TERMINAL=\"4294967296\": number too large to fit in target type",
+            ),
+            (
+                environ(&["LUNETA_MUX_TERMINAL=", made]),
+                "LUNETA_MUX_TERMINAL=\"\": cannot parse integer from empty string",
+            ),
         ];
-        for environ in unnamed {
-            assert_eq!(terminal_in(&environ), None, "{environ:?}");
+        let no_utf_8 = OsString::from_vec(b"LUNETA_MUX_TERMINAL=7\xff".to_vec());
+        let no_utf_8 = (
+            vec![no_utf_8, OsString::from(made)],
+            "LUNETA_MUX_TERMINAL=\"7\u{fffd}\": invalid digit found in string",
+        );
+        for (environ, why) in unnamed.into_iter().chain([no_utf_8]) {
+            let unnamed = "LUNETA_MUX_TERMINAL and LUNETA_MUX_TERMINAL_MADE name no terminal";
+            let said = format!("{unnamed}: {why}");
+            assert_eq!(terminal_in(&environ), Err(said), "{environ:?}");
         }
     }
 }

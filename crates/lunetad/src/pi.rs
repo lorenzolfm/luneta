@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime};
 use luneta_protocol::said::Said;
 use serde::Deserialize;
 
-use crate::agent::{file_text, moment, named_pid, nonempty, Agent, Harness, Status};
+use crate::agent::{
+    file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Harness, Status,
+};
 use crate::mux::{self, TerminalKey};
 use crate::watch::{self, Troubles};
 use crate::{log, process};
@@ -106,7 +108,9 @@ impl AgentFiles {
             };
             let key = (pid, start);
             let found = self.processes.remove(&key).or_else(|| {
-                Some(Process { started: process::started(pid)?, terminal: mux::terminal_of(pid) })
+                let started = process::started(pid)?;
+                let terminal = terminal_or_trouble(pid, mux::terminal_of(pid), &mut self.troubles);
+                Some(Process { started, terminal })
             });
             let Some(found) = found else {
                 continue;

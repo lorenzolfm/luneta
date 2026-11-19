@@ -35,9 +35,8 @@ pub enum Runs<'a> {
     Command { program: &'a str, args: &'a [String] },
 }
 
-#[must_use]
-pub fn terminal_of(pid: u32) -> Option<TerminalKey> {
-    own::terminal_in(&process::environ(pid)?)
+pub fn terminal_of(pid: u32) -> Result<Option<TerminalKey>, String> {
+    process::environ(pid).map_or(Ok(None), |environ| own::terminal_in(&environ))
 }
 
 fn value_in<'a>(environ: &'a [OsString], name: &str) -> Option<&'a [u8]> {
@@ -60,10 +59,10 @@ mod tests {
     fn a_terminal_is_named_by_its_variables() {
         let terminal = ["LUNETA_MUX_TERMINAL=7", "LUNETA_MUX_TERMINAL_MADE=60"];
         let key = TerminalKey { id: NonZeroU32::new(7).unwrap(), made: OwnMade::from_nanos(60) };
-        assert_eq!(own::terminal_in(&environ(&terminal)), Some(key));
-        assert_eq!(own::terminal_in(&environ(&["HOME=/h"])), None);
+        assert_eq!(own::terminal_in(&environ(&terminal)), Ok(Some(key)));
         let old = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_MADE=60", "LUNETA_MUX_PANE=12"];
-        assert_eq!(own::terminal_in(&environ(&old)), None, "an old own session names no terminal");
+        let old = own::terminal_in(&environ(&old));
+        assert_eq!(old, Ok(None), "an old own session names no terminal");
     }
 
     #[test]
@@ -71,6 +70,6 @@ mod tests {
         let twice = ["LUNETA_MUX_TERMINAL=7", "LUNETA_MUX_TERMINAL_MADE=60"];
         let twice = [&twice[..], &["LUNETA_MUX_TERMINAL=8"]].concat();
         let key = TerminalKey { id: NonZeroU32::new(7).unwrap(), made: OwnMade::from_nanos(60) };
-        assert_eq!(own::terminal_in(&environ(&twice)), Some(key));
+        assert_eq!(own::terminal_in(&environ(&twice)), Ok(Some(key)));
     }
 }

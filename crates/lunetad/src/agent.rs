@@ -10,6 +10,7 @@ use crate::api;
 use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
 use crate::mux::TerminalKey;
+use crate::watch::Troubles;
 
 const FILE_BYTES_MAX: u64 = 64 * 1024;
 
@@ -216,6 +217,20 @@ pub fn file_text(path: &Path) -> io::Result<Vec<u8>> {
 
 pub fn nonempty<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Said, D::Error> {
     Said::new(String::deserialize(text)?).ok_or_else(|| serde::de::Error::custom("it is empty"))
+}
+
+pub fn terminal_or_trouble(
+    pid: u32,
+    read: Result<Option<TerminalKey>, String>,
+    troubles: &mut Troubles,
+) -> Option<TerminalKey> {
+    match read {
+        Ok(terminal) => terminal,
+        Err(why) => {
+            troubles.say(format!("agent {pid} shows in no view, as {why}"));
+            None
+        },
+    }
 }
 
 #[must_use]

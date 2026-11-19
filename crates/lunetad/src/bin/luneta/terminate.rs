@@ -304,9 +304,9 @@ fn say_alone(folders: &Folders) -> ExitCode {
 }
 
 fn end_alone(key: Key, folders: &Folders) -> ExitCode {
-    let in_luneta = match agreed::turn_here() {
-        Ok(turn) => turn.is_some() || lunetad::mux::own::terminal_here().is_some(),
-        Err(why) => return failed(&format!("ended nothing, as {why}")),
+    let in_luneta = match (agreed::turn_here(), lunetad::mux::own::terminal_here()) {
+        (Ok(turn), Ok(terminal)) => turn.is_some() || terminal.is_some(),
+        (Err(why), _) | (_, Err(why)) => return failed(&format!("ended nothing, as {why}")),
     };
     if in_luneta {
         return failed(
