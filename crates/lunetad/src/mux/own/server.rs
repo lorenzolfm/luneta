@@ -63,11 +63,29 @@ pub(super) struct Unmatched {
     build: Option<release::Other>,
 }
 
+impl Unmatched {
+    fn is_newer(&self) -> bool {
+        self.build.as_ref().is_some_and(release::Other::is_newer)
+    }
+
+    fn left_be(&self) -> String {
+        let end = |pid| format!("end it (`kill {pid}`)");
+        let end = self.pid.map_or_else(|| "end it".to_owned(), end);
+        format!(
+            "{self}, so lunetad leaves it be: open a luneta of its build, or {end} for this \
+             lunetad to start its own, which ends what its terminals run"
+        )
+    }
+}
+
 impl fmt::Display for Unmatched {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let pid = self.pid.map_or_default(|pid| format!(" (pid {pid})"));
         let own = release::SAID.as_str();
         match &self.build {
+            Some(build) if build.is_newer() => {
+                write!(f, "luneta-mux {build}{pid} is newer than {own}")
+            },
             Some(build) => write!(f, "luneta-mux {build}{pid} is another build than {own}"),
             None => write!(f, "luneta-mux{pid} says no build, as one older than {own} does"),
         }
@@ -136,13 +154,18 @@ impl Server {
 
 fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
     let unstopped = |why: String| Failure::Own(format!("{unmatched}, and is not stopped: {why}"));
-    let pid = unmatched.pid.ok_or_else(|| unstopped("the kernel names no pid for it".to_owned()))?;
-    assert_ne!(pid, rustix::process::getpid(), "lunetad is never the luneta-mux it stops");
-    if Pid::from_raw(STARTED.load(Ordering::Relaxed)) == Some(pid) {
+    if let Some(pid) = unmatched.pid
+        && Pid::from_raw(STARTED.load(Ordering::Relaxed)) == Some(pid)
+    {
         let from = program();
         let from = from.display();
         return Err(Failure::Own(format!("{unmatched}, though lunetad started it from {from}")));
     }
+    if unmatched.is_newer() {
+        return Err(Failure::Own(unmatched.left_be()));
+    }
+    let pid = unmatched.pid.ok_or_else(|| unstopped("the kernel names no pid for it".to_owned()))?;
+    assert_ne!(pid, rustix::process::getpid(), "lunetad is never the luneta-mux it stops");
     match rustix::process::kill_process(pid, Signal::TERM) {
         Ok(()) | Err(rustix::io::Errno::SRCH) => {},
         Err(error) => return Err(unstopped(error.to_string())),
@@ -311,10 +334,11 @@ fn doing(is: &api::ran::Is) -> Result<Doing, String> {
     Ok(doing)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Followed {
     Unreached { at: Instant },
     Unmatched,
+    Newer(String),
     Emptied { since: Instant },
     LetGo,
 }
@@ -326,6 +350,9 @@ pub fn followed(
     let server = match Server::reached_on(runtime()?, None)? {
         (runtime, Reached::Matched(client)) => Server { runtime, client },
         (_, Reached::Unreached) => return Ok(Followed::Unreached { at }),
+        (_, Reached::Unmatched(unmatched)) if unmatched.is_newer() => {
+            return Ok(Followed::Newer(unmatched.left_be()));
+        },
         (runtime, Reached::Unmatched(unmatched)) => {
             stop(&runtime, &unmatched)?;
             return Ok(Followed::Unmatched);

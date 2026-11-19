@@ -1110,19 +1110,47 @@ fn lunetad_stops_a_luneta_mux_that_says_no_build_and_restores_its_terminals() {
 }
 
 #[test]
-fn lunetad_stops_a_luneta_mux_of_another_build_and_names_both() {
+fn lunetad_stops_a_luneta_mux_of_an_older_build_and_names_both() {
     let mut owned = Owned::new();
     owned.stop_daemon();
     owned.kill_mux();
-    let theirs = another_build();
+    let theirs = older_build();
     let mut other = owned.stand_in_mux(Some(&theirs));
     owned.start_daemon();
     let stopped = other.ended_within(Duration::from_secs(5));
-    let stopped = stopped.expect("lunetad stops the luneta-mux of another build");
+    let stopped = stopped.expect("lunetad stops the luneta-mux of an older build");
     assert_eq!(stopped.signal(), Some(rustix::process::Signal::TERM.as_raw()));
     let (pid, own) = (other.pid(), release::SAID.as_str());
     let said = format!("luneta-mux {theirs} (pid {pid}) is another build than {own}, and is stopped");
     eventually("lunetad says why it stopped it", || logged(&owned).contains(&said).then_some(()));
+}
+
+#[test]
+fn lunetad_leaves_a_newer_luneta_mux_be_and_restores_its_terminals_once_it_ends() {
+    let mut owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    let terminal = heard_in_below(&owned, &mut shown, "sleep 604");
+    drop(shown);
+    owned.stop_daemon();
+    owned.kill_mux();
+    let theirs = newer_build();
+    let mut newer = owned.stand_in_mux(Some(&theirs));
+    owned.start_daemon();
+    let (pid, own) = (newer.pid(), release::SAID.as_str());
+    let said = format!("luneta-mux {theirs} (pid {pid}) is newer than {own}");
+    let left = format!("{said}, so lunetad leaves it be: open a luneta of its build, or end it");
+    eventually("lunetad says why it leaves it be", || logged(&owned).contains(&left).then_some(()));
+    assert_eq!(newer.ended_within(Duration::from_secs(1)), None, "{}", logged(&owned));
+    drop(newer);
+    let mut again = Shown::new(&owned, worktree, 80, 24);
+    let restored = |laid: &Laid| laid.panes.iter().all(|pane| key(pane).is_some());
+    let laid = again.until("the terminal restored", restored);
+    assert_eq!(laid.panes.iter().map(|pane| pane.view).collect::<Vec<_>>(), [terminal]);
+    let log = logged(&owned);
+    assert!(!log.contains(&format!("{said}, and is stopped")), "{log}");
+    let tried = |line: &str| line.contains("is not restored") && line.contains(&said);
+    assert!(!log.lines().any(tried), "{log}");
 }
 
 #[test]
@@ -1134,7 +1162,7 @@ fn lunetad_stops_no_luneta_mux_it_started_of_another_build_and_names_its_path() 
     drop(shown);
     owned.stop_daemon();
     owned.kill_mux();
-    let beside = own::beside_a_stand_in_mux(&another_build());
+    let beside = own::beside_a_stand_in_mux(&older_build());
     owned.start_daemon_from(&beside.path().join("lunetad"));
     let own = release::SAID.as_str();
     let from = fs::canonicalize(beside.path()).unwrap().join("luneta-mux");
@@ -1147,7 +1175,11 @@ fn lunetad_stops_no_luneta_mux_it_started_of_another_build_and_names_its_path() 
     assert!(!log.contains(&format!("is another build than {own}, and is stopped")), "{log}");
 }
 
-fn another_build() -> String {
+fn older_build() -> String {
+    release::spelled("0.0.0", release::BUILT)
+}
+
+fn newer_build() -> String {
     let built = release::BUILT.map_or(1, |built| built + 1);
     release::spelled(release::VERSION, Some(built))
 }
