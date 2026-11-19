@@ -173,3 +173,75 @@ fn main() -> ExitCode {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory as _;
+    use lunetad::asks::SKILL;
+
+    use super::*;
+
+    fn commands_named(skill: &str) -> Vec<String> {
+        let mut named = Vec::new();
+        let mut prose = String::new();
+        let mut fence: Option<&str> = None;
+        for line in skill.lines() {
+            match (fence, line.trim_start().strip_prefix("```")) {
+                (None, Some(info)) => fence = Some(info.trim()),
+                (Some(_), Some(_)) => fence = None,
+                (Some("sh"), None) => named.push(line.split(" # ").next().unwrap_or(line).to_owned()),
+                (Some(_), None) => {},
+                (None, None) => {
+                    prose.push_str(line);
+                    prose.push('\n');
+                },
+            }
+        }
+        assert!(fence.is_none(), "the skill leaves a code block open");
+        named.extend(prose.split('`').skip(1).step_by(2).map(|span| span.replace('\n', " ")));
+        let named = named.into_iter().map(|said| said.trim().to_owned());
+        named.filter(|said| said.starts_with("luneta ")).collect()
+    }
+
+    fn unlisted(skill: &str) -> Vec<String> {
+        let mut cli = Cli::command();
+        cli.build();
+        let mut unlisted = Vec::new();
+        for said in commands_named(skill) {
+            let mut words = said.split_whitespace().skip(1);
+            let lowercase = |word: &&str| word.starts_with(|c: char| c.is_ascii_lowercase());
+            let Some(verb) = words.next().filter(lowercase) else {
+                continue;
+            };
+            let Some(command) = cli.find_subcommand(verb).filter(|command| !command.is_hide_set())
+            else {
+                unlisted.push(format!("luneta {verb}"));
+                continue;
+            };
+            for flag in words.filter_map(|word| word.split_once("--").map(|(_, flag)| flag)) {
+                let flag = flag.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').next();
+                let Some(flag) = flag.filter(|flag| !flag.is_empty()) else {
+                    continue;
+                };
+                let listed = command.get_arguments().any(|argument| {
+                    argument.get_long() == Some(flag) && !argument.is_hide_set()
+                });
+                if !listed {
+                    unlisted.push(format!("luneta {verb} --{flag}"));
+                }
+            }
+        }
+        unlisted
+    }
+
+    #[test]
+    fn the_luneta_skill_names_only_commands_and_flags_luneta_help_lists() {
+        let named = commands_named(SKILL);
+        assert!(named.len() >= 8, "the skill names {} luneta commands: {named:?}", named.len());
+        assert_eq!(unlisted(SKILL), Vec::<String>::new());
+        let stale = "Run `luneta\nhere`, then:\n\n```sh\nluneta prune --beside x   # no such \
+                     flag\nluneta terminate --here\n```\n\n```text\nluneta go a\n```\n";
+        let said = ["luneta prune --beside", "luneta terminate --here", "luneta here"];
+        assert_eq!(unlisted(stale), said, "a verb gone, a flag it lacks, and a hidden flag");
+    }
+}
