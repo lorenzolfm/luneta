@@ -1793,24 +1793,26 @@ impl App {
     }
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
-        match (on, act) {
-            (_, Act::Worktree { worktree, seen, .. }) => {
+        match act {
+            Act::Worktree { worktree, seen, .. } => {
                 let (worktree, seen) = (*worktree, seen.clone());
                 self.project_act_delete(on, Doomed::Worktree { worktree, seen });
             },
-            (_, Act::Project { project, worktrees, seen, .. }) => {
+            Act::Project { project, worktrees, seen, .. } => {
                 let (project, worktrees, seen) = (*project, worktrees.clone(), seen.clone());
                 self.project_act_delete(on, Doomed::Project { project, worktrees, seen });
             },
-            (_, Act::Pane { whose: Whose::Own(key), pane: pane @ PaneKey::Terminal(_), .. }) => {
-                let own = OwnPane::new(*key, pane.id());
-                let Some((_, view)) = own.and_then(|it| self.projected.of_pane(on, it)) else {
-                    let unlisted = format!("menu: lunetad lists no view {}", pane.id());
-                    return self.sidebar.notify(unlisted);
+            Act::Pane { whose: Whose::Own(session), pane: PaneKey::Terminal(key), .. } => {
+                let Some(view) = self.projected.of_terminal(on, *session, *key) else {
+                    let id = key.id;
+                    let unlisted = format!("lunetad lists no view of terminal {id} made then");
+                    return self.sidebar.notify(format!("menu: {unlisted}"));
                 };
                 self.project_act_delete(on, Doomed::View(view));
             },
-            _ => self.sidebar.notify(format!("menu: {NOT_YET}")),
+            Act::Pane { .. } | Act::Tab { .. } | Act::Kill { .. } | Act::Leave { .. } => {
+                self.sidebar.notify(format!("menu: {NOT_YET}"));
+            },
         }
     }
 

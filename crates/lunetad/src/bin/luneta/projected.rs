@@ -198,6 +198,15 @@ impl Projected {
         Some((worktree, terminal))
     }
 
+    #[must_use]
+    pub fn of_terminal(&self, on: &Machine, session: OwnKey, key: TerminalKey) -> Option<ViewId> {
+        let project = self.project(on, session)?;
+        let held = project.worktrees().iter().flat_map(|worktree| &worktree.terminals);
+        let mut keyed = held.filter(|(_, held)| *held == Some(key));
+        let (view, _) = keyed.next()?;
+        keyed.next().is_none().then_some(*view)
+    }
+
     pub fn whole(&self, on: &Machine, session: &Listed) -> Result<Route<Option<u32>>, String> {
         let Whose::Own(key) = session.whose() else {
             let (on, session) = (on.clone(), session.name().clone());
@@ -471,6 +480,27 @@ mod tests {
         let five = OwnPane { session: project_key, id: NonZeroU32::new(5).unwrap() };
         let held = Some((worktree(12), ViewId::of(23).unwrap()));
         assert_eq!(projected.of_pane(&Machine::Local, five), held);
+    }
+
+    #[test]
+    fn a_view_is_found_by_its_terminal_s_whole_key_and_a_key_made_before_finds_none() {
+        let mut host = host();
+        let made_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
+        let remade = api::TerminalKey { id: 4, made_at };
+        rows(kept(&mut host))[0].terminals[0].found = Some(terminal::Found::Key(remade));
+        let projected = Projected::adapted(&mut host).unwrap();
+        let (here, session) = (Machine::Local, key_of(ProjectId::of(7).unwrap()));
+        let id = NonZeroU32::new(4).unwrap();
+        let (before, now) = (OwnMade::from_nanos(0), OwnMade::from_nanos(1_000_000_000));
+        let (stale, fresh) = (TerminalKey { id, made: before }, TerminalKey { id, made: now });
+        let view = ViewId::of(21).unwrap();
+        assert_eq!(projected.of_terminal(&here, session, fresh), Some(view));
+        assert_eq!(projected.of_terminal(&here, session, stale), None, "terminal 4 was made again");
+        let pane = OwnPane { session, id };
+        let by_id = Some((worktree(11), view));
+        assert_eq!(projected.of_pane(&here, pane), by_id, "the id alone finds it");
+        let far = Machine::Remote("far".parse().unwrap());
+        assert_eq!(projected.of_terminal(&far, session, fresh), None, "far keeps no project");
     }
 
     #[test]
