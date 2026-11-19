@@ -2379,34 +2379,13 @@ pub struct AllKeys {
 struct KeysRow {
     keys: String,
     does: String,
-    setup: &'static [&'static str],
 }
 
 impl KeysRow {
     fn of(action: Action, keys: String) -> KeysRow {
-        KeysRow { keys, does: action.name().to_owned(), setup: action.setup() }
+        KeysRow { keys, does: action.name().to_owned() }
     }
 }
-
-const SETUP_INDENT: &str = "  ";
-
-const _: () = {
-    let (edge, margin) = (1, 1);
-    let room = sidebar::COLUMNS as usize - edge - margin - SETUP_INDENT.len();
-    let mut at = 0;
-    while at < Action::ALL.len() {
-        let setup = Action::ALL[at].setup();
-        let mut line = 0;
-        while line < setup.len() {
-            let cells = "a setup line is ASCII, so its bytes are its cells";
-            assert!(setup[line].is_ascii(), "{}", cells);
-            let whole = "a setup line is drawn whole in the sidebar at the width it opens at";
-            assert!(setup[line].len() <= room, "{}", whole);
-            line += 1;
-        }
-        at += 1;
-    }
-};
 
 impl AllKeys {
     fn groups() -> [(&'static str, Vec<KeysRow>); 5] {
@@ -2414,7 +2393,6 @@ impl AllKeys {
             let row = |(label, does): &(Label, &str)| KeysRow {
                 keys: label.to_string(),
                 does: (*does).to_owned(),
-                setup: &[],
             };
             keys.iter().map(row).collect()
         };
@@ -2444,10 +2422,7 @@ impl AllKeys {
         for (name, keys) in AllKeys::groups() {
             rows.push(Line::from(vec![Span::raw(" "), Span::styled(name, bold)]));
             let column = keys.iter().map(|row| row.keys.width()).max().unwrap_or(0);
-            for row in keys {
-                rows.push(keys_line_of(&row.keys, column, &row.does, inner));
-                rows.extend(row.setup.iter().map(|line| setup_line(line, inner)));
-            }
+            rows.extend(keys.iter().map(|row| keys_line_of(&row.keys, column, &row.does, inner)));
         }
         rows
     }
@@ -2536,12 +2511,6 @@ fn keys_line_of(keys: &str, column: usize, does: &str, inner: usize) -> Line<'st
         Span::raw(" ".repeat(pad)),
         Span::styled(sidebar::cut(does, room), Style::new().fg(NAME)),
     ])
-}
-
-fn setup_line(line: &str, inner: usize) -> Line<'static> {
-    let room = inner.saturating_sub(SETUP_INDENT.width());
-    let dim = Style::new().add_modifier(Modifier::DIM);
-    Line::from(vec![Span::raw(SETUP_INDENT), Span::styled(sidebar::cut(line, room), dim)])
 }
 
 fn all_keys_line(inner: usize) -> Line<'static> {
