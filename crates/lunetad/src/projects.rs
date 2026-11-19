@@ -1008,7 +1008,7 @@ impl Projects {
         if spot.is_clone() {
             let (project, _) = self.inside(spot)?;
             let holding = self.project_of(project).expect("the project a spot is inside is held");
-            holding.plain()
+            holding.plain().filter(|plain| plain.dir != spot.place())
         } else {
             None
         }
@@ -2248,6 +2248,10 @@ mod tests {
         let own = projects.project_of(notes).unwrap().worktrees().next().unwrap().id();
         let (same, found) = change(&projects, joining(folder("/n/drafts"))).unwrap();
         assert_eq!((same == projects, found), (true, Some(Made::Found(own))));
+        let fix = project(&mut projects, "/m/cdk/fix");
+        let own = projects.project_of(fix).unwrap().worktrees().next().unwrap().id();
+        let (_, found) = change(&projects, joining(spot_at("/m/cdk", "fix"))).unwrap();
+        assert_eq!(found, Some(Made::Found(own)), "a folder's project at the worktree holds it");
     }
 
     #[test]

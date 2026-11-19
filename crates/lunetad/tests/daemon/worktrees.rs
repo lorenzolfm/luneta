@@ -179,9 +179,14 @@ fn a_branch_in_a_clone_a_folder_s_project_holds_makes_nothing_and_its_folder_goe
     assert_eq!(folders(host), kept);
     let main = clone.join("main");
 
+    let side = scratch.join("side");
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "-b", "side", &side.display().to_string()]);
+
     let one = "notes is a folder, and its own is its one worktree";
-    let held = format!("{} is in {notes_s}, project notes's folder; {one}", main.display());
-    assert_eq!(refused(&started(host, &main, "feat", &[])), format!("luneta: nothing made: {held}"));
+    let held = format!("{} is in {notes_s}, project notes's folder; {one}", clone.display());
+    let refusal = format!("luneta: nothing made: {held}");
+    assert_eq!(refused(&started(host, &main, "feat", &[])), refusal);
+    assert_eq!(refused(&started(host, &side, "feat", &[])), refusal, "wt makes it in the clone");
     assert!(!clone.join("feat").exists(), "wt makes no worktree");
     assert_eq!(folders(host), kept);
 
