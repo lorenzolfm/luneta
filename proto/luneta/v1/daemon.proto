@@ -1055,7 +1055,7 @@ message ChangeProjectsRequest {
   }
 
   message CloseView {
-    fixed64 view = 1;
+    TerminalKey terminal = 1;
   }
 }
 

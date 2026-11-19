@@ -450,7 +450,7 @@ impl Layouts {
                         self.close_project(project, &worktrees, &seen)
                     },
                     Ask::Bring { worktree, from } => self.bring(worktree, from),
-                    Ask::CloseView(view) => self.close_view(view),
+                    Ask::CloseView(terminal) => self.close_view(terminal),
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|made| Changed { made, kept }));
@@ -737,13 +737,14 @@ impl Layouts {
         Ok(None)
     }
 
-    fn close_view(&mut self, view: ViewId) -> Result<Option<Made>, Failed> {
-        let projects = self.kept().map_err(Failed::NotKept)?;
-        let terminal = projects.holding_terminal(view).map(|(_, held)| held.id());
-        self.close(view)?;
-        if let Some(terminal) = terminal {
-            assert!(!self.known.contains_key(&terminal), "terminal {terminal} is known no more");
-        }
+    fn close_view(&mut self, key: TerminalKey) -> Result<Option<Made>, Failed> {
+        let held = self.known.iter().find(|(_, known)| known.key == key);
+        let Some((&terminal, _)) = held else {
+            let id = key.id;
+            return Err(Failed::Gone(format!("no view holds terminal {id} made then")));
+        };
+        self.close(terminal.view())?;
+        assert!(!self.known.contains_key(&terminal), "terminal {terminal} is known no more");
         Ok(None)
     }
 
@@ -1754,7 +1755,8 @@ fn said(failed: Failed) -> String {
         | Failed::Refused(why)
         | Failed::Unwritten(why)
         | Failed::Unclosed(why)
-        | Failed::Unopened(why) => why,
+        | Failed::Unopened(why)
+        | Failed::Gone(why) => why,
         Failed::KeptUntold => "it is kept, but the daemon's core has stopped".to_owned(),
     }
 }

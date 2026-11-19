@@ -357,6 +357,7 @@ pub enum Failed {
     Unwritten(String),
     Unclosed(String),
     Unopened(String),
+    Gone(String),
     KeptUntold,
 }
 

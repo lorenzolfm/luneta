@@ -90,7 +90,7 @@ pub struct Pulled {
 
 #[derive(Debug)]
 enum Doomed {
-    View(ViewId),
+    View(TerminalKey),
     Worktree { worktree: WorktreeId, seen: Vec<ViewId> },
     Project { project: ProjectId, worktrees: Vec<WorktreeId>, seen: Vec<ViewId> },
 }
@@ -1802,13 +1802,8 @@ impl App {
                 let (project, worktrees, seen) = (*project, worktrees.clone(), seen.clone());
                 self.project_act_delete(on, Doomed::Project { project, worktrees, seen });
             },
-            Act::Pane { whose: Whose::Own(session), pane: PaneKey::Terminal(key), .. } => {
-                let Some(view) = self.projected.of_terminal(on, *session, *key) else {
-                    let id = key.id;
-                    let unlisted = format!("lunetad lists no view of terminal {id} made then");
-                    return self.sidebar.notify(format!("menu: {unlisted}"));
-                };
-                self.project_act_delete(on, Doomed::View(view));
+            Act::Pane { whose: Whose::Own(_), pane: PaneKey::Terminal(key), .. } => {
+                self.project_act_delete(on, Doomed::View(*key));
             },
             Act::Pane { .. } | Act::Tab { .. } | Act::Kill { .. } | Act::Leave { .. } => {
                 self.sidebar.notify(format!("menu: {NOT_YET}"));
@@ -1820,7 +1815,7 @@ impl App {
         let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
         self.keep_change(thread::spawn(move || {
             let closed = caught(|| match &doomed {
-                Doomed::View(view) => worktrees::closed_view(&lunetad, &on, *view),
+                Doomed::View(key) => worktrees::closed_view(&lunetad, &on, *key),
                 Doomed::Worktree { worktree, seen } => {
                     worktrees::closed(&lunetad, &on, *worktree, seen)
                 },

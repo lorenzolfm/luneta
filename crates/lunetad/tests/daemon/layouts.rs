@@ -781,35 +781,46 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
 }
 
 #[test]
-fn a_view_closed_by_its_id_leaves_the_mux_and_the_last_takes_its_worktree() {
+fn a_view_closes_by_its_terminal_s_whole_key_and_the_last_takes_its_worktree() {
     let owned = Owned::new();
     let (_, closing, other) = two_in_a_clone(&owned, "clone");
     let mut shown = Shown::new(&owned, closing, 80, 24);
     let [first] = shown.terminals()[..] else { panic!("a worktree is made with one terminal") };
     let second = shown.open();
+    shown.until("both terminals found", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
+    let (first_key, second_key) = (shown.key_of(first), shown.key_of(second));
     let beside = Shown::new(&owned, other, 80, 24);
     let [stays] = beside.terminals()[..] else { panic!("the other holds its first alone") };
-    let close = |view| Change::CloseView(CloseView { view });
+    let close = |terminal| Change::CloseView(CloseView { terminal });
+
+    let mut before = second_key;
+    before.made_at.as_mut().expect("a key says when its terminal was made").seconds -= 1;
+    let stale = asked(&owned.host, close(Some(before))).unwrap_err();
+    assert_eq!(stale.code(), Code::NotFound, "{stale:?}");
+    assert!(stale.message().contains("made then"), "{}", stale.message());
+    assert_eq!(watched(&owned, closing).len(), 2, "a key made before closes nothing");
 
     let stalled = owned.stall_mux();
-    let unclosed = asked(&owned.host, close(second)).unwrap_err();
+    let unclosed = asked(&owned.host, close(Some(second_key))).unwrap_err();
     assert_eq!(unclosed.code(), Code::Unavailable, "{unclosed:?}");
     assert!(unclosed.message().contains("may close still"), "{}", unclosed.message());
     assert_eq!(watched(&owned, closing).len(), 2, "a stalled mux has closed none yet");
     drop(stalled);
-    match asked(&owned.host, close(second)) {
+    match asked(&owned.host, close(Some(second_key))) {
         Ok(None) => {},
-        Err(gone) if gone.message().contains("no layout holds the view") => {},
+        Err(gone) if gone.code() == Code::NotFound => {},
         again => panic!("a view closed again once the mux answers: {again:?}"),
     }
     assert_eq!(watched(&owned, closing).len(), 1, "the view closed leaves its layout");
-    let refused = asked(&owned.host, close(second)).unwrap_err();
-    assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
-    assert!(refused.message().contains("no layout holds the view"), "{}", refused.message());
-    let unnamed = asked(&owned.host, close(0)).unwrap_err();
+    let gone = asked(&owned.host, close(Some(second_key))).unwrap_err();
+    assert_eq!(gone.code(), Code::NotFound, "{gone:?}");
+    let unnamed = asked(&owned.host, close(None)).unwrap_err();
     assert_eq!(unnamed.code(), Code::InvalidArgument, "{unnamed:?}");
+    let zero = TerminalKey { id: 0, made_at: second_key.made_at };
+    let unnumbered = asked(&owned.host, close(Some(zero))).unwrap_err();
+    assert_eq!(unnumbered.code(), Code::InvalidArgument, "{unnumbered:?}");
 
-    assert_eq!(asked(&owned.host, close(first)).unwrap(), None);
+    assert_eq!(asked(&owned.host, close(Some(first_key))).unwrap(), None);
     eventually("the closed terminal leaves the mux", || {
         tagged(&owned.listing(), first).is_none().then_some(())
     });

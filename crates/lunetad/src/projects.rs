@@ -594,7 +594,7 @@ pub enum Ask {
         seen: BTreeSet<ViewId>,
     },
     Bring { worktree: WorktreeId, from: TerminalKey },
-    CloseView(ViewId),
+    CloseView(TerminalKey),
 }
 
 impl Ask {
@@ -682,8 +682,9 @@ impl Ask {
                 let from = TerminalKey::of(&from).map_err(field("from"))?;
                 return Ok(Ask::Bring { worktree, from });
             },
-            Asked::CloseView(asked::CloseView { view }) => {
-                return id("view", view).map(ViewId).map(Ask::CloseView);
+            Asked::CloseView(asked::CloseView { terminal }) => {
+                let terminal = terminal.ok_or("terminal: it names no terminal")?;
+                return TerminalKey::of(&terminal).map_err(field("terminal")).map(Ask::CloseView);
             },
             Asked::RenameTerminal(asked::RenameTerminal { terminal, to }) => {
                 Change::RenameTerminal {

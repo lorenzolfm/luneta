@@ -221,8 +221,10 @@ pub fn closed(
     changed_on(path, on(machine), close(worktree, seen)).map(drop).map_err(Unmade::said)
 }
 
-pub fn closed_view(path: &Path, machine: &Machine, view: ViewId) -> Result<(), String> {
-    let change = Change::CloseView(CloseView { view: view.get() });
+pub fn closed_view(path: &Path, machine: &Machine, terminal: TerminalKey) -> Result<(), String> {
+    let (id, made_at) = (terminal.id.get(), Some(terminal.made.into()));
+    let terminal = Some(lunetad::api::TerminalKey { id, made_at });
+    let change = Change::CloseView(CloseView { terminal });
     changed_on(path, on(machine), change).map(drop).map_err(Unmade::said)
 }
 
