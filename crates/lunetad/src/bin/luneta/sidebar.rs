@@ -51,7 +51,7 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::{self, Machine};
 use crate::menu::{
-    self, AllKeys, Briefed, Choice, Did, Done, Hint, Label, Menu, Origin, ViewRow,
+    self, AllKeys, Briefed, Choice, Cwd, Did, Done, Hint, Label, Menu, Origin, ViewRow,
     ProjectTarget, Ran, Rename, Target, Top, Wants, WorktreeRow,
 };
 use crate::news::News;
@@ -3368,23 +3368,22 @@ impl Sidebar {
         let seen = self.seen(machine);
         let shown = self.view_of(machine, &session, view.terminal_id());
         let agents = seen.as_ref().map(Seen::seated);
-        let cwd = shown.and_then(|shown| {
+        let cwd = Cwd::of(shown.and_then(|shown| {
             let agents = agents.as_ref()?;
             match keyed(shown).and_then(|key| agents.get(&key)) {
                 Some(agent) => Some(agent_dir(agent, shown).to_owned()),
                 None => shown.cwd.clone(),
             }
-        });
+        }));
+        let dir = cwd.at().map(Directory::as_str);
         let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
-        let status =
-            cwd.as_deref().and_then(|cwd| statuses.into_iter().find(|status| status.dir == cwd));
+        let status = dir.and_then(|dir| statuses.into_iter().find(|status| status.dir == dir));
         let status = status.and_then(GitStatus::of_api);
         let checkout = status.as_ref().and_then(|status| checkout(status, None));
         let branch = checkout.map(|checkout| checkout.branch);
         let repository = status.as_ref().and_then(repository_of);
         let pulls = seen.iter().flat_map(|seen| seen.pull_requests);
-        let pull_request =
-            cwd.as_deref().and_then(|cwd| pulls.into_iter().find(|pull| pull.dir == cwd));
+        let pull_request = dir.and_then(|dir| pulls.into_iter().find(|pull| pull.dir == dir));
         let pull_request = pull_request.and_then(PullRequest::of_api);
         let ran = self.ran_in(machine, &session, view.terminal_id());
         let terminal = view_id_of(&self.shelves, machine, &session, view);
@@ -3536,8 +3535,7 @@ impl Sidebar {
             Some(menu) => Some(menu.target().clone()),
             None => self.target(),
         };
-        let from = target.as_ref().and_then(Target::cwd);
-        let from = from.and_then(|from| Directory::parse(from.to_owned()).ok());
+        let from = target.as_ref().and_then(Target::cwd).cloned();
         let Some(work) = Work::parse(text, from) else {
             return;
         };
@@ -9234,7 +9232,7 @@ mod tests {
             assert!(sidebar.open().is_none(), "{text:?}");
         }
         let Some(Target::View(on, row)) = sidebar.target() else { panic!("not a view's row") };
-        let cwd = row.cwd.clone();
+        let from = row.cwd.at().cloned();
         sidebar.paste("  docs/plans/sync-rework.md\n");
         let lines = screen(&mut sidebar, true, 39, 17);
         assert_eq!(lines[12..], [
@@ -9249,7 +9247,6 @@ mod tests {
             panic!("no job for the key");
         };
         assert_eq!(asked_on, on);
-        let from = cwd.map(|cwd| Directory::parse(cwd).unwrap());
         assert_eq!(Some(work), Work::parse("docs/plans/sync-rework.md", from));
 
         let mut sidebar = two_sessions();
@@ -9332,7 +9329,8 @@ mod tests {
         sidebar.hear(host(vec![session("s", 10, vec![unsaid])], vec![elsewhere]));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "j");
-        assert_eq!(sidebar.target().as_ref().and_then(Target::cwd), Some("w/luneta"));
+        let Some(Target::View(_, row)) = sidebar.target() else { panic!("not a view's row") };
+        assert!(matches!(row.cwd, Cwd::Unread { .. }), "{:?}", row.cwd);
         sidebar.paste("docs/plan.md");
         let Asked::Pull { work, .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
@@ -9529,7 +9527,7 @@ mod tests {
             session: Listed::new_project("older", 1),
             view: view_key(1, 1),
             terminal: ViewId::of(1),
-            cwd: Some("/w/luneta/main".to_owned()),
+            cwd: Cwd::At(directory("/w/luneta/main")),
             branch: Some("feat/menu".to_owned()),
             repository: None,
             pull_request: None,
@@ -10882,7 +10880,7 @@ mod tests {
         assert_eq!(sidebar.key(&enter, moment(160_000)), there);
         type_in(&mut sidebar, "mn");
         let on = Machine::Remote(nixos());
-        let (session, cwd) = (listed("main", 20), Some("/w/b".to_owned()));
+        let (session, cwd) = (listed("main", 20), Cwd::At(directory("/w/b")));
         let (branch, repository, ran) = (None, None, Ran::Unhooked);
         let view = view_key(20, 1);
         let terminal = ViewId::of(1);

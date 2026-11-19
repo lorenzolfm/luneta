@@ -2365,7 +2365,7 @@ mod tests {
 
     use super::*;
     use crate::close::Doing;
-    use crate::menu::{Ran, ViewRow, WorktreeRow};
+    use crate::menu::{Cwd, Ran, ViewRow, WorktreeRow};
     use crate::spots::Hit;
 
     const NOW: Duration = Duration::from_secs(1000);
@@ -2519,7 +2519,7 @@ mod tests {
             session: fix().project.listed().clone(),
             view: ViewKey::terminal(3),
             terminal: ViewId::of(3),
-            cwd: Some("/home/you/fix".to_owned()),
+            cwd: Cwd::At(directory("/home/you/fix")),
             branch: None,
             repository: None,
             pull_request: None,

@@ -804,11 +804,37 @@ pub struct ViewRow {
     pub session: Listed,
     pub view: ViewKey,
     pub terminal: Option<ViewId>,
-    pub cwd: Option<String>,
+    pub cwd: Cwd,
     pub branch: Option<String>,
     pub repository: Option<String>,
     pub pull_request: Option<PullRequest>,
     pub ran: Ran,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Cwd {
+    Unsaid,
+    At(Directory),
+    Unread { why: String },
+}
+
+impl Cwd {
+    #[must_use]
+    pub fn of(said: Option<String>) -> Cwd {
+        match said.map(Directory::parse) {
+            None => Cwd::Unsaid,
+            Some(Ok(dir)) => Cwd::At(dir),
+            Some(Err(why)) => Cwd::Unread { why },
+        }
+    }
+
+    #[must_use]
+    pub fn at(&self) -> Option<&Directory> {
+        match self {
+            Cwd::At(dir) => Some(dir),
+            Cwd::Unsaid | Cwd::Unread { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -927,19 +953,11 @@ impl Target {
         }
     }
 
-    pub fn cwd(&self) -> Option<&str> {
+    pub fn cwd(&self) -> Option<&Directory> {
         match self {
             Target::Project(..) | Target::Machine(_) => None,
-            Target::Worktree(_, row) => Some(row.folder.as_str()),
-            Target::View(_, row) => row.cwd.as_deref(),
-        }
-    }
-
-    fn directory(&self) -> Option<Directory> {
-        match self {
-            Target::Project(..) | Target::Machine(_) => None,
-            Target::Worktree(_, row) => Some(row.folder.clone()),
-            Target::View(_, row) => Directory::parse(row.cwd.clone()?).ok(),
+            Target::Worktree(_, row) => Some(&row.folder),
+            Target::View(_, row) => row.cwd.at(),
         }
     }
 
@@ -956,27 +974,29 @@ impl Target {
     }
 
     fn repository(&self) -> Option<Repository> {
-        let (on, dir, home) = (self.machine(), self.directory()?, self.held_repository()?);
+        let (on, dir, home) = (self.machine(), self.cwd()?.clone(), self.held_repository()?);
         let (home, name) = (home.to_owned(), self.repository_name().to_owned());
         Some(Repository { on: on.clone(), dir, home, name })
     }
 
     fn merged_in(&self) -> Option<Directory> {
         self.held_repository()?;
-        self.directory()
+        self.cwd().cloned()
     }
 
     fn folder_hint(&self) -> String {
         let held = match self {
-            Target::View(_, row) => row.cwd.clone(),
-            Target::Worktree(_, row) => Some(row.folder.as_str().to_owned()),
-            Target::Project(_, project) => Some(project.dir.clone()),
+            Target::View(..) | Target::Worktree(..) => self.cwd().map(Directory::as_str),
+            Target::Project(_, project) => Some(project.dir.as_str()),
             Target::Machine(_) => None,
         };
-        held.unwrap_or_else(|| match self.machine() {
-            Machine::Local => own_folder(),
-            Machine::Remote(_) => "~".to_owned(),
-        })
+        held.map_or_else(
+            || match self.machine() {
+                Machine::Local => own_folder(),
+                Machine::Remote(_) => "~".to_owned(),
+            },
+            str::to_owned,
+        )
     }
 
     pub fn branch(&self) -> Option<&str> {
@@ -1098,13 +1118,15 @@ impl Rebases<'_> {
 impl ViewRow {
     fn beside(&self) -> Result<Beside, String> {
         let view = self.view;
-        let Some(cwd) = self.cwd.clone() else {
-            return Err(format!(
-                "menu: luneta does not know yet where view {view} works; try again in a moment"
-            ));
+        let cwd = match &self.cwd {
+            Cwd::At(cwd) => cwd.clone(),
+            Cwd::Unsaid => {
+                return Err(format!(
+                    "menu: luneta does not know yet where view {view} works; try again in a moment"
+                ));
+            },
+            Cwd::Unread { why } => return Err(format!("menu: where view {view} works, {why}")),
         };
-        let cwd =
-            Directory::parse(cwd).map_err(|why| format!("menu: where view {view} works, {why}"))?;
         Ok(Beside { session: self.session.clone(), view, cwd })
     }
 
@@ -1694,7 +1716,7 @@ impl Menu {
                     session: session.clone(),
                     view,
                     terminal: None,
-                    cwd: Some(folder),
+                    cwd: Cwd::At(dir),
                     branch,
                     repository: None,
                     pull_request: None,
@@ -1918,7 +1940,7 @@ impl Menu {
 
     fn shown(&self, width: usize, body_room: usize, frame: usize) -> Shown {
         let inner = width.saturating_sub(1);
-        let right = self.target.cwd().map_or_default(sidebar::short_cwd);
+        let right = self.target.cwd().map_or_default(|cwd| sidebar::short_cwd(cwd.as_str()));
         let mut spots = Spots::default();
         let (title, right, body, (footer, keys)) = match &self.stage {
             Stage::Pull { work, agent, step } => {
@@ -2735,7 +2757,7 @@ mod tests {
             session: listed(),
             view: ViewKey::terminal(4),
             terminal: None,
-            cwd: Some("/w/luneta/main".to_owned()),
+            cwd: Cwd::At(main_dir()),
             branch: Some("feat/menu".to_owned()),
             repository: Some("/w/luneta".to_owned()),
             pull_request: None,
@@ -3315,7 +3337,7 @@ mod tests {
             refused(pull_row(State::Open, None)),
             wrong("menu: view 4's lunetad does not say the page of #328, as an older one does not")
         );
-        let unsaid = Target::View(Machine::Local, ViewRow { cwd: None, ..row() });
+        let unsaid = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
         assert!(matches!(refused(unsaid), Done::Wrong(_)));
     }
 
@@ -3386,7 +3408,7 @@ mod tests {
             assert_eq!(closed(menu.key(&char('i'))), Done::Issue(repository));
         }
         let unrepositoried = Target::View(Machine::Local, ViewRow { repository: None, ..row() });
-        let nowhere = Target::View(Machine::Local, ViewRow { cwd: None, ..row() });
+        let nowhere = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
         for row in [session_row(), Target::Machine(Machine::Local), unrepositoried, nowhere] {
             assert!(Menu::open(1, row.clone(), Some('i'), PICKED).is_none(), "{row:?}");
             let (menu, _) = stays(opened(row.clone(), None));
@@ -3699,7 +3721,7 @@ mod tests {
         assert!(menu.sweeping() && menu.turning());
 
         let outside = Target::View(Machine::Local, ViewRow { repository: None, ..row() });
-        let unplaced = Target::View(Machine::Local, ViewRow { cwd: None, ..row() });
+        let unplaced = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
         for target in [outside, unplaced, project_on(Machine::Local), remote_header()] {
             let (menu, _) = stays(opened(target.clone(), Some('d')));
             let (menu, wants) = stays(menu.key(&char('m')));
@@ -3968,11 +3990,11 @@ mod tests {
 
     #[test]
     fn a_menu_that_cannot_open_beside_its_row_says_why() {
-        let unknown = Target::View(Machine::Local, ViewRow { cwd: None, ..row() });
-        let (menu, _) = stays(opened(unknown, None));
+        let unsaid = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
+        let (menu, _) = stays(opened(unsaid, None));
         let done = closed(menu.key(&char('/')));
         assert!(matches!(done, Done::Wrong(why) if why.contains("where view 4 works")));
-        let relative = ViewRow { cwd: Some("w".to_owned()), ..own_row() };
+        let relative = ViewRow { cwd: Cwd::of(Some("w".to_owned())), ..own_row() };
         let relative = Target::View(Machine::Local, relative);
         let (menu, _) = stays(opened(relative, Some('n')));
         let why = "menu: where view 4 works, \"w\" is no absolute path".to_owned();
