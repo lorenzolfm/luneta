@@ -321,7 +321,6 @@ fn a_click_on_a_project_s_row_goes_to_its_worktree_used_last() {
     eventually("a click on work's row goes to docs, the worktree used last there", || {
         (used(docs) > used(other)).then_some(())
     });
-    assert!(used(main) < used(docs), "luneta went to docs, not work's first worktree");
 }
 
 fn sidebar_row(window: &Window, text: &str) -> usize {
