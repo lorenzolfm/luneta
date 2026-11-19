@@ -47,7 +47,6 @@ pub struct Within<S> {
 impl<S> Within<S> {
     pub(crate) fn new(inner: S, answer: Duration) -> Within<S> {
         assert!(!answer.is_zero(), "a call waits some time for its answer");
-        assert_eq!(answer.subsec_nanos(), 0, "unanswered says the bound in whole seconds");
         Within { inner, answer }
     }
 }
@@ -78,8 +77,7 @@ where
 
 #[must_use]
 pub fn unanswered(within: Duration) -> String {
-    assert_eq!(within.subsec_nanos(), 0, "only whole seconds are said exactly");
-    format!("lunetad did not answer in {}s", within.as_secs())
+    format!("lunetad did not answer in {}s", within.as_secs_f64())
 }
 
 pub async fn connect(folder: &Folder) -> Result<Daemon, Error> {
@@ -236,7 +234,7 @@ mod tests {
     use tonic::Code;
     use tower::{service_fn, BoxError};
 
-    use super::Within;
+    use super::{unanswered, Within};
     use crate::api::daemon_client::DaemonClient;
 
     #[test]
@@ -247,5 +245,11 @@ mod tests {
         let late = runtime.block_on(daemon.info(())).unwrap_err();
         let said = (late.code(), late.message());
         assert_eq!(said, (Code::DeadlineExceeded, "lunetad did not answer in 1s"));
+    }
+
+    #[test]
+    fn a_bound_in_part_of_a_second_is_said_exactly() {
+        assert_eq!(unanswered(Duration::from_millis(1500)), "lunetad did not answer in 1.5s");
+        assert_eq!(unanswered(Duration::from_millis(250)), "lunetad did not answer in 0.25s");
     }
 }
