@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crate::ledger::Session;
+use lunetad::projects::ViewId;
+
+use crate::ledger::{Key, Mark, Session};
 use crate::machines::Machine;
 
 pub const GONE: Duration = Duration::from_secs(10);
@@ -9,65 +11,91 @@ pub const GONE: Duration = Duration::from_secs(10);
 #[derive(Debug, Default)]
 pub struct Lists {
     running: HashMap<Session, Machine>,
+    views: HashMap<Key, Machine>,
     unsure: HashSet<Machine>,
 }
 
 impl Lists {
-    pub fn lists(
+    pub fn lists<V: IntoIterator<Item = ViewId>>(
         &mut self,
         machine: &Machine,
-        sessions: impl IntoIterator<Item = Session>,
+        sessions: impl IntoIterator<Item = (Session, V)>,
         whole: bool,
     ) {
-        self.running.extend(sessions.into_iter().map(|session| (session, machine.clone())));
+        for (session, views) in sessions {
+            self.running.insert(session, machine.clone());
+            let views = views.into_iter().map(|view| (Key { session, view }, machine.clone()));
+            self.views.extend(views);
+        }
         if !whole {
             self.unsure.insert(machine.clone());
         }
     }
+
+    pub fn unreached(&mut self, machine: &Machine) {
+        self.unsure.insert(machine.clone());
+    }
 }
 
-#[derive(Debug, Default)]
-pub struct Missing {
-    since: BTreeMap<Session, Instant>,
-    ran_on: HashMap<Session, Machine>,
+pub trait Runs: Mark {
+    fn on(self, live: &Lists) -> Option<&Machine>;
 }
 
-impl Missing {
-    pub fn gone(
-        &mut self,
-        kept: &BTreeSet<Session>,
-        live: Option<&Lists>,
-        at: Instant,
-    ) -> BTreeSet<Session> {
-        self.since.retain(|session, _| kept.contains(session));
-        self.ran_on.retain(|session, _| kept.contains(session));
+impl Runs for Session {
+    fn on(self, live: &Lists) -> Option<&Machine> {
+        live.running.get(&self)
+    }
+}
+
+impl Runs for Key {
+    fn on(self, live: &Lists) -> Option<&Machine> {
+        live.views.get(&self)
+    }
+}
+
+#[derive(Debug)]
+pub struct Missing<R> {
+    since: BTreeMap<R, Instant>,
+    ran_on: BTreeMap<R, Machine>,
+}
+
+impl<R> Default for Missing<R> {
+    fn default() -> Self {
+        Missing { since: BTreeMap::new(), ran_on: BTreeMap::new() }
+    }
+}
+
+impl<R: Runs> Missing<R> {
+    pub fn gone(&mut self, kept: &BTreeSet<R>, live: Option<&Lists>, at: Instant) -> BTreeSet<R> {
+        self.since.retain(|mark, _| kept.contains(mark));
+        self.ran_on.retain(|mark, _| kept.contains(mark));
         let Some(live) = live else {
             self.since.clear();
             return BTreeSet::new();
         };
         let mut gone = BTreeSet::new();
-        for session in kept {
-            if let Some(machine) = live.running.get(session) {
-                self.ran_on.insert(*session, machine.clone());
-                self.since.remove(session);
+        for mark in kept {
+            if let Some(machine) = mark.on(live) {
+                self.ran_on.insert(*mark, machine.clone());
+                self.since.remove(mark);
                 continue;
             }
-            let unsure = match self.ran_on.get(session) {
+            let unsure = match self.ran_on.get(mark) {
                 Some(machine) => live.unsure.contains(machine),
                 None => !live.unsure.is_empty(),
             };
             if unsure {
-                self.since.remove(session);
+                self.since.remove(mark);
                 continue;
             }
-            let since = *self.since.entry(*session).or_insert(at);
+            let since = *self.since.entry(*mark).or_insert(at);
             if at.duration_since(since) >= GONE {
-                gone.insert(*session);
+                gone.insert(*mark);
             }
         }
-        for session in &gone {
-            self.since.remove(session);
-            self.ran_on.remove(session);
+        for mark in &gone {
+            self.since.remove(mark);
+            self.ran_on.remove(mark);
         }
         gone
     }
@@ -84,7 +112,7 @@ mod tests {
     fn lists<const N: usize>(machines: [(&Machine, &[Session], bool); N]) -> Lists {
         let mut live = Lists::default();
         for (machine, sessions, whole) in machines {
-            live.lists(machine, sessions.iter().copied(), whole);
+            live.lists(machine, sessions.iter().map(|session| (*session, [])), whole);
         }
         live
     }
