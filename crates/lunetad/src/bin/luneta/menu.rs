@@ -16,8 +16,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::actions::{self, Action, Key, Noun, MENU_GROUPS, REVIEW, ROW_GROUPS, YANK};
-pub use crate::actions::YANK_PULL;
+use crate::actions::{self, Action, Key, Noun, MENU_GROUPS, OPEN, REVIEW, ROW_GROUPS, YANK};
 use crate::agents::{self, Harness, Picked};
 use crate::brief;
 use crate::checks::{self, Failing, PullPage};
@@ -139,7 +138,7 @@ pub enum Top {
     Shift(isize),
     Fold(Option<bool>),
     Menu,
-    Yank,
+    Group(char),
     AllKeys,
     Command(Action),
 }
@@ -157,7 +156,8 @@ impl Top {
             'l' => Some(Top::Fold(Some(false))),
             ' ' => Some(Top::Fold(None)),
             'm' => Some(Top::Menu),
-            YANK => Some(Top::Yank),
+            YANK => Some(Top::Group(YANK)),
+            OPEN => Some(Top::Group(OPEN)),
             ALL_KEYS => Some(Top::AllKeys),
             _ => None,
         }
@@ -760,7 +760,7 @@ impl Target {
         Some(offer)
     }
 
-    fn project(&self) -> Option<ProjectRow> {
+    pub fn project(&self) -> Option<ProjectRow> {
         match self {
             Target::Project(_, target) => Some(target.project.clone()),
             Target::Worktree(_, row) => Some(row.place.project.clone()),
@@ -2121,13 +2121,17 @@ pub fn shortcuts(
     fitted(title, rows.collect(), width, room)
 }
 
-pub fn yanks(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
-    let yanks = tree(Action::row(), &ROW_GROUPS).into_iter().find_map(|entry| match entry {
-        Entry::Group { key: YANK, name, entries } => Some((name, entries)),
+pub fn grouped(group: char, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
+    let found = tree(Action::row(), &ROW_GROUPS).into_iter().find_map(|entry| match entry {
+        Entry::Group { key, name, entries } if key == group => Some((name, entries)),
         Entry::Group { .. } | Entry::Act { .. } => None,
     });
-    let (name, entries) = yanks.expect("the catalogue keys its yanks under y");
+    let (name, entries) = found.expect("a row group the sidebar opens is in the catalogue");
     listed(name, &entries, width, room)
+}
+
+pub fn in_group(group: char, key: char) -> Option<Action> {
+    Action::row().find_map(|(action, path)| (*path == [group, key]).then_some(action))
 }
 
 fn listed(
@@ -2630,7 +2634,8 @@ mod tests {
         for c in &named {
             assert!(Top::moves(*c).is_some(), "{c:?}");
         }
-        for c in (' '..='~').filter(|c| *c != YANK && Top::moves(*c).is_some()) {
+        let group = |c: &char| ROW_GROUPS.iter().any(|(key, _)| key == c);
+        for c in (' '..='~').filter(|c| !group(c) && Top::moves(*c).is_some()) {
             assert!(named.contains(&c), "{c:?}");
         }
     }
@@ -2723,7 +2728,7 @@ mod tests {
                 " /  Search",
                 " u  Unread",
                 " v  Reorder",
-                " o  Open PR",
+                " o  Open ▸",
                 " y  Yank ▸",
                 " a  Ask",
                 " i  File issue",
@@ -2745,9 +2750,13 @@ mod tests {
         assert_eq!(Top::of('m'), Some(Top::Menu));
         assert_eq!(Top::of('/'), Some(Top::Command(Action::Search)));
         assert_eq!(Top::of('u'), Some(Top::Command(Action::Unread)));
-        assert_eq!(Top::of('o'), Some(Top::Command(Action::OpenPull)));
+        assert_eq!(Top::of('o'), Some(Top::Group(OPEN)));
+        assert_eq!(in_group(OPEN, 'p'), Some(Action::OpenPull));
+        assert_eq!(in_group(OPEN, 'w'), Some(Action::OpenWorktree));
+        assert_eq!(in_group(YANK, 'p'), Some(Action::YankPull));
+        assert_eq!(in_group(YANK, 'w'), None);
         assert_eq!(Top::of('V'), None);
-        assert_eq!(Top::of('y'), Some(Top::Yank));
+        assert_eq!(Top::of('y'), Some(Top::Group(YANK)));
         assert_eq!(Top::of('a'), None);
         assert_eq!(Top::of('c'), None);
         assert_eq!(Top::of('n'), None);
@@ -2759,7 +2768,8 @@ mod tests {
     #[test]
     fn no_command_of_the_rows_nor_group_of_the_menu_is_on_a_key_the_sidebar_moves_with() {
         for (action, path) in Action::row().chain(Action::menu()) {
-            assert!(Top::moves(path[0]).is_none() || path[0] == YANK, "{action:?} on {path:?}");
+            let group = ROW_GROUPS.iter().any(|(key, _)| *key == path[0]);
+            assert!(Top::moves(path[0]).is_none() || group, "{action:?} on {path:?}");
         }
         for (_, path) in Action::row() {
             let group = |(key, _): &(char, &str)| *key == path[0];

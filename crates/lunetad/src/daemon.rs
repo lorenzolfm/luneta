@@ -1161,7 +1161,7 @@ impl Daemon for Host {
                 Failed::Stale(why) => Status::aborted(why),
                 Failed::Refused(why) => Status::invalid_argument(why),
                 Failed::Unwritten(why) => Status::internal(why),
-                Failed::Unclosed(why) => Status::unavailable(why),
+                Failed::Unclosed(why) | Failed::Unopened(why) => Status::unavailable(why),
                 Failed::KeptUntold => Status::unavailable(stopped),
             })
         });

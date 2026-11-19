@@ -112,6 +112,65 @@ pub enum Runs {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Opens {
+    Shell,
+    Command(Argv),
+}
+
+impl Opens {
+    pub fn of(argv: Vec<String>) -> Result<Opens, String> {
+        if argv.is_empty() {
+            return Ok(Opens::Shell);
+        }
+        Argv::parse(argv).map(Opens::Command)
+    }
+
+    #[must_use]
+    pub fn runs(&self) -> Runs {
+        match self {
+            Opens::Shell => Runs::Shell,
+            Opens::Command(argv) => Runs::Command(argv.line.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Argv {
+    words: Vec<String>,
+    line: Line,
+}
+
+impl Argv {
+    fn parse(words: Vec<String>) -> Result<Argv, String> {
+        assert!(!words.is_empty(), "an argv names its program");
+        let line = Line::parse(&quoted(&words))?;
+        Ok(Argv { words, line })
+    }
+
+    #[must_use]
+    pub fn program(&self) -> &str {
+        &self.words[0]
+    }
+
+    #[must_use]
+    pub fn args(&self) -> &[String] {
+        &self.words[1..]
+    }
+}
+
+#[must_use]
+pub fn quoted(argv: &[String]) -> String {
+    let plain = |word: &str| {
+        let safe = |byte: u8| byte.is_ascii_alphanumeric() || b"-_./=:,+@%".contains(&byte);
+        !word.is_empty() && word.bytes().all(safe)
+    };
+    let words = argv.iter().map(|word| {
+        if plain(word) { word.clone() } else { format!("'{}'", word.replace('\'', r"'\''")) }
+    });
+    words.collect::<Vec<String>>().join(" ")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line(String);
 
 impl Line {
@@ -242,6 +301,12 @@ impl Layout {
             View::Terminal(held) => held,
             View::Welcome(_) => unreachable!("terminal {terminal} is made only as a terminal"),
         }
+    }
+
+    pub(super) fn first(view: View) -> Layout {
+        let first = Layout(Some(Laid { tree: Tree::one(view), full: None }));
+        assert_eq!(first.len(), 1, "a first layout holds its one view");
+        first
     }
 
     pub(super) fn opened(

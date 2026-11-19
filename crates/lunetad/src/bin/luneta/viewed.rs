@@ -160,6 +160,15 @@ impl Layout {
         self.pointer = Pointer::Free;
     }
 
+    fn left(&mut self, worktree: WorktreeId) -> bool {
+        if worktree != self.worktree {
+            return false;
+        }
+        self.go(worktree);
+        assert!(self.wanted().is_empty(), "a worktree gone shows no terminal");
+        true
+    }
+
     fn followed(&mut self, laid: &Laid) -> bool {
         let arrived = self.laid.is_some();
         let follows = arrived && laid.worktree() != self.worktree;
@@ -589,6 +598,14 @@ impl Viewed {
                 self.layout.edged(worktree, direction).map_or(Heeded::Quiet, Heeded::Edged)
             },
             Heard::Sent(worktree) => Heeded::Sent(worktree),
+            Heard::Left(worktree) => {
+                self.opened.remove(&worktree);
+                if !self.layout.left(worktree) {
+                    return Heeded::Quiet;
+                }
+                self.watch();
+                Heeded::Emptied
+            },
             Heard::Refused(why) => Heeded::Note(format!("lunetad refused: {why}")),
             Heard::Forgotten(why) => {
                 self.show = None;

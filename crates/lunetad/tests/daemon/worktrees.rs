@@ -87,12 +87,13 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
 
     assert_eq!(said(&started(&owned.host, &main, "feat", &[])), shown(&feat));
     assert!(feat.join(".git").is_file(), "wt made the worktree");
-    let worktrees = [&feat, &main].map(|it| it.display().to_string()).to_vec();
-    let made = vec![("n".to_owned(), clone.display().to_string(), worktrees)];
-    assert_eq!(folders(&owned.host), made, "one for each of its clone's worktrees");
+    let opened = vec![feat.display().to_string()];
+    let made = vec![("n".to_owned(), clone.display().to_string(), opened)];
+    assert_eq!(folders(&owned.host), made, "only the worktree started opens");
     assert_eq!(said(&started(&owned.host, &main, "feat", &[])), shown(&feat));
     assert_eq!(folders(&owned.host), made, "the worktree is started again");
 
+    worktree(&owned.host, projects(&owned.host)[0].id, &main);
     let projects = projects(&owned.host);
     let worktrees = projects[0].worktrees().unwrap();
     let [there, here] = [0, 1].map(|at| WorktreeId::of(worktrees[at].id).unwrap());
@@ -184,9 +185,9 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     assert!(issue.join(".git").is_file(), "the issue's worktree is made");
     let agent = eventually("an agent starts on the issue", || fs::read_to_string(&asked).ok());
     assert_eq!(agent, "Tackle https://github.com/o/n/issues/7\n");
-    let worktrees = [&issue, &clone.join("main")].map(|it| it.display().to_string()).to_vec();
-    let made = vec![("n".to_owned(), clone.display().to_string(), worktrees)];
-    assert_eq!(folders(host), made);
+    let opened = vec![issue.display().to_string()];
+    let made = vec![("n".to_owned(), clone.display().to_string(), opened)];
+    assert_eq!(folders(host), made, "only the issue's worktree opens");
     let terminals = || projects(host)[0].worktrees().unwrap()[0].terminals.len();
     assert_eq!(terminals(), 1);
 
@@ -199,13 +200,13 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     host.gh.issue(9, "https://github.com/o/n/issues/9");
     let nine = clone.join("issue-9");
     git(&bare, &["worktree", "add", "-q", "-b", "issue-9", "../issue-9", "main"]);
-    let empty = worktree(host, projects(host)[0].id, &nine);
     fs::remove_file(&asked).unwrap();
     assert_eq!(said(&started(host, &clone.join("main"), "#9", &[])), shown(&nine));
-    let agent = eventually("an agent starts where none was", || fs::read_to_string(&asked).ok());
+    let agent = eventually("an agent starts in one not open", || fs::read_to_string(&asked).ok());
     assert_eq!(agent, "Tackle https://github.com/o/n/issues/9\n");
     let projects = projects(host);
     let mut held = projects.iter().flat_map(|it| it.worktrees().unwrap());
-    let there = held.find(|it| it.id == empty).expect("the empty worktree is the one started");
-    assert_eq!(there.terminals.len(), 1);
+    let nine = nine.display().to_string();
+    let there = held.find(|it| it.folder == nine).expect("the worktree started opens");
+    assert_eq!(there.terminals.len(), 1, "with its agent as its one terminal");
 }

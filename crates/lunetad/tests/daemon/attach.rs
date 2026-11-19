@@ -80,12 +80,13 @@ fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
         (worktree.terminals.len() == 1).then_some(worktree.id)
     });
     window.send(CLOSE);
-    eventually("the worktree stays, with no pane, and luneta leaves it", || {
+    eventually("the worktree goes with its last pane, and luneta leaves it", || {
         let projects = projects_of(&owned);
         let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
-        let emptied = worktrees.any(|it| it.id == id && it.terminals.is_empty());
-        (emptied && window.shows(UNSHOWN)).then_some(())
+        let gone = worktrees.all(|it| it.id != id);
+        (gone && projects.len() == 1 && window.shows(UNSHOWN)).then_some(())
     });
+    assert!(!window.shows("lunetad's layout"), "luneta leaves it with no note");
 }
 
 #[test]
@@ -146,19 +147,47 @@ fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_worktree_beside_but_not_past_the_proj
     worktree_added(dir.path.parent().unwrap(), "docs");
     let second = worktree(&owned.host, project, &docs);
     eventually("the tab bar lists docs", || window.shows("docs").then_some(()));
-    let used = |id: u64| {
-        let projects = projects_of(&owned);
-        let found = projects.iter().flat_map(|it| it.worktrees().unwrap()).find(|it| it.id == id);
-        found.and_then(|it| it.used_at).map(|at| (at.seconds, at.nanos))
-    };
+    let used = |id: u64| used(&owned, id);
     window.send(LEFT);
     thread::sleep(Duration::from_secs(1));
-    assert_eq!(shown(&owned, &docs), None, "Ctrl h stops at the project's first worktree");
+    assert_eq!(used(second), None, "Ctrl h stops at the project's first worktree");
     window.send(RIGHT);
-    eventually("Ctrl l goes to docs, where a shell opens", || shown(&owned, &docs));
-    assert!(used(second) > used(first), "{:?}", projects_of(&owned));
+    eventually("Ctrl l goes to docs", || (used(second) > used(first)).then_some(()));
     window.send(LEFT);
     eventually("Ctrl h goes back", || (used(first) > used(second)).then_some(()));
+}
+
+#[test]
+fn a_worktree_s_last_pane_closed_takes_luneta_to_the_one_used_before_with_no_note() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    window.send(TYPED);
+    eventually("main's shell prints", || window.shows(PRINTED).then_some(()));
+    let project = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().id;
+    let root = dir.path.parent().unwrap();
+    worktree_added(root, "docs");
+    let docs = root.join("docs");
+    let gone = worktree(&owned.host, project, &docs);
+    window.send(RIGHT);
+    eventually("Ctrl l goes to docs", || used(&owned, gone).is_some().then_some(()));
+    window.send(CLOSE);
+    eventually("docs goes with its last pane, and luneta goes back to main", || {
+        let projects = projects_of(&owned);
+        let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
+        (worktrees.all(|it| it.id != gone) && window.shows(PRINTED)).then_some(())
+    });
+    thread::sleep(Duration::from_secs(1));
+    assert!(window.shows(PRINTED), "luneta stays on main: {:?}", window.screen());
+    assert!(!window.shows("lunetad's layout"), "luneta leaves docs with no note");
+}
+
+fn used(owned: &Owned, worktree: u64) -> Option<(i64, i32)> {
+    let projects = projects_of(owned);
+    let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
+    let found = worktrees.find(|it| it.id == worktree);
+    found.and_then(|it| it.used_at).map(|at| (at.seconds, at.nanos))
 }
 
 fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
@@ -174,14 +203,6 @@ fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
     let made: Vec<_> = projects.iter().filter(|project| project.name == name).collect();
     assert_eq!(made.len(), 1, "{projects:?}");
     assert_eq!(made[0].worktrees().unwrap().len(), 1, "{projects:?}");
-}
-
-#[test]
-fn bare_lunetas_started_at_once_show_the_project_one_of_them_made() {
-    let owned = Owned::new();
-    let dir = directory("project");
-    let opening = || Window::opening(&owned.host, &dir, &[]);
-    both_show(&owned, "project", [opening(), opening()]);
 }
 
 #[test]

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
 use lunetad::api::change_projects_request::{
-    Bring, Change, CloseProject, CloseWorktree, ForgetWorktree, RenameTerminal,
+    Bring, Change, CloseProject, CloseWorktree, RenameTerminal,
 };
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::projects::Held;
@@ -50,6 +50,7 @@ struct Shown<'a> {
     refused: Vec<String>,
     edged: Vec<show_response::Edged>,
     sent: Vec<u64>,
+    left: Vec<u64>,
 }
 
 fn size(columns: u32, rows: u32) -> show_request::Size {
@@ -91,7 +92,8 @@ impl<'a> Shown<'a> {
             daemon.show(ReceiverStream::new(asked)).await.unwrap().into_inner()
         });
         let (refused, edged, sent) = (Vec::new(), Vec::new(), Vec::new());
-        let mut shown = Shown { owned, asks, heard, laid: None, refused, edged, sent };
+        let left = Vec::new();
+        let mut shown = Shown { owned, asks, heard, laid: None, refused, edged, sent, left };
         shown.until("the first layout", |_| true);
         shown
     }
@@ -147,6 +149,7 @@ impl<'a> Shown<'a> {
                 show_response::Event::Refused(why) => self.refused.push(why),
                 show_response::Event::Edged(edged) => self.edged.push(edged),
                 show_response::Event::Sent(worktree) => self.sent.push(worktree),
+                show_response::Event::Left(worktree) => self.left.push(worktree),
             }
         }
     }
@@ -156,17 +159,6 @@ impl<'a> Shown<'a> {
     ) -> Result<Result<Option<ShowResponse>, tonic::Status>, tokio::time::error::Elapsed> {
         let heard = &mut self.heard;
         self.owned.block_on(async { tokio::time::timeout(HEARD_IN, heard.message()).await })
-    }
-
-    fn until_ended(&mut self) -> Status {
-        loop {
-            let heard = self.heard_in_time().expect("the layout ends in time");
-            match heard {
-                Ok(Some(_)) => {},
-                Ok(None) => panic!("the layout ends with no word of why"),
-                Err(status) => return status,
-            }
-        }
     }
 
     fn until_refused(&mut self) -> String {
@@ -181,6 +173,7 @@ impl<'a> Shown<'a> {
                 show_response::Event::Refused(why) => return why,
                 show_response::Event::Edged(edged) => self.edged.push(edged),
                 show_response::Event::Sent(worktree) => self.sent.push(worktree),
+                show_response::Event::Left(worktree) => self.left.push(worktree),
             }
         }
     }
@@ -197,6 +190,24 @@ impl<'a> Shown<'a> {
                 show_response::Event::Refused(why) => panic!("refused, not edged: {why}"),
                 show_response::Event::Edged(edged) => return edged,
                 show_response::Event::Sent(worktree) => self.sent.push(worktree),
+                show_response::Event::Left(worktree) => self.left.push(worktree),
+            }
+        }
+    }
+
+    fn until_left(&mut self) -> u64 {
+        loop {
+            if !self.left.is_empty() {
+                return self.left.remove(0);
+            }
+            let heard = self.heard_in_time();
+            let word = heard.expect("a leave comes").unwrap().expect("the layout goes on");
+            match word.event.expect("a word says something") {
+                show_response::Event::Laid(laid) => self.laid = Some(laid),
+                show_response::Event::Refused(why) => self.refused.push(why),
+                show_response::Event::Edged(edged) => self.edged.push(edged),
+                show_response::Event::Sent(worktree) => self.sent.push(worktree),
+                show_response::Event::Left(worktree) => return worktree,
             }
         }
     }
@@ -213,6 +224,7 @@ impl<'a> Shown<'a> {
                 show_response::Event::Refused(why) => panic!("refused, not sent: {why}"),
                 show_response::Event::Edged(edged) => self.edged.push(edged),
                 show_response::Event::Sent(worktree) => return worktree,
+                show_response::Event::Left(worktree) => self.left.push(worktree),
             }
         }
     }
@@ -584,7 +596,7 @@ fn a_layout_comes_back_with_its_terminals_when_lunetad_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 8,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 9,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();
@@ -724,13 +736,11 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     let owned = Owned::new();
     let (_, closing, other) = two_in_a_clone(&owned, "clone");
     let mut shown = Shown::new(&owned, closing, 80, 24);
-    let terminals = [shown.open(), shown.open()];
-    let mut beside = Shown::new(&owned, other, 80, 24);
-    let stays = beside.open();
-    let forget = Change::ForgetWorktree(ForgetWorktree { worktree: closing });
-    let refused = asked(&owned.host, forget).unwrap_err();
-    assert_eq!(refused.code(), Code::InvalidArgument);
-    assert!(refused.message().contains("holds 2 views still"), "{}", refused.message());
+    let first = shown.terminals();
+    assert_eq!(first.len(), 1, "a worktree is made with its first terminal");
+    let terminals = [first[0], shown.open()];
+    let beside = Shown::new(&owned, other, 80, 24);
+    let [stays] = beside.terminals()[..] else { panic!("the other holds its first alone") };
 
     let closed = |seen: &[u64]| {
         Change::CloseWorktree(CloseWorktree { worktree: closing, seen: seen.to_vec() })
@@ -754,11 +764,20 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
         terminals.iter().all(|terminal| tagged(&listing, *terminal).is_none()).then_some(())
     });
     assert!(tagged(&owned.listing(), stays).is_some(), "another worktree's terminal stays");
-    shown.until("the view emptied", |laid| laid.panes.is_empty());
-    assert_eq!(watched(&owned, closing), [], "a worktree closed stays, empty");
+    assert_eq!(shown.until_left(), closing, "its client hears it gone");
+    let gone = || watched_worktree(&owned, closing).is_none().then_some(());
+    eventually("a worktree closed goes", gone);
+    let largest = Some(open::Beside::Largest(()));
+    shown.ask(Event::Open(show_request::Open { beside: largest, argv: Vec::new() }));
+    assert!(shown.until_refused().contains("is gone"), "a client left behind opens nothing");
+    shown.ask(Event::Go(other));
+    let there = shown.until("the client goes on to another", |laid| laid.worktree == other);
+    assert_eq!(there.panes.iter().map(|it| it.view).collect::<Vec<_>>(), [stays]);
+    assert_eq!(watched(&owned, other).len(), 1, "the other stays, with its terminal");
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.contains(&format!("{closing:016x}")), "{file}");
-    assert_eq!(asked(&owned.host, closed(&[])).unwrap(), None, "and closes again");
+    assert!(!file.contains(&format!("{closing:016x}")), "{file}");
+    let again = asked(&owned.host, closed(&[])).unwrap_err();
+    assert!(again.message().contains("no worktree has the id"), "{}", again.message());
 }
 
 #[test]
@@ -776,7 +795,8 @@ fn a_project_closes_with_each_worktree_s_terminals_and_one_with_none_is_forgotte
     let mut first = Shown::new(&owned, one, 80, 24);
     let mut second = Shown::new(&owned, two, 80, 24);
     let mut beside = Shown::new(&owned, stays, 80, 24);
-    let terminals = [first.open(), first.open(), second.open()];
+    let [one_first, two_first] = [&first, &second].map(|it| it.terminals()[0]);
+    let terminals = [one_first, first.open(), two_first];
     let kept_open = beside.open();
     let closed = |project, worktrees: &[u64], seen: &[u64]| {
         let (worktrees, seen) = (worktrees.to_vec(), seen.to_vec());
@@ -803,8 +823,7 @@ fn a_project_closes_with_each_worktree_s_terminals_and_one_with_none_is_forgotte
         terminals.iter().all(|terminal| tagged(&listing, *terminal).is_none()).then_some(())
     });
     assert!(tagged(&owned.listing(), kept_open).is_some(), "another project's terminal stays");
-    assert_eq!(first.until_ended().code(), Code::NotFound);
-    assert_eq!(second.until_ended().code(), Code::NotFound);
+    assert_eq!((first.until_left(), second.until_left()), (one, two), "each client hears it");
     let ids: Vec<u64> = projects_of(&owned).iter().map(|it| it.id).collect();
     assert_eq!(ids, [other], "the project goes with its last worktree, and no other");
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
@@ -1070,7 +1089,7 @@ fn a_terminal_gone_to_another_worktree_moves_there_and_its_client_follows() {
     let made = project(&owned.host, &clone, None);
     let main = worktree(&owned.host, made, &clone.join("main"));
     let mut shown = Shown::new(&owned, main, 80, 24);
-    let stays = shown.open();
+    let [stays] = shown.terminals()[..] else { panic!("a worktree is made with its first") };
     let feat = clone.join("feat").join("src");
     fs::create_dir_all(&feat).unwrap();
     let said = r#"(sleep 0.3; printf '\033]7;file://localhost%s\007' "$PWD") &"#;
@@ -1469,6 +1488,7 @@ fn seen_and_typed_into(
         },
         Heard::Edged { direction, .. } => panic!("the layout is at its {direction:?} edge"),
         Heard::Sent(to) => panic!("the layout is sent to worktree {to}"),
+        Heard::Left(gone) => panic!("worktree {gone} is gone"),
     };
     assert!(laid().is_empty());
     show.ask(Asked::Open { beside: Beside::Largest, argv: vec!["sh".to_owned()] });
@@ -1534,6 +1554,7 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
         },
         Heard::Edged { direction, .. } => panic!("the layout is at its {direction:?} edge"),
         Heard::Sent(to) => panic!("the layout is sent to worktree {to}"),
+        Heard::Left(gone) => panic!("worktree {gone} is gone"),
     };
     assert!(laid().is_empty());
     let ticking = ["sh", "-c", "while :; do date +%N; sleep 0.005; done"];

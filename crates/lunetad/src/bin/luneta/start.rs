@@ -12,7 +12,7 @@ use lunetad::Directory;
 
 use crate::agents::{self, Kept};
 use crate::machines::Machine;
-use crate::worktrees::{self, Joined, Went};
+use crate::worktrees::{self, Landed, Landing, Went};
 
 pub const UNFINISHED: u8 = 4;
 
@@ -146,25 +146,25 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
             let folder = worktrees::real(&dir)?;
             let clone = links::wt_holder(utf8(&folder)?).filter(|clone| Path::new(clone) != folder);
             if clone.is_some() {
-                let joined = worktrees::worked_in(path, &folder)?;
-                let worktree = joined.worktree();
+                let worktree = worktrees::worked_in(path, &folder, Vec::new())?.worktree();
                 return Ok(Started::Worktree { worktree, folder, left: Left::Done });
             }
             let at = Directory::parse(utf8(&folder)?.to_owned())?;
             Ok(match worktrees::made_at(path, &Machine::Local, &at, None)? {
-                Some(worktree) => {
+                Landing::Worktree(landed) => {
+                    let worktree = landed.worktree();
                     let there = worktrees::folder_of(path, worktree);
                     let there = there.unwrap_or_else(|_| folder.clone());
                     let folder = if folder.starts_with(&there) { folder } else { there };
                     Started::Worktree { worktree, folder, left: Left::Done }
                 },
-                None => Started::Project { folder },
+                Landing::Unopened(_) => Started::Project { folder },
             })
         },
         What::Branch(branch) => {
             let repo = utf8(&cwd)?;
             let folder = worktrees::real(&links::made(repo, &Of::Branch(branch))?)?;
-            let worktree = in_clone(path, &folder)?.worktree();
+            let worktree = worktrees::worked_in(path, &folder, Vec::new())?.worktree();
             Ok(Started::Worktree { worktree, folder, left: Left::Done })
         },
         What::Issue(number) => linked(path, &cwd, &numbered(number, &cwd)?),
@@ -180,28 +180,30 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let worked = std::iter::once(here).chain(others).collect();
     let ready = Pasted::new(Work::Link(link.clone()), worked).ready().map_err(said)?;
     let folder = PathBuf::from(&ready.folder);
-    let joined = in_clone(path, &folder)?;
-    let worktree = joined.worktree();
     let off = Work::Link(link.clone()).off_branch(ready.branch.as_deref());
-    let left = match (link.kind(), joined, off.filter(|_| ready.moved_off)) {
-        (Kind::Pull, _, _) | (Kind::Issue, Joined::Found(_), Some(_)) => Left::Done,
-        (Kind::Issue, Joined::Made(_), Some(off)) => {
+    let off = off.filter(|_| ready.moved_off);
+    let agent = match (link.kind(), &off) {
+        (Kind::Issue, None) => {
+            let harness = Kept::shared().0.harness();
+            agents::on_words(harness, format!("{TACKLE} {}", link.url()), &[])
+        },
+        (Kind::Issue, Some(_)) | (Kind::Pull, _) => Vec::new(),
+    };
+    let landed = worktrees::worked_in(path, &folder, agent.clone())?;
+    let worktree = landed.worktree();
+    let left = match (link.kind(), landed, off) {
+        (Kind::Pull, _, _)
+        | (Kind::Issue, Landed::Found(_), Some(_))
+        | (Kind::Issue, Landed::Made(_), None) => Left::Done,
+        (Kind::Issue, Landed::Made(_), Some(off)) => {
             Left::Noted(format!("{} is {off}, so no agent starts there", folder.display()))
         },
-        (Kind::Issue, _, None) => {
-            let harness = Kept::shared().0.harness();
-            let argv = agents::on_words(harness, format!("{TACKLE} {}", link.url()), &[]);
-            match worktrees::opened(path, worktree, argv) {
-                Ok(()) => Left::Done,
-                Err(why) => Left::Unfinished(format!("no agent started on {}: {why}", link.tab())),
-            }
+        (Kind::Issue, Landed::Found(_), None) => match worktrees::opened(path, worktree, agent) {
+            Ok(()) => Left::Done,
+            Err(why) => Left::Unfinished(format!("no agent started on {}: {why}", link.tab())),
         },
     };
     Ok(Started::Worktree { worktree, folder, left })
-}
-
-fn in_clone(path: &Path, folder: &Path) -> Result<Joined, String> {
-    worktrees::worked_in(path, folder)
 }
 
 fn numbered(number: NonZeroU32, cwd: &Path) -> Result<Link, String> {
