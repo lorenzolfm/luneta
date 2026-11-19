@@ -12,6 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::alerts::Key;
+use crate::aloud::NothingToRead;
 use crate::host::Event;
 use crate::machines::Machine;
 
@@ -48,7 +49,7 @@ pub enum Peered {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Line {
+enum ToHolder {
     Unfocuses,
     Focused,
     Unfocused,
@@ -59,24 +60,30 @@ enum Line {
     Dictating(bool),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FromHolder {
+    Clicked(Key),
+    NothingToRead,
+}
+
 const SELECTION: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-impl Line {
-    fn parse(text: &str) -> Option<Line> {
+impl ToHolder {
+    fn parse(text: &str) -> Option<ToHolder> {
         let mut words = text.split_whitespace();
         let line = match words.next()? {
-            "unfocuses" => Line::Unfocuses,
-            "focused" => Line::Focused,
-            "unfocused" => Line::Unfocused,
-            "looks" => Line::Looks(words.by_ref().map(key_of).collect::<Option<_>>()?),
-            "clicked" => Line::Clicked(key_of(words.next()?)?),
+            "unfocuses" => ToHolder::Unfocuses,
+            "focused" => ToHolder::Focused,
+            "unfocused" => ToHolder::Unfocused,
+            "looks" => ToHolder::Looks(words.by_ref().map(key_of).collect::<Option<_>>()?),
+            "clicked" => ToHolder::Clicked(key_of(words.next()?)?),
             "selected" => {
                 let selected = SELECTION.decode(words.next().unwrap_or_default()).ok()?;
-                Line::Selected(String::from_utf8(selected).ok()?)
+                ToHolder::Selected(String::from_utf8(selected).ok()?)
             },
-            "stopped" => Line::Stopped,
-            "dictating" => Line::Dictating(true),
-            "dictated" => Line::Dictating(false),
+            "stopped" => ToHolder::Stopped,
+            "dictating" => ToHolder::Dictating(true),
+            "dictated" => ToHolder::Dictating(false),
             _ => return None,
         };
         words.next().is_none().then_some(line)
@@ -84,19 +91,42 @@ impl Line {
 
     fn said(&self) -> String {
         match self {
-            Line::Unfocuses => "unfocuses\n".to_owned(),
-            Line::Focused => "focused\n".to_owned(),
-            Line::Unfocused => "unfocused\n".to_owned(),
-            Line::Looks(keys) => {
+            ToHolder::Unfocuses => "unfocuses\n".to_owned(),
+            ToHolder::Focused => "focused\n".to_owned(),
+            ToHolder::Unfocused => "unfocused\n".to_owned(),
+            ToHolder::Looks(keys) => {
                 keys.iter().fold("looks".to_owned(), |line, key| line + " " + &group(key)) + "\n"
             },
-            Line::Clicked(key) => format!("clicked {}\n", group(key)),
-            Line::Selected(selected) => format!("selected {}\n", SELECTION.encode(selected)),
-            Line::Stopped => "stopped\n".to_owned(),
-            Line::Dictating(true) => "dictating\n".to_owned(),
-            Line::Dictating(false) => "dictated\n".to_owned(),
+            ToHolder::Clicked(key) => clicked(key),
+            ToHolder::Selected(selected) => format!("selected {}\n", SELECTION.encode(selected)),
+            ToHolder::Stopped => "stopped\n".to_owned(),
+            ToHolder::Dictating(true) => "dictating\n".to_owned(),
+            ToHolder::Dictating(false) => "dictated\n".to_owned(),
         }
     }
+}
+
+impl FromHolder {
+    fn parse(text: &str) -> Option<FromHolder> {
+        let mut words = text.split_whitespace();
+        let line = match words.next()? {
+            "clicked" => FromHolder::Clicked(key_of(words.next()?)?),
+            "nothing-to-read" => FromHolder::NothingToRead,
+            _ => return None,
+        };
+        words.next().is_none().then_some(line)
+    }
+
+    fn said(&self) -> String {
+        match self {
+            FromHolder::Clicked(key) => clicked(key),
+            FromHolder::NothingToRead => "nothing-to-read\n".to_owned(),
+        }
+    }
+}
+
+fn clicked(key: &Key) -> String {
+    format!("clicked {}\n", group(key))
 }
 
 pub fn group(key: &Key) -> String {
@@ -174,16 +204,16 @@ fn listen(socket: &Path, events: Sender<Event>) -> io::Result<()> {
 }
 
 fn hear(number: u64, stream: UnixStream, events: &Sender<Event>) {
-    for line in lines(stream) {
+    for line in lines(stream, ToHolder::parse) {
         let event = match line {
-            Line::Clicked(key) => Event::Clicked(key),
-            Line::Selected(selected) => Event::ReadAloud(selected),
-            Line::Stopped => Event::StopAloud,
-            Line::Unfocuses => Event::Peers(Heard::Peer(number, Peered::Unfocuses)),
-            Line::Focused => Event::Peers(Heard::Peer(number, Peered::Focused)),
-            Line::Unfocused => Event::Peers(Heard::Peer(number, Peered::Unfocused)),
-            Line::Looks(keys) => Event::Peers(Heard::Peer(number, Peered::Looks(keys))),
-            Line::Dictating(now) => Event::Peers(Heard::Peer(number, Peered::Dictating(now))),
+            ToHolder::Clicked(key) => Event::Clicked(key),
+            ToHolder::Selected(selected) => Event::ReadAloud { from: number, selected },
+            ToHolder::Stopped => Event::StopAloud,
+            ToHolder::Unfocuses => Event::Peers(Heard::Peer(number, Peered::Unfocuses)),
+            ToHolder::Focused => Event::Peers(Heard::Peer(number, Peered::Focused)),
+            ToHolder::Unfocused => Event::Peers(Heard::Peer(number, Peered::Unfocused)),
+            ToHolder::Looks(keys) => Event::Peers(Heard::Peer(number, Peered::Looks(keys))),
+            ToHolder::Dictating(now) => Event::Peers(Heard::Peer(number, Peered::Dictating(now))),
         };
         if events.send(event).is_err() {
             return;
@@ -192,13 +222,13 @@ fn hear(number: u64, stream: UnixStream, events: &Sender<Event>) {
     let _ = events.send(Event::Peers(Heard::Peer(number, Peered::Gone)));
 }
 
-fn lines(stream: UnixStream) -> impl Iterator<Item = Line> {
+fn lines<L>(stream: UnixStream, parse: fn(&str) -> Option<L>) -> impl Iterator<Item = L> {
     let mut reader = BufReader::new(stream);
     std::iter::from_fn(move || loop {
         let mut text = String::new();
         match (&mut reader).take(LINE_BYTES).read_line(&mut text) {
             Ok(_) if text.ends_with('\n') => {
-                if let Some(line) = Line::parse(&text) {
+                if let Some(line) = parse(&text) {
                     return Some(line);
                 }
             },
@@ -209,7 +239,7 @@ fn lines(stream: UnixStream) -> impl Iterator<Item = Line> {
 
 pub fn tell(socket: &Path, group: &str) -> io::Result<()> {
     let key = key_of(group).ok_or_else(|| io::Error::other(format!("{group:?} names no agent")))?;
-    UnixStream::connect(socket)?.write_all(Line::Clicked(key).said().as_bytes())
+    UnixStream::connect(socket)?.write_all(ToHolder::Clicked(key).said().as_bytes())
 }
 
 #[derive(Default)]
@@ -296,7 +326,15 @@ impl Peers {
         let Some(Last { number, .. }) = self.last else {
             return false;
         };
-        let line = Line::Clicked(key.clone()).said();
+        self.tell(number, &FromHolder::Clicked(key.clone()))
+    }
+
+    pub fn nothing_to_read(&mut self, number: u64) {
+        self.tell(number, &FromHolder::NothingToRead);
+    }
+
+    fn tell(&mut self, number: u64, line: &FromHolder) -> bool {
+        let line = line.said();
         let told = (self.peers.get_mut(&number))
             .is_some_and(|peer| peer.stream.write_all(line.as_bytes()).is_ok());
         if !told {
@@ -391,43 +429,45 @@ fn talk(
     if let Ok(reads) = stream.try_clone() {
         let (gone, events) = (Arc::clone(&gone), events.clone());
         thread::spawn(move || {
-            for line in lines(reads) {
-                if let Line::Clicked(key) = line
-                    && events.send(Event::Clicked(key)).is_err()
-                {
+            for line in lines(reads, FromHolder::parse) {
+                let event = match line {
+                    FromHolder::Clicked(key) => Event::Clicked(key),
+                    FromHolder::NothingToRead => Event::Notice(NothingToRead.to_string()),
+                };
+                if events.send(event).is_err() {
                     break;
                 }
             }
             gone.store(true, Ordering::Relaxed);
         });
     }
-    let tell = |line: Line| (&*stream).write_all(line.said().as_bytes()).is_ok();
-    let key = |line: Line| {
+    let tell = |line: ToHolder| (&*stream).write_all(line.said().as_bytes()).is_ok();
+    let key = |line: ToHolder| {
         let told = tell(line);
         if !told {
             unreached(events);
         }
         told
     };
-    let mut talking = tell(Line::Unfocuses)
-        && tell(Line::Looks(looks.clone()))
-        && (!*focused || tell(Line::Focused))
-        && (!*dictating || tell(Line::Dictating(true)));
+    let mut talking = tell(ToHolder::Unfocuses)
+        && tell(ToHolder::Looks(looks.clone()))
+        && (!*focused || tell(ToHolder::Focused))
+        && (!*dictating || tell(ToHolder::Dictating(true)));
     while talking {
         match telling.recv_timeout(AGAIN) {
             Ok(Tell::Focus(now)) => {
                 *focused = now;
-                talking = tell(if now { Line::Focused } else { Line::Unfocused });
+                talking = tell(if now { ToHolder::Focused } else { ToHolder::Unfocused });
             },
             Ok(Tell::Looks(now)) => {
                 *looks = now;
-                talking = tell(Line::Looks(looks.clone()));
+                talking = tell(ToHolder::Looks(looks.clone()));
             },
-            Ok(Tell::Selected(selected)) => talking = key(Line::Selected(selected)),
-            Ok(Tell::Stopped) => talking = key(Line::Stopped),
+            Ok(Tell::Selected(selected)) => talking = key(ToHolder::Selected(selected)),
+            Ok(Tell::Stopped) => talking = key(ToHolder::Stopped),
             Ok(Tell::Dictating(now)) => {
                 *dictating = now;
-                talking = tell(Line::Dictating(now));
+                talking = tell(ToHolder::Dictating(now));
             },
             Err(RecvTimeoutError::Timeout) => talking = !gone.load(Ordering::Relaxed),
             Err(RecvTimeoutError::Disconnected) => {
@@ -471,25 +511,33 @@ mod tests {
     #[test]
     fn a_line_reads_back_as_what_it_said() {
         let lines = [
-            Line::Unfocuses,
-            Line::Focused,
-            Line::Unfocused,
-            Line::Looks(Vec::new()),
-            Line::Looks(vec![key(41), far(7)]),
-            Line::Selected(String::new()),
-            Line::Selected("two words\nand a line é".to_owned()),
-            Line::Stopped,
-            Line::Dictating(true),
-            Line::Dictating(false),
-            Line::Clicked(far(7)),
+            ToHolder::Unfocuses,
+            ToHolder::Focused,
+            ToHolder::Unfocused,
+            ToHolder::Looks(Vec::new()),
+            ToHolder::Looks(vec![key(41), far(7)]),
+            ToHolder::Selected(String::new()),
+            ToHolder::Selected("two words\nand a line é".to_owned()),
+            ToHolder::Stopped,
+            ToHolder::Dictating(true),
+            ToHolder::Dictating(false),
+            ToHolder::Clicked(far(7)),
         ];
         for line in lines {
-            assert_eq!(Line::parse(&line.said()), Some(line.clone()), "{:?}", line.said());
+            assert_eq!(ToHolder::parse(&line.said()), Some(line.clone()), "{:?}", line.said());
         }
-        assert_eq!(Line::Looks(Vec::new()).said(), "looks\n");
+        assert_eq!(ToHolder::Looks(Vec::new()).said(), "looks\n");
         let unsaid = ["", "hello", "looks other-41", "clicked", "clicked luneta-1 luneta-2"];
         for text in unsaid.into_iter().chain(["focused x"]) {
-            assert_eq!(Line::parse(text), None, "{text:?}");
+            assert_eq!(ToHolder::parse(text), None, "{text:?}");
+        }
+        for line in [FromHolder::Clicked(far(7)), FromHolder::NothingToRead] {
+            assert_eq!(FromHolder::parse(&line.said()), Some(line.clone()), "{:?}", line.said());
+        }
+        assert_eq!(FromHolder::Clicked(key(41)).said(), ToHolder::Clicked(key(41)).said());
+        assert_eq!(ToHolder::parse(&FromHolder::NothingToRead.said()), None);
+        for text in [ToHolder::Stopped.said().as_str(), "clicked", "nothing-to-read x"] {
+            assert_eq!(FromHolder::parse(text), None, "{text:?}");
         }
     }
 
@@ -578,7 +626,7 @@ mod tests {
         hear_until(&heard, &mut peers, |peers| peers.last.is_some());
         assert!(!peers.focused());
         assert!(peers.hand(&key(41)), "its window had the focus last");
-        assert_eq!(lines(older).next(), Some(Line::Clicked(key(41))));
+        assert_eq!(lines(older, FromHolder::parse).next(), Some(FromHolder::Clicked(key(41))));
     }
 
     fn hear_until(heard: &Receiver<Event>, peers: &mut Peers, done: impl Fn(&Peers) -> bool) {
@@ -628,12 +676,56 @@ mod tests {
 
         let listener = UnixListener::bind(&socket).expect("it listens");
         let (stream, _) = listener.accept().expect("the other comes");
-        let mut said = lines(stream);
-        assert_eq!(said.next(), Some(Line::Unfocuses));
-        assert_eq!(said.next(), Some(Line::Looks(Vec::new())));
+        let mut said = lines(stream, ToHolder::parse);
+        assert_eq!(said.next(), Some(ToHolder::Unfocuses));
+        assert_eq!(said.next(), Some(ToHolder::Looks(Vec::new())));
         drop((said, listener));
         reaching.stopped();
         assert_eq!(note(&heard), NO_READER);
+    }
+
+    fn came(heard: &Receiver<Event>, peers: &mut Peers) -> u64 {
+        loop {
+            let (number, peered) = next(heard);
+            let came = matches!(peered, Peered::Came(_));
+            peers.heard(number, peered);
+            if came {
+                return number;
+            }
+        }
+    }
+
+    fn read_aloud(heard: &Receiver<Event>) -> (u64, String) {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            let event = heard.recv_timeout(left).expect("the luneta holding the lock hears it");
+            if let Event::ReadAloud { from, selected } = event {
+                return (from, selected);
+            }
+        }
+    }
+
+    #[test]
+    fn the_luneta_that_holds_the_lock_tells_only_the_one_that_asked_it_has_nothing_to_read() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let socket = folder.path().join(SOCKET);
+        let (events, heard) = mpsc::channel();
+        listen(&socket, events).expect("it listens");
+        let mut peers = Peers::default();
+        let (asker_events, asker_heard) = mpsc::channel();
+        let asker = Reaching::to(socket.clone(), false, asker_events);
+        let asker_number = came(&heard, &mut peers);
+        let (other_events, other_heard) = mpsc::channel();
+        let _other = Reaching::to(socket, false, other_events);
+        assert_ne!(came(&heard, &mut peers), asker_number);
+
+        asker.selected("");
+        assert_eq!(read_aloud(&heard), (asker_number, String::new()));
+        peers.nothing_to_read(asker_number);
+        assert_eq!(note(&asker_heard), NothingToRead.to_string());
+        let told = other_heard.recv_timeout(Duration::from_millis(300));
+        assert!(told.is_err(), "the other luneta is told nothing");
     }
 
     fn socket_after_waiting(path: &Path, change: impl FnOnce()) -> Result<PathBuf, String> {
@@ -700,7 +792,7 @@ mod tests {
         let first = UnixListener::bind(&socket).expect("it listens");
         let (stream, _) = first.accept().expect("the other comes");
         reaching.dictating(true);
-        assert!(lines(stream).any(|line| line == Line::Dictating(true)));
+        assert!(lines(stream, ToHolder::parse).any(|line| line == ToHolder::Dictating(true)));
         drop(first);
 
         let (events, heard) = mpsc::channel();

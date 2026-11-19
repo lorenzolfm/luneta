@@ -219,6 +219,15 @@ impl Desktop {
             Role::Peer(_) | Role::Undecided | Role::Elsewhere => false,
         }
     }
+
+    pub fn nothing_to_read(&mut self, number: u64) {
+        match &mut self.role {
+            Role::Holder { peers, .. } => peers.nothing_to_read(number),
+            Role::Peer(_) | Role::Undecided | Role::Elsewhere => {
+                unreachable!("only the luneta that holds the lock hears another window's keys")
+            },
+        }
+    }
 }
 
 impl Drop for Desktop {

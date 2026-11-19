@@ -178,7 +178,7 @@ pub enum Event {
     Fetched(Fetched),
     Voiced { number: u64, ended: Result<(), String> },
     VoiceFetched(Fetched),
-    ReadAloud(String),
+    ReadAloud { from: u64, selected: String },
     StopAloud,
     Folds,
     News,
@@ -1044,9 +1044,10 @@ impl App {
                     self.sidebar.notify(why);
                 }
             },
-            Event::ReadAloud(selected) => {
-                let read = self.aloud.key(Some(&selected));
-                self.read_aloud_went(read);
+            Event::ReadAloud { from, selected } => {
+                if let Err(aloud::NothingToRead) = self.aloud.key(Some(&selected)) {
+                    self.desktop.nothing_to_read(from);
+                }
             },
             Event::StopAloud => self.aloud.press(aloud::Button::Stop),
             Event::News => self.sidebar.reread(),
@@ -2034,8 +2035,9 @@ impl App {
         self.sidebar.clear_notice();
         match self.desktop.reader() {
             Reader::This => {
-                let read = self.aloud.key(self.copied.as_deref());
-                self.read_aloud_went(read);
+                if let Err(nothing) = self.aloud.key(self.copied.as_deref()) {
+                    self.sidebar.notify(nothing.to_string());
+                }
             },
             Reader::Another(holder) => holder.selected(self.copied.as_deref().unwrap_or_default()),
             Reader::Nobody(why) => self.sidebar.notify(why.to_owned()),
@@ -2055,12 +2057,6 @@ impl App {
         let here = matches!(self.focus.over, Some(Over::Dictation(..)));
         self.desktop.dictating(here);
         self.aloud.hold(here || self.desktop.another_dictates());
-    }
-
-    fn read_aloud_went(&mut self, read: Result<(), &str>) {
-        if let Err(why) = read {
-            self.sidebar.notify(why.to_owned());
-        }
     }
 
     fn undictate(&mut self, dictated: Option<Dictated>) {
