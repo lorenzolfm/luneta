@@ -561,9 +561,7 @@ impl Known {
         let opened: BTreeSet<&Subfolder> = rows.iter().map(|(subfolder, _)| subfolder).collect();
         let unopened = listed.iter().filter(|it| !opened.contains(it));
         let folder = |it: &Subfolder| dir.at(it).as_str().to_owned();
-        let unopened: Vec<String> = unopened.map(folder).collect();
-        assert!(unopened.len() <= listed.len(), "a project's unopened worktrees are listed ones");
-        unopened
+        unopened.map(folder).collect()
     }
 
     fn built_terminals(&self, worktree: &Worktree) -> Vec<api::Terminal> {

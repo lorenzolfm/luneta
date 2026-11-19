@@ -22,7 +22,7 @@ use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, Dir, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, Dir, ProjectId, ViewId, WorktreeId, CLONE_WORKTREES_MAX};
 use lunetad::prunes;
 use lunetad::seats::{self, seated, Where};
 use lunetad::transcripts::SessionId;
@@ -819,15 +819,29 @@ impl Known {
             let name = worktree.name.clone();
             Some(KnownWorktree { place, name, folder, seen, used, panes, terminals, in_panes })
         });
-        let worktrees = worktrees.collect();
+        let worktrees: Vec<KnownWorktree> = worktrees.collect();
         let order = rows.iter().filter_map(|it| WorktreeId::of(it.id)).collect();
         let dir = Dir::parse(&said.dir).expect("lunetad says a project's folder as one it keeps");
+        let unopened = Known::unopened_of(said, &dir, &worktrees);
+        Some(Known { project, dir, worktrees, order, unopened })
+    }
+
+    fn unopened_of(said: &api::Project, dir: &Dir, worktrees: &[KnownWorktree]) -> Vec<Dir> {
         let listed = match &said.holds {
             Some(api::project::Holds::Clone(clone)) => clone.unopened.as_slice(),
             Some(api::project::Holds::Folder(_)) | None => &[],
         };
-        let unopened = listed.iter().filter_map(|it| Dir::parse(it).ok()).collect();
-        Some(Known { project, dir, worktrees, order, unopened })
+        let max = CLONE_WORKTREES_MAX;
+        assert!(listed.len() <= max, "a clone lists at most {max} worktrees");
+        let open: BTreeSet<&Dir> = worktrees.iter().map(|it| &it.folder).collect();
+        let unopened = listed.iter().map(|it| {
+            let folder = Dir::parse(it);
+            let folder = folder.expect("lunetad says a worktree not open as a folder it lists");
+            assert!(dir.subfolder(&folder).is_some(), "{it} is a worktree of {}", dir.as_str());
+            assert!(!open.contains(&folder), "{it} is said not open, so no open worktree is there");
+            folder
+        });
+        unopened.collect()
     }
 
     fn listed(&self) -> &Listed {
@@ -2687,7 +2701,7 @@ impl Sidebar {
             Action::YankPull => self.yank(now),
             Action::OpenPull => self.browse(),
             Action::OpenWorktree => self.open_worktree(),
-            _ => Asked::Nothing,
+            other => unreachable!("{other:?} is in a row group and has no handler"),
         }
     }
 
@@ -7496,6 +7510,20 @@ mod tests {
         assert_eq!(open_pull(&mut sidebar, now), Asked::Browse(far_link.clone()));
         sidebar.key(&char('y'), now);
         assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(far_link));
+    }
+
+    #[test]
+    fn every_key_of_a_row_group_asks_or_says_why_not() {
+        let now = moment(160_000);
+        let grouped = Action::row().filter(|(_, path)| path.len() == 2);
+        for (action, path) in grouped {
+            let mut sidebar = pulls();
+            sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
+            assert_eq!(sidebar.key(&char(path[0]), now), Asked::Nothing, "{path:?} opens a group");
+            let asked = sidebar.key(&char(path[1]), now);
+            let said = asked != Asked::Nothing || sidebar.notice.is_some();
+            assert!(said, "{action:?} on {path:?} does nothing");
+        }
     }
 
     #[test]

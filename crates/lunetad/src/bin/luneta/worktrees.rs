@@ -265,10 +265,10 @@ fn last_used(project: &Project) -> Option<WorktreeId> {
     last.map(|it| it.id)
 }
 
-fn at_folder(path: &Path, project: &Project, folder: &str) -> Result<Option<Opened>, Tried> {
+fn at_folder(path: &Path, project: &Project, folder: &str) -> Result<Landing, Tried> {
     assert!(holds(&project.dir, Path::new(folder)), "{folder} is in {}", project.dir);
     let started = in_kept(path, project.id, started_at(path, folder))?;
-    Ok(Some(started.map_or(Opened::Root(project.id), Opened::Worktree)))
+    Ok(started.map_or(Landing::Unopened(project.id), Landing::Worktree))
 }
 
 fn chosen(
@@ -277,14 +277,14 @@ fn chosen(
     name: Option<&str>,
     cwd: &Path,
     folder: &str,
-) -> Option<Result<Option<Opened>, Tried>> {
+) -> Option<Result<Landing, Tried>> {
     if let Some(name) = name {
         let named: Vec<&Project> = projects.iter().filter(|project| project.name == name).collect();
         match named[..] {
             [] => {},
             [one] => {
-                let opened = last_used(one).map_or(Opened::Root(one.id), Opened::Worktree);
-                return Some(Ok(Some(opened)));
+                let landing = last_used(one).map_or(Landing::Unopened(one.id), Landing::Worktree);
+                return Some(Ok(landing));
             },
             [..] => {
                 let dirs: Vec<&str> = named.iter().map(|project| project.dir.as_str()).collect();
@@ -312,7 +312,7 @@ pub fn start(
     name: Option<&str>,
     cwd: &Path,
     seen: impl Fn(ProjectId) -> Option<SystemTime>,
-) -> Result<Option<Opened>, String> {
+) -> Result<Option<Landing>, String> {
     let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
     twice(|| started(path, name, cwd, folder, &seen))
 }
@@ -323,15 +323,15 @@ fn started(
     cwd: &Path,
     folder: &str,
     seen: &impl Fn(ProjectId) -> Option<SystemTime>,
-) -> Result<Option<Opened>, Tried> {
+) -> Result<Option<Landing>, Tried> {
     let projects = kept(path)?;
     if let Some(chosen) = chosen(path, &projects, name, cwd, folder) {
-        return chosen;
+        return chosen.map(Some);
     }
     let Some(name) = name else {
         let last = |project: &&Project| seen(project.id);
         let held = projects.iter().filter(|project| !project.worktrees().is_empty());
-        return Ok(held.max_by_key(last).and_then(last_used).map(Opened::Worktree));
+        return Ok(held.max_by_key(last).and_then(last_used).map(Landing::Worktree));
     };
     let unmade = match add_project(path, folder, Some(name)) {
         Ok(_) => format!("lunetad made the project of {}, and keeps it nowhere", cwd.display()),
@@ -339,7 +339,8 @@ fn started(
         Err(Unmade::Nests(why)) => why,
     };
     let projects = kept(path)?;
-    chosen(path, &projects, Some(name), cwd, folder).unwrap_or(Err(Tried::Failed(unmade)))
+    let chosen = chosen(path, &projects, Some(name), cwd, folder);
+    chosen.unwrap_or(Err(Tried::Failed(unmade))).map(Some)
 }
 
 pub fn made_at(
@@ -414,16 +415,16 @@ pub fn renamed_terminal(
     changed_there(machine, Change::RenameTerminal(RenameTerminal { terminal, to }))
 }
 
-pub enum Opened {
+pub enum Landing {
     Worktree(WorktreeId),
-    Root(ProjectId),
+    Unopened(ProjectId),
 }
 
 pub fn project_made(
     machine: &Machine,
     folder: &str,
     name: Option<&Name>,
-) -> Result<Opened, String> {
+) -> Result<Landing, String> {
     let (dir, name) = (folder.to_owned(), name.map(spelled));
     let unmade = |why: String| format!("no project made: {why}");
     let made = made_there(machine, Change::AddProject(AddProject { dir, name })).map_err(unmade)?;
@@ -435,9 +436,9 @@ pub fn project_made(
     let start = Start { folder: folder.to_owned(), name: None };
     match made_there(machine, Change::Start(start)).map_err(empty)? {
         Some(Made::Project(root)) if root == project => {
-            ProjectId::of(project).map(Opened::Root).ok_or_else(|| zero("project"))
+            ProjectId::of(project).map(Landing::Unopened).ok_or_else(|| zero("project"))
         },
-        made => worktree_made(made).map(Opened::Worktree).map_err(empty),
+        made => worktree_made(made).map(Landing::Worktree).map_err(empty),
     }
 }
 

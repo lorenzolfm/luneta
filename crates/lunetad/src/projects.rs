@@ -1251,11 +1251,9 @@ impl Projects {
         let rows = self.rows(project)?;
         let held = |worktree: &Worktree| worktree.layout.terminals().count();
         let terminals: usize = rows.iter().map(|(_, it)| held(it)).sum();
-        let before = rows.len();
         rows.retain(|(subfolder, it)| {
             !seen.contains(&it.id) || subfolders.contains(subfolder) || held(it) > 0
         });
-        assert!(rows.len() <= before, "a listing of worktrees makes no row");
         let kept: usize = rows.iter().map(|(_, it)| held(it)).sum();
         assert_eq!(kept, terminals, "a listing of worktrees drops no terminal");
         Ok(())
@@ -1553,8 +1551,10 @@ pub fn follow(
             }
             assert!(listed.len() <= PROJECTS_MAX, "a sweep lists the worktrees of kept clones");
             troubles.done();
-            let told = core.send(Command::Missing(missing)).is_ok();
-            if !told || core.send(Command::Listed(listed)).is_err() {
+            if core.send(Command::Missing(missing)).is_err() {
+                return;
+            }
+            if core.send(Command::Listed(listed)).is_err() {
                 return;
             }
             thread::sleep(sweep);

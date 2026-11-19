@@ -19,7 +19,7 @@ use crate::mux::own::TerminalKey;
 use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
-use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
+use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Holds, Home, Id, Line, Placed};
 use crate::projects::{Layout, Made, Project, ProjectId, Projects, Ran, Runs, Spot};
 use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
 use crate::projects::Worktree;
@@ -599,8 +599,7 @@ impl Layouts {
             self.unwritten(&why);
         }
         let projects = self.store.projects().expect("projects just changed are kept");
-        let emptied = projects.find(worktree).is_none_or(|(_, it)| it.layout().is_empty());
-        assert!(emptied, "worktree {worktree} is closed: gone, or a folder's, empty");
+        left_by_all(projects, worktree);
         self.forget_closed(&[worktree], &terminals);
         Ok(None)
     }
@@ -1152,8 +1151,7 @@ impl Layouts {
         if let Some(heir) = heir {
             assert!(projects.holding_view(heir).is_some(), "view {heir} took the room it left");
         } else {
-            let emptied = projects.find(worktree).is_none_or(|(_, it)| it.layout().is_empty());
-            assert!(emptied, "worktree {worktree}, after its last view, is gone or empty");
+            left_by_all(projects, worktree);
         }
         let focused = self.clients.values().any(|client| client.focus == Some(view));
         assert!(!focused, "no client focuses view {view}, which closed");
@@ -1410,11 +1408,7 @@ impl Layouts {
         let mut gone = Vec::new();
         for (id, client) in clients.iter_mut() {
             let Some((_, shown)) = projects.find(client.worktree) else {
-                if let Some(emptied) = client.said.as_ref().and_then(emptied) {
-                    let _ = client.out.try_send(Ok(emptied));
-                }
-                let forgotten = format!("worktree {} is forgotten", client.worktree);
-                let _ = client.out.try_send(Err(Status::not_found(forgotten)));
+                forgotten(&client.out, client.said.as_ref(), client.worktree);
                 gone.push(*id);
                 continue;
             };
@@ -1602,6 +1596,35 @@ fn emptied(said: &api::ShowResponse) -> Option<api::ShowResponse> {
     }
     let empty = show_response::Laid { panes: Vec::new(), shown: None, ..laid.clone() };
     Some(api::ShowResponse { event: Some(show_response::Event::Laid(empty)) })
+}
+
+fn left_by_all(projects: &Projects, worktree: WorktreeId) {
+    let Some((project, stays)) = projects.find(worktree) else {
+        return;
+    };
+    let own = matches!(project.holds(), Holds::Folder(_));
+    assert!(own, "worktree {worktree} stays with no view only as its folder's own");
+    assert!(stays.layout().is_empty(), "worktree {worktree} stays empty");
+}
+
+fn forgotten(out: &Out, said: Option<&api::ShowResponse>, worktree: WorktreeId) {
+    assert!(out.capacity() >= 1, "a client held keeps an answer free for its last word");
+    if out.capacity() >= 2
+        && let Some(emptied) = said.and_then(emptied)
+    {
+        forgotten_said(out, Ok(emptied));
+    }
+    let forgotten = format!("worktree {worktree} is forgotten");
+    forgotten_said(out, Err(Status::not_found(forgotten)));
+}
+
+fn forgotten_said(out: &Out, word: Result<api::ShowResponse, Status>) {
+    match out.try_send(word) {
+        Ok(()) | Err(answers::error::TrySendError::Closed(_)) => {},
+        Err(answers::error::TrySendError::Full(_)) => {
+            unreachable!("the layouts alone answer a client, and saw room for this")
+        },
+    }
 }
 
 fn told(out: &Out, word: api::ShowResponse) -> bool {
@@ -1821,6 +1844,46 @@ mod tests {
     use crate::agent::{Harness, Status};
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
+
+    fn word_of(word: Result<api::ShowResponse, tonic::Status>) -> Result<usize, tonic::Code> {
+        match word {
+            Ok(api::ShowResponse { event: Some(show_response::Event::Laid(laid)) }) => {
+                Ok(laid.panes.len())
+            },
+            Ok(other) => panic!("a forgotten worktree's client hears only layouts: {other:?}"),
+            Err(status) => Err(status.code()),
+        }
+    }
+
+    #[test]
+    fn a_forgotten_worktree_s_client_hears_it_emptied_only_with_room_left_for_the_end() {
+        let worktree = WorktreeId::of(7).unwrap();
+        let panes = vec![show_response::Pane::default()];
+        let laid = show_response::Laid { panes, ..show_response::Laid::default() };
+        let said = api::ShowResponse { event: Some(show_response::Event::Laid(laid)) };
+        let heard = |said: Option<&api::ShowResponse>, room: usize| {
+            let (out, mut answers) = answers::channel(ANSWERS_MAX);
+            for _ in room..ANSWERS_MAX {
+                out.try_send(Ok(api::ShowResponse::default())).unwrap();
+            }
+            forgotten(&out, said, worktree);
+            let mut words = Vec::new();
+            while let Ok(word) = answers.try_recv() {
+                words.push(word);
+            }
+            let last = words.split_off(ANSWERS_MAX - room);
+            last.into_iter().map(word_of).collect::<Vec<_>>()
+        };
+        let end = Err(tonic::Code::NotFound);
+        assert_eq!(heard(Some(&said), ANSWERS_MAX), [Ok(0), end]);
+        assert_eq!(heard(Some(&said), 2), [Ok(0), end]);
+        assert_eq!(heard(Some(&said), 1), [end], "the end takes the last room");
+        assert_eq!(heard(None, ANSWERS_MAX), [end], "a client told nothing hears the end alone");
+
+        let (out, answers) = answers::channel(ANSWERS_MAX);
+        drop(answers);
+        forgotten(&out, Some(&said), worktree);
+    }
 
     fn listed(is: Is) -> server::Terminal {
         let key = TerminalKey { id: 1.try_into().unwrap(), made: OwnMade::from_nanos(5) };
