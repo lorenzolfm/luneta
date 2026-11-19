@@ -1324,21 +1324,19 @@ struct Layout {
     area: Rect,
     top: usize,
     rows: Vec<(Spot, usize)>,
-    bottom: usize,
+    notes_y: u16,
     notes: Vec<String>,
 }
 
 impl Layout {
-    fn keeps(&self, sweep: Sweep, now: &Layout) -> bool {
-        let rows = self.area == now.area && self.top == now.top && self.rows == now.rows;
-        let notes = self.bottom == now.bottom && self.notes == now.notes;
-        let above = |laid: &Layout| sweep.last_line() < laid.bottom_from();
-        rows && (notes || (above(self) && above(now)))
-    }
-
-    fn bottom_from(&self) -> u16 {
-        let bottom = u16::try_from(self.bottom).unwrap_or(u16::MAX);
-        self.area.bottom().saturating_sub(bottom)
+    fn keeps(&self, sweep: Sweep, laid: &Layout) -> bool {
+        let rows_stay = self.area == laid.area && self.top == laid.top && self.rows == laid.rows;
+        let notes_stay = self.notes_y == laid.notes_y && self.notes == laid.notes;
+        match (rows_stay, notes_stay) {
+            (true, true) => true,
+            (true, false) => sweep.last_y() < self.notes_y.min(laid.notes_y),
+            (false, _) => false,
+        }
     }
 }
 
@@ -4253,10 +4251,11 @@ impl Sidebar {
             }
         }
         self.top = self.top.min(drawn.len().saturating_sub(1));
-        let bottom = notes.lines.len();
-        let laid = Layout { area, top: self.top, rows, bottom, notes: notes.said };
-        lines.extend(drawn.into_iter().skip(self.top).take(room));
         let notes_from = height.saturating_sub(notes.lines.len());
+        let notes_line = u16::try_from(notes_from).expect("the notes start inside the area");
+        let notes_y = area.y.checked_add(notes_line).expect("an area ends inside the screen");
+        let laid = Layout { area, top: self.top, rows, notes_y, notes: notes.said };
+        lines.extend(drawn.into_iter().skip(self.top).take(room));
         lines.resize(notes_from, Line::default());
         let goes_on = notes.goes_on.iter().map(|line| notes_from + line).collect();
         lines.extend(notes.lines);

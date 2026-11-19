@@ -29,7 +29,7 @@ impl Sweep {
         self.to = kept(to, within);
     }
 
-    pub fn last_line(self) -> u16 {
+    pub fn last_y(self) -> u16 {
         self.ends().1.y
     }
 
