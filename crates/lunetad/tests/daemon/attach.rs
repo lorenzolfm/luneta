@@ -451,14 +451,14 @@ fn a_tie_for_the_worktree_used_last_goes_to_the_first_listed_wherever_luneta_pic
     });
     let row = sidebar_row(&window, "▾ other");
     click(&mut window, row);
-    eventually("a click on other's row goes to its first", || {
-        (gone_to() == [two, three]).then_some(())
-    });
+    eventually("a click on other's row shows its home", || window.shows(UNHOSTED).then_some(()));
+    assert_eq!(gone_to(), [two], "and goes to none of other's worktrees");
     drop(window);
-    let _window = Window::open(&owned.host, &directory("anywhere"), &["named"]);
-    eventually("a luneta started by the project's name goes to its first", || {
-        (gone_to() == [two, three, five]).then_some(())
+    let window = Window::open(&owned.host, &directory("anywhere"), &["named"]);
+    eventually("a luneta started by the project's name shows its home", || {
+        window.shows(UNHOSTED).then_some(())
     });
+    assert_eq!(gone_to(), [two], "and goes to none of named's worktrees");
 }
 
 fn sidebar_row(window: &Window, text: &str) -> usize {
