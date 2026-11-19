@@ -947,20 +947,19 @@ message ChangeProjectsRequest {
   oneof change {
     AddProject add_project = 2;
     AddWorktree add_worktree = 3;
-    WorktreeAt worktree_at = 4;
-    Start start = 5;
-    Join join = 6;
-    Pull pull = 7;
-    RenameProject rename_project = 8;
-    RenameWorktree rename_worktree = 9;
-    RenameTerminal rename_terminal = 10;
-    ReorderProjects reorder_projects = 11;
-    ReorderWorktrees reorder_worktrees = 12;
-    ForgetProject forget_project = 13;
-    ForgetWorktree forget_worktree = 14;
-    CloseProject close_project = 15;
-    CloseWorktree close_worktree = 16;
-    Bring bring = 17;
+    Start start = 4;
+    Join join = 5;
+    Pull pull = 6;
+    RenameProject rename_project = 7;
+    RenameWorktree rename_worktree = 8;
+    RenameTerminal rename_terminal = 9;
+    ReorderProjects reorder_projects = 10;
+    ReorderWorktrees reorder_worktrees = 11;
+    ForgetProject forget_project = 12;
+    ForgetWorktree forget_worktree = 13;
+    CloseProject close_project = 14;
+    CloseWorktree close_worktree = 15;
+    Bring bring = 16;
   }
 
   message AddProject {
@@ -972,11 +971,6 @@ message ChangeProjectsRequest {
     fixed64 project = 1;
     string folder = 2;
     optional string name = 3;
-  }
-
-  message WorktreeAt {
-    fixed64 project = 1;
-    string folder = 2;
   }
 
   message Start {

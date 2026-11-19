@@ -611,11 +611,6 @@ impl Ask {
                     name: name(named).map_err(field("name"))?,
                 }
             },
-            Asked::WorktreeAt(asked::WorktreeAt { project, folder }) => Change::AddWorktree {
-                project: id("project", project).map(ProjectId)?,
-                spot: spot(&folder).map_err(field("folder"))?,
-                name: None,
-            },
             Asked::Start(asked::Start { folder, name: named }) => Change::Start {
                 spot: spot(&folder).map_err(field("folder"))?,
                 name: named.as_deref().map(Name::of_project).transpose().map_err(field("name"))?,
