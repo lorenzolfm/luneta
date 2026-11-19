@@ -46,7 +46,7 @@ use crate::api::{
 use crate::asks::{Asked, Step};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Ask, Changed, Failed, Lock, Made, Plain, ProjectId, Store, WorktreeId};
+use crate::projects::{Ask, Changed, Lock, Made, Plain, ProjectId, Store, WorktreeId};
 use crate::layouts::{self, NotCloned};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
@@ -63,8 +63,8 @@ use crate::transcripts::Reading;
 use crate::agent::Agent;
 use crate::checks::{Failing, Log};
 use crate::{
-    checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed, projects,
-    release, remote, skills, topics, watch, zoxide, Harness,
+    changes, checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed,
+    projects, release, remote, skills, topics, watch, zoxide, Harness,
 };
 
 const SWEEP: Duration = Duration::from_secs(2);
@@ -1007,19 +1007,9 @@ fn change_made(
     change: change_projects_request::Change,
 ) -> Result<Changed, Status> {
     let change = Ask::of_api(change).map_err(Status::invalid_argument)?;
-    let stopped = "it is kept, but the daemon's core has stopped";
     let asked = layouts::ask(layouts, |answer| layouts::Command::Change { change, answer });
     let changed = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
-    changed.map_err(|failed| match failed {
-        Failed::NotKept(why) => Status::failed_precondition(why),
-        Failed::Nests(why) => Status::already_exists(why),
-        Failed::Stale(why) => Status::aborted(why),
-        Failed::Refused(why) => Status::invalid_argument(why),
-        Failed::Unwritten(why) => Status::internal(why),
-        Failed::Unclosed(why) | Failed::Unopened(why) => Status::unavailable(why),
-        Failed::Gone(why) => Status::not_found(why),
-        Failed::KeptUntold => Status::unavailable(stopped),
-    })
+    changed.map_err(changes::status)
 }
 
 fn change_answered(

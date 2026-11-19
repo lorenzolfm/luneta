@@ -365,6 +365,23 @@ pub enum Failed {
     KeptUntold,
 }
 
+impl Failed {
+    #[must_use]
+    pub fn said(self) -> String {
+        match self {
+            Failed::NotKept(why)
+            | Failed::Nests(why)
+            | Failed::Stale(why)
+            | Failed::Refused(why)
+            | Failed::Unwritten(why)
+            | Failed::Unclosed(why)
+            | Failed::Unopened(why)
+            | Failed::Gone(why) => why,
+            Failed::KeptUntold => "it is kept, but the daemon's core has stopped".to_owned(),
+        }
+    }
+}
+
 impl Store {
     pub fn open(kept: Result<Lock, String>, core: SyncSender<Command>) -> io::Result<Store> {
         let (keeping, held) = match kept {
