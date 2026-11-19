@@ -1,9 +1,29 @@
+use std::io;
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::ops::Deref;
+
+use base64::Engine as _;
+use lunetad::links::Link;
 
 use crate::sidebar::cut;
 use crate::sweep::cells;
 
 const SHOWN_CHARS_MAX: usize = 512;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Excerpt(String);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Clip {
+    Pull(Link),
+    Filed(Link),
+    Excerpt(Excerpt),
+}
+
+#[derive(Debug, Default)]
+pub struct Copies {
+    excerpt: Option<Excerpt>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Copied {
@@ -17,9 +37,58 @@ pub struct Text {
     first: Option<String>,
 }
 
+impl Excerpt {
+    pub fn of(text: String) -> Option<Excerpt> {
+        (!text.is_empty()).then_some(Excerpt(text))
+    }
+}
+
+impl Deref for Excerpt {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Copies {
+    pub fn clip(&mut self, out: &mut impl io::Write, clip: Clip) -> io::Result<Option<Copied>> {
+        match clip {
+            Clip::Pull(link) => {
+                write(out, &link.url())?;
+                Ok(Some(Copied::Pull(link.number())))
+            },
+            Clip::Filed(link) => {
+                write(out, &link.url())?;
+                Ok(None)
+            },
+            Clip::Excerpt(excerpt) => {
+                write(out, &excerpt)?;
+                let copied = Copied::text(&excerpt);
+                self.excerpt = Some(excerpt);
+                Ok(Some(copied))
+            },
+        }
+    }
+
+    pub fn excerpt(&self) -> Option<&str> {
+        self.excerpt.as_deref()
+    }
+}
+
+fn write(out: &mut impl io::Write, text: &str) -> io::Result<()> {
+    out.write_all(osc52(text).as_bytes())?;
+    out.flush()
+}
+
+fn osc52(text: &str) -> String {
+    let text = base64::engine::general_purpose::STANDARD.encode(text);
+    format!("\x1b]52;c;{text}\x07")
+}
+
 impl Copied {
-    pub fn text(text: &str) -> Copied {
-        Copied::Text(Text::of(text))
+    pub fn text(excerpt: &Excerpt) -> Copied {
+        Copied::Text(Text::of(excerpt))
     }
 
     pub fn said(&self, room: usize) -> String {
@@ -31,9 +100,8 @@ impl Copied {
 }
 
 impl Text {
-    fn of(text: &str) -> Text {
-        assert!(!text.is_empty(), "a sweep, a selection and a link each copy something");
-        let lines = NonZeroUsize::new(text.lines().count()).expect("a text with something has a line");
+    fn of(text: &Excerpt) -> Text {
+        let lines = NonZeroUsize::new(text.lines().count()).expect("an excerpt has a line");
         let first = text.lines().map(shown).find(|line| !line.is_empty());
         let fits = |first: &str| first.chars().count() <= SHOWN_CHARS_MAX;
         assert!(first.as_deref().is_none_or(fits), "a note keeps only what it can show");
@@ -88,6 +156,56 @@ mod tests {
     use super::*;
     use crate::sidebar::wrapped;
 
+    fn excerpt(text: &str) -> Excerpt {
+        Excerpt::of(text.to_owned()).expect("a test excerpts some text")
+    }
+
+    fn noted(text: &str) -> Copied {
+        Copied::text(&excerpt(text))
+    }
+
+    fn link(kind: &str) -> Link {
+        Link::parse(&format!("https://github.com/o/r/{kind}/246")).expect("a link on github.com")
+    }
+
+    #[test]
+    fn what_to_copy_goes_out_as_osc_52() {
+        let mut out = Vec::new();
+        let mut copies = Copies::default();
+        let note = copies.clip(&mut out, Clip::Pull(link("pull"))).unwrap();
+        assert_eq!(note, Some(Copied::Pull(NonZeroU32::new(246).unwrap())));
+        let spelled = "aHR0cHM6Ly9naXRodWIuY29tL28vci9wdWxsLzI0Ng==";
+        assert_eq!(String::from_utf8(out).unwrap(), format!("\x1b]52;c;{spelled}\x07"));
+    }
+
+    #[test]
+    fn alt_u_reads_only_an_excerpt_of_the_screen() {
+        let mut copies = Copies::default();
+        let mut out = Vec::new();
+        let pull = Some(Copied::Pull(NonZeroU32::new(246).unwrap()));
+        let mut clip = |copies: &mut Copies, clip| copies.clip(&mut out, clip).unwrap();
+        assert_eq!(clip(&mut copies, Clip::Pull(link("pull"))), pull);
+        assert_eq!(copies.excerpt(), None, "a link luneta made is not read");
+        assert_eq!(clip(&mut copies, Clip::Excerpt(excerpt("swept"))), Some(noted("swept")));
+        assert_eq!(copies.excerpt(), Some("swept"));
+        assert_eq!(clip(&mut copies, Clip::Pull(link("pull"))), pull);
+        assert_eq!(copies.excerpt(), Some("swept"), "a pull request's link leaves it");
+        let filed = clip(&mut copies, Clip::Filed(link("issues")));
+        assert_eq!(filed, None, "a filed issue says so in its own note");
+        assert_eq!(copies.excerpt(), Some("swept"), "a filed issue's link leaves it");
+        let selected = clip(&mut copies, Clip::Excerpt(excerpt("selected")));
+        assert_eq!(selected, Some(noted("selected")));
+        assert_eq!(copies.excerpt(), Some("selected"), "the next excerpt replaces it");
+        let written = String::from_utf8(out).unwrap();
+        assert_eq!(written.matches("\x1b]52;c;").count(), 5, "every copy goes to the clipboard");
+    }
+
+    #[test]
+    fn an_empty_text_is_no_excerpt() {
+        assert_eq!(Excerpt::of(String::new()), None);
+        assert_eq!(Excerpt::of(" ".to_owned()).as_deref(), Some(" "));
+    }
+
     #[test]
     fn a_pull_request_link_is_said_by_its_number() {
         let copied = Copied::Pull(NonZeroU32::new(246).unwrap());
@@ -96,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_line_is_said_in_quotes_and_cut_to_fit() {
-        let copied = Copied::text("cargo nextest run");
+        let copied = noted("cargo nextest run");
         assert_eq!(copied.said(30), "copied \"cargo nextest run\"");
         assert_eq!(copied.said(26), "copied \"cargo nextest run\"");
         assert_eq!(copied.said(25), "copied \"cargo nextest r…\"");
@@ -108,14 +226,14 @@ mod tests {
 
     #[test]
     fn a_line_of_one_character_is_said_whole_where_it_fits() {
-        let copied = Copied::text("a");
+        let copied = noted("a");
         assert_eq!(copied.said(10), "copied \"a\"");
         assert_eq!(copied.said(9), "copied");
     }
 
     #[test]
     fn more_lines_are_counted_and_the_first_with_words_is_said() {
-        let copied = Copied::text("\n   \n  fn main() {\n      run();\n  }\n");
+        let copied = noted("\n   \n  fn main() {\n      run();\n  }\n");
         assert_eq!(copied, Copied::Text(Text {
             lines: NonZeroUsize::new(5).unwrap(),
             first: Some("fn main() {".to_owned())
@@ -127,19 +245,19 @@ mod tests {
 
     #[test]
     fn blanks_are_said_as_blank_lines() {
-        assert_eq!(Copied::text("   ").said(30), "copied 1 blank line");
-        assert_eq!(Copied::text(" \n\t\n").said(30), "copied 2 blank lines");
+        assert_eq!(noted("   ").said(30), "copied 1 blank line");
+        assert_eq!(noted(" \n\t\n").said(30), "copied 2 blank lines");
     }
 
     #[test]
     fn control_characters_are_said_as_spaces() {
-        assert_eq!(Copied::text("\x1b[1mbold\x07\tafter").said(40), "copied \"[1mbold  after\"");
+        assert_eq!(noted("\x1b[1mbold\x07\tafter").said(40), "copied \"[1mbold  after\"");
     }
 
     #[test]
     fn a_long_line_keeps_only_what_a_note_can_show() {
         let long = "a".repeat(SHOWN_CHARS_MAX * 2);
-        let Copied::Text(Text { first, .. }) = Copied::text(&long) else {
+        let Copied::Text(Text { first, .. }) = noted(&long) else {
             panic!("a text is copied as text");
         };
         assert_eq!(first, Some("a".repeat(SHOWN_CHARS_MAX)));
@@ -147,14 +265,14 @@ mod tests {
 
     #[test]
     fn a_wide_line_is_cut_by_the_columns_it_takes() {
-        let copied = Copied::text("日本語のテキスト");
+        let copied = noted("日本語のテキスト");
         assert_eq!(copied.said(20), "copied \"日本語のテ…\"");
         assert!(cells(&copied.said(20)) <= 20);
     }
 
     #[test]
     fn a_wide_character_with_no_room_beside_its_ellipsis_leaves_only_the_count() {
-        let copied = Copied::text("日本語のテキスト");
+        let copied = noted("日本語のテキスト");
         assert_eq!(copied.said(11), "copied");
         assert_eq!(copied.said(12), "copied \"日…\"");
     }
@@ -175,7 +293,7 @@ mod tests {
             "ᨀ……🏴\u{200d}#\u{fe0f}",
         ];
         for line in lines {
-            let copied = Copied::text(line);
+            let copied = noted(line);
             for room in 0..40 {
                 let said = copied.said(room);
                 if said.contains('"') {
