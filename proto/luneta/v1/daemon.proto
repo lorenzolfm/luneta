@@ -971,10 +971,9 @@ message ChangeProjectsRequest {
     ReorderProjects reorder_projects = 10;
     ReorderWorktrees reorder_worktrees = 11;
     ForgetProject forget_project = 12;
-    ForgetWorktree forget_worktree = 13;
-    CloseProject close_project = 14;
-    CloseWorktree close_worktree = 15;
-    Bring bring = 16;
+    CloseProject close_project = 13;
+    CloseWorktree close_worktree = 14;
+    Bring bring = 15;
   }
 
   message AddProject {
@@ -986,6 +985,7 @@ message ChangeProjectsRequest {
     fixed64 project = 1;
     string folder = 2;
     optional string name = 3;
+    repeated string argv = 4;
   }
 
   message Start {
@@ -995,6 +995,7 @@ message ChangeProjectsRequest {
 
   message Join {
     string folder = 1;
+    repeated string argv = 2;
   }
 
   message Pull {
@@ -1002,6 +1003,7 @@ message ChangeProjectsRequest {
     string folder = 2;
     string project = 3;
     string name = 4;
+    repeated string argv = 5;
   }
 
   message RenameProject {
@@ -1032,10 +1034,6 @@ message ChangeProjectsRequest {
 
   message ForgetProject {
     fixed64 project = 1;
-  }
-
-  message ForgetWorktree {
-    fixed64 worktree = 1;
   }
 
   message CloseProject {

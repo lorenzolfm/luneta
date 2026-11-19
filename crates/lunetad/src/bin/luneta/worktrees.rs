@@ -146,11 +146,11 @@ fn zero(made: &str) -> String {
     format!("lunetad said it made {made} 0, and no id is 0")
 }
 
-fn worktree_made(made: Option<Made>) -> Result<WorktreeId, String> {
+fn landed(made: Option<Made>) -> Result<Landed, String> {
+    let id = |id| WorktreeId::of(id).ok_or_else(|| zero("worktree"));
     match made {
-        Some(Made::Worktree(it) | Made::Found(it)) => {
-            WorktreeId::of(it).ok_or_else(|| zero("worktree"))
-        },
+        Some(Made::Worktree(made)) => id(made).map(Landed::Made),
+        Some(Made::Found(found)) => id(found).map(Landed::Found),
         made => Err(format!("lunetad found no worktree but {made:?}")),
     }
 }
@@ -158,20 +158,20 @@ fn worktree_made(made: Option<Made>) -> Result<WorktreeId, String> {
 pub fn add_worktree(
     path: &Path,
     machine: &Machine,
-    project: ProjectId,
-    folder: &str,
+    (project, folder): (ProjectId, &str),
     name: Option<&str>,
-) -> Result<WorktreeId, String> {
+    argv: Vec<String>,
+) -> Result<Landed, String> {
     let (project, folder, name) = (project.get(), folder.to_owned(), name.map(str::to_owned));
-    let change = Change::AddWorktree(AddWorktree { project, folder, name });
-    worktree_made(changed_on(path, on(machine), change).map_err(Unmade::said)?)
+    let change = Change::AddWorktree(AddWorktree { project, folder, name, argv });
+    landed(changed_on(path, on(machine), change).map_err(Unmade::said)?)
 }
 
-fn started_at(path: &Path, folder: &str) -> Result<Option<WorktreeId>, String> {
+fn started_at(path: &Path, folder: &str) -> Result<Option<Landed>, String> {
     let start = Start { folder: folder.to_owned(), name: None };
     match changed_on(path, None, Change::Start(start)).map_err(Unmade::said)? {
         Some(Made::Project(_)) => Ok(None),
-        made => worktree_made(made).map(Some),
+        made => landed(made).map(Some),
     }
 }
 
@@ -283,7 +283,8 @@ fn chosen(
         match named[..] {
             [] => {},
             [one] => {
-                let landing = last_used(one).map_or(Landing::Unopened(one.id), Landing::Worktree);
+                let last = last_used(one).map(Landed::Found);
+                let landing = last.map_or(Landing::Unopened(one.id), Landing::Worktree);
                 return Some(Ok(landing));
             },
             [..] => {
@@ -331,7 +332,8 @@ fn started(
     let Some(name) = name else {
         let last = |project: &&Project| seen(project.id);
         let held = projects.iter().filter(|project| !project.worktrees().is_empty());
-        return Ok(held.max_by_key(last).and_then(last_used).map(Landing::Worktree));
+        let found = held.max_by_key(last).and_then(last_used).map(Landed::Found);
+        return Ok(found.map(Landing::Worktree));
     };
     let unmade = match add_project(path, folder, Some(name)) {
         Ok(_) => format!("lunetad made the project of {}, and keeps it nowhere", cwd.display()),
@@ -354,7 +356,7 @@ pub fn made_at(
         Ok(Some(Made::Project(project))) => {
             ProjectId::of(project).map(Landing::Unopened).ok_or_else(|| zero("project"))
         },
-        Ok(made) => worktree_made(made).map(Landing::Worktree),
+        Ok(made) => landed(made).map(Landing::Worktree),
         Err(unmade) => Err(unmade.said()),
     }
 }
@@ -365,11 +367,12 @@ pub fn pulled(
     project: &str,
     (holder, cwd): (&Directory, &Directory),
     name: &str,
-) -> Result<WorktreeId, String> {
+    argv: Vec<String>,
+) -> Result<Landed, String> {
     let (holder, folder) = (holder.to_string(), cwd.to_string());
     let (project, name) = (project.to_owned(), name.to_owned());
-    let change = Change::Pull(Pull { holder, folder, project, name });
-    worktree_made(changed_on(path, on(machine), change).map_err(Unmade::said)?)
+    let change = Change::Pull(Pull { holder, folder, project, name, argv });
+    landed(changed_on(path, on(machine), change).map_err(Unmade::said)?)
 }
 
 pub fn real(cwd: &Path) -> Result<PathBuf, String> {
@@ -418,7 +421,7 @@ pub fn renamed_terminal(
 }
 
 pub enum Landing {
-    Worktree(WorktreeId),
+    Worktree(Landed),
     Unopened(ProjectId),
 }
 
@@ -440,7 +443,7 @@ pub fn project_made(
         Some(Made::Project(root)) if root == project => {
             ProjectId::of(project).map(Landing::Unopened).ok_or_else(|| zero("project"))
         },
-        made => worktree_made(made).map(Landing::Worktree).map_err(empty),
+        made => landed(made).map(Landing::Worktree).map_err(empty),
     }
 }
 
@@ -448,28 +451,24 @@ fn spelled(name: &Name) -> String {
     name.as_str().to_owned()
 }
 
-pub enum Joined {
-    Found(WorktreeId),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landed {
     Made(WorktreeId),
+    Found(WorktreeId),
 }
 
-impl Joined {
-    pub fn worktree(&self) -> WorktreeId {
+impl Landed {
+    pub fn worktree(self) -> WorktreeId {
         match self {
-            Joined::Found(worktree) | Joined::Made(worktree) => *worktree,
+            Landed::Found(worktree) | Landed::Made(worktree) => worktree,
         }
     }
 }
 
-pub fn worked_in(path: &Path, folder: &Path) -> Result<Joined, String> {
+pub fn worked_in(path: &Path, folder: &Path, argv: Vec<String>) -> Result<Landed, String> {
     let folder = folder.to_str().ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
-    let change = Change::Join(Join { folder: folder.to_owned() });
-    let id = |id| WorktreeId::of(id).ok_or_else(|| zero("worktree"));
-    match changed_on(path, None, change).map_err(Unmade::said)? {
-        Some(Made::Found(found)) => id(found).map(Joined::Found),
-        Some(Made::Worktree(made)) => id(made).map(Joined::Made),
-        made => Err(format!("lunetad joined no worktree but {made:?}")),
-    }
+    let change = Change::Join(Join { folder: folder.to_owned(), argv });
+    landed(changed_on(path, None, change).map_err(Unmade::said)?)
 }
 
 pub fn dirs(path: &Path) -> Result<Vec<String>, String> {

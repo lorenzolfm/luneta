@@ -545,7 +545,8 @@ impl Known {
                 let rows = rows.iter().map(|(subfolder, it)| {
                     worktree(project.dir().at(subfolder), it)
                 });
-                api::project::Holds::Clone(api::project::Clone { worktrees: rows.collect(), listing })
+                let clone = api::project::Clone { worktrees: rows.collect(), listing };
+                api::project::Holds::Clone(clone)
             },
         };
         let project = |project: &Project| api::Project {

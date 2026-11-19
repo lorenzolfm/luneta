@@ -2196,7 +2196,8 @@ mod tests {
 
     fn housed(name: &str, id: u64, worktrees: Vec<Worktree>) -> Housed {
         let dir = projects::Dir::parse(&format!("/home/you/{name}")).unwrap();
-        Housed { project: project(name, id), dir, worktrees, unopened: Unopened::Listed(Vec::new()) }
+        let unopened = Unopened::Listed(Vec::new());
+        Housed { project: project(name, id), dir, worktrees, unopened }
     }
 
     fn shelved(on: Machine, projects: Vec<Housed>) -> Shelved {

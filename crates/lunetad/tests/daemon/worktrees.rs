@@ -200,13 +200,13 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     host.gh.issue(9, "https://github.com/o/n/issues/9");
     let nine = clone.join("issue-9");
     git(&bare, &["worktree", "add", "-q", "-b", "issue-9", "../issue-9", "main"]);
-    let empty = worktree(host, projects(host)[0].id, &nine);
     fs::remove_file(&asked).unwrap();
     assert_eq!(said(&started(host, &clone.join("main"), "#9", &[])), shown(&nine));
-    let agent = eventually("an agent starts where none was", || fs::read_to_string(&asked).ok());
+    let agent = eventually("an agent starts in one not open", || fs::read_to_string(&asked).ok());
     assert_eq!(agent, "Tackle https://github.com/o/n/issues/9\n");
     let projects = projects(host);
     let mut held = projects.iter().flat_map(|it| it.worktrees().unwrap());
-    let there = held.find(|it| it.id == empty).expect("the empty worktree is the one started");
-    assert_eq!(there.terminals.len(), 1);
+    let nine = nine.display().to_string();
+    let there = held.find(|it| it.folder == nine).expect("the worktree started opens");
+    assert_eq!(there.terminals.len(), 1, "with its agent as its one terminal");
 }

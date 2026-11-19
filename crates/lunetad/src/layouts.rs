@@ -19,12 +19,12 @@ use crate::mux::own::TerminalKey;
 use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
-use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Holds, Home, Id, Line, Placed};
-use crate::projects::{Layout, Made, Project, ProjectId, Projects, Ran, Runs, Spot};
+use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
+use crate::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Runs, Spot};
 use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
 use crate::projects::Worktree;
 use crate::projects::{WorktreeId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, VIEWS_MAX};
-use crate::projects::{Subfolder, WORKTREES_MAX};
+use crate::projects::{quoted, Opens, Subfolder, WORKTREES_MAX};
 use crate::shells::Doing;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
@@ -434,7 +434,7 @@ impl Layouts {
         match command {
             Command::Change { change, answer } => {
                 let changed = match change {
-                    Ask::Change(change) => self.store.change(change),
+                    Ask::Change(change) => self.changed_opening(change),
                     Ask::CloseWorktree { worktree, seen } => {
                         self.close_worktree(worktree, &seen)
                     },
@@ -585,6 +585,60 @@ impl Layouts {
         }
     }
 
+    fn changed_opening(&mut self, change: Change) -> Result<Option<Made>, Failed> {
+        let opens = change.opens().cloned();
+        let made = self.store.change(change)?;
+        if let (Some(opens), Some(Made::Worktree(worktree))) = (opens, made) {
+            self.first_made(worktree, &opens).map_err(Failed::Unopened)?;
+        }
+        Ok(made)
+    }
+
+    fn first_made(&mut self, worktree: WorktreeId, opens: &Opens) -> Result<(), String> {
+        let (terminal, folder, inner) = {
+            let projects = self.kept()?;
+            let (_, made) = projects.find(worktree).expect("a worktree just made is held");
+            let mut terminals = made.layout().terminals();
+            let first = terminals.next().expect("a worktree is made with its first terminal");
+            assert!(terminals.next().is_none(), "a worktree is made with one terminal");
+            let inner = placed(made.layout(), first.id().view(), UNSHOWN_SIZE);
+            let inner = inner.expect("a layout lays out the terminal it holds");
+            (first.id(), first.folder().clone(), inner)
+        };
+        let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
+        if let Err(failure) = self.spawned(terminal, &cwd, opens, inner) {
+            let projects = self.store.projects().expect("projects just changed are kept");
+            assert!(projects.find(worktree).is_none(), "worktree {worktree} goes unopened");
+            return Err(format!("no terminal opens in worktree {worktree}: {failure}"));
+        }
+        Ok(())
+    }
+
+    fn spawned(
+        &mut self,
+        terminal: TerminalViewId,
+        cwd: &Directory,
+        opens: &Opens,
+        inner: Size,
+    ) -> Result<(), String> {
+        let opened = match opens {
+            Opens::Shell => Opened::Shell(&self.shell),
+            Opens::Command(argv) => Opened::Command { program: argv.program(), args: argv.args() },
+        };
+        match self.mux.made(cwd, opened, tag(terminal.view()), inner) {
+            Ok(key) => {
+                self.made(terminal, key, Some(inner), None);
+                Ok(())
+            },
+            Err(failure) => {
+                if let Err(why) = self.followed(Change::Unopen { terminal }) {
+                    self.troubles.say(format!("terminal {terminal} stays lost: {why}"));
+                }
+                Err(failure.to_string())
+            },
+        }
+    }
+
     fn went(&mut self, worktree: WorktreeId) {
         let went = Change::Went { worktree, at: Used::at(SystemTime::now()) };
         if let Err(why) = self.changed(went) {
@@ -644,8 +698,6 @@ impl Layouts {
         if let Some(why) = self.store.closed(Closing::Worktree(worktree))? {
             self.unwritten(&why);
         }
-        let projects = self.store.projects().expect("projects just changed are kept");
-        left_by_all(projects, worktree);
         self.forget_closed(&[worktree], &terminals);
         Ok(None)
     }
@@ -876,10 +928,7 @@ impl Layouts {
     }
 
     fn open(&mut self, client: ClientId, beside: Beside, argv: &[String]) -> Result<(), String> {
-        let runs = match argv {
-            [] => Runs::Shell,
-            _ => Runs::Command(Line::parse(&quoted(argv)).map_err(|why| format!("open: {why}"))?),
-        };
+        let opens = Opens::of(argv.to_vec()).map_err(|why| format!("open: {why}"))?;
         let Client { worktree, focus, .. } = self.clients[&client];
         let size = self.size_of(client);
         let terminal = self.store.fresh_terminal().map_err(said)?;
@@ -898,22 +947,9 @@ impl Layouts {
             .filter(|cwd| home.below(cwd).is_some());
         let folder = listed_cwd.unwrap_or(home);
         let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
-        let made = Terminal::new(terminal, folder, runs);
+        let made = Terminal::new(terminal, folder, opens.runs());
         self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
-        let opened = match argv.split_first() {
-            None => Opened::Shell(&self.shell),
-            Some((program, rest)) => Opened::Command { program, args: rest },
-        };
-        let key = match self.mux.made(&cwd, opened, tag(terminal.view()), inner) {
-            Ok(key) => key,
-            Err(failure) => {
-                if let Err(why) = self.followed(Change::Unopen { terminal }) {
-                    self.troubles.say(format!("terminal {terminal} stays lost: {why}"));
-                }
-                return Err(failure.to_string());
-            },
-        };
-        self.made(terminal, key, Some(inner), None);
+        self.spawned(terminal, &cwd, &opens, inner)?;
         self.client(client).focus = Some(terminal.view());
         self.last_focus.insert(worktree, terminal.view());
         Ok(())
@@ -1196,8 +1232,6 @@ impl Layouts {
         assert!(projects.holding_view(view).is_none(), "view {view} left its layout");
         if let Some(heir) = heir {
             assert!(projects.holding_view(heir).is_some(), "view {heir} took the room it left");
-        } else {
-            left_by_all(projects, worktree);
         }
         let focused = self.clients.values().any(|client| client.focus == Some(view));
         assert!(!focused, "no client focuses view {view}, which closed");
@@ -1362,35 +1396,35 @@ impl Layouts {
         let projects = self.store.projects().expect("projects just looked at are kept");
         let to = match projects.home(terminal.view(), &spot) {
             Home::Stays => return,
-            Home::In(to) => to,
-            Home::Made { project, spot } => {
-                let unmade = format!("no worktree is made at {}", spot.place().as_str());
-                let add = Change::AddWorktree { project, spot, name: None };
-                match self.store.change(add) {
-                    Ok(Some(Made::Worktree(made))) => made,
-                    Ok(_) => unreachable!("a worktree added is made"),
-                    Err(failed) => {
-                        return self.troubles.say(format!("{stays}: {unmade}: {}", said(failed)));
-                    },
-                }
-            },
+            Home::In(to) => MoveTo::Worktree(to),
+            Home::Made { project, spot } => MoveTo::Made { project, spot },
         };
         if let Err(why) = self.moved(terminal, to) {
             self.troubles.say(format!("{stays}: {why}"));
         }
     }
 
-    fn moved(&mut self, terminal: TerminalViewId, to: WorktreeId) -> Result<(), String> {
+    fn moved(&mut self, terminal: TerminalViewId, to: MoveTo) -> Result<(), String> {
         let projects = self.kept()?;
         let view = terminal.view();
         let (held_in, _) = projects.holding_terminal(view).ok_or("no layout holds it")?;
         let from = held_in.id();
         let heir = held_in.layout().tree().and_then(|tree| tree.heir(view));
-        let (_, target) = projects.find(to).ok_or_else(|| format!("no worktree {to}"))?;
         let follows = |client: &Client| client.worktree == from && client.focus == Some(view);
-        let shown = self.clients.values().filter(|it| it.worktree == to || follows(it));
-        let size = fit(shown, target.layout(), &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
-        self.changed(Change::Move { terminal, to, size })?;
+        let unmade = Layout::default();
+        let (target, bound) = match &to {
+            MoveTo::Worktree(to) => {
+                let (_, target) = projects.find(*to).ok_or_else(|| format!("no worktree {to}"))?;
+                (target.layout(), Some(*to))
+            },
+            MoveTo::Made { .. } => (&unmade, None),
+        };
+        let shown = self.clients.values().filter(|it| Some(it.worktree) == bound || follows(it));
+        let size = fit(shown, target, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let moved = self.store.change(Change::Move { terminal, to, size }).map_err(said)?;
+        let Some(Made::Worktree(to) | Made::Found(to)) = moved else {
+            unreachable!("a move says the worktree it went to, not {moved:?}");
+        };
         let mut followed = false;
         for client in self.clients.values_mut() {
             if follows(client) {
@@ -1443,7 +1477,8 @@ impl Layouts {
     }
 
     fn settle(&mut self) {
-        let Layouts { store, clients, stranded, known, looked, last_focus, mux, troubles, .. } = self;
+        let Layouts { store, clients, stranded, known, looked, last_focus, mux, troubles, .. } =
+            self;
         let Some(projects) = store.projects() else {
             let why = store.unkept().unwrap_or("no projects are kept").to_owned();
             let outs = std::mem::take(clients).into_values().map(|it| it.out);
@@ -1537,7 +1572,8 @@ impl Layouts {
         }
         let held = clients.len() + stranded.len();
         assert!(held <= CLIENTS_MAX, "no more than {CLIENTS_MAX} clients show layouts");
-        assert!(clients.keys().all(|it| !stranded.contains_key(it)), "a client shows or is stranded");
+        let both = clients.keys().any(|it| stranded.contains_key(it));
+        assert!(!both, "a client shows or is stranded");
     }
 }
 
@@ -1641,15 +1677,6 @@ fn is_folder(folder: &Dir) -> Result<bool, String> {
     }
 }
 
-fn left_by_all(projects: &Projects, worktree: WorktreeId) {
-    let Some((project, stays)) = projects.find(worktree) else {
-        return;
-    };
-    let own = matches!(project.holds(), Holds::Folder(_));
-    assert!(own, "worktree {worktree} stays with no view only as its folder's own");
-    assert!(stays.layout().is_empty(), "worktree {worktree} stays empty");
-}
-
 fn told(out: &Out, word: api::ShowResponse) -> bool {
     if out.capacity() <= 1 {
         let slow = format!("the client read too slowly, with {ANSWERS_MAX} answers unread");
@@ -1666,7 +1693,8 @@ fn said(failed: Failed) -> String {
         | Failed::Stale(why)
         | Failed::Refused(why)
         | Failed::Unwritten(why)
-        | Failed::Unclosed(why) => why,
+        | Failed::Unclosed(why)
+        | Failed::Unopened(why) => why,
         Failed::KeptUntold => "it is kept, but the daemon's core has stopped".to_owned(),
     }
 }
@@ -1821,17 +1849,6 @@ fn runs_line(line: &str) -> Runs {
     kept.truncate(end.expect("a string's start is a char's boundary"));
     assert!(kept.len() <= LINE_BYTES_MAX, "a line kept is cut to {LINE_BYTES_MAX} bytes");
     Line::parse(&kept).map_or(Runs::Shell, Runs::Command)
-}
-
-fn quoted(argv: &[String]) -> String {
-    let plain = |word: &str| {
-        let safe = |byte: u8| byte.is_ascii_alphanumeric() || b"-_./=:,+@%".contains(&byte);
-        !word.is_empty() && word.bytes().all(safe)
-    };
-    let words = argv.iter().map(|word| {
-        if plain(word) { word.clone() } else { format!("'{}'", word.replace('\'', r"'\''")) }
-    });
-    words.collect::<Vec<String>>().join(" ")
 }
 
 fn is_shell(argv: &[String], shell: &OsString) -> bool {

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
 use lunetad::api::change_projects_request::{
-    Bring, Change, CloseProject, CloseWorktree, ForgetWorktree, RenameTerminal,
+    Bring, Change, CloseProject, CloseWorktree, RenameTerminal,
 };
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::projects::Held;
@@ -596,7 +596,7 @@ fn a_layout_comes_back_with_its_terminals_when_lunetad_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 8,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 9,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();
@@ -736,13 +736,11 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     let owned = Owned::new();
     let (_, closing, other) = two_in_a_clone(&owned, "clone");
     let mut shown = Shown::new(&owned, closing, 80, 24);
-    let terminals = [shown.open(), shown.open()];
-    let mut beside = Shown::new(&owned, other, 80, 24);
-    let stays = beside.open();
-    let forget = Change::ForgetWorktree(ForgetWorktree { worktree: closing });
-    let refused = asked(&owned.host, forget).unwrap_err();
-    assert_eq!(refused.code(), Code::InvalidArgument);
-    assert!(refused.message().contains("holds 2 views still"), "{}", refused.message());
+    let first = shown.terminals();
+    assert_eq!(first.len(), 1, "a worktree is made with its first terminal");
+    let terminals = [first[0], shown.open()];
+    let beside = Shown::new(&owned, other, 80, 24);
+    let [stays] = beside.terminals()[..] else { panic!("the other holds its first alone") };
 
     let closed = |seen: &[u64]| {
         Change::CloseWorktree(CloseWorktree { worktree: closing, seen: seen.to_vec() })
@@ -797,7 +795,8 @@ fn a_project_closes_with_each_worktree_s_terminals_and_one_with_none_is_forgotte
     let mut first = Shown::new(&owned, one, 80, 24);
     let mut second = Shown::new(&owned, two, 80, 24);
     let mut beside = Shown::new(&owned, stays, 80, 24);
-    let terminals = [first.open(), first.open(), second.open()];
+    let [one_first, two_first] = [&first, &second].map(|it| it.terminals()[0]);
+    let terminals = [one_first, first.open(), two_first];
     let kept_open = beside.open();
     let closed = |project, worktrees: &[u64], seen: &[u64]| {
         let (worktrees, seen) = (worktrees.to_vec(), seen.to_vec());
@@ -1090,7 +1089,7 @@ fn a_terminal_gone_to_another_worktree_moves_there_and_its_client_follows() {
     let made = project(&owned.host, &clone, None);
     let main = worktree(&owned.host, made, &clone.join("main"));
     let mut shown = Shown::new(&owned, main, 80, 24);
-    let stays = shown.open();
+    let [stays] = shown.terminals()[..] else { panic!("a worktree is made with its first") };
     let feat = clone.join("feat").join("src");
     fs::create_dir_all(&feat).unwrap();
     let said = r#"(sleep 0.3; printf '\033]7;file://localhost%s\007' "$PWD") &"#;

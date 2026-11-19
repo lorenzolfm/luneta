@@ -328,12 +328,16 @@ fn a_bare_luneta_in_a_project_shows_the_worktree_of_its_folder() {
     let dir = cloned("project", &["below", "other"]);
     let (below, other) = (dir.path.join("below"), dir.path.join("other"));
     let made = project(&owned.host, Path::new(&real(&dir.path)), None);
-    worktree(&owned.host, made, Path::new(&real(&other)));
+    let in_other = worktree(&owned.host, made, Path::new(&real(&other)));
     let in_below = worktree(&owned.host, made, Path::new(&real(&below)));
     let _window = Window::running(luneta(owned.host.vars(), &below));
-    let shown = eventually("luneta shows the folder's worktree", || shown(&owned, &below));
-    assert_eq!(shown.id, in_below);
-    assert!(self::shown(&owned, &other).is_none(), "the project's other stays empty");
+    let used = |id: u64| {
+        let projects = projects_of(&owned);
+        let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
+        worktrees.find(|it| it.id == id).and_then(|it| it.used_at)
+    };
+    eventually("luneta goes to the folder's worktree", || used(in_below).map(drop));
+    assert!(used(in_other).is_none(), "the project's other is not gone to");
     assert_eq!(projects_of(&owned).len(), 1);
 }
 

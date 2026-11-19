@@ -147,17 +147,12 @@ fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_worktree_beside_but_not_past_the_proj
     worktree_added(dir.path.parent().unwrap(), "docs");
     let second = worktree(&owned.host, project, &docs);
     eventually("the tab bar lists docs", || window.shows("docs").then_some(()));
-    let used = |id: u64| {
-        let projects = projects_of(&owned);
-        let found = projects.iter().flat_map(|it| it.worktrees().unwrap()).find(|it| it.id == id);
-        found.and_then(|it| it.used_at).map(|at| (at.seconds, at.nanos))
-    };
+    let used = |id: u64| used(&owned, id);
     window.send(LEFT);
     thread::sleep(Duration::from_secs(1));
-    assert_eq!(shown(&owned, &docs), None, "Ctrl h stops at the project's first worktree");
+    assert_eq!(used(second), None, "Ctrl h stops at the project's first worktree");
     window.send(RIGHT);
-    eventually("Ctrl l goes to docs, where a shell opens", || shown(&owned, &docs));
-    assert!(used(second) > used(first), "{:?}", projects_of(&owned));
+    eventually("Ctrl l goes to docs", || (used(second) > used(first)).then_some(()));
     window.send(LEFT);
     eventually("Ctrl h goes back", || (used(first) > used(second)).then_some(()));
 }
@@ -176,7 +171,7 @@ fn a_worktree_s_last_pane_closed_takes_luneta_to_the_one_used_before_with_no_not
     let docs = root.join("docs");
     let gone = worktree(&owned.host, project, &docs);
     window.send(RIGHT);
-    eventually("Ctrl l goes to docs, where a shell opens", || shown(&owned, &docs));
+    eventually("Ctrl l goes to docs", || used(&owned, gone).is_some().then_some(()));
     window.send(CLOSE);
     eventually("docs goes with its last pane, and luneta goes back to main", || {
         let projects = projects_of(&owned);
@@ -186,6 +181,13 @@ fn a_worktree_s_last_pane_closed_takes_luneta_to_the_one_used_before_with_no_not
     thread::sleep(Duration::from_secs(1));
     assert!(window.shows(PRINTED), "luneta stays on main: {:?}", window.screen());
     assert!(!window.shows("lunetad's layout"), "luneta leaves docs with no note");
+}
+
+fn used(owned: &Owned, worktree: u64) -> Option<(i64, i32)> {
+    let projects = projects_of(owned);
+    let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
+    let found = worktrees.find(|it| it.id == worktree);
+    found.and_then(|it| it.used_at).map(|at| (at.seconds, at.nanos))
 }
 
 fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {

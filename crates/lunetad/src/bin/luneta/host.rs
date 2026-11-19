@@ -71,7 +71,7 @@ use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::projected::{self, Projected, Route};
 use crate::viewed::{self, Heeded, Viewed};
-use crate::worktrees::{self, Landing, Unmoved};
+use crate::worktrees::{self, Landed, Landing, Unmoved};
 use crate::width::Width;
 use crate::zellij::{self, Close, Closes, Open, SessionName};
 
@@ -82,7 +82,7 @@ pub enum Made {
 
 pub struct Pulled {
     on: Machine,
-    worktree: WorktreeId,
+    worktree: Landed,
     argv: Vec<String>,
 }
 
@@ -545,7 +545,7 @@ fn run_in(
     let lunetad = daemon.clone().unwrap_or_default();
     let (size, greeting, here) = (layout_size(areas.1), greeting(colours), Machine::Local);
     let (start, root) = match start {
-        Some(Landing::Worktree(start)) => (Some(start), None),
+        Some(Landing::Worktree(start)) => (Some(start.worktree()), None),
         Some(Landing::Unopened(root)) => (None, Some(root)),
         None => (None, None),
     };
@@ -1590,8 +1590,9 @@ impl App {
             Asked::Welcome { on, session, pane } => self.welcome(&on, &session, pane),
             Asked::NewWorktree { on, project, folder } => {
                 self.make_worktree(on, folder, Asker::Menu, move |lunetad, on, folder| {
-                    let folder = folder.as_str();
-                    worktrees::add_worktree(lunetad, on, project, folder, None).map(Landing::Worktree)
+                    let at = (project, folder.as_str());
+                    let added = worktrees::add_worktree(lunetad, on, at, None, Vec::new());
+                    added.map(Landing::Worktree)
                 });
                 self.leave();
             },
@@ -1630,7 +1631,8 @@ impl App {
                 self.naming_on(move || {
                     let made = caught(|| {
                         let (session, at) = (session.as_str(), (&holder, &cwd));
-                        let made = worktrees::pulled(&lunetad, &on, session, at, &name)?;
+                        let first = command.clone();
+                        let made = worktrees::pulled(&lunetad, &on, session, at, &name, first)?;
                         Ok(Pulled { on, worktree: made, argv: command })
                     });
                     Made::Pulled { menu, made }
@@ -1802,7 +1804,9 @@ impl App {
                     let made = caught(|| {
                         let named = name.as_deref();
                         let folder = cwd.as_str();
-                        worktrees::add_worktree(&lunetad, &on, id, folder, named).map(Landing::Worktree)
+                        let (at, first) = ((id, folder), argv.clone());
+                        let added = worktrees::add_worktree(&lunetad, &on, at, named, first);
+                        added.map(Landing::Worktree)
                     });
                     let made = made.map_err(|why| format!("menu: no worktree made: {why}"));
                     Made::Worktree { on, made, argv, asker: Asker::Menu }
@@ -1830,8 +1834,9 @@ impl App {
                 let project = project.id();
                 self.make_worktree(on, folder, Asker::Picker, move |lunetad, on, folder| {
                     let named = name.as_ref().map(Name::as_str);
-                    let folder = folder.as_str();
-                    worktrees::add_worktree(lunetad, on, project, folder, named).map(Landing::Worktree)
+                    let at = (project, folder.as_str());
+                    let added = worktrees::add_worktree(lunetad, on, at, named, Vec::new());
+                    added.map(Landing::Worktree)
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
@@ -2277,9 +2282,12 @@ impl App {
         }
     }
 
-    fn go_opening(&mut self, on: &Machine, worktree: WorktreeId, argv: Vec<String>) {
+    fn go_opening(&mut self, on: &Machine, landed: Landed, argv: Vec<String>) {
+        let worktree = landed.worktree();
         self.go_worktree(on, worktree, None);
-        if !argv.is_empty() {
+        if let Landed::Found(_) = landed
+            && !argv.is_empty()
+        {
             self.shown().open_in(worktree, argv);
         }
     }
