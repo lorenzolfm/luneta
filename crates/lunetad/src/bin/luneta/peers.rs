@@ -261,12 +261,19 @@ struct Peer {
     unfocuses: bool,
 }
 
+impl Drop for Peer {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
 impl Peers {
     pub fn heard(&mut self, number: u64, peered: Peered) {
         match peered {
             Peered::Came(stream) => {
                 let peer = Peer { stream, looks: Vec::new(), dictating: false, unfocuses: false };
-                self.peers.insert(number, peer);
+                let other = self.peers.insert(number, peer);
+                assert!(other.is_none(), "another connection has number {number}");
             },
             Peered::Unfocuses => {
                 if let Some(peer) = self.peers.get_mut(&number) {
@@ -541,6 +548,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_line_cut_short_is_never_read() {
+        let (mut holder, window) = UnixStream::pair().expect("a connection");
+        holder.write_all(b"clicked luneta-41\nclicked luneta-4").expect("it writes");
+        holder.shutdown(Shutdown::Both).expect("it ends");
+        let read: Vec<_> = lines(window, FromHolder::parse).collect();
+        assert_eq!(read, [FromHolder::Clicked(key(41))]);
+    }
+
     fn next(heard: &Receiver<Event>) -> (u64, Peered) {
         let until = Instant::now() + Duration::from_secs(5);
         loop {
@@ -726,6 +742,54 @@ mod tests {
         assert_eq!(note(&asker_heard), NothingToRead.to_string());
         let told = other_heard.recv_timeout(Duration::from_millis(300));
         assert!(told.is_err(), "the other luneta is told nothing");
+    }
+
+    fn relay(at: &Path, holder: PathBuf, stopped: Receiver<()>) {
+        let listener = UnixListener::bind(at).expect("it listens");
+        thread::spawn(move || {
+            for mut window in listener.incoming().flatten() {
+                let mut to_holder = UnixStream::connect(&holder).expect("it reaches the holder");
+                let mut from_window = window.try_clone().expect("a clone");
+                let mut up = to_holder.try_clone().expect("a clone");
+                thread::spawn(move || io::copy(&mut from_window, &mut up));
+                let _ = stopped.recv();
+                thread::spawn(move || {
+                    let _ = io::copy(&mut to_holder, &mut window);
+                    let _ = window.shutdown(Shutdown::Both);
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn a_luneta_that_stopped_reading_until_a_line_to_it_failed_is_heard_again() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let socket = folder.path().join(SOCKET);
+        let (events, heard) = mpsc::channel();
+        listen(&socket, events).expect("it listens");
+        let (stop, stopped) = mpsc::channel();
+        let relayed = folder.path().join("relayed.sock");
+        relay(&relayed, socket, stopped);
+        let (clicks, _clicked) = mpsc::channel();
+        let mut reaching = Reaching::to(relayed, true, clicks);
+        reaching.looks(&[key(41)]);
+        reaching.dictating(true);
+
+        let mut peers = Peers::default();
+        let known = |peers: &Peers| {
+            peers.focused() && peers.looks() == [key(41)] && peers.dictating()
+        };
+        hear_until(&heard, &mut peers, known);
+        let Some(Last { number: first, .. }) = peers.last else {
+            panic!("its window has the focus");
+        };
+        let failed = (0..1_000_000).any(|_| !peers.hand(&key(41)));
+        assert!(failed, "a line to the luneta that reads nothing fails");
+        assert!(!known(&peers), "the luneta it failed to tell is forgotten");
+        drop(stop);
+        hear_until(&heard, &mut peers, |peers| {
+            known(peers) && peers.last.is_some_and(|last| last.number != first)
+        });
     }
 
     fn socket_after_waiting(path: &Path, change: impl FnOnce()) -> Result<PathBuf, String> {
