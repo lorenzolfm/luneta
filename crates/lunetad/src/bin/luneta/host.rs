@@ -238,6 +238,43 @@ enum Holder<'a> {
     Box(&'a Over),
 }
 
+impl<'a> Holder<'a> {
+    fn of(focus: &'a Focus, holding: Holding) -> Holder<'a> {
+        if let Some(over) = &focus.over {
+            assert_ne!(holding, Holding::Afloat, "nothing floats under a box");
+            return Holder::Box(over);
+        }
+        match (holding, focus.side) {
+            (holding @ Holding::Afloat, _) | (holding, Side::Sidebar) => Holder::Sidebar(holding),
+            (
+                Holding::Nothing
+                | Holding::Chord
+                | Holding::Search
+                | Holding::Reorder
+                | Holding::Menu
+                | Holding::Press,
+                Side::Session | Side::Collapsed,
+            ) => Holder::Terminal,
+        }
+    }
+
+    fn reported(self) -> Reported {
+        match self {
+            Holder::Terminal | Holder::Box(Over::Dictation(_, Where::Session(_))) => {
+                Reported::Focused
+            },
+            Holder::Sidebar(_)
+            | Holder::Box(
+                Over::Brief(_)
+                | Over::Ask(_)
+                | Over::Issue(_)
+                | Over::Picker(_)
+                | Over::Dictation(..),
+            ) => Reported::Unfocused,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reported {
     Focused,
@@ -346,7 +383,7 @@ struct App {
     held: Held,
     last_press: LastPress,
     focus: Focus,
-    told: Reported,
+    reported: Reported,
     focused: bool,
     burst: Option<Burst>,
     settling: Settling,
@@ -596,7 +633,8 @@ fn run_in(
     let right = start.map(|start| {
         Viewed::start(1, lunetad.clone(), here, start, size, greeting, runs_in, &events)
     });
-    let keys = if right.is_some() { Side::Session } else { Side::Sidebar };
+    let focus = Focus::on(if right.is_some() { Side::Session } else { Side::Sidebar });
+    let reported = Holder::of(&focus, sidebar.holding()).reported();
     let desktop = Desktop::start(&events);
     let focused = true;
     let mut app = App {
@@ -612,8 +650,8 @@ fn run_in(
         width,
         held: Held::Nothing,
         last_press: LastPress::Elsewhere,
-        focus: Focus::on(keys),
-        told: if keys == Side::Session { Reported::Focused } else { Reported::Unfocused },
+        focus,
+        reported,
         focused,
         burst: None,
         settling: Settling::default(),
@@ -1222,8 +1260,8 @@ impl App {
             self.let_go();
             if self.right.as_ref().is_some_and(Viewed::welcomes) {
                 self.sidebar.float_note(WELCOME_MENU.to_owned());
-            } else if let Err(why) = self.sidebar.float_menu() {
-                self.sidebar.float_note(why.to_owned());
+            } else {
+                self.sidebar.float_menu();
             }
             return;
         }
@@ -2385,8 +2423,8 @@ impl App {
             },
             (Opener::LetGo, Holder::Terminal | Holder::Sidebar(Holding::Nothing)) => {
                 self.give(Focus::on(self.focus.side.session()));
-                let taken = matches!(self.holder(), Holder::Terminal);
-                assert!(taken, "the opened view takes the keys");
+                let on_terminal = matches!(self.holder(), Holder::Terminal);
+                assert!(on_terminal, "the opened view takes the keys");
             },
             (
                 Opener::LetGo,
@@ -2404,21 +2442,7 @@ impl App {
     }
 
     fn holder(&self) -> Holder<'_> {
-        if let Some(over) = &self.focus.over {
-            return Holder::Box(over);
-        }
-        match (self.sidebar.holding(), self.focus.side) {
-            (holding @ Holding::Afloat, _) | (holding, Side::Sidebar) => Holder::Sidebar(holding),
-            (
-                Holding::Nothing
-                | Holding::Chord
-                | Holding::Search
-                | Holding::Reorder
-                | Holding::Menu
-                | Holding::Press,
-                Side::Session | Side::Collapsed,
-            ) => Holder::Terminal,
-        }
+        Holder::of(&self.focus, self.sidebar.holding())
     }
 
     fn covered(&self) -> bool {
@@ -2436,30 +2460,14 @@ impl App {
         }
     }
 
-    fn tells(&self) -> Reported {
-        match self.holder() {
-            Holder::Terminal | Holder::Box(Over::Dictation(_, Where::Session(_))) => {
-                Reported::Focused
-            },
-            Holder::Sidebar(_)
-            | Holder::Box(
-                Over::Brief(_)
-                | Over::Ask(_)
-                | Over::Issue(_)
-                | Over::Picker(_)
-                | Over::Dictation(..),
-            ) => Reported::Unfocused,
-        }
-    }
-
     fn tell(&mut self) {
-        let told = self.tells();
-        if told == self.told {
+        let reported = self.holder().reported();
+        if reported == self.reported {
             return;
         }
-        self.told = told;
+        self.reported = reported;
         if self.focused {
-            self.tell_focus(told == Reported::Focused);
+            self.tell_focus(reported == Reported::Focused);
         }
     }
 
@@ -2498,6 +2506,7 @@ impl App {
                 Side::Session | Side::Collapsed,
             ) => Keys::Zellij,
         });
+        assert!(self.sidebar.floating().is_none(), "a focus change closes what floats");
         self.focus = focus;
         self.hold_aloud();
         self.tell();
@@ -2524,7 +2533,7 @@ impl App {
             self.pointer = None;
             self.sidebar.let_go();
         }
-        if self.told == Reported::Focused {
+        if self.reported == Reported::Focused {
             self.tell_focus(focused);
         }
     }

@@ -1181,7 +1181,7 @@ pub enum Held {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Placed {
-    Sidebar(Holds),
+    Sidebar(Pause),
     Afloat,
 }
 
@@ -1237,7 +1237,7 @@ enum Mode {
     Pending(Pending),
     Search(Search),
     Reorder(Movable),
-    Menu { menu: Menu, holds: Holds },
+    Menu { menu: Menu, pause: Pause },
     Afloat { menu: Menu, said: Option<String> },
     AfloatNote(String),
 }
@@ -1331,19 +1331,19 @@ enum Came {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Holds {
+enum Pause {
     #[default]
     Nothing,
     Until(SystemTime),
     Quiet,
 }
 
-impl Holds {
-    fn pause(self, menu: &Menu, now: SystemTime) -> bool {
+impl Pause {
+    fn pauses(self, menu: &Menu, now: SystemTime) -> bool {
         match self {
-            Holds::Nothing => false,
-            Holds::Until(shows) => now < shows,
-            Holds::Quiet => menu.quiet(),
+            Pause::Nothing => false,
+            Pause::Until(shows) => now < shows,
+            Pause::Quiet => menu.quiet(),
         }
     }
 }
@@ -1800,6 +1800,17 @@ impl Sidebar {
         }
     }
 
+    fn drop_menu_saying(&mut self, menu: u64, notice: String) {
+        let open = self.open().is_some_and(|open| open.number() == menu);
+        let taken = if open {
+            let (_, placed) = self.take_open().expect("the menu is open");
+            Taken::Open(placed)
+        } else {
+            Taken::Kept
+        };
+        self.say_of(taken, notice);
+    }
+
     fn open(&self) -> Option<&Menu> {
         match &self.mode {
             Mode::Menu { menu, .. } | Mode::Afloat { menu, .. } => Some(menu),
@@ -1824,7 +1835,7 @@ impl Sidebar {
 
     fn take_open(&mut self) -> Option<(Menu, Placed)> {
         match std::mem::take(&mut self.mode) {
-            Mode::Menu { menu, holds } => Some((menu, Placed::Sidebar(holds))),
+            Mode::Menu { menu, pause } => Some((menu, Placed::Sidebar(pause))),
             Mode::Afloat { menu, said } => {
                 if let Some(said) = said {
                     self.mode = Mode::AfloatNote(said);
@@ -1840,7 +1851,7 @@ impl Sidebar {
 
     fn put(&mut self, menu: Menu, placed: Placed) {
         self.mode = match (placed, std::mem::take(&mut self.mode)) {
-            (Placed::Sidebar(holds), Mode::Idle) => Mode::Menu { menu, holds },
+            (Placed::Sidebar(pause), Mode::Idle) => Mode::Menu { menu, pause },
             (Placed::Afloat, Mode::Idle) => Mode::Afloat { menu, said: None },
             (Placed::Afloat, Mode::AfloatNote(said)) => {
                 Mode::Afloat { menu, said: Some(said) }
@@ -2302,7 +2313,7 @@ impl Sidebar {
             Mode::AfloatNote(note) => *note = notice,
             Mode::Idle => self.mode = Mode::AfloatNote(notice),
             Mode::Pending(_) | Mode::Search(_) | Mode::Reorder(_) | Mode::Menu { .. } => {
-                self.notice = Some(notice);
+                unreachable!("an afloat menu's words find the sidebar's keys free")
             },
         }
     }
@@ -2833,8 +2844,8 @@ impl Sidebar {
         self.notice = None;
         self.copied = None;
         self.filed = None;
-        let held = match &mut self.mode {
-            Mode::Menu { menu, holds } => std::mem::take(holds).pause(menu, now),
+        let paused = match &mut self.mode {
+            Mode::Menu { menu, pause } => std::mem::take(pause).pauses(menu, now),
             Mode::Idle
             | Mode::Pending(_)
             | Mode::Search(_)
@@ -2861,11 +2872,11 @@ impl Sidebar {
         }
         if let Some((menu, placed)) = self.take_open() {
             let asked = self.menu_did(placed, menu.key(key));
-            if held
-                && let Mode::Menu { menu, holds } = &mut self.mode
+            if paused
+                && let Mode::Menu { menu, pause } = &mut self.mode
                 && menu.quiet()
             {
-                *holds = Holds::Quiet;
+                *pause = Pause::Quiet;
             }
             return asked;
         }
@@ -2933,8 +2944,8 @@ impl Sidebar {
                 Some(Top::Shift(_)) => {},
                 None => {
                     let asked = self.open_menu(Some(c));
-                    if let Mode::Menu { holds, .. } = &mut self.mode {
-                        *holds = Holds::Until(shows);
+                    if let Mode::Menu { pause, .. } = &mut self.mode {
+                        *pause = Pause::Until(shows);
                     }
                     return asked;
                 },
@@ -2947,11 +2958,11 @@ impl Sidebar {
     pub fn due(&self, now: SystemTime) -> Option<Duration> {
         let shows = match &self.mode {
             Mode::Pending(pending) => pending.shows(),
-            Mode::Menu { holds: Holds::Until(shows), .. } => Some(*shows),
+            Mode::Menu { pause: Pause::Until(shows), .. } => Some(*shows),
             Mode::Idle
             | Mode::Search(_)
             | Mode::Reorder(_)
-            | Mode::Menu { holds: Holds::Nothing | Holds::Quiet, .. }
+            | Mode::Menu { pause: Pause::Nothing | Pause::Quiet, .. }
             | Mode::Afloat { .. }
             | Mode::AfloatNote(_) => None,
         };
@@ -3263,7 +3274,7 @@ impl Sidebar {
         let Some(did) = Menu::open(self.menus, target, key, agent) else {
             return Asked::Nothing;
         };
-        self.menu_did(Placed::Sidebar(Holds::Nothing), did)
+        self.menu_did(Placed::Sidebar(Pause::Nothing), did)
     }
 
     pub fn agent(&self) -> agents::Harness {
@@ -3385,16 +3396,23 @@ impl Sidebar {
         }
     }
 
-    pub fn float_menu(&mut self) -> Result<(), &'static str> {
+    pub fn float_menu(&mut self) {
         self.notice = None;
-        let place = Place::Pane(self.here_place().inspect_err(|why| log::say(why))?);
+        let place = match self.here_place() {
+            Ok(place) => Place::Pane(place),
+            Err(why) => {
+                log::say(why);
+                return self.float_note(why.to_owned());
+            },
+        };
         self.menus += 1;
-        let target = self.target_at(self.on(), place).ok_or(NO_HERE_PANE)?;
+        let Some(target) = self.target_at(self.on(), place) else {
+            return self.float_note(NO_HERE_PANE.to_owned());
+        };
         let agent = self.agent_for(&target);
         self.end_mode();
         self.let_go();
         self.put(Menu::new(self.menus, target, agent), Placed::Afloat);
-        Ok(())
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -3430,7 +3448,7 @@ impl Sidebar {
             Placed::Afloat
         } else {
             self.end_mode();
-            Placed::Sidebar(Holds::Nothing)
+            Placed::Sidebar(Pause::Nothing)
         };
         self.menus += 1;
         self.put(Menu::pull(self.menus, target, work, self.agent.harness()), placed);
@@ -3454,7 +3472,7 @@ impl Sidebar {
             Bottom::Search(_) => Some(Keyed::Search),
             Bottom::Menu(_) | Bottom::Nothing => None,
         };
-        if !self.lit() || there != Some(keyed) {
+        if !self.has_keys() || there != Some(keyed) {
             return Asked::Nothing;
         }
         self.key_from(key, now, Came::Read)
@@ -3475,7 +3493,7 @@ impl Sidebar {
         }
     }
 
-    fn lit(&self) -> bool {
+    fn has_keys(&self) -> bool {
         let afloat = matches!(self.mode, Mode::Afloat { .. } | Mode::AfloatNote(_));
         self.keys == Keys::Sidebar && !afloat
     }
@@ -3562,8 +3580,7 @@ impl Sidebar {
                 let known = known.find(|it| it.project.id() == project);
                 if let Some(known) = known.filter(|it| it.unopened == Unopened::Folder) {
                     let refused = projects::folder_has_one_worktree(known.listed().name());
-                    self.say(format!("menu: {refused}"));
-                    self.drop_menu(number);
+                    self.drop_menu_saying(number, format!("menu: {refused}"));
                 }
                 Asked::Nothing
             },
@@ -3582,8 +3599,7 @@ impl Sidebar {
             },
             Wants::Open { session, opens: Opens::Tab { .. }, .. } => {
                 let refused = format!("{} is one of zellij's sessions", session.name());
-                self.say(format!("menu: {refused}: {}", menu::OWN_ONLY));
-                self.drop_menu(number);
+                self.drop_menu_saying(number, format!("menu: {refused}: {}", menu::OWN_ONLY));
                 Asked::Nothing
             },
             Wants::Pull(work, wanted) => match self.worked(&on) {
@@ -4426,12 +4442,16 @@ impl Sidebar {
     }
 
     fn framing(&self) -> Style {
-        if self.lit() { Style::new().fg(ACCENT) } else { Style::new().add_modifier(Modifier::DIM) }
+        if self.has_keys() {
+            Style::new().fg(ACCENT)
+        } else {
+            Style::new().add_modifier(Modifier::DIM)
+        }
     }
 
     fn title(&self, width: usize) -> Line<'static> {
         let rule = self.framing();
-        let name = if self.lit() { rule.add_modifier(Modifier::BOLD) } else { rule };
+        let name = if self.has_keys() { rule.add_modifier(Modifier::BOLD) } else { rule };
         let word = format!(" {} ", menu::TITLE);
         let rest = width.saturating_sub(RULE.width() + word.width());
         Line::from(vec![
@@ -4600,7 +4620,7 @@ impl Sidebar {
             lines.push(menu::rule(Action::Search.name(), &counted, width));
         }
         lines.extend((room >= 1).then(|| query(term, width)));
-        if room < 3 || !self.lit() {
+        if room < 3 || !self.has_keys() {
             return (lines, Spots::default());
         }
         let (keys, spots) = menu::keyed(width, &[(Hint::Enter, "Go"), (Hint::Esc, "Close")]);
@@ -4610,7 +4630,7 @@ impl Sidebar {
     }
 
     fn unreached(&self) -> Option<String> {
-        if !self.lit() {
+        if !self.has_keys() {
             return None;
         }
         let machine = self.cursor.as_ref()?.machine();
@@ -4624,10 +4644,10 @@ impl Sidebar {
 
     fn bottom(&self, now: SystemTime) -> Bottom<'_> {
         match &self.mode {
-            Mode::Menu { menu, holds } if holds.pause(menu, now) => Bottom::Nothing,
+            Mode::Menu { menu, pause } if pause.pauses(menu, now) => Bottom::Nothing,
             Mode::Menu { menu, .. } => Bottom::Menu(menu),
             Mode::Search(search) => Bottom::Search(search),
-            _ if !self.lit() => Bottom::Nothing,
+            _ if !self.has_keys() => Bottom::Nothing,
             Mode::Pending(Pending::Legend) => Bottom::Legend,
             Mode::Pending(Pending::AllKeys(all)) => Bottom::AllKeys(all),
             Mode::Pending(Pending::Group { key, shows }) if *shows <= now => Bottom::Group(*key),
@@ -5780,6 +5800,11 @@ mod tests {
             Some(Floating::Menu(menu)) => Some(menu),
             Some(Floating::Note(_)) | None => None,
         }
+    }
+
+    fn float_a_menu(sidebar: &mut Sidebar) {
+        sidebar.float_menu();
+        assert!(floating_menu(sidebar).is_some(), "the menu floats");
     }
 
     fn sit(sidebar: &mut Sidebar, place: &Place) {
@@ -8772,7 +8797,7 @@ mod tests {
 
         let mut sidebar = waiting();
         sit(&mut sidebar, &own_pane_of("older", 1, 1));
-        assert_eq!(sidebar.float_menu(), Ok(()));
+        float_a_menu(&mut sidebar);
         assert_eq!(sidebar.open().map(Menu::number), Some(2));
         assert!(sidebar.working.contains_key(&1));
     }
@@ -8886,7 +8911,7 @@ mod tests {
             sidebar.focus(Keys::Sidebar);
             if floats {
                 sit(&mut sidebar, &pane_of("older", 10, 1));
-                assert_eq!(sidebar.float_menu(), Ok(()));
+                float_a_menu(&mut sidebar);
             }
             sidebar.paste(page);
             let number = sidebar.open().map_or(0, Menu::number);
@@ -9092,8 +9117,9 @@ mod tests {
         sidebar.hear(host);
         let made = OwnMade::from_nanos(0);
         sidebar.attaching(Machine::Local, OwnKey { id: OwnId::new(1).unwrap(), made });
-        assert_eq!(sidebar.float_menu(), Err(NO_HERE_PANE));
-        assert!(sidebar.floating().is_none());
+        sidebar.float_menu();
+        assert!(matches!(sidebar.floating(), Some(Floating::Note(NO_HERE_PANE))));
+        sidebar.close_note();
         sit(&mut sidebar, &own_pane_of("older", 1, 1));
 
         sidebar.focus(Keys::Sidebar);
@@ -9110,7 +9136,7 @@ mod tests {
         sidebar.focus(Keys::Lent);
         let lent = standing(&mut sidebar);
         sidebar.focus(Keys::Sidebar);
-        assert_eq!(sidebar.float_menu(), Ok(()));
+        float_a_menu(&mut sidebar);
         assert_eq!(standing(&mut sidebar), lent);
         let target = floating_menu(&sidebar).map(Menu::target).cloned();
         assert_eq!(target, Some(Target::Pane(Machine::Local, PaneRow {
@@ -9132,7 +9158,7 @@ mod tests {
         assert!(sidebar.floating().is_none());
         sidebar.focus(Keys::Zellij);
 
-        assert_eq!(sidebar.float_menu(), Ok(()));
+        float_a_menu(&mut sidebar);
         type_in(&mut sidebar, "c");
         let command = ["claude", "/thermo-nuclear-review"];
         let command = command.map(str::to_owned).to_vec();
@@ -9199,13 +9225,13 @@ mod tests {
             Some(Floating::Menu(_)) | None => None,
         };
 
-        assert_eq!(sidebar.float_menu(), Ok(()));
+        float_a_menu(&mut sidebar);
         type_in(&mut sidebar, "nv");
         assert_eq!((floated(&sidebar).as_deref(), sidebar.notice.as_deref()), (Some(wrong), None));
         sidebar.close_note();
         assert!(sidebar.floating().is_none());
 
-        assert_eq!(sidebar.float_menu(), Ok(()));
+        float_a_menu(&mut sidebar);
         type_in(&mut sidebar, "nv");
         sidebar.focus(Keys::Zellij);
         assert_eq!((floated(&sidebar).as_deref(), sidebar.notice.as_deref()), (None, Some(wrong)));
@@ -9213,7 +9239,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "nv");
         assert_eq!((floated(&sidebar).as_deref(), sidebar.notice.as_deref()), (None, Some(wrong)));
-        assert_eq!(sidebar.float_menu(), Ok(()));
+        float_a_menu(&mut sidebar);
         assert!(sidebar.notice.is_none());
     }
 
@@ -9224,13 +9250,13 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "/old");
         assert_eq!(sidebar.holding(), Holding::Search);
-        assert_eq!(sidebar.float_menu(), Ok(()));
+        float_a_menu(&mut sidebar);
         assert_eq!(sidebar.holding(), Holding::Afloat);
         assert!(sidebar.search().is_none(), "the menu floats where the search was");
         sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000));
         assert!(sidebar.floating().is_none());
         assert_eq!(sidebar.holding(), Holding::Nothing, "Esc gives the keys back");
-        assert_eq!(sidebar.float_menu(), Ok(()));
+        float_a_menu(&mut sidebar);
         sidebar.focus(Keys::Lent);
         assert!(sidebar.floating().is_none(), "a box over the sidebar closes the menu");
         assert_eq!(sidebar.holding(), Holding::Nothing);
@@ -10621,6 +10647,23 @@ mod tests {
         assert!(sidebar.open().is_none(), "no box asks for a branch");
         let said = sidebar.notice.as_deref();
         assert_eq!(said, Some("menu: notes is a folder, and its own is its one worktree"));
+    }
+
+    #[test]
+    fn n_w_in_a_floating_menu_over_a_folder_floats_its_note() {
+        let mut sidebar = fresh();
+        let own = worktree_of(31, "notes", "/w/notes", &[1]);
+        let mut notes = a_project(8, "notes", Vec::new());
+        notes.dir = "/w/notes".to_owned();
+        notes.holds = Some(api::project::Holds::Folder(own));
+        sidebar.heard(Host { projects: Some(kept(vec![notes])), ..host(Vec::new(), Vec::new()) });
+        sit(&mut sidebar, &own_pane_of("notes", 8, 1));
+        float_a_menu(&mut sidebar);
+        type_in(&mut sidebar, "n");
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Nothing);
+        let said = "menu: notes is a folder, and its own is its one worktree";
+        assert!(matches!(sidebar.floating(), Some(Floating::Note(note)) if note == said));
+        assert_eq!(sidebar.notice, None);
     }
 
     #[test]
