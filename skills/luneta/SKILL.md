@@ -1,6 +1,6 @@
 ---
 name: luneta
-description: Drive luneta and zellij for the user with the `luneta` CLI - start a worktree in a folder, a branch, an issue or a PR, open a session, a tab or a pane, start coding agents (Claude Code or pi) on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, delete the worktrees of merged pull requests, and reset luneta on every machine. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, clean up merged worktrees, or reset luneta and start from scratch, and `luneta` is on the PATH.
+description: Drive luneta and zellij for the user with the `luneta` CLI - start a worktree in a folder, a branch, an issue or a PR, open a session, a tab or a pane, start coding agents (Claude Code or pi) on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, delete the worktrees of merged pull requests, rebase a worktree's branch onto upstream, and reset luneta on every machine. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, clean up merged worktrees, rebase a branch onto main, or reset luneta and start from scratch, and `luneta` is on the PATH.
 ---
 
 # Drive luneta
@@ -59,6 +59,7 @@ luneta turn pane <session>:<pane>
 luneta turn tab <session>:<pane> --into <session>:<pane>
 luneta close <session>[:<pane>]... [--yes <plan>]
 luneta prune [--repo <dir>] [--yes <plan>]
+luneta rebase [<dir>]
 luneta terminate [--yes <plan>]
 luneta start <folder|branch|'#issue'|issue or PR link>
 ```
@@ -89,6 +90,8 @@ luneta start <folder|branch|'#issue'|issue or PR link>
   there to tell the user.
 - `prune` deletes the worktrees of a repository's merged pull requests: see
   [Merged worktrees](#merged-worktrees).
+- `rebase` rebases the branch of a worktree onto upstream: see
+  [Rebase onto upstream](#rebase-onto-upstream).
 - `terminate` ends luneta on every machine and forgets every project: see
   [Reset luneta](#reset-luneta).
 - `start` starts a worktree of one of luneta's projects: see
@@ -310,7 +313,29 @@ files git ignores go with a worktree, build output included.
 
 Never run it unless the user asked.
 
-## Reset luneta
+## Rebase onto upstream
+
+When the user asks to rebase a branch onto main, or to bring it up to date,
+run `luneta rebase`, with the worktree's directory for one other than the one
+you run in. It fetches the default branch of the repository's `upstream`,
+`github` or `origin` remote (else its own `main` or `master`), and rebases the
+worktree's branch onto it. It pushes nothing: push only when the user asks.
+
+- It exits 0 once the branch is on top of it, and prints a line of where it
+  is now.
+- It exits 1 and rebases nothing when the worktree has changes not committed,
+  is on no branch, or is already in the middle of a rebase, a merge or a
+  cherry-pick. Tell the user why: don't commit or stash for them.
+- It exits 4 when the rebase stopped on conflicts. The rebase is left stopped,
+  and an agent is started on it in a new view of the worktree, in the harness
+  the user picked last. Don't resolve the conflicts yourself, and don't run
+  `git rebase --abort`: that agent has them. stderr says if no agent started;
+  then tell the user the rebase waits for them.
+- It also exits 4, with `no telling how the rebase ended` on stderr, when git
+  took too long and was stopped, or what it left could not be read. The
+  rebase may be part of the way through: don't resolve or abort anything, and
+  tell the user to look at `git status` in the worktree.
+
 
 When the user asks to reset luneta, or start it from scratch, run `luneta
 terminate`. It ends nothing, prints what would end on each machine, and exits 3.

@@ -12,7 +12,7 @@ use lunetad::Directory;
 
 use crate::agents::{self, Kept};
 use crate::machines::Machine;
-use crate::worktrees::{self, Landed, Landing, Went};
+use crate::worktrees::{self, Landed, Landing, Opening, Went};
 
 pub const UNFINISHED: u8 = 4;
 
@@ -204,9 +204,11 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
         (Kind::Issue, Landed::Made(_), Some(off)) => {
             Left::Noted(format!("{} is {off}, so no agent starts there", folder.display()))
         },
-        (Kind::Issue, Landed::Found(_), None) => match worktrees::opened(path, worktree, agent) {
-            Ok(()) => Left::Done,
-            Err(why) => Left::Unfinished(format!("no agent started on {}: {why}", link.tab())),
+        (Kind::Issue, Landed::Found(_), None) => {
+            match worktrees::opened(path, worktree, agent, Opening::IfEmpty) {
+                Ok(()) => Left::Done,
+                Err(why) => Left::Unfinished(format!("no agent started on {}: {why}", link.tab())),
+            }
         },
     };
     Ok(Started::Worktree { worktree, folder, left })

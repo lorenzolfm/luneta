@@ -16,6 +16,7 @@ use lunetad::issues::{self, Filed, Filing, Remote, Unfiled};
 use lunetad::links::{Pasted, Ready, Unready};
 use lunetad::printed::Kept;
 use lunetad::prunes::{self, Deleting, Plan, Pruned};
+use lunetad::rebases::{self, Rebased, Unrebased};
 use lunetad::skills::{Name, Runs, Skill};
 use lunetad::transcripts::{Reading, SessionId};
 use lunetad::zoxide::Dir;
@@ -185,6 +186,16 @@ impl Away {
             timeout(patience, daemon.prune(request)).await
         })?;
         prunes::pruned_of(answer)
+    }
+
+    pub fn rebase(&mut self, dir: &Directory, branch: &str) -> Result<Rebased, Unrebased> {
+        let request = rebases::asked(Some(self.on()), dir, Some(branch));
+        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let answer = self.answer_or_code(rebases::REBASING, async move {
+            timeout(patience, daemon.rebase(request)).await
+        });
+        let answer = answer.map_err(|(why, code)| Unrebased::of(why, code))?;
+        Rebased::of_api(answer).map_err(|why| Unrebased::InDoubt(format!("{}: {why}", self.on)))
     }
 
     fn answer_of<T>(

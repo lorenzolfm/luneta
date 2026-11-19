@@ -26,6 +26,7 @@ mod process;
 pub mod program;
 pub mod projects;
 pub mod prunes;
+pub mod rebases;
 mod remote;
 pub mod sayings;
 pub mod screens;

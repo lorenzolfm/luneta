@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -26,7 +27,7 @@ pub(super) fn to_head(dir: &str, link: &Link, remote: Option<&str>) -> Result<()
     };
     let Viewed { base_ref_name: base, head_ref_oid: head } = viewed(link)?;
     if let Some(remote) = remote {
-        fetch(dir, &remote, &base)?;
+        fetch(dir, &remote, &base, MAKING)?;
     }
     if here(dir)? == head {
         return Ok(());
@@ -64,12 +65,12 @@ fn viewed(link: &Link) -> Result<Viewed, String> {
     serde_json::from_slice(&said).map_err(|error| format!("gh pr view does not read: {error}"))
 }
 
-fn fetch(dir: &str, remote: &str, base: &str) -> Result<(), String> {
+pub(crate) fn fetch(dir: &str, remote: &str, base: &str, limit: Duration) -> Result<(), String> {
     let base = format!("+refs/heads/{base}:refs/remotes/{remote}/{base}");
     let args = ["-C", dir, "fetch", "--no-tags", "--", remote, &base];
     let mut git = Command::new("git");
     git::local(trusting_no_tree(&mut git).args(args));
-    let ran = program::run_alone(&mut git, MAKING)
+    let ran = program::run_alone(&mut git, limit)
         .map_err(|error| format!("git fetch could not be run: {error}"))?;
     ran.answer().map(drop).map_err(|why| format!("git fetch: {why}"))
 }

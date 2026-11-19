@@ -29,6 +29,7 @@ use crate::bridge;
 use crate::daemon::{self, Unreached};
 use crate::machines::{self, Added};
 use crate::prune;
+use crate::rebase;
 use crate::start;
 use crate::terminate;
 
@@ -119,6 +120,18 @@ pub enum Command {
         yes: Option<Agreed>,
     },
     #[command(
+        about = "Rebase the branch of a worktree onto upstream, as the menu's `g r` does: onto \
+                 the default branch of the repository's `upstream`, `github` or `origin` \
+                 remote, fetched first, or else its own main or master. It pushes nothing. A \
+                 rebase that stops on conflicts is left stopped, an agent is started on them in \
+                 a view of the worktree, and it exits 4, as it does when it cannot tell how \
+                 the rebase ended. Where it rebased nothing, it exits 1"
+    )]
+    Rebase {
+        #[arg(value_name = "DIR", help = "A directory of the worktree. Without one, this one")]
+        dir: Option<PathBuf>,
+    },
+    #[command(
         about = "Reset luneta: end every luneta, lunetad and luneta-mux, on this machine and on \
                  each machine of luneta's hosts file, and the shells and agents in luneta-mux's \
                  terminals with them, and forget every project and worktree, so that the next \
@@ -194,6 +207,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Bridge => bridge::run(folder),
         Command::Ssh { destination } => ssh(destination, folder),
         Command::Prune { repo, yes } => prune::run(repo.as_deref(), *yes, folder),
+        Command::Rebase { dir } => rebase::run(dir.as_deref(), folder),
         Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
         Command::Terminate { yes, here, ending } => terminate::run(*yes, *here, *ending, folder),
         Command::Start { what } => start::run(what, folder),

@@ -39,7 +39,8 @@ use crate::api::{
     KeepImageResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
     ListDirsRequest, ListDirsResponse, ListSkillsRequest, ListSkillsResponse,
     MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest, PasteResponse, PrintedFile,
-    PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, SayRequest, ShowRequest,
+    PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, RebaseRequest, RebaseResponse,
+    SayRequest, ShowRequest,
     ShowResponse, TranscriptEndsRequest, TranscriptEndsResponse, FramesRequest,
 };
 use crate::asks::{Asked, Step};
@@ -50,6 +51,7 @@ use crate::layouts::{self, NotCloned};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
 use crate::prunes::{self, Occupied};
+use crate::rebases;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::issues::{self, Filing, Remote, Unfiled};
@@ -600,6 +602,27 @@ impl Daemon for Host {
             let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied, here.as_deref())
                 .map_err(Status::failed_precondition)?;
             Ok(PruneResponse::from(&pruned))
+        });
+        Ok(Response::new(Box::pin(answer)))
+    }
+
+    type RebaseStream = Pin<Box<dyn Stream<Item = Result<RebaseResponse, Status>> + Send>>;
+
+    async fn rebase(
+        &self,
+        request: Request<RebaseRequest>,
+    ) -> Result<Response<Self::RebaseStream>, Status> {
+        let RebaseRequest { on, dir, branch } = request.into_inner();
+        let dir = directory("dir", dir)?;
+        if let Some(mut daemon) = self.bridged(on).await? {
+            let asked = rebases::asked(None, &dir, branch.as_deref());
+            let answer = daemon.rebase(asked).await?.into_inner();
+            return Ok(Response::new(Box::pin(answer)));
+        }
+        let answer = late(move || {
+            let rebased = rebases::rebase(&dir, branch.as_deref());
+            let rebased = rebased.map_err(rebases::Unrebased::status)?;
+            Ok(rebased.to_api())
         });
         Ok(Response::new(Box::pin(answer)))
     }
