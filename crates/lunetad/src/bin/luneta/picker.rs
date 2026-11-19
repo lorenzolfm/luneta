@@ -61,9 +61,21 @@ const MIN_ACTION: usize = 12;
 
 const UNOPENED: &str = "not open";
 
+const BORDER_LINES: u16 = 2;
+
+const HELP_LINES: u16 = 1;
+
 const PALETTE_ROWS: u16 = 8;
 
-const PALETTE_WIDTHS: (u16, u16) = (48, 80);
+const PALETTE_HEIGHT: u16 = BORDER_LINES + PALETTE_ROWS + BORDER_LINES + INPUT_HEIGHT + HELP_LINES;
+
+const PALETTE_WIDTH_MIN: u16 = 48;
+
+const PALETTE_WIDTH_MAX: u16 = 80;
+
+const _: () = assert!(PALETTE_WIDTH_MIN <= PALETTE_WIDTH_MAX);
+
+const _: () = assert!(PALETTE_ROWS + BORDER_LINES >= MIN_RESULTS);
 
 #[derive(Debug, Default)]
 pub struct Listing {
@@ -99,6 +111,14 @@ pub enum Unopened {
 }
 
 impl Unopened {
+    #[must_use]
+    pub fn refuses_new_worktree(&self, project: &ProjectRow) -> Option<String> {
+        match self {
+            Unopened::Folder => Some(projects::folder_has_one_worktree(project.listed().name())),
+            Unopened::Unlisted(_) | Unopened::Listed(_) => None,
+        }
+    }
+
     #[must_use]
     pub fn folders(&self) -> &[projects::Dir] {
         match self {
@@ -183,6 +203,17 @@ pub enum List {
 }
 
 impl List {
+    #[must_use]
+    pub fn opened_by(chord: actions::Chord) -> Option<List> {
+        match chord {
+            actions::PALETTE => Some(List::Actions),
+            actions::WORKTREES => Some(List::Worktrees),
+            actions::AGENTS => Some(List::Agents),
+            actions::DIRS => Some(List::Dirs),
+            _ => None,
+        }
+    }
+
     fn next(self) -> List {
         match self {
             List::Actions => List::Worktrees,
@@ -843,12 +874,17 @@ impl Picker {
     }
 
     fn compact(over: Rect) -> Rect {
-        let (fewest, most) = PALETTE_WIDTHS;
-        let width = (over.width * 3 / 5).clamp(over.width.min(fewest), over.width.min(most));
-        let height = (2 + PALETTE_ROWS + 2 + INPUT_HEIGHT + 1).min(over.height);
+        let three_fifths = u16::try_from(u32::from(over.width) * 3 / 5);
+        let three_fifths = three_fifths.expect("three fifths of a width fits its type");
+        let (fewest, most) = (over.width.min(PALETTE_WIDTH_MIN), over.width.min(PALETTE_WIDTH_MAX));
+        let width = three_fifths.clamp(fewest, most);
+        let height = PALETTE_HEIGHT.min(over.height);
         let x = over.x + (over.width - width) / 2;
         let y = (over.y + over.height / 5).min(over.bottom() - height);
-        Rect::new(x, y, width, height)
+        let area = Rect::new(x, y, width, height);
+        assert!(area.right() <= over.right(), "the palette fits the width it is drawn over");
+        assert!(area.bottom() <= over.bottom(), "the palette fits the height it is drawn over");
+        area
     }
 
     pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) -> Drawn {
@@ -894,7 +930,7 @@ impl Picker {
     fn draw_chain(&self, buffer: &mut Buffer, layout: &Layout, chain: &Chain) -> Spots<Pick> {
         if let Some(full) = layout.full {
             let inner = usize::from(full.width.saturating_sub(2));
-            framed(buffer, full, chain.title(), &chain.right(), menu::chain_said(chain, inner));
+            framed(buffer, full, chain.title(), &chain.right(), menu::chain_says(chain, inner));
         }
         let width = usize::from(layout.input.width.saturating_sub(2));
         let prompt = typed(chain.typed(), Ok(chain.enter().to_owned()), width);
@@ -1017,13 +1053,10 @@ impl Picker {
     }
 
     fn act(&mut self, action: Action) -> Picked {
-        let list = match action {
-            Action::Worktrees => Some(List::Worktrees),
-            Action::Agents => Some(List::Agents),
-            Action::Dirs => Some(List::Dirs),
-            _ => None,
-        };
-        if let Some(list) = list {
+        assert!(self.offers(action), "Enter runs only an action the palette lists");
+        if let actions::Key::Chord(chord) = action.key()
+            && let Some(list) = List::opened_by(chord)
+        {
             self.list = list;
             return Picked::Nothing;
         }
@@ -1045,19 +1078,21 @@ impl Picker {
         }
         let target = &self.palette.target;
         let housed = self.housed(target.machine(), &target.project()?)?;
-        let name = housed.project.listed().name();
-        (housed.unopened == Unopened::Folder).then(|| projects::folder_has_one_worktree(name))
+        housed.unopened.refuses_new_worktree(&housed.project)
     }
 
     fn offers(&self, action: Action) -> bool {
         let Palette { target, origin } = &self.palette;
-        action.in_palette()
-            && match action.key() {
-                actions::Key::Menu(_) | actions::Key::RowAndMenu(_) => target.fits(action),
-                actions::Key::Row(_) => *origin == Origin::Sidebar && action.fits(target.noun()),
-                actions::Key::Chord(_) => true,
-                actions::Key::Pasted(_) => false,
-            }
+        if action.in_palette() {
+            return match (action.key(), origin) {
+                (actions::Key::Menu(_) | actions::Key::RowAndMenu(_), _) => target.fits(action),
+                (actions::Key::Row(_), Origin::Sidebar) => action.fits(target.noun()),
+                (actions::Key::Row(_), Origin::Views) => false,
+                (actions::Key::Chord(_), _) => true,
+                (actions::Key::Pasted(_), _) => unreachable!("the palette leaves pasted keys out"),
+            };
+        }
+        false
     }
 
     fn action_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
@@ -1072,7 +1107,7 @@ impl Picker {
         let mut found: Vec<(Tier, Fit, Row)> =
             fitting.filter_map(|action| found_action(finder, &term, action)).collect();
         found.sort_by_key(|(tier, fit, _)| (*tier, Reverse(*fit)));
-        let ahead = found.iter().take_while(|(tier, ..)| *tier != Tier::Fuzzy).count();
+        let ahead = found.iter().take_while(|(tier, ..)| *tier < Tier::Fuzzy).count();
         let mut found = found.into_iter().map(|(.., row)| row);
         let mut rows: Vec<Row> = found.by_ref().take(ahead).collect();
         rows.extend(worktrees);
@@ -1945,7 +1980,8 @@ fn titled(action: Action) -> String {
 fn tier(finder: &Finder<'_>, term: &str, text: &str) -> Option<(Tier, Fit, Vec<usize>)> {
     let (fit, hits) = finder.find(text, &[])?;
     let lower = text.to_lowercase();
-    let starts = lower.split([' ', '/', '-']).any(|word| word.starts_with(term));
+    let words = lower.match_indices([' ', '/', '-']).map(|(at, _)| at + 1);
+    let starts = std::iter::once(0).chain(words).any(|at| lower[at..].starts_with(term));
     let tier = if lower == term {
         Tier::Exact
     } else if starts {
@@ -1959,22 +1995,22 @@ fn tier(finder: &Finder<'_>, term: &str, text: &str) -> Option<(Tier, Fit, Vec<u
 fn found_action(finder: &Finder<'_>, term: &str, action: Action) -> Option<(Tier, Fit, Row)> {
     let Spec { keywords, .. } = action.spec();
     let title = titled(action);
+    let row = |name, hits| Row { key: Key::Action(action), name, hits, rules: Rules::default() };
     let named = tier(finder, term, &title);
     let keyword = keywords.iter().filter_map(|it| Some((tier(finder, term, it)?, *it)));
     let keyword = keyword.min_by_key(|((tier, fit, _), _)| (*tier, Reverse(*fit)));
-    let key = Key::Action(action);
-    let by_keyword = keyword.as_ref().map(|((tier, ..), _)| *tier);
-    match named {
-        Some((by_name, fit, hits)) if by_keyword.is_none_or(|by_keyword| by_name <= by_keyword) => {
-            Some((by_name, fit, Row { key, name: title, hits, rules: Rules::default() }))
+    match (named, keyword) {
+        (Some((by_name, fit, hits)), Some(((by_keyword, ..), _))) if by_name <= by_keyword => {
+            Some((by_name, fit, row(title, hits)))
         },
-        Some(_) | None => {
-            let ((tier, fit, hits), keyword) = keyword?;
-            let shift = title.chars().count() + 2;
+        (Some((by_name, fit, hits)), None) => Some((by_name, fit, row(title, hits))),
+        (_, Some(((by_keyword, fit, hits), keyword))) => {
+            let lead = format!("{title} (");
+            let shift = lead.chars().count();
             let hits = hits.into_iter().map(|hit| hit + shift).collect();
-            let name = format!("{title} ({keyword})");
-            Some((tier, fit, Row { key, name, hits, rules: Rules::default() }))
+            Some((by_keyword, fit, row(format!("{lead}{keyword})"), hits)))
         },
+        (None, None) => None,
     }
 }
 
@@ -3585,6 +3621,18 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert_eq!(lit, "kill", "the keyword that matched is lit");
+    }
+
+    #[test]
+    fn a_typed_phrase_ranks_the_action_it_starts_over_a_worktree_it_fits_loosely() {
+        let mut listing = works();
+        let parser = worktree(place("renew", 4, 1), "parser", Some(10), &[5]);
+        listing.shelves[0].projects.push(housed("renew", 4, vec![parser]));
+        let mut picker = palette_on(listing, at_fix(Origin::Views));
+        typed(&mut picker, "new p");
+        let (shown, _) = shown_actions(&picker);
+        let shown: Vec<String> = shown.iter().map(|line| named(line)).collect();
+        assert_eq!(shown[..2], ["New project…", "renew › parser"]);
     }
 
     #[test]

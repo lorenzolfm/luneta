@@ -38,10 +38,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Terminal};
 
-use crate::actions::{
-    self, Chord, AGENTS, COLLAPSE, DIRS, DOWN, GROW, LEFT, MENU, PALETTE, RIGHT, WORKTREES, SHRINK,
-    SWAP, UP,
-};
+use crate::actions::{self, Chord, COLLAPSE, DOWN, GROW, LEFT, MENU, RIGHT, SHRINK, SWAP, UP};
 use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange};
@@ -1307,14 +1304,7 @@ impl App {
             }
             return true;
         }
-        let list = match chord {
-            PALETTE => Some(List::Actions),
-            WORKTREES => Some(List::Worktrees),
-            AGENTS => Some(List::Agents),
-            DIRS => Some(List::Dirs),
-            _ => None,
-        };
-        if let Some(list) = list {
+        if let Some(list) = List::opened_by(chord) {
             self.pickers += 1;
             let aim = match (list, self.focus.side) {
                 (List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
@@ -1350,6 +1340,9 @@ impl App {
 
     fn palette(&self) -> Palette {
         let origin = match self.holder() {
+            Holder::Sidebar(Holding::Afloat) => {
+                unreachable!("a floating menu or note takes the keys that open a picker")
+            },
             Holder::Sidebar(_) => Origin::Sidebar,
             Holder::Terminal | Holder::Box(_) => Origin::Views,
         };
@@ -1988,14 +1981,15 @@ impl App {
                     actions::Key::Chord(chord) if chord == aloud::KEY => self.read_aloud(),
                     actions::Key::Chord(chord) if aloud::stops(chord) => self.stop_aloud(),
                     actions::Key::Chord(chord) => {
-                        self.chord(chord);
+                        let ran = self.chord(chord);
+                        assert!(ran, "every chord the palette lists is one App::chord runs");
                     },
-                    actions::Key::Menu(_)
-                    | actions::Key::Row(_)
-                    | actions::Key::RowAndMenu(_)
-                    | actions::Key::Pasted(_) => {
+                    actions::Key::Menu(_) | actions::Key::Row(_) | actions::Key::RowAndMenu(_) => {
                         let asked = self.sidebar.act(&target, action, origin, SystemTime::now());
                         self.follow(asked);
+                    },
+                    actions::Key::Pasted(_) => {
+                        unreachable!("the palette leaves the pasted keys out")
                     },
                 }
             },

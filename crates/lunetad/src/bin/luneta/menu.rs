@@ -584,6 +584,12 @@ pub enum Chained {
     Done(Done),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Says<'a> {
+    Hint(&'static str),
+    Wrong(&'a str),
+}
+
 impl Chain {
     fn new(typing: Typing, typed: String) -> Chain {
         Chain { typing, typed, wrong: None }
@@ -635,7 +641,11 @@ impl Chain {
             },
             Typed::Enter => match self.typing.clone().typed(&self.typed, on) {
                 Entered::Done(done) => Chained::Done(done),
-                Entered::Next(typing) => Chained::Typing(Chain::new(typing, String::new())),
+                Entered::Next(typing) => {
+                    assert!(matches!(self.typing, Typing::Folder), "only a folder steps on");
+                    assert!(matches!(typing, Typing::Name(_)), "a folder's next step is its name");
+                    Chained::Typing(Chain::new(typing, String::new()))
+                },
                 Entered::Wrong(why) => {
                     self.wrong = Some(why);
                     Chained::Typing(self)
@@ -664,8 +674,12 @@ impl Chain {
         &self.typed
     }
 
-    pub fn said(&self) -> Result<&'static str, &str> {
-        self.wrong.as_deref().map_or(Ok(self.typing.hint()), Err)
+    #[must_use]
+    pub fn says(&self) -> Says<'_> {
+        match &self.wrong {
+            Some(wrong) => Says::Wrong(wrong),
+            None => Says::Hint(self.typing.hint()),
+        }
     }
 
     #[must_use]
@@ -820,6 +834,18 @@ impl Target {
             | Target::Worktree(machine, _)
             | Target::View(machine, _)
             | Target::Machine(machine) => machine,
+        }
+    }
+
+    #[must_use]
+    pub fn place(&self) -> Option<Place> {
+        match self {
+            Target::Project(_, target) => Some(Place::Session(target.project.listed().clone())),
+            Target::Worktree(_, row) => Some(Place::Worktree(row.place.clone())),
+            Target::View(_, row) => {
+                Some(Place::View(ViewPlace::new(row.session.clone(), row.view)))
+            },
+            Target::Machine(_) => None,
         }
     }
 
@@ -1229,9 +1255,9 @@ impl Menu {
         Menu { number, target, stage: Stage::Choosing(keys) }
     }
 
-    pub fn acting(number: u64, target: &Target, action: Action, agent: Picked) -> Option<Did> {
-        let offer = target.offer(action)?;
-        Some(Menu::act(number, target, Keys::new(target, agent), offer))
+    pub fn acting(number: u64, target: &Target, action: Action, agent: Picked) -> Did {
+        let offer = target.offer(action).expect("the palette lists only actions its target fits");
+        Menu::act(number, target, Keys::new(target, agent), offer)
     }
 
     pub fn pull(number: u64, target: Target, work: Work, agent: Harness) -> Menu {
@@ -1931,7 +1957,7 @@ impl Menu {
                     Span::raw(" "),
                     Span::styled(typed, Style::new().fg(ACCENT)),
                 ])];
-                body.extend(chain_said(chain, width));
+                body.extend(chain_says(chain, width));
                 let keys = [(Hint::Enter, chain.enter()), (Hint::Esc, "Back")];
                 (chain.title().to_owned(), chain.right(), body, keyed(width, &keys))
             },
@@ -1941,10 +1967,10 @@ impl Menu {
 }
 
 #[must_use]
-pub fn chain_said(chain: &Chain, width: usize) -> Vec<Line<'static>> {
-    match chain.said() {
-        Ok(hint) => wrap(hint, width, Style::new().fg(NAME)),
-        Err(wrong) => wrap(wrong, width, Style::new().fg(gruvbox::RED)),
+pub fn chain_says(chain: &Chain, width: usize) -> Vec<Line<'static>> {
+    match chain.says() {
+        Says::Hint(hint) => wrap(hint, width, Style::new().fg(NAME)),
+        Says::Wrong(wrong) => wrap(wrong, width, Style::new().fg(gruvbox::RED)),
     }
 }
 

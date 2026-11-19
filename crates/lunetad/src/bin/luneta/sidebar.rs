@@ -118,6 +118,9 @@ const LONG: Duration = Duration::from_secs(1);
 const NO_HERE_VIEW: &str =
     "menu: luneta does not know yet which view its client is on; try again in a moment";
 
+const PALETTE_ROW_GONE: &str =
+    "palette: the highlighted row changed while the palette was open, so nothing ran";
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Listed {
     name: SessionName,
@@ -3392,31 +3395,58 @@ impl Sidebar {
     ) -> Asked {
         self.notice = None;
         self.end_mode();
-        match (Command::of(action), action.key()) {
-            (Some(Command::Search), _) => self.find(String::new()),
-            (Some(Command::Unread), _) => self.toggle_unread(now),
-            (Some(Command::Reorder), _) => self.select(),
-            (Some(Command::Quit), _) => return Asked::Quit,
-            (None, actions::Key::Row(_)) => return self.row_action(action, now),
-            (
-                None,
-                actions::Key::Menu(_)
-                | actions::Key::RowAndMenu(_)
-                | actions::Key::Pasted(_)
-                | actions::Key::Chord(_),
-            ) => {
-                self.menus += 1;
-                let agent = self.agent_for(target);
-                let Some(did) = Menu::acting(self.menus, target, action, agent) else {
-                    return Asked::Nothing;
-                };
-                if origin == Origin::Views {
-                    self.let_go();
-                }
-                return self.menu_did(Placed::of(origin), did);
+        match action.key() {
+            actions::Key::Row(_) => {
+                assert_eq!(origin, Origin::Sidebar, "the sidebar's keys are listed in it alone");
+                assert!(self.has_keys(), "the sidebar has the keys its own keys act with");
+                self.act_on_row(target, action, now)
+            },
+            actions::Key::Menu(_) | actions::Key::RowAndMenu(_) => {
+                self.act_in_menu(target, action, origin)
+            },
+            actions::Key::Pasted(_) | actions::Key::Chord(_) => {
+                unreachable!("the palette lists no pasted key, and App runs the chords")
             },
         }
+    }
+
+    fn act_on_row(&mut self, target: &Target, action: Action, now: SystemTime) -> Asked {
+        let command = Command::of(action);
+        if command == Some(Command::Search) {
+            self.find(String::new());
+            return Asked::Nothing;
+        }
+        if self.highlights(target) {
+            match command {
+                Some(Command::Unread) => self.toggle_unread(now),
+                Some(Command::Reorder) => self.select(),
+                Some(Command::Search | Command::Quit) => {
+                    unreachable!("Search ran above, and Quit is a menu key too")
+                },
+                None => return self.row_action(action, now),
+            }
+        } else {
+            self.notify(PALETTE_ROW_GONE.to_owned());
+        }
         Asked::Nothing
+    }
+
+    fn act_in_menu(&mut self, target: &Target, action: Action, origin: Origin) -> Asked {
+        if Command::of(action) == Some(Command::Quit) {
+            return Asked::Quit;
+        }
+        self.menus += 1;
+        let agent = self.agent_for(target);
+        let did = Menu::acting(self.menus, target, action, agent);
+        if origin == Origin::Views {
+            self.let_go();
+        }
+        self.menu_did(Placed::of(origin), did)
+    }
+
+    fn highlights(&self, target: &Target) -> bool {
+        let highlighted = self.aimed(Origin::Sidebar);
+        (highlighted.machine(), highlighted.place()) == (target.machine(), target.place())
     }
 
     pub fn chained(&mut self, done: Done, origin: Origin) -> Asked {
@@ -3587,8 +3617,8 @@ impl Sidebar {
             Wants::Cloned(project) => {
                 let mut known = shelf(&self.shelves, &on).iter();
                 let known = known.find(|it| it.project.id() == project);
-                if let Some(known) = known.filter(|it| it.unopened == Unopened::Folder) {
-                    let refused = projects::folder_has_one_worktree(known.listed().name());
+                let refused = known.and_then(|it| it.unopened.refuses_new_worktree(&it.project));
+                if let Some(refused) = refused {
                     self.drop_menu_saying(number, format!("menu: {refused}"));
                 }
                 Asked::Nothing
@@ -9258,6 +9288,24 @@ mod tests {
         let vps: Destination = "me@vps".parse().unwrap();
         let asked = sidebar.chained(Done::Ssh(vps.clone()), Origin::Sidebar);
         assert_eq!(asked, Asked::Ssh(vps));
+    }
+
+    #[test]
+    fn a_sidebar_key_from_the_palette_runs_on_the_row_it_named_and_on_no_other() {
+        let mut sidebar = searched();
+        sidebar.focus(Keys::Sidebar);
+        let bipa = Spot::Local(Place::Session(listed("bipa", 10)));
+        sidebar.cursor = Some(bipa.clone());
+        let target = sidebar.aimed(Origin::Sidebar);
+        sidebar.key(&char('j'), moment(160_000));
+        assert_ne!(sidebar.cursor, Some(bipa.clone()), "j moves the highlight");
+        let asked = sidebar.act(&target, Action::Reorder, Origin::Sidebar, moment(160_000));
+        assert_eq!(asked, Asked::Nothing);
+        assert_eq!(sidebar.holding(), Holding::Nothing, "its row is no longer highlighted");
+        assert_eq!(sidebar.notice.as_deref(), Some(PALETTE_ROW_GONE));
+        sidebar.cursor = Some(bipa);
+        sidebar.act(&target, Action::Reorder, Origin::Sidebar, moment(160_000));
+        assert_eq!(sidebar.holding(), Holding::Reorder, "on the row it named, it runs");
     }
 
     #[test]

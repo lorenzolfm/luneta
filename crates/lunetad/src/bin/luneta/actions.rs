@@ -367,7 +367,10 @@ impl Action {
 
     #[must_use]
     pub const fn in_palette(self) -> bool {
-        !matches!(self.key(), Key::Pasted(_)) && !matches!(self, Action::Dictate | Action::Palette)
+        match (self, self.key()) {
+            (_, Key::Pasted(_)) | (Action::Dictate | Action::Palette, _) => false,
+            (_, Key::Menu(_) | Key::Row(_) | Key::RowAndMenu(_) | Key::Chord(_)) => true,
+        }
     }
 
     #[must_use]
