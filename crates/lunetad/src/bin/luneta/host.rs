@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::io::{self, Write as _};
+use std::iter;
 use std::num::NonZeroU16;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -130,6 +131,10 @@ const UNSHOWN_CURSOR: (CursorShape, bool) = (CursorShape::HollowBlock, false);
 const CLIENT: u64 = 1;
 
 const ASKED_TO_QUIT: &str = "asked to quit";
+
+const SLOW_END: Duration = Duration::from_secs(1);
+
+const WAITS: &str = "ends once the changes it sent are done; Ctrl c ends it now";
 
 pub enum Event {
     Input(Input),
@@ -424,6 +429,7 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
     let mut inbox = Inbox::new(inbox);
     input::read(events.clone());
     let answers = answers::ask(&mut inbox);
+    let mut sent = Vec::new();
     let ran = execute!(
         io::stdout(),
         EnableMouseCapture,
@@ -448,6 +454,7 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
             answers.kitty,
             events,
             &mut inbox,
+            &mut sent,
         )
     });
     if let Err(error) = &ran {
@@ -462,6 +469,15 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
         log::say(&format!("its terminal was not put back: {error}"));
     }
     let mut said = io::stderr();
+    wait_for(sent, SLOW_END, || {
+        log::say(WAITS);
+        let _ = writeln!(said, "luneta: {WAITS}");
+    });
+    for event in iter::from_fn(|| inbox.try_next()) {
+        if let Event::Filed { to, words, filed, .. } = event {
+            let _ = writeln!(said, "{}", issue::on_quit(&to, &words, &filed));
+        }
+    }
     match hidden.and(ran).and_then(|failed| put.map(|()| failed)) {
         Ok(None) => ExitCode::SUCCESS,
         Ok(Some(failed)) => {
@@ -483,6 +499,22 @@ fn did_not_start(why: &str) -> ExitCode {
 
 fn say_ends(why: &str) {
     log::say(&format!("ends: {why}"));
+}
+
+fn wait_for(sent: Vec<JoinHandle<()>>, slow: Duration, said: impl FnOnce()) {
+    let (ended, ending) = mpsc::channel();
+    thread::spawn(move || {
+        for change in sent {
+            if change.join().is_err() {
+                log::say("a change luneta sent panicked");
+            }
+        }
+        let _ = ended.send(());
+    });
+    if ending.recv_timeout(slow).is_err() {
+        said();
+        let _ = ending.recv();
+    }
 }
 
 fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
@@ -508,6 +540,7 @@ fn run_in(
     releases: bool,
     events: Sender<Event>,
     inbox: &mut Inbox,
+    sent: &mut Vec<JoinHandle<()>>,
 ) -> io::Result<Option<String>> {
     let (width, width_unread) = Width::kept();
     let folds = Folds::shared();
@@ -623,7 +656,7 @@ fn run_in(
         app.open_worktree(Machine::Local, root);
     }
     let ran = run_loop(terminal, &mut app, inbox);
-    app.wait_for_changes();
+    sent.extend(app.sent());
     ran?;
     Ok(app.failure())
 }
@@ -1761,13 +1794,9 @@ impl App {
         self.changes.push(change);
     }
 
-    fn wait_for_changes(&mut self) {
+    fn sent(&mut self) -> Vec<JoinHandle<()>> {
         let movers = self.movers.drain().map(|(_, mover)| mover.stopped());
-        for change in movers.chain(self.changes.drain(..)) {
-            if change.join().is_err() {
-                log::say("a change luneta sent panicked");
-            }
-        }
+        movers.chain(self.changes.drain(..)).collect()
     }
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
@@ -1929,8 +1958,9 @@ impl App {
         let Some(Over::Issue(issue)) = open else {
             return;
         };
-        if let Some((number, to)) = issue.send(&self.events, &mut self.unfiled) {
+        if let Some((number, to, filing)) = issue.send(&self.events, &mut self.unfiled) {
             self.sidebar.filing(number, &to.to_string());
+            self.keep_change(filing);
         }
         self.give_from(had, Focus::on(self.focus.side));
     }
@@ -2636,6 +2666,25 @@ mod tests {
     use ratatui::{TerminalOptions, Viewport};
 
     use super::*;
+
+    #[test]
+    fn the_end_waits_for_the_changes_sent_and_says_so_only_once_it_is_slow() {
+        let mut said = 0;
+        wait_for(vec![thread::spawn(|| {})], Duration::from_secs(60), || said += 1);
+        assert_eq!(said, 0);
+        let (go, gate) = mpsc::channel::<()>();
+        let (done, ended) = mpsc::channel();
+        let slow = thread::spawn(move || {
+            let _ = gate.recv();
+            let _ = done.send(());
+        });
+        wait_for(vec![slow], Duration::ZERO, || {
+            said += 1;
+            let _ = go.send(());
+        });
+        assert_eq!(said, 1);
+        assert_eq!(ended.try_recv(), Ok(()), "the end outlasts the slow change");
+    }
 
     #[test]
     fn alt_equals_or_plus_grows_with_or_without_shift_and_alt_minus_shrinks() {

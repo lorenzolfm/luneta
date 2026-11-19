@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -211,7 +211,11 @@ impl Issue {
         self.typed.push_str(&text);
     }
 
-    pub fn send(self, events: &Sender<Event>, kept: &mut Kept) -> Option<(u64, OnGitHub)> {
+    pub fn send(
+        self,
+        events: &Sender<Event>,
+        kept: &mut Kept,
+    ) -> Option<(u64, OnGitHub, JoinHandle<()>)> {
         let words = self.typed.trim().to_owned();
         let filing = self.picked().cloned().and_then(|to| {
             let filing = Filing::new(self.repository.dir.clone(), to.clone(), &words);
@@ -231,7 +235,7 @@ impl Issue {
             let filed = filed.unwrap_or_else(|why| Err(Unfiled::InDoubt(why)));
             Event::Filed { number, repository, to: sent_to, words, filed }
         });
-        thread::spawn(move || {
+        let filing = thread::spawn(move || {
             let filed = match &on {
                 Machine::Local => filing.file(),
                 Machine::Remote(on) => match Away::reach(on, away::ANSWER) {
@@ -241,7 +245,7 @@ impl Issue {
             };
             due.pay(Ok(filed));
         });
-        Some((number, to))
+        Some((number, to, filing))
     }
 
     pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
@@ -306,6 +310,22 @@ impl Issue {
             Machine::Remote(on) => format!("{named} on {on}"),
         };
         brief::boxed(buffer, over, TITLE, &right, &lines);
+    }
+}
+
+pub fn on_quit(to: &OnGitHub, words: &str, filed: &Result<Filed, Unfiled>) -> String {
+    match filed {
+        Ok(filed) => {
+            let (number, title, url) = (filed.number(), filed.title(), filed.link().url());
+            format!("luneta: filed #{number} in {to}: {title}\n{url}")
+        },
+        Err(Unfiled::Refused(why)) => {
+            format!("luneta: the issue in {to} is not filed: {why}. Its words:\n{words}")
+        },
+        Err(Unfiled::InDoubt(why)) => {
+            let doubt = format!("luneta: the issue in {to} may be filed: {why}");
+            format!("{doubt}. Look first. Its words:\n{words}")
+        },
     }
 }
 
@@ -482,14 +502,36 @@ mod tests {
     }
 
     #[test]
+    fn a_filing_luneta_quit_during_says_how_it_ended_and_keeps_words_not_surely_filed() {
+        let to = github("me/luneta");
+        let filed = Filed::page("https://github.com/me/luneta/issues/12", "Red button").unwrap();
+        assert_eq!(
+            on_quit(&to, "a red button", &Ok(filed)),
+            "luneta: filed #12 in me/luneta: Red button\nhttps://github.com/me/luneta/issues/12"
+        );
+        let refused = Err(Unfiled::Refused("gh is not logged in".to_owned()));
+        assert_eq!(
+            on_quit(&to, "a red button", &refused),
+            "luneta: the issue in me/luneta is not filed: gh is not logged in. Its words:\n\
+             a red button"
+        );
+        let doubt = Err(Unfiled::InDoubt("gh did not answer in time".to_owned()));
+        assert_eq!(
+            on_quit(&to, "a red button", &doubt),
+            "luneta: the issue in me/luneta may be filed: gh did not answer in time. Look first. \
+             Its words:\na red button"
+        );
+    }
+
+    #[test]
     fn nothing_typed_sends_nothing() {
         let (events, heard) = mpsc::channel();
         let issue = open(1, &repository(Machine::Local), &Kept::default(), fork()[..1].to_vec());
-        assert_eq!(issue.send(&events, &mut Kept::default()), None);
+        assert!(issue.send(&events, &mut Kept::default()).is_none());
         let mut unpicked = open(2, &repository(Machine::Local), &Kept::default(), fork());
         unpicked.paste("a red button");
         assert!(!unpicked.ready());
-        assert_eq!(unpicked.send(&events, &mut Kept::default()), None);
+        assert!(unpicked.send(&events, &mut Kept::default()).is_none());
         assert!(heard.try_recv().is_err());
     }
 
@@ -513,7 +555,7 @@ mod tests {
         let blank = picked(3, &here, &kept);
         kept.keep(1, here.clone(), github("me/luneta"), "first".to_owned());
         kept.keep(2, here.clone(), github("cashubtc/luneta"), "second".to_owned());
-        assert_eq!(blank.send(&events, &mut kept), None);
+        assert!(blank.send(&events, &mut kept).is_none());
         for other in [&elsewhere, &far] {
             assert_eq!(typed_in(&open(4, other, &kept, fork())), "");
         }
@@ -525,7 +567,7 @@ mod tests {
         edited.close(&mut kept);
         let mut early = picked(6, &here, &Kept::default());
         typed(&mut early, "sent while they were kept");
-        let sent = early.send(&events, &mut kept);
+        let sent = early.send(&events, &mut kept).map(|(number, to, _)| (number, to));
         assert_eq!(sent, Some((6, github("cashubtc/luneta"))));
         assert_eq!(typed_in(&open(7, &here, &kept, fork())), "first again");
 
