@@ -794,7 +794,7 @@ enum Offer<'t> {
 pub struct WorktreeRow {
     pub place: WorktreePlace,
     pub name: String,
-    pub folder: String,
+    pub folder: Directory,
     pub branch: Option<String>,
     pub repository: Option<String>,
 }
@@ -930,8 +930,16 @@ impl Target {
     pub fn cwd(&self) -> Option<&str> {
         match self {
             Target::Project(..) | Target::Machine(_) => None,
-            Target::Worktree(_, row) => Some(&row.folder),
+            Target::Worktree(_, row) => Some(row.folder.as_str()),
             Target::View(_, row) => row.cwd.as_deref(),
+        }
+    }
+
+    fn directory(&self) -> Option<Directory> {
+        match self {
+            Target::Project(..) | Target::Machine(_) => None,
+            Target::Worktree(_, row) => Some(row.folder.clone()),
+            Target::View(_, row) => Directory::parse(row.cwd.clone()?).ok(),
         }
     }
 
@@ -948,21 +956,20 @@ impl Target {
     }
 
     fn repository(&self) -> Option<Repository> {
-        let (on, cwd, home) = (self.machine(), self.cwd()?, self.held_repository()?);
-        let dir = Directory::parse(cwd.to_owned()).ok()?;
+        let (on, dir, home) = (self.machine(), self.directory()?, self.held_repository()?);
         let (home, name) = (home.to_owned(), self.repository_name().to_owned());
         Some(Repository { on: on.clone(), dir, home, name })
     }
 
     fn merged_in(&self) -> Option<Directory> {
         self.held_repository()?;
-        Directory::parse(self.cwd()?.to_owned()).ok()
+        self.directory()
     }
 
     fn folder_hint(&self) -> String {
         let held = match self {
             Target::View(_, row) => row.cwd.clone(),
-            Target::Worktree(_, row) => Some(row.folder.clone()),
+            Target::Worktree(_, row) => Some(row.folder.as_str().to_owned()),
             Target::Project(_, project) => Some(project.dir.clone()),
             Target::Machine(_) => None,
         };
@@ -1082,9 +1089,7 @@ impl Rebases<'_> {
                 Ok((Resolves::Beside(beside), dir, (*branch).to_owned()))
             },
             Rebases::Worktree(row, branch) => {
-                let dir = Directory::parse(row.folder.clone());
-                let dir = dir.map_err(|why| format!("menu: the folder of {}, {why}", row.name))?;
-                Ok((Resolves::In(row.place.worktree), dir, (*branch).to_owned()))
+                Ok((Resolves::In(row.place.worktree), row.folder.clone(), (*branch).to_owned()))
             },
         }
     }
@@ -2764,7 +2769,7 @@ mod tests {
         Target::Worktree(on, WorktreeRow {
             place,
             name: "main".to_owned(),
-            folder: "/w/luneta/main".to_owned(),
+            folder: main_dir(),
             branch: Some("feat/menu".to_owned()),
             repository: Some("/w/luneta".to_owned()),
         })
