@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
-use std::time::SystemTime;
 
 use lunetad::api::projects::Held;
 use lunetad::api::{self, remote, terminal, Host};
 use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnTerminal};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{ProjectId, Used, ViewId, WorktreeId};
 use lunetad::Destination;
 
 use crate::host::NOT_YET;
@@ -22,7 +21,7 @@ pub struct Worktree {
     pub tab: u32,
     pub terminals: Vec<(ViewId, Option<TerminalKey>)>,
     pub titles: BTreeMap<ViewId, String>,
-    pub used: Option<SystemTime>,
+    pub used: Option<Used>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +69,10 @@ impl Project {
             Holds::Folder(own) => std::slice::from_ref(own),
             Holds::Clone(rows) => rows,
         }
+    }
+
+    pub fn uses(&self) -> impl Iterator<Item = (WorktreeId, Option<Used>)> + '_ {
+        self.worktrees().iter().map(|it| (it.id, it.used))
     }
 
     #[must_use]
@@ -233,7 +236,7 @@ pub fn project(project: &api::Project) -> Result<Project, String> {
             }
         }
         let (name, folder) = (worktree.name.clone(), worktree.folder.clone());
-        let used = worktree.used_at.map(SystemTime::try_from).transpose();
+        let used = worktree.used_at.map(Used::of_api).transpose();
         let used = used.map_err(|why| format!("worktree {named}'s last use: {why}"))?;
         Ok(Worktree { id, name, folder, tab, terminals, titles, used })
     };

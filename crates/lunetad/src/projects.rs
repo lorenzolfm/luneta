@@ -202,6 +202,17 @@ impl Used {
         Used(millis)
     }
 
+    pub fn of_api(at: prost_types::Timestamp) -> Result<Used, String> {
+        let time = SystemTime::try_from(at).map_err(|why| format!("a use at no time: {why}"))?;
+        let since = time.duration_since(UNIX_EPOCH).map_err(|_| "a use before 1970".to_owned())?;
+        let millis = u64::try_from(since.as_millis()).ok().filter(|it| *it <= USED_MILLIS_MAX);
+        let millis = millis.ok_or_else(|| format!("a use past {USED_MILLIS_MAX} ms"))?;
+        if Duration::from_millis(millis) != since {
+            return Err(format!("a use at {since:?} past 1970 is no whole millisecond"));
+        }
+        Ok(Used(millis))
+    }
+
     #[must_use]
     pub fn millis(self) -> u64 {
         self.0
@@ -445,15 +456,10 @@ impl Project {
     }
 
     fn last_used(&self) -> Option<WorktreeId> {
-        let mut last: Option<&Worktree> = None;
-        for worktree in self.worktrees() {
-            if last.is_none_or(|last| worktree.used > last.used) {
-                last = Some(worktree);
-            }
-        }
+        let last = last_used(self.worktrees().map(|it| (it.id, it.used)));
         let held = self.worktrees().next().is_some();
         assert_eq!(last.is_some(), held, "a project's worktree is last");
-        last.map(Worktree::id)
+        last
     }
 
     fn within(&self, spot: &Spot) -> Option<Within> {
@@ -481,6 +487,19 @@ impl Project {
     fn view_count(&self) -> usize {
         self.worktrees().map(|it| it.layout.len()).sum()
     }
+}
+
+#[must_use]
+pub fn last_used(
+    worktrees: impl IntoIterator<Item = (WorktreeId, Option<Used>)>,
+) -> Option<WorktreeId> {
+    let mut last: Option<(WorktreeId, Option<Used>)> = None;
+    for (worktree, used) in worktrees {
+        if last.is_none_or(|(_, last)| used > last) {
+            last = Some((worktree, used));
+        }
+    }
+    last.map(|(worktree, _)| worktree)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2480,6 +2499,17 @@ mod tests {
         assert!(refused.contains("no worktree is used past"), "{refused}");
         let (same, _) = change(&projects, went(one, 1)).unwrap();
         assert_eq!(same, projects, "the worktree used last is gone to still");
+    }
+
+    #[test]
+    fn a_use_said_over_the_api_is_read_back_as_the_millisecond_it_was() {
+        let used = Used::of_millis(1_763_460_000_123);
+        assert_eq!(Used::of_api(used.time().into()), Ok(used));
+        let at = |seconds, nanos| prost_types::Timestamp { seconds, nanos };
+        let between = Used::of_api(at(1, 500)).unwrap_err();
+        assert!(between.contains("no whole millisecond"), "{between}");
+        let before = Used::of_api(at(-1, 0)).unwrap_err();
+        assert!(before.contains("before 1970"), "{before}");
     }
 
     #[test]
