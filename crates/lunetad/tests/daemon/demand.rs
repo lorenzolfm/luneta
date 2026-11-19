@@ -16,6 +16,7 @@ use lunetad::api::{
     KeepImageRequest, KeepImageResponse, ListAgentsResponse, ListContentsRequest,
     ListContentsResponse, ListDirsRequest, ListDirsResponse, ListSkillsRequest, ListSkillsResponse,
     PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
+    RebaseRequest, RebaseResponse,
     TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
@@ -641,6 +642,15 @@ impl Daemon for StandIn {
 
     async fn prune(&self, _: Request<PruneRequest>) -> Result<Response<Self::PruneStream>, Status> {
         Err(Status::unimplemented("a stand-in deletes no worktree"))
+    }
+
+    type RebaseStream = tokio_stream::Empty<Result<RebaseResponse, Status>>;
+
+    async fn rebase(
+        &self,
+        _: Request<RebaseRequest>,
+    ) -> Result<Response<Self::RebaseStream>, Status> {
+        Err(Status::unimplemented("a stand-in rebases no branch"))
     }
 
     type KeepImageStream = tokio_stream::Empty<Result<KeepImageResponse, Status>>;

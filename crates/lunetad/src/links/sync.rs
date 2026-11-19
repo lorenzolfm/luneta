@@ -64,7 +64,7 @@ fn viewed(link: &Link) -> Result<Viewed, String> {
     serde_json::from_slice(&said).map_err(|error| format!("gh pr view does not read: {error}"))
 }
 
-fn fetch(dir: &str, remote: &str, base: &str) -> Result<(), String> {
+pub(crate) fn fetch(dir: &str, remote: &str, base: &str) -> Result<(), String> {
     let base = format!("+refs/heads/{base}:refs/remotes/{remote}/{base}");
     let args = ["-C", dir, "fetch", "--no-tags", "--", remote, &base];
     let mut git = Command::new("git");

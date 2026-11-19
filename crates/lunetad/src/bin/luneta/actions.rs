@@ -43,8 +43,10 @@ pub const SKILLS: char = 'c';
 
 pub const QUIT: char = 'q';
 
-pub const MENU_GROUPS: [(char, &str); 4] =
-    [(SKILLS, "Skills"), ('n', "New"), ('d', "Delete"), ('b', "Brief")];
+pub const GIT: char = 'g';
+
+pub const MENU_GROUPS: [(char, &str); 5] =
+    [(SKILLS, "Skills"), ('n', "New"), ('d', "Delete"), ('b', "Brief"), (GIT, "Git")];
 
 pub const ROW_GROUPS: [(char, &str); 2] = [(YANK, "Yank"), (OPEN, "Open")];
 
@@ -123,6 +125,7 @@ actions! {
     DeleteProject,
     ForgetMachine,
     DeleteMerged,
+    Rebase,
     BriefEvery,
     BriefThis,
     BriefHighlighted,
@@ -280,6 +283,12 @@ impl Action {
                 "delete merged worktrees",
                 &["prune", "clean", "branches"],
                 menu(&['d', 'm']),
+                CHECKED_OUT,
+            ),
+            Action::Rebase => spec(
+                "rebase onto upstream",
+                &["update", "main", "conflicts", "branch"],
+                menu(&[GIT, 'r']),
                 CHECKED_OUT,
             ),
             Action::BriefEvery => {

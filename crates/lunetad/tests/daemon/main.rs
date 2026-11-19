@@ -21,6 +21,8 @@ mod projects;
 #[cfg(test)]
 mod prune;
 #[cfg(test)]
+mod rebase;
+#[cfg(test)]
 mod remote;
 #[cfg(test)]
 mod say;

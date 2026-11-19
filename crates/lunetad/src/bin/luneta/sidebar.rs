@@ -24,6 +24,7 @@ use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Dir, Plain, ProjectId, Used, ViewId, WorktreeId};
 use lunetad::projects::CLONE_WORKTREES_MAX;
 use lunetad::prunes;
+use lunetad::rebases::Rebased;
 use lunetad::seats::{self, seated, Unread};
 use lunetad::transcripts::SessionId;
 use lunetad::{log, Destination, Directory, SessionName};
@@ -34,7 +35,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::actions::{Action, Command, QUIT};
+use crate::actions::{Action, Command, GIT, QUIT};
 use crate::agents::{self, Kept};
 use crate::alerts::{self, Reach};
 use crate::aloud;
@@ -68,6 +69,9 @@ pub const PAUSE: Duration = Duration::from_millis(200);
 
 const GO: &str = "Go";
 const GO_KEYS: [(Label, &str); 1] = [(Label::char('g'), "First row")];
+const GO_GIT: &str = "Go, or git";
+const GO_GIT_KEYS: [(Label, &str); 2] =
+    [(Label::char('g'), "First row"), (Label::char('r'), "Rebase onto upstream")];
 
 const SELECTED_KEYS: [(Label, &str); 4] = [
     (Label::Two('j', 'k'), "Grow"),
@@ -1104,6 +1108,7 @@ pub enum Asked {
     OpenWorktree { on: Machine, project: ProjectRow },
     Prunes { menu: u64, on: Machine, dir: Directory },
     Prune { menu: u64, on: Machine, dir: Directory, agreed: BTreeSet<prunes::Deleting> },
+    Rebase { menu: u64, on: Machine, dir: Directory },
     Go { on: Machine, place: Place },
     Take,
     Copy(Link),
@@ -1114,6 +1119,7 @@ pub enum Asked {
     Open { asking: Held, on: Machine, project: ProjectId, beside: ViewKey, command: Vec<String> },
     NewWorktree { on: Machine, project: ProjectId, branch: Branch },
     Welcome { asking: Held, on: Machine, session: Listed, view: ViewKey },
+    OpenIn { asking: Held, on: Machine, worktree: WorktreeId, command: Vec<String> },
     AddProject { on: Machine, folder: String, name: Option<projects::Name> },
     Rename { on: Machine, rename: Rename },
     Make {
@@ -1150,6 +1156,7 @@ impl Asked {
         match self {
             Asked::Prunes { menu, .. }
             | Asked::Prune { menu, .. }
+            | Asked::Rebase { menu, .. }
             | Asked::Make { menu, .. }
             | Asked::Pull { menu, .. }
             | Asked::Find { menu, .. }
@@ -1167,6 +1174,7 @@ impl Asked {
             | Asked::Open { .. }
             | Asked::NewWorktree { .. }
             | Asked::Welcome { .. }
+            | Asked::OpenIn { .. }
             | Asked::AddProject { .. }
             | Asked::Rename { .. }
             | Asked::Brief(_)
@@ -2938,6 +2946,12 @@ impl Sidebar {
             {
                 return self.row_action(action);
             },
+            KeyCode::Char(c)
+                if let Some(Pending::First { .. }) = pending
+                    && menu::in_menu_group(GIT, c) =>
+            {
+                return self.open_menu_at(GIT, c);
+            },
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
                 Some(Top::Last) => self.end(true),
@@ -3290,6 +3304,20 @@ impl Sidebar {
         self.menu_did(Placed::Sidebar(Pause::Nothing), did)
     }
 
+    fn open_menu_at(&mut self, group: char, key: char) -> Asked {
+        let Some(target) = self.target() else {
+            return Asked::Nothing;
+        };
+        self.menus += 1;
+        let agent = self.agent_for(&target);
+        let opened = Menu::open(self.menus, target, Some(group), agent);
+        let Some(Did::Stays(menu, Wants::Nothing)) = opened else {
+            return Asked::Nothing;
+        };
+        let did = menu.key(&KeyEvent::from(KeyCode::Char(key)));
+        self.menu_did(Placed::Sidebar(Pause::Nothing), did)
+    }
+
     fn keep_agent(&mut self, harness: agents::Harness) {
         if let Err(why) = self.agent.keep(harness) {
             let name = agents::name(harness);
@@ -3610,6 +3638,13 @@ impl Sidebar {
                     Done::Welcome { on, session, view } => {
                         Asked::Welcome { asking: taken.held(), on, session, view }
                     },
+                    Done::OpenIn { on, worktree, command } => {
+                        Asked::OpenIn { asking: taken.held(), on, worktree, command }
+                    },
+                    Done::Said(said) => {
+                        self.say_of(taken, said);
+                        Asked::Nothing
+                    },
                     Done::Project { on, folder, name } => Asked::AddProject { on, folder, name },
                     Done::Rename(on, rename) => Asked::Rename { on, rename },
                     Done::Go(on, place) if taken.held() == Held::Open => Asked::Go { on, place },
@@ -3690,6 +3725,7 @@ impl Sidebar {
                 Asked::Make { menu: number, on, project, cwd, name, command }
             },
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
+            Wants::Rebase { dir } => Asked::Rebase { menu: number, on, dir },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
             Wants::Plan { session, scope: Scope::View(view) } => {
                 let plan = self.plan(&on, &session, Deletes::View(view));
@@ -3772,6 +3808,13 @@ impl Sidebar {
             return Asked::Nothing;
         };
         self.menu_did_after(taken, waiting.checked(checks))
+    }
+
+    pub fn rebased(&mut self, menu: u64, rebased: Result<Rebased, String>) -> Asked {
+        let Some((waiting, taken)) = self.take_waited(menu, Menu::rebasing) else {
+            return Asked::Nothing;
+        };
+        self.menu_did_after(taken, waiting.rebased(rebased))
     }
 
     fn worked(&self, on: &Machine) -> Result<Vec<Worked>, String> {
@@ -4686,7 +4729,13 @@ impl Sidebar {
             Mode::Pending(Pending::Legend) => Bottom::Legend,
             Mode::Pending(Pending::AllKeys(all)) => Bottom::AllKeys(all),
             Mode::Pending(Pending::Group { key, shows }) if *shows <= now => Bottom::Group(*key),
-            Mode::Pending(Pending::First { shows }) if *shows <= now => Bottom::Keys(GO, &GO_KEYS),
+            Mode::Pending(Pending::First { shows }) if *shows <= now => {
+                if self.target().is_some_and(|target| target.fits(Action::Rebase)) {
+                    Bottom::Keys(GO_GIT, &GO_GIT_KEYS)
+                } else {
+                    Bottom::Keys(GO, &GO_KEYS)
+                }
+            },
             Mode::Reorder(_) => Bottom::Keys(Action::Reorder.name(), &SELECTED_KEYS),
             Mode::Idle
             | Mode::Pending(Pending::First { .. } | Pending::Group { .. })
@@ -5509,6 +5558,7 @@ mod tests {
     use ratatui::buffer::Cell;
 
     use super::*;
+    use lunetad::rebases;
     use crate::pull::{At, Readied, Ready};
     use crate::spots::Hit;
 
@@ -10635,6 +10685,51 @@ mod tests {
         type_in(&mut sidebar, "l");
         assert!(!sidebar.folds.contains(Fold::Project(&machine, main)));
         assert!(sidebar.folds.contains(Fold::Worktree(&machine, tab)));
+    }
+
+    #[test]
+    fn g_r_on_a_far_row_rebases_there_and_g_g_still_goes_to_the_first_row() {
+        let mut host = machines();
+        let Reached::Host(there) = host.remotes[0].reached.as_mut().unwrap() else {
+            panic!("nixos is reached");
+        };
+        let name = Said::new("fix".to_owned()).expect("a branch's name");
+        let head = Head::Branch { name, upstream: None, changed: None };
+        let repository = Said::new("/w".to_owned());
+        let stashes = 0;
+        let status = GitStatus::Checkout { repository, head, changes: Changes::default(), stashes };
+        there.git_statuses.push(status.to_api("/w/b"));
+        let mut sidebar = fresh();
+        sidebar.hear(host);
+        sidebar.focus(Keys::Sidebar);
+        let place = ViewPlace { session: listed("main", 20), view: view_key(20, 1) };
+        let spot = Spot::Remote(nixos(), Place::View(place));
+        sidebar.cursor = Some(spot.clone());
+        let now = moment(160_000);
+        assert_eq!(sidebar.key(&char('g'), now - PAUSE), Asked::Nothing);
+        assert_eq!(clicks(&mut sidebar, 17), [
+            (format!("─ Go, or git {}", "─".repeat(18)), None),
+            (" g  First row".to_owned(), Some(on_legend('g'))),
+            (" r  Rebase onto upstream".to_owned(), Some(on_legend('r'))),
+        ]);
+        let dir = Directory::parse("/w/b".to_owned()).unwrap();
+        let on = Machine::Remote(nixos());
+        let number = sidebar.menus + 1;
+        assert_eq!(sidebar.key(&char('r'), now), Asked::Rebase { menu: number, on, dir });
+        assert!(sidebar.open().expect("the menu").rebasing());
+        let rebased = rebases::Rebased {
+            branch: "fix".to_owned(),
+            onto: "origin/main".to_owned(),
+            came: rebases::Came::Already,
+        };
+        assert_eq!(sidebar.rebased(number, Ok(rebased)), Asked::Nothing);
+        assert!(sidebar.open().is_none());
+        assert_eq!(sidebar.notice.as_deref(), Some("menu: fix is on origin/main already"));
+
+        sidebar.key(&char('g'), now);
+        sidebar.key(&char('g'), now);
+        assert!(sidebar.open().is_none(), "g g opens no menu");
+        assert_ne!(sidebar.cursor, Some(spot), "g g goes to the first row");
     }
 
     #[test]

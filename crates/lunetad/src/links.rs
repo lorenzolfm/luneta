@@ -24,7 +24,7 @@ use crate::program::{self, Ran};
 use crate::projects::{self, Dir, Plain};
 use crate::{names, zoxide, Destination, Directory, SessionName};
 
-mod sync;
+pub(crate) mod sync;
 
 const GITHUB: &str = "github.com";
 

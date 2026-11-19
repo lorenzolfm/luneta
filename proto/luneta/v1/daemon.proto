@@ -22,6 +22,7 @@ service Daemon {
   rpc Say(SayRequest) returns (google.protobuf.Empty);
   rpc Prunes(PrunesRequest) returns (stream PrunesResponse);
   rpc Prune(PruneRequest) returns (stream PruneResponse);
+  rpc Rebase(RebaseRequest) returns (stream RebaseResponse);
   rpc FileIssue(FileIssueRequest) returns (stream FileIssueResponse);
   rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
   rpc ChangeProjects(ChangeProjectsRequest) returns (ChangeProjectsResponse);
@@ -548,6 +549,30 @@ message PruneResponse {
       string went_but = 3;
       string stays = 4;
     }
+  }
+}
+
+message RebaseRequest {
+  On on = 1;
+  string dir = 2;
+}
+
+message RebaseResponse {
+  string branch = 1;
+  string onto = 2;
+  oneof came {
+    google.protobuf.Empty already = 3;
+    Clean clean = 4;
+    Stopped stopped = 5;
+  }
+
+  message Clean {
+    uint32 ahead = 1;
+  }
+
+  message Stopped {
+    optional string at = 1;
+    repeated string conflicted = 2;
   }
 }
 

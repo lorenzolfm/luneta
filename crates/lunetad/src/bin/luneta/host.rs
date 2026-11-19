@@ -29,6 +29,7 @@ use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
+use lunetad::rebases::Rebased;
 use lunetad::{Destination, Direction, Growth, SessionName};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -60,6 +61,7 @@ use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
 use crate::prune;
+use crate::rebase;
 use crate::peers;
 use crate::picker::{self, List, Palette, Picked, Picker};
 use crate::printed::{self, Printed};
@@ -156,6 +158,7 @@ pub enum Event {
     Pruned { menu: u64, pruned: Result<prunes::Pruned, String> },
     Printed { menu: u64, printed: Result<Printed, String> },
     Checks { menu: u64, checks: Result<checks::Failing, String> },
+    Rebased { menu: u64, rebased: Result<Rebased, String> },
     Briefed { number: u64, written: Written },
     Heard { number: u64, heard: ask::Heard },
     Remotes { number: u64, remotes: Result<Vec<Remote>, String> },
@@ -959,6 +962,10 @@ impl App {
                 let asked = self.sidebar.checks(menu, checks);
                 self.follow(asked);
             },
+            Event::Rebased { menu, rebased } => {
+                let asked = self.sidebar.rebased(menu, rebased);
+                self.follow(asked);
+            },
             Event::Prunes { menu, plan } => {
                 let asked = self.sidebar.prunes(menu, plan);
                 self.follow(asked);
@@ -1695,6 +1702,11 @@ impl App {
             Asked::Welcome { asking, on, session, view } => {
                 self.welcome(asking, &on, &session, view);
             },
+            Asked::OpenIn { asking, on, worktree, command } => {
+                self.go_worktree(&on, worktree, None);
+                self.shown().open_beside_focused(command);
+                self.give_opened(Opener::of(asking));
+            },
             Asked::NewWorktree { on, project, branch } => {
                 self.make_worktree(on, move |lunetad, on| {
                     worktrees::branched(lunetad, on, project, &branch).map(Landing::Worktree)
@@ -1748,6 +1760,13 @@ impl App {
                 pull::prepare(menu, asking, &self.events);
             },
             Asked::Prunes { menu, on, dir } => prune::plan(menu, on, dir, &self.events),
+            Asked::Rebase { menu, on, dir } => {
+                let here = on == Machine::Local;
+                let rebasing = rebase::start(menu, on, dir, &self.events);
+                if here {
+                    self.keep_change(rebasing);
+                }
+            },
             Asked::Prune { menu, on, dir, agreed } => {
                 let here = on == Machine::Local;
                 let deleting = prune::delete(menu, on, dir, agreed, &self.events);

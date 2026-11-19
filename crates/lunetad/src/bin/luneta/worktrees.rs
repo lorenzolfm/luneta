@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
@@ -601,7 +602,18 @@ pub fn bring(path: &Path, worktree: WorktreeId, from: TerminalKey) -> Result<Wen
 
 const OPENING: Duration = Duration::from_secs(15);
 
-pub fn opened(path: &Path, worktree: WorktreeId, argv: Vec<String>) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opening {
+    IfEmpty,
+    Beside,
+}
+
+pub fn opened(
+    path: &Path,
+    worktree: WorktreeId,
+    argv: Vec<String>,
+    opening: Opening,
+) -> Result<(), String> {
     let folder = lunetad::folder::open(path).map_err(|refusal| refusal.to_string())?;
     let folder = folder.ok_or("lunetad has made no folder yet")?;
     let size = Size::of(80, 24).expect("80 by 24 cells is a size");
@@ -611,7 +623,12 @@ pub fn opened(path: &Path, worktree: WorktreeId, argv: Vec<String>) -> Result<()
     let show = lunetad::show(folder, at, worktree, size, unvisited, move |it| {
         drop(heard.send(it));
     });
-    let mut open = Some(Asked::Open { beside: Beside::Alone, argv });
+    let beside = match opening {
+        Opening::IfEmpty => Beside::Alone,
+        Opening::Beside => Beside::Focused,
+    };
+    let mut open = Some(Asked::Open { beside, argv });
+    let mut before: Option<BTreeSet<ViewId>> = None;
     let until = Instant::now() + OPENING;
     loop {
         let left = until.saturating_duration_since(Instant::now());
@@ -621,12 +638,19 @@ pub fn opened(path: &Path, worktree: WorktreeId, argv: Vec<String>) -> Result<()
                 let other = laid.worktree();
                 return Err(format!("lunetad laid out worktree {other}, not {worktree}"));
             },
-            Heard::Laid(laid) if laid.is_empty() => {
-                if let Some(open) = open.take() {
-                    show.ask(open);
+            Heard::Laid(laid) => {
+                let views: BTreeSet<ViewId> = laid.views().map(|view| view.id).collect();
+                match &before {
+                    None if opening == Opening::IfEmpty && !laid.is_empty() => return Ok(()),
+                    None => {
+                        let open = open.take().expect("a terminal is asked for once");
+                        show.ask(open);
+                        before = Some(views);
+                    },
+                    Some(before) if !views.is_subset(before) => return Ok(()),
+                    Some(_) => {},
                 }
             },
-            Heard::Laid(_) => return Ok(()),
             Heard::Edged { .. } | Heard::Sent(_) => {},
             Heard::Left(gone) => return Err(format!("worktree {gone} is gone")),
             Heard::Refused(why) => return Err(format!("lunetad refused: {why}")),

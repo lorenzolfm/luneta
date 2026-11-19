@@ -193,33 +193,19 @@ pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
         program::run(&mut git, LIMIT).map_err(|error| format!("git could not be run: {error}"))
     };
     let tip = format!("refs/heads/{branch}");
-    let mut named = vec![tip.clone()];
-    named.extend(DEFAULT_REMOTES.map(|remote| format!("refs/remotes/{remote}/HEAD")));
-    for name in ["main", "master"] {
-        named.extend(DEFAULT_REMOTES.map(|remote| format!("refs/remotes/{remote}/{name}")));
-        named.push(format!("refs/heads/{name}"));
-    }
-    let mut listing = vec!["for-each-ref", "--format=%(refname) %(objectname) %(symref)"];
+    let named = defaults();
+    let mut listing = vec!["for-each-ref", LISTING, tip.as_str()];
     listing.extend(named.iter().map(String::as_str));
     let listed = git(&listing)?.answer().map_err(|why| format!("git for-each-ref said {why}"))?;
     let listed = String::from_utf8_lossy(&listed);
-    let listed: HashMap<&str, (&str, &str)> = listed
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.splitn(3, ' ');
-            Some((fields.next()?, (fields.next()?, fields.next().unwrap_or(""))))
-        })
-        .collect();
+    let listed = refs(&listed);
     let Some(&(tip, _)) = listed.get(tip.as_str()) else {
         return Ok(None);
     };
-    let Some((base, default)) = named[1..].iter().find_map(|name| {
-        let &(base, symref) = listed.get(name.as_str())?;
-        Some((base, default_name(if symref.is_empty() { name } else { symref })))
-    }) else {
+    let Some((base, target)) = first_default(&named, &listed) else {
         return Ok(None);
     };
-    if default == Some(branch) {
+    if DefaultBranch::of(target).is_some_and(|default| default.branch() == branch) {
         return Ok(None);
     }
     let fork = match git(&["merge-base", tip, base])? {
@@ -248,11 +234,92 @@ pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
 
 const DEFAULT_REMOTES: [&str; 3] = ["upstream", "github", "origin"];
 
-fn default_name(target: &str) -> Option<&str> {
-    target.strip_prefix("refs/heads/").or_else(|| {
-        let remote = target.strip_prefix("refs/remotes/")?;
-        DEFAULT_REMOTES.iter().find_map(|name| remote.strip_prefix(name)?.strip_prefix('/'))
+const LISTING: &str = "--format=%(refname) %(objectname) %(symref)";
+
+fn defaults() -> Vec<String> {
+    let mut named = DEFAULT_REMOTES.map(|remote| format!("refs/remotes/{remote}/HEAD")).to_vec();
+    for name in ["main", "master"] {
+        named.extend(DEFAULT_REMOTES.map(|remote| format!("refs/remotes/{remote}/{name}")));
+        named.push(format!("refs/heads/{name}"));
+    }
+    named
+}
+
+fn refs(listed: &str) -> HashMap<&str, (&str, &str)> {
+    listed
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, ' ');
+            Some((fields.next()?, (fields.next()?, fields.next().unwrap_or(""))))
+        })
+        .collect()
+}
+
+fn first_default<'a>(
+    named: &'a [String],
+    listed: &HashMap<&'a str, (&'a str, &'a str)>,
+) -> Option<(&'a str, &'a str)> {
+    named.iter().find_map(|name| {
+        let &(base, symref) = listed.get(name.as_str())?;
+        Some((base, if symref.is_empty() { name.as_str() } else { symref }))
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefaultBranch {
+    Remote { remote: &'static str, branch: String },
+    Local { branch: String },
+}
+
+impl DefaultBranch {
+    fn of(target: &str) -> Option<DefaultBranch> {
+        if let Some(branch) = target.strip_prefix("refs/heads/") {
+            return Some(DefaultBranch::Local { branch: branch.to_owned() });
+        }
+        let remote = target.strip_prefix("refs/remotes/")?;
+        DEFAULT_REMOTES.into_iter().find_map(|name| {
+            let branch = remote.strip_prefix(name)?.strip_prefix('/')?;
+            Some(DefaultBranch::Remote { remote: name, branch: branch.to_owned() })
+        })
+    }
+
+    #[must_use]
+    pub fn branch(&self) -> &str {
+        match self {
+            DefaultBranch::Remote { branch, .. } | DefaultBranch::Local { branch } => branch,
+        }
+    }
+
+    #[must_use]
+    pub fn reference(&self) -> String {
+        match self {
+            DefaultBranch::Remote { remote, branch } => format!("refs/remotes/{remote}/{branch}"),
+            DefaultBranch::Local { branch } => format!("refs/heads/{branch}"),
+        }
+    }
+}
+
+impl fmt::Display for DefaultBranch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DefaultBranch::Remote { remote, branch } => write!(f, "{remote}/{branch}"),
+            DefaultBranch::Local { branch } => f.write_str(branch),
+        }
+    }
+}
+
+pub fn default_branch(dir: &str) -> Result<Option<DefaultBranch>, String> {
+    let named = defaults();
+    let mut listing = vec!["for-each-ref", LISTING];
+    listing.extend(named.iter().map(String::as_str));
+    let listed = says(dir, &listing)?;
+    let listed = refs(&listed);
+    let Some((_, target)) = first_default(&named, &listed) else {
+        return Ok(None);
+    };
+    let remotes = DEFAULT_REMOTES.join(", ");
+    let unknown = || format!("git says {target} is the default branch, of none of {remotes}");
+    DefaultBranch::of(target).map(Some).ok_or_else(unknown)
 }
 
 pub enum NamedHead {
@@ -280,7 +347,7 @@ pub fn named_head(dir: &str, branch: &str) -> Result<Option<NamedHead>, String> 
     Ok((push != remote || merge == head).then_some(NamedHead::OnRemote))
 }
 
-fn says(dir: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn says(dir: &str, args: &[&str]) -> Result<String, String> {
     let asked = args.join(" ");
     let mut git = Command::new("git");
     local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]).args(args));

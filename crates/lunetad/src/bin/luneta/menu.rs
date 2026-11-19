@@ -9,6 +9,7 @@ use luneta_protocol::said::Said;
 use lunetad::links::Branch;
 use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
+use lunetad::rebases::{self, Came, Rebased};
 use lunetad::{Destination, Directory, SessionName};
 use luneta_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
@@ -30,6 +31,7 @@ use crate::issue::Repository;
 use crate::machines::Machine;
 use crate::printed::{self, Printed};
 use crate::prune;
+use crate::rebase;
 use crate::pull::{At, Found, Kind, Readied, Ready, Wanted, Work};
 use crate::sidebar::{
     self, ACCENT, LIT, Listed, Mark, NAME, ViewKey, ViewPlace, Place, ProjectRow, TAG,
@@ -617,6 +619,7 @@ impl Chain {
             | Offer::DeleteProject(_)
             | Offer::ForgetMachine(_)
             | Offer::DeleteMerged(_)
+            | Offer::Rebase(_)
             | Offer::Brief(_)
             | Offer::Ask
             | Offer::FileIssue(_)
@@ -782,6 +785,7 @@ enum Offer<'t> {
     DeleteProject(&'t Listed),
     ForgetMachine(&'t Destination),
     DeleteMerged(Directory),
+    Rebase(Rebases<'t>),
     Brief(brief::Scope),
     Ask,
     FileIssue(Repository),
@@ -899,6 +903,16 @@ impl Target {
                 Offer::ForgetMachine(destination)
             },
             (Action::DeleteMerged, _) => Offer::DeleteMerged(self.merged_in()?),
+            (Action::Rebase, Target::View(_, row))
+                if row.repository.is_some() && row.branch.is_some() =>
+            {
+                Offer::Rebase(Rebases::View(row))
+            },
+            (Action::Rebase, Target::Worktree(_, row))
+                if row.repository.is_some() && row.branch.is_some() =>
+            {
+                Offer::Rebase(Rebases::Worktree(row))
+            },
             (Action::BriefEvery, _) => Offer::Brief(brief::Scope::Every),
             (Action::BriefThis, _) => Offer::Brief(brief::Scope::Session),
             (Action::BriefHighlighted, _) => Offer::Brief(brief::Scope::Highlighted),
@@ -1055,6 +1069,35 @@ struct Beside {
     cwd: Directory,
 }
 
+enum Rebases<'t> {
+    View(&'t ViewRow),
+    Worktree(&'t WorktreeRow),
+}
+
+enum Rebasing {
+    Beside(Beside),
+    In(WorktreeId),
+}
+
+impl Rebases<'_> {
+    fn asked(&self) -> Result<(Rebasing, Directory, String), String> {
+        match self {
+            Rebases::View(row) => {
+                let beside = row.beside()?;
+                let (dir, branch) = (beside.cwd.clone(), row.branch.clone());
+                let branch = branch.expect("a view is rebased only on a branch");
+                Ok((Rebasing::Beside(beside), dir, branch))
+            },
+            Rebases::Worktree(row) => {
+                let dir = Directory::parse(row.folder.clone());
+                let dir = dir.map_err(|why| format!("menu: the folder of {}, {why}", row.name))?;
+                let branch = row.branch.clone().expect("a worktree is rebased only on a branch");
+                Ok((Rebasing::In(row.place.worktree), dir, branch))
+            },
+        }
+    }
+}
+
 impl ViewRow {
     fn beside(&self) -> Result<Beside, String> {
         let view = self.view;
@@ -1144,6 +1187,7 @@ pub enum Wants {
     Plan { session: Listed, scope: Scope },
     Prunes { dir: Directory },
     Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
+    Rebase { dir: Directory },
     Open { session: Listed, view: ViewKey, command: Vec<String> },
     Pull(Work, Wanted),
     Printed { session: Listed, view: ViewKey, ended: Ended },
@@ -1164,6 +1208,8 @@ pub enum Done {
     Forget(Destination),
     Worktree(Machine, ProjectId, Branch),
     Welcome { on: Machine, session: Listed, view: ViewKey },
+    OpenIn { on: Machine, worktree: WorktreeId, command: Vec<String> },
+    Said(String),
     Project { on: Machine, folder: String, name: Option<projects::Name> },
     Rename(Machine, Rename),
     Quit,
@@ -1199,6 +1245,7 @@ enum Stage {
     Opening { keys: Keys },
     Reading { keys: Keys, last: Last, beside: Beside, ended: Ended },
     Fetching { keys: Keys, beside: Beside, page: PullPage },
+    Rebasing { keys: Keys, from: Rebasing, branch: String },
     Pull { work: Work, agent: Harness, step: Step },
     Typing { keys: Keys, chain: Chain },
 }
@@ -1279,6 +1326,10 @@ impl Menu {
         matches!(self.stage, Stage::Fetching { .. })
     }
 
+    pub fn rebasing(&self) -> bool {
+        matches!(self.stage, Stage::Rebasing { .. })
+    }
+
     pub fn pulling(&self) -> bool {
         matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Pulling(_)), .. })
     }
@@ -1290,6 +1341,7 @@ impl Menu {
                 | Stage::Pruning { .. }
                 | Stage::Reading { .. }
                 | Stage::Fetching { .. }
+                | Stage::Rebasing { .. }
                 | Stage::Opening { .. }
                 | Stage::Pull { step: Step::Waiting(_), .. }
         )
@@ -1301,6 +1353,7 @@ impl Menu {
             Stage::Pruning { count, .. } => Some(pruning(*count)),
             Stage::Reading { ended, .. } => Some(reading(ended)),
             Stage::Fetching { page, .. } => Some(fetching(page.number())),
+            Stage::Rebasing { branch, .. } => Some(rebasing(branch)),
             Stage::Pull { work, step: Step::Waiting(wait), .. } => Some(wait.doing(work)),
             Stage::Choosing(_)
             | Stage::Planning { .. }
@@ -1332,6 +1385,7 @@ impl Menu {
             | Stage::Opening { .. }
             | Stage::Reading { .. }
             | Stage::Fetching { .. }
+            | Stage::Rebasing { .. }
             | Stage::Typing { .. } => None,
         }
     }
@@ -1354,6 +1408,7 @@ impl Menu {
             | Stage::Opening { .. }
             | Stage::Reading { .. }
             | Stage::Fetching { .. }
+            | Stage::Rebasing { .. }
             | Stage::Typing { .. } => None,
         }
     }
@@ -1441,6 +1496,12 @@ impl Menu {
                 let wants = Wants::Prunes { dir: dir.clone() };
                 stays(Stage::Sweeping { keys, dir }, wants)
             },
+            Offer::Rebase(rebases) => match rebases.asked() {
+                Ok((from, dir, branch)) => {
+                    stays(Stage::Rebasing { keys, from, branch }, Wants::Rebase { dir })
+                },
+                Err(reason) => wrong(reason),
+            },
             Offer::Brief(scope) => Did::Closed(Done::Brief(target.brief(scope))),
             Offer::Ask => Did::Closed(Done::Ask(target.clone())),
             Offer::FileIssue(repository) => Did::Closed(Done::Issue(repository)),
@@ -1494,6 +1555,7 @@ impl Menu {
             | Stage::Opening { .. }
             | Stage::Reading { .. }
             | Stage::Fetching { .. }
+            | Stage::Rebasing { .. }
             | Stage::Pull { .. }
                 if closes(key) =>
             {
@@ -1527,6 +1589,7 @@ impl Menu {
             | Stage::Opening { .. }
             | Stage::Reading { .. }
             | Stage::Fetching { .. }
+            | Stage::Rebasing { .. }
             | Stage::Pull { .. }) => stays(stage, Wants::Nothing),
             Stage::Swept { keys, dir, plan } => match answer(key, yes_key(Action::DeleteMerged)) {
                 Answer::Yes if !plan.goes.is_empty() => {
@@ -1726,6 +1789,33 @@ impl Menu {
         Did::Stays(Menu { number: menu, target, stage }, wants)
     }
 
+    pub fn rebased(self, rebased: Result<Rebased, String>) -> Did {
+        let Menu { number, target, stage } = self;
+        let Stage::Rebasing { keys, from, branch } = stage else {
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        };
+        let rebased = match rebased {
+            Ok(rebased) => rebased,
+            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {branch}: {why}"))),
+        };
+        let Came::Stopped(stopped) = &rebased.came else {
+            return Did::Closed(Done::Said(format!("menu: {}", rebase::said(&rebased))));
+        };
+        let prompt = rebases::prompt(&rebased.branch, &rebased.onto, stopped);
+        let command = agents::on_words(keys.agent.harness(), prompt, &[]);
+        match from {
+            Rebasing::Beside(Beside { session, view, .. }) => {
+                let stage = Stage::Opening { keys };
+                let wants = Wants::Open { session, view, command };
+                Did::Stays(Menu { number, target, stage }, wants)
+            },
+            Rebasing::In(worktree) => {
+                let on = target.machine().clone();
+                Did::Closed(Done::OpenIn { on, worktree, command })
+            },
+        }
+    }
+
     pub fn found(&mut self, agent: Harness, skills: Result<Vec<crate::skills::Skill>, String>) {
         if let Stage::Choosing(keys) = &mut self.stage
             && keys.agent.harness() == agent
@@ -1813,6 +1903,7 @@ impl Menu {
             | Stage::Swept { .. }
             | Stage::Pruning { .. }
             | Stage::Fetching { .. }
+            | Stage::Rebasing { .. }
             | Stage::Pull { .. } => false,
         }
     }
@@ -1911,6 +2002,10 @@ impl Menu {
             Stage::Fetching { keys, page, .. } => {
                 let doing = fetching(page.number());
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
+                (title(keys), right, body, keyed(width, &[(Hint::Esc, "Close")]))
+            },
+            Stage::Rebasing { keys, branch, .. } => {
+                let body = waiting(&rebasing(branch), width, Style::new().fg(NAME), frame);
                 (title(keys), right, body, keyed(width, &[(Hint::Esc, "Close")]))
             },
             Stage::Pruning { keys, count, .. } => {
@@ -2076,6 +2171,10 @@ fn fetching(number: NonZeroU32) -> String {
     format!("Asking gh about the checks of #{number}…")
 }
 
+fn rebasing(branch: &str) -> String {
+    format!("Rebasing {branch} onto upstream…")
+}
+
 pub fn waiting(doing: &str, width: usize, style: Style, frame: usize) -> Vec<Line<'static>> {
     let (spinner, turning) = Mark::Busy.glyph(frame);
     let lines = wrap(doing, width.saturating_sub(2), style).into_iter().enumerate();
@@ -2215,6 +2314,10 @@ pub fn grouped(group: char, width: usize, room: usize) -> (Vec<Line<'static>>, S
 
 pub fn in_group(group: char, key: char) -> Option<Action> {
     Action::row().find_map(|(action, path)| (*path == [group, key]).then_some(action))
+}
+
+pub fn in_menu_group(group: char, key: char) -> bool {
+    Action::menu().any(|(_, path)| *path == [group, key])
 }
 
 fn listed(
@@ -2587,6 +2690,7 @@ mod tests {
     use ratatui::layout::Position;
 
     use super::*;
+    use crate::actions::GIT;
     use crate::close::{self, Deletes, Doing, Subject};
     use crate::printed::Kept;
     use crate::pull::{At, Found, Link, Readied, Ready, Work};
@@ -2784,7 +2888,7 @@ mod tests {
     fn the_first_group_has_luneta_s_keys_and_backspace_goes_back_to_it() {
         let (menu, _) = stays(opened(own_view(), None));
         assert_eq!(
-            text(&menu.lines(31, 11, 0).0),
+            text(&menu.lines(31, 12, 0).0),
             [
                 "─ luneta ──────── luneta/main ─",
                 " /  Search skills",
@@ -2794,6 +2898,7 @@ mod tests {
                 " n  New ▸",
                 " r  Rename the view…",
                 " d  Delete ▸",
+                " g  Git ▸",
                 " b  Brief ▸",
                 " q  Quit luneta",
                 " <ESC> - Close",
@@ -2865,8 +2970,11 @@ mod tests {
     fn no_command_of_the_rows_nor_group_of_the_menu_is_on_a_key_the_sidebar_moves_with() {
         for (action, path) in Action::row().chain(Action::menu()) {
             let group = ROW_GROUPS.iter().any(|(key, _)| *key == path[0]);
-            assert!(Top::moves(path[0]).is_none() || group, "{action:?} on {path:?}");
+            let handed_on = path[0] == GIT && Top::moves(GIT) == Some(Top::First);
+            assert!(Top::moves(path[0]).is_none() || group || handed_on, "{action:?} on {path:?}");
         }
+        assert!(!in_menu_group(GIT, GIT), "g g goes to the first row, and to no git action");
+        assert!(in_menu_group(GIT, 'r'));
         for (_, path) in Action::row() {
             let group = |(key, _): &(char, &str)| *key == path[0];
             assert!(!MENU_GROUPS.iter().any(group), "{path:?} opens a group of the menu");
@@ -3082,6 +3190,72 @@ mod tests {
             fetched(Ok(failing(0, 3))),
             wrong("menu: no check failed on the head of #328, and 3 have yet to end")
         );
+    }
+
+    fn rebased(came: Came) -> Rebased {
+        Rebased { branch: "feat/menu".to_owned(), onto: "origin/main".to_owned(), came }
+    }
+
+    fn on_conflicts() -> Came {
+        Came::Stopped(rebases::Stopped { at: None, conflicted: vec!["menu.rs".to_owned()] })
+    }
+
+    fn rebasing(target: Target) -> Menu {
+        let (menu, _) = stays(opened(target, Some(GIT)));
+        let (menu, wants) = stays(menu.key(&char('r')));
+        assert_eq!(wants, Wants::Rebase { dir: main_dir() });
+        assert!(menu.rebasing() && menu.waits());
+        menu
+    }
+
+    #[test]
+    fn g_r_rebases_a_view_s_branch_and_says_how_it_came_out() {
+        let menu = rebasing(view_row());
+        let body = text(&menu.lines(40, 4, 0).0);
+        assert!(body.iter().any(|line| line.ends_with("Rebasing feat/menu onto upstream…")));
+        let (menu, wants) = stays(menu.key(&char('r')));
+        assert_eq!(wants, Wants::Nothing);
+        let clean = "menu: feat/menu is rebased onto origin/main, 2 commits on top";
+        let done = closed(menu.rebased(Ok(rebased(Came::Clean { ahead: 2 }))));
+        assert_eq!(done, Done::Said(clean.to_owned()));
+        let already = closed(rebasing(view_row()).rebased(Ok(rebased(Came::Already))));
+        assert_eq!(already, Done::Said("menu: feat/menu is on origin/main already".to_owned()));
+        let failed = closed(rebasing(view_row()).rebased(Err("git fetch: no route".to_owned())));
+        assert_eq!(failed, Done::Wrong("menu: feat/menu: git fetch: no route".to_owned()));
+    }
+
+    #[test]
+    fn a_rebase_stopped_on_conflicts_starts_an_agent_on_them_where_it_was_asked() {
+        let Rebased { came: Came::Stopped(stopped), .. } = rebased(on_conflicts()) else {
+            unreachable!("on_conflicts() is a stopped rebase");
+        };
+        let prompt = rebases::prompt("feat/menu", "origin/main", &stopped);
+        let command = vec!["claude".to_owned(), prompt];
+
+        let (menu, wants) = stays(rebasing(view_row()).rebased(Ok(rebased(on_conflicts()))));
+        assert_eq!(wants, beside_row(command.clone()));
+        assert!(menu.waits());
+
+        let worktree_row = worktree_on(Machine::Local);
+        let done = closed(rebasing(worktree_row).rebased(Ok(rebased(on_conflicts()))));
+        assert_eq!(done, Done::OpenIn { on: Machine::Local, worktree: worktree(), command });
+    }
+
+    #[test]
+    fn only_a_view_or_worktree_on_a_branch_of_a_repository_is_rebased() {
+        let unbranched = ViewRow { branch: None, ..row() };
+        let outside = ViewRow { repository: None, ..row() };
+        for target in [
+            Target::View(Machine::Local, unbranched),
+            Target::View(Machine::Local, outside),
+            session_row(),
+            Target::Machine(Machine::Local),
+        ] {
+            assert!(Menu::open(1, target.clone(), Some(GIT), PICKED).is_none(), "{target:?}");
+        }
+        let far = Machine::Remote("me@vps".parse().unwrap());
+        let (_, wants) = stays(rebasing(worktree_on(far)).key(&char('x')));
+        assert_eq!(wants, Wants::Nothing);
     }
 
     #[test]
@@ -3400,6 +3574,7 @@ mod tests {
             " n  New ▸",
             " r  Rename the view…",
             " d  Delete ▸",
+            " g  Git ▸",
             " b  Brief ▸",
             " q  Quit luneta",
             " <ESC> - Close",
@@ -3711,6 +3886,7 @@ mod tests {
             " n  New ▸",
             " r  Rename the worktree…",
             " d  Delete ▸",
+            " g  Git ▸",
             " b  Brief ▸",
             " q  Quit luneta",
             " <ESC> - Close",
@@ -4039,7 +4215,7 @@ mod tests {
     fn the_menu_floats_at_the_bottom_right_of_the_view_s_side() {
         let menu = Menu::new(1, view_row(), PICKED);
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
-        assert_eq!(floated(drawing(&menu), 50, 12), [
+        assert_eq!(floated(drawing(&menu), 50, 13), [
             "z".repeat(50),
             format!("{}┌─ luneta ─ luneta/main ─┐", "z".repeat(24)),
             boxed(" /  Search skills"),
@@ -4048,6 +4224,7 @@ mod tests {
             boxed(" c  Skills ▸"),
             boxed(" n  New ▸"),
             boxed(" d  Delete ▸"),
+            boxed(" g  Git ▸"),
             boxed(" b  Brief ▸"),
             boxed(" q  Quit luneta"),
             boxed(" <ESC> - Close"),

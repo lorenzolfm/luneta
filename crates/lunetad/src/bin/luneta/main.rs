@@ -41,6 +41,7 @@ mod printed;
 mod projected;
 mod prune;
 mod pull;
+mod rebase;
 mod screen;
 mod sidebar;
 mod skills;
