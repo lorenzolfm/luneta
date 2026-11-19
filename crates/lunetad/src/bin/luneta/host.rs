@@ -29,7 +29,7 @@ use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
-use lunetad::rebases::Rebased;
+use lunetad::rebases::{Rebased, Unrebased};
 use lunetad::{Destination, Direction, Growth, SessionName};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -158,7 +158,7 @@ pub enum Event {
     Pruned { menu: u64, pruned: Result<prunes::Pruned, String> },
     Printed { menu: u64, printed: Result<Printed, String> },
     Checks { menu: u64, checks: Result<checks::Failing, String> },
-    Rebased { menu: u64, rebased: Result<Rebased, String> },
+    Rebased { menu: u64, rebased: Result<Rebased, Unrebased> },
     Briefed { number: u64, written: Written },
     Heard { number: u64, heard: ask::Heard },
     Remotes { number: u64, remotes: Result<Vec<Remote>, String> },

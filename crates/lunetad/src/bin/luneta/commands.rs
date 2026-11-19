@@ -124,7 +124,8 @@ pub enum Command {
                  the default branch of the repository's `upstream`, `github` or `origin` \
                  remote, fetched first, or else its own main or master. It pushes nothing. A \
                  rebase that stops on conflicts is left stopped, an agent is started on them in \
-                 a view of the worktree, and it exits 4. Where it rebased nothing, it exits 1"
+                 a view of the worktree, and it exits 4, as it does when it cannot tell how \
+                 the rebase ended. Where it rebased nothing, it exits 1"
     )]
     Rebase {
         #[arg(value_name = "DIR", help = "A directory of the worktree. Without one, this one")]

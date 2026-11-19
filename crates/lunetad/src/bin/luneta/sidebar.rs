@@ -24,7 +24,7 @@ use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Dir, Plain, ProjectId, Used, ViewId, WorktreeId};
 use lunetad::projects::CLONE_WORKTREES_MAX;
 use lunetad::prunes;
-use lunetad::rebases::Rebased;
+use lunetad::rebases::{Rebased, Unrebased};
 use lunetad::seats::{self, seated, Unread};
 use lunetad::transcripts::SessionId;
 use lunetad::{log, Destination, Directory, SessionName};
@@ -3810,7 +3810,7 @@ impl Sidebar {
         self.menu_did_after(taken, waiting.checked(checks))
     }
 
-    pub fn rebased(&mut self, menu: u64, rebased: Result<Rebased, String>) -> Asked {
+    pub fn rebased(&mut self, menu: u64, rebased: Result<Rebased, Unrebased>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::rebasing) else {
             return Asked::Nothing;
         };

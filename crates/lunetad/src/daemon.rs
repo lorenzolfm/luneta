@@ -621,7 +621,7 @@ impl Daemon for Host {
         }
         let answer = late(move || {
             let rebased = rebases::rebase(&dir, branch.as_deref());
-            let rebased = rebased.map_err(Status::failed_precondition)?;
+            let rebased = rebased.map_err(rebases::Unrebased::status)?;
             Ok(rebased.to_api())
         });
         Ok(Response::new(Box::pin(answer)))

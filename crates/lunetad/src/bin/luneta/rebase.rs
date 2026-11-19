@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 
-use lunetad::rebases::{self, Came, Rebased, Stopped};
+use lunetad::rebases::{self, Came, Rebased, Stopped, Unrebased};
 use lunetad::Directory;
 
 use crate::agents::{self, Kept};
@@ -22,7 +22,11 @@ pub fn run(dir: Option<&Path>, path: &Path) -> ExitCode {
     };
     let rebased = match rebases::rebase(&dir, None) {
         Ok(rebased) => rebased,
-        Err(why) => return failed(&format!("no rebase: {why}")),
+        Err(Unrebased::Refused(why)) => return failed(&format!("no rebase: {why}")),
+        Err(Unrebased::InDoubt(why)) => {
+            eprintln!("luneta: no telling how the rebase ended, and it may wait for you: {why}");
+            return ExitCode::from(UNFINISHED);
+        },
     };
     let Came::Stopped(stopped) = &rebased.came else {
         println!("{}", said(&rebased));
@@ -58,15 +62,19 @@ pub fn start(
     branch: String,
     events: &Sender<Event>,
 ) -> JoinHandle<()> {
-    let due = Due::new(events, move |rebased| Event::Rebased { menu, rebased });
-    thread::spawn(move || due.pay(rebased(&on, &dir, &branch)))
+    let due = Due::new(events, move |rebased: Result<Result<Rebased, Unrebased>, String>| {
+        let rebased = rebased.unwrap_or_else(|why| Err(Unrebased::InDoubt(why)));
+        Event::Rebased { menu, rebased }
+    });
+    thread::spawn(move || due.pay(Ok(rebased(&on, &dir, &branch))))
 }
 
-fn rebased(on: &Machine, dir: &Directory, branch: &str) -> Result<Rebased, String> {
+fn rebased(on: &Machine, dir: &Directory, branch: &str) -> Result<Rebased, Unrebased> {
     match on {
         Machine::Local => rebases::rebase(dir, Some(branch)),
-        Machine::Remote(destination) => {
-            Away::reach(destination, away::ANSWER)?.rebase(dir, branch)
+        Machine::Remote(destination) => match Away::reach(destination, away::ANSWER) {
+            Ok(mut away) => away.rebase(dir, branch),
+            Err(why) => Err(Unrebased::Refused(format!("{destination}: {why}"))),
         },
     }
 }

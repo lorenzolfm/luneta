@@ -9,7 +9,7 @@ use luneta_protocol::said::Said;
 use lunetad::links::Branch;
 use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
-use lunetad::rebases::{self, Came, Rebased};
+use lunetad::rebases::{self, Came, Rebased, Unrebased};
 use lunetad::{Destination, Directory, SessionName};
 use luneta_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
@@ -1784,7 +1784,7 @@ impl Menu {
         Did::Stays(Menu { number: menu, target, stage }, wants)
     }
 
-    pub fn rebased(self, rebased: Result<Rebased, String>) -> Did {
+    pub fn rebased(self, rebased: Result<Rebased, Unrebased>) -> Did {
         let Menu { number, target, stage } = self;
         let Stage::Rebasing { keys, resolves, branch } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
@@ -1795,7 +1795,13 @@ impl Menu {
                 let why = format!("menu: {branch}: lunetad rebased {other}, not {branch}");
                 return Did::Closed(Done::Wrong(why));
             },
-            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {branch}: {why}"))),
+            Err(Unrebased::Refused(why)) => {
+                return Did::Closed(Done::Wrong(format!("menu: {branch}: {why}")));
+            },
+            Err(Unrebased::InDoubt(why)) => {
+                let why = format!("menu: {branch}: no telling how the rebase ended: {why}");
+                return Did::Closed(Done::Wrong(why));
+            },
         };
         let Came::Stopped(stopped) = &rebased.came else {
             return Did::Closed(Done::Said(format!("menu: {}", rebase::said(&rebased))));
@@ -3220,8 +3226,14 @@ mod tests {
         assert_eq!(done, Done::Said(clean.to_owned()));
         let already = closed(rebasing(view_row()).rebased(Ok(rebased(Came::Already))));
         assert_eq!(already, Done::Said("menu: feat/menu is on origin/main already".to_owned()));
-        let failed = closed(rebasing(view_row()).rebased(Err("git fetch: no route".to_owned())));
+        let refused = Err(Unrebased::Refused("git fetch: no route".to_owned()));
+        let failed = closed(rebasing(view_row()).rebased(refused));
         assert_eq!(failed, Done::Wrong("menu: feat/menu: git fetch: no route".to_owned()));
+        let doubt = Err(Unrebased::InDoubt("me@vps: lunetad said nothing for 1260s".to_owned()));
+        let doubted = closed(rebasing(view_row()).rebased(doubt));
+        let wrong = "menu: feat/menu: no telling how the rebase ended: me@vps: lunetad said \
+                     nothing for 1260s";
+        assert_eq!(doubted, Done::Wrong(wrong.to_owned()), "no agent starts on a rebase in doubt");
         let other = Rebased { branch: "main".to_owned(), ..rebased(on_conflicts()) };
         let moved = closed(rebasing(view_row()).rebased(Ok(other)));
         let wrong = "menu: feat/menu: lunetad rebased main, not feat/menu";

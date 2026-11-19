@@ -331,6 +331,10 @@ worktree's branch onto it. It pushes nothing: push only when the user asks.
   the user picked last. Don't resolve the conflicts yourself, and don't run
   `git rebase --abort`: that agent has them. stderr says if no agent started;
   then tell the user the rebase waits for them.
+- It also exits 4, with `no telling how the rebase ended` on stderr, when git
+  took too long and was stopped, or what it left could not be read. The
+  rebase may be part of the way through: don't resolve or abort anything, and
+  tell the user to look at `git status` in the worktree.
 
 
 When the user asks to reset luneta, or start it from scratch, run `luneta

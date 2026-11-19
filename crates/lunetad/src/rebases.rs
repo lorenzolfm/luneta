@@ -4,6 +4,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use tonic::{Code, Status};
+
 use crate::api::rebase_response::{self, Came as Said};
 use crate::api::{On, RebaseRequest, RebaseResponse};
 use crate::directory::Directory;
@@ -75,11 +77,41 @@ enum Doing {
 enum Picked {
     Ended,
     Stopped,
-    Refused(String),
 }
 
-pub fn rebase(dir: &Directory, expected: Option<&str>) -> Result<Rebased, String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unrebased {
+    Refused(String),
+    InDoubt(String),
+}
+
+struct Ready {
+    top: String,
+    branch: String,
+    default: DefaultBranch,
+    before: String,
+}
+
+pub fn rebase(dir: &Directory, expected: Option<&str>) -> Result<Rebased, Unrebased> {
     let until = Instant::now() + RUNNING_MAX;
+    let Ready { top, branch, default, before } =
+        ready(dir, expected, until).map_err(Unrebased::Refused)?;
+    let (onto, reference) = (default.to_string(), default.reference());
+    let doubt = |why: String| in_doubt(&top, &why);
+    let came = match picked(&top, &reference, &branch, until)? {
+        Picked::Ended if tip(&top, &branch, until).map_err(doubt)? == before => Came::Already,
+        Picked::Ended => {
+            Came::Clean { ahead: ahead(&top, &reference, &branch, until).map_err(doubt)? }
+        },
+        Picked::Stopped => {
+            let at = stopped_at(&top, until).map_err(doubt)?;
+            Came::Stopped(Stopped { at, conflicted: conflicted(&top, until).map_err(doubt)? })
+        },
+    };
+    Ok(Rebased { branch, onto, came })
+}
+
+fn ready(dir: &Directory, expected: Option<&str>, until: Instant) -> Result<Ready, String> {
     let top = says(dir.as_str(), &["rev-parse", "--show-toplevel"], until)?;
     if top.is_empty() {
         return Err(format!("{dir} is in no worktree of a repository"));
@@ -103,18 +135,12 @@ pub fn rebase(dir: &Directory, expected: Option<&str>) -> Result<Rebased, String
     if let DefaultBranch::Remote { remote, branch } = &default {
         sync::fetch(&top, remote, branch, left(until, FETCHING)?)?;
     }
-    let (onto, reference) = (default.to_string(), default.reference());
-    let before = head(&top, until)?;
-    let came = match picked(&top, &reference, until)? {
-        Picked::Ended if head(&top, until)? == before => Came::Already,
-        Picked::Ended => Came::Clean { ahead: ahead(&top, &reference, until)? },
-        Picked::Stopped => {
-            let at = stopped_at(&top, until)?;
-            Came::Stopped(Stopped { at, conflicted: conflicted(&top, until)? })
-        },
-        Picked::Refused(why) => return Err(format!("git rebase: {why}")),
-    };
-    Ok(Rebased { branch, onto, came })
+    let before = tip(&top, &branch, until)?;
+    Ok(Ready { top, branch, default, before })
+}
+
+fn in_doubt(top: &str, why: &str) -> Unrebased {
+    Unrebased::InDoubt(format!("{why}; see git status in {top}"))
 }
 
 fn left(until: Instant, most: Duration) -> Result<Duration, String> {
@@ -164,35 +190,44 @@ fn committed(top: &str, until: Instant) -> Result<bool, String> {
     Ok(said.is_empty())
 }
 
-fn head(top: &str, until: Instant) -> Result<String, String> {
-    says(top, &["rev-parse", "--verify", "HEAD"], until)
+fn tip(top: &str, branch: &str, until: Instant) -> Result<String, String> {
+    says(top, &["rev-parse", "--verify", &format!("refs/heads/{branch}")], until)
 }
 
-fn ahead(top: &str, reference: &str, until: Instant) -> Result<u32, String> {
-    let said = says(top, &["rev-list", "--count", &format!("{reference}..HEAD")], until)?;
+fn ahead(top: &str, reference: &str, branch: &str, until: Instant) -> Result<u32, String> {
+    let counted = format!("{reference}..refs/heads/{branch}");
+    let said = says(top, &["rev-list", "--count", &counted], until)?;
     said.parse().map_err(|_| format!("git rev-list counted {said}, which is no count"))
 }
 
-fn picked(top: &str, onto: &str, until: Instant) -> Result<Picked, String> {
+fn picked(top: &str, onto: &str, branch: &str, until: Instant) -> Result<Picked, Unrebased> {
     let mut git = Command::new("git");
-    git::local(git.args(["-C", top, "rebase", onto]))
+    git::local(git.args(["-C", top, "rebase", onto, branch]))
         .env("GIT_EDITOR", ":")
         .env("GIT_SEQUENCE_EDITOR", ":");
-    let ran = program::run_alone(&mut git, left(until, PICKING)?)
-        .map_err(|error| format!("git rebase could not be run: {error}"))?;
+    let limit = left(until, PICKING).map_err(Unrebased::Refused)?;
+    let ran = program::run_alone(&mut git, limit).map_err(|error| {
+        Unrebased::Refused(format!("git rebase could not be run: {error}"))
+    })?;
     let code = match &ran {
         Ran::Ended { status, .. } => status.code(),
-        Ran::Stuck => {
-            return Err("git rebase did not end in time and was stopped: see git status".to_owned());
-        },
+        Ran::Stuck => return Err(in_doubt(top, "git rebase did not end in time and was stopped")),
     };
     let Err(why) = ran.answer() else {
         return Ok(Picked::Ended);
     };
-    if code == Some(STOPPED_CODE) && under_way(top, until)? == Some(Doing::Rebase) {
-        return Ok(Picked::Stopped);
+    let doing = under_way(top, until)
+        .map_err(|unread| in_doubt(top, &format!("git rebase: {why}, and {unread}")))?;
+    match (code, doing) {
+        (Some(STOPPED_CODE), Some(Doing::Rebase)) => Ok(Picked::Stopped),
+        (Some(_), None | Some(Doing::Merge | Doing::CherryPick | Doing::Revert)) => {
+            Err(Unrebased::Refused(format!("git rebase: {why}")))
+        },
+        (Some(_), Some(Doing::Rebase)) => {
+            Err(in_doubt(top, &format!("git rebase: {why}, and a rebase is under way")))
+        },
+        (None, _) => Err(in_doubt(top, &format!("git rebase: {why}"))),
     }
-    Ok(Picked::Refused(why))
 }
 
 fn stopped_at(top: &str, until: Instant) -> Result<Option<String>, String> {
@@ -261,6 +296,29 @@ impl Conflicted {
         let named = self.named.len();
         let named = u32::try_from(named).expect("at most CONFLICTED_NAMED_MAX files are named");
         self.count.checked_sub(named).expect("a conflicted list names at most its count")
+    }
+}
+
+impl Unrebased {
+    #[must_use]
+    pub fn of(why: String, code: Option<Code>) -> Unrebased {
+        match code {
+            Some(
+                Code::FailedPrecondition
+                | Code::InvalidArgument
+                | Code::NotFound
+                | Code::Unimplemented,
+            ) => Unrebased::Refused(why),
+            _ => Unrebased::InDoubt(why),
+        }
+    }
+
+    #[must_use]
+    pub fn status(self) -> Status {
+        match self {
+            Unrebased::Refused(why) => Status::failed_precondition(why),
+            Unrebased::InDoubt(why) => Status::aborted(why),
+        }
     }
 }
 
@@ -382,6 +440,13 @@ mod tests {
         Directory::parse(dir.to_str().unwrap().to_owned()).unwrap()
     }
 
+    fn refusal(dir: &Path, expected: Option<&str>) -> String {
+        match rebase(&directory(dir), expected) {
+            Err(Unrebased::Refused(why)) => why,
+            other => panic!("{} is not refused: {other:?}", dir.display()),
+        }
+    }
+
     struct Cloned {
         _scratch: tempfile::TempDir,
         up: PathBuf,
@@ -441,16 +506,17 @@ mod tests {
         assert_eq!(stopped, &Stopped { at, conflicted });
         assert!(cloned.dir.join(".git/rebase-merge").is_dir(), "the rebase waits, stopped");
 
-        let refused = rebase(&directory(&cloned.dir), None).unwrap_err();
+        let refused = refusal(&cloned.dir, None);
         let doing = "is in the middle of a rebase: finish it, or abort it, first";
         assert!(refused.ends_with(doing), "{refused}");
         let top = cloned.dir.to_str().unwrap();
         let onto = "refs/remotes/origin/main";
-        let later = super::picked(top, onto, Instant::now() + GIT_SAYS).unwrap();
-        let Picked::Refused(why) = later else {
+        let later = super::picked(top, onto, "issue-429", Instant::now() + GIT_SAYS);
+        let Err(Unrebased::InDoubt(why)) = later else {
             panic!("a rebase git would not start is taken for {later:?}");
         };
         assert!(why.contains("already a rebase-merge directory"), "{why}");
+        assert!(why.contains(", and a rebase is under way; see git status in "), "{why}");
         let words = prompt(&rebased.branch, &rebased.onto, stopped);
         let starts = format!(
             "The rebase of issue-429 onto origin/main stopped at {picked} own base, on conflicts \
@@ -466,21 +532,77 @@ mod tests {
         let tip = cloned.head("HEAD");
         commit(&cloned.up, "theirs", "t\n", "theirs");
         fs::write(cloned.dir.join("own"), "changed\n").unwrap();
-        let refused = rebase(&directory(&cloned.dir), None).unwrap_err();
+        let refused = refusal(&cloned.dir, None);
         assert!(refused.ends_with("has changes not committed: commit or stash them first"));
         assert_eq!(cloned.head("HEAD"), tip);
         assert_eq!(cloned.head("origin/main"), cloned.head("main"), "nothing is fetched");
 
         git(&cloned.dir, &["checkout", "-q", "own"]);
         fs::write(cloned.dir.join("loose"), "untracked\n").unwrap();
-        let refused = rebase(&directory(&cloned.dir), Some("fix")).unwrap_err();
+        let refused = refusal(&cloned.dir, Some("fix"));
         assert!(refused.ends_with("is on issue-429 now, not fix"), "{refused}");
         assert_eq!(cloned.head("origin/main"), cloned.head("main"), "nothing is fetched");
         assert_eq!(rebase(&directory(&cloned.dir), None).unwrap().came, Came::Clean { ahead: 1 });
 
         git(&cloned.dir, &["switch", "-q", "--detach"]);
-        let refused = rebase(&directory(&cloned.dir), None).unwrap_err();
+        let refused = refusal(&cloned.dir, None);
         assert!(refused.ends_with("is on no branch, and a rebase moves a branch"), "{refused}");
+    }
+
+    #[test]
+    fn the_branch_asked_for_is_rebased_though_another_is_checked_out_by_then() {
+        let cloned = Cloned::new();
+        commit(&cloned.dir, "own", "o\n", "own");
+        commit(&cloned.up, "theirs", "t\n", "theirs");
+        git(&cloned.dir, &["fetch", "-q", "origin"]);
+        git(&cloned.dir, &["switch", "-q", "-c", "other", "main"]);
+        commit(&cloned.dir, "other", "x\n", "other");
+        let other = cloned.head("other");
+        let top = cloned.dir.to_str().unwrap();
+        let onto = "refs/remotes/origin/main";
+        let picked = super::picked(top, onto, "issue-429", Instant::now() + GIT_SAYS);
+        assert_eq!(picked, Ok(Picked::Ended));
+        assert_eq!(cloned.head("other"), other, "the branch checked out by then is not rewritten");
+        assert_eq!(cloned.head("issue-429~"), cloned.head("origin/main"));
+    }
+
+    #[test]
+    fn a_rebase_stopped_for_its_time_is_in_doubt_not_refused() {
+        let cloned = Cloned::new();
+        commit(&cloned.dir, "own", "o\n", "own");
+        commit(&cloned.up, "theirs", "t\n", "theirs");
+        git(&cloned.dir, &["fetch", "-q", "origin"]);
+        let hooks = cloned.dir.join(".git/waiting");
+        fs::create_dir(&hooks).unwrap();
+        let draft = hooks.join("pre-rebase.draft");
+        fs::write(&draft, "#!/bin/sh\nexec sleep 5\n").unwrap();
+        let hook = hooks.join("pre-rebase");
+        let installed = Command::new("install").arg("-m755").arg(&draft).arg(&hook).status();
+        assert!(installed.unwrap().success());
+        git(&cloned.dir, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        let top = cloned.dir.to_str().unwrap();
+        let until = Instant::now() + Duration::from_millis(500);
+        let picked = super::picked(top, "refs/remotes/origin/main", "issue-429", until);
+        let Err(Unrebased::InDoubt(why)) = picked else {
+            panic!("a rebase stopped part of the way is taken for {picked:?}");
+        };
+        let stopped = "git rebase did not end in time and was stopped; see git status in ";
+        assert!(why.starts_with(stopped), "{why}");
+    }
+
+    #[test]
+    fn a_far_rebase_is_refused_only_where_lunetad_says_nothing_ran() {
+        let why = || "w".to_owned();
+        for code in [Code::FailedPrecondition, Code::InvalidArgument, Code::NotFound] {
+            assert_eq!(Unrebased::of(why(), Some(code)), Unrebased::Refused(why()), "{code:?}");
+        }
+        for code in [Some(Code::Aborted), Some(Code::Unavailable), Some(Code::Internal), None] {
+            assert_eq!(Unrebased::of(why(), code), Unrebased::InDoubt(why()), "{code:?}");
+        }
+        for unrebased in [Unrebased::Refused(why()), Unrebased::InDoubt(why())] {
+            let status = unrebased.clone().status();
+            assert_eq!(Unrebased::of(why(), Some(status.code())), unrebased);
+        }
     }
 
     #[test]
@@ -490,7 +612,7 @@ mod tests {
         git(&dir, &["init", "-q", "-b", "trunk"]);
         own_config(&dir);
         commit(&dir, "base", "a\n", "base");
-        let refused = rebase(&directory(&dir), None).unwrap_err();
+        let refused = refusal(&dir, None);
         assert!(refused.contains("has no default branch to rebase onto"), "{refused}");
     }
 
