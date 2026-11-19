@@ -955,6 +955,57 @@ fn a_project_closes_with_each_worktree_s_terminals_and_one_with_none_is_forgotte
 }
 
 #[test]
+fn a_close_lunetad_cannot_keep_is_in_doubt_only_once_the_mux_closed_a_terminal() {
+    let changed = "{\"version\": 10, \"projects\": []}\n";
+    for closing in ["view", "worktree", "project"] {
+        let owned = Owned::new();
+        let (project, worktree, other) = two_in_a_clone(&owned, "clone");
+        owned.new_terminal(b"keeps the mux on");
+        let file = kept(&owned.host);
+        let ran = |worktree| {
+            let [first] = &watched(&owned, worktree)[..] else {
+                panic!("a worktree is made with one terminal");
+            };
+            let Some(terminal::Found::Key(key)) = first.found else { return None };
+            let runs = first.command.as_deref() == Some(&WAITS.join(" "));
+            let written = fs::read_to_string(&file).unwrap().contains(&WAITS.join(" "));
+            (runs && written).then_some((first.id, key))
+        };
+        let runs = |worktree| {
+            eventually(&format!("{closing}: worktree {worktree} runs, kept"), || ran(worktree))
+        };
+        let ((terminal, key), (beside, _)) = (runs(worktree), runs(other));
+        let close = match closing {
+            "view" => Change::CloseView(CloseView { terminal: Some(key) }),
+            "worktree" => Change::CloseWorktree(CloseWorktree { worktree, seen: vec![terminal] }),
+            _ => {
+                let (worktrees, seen) = (vec![worktree, other], vec![terminal, beside]);
+                Change::CloseProject(CloseProject { project, worktrees, seen })
+            },
+        };
+        fs::write(&file, changed).unwrap();
+        let unkept = asked(&owned.host, close).unwrap_err();
+        assert_eq!(unkept.code(), Code::Unavailable, "{closing}: {unkept:?}");
+        let said = unkept.message();
+        assert!(said.contains(" closed, and "), "{closing}: {said}");
+        assert!(said.contains("it changed since lunetad read it"), "{closing}: {said}");
+        let left = || tagged(&owned.listing(), terminal).is_none().then_some(());
+        eventually(&format!("{closing}: its terminal leaves the mux"), left);
+        assert_eq!(fs::read_to_string(&file).unwrap(), changed, "{closing}: the file is left");
+    }
+    let owned = Owned::new();
+    let project = project_in_home(&owned);
+    let worktree = worktree(&owned.host, project, &work_folder(&owned));
+    assert!(watched(&owned, worktree).is_empty(), "a folder's own worktree opens no terminal");
+    fs::write(kept(&owned.host), changed).unwrap();
+    let worktrees = vec![worktree];
+    let close = Change::CloseProject(CloseProject { project, worktrees, seen: Vec::new() });
+    let refused = asked(&owned.host, close).unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "it closed nothing: {refused:?}");
+    assert!(!refused.message().contains(" closed, and "), "{}", refused.message());
+}
+
+#[test]
 fn a_terminal_s_name_and_the_last_use_of_a_worktree_reach_watch_and_the_file() {
     let owned = Owned::new();
     let (_, first, second) = two_in_a_clone(&owned, "clone");

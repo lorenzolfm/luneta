@@ -13,6 +13,7 @@ use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::make_worktree_response::Landed as Answered;
 use lunetad::api::projects::Held;
 use lunetad::api::{self, ChangeProjectsRequest, MakeWorktreeRequest, On, Version, WatchRequest};
+use lunetad::changes::Unchanged;
 use lunetad::mux::own::TerminalKey;
 use lunetad::projects::{self, Name, Plain, ProjectId, Size, ViewId, WorktreeId};
 use lunetad::links::{self, Branch, Unready};
@@ -45,11 +46,10 @@ impl From<String> for Unmade {
 
 impl Unmade {
     fn of(status: &Status) -> Unmade {
-        let why = status.message().to_owned();
-        match status.code() {
-            Code::AlreadyExists => Unmade::Nests(why),
-            code if refused(code) => Unmade::Failed(why),
-            _ => Unmade::InDoubt(why),
+        match Unchanged::of(status) {
+            Unchanged::Refused(why) => Unmade::Failed(why),
+            Unchanged::Nests(why) => Unmade::Nests(why),
+            Unchanged::InDoubt(why) => Unmade::InDoubt(why),
         }
     }
 
@@ -72,17 +72,6 @@ impl Unmade {
             Unmade::InDoubt(why) => format!("{why}, so {folder}, {tab}'s worktree, may be opened"),
         }
     }
-}
-
-fn refused(code: Code) -> bool {
-    let refusals = [
-        Code::InvalidArgument,
-        Code::FailedPrecondition,
-        Code::Aborted,
-        Code::NotFound,
-        Code::Unimplemented,
-    ];
-    refusals.contains(&code)
 }
 
 enum Tried {
@@ -329,8 +318,10 @@ impl From<String> for Unmoved {
 
 impl Unmoved {
     fn of(status: &Status) -> Unmoved {
-        let why = status.message().to_owned();
-        if refused(status.code()) { Unmoved::Refused(why) } else { Unmoved::Unsure(why) }
+        match Unchanged::of(status) {
+            Unchanged::Refused(why) | Unchanged::Nests(why) => Unmoved::Refused(why),
+            Unchanged::InDoubt(why) => Unmoved::Unsure(why),
+        }
     }
 }
 
@@ -674,44 +665,25 @@ mod tests {
 
     #[test]
     fn only_a_refusal_from_lunetad_says_nothing_was_made() {
-        let refusals = [
-            Status::invalid_argument("it said no"),
-            Status::failed_precondition("it said no"),
-            Status::aborted("it said no"),
-            Status::not_found("it said no"),
-            Status::unimplemented("it said no"),
-        ];
-        for status in &refusals {
-            assert_eq!(said(status), "no project made: it said no", "{status:?}");
-        }
+        let refused = Status::failed_precondition("it said no");
+        assert_eq!(said(&refused), "no project made: it said no");
         let nests = Status::already_exists("/a/b is inside /a");
         assert_eq!(said(&nests), "no project made: /a/b is inside /a");
-        let doubts = [
-            Status::unavailable("it dropped"),
-            Status::cancelled("it dropped"),
-            Status::deadline_exceeded("it dropped"),
-            Status::unknown("it dropped"),
-            Status::internal("it dropped"),
-            Status::resource_exhausted("it dropped"),
-        ];
-        for status in &doubts {
-            assert_eq!(said(status), "it dropped, so the project may be made", "{status:?}");
-        }
+        let doubt = Status::unavailable("it dropped");
+        assert_eq!(said(&doubt), "it dropped, so the project may be made");
         let timed_out = Status::cancelled("Timeout expired");
         assert_eq!(said(&timed_out), "Timeout expired, so the project may be made");
 
         let folder = Directory::parse("/w/cdk/issue-5".to_owned()).unwrap();
         let unopened = |status: &Status| Unmade::of(status).said_unopened(&folder, "#5");
         let left = "/w/cdk/issue-5 is #5's worktree, and it is not opened: it said no";
-        assert_eq!(unopened(&refusals[1]), left, "a pull refused leaves the worktree made");
-        let doubt = "it dropped, so /w/cdk/issue-5, #5's worktree, may be opened";
-        assert_eq!(unopened(&doubts[0]), doubt, "a pull answered late may have opened it");
-        for status in &refusals {
+        assert_eq!(unopened(&refused), left, "a pull refused leaves the worktree made");
+        let maybe = "it dropped, so /w/cdk/issue-5, #5's worktree, may be opened";
+        assert_eq!(unopened(&doubt), maybe, "a pull answered late may have opened it");
+        for status in [&refused, &nests] {
             assert!(matches!(Unmoved::of(status), Unmoved::Refused(_)), "{status:?}");
         }
-        for status in &doubts {
-            assert!(matches!(Unmoved::of(status), Unmoved::Unsure(_)), "{status:?}");
-        }
+        assert!(matches!(Unmoved::of(&doubt), Unmoved::Unsure(_)), "{doubt:?}");
     }
 
     #[test]

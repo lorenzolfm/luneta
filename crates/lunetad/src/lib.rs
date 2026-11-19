@@ -1,6 +1,7 @@
 mod agent;
 pub mod api;
 pub mod asks;
+pub mod changes;
 pub mod checks;
 mod claude;
 mod client;

@@ -700,8 +700,11 @@ impl Layouts {
             let changed = format!("project {project}'s worktrees or terminals are not those seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
         }
-        self.close_terminals(&terminals)?;
-        if let Some(why) = self.store.closed(Closing::Project(project))? {
+        let mux_closed = self.close_terminals(&terminals)?;
+        let kept = self.store.closed(Closing::Project(project));
+        let what = format!("project {project}'s terminals");
+        let kept = if mux_closed { kept.map_err(half_closed(what)) } else { kept };
+        if let Some(why) = kept? {
             self.unwritten(&why);
         }
         let projects = self.store.projects().expect("projects just changed are kept");
@@ -728,8 +731,11 @@ impl Layouts {
         }
         let most = LAYOUT_VIEWS_MAX;
         assert!(terminals.len() <= most, "a layout holds at most {most} terminals");
-        self.close_terminals(&terminals)?;
-        if let Some(why) = self.store.closed(Closing::Worktree(worktree))? {
+        let mux_closed = self.close_terminals(&terminals)?;
+        let kept = self.store.closed(Closing::Worktree(worktree));
+        let what = format!("worktree {worktree}'s terminals");
+        let kept = if mux_closed { kept.map_err(half_closed(what)) } else { kept };
+        if let Some(why) = kept? {
             self.unwritten(&why);
         }
         self.forget_closed(&terminals);
@@ -747,33 +753,36 @@ impl Layouts {
         Ok(None)
     }
 
-    fn close_terminals(&mut self, terminals: &[TerminalViewId]) -> Result<(), Failed> {
+    fn close_terminals(&mut self, terminals: &[TerminalViewId]) -> Result<bool, Failed> {
         assert!(terminals.len() <= VIEWS_MAX, "at most {VIEWS_MAX} views are kept");
         let unclosed = |failure: Failure| Failed::Unclosed(failure.to_string());
         let unseen = terminals.iter().any(|terminal| !self.known.contains_key(terminal));
         let tags = if unseen { self.mux.tags().map_err(unclosed)? } else { Vec::new() };
         let mut done: Vec<TerminalViewId> = Vec::with_capacity(terminals.len());
+        let mut mux_closed = false;
         for terminal in terminals {
             let known = self.known.get(terminal).map(|known| known.key);
             let found = || {
                 let found = tags.iter().find(|(tag, _)| tagged(tag) == Some(terminal.view()));
                 found.map(|(_, key)| *key)
             };
-            if let Some(key) = known.or_else(found)
-                && let Err(failure) = self.mux.closed(key)
-            {
-                for closed in done {
-                    if let Err(failed) = self.closed(closed.view()) {
-                        let why = said(failed);
-                        self.troubles.say(format!("terminal {closed} closed, and stays: {why}"));
+            if let Some(key) = known.or_else(found) {
+                if let Err(failure) = self.mux.closed(key) {
+                    for closed in done {
+                        if let Err(failed) = self.closed(closed.view()) {
+                            let why = failed.said();
+                            let stays = format!("terminal {closed} closed, and stays: {why}");
+                            self.troubles.say(stays);
+                        }
                     }
+                    return Err(unclosed(failure));
                 }
-                return Err(unclosed(failure));
+                mux_closed = true;
             }
             done.push(*terminal);
         }
         assert_eq!(done, terminals, "each terminal is closed in the mux, in order");
-        Ok(())
+        Ok(mux_closed)
     }
 
     fn forget_closed(&mut self, terminals: &[TerminalViewId]) {
@@ -834,15 +843,15 @@ impl Layouts {
     }
 
     fn changed(&mut self, change: Change) -> Result<(), String> {
-        self.store.change(change).map(drop).map_err(said)
+        self.store.change(change).map(drop).map_err(Failed::said)
     }
 
     fn relaid(&mut self, relaid: Relaid) -> Result<(), String> {
-        self.store.relaid(relaid).map_err(said)
+        self.store.relaid(relaid).map_err(Failed::said)
     }
 
     fn followed(&mut self, change: Change) -> Result<(), String> {
-        if let Some(why) = self.store.followed(change).map_err(said)? {
+        if let Some(why) = self.store.followed(change).map_err(Failed::said)? {
             self.unwritten(&why);
         }
         Ok(())
@@ -854,7 +863,7 @@ impl Layouts {
 
     fn flushed(&mut self) {
         if let Err(failed) = self.store.flush() {
-            self.troubles.say(format!("the layouts are not written: {}", said(failed)));
+            self.troubles.say(format!("the layouts are not written: {}", failed.said()));
         }
     }
 
@@ -880,7 +889,7 @@ impl Layouts {
                 if !self.layout(worktree)?.holds(view) {
                     return Ok(Done::Quiet);
                 }
-                self.close(view).map_err(said)?;
+                self.close(view).map_err(Failed::said)?;
             },
             Asked::Focus(Focus::View(view)) => {
                 if !self.layout(worktree)?.holds(view) {
@@ -983,7 +992,7 @@ impl Layouts {
         let opens = Opens::of(argv.to_vec()).map_err(|why| format!("open: {why}"))?;
         let Client { worktree, focus, .. } = self.clients[&client];
         let size = self.size_of(client);
-        let terminal = self.store.fresh_terminal().map_err(said)?;
+        let terminal = self.store.fresh_terminal().map_err(Failed::said)?;
         let projects = self.kept()?;
         let (project, shown) = projects.find(worktree).ok_or("the worktree is gone")?;
         if beside == Beside::Alone && !shown.layout().is_empty() {
@@ -1011,7 +1020,7 @@ impl Layouts {
     fn welcome(&mut self, client: ClientId) -> Result<(), String> {
         let Client { worktree, focus, .. } = self.clients[&client];
         let size = self.size_of(client);
-        let view = self.store.fresh().map_err(said)?;
+        let view = self.store.fresh().map_err(Failed::said)?;
         let projects = self.kept()?;
         let (_, shown) = projects.find(worktree).ok_or("the worktree is gone")?;
         let beside = if focus.is_some() { Beside::Focused } else { Beside::Largest };
@@ -1260,6 +1269,7 @@ impl Layouts {
         };
         if let Some(key) = key {
             self.mux.closed(key).map_err(|failure| Failed::Unclosed(failure.to_string()))?;
+            return self.closed(view).map_err(half_closed(format!("terminal {view}")));
         }
         self.closed(view)
     }
@@ -1359,7 +1369,7 @@ impl Layouts {
         for terminal in ended {
             if let Err(failed) = self.closed(terminal.view()) {
                 let stays = format!("terminal {terminal} ended, and stays in its layout");
-                self.troubles.say(format!("{stays}: {}", said(failed)));
+                self.troubles.say(format!("{stays}: {}", failed.said()));
             }
         }
         self.read_runs();
@@ -1474,7 +1484,7 @@ impl Layouts {
         let size = fit(shown, target, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
         let followed = self.clients.values().any(follows);
         let move_to = Change::Move { terminal, to, size, focused: followed };
-        let moved = self.store.change(move_to).map_err(said)?;
+        let moved = self.store.change(move_to).map_err(Failed::said)?;
         let Some(Made::Worktree(to) | Made::Found(to)) = moved else {
             unreachable!("a move says the worktree it went to, not {moved:?}");
         };
@@ -1728,18 +1738,8 @@ fn told(out: &Out, word: api::ShowResponse) -> bool {
     out.try_send(Ok(word)).is_ok()
 }
 
-fn said(failed: Failed) -> String {
-    match failed {
-        Failed::NotKept(why)
-        | Failed::Nests(why)
-        | Failed::Stale(why)
-        | Failed::Refused(why)
-        | Failed::Unwritten(why)
-        | Failed::Unclosed(why)
-        | Failed::Unopened(why)
-        | Failed::Gone(why) => why,
-        Failed::KeptUntold => "it is kept, but the daemon's core has stopped".to_owned(),
-    }
+fn half_closed(closed: String) -> impl FnOnce(Failed) -> Failed {
+    move |failed| Failed::Unclosed(format!("{closed} closed, and {}", failed.said()))
 }
 
 fn by_key(terminals: Vec<server::Terminal>) -> BTreeMap<TerminalKey, server::Terminal> {
