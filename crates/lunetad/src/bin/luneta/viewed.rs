@@ -65,6 +65,7 @@ pub enum Heeded {
     Edged(Direction),
     Sent(WorkstreamId),
     Note(String),
+    Emptied,
     Forgotten(String),
     Lost(String),
 }
@@ -508,11 +509,20 @@ impl Viewed {
                 if followed {
                     self.opened.insert(self.view.workstream);
                 }
-                if self.view.laid_out(laid) && self.opened.insert(self.view.workstream) {
-                    self.ask(Asked::Open { beside: Beside::Alone, argv: Vec::new() });
+                let mut emptied = false;
+                if self.view.laid_out(laid) {
+                    if self.opened.insert(self.view.workstream) {
+                        self.ask(Asked::Open { beside: Beside::Alone, argv: Vec::new() });
+                    } else {
+                        emptied = true;
+                    }
                 }
                 self.watch();
-                if followed { Heeded::Followed } else { Heeded::Quiet }
+                match (emptied, followed) {
+                    (true, _) => Heeded::Emptied,
+                    (false, true) => Heeded::Followed,
+                    (false, false) => Heeded::Quiet,
+                }
             },
             Heard::Edged { workstream, direction } => {
                 self.view.edged(workstream, direction).map_or(Heeded::Quiet, Heeded::Edged)
@@ -634,6 +644,7 @@ impl Viewed {
         if workstream == self.view.workstream {
             return;
         }
+        self.opened.remove(&workstream);
         self.view.go(workstream);
         self.ask(Asked::Go(workstream));
         self.watch();
@@ -996,5 +1007,38 @@ mod tests {
         assert!(!view.screens.contains_key(&key(1)), "a terminal its view lacks gets no screen");
         view.go(workstream(2));
         assert_eq!(view.focused(), None, "a view of another workstream lays out nothing here");
+    }
+
+    fn laid_in(id: u64, panes: Vec<show_response::Pane>) -> Heard {
+        use show_response::laid::Shown as Said;
+        let shown = panes.first().map(|pane| Said::Tiled(pane.terminal));
+        let size = Some(show_request::Size { columns: 20, rows: 4 });
+        let said = show_response::Laid { workstream: id, size, panes, shown };
+        Heard::Laid(Laid::heard(said).unwrap())
+    }
+
+    #[test]
+    fn a_workstream_emptied_is_left_and_one_gone_back_to_opens_again() {
+        let unserved = tempfile::tempdir().unwrap();
+        let (events, _heard) = std::sync::mpsc::channel();
+        let size = view_size(side(20), side(6));
+        let greeting = Greeting { foreground: None, background: None };
+        let folder = unserved.path().to_owned();
+        let mut viewed =
+            Viewed::start(1, folder, Machine::Local, workstream(1), size, greeting, None, &events);
+        let one = || vec![pane(11, (0, 0, 20, 4), Some(1))];
+        assert!(matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Quiet), "first, it opens");
+        assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Quiet));
+        let emptied = viewed.heard(laid_in(1, Vec::new()));
+        assert!(matches!(emptied, Heeded::Emptied), "its last terminal closed, luneta leaves it");
+        viewed.go(&Machine::Local, workstream(2));
+        let two = vec![pane(21, (0, 0, 20, 4), Some(2))];
+        assert!(matches!(viewed.heard(laid_in(2, two)), Heeded::Quiet));
+        viewed.go(&Machine::Local, workstream(1));
+        let back = viewed.heard(laid_in(1, Vec::new()));
+        assert!(matches!(back, Heeded::Quiet), "gone back to, it opens as it did first");
+        assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Quiet));
+        let again = viewed.heard(laid_in(1, Vec::new()));
+        assert!(matches!(again, Heeded::Emptied), "emptied again, luneta leaves it again");
     }
 }

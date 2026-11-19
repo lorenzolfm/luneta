@@ -13,7 +13,7 @@ pub const PANES_MAX: usize = 64;
 
 pub const SIDE_MAX: u16 = 1000;
 
-const SHARES: u32 = 1_000_000;
+pub const SHARES: u32 = 1_000_000;
 
 const STEP_PERCENT: u32 = 5;
 

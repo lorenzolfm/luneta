@@ -126,7 +126,7 @@ fn luneta_terminate_ends_luneta_on_each_machine_ssh_reaches_and_skips_the_others
         panic!("a line for each machine: {:?}", planned.lines);
     };
     assert_eq!(here(local), "nothing of luneta runs; keeps no project to forget");
-    assert_eq!(far_line, "far: ends lunetad; forgets 1 project");
+    assert_eq!(far_line, "far: ends lunetad; forgets 1 project and 1 workstream");
     let skipped = "gone: skipped, as ssh does not reach it, and so luneta runs on there and keeps \
                    its projects: ssh: Could not resolve hostname gone";
     assert!(gone_line.starts_with(skipped), "{gone_line}");
@@ -138,7 +138,7 @@ fn luneta_terminate_ends_luneta_on_each_machine_ssh_reaches_and_skips_the_others
         panic!("a line for each machine: {:?}", ended.lines);
     };
     assert_eq!(here(local), "nothing of luneta ran; kept no project to forget");
-    assert_eq!(far_line, "far: ended lunetad; forgot 1 project");
+    assert_eq!(far_line, "far: ended lunetad; forgot 1 project and 1 workstream");
     assert_eq!(gone_again, gone_line);
     assert!(far_daemon.ended_within(ENDS).is_some(), "far's lunetad runs on");
     assert!(!kept(&far).exists());

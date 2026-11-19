@@ -2081,6 +2081,26 @@ impl App {
         self.right.as_mut().expect("luneta went to a workstream")
     }
 
+    fn leave_view(&mut self) {
+        let Some(right) = &self.right else {
+            return;
+        };
+        let (on, left) = (right.machine().clone(), right.workstream());
+        let held = |machine: &Machine| {
+            let projects = self.projected.projects(machine).iter();
+            let workstreams = projects.flat_map(|it| &it.workstreams);
+            let open = workstreams.filter(|it| !it.terminals.is_empty());
+            let others = open.filter(|it| *machine != on || it.id != left);
+            others.max_by_key(|it| it.used).map(|it| it.id)
+        };
+        let other = held(&on).map(|id| (on.clone(), id));
+        let other = other.or_else(|| held(&Machine::Local).map(|id| (Machine::Local, id)));
+        match other {
+            Some((machine, other)) => self.go_workstream(&machine, other, None),
+            None => self.unview(),
+        }
+    }
+
     fn unview(&mut self) {
         if let Some(right) = self.right.take() {
             let number = right.number();
@@ -2137,25 +2157,9 @@ impl App {
                 self.go_workstream(&on, workstream, None);
             },
             Heeded::Note(note) => self.sidebar.notify(note),
+            Heeded::Emptied => self.leave_view(),
             Heeded::Forgotten(why) => {
-                let Some(right) = &self.right else {
-                    return;
-                };
-                let (on, forgotten) = (right.machine().clone(), right.workstream());
-                let held = |machine: &Machine| {
-                    let projects = self.projected.projects(machine).iter();
-                    let mut workstreams = projects.flat_map(|it| &it.workstreams).map(|it| it.id);
-                    workstreams.find(|id| {
-                        let is_forgotten = *machine == on && *id == forgotten;
-                        !is_forgotten
-                    })
-                };
-                let other = held(&on).map(|id| (on.clone(), id));
-                let other = other.or_else(|| held(&Machine::Local).map(|id| (Machine::Local, id)));
-                match other {
-                    Some((machine, other)) => self.go_workstream(&machine, other, None),
-                    None => self.unview(),
-                }
+                self.leave_view();
                 self.sidebar.notify(format!("lunetad's view: {why}"));
             },
             Heeded::Lost(why) => self.sidebar.notify(format!("lunetad's view: {why}")),

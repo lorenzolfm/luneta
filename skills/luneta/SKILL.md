@@ -194,16 +194,17 @@ luneta start https://github.com/o/app/pull/7   # a pull request, checked out in 
 - Run it in the repository the branch, issue or pull request is of, or from
   anywhere for a link: luneta finds a clone of the link's repository. Quote
   `'#42'`, or the shell drops it as a comment.
+- A project is the root of a clone `wt clone` made, with one workstream for
+  each of its worktrees, or a plain folder, with one workstream: the folder
+  itself. A folder inside a project starts that project's workstream there.
 - A branch needs a clone `wt clone` made: in a plain clone it makes nothing
   and says why. Tell the user. An issue or a pull request goes to a clone
   `wt clone` made of its repository: the one it runs in, else one of
   luneta's projects, else one zoxide knows.
-- A folder in a worktree of a clone `wt clone` made joins the clone's
-  project, as a branch's worktree does.
 - The issue's agent starts in the harness the user picked last in luneta's
-  menu. Don't open another agent for it: `start` already has. Started again,
-  it goes to the same workstream and starts no second agent. If the
-  workstream there has no terminal, the agent starts in it.
+  menu. Don't open another agent for it: `start` already has. Started again
+  while its workstream has terminals, it goes there and starts no second
+  agent. If the workstream has no terminal, the agent starts in it.
 - A folder of the name goes before a branch of it. `~` is the user's home,
   quoted or not.
 - It exits 4 when the workstream started but its agent did not, or taking

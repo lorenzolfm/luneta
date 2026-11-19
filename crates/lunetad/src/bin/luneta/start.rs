@@ -93,7 +93,7 @@ pub fn run(what: &str, path: &Path) -> ExitCode {
     let (folder, finished) = match &started {
         Started::Project { folder } => {
             let at = folder.display();
-            eprintln!("luneta: {at} is a project with no workstream there: start a folder in it");
+            eprintln!("luneta: {at} is a clone with no worktree: start a branch in it");
             (folder, true)
         },
         Started::Workstream { workstream, folder, left } => {
@@ -145,15 +145,17 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
         What::Folder(dir) => {
             let folder = workstreams::real(&dir)?;
             let clone = links::wt_holder(utf8(&folder)?).filter(|clone| Path::new(clone) != folder);
-            if let Some(clone) = clone {
-                let joined = workstreams::worked_in(path, &folder, &clone, links::holder)?;
+            if clone.is_some() {
+                let joined = workstreams::worked_in(path, &folder)?;
                 let workstream = joined.workstream();
                 return Ok(Started::Workstream { workstream, folder, left: Left::Done });
             }
             let at = Directory::parse(utf8(&folder)?.to_owned())?;
             Ok(match workstreams::made_at(path, &Machine::Local, &at, None)? {
                 Some(workstream) => {
-                    let folder = workstreams::folder_of(path, workstream).unwrap_or(folder);
+                    let there = workstreams::folder_of(path, workstream);
+                    let there = there.unwrap_or_else(|_| folder.clone());
+                    let folder = if folder.starts_with(&there) { folder } else { there };
                     Started::Workstream { workstream, folder, left: Left::Done }
                 },
                 None => Started::Project { folder },
@@ -199,10 +201,7 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
 }
 
 fn in_clone(path: &Path, folder: &Path) -> Result<Joined, String> {
-    let worktree = utf8(folder)?;
-    let clone = links::holder(worktree)
-        .ok_or_else(|| format!("git does not say what repository {worktree} is"))?;
-    workstreams::worked_in(path, folder, &clone, links::holder)
+    workstreams::worked_in(path, folder)
 }
 
 fn numbered(number: NonZeroU32, cwd: &Path) -> Result<Link, String> {

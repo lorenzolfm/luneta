@@ -142,11 +142,16 @@ impl Common {
 
 #[must_use]
 pub fn common(dir: &str) -> Common {
+    common_within(dir, LIMIT)
+}
+
+#[must_use]
+pub fn common_within(dir: &str, limit: Duration) -> Common {
     let mut git = Command::new("git");
     local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]))
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .env("LC_ALL", "C");
-    let ran = program::run(&mut git, LIMIT);
+    let ran = program::run(&mut git, limit);
     Common::of(ran.map_err(|error| format!("it could not be run: {error}")).and_then(Ran::answer))
 }
 

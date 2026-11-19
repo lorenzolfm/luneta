@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -8,11 +9,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
-use super::{Below, Change, Closing, Dir, Id, Line, Name, Project, Projects, Refused, Runs};
-use super::{Session, Terminal, TerminalId, Used, WorkstreamId};
-use super::{Made, View, Workstream};
+use super::{Below, Change, Closing, Dir, Holds, Id, Line, Name, Project, Projects};
+use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, TerminalId, Used, View};
+use super::{Workstream, WorkstreamId, Worktree};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
-use super::{TERMINALS_MAX, WORKSTREAMS_MAX};
+use super::{SPOT_LOOK, TERMINALS_MAX, WORKSTREAMS_MAX};
 use crate::agent::Harness;
 use crate::api;
 use crate::core::Command;
@@ -27,7 +28,7 @@ const HELD_TRIES: u32 = 40;
 
 const HELD_PAUSE: Duration = Duration::from_millis(50);
 
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 const WITHOUT_VIEWS: u32 = 1;
 
@@ -35,7 +36,7 @@ const WITHOUT_UNRUN: u32 = 2;
 
 const WITHOUT_NAMES_OR_USE: u32 = 3;
 
-const UNFOLLOWED: u32 = 4;
+const UNROOTED: u32 = 5;
 
 const CHAR_BYTES_MAX: usize = 4;
 
@@ -78,8 +79,14 @@ struct KeptProject {
     id: String,
     name: String,
     dir: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    workstreams: Vec<KeptWorkstream>,
+    holds: KeptHolds,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum KeptHolds {
+    Folder(KeptWorkstream),
+    Clone(Vec<KeptWorktree>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -88,11 +95,58 @@ struct KeptWorkstream {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    #[serde(default)]
-    below: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<KeptView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    used_millis: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptWorktree {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    worktree: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    view: Option<KeptView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    used_millis: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptUnrooted {
+    version: u32,
+    projects: Vec<UnrootedProject>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnrootedProject {
+    id: String,
+    name: String,
+    dir: String,
+    #[serde(default)]
+    workstreams: Vec<UnrootedWorkstream>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnrootedWorkstream {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    below: String,
+    #[serde(default)]
+    view: Option<KeptView>,
+    #[serde(default)]
+    used_millis: Option<u64>,
+}
+
+struct Counted<'a> {
+    view: Option<&'a KeptView>,
     used_millis: Option<u64>,
 }
 
@@ -256,7 +310,7 @@ impl Store {
 
     pub fn followed(&mut self, change: Change) -> Result<Option<String>, Failed> {
         let (changed, made) = self.applied(change)?;
-        assert!(made.is_none(), "a change that follows the mux makes no id");
+        assert!(made.is_none(), "a change that follows the mux or git hands back nothing made");
         self.follows(changed)
     }
 
@@ -351,9 +405,18 @@ impl Keeping {
             Err(why) => return Keeping::Unkept(why),
         };
         match read(&file) {
-            Ok(projects) => {
+            Ok(Read { projects, rooted: false }) => {
                 let written = projects.clone();
                 Keeping::Kept { file, projects, written, _lock: lock }
+            },
+            Ok(Read { projects, rooted: true }) => match write(&file, &projects) {
+                Ok(()) => {
+                    let written = projects.clone();
+                    Keeping::Kept { file, projects, written, _lock: lock }
+                },
+                Err(error) => {
+                    Keeping::Unkept(left(&file, &format!("rooted, it is unwritten: {error}")))
+                },
             },
             Err(why) => Keeping::Unkept(left(&file, &why)),
         }
@@ -390,7 +453,8 @@ fn held(lock: &File) -> io::Result<bool> {
 
 pub fn kept() -> Result<Projects, String> {
     let file = state::path(FILE).map_err(|unset| unset.to_string())?;
-    read(&file).map_err(|why| format!("{}: {why}", file.display()))
+    let read = read(&file).map_err(|why| format!("{}: {why}", file.display()))?;
+    Ok(read.projects)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -418,7 +482,7 @@ fn forget_at(file: &Path) -> Result<Forgotten, String> {
         return Err(format!("a lunetad keeps them still, as it holds {}", path.display()));
     }
     let held = match read(file) {
-        Ok(projects) => Forgotten::Read(projects),
+        Ok(Read { projects, .. }) => Forgotten::Read(projects),
         Err(why) => Forgotten::Unread(why),
     };
     match fs::remove_file(file) {
@@ -432,7 +496,7 @@ fn forget_at(file: &Path) -> Result<Forgotten, String> {
 
 fn unchanged(file: &Path, projects: &Projects) -> Result<(), String> {
     match read(file) {
-        Ok(now) if now == *projects => Ok(()),
+        Ok(Read { projects: now, rooted: false }) if now == *projects => Ok(()),
         Ok(_) => Err(left(file, "it changed since lunetad read it")),
         Err(why) => Err(left(file, &why)),
     }
@@ -442,11 +506,18 @@ fn left(file: &Path, why: &str) -> String {
     format!("{}: {why}, and so it is left as it is", file.display())
 }
 
-fn read(file: &Path) -> Result<Projects, String> {
+struct Read {
+    projects: Projects,
+    rooted: bool,
+}
+
+fn read(file: &Path) -> Result<Read, String> {
     let mut text = String::new();
     let opened = match File::open(file) {
         Ok(opened) => opened,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Projects::default()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(Read { projects: Projects::default(), rooted: false });
+        },
         Err(error) => return Err(error.to_string()),
     };
     let limit = u64::try_from(FILE_BYTES_MAX).expect("8 MiB fits a u64") + 1;
@@ -454,93 +525,404 @@ fn read(file: &Path) -> Result<Projects, String> {
     if text.len() > FILE_BYTES_MAX {
         return Err(format!("it is over {FILE_BYTES_MAX} bytes"));
     }
-    parse(&text)
+    parse(&text, &mut spot_of_kept, &mut Id::random)
 }
 
-fn parse(text: &str) -> Result<Projects, String> {
+fn spot_of_kept(dir: &Dir) -> Result<Option<Spot>, String> {
+    match super::gone(dir) {
+        Ok(true) => Ok(None),
+        Ok(false) => Spot::of(dir, SPOT_LOOK).map(Some),
+        Err(error) => Err(format!("{}: {error}", dir.as_str())),
+    }
+}
+
+fn parse(
+    text: &str,
+    root: &mut impl FnMut(&Dir) -> Result<Option<Spot>, String>,
+    draw: &mut impl FnMut() -> io::Result<Id>,
+) -> Result<Read, String> {
     let Versioned { version } = serde_json::from_str(text).map_err(|error| error.to_string())?;
     if !(WITHOUT_VIEWS..=VERSION).contains(&version) {
         let read = format!("this lunetad reads only {WITHOUT_VIEWS} to {VERSION}");
         return Err(format!("it is of version {version}, and {read}"));
     }
-    let kept: Kept = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    if version > UNROOTED {
+        let kept: Kept = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        assert_eq!(kept.version, version, "a file says one version");
+        let counted = || kept.projects.iter().flat_map(KeptProject::counted);
+        bounded(version, kept.projects.len(), counted)?;
+        let projects = kept.projects.into_iter().map(KeptProject::read);
+        let projects = projects.collect::<Result<_, String>>()?;
+        return Ok(Read { projects: Projects::checked(projects)?, rooted: false });
+    }
+    let kept: KeptUnrooted = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    assert_eq!(kept.version, version, "a file says one version");
     let workstreams = || kept.projects.iter().flat_map(|project| &project.workstreams);
+    bounded(version, kept.projects.len(), || workstreams().map(UnrootedWorkstream::counted))?;
+    let unrooted = kept.projects.into_iter().map(UnrootedProject::read);
+    let unrooted: Vec<Unrooted> = unrooted.collect::<Result<_, _>>()?;
+    let projects = root_projects(unrooted, root, draw)?;
+    Ok(Read { projects: Projects::checked(projects)?, rooted: true })
+}
+
+fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
+    version: u32,
+    projects: usize,
+    workstreams: impl Fn() -> I,
+) -> Result<(), String> {
+    let nodes = || workstreams().filter_map(|it| it.view).flat_map(|view| &view.tree);
+    if projects > PROJECTS_MAX {
+        return Err(format!("it holds over {PROJECTS_MAX} projects"));
+    }
+    if workstreams().count() > WORKSTREAMS_MAX {
+        return Err(format!("it holds over {WORKSTREAMS_MAX} workstreams"));
+    }
+    if nodes().filter(|node| matches!(node, KeptNode::Terminal(_))).count() > TERMINALS_MAX {
+        return Err(format!("it holds over {TERMINALS_MAX} terminals"));
+    }
     if version == WITHOUT_VIEWS && workstreams().any(|it| it.view.is_some()) {
         return Err(format!("it is of version {WITHOUT_VIEWS}, which holds no views"));
     }
-    let mut nodes = workstreams().filter_map(|it| it.view.as_ref()).flat_map(|view| &view.tree);
     let unrun = |node: &KeptNode| {
         matches!(node, KeptNode::Terminal(KeptTerminal { runs: KeptRuns::Unrun(_), .. }))
     };
-    if version <= WITHOUT_UNRUN && nodes.clone().any(unrun) {
+    if version <= WITHOUT_UNRUN && nodes().any(unrun) {
         return Err(format!("it is of version {version}, which holds no line left unrun"));
     }
     let named = |node: &KeptNode| {
         matches!(node, KeptNode::Terminal(KeptTerminal { name: Some(_), .. }))
     };
     if version <= WITHOUT_NAMES_OR_USE {
-        if nodes.any(named) {
+        if nodes().any(named) {
             return Err(format!("it is of version {version}, which holds no terminal's name"));
         }
         if workstreams().any(|it| it.used_millis.is_some()) {
             return Err(format!("it is of version {version}, which holds no workstream's use"));
         }
     }
-    let projects = kept.projects.into_iter().map(KeptProject::read);
-    let mut projects = Projects { projects: projects.collect::<Result<_, _>>()? };
-    if version <= UNFOLLOWED {
-        projects.followed();
+    Ok(())
+}
+
+struct Unrooted {
+    id: ProjectId,
+    name: Name,
+    dir: Dir,
+    workstreams: Vec<(Below, Workstream)>,
+}
+
+struct Gathered {
+    id: ProjectId,
+    name: Name,
+    dir: Dir,
+    holds: Gathering,
+}
+
+enum Gathering {
+    Folder(Vec<Workstream>),
+    Clone {
+        own: Vec<Workstream>,
+        rows: Vec<(Worktree, Workstream)>,
+        worktrees: BTreeSet<Worktree>,
+    },
+}
+
+fn root_projects(
+    unrooted: Vec<Unrooted>,
+    root: &mut impl FnMut(&Dir) -> Result<Option<Spot>, String>,
+    draw: &mut impl FnMut() -> io::Result<Id>,
+) -> Result<Vec<Project>, String> {
+    let terminal_count = |workstreams: &mut dyn Iterator<Item = &Workstream>| -> usize {
+        workstreams.map(|it| it.view.len()).sum()
+    };
+    let terminals: usize =
+        unrooted.iter().map(|it| terminal_count(&mut it.workstreams.iter().map(|(_, it)| it))).sum();
+    let mut taken: BTreeSet<Id> = BTreeSet::new();
+    for project in &unrooted {
+        let workstreams = project.workstreams.iter().map(|(_, it)| it);
+        let views = workstreams.clone().map(|it| &it.view);
+        let terminals = views.flat_map(|view| view.terminals().map(|it| it.id().id()));
+        let ids = std::iter::once(project.id.id()).chain(workstreams.map(|it| it.id.id()));
+        for id in ids.chain(terminals) {
+            if !taken.insert(id) {
+                return Err(format!("the id {id} comes twice"));
+            }
+        }
     }
-    Projects::checked(projects.projects)
+    let mut fresh = || -> Result<WorkstreamId, String> {
+        for _ in 0..super::FRESH_TRIES {
+            let id = draw().map_err(|error| format!("no id is drawn: {error}"))?;
+            if taken.insert(id) {
+                return Ok(WorkstreamId::new(id));
+            }
+        }
+        Err(format!("{} ids drawn were all taken", super::FRESH_TRIES))
+    };
+    let mut gathered: Vec<Gathered> = Vec::with_capacity(unrooted.len());
+    for project in unrooted {
+        let Gathered { id, name, dir, holds } = root_project(project, root)?;
+        match holds {
+            Gathering::Folder(more) => {
+                let held = gathered.iter_mut().find_map(|it| match &mut it.holds {
+                    Gathering::Folder(all) if it.dir == dir => Some(all),
+                    Gathering::Folder(_) | Gathering::Clone { .. } => None,
+                });
+                match held {
+                    Some(all) => all.extend(more),
+                    None => gathered.push(Gathered { id, name, dir, holds: Gathering::Folder(more) }),
+                }
+            },
+            Gathering::Clone { own: more_own, rows: more_rows, worktrees } => {
+                let held = gathered.iter_mut().find_map(|it| match &mut it.holds {
+                    Gathering::Clone { own, rows, .. } if it.dir == dir => Some((own, rows)),
+                    Gathering::Folder(_) | Gathering::Clone { .. } => None,
+                });
+                if let Some((own, rows)) = held {
+                    own.extend(more_own);
+                    rows.extend(more_rows);
+                } else {
+                    let holds = Gathering::Clone { own: more_own, rows: more_rows, worktrees };
+                    gathered.push(Gathered { id, name, dir, holds });
+                }
+            },
+        }
+    }
+    let shaped = gathered.into_iter().map(|it| shape(it, &mut fresh));
+    let projects: Vec<Project> = shaped.collect::<Result<_, _>>()?;
+    let rooted: usize = projects.iter().map(|it| terminal_count(&mut it.workstreams())).sum();
+    assert_eq!(rooted, terminals, "rooting keeps every terminal");
+    Ok(projects)
+}
+
+fn root_project(
+    project: Unrooted,
+    root: &mut impl FnMut(&Dir) -> Result<Option<Spot>, String>,
+) -> Result<Gathered, String> {
+    let named = |at: &Dir| match Name::parse(at.last()) {
+        Ok(after) if project.name.as_str() == project.dir.last() => after,
+        Ok(_) | Err(_) => project.name.clone(),
+    };
+    let unread = |why: String| {
+        let (name, dir) = (project.name.as_str(), project.dir.as_str());
+        let unsaid = "git did not say whose clone it is, so none is rooted";
+        format!("project {name} in {dir}: {unsaid}: {why}")
+    };
+    let Some(spot) = root(&project.dir).map_err(unread)? else {
+        let Unrooted { id, name, dir, workstreams } = project;
+        let all = workstreams.into_iter().map(|(_, it)| it).collect();
+        return Ok(Gathered { id, name, dir, holds: Gathering::Folder(all) });
+    };
+    let name = named(spot.dir());
+    let Unrooted { id, dir, workstreams, .. } = project;
+    let Some(worktrees) = spot.worktrees() else {
+        let all = workstreams.into_iter().map(|(_, it)| it).collect();
+        let dir = spot.dir().clone();
+        return Ok(Gathered { id, name, dir, holds: Gathering::Folder(all) });
+    };
+    let root = spot.dir().clone();
+    let (mut own, mut rows) = (Vec::new(), Vec::new());
+    for (below, workstream) in workstreams {
+        match worktree_holding(&root, worktrees, &dir.join(&below)) {
+            Some(worktree) => rows.push((worktree, workstream)),
+            None => own.push(workstream),
+        }
+    }
+    let holds = Gathering::Clone { own, rows, worktrees: worktrees.clone() };
+    Ok(Gathered { id, name, dir: root, holds })
+}
+
+fn worktree_holding(root: &Dir, worktrees: &BTreeSet<Worktree>, folder: &Dir) -> Option<Worktree> {
+    let holding = worktrees.iter().filter(|it| root.at(it).below(folder).is_some());
+    let listed = holding.max_by_key(|it| it.as_str().len()).cloned();
+    listed.or_else(|| {
+        let below = root.below(folder)?;
+        let first = below.as_str().split('/').next().expect("a split yields at least once");
+        Worktree::parse(first).ok()
+    })
+}
+
+fn shape(
+    gathered: Gathered,
+    fresh: &mut impl FnMut() -> Result<WorkstreamId, String>,
+) -> Result<Project, String> {
+    let Gathered { id, name, dir, holds } = gathered;
+    let holds = match holds {
+        Gathering::Folder(all) => Holds::Folder(one_of(all, fresh)?),
+        Gathering::Clone { own, rows, worktrees } => shape_clone(own, rows, &worktrees, fresh)?,
+    };
+    Ok(Project { id, name, dir, holds })
+}
+
+fn shape_clone(
+    own: Vec<Workstream>,
+    rows: Vec<(Worktree, Workstream)>,
+    worktrees: &BTreeSet<Worktree>,
+    fresh: &mut impl FnMut() -> Result<WorkstreamId, String>,
+) -> Result<Holds, String> {
+    let mut merged: Vec<(Worktree, Workstream)> = Vec::with_capacity(rows.len());
+    for (worktree, workstream) in rows {
+        let held = merged.iter_mut().find(|(it, _)| *it == worktree);
+        match held {
+            Some((_, held)) => join(held, workstream)?,
+            None => merged.push((worktree, workstream)),
+        }
+    }
+    for worktree in worktrees {
+        if !merged.iter().any(|(it, _)| it == worktree) {
+            merged.push((worktree.clone(), Workstream::new(fresh()?, None)));
+        }
+    }
+    let used_last = |(at, (_, it)): &(usize, &(Worktree, Workstream))| (it.used, std::cmp::Reverse(*at));
+    let last = merged.iter().enumerate().max_by_key(used_last).map(|(at, _)| at);
+    let Some(last) = last else {
+        if own.iter().all(|it| it.view.is_empty()) {
+            return Ok(Holds::Clone(Vec::new()));
+        }
+        return one_of(own, fresh).map(Holds::Folder);
+    };
+    let (_, into) = &mut merged[last];
+    for workstream in own {
+        into.view = std::mem::take(&mut into.view).joined(workstream.view)?;
+    }
+    Ok(Holds::Clone(merged))
+}
+
+fn one_of(
+    all: Vec<Workstream>,
+    fresh: &mut impl FnMut() -> Result<WorkstreamId, String>,
+) -> Result<Workstream, String> {
+    let mut all = all.into_iter();
+    let Some(mut one) = all.next() else {
+        return Ok(Workstream::new(fresh()?, None));
+    };
+    for other in all {
+        join(&mut one, other)?;
+    }
+    Ok(one)
+}
+
+fn join(held: &mut Workstream, other: Workstream) -> Result<(), String> {
+    let terminals = held.view.len() + other.view.len();
+    let view = std::mem::take(&mut held.view).joined(other.view)?;
+    if other.used > held.used {
+        *held = Workstream { view, ..other };
+    } else {
+        held.view = view;
+    }
+    assert_eq!(held.view.len(), terminals, "workstreams joined keep every terminal");
+    Ok(())
 }
 
 impl KeptProject {
     fn read(self) -> Result<Project, String> {
-        let workstreams = self.workstreams.into_iter().map(KeptWorkstream::read);
-        Ok(Project {
-            id: self.id.parse()?,
-            name: Name::parse(&self.name)?,
-            dir: Dir::parse(&self.dir)?,
-            workstreams: workstreams.collect::<Result<_, _>>()?,
-        })
+        let (id, name, dir) = (self.id.parse()?, Name::parse(&self.name)?, Dir::parse(&self.dir)?);
+        let holds = match self.holds {
+            KeptHolds::Folder(own) => Holds::Folder(own.read()?),
+            KeptHolds::Clone(rows) => {
+                let rows = rows.into_iter().map(KeptWorktree::read);
+                Holds::Clone(rows.collect::<Result<_, _>>()?)
+            },
+        };
+        Ok(Project { id, name, dir, holds })
     }
 
     fn of(project: &Project) -> KeptProject {
+        let holds = match &project.holds {
+            Holds::Folder(own) => KeptHolds::Folder(KeptWorkstream::of(own)),
+            Holds::Clone(rows) => {
+                let rows = rows.iter().map(|(worktree, it)| KeptWorktree::of(worktree, it));
+                KeptHolds::Clone(rows.collect())
+            },
+        };
         KeptProject {
             id: project.id.to_string(),
             name: project.name.0.clone(),
             dir: project.dir.0.clone(),
-            workstreams: project.workstreams.iter().map(KeptWorkstream::of).collect(),
+            holds,
         }
     }
+
+    fn counted(&self) -> impl Iterator<Item = Counted<'_>> {
+        let (own, rows): (_, &[KeptWorktree]) = match &self.holds {
+            KeptHolds::Folder(own) => (Some(own.counted()), &[]),
+            KeptHolds::Clone(rows) => (None, rows),
+        };
+        own.into_iter().chain(rows.iter().map(KeptWorktree::counted))
+    }
+}
+
+fn read_workstream(
+    id: &str,
+    name: Option<&str>,
+    view: Option<KeptView>,
+    used_millis: Option<u64>,
+) -> Result<Workstream, String> {
+    let id: WorkstreamId = id.parse()?;
+    let view = match view {
+        None => View::default(),
+        Some(view) => view.read().map_err(|why| format!("workstream {id}'s view: {why}"))?,
+    };
+    Ok(Workstream {
+        id,
+        renamed: name.map(Name::parse).transpose()?,
+        view,
+        used: used_millis.map(Used::read).transpose().map_err(|why| {
+            format!("workstream {id}: {why}")
+        })?,
+    })
 }
 
 impl KeptWorkstream {
     fn read(self) -> Result<Workstream, String> {
-        let id: WorkstreamId = self.id.parse()?;
-        let view = match self.view {
-            None => View::default(),
-            Some(view) => view.read().map_err(|why| format!("workstream {id}'s view: {why}"))?,
-        };
-        Ok(Workstream {
-            id,
-            renamed: self.name.as_deref().map(Name::parse).transpose()?,
-            below: Below::parse(&self.below)?,
-            view,
-            used: self.used_millis.map(Used::read).transpose().map_err(|why| {
-                format!("workstream {id}: {why}")
-            })?,
-        })
+        read_workstream(&self.id, self.name.as_deref(), self.view, self.used_millis)
     }
 
     fn of(workstream: &Workstream) -> KeptWorkstream {
         KeptWorkstream {
             id: workstream.id.to_string(),
             name: workstream.renamed.as_ref().map(|name| name.0.clone()),
-            below: workstream.below.0.clone(),
             view: KeptView::of(&workstream.view),
             used_millis: workstream.used.map(Used::millis),
         }
+    }
+
+    fn counted(&self) -> Counted<'_> {
+        Counted { view: self.view.as_ref(), used_millis: self.used_millis }
+    }
+}
+
+impl KeptWorktree {
+    fn read(self) -> Result<(Worktree, Workstream), String> {
+        let workstream = read_workstream(&self.id, self.name.as_deref(), self.view, self.used_millis)?;
+        let at = |why: String| format!("workstream {}: {why}", workstream.id);
+        Ok((Worktree::parse(&self.worktree).map_err(at)?, workstream))
+    }
+
+    fn of(worktree: &Worktree, workstream: &Workstream) -> KeptWorktree {
+        let KeptWorkstream { id, name, view, used_millis } = KeptWorkstream::of(workstream);
+        KeptWorktree { id, name, worktree: worktree.as_str().to_owned(), view, used_millis }
+    }
+
+    fn counted(&self) -> Counted<'_> {
+        Counted { view: self.view.as_ref(), used_millis: self.used_millis }
+    }
+}
+
+impl UnrootedProject {
+    fn read(self) -> Result<Unrooted, String> {
+        let (id, name, dir) = (self.id.parse()?, Name::parse(&self.name)?, Dir::parse(&self.dir)?);
+        let workstreams = self.workstreams.into_iter().map(UnrootedWorkstream::read);
+        Ok(Unrooted { id, name, dir, workstreams: workstreams.collect::<Result<_, _>>()? })
+    }
+}
+
+impl UnrootedWorkstream {
+    fn read(self) -> Result<(Below, Workstream), String> {
+        let workstream = read_workstream(&self.id, self.name.as_deref(), self.view, self.used_millis)?;
+        Ok((Below::parse(&self.below)?, workstream))
+    }
+
+    fn counted(&self) -> Counted<'_> {
+        Counted { view: self.view.as_ref(), used_millis: self.used_millis }
     }
 }
 
@@ -670,8 +1052,66 @@ mod tests {
     use super::super::{Placed, ProjectId};
     use super::*;
 
+    fn add_in(project: ProjectId, spot: Spot) -> Change {
+        Change::AddWorkstream { project, spot, name: None }
+    }
+
+    fn add_named(project: ProjectId, spot: Spot, name: Option<Name>) -> Change {
+        Change::AddWorkstream { project, spot, name }
+    }
+
     fn dir(text: &str) -> Dir {
         Dir::parse(text).unwrap()
+    }
+
+    fn alone(at: &str) -> Spot {
+        Spot::in_folder(dir(at), dir(at))
+    }
+
+    fn tree(at: &str) -> Worktree {
+        Worktree::parse(at).unwrap()
+    }
+
+    fn clone_of(root: &str, worktrees: &[&str]) -> Spot {
+        Spot::in_clone(dir(root), None, worktrees.iter().copied().map(tree).collect())
+    }
+
+    fn worktree(root: &str, at: &str) -> Spot {
+        Spot::in_clone(dir(root), Some(tree(at)), BTreeSet::from([tree(at)]))
+    }
+
+    fn is_clone(project: &Project) -> bool {
+        matches!(project.holds(), Holds::Clone(_))
+    }
+
+    fn rows(project: &Project) -> &[(Worktree, Workstream)] {
+        let Holds::Clone(rows) = project.holds() else { panic!("{project:?} is a clone") };
+        rows
+    }
+
+    fn row<'a>(project: &'a Project, at: &str) -> &'a Workstream {
+        let found = rows(project).iter().find(|(it, _)| *it == tree(at));
+        &found.unwrap_or_else(|| panic!("{at} is a worktree of {project:?}")).1
+    }
+
+    fn counting(from: u64) -> impl FnMut() -> io::Result<Id> {
+        let mut next = from;
+        move || {
+            next += 1;
+            Ok(Id::of(next).unwrap())
+        }
+    }
+
+    fn rooted_as(
+        text: &str,
+        mut root: impl FnMut(&Dir) -> Result<Option<Spot>, String>,
+    ) -> Result<Read, String> {
+        super::parse(text, &mut root, &mut counting(100))
+    }
+
+    fn parse(text: &str) -> Result<Projects, String> {
+        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), dir.clone())));
+        rooted_as(text, alone).map(|read| read.projects)
     }
 
     fn channel() -> (SyncSender<Command>, Receiver<Command>) {
@@ -700,19 +1140,19 @@ mod tests {
         let mut store = Store::at(Ok(file.clone()), core.clone()).unwrap();
         assert_eq!(store.unkept(), None);
         let vault = Some(Name::parse("bitwarden backup").unwrap());
-        let made = store.change(Change::AddProject { dir: dir("/home/me/Vault"), name: vault });
-        let Some(Made::Project(vault)) = made.unwrap() else { panic!("Vault is made") };
-        store.change(Change::AddProject { dir: dir("/w/luneta"), name: None }).unwrap();
-        let top = dir("/home/me/Vault/notes");
-        store.change(Change::AddWorkstream { project: vault, folder: top, name: None }).unwrap();
-        let (sub, named) = (dir("/home/me/Vault/a/b"), Some(Name::parse("release").unwrap()));
-        store.change(Change::AddWorkstream { project: vault, folder: sub, name: named }).unwrap();
+        store.change(Change::AddProject { spot: alone("/home/me/Vault"), name: vault }).unwrap();
+        let luneta = Change::AddProject { spot: clone_of("/w/luneta", &["main"]), name: None };
+        let made = store.change(luneta);
+        let Some(Made::Project(luneta)) = made.unwrap() else { panic!("luneta is made") };
+        let named = Some(Name::parse("release").unwrap());
+        let fix = add_named(luneta, worktree("/w/luneta", "fix"), named);
+        store.change(fix).unwrap();
 
         let mut told = heard(&commands);
-        assert_eq!(told.len(), 5);
+        assert_eq!(told.len(), 4);
         assert_eq!(told[0], Ok(Projects::default()));
         let kept = told.pop().unwrap();
-        assert_eq!(kept.as_ref().map(|kept| kept.all().len()), Ok(2));
+        assert_eq!(kept.as_ref().map(|kept| kept.workstreams().count()), Ok(3));
 
         drop(store);
         let again = Store::at(Ok(file.clone()), core).unwrap();
@@ -735,10 +1175,11 @@ mod tests {
 
         let (core, _commands) = channel();
         let mut store = Store::at(Ok(file.clone()), core.clone()).unwrap();
-        let made = store.change(Change::AddProject { dir: dir("/w/luneta"), name: None });
+        let luneta = Change::AddProject { spot: clone_of("/w/luneta", &[]), name: None };
+        let made = store.change(luneta);
         let Some(Made::Project(luneta)) = made.unwrap() else { panic!("luneta is made") };
-        let folder = dir("/w/luneta/main");
-        store.change(Change::AddWorkstream { project: luneta, folder, name: None }).unwrap();
+        let spot = worktree("/w/luneta", "main");
+        store.change(add_in(luneta, spot)).unwrap();
         let held = store.projects().unwrap().clone();
         let refused = forget_at(&file).unwrap_err();
         assert!(refused.starts_with("a lunetad keeps them still"), "{refused}");
@@ -759,46 +1200,55 @@ mod tests {
     #[test]
     fn the_file_says_its_version_and_only_what_differs_from_the_defaults() {
         let mut projects = Projects::default();
-        let ids = [1, 2, 3].map(|id| Id::of(id).unwrap());
+        let ids = [1, 2, 3, 4, 5].map(|id| Id::of(id).unwrap());
         let mut drawn = ids.into_iter();
         let mut draw = || Ok(drawn.next().unwrap());
-        let change = Change::AddProject { dir: dir("/w/luneta"), name: None };
+        let change = Change::AddProject { spot: clone_of("/w/luneta", &["top"]), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
         let project = ProjectId::new(ids[0]);
-        let top = Change::AddWorkstream { project, folder: dir("/w/luneta/top"), name: None };
-        (projects, _) = projects.changed(top, &mut draw).unwrap();
         let named = Some(Name::parse("release").unwrap());
-        let folder = dir("/w/luneta/main");
-        let main = Change::AddWorkstream { project, folder, name: named };
+        let main = add_named(project, worktree("/w/luneta", "main"), named);
         (projects, _) = projects.changed(main, &mut draw).unwrap();
+        let change = Change::AddProject { spot: alone("/home/me/Vault"), name: None };
+        (projects, _) = projects.changed(change, &mut draw).unwrap();
         let want = r#"{
-  "version": 5,
+  "version": 6,
   "projects": [
     {
       "id": "0000000000000001",
       "name": "luneta",
       "dir": "/w/luneta",
-      "workstreams": [
-        {
-          "id": "0000000000000002",
-          "below": "top"
-        },
-        {
-          "id": "0000000000000003",
-          "name": "release",
-          "below": "main"
+      "holds": {
+        "clone": [
+          {
+            "id": "0000000000000002",
+            "worktree": "top"
+          },
+          {
+            "id": "0000000000000003",
+            "name": "release",
+            "worktree": "main"
+          }
+        ]
+      }
+    },
+    {
+      "id": "0000000000000004",
+      "name": "Vault",
+      "dir": "/home/me/Vault",
+      "holds": {
+        "folder": {
+          "id": "0000000000000005"
         }
-      ]
+      }
     }
   ]
 }
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        for before in [1, 2, 3, 4] {
-            let before = want.replace(r#""version": 5"#, &format!(r#""version": {before}"#));
-            assert_eq!(parse(&before), Ok(projects.clone()));
-        }
+        let before = want.replace(r#""version": 6"#, r#""version": 5"#);
+        assert!(parse(&before).unwrap_err().contains("unknown field `holds`"));
     }
 
     #[test]
@@ -807,11 +1257,8 @@ mod tests {
         let ids = [1, 2].map(|id| Id::of(id).unwrap());
         let mut drawn = ids.into_iter();
         let mut draw = || Ok(drawn.next().unwrap());
-        let change = Change::AddProject { dir: dir("/w/luneta"), name: None };
+        let change = Change::AddProject { spot: clone_of("/w/luneta", &["top"]), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
-        let project = ProjectId::new(ids[0]);
-        let top = Change::AddWorkstream { project, folder: dir("/w/luneta/top"), name: None };
-        (projects, _) = projects.changed(top, &mut draw).unwrap();
         let workstream = WorkstreamId::new(ids[1]);
         let size = super::super::Size::of(80, 24).unwrap();
         let [shell, vim, agent] = [4, 5, 6].map(|id| TerminalId::of(id).unwrap());
@@ -838,94 +1285,181 @@ mod tests {
         let fill = Change::Fill { workstream, full: Some(vim) };
         (projects, _) = projects.changed(fill, &mut draw).unwrap();
         let want = r#"{
-  "version": 5,
+  "version": 6,
   "projects": [
     {
       "id": "0000000000000001",
       "name": "luneta",
       "dir": "/w/luneta",
-      "workstreams": [
-        {
-          "id": "0000000000000002",
-          "below": "top",
-          "view": {
-            "full": "0000000000000005",
-            "tree": [
-              {
-                "split": {
-                  "towards": "right",
-                  "share": 500000
-                }
-              },
-              {
-                "terminal": {
-                  "id": "0000000000000004",
-                  "folder": "/w/luneta/top",
-                  "runs": "shell"
-                }
-              },
-              {
-                "split": {
-                  "towards": "down",
-                  "share": 500000
-                }
-              },
-              {
-                "terminal": {
-                  "id": "0000000000000005",
-                  "folder": "/w/luneta/top",
-                  "runs": {
-                    "command": "vim notes"
+      "holds": {
+        "clone": [
+          {
+            "id": "0000000000000002",
+            "worktree": "top",
+            "view": {
+              "full": "0000000000000005",
+              "tree": [
+                {
+                  "split": {
+                    "towards": "right",
+                    "share": 500000
                   }
-                }
-              },
-              {
-                "terminal": {
-                  "id": "0000000000000006",
-                  "folder": "/w/luneta/top",
-                  "runs": {
-                    "agent": {
-                      "harness": "claude-code",
-                      "session": "7c22-ab"
+                },
+                {
+                  "terminal": {
+                    "id": "0000000000000004",
+                    "folder": "/w/luneta/top",
+                    "runs": "shell"
+                  }
+                },
+                {
+                  "split": {
+                    "towards": "down",
+                    "share": 500000
+                  }
+                },
+                {
+                  "terminal": {
+                    "id": "0000000000000005",
+                    "folder": "/w/luneta/top",
+                    "runs": {
+                      "command": "vim notes"
+                    }
+                  }
+                },
+                {
+                  "terminal": {
+                    "id": "0000000000000006",
+                    "folder": "/w/luneta/top",
+                    "runs": {
+                      "agent": {
+                        "harness": "claude-code",
+                        "session": "7c22-ab"
+                      }
                     }
                   }
                 }
-              }
-            ]
+              ]
+            }
           }
-        }
-      ]
+        ]
+      }
     }
   ]
 }
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects));
-        let before = want.replace(r#""version": 5"#, r#""version": 1"#);
-        assert_eq!(parse(&before), Err("it is of version 1, which holds no views".to_owned()));
+        let before = r#"{"version": 1, "projects": [{"id": "0000000000000001", "name": "luneta",
+            "dir": "/w/luneta", "workstreams": [{"id": "0000000000000002", "below": "top",
+            "view": {"tree": [{"terminal": {"id": "0000000000000004", "folder": "/w/luneta/top",
+            "runs": "shell"}}]}}]}]}"#;
+        assert_eq!(parse(before), Err("it is of version 1, which holds no views".to_owned()));
     }
 
     #[test]
-    fn a_workstream_kept_in_its_project_s_own_folder_is_read_and_written_back() {
+    fn an_old_file_s_folder_holds_its_workstreams_as_one_in_its_own_folder() {
         let text = r#"{"version": 4, "projects": [{"id": "0000000000000001", "name": "a",
             "dir": "/a", "workstreams": [{"id": "0000000000000002"},
-            {"id": "0000000000000003", "below": "b"}]}]}"#;
-        let kept = parse(text).unwrap();
-        let project = &kept.all()[0];
-        let folders: Vec<Dir> = project.workstreams().iter().map(|it| project.folder(it)).collect();
-        assert_eq!(folders, [dir("/a"), dir("/a/b")]);
+            {"id": "0000000000000003", "below": "b", "used_millis": 7}]}, {"id": "0000000000000004",
+            "name": "c", "dir": "/c"}]}"#;
+        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), dir.clone())));
+        let read = rooted_as(text, alone).unwrap();
+        assert!(read.rooted, "an old file is rooted, and so written again at once");
+        let kept = read.projects;
+        let [a, c] = kept.all() else { panic!("both projects are kept") };
+        assert_eq!((is_clone(a), a.dir()), (false, &dir("/a")));
+        let ids: Vec<u64> = a.workstreams().map(|it| it.id().get()).collect();
+        assert_eq!(ids, [3], "the one used last stands for both");
+        assert_eq!(c.workstreams().count(), 1, "a folder with none is given one");
         assert_eq!(parse(&written(&kept)), Ok(kept));
     }
 
     #[test]
-    fn a_workstream_read_from_version_4_is_where_its_terminals_all_went() {
-        let text = r#"{"version": 4, "projects": [{"id": "0000000000000001", "name": "a",
-            "dir": "/a", "workstreams": [{"id": "0000000000000002", "below": "b",
-            "view": {"tree": [{"terminal": {"id": "0000000000000003", "folder": "/a/c/d",
-            "runs": "shell"}}]}}]}]}"#;
-        let projects = parse(text).unwrap();
-        let project = &projects.all()[0];
-        assert_eq!(project.folder(&project.workstreams()[0]).as_str(), "/a/c/d");
+    fn an_old_file_s_projects_of_one_clone_are_one_at_its_root_with_a_workstream_per_worktree() {
+        let terminal = |id: u64, folder: &str| {
+            let at = format!(r#""id": "{id:016x}", "folder": "{folder}""#);
+            format!(r#"{{"terminal": {{{at}, "runs": "shell"}}}}"#)
+        };
+        let view = |id: u64, at: &str| format!(r#""view": {{"tree": [{}]}}"#, terminal(id, at));
+        let text = format!(
+            r#"{{"version": 5, "projects": [
+            {{"id": "0000000000000001", "name": "main", "dir": "/w/luneta/main", "workstreams": [
+              {{"id": "0000000000000002", {}, "used_millis": 5}},
+              {{"id": "0000000000000003", "name": "kept", {}, "used_millis": 9}}]}},
+            {{"id": "0000000000000004", "name": "feat", "dir": "/w/luneta/feat", "workstreams": [
+              {{"id": "0000000000000005", "below": "crates", {}}}]}},
+            {{"id": "0000000000000006", "name": "Vault", "dir": "/home/me/Vault", "workstreams": [
+              {{"id": "0000000000000007"}}, {{"id": "0000000000000008", "below": "notes"}}]}},
+            {{"id": "0000000000000009", "name": "x", "dir": "/w/luneta/team", "workstreams": [
+              {{"id": "000000000000000a", "below": "x/src", {}}}]}}]}}"#,
+            view(16, "/w/luneta/main"),
+            view(17, "/w/luneta/main/src"),
+            view(18, "/w/luneta/feat/crates"),
+            view(19, "/w/luneta/team/x/src"),
+        );
+        let clone = clone_of("/w/luneta", &["feat", "fix", "main", "team/x"]);
+        let root = |at: &Dir| {
+            let held = at.as_str().starts_with("/w/luneta");
+            if held { Ok(Some(clone.clone())) } else { Ok(None) }
+        };
+        let read = rooted_as(&text, root).unwrap();
+        assert!(read.rooted);
+        let [luneta, vault] = read.projects.all() else { panic!("one clone, one folder") };
+        let held = (luneta.id().get(), luneta.name().as_str(), luneta.dir(), is_clone(luneta));
+        let named = "the first keeps its id, and its folder's name becomes its clone's";
+        assert_eq!(held, (1, "luneta", &dir("/w/luneta"), true), "{named}");
+        let (first, main) = &rows(luneta)[0];
+        assert_eq!((main.id().get(), first.as_str(), main.view().len()), (3, "main", 2));
+        let renamed = main.renamed().map(Name::as_str);
+        assert_eq!(renamed, Some("kept"), "the one used last stands for both");
+        let feat = row(luneta, "feat");
+        assert_eq!((feat.id().get(), feat.view().len()), (5, 1), "a folder below a worktree is it");
+        let nested = row(luneta, "team/x");
+        let held = (nested.id().get(), nested.view().len());
+        assert_eq!(held, (10, 1), "a folder in a nested worktree is that worktree's");
+        let fix = row(luneta, "fix");
+        assert!(fix.view().is_empty() && fix.id().get() > 100, "a worktree listed is given one");
+        assert_eq!(rows(luneta).len(), 4);
+        let held = (is_clone(vault), vault.workstreams().count());
+        assert_eq!(held, (false, 1), "a folder gone stays");
+        let again = parse(&written(&read.projects)).unwrap();
+        assert_eq!(again, read.projects);
+    }
+
+    #[test]
+    fn an_old_file_is_rooted_only_where_git_says_whose_clone_each_project_is() {
+        let text = r#"{"version": 5, "projects": [{"id": "0000000000000001", "name": "a",
+            "dir": "/a"}]}"#;
+        let stuck = |_: &Dir| Err("git did not answer in 2000ms".to_owned());
+        let Err(refused) = rooted_as(text, stuck) else { panic!("a file unrooted is refused") };
+        let unsaid = "project a in /a: git did not say whose clone it is, so none is rooted";
+        assert!(refused.starts_with(unsaid), "{refused}");
+        assert!(refused.ends_with("git did not answer in 2000ms"), "{refused}");
+
+        let text = r#"{"version": 5, "projects": [{"id": "0000000000000001", "name": "bare",
+            "dir": "/w/bare", "workstreams": [{"id": "0000000000000002"}]}]}"#;
+        let read = rooted_as(text, |_: &Dir| Ok(Some(clone_of("/w/bare", &[])))).unwrap();
+        let [bare] = read.projects.all() else { panic!("the clone is kept") };
+        let held = (is_clone(bare), bare.workstreams().count());
+        assert_eq!(held, (true, 0), "a clone with no worktree and no terminal stays one");
+    }
+
+    #[test]
+    fn an_old_file_over_the_limits_is_refused_before_git_is_asked_of_it() {
+        let project = |at: usize| {
+            format!(r#"{{"id": "{at:016x}", "name": "p{at}", "dir": "/p{at}"}}"#)
+        };
+        let many: Vec<String> = (1..=PROJECTS_MAX + 1).map(project).collect();
+        let text = format!(r#"{{"version": 5, "projects": [{}]}}"#, many.join(", "));
+        let mut asked = 0;
+        let counted = |_: &Dir| {
+            asked += 1;
+            Ok(None)
+        };
+        let Err(refused) = rooted_as(&text, counted) else { panic!("a file over is refused") };
+        assert_eq!(refused, format!("it holds over {PROJECTS_MAX} projects"));
+        assert_eq!(asked, 0, "no git is asked of a file refused");
     }
 
     #[test]
@@ -985,7 +1519,7 @@ mod tests {
         let project = r#"{"id": "0000000000000001", "name": "a", "dir": "/a"}"#;
         let refused = [
             ("{", "EOF"),
-            (r#"{"version": 6, "projects": []}"#, "version 6, and this lunetad reads only 1 to 5"),
+            (r#"{"version": 7, "projects": []}"#, "version 7, and this lunetad reads only 1 to 6"),
             (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),
             (
@@ -995,11 +1529,25 @@ mod tests {
             ),
             (&format!(r#"{{"version": 1, "projects": [{project}, {project}]}}"#), "comes twice"),
             (
-                r#"{"version": 5, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
-                "workstreams": [{"id": "0000000000000002", "below": "b",
-                "view": {"tree": [{"terminal": {"id": "0000000000000003", "folder": "/a/c/d",
-                "runs": "shell"}}]}}]}]}"#,
-                "/a/b: its terminals all went to /a/c/d",
+                r#"{"version": 6, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
+                "holds": {"clone": [{"id": "0000000000000002", "worktree": "b"},
+                {"id": "0000000000000003", "worktree": "b"}]}}]}"#,
+                "/a/b holds two of project a's workstreams",
+            ),
+            (
+                r#"{"version": 6, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
+                "holds": {"clone": [{"id": "0000000000000002", "worktree": ""}]}}]}"#,
+                "workstream 0000000000000002: a worktree is below its clone's root",
+            ),
+            (
+                r#"{"version": 6, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
+                "holds": {"folder": {"id": "0000000000000002", "worktree": "b"}}}]}"#,
+                "unknown field `worktree`",
+            ),
+            (
+                r#"{"version": 6, "projects": [{"id": "0000000000000001", "name": "a",
+                "dir": "/a"}]}"#,
+                "missing field `holds`",
             ),
             (
                 r#"{"version": 1, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
@@ -1046,7 +1594,7 @@ mod tests {
             assert!(unkept.contains(why), "{unkept:?} for {text}");
             assert!(unkept.ends_with("and so it is left as it is"), "{unkept}");
             assert_eq!(heard(&commands), [Err(unkept.clone())]);
-            let change = Change::AddProject { dir: dir("/c"), name: None };
+            let change = Change::AddProject { spot: alone("/c"), name: None };
             assert_eq!(store.change(change), Err(Failed::NotKept(unkept)));
             assert_eq!(heard(&commands), []);
             assert_eq!(fs::read_to_string(&file).unwrap(), text);
@@ -1069,7 +1617,7 @@ mod tests {
         let mut store = Store::at(Err(Unset), core).unwrap();
         let unkept = store.unkept().unwrap().to_owned();
         assert!(unkept.starts_with("projects are kept nowhere: neither XDG_STATE_HOME"));
-        let change = Change::AddProject { dir: dir("/c"), name: None };
+        let change = Change::AddProject { spot: alone("/c"), name: None };
         assert_eq!(store.change(change), Err(Failed::NotKept(unkept)));
     }
 
@@ -1080,7 +1628,7 @@ mod tests {
         let (core, commands) = channel();
         let mut store = Store::at(Ok(file.clone()), core).unwrap();
         drop(commands);
-        let change = Change::AddProject { dir: dir("/c"), name: None };
+        let change = Change::AddProject { spot: alone("/c"), name: None };
         assert_eq!(store.change(change), Err(Failed::KeptUntold));
 
         drop(store);
@@ -1097,11 +1645,11 @@ mod tests {
         let file = file_in(&scratch);
         let (core, commands) = channel();
         let mut store = Store::at(Ok(file.clone()), core).unwrap();
-        store.change(Change::AddProject { dir: dir("/a"), name: None }).unwrap();
+        store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
         let written = fs::read_to_string(&file).unwrap();
         assert_eq!(heard(&commands).len(), 2);
 
-        let inside = Change::AddProject { dir: dir("/a/b"), name: None };
+        let inside = Change::AddProject { spot: alone("/a/b"), name: None };
         let Err(Failed::Nests(why)) = store.change(inside) else {
             panic!("a project inside another is kept");
         };
@@ -1114,7 +1662,7 @@ mod tests {
 
         let folder = file.parent().unwrap();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o500)).unwrap();
-        let unwritten = store.change(Change::AddProject { dir: dir("/c"), name: None });
+        let unwritten = store.change(Change::AddProject { spot: alone("/c"), name: None });
         fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
         let Err(Failed::Unwritten(why)) = unwritten else {
             panic!("a change into a folder that refuses writes is kept: {unwritten:?}");
@@ -1124,7 +1672,7 @@ mod tests {
         assert_eq!(store.unkept(), None);
         assert_eq!(heard(&commands), []);
         assert_eq!(fs::read_to_string(&file).unwrap(), written);
-        store.change(Change::AddProject { dir: dir("/c"), name: None }).unwrap();
+        store.change(Change::AddProject { spot: alone("/c"), name: None }).unwrap();
         let [kept] = heard(&commands).try_into().unwrap();
         assert_eq!(kept.map(|kept| kept.all().len()), Ok(2));
     }
@@ -1135,9 +1683,9 @@ mod tests {
         let file = file_in(&scratch);
         let (core, commands) = channel();
         let mut store = Store::at(Ok(file.clone()), core).unwrap();
-        let made = store.change(Change::AddProject { dir: dir("/a"), name: None }).unwrap();
+        let made = store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
         let Some(Made::Project(project)) = made else { panic!("/a is made") };
-        let add = Change::AddWorkstream { project, folder: dir("/a/b"), name: None };
+        let add = add_in(project, alone("/a/b"));
         let Some(Made::Workstream(workstream)) = store.change(add).unwrap() else {
             panic!("/a/b is made");
         };
@@ -1156,14 +1704,14 @@ mod tests {
         assert!(why.starts_with(&format!("{}: ", file.display())), "{why}");
         assert!(matches!(flushed, Err(Failed::Unwritten(_))), "{flushed:?}");
         assert_eq!(fs::read_to_string(&file).unwrap(), written);
+        let emptied = |projects: &Projects| projects.find(workstream).unwrap().1.view().is_empty();
         let [told] = heard(&commands).try_into().unwrap();
-        assert!(told.unwrap().find(workstream).is_none(), "the core hears of the close");
-        assert!(store.projects().unwrap().find(workstream).is_none());
+        assert!(emptied(&told.unwrap()), "the core hears of the close");
+        assert!(emptied(store.projects().unwrap()));
 
         store.flush().unwrap();
-        assert!(read(&file).unwrap().find(workstream).is_none(), "a flush writes the close");
-        let again = store.closed(Closing::Workstream(workstream));
-        assert!(matches!(again, Err(Failed::Refused(_))), "{again:?}");
+        assert!(emptied(&parse(&fs::read_to_string(&file).unwrap()).unwrap()), "a flush writes it");
+        assert_eq!(store.closed(Closing::Workstream(workstream)), Ok(None), "closed, it stays");
     }
 
     #[test]
@@ -1175,7 +1723,7 @@ mod tests {
         let mut second = Store::at(Ok(file.clone()), core.clone()).unwrap();
         let unkept = second.unkept().unwrap().to_owned();
         assert!(unkept.starts_with("another lunetad keeps the projects in "), "{unkept}");
-        let change = Change::AddProject { dir: dir("/c"), name: None };
+        let change = Change::AddProject { spot: alone("/c"), name: None };
         assert_eq!(second.change(change), Err(Failed::NotKept(unkept)));
 
         let released = thread::spawn(move || {
@@ -1193,13 +1741,13 @@ mod tests {
         let file = file_in(&scratch);
         let (core, commands) = channel();
         let mut store = Store::at(Ok(file.clone()), core).unwrap();
-        store.change(Change::AddProject { dir: dir("/a"), name: None }).unwrap();
+        store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
         let written = fs::read_to_string(&file).unwrap();
         let edited = written.replace(r#""name": "a""#, r#""name": "edited""#);
         assert_ne!(edited, written);
         fs::write(&file, &edited).unwrap();
 
-        let change = Change::AddProject { dir: dir("/b"), name: None };
+        let change = Change::AddProject { spot: alone("/b"), name: None };
         let Err(Failed::NotKept(why)) = store.change(change) else {
             panic!("a change over an edited file is kept");
         };
@@ -1215,9 +1763,9 @@ mod tests {
         let file = file_in(&scratch);
         let (core, commands) = channel();
         let mut store = Store::at(Ok(file.clone()), core).unwrap();
-        let project = store.change(Change::AddProject { dir: dir("/a"), name: None });
+        let project = store.change(Change::AddProject { spot: alone("/a"), name: None });
         let Some(Made::Project(project)) = project.unwrap() else { panic!("/a is made") };
-        let add = Change::AddWorkstream { project, folder: dir("/a/b"), name: None };
+        let add = add_in(project, alone("/a/b"));
         let Some(Made::Workstream(workstream)) = store.change(add).unwrap() else {
             panic!("/a/b is made");
         };

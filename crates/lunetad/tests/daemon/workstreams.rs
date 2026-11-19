@@ -53,65 +53,22 @@ fn shown(dir: &Path) -> String {
 }
 
 #[test]
-fn a_folder_starts_in_the_project_it_is_in_or_one_made_of_it_and_luneta_goes_there() {
+fn a_folder_starts_the_workstream_of_its_project_or_of_one_made_of_it() {
     let owned = Owned::new();
     let home = fs::canonicalize(owned.host.home.path()).unwrap();
-    let (work, docs, notes) = (home.join("work"), home.join("work/docs"), home.join("work/notes"));
+    let (work, docs) = (home.join("work"), home.join("work/docs"));
     fs::create_dir_all(&docs).unwrap();
-    fs::create_dir_all(&notes).unwrap();
 
     let made = started(&owned.host, &home, "work", &[]);
     assert_eq!(said(&made), shown(&work));
-    let stderr = String::from_utf8_lossy(&made.stderr);
-    assert!(stderr.contains("is a project with no workstream there"), "{stderr}");
-    let (work_s, docs_s) = (work.display().to_string(), docs.display().to_string());
-    assert_eq!(folders(&owned.host), vec![("work".to_owned(), work_s.clone(), vec![])]);
+    assert!(made.stderr.is_empty(), "{}", String::from_utf8_lossy(&made.stderr));
+    let work_s = work.display().to_string();
+    let made = vec![("work".to_owned(), work_s.clone(), vec![work_s.clone()])];
+    assert_eq!(folders(&owned.host), made, "a folder's project holds one workstream there");
     assert_eq!(said(&started(&owned.host, &work, "docs", &[])), shown(&docs));
-    let made = vec![("work".to_owned(), work_s.clone(), vec![docs_s.clone()])];
+    assert_eq!(folders(&owned.host), made, "a folder in it starts that one");
+    assert_eq!(said(&started(&owned.host, &docs, "..", &[])), shown(&work));
     assert_eq!(folders(&owned.host), made);
-    assert_eq!(said(&started(&owned.host, &docs, ".", &[])), shown(&docs));
-    assert_eq!(folders(&owned.host), made, "a workstream there already is the one started");
-    let last = said(&started(&owned.host, &docs, "..", &[]));
-    assert_eq!(last, shown(&docs), "a project's own folder starts its last workstream, said");
-    assert_eq!(folders(&owned.host), made);
-
-    let here = WorkstreamId::of(projects(&owned.host)[0].workstreams[0].id).unwrap();
-    let folder = folder_in(owned.host.runtime.path()).unwrap();
-    let (heard, hearing) = mpsc::channel();
-    let size = Size::of(80, 24).unwrap();
-    let at = Where::Here { runs_in: None };
-    let show = lunetad::show(folder, at, here, size, false, move |it| drop(heard.send(it)));
-    let argv = ["sleep", "600"].map(str::to_owned).to_vec();
-    show.ask(Asked::Open { beside: Beside::Alone, argv });
-    let laid = eventually("the view lays out the terminal", || match hearing.try_recv() {
-        Ok(Heard::Laid(laid)) if !laid.is_empty() => Some(laid),
-        Ok(_) | Err(_) => None,
-    });
-    let key = laid.focused().and_then(lunetad::Pane::key).expect("a terminal of the mux's");
-    let inside = [
-        ("LUNETA_MUX_TERMINAL", key.id.to_string()),
-        ("LUNETA_MUX_TERMINAL_MADE", key.made.nanos().to_string()),
-    ];
-    assert_eq!(said(&started(&owned.host, &home, "work/notes", &inside)), shown(&notes));
-    let notes_s = notes.display().to_string();
-    let both = vec![("work".to_owned(), work_s, vec![docs_s, notes_s])];
-    assert_eq!(folders(&owned.host), both);
-    let there = WorkstreamId::of(projects(&owned.host)[0].workstreams[1].id).unwrap();
-    let sent = eventually("luneta is sent to the workstream started", || {
-        match hearing.try_recv() {
-            Ok(Heard::Sent(to)) => Some(to),
-            Ok(_) | Err(_) => None,
-        }
-    });
-    assert_eq!(sent, there);
-    let unseen = [
-        ("LUNETA_MUX_TERMINAL", (key.id.get() + 100).to_string()),
-        ("LUNETA_MUX_TERMINAL_MADE", key.made.nanos().to_string()),
-    ];
-    let stayed = started(&owned.host, &home, "work/docs", &unseen);
-    assert_eq!(said(&stayed), shown(&docs), "no luneta on the terminal is no failure");
-    let stderr = String::from_utf8_lossy(&stayed.stderr);
-    assert!(stderr.contains("no luneta is on this terminal"), "{stderr}");
 
     assert_eq!(refused(&started(&owned.host, &home, "./gone", &[])), format!(
         "luneta: {} is no folder",
@@ -130,11 +87,46 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
 
     assert_eq!(said(&started(&owned.host, &main, "feat", &[])), shown(&feat));
     assert!(feat.join(".git").is_file(), "wt made the worktree");
-    let feat_s = feat.display().to_string();
-    let made = vec![("n".to_owned(), clone.display().to_string(), vec![feat_s])];
-    assert_eq!(folders(&owned.host), made);
+    let worktrees = [&feat, &main].map(|it| it.display().to_string()).to_vec();
+    let made = vec![("n".to_owned(), clone.display().to_string(), worktrees)];
+    assert_eq!(folders(&owned.host), made, "a workstream for each of its clone's worktrees");
     assert_eq!(said(&started(&owned.host, &main, "feat", &[])), shown(&feat));
     assert_eq!(folders(&owned.host), made, "the worktree's workstream is started again");
+
+    let workstreams = &projects(&owned.host)[0].workstreams;
+    let [there, here] = [0, 1].map(|at| WorkstreamId::of(workstreams[at].id).unwrap());
+    let folder = folder_in(owned.host.runtime.path()).unwrap();
+    let (heard, hearing) = mpsc::channel();
+    let size = Size::of(80, 24).unwrap();
+    let at = Where::Here { runs_in: None };
+    let show = lunetad::show(folder, at, here, size, false, move |it| drop(heard.send(it)));
+    let argv = ["sleep", "600"].map(str::to_owned).to_vec();
+    show.ask(Asked::Open { beside: Beside::Alone, argv });
+    let laid = eventually("the view lays out the terminal", || match hearing.try_recv() {
+        Ok(Heard::Laid(laid)) if !laid.is_empty() => Some(laid),
+        Ok(_) | Err(_) => None,
+    });
+    let key = laid.focused().and_then(lunetad::Pane::key).expect("a terminal of the mux's");
+    let inside = [
+        ("LUNETA_MUX_TERMINAL", key.id.to_string()),
+        ("LUNETA_MUX_TERMINAL_MADE", key.made.nanos().to_string()),
+    ];
+    assert_eq!(said(&started(&owned.host, &main, "feat", &inside)), shown(&feat));
+    let sent = eventually("luneta is sent to the workstream started", || {
+        match hearing.try_recv() {
+            Ok(Heard::Sent(to)) => Some(to),
+            Ok(_) | Err(_) => None,
+        }
+    });
+    assert_eq!(sent, there);
+    let unseen = [
+        ("LUNETA_MUX_TERMINAL", (key.id.get() + 100).to_string()),
+        ("LUNETA_MUX_TERMINAL_MADE", key.made.nanos().to_string()),
+    ];
+    let stayed = started(&owned.host, &main, "feat", &unseen);
+    assert_eq!(said(&stayed), shown(&feat), "no luneta on the terminal is no failure");
+    let stderr = String::from_utf8_lossy(&stayed.stderr);
+    assert!(stderr.contains("no luneta is on this terminal"), "{stderr}");
 
     git(&scratch, &["clone", "-q", &up.display().to_string(), "plain"]);
     let plain = refused(&started(&owned.host, &scratch.join("plain"), "feat", &[]));
@@ -144,7 +136,7 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
 }
 
 #[test]
-fn a_branch_joins_the_project_of_its_clone_made_at_a_worktree_which_widens_to_the_clone() {
+fn a_project_asked_for_at_a_worktree_is_its_clone_s_and_a_branch_joins_it() {
     let owned = Owned::new();
     let host = &owned.host;
     let scratch = tempfile::tempdir().unwrap();
@@ -154,30 +146,19 @@ fn a_branch_joins_the_project_of_its_clone_made_at_a_worktree_which_widens_to_th
     let (main, feat) = (clone.join("main"), clone.join("feat"));
     let made = project(host, &main, None);
     workstream(host, made, &main);
+    let rooted = vec![("n".to_owned(), clone.display().to_string(), vec![main.display().to_string()])];
+    assert_eq!(folders(host), rooted, "a project is made at its clone's root");
     let docs = clone.join("docs");
     git(&clone.join(".bare"), &["worktree", "add", "-q", "-b", "docs", "../docs", "main"]);
 
     assert_eq!(said(&started(host, &clone, "docs", &[])), shown(&docs));
-    let widened = |at: &[&Path]| {
-        let folders = at.iter().map(|it| it.display().to_string()).collect();
-        vec![("main".to_owned(), clone.display().to_string(), folders)]
-    };
-    assert_eq!(folders(host), widened(&[&main, &docs]), "a worktree's folder joins it too");
+    let joined = [&main, &docs].map(|it| it.display().to_string()).to_vec();
+    let joined = vec![("n".to_owned(), clone.display().to_string(), joined)];
+    assert_eq!(folders(host), joined, "a worktree's folder joins it too");
     assert_eq!(said(&started(host, &main, "feat", &[])), shown(&feat));
-    assert_eq!(folders(host), widened(&[&main, &docs, &feat]));
+    let all = [&main, &docs, &feat].map(|it| it.display().to_string()).to_vec();
+    assert_eq!(folders(host), vec![("n".to_owned(), clone.display().to_string(), all)]);
     assert_eq!(projects(host)[0].id, made, "the workstream joins the project there was");
-
-
-    let two = scratch.join("m");
-    cloned_as_wt(&scratch, &scratch.join("up-m"), &two);
-    let bare = two.join(".bare");
-    git(&bare, &["worktree", "add", "-q", "../docs", "feat"]);
-    git(&bare, &["branch", "next", "main"]);
-    project(host, &two.join("main"), None);
-    project(host, &two.join("docs"), None);
-    let many = refused(&started(host, &two.join("main"), "next", &[]));
-    assert!(many.contains("projects main, docs are all of the clone in"), "{many}");
-    assert_eq!(projects(host).len(), 3, "no project is made for it");
 }
 
 #[test]
@@ -202,8 +183,8 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     assert!(issue.join(".git").is_file(), "the issue's worktree is made");
     let agent = eventually("an agent starts on the issue", || fs::read_to_string(&asked).ok());
     assert_eq!(agent, "Tackle https://github.com/o/n/issues/7\n");
-    let issue_s = issue.display().to_string();
-    let made = vec![("n".to_owned(), clone.display().to_string(), vec![issue_s])];
+    let worktrees = [&issue, &clone.join("main")].map(|it| it.display().to_string()).to_vec();
+    let made = vec![("n".to_owned(), clone.display().to_string(), worktrees)];
     assert_eq!(folders(host), made);
     let terminals = || projects(host)[0].workstreams[0].terminals.len();
     assert_eq!(terminals(), 1);

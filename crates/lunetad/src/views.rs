@@ -20,11 +20,10 @@ use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
 use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
-use crate::projects::{Made, ProjectId, Projects, Ran, Runs};
+use crate::projects::{Made, Project, ProjectId, Projects, Ran, Runs, Spot};
 use crate::projects::{Session, Size, Store, Terminal, TerminalId, Used, View, Workstream};
 use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
-use crate::projects::WORKSTREAMS_MAX;
-use crate::git;
+use crate::projects::{Worktree, WORKSTREAMS_MAX};
 use crate::shells::Doing;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
@@ -93,6 +92,8 @@ pub enum Command {
     Emptied { since: Instant },
     Crashed,
     Unreached { since: Instant },
+    Worktrees { root: Dir, worktrees: BTreeSet<Worktree>, seen: BTreeSet<WorkstreamId> },
+    Rooted { root: Dir, worktrees: BTreeSet<Worktree> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -470,6 +471,29 @@ impl Views {
                 self.known.clear();
                 self.listed.clear();
             },
+            Command::Worktrees { root, worktrees, seen } => {
+                let listed = Change::Listed { root: root.clone(), worktrees, seen };
+                if let Err(why) = self.followed(listed) {
+                    let root = root.as_str();
+                    self.troubles.say(format!("{root}: its worktrees are not kept: {why}"));
+                }
+            },
+            Command::Rooted { root, worktrees } => {
+                let rooted = Change::Rooted { root: root.clone(), worktrees };
+                if let Err(why) = self.followed(rooted) {
+                    let root = root.as_str();
+                    self.troubles.say(format!("{root}: it is not kept as a clone: {why}"));
+                    return;
+                }
+                let Some(projects) = self.store.projects() else {
+                    return;
+                };
+                let held = projects.all().iter().find(|it| *it.dir() == root);
+                let views = held.into_iter().flat_map(Project::workstreams).map(Workstream::view);
+                let terminals = views.flat_map(View::terminals).map(layout::Leaf::id);
+                self.unhomed.extend(terminals);
+                assert!(self.unhomed.len() <= TERMINALS_MAX, "only held terminals wait for a home");
+            },
             Command::Unreached { since } => {
                 let gone = |known: &Known| match known.heard {
                     Heard::Made(made) => made < since,
@@ -526,8 +550,8 @@ impl Views {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no project has the id {project}"));
         let held = projects.project_of(project).ok_or_else(unknown)?;
-        let workstreams: Vec<WorkstreamId> = held.workstreams().iter().map(Workstream::id).collect();
-        let views = held.workstreams().iter().map(Workstream::view);
+        let workstreams: Vec<WorkstreamId> = held.workstreams().map(Workstream::id).collect();
+        let views = held.workstreams().map(Workstream::view);
         let terminals: Vec<TerminalId> = views.flat_map(View::terminals).map(layout::Leaf::id).collect();
         assert!(workstreams.len() <= WORKSTREAMS_MAX, "a project holds at most {WORKSTREAMS_MAX}");
         assert!(terminals.len() <= TERMINALS_MAX, "a project holds at most {TERMINALS_MAX} terminals");
@@ -543,6 +567,9 @@ impl Views {
         }
         let projects = self.store.projects().expect("projects just changed are kept");
         assert!(projects.project_of(project).is_none(), "project {project} is closed");
+        for workstream in &workstreams {
+            assert!(projects.find(*workstream).is_none(), "workstream {workstream} goes with it");
+        }
         self.forget_closed(&workstreams, &terminals);
         Ok(None)
     }
@@ -565,6 +592,9 @@ impl Views {
         if let Some(why) = self.store.closed(Closing::Workstream(workstream))? {
             self.unwritten(&why);
         }
+        let projects = self.store.projects().expect("projects just changed are kept");
+        let emptied = projects.find(workstream).is_some_and(|(_, it)| it.view().is_empty());
+        assert!(emptied, "workstream {workstream} is closed, and stays empty");
         self.forget_closed(&[workstream], &terminals);
         Ok(None)
     }
@@ -606,7 +636,6 @@ impl Views {
         }
         let projects = self.store.projects().expect("projects just changed are kept");
         for workstream in workstreams {
-            assert!(projects.find(*workstream).is_none(), "workstream {workstream} is closed");
             let focused = self.last_focus.contains_key(workstream);
             assert!(!focused, "closed workstream {workstream} has no focus");
         }
@@ -819,7 +848,7 @@ impl Views {
                 (Placed::Beside { at, towards }, inner)
             },
         };
-        let home = project.folder(shown);
+        let home = project.folder(shown.id()).ok_or("its project holds it not")?;
         let listed_cwd = focus
             .and_then(|focus| self.known.get(&focus))
             .and_then(|known| self.listed.get(&known.key))
@@ -972,7 +1001,8 @@ impl Views {
         let projects = self.kept()?;
         let (held_in, held) = projects.holding(terminal).ok_or("no view holds it")?;
         let (project, workstream) = projects.find(held_in.id()).expect("a view's workstream is");
-        let (kept_folder, workstream_folder) = (held.folder().clone(), project.folder(workstream));
+        let workstream_folder = project.folder(workstream.id()).ok_or("its project holds it not")?;
+        let kept_folder = held.folder().clone();
         let runs = held.runs().clone();
         let view = workstream.view();
         let shown = self.clients.values().filter(|it| it.workstream == held_in.id());
@@ -1092,8 +1122,8 @@ impl Views {
         if let Some(heir) = heir {
             assert!(projects.holding(heir).is_some(), "terminal {heir} took the room it left");
         } else {
-            let gone = projects.find(workstream).is_none();
-            assert!(gone, "workstream {workstream} goes with its last terminal");
+            let emptied = projects.find(workstream).is_some_and(|(_, it)| it.view().is_empty());
+            assert!(emptied, "workstream {workstream} stays, empty, after its last terminal");
         }
         let focused = self.clients.values().any(|client| client.focus == Some(terminal));
         assert!(!focused, "no client focuses terminal {terminal}, which closed");
@@ -1249,32 +1279,28 @@ impl Views {
         let (_, held) = projects.holding(terminal).expect("a terminal waiting for a home is held");
         let folder = held.folder().clone();
         let stays = format!("terminal {terminal}, gone to {}, stays", folder.as_str());
-        let top = match worktree(&folder) {
-            Ok(top) => top,
+        let spot = match Spot::of(&folder, FOLDER_LOOK) {
+            Ok(spot) => spot,
             Err(why) => return self.troubles.say(format!("{stays}: its worktree is unknown: {why}")),
         };
         let projects = self.store.projects().expect("projects just looked at are kept");
-        let (to, made) = match projects.home(terminal, &folder, top.as_ref()) {
+        let to = match projects.home(terminal, &spot) {
             Home::Stays => return,
-            Home::In(to) => (to, false),
-            Home::Made { project, folder: at } => {
-                let add = Change::AddWorkstream { project, folder: at.clone(), name: None };
+            Home::In(to) => to,
+            Home::Made { project, spot } => {
+                let unmade = format!("no workstream is made at {}", spot.place().as_str());
+                let add = Change::AddWorkstream { project, spot, name: None };
                 match self.store.change(add) {
-                    Ok(Some(Made::Workstream(made))) => (made, true),
+                    Ok(Some(Made::Workstream(made))) => made,
                     Ok(_) => unreachable!("a workstream added is made"),
                     Err(failed) => {
-                        let unmade = format!("no workstream is made at {}", at.as_str());
                         return self.troubles.say(format!("{stays}: {unmade}: {}", said(failed)));
                     },
                 }
             },
         };
-        let Err(why) = self.moved(terminal, to) else {
-            return;
-        };
-        self.troubles.say(format!("{stays}: {why}"));
-        if made && let Err(why) = self.changed(Change::ForgetWorkstream { workstream: to }) {
-            self.troubles.say(format!("workstream {to}, made for it, stays empty: {why}"));
+        if let Err(why) = self.moved(terminal, to) {
+            self.troubles.say(format!("{stays}: {why}"));
         }
     }
 
@@ -1525,31 +1551,6 @@ fn is_folder(folder: &Dir) -> Result<bool, String> {
         Ok(Looked::Stuck) => Err(format!("{} did not answer in {secs}s", folder.as_str())),
         Err(error) => Err(format!("{} is not looked at: {error}", folder.as_str())),
     }
-}
-
-fn worktree(folder: &Dir) -> Result<Option<Dir>, String> {
-    let mut looked = process::Command::new("git");
-    git::local(looked.args(["-c", "safe.bareRepository=explicit", "-C", folder.as_str()]))
-        .args(["rev-parse", "--show-toplevel", "--show-superproject-working-tree"])
-        .env("LC_ALL", "C");
-    let secs = FOLDER_LOOK.as_secs();
-    let stdout = match program::run(&mut looked, FOLDER_LOOK) {
-        Ok(Looked::Ended { status, stdout, .. }) if status.success() => stdout,
-        Ok(Looked::Ended { .. }) => return Ok(None),
-        Ok(Looked::Stuck) => return Err(format!("git did not answer in {secs}s")),
-        Err(error) => return Err(format!("git did not run: {error}")),
-    };
-    let Ok(answer) = String::from_utf8(stdout) else {
-        return Ok(None);
-    };
-    let mut lines = answer.lines();
-    let Some(top) = lines.next().map(Dir::parse).and_then(Result::ok) else {
-        return Ok(None);
-    };
-    if lines.next().is_some() {
-        return Ok(None);
-    }
-    Ok(top.below(folder).is_some().then_some(top))
 }
 
 fn told(out: &Out, word: api::ShowResponse) -> bool {
@@ -1929,25 +1930,6 @@ mod tests {
         let spaced = folder.path().join("a b'c");
         fs::create_dir(&spaced).unwrap();
         assert_eq!(is_folder(&Dir::parse(spaced.to_str().unwrap()).unwrap()), Ok(true));
-    }
-
-    #[test]
-    fn a_folder_s_worktree_is_the_top_git_names_only_where_that_top_holds_it() {
-        let scratch = tempfile::tempdir().unwrap();
-        let real = fs::canonicalize(scratch.path()).unwrap();
-        let dir = |path: &std::path::Path| Dir::parse(path.to_str().unwrap()).unwrap();
-        let repository = real.join("repository");
-        fs::create_dir_all(repository.join("src")).unwrap();
-        let mut init = process::Command::new("git");
-        let inited = git::local(init.args(["init", "-q"]).arg(&repository)).status().unwrap();
-        assert!(inited.success());
-        assert_eq!(worktree(&dir(&repository.join("src"))), Ok(Some(dir(&repository))));
-        let outside = real.join("outside");
-        fs::create_dir(&outside).unwrap();
-        assert_eq!(worktree(&dir(&outside)), Ok(None), "outside every repository");
-        let linked = real.join("linked");
-        std::os::unix::fs::symlink(&repository, &linked).unwrap();
-        assert_eq!(worktree(&dir(&linked.join("src"))), Ok(None), "the top git names is real");
     }
 
     #[test]

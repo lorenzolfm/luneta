@@ -38,7 +38,12 @@ pub fn cloned_as_wt(scratch: &Path, up: &Path, clone: &Path) {
     origin(up);
     let (up, bare) = (up.display().to_string(), clone.join(".bare"));
     git(scratch, &["clone", "-q", "--bare", &up, &bare.display().to_string()]);
+    fs::write(clone.join(".git"), "gitdir: ./.bare\n").unwrap();
     git(&bare, &["worktree", "add", "-q", "../main", "main"]);
+}
+
+pub fn worktree_added(clone: &Path, name: &str) {
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "-b", name, &format!("../{name}")]);
 }
 
 fn origin(dir: &Path) {
