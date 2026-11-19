@@ -1259,11 +1259,12 @@ impl Projects {
             return Ok(());
         };
         let rows = self.rows(project)?;
-        let terminals: usize = rows.iter().map(|(_, it)| it.layout.len()).sum();
+        let held = |workstream: &Workstream| workstream.layout.terminals().count();
+        let terminals: usize = rows.iter().map(|(_, it)| held(it)).sum();
         rows.retain(|(worktree, it)| {
-            !seen.contains(&it.id) || worktrees.contains(worktree) || !it.layout.is_empty()
+            !seen.contains(&it.id) || worktrees.contains(worktree) || held(it) > 0
         });
-        let kept: usize = rows.iter().map(|(_, it)| it.layout.len()).sum();
+        let kept: usize = rows.iter().map(|(_, it)| held(it)).sum();
         assert_eq!(kept, terminals, "a listing of worktrees drops no terminal");
         for worktree in worktrees {
             self.worktree_made(project, worktree, None, draw)?;
@@ -2389,6 +2390,32 @@ mod tests {
         assert_eq!(own(&projects, vault), own(&same, vault));
         let unknown = change(&projects, listed(&projects, "/w/elo", &["main"])).unwrap().0;
         assert_eq!(unknown, projects, "a clone of no project");
+    }
+
+    #[test]
+    fn a_worktree_gone_takes_a_workstream_that_holds_welcome_views_alone() {
+        let mut projects = Projects::default();
+        clone(&mut projects, "/w/luneta", &["main", "welcomed", "both"]);
+        let welcome = |projects: &mut Projects, workstream, id, placed| {
+            let view = View::Welcome(ViewId::of(id).unwrap());
+            let size = Size::of(80, 24).unwrap();
+            let open = Change::Open { workstream, view, placed, size };
+            (*projects, _) = change(projects, open).unwrap();
+        };
+        let welcomed = at(&projects, "/w/luneta/welcomed").unwrap();
+        welcome(&mut projects, welcomed, 100, Placed::Alone);
+        let both = at(&projects, "/w/luneta/both").unwrap();
+        let one = opened(&mut projects, both, 101, Placed::Alone);
+        let right = Placed::Beside { at: one, towards: layout::Towards::Right };
+        welcome(&mut projects, both, 102, right);
+        let seen = projects.clones().find(|(it, _)| *it == dir("/w/luneta")).unwrap().1;
+        let worktrees = [tree("main")].into();
+        let listed = Change::Listed { root: dir("/w/luneta"), worktrees, seen };
+        (projects, _) = change(&projects, listed).unwrap();
+        assert_eq!(at(&projects, "/w/luneta/welcomed"), None, "a welcome view holds nothing");
+        assert!(projects.holding_view(ViewId::of(100).unwrap()).is_none(), "it goes with it");
+        assert_eq!(at(&projects, "/w/luneta/both"), Some(both), "a terminal keeps it");
+        assert_eq!(layout(&projects, both).len(), 2, "with its welcome view");
     }
 
     #[test]
