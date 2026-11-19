@@ -62,6 +62,7 @@ enum Moused {
 pub enum Heeded {
     Quiet,
     Edged(Direction),
+    Sent(WorkstreamId),
     Note(String),
     Forgotten(String),
     Lost(String),
@@ -501,6 +502,7 @@ impl Viewed {
             Heard::Edged { workstream, direction } => {
                 self.view.edged(workstream, direction).map_or(Heeded::Quiet, Heeded::Edged)
             },
+            Heard::Sent(workstream) => Heeded::Sent(workstream),
             Heard::Refused(why) => Heeded::Note(format!("lunetad refused: {why}")),
             Heard::Forgotten(why) => {
                 self.show = None;

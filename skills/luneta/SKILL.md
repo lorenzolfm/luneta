@@ -1,6 +1,6 @@
 ---
 name: luneta
-description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start coding agents (Claude Code or pi) on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, delete the worktrees of merged pull requests, and reset luneta on every machine. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, clean up merged worktrees, or reset luneta and start from scratch, and `luneta` is on the PATH.
+description: Drive luneta and zellij for the user with the `luneta` CLI - start a workstream in a folder, a branch, an issue or a PR, open a session, a tab or a pane, start coding agents (Claude Code or pi) on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, delete the worktrees of merged pull requests, and reset luneta on every machine. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, clean up merged worktrees, or reset luneta and start from scratch, and `luneta` is on the PATH.
 ---
 
 # Drive luneta
@@ -60,6 +60,7 @@ luneta turn tab <session>:<pane> --into <session>:<pane>
 luneta close <session>[:<pane>]... [--yes <plan>]
 luneta prune [--repo <dir>] [--yes <plan>]
 luneta terminate [--yes <plan>]
+luneta start <folder|branch|'#issue'|issue or PR link>
 ```
 
 - `open pane` opens beside your pane by default, in its tab. `open tab` opens
@@ -90,6 +91,8 @@ luneta terminate [--yes <plan>]
   [Merged worktrees](#merged-worktrees).
 - `terminate` ends luneta on every machine and forgets every project: see
   [Reset luneta](#reset-luneta).
+- `start` starts a workstream of one of luneta's projects: see
+  [Start a workstream](#start-a-workstream).
 
 ## Which session a tab opens in
 
@@ -174,6 +177,33 @@ Find the pane whose branch is the PR's in `luneta sessions` and open a pane
 beside it. If no pane has the branch, make a worktree for the PR (`luneta
 worktree --repo <dir> <PR link>` takes a link), then open a tab there, in the
 session [Which session a tab opens in](#which-session-a-tab-opens-in) picks.
+
+## Start a workstream
+
+`luneta start` starts work in one of luneta's own projects, and prints the
+workstream's folder. It works from a pane of zellij too, as it asks lunetad,
+not zellij.
+
+```sh
+luneta start ~/code/app              # a folder: its project's, or a project made of it
+luneta start feat/sidebar            # a branch: a worktree of it, as `wt add` makes
+luneta start '#42'                   # an issue: worktree issue-42, and an agent told to tackle it
+luneta start https://github.com/o/app/pull/7   # a pull request, checked out in a worktree
+```
+
+- Run it in the repository the branch, issue or pull request is of, or from
+  anywhere for a link: luneta finds a clone of the link's repository. Quote
+  `'#42'`, or the shell drops it as a comment.
+- A branch, an issue or a pull request needs a clone `wt clone` made. In a
+  plain clone it makes nothing and says why: tell the user.
+- The issue's agent starts in the harness the user picked last in luneta's
+  menu. Don't open another agent for it: `start` already has. Started again,
+  it goes to the same workstream and starts no second agent.
+- A folder of the name goes before a branch of it.
+- Run in a terminal of luneta's, it takes the user there if they are on your
+  terminal. For several issues at once, run it once per issue: each gets its
+  own worktree and agent, and the user lands on the first, as they leave your
+  terminal with it.
 
 ## New session to work on X
 

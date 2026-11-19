@@ -212,6 +212,7 @@ fn tiles(panes: &[Pane], size: Size) -> Result<(), String> {
 pub enum Heard {
     Laid(Laid),
     Edged { workstream: WorkstreamId, direction: Direction },
+    Sent(WorkstreamId),
     Refused(String),
     Forgotten(String),
     Lost(String),
@@ -408,6 +409,10 @@ async fn stream(
                 Err(why) => {
                     return Heard::Lost(format!("lunetad said what luneta cannot follow: {why}"));
                 },
+            },
+            Some(show_response::Event::Sent(workstream)) => match WorkstreamId::of(workstream) {
+                Some(workstream) => told(Heard::Sent(workstream)),
+                None => return Heard::Lost("lunetad sent luneta's view to workstream 0".to_owned()),
             },
             Some(show_response::Event::Refused(why)) => told(Heard::Refused(why)),
             None => return Heard::Lost("lunetad said nothing to luneta's view".to_owned()),

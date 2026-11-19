@@ -40,4 +40,6 @@ mod turns;
 #[cfg(test)]
 mod views;
 #[cfg(test)]
+mod workstreams;
+#[cfg(test)]
 mod worktree;

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
 use lunetad::api::change_projects_request::{
-    Change, CloseProject, CloseWorkstream, ForgetWorkstream, RenameTerminal,
+    Bring, Change, CloseProject, CloseWorkstream, ForgetWorkstream, RenameTerminal,
 };
 use lunetad::api::projects::Held;
 use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Workstream};
@@ -47,6 +47,7 @@ struct Shown<'a> {
     laid: Option<Laid>,
     refused: Vec<String>,
     edged: Vec<show_response::Edged>,
+    sent: Vec<u64>,
 }
 
 fn size(columns: u32, rows: u32) -> show_request::Size {
@@ -87,8 +88,8 @@ impl<'a> Shown<'a> {
             let mut daemon = lunetad::connect(&folder).await.unwrap();
             daemon.show(ReceiverStream::new(asked)).await.unwrap().into_inner()
         });
-        let (refused, edged) = (Vec::new(), Vec::new());
-        let mut shown = Shown { owned, asks, heard, laid: None, refused, edged };
+        let (refused, edged, sent) = (Vec::new(), Vec::new(), Vec::new());
+        let mut shown = Shown { owned, asks, heard, laid: None, refused, edged, sent };
         shown.until("the first view", |_| true);
         shown
     }
@@ -143,6 +144,7 @@ impl<'a> Shown<'a> {
                 },
                 show_response::Event::Refused(why) => self.refused.push(why),
                 show_response::Event::Edged(edged) => self.edged.push(edged),
+                show_response::Event::Sent(workstream) => self.sent.push(workstream),
             }
         }
     }
@@ -176,6 +178,7 @@ impl<'a> Shown<'a> {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => return why,
                 show_response::Event::Edged(edged) => self.edged.push(edged),
+                show_response::Event::Sent(workstream) => self.sent.push(workstream),
             }
         }
     }
@@ -191,8 +194,31 @@ impl<'a> Shown<'a> {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => panic!("refused, not edged: {why}"),
                 show_response::Event::Edged(edged) => return edged,
+                show_response::Event::Sent(workstream) => self.sent.push(workstream),
             }
         }
+    }
+
+    fn until_sent(&mut self) -> u64 {
+        loop {
+            if !self.sent.is_empty() {
+                return self.sent.remove(0);
+            }
+            let heard = self.heard_in_time();
+            let word = heard.expect("a send comes").unwrap().expect("the view goes on");
+            match word.event.expect("a word says something") {
+                show_response::Event::Laid(laid) => self.laid = Some(laid),
+                show_response::Event::Refused(why) => panic!("refused, not sent: {why}"),
+                show_response::Event::Edged(edged) => self.edged.push(edged),
+                show_response::Event::Sent(workstream) => return workstream,
+            }
+        }
+    }
+
+    fn key_of(&self, terminal: u64) -> TerminalKey {
+        let laid = self.laid.as_ref().expect("a view was heard");
+        let pane = laid.panes.iter().find(|pane| pane.terminal == terminal);
+        pane.and_then(key).expect("the view lays out the terminal, found")
     }
 }
 
@@ -402,6 +428,43 @@ fn a_step_with_no_terminal_that_way_says_the_edge_of_the_workstream_it_is_on() {
     shown.ask(step(Left));
     assert_eq!(shown.until_edged(), edged(Left));
     assert!(shown.refused.is_empty(), "an edge is no refusal: {:?}", shown.refused);
+}
+
+#[test]
+fn a_bring_sends_the_clients_on_the_terminal_it_is_asked_from_to_the_workstream() {
+    let owned = Owned::new();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let made = project(&owned.host, &home, None);
+    let add = || workstream(&owned.host, made, &home);
+    let (here, there) = (add(), add());
+    let mut on = Shown::new(&owned, here, 80, 24);
+    let left = on.open();
+    let right = on.open();
+    let mut off = Shown::new(&owned, here, 80, 24);
+    let focus = |to| Event::Focus(show_request::Focus { to: Some(focus::To::Terminal(to)) });
+    off.ask(focus(left));
+    off.until("the other client on the left", |laid| focused_of(laid) == Some(left));
+    let from = on.key_of(right);
+    let bring = |workstream, from| Change::Bring(Bring { workstream, from: Some(from) });
+
+    assert_eq!(asked(&owned.host, bring(here, from)).unwrap(), None);
+    assert_eq!(asked(&owned.host, bring(there, from)).unwrap(), None);
+    assert_eq!(on.until_sent(), there, "the client on the terminal is sent");
+    let unknown = TerminalKey { id: from.id + 100, made_at: from.made_at };
+    assert_eq!(asked(&owned.host, bring(there, unknown)).unwrap(), None);
+    off.ask(focus(right));
+    off.until("the other client on the right", |laid| focused_of(laid) == Some(right));
+    on.ask(focus(left));
+    on.until("the client where it was, until it goes", |laid| {
+        laid.workstream == here && focused_of(laid) == Some(left)
+    });
+    assert_eq!((&on.sent, &off.sent), (&Vec::new(), &Vec::new()), "no other client is sent");
+
+    let nowhere = asked(&owned.host, bring(there + 100, from)).unwrap_err();
+    assert_eq!(nowhere.code(), Code::InvalidArgument);
+    assert!(nowhere.message().contains("no workstream has the id"), "{}", nowhere.message());
+    let unnamed = Change::Bring(Bring { workstream: there, from: None });
+    assert_eq!(asked(&owned.host, unnamed).unwrap_err().code(), Code::InvalidArgument);
 }
 
 fn closed_outside(owned: &Owned, laid: &Laid, terminal: u64) {
@@ -1355,6 +1418,7 @@ fn seen_and_typed_into(
             panic!("the view is not laid out: {why}")
         },
         Heard::Edged { direction, .. } => panic!("the view is at its {direction:?} edge"),
+        Heard::Sent(to) => panic!("the view is sent to workstream {to}"),
     };
     assert!(laid().is_empty());
     show.ask(Asked::Open { beside: Beside::Largest, argv: vec!["sh".to_owned()] });
@@ -1419,6 +1483,7 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
             panic!("the view is not laid out: {why}")
         },
         Heard::Edged { direction, .. } => panic!("the view is at its {direction:?} edge"),
+        Heard::Sent(to) => panic!("the view is sent to workstream {to}"),
     };
     assert!(laid().is_empty());
     let ticking = ["sh", "-c", "while :; do date +%N; sleep 0.005; done"];

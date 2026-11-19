@@ -1,16 +1,19 @@
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, CloseProject};
 use lunetad::api::change_projects_request::{CloseWorkstream, Pull, Start};
 use lunetad::api::change_projects_request::RenameProject;
 use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams, WorkstreamAt};
-use lunetad::api::change_projects_request::RenameTerminal;
+use lunetad::api::change_projects_request::{Bring, RenameTerminal, WidenProject};
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::{ChangeProjectsRequest, On, Version, WatchRequest};
-use lunetad::projects::{Name, ProjectId, TerminalId, WorkstreamId};
+use lunetad::mux::own::TerminalKey;
+use lunetad::projects::{Name, ProjectId, Size, TerminalId, WorkstreamId};
+use lunetad::{Asked, Beside, Heard};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
@@ -431,4 +434,87 @@ pub fn project_made(
 
 fn spelled(name: &Name) -> String {
     name.as_str().to_owned()
+}
+
+pub fn worked_in(
+    path: &Path,
+    folder: &Path,
+    clone: &str,
+    of_clone: impl Fn(&str) -> Option<String>,
+) -> Result<(WorkstreamId, bool), String> {
+    let projects = kept(path)?;
+    let mut workstreams = projects.iter().flat_map(|project| &project.workstreams);
+    if let Some(found) = workstreams.find(|it| Path::new(&it.folder) == folder) {
+        return Ok((found.id, false));
+    }
+    let in_clone = |it: &&Project| it.dir == clone || of_clone(&it.dir).as_deref() == Some(clone);
+    let cloned: Vec<&Project> = projects.iter().filter(in_clone).collect();
+    let holding = projects.iter().find(|project| holds(&project.dir, folder));
+    let id = match (cloned.as_slice(), holding) {
+        ([], Some(project)) => project.id,
+        ([], None) => add_project(path, clone, None).map_err(Unmade::said)?,
+        ([one], _) if one.dir == clone => one.id,
+        ([one], _) => {
+            widen(path, one.id, clone)?;
+            one.id
+        },
+        (many, _) => {
+            let named: Vec<&str> = many.iter().map(|it| it.name.as_str()).collect();
+            return Err(format!(
+                "projects {} are all of the clone in {clone}, and luneta widens one alone to \
+                 hold it: forget all but one",
+                named.join(", ")
+            ));
+        },
+    };
+    let folder = folder.to_str().ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
+    Ok((add_workstream(path, &Machine::Local, id, folder, None)?, true))
+}
+
+fn widen(path: &Path, project: ProjectId, dir: &str) -> Result<(), String> {
+    let (project, dir) = (project.get(), dir.to_owned());
+    let change = Change::WidenProject(WidenProject { project, dir });
+    changed_on(path, None, change).map(drop).map_err(Unmade::said)
+}
+
+pub fn dirs(path: &Path) -> Result<Vec<String>, String> {
+    Ok(kept(path)?.into_iter().map(|project| project.dir).collect())
+}
+
+pub fn bring(path: &Path, workstream: WorkstreamId, from: TerminalKey) -> Result<(), String> {
+    let from = lunetad::api::TerminalKey { id: from.id.get(), made_at: Some(from.made.into()) };
+    let change = Change::Bring(Bring { workstream: workstream.get(), from: Some(from) });
+    changed_on(path, None, change).map(drop).map_err(Unmade::said)
+}
+
+const OPENING: Duration = Duration::from_secs(15);
+
+pub fn opened(path: &Path, workstream: WorkstreamId, argv: Vec<String>) -> Result<(), String> {
+    let folder = lunetad::folder::open(path).map_err(|refusal| refusal.to_string())?;
+    let folder = folder.ok_or("lunetad has made no folder yet")?;
+    let size = Size::of(80, 24).expect("80 by 24 cells is a size");
+    let (heard, hearing) = mpsc::channel();
+    let at = lunetad::Where::Here { runs_in: None };
+    let show = lunetad::show(folder, at, workstream, size, false, move |it| {
+        drop(heard.send(it));
+    });
+    let mut open = Some(Asked::Open { beside: Beside::Alone, argv });
+    let until = Instant::now() + OPENING;
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        let late = |_| format!("lunetad opened no terminal in {}s", OPENING.as_secs());
+        match hearing.recv_timeout(left).map_err(late)? {
+            Heard::Laid(laid) if laid.workstream() == workstream && !laid.is_empty() => {
+                return Ok(());
+            },
+            Heard::Laid(_) => {
+                if let Some(open) = open.take() {
+                    show.ask(open);
+                }
+            },
+            Heard::Edged { .. } | Heard::Sent(_) => {},
+            Heard::Refused(why) => return Err(format!("lunetad refused: {why}")),
+            Heard::Forgotten(why) | Heard::Lost(why) => return Err(why),
+        }
+    }
 }
