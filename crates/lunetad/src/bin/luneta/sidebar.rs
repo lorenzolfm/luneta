@@ -3623,6 +3623,10 @@ impl Sidebar {
         self.take_seen(menu, made).map(|(_, held, ())| held)
     }
 
+    pub fn opening_for(&mut self, menu: u64) -> Option<Held> {
+        self.take_seen(menu, Menu::opening).map(|(_, held, _)| held)
+    }
+
     pub fn closes(&mut self, menu: u64, closes: Result<Closes, String>) -> Asked {
         let waiting = self.menu.as_ref().filter(|it| it.number() == menu);
         let Some(((session, pane), on)) =

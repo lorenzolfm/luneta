@@ -77,7 +77,7 @@ use crate::width::Width;
 use crate::zellij::{self, Close, Closes, Open, SessionName};
 
 pub enum Made {
-    Worktree { on: Machine, made: Result<Landing, String>, argv: Vec<String>, asker: Asker },
+    Worktree { on: Machine, made: Result<Landing, String>, argv: Vec<String> },
     Pulled { menu: u64, made: Result<Pulled, String> },
 }
 
@@ -97,12 +97,6 @@ enum Doomed {
 enum Naming {
     Idle,
     Busy,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Asker {
-    Menu,
-    Picker,
 }
 
 const NAMING: &str = "menu: luneta names a session already: try again once it has made it";
@@ -1590,7 +1584,7 @@ impl App {
             },
             Asked::Welcome { on, session, pane } => self.welcome(&on, &session, pane),
             Asked::NewWorktree { on, project, branch } => {
-                self.make_worktree(on, Asker::Menu, move |lunetad, on| {
+                self.make_worktree(on, move |lunetad, on| {
                     worktrees::branched(lunetad, on, project, &branch).map(Landing::Worktree)
                 });
                 self.leave();
@@ -1602,7 +1596,7 @@ impl App {
                 self.naming_on(move || {
                     let made = || worktrees::project_made(&on, &folder, name.as_ref());
                     let made = caught(made).map_err(|why| format!("menu: {why}"));
-                    Made::Worktree { on, made, argv: Vec::new(), asker: Asker::Menu }
+                    Made::Worktree { on, made, argv: Vec::new() }
                 });
                 self.leave();
             },
@@ -1776,10 +1770,11 @@ impl App {
         };
         self.go_worktree(on, worktree, Some(terminal));
         self.shown().welcome();
+        self.leave();
     }
 
     fn project_open(&mut self, menu: u64, on: &Machine, key: OwnKey, open: &Open) {
-        self.sidebar.drop_menu(menu);
+        let opening = self.sidebar.opening_for(menu);
         let Some(project) = self.projected.project(on, key) else {
             return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());
         };
@@ -1792,6 +1787,7 @@ impl App {
                 };
                 self.go_worktree(on, worktree, Some(terminal));
                 self.shown().open_beside_focused(command.clone());
+                self.give_opened(opening);
             },
             Open::Tab { tab, .. } => {
                 let (lunetad, id, on) = (self.lunetad.clone(), project.id, on.clone());
@@ -1808,7 +1804,7 @@ impl App {
                         added.map(Landing::Worktree)
                     });
                     let made = made.map_err(|why| format!("menu: no worktree made: {why}"));
-                    Made::Worktree { on, made, argv, asker: Asker::Menu }
+                    Made::Worktree { on, made, argv }
                 });
             },
         }
@@ -1831,7 +1827,7 @@ impl App {
             },
             Picked::Add { on, project, folder, name } => {
                 let project = project.id();
-                self.make_worktree(on, Asker::Picker, move |lunetad, on| {
+                self.make_worktree(on, move |lunetad, on| {
                     let named = name.as_ref().map(Name::as_str);
                     let at = (project, folder.as_str());
                     let added = worktrees::add_worktree(lunetad, on, at, named, Vec::new());
@@ -1840,7 +1836,7 @@ impl App {
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Make { on, session, cwd } => {
-                self.make_worktree(on, Asker::Picker, move |lunetad, on| {
+                self.make_worktree(on, move |lunetad, on| {
                     worktrees::made_at(lunetad, on, &cwd, Some(session.as_str()))
                         .map_err(Unready::Failed)
                 });
@@ -2231,7 +2227,6 @@ impl App {
     fn make_worktree(
         &mut self,
         on: Machine,
-        asker: Asker,
         made: impl FnOnce(&Path, &Machine) -> Result<Landing, Unready> + Send + 'static,
     ) {
         if self.refuse_naming(None) {
@@ -2245,7 +2240,7 @@ impl App {
                 Unready::Nowhere(why) | Unready::Failed(why) => format!("no worktree made: {why}"),
                 Unready::InDoubt(why) => why,
             });
-            Made::Worktree { on, made, argv: Vec::new(), asker }
+            Made::Worktree { on, made, argv: Vec::new() }
         });
     }
 
@@ -2271,11 +2266,9 @@ impl App {
         assert_eq!(self.naming, Naming::Busy, "a session was named that `name` did not name");
         self.naming = Naming::Idle;
         match made {
-            Made::Worktree { on, made: Ok(Landing::Worktree(made)), argv, asker } => {
+            Made::Worktree { on, made: Ok(Landing::Worktree(made)), argv } => {
                 self.go_opening(&on, made, argv);
-                if asker == Asker::Picker && self.focus.over.is_none() {
-                    self.give(Focus::on(self.focus.side.session()));
-                }
+                self.give_opened(None);
             },
             Made::Worktree { on, made: Ok(Landing::Unopened(project)), .. } => {
                 self.open_worktree(on, project);
@@ -2296,13 +2289,24 @@ impl App {
     }
 
     fn pulled_made(&mut self, menu: u64, made: Result<Pulled, String>) {
-        self.sidebar.made_for(menu);
+        let held = self.sidebar.made_for(menu);
         let made = match made {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: no session made: {why}")),
         };
         let Pulled { on, worktree, argv } = made;
         self.go_opening(&on, worktree, argv);
+        self.give_opened(held);
+    }
+
+    fn give_opened(&mut self, held: Option<sidebar::Held>) {
+        match (held, &self.focus.over) {
+            (Some(sidebar::Held::Open), _) => self.leave(),
+            (Some(sidebar::Held::Kept) | None, None) => {
+                self.give(Focus::on(self.focus.side.session()));
+            },
+            (Some(sidebar::Held::Kept) | None, Some(_)) => {},
+        }
     }
 
     fn give(&mut self, focus: Focus) {
