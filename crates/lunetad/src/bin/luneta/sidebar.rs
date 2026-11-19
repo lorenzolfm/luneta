@@ -1059,7 +1059,6 @@ pub enum Asked {
     CopyText(String),
     Browse(Link),
     Leave,
-    Closes { menu: u64, on: Machine, session: Listed, pane: PaneKey },
     Delete { on: Machine, act: Act },
     Open { asking: Held, on: Machine, key: OwnKey, cwd: Directory, opens: Opens },
     NewWorktree { on: Machine, project: ProjectId, branch: Branch },
@@ -1093,7 +1092,6 @@ impl Asked {
         match self {
             Asked::Prunes { menu, .. }
             | Asked::Prune { menu, .. }
-            | Asked::Closes { menu, .. }
             | Asked::Make { menu, .. }
             | Asked::Pull { menu, .. }
             | Asked::Find { menu, .. }
@@ -3536,7 +3534,8 @@ impl Sidebar {
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
             Wants::Plan { session, scope: Scope::Pane(pane) } => {
-                Asked::Closes { menu: number, on, session, pane }
+                let plan = self.plan(&on, &session, Deletes::Pane(pane));
+                self.planned(plan)
             },
             Wants::Plan { session, scope: Scope::Worktree(worktree) } => {
                 let plan = self.deletes_of(&on, worktree).and_then(|deletes| {
@@ -3822,21 +3821,6 @@ impl Sidebar {
     pub fn made_for(&mut self, menu: u64) -> Option<Held> {
         let made = |it: &Menu| it.made().map(|_| ());
         self.take_seen(menu, made).map(|(_, taken, ())| taken.held())
-    }
-
-    pub fn closes(&mut self, menu: u64, closes: Result<(), String>) -> Asked {
-        let waiting = self.open().filter(|it| it.number() == menu);
-        let Some(((session, pane), on)) =
-            waiting.and_then(|it| Some((it.planning()?, it.target().machine())))
-        else {
-            return Asked::Nothing;
-        };
-        let (session, on) = (session.clone(), on.clone());
-        let plan = match closes {
-            Ok(()) => self.plan(&on, &session, Deletes::Pane(pane)),
-            Err(why) => Err(format!("menu: nothing closed: {why}")),
-        };
-        self.planned(plan)
     }
 
     pub fn found(&mut self, menu: u64, agent: agents::Harness, skills: Result<Vec<Skill>, String>) {
@@ -5333,10 +5317,6 @@ mod tests {
 
     fn session_name(name: &str) -> SessionName {
         SessionName::parse(name).unwrap()
-    }
-
-    fn closes_here(menu: u64, session: Listed, pane: PaneKey) -> Asked {
-        Asked::Closes { menu, on: Machine::Local, session, pane }
     }
 
     fn delete_here(act: Act) -> Asked {
@@ -7997,7 +7977,9 @@ mod tests {
         assert_eq!(clicked, Asked::Nothing);
         assert_eq!(clicks(&mut sidebar, 18), delete);
         let deleted = sidebar.chose(1, Choice::Key(char('d')), moment(160_000));
-        assert_ne!(deleted, Asked::Nothing);
+        assert_eq!(deleted, Asked::Nothing);
+        let lines = screen(&mut sidebar, true, 32, 20);
+        assert!(lines.iter().any(|line| line.starts_with(" Close the view?")), "{lines:#?}");
     }
 
     fn shows_at(sidebar: &mut Sidebar, at: SystemTime, start: &str) -> bool {
@@ -8018,10 +8000,12 @@ mod tests {
         assert_eq!(sidebar.due(now + PAUSE), None);
 
         sidebar.close_menu();
+        sidebar.step(1);
         sidebar.key(&char('d'), now);
         let fast = now + Duration::from_millis(50);
-        assert_ne!(sidebar.key(&char('d'), fast), Asked::Nothing);
-        assert!(sidebar.open().is_some_and(Menu::quiet));
+        let act = Act::Pane { session: session_name("older"), pane: PaneKey::terminal(2) };
+        assert_eq!(sidebar.key(&char('d'), fast), delete_here(act));
+        assert!(sidebar.open().is_none());
         let later = now + 10 * PAUSE;
         assert!(!shows_at(&mut sidebar, later, "─ Delete ─"));
         assert!(!shows_at(&mut sidebar, later, " d  Delete ▸"));
@@ -8375,9 +8359,8 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(Place::Pane(PanePlace { session: twin.clone(), pane })));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes_here(1, twin, pane));
         let act = Act::Pane { session: session_name("twin"), pane };
-        assert_eq!(sidebar.closes(1, Ok(())), delete_here(act));
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(act));
     }
 
     #[test]
@@ -9281,20 +9264,17 @@ mod tests {
             untold(&mut sidebar);
             sidebar.step(2);
             type_in(&mut sidebar, "d");
-            let closes = || closes_here(1, listed("newer", 20), PaneKey::terminal(1));
-            assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
-            assert_eq!(sidebar.closes(1, Ok(())), Asked::Nothing);
+            assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
             let lines = screen(&mut sidebar, true, 160, 16);
             let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
             let asks = format!("Close the view? luneta cannot tell which agents it ends: {why}");
             assert!(lines.contains(&note), "{lines:#?}");
             assert!(lines.contains(&asks.as_str()), "{lines:#?}");
-            assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
             let act = Act::Pane {
                 session: session_name("newer"),
                 pane: PaneKey::terminal(1),
             };
-            assert_eq!(sidebar.closes(1, Ok(())), delete_here(act));
+            assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(act));
         }
     }
 
@@ -9310,13 +9290,11 @@ mod tests {
             sidebar.hear(Host { unread: 1, unread_files, ..host });
             sidebar.step(2);
             type_in(&mut sidebar, "d");
-            let closes = closes_here(1, listed("newer", 20), PaneKey::terminal(1));
-            assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
             let act = Act::Pane {
                 session: session_name("newer"),
                 pane: PaneKey::terminal(1),
             };
-            let went = sidebar.closes(1, Ok(()));
+            let went = sidebar.key(&char('d'), moment(160_000));
             let lines = screen(&mut sidebar, true, 120, 16);
             let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
             let note = "lunetad cannot read 1 of Claude Code's session files";
@@ -9362,13 +9340,11 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.step(1);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
-        let closes = closes_here(1, listed("older", 10), PaneKey::terminal(2));
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
         let act = Act::Pane {
             session: session_name("older"),
             pane: PaneKey::terminal(2),
         };
-        assert_eq!(sidebar.closes(1, Ok(())), delete_here(act));
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(act));
         assert!(sidebar.open().is_none());
         sidebar.hear(host(
             vec![
@@ -9386,15 +9362,12 @@ mod tests {
         sit(&mut sidebar, &own_pane_of("older", 1, 1));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        let closes = || closes_here(1, own_listed("older", 1), PaneKey::terminal(1));
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
-        assert_eq!(sidebar.closes(1, Ok(())), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         assert_eq!(bottom(&mut sidebar), " <y> Yes <BS> Back <ESC> Close");
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13], " Close the view? 1 agent, 1");
-        assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
         let act = Act::Pane { session: session_name("older"), pane: PaneKey::terminal(1) };
-        assert_eq!(sidebar.closes(1, Ok(())), delete_here(act));
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(act));
         sidebar.cursor = Some(Spot::Local(Place::Session(own_listed("older", 1))));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
@@ -9403,24 +9376,6 @@ mod tests {
         let deleted = project_deleted("older", 1, &[1000, 1001], &[1, 2]);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted));
         assert!(sidebar.open().is_none());
-    }
-
-    #[test]
-    fn a_planned_close_of_a_project_pane_keeps_the_terminal_it_planned_when_the_mux_remakes_it() {
-        let mut sidebar = own_two_sessions();
-        sit(&mut sidebar, &own_pane_of("young", 2, 1));
-        sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "d");
-        let planned = PaneKey::terminal(1);
-        let closes = closes_here(1, own_listed("young", 2), planned);
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
-        let mut remade = own_session("young", 2, vec![pane(1, 0, "/w/b", "fish")]);
-        let panes = remade.panes.as_mut().map_or(&mut [][..], |panes| &mut panes.panes);
-        let made_at = Some(Timestamp { seconds: 1, nanos: 0 });
-        panes[0].key = Some(api::TerminalKey { id: 1, made_at });
-        sidebar.hear(host(vec![remade], Vec::new()));
-        let act = Act::Pane { session: session_name("young"), pane: planned };
-        assert_eq!(sidebar.closes(1, Ok(())), delete_here(act));
     }
 
     #[test]
@@ -10308,11 +10263,13 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.cursor = Some(Spot::Remote(nixos(), pane_of("main", 20, 1)));
         type_in(&mut sidebar, "d");
-        let closes = sidebar.key(&char('d'), moment(160_000));
-        let (session, pane) = (listed("main", 20), PaneKey::terminal(1));
-        let there = Asked::Closes { menu: 1, on: Machine::Remote(nixos()), session, pane };
-        assert_eq!(closes, there);
-        assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000)), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
+        let lines = screen(&mut sidebar, true, 120, 16);
+        let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
+        assert!(lines.contains(&"Close the view? 1 agent, 1 waiting"), "{lines:#?}");
+        let act = Act::Pane { session: session_name("main"), pane: PaneKey::terminal(1) };
+        let there = Asked::Delete { on: Machine::Remote(nixos()), act };
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), there);
         assert!(sidebar.open().is_none());
         let place = WorktreePlace { project: project_row("main", 20), worktree: tab_of(20, 0) };
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Worktree(place.clone())));

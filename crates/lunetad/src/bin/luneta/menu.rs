@@ -1106,25 +1106,6 @@ impl Menu {
         &self.target
     }
 
-    pub fn planning(&self) -> Option<(&Listed, PaneKey)> {
-        match &self.stage {
-            Stage::Planning { delete: Delete { session, scope: Scope::Pane(pane), .. }, .. } => {
-                Some((session, *pane))
-            },
-            Stage::Planning { .. }
-            | Stage::Choosing(_)
-            | Stage::Asking { .. }
-            | Stage::Sweeping { .. }
-            | Stage::Swept { .. }
-            | Stage::Pruning { .. }
-            | Stage::Opening { .. }
-            | Stage::Reading { .. }
-            | Stage::Fetching { .. }
-            | Stage::Pull { .. }
-            | Stage::Typing { .. } => None,
-        }
-    }
-
     pub fn sweeping(&self) -> bool {
         matches!(self.stage, Stage::Sweeping { .. })
     }
@@ -3797,15 +3778,13 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('d')));
         let scope = Scope::Pane(PaneKey::terminal(4));
         assert_eq!(wants, Wants::Plan { session: listed(), scope });
-        assert_eq!(menu.planning(), Some((&listed(), PaneKey::terminal(4))));
         let done = closed(menu.planned(Ok(plan(vec![(4, Doing::Idle)]))));
         let act = Act::Pane { session: listed().name().clone(), pane: PaneKey::terminal(4) };
         assert_eq!(done, Done::Act(Machine::Local, act));
         let (menu, _) = stays(opened(worktree_on(Machine::Local), Some('d')));
-        let (menu, wants) = stays(menu.key(&char('d')));
+        let (_, wants) = stays(menu.key(&char('d')));
         let (session, scope) = (project().listed().clone(), Scope::Worktree(worktree()));
         assert_eq!(wants, Wants::Plan { session, scope });
-        assert_eq!(menu.planning(), None);
     }
 
     #[test]

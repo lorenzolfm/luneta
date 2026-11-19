@@ -214,7 +214,6 @@ pub enum Heard {
         asked: Option<PaneKey>,
         peek: Result<(u32, String), String>,
     },
-    Closes { on: Machine, place: PanePlace, closes: Result<(), String> },
     Renamed { from: String, to: Name, renamed: Result<(), String> },
     Closed { name: String, closed: Result<(), String> },
     Dirs { on: Machine, ask: u64, visited: Result<Vec<Dir>, String> },
@@ -224,7 +223,6 @@ pub enum Heard {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
     Peek { on: Machine, session: Listed, asked: Option<PaneKey> },
-    Closes { on: Machine, place: PanePlace },
     Rename { on: Machine, renames: Renames, to: Name },
     Close { on: Machine, place: WorktreePlace, name: String, seen: Vec<ViewId> },
     Dirs { on: Machine, ask: u64 },
@@ -261,7 +259,6 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
                 Heard::Peek { on, session, asked, peek }
             })
         },
-        Ask::Closes { on, place } => Box::new(move || Heard::Closes { on, place, closes: Ok(()) }),
         Ask::Rename { on, renames, to } => Box::new(move || {
             let renamed = match &renames {
                 Renames::Worktree { place, .. } => {
@@ -632,27 +629,6 @@ impl Picker {
                 };
                 self.peeks.insert((on, session, asked), peek);
             },
-            Heard::Closes { on, place, closes } => {
-                let planning = matches!(
-                    &self.stage,
-                    Stage::Planning { on: planned, place: at, .. }
-                        if (planned, at) == (&on, &place)
-                );
-                if !planning {
-                    return Picked::Nothing;
-                }
-                return match closes {
-                    Ok(()) => {
-                        let deletes = Deletes::Pane(place.pane);
-                        Picked::Plan { on, session: place.session, deletes }
-                    },
-                    Err(why) => {
-                        self.stage = Stage::Search;
-                        self.error = Some(format!("nothing closed: {why}"));
-                        Picked::Nothing
-                    },
-                };
-            },
             Heard::Renamed { from, to, renamed } => {
                 if let Err(why) = renamed {
                     self.error = Some(format!("{from} is not called {}: {why}", to.as_str()));
@@ -1007,9 +983,10 @@ impl Picker {
     }
 
     fn plan(&mut self, on: Machine, place: PanePlace, agreed: Option<Plan>) -> Picked {
-        self.asking.push(Ask::Closes { on: on.clone(), place: place.clone() });
+        let deletes = Deletes::Pane(place.pane);
+        let picked = Picked::Plan { on: on.clone(), session: place.session.clone(), deletes };
         self.stage = Stage::Planning { on, place, agreed };
-        Picked::Nothing
+        picked
     }
 
     fn rename(&mut self) {
@@ -2437,15 +2414,12 @@ mod tests {
         assert_eq!(yes, Some(Pick::Key(KeyEvent::from(KeyCode::Char('y')))));
         press(&mut picker, KeyCode::Esc);
 
-        let place = PanePlace { session: listed("c", 30), pane: PaneKey::terminal(4) };
         let listing = Listing {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
         let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
-        press(&mut picker, KeyCode::Delete);
-        let heard = Heard::Closes { on: Machine::Local, place, closes: Ok(()) };
-        assert!(matches!(picker.heard(heard), Picked::Plan { .. }));
+        assert!(matches!(press(&mut picker, KeyCode::Delete), Picked::Plan { .. }));
         let (rows, give_up) = clicks(&picker, "<ESC>");
         assert!(!rows.is_empty() && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
         assert_eq!(give_up, Some(Pick::Key(KeyEvent::from(KeyCode::Esc))));
@@ -2835,7 +2809,6 @@ mod tests {
 
     #[test]
     fn del_on_an_agent_asks_before_ending_it_at_work_and_goes_ahead_on_yes_to_the_same_plan() {
-        let place = PanePlace { session: listed("c", 30), pane: PaneKey::terminal(4) };
         let listing = Listing {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
@@ -2847,13 +2820,7 @@ mod tests {
         let planning = Picked::Plan { on: Machine::Local, session: c.clone(), deletes: deletes() };
         let act = || Act::Pane { session: c.name().clone(), pane: PaneKey::terminal(4) };
         let plan = |doing: Doing| Plan::of(act(), Ok(&[(4, doing)]));
-        let closes = |picker: &mut Picker| {
-            assert_eq!(picker.asks(), [Ask::Closes { on: Machine::Local, place: place.clone() }]);
-            let closes = Ok(());
-            picker.heard(Heard::Closes { on: Machine::Local, place: place.clone(), closes })
-        };
-        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        assert_eq!(closes(&mut picker), planning);
+        assert_eq!(press(&mut picker, KeyCode::Delete), planning);
         assert_eq!(picker.planned(Ok(plan(Doing::Busy))), Picked::Nothing);
         let asks = |picker: &Picker| said(picker).contains("Close the view? 1 agent, 1 busy");
         assert!(asks(&picker));
@@ -2861,40 +2828,29 @@ mod tests {
         assert!(!asks(&picker));
 
         press(&mut picker, KeyCode::Delete);
-        closes(&mut picker);
         picker.planned(Ok(plan(Doing::Busy)));
-        assert_eq!(press(&mut picker, KeyCode::Char('y')), Picked::Nothing);
-        assert_eq!(closes(&mut picker), planning);
+        assert_eq!(press(&mut picker, KeyCode::Char('y')), planning);
         assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), Picked::Nothing);
-        press(&mut picker, KeyCode::Char('y'));
-        closes(&mut picker);
+        assert_eq!(press(&mut picker, KeyCode::Char('y')), planning);
         let ended = Picked::Delete { on: Machine::Local, act: act() };
         assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), ended);
 
-        press(&mut picker, KeyCode::Delete);
-        closes(&mut picker);
+        assert_eq!(press(&mut picker, KeyCode::Delete), planning);
         assert_eq!(picker.planned(Ok(plan(Doing::Idle))), ended);
     }
 
     #[test]
-    fn del_on_an_agent_asks_what_closing_its_pane_closes_first() {
-        let place = PanePlace { session: listed("c", 30), pane: PaneKey::terminal(4) };
+    fn del_on_an_agent_plans_closing_its_pane_and_asks_nothing_of_another_thread() {
         let listing = Listing {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
         let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
         picker.asks();
-        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        let ask = Ask::Closes { on: Machine::Local, place: place.clone() };
-        assert_eq!(picker.asks(), vec![ask]);
-        let heard = |on, place| Heard::Closes { on, place, closes: Ok(()) };
-        let other = PanePlace { session: listed("c", 30), pane: PaneKey::terminal(5) };
-        assert_eq!(picker.heard(heard(Machine::Local, other)), Picked::Nothing);
-        assert_eq!(picker.heard(heard(nixos(), place.clone())), Picked::Nothing);
         let deletes = Deletes::Pane(PaneKey::terminal(4));
         let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), deletes };
-        assert_eq!(picker.heard(heard(Machine::Local, place)), plan);
+        assert_eq!(press(&mut picker, KeyCode::Delete), plan);
+        assert_eq!(picker.asks(), []);
     }
 
     #[test]
@@ -3203,8 +3159,9 @@ mod tests {
         press(&mut picker, KeyCode::Down);
         let fix = Picked::Go { on: nixos(), place: Place::Pane(at(PaneKey::terminal(2))) };
         assert_eq!(press(&mut picker, KeyCode::Enter), fix);
-        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        assert_eq!(picker.asks(), [Ask::Closes { on: nixos(), place: at(PaneKey::terminal(2)) }]);
+        let deletes = Deletes::Pane(PaneKey::terminal(2));
+        let plan = Picked::Plan { on: nixos(), session: listed("api", 40), deletes };
+        assert_eq!(press(&mut picker, KeyCode::Delete), plan);
     }
 
     fn asked(ask: Ask, projected: &Projected) -> Heard {
@@ -3217,22 +3174,10 @@ mod tests {
     }
 
     #[test]
-    fn a_project_row_s_pane_closes_alone_by_key() {
+    fn a_peek_at_another_machine_s_pane_is_not_done_yet() {
         let projected = Projected::default();
         let session = Listed::new_project("work", 7);
-        let place = PanePlace { session: session.clone(), pane: PaneKey::terminal(4) };
-        let close = Ask::Closes { on: Machine::Local, place };
-        let Heard::Closes { closes, .. } = asked(close, &projected) else {
-            panic!("a close is answered with its plan");
-        };
-        assert_eq!(closes, Ok(()));
         let far = Machine::Remote("far".parse().unwrap());
-        let there = PanePlace { session: session.clone(), pane: PaneKey::terminal(4) };
-        let close = Ask::Closes { on: far.clone(), place: there };
-        let Heard::Closes { closes, .. } = asked(close, &projected) else {
-            panic!("a close on another machine is answered with its plan");
-        };
-        assert_eq!(closes, Ok(()), "lunetad there closes it");
         let peek = Ask::Peek { on: far, session, asked: Some(PaneKey::terminal(4)) };
         let peeked = asked(peek, &projected);
         let Heard::Peek { peek, .. } = peeked else {

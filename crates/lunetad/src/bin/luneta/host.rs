@@ -1673,10 +1673,6 @@ impl App {
                 self.go(&on, &place);
                 self.leave();
             },
-            Asked::Closes { menu, .. } => {
-                let asked = self.sidebar.closes(menu, Ok(()));
-                self.follow(asked);
-            },
             Asked::Delete { on, act } => self.project_act(&on, &act),
             Asked::Open { asking, on, key, cwd, opens } => {
                 self.project_open(asking, &on, key, &cwd, &opens);
