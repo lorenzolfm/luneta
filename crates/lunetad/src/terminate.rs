@@ -187,14 +187,11 @@ mod tests {
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
         let front_ends = pids(running.luneta_ids());
         let (daemons, muxes) = (pids(running.lunetads), pids(running.muxes));
-        let named_by_tmpdir =
-            if cfg!(target_os = "macos") { (vec![8], vec![]) } else { (vec![2, 8], vec![3]) };
-        assert_eq!((front_ends, (daemons, muxes)), (vec![1], named_by_tmpdir));
+        assert_eq!((front_ends, daemons, muxes), (vec![1], vec![8], vec![]));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn a_process_of_another_shell_s_tmpdir_is_luneta_s_on_macos() {
+    fn a_process_of_another_shell_s_tmpdir_is_luneta_s() {
         let folder = folder::find_in(&[]).unwrap();
         let listed = vec![
             found(1, LUNETAD, &["TMPDIR=/var/T/nix-shell.a"]),

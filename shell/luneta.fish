@@ -1,3 +1,14 @@
+function __luneta_folder
+    if string match -q '/*' -- "$XDG_RUNTIME_DIR"
+        echo $XDG_RUNTIME_DIR/luneta
+    else if test (uname) = Darwin
+        set -l root (/usr/bin/getconf DARWIN_USER_TEMP_DIR | string trim -r -c /)
+        string match -q '/*' -- "$root"; and echo $root/luneta
+    else
+        echo /tmp/luneta-(id -u)
+    end
+end
+
 if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
     and not begin
         test "$__luneta_pane" = "$ZELLIJ_SESSION_NAME $ZELLIJ_PANE_ID"
@@ -5,14 +16,7 @@ if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
     end
     set -gx __luneta_pane "$ZELLIJ_SESSION_NAME $ZELLIJ_PANE_ID"
     set -gx __luneta_pane_tty (tty)
-    set -l root $XDG_RUNTIME_DIR
-    if not string match -q '/*' -- "$root"; and test (uname) = Darwin
-        set root (/usr/bin/getconf DARWIN_USER_TEMP_DIR | string trim -r -c /)
-    else if not string match -q '/*' -- "$root"
-        set root $TMPDIR
-    end
-    set -g __luneta_root
-    string match -q '/*' -- "$root"; and set __luneta_root $root/luneta
+    set -g __luneta_root (__luneta_folder)
     set -g __luneta_dir $__luneta_root/commands/$ZELLIJ_SESSION_NAME
     set -q __luneta_file; or set -g __luneta_file $__luneta_dir/$ZELLIJ_PANE_ID.(date +%s)
 

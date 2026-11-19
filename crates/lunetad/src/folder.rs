@@ -14,35 +14,37 @@ pub const LOG: &str = "lunetad.log";
 
 #[derive(Debug)]
 pub enum Unfound {
-    #[cfg(not(target_os = "macos"))]
-    Unset,
     #[cfg(target_os = "macos")]
     Unnamed(io::Error),
 }
 
+#[cfg(not(target_os = "macos"))]
+impl fmt::Display for Unfound {
+    fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {}
+    }
+}
+
+#[cfg(target_os = "macos")]
 impl fmt::Display for Unfound {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            #[cfg(not(target_os = "macos"))]
-            Unfound::Unset => {
-                f.write_str("neither XDG_RUNTIME_DIR nor TMPDIR is set to an absolute path")
-            },
-            #[cfg(target_os = "macos")]
-            Unfound::Unnamed(error) => write!(
-                f,
-                "XDG_RUNTIME_DIR is not set to an absolute path, and macOS names no temporary \
-                 folder of yours: {error}"
-            ),
-        }
+        let Unfound::Unnamed(error) = self;
+        write!(
+            f,
+            "XDG_RUNTIME_DIR is not set to an absolute path, and macOS names no temporary folder \
+             of yours: {error}"
+        )
     }
 }
 
 impl std::error::Error for Unfound {}
 
+#[cfg_attr(not(target_os = "macos"), must_use)]
 pub fn find() -> Result<PathBuf, Unfound> {
     find_by(|name| std::env::var_os(name))
 }
 
+#[cfg_attr(not(target_os = "macos"), must_use)]
 pub fn find_in(environ: &[OsString]) -> Result<PathBuf, Unfound> {
     find_by(|name| {
         let mut set = environ.iter().map(|entry| entry.as_bytes()).filter_map(|entry| {
@@ -54,18 +56,25 @@ pub fn find_in(environ: &[OsString]) -> Result<PathBuf, Unfound> {
 }
 
 fn find_by(var: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, Unfound> {
-    let set = |name| var(name).filter(|root| Path::new(root).is_absolute());
-    #[cfg(not(target_os = "macos"))]
-    let outside_runtime = || set("TMPDIR").ok_or(Unfound::Unset);
-    #[cfg(target_os = "macos")]
-    let outside_runtime = || user_temp().map_err(Unfound::Unnamed);
-    let root = match set("XDG_RUNTIME_DIR") {
-        Some(root) => root,
+    let runtime = var("XDG_RUNTIME_DIR").filter(|root| Path::new(root).is_absolute());
+    let folder = match runtime {
+        Some(root) => PathBuf::from(root).join("luneta"),
         None => outside_runtime()?,
     };
-    let folder = PathBuf::from(root).join("luneta");
     assert!(folder.is_absolute(), "lunetad's folder is absolute: {}", folder.display());
     Ok(folder)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[expect(clippy::unnecessary_wraps, reason = "macOS's can fail, and both have one signature")]
+fn outside_runtime() -> Result<PathBuf, Unfound> {
+    let uid = rustix::process::getuid().as_raw();
+    Ok(PathBuf::from(format!("/tmp/luneta-{uid}")))
+}
+
+#[cfg(target_os = "macos")]
+fn outside_runtime() -> Result<PathBuf, Unfound> {
+    Ok(PathBuf::from(user_temp().map_err(Unfound::Unnamed)?).join("luneta"))
 }
 
 #[cfg(target_os = "macos")]
@@ -199,16 +208,49 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_folder_in_the_variables_is_no_folder() {
-        let relative = find_in(&environ(&["XDG_RUNTIME_DIR=run/user/1000", "TMPDIR=tmp"]));
-        let past_relative = find_in(&environ(&["XDG_RUNTIME_DIR=run", "TMPDIR=/tmp/a"]));
-        if cfg!(target_os = "macos") {
-            let user_s = find_in(&[]).unwrap();
-            assert_eq!(relative.unwrap(), user_s);
-            assert_eq!(past_relative.unwrap(), user_s);
-        } else {
-            assert!(relative.is_err(), "{relative:?}");
-            assert_eq!(past_relative.unwrap(), Path::new("/tmp/a/luneta"));
+    fn a_folder_past_xdg_runtime_dir_is_the_user_s_whatever_tmpdir_says() {
+        let user_s = find_in(&[]).unwrap();
+        if cfg!(not(target_os = "macos")) {
+            let uid = rustix::process::getuid().as_raw();
+            assert_eq!(user_s, PathBuf::from(format!("/tmp/luneta-{uid}")));
+        }
+        for unset in [
+            vec!["XDG_RUNTIME_DIR=run/user/1000", "TMPDIR=tmp"],
+            vec!["XDG_RUNTIME_DIR=run", "TMPDIR=/tmp/a"],
+            vec!["XDG_RUNTIME_DIR=", "TMPDIR=/tmp/a"],
+            vec!["TMPDIR=/tmp/a"],
+        ] {
+            assert_eq!(find_in(&environ(&unset)).unwrap(), user_s, "{unset:?}");
+        }
+        let runtime = find_in(&environ(&["XDG_RUNTIME_DIR=/run/user/1000", "TMPDIR=/tmp/a"]));
+        assert_eq!(runtime.unwrap(), Path::new("/run/user/1000/luneta"));
+    }
+
+    #[test]
+    fn the_fish_hook_names_the_folder_lunetad_finds() {
+        let hook = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shell/luneta.fish");
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        for set in [
+            vec![],
+            vec!["XDG_RUNTIME_DIR=/run/user/1000"],
+            vec!["XDG_RUNTIME_DIR=/run/user/1000/", "TMPDIR=/tmp/a"],
+            vec!["XDG_RUNTIME_DIR=run", "TMPDIR=/tmp/a"],
+            vec!["XDG_RUNTIME_DIR=", "TMPDIR=/tmp/a"],
+            vec!["TMPDIR=/tmp/a"],
+        ] {
+            let mut fish = std::process::Command::new("fish");
+            fish.args(["--no-config", "-c", "source $argv[1]; __luneta_folder"]).arg(&hook);
+            fish.env_clear().env("PATH", &path);
+            for entry in &set {
+                let (name, value) = entry.split_once('=').unwrap();
+                fish.env(name, value);
+            }
+            let said = fish.output().expect("fish runs, as the devshell and the build have it");
+            let stderr = String::from_utf8_lossy(&said.stderr);
+            assert!(said.status.success() && stderr.is_empty(), "{set:?}: {stderr}");
+            let named = String::from_utf8(said.stdout).unwrap();
+            let named = Path::new(named.strip_suffix('\n').unwrap());
+            assert_eq!(named, find_in(&environ(&set)).unwrap(), "{set:?}");
         }
     }
 }
