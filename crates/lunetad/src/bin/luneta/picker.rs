@@ -1778,7 +1778,8 @@ impl Picker {
             let makes = |(_, housed): (_, &Housed)| {
                 housed.unopened.refuses_new_worktree(&housed.project).is_none()
             };
-            if self.list == List::Worktrees && self.here_project().is_some_and(makes) {
+            let offers = self.list == List::Worktrees && self.scope.is_none();
+            if offers && self.here_project().is_some_and(makes) {
                 lines.push(Line::default());
                 lines.push(Line::styled(" type a branch to make its worktree", grey));
             }
@@ -1943,8 +1944,14 @@ impl Picker {
                 },
                 Key::Action(..) => Ok("Run".to_owned()),
             },
-            None if self.list == List::Worktrees && !self.term.is_empty() => {
-                self.new_key().map_or(Ok(String::new()), |key| key.map(|_| String::new()))
+            None if self.list == List::Worktrees
+                && self.scope.is_none()
+                && !self.term.is_empty() =>
+            {
+                match self.new_key() {
+                    Some(Err(why)) => Err(why),
+                    Some(Ok(_)) | None => Ok(String::new()),
+                }
             },
             None => Ok(String::new()),
         };
@@ -2760,6 +2767,12 @@ mod tests {
         assert_eq!(rows(&picker), ["luneta › old", "luneta › spike"]);
         typed(&mut picker, "zzz");
         assert_eq!(rows(&picker), ["no match for \"zzz\""], "no worktree is made of what is typed");
+        typed(&mut picker, "#3");
+        let unbranched = "names an issue or a pull request";
+        assert!(!said(&picker).contains(unbranched), "no branch is asked for: {}", said(&picker));
+        let (_, preview) = parts();
+        let shown = text(&drawn(&picker), preview).join(" ");
+        assert!(!shown.contains("type a branch"), "o w makes no worktree: {shown}");
         let mut all_open = works();
         let web = with_unopened(works()).shelves[0].projects[2].unopened.clone();
         all_open.shelves[0].projects[2].unopened = web;

@@ -382,9 +382,13 @@ fn chosen(
 }
 
 fn branched_in(path: &Path, holding: &Project, name: &str) -> Result<Landing, Tried> {
-    if let Holds::Folder(_) = holding.holds {
-        let one = projects::folder_has_one_worktree(&holding.name);
-        return Err(Tried::Failed(format!("{name} names no project, and {one}")));
+    assert_ne!(holding.name, name, "a name a project has goes to that project");
+    match holding.holds {
+        Holds::Clone(_) => {},
+        Holds::Folder(_) => {
+            let one = projects::folder_has_one_worktree(&holding.name);
+            return Err(Tried::Failed(format!("{name} names no project, and {one}")));
+        },
     }
     let branch = Branch::parse(name).map_err(|why| format!("no worktree made: {why}"))?;
     let made = branched(path, &Machine::Local, holding.id, &branch);
