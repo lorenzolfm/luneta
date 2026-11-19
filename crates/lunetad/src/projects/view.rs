@@ -225,6 +225,7 @@ pub struct Layout(Option<Laid>);
 struct Laid {
     tree: Tree<View>,
     full: Option<ViewId>,
+    focus: Option<ViewId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +238,7 @@ impl Layout {
     pub fn read(
         preorder: Vec<Preordered<View>>,
         full: Option<ViewId>,
+        focus: Option<ViewId>,
     ) -> Result<Layout, String> {
         if preorder.is_empty() {
             return Err("a layout holds no view, and so is kept as no layout".to_owned());
@@ -245,7 +247,12 @@ impl Layout {
         if let Some(full) = full {
             fills(&tree, full)?;
         }
-        Ok(Layout(Some(Laid { tree, full })))
+        if let Some(focus) = focus
+            && !tree.holds(focus)
+        {
+            return Err(format!("the layout holds no view {focus} to focus"));
+        }
+        Ok(Layout(Some(Laid { tree, full, focus })))
     }
 
     pub fn joined(self, other: Layout) -> Result<Layout, String> {
@@ -258,7 +265,7 @@ impl Layout {
         };
         let split = Preordered::Split { towards: Towards::Right, share: SHARES / 2 };
         let halves = one.preorder().into_iter().chain(other.preorder()).map(owned);
-        let joined = Layout::read(std::iter::once(split).chain(halves).collect(), None)?;
+        let joined = Layout::read(std::iter::once(split).chain(halves).collect(), None, None)?;
         let both = one.len() + other.len();
         assert_eq!(joined.len(), both, "a joined layout holds both layouts' views");
         Ok(joined)
@@ -272,6 +279,11 @@ impl Layout {
     #[must_use]
     pub fn full(&self) -> Option<ViewId> {
         self.0.as_ref().and_then(|laid| laid.full)
+    }
+
+    #[must_use]
+    pub fn focus(&self) -> Option<ViewId> {
+        self.0.as_ref().and_then(|laid| laid.focus)
     }
 
     #[must_use]
@@ -306,7 +318,7 @@ impl Layout {
     }
 
     pub(super) fn first(view: View) -> Layout {
-        let first = Layout(Some(Laid { tree: Tree::one(view), full: None }));
+        let first = Layout(Some(Laid { tree: Tree::one(view), full: None, focus: None }));
         assert_eq!(first.len(), 1, "a first layout holds its one view");
         first
     }
@@ -321,7 +333,7 @@ impl Layout {
         let count = self.len();
         match (&mut self.0, placed) {
             (None, Placed::Alone) => {
-                self.0 = Some(Laid { tree: Tree::one(view), full: None });
+                self.0 = Some(Laid { tree: Tree::one(view), full: None, focus: None });
             },
             (Some(_), Placed::Alone) => return Err("the layout holds views already".to_owned()),
             (None, Placed::Beside { at, .. }) => {
@@ -358,6 +370,9 @@ impl Layout {
                 if laid.full == Some(view) || laid.tree.len() == 1 {
                     laid.full = None;
                 }
+                if laid.focus == Some(view) {
+                    laid.focus = Some(heir);
+                }
                 Some(heir)
             },
         };
@@ -365,7 +380,14 @@ impl Layout {
         if let Some(heir) = heir {
             assert!(self.holds(heir), "view {heir} took the room of view {view}");
         }
+        assert!(self.focus().is_none_or(|focus| self.holds(focus)), "a layout focuses its own");
         heir
+    }
+
+    pub(super) fn focused(&mut self, view: ViewId) {
+        let laid = self.0.as_mut().expect("a focused view is in the layout");
+        assert!(laid.tree.holds(view), "view {view} is focused in its own layout");
+        laid.focus = Some(view);
     }
 
     pub(super) fn filled(&mut self, full: Option<ViewId>) -> Result<(), String> {

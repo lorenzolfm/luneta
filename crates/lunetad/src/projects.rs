@@ -572,6 +572,7 @@ pub enum Change {
     },
     Swap { one: ViewId, other: ViewId },
     Fill { worktree: WorktreeId, full: Option<ViewId> },
+    Focus { view: ViewId },
     Ran(Vec<Ran>),
 }
 
@@ -751,6 +752,7 @@ impl Change {
             | Change::Resize { .. }
             | Change::Swap { .. }
             | Change::Fill { .. }
+            | Change::Focus { .. }
             | Change::Ran(_) => false,
         }
     }
@@ -1074,7 +1076,9 @@ impl Projects {
                     let many = format!("there are {VIEWS_MAX} views");
                     return Err(format!("{many}, as many as are kept"));
                 }
-                changed.worktree_mut(worktree)?.layout.opened(view, placed, size)?;
+                let layout = &mut changed.worktree_mut(worktree)?.layout;
+                layout.opened(view, placed, size)?;
+                layout.focused(id);
                 None
             },
             Change::Close { view } => {
@@ -1128,6 +1132,10 @@ impl Projects {
             },
             Change::Fill { worktree, full } => {
                 changed.worktree_mut(worktree)?.layout.filled(full)?;
+                None
+            },
+            Change::Focus { view } => {
+                changed.layout_of(view)?.focused(view);
                 None
             },
             Change::Ran(ran) => {
@@ -2404,6 +2412,37 @@ mod tests {
         assert!(projects.find(main).is_none(), "a worktree goes with its last terminal moved out");
         let outside = MoveTo::Made { project: luneta, spot: spot_at("/w/elo", "main") };
         assert!(change(&projects, moving(two, outside)).unwrap_err().contains("in no worktree"));
+    }
+
+    #[test]
+    fn a_layout_s_focus_is_the_view_opened_or_focused_last_and_goes_to_the_heir_of_one_gone() {
+        let mut projects = Projects::default();
+        let luneta = clone(&mut projects, "/w/luneta", &[]);
+        let main = worktree(&mut projects, luneta, "/w/luneta/main");
+        let feat = worktree(&mut projects, luneta, "/w/luneta/feat");
+        let (one, four) = (first(&projects, main), first(&projects, feat));
+        let focus = |projects: &Projects, worktree| layout(projects, worktree).focus();
+        assert_eq!(focus(&projects, main), None, "a worktree's first view is focused by none yet");
+        let right = Placed::Beside { at: one, towards: layout::Towards::Right };
+        let two = opened(&mut projects, main, 101, right);
+        assert_eq!(focus(&projects, main), Some(two), "a view opened takes the focus");
+        (projects, _) = change(&projects, Change::Focus { view: one }).unwrap();
+        assert_eq!(focus(&projects, main), Some(one));
+        let down = Placed::Beside { at: two, towards: layout::Towards::Down };
+        let three = opened(&mut projects, main, 102, down);
+        (projects, _) = change(&projects, Change::Focus { view: two }).unwrap();
+
+        (projects, _) = change(&projects, Change::Close { view: two }).unwrap();
+        assert_eq!(focus(&projects, main), Some(three), "a closed view's heir takes the focus");
+        let size = Size::of(80, 24).unwrap();
+        let (terminal, to) = (TerminalViewId::new(three), MoveTo::Worktree(feat));
+        (projects, _) = change(&projects, Change::Move { terminal, to, size }).unwrap();
+        assert_eq!(focus(&projects, main), Some(one), "and a moved view's heir");
+        assert_eq!(focus(&projects, feat), None, "a moved view takes no focus where it goes");
+        (projects, _) = change(&projects, Change::Focus { view: four }).unwrap();
+        assert_eq!((focus(&projects, main), focus(&projects, feat)), (Some(one), Some(four)));
+        let gone = change(&projects, Change::Focus { view: two });
+        assert!(gone.unwrap_err().contains("has the id"), "a view gone takes no focus");
     }
 
     #[test]
