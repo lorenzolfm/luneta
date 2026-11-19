@@ -171,12 +171,16 @@ mod tests {
         Session::Project(lunetad::projects::ProjectId::of(project).unwrap())
     }
 
-    fn view(view: u32) -> Key {
-        Key { session: session(10), view }
+    fn id(view: u64) -> lunetad::projects::ViewId {
+        lunetad::projects::ViewId::of(view).unwrap()
+    }
+
+    fn view(view: u64) -> Key {
+        Key { session: session(10), view: id(view) }
     }
 
     fn finished(key: Key) -> Option<SystemTime> {
-        match key.view {
+        match key.view.get() {
             1 => Some(at(100)),
             2 => Some(ms(101_999)),
             _ => None,
@@ -203,7 +207,7 @@ mod tests {
 
     #[test]
     fn a_stay_dates_the_session_with_nothing_new_in_it() {
-        let other = |view: u32| Key { session: session(20), view };
+        let other = |view: u64| Key { session: session(20), view: id(view) };
         let nothing = |_: Key| None;
         let mut news = News::default();
 

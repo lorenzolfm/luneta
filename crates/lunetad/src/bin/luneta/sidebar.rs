@@ -180,7 +180,7 @@ impl Listed {
         &self.name
     }
 
-    fn key(&self, view: u32) -> Key {
+    fn key(&self, view: ViewId) -> Key {
         Key { session: self.kept, view }
     }
 
@@ -562,6 +562,7 @@ enum Row {
         machine: Machine,
         session: Listed,
         view: ViewKey,
+        view_id: ViewId,
         here: bool,
         unread: bool,
         marked: Option<Marked>,
@@ -789,9 +790,8 @@ struct KnownWorktree {
     folder: Dir,
     seen: projects::Seen,
     used: Option<Used>,
-    views: Vec<View>,
+    views: Vec<(ViewId, View)>,
     terminals: Vec<ViewId>,
-    by_terminal: Vec<(u32, ViewId)>,
 }
 
 impl Known {
@@ -806,12 +806,10 @@ impl Known {
             });
             let terminals: Vec<ViewId> = terminals.collect();
             let found = worktree.terminals.iter().zip(&terminals);
-            let held = found.filter_map(|(it, id)| {
+            let views = found.filter_map(|(it, id)| {
                 Some((*id, view_of(it, worktree, tab)?))
             });
-            let held: Vec<(ViewId, View)> = held.collect();
-            let by_terminal = held.iter().map(|(id, view)| (view.id, *id)).collect();
-            let views = held.into_iter().map(|(_, view)| view).collect();
+            let views = views.collect();
             let seen = worktree.seen.and_then(projects::Seen::of_api);
             let seen = seen.expect("lunetad says a worktree's stage luneta knows");
             let used = worktree.used_at.map(|at| {
@@ -820,7 +818,7 @@ impl Known {
             let folder = Dir::parse(&worktree.folder);
             let folder = folder.expect("lunetad says a worktree's folder as a folder it keeps");
             let name = worktree.name.clone();
-            Some(KnownWorktree { place, name, folder, seen, used, views, terminals, by_terminal })
+            Some(KnownWorktree { place, name, folder, seen, used, views, terminals })
         });
         let worktrees: Vec<KnownWorktree> = worktrees.collect();
         let order = rows.iter().filter_map(|it| WorktreeId::of(it.id)).collect();
@@ -857,8 +855,12 @@ impl Known {
         self.project.listed()
     }
 
-    fn views(&self) -> impl Iterator<Item = &View> {
+    fn kept_views(&self) -> impl Iterator<Item = &(ViewId, View)> {
         self.worktrees.iter().flat_map(|worktree| &worktree.views)
+    }
+
+    fn views(&self) -> impl Iterator<Item = &View> {
+        self.kept_views().map(|(_, view)| view)
     }
 
     fn view(&self, id: u32) -> Option<&View> {
@@ -873,6 +875,17 @@ fn project_of(spot: &Spot) -> Option<Spot> {
 
 fn keyed(view: &View) -> Option<TerminalKey> {
     TerminalKey::of(view.key.as_ref()?).ok()
+}
+
+fn view_id_of(shelves: &[Shelf], on: &Machine, listed: &Listed, view: ViewKey) -> Option<ViewId> {
+    let ViewKey::Terminal(key) = view;
+    let known = shelf(shelves, on).iter().find(|it| it.listed() == listed)?;
+    let mut kept = known.kept_views();
+    kept.find(|(_, view)| keyed(view) == Some(key)).map(|(id, _)| *id)
+}
+
+fn news_key(shelves: &[Shelf], on: &Machine, place: &ViewPlace) -> Option<Key> {
+    Some(place.session.key(view_id_of(shelves, on, &place.session, place.view)?))
 }
 
 fn view_of(terminal: &api::Terminal, worktree: &api::Worktree, tab: u32) -> Option<View> {
@@ -2096,7 +2109,7 @@ impl Sidebar {
     ) -> Shelved {
         let here = here.filter(|here| here.on() == machine);
         let placed = here.and_then(Here::view);
-        let here_key = placed.map(|place| place.session.key(place.view.terminal_id()));
+        let here_key = placed.and_then(|place| news_key(&self.shelves, machine, place));
         let heard = seen.ok();
         let seated = heard.map_or_default(|seen| seen.seated());
         let unread = heard.filter(|_| self.away.is_none()).map(Seen::unread_seats);
@@ -2110,9 +2123,11 @@ impl Sidebar {
             let listed = known.listed();
             let mut worktrees = Vec::with_capacity(known.worktrees.len());
             for worktree in &known.worktrees {
-                let held: Vec<TerminalKey> = worktree.views.iter().filter_map(keyed).collect();
-                let agents = worktree.views.iter().filter_map(|view| {
-                    Some((listed.key(view.id), *seated.get(&keyed(view)?)?))
+                let views = worktree.views.iter();
+                let held = views.clone().filter_map(|(_, view)| keyed(view));
+                let held: Vec<TerminalKey> = held.collect();
+                let agents = views.clone().filter_map(|(id, view)| {
+                    Some((listed.key(*id), *seated.get(&keyed(view)?)?))
                 });
                 let waiting = agents.clone().filter(|(key, agent)| {
                     let (marked, _) = agent_marked(&self.news, agent, *key, here_key == Some(*key));
@@ -2130,7 +2145,7 @@ impl Sidebar {
                 let branch = statuses.get(worktree.folder.as_str()).and_then(|status| {
                     Some(checkout(&GitStatus::of_api(status)?, None)?.branch)
                 });
-                let terminals = worktree.views.iter().filter_map(|view| {
+                let terminals = views.filter_map(|(_, view)| {
                     ViewPlace::of(listed.clone(), view).map(|place| place.view)
                 });
                 worktrees.push(Worktree {
@@ -2193,19 +2208,19 @@ impl Sidebar {
     fn runs(&self, machine: &Machine, seen: &Seen<'_>, here: Option<&Here>) -> Runs {
         let here = here.filter(|here| here.on() == machine);
         let placed = here.and_then(Here::view);
-        let here_key = placed.map(|place| place.session.key(place.view.terminal_id()));
+        let here_key = placed.and_then(|place| news_key(&self.shelves, machine, place));
         let seated = seen.seated();
         let mut runs = Runs::default();
         for known in seen.projects.iter().rev() {
             let listed = known.listed();
-            for view in known.views() {
+            for (id, view) in known.kept_views() {
                 let Some(agent) = keyed(view).and_then(|key| seated.get(&key)) else {
                     continue;
                 };
                 let Some(place) = ViewPlace::of(listed.clone(), view) else {
                     continue;
                 };
-                let key = listed.key(view.id);
+                let key = listed.key(*id);
                 let (marked, _) = agent_marked(&self.news, agent, key, here_key == Some(key));
                 runs.agents.push(Seated {
                     place,
@@ -2326,6 +2341,8 @@ impl Sidebar {
             return;
         };
         let (seated, sits_on) = (self.seated_in(), self.on().clone());
+        let here_key =
+            here_view.as_ref().and_then(|place| news_key(&self.shelves, &sits_on, place));
         let now = self.drawn.unwrap_or(SystemTime::UNIX_EPOCH);
         let mut due: Option<SystemTime> = None;
         let listed = machines(host, &self.shelves);
@@ -2344,7 +2361,6 @@ impl Sidebar {
             | Mode::AfloatNote(_) => (None, false),
         };
         let finder = term.map(Finder::new);
-        let here_key = here_view.as_ref().map(|place| place.session.key(place.view.terminal_id()));
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
         let mut counts = Counts::default();
         let mut rows = Vec::new();
@@ -2394,9 +2410,9 @@ impl Sidebar {
                 let mut worktrees = Vec::with_capacity(known.worktrees.len());
                 for worktree in &known.worktrees {
                     let mut by_view: Vec<Shows> = Vec::with_capacity(worktree.views.len());
-                    for view in &worktree.views {
+                    for (id, view) in &worktree.views {
                         counts.views += 1;
-                        let key = listed.key(view.id);
+                        let key = listed.key(*id);
                         let here = on && here_key == Some(key);
                         let unread = self.news.is_unread(key);
                         let place = ViewPlace::of(listed.clone(), view);
@@ -2484,7 +2500,8 @@ impl Sidebar {
                         let mut shown = Vec::with_capacity(worktree.views.len());
                         let listing =
                             if worktree_folded { &[][..] } else { worktree.views.as_slice() };
-                        for (view, Shows { marked, ran, unread }) in listing.iter().zip(by_view) {
+                        let listing = listing.iter().zip(by_view);
+                        for ((view_id, view), Shows { marked, ran, unread }) in listing {
                             let cwd = view.cwd.as_deref();
                             let command = view.command.as_deref();
                             let program = agent(view)
@@ -2512,11 +2529,12 @@ impl Sidebar {
                             let here = on && here_view.as_ref() == Some(&place);
                             let icon = program.and_then(icons::of);
                             let (machine, session) = (machine.clone(), place.session);
-                            let id = place.view;
+                            let (view, view_id) = (place.view, *view_id);
                             let row = move |bracket| Row::View {
                                 machine,
                                 session,
-                                view: id,
+                                view,
+                                view_id,
                                 here,
                                 unread,
                                 marked,
@@ -3326,7 +3344,7 @@ impl Sidebar {
             cwd.as_deref().and_then(|cwd| pulls.into_iter().find(|pull| pull.dir == cwd));
         let pull_request = pull_request.and_then(PullRequest::of_api);
         let ran = self.ran_in(machine, &session, view.terminal_id());
-        let terminal = self.terminal_of(machine, &session, view);
+        let terminal = view_id_of(&self.shelves, machine, &session, view);
         let row = ViewRow { session, view, terminal, cwd, branch, repository, pull_request, ran };
         Some(Target::View(machine.clone(), row))
     }
@@ -3336,14 +3354,6 @@ impl Sidebar {
         let known = known.find(|it| it.listed() == listed)?;
         let (project, dir) = (known.project.clone(), known.dir.as_str().to_owned());
         Some(Target::Project(machine.clone(), ProjectTarget { project, dir }))
-    }
-
-    fn terminal_of(&self, machine: &Machine, listed: &Listed, view: ViewKey) -> Option<ViewId> {
-        let ViewKey::Terminal(key) = view;
-        let mut known = shelf(&self.shelves, machine).iter();
-        let worktrees = &known.find(|it| it.listed() == listed)?.worktrees;
-        let mut held = worktrees.iter().flat_map(|worktree| &worktree.by_terminal);
-        held.find(|(id, _)| *id == key.id.get()).map(|(_, terminal)| *terminal)
     }
 
     fn worktree_target(&self, machine: &Machine, place: WorktreePlace) -> Option<Target> {
@@ -3823,7 +3833,7 @@ impl Sidebar {
         let Some(found) = held.next() else {
             return Err(format!("worktree {worktree} is no longer listed"));
         };
-        let views = found.views.iter().map(|view| view.id).collect();
+        let views = found.views.iter().map(|(_, view)| view.id).collect();
         Ok(Deletes::Worktree { worktree, views, seen: found.terminals.clone() })
     }
 
@@ -3969,12 +3979,12 @@ impl Sidebar {
         let Some(spot) = &self.cursor else {
             return;
         };
-        let Some(Row::View { session, view, unread, marked, .. }) =
+        let Some(Row::View { session, view_id, unread, marked, .. }) =
             self.rows.iter().find(|row| row.spot() == *spot)
         else {
             return;
         };
-        let key = session.key(view.terminal_id());
+        let key = session.key(*view_id);
         if dotted(*unread, marked.as_ref()) {
             self.news.read(key, self.finished.get(&key).copied(), now);
         } else {
@@ -5877,7 +5887,7 @@ mod tests {
         let (project, terminal) = (session.project(), view.key());
         let known = sidebar.known_of(project).expect("luneta sits in a project it knows");
         let mut worktrees = known.worktrees.iter();
-        let home = worktrees.find(|it| it.views.iter().any(|it| keyed(it) == Some(terminal)));
+        let home = worktrees.find(|it| it.views.iter().any(|(_, it)| keyed(it) == Some(terminal)));
         let worktree = home.expect("a worktree holds the view luneta sits on").place.worktree;
         sidebar.sit(Seat { on: Machine::Local, project, worktree, terminal: Some(terminal) });
     }
@@ -7210,6 +7220,60 @@ mod tests {
             [&lines[6], &lines[9]],
             ["▌  ✓ \u{ec82} fold                 1m", "  •✓ \u{ec82} fold                 1m"]
         );
+    }
+
+    fn restored(mut host: Host, made: Timestamp, terminal: impl Fn(u32) -> u32) -> Host {
+        let projects = host.projects.as_mut().and_then(|projects| projects.held.as_mut());
+        let Some(api::projects::Held::Kept(kept)) = projects else {
+            panic!("kept projects");
+        };
+        for project in &mut kept.projects {
+            let Some(api::project::Holds::Clone(clone)) = &mut project.holds else {
+                panic!("a clone");
+            };
+            for held in clone.worktrees.iter_mut().flat_map(|worktree| &mut worktree.terminals) {
+                let Some(api::terminal::Found::Key(key)) = &mut held.found else {
+                    panic!("a found terminal");
+                };
+                key.id = terminal(key.id);
+                key.made_at = Some(made);
+            }
+        }
+        host
+    }
+
+    #[test]
+    fn a_view_keeps_its_marks_when_a_new_mux_gives_its_terminal_another_id() {
+        let mut sidebar = fresh();
+        let s = || {
+            let views = vec![
+                in_shell(1, ended("cargo test", Some(0), 5_000)),
+                view(2, 0, "/w/c", "nvim src/main.rs"),
+                view(3, 0, "/w/a", "fish"),
+            ];
+            host(vec![own_session("s", 1, views)], Vec::new())
+        };
+        sidebar.hear(s());
+        sit(&mut sidebar, &own_view_of("s", 1, 3));
+        let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let rows = |sidebar: &mut Sidebar| seen_at(sidebar, true, 32, 9, moment(160_000)).0;
+        let marked = [
+            " ╭   \u{e795} luneta/main",
+            " │•  \u{e6ae} nvim src/main.rs",
+            "▌╰   \u{e795} w/a",
+        ];
+        assert_eq!(rows(&mut sidebar)[6], " ╭•✓ \u{e795} cargo test          29s");
+        for asked in ['k', 'u', 'k', 'u'] {
+            sidebar.key(&key(asked), moment(160_000));
+        }
+        assert_eq!(rows(&mut sidebar)[6..], marked);
+
+        let made = Timestamp { seconds: 99, nanos: 0 };
+        sidebar.hear(restored(s(), made, |id| id % 3 + 1));
+        let fish = TerminalKey::of(&api::TerminalKey { id: 1, made_at: Some(made) }).unwrap();
+        let fish = ViewPlace::new(own_listed("s", 1), ViewKey::Terminal(fish));
+        sit(&mut sidebar, &Place::View(fish));
+        assert_eq!(rows(&mut sidebar)[6..], marked);
     }
 
     #[test]
