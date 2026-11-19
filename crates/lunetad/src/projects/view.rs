@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::agent::Harness;
 
 use super::layout::{self, Leaf, Preordered, Removed, Sides, Towards, Tree, PANES_MAX, SHARES};
@@ -7,9 +9,29 @@ pub const LINE_BYTES_MAX: usize = 1024;
 
 pub const SESSION_BYTES_MAX: usize = 128;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TerminalViewId(ViewId);
+
+impl TerminalViewId {
+    pub(super) fn new(view: ViewId) -> TerminalViewId {
+        TerminalViewId(view)
+    }
+
+    #[must_use]
+    pub fn view(self) -> ViewId {
+        self.0
+    }
+}
+
+impl fmt::Display for TerminalViewId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Terminal {
-    id: ViewId,
+    id: TerminalViewId,
     folder: Dir,
     runs: Runs,
     name: Option<Name>,
@@ -17,8 +39,13 @@ pub struct Terminal {
 
 impl Terminal {
     #[must_use]
-    pub fn new(id: ViewId, folder: Dir, runs: Runs) -> Terminal {
+    pub fn new(id: TerminalViewId, folder: Dir, runs: Runs) -> Terminal {
         Terminal { id, folder, runs, name: None }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> TerminalViewId {
+        self.id
     }
 
     #[must_use]
@@ -51,12 +78,6 @@ impl Terminal {
     }
 }
 
-impl Leaf for Terminal {
-    fn id(&self) -> ViewId {
-        self.id
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum View {
     Terminal(Terminal),
@@ -76,7 +97,7 @@ impl View {
 impl Leaf for View {
     fn id(&self) -> ViewId {
         match self {
-            View::Terminal(terminal) => terminal.id,
+            View::Terminal(terminal) => terminal.id.view(),
             View::Welcome(id) => *id,
         }
     }
@@ -215,11 +236,11 @@ impl Layout {
         self.tree().is_some_and(|tree| tree.holds(terminal))
     }
 
-    pub(super) fn terminal_mut(&mut self, view: ViewId) -> Option<&mut Terminal> {
-        let laid = self.0.as_mut().expect("a layout asked for its view is laid");
-        match laid.tree.get_mut(view).expect("its layout holds the view") {
-            View::Terminal(held) => Some(held),
-            View::Welcome(_) => None,
+    pub(super) fn terminal_mut(&mut self, terminal: TerminalViewId) -> &mut Terminal {
+        let laid = self.0.as_mut().expect("a layout asked for its terminal is laid");
+        match laid.tree.get_mut(terminal.view()).expect("its layout holds the terminal") {
+            View::Terminal(held) => held,
+            View::Welcome(_) => unreachable!("terminal {terminal} is made only as a terminal"),
         }
     }
 

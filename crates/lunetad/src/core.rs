@@ -15,7 +15,6 @@ use crate::claude::Scan;
 use crate::github::Found;
 use crate::mux::own::server::{self, Is};
 use crate::panes::{self, Pane, Titled};
-use crate::projects::layout::Leaf as _;
 use crate::projects::{Dir, Name, Project, Projects, Revision, Seen, Stage, ViewId, Workstream};
 use crate::projects::WorkstreamId;
 use crate::remote::{Destination, Named, Reached};
@@ -546,7 +545,7 @@ impl Known {
     fn built_terminals(&self, workstream: &Workstream) -> Vec<api::Terminal> {
         use api::terminal::Found as Told;
         let built = workstream.layout().terminals().map(|terminal| {
-            let id = terminal.id();
+            let id = terminal.id().view();
             let found = self.terminals.get(&id).unwrap_or(&Located::Looking);
             let (told, listed) = match found {
                 Located::Shown(Shown { key, listed }) => {

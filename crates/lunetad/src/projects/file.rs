@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Closing, Dir, Holds, Id, Line, Name, Project, Projects};
-use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, Used, View, ViewId};
+use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, TerminalViewId, Used};
+use super::{View, ViewId};
 use super::{Layout, Workstream, WorkstreamId, Worktree};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{SPOT_LOOK, VIEWS_MAX, WORKSTREAMS_MAX};
@@ -390,6 +391,10 @@ impl Store {
             },
             Keeping::Unkept(why) => Err(Failed::NotKept(why.clone())),
         }
+    }
+
+    pub fn fresh_terminal(&self) -> Result<TerminalViewId, Failed> {
+        self.fresh().map(TerminalViewId::new)
     }
 
     pub fn change(&mut self, change: Change) -> Result<Option<Made>, Failed> {
@@ -1090,7 +1095,7 @@ impl KeptTowards {
 
 impl KeptTerminal {
     fn read(self) -> Result<Terminal, String> {
-        let id: ViewId = self.id.parse()?;
+        let id = TerminalViewId::new(self.id.parse()?);
         let why = |why: String| format!("terminal {id}: {why}");
         let folder = Dir::parse(&self.folder).map_err(why)?;
         let name = self.name.as_deref().map(Name::parse).transpose().map_err(why)?;
@@ -1415,7 +1420,7 @@ mod tests {
             ),
         ];
         for (id, runs, placed) in runs {
-            let terminal = Terminal::new(id, dir("/w/luneta/top"), runs);
+            let terminal = Terminal::new(TerminalViewId::new(id), dir("/w/luneta/top"), runs);
             let open = Change::Open { workstream, view: View::Terminal(terminal), placed, size };
             (projects, _) = projects.changed(open, &mut draw).unwrap();
         }
@@ -1873,7 +1878,8 @@ mod tests {
         let Some(Made::Workstream(workstream)) = store.change(add).unwrap() else {
             panic!("/a/b is made");
         };
-        let terminal = Terminal::new(ViewId::of(7).unwrap(), dir("/a"), Runs::Shell);
+        let terminal = TerminalViewId::new(ViewId::of(7).unwrap());
+        let terminal = Terminal::new(terminal, dir("/a"), Runs::Shell);
         let (placed, size) = (Placed::Alone, super::super::Size::of(80, 24).unwrap());
         let view = View::Terminal(terminal);
         store.change(Change::Open { workstream, view, placed, size }).unwrap();
@@ -1987,7 +1993,7 @@ mod tests {
         let size = super::super::Size::of(80, 24).unwrap();
         let [one, two] = [store.fresh().unwrap(), ViewId::of(u64::MAX).unwrap()];
         let opened = |id, placed| {
-            let terminal = Terminal::new(id, dir("/a"), Runs::Shell);
+            let terminal = Terminal::new(TerminalViewId::new(id), dir("/a"), Runs::Shell);
             Change::Open { workstream, view: View::Terminal(terminal), placed, size }
         };
         store.change(opened(one, Placed::Alone)).unwrap();
