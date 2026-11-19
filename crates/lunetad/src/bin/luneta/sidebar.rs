@@ -9449,12 +9449,12 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 10), area);
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
         assert!(sidebar.holds_input(), "the press");
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 5), area);
         assert_ne!(drawn_rows(&mut sidebar).0, listed, "a row is lifted");
         assert!(sidebar.holds_input(), "the drag");
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 5), area);
         assert!(!sidebar.holds_input(), "the row landed");
     }
 
