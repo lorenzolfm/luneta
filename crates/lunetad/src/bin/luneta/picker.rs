@@ -82,11 +82,11 @@ pub struct Shelved {
 pub struct Housed {
     pub project: ProjectRow,
     pub dir: projects::Dir,
-    pub worktrees: Vec<Tree>,
+    pub worktrees: Vec<Worktree>,
 }
 
 #[derive(Clone, Debug)]
-pub struct Tree {
+pub struct Worktree {
     pub place: WorktreePlace,
     pub name: String,
     pub folder: projects::Dir,
@@ -603,14 +603,14 @@ impl Picker {
         projects.iter().find(|housed| housed.project.id() == project.id())
     }
 
-    fn tree(&self, on: &Machine, place: &WorktreePlace) -> Option<&Tree> {
+    fn worktree(&self, on: &Machine, place: &WorktreePlace) -> Option<&Worktree> {
         let worktrees = &self.housed(on, &place.project)?.worktrees;
-        worktrees.iter().find(|tree| tree.place.worktree == place.worktree)
+        worktrees.iter().find(|worktree| worktree.place.worktree == place.worktree)
     }
 
-    fn row_tree(&self, on: &Machine, place: &WorktreePlace) -> &Tree {
-        let tree = self.tree(on, place);
-        tree.expect("a worktree's row is rebuilt with the listing that holds it")
+    fn row_worktree(&self, on: &Machine, place: &WorktreePlace) -> &Worktree {
+        let worktree = self.worktree(on, place);
+        worktree.expect("a worktree's row is rebuilt with the listing that holds it")
     }
 
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
@@ -622,10 +622,10 @@ impl Picker {
         self.listing.shown.as_ref().is_some_and(|(at, shown)| at == on && shown == place)
     }
 
-    fn focus(&self, on: &Machine, tree: &Tree) -> Option<PaneKey> {
+    fn focus(&self, on: &Machine, worktree: &Worktree) -> Option<PaneKey> {
         let here = self.here_pane(on).map(|place| place.pane);
-        let focused = here.filter(|pane| tree.terminals.contains(pane));
-        focused.or_else(|| tree.terminals.first().copied())
+        let focused = here.filter(|pane| worktree.terminals.contains(pane));
+        focused.or_else(|| worktree.terminals.first().copied())
     }
 
     fn seated(&self, on: &Machine, place: &PanePlace) -> Option<&Seated> {
@@ -1012,7 +1012,7 @@ impl Picker {
         };
         match key {
             Key::Worktree { on, place } => {
-                let name = self.row_tree(&on, &place).name.clone();
+                let name = self.row_worktree(&on, &place).name.clone();
                 self.close(on, place, name, None);
                 Picked::Nothing
             },
@@ -1027,11 +1027,11 @@ impl Picker {
     }
 
     fn close(&mut self, on: Machine, place: WorktreePlace, name: String, agreed: Option<&Ends>) {
-        let Some(tree) = self.tree(&on, &place) else {
+        let Some(worktree) = self.worktree(&on, &place) else {
             self.error = Some(format!("{name} is listed no more"));
             return;
         };
-        let ends = Ends::of(&tree.held, tree.ending.as_deref().map_err(|untold| *untold));
+        let ends = Ends::of(&worktree.held, worktree.ending.as_deref().map_err(|untold| *untold));
         if let Some(why) = self.out_of_reach(&on) {
             self.error = Some(format!("{name} stays: {why}"));
             return;
@@ -1057,7 +1057,7 @@ impl Picker {
         }
         let (on, renames) = match self.worktrees.selected().map(|row| &row.key) {
             Some(Key::Worktree { on, place }) => {
-                let name = self.row_tree(on, place).name.clone();
+                let name = self.row_worktree(on, place).name.clone();
                 (on.clone(), Renames::Worktree { place: place.clone(), name })
             },
             Some(Key::Project { on, project, .. }) => {
@@ -1109,7 +1109,7 @@ impl Picker {
             return Err("already called that".to_owned());
         }
         let listed = match renames {
-            Renames::Worktree { place, .. } => self.tree(on, place).is_some(),
+            Renames::Worktree { place, .. } => self.worktree(on, place).is_some(),
             Renames::Project(project) => self.housed(on, project).is_some(),
         };
         if !listed {
@@ -1179,11 +1179,11 @@ impl Picker {
                     let dir = sidebar::short_cwd(housed.dir.as_str());
                     found.push((None, project.to_owned(), None, dir, key));
                 }
-                for tree in &housed.worktrees {
-                    let name = format!("{project} › {}", tree.name);
-                    let folder = sidebar::short_cwd(tree.folder.as_str());
-                    let key = Key::Worktree { on: on.clone(), place: tree.place.clone() };
-                    found.push((tree.used, name, tree.branch.as_deref(), folder, key));
+                for worktree in &housed.worktrees {
+                    let name = format!("{project} › {}", worktree.name);
+                    let folder = sidebar::short_cwd(worktree.folder.as_str());
+                    let key = Key::Worktree { on: on.clone(), place: worktree.place.clone() };
+                    found.push((worktree.used, name, worktree.branch.as_deref(), folder, key));
                 }
             }
         }
@@ -1248,7 +1248,7 @@ impl Picker {
     fn follow(&mut self) {
         let preview = match self.rows().selected().map(|row| &row.key) {
             Some(Key::Worktree { on, place }) => {
-                let focus = self.focus(on, self.row_tree(on, place));
+                let focus = self.focus(on, self.row_worktree(on, place));
                 let looked = |focus| (on.clone(), place.project.listed().clone(), Some(focus));
                 focus.map(|focus| Preview::Screen(looked(focus)))
             },
@@ -1384,15 +1384,15 @@ impl Picker {
         let grey = Style::new().fg(gruvbox::GREY);
         let (lead, name_style, right) = match &row.key {
             Key::Worktree { on, place } => {
-                let tree = self.row_tree(on, place);
+                let worktree = self.row_worktree(on, place);
                 let away = self.shelved(on).and_then(|shelved| shelved.away);
                 let mut right = Vec::new();
-                if tree.waiting > 0 {
+                if worktree.waiting > 0 {
                     let (dot, style) = Mark::Waiting.glyph(frame);
-                    right.push(Span::styled(format!("{dot}{} ", tree.waiting), style));
+                    right.push(Span::styled(format!("{dot}{} ", worktree.waiting), style));
                 }
                 right.extend(self.tag(on, away));
-                let (stage, colour) = staged(tree.seen);
+                let (stage, colour) = staged(worktree.seen);
                 let style = if away.is_some() { dim } else { Style::new().fg(colour) };
                 right.push(Span::styled(stage, style));
                 let style = match away {
@@ -1560,15 +1560,15 @@ impl Picker {
                 return;
             },
             Key::Worktree { on, place } => {
-                let tree = self.row_tree(on, place);
-                let count = tree.terminals.len();
+                let worktree = self.row_worktree(on, place);
+                let count = worktree.terminals.len();
                 let right =
                     if count == 1 { "1 terminal".to_owned() } else { format!("{count} terminals") };
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
                 let room = inner.saturating_sub(1 + caption.iter().map(Span::width).sum::<usize>());
-                caption.push(Span::styled(sidebar::tail(tree.folder.as_str(), room), grey));
-                let Some(focus) = self.focus(on, tree) else {
+                caption.push(Span::styled(sidebar::tail(worktree.folder.as_str(), room), grey));
+                let Some(focus) = self.focus(on, worktree) else {
                     let lines = said(caption, "it holds no terminal to look at");
                     framed(buffer, area, &row.name, &right, lines);
                     return;
@@ -2067,13 +2067,13 @@ mod tests {
         WorktreePlace { project: self::project(project, id), worktree }
     }
 
-    fn tree(
+    fn worktree(
         place: WorktreePlace,
         name: &str,
         used: Option<u64>,
         terminals: &[u32],
-    ) -> Tree {
-        Tree {
+    ) -> Worktree {
+        Worktree {
             place,
             name: name.to_owned(),
             folder: projects::Dir::parse(&format!("/home/you/{name}")).unwrap(),
@@ -2091,7 +2091,7 @@ mod tests {
         terminals.iter().map(|id| ViewId::of(u64::from(*id)).unwrap()).collect()
     }
 
-    fn housed(name: &str, id: u64, worktrees: Vec<Tree>) -> Housed {
+    fn housed(name: &str, id: u64, worktrees: Vec<Worktree>) -> Housed {
         let dir = projects::Dir::parse(&format!("/home/you/{name}")).unwrap();
         Housed { project: project(name, id), dir, worktrees }
     }
@@ -2114,9 +2114,9 @@ mod tests {
 
     fn luneta() -> Housed {
         housed("luneta", 1, vec![
-            tree(main_place(), "main", Some(30), &[1, 2]),
-            tree(fix(), "fix", Some(50), &[5, 3]),
-            tree(place("luneta", 1, 3), "docs", None, &[]),
+            worktree(main_place(), "main", Some(30), &[1, 2]),
+            worktree(fix(), "fix", Some(50), &[5, 3]),
+            worktree(place("luneta", 1, 3), "docs", None, &[]),
         ])
     }
 
@@ -2124,7 +2124,7 @@ mod tests {
         let projects = vec![
             luneta(),
             housed("notes", 2, Vec::new()),
-            housed("web", 3, vec![tree(api(), "api", Some(40), &[4])]),
+            housed("web", 3, vec![worktree(api(), "api", Some(40), &[4])]),
         ];
         let at = PanePlace { session: fix().project.listed().clone(), pane: PaneKey::terminal(3) };
         Listing {
@@ -2495,7 +2495,7 @@ mod tests {
         assert!(said(&picker).contains(busy_asks), "{}", said(&picker));
         let mut untold = busy(works());
         let shelf = &mut untold.shelves[0].projects[0].worktrees;
-        let main = shelf.iter_mut().find(|tree| tree.name == "main").unwrap();
+        let main = shelf.iter_mut().find(|worktree| worktree.name == "main").unwrap();
         main.ending = Err(Untold::Away);
         picker.listed(untold);
         press(&mut picker, KeyCode::Char('y'));
@@ -2504,7 +2504,7 @@ mod tests {
         assert!(said(&picker).contains(untold_asks), "{}", said(&picker));
         let mut grown = busy(works());
         let shelf = &mut grown.shelves[0].projects[0].worktrees;
-        let main = shelf.iter_mut().find(|tree| tree.name == "main").unwrap();
+        let main = shelf.iter_mut().find(|worktree| worktree.name == "main").unwrap();
         (main.ending, main.held) = (Err(Untold::Away), held(&[2, 9, 1]));
         picker.listed(grown);
         press(&mut picker, KeyCode::Char('y'));
@@ -2571,10 +2571,10 @@ mod tests {
         let mut far = shelved(Machine::Remote("far".parse().unwrap()), vec![housed(
             "old",
             5,
-            vec![tree(place("old", 5, 1), "stale", Some(10), &[7])],
+            vec![worktree(place("old", 5, 1), "stale", Some(10), &[7])],
         )]);
         far.away = Some("unreachable");
-        let gateway = tree(place("api", 4, 1), "gateway", Some(60), &[6]);
+        let gateway = worktree(place("api", 4, 1), "gateway", Some(60), &[6]);
         let shelves = vec![
             shelved(Machine::Local, vec![luneta()]),
             shelved(nixos(), vec![housed("api", 4, vec![gateway])]),

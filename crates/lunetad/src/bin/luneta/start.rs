@@ -179,7 +179,7 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let here = Worked { dir, pull: None, here: true };
     let worked = std::iter::once(here).chain(others).collect();
     let ready = Pasted::new(Work::Link(link.clone()), worked).ready().map_err(said)?;
-    let folder = PathBuf::from(&ready.worktree);
+    let folder = PathBuf::from(&ready.folder);
     let joined = in_clone(path, &folder)?;
     let worktree = joined.worktree();
     let off = Work::Link(link.clone()).off_branch(ready.branch.as_deref());

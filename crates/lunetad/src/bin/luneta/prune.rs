@@ -90,7 +90,7 @@ fn untold(why: &str) -> String {
 fn said_of(outcomes: &[Outcome]) -> ExitCode {
     let mut well = true;
     for outcome in outcomes {
-        let name = name_of(&outcome.worktree);
+        let name = name_of(&outcome.folder);
         match &outcome.came {
             Came::Gone => println!("deleted {name}"),
             Came::WentBut(why) => {
@@ -132,20 +132,20 @@ fn with_it(goes: &Goes) -> String {
 }
 
 fn listed(plan: &Plan) -> Vec<String> {
-    let width = plan.goes.iter().map(|goes| name_of(&goes.worktree).len()).max().unwrap_or(0);
+    let width = plan.goes.iter().map(|goes| name_of(&goes.folder).len()).max().unwrap_or(0);
     let goes = plan.goes.iter().map(|goes| {
-        let (name, number) = (name_of(&goes.worktree), goes.number);
+        let (name, number) = (name_of(&goes.folder), goes.number);
         let bytes = goes.bytes.map_or("?".to_owned(), size);
         format!("delete {name:<width$}  #{number}  {bytes}  {}", with_it(goes))
     });
     let kept = plan
         .kept
         .iter()
-        .map(|kept| format!("keep {} #{}: {}", name_of(&kept.worktree), kept.number, kept.why));
+        .map(|kept| format!("keep {} #{}: {}", name_of(&kept.folder), kept.number, kept.why));
     let unasked = plan
         .unasked
         .iter()
-        .map(|unasked| format!("keep {}: {}", name_of(&unasked.worktree), unasked.why));
+        .map(|unasked| format!("keep {}: {}", name_of(&unasked.folder), unasked.why));
     goes.chain(kept).chain(unasked).collect()
 }
 
@@ -195,7 +195,7 @@ pub fn note(outcomes: &[Outcome]) -> Option<String> {
     let mut stays: Vec<String> = Vec::new();
     let mut gone = 0;
     for outcome in outcomes {
-        let name = name_of(&outcome.worktree);
+        let name = name_of(&outcome.folder);
         match &outcome.came {
             Came::Gone => gone += 1,
             Came::WentBut(why) => {
@@ -230,7 +230,7 @@ mod tests {
     }
 
     fn outcome(name: &str, came: Came) -> Outcome {
-        Outcome { worktree: format!("/w/{name}"), came }
+        Outcome { folder: format!("/w/{name}"), came }
     }
 
     #[test]
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn the_list_says_what_goes_and_why_the_rest_stay() {
         let goes = |name: &str, pushed, bytes| Goes {
-            worktree: format!("/w/{name}"),
+            folder: format!("/w/{name}"),
             branch: name.to_owned(),
             head: "abc".to_owned(),
             number: 7,
@@ -271,12 +271,12 @@ mod tests {
                 goes("tre", Pushed::Nowhere, Some(4096)),
             ],
             kept: vec![prunes::Kept {
-                worktree: "/w/k".to_owned(),
+                folder: "/w/k".to_owned(),
                 number: 8,
                 why: "it has a pane".to_owned(),
             }],
             unasked: vec![prunes::Unasked {
-                worktree: "/w/u".to_owned(),
+                folder: "/w/u".to_owned(),
                 why: "gh failed".to_owned(),
             }],
         };

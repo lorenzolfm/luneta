@@ -91,7 +91,7 @@ const SWEEP: Duration = Duration::from_secs(2);
 
 const TERMINAL_SWEEP: Duration = Duration::from_secs(1);
 
-const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
+const GIT_STATUS_SWEEP: Duration = Duration::from_secs(5);
 
 const FETCH_SWEEP: Duration = Duration::from_mins(5);
 
@@ -193,7 +193,7 @@ pub async fn serve(
     follow(&core, &claim.folder, folders, (watchers.clone(), owns.clone()), end)?;
     panes::follow(core.clone(), wake_panes, panes_woken, Zellij::cache_folder(), SWEEP)?;
     owns::follow(layouts.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
-    git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
+    git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
     github::follow(core.clone(), wake_github, github_woken, rests)?;

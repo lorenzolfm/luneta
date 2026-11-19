@@ -45,8 +45,8 @@ pub enum Command {
     #[command(about = "List the agents that run, and the pane each is in")]
     Agents,
     #[command(
-        about = "List the zellij sessions that run, their panes, and how the work tree each pane \
-                 works in stands"
+        about = "List the zellij sessions that run, their panes, and the git status of the folder \
+                 each pane works in"
     )]
     Sessions,
     #[command(
@@ -603,17 +603,17 @@ fn sessions_of(
                 println!("{indent}  {at}  -");
                 continue;
             };
-            let Some(tree) = git_statuses.iter().find(|tree| tree.dir == cwd) else {
+            let Some(status) = git_statuses.iter().find(|status| status.dir == cwd) else {
                 println!("{indent}  {at}  {cwd}");
                 continue;
             };
-            let stands = stands(tree).unwrap_or_else(|| "(does not read)".to_owned());
+            let stands = stands(status).unwrap_or_else(|| "(does not read)".to_owned());
             let pull_request = pull_requests.iter().find(|it| it.dir == cwd);
             let pulled = pull_request.map(|it| {
                 format!("  {}", pulled(it).unwrap_or_else(|| "(does not read)".to_owned()))
             });
             let pulled = pulled.unwrap_or_default();
-            let repo = match tree.stands.as_ref() {
+            let repo = match status.stands.as_ref() {
                 Some(Stands::Checkout(checkout)) => checkout.repository.as_ref(),
                 Some(Stands::NoCheckout(it)) => Some(&it.repository),
                 Some(Stands::Outside(())) | None => None,
@@ -624,8 +624,8 @@ fn sessions_of(
     }
 }
 
-fn stands(tree: &GitStatus) -> Option<String> {
-    let checkout = match tree.stands.as_ref()? {
+fn stands(status: &GitStatus) -> Option<String> {
+    let checkout = match status.stands.as_ref()? {
         Stands::NoCheckout(_) => return Some("no checkout".to_owned()),
         Stands::Outside(()) => return Some("no repository".to_owned()),
         Stands::Checkout(checkout) => checkout,

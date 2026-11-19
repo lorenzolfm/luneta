@@ -76,14 +76,14 @@ fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Stood {
     };
     match (said, placed) {
         (Ok(stdout), _) => GitStatus::parse(&String::from_utf8_lossy(&stdout), repository)
-            .map(|mut tree| {
-                let uncounted = match &mut tree {
+            .map(|mut status| {
+                let uncounted = match &mut status {
                     GitStatus::Checkout { head: Head::Branch { name, changed, .. }, .. } => {
                         counted(dir, name.as_str(), changed)
                     },
                     _ => None,
                 };
-                (tree, uncounted)
+                (status, uncounted)
             })
             .map_err(|why| format!("git status in {dir} said {why}")),
         (Err(_), Placed::Outside(_)) => Ok((GitStatus::NoCheckout { repository }, None)),
@@ -749,8 +749,8 @@ pub fn follow(
                     troubles.say(trouble.clone());
                 }
                 asked.insert(dir.clone(), Asked { ended, took, changed: moved, placed, trouble });
-                if let Ok((tree, _)) = said
-                    && core.send(core::Command::GitStatus { dir, tree }).is_err()
+                if let Ok((status, _)) = said
+                    && core.send(core::Command::GitStatus { dir, status }).is_err()
                 {
                     return;
                 }

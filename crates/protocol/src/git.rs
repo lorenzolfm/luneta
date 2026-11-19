@@ -104,8 +104,8 @@ impl GitStatus {
     }
 
     #[must_use]
-    pub fn of_api(tree: &v1::GitStatus) -> Option<Self> {
-        let checkout = match tree.stands.as_ref()? {
+    pub fn of_api(status: &v1::GitStatus) -> Option<Self> {
+        let checkout = match status.stands.as_ref()? {
             v1::git_status::Stands::Outside(()) => return Some(GitStatus::Outside),
             v1::git_status::Stands::NoCheckout(it) => {
                 let repository = Said::new(it.repository.clone())?;
@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn a_status_that_does_not_read_is_no_work_tree() {
+    fn a_status_that_does_not_read_is_refused() {
         let head = "# branch.oid 0123abc\n# branch.head main\n";
         let unread = [
             "# branch.head ",
@@ -276,19 +276,20 @@ mod tests {
         for status in ["? new\n", "# branch.head (detached)\n# branch.ab +1 -0\n"] {
             assert!(GitStatus::parse(status, repo()).is_err(), "{status:?}");
         }
-        let tree = GitStatus::parse(&format!("{head}# branch.to-come 1\n? new\n"), repo()).unwrap();
+        let status =
+            GitStatus::parse(&format!("{head}# branch.to-come 1\n? new\n"), repo()).unwrap();
         let GitStatus::Checkout { head: Head::Branch { name, upstream: None, .. }, changes, .. } =
-            tree
+            status
         else {
-            panic!("main, with no upstream: {tree:?}");
+            panic!("main, with no upstream: {status:?}");
         };
         assert_eq!(name.as_str(), "main");
         assert_eq!(changes.untracked, 1);
     }
 
     #[test]
-    fn a_work_tree_reads_back_as_the_daemon_wrote_it() {
-        let statuses = [
+    fn a_git_status_reads_back_as_the_daemon_wrote_it() {
+        let said = [
             "# branch.head main\n",
             "# branch.oid 0123abc\n# branch.head fold\n# branch.upstream origin/fold\n\
              # branch.ab +1 -2\n# stash 3\n1 MM N... 100644 100644 100644 a b README.md\n\
@@ -297,11 +298,11 @@ mod tests {
              1 .D N... 100644 100644 000000 a a gone.rs\n? new\n",
             "# branch.head (detached)\n1 .T N... 100644 100644 120000 a a link\n",
         ];
-        let mut trees: Vec<GitStatus> =
-            statuses.iter().map(|status| GitStatus::parse(status, repo()).unwrap()).collect();
-        trees.push(GitStatus::Outside);
-        trees.push(GitStatus::NoCheckout { repository: repo() });
-        trees.push(GitStatus::Checkout {
+        let mut statuses: Vec<GitStatus> =
+            said.iter().map(|it| GitStatus::parse(it, repo()).unwrap()).collect();
+        statuses.push(GitStatus::Outside);
+        statuses.push(GitStatus::NoCheckout { repository: repo() });
+        statuses.push(GitStatus::Checkout {
             repository: None,
             head: Head::Detached,
             changes: Changes::default(),
@@ -310,14 +311,14 @@ mod tests {
         let name = Said::new("fold".to_owned()).unwrap();
         let changed = Changed::new(120, 34);
         let head = Head::Branch { name, upstream: None, changed };
-        trees.push(GitStatus::Checkout {
+        statuses.push(GitStatus::Checkout {
             repository: None,
             head,
             changes: Changes::default(),
             stashes: 0,
         });
-        for tree in trees {
-            assert_eq!(GitStatus::of_api(&tree.to_api("/w/repo")).as_ref(), Some(&tree));
+        for status in statuses {
+            assert_eq!(GitStatus::of_api(&status.to_api("/w/repo")).as_ref(), Some(&status));
         }
 
         let checkout = |head, changes| {
@@ -335,9 +336,9 @@ mod tests {
         let none = v1::Changed { added: 0, deleted: 0 };
         let head = v1::Branch { name: "fold".to_owned(), upstream: None, changed: Some(none) };
         let stands = checkout(Some(v1::checkout::Head::Branch(head)), Some(v1::Changes::default()));
-        let tree = GitStatus::of_api(&v1::GitStatus { dir: "/w/repo".to_owned(), stands });
-        let Some(GitStatus::Checkout { head: Head::Branch { changed, .. }, .. }) = tree else {
-            panic!("fold: {tree:?}");
+        let status = GitStatus::of_api(&v1::GitStatus { dir: "/w/repo".to_owned(), stands });
+        let Some(GitStatus::Checkout { head: Head::Branch { changed, .. }, .. }) = status else {
+            panic!("fold: {status:?}");
         };
         assert_eq!(changed, None);
         let unread = [
@@ -356,8 +357,8 @@ mod tests {
             })),
         ];
         for stands in unread {
-            let tree = v1::GitStatus { dir: "/w/repo".to_owned(), stands };
-            assert_eq!(GitStatus::of_api(&tree), None, "{tree:?}");
+            let status = v1::GitStatus { dir: "/w/repo".to_owned(), stands };
+            assert_eq!(GitStatus::of_api(&status), None, "{status:?}");
         }
     }
 }

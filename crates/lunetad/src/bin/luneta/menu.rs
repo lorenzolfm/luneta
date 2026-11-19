@@ -1500,14 +1500,14 @@ impl Menu {
         let Stage::Pull { work, agent, step: Step::Waiting(Wait::Pulling(pull)) } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
-        let Found { on, ready: Ready { at, worktree, branch, moved_off, work: readied } } =
+        let Found { on, ready: Ready { at, folder, branch, moved_off, work: readied } } =
             match found {
                 Ok(found) => found,
                 Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
             };
         let off = work.off_branch(branch.as_deref()).filter(|_| moved_off);
         if let (Pull::Agent, Some(off)) = (pull, off) {
-            let wrong = Some(format!("{worktree} is {off}, so no agent starts there; w opens it"));
+            let wrong = Some(format!("{folder} is {off}, so no agent starts there; w opens it"));
             let stage = Stage::Pull { work, agent, step: Step::Choosing { wrong } };
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         }
@@ -1523,12 +1523,12 @@ impl Menu {
                 agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
             },
         };
-        let dir = match Directory::parse(worktree.clone()) {
+        let dir = match Directory::parse(folder.clone()) {
             Ok(dir) => dir,
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
         };
         let opening = |session: Listed, pane: PaneKey, opens: Opens| {
-            let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
+            let (cwd, branch, ran) = (Some(folder.clone()), branch.clone(), Ran::Unhooked);
             let row = PaneRow {
                 session: session.clone(),
                 pane,
@@ -2025,8 +2025,8 @@ fn swept_lines(plan: &prunes::Plan, width: usize, room: usize) -> Vec<Line<'stat
         wrap(&asked_of(plan), width, style)
     };
     lines.push(Line::default());
-    let kept = plan.kept.iter().map(|kept| (&kept.worktree, kept.why.as_str()));
-    let unasked = plan.unasked.iter().map(|unasked| (&unasked.worktree, "luneta could not ask"));
+    let kept = plan.kept.iter().map(|kept| (&kept.folder, kept.why.as_str()));
+    let unasked = plan.unasked.iter().map(|unasked| (&unasked.folder, "luneta could not ask"));
     let keeps: Vec<Vec<Line<'static>>> = kept
         .chain(unasked)
         .map(|(worktree, why)| {
@@ -2062,7 +2062,7 @@ fn goes_lines(goes: &[prunes::Goes], width: usize, room: usize) -> Vec<Line<'sta
     let sizes: Vec<String> = goes.iter().map(size).collect();
     let widest = |all: &[String]| all.iter().take(shown).map(|it| it.width()).max().unwrap_or(0);
     let (numbers_wide, sizes_wide) = (widest(&numbers), widest(&sizes));
-    let names: Vec<&str> = goes.iter().map(|goes| prunes::name_of(&goes.worktree)).collect();
+    let names: Vec<&str> = goes.iter().map(|goes| prunes::name_of(&goes.folder)).collect();
     let names_room = width.saturating_sub(numbers_wide + sizes_wide + 6);
     let longest = names.iter().take(shown).map(|name| name.width()).max().unwrap_or(0);
     let names_wide = longest.min(names_room);
@@ -3340,7 +3340,7 @@ mod tests {
 
     fn merged_plan(names: &[(&str, u32, u64)]) -> prunes::Plan {
         let goes = names.iter().map(|(name, number, megabytes)| prunes::Goes {
-            worktree: format!("/w/luneta/{name}"),
+            folder: format!("/w/luneta/{name}"),
             branch: (*name).to_owned(),
             head: "abc".to_owned(),
             number: *number,
@@ -3386,7 +3386,7 @@ mod tests {
         let goes = [("issue-282", 297, 4608), ("dev-check", 293, 916), ("dev-ci", 303, 6)];
         let mut plan = merged_plan(&goes);
         plan.kept.push(prunes::Kept {
-            worktree: "/w/luneta/issue-308".to_owned(),
+            folder: "/w/luneta/issue-308".to_owned(),
             number: 310,
             why: "it has a pane".to_owned(),
         });
@@ -3425,7 +3425,7 @@ mod tests {
         let mut plan = merged_plan(&[]);
         for name in ["k1", "k2", "k3"] {
             plan.kept.push(prunes::Kept {
-                worktree: format!("/w/luneta/{name}"),
+                folder: format!("/w/luneta/{name}"),
                 number: 1,
                 why: "it is locked".to_owned(),
             });
@@ -4100,12 +4100,12 @@ mod tests {
     #[test]
     fn a_key_for_a_pull_request_opens_where_luneta_found_it_goes() {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
-        let worktree = "/w/cdk/feat-x".to_owned();
+        let folder = "/w/cdk/feat-x".to_owned();
         let branch = Some("feat/x".to_owned());
         let ready = |at| {
-            let (worktree, branch) = (worktree.clone(), branch.clone());
+            let (folder, branch) = (folder.clone(), branch.clone());
             let work = Readied::Link(pull_request());
-            Ok(here(Ready { at, worktree, branch, moved_off: false, work }))
+            Ok(here(Ready { at, folder, branch, moved_off: false, work }))
         };
         let review = [
             "claude",
@@ -4117,7 +4117,7 @@ mod tests {
         for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
             let (menu, wants) = stays(pulling(key).pulled(ready(session())));
             let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-            let cwd = directory(&worktree);
+            let cwd = directory(&folder);
             let pane = PaneKey::Zellij(7);
             assert_eq!(wants, Wants::Open { session: other.clone(), pane, cwd, opens });
             assert_eq!(menu.opening(), Some(other.clone()));
@@ -4131,7 +4131,7 @@ mod tests {
         assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(Machine::Local, place));
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         let opens = Opens::Pane { beside: 9, command: review };
-        let cwd = directory(&worktree);
+        let cwd = directory(&folder);
         let pane = PaneKey::Zellij(9);
         assert_eq!(wants, Wants::Open { session: other.clone(), pane, cwd, opens });
         let Target::Pane(_, row) = menu.target() else { panic!("not a pane's row") };
@@ -4150,11 +4150,11 @@ mod tests {
         let (menu, wants) = stays(menu.key(&tab));
         assert_eq!(wants, Wants::Nothing);
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
-        let worktree = "/w/cdk/feat-x".to_owned();
+        let folder = "/w/cdk/feat-x".to_owned();
         let work = Readied::Link(pull_request());
         let at = At::Session((other.clone(), PaneKey::Zellij(7)));
         let branch = Some("feat/x".to_owned());
-        let ready = Ready { at, worktree: worktree.clone(), branch, moved_off: false, work };
+        let ready = Ready { at, folder: folder.clone(), branch, moved_off: false, work };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
         let review = [
             "pi",
@@ -4162,7 +4162,7 @@ mod tests {
         ];
         let command = review.map(str::to_owned).to_vec();
         let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-        let cwd = directory(&worktree);
+        let cwd = directory(&folder);
         assert_eq!(wants, Wants::Open { session: other, pane: PaneKey::Zellij(7), cwd, opens });
     }
 
@@ -4186,10 +4186,10 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('t')));
         assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
-        let worktree = "/w/cdk/issue-2736".to_owned();
+        let folder = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
             at: At::Session((other.clone(), PaneKey::Zellij(7))),
-            worktree: worktree.clone(),
+            folder: folder.clone(),
             branch: Some("issue-2736".to_owned()),
             moved_off: false,
             work: Readied::Link(link),
@@ -4198,7 +4198,7 @@ mod tests {
         let tackle = ["claude", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
         let command = tackle.map(str::to_owned).to_vec();
         let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-        let cwd = directory(&worktree);
+        let cwd = directory(&folder);
         assert_eq!(wants, Wants::Open { session: other, pane: PaneKey::Zellij(7), cwd, opens });
         assert!(menu.opening().is_some());
     }
@@ -4211,7 +4211,7 @@ mod tests {
         let name = SessionName::parse("cdk").unwrap();
         let ready = Ready {
             at: At::Clone { cwd: directory("/w/cdk"), name },
-            worktree: "/w/cdk/issue-2736".to_owned(),
+            folder: "/w/cdk/issue-2736".to_owned(),
             branch: Some("dev-docs".to_owned()),
             moved_off: true,
             work: Readied::Link(link),
@@ -4266,10 +4266,10 @@ mod tests {
         assert_eq!(wants, Wants::Pull(file(), Wanted::AsItIs));
         assert_eq!(text(&menu.lines(38, 9, 0).0)[1], " ⠋ Making a worktree of sync-rework…");
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
-        let (worktree, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");
+        let (folder, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");
         let ready = || Ready {
             at: At::Session((other.clone(), PaneKey::Zellij(7))),
-            worktree: worktree.to_owned(),
+            folder: folder.to_owned(),
             branch: Some("md-sync-rework".to_owned()),
             moved_off: false,
             work: Readied::File { real: real.to_owned() },
@@ -4286,7 +4286,7 @@ mod tests {
         .to_vec();
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command };
         let session = other.clone();
-        let cwd = directory(worktree);
+        let cwd = directory(folder);
         assert_eq!(wants, Wants::Open { session, pane: PaneKey::Zellij(7), cwd, opens });
 
         let pressed = |key: char| {
@@ -4295,7 +4295,7 @@ mod tests {
         let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command: Vec::new() };
         let session = other.clone();
-        let cwd = directory(worktree);
+        let cwd = directory(folder);
         assert_eq!(wants, Wants::Open { session, pane: PaneKey::Zellij(7), cwd, opens });
 
         assert_eq!(
@@ -4309,8 +4309,8 @@ mod tests {
         let name = SessionName::parse("cdk").unwrap();
         let at = At::Clone { cwd: directory("/w/cdk"), name: name.clone() };
         let work = Readied::Link(pull_request());
-        let worktree = "/w/cdk/feat-x".to_owned();
-        let ready = Ready { at, worktree, branch: None, moved_off: false, work };
+        let folder = "/w/cdk/feat-x".to_owned();
+        let ready = Ready { at, folder, branch: None, moved_off: false, work };
         let (menu, wants) = stays(pulling('w').pulled(Ok(here(ready))));
         assert_eq!(
             wants,
@@ -4338,8 +4338,8 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let ready = |at| {
             let work = Readied::Link(pull_request());
-            let worktree = "/w/cdk/feat-x".to_owned();
-            let ready = Ready { at, worktree, branch: None, moved_off: false, work };
+            let folder = "/w/cdk/feat-x".to_owned();
+            let ready = Ready { at, folder, branch: None, moved_off: false, work };
             Ok(Found { on: vps(), ready })
         };
         let row = || Target::Pane(vps(), row());
@@ -4364,8 +4364,8 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let found = |at| {
             let work = Readied::Link(pull_request());
-            let worktree = "/w/cdk/feat-x".to_owned();
-            let ready = Ready { at, worktree, branch: None, moved_off: false, work };
+            let folder = "/w/cdk/feat-x".to_owned();
+            let ready = Ready { at, folder, branch: None, moved_off: false, work };
             Ok(Found { on: vps(), ready })
         };
         let rows = [session_row(), pane_row(), Target::Machine(Machine::Local)];

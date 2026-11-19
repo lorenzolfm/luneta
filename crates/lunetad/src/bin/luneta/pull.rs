@@ -128,8 +128,8 @@ const UNASKED: &str = "lunetad says the key goes to a view luneta did not ask of
 
 pub fn make(repo: &str, of: &Of) -> ExitCode {
     match links::made(repo, of) {
-        Ok(worktree) => {
-            println!("{}", worktree.display());
+        Ok(folder) => {
+            println!("{}", folder.display());
             ExitCode::SUCCESS
         },
         Err(why) => {
@@ -191,8 +191,8 @@ mod tests {
 
     fn there(at: usize) -> links::Ready<usize> {
         let work = Readied::Link(Link::parse("https://github.com/cashubtc/cdk/pull/5").unwrap());
-        let worktree = "/w/x".to_owned();
-        links::Ready { at: At::Session(at), worktree, branch: None, moved_off: false, work }
+        let folder = "/w/x".to_owned();
+        links::Ready { at: At::Session(at), folder, branch: None, moved_off: false, work }
     }
 
     fn nowhere() -> Result<links::Ready<usize>, Unready> {

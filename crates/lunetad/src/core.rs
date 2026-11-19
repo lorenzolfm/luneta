@@ -56,7 +56,7 @@ pub enum Command {
     Panes { asked: Asked, panes: Vec<Pane> },
     Clients { asked: Asked, clients: Listed },
     Terminals(BTreeMap<ViewId, Located>),
-    GitStatus { dir: String, tree: GitStatus },
+    GitStatus { dir: String, status: GitStatus },
     PullRequests(BTreeMap<String, Found>),
     Shells(Vec<Shell>),
     Topics(HashMap<SessionId, Said>),
@@ -118,7 +118,7 @@ struct Known {
     terminals: BTreeMap<ViewId, Located>,
     panes: HashMap<Id, Vec<Pane>>,
     clients: HashMap<Id, Listed>,
-    trees: BTreeMap<String, GitStatus>,
+    statuses: BTreeMap<String, GitStatus>,
     pull_requests: BTreeMap<String, Found>,
     shells: Vec<Shell>,
     topics: HashMap<SessionId, Said>,
@@ -144,7 +144,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         terminals: BTreeMap::new(),
         panes: HashMap::new(),
         clients: HashMap::new(),
-        trees: BTreeMap::new(),
+        statuses: BTreeMap::new(),
         pull_requests: BTreeMap::new(),
         shells: Vec::new(),
         topics: HashMap::new(),
@@ -200,12 +200,12 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     wake(&wakes.git);
                 }
             },
-            Command::GitStatus { dir, tree } => {
+            Command::GitStatus { dir, status } => {
                 if !known.dirs().contains(&dir) {
                     continue;
                 }
                 let before = known.branch(&dir).map(str::to_owned);
-                known.trees.insert(dir.clone(), tree);
+                known.statuses.insert(dir.clone(), status);
                 if known.branch(&dir).is_some_and(|now| before.as_deref() != Some(now)) {
                     wake(&wakes.github);
                 }
@@ -398,12 +398,12 @@ impl Known {
 
     fn forget_dirs(&mut self) {
         let dirs = self.dirs();
-        self.trees.retain(|dir, _| dirs.contains(dir));
+        self.statuses.retain(|dir, _| dirs.contains(dir));
         self.pull_requests.retain(|dir, _| dirs.contains(dir));
     }
 
     fn branch(&self, dir: &str) -> Option<&str> {
-        match self.trees.get(dir)? {
+        match self.statuses.get(dir)? {
             GitStatus::Checkout { head: Head::Branch { name, .. }, .. } => Some(name.as_str()),
             GitStatus::Checkout { head: Head::Detached, .. }
             | GitStatus::NoCheckout { .. }
@@ -413,22 +413,22 @@ impl Known {
 
     fn branches(&self) -> BTreeMap<String, String> {
         let branch = |dir: &String| Some((dir.clone(), self.branch(dir)?.to_owned()));
-        self.trees.keys().filter_map(branch).collect()
+        self.statuses.keys().filter_map(branch).collect()
     }
 
     fn tracking(&self) -> BTreeMap<String, Branch> {
-        let tracking = |(dir, tree): (&String, &GitStatus)| {
+        let tracking = |(dir, status): (&String, &GitStatus)| {
             let GitStatus::Checkout {
                 repository: Some(repository),
                 head: Head::Branch { name, upstream: Some(_), .. },
                 ..
-            } = tree
+            } = status
             else {
                 return None;
             };
             Some((dir.clone(), Branch { repository: repository.clone(), name: name.clone() }))
         };
-        self.trees.iter().filter_map(tracking).collect()
+        self.statuses.iter().filter_map(tracking).collect()
     }
 
     fn agents(&self) -> Vec<api::Agent> {
@@ -493,7 +493,7 @@ impl Known {
         api::Host {
             version: None,
             sessions,
-            git_statuses: self.trees.iter().map(|(dir, tree)| tree.to_api(dir)).collect(),
+            git_statuses: self.statuses.iter().map(|(dir, status)| status.to_api(dir)).collect(),
             agents,
             unread,
             pull_requests,
@@ -583,7 +583,7 @@ impl Known {
         if self.missing.contains(folder) {
             return Seen::Missing;
         }
-        if !self.trees.contains_key(folder.as_str()) {
+        if !self.statuses.contains_key(folder.as_str()) {
             return Seen::Unread;
         }
         let branch = self.branch(folder.as_str());

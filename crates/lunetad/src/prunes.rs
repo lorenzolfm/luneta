@@ -49,7 +49,7 @@ pub struct Plan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Goes {
-    pub worktree: String,
+    pub folder: String,
     pub branch: String,
     pub head: String,
     pub number: u32,
@@ -66,14 +66,14 @@ pub enum Pushed {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Kept {
-    pub worktree: String,
+    pub folder: String,
     pub number: u32,
     pub why: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unasked {
-    pub worktree: String,
+    pub folder: String,
     pub why: String,
 }
 
@@ -97,7 +97,7 @@ impl Planned {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
-    pub worktree: String,
+    pub folder: String,
     pub came: Came,
 }
 
@@ -116,7 +116,7 @@ pub enum Pruned {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Deleting {
-    pub worktree: String,
+    pub folder: String,
     pub branch: String,
     pub head: String,
     pub number: u32,
@@ -148,7 +148,7 @@ impl Goes {
             Pushed::Nowhere | Pushed::Stays(_) => None,
         };
         Deleting {
-            worktree: self.worktree.clone(),
+            folder: self.folder.clone(),
             branch: self.branch.clone(),
             head: self.head.clone(),
             number: self.number,
@@ -226,10 +226,10 @@ impl Occupied {
         Ok(Occupied { panes, agents })
     }
 
-    fn why_in(&self, worktree: &Path) -> Option<&'static str> {
-        let real = fs::canonicalize(worktree).ok();
+    fn why_in(&self, folder: &Path) -> Option<&'static str> {
+        let real = fs::canonicalize(folder).ok();
         let holds = |dir: &PathBuf| {
-            dir.starts_with(worktree) || real.as_ref().is_some_and(|real| dir.starts_with(real))
+            dir.starts_with(folder) || real.as_ref().is_some_and(|real| dir.starts_with(real))
         };
         if self.panes.iter().any(holds) {
             return Some(A_PANE);
@@ -328,10 +328,10 @@ fn worktrees(common: &str) -> Result<Vec<Listed>, String> {
     says(git, GIT_SAYS, "worktree list").map(|said| parse_listed(&said))
 }
 
-fn clean(worktree: &str) -> Result<bool, String> {
+fn clean(folder: &str) -> Result<bool, String> {
     let mut git = Command::new("git");
     git::local(&mut git).args(["-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false"]);
-    git.args(["-C", worktree, "--no-optional-locks", "status", "--porcelain"]);
+    git.args(["-C", folder, "--no-optional-locks", "status", "--porcelain"]);
     git.arg("--untracked-files=normal");
     says(git, GIT_SAYS, "status").map(|said| said.is_empty())
 }
@@ -360,9 +360,9 @@ fn stays(
     if listed.locked {
         return Ok(Some(LOCKED));
     }
-    let worktree = Path::new(&listed.path);
+    let folder = Path::new(&listed.path);
     let in_it = |other: &Listed| {
-        !other.prunable && other.path != listed.path && Path::new(&other.path).starts_with(worktree)
+        !other.prunable && other.path != listed.path && Path::new(&other.path).starts_with(folder)
     };
     if all.iter().any(in_it) {
         return Ok(Some(HOLDS_ANOTHER));
@@ -370,12 +370,12 @@ fn stays(
     if !clean(&listed.path)? {
         return Ok(Some(CHANGED));
     }
-    if let Some(why) = occupied.why_in(worktree) {
+    if let Some(why) = occupied.why_in(folder) {
         return Ok(Some(why));
     }
     let runs_here = here.is_some_and(|here| {
-        here.starts_with(worktree)
-            || fs::canonicalize(worktree).is_ok_and(|real| here.starts_with(real))
+        here.starts_with(folder)
+            || fs::canonicalize(folder).is_ok_and(|real| here.starts_with(real))
     });
     Ok(runs_here.then_some(RUNS_HERE))
 }
@@ -526,9 +526,9 @@ impl Remotes<'_> {
     }
 }
 
-fn bytes_of(worktree: &str) -> Option<u64> {
+fn bytes_of(folder: &str) -> Option<u64> {
     let mut du = Command::new("du");
-    du.args(["-sk", "--", worktree]);
+    du.args(["-sk", "--", folder]);
     let said = program::run(&mut du, GIT_SAYS).ok()?.answer().ok()?;
     let said = String::from_utf8_lossy(&said);
     let kibibytes: u64 = said.split_whitespace().next()?.parse().ok()?;
@@ -553,7 +553,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
                 merged.push((on, pulled));
             },
             Ok(_) => {},
-            Err(why) => plan.unasked.push(Unasked { worktree: on.listed.path.clone(), why }),
+            Err(why) => plan.unasked.push(Unasked { folder: on.listed.path.clone(), why }),
         }
     }
     let going = sorted_out(&mut plan, merged, &listed, occupied, here, &common)?;
@@ -568,16 +568,16 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
     };
     let mut goes = Vec::new();
     for ((on, pulled, target), others) in going.into_iter().zip(others) {
-        let (worktree, number) = (on.listed.path.clone(), pulled.pull_request.number.get());
+        let (folder, number) = (on.listed.path.clone(), pulled.pull_request.number.get());
         let merged_into = match others {
             Ok(Others::Leave) => None,
             Ok(Others::MergedInto(merged)) => Some(merged),
             Ok(Others::Need(why)) => {
-                plan.kept.push(Kept { worktree, number, why });
+                plan.kept.push(Kept { folder, number, why });
                 continue;
             },
             Err(why) => {
-                plan.unasked.push(Unasked { worktree, why });
+                plan.unasked.push(Unasked { folder, why });
                 continue;
             },
         };
@@ -588,13 +588,13 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
             (pushed, _) => pushed,
         };
         let branch = on.branch.to_owned();
-        goes.push(Goes { worktree, branch, head: pulled.head, number, pushed, bytes: None });
+        goes.push(Goes { folder, branch, head: pulled.head, number, pushed, bytes: None });
     }
-    let bytes = at_once(&goes, || (), |(), goes: &Goes| bytes_of(&goes.worktree));
+    let bytes = at_once(&goes, || (), |(), goes: &Goes| bytes_of(&goes.folder));
     for (goes, bytes) in goes.iter_mut().zip(bytes) {
         goes.bytes = bytes;
     }
-    goes.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.worktree.cmp(&b.worktree)));
+    goes.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.folder.cmp(&b.folder)));
     plan.goes = goes;
     Ok(Planned { plan, common })
 }
@@ -639,16 +639,16 @@ fn sorted_out<'a>(
     let mut defaults: HashMap<String, Result<Option<String>, String>> = HashMap::new();
     let mut going = Vec::new();
     for (on, pulled) in merged {
-        let (worktree, number) = (on.listed.path.clone(), pulled.pull_request.number.get());
+        let (folder, number) = (on.listed.path.clone(), pulled.pull_request.number.get());
         let why = match stays(on.listed, all, &pulled.head, occupied, here) {
             Ok(why) => why,
             Err(why) => {
-                plan.unasked.push(Unasked { worktree, why });
+                plan.unasked.push(Unasked { folder, why });
                 continue;
             },
         };
         if let Some(why) = why {
-            plan.kept.push(Kept { worktree, number, why: why.to_owned() });
+            plan.kept.push(Kept { folder, number, why: why.to_owned() });
             continue;
         }
         let default = match &default {
@@ -663,14 +663,14 @@ fn sorted_out<'a>(
         let far = match far.transpose() {
             Ok(far) => far.flatten(),
             Err(why) => {
-                plan.unasked.push(Unasked { worktree, why });
+                plan.unasked.push(Unasked { folder, why });
                 continue;
             },
         };
         let is_default = |name: &str| name == default.as_str() || far.as_deref() == Some(name);
         let there = target.as_ref().map(|target| target.branch.as_str());
         if is_default(on.branch) || there.is_some_and(is_default) {
-            plan.kept.push(Kept { worktree, number, why: DEFAULT.to_owned() });
+            plan.kept.push(Kept { folder, number, why: DEFAULT.to_owned() });
             continue;
         }
         going.push((on, pulled, target));
@@ -692,7 +692,7 @@ pub fn deleted(
             },
             Err(why) => Came::Stays(why),
         };
-        Outcome { worktree: goes.worktree, came }
+        Outcome { folder: goes.folder, came }
     };
     plan.goes.into_iter().map(outcome).collect()
 }
@@ -719,11 +719,11 @@ fn removed(
 ) -> Result<(), String> {
     stands_as_planned(common, goes, occupied, here)?;
     let Pushed::Goes(far) = &goes.pushed else {
-        return worktree_removed(common, &goes.worktree);
+        return worktree_removed(common, &goes.folder);
     };
     far_branch_deleted(common, &goes.head, far)?;
     stands_as_planned(common, goes, occupied, here)
-        .and_then(|()| worktree_removed(common, &goes.worktree))
+        .and_then(|()| worktree_removed(common, &goes.folder))
         .map_err(|why| format!("{why}; its branch on {} has gone", far.remote))
 }
 
@@ -737,7 +737,7 @@ fn stands_as_planned(
     let all = worktrees(common)?;
     let listed = all
         .iter()
-        .find(|listed| listed.path == goes.worktree)
+        .find(|listed| listed.path == goes.folder)
         .ok_or_else(|| "git lists no such worktree now".to_owned())?;
     if listed.branch.as_deref() != Some(goes.branch.as_str()) {
         return Err(format!("it is no longer on {}", goes.branch));
@@ -748,9 +748,9 @@ fn stands_as_planned(
     }
 }
 
-fn worktree_removed(common: &str, worktree: &str) -> Result<(), String> {
+fn worktree_removed(common: &str, folder: &str) -> Result<(), String> {
     let mut git = on_repository(common);
-    git.args(["-c", "status.showUntrackedFiles=normal", "worktree", "remove", "--", worktree]);
+    git.args(["-c", "status.showUntrackedFiles=normal", "worktree", "remove", "--", folder]);
     says(git, REMOVING, "worktree remove").map(|_| ())
 }
 
@@ -801,7 +801,7 @@ impl From<&Goes> for api::prunes_response::Goes {
             Pushed::Stays(why) => Some(Said::Stays(why.clone())),
         };
         api::prunes_response::Goes {
-            worktree: goes.worktree.clone(),
+            folder: goes.folder.clone(),
             branch: goes.branch.clone(),
             head: goes.head.clone(),
             number: goes.number,
@@ -820,7 +820,7 @@ impl From<api::prunes_response::Goes> for Goes {
             Some(Said::Stays(why)) => Pushed::Stays(why),
         };
         Goes {
-            worktree: goes.worktree,
+            folder: goes.folder,
             branch: goes.branch,
             head: goes.head,
             number: goes.number,
@@ -833,12 +833,12 @@ impl From<api::prunes_response::Goes> for Goes {
 impl From<&Plan> for PrunesResponse {
     fn from(plan: &Plan) -> Self {
         let kept = plan.kept.iter().map(|kept| api::prunes_response::Kept {
-            worktree: kept.worktree.clone(),
+            folder: kept.folder.clone(),
             number: kept.number,
             why: kept.why.clone(),
         });
         let unasked = plan.unasked.iter().map(|unasked| api::prunes_response::Unasked {
-            worktree: unasked.worktree.clone(),
+            folder: unasked.folder.clone(),
             why: unasked.why.clone(),
         });
         PrunesResponse {
@@ -853,14 +853,14 @@ impl From<&Plan> for PrunesResponse {
 impl From<PrunesResponse> for Plan {
     fn from(said: PrunesResponse) -> Self {
         let kept = said.kept.into_iter().map(|kept| Kept {
-            worktree: kept.worktree,
+            folder: kept.folder,
             number: kept.number,
             why: kept.why,
         });
         let unasked = said
             .unasked
             .into_iter()
-            .map(|unasked| Unasked { worktree: unasked.worktree, why: unasked.why });
+            .map(|unasked| Unasked { folder: unasked.folder, why: unasked.why });
         Plan {
             repository: said.repository,
             goes: said.goes.into_iter().map(Into::into).collect(),
@@ -873,7 +873,7 @@ impl From<PrunesResponse> for Plan {
 impl From<&Deleting> for api::prune_request::Deleting {
     fn from(deleting: &Deleting) -> Self {
         api::prune_request::Deleting {
-            worktree: deleting.worktree.clone(),
+            folder: deleting.folder.clone(),
             branch: deleting.branch.clone(),
             head: deleting.head.clone(),
             number: deleting.number,
@@ -885,7 +885,7 @@ impl From<&Deleting> for api::prune_request::Deleting {
 impl From<api::prune_request::Deleting> for Deleting {
     fn from(said: api::prune_request::Deleting) -> Self {
         Deleting {
-            worktree: said.worktree,
+            folder: said.folder,
             branch: said.branch,
             head: said.head,
             number: said.number,
@@ -899,7 +899,7 @@ impl From<&Pruned> for PruneResponse {
         use api::prune_response::outcome::Came as SaidCame;
         use api::prune_response::{Answer, Outcomes};
         let said = |outcome: &Outcome| api::prune_response::Outcome {
-            worktree: outcome.worktree.clone(),
+            folder: outcome.folder.clone(),
             came: Some(match &outcome.came {
                 Came::Gone => SaidCame::Gone(()),
                 Came::WentBut(why) => SaidCame::WentBut(why.clone()),
@@ -930,14 +930,14 @@ pub fn pruned_of(said: PruneResponse) -> Result<Pruned, String> {
 
 fn outcome_of(said: api::prune_response::Outcome) -> Result<Outcome, String> {
     use api::prune_response::outcome::Came as SaidCame;
-    let worktree = said.worktree;
+    let folder = said.folder;
     let came = match said.came {
         Some(SaidCame::Gone(())) => Came::Gone,
         Some(SaidCame::WentBut(why)) => Came::WentBut(why),
         Some(SaidCame::Stays(why)) => Came::Stays(why),
-        None => return Err(format!("lunetad's answer says nothing of how {worktree} went")),
+        None => return Err(format!("lunetad's answer says nothing of how {folder} went")),
     };
-    Ok(Outcome { worktree, came })
+    Ok(Outcome { folder, came })
 }
 
 #[must_use]
@@ -964,9 +964,9 @@ mod tests {
 
     use super::*;
 
-    fn goes(worktree: &str, pushed: Pushed, bytes: Option<u64>) -> Goes {
+    fn goes(folder: &str, pushed: Pushed, bytes: Option<u64>) -> Goes {
         let (branch, head) = ("fix".to_owned(), "abc".to_owned());
-        Goes { worktree: worktree.to_owned(), branch, head, number: 1, pushed, bytes }
+        Goes { folder: folder.to_owned(), branch, head, number: 1, pushed, bytes }
     }
 
     fn plan_of(goes: Vec<Goes>) -> Plan {
@@ -1288,32 +1288,32 @@ mod tests {
     fn git_refuses_to_remove_an_untracked_file_whatever_it_is_set_to_show() {
         let scratch = tempfile::tempdir().unwrap();
         let scratch = scratch.path().canonicalize().unwrap();
-        let (repository, worktree) = (scratch.join("r"), scratch.join("w"));
+        let (repository, folder) = (scratch.join("r"), scratch.join("w"));
         ran(&scratch, &["init", "-q", "-b", "main", repository.to_str().unwrap()]);
         ran(&repository, &["commit", "-q", "--allow-empty", "-m", "one"]);
         ran(&repository, &["config", "status.showUntrackedFiles", "no"]);
-        let at = worktree.to_str().unwrap();
+        let at = folder.to_str().unwrap();
         ran(&repository, &["worktree", "add", "-q", "-b", "w", at]);
-        fs::write(worktree.join("new"), "not yet added").unwrap();
+        fs::write(folder.join("new"), "not yet added").unwrap();
         let common = repository.join(".git");
         let common = common.to_str().unwrap();
         assert!(worktree_removed(common, at).is_err());
-        assert!(worktree.join("new").exists());
-        fs::remove_file(worktree.join("new")).unwrap();
+        assert!(folder.join("new").exists());
+        fs::remove_file(folder.join("new")).unwrap();
         assert_eq!(worktree_removed(common, at), Ok(()));
-        assert!(!worktree.exists());
+        assert!(!folder.exists());
     }
 
     #[test]
     fn a_pane_that_comes_as_its_far_branch_goes_keeps_the_worktree() {
         let scratch = tempfile::tempdir().unwrap();
         let scratch = scratch.path().canonicalize().unwrap();
-        let (up, repository, worktree) = (scratch.join("up"), scratch.join("r"), scratch.join("w"));
+        let (up, repository, folder) = (scratch.join("up"), scratch.join("r"), scratch.join("w"));
         ran(&scratch, &["init", "-q", "--bare", "-b", "main", up.to_str().unwrap()]);
         ran(&scratch, &["init", "-q", "-b", "main", repository.to_str().unwrap()]);
         ran(&repository, &["commit", "-q", "--allow-empty", "-m", "one"]);
         ran(&repository, &["remote", "add", "origin", up.to_str().unwrap()]);
-        let at = worktree.to_str().unwrap();
+        let at = folder.to_str().unwrap();
         ran(&repository, &["worktree", "add", "-q", "-b", "fix", at]);
         ran(&repository, &["push", "-q", "origin", "fix"]);
         let common = repository.join(".git");
@@ -1325,7 +1325,7 @@ mod tests {
             let panes = if remote_heads(common, "origin")?.contains_key("fix") {
                 Vec::new()
             } else {
-                vec![worktree.clone()]
+                vec![folder.clone()]
             };
             Ok(Occupied { panes, agents: Vec::new() })
         };
@@ -1337,7 +1337,7 @@ mod tests {
         let outcomes = deleted(planned, occupied, None);
         let why = "it has a pane; its branch on origin has gone";
         assert_eq!(outcomes[0].came, Came::Stays(why.to_owned()));
-        assert!(worktree.join(".git").is_file());
+        assert!(folder.join(".git").is_file());
         let heads = remote_heads(common, "origin").unwrap();
         assert!(!heads.contains_key("fix"));
     }
@@ -1357,15 +1357,15 @@ mod tests {
             goes("/w/b", Pushed::Goes(on_origin("x")), Some(7)),
             goes("/w/c", Pushed::Stays("moved".to_owned()), Some(0)),
         ];
-        let kept = vec![Kept { worktree: "/w/d".to_owned(), number: 2, why: "pane".to_owned() }];
-        let unasked = vec![Unasked { worktree: "/w/e".to_owned(), why: "gh".to_owned() }];
+        let kept = vec![Kept { folder: "/w/d".to_owned(), number: 2, why: "pane".to_owned() }];
+        let unasked = vec![Unasked { folder: "/w/e".to_owned(), why: "gh".to_owned() }];
         let plan = Plan { repository: "/w".to_owned(), goes, kept, unasked };
         assert_eq!(Plan::from(PrunesResponse::from(&plan)), plan);
         let agreed = plan.deletes();
         let dir = Directory::parse("/w".to_owned()).unwrap();
         let said = told(None, &dir, &agreed).agreed.into_iter().map(Into::into);
         assert_eq!(said.collect::<BTreeSet<Deleting>>(), agreed);
-        let outcome = |worktree: &str, came| Outcome { worktree: worktree.to_owned(), came };
+        let outcome = |folder: &str, came| Outcome { folder: folder.to_owned(), came };
         let went = Pruned::Went(vec![
             outcome("/w/a", Came::Gone),
             outcome("/w/b", Came::WentBut("x".to_owned())),
@@ -1380,7 +1380,7 @@ mod tests {
     fn an_answer_that_says_nothing_of_how_it_went_does_not_read() {
         use api::prune_response::{Answer, Outcome, Outcomes};
         assert!(pruned_of(PruneResponse { answer: None }).is_err());
-        let outcomes = vec![Outcome { worktree: "/w/a".to_owned(), came: None }];
+        let outcomes = vec![Outcome { folder: "/w/a".to_owned(), came: None }];
         let answer = Some(Answer::Deleted(Outcomes { outcomes }));
         assert_eq!(
             pruned_of(PruneResponse { answer }),

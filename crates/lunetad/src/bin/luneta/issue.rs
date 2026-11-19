@@ -325,8 +325,8 @@ mod tests {
         in_worktree(on, "main")
     }
 
-    fn in_worktree(on: Machine, worktree: &str) -> Repository {
-        let dir = Directory::parse(format!("/w/luneta/{worktree}")).unwrap();
+    fn in_worktree(on: Machine, subfolder: &str) -> Repository {
+        let dir = Directory::parse(format!("/w/luneta/{subfolder}")).unwrap();
         Repository { on, dir, home: "/w/luneta".to_owned(), name: "luneta".to_owned() }
     }
 

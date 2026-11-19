@@ -424,7 +424,7 @@ message PasteResponse {
     uint32 session = 2;
     Clone clone = 3;
   }
-  string worktree = 4;
+  string folder = 4;
   optional string branch = 5;
   optional string file = 6;
   bool at_head = 7;
@@ -796,7 +796,7 @@ message PrunesResponse {
   repeated Unasked unasked = 4;
 
   message Goes {
-    string worktree = 1;
+    string folder = 1;
     string branch = 2;
     string head = 3;
     uint32 number = 4;
@@ -813,13 +813,13 @@ message PrunesResponse {
   }
 
   message Kept {
-    string worktree = 1;
+    string folder = 1;
     uint32 number = 2;
     string why = 3;
   }
 
   message Unasked {
-    string worktree = 1;
+    string folder = 1;
     string why = 2;
   }
 }
@@ -830,7 +830,7 @@ message PruneRequest {
   repeated Deleting agreed = 3;
 
   message Deleting {
-    string worktree = 1;
+    string folder = 1;
     string branch = 2;
     string head = 3;
     uint32 number = 4;
@@ -849,7 +849,7 @@ message PruneResponse {
   }
 
   message Outcome {
-    string worktree = 1;
+    string folder = 1;
     oneof came {
       google.protobuf.Empty gone = 2;
       string went_but = 3;

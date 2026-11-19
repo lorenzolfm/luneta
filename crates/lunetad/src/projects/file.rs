@@ -97,13 +97,13 @@ struct KeptProject {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum KeptHolds {
-    Folder(KeptFolder),
-    Clone(Vec<KeptWorktree>),
+    Folder(KeptFolderWorktree),
+    Clone(Vec<KeptCloneWorktree>),
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct KeptFolder {
+struct KeptFolderWorktree {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -117,7 +117,7 @@ struct KeptFolder {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct KeptWorktree {
+struct KeptCloneWorktree {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -933,7 +933,7 @@ impl KeptProject {
         let holds = match self.holds {
             KeptHolds::Folder(own) => Holds::Folder(own.read()?),
             KeptHolds::Clone(rows) => {
-                let rows = rows.into_iter().map(KeptWorktree::read);
+                let rows = rows.into_iter().map(KeptCloneWorktree::read);
                 Holds::Clone(rows.collect::<Result<_, _>>()?)
             },
         };
@@ -942,9 +942,9 @@ impl KeptProject {
 
     fn of(project: &Project) -> KeptProject {
         let holds = match &project.holds {
-            Holds::Folder(own) => KeptHolds::Folder(KeptFolder::of(own)),
+            Holds::Folder(own) => KeptHolds::Folder(KeptFolderWorktree::of(own)),
             Holds::Clone(rows) => {
-                let rows = rows.iter().map(|(subfolder, it)| KeptWorktree::of(subfolder, it));
+                let rows = rows.iter().map(|(subfolder, it)| KeptCloneWorktree::of(subfolder, it));
                 KeptHolds::Clone(rows.collect())
             },
         };
@@ -957,11 +957,11 @@ impl KeptProject {
     }
 
     fn counted(&self) -> impl Iterator<Item = Counted<'_>> {
-        let (own, rows): (_, &[KeptWorktree]) = match &self.holds {
+        let (own, rows): (_, &[KeptCloneWorktree]) = match &self.holds {
             KeptHolds::Folder(own) => (Some(own.counted()), &[]),
             KeptHolds::Clone(rows) => (None, rows),
         };
-        own.into_iter().chain(rows.iter().map(KeptWorktree::counted))
+        own.into_iter().chain(rows.iter().map(KeptCloneWorktree::counted))
     }
 }
 
@@ -988,14 +988,14 @@ fn read_worktree(
     })
 }
 
-impl KeptFolder {
+impl KeptFolderWorktree {
     fn read(self) -> Result<Worktree, String> {
         let layout = self.layout.or(self.view);
         read_worktree(&self.id, self.name.as_deref(), layout, self.used_millis)
     }
 
-    fn of(worktree: &Worktree) -> KeptFolder {
-        KeptFolder {
+    fn of(worktree: &Worktree) -> KeptFolderWorktree {
+        KeptFolderWorktree {
             id: worktree.id.to_string(),
             name: worktree.renamed.as_ref().map(|name| name.0.clone()),
             layout: KeptLayout::of(&worktree.layout),
@@ -1010,7 +1010,7 @@ impl KeptFolder {
     }
 }
 
-impl KeptWorktree {
+impl KeptCloneWorktree {
     fn read(self) -> Result<(Subfolder, Worktree), String> {
         let layout = self.layout.or(self.view);
         let worktree = read_worktree(&self.id, self.name.as_deref(), layout, self.used_millis)?;
@@ -1018,10 +1018,11 @@ impl KeptWorktree {
         Ok((Subfolder::parse(&self.subfolder).map_err(at)?, worktree))
     }
 
-    fn of(subfolder: &Subfolder, worktree: &Worktree) -> KeptWorktree {
-        let KeptFolder { id, name, layout, view, used_millis } = KeptFolder::of(worktree);
+    fn of(subfolder: &Subfolder, worktree: &Worktree) -> KeptCloneWorktree {
+        let KeptFolderWorktree { id, name, layout, view, used_millis } =
+            KeptFolderWorktree::of(worktree);
         let subfolder = subfolder.as_str().to_owned();
-        KeptWorktree { id, name, subfolder, layout, view, used_millis }
+        KeptCloneWorktree { id, name, subfolder, layout, view, used_millis }
     }
 
     fn counted(&self) -> Counted<'_> {
