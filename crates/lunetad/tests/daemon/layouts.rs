@@ -623,7 +623,7 @@ fn a_worktree_s_last_focus_comes_back_when_lunetad_starts_again() {
     shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(middle)) }));
     shown.until("the middle terminal focused", |laid| focused_of(laid) == Some(middle));
     drop(shown);
-    let kept_focus = format!(r#""focus": "{middle:016x}""#);
+    let kept_focus = format!(r#""last_focus": "{middle:016x}""#);
     eventually("the focus is kept within a sweep", || {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&kept_focus).then_some(())
     });

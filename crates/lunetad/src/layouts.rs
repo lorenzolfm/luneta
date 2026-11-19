@@ -963,6 +963,8 @@ impl Layouts {
         }
         self.changed(Change::Focus { view })?;
         self.client(client).focus = Some(view);
+        let last_focus = self.layout(worktree).map(Layout::last_focus);
+        assert_eq!(last_focus, Ok(Some(view)), "view {view} is its worktree's last focus");
         Ok(())
     }
 
@@ -999,6 +1001,8 @@ impl Layouts {
         self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
         self.spawned(terminal, &cwd, &opens, inner)?;
         self.client(client).focus = Some(terminal.view());
+        let last_focus = self.layout(worktree).map(Layout::last_focus);
+        assert_eq!(last_focus, Ok(Some(terminal.view())), "terminal {terminal} opens focused");
         Ok(())
     }
 
@@ -1016,6 +1020,8 @@ impl Layouts {
         assert_eq!(held_in, Some(worktree), "welcome view {view} opened in its worktree");
         assert!(projects.holding_terminal(view).is_none(), "welcome view {view} runs no terminal");
         self.client(client).focus = Some(view);
+        let last_focus = self.layout(worktree).map(Layout::last_focus);
+        assert_eq!(last_focus, Ok(Some(view)), "welcome view {view} opens focused");
         Ok(())
     }
 
@@ -1464,26 +1470,25 @@ impl Layouts {
         };
         let shown = self.clients.values().filter(|it| Some(it.worktree) == bound || follows(it));
         let size = fit(shown, target, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
-        let moved = self.store.change(Change::Move { terminal, to, size }).map_err(said)?;
+        let followed = self.clients.values().any(follows);
+        let move_to = Change::Move { terminal, to, size, focused: followed };
+        let moved = self.store.change(move_to).map_err(said)?;
         let Some(Made::Worktree(to) | Made::Found(to)) = moved else {
             unreachable!("a move says the worktree it went to, not {moved:?}");
         };
-        let mut followed = false;
-        for client in self.clients.values_mut() {
-            if follows(client) {
-                client.worktree = to;
-                followed = true;
-            }
+        for client in self.clients.values_mut().filter(|client| follows(client)) {
+            client.worktree = to;
         }
         if followed {
-            if let Err(why) = self.changed(Change::Focus { view }) {
-                self.troubles.say(format!("terminal {terminal}'s focus is not kept: {why}"));
-            }
             self.went(to);
         }
         let projects = self.store.projects().expect("projects just changed are kept");
-        let held_in = projects.holding_terminal(view).map(|(it, _)| it.id());
-        assert_eq!(held_in, Some(to), "terminal {terminal} moved to worktree {to}");
+        let (held_in, _) = projects.holding_terminal(view).expect("a terminal moved is held");
+        assert_eq!(held_in.id(), to, "terminal {terminal} moved to worktree {to}");
+        if followed {
+            let last_focus = held_in.layout().last_focus();
+            assert_eq!(last_focus, Some(view), "terminal {terminal} is focused where it went");
+        }
         assert!(!self.clients.values().any(follows), "no client of {from} focuses {terminal}");
         Ok(())
     }
@@ -1779,7 +1784,10 @@ fn placement(
 fn arrival(worktree: &Worktree) -> Option<ViewId> {
     let layout = worktree.layout();
     let first = || layout.views().next().map(layout::Leaf::id);
-    layout.full().or(layout.focus()).or_else(first)
+    let arrived = layout.full().or(layout.last_focus()).or_else(first);
+    let held = arrived.is_none_or(|view| layout.holds(view));
+    assert!(held, "a client arrives on a view of worktree {}", worktree.id());
+    arrived
 }
 
 fn tag(terminal: ViewId) -> Vec<u8> {

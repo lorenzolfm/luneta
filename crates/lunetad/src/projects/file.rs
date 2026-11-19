@@ -52,7 +52,7 @@ const WITHOUT_WELCOMES: u32 = 7;
 
 const ROWS_UNOPENED: u32 = 8;
 
-const WITHOUT_FOCUS: u32 = 9;
+const WITHOUT_LAST_FOCUS: u32 = 9;
 
 const CHAR_BYTES_MAX: usize = 4;
 
@@ -178,7 +178,7 @@ struct KeptLayout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     full: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    focus: Option<String>,
+    last_focus: Option<String>,
     tree: Vec<KeptNode>,
 }
 
@@ -716,8 +716,8 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     let unrun = |node: &KeptNode| {
         matches!(node, KeptNode::Terminal(KeptTerminal { runs: KeptRuns::Unrun(_), .. }))
     };
-    if version <= WITHOUT_FOCUS && laid().any(|it| it.focus.is_some()) {
-        return Err(format!("it is of version {version}, which holds no focus"));
+    if version <= WITHOUT_LAST_FOCUS && laid().any(|it| it.last_focus.is_some()) {
+        return Err(format!("it is of version {version}, which keeps no last focus"));
     }
     if version <= WITHOUT_WELCOMES && nodes().any(|it| matches!(it, KeptNode::Welcome(_))) {
         return Err(format!("it is of version {version}, which holds no welcome"));
@@ -1078,7 +1078,7 @@ impl UnrootedWorktree {
 impl KeptLayout {
     fn read(self) -> Result<Layout, String> {
         let full = self.full.as_deref().map(str::parse).transpose()?;
-        let focus = self.focus.as_deref().map(str::parse).transpose()?;
+        let last_focus = self.last_focus.as_deref().map(str::parse).transpose()?;
         let tree = self.tree.into_iter().map(|node| match node {
             KeptNode::Split(KeptSplit { towards, share }) => {
                 Ok(Preordered::Split { towards: towards.read(), share })
@@ -1090,7 +1090,7 @@ impl KeptLayout {
                 id.parse().map(|id| Preordered::View(View::Welcome(id)))
             },
         });
-        Layout::read(tree.collect::<Result<_, String>>()?, full, focus)
+        Layout::read(tree.collect::<Result<_, String>>()?, full, last_focus)
     }
 
     fn of(layout: &Layout) -> Option<KeptLayout> {
@@ -1106,8 +1106,8 @@ impl KeptLayout {
             },
         });
         let full = layout.full().map(|full| full.to_string());
-        let focus = layout.focus().map(|focus| focus.to_string());
-        Some(KeptLayout { full, focus, tree: tree.collect() })
+        let last_focus = layout.last_focus().map(|focus| focus.to_string());
+        Some(KeptLayout { full, last_focus, tree: tree.collect() })
     }
 }
 
@@ -1525,7 +1525,7 @@ mod tests {
             "worktree": "top",
             "layout": {
               "full": "0000000000000005",
-              "focus": "0000000000000003",
+              "last_focus": "0000000000000003",
               "tree": [
                 {
                   "split": {
@@ -1578,17 +1578,18 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        let astray = r#""focus": "0000000000000009""#;
-        let refused = parse(&want.replace(r#""focus": "0000000000000003""#, astray)).unwrap_err();
+        let astray = r#""last_focus": "0000000000000009""#;
+        let focused = r#""last_focus": "0000000000000003""#;
+        let refused = parse(&want.replace(focused, astray)).unwrap_err();
         assert!(refused.contains("holds no view 0000000000000009 to focus"), "{refused}");
-        let unfocused = want.replace("\n              \"focus\": \"0000000000000003\",", "");
+        let unfocused = want.replace(&format!("\n              {focused},"), "");
         let read = parse(&unfocused).unwrap();
         let (_, top) = read.find(worktree).unwrap();
-        assert_eq!(top.layout().focus(), None, "a layout kept with no focus focuses none");
+        assert_eq!(top.layout().last_focus(), None, "a layout kept with no last focus has none");
         for before in [7, 8, 9] {
             let version = format!(r#""version": {before}"#);
             assert_eq!(parse(&unfocused.replace(r#""version": 10"#, &version)), Ok(read.clone()));
-            let refused = format!("it is of version {before}, which holds no focus");
+            let refused = format!("it is of version {before}, which keeps no last focus");
             assert_eq!(parse(&want.replace(r#""version": 10"#, &version)), Err(refused));
         }
         let viewed = unfocused.replace(r#""version": 10"#, r#""version": 6"#);

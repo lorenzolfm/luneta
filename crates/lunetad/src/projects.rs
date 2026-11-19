@@ -563,7 +563,7 @@ pub enum Change {
     Open { worktree: WorktreeId, view: View, placed: Placed, size: Size },
     Close { view: ViewId },
     Unopen { terminal: TerminalViewId },
-    Move { terminal: TerminalViewId, to: MoveTo, size: Size },
+    Move { terminal: TerminalViewId, to: MoveTo, size: Size, focused: bool },
     Resize {
         view: ViewId,
         sides: layout::Sides,
@@ -1089,7 +1089,7 @@ impl Projects {
                 self.close_view(&mut changed, terminal.view())?;
                 None
             },
-            Change::Move { terminal, to, size } => {
+            Change::Move { terminal, to, size, focused } => {
                 let held_in = self.holding_terminal(terminal.view()).map(|(it, _)| it.id());
                 let from = held_in.ok_or_else(|| unknown("terminal", terminal))?;
                 let to = match to {
@@ -1113,7 +1113,11 @@ impl Projects {
                 let moved = layout.terminal_mut(terminal).clone();
                 layout.closed(terminal.view());
                 changed.left(from);
-                changed.worktree_mut(to)?.layout.opened(View::Terminal(moved), placed, size)?;
+                let landed = &mut changed.worktree_mut(to)?.layout;
+                landed.opened(View::Terminal(moved), placed, size)?;
+                if focused {
+                    landed.focused(terminal.view());
+                }
                 let held_in = changed.holding_terminal(terminal.view()).map(|(it, _)| it.id());
                 assert_eq!(held_in, Some(to), "terminal {terminal} moved to worktree {to}");
                 Some(self.made(to))
@@ -2388,7 +2392,7 @@ mod tests {
         (projects, _) = change(&projects, Change::RenameTerminal { terminal: two, to: name }).unwrap();
         let size = Size::of(80, 24).unwrap();
         let moving = |terminal: ViewId, to| {
-            Change::Move { terminal: TerminalViewId::new(terminal), to, size }
+            Change::Move { terminal: TerminalViewId::new(terminal), to, size, focused: false }
         };
         let made;
         (projects, made) = change(&projects, moving(two, MoveTo::Worktree(feat))).unwrap();
@@ -2415,32 +2419,36 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_s_focus_is_the_view_opened_or_focused_last_and_goes_to_the_heir_of_one_gone() {
+    fn a_layout_s_last_focus_is_the_view_opened_or_focused_last_and_goes_to_the_heir_of_one_gone() {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let main = worktree(&mut projects, luneta, "/w/luneta/main");
         let feat = worktree(&mut projects, luneta, "/w/luneta/feat");
         let (one, four) = (first(&projects, main), first(&projects, feat));
-        let focus = |projects: &Projects, worktree| layout(projects, worktree).focus();
-        assert_eq!(focus(&projects, main), None, "a worktree's first view is focused by none yet");
+        let last_focus = |projects: &Projects, worktree| layout(projects, worktree).last_focus();
+        assert_eq!(last_focus(&projects, main), None, "no view is focused in a new worktree yet");
         let right = Placed::Beside { at: one, towards: layout::Towards::Right };
         let two = opened(&mut projects, main, 101, right);
-        assert_eq!(focus(&projects, main), Some(two), "a view opened takes the focus");
+        assert_eq!(last_focus(&projects, main), Some(two), "a view opened takes the focus");
         (projects, _) = change(&projects, Change::Focus { view: one }).unwrap();
-        assert_eq!(focus(&projects, main), Some(one));
+        assert_eq!(last_focus(&projects, main), Some(one));
         let down = Placed::Beside { at: two, towards: layout::Towards::Down };
         let three = opened(&mut projects, main, 102, down);
         (projects, _) = change(&projects, Change::Focus { view: two }).unwrap();
 
         (projects, _) = change(&projects, Change::Close { view: two }).unwrap();
-        assert_eq!(focus(&projects, main), Some(three), "a closed view's heir takes the focus");
+        assert_eq!(last_focus(&projects, main), Some(three), "a closed view's heir takes it");
         let size = Size::of(80, 24).unwrap();
         let (terminal, to) = (TerminalViewId::new(three), MoveTo::Worktree(feat));
-        (projects, _) = change(&projects, Change::Move { terminal, to, size }).unwrap();
-        assert_eq!(focus(&projects, main), Some(one), "and a moved view's heir");
-        assert_eq!(focus(&projects, feat), None, "a moved view takes no focus where it goes");
+        let unfollowed = Change::Move { terminal, to, size, focused: false };
+        (projects, _) = change(&projects, unfollowed).unwrap();
+        assert_eq!(last_focus(&projects, main), Some(one), "and a moved view's heir");
+        assert_eq!(last_focus(&projects, feat), None, "a moved view takes no focus where it goes");
         (projects, _) = change(&projects, Change::Focus { view: four }).unwrap();
-        assert_eq!((focus(&projects, main), focus(&projects, feat)), (Some(one), Some(four)));
+        let followed = Change::Move { terminal, to: MoveTo::Worktree(main), size, focused: true };
+        (projects, _) = change(&projects, followed).unwrap();
+        let both = (last_focus(&projects, main), last_focus(&projects, feat));
+        assert_eq!(both, (Some(three), Some(four)), "unless a client followed it there");
         let gone = change(&projects, Change::Focus { view: two });
         assert!(gone.unwrap_err().contains("has the id"), "a view gone takes no focus");
     }
