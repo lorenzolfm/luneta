@@ -1541,10 +1541,10 @@ impl Sidebar {
         self.shelve(&host);
         for shelf in self.shelves.iter().filter(|shelf| shelf.kept && shelf.unlisted == 0) {
             let machine = &shelf.machine;
-            let mut live = Vec::new();
-            if !shelf.projects.is_empty() {
-                live.push(Fold::Machine(machine));
+            if shelf.projects.is_empty() && self.folds.contains(Fold::Machine(machine)) {
+                self.folds.set(Fold::Machine(machine), false);
             }
+            let mut live = Vec::new();
             for known in &shelf.projects {
                 live.push(Fold::Project(machine, known.project.id()));
                 let worktrees = known.worktrees.iter();
@@ -2467,6 +2467,16 @@ impl Sidebar {
         self.rows.iter().position(|row| row.spot() == *spot)
     }
 
+    fn machine_row(&self, machine: &Machine) -> (&str, Option<&Away>, Heads) {
+        let found = self.rows.iter().find_map(|row| match row {
+            Row::Machine { machine: of, name, away, heads } => {
+                (of == machine).then_some((name.as_str(), away.as_ref(), *heads))
+            },
+            Row::Project { .. } | Row::Worktree { .. } | Row::Pane { .. } => None,
+        });
+        found.expect("a machine's rows sit under its own")
+    }
+
     fn home_row(&self, at: usize) -> Option<usize> {
         let row = &self.rows[at];
         if !matches!(row, Row::Pane { .. }) {
@@ -2547,31 +2557,27 @@ impl Sidebar {
         let Some(spot) = self.cursor.clone() else {
             return;
         };
-        let Some(mut folding) = self.folding(&spot) else {
+        let Some(folding) = self.folding(&spot) else {
             return;
         };
         let machine = spot.machine();
-        let bare = |row: &Row| match row {
-            Row::Project { under, .. } | Row::Worktree { under, .. } => *under != Under::Rows,
-            Row::Machine { .. } | Row::Pane { .. } => false,
+        let lifted = match self.row_of(&spot).map(|at| &self.rows[at]) {
+            Some(Row::Worktree { under, .. }) if folded && *under != Under::Rows => {
+                spot.place().and_then(|place| place.listed().project()).map(Folding::Project)
+            },
+            Some(Row::Project { under, .. }) if folded && *under != Under::Rows => {
+                Some(Folding::Machine)
+            },
+            _ => None,
         };
-        if folded && self.row_of(&spot).is_some_and(|at| bare(&self.rows[at])) {
-            folding = match folding {
-                Folding::Worktree(_) => {
-                    let project = spot.place().and_then(|place| place.listed().project());
-                    project.map_or(folding, Folding::Project)
-                },
-                Folding::Project(_) => Folding::Machine,
-                Folding::Machine => unreachable!("a machine's row is never bare"),
-            };
-        }
-        let header = Spot::Machine(machine.clone());
+        let folding = lifted.unwrap_or(folding);
         if folding == Folding::Machine {
-            let at = self.row_of(&header).expect("a machine's rows sit under its own");
-            if matches!(self.rows[at], Row::Machine { heads: Heads::Nothing, .. }) {
+            let (_, _, heads) = self.machine_row(&machine);
+            if heads == Heads::Nothing {
                 return;
             }
         }
+        let header = Spot::Machine(machine.clone());
         let (fold, row) = match folding {
             Folding::Machine => (Fold::Machine(&machine), Some(header)),
             Folding::Project(project) => (Fold::Project(&machine, project), project_of(&spot)),
@@ -4381,16 +4387,12 @@ impl Sidebar {
         if self.keys != Keys::Sidebar {
             return None;
         }
-        let header = Spot::Machine(self.cursor.as_ref()?.machine());
-        let at = self.row_of(&header).expect("a machine's rows sit under its own");
-        match &self.rows[at] {
-            Row::Machine { name, away: Some(Away::Unreached { why, .. }), .. } => {
+        let machine = self.cursor.as_ref()?.machine();
+        match self.machine_row(&machine) {
+            (name, Some(Away::Unreached { why, .. }), _) => {
                 Some(format!("{name}: {why}; what ssh said is in {}", lunetad::log::NAME))
             },
-            Row::Machine { away: None | Some(Away::Reaching), .. } => None,
-            Row::Project { .. } | Row::Worktree { .. } | Row::Pane { .. } => {
-                unreachable!("a machine's spot is its own row")
-            },
+            (_, None | Some(Away::Reaching), _) => None,
         }
     }
 
@@ -9882,6 +9884,20 @@ mod tests {
         let lines = screen(&mut sidebar, false, 32, 14);
         assert_eq!(lines[3], " ▾ \u{f108} mac ═════════════════════");
         assert_eq!(lines[7], " ▾ \u{f108} nixos ════════════════ ●1");
+    }
+
+    #[test]
+    fn a_machine_s_fold_no_luneta_saw_go_goes_on_the_first_listing() {
+        let mut sidebar = fresh();
+        sidebar.folds.set(Fold::Machine(&Machine::Local), true);
+        sidebar.hear(host(Vec::new(), Vec::new()));
+        assert!(!sidebar.folds.contains(Fold::Machine(&Machine::Local)));
+        sidebar.hear(host(vec![session("x", 10, Vec::new())], Vec::new()));
+        let lines = screen(&mut sidebar, false, 32, 6);
+        assert_eq!(
+            lines[3..5],
+            [" ▾ \u{f108} mac ═════════════════════", " ▾ x ─────────────────────────"]
+        );
     }
 
     #[test]
