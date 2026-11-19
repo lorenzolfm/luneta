@@ -2379,14 +2379,33 @@ pub struct AllKeys {
 struct KeysRow {
     keys: String,
     does: String,
-    notes: &'static [&'static str],
+    setup: &'static [&'static str],
 }
 
 impl KeysRow {
     fn of(action: Action, keys: String) -> KeysRow {
-        KeysRow { keys, does: action.name().to_owned(), notes: action.notes() }
+        KeysRow { keys, does: action.name().to_owned(), setup: action.setup() }
     }
 }
+
+const SETUP_INDENT: &str = "  ";
+
+const _: () = {
+    let room = sidebar::COLUMNS as usize - 1 - SETUP_INDENT.len();
+    let mut at = 0;
+    while at < Action::ALL.len() {
+        let setup = Action::ALL[at].setup();
+        let mut line = 0;
+        while line < setup.len() {
+            let cells = "a setup line is ASCII, so its bytes are its cells";
+            assert!(setup[line].is_ascii(), "{}", cells);
+            let whole = "a setup line is drawn whole in the sidebar at the width it opens at";
+            assert!(setup[line].len() <= room, "{}", whole);
+            line += 1;
+        }
+        at += 1;
+    }
+};
 
 impl AllKeys {
     fn groups() -> [(&'static str, Vec<KeysRow>); 5] {
@@ -2394,7 +2413,7 @@ impl AllKeys {
             let row = |(label, does): &(Label, &str)| KeysRow {
                 keys: label.to_string(),
                 does: (*does).to_owned(),
-                notes: &[],
+                setup: &[],
             };
             keys.iter().map(row).collect()
         };
@@ -2426,7 +2445,7 @@ impl AllKeys {
             let column = keys.iter().map(|row| row.keys.width()).max().unwrap_or(0);
             for row in keys {
                 rows.push(keys_line_of(&row.keys, column, &row.does, inner));
-                rows.extend(row.notes.iter().map(|note| note_line(note, inner)));
+                rows.extend(row.setup.iter().map(|line| setup_line(line, inner)));
             }
         }
         rows
@@ -2518,11 +2537,10 @@ fn keys_line_of(keys: &str, column: usize, does: &str, inner: usize) -> Line<'st
     ])
 }
 
-fn note_line(note: &str, inner: usize) -> Line<'static> {
-    let indent = "  ";
-    let room = inner.saturating_sub(indent.width());
+fn setup_line(line: &str, inner: usize) -> Line<'static> {
+    let room = inner.saturating_sub(SETUP_INDENT.width());
     let dim = Style::new().add_modifier(Modifier::DIM);
-    Line::from(vec![Span::raw(indent), Span::styled(sidebar::cut(note, room), dim)])
+    Line::from(vec![Span::raw(SETUP_INDENT), Span::styled(sidebar::cut(line, room), dim)])
 }
 
 fn all_keys_line(inner: usize) -> Line<'static> {
