@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -23,6 +24,12 @@ const GROW: &str = "\x1b[61;3u";
 
 const SHRINK: &str = "\x1b[45;3u";
 
+const SIDEBAR: &str = "\x1b[97;5u";
+
+const MENU: &str = "\x1b[97;3u";
+
+const WELCOMES: &str = "d d  close it";
+
 
 const CLOSE: &str = "\x1b[97;3udd";
 
@@ -33,6 +40,17 @@ fn seam(window: &Window) -> Option<usize> {
         let (at, _) = line.char_indices().filter(|(_, c)| *c == '╭').nth(1)?;
         Some(line[..at].chars().count())
     })
+}
+
+fn tops(window: &Window) -> Vec<(usize, usize)> {
+    let screen = window.screen();
+    let edge = screen.first().and_then(|line| line.chars().position(|it| it == '│'));
+    let edge = edge.expect("the sidebar's edge is drawn");
+    let tops = screen.iter().enumerate().flat_map(|(row, line)| {
+        let right = line.chars().enumerate().skip(edge);
+        right.filter(|(_, it)| *it == '╭').map(move |(column, _)| (row, column))
+    });
+    tops.collect()
 }
 
 #[test]
@@ -111,6 +129,93 @@ fn the_menu_opens_a_welcome_view_beside_the_terminal_and_d_d_in_it_closes_it() {
         (frames(&window) == Some(1) && !window.shows("runs no terminal")).then_some(())
     });
     assert_eq!(ids(), terminals);
+}
+
+#[test]
+fn a_view_opened_from_the_sidebar_or_its_menu_takes_the_keys() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    let mut before = tops(&window);
+    for (keys, count) in [(format!("{SIDEBAR}nv"), 2), (format!("{SIDEBAR}{MENU}nv"), 3)] {
+        window.send(&keys);
+        let drawn = eventually(&format!("{count} terminals are drawn"), || {
+            let terminals = shown(&owned, &dir.path)?.terminals;
+            let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
+            let drawn = tops(&window);
+            (found.count() == count && drawn.len() == count).then_some(drawn)
+        });
+        window.send(&format!("printf 'own-%s\\n' {count}\r"));
+        let (row, column) = window.spot_of(&format!("own-{count}"));
+        let printer = drawn.iter().filter(|top| top.0 < row && top.1 < column).max();
+        let printer = printer.expect("a drawn pane holds what was printed");
+        let new = !before.contains(printer);
+        assert!(new, "the new pane printed it at {row},{column}: {drawn:?} after {before:?}");
+        before = drawn;
+    }
+    window.send(&format!("{SIDEBAR}nh"));
+    eventually("a welcome view is drawn", || {
+        (tops(&window).len() == 4 && window.shows(WELCOMES)).then_some(())
+    });
+    window.send("dd");
+    eventually("d d in the welcome view closes it", || {
+        (tops(&window).len() == 3 && !window.shows(WELCOMES)).then_some(())
+    });
+}
+
+#[test]
+fn a_worktree_opened_or_made_while_luneta_shows_none_takes_the_keys() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    let root = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().dir;
+    let other = directory("other");
+    let typed_in = |window: &mut Window, folder: &Path, typed: u32| {
+        eventually(&format!("a shell opens in {}", folder.display()), || {
+            let terminals = shown(&owned, folder)?.terminals;
+            let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
+            (found.count() == 1 && tops(window).len() == 1).then_some(())
+        });
+        window.send(&format!("printf 'own-%s\\n' {typed}\r"));
+        window.spot_of(&format!("own-{typed}"));
+    };
+    let unshow = |window: &mut Window| {
+        window.send(CLOSE);
+        eventually("luneta shows no worktree", || window.shows(UNSHOWN).then_some(()));
+    };
+    window.send(TYPED);
+    window.spot_of(PRINTED);
+    unshow(&mut window);
+    window.send("ow");
+    eventually("o w lists main", || window.shows("not open").then_some(()));
+    window.send("\r");
+    typed_in(&mut window, &dir.path, 1);
+    unshow(&mut window);
+    let erased = "\x7f".repeat(root.chars().count());
+    window.send(&format!("np{erased}{}\r\r", other.path.display()));
+    typed_in(&mut window, &other.path, 2);
+}
+
+#[test]
+fn a_menu_opened_while_a_project_is_made_keeps_the_keys() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    let other = directory("other");
+    let erased = "\x7f".repeat(dir.path.display().to_string().chars().count());
+    window.send(&format!("{SIDEBAR}np{erased}{}\r\r{SIDEBAR}n", other.path.display()));
+    eventually(&format!("luneta shows {}", other.path.display()), || {
+        let terminals = shown(&owned, &other.path)?.terminals;
+        let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
+        (found.count() == 1 && tops(&window).len() == 1).then_some(())
+    });
+    eventually("the menu opened meanwhile stays open", || window.shows("─ New ─").then_some(()));
 }
 
 #[test]

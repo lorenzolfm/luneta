@@ -1068,6 +1068,26 @@ fn machines<'a>(host: &'a Host, shelves: &'a [Shelf]) -> Machines<'a> {
     Machines { here, others, left_out }
 }
 
+fn opens_own(asking: Held, on: &Machine, wants: Wants) -> Result<Asked, Wants> {
+    match wants {
+        Wants::Open { session, pane, cwd, opens } => match session.own_key() {
+            Some(key) => {
+                let session = session.name;
+                let open = match opens {
+                    Opens::Pane { beside, command } => Open::Pane { session, beside, cwd, command },
+                    Opens::Tab { name, command } => {
+                        let tab = Tab { cwd, name, command };
+                        Open::Tab { session, tab, alone_since: None }
+                    },
+                };
+                Ok(Asked::Open { asking, on: on.clone(), key, open })
+            },
+            None => Err(Wants::Open { session, pane, cwd, opens }),
+        },
+        wants => Err(wants),
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Asked {
     Nothing,
@@ -1082,9 +1102,10 @@ pub enum Asked {
     Leave,
     Closes { menu: u64, on: Machine, session: Listed, pane: PaneKey },
     Delete { on: Machine, act: Act },
-    Open { menu: u64, on: Machine, whose: Whose, open: Open },
+    Open { asking: Held, on: Machine, key: OwnKey, open: Open },
+    OpenZellij { menu: u64, on: Machine, open: Open },
     NewWorktree { on: Machine, project: ProjectId, branch: Branch },
-    Welcome { on: Machine, session: Listed, pane: PaneKey },
+    Welcome { asking: Held, on: Machine, session: Listed, pane: PaneKey },
     AddProject { on: Machine, folder: String, name: Option<projects::Name> },
     Rename { on: Machine, rename: Rename },
     Make {
@@ -1114,7 +1135,7 @@ impl Asked {
             Asked::Prunes { menu, .. }
             | Asked::Prune { menu, .. }
             | Asked::Closes { menu, .. }
-            | Asked::Open { menu, .. }
+            | Asked::OpenZellij { menu, .. }
             | Asked::Make { menu, .. }
             | Asked::Pull { menu, .. }
             | Asked::Find { menu, .. }
@@ -1129,6 +1150,7 @@ impl Asked {
             | Asked::Browse(_)
             | Asked::Leave
             | Asked::Delete { .. }
+            | Asked::Open { .. }
             | Asked::NewWorktree { .. }
             | Asked::Welcome { .. }
             | Asked::AddProject { .. }
@@ -3126,6 +3148,20 @@ impl Sidebar {
         self.menu.as_ref().filter(|_| self.floats())
     }
 
+    pub fn holds_input(&self) -> bool {
+        let chord = match self.pending {
+            Pending::Nothing | Pending::Legend | Pending::AllKeys(_) => false,
+            Pending::First { .. } | Pending::Group { .. } => true,
+        };
+        let moving = match &self.moving {
+            Moving::Still | Moving::Swept(..) => false,
+            Moving::Selected(_) | Moving::Down { .. } | Moving::Lifted(_) | Moving::Sweeping(_) => {
+                true
+            },
+        };
+        self.menu.is_some() || self.search.is_some() || chord || moving
+    }
+
     pub fn chose(&mut self, menu: u64, choice: Choice, now: SystemTime) -> Asked {
         if self.menu.as_ref().is_none_or(|open| open.number() != menu) {
             return Asked::Nothing;
@@ -3204,7 +3240,9 @@ impl Sidebar {
                     Done::Worktree(on, project, branch) => {
                         Asked::NewWorktree { on, project, branch }
                     },
-                    Done::Welcome { on, session, pane } => Asked::Welcome { on, session, pane },
+                    Done::Welcome { on, session, pane } => {
+                        Asked::Welcome { asking: held, on, session, pane }
+                    },
                     Done::Project { on, folder, name } => Asked::AddProject { on, folder, name },
                     Done::Rename(on, rename) => Asked::Rename { on, rename },
                     Done::Go(on, place) if held == Held::Open => Asked::Go { on, place },
@@ -3223,6 +3261,10 @@ impl Sidebar {
             },
         };
         let (number, on) = (menu.number(), menu.target().machine().clone());
+        let wants = match opens_own(held, &on, wants) {
+            Ok(asked) => return asked,
+            Err(wants) => wants,
+        };
         match held {
             Held::Open => self.menu = Some(menu),
             Held::Kept => {
@@ -3262,23 +3304,14 @@ impl Sidebar {
                 Asked::Find { menu: number, on, cwd, agent }
             },
             Wants::Open { session, cwd, opens: Opens::Pane { beside, command }, .. } => {
-                let whose = session.whose();
                 let open = Open::Pane { session: session.name, beside, cwd, command };
-                Asked::Open { menu: number, on, whose, open }
+                Asked::OpenZellij { menu: number, on, open }
             },
-            Wants::Open { session, pane, cwd, opens: Opens::Tab { name, command } } => {
-                let place = Place::Pane(PanePlace { session, pane });
-                let session = place.listed().name().clone();
-                let tab = Tab { cwd, name, command };
-                let opened = Open::Tab { session: session.clone(), tab, alone_since: None };
-                if let Some(key) = place.listed().own_key() {
-                    Asked::Open { menu: number, on, whose: Whose::Own(key), open: opened }
-                } else {
-                    self.drop_menu(number);
-                    let refused = format!("{session} is one of zellij's sessions");
-                    self.say(format!("menu: {refused}: {}", menu::OWN_ONLY));
-                    Asked::Nothing
-                }
+            Wants::Open { session, opens: Opens::Tab { .. }, .. } => {
+                self.drop_menu(number);
+                let refused = format!("{} is one of zellij's sessions", session.name());
+                self.say(format!("menu: {refused}: {}", menu::OWN_ONLY));
+                Asked::Nothing
             },
             Wants::Pull(work, wanted) => match self.worked(&on) {
                 Ok(worked) => {
@@ -7974,7 +8007,8 @@ mod tests {
         let command = ["claude", "/tigerstyle"].map(str::to_owned).to_vec();
         let (session, cwd) = (session_name("older"), directory(&cwd));
         let open = Open::Pane { session, beside: 1, cwd, command };
-        let open = Asked::Open { menu: 1, on: Machine::Local, whose: listed("older", 10).whose(), open };
+        let key = listed("older", 10).own_key().unwrap();
+        let open = Asked::Open { asking: Held::Open, on: Machine::Local, key, open };
         assert_eq!(sidebar.chose(1, tigerstyle(), moment(160_000)), open);
     }
 
@@ -7988,22 +8022,22 @@ mod tests {
             host.agents[0].harness = Some(Harness::Pi.into());
         }
         sidebar.focus(Keys::Sidebar);
-        let started = |menu, session: &str, beside, cwd: &str, harness, spelled| {
+        let started = |session: &str, beside, cwd: &str, harness, spelled| {
             let command = [harness, spelled].map(str::to_owned).to_vec();
-            let whose = listed(session, if session == "older" { 10 } else { 20 }).whose();
+            let key = listed(session, if session == "older" { 10 } else { 20 }).own_key().unwrap();
             let (session, cwd) = (session_name(session), directory(cwd));
             let open = Open::Pane { session, beside, cwd, command };
-            Asked::Open { menu, on: Machine::Local, whose, open }
+            Asked::Open { asking: Held::Open, on: Machine::Local, key, open }
         };
         type_in(&mut sidebar, "c");
-        let pi = started(1, "older", 1, "/w/luneta/main", "pi", "/skill:tigerstyle");
+        let pi = started("older", 1, "/w/luneta/main", "pi", "/skill:tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
 
         sidebar.focus(Keys::Zellij);
         sidebar.focus(Keys::Sidebar);
         sidebar.step(2);
         type_in(&mut sidebar, "c");
-        let claude = started(2, "newer", 1, "/w/b", "claude", "/tigerstyle");
+        let claude = started("newer", 1, "/w/b", "claude", "/tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), claude);
 
         sidebar.focus(Keys::Zellij);
@@ -8012,12 +8046,12 @@ mod tests {
         let tab = KeyEvent::from(KeyCode::Tab);
         assert_eq!(sidebar.key(&tab, moment(160_000)), Asked::Nothing);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "pi\n");
-        let pi = started(3, "newer", 1, "/w/b", "pi", "/skill:tigerstyle");
+        let pi = started("newer", 1, "/w/b", "pi", "/skill:tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
         sidebar.focus(Keys::Zellij);
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "c");
-        let pi = started(4, "newer", 1, "/w/b", "pi", "/skill:tigerstyle");
+        let pi = started("newer", 1, "/w/b", "pi", "/skill:tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
     }
 
@@ -8204,15 +8238,13 @@ mod tests {
         assert!(lines.iter().any(|line| line.contains("Syncing #5…")), "{lines:?}");
         let found = || Found { on: Machine::Local, ready: ready() };
         let asked = sidebar.pulled(number, Ok(found()));
-        assert!(matches!(asked, Asked::Open { .. }), "{asked:?}");
-        assert_eq!(sidebar.working.len(), 1);
-        assert_eq!(sidebar.opened(number, Ok(PaneKey::terminal(7))), Asked::Nothing);
+        assert!(matches!(asked, Asked::Open { asking: Held::Kept, .. }), "{asked:?}");
         assert!(sidebar.working.is_empty());
-        assert_eq!(sidebar.notice.as_deref(), Some("menu: opened older:7"));
 
         let mut sidebar = pulling();
         let asked = sidebar.pulled(number, Ok(found()));
-        assert!(matches!(asked, Asked::Open { .. }), "{asked:?}");
+        assert!(matches!(asked, Asked::Open { asking: Held::Open, .. }), "{asked:?}");
+        assert!(sidebar.menu.is_none());
 
         let mut sidebar = own_two_sessions();
         sidebar.focus(Keys::Sidebar);
@@ -8238,7 +8270,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tab_a_pasted_link_s_key_opened_while_the_keys_left_says_where_it_is() {
+    fn a_tab_a_pasted_link_s_key_opens_leaves_no_menu_waiting() {
         let mut sidebar = own_two_sessions();
         sidebar.focus(Keys::Sidebar);
         sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
@@ -8254,17 +8286,12 @@ mod tests {
         let (cwd, name) = (directory(&folder), Some("#5".to_owned()));
         let tab = Tab { cwd, name, command: Vec::new() };
         let open = Open::Tab { session: session_name("older"), tab, alone_since: None };
-        assert_eq!(sidebar.pulled(number, Ok(Found { on: Machine::Local, ready })), Asked::Open {
-            menu: number,
-            on: Machine::Local,
-            whose: own_listed("older", 1).whose(),
-            open,
-        });
+        let key = own_listed("older", 1).own_key().unwrap();
+        let asked = Asked::Open { asking: Held::Open, on: Machine::Local, key, open };
+        assert_eq!(sidebar.pulled(number, Ok(Found { on: Machine::Local, ready })), asked);
+        assert!(sidebar.menu.is_none());
         sidebar.focus(Keys::Zellij);
-        assert!(sidebar.working.get(&number).is_some_and(|it| it.opening().is_some()));
-        assert_eq!(sidebar.opened(number, Ok(PaneKey::terminal(7))), Asked::Nothing);
-        assert_eq!(sidebar.notice.as_deref(), Some("menu: opened older:7"));
-        assert!(!sidebar.working.contains_key(&number));
+        assert!(sidebar.working.is_empty());
     }
 
     #[test]
@@ -8369,7 +8396,8 @@ mod tests {
         let folder = "/w/luneta/issue-6".to_owned();
         let ready = Ready { at, folder, branch: None, moved_off: false, work };
         let asked = sidebar.pulled(2, Ok(Found { on: Machine::Local, ready }));
-        assert!(matches!(asked, Asked::Open { menu: 2, .. }), "{asked:?}");
+        assert!(matches!(asked, Asked::Open { asking: Held::Open, .. }), "{asked:?}");
+        assert!(sidebar.menu.is_none());
     }
 
     #[test]
@@ -8504,7 +8532,8 @@ mod tests {
         assert_eq!(lines[6], "─ New ─────────── luneta/main ─", "{lines:?}");
         let (session, cwd) = (session_name("s"), directory("/w/luneta/main"));
         let pane = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
-        let pane = Asked::Open { menu: 1, on: Machine::Local, whose: listed("s", 10).whose(), open: pane };
+        let key = listed("s", 10).own_key().unwrap();
+        let pane = Asked::Open { asking: Held::Open, on: Machine::Local, key, open: pane };
         assert_eq!(sidebar.key(&char('v'), moment(160_000)), pane);
     }
 
@@ -8532,9 +8561,9 @@ mod tests {
         let command = vec!["claude".to_owned(), prompt.to_owned()];
         let cwd = directory("/w/luneta/main");
         let open = Open::Pane { session: session_name("s"), beside: 1, cwd, command };
-        let open = Asked::Open { menu: 1, on: Machine::Local, whose: listed("s", 10).whose(), open };
+        let key = listed("s", 10).own_key().unwrap();
+        let open = Asked::Open { asking: Held::Open, on: Machine::Local, key, open };
         assert_eq!(sidebar.printed(1, nothing()), open);
-        assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000)), Asked::Nothing);
         assert!(sidebar.menu.is_none());
 
         type_in(&mut sidebar, "jcf");
@@ -8579,9 +8608,7 @@ mod tests {
         let notes: String = lines[14..].join(" ");
         assert!(notes.contains("⠋ Reading what `cargo test` printed…"), "{lines:?}");
         let asked = sidebar.printed(number, Ok(Printed::Nothing));
-        assert!(matches!(asked, Asked::Open { .. }), "{asked:?}");
-        assert_eq!(sidebar.opened(number, Ok(PaneKey::terminal(4))), Asked::Nothing);
-        assert_eq!(sidebar.notice.as_deref(), Some("menu: opened s:4"));
+        assert!(matches!(asked, Asked::Open { asking: Held::Kept, .. }), "{asked:?}");
         assert!(sidebar.working.is_empty());
     }
 
@@ -8705,7 +8732,8 @@ mod tests {
         let command = ["claude", "/thermo-nuclear-review"];
         let command = command.map(str::to_owned).to_vec();
         let pane = Open::Pane { session: older, beside: 1, cwd, command };
-        let pane = Asked::Open { menu: 2, on: Machine::Local, whose: own_listed("older", 1).whose(), open: pane };
+        let key = own_listed("older", 1).own_key().unwrap();
+        let pane = Asked::Open { asking: Held::Open, on: Machine::Local, key, open: pane };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), pane);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
@@ -9285,6 +9313,29 @@ mod tests {
     }
 
     #[test]
+    fn a_row_reordered_by_v_or_dragged_holds_the_keys_until_it_lands() {
+        let mut sidebar = searched();
+        sidebar.focus(Keys::Sidebar);
+        assert!(!sidebar.holds_input());
+        sidebar.cursor = Some(Spot::Local(Place::Session(listed("bipa", 10))));
+        type_in(&mut sidebar, "v");
+        assert!(sidebar.holds_input(), "v reorders");
+        sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000));
+        assert!(!sidebar.holds_input(), "Esc ends the reorder");
+
+        let area = Rect::new(0, 0, 32, 26);
+        let (listed, _) = drawn_rows(&mut sidebar);
+        let left = MouseButton::Left;
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 10), area);
+        assert!(sidebar.holds_input(), "the press");
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area);
+        assert_ne!(drawn_rows(&mut sidebar).0, listed, "a row is lifted");
+        assert!(sidebar.holds_input(), "the drag");
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
+        assert!(!sidebar.holds_input(), "the row landed");
+    }
+
+    #[test]
     fn the_left_button_down_has_the_keys() {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
@@ -9803,13 +9854,12 @@ mod tests {
             PaneRow { session, pane, terminal, cwd, branch, repository, pull_request: None, ran };
         let menu = sidebar.menu.as_ref().expect("the menu");
         assert_eq!(menu.target(), &Target::Pane(on.clone(), row.clone()));
-        let number = menu.number();
         let (session, cwd) = (session_name("main"), directory("/w/b"));
         let open = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
-        let whose = listed("main", 20).whose();
-        let asked = Asked::Open { menu: number, on: on.clone(), whose, open };
+        let key = listed("main", 20).own_key().unwrap();
+        let asked = Asked::Open { asking: Held::Open, on: on.clone(), key, open };
         assert_eq!(sidebar.key(&char('v'), moment(160_000)), asked);
-        sidebar.close_menu();
+        assert!(sidebar.menu.is_none());
 
         let area = Rect::new(0, 0, 32, 26);
         let lines = screen(&mut sidebar, true, area.width, area.height);
@@ -9903,9 +9953,6 @@ mod tests {
         let asked = sidebar.pulled(number, Ok(Found { on: nixos.clone(), ready }));
         let there = |asked: &Asked| matches!(asked, Asked::Open { on, .. } if *on == nixos);
         assert!(there(&asked), "{asked:?}");
-        let opened = own_pane_of("work", 1, 9);
-        let go = Asked::Go { on: nixos, place: opened };
-        assert_eq!(sidebar.opened(number, Ok(PaneKey::terminal(9))), go);
     }
 
     #[test]
