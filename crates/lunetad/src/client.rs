@@ -46,6 +46,8 @@ pub struct Within<S> {
 
 impl<S> Within<S> {
     pub(crate) fn new(inner: S, answer: Duration) -> Within<S> {
+        assert!(!answer.is_zero(), "a call waits some time for its answer");
+        assert_eq!(answer.subsec_nanos(), 0, "unanswered says the bound in whole seconds");
         Within { inner, answer }
     }
 }
@@ -64,9 +66,9 @@ where
     }
 
     fn call(&mut self, request: R) -> Self::Future {
-        let (answer, answered) = (self.answer, self.inner.call(request));
+        let (answer, asked) = (self.answer, self.inner.call(request));
         Box::pin(async move {
-            match tokio::time::timeout(answer, answered).await {
+            match tokio::time::timeout(answer, asked).await {
                 Ok(answered) => answered.map_err(Into::into),
                 Err(_) => Err(Status::cancelled(unanswered(answer)).into()),
             }
@@ -76,6 +78,7 @@ where
 
 #[must_use]
 pub fn unanswered(within: Duration) -> String {
+    assert_eq!(within.subsec_nanos(), 0, "only whole seconds are said exactly");
     format!("lunetad did not answer in {}s", within.as_secs())
 }
 
