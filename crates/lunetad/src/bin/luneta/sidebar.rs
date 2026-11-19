@@ -895,10 +895,13 @@ fn project_of(spot: &Spot) -> Option<Spot> {
 }
 
 fn closed_by(act: &Act, on: &Machine, spot: &Spot) -> bool {
+    if spot.machine() != *on {
+        return false;
+    }
     let Some(place) = spot.place() else {
         return false;
     };
-    let takes = match (act, place.terminal_id()) {
+    match (act, place.terminal_id()) {
         (Act::View { session, view, .. }, Some(at)) => {
             place.session() == session.as_str() && at == view.terminal_id()
         },
@@ -910,8 +913,7 @@ fn closed_by(act: &Act, on: &Machine, spot: &Spot) -> bool {
         },
         (Act::View { .. }, None) => false,
         (Act::Project { session, .. }, _) => place.session() == session.as_str(),
-    };
-    spot.machine() == *on && takes
+    }
 }
 
 fn keyed(view: &View) -> Option<TerminalKey> {
@@ -4059,7 +4061,7 @@ impl Sidebar {
     fn delete(&mut self, on: Machine, act: Act) -> Asked {
         let takes = |spot: &Spot| closed_by(&act, &on, spot);
         if let Some(gone) = self.cursor().filter(|cursor| takes(cursor)).cloned() {
-            let at = self.cursor_index().unwrap_or(0);
+            let at = self.row_of(&gone).expect("the highlight is on a row");
             let stays = |index: &usize| self.stops(*index) && !takes(&self.rows[*index].spot());
             let after = (at..self.rows.len()).chain((0..at).rev()).find(stays);
             let after = after.map(|index| self.rows[index].spot());
@@ -4072,6 +4074,8 @@ impl Sidebar {
         if let Some(Lit::Closing { gone, .. }) = &self.lit
             && closed_by(act, on, gone)
         {
+            let listed = "a closing row stays listed: rebuild lands past it once it goes";
+            assert!(self.row_of(gone).is_some(), "{listed}");
             self.lit = Some(Lit::On(gone.clone()));
         }
         self.notify(notice);

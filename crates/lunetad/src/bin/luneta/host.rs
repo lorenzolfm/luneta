@@ -91,13 +91,6 @@ pub struct Pulled {
     argv: Vec<String>,
 }
 
-#[derive(Debug)]
-enum Doomed {
-    View(TerminalKey),
-    Worktree { worktree: WorktreeId, seen: Vec<ViewId> },
-    Project { project: ProjectId, worktrees: Vec<WorktreeId>, seen: Vec<ViewId> },
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Naming {
     Idle,
@@ -1839,7 +1832,7 @@ impl App {
                 self.go(&on, &place);
                 self.leave();
             },
-            Asked::Delete { on, act } => self.project_act(&on, &act),
+            Asked::Delete { on, act } => self.project_act(on, act),
             Asked::Open { asking, on, project, beside, command } => {
                 self.project_open(asking, &on, project, beside, command);
             },
@@ -2004,32 +1997,17 @@ impl App {
         movers.chain(self.changes.drain(..)).collect()
     }
 
-    fn project_act(&mut self, on: &Machine, act: &Act) {
-        match act {
-            Act::Worktree { worktree, seen, .. } => {
-                let (worktree, seen) = (*worktree, seen.clone());
-                self.project_act_delete(on, act, Doomed::Worktree { worktree, seen });
-            },
-            Act::Project { project, worktrees, seen, .. } => {
-                let (project, worktrees, seen) = (*project, worktrees.clone(), seen.clone());
-                self.project_act_delete(on, act, Doomed::Project { project, worktrees, seen });
-            },
-            Act::View { view: ViewKey::Terminal(key), .. } => {
-                self.project_act_delete(on, act, Doomed::View(*key));
-            },
-        }
-    }
-
-    fn project_act_delete(&mut self, on: &Machine, act: &Act, doomed: Doomed) {
-        let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
-        let act = act.clone();
+    fn project_act(&mut self, on: Machine, act: Act) {
+        let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
         self.keep_change(thread::spawn(move || {
-            let closed = caught(|| match &doomed {
-                Doomed::View(key) => worktrees::closed_view(&lunetad, &on, *key),
-                Doomed::Worktree { worktree, seen } => {
+            let closed = caught(|| match &act {
+                Act::View { view: ViewKey::Terminal(key), .. } => {
+                    worktrees::closed_view(&lunetad, &on, *key)
+                },
+                Act::Worktree { worktree, seen, .. } => {
                     worktrees::closed(&lunetad, &on, *worktree, seen)
                 },
-                Doomed::Project { project, worktrees, seen } => {
+                Act::Project { project, worktrees, seen, .. } => {
                     worktrees::closed_project(&lunetad, &on, *project, worktrees, seen)
                 },
             });
@@ -2106,7 +2084,7 @@ impl App {
                 }
             },
             Picked::Delete { on, act } => {
-                self.project_act(&on, &act);
+                self.project_act(on, act);
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Chord(chord) => {
