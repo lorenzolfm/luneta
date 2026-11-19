@@ -809,7 +809,7 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     let unclosed = asked(&owned.host, close()).unwrap_err();
     assert_eq!(unclosed.code(), Code::Unavailable, "{unclosed:?}");
     let said = unclosed.message();
-    assert!(said.contains("luneta-mux did not answer in 1.5s, and terminal "), "{said}");
+    assert!(said.starts_with("luneta-mux: it did not answer in 1.5s, and terminal "), "{said}");
     assert!(said.ends_with(" may close still"), "{said}");
     assert_eq!(watched(&owned, closing).len(), 2, "a stalled mux has closed none yet");
     drop(stalled);

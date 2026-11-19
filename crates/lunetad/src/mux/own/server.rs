@@ -24,7 +24,7 @@ use tower::service_fn;
 use super::api::{self, mux_client::MuxClient};
 use super::frames::colours;
 use super::{in_no_terminal, TerminalKey};
-use crate::client::{Answerer, Within};
+use crate::client::Within;
 use crate::mux::{Failure, Runs};
 use crate::projects::{Line, Size, VIEWS_MAX};
 use crate::shells::{Doing, Front};
@@ -106,7 +106,7 @@ struct Server {
 
 impl Server {
     fn matched(runtime: Runtime, channel: Channel) -> Server {
-        Server { runtime, client: MuxClient::new(Within::new(channel, Answerer::Mux, ANSWER)) }
+        Server { runtime, client: MuxClient::new(Within::new(channel, ANSWER, unanswered)) }
     }
 
     fn reached() -> Result<Option<Server>, Failure> {
@@ -194,6 +194,10 @@ fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
 pub(super) fn runtime() -> Result<Runtime, Failure> {
     let runtime = runtime::Builder::new_current_thread().enable_all().build();
     runtime.map_err(|error| Failure::Own(format!("no runtime: {error}")))
+}
+
+fn unanswered(within: Duration) -> String {
+    format!("it did not answer in {}s", within.as_secs_f64())
 }
 
 pub(super) fn refused(status: &Status) -> Failure {

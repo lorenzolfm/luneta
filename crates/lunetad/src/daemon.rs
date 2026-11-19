@@ -208,7 +208,7 @@ pub async fn serve(
             .max_concurrent_streams(QUESTIONS_MAX)
             .initial_stream_window_size(IN_FLIGHT)
             .layer(layer_fn(|routes| {
-                client::Within::new(routes, client::Answerer::Lunetad, client::ANSWER)
+                client::Within::new(routes, client::ANSWER, client::unanswered)
             }))
             .add_service(DaemonServer::new(host))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
