@@ -694,8 +694,10 @@ impl Row {
     fn stops(&self) -> bool {
         match self {
             Row::Machine { heads: Heads::Projects { folded, .. }, .. } => *folded,
-            Row::Project { under, .. } | Row::Worktree { under, .. } => *under != Under::Rows,
-            Row::Machine { heads: Heads::Nothing, .. } | Row::View { .. } => true,
+            Row::Worktree { under, .. } => *under != Under::Rows,
+            Row::Machine { heads: Heads::Nothing, .. } | Row::Project { .. } | Row::View { .. } => {
+                true
+            },
         }
     }
 }
@@ -5734,7 +5736,7 @@ mod tests {
         assert_eq!(cursor(&sidebar), Some(empty.clone()));
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(empty));
-        type_in(&mut sidebar, "j");
+        type_in(&mut sidebar, "jj");
         let worktree = WorktreeId::of(31).unwrap();
         let solo = project_row("solo", 8);
         let place = Place::Worktree(WorktreePlace { project: solo, worktree });
@@ -5756,7 +5758,7 @@ mod tests {
         };
         type_in(&mut sidebar, " ");
         assert_eq!(folded(&sidebar), [false, true, false]);
-        type_in(&mut sidebar, " j ");
+        type_in(&mut sidebar, " jj ");
         assert_eq!(folded(&sidebar), [false, false, true]);
         let area = Rect::new(0, 0, 32, 10);
         screen(&mut sidebar, true, area.width, area.height);
@@ -6222,26 +6224,57 @@ mod tests {
     }
 
     #[test]
-    fn the_highlight_skips_a_session_s_row_and_goes_no_further_than_the_ends() {
+    fn the_highlight_stops_on_a_project_s_row_and_goes_no_further_than_the_ends() {
         let mut sidebar = two_sessions();
-        let older = Some(view_of("older", 10, 1));
-        let newer = Some(view_of("newer", 20, 1));
+        let older = Some(Place::Session(listed("older", 10)));
+        let fold = Some(view_of("older", 10, 1));
+        let nvim = Some(view_of("older", 10, 2));
+        let newer = Some(Place::Session(listed("newer", 20)));
+        let shell = Some(view_of("newer", 20, 1));
         assert_eq!(cursor(&sidebar), older);
-        sidebar.step(1);
-        sidebar.step(1);
-        assert_eq!(cursor(&sidebar), newer);
-        sidebar.step(1);
-        assert_eq!(cursor(&sidebar), newer);
-        sidebar.step(-5);
+        let mut went = Vec::new();
+        for _ in 0..5 {
+            sidebar.step(1);
+            went.push(cursor(&sidebar));
+        }
+        assert_eq!(went, [fold, nvim, newer, shell.clone(), shell]);
+        sidebar.step(-9);
         assert_eq!(cursor(&sidebar), older);
+    }
+
+    #[test]
+    fn h_folds_a_project_from_its_row_and_l_or_space_unfolds_it() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        let newer = Some(Place::Session(listed("newer", 20)));
+        sidebar.cursor = Some(Spot::Local(view_of("older", 10, 2)));
+        type_in(&mut sidebar, "j");
+        let (lines, lit) = seen(&mut sidebar, true, 32, 24);
+        let lit: Vec<&str> = lit.iter().map(|y| lines[usize::from(*y)].as_str()).collect();
+        assert!(matches!(lit[..], [row] if row.starts_with(" ▾ newer ─")), "{lit:?}");
+        type_in(&mut sidebar, "h");
+        assert_eq!(cursor(&sidebar), newer);
+        assert!(folded(&sidebar, "newer"));
+        assert!(!folded(&sidebar, "older"));
+        assert!(!sidebar.folds.contains(Fold::Machine(&Machine::Local)));
+        let tab = tab_of(20, 0);
+        assert!(!sidebar.folds.contains(Fold::Worktree(&Machine::Local, tab)));
+        assert_eq!(rows_shown(&mut sidebar).last().map(String::as_str), Some(" ▸ newer"));
+        type_in(&mut sidebar, "l");
+        assert!(!folded(&sidebar, "newer"));
+        assert_eq!(cursor(&sidebar), newer);
+        type_in(&mut sidebar, "  ");
+        assert!(!folded(&sidebar, "newer"));
+        type_in(&mut sidebar, " ");
+        assert!(folded(&sidebar, "newer"));
     }
 
     #[test]
     fn g_and_end_go_to_the_last_row_and_gg_and_home_to_the_first() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        let first = Some(view_of("older", 10, 1));
-        let second = Some(view_of("older", 10, 2));
+        let first = Some(Place::Session(listed("older", 10)));
+        let second = Some(Place::Session(listed("newer", 20)));
         let last = Some(view_of("newer", 20, 1));
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let shift_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
@@ -6296,7 +6329,7 @@ mod tests {
             Vec::new(),
         ));
         let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        for _ in 0..3 {
+        for _ in 0..4 {
             sidebar.key(&down, moment(160_000));
         }
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -6308,6 +6341,7 @@ mod tests {
     fn folding_a_view_s_worktree_then_its_project_stops_the_highlight_on_its_row() {
         let mut sidebar = two_sessions();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        sidebar.step(1);
         type_in(&mut sidebar, "hh");
         let older = Place::Session(listed("older", 10));
         assert_eq!(cursor(&sidebar), Some(older.clone()));
@@ -6367,12 +6401,13 @@ mod tests {
     #[test]
     fn a_gone_view_leaves_the_highlight_in_its_session() {
         let mut sidebar = two_sessions();
-        sidebar.step(1);
+        sidebar.step(2);
+        assert_eq!(cursor(&sidebar), Some(view_of("older", 10, 2)));
         sidebar.hear(host(
             vec![session("older", 10, vec![view(1, 0, "/w/luneta/main", "claude")])],
             Vec::new(),
         ));
-        assert_eq!(cursor(&sidebar), Some(view_of("older", 10, 1)));
+        assert_eq!(cursor(&sidebar), Some(Place::Session(listed("older", 10))));
     }
 
     #[test]
@@ -6383,11 +6418,18 @@ mod tests {
         let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 5)[3..5].to_vec();
         assert_eq!(
             shown(&mut sidebar),
-            ["  ▾ Tab #1                  ●1", "   ● \u{ec82} fold                 1m"]
+            [" ▾ \u{f108} mac ══════════════════ ●1", " ▾ older ────────────────── ●1"]
         );
         sidebar.key(&down, moment(160_000));
-        sidebar.key(&down, moment(160_000));
+        assert_eq!(
+            shown(&mut sidebar),
+            ["  ▾ Tab #1                  ●1", "   ● \u{ec82} fold                 1m"]
+        );
+        for _ in 0..3 {
+            sidebar.key(&down, moment(160_000));
+        }
         assert_eq!(shown(&mut sidebar), ["  ▾ Tab #1", "     \u{e795} w/b"]);
+        sidebar.key(&up, moment(160_000));
         sidebar.key(&up, moment(160_000));
         assert_eq!(
             shown(&mut sidebar),
@@ -6458,8 +6500,8 @@ mod tests {
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(lines[5], " a word", "{lines:?}");
         assert_eq!(click(&mut sidebar, 10, 5, area), Asked::Take);
-        let fold = view_of("older", 10, 1);
-        assert_eq!(click(&mut sidebar, 10, 4, area), go_here(fold));
+        let older = Place::Session(listed("older", 10));
+        assert_eq!(click(&mut sidebar, 10, 4, area), go_here(older));
     }
 
     #[test]
@@ -6794,6 +6836,7 @@ mod tests {
         );
         assert!(!dimmed(&mut sidebar, 3, 6, moment(160_000)));
         assert_eq!(sidebar.listing().local.agents[0].mark, Mark::Finished);
+        sidebar.step(1);
         sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
         assert!(lines(&mut sidebar, moment(160_000))[5].ends_with(" •"));
         sidebar.key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), moment(160_000));
@@ -7341,7 +7384,7 @@ mod tests {
             "       less logs",
         ];
         let bipa = view_of("bipa", 10, 3);
-        let notes = view_of("notes", 20, 1);
+        let notes = Place::Session(listed("notes", 20));
         let zed = view_of("zed", 30, 2);
         for (typed, rows, best) in [
             ("pix", &PIX[..], bipa),
@@ -7398,7 +7441,7 @@ mod tests {
     fn a_search_opens_a_folded_project_until_it_closes() {
         for close in [Some(KeyCode::Esc), Some(KeyCode::Enter), None] {
             let mut sidebar = searched();
-            type_in(&mut sidebar, "hh/pix");
+            type_in(&mut sidebar, "jhh/pix");
             let found =
                 [" ▾ bipa", "  ▾ Tab #1", "       a-p-i-x", "  ▾ Tab #3", "       pix outflow"];
             assert_eq!(rows_shown(&mut sidebar), found, "{close:?}");
@@ -7420,7 +7463,7 @@ mod tests {
     fn going_to_a_view_found_in_luneta_s_folded_project_unfolds_it() {
         let mut sidebar = fresh();
         sidebar.hear(host(owned(searched_sessions()), Vec::new()));
-        type_in(&mut sidebar, "hh");
+        type_in(&mut sidebar, "jhh");
         assert_eq!(rows_shown(&mut sidebar)[..2], [" ▸ bipa", " ▾ notes"]);
         type_in(&mut sidebar, "/pix");
         let pix = own_view_of("bipa", 1, 3);
@@ -7978,6 +8021,7 @@ mod tests {
     fn a_click_on_the_legend_or_the_menu_under_it_presses_its_key() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
+        sidebar.step(1);
         sidebar.key(&char('?'), moment(160_000));
         let clicked = clicks(&mut sidebar, 0);
         assert!(clicked[..7].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
@@ -8053,6 +8097,7 @@ mod tests {
     fn a_click_on_the_legend_once_the_menu_took_its_place_does_nothing() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
+        sidebar.step(1);
         sidebar.key(&char('?'), moment(160_000));
         sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
         let delete = clicks(&mut sidebar, 18);
@@ -8074,6 +8119,7 @@ mod tests {
     fn a_group_shows_once_a_pause_passes_and_never_when_typed_fast() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
+        sidebar.step(1);
         let now = moment(160_000);
         sidebar.key(&char('d'), now);
         assert_eq!(sidebar.due(now), Some(PAUSE));
@@ -8281,6 +8327,7 @@ mod tests {
     fn a_click_on_a_skill_of_the_menu_under_the_rows_starts_an_agent_on_it() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
+        sidebar.step(1);
         sidebar.key(&char('m'), moment(160_000));
         let cwd = "/w/luneta/main".to_owned();
         let agent = agents::Harness::ClaudeCode;
@@ -8324,6 +8371,7 @@ mod tests {
             host.agents[0].harness = Some(Harness::Pi.into());
         }
         sidebar.focus(Keys::Sidebar);
+        sidebar.step(1);
         let started = |session: &str, beside, cwd: &str, harness, spelled| {
             let command = [harness, spelled].map(str::to_owned).to_vec();
             let key = listed(session, if session == "older" { 10 } else { 20 }).own_key();
@@ -8337,7 +8385,7 @@ mod tests {
 
         sidebar.focus(Keys::Terminal);
         sidebar.focus(Keys::Sidebar);
-        sidebar.step(2);
+        sidebar.end(true);
         type_in(&mut sidebar, "c");
         let claude = started("newer", 1, "/w/b", "claude", "/tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), claude);
@@ -8361,6 +8409,7 @@ mod tests {
     fn a_key_of_the_menu_opens_it_for_the_highlighted_row() {
         let mut sidebar = own_two_sessions();
         sidebar.focus(Keys::Sidebar);
+        sidebar.step(1);
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 17, moment(160_000) + PAUSE);
         assert_eq!(lines[10..], [
@@ -8701,6 +8750,7 @@ mod tests {
     fn a_md_file_s_path_pasted_opens_the_menu_for_it() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
+        sidebar.step(1);
         for text in [
             "notes.txt",
             "two\nlines.md",
@@ -8844,7 +8894,7 @@ mod tests {
         let busy = in_shell(2, going("make", 100, Front::Working));
         sidebar.hear(host(vec![session("s", 10, vec![failed, busy])], Vec::new()));
         sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "gg");
+        type_in(&mut sidebar, "j");
         assert_eq!(cursor(&sidebar), Some(view_of("s", 10, 1)));
         type_in(&mut sidebar, "c");
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
@@ -8896,7 +8946,7 @@ mod tests {
         let failed = in_shell(1, ended("cargo test", Some(101), 3000));
         sidebar.hear(host(vec![own_session("s", 1, vec![failed])], Vec::new()));
         sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "ggc");
+        type_in(&mut sidebar, "Gc");
         let asked = sidebar.key(&char('f'), moment(160_000));
         let project = own_listed("s", 1);
         let printed = matches!(&asked, Asked::Printed { session, .. } if *session == project);
@@ -8991,7 +9041,7 @@ mod tests {
         sit(&mut sidebar, &own_view_of("older", 1, 1));
 
         sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "hhj");
+        type_in(&mut sidebar, "hhjj");
         assert!(folded(&sidebar, "older"));
         assert_eq!(cursor(&sidebar), Some(own_view_of("young", 2, 1)));
         let standing = |sidebar: &mut Sidebar| {
@@ -9146,6 +9196,7 @@ mod tests {
         }];
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
+        sidebar.step(1);
         let older = || SessionName::parse("older").unwrap();
         let fold = Note {
             on: Machine::Local,
@@ -9344,7 +9395,7 @@ mod tests {
             let mut sidebar = two_sessions();
             sidebar.focus(Keys::Sidebar);
             untold(&mut sidebar);
-            sidebar.step(2);
+            sidebar.end(true);
             type_in(&mut sidebar, "d");
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
             let lines = screen(&mut sidebar, true, 160, 16);
@@ -9369,7 +9420,7 @@ mod tests {
             let file = UnreadFile { pid: 200, terminal: Some(in_named("newer", view)) };
             let unread_files = vec![file];
             sidebar.hear(Host { unread: 1, unread_files, ..host });
-            sidebar.step(2);
+            sidebar.end(true);
             type_in(&mut sidebar, "d");
             let act = Act::View {
                 session: session_name("newer"),
@@ -9415,7 +9466,7 @@ mod tests {
     fn a_delete_closes_the_view_and_the_highlight_goes_past_it() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.step(1);
+        sidebar.step(2);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let act = Act::View {
             session: session_name("older"),
@@ -9430,7 +9481,7 @@ mod tests {
             ],
             vec![agent("older", 1, Status::Waiting, Some("fold"))],
         ));
-        assert_eq!(cursor(&sidebar), Some(view_of("newer", 20, 1)));
+        assert_eq!(cursor(&sidebar), Some(Place::Session(listed("newer", 20))));
     }
 
     #[test]
@@ -9492,7 +9543,7 @@ mod tests {
     fn v_selects_worktrees_that_shifted_j_and_k_move() {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "vjjk");
+        type_in(&mut sidebar, "jvjjk");
         let (_, lit) = drawn_rows(&mut sidebar);
         assert_eq!(lit, [1, 2, 3, 4]);
         sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 26));
