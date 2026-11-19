@@ -2302,16 +2302,16 @@ impl App {
             return;
         };
         let id = project.id;
-        let terminal = right.focused().and_then(|focused| project.terminal_of(focused));
+        let terminal = right.focused().and_then(|focused| project.terminal_key(focused));
         if self.sidebar.seated_on(&on) != Some(id) {
             self.sidebar.sit_in(on.clone(), id);
         }
         assert_eq!(self.sidebar.seated_on(&on), Some(id), "the sidebar sits where luneta shows");
         self.sidebar.showing(worktree);
         if let Some(terminal) = terminal
-            && self.sidebar.seated_terminal() != Some(terminal)
+            && self.sidebar.seated_at() != Some(terminal)
         {
-            self.sidebar.sit_on(terminal);
+            self.sidebar.sit_at(terminal);
         }
     }
 

@@ -1959,8 +1959,8 @@ impl Sidebar {
         assert!(self.seat.is_none(), "luneta sits nowhere when it shows no worktree");
     }
 
-    pub fn sit_on(&mut self, terminal: TerminalKey) {
-        let seat = self.seat.as_mut().expect("luneta sits on a terminal of a project it sits in");
+    pub fn sit_at(&mut self, terminal: TerminalKey) {
+        let seat = self.seat.as_mut().expect("luneta sits at a terminal of the project it sits in");
         seat.terminal = Some(terminal);
         let project = seat.project;
         if let Some(place) = self.view_place(project, terminal) {
@@ -1992,7 +1992,7 @@ impl Sidebar {
     }
 
     #[must_use]
-    pub fn seated_terminal(&self) -> Option<TerminalKey> {
+    pub fn seated_at(&self) -> Option<TerminalKey> {
         self.seat.as_ref()?.terminal
     }
 
@@ -5878,7 +5878,7 @@ mod tests {
         if sidebar.seated_in() != Some(session.project()) {
             sidebar.sit_in(Machine::Local, session.project());
         }
-        sidebar.sit_on(view.key());
+        sidebar.sit_at(view.key());
     }
 
     fn kept(projects: Vec<api::Project>) -> api::Projects {
@@ -8725,7 +8725,7 @@ mod tests {
         sidebar.hear(host(sessions, Vec::new()));
         sidebar.sit_in(Machine::Local, ProjectId::of(1).unwrap());
         assert_eq!(sidebar.here_place(), Err(NO_HERE_VIEW));
-        sidebar.sit_on(view_key(1, 1).key());
+        sidebar.sit_at(view_key(1, 1).key());
         let twin = Listed::new_project("twin", 1);
         let here = ViewPlace { session: twin.clone(), view: view_key(1, 1) };
         assert_eq!(sidebar.here_place(), Ok(here));
@@ -8744,7 +8744,7 @@ mod tests {
         let sessions = vec![own_session("twin", 1, views()), own_session("newest", 2, Vec::new())];
         sidebar.hear(host(sessions, Vec::new()));
         sidebar.sit_in(Machine::Local, ProjectId::of(1).unwrap());
-        sidebar.sit_on(view_key(1, 1).key());
+        sidebar.sit_at(view_key(1, 1).key());
         sidebar.unseat();
         assert_eq!(sidebar.seated_in(), None);
         let (twin, view) = (Listed::new_project("twin", 1), view_key(1, 1));

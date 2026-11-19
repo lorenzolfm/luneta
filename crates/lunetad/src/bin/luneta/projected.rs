@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lunetad::api::projects::Held;
 use lunetad::api::{self, remote, terminal, Host};
 use lunetad::log;
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{ProjectId, Used, ViewId, WorktreeId, WORKTREES_MAX};
+use lunetad::projects::{ProjectId, Used, ViewId, WorktreeId, VIEWS_MAX, WORKTREES_MAX};
 use lunetad::Destination;
 
 use crate::host::NOT_YET;
@@ -64,7 +64,7 @@ impl Project {
     }
 
     #[must_use]
-    pub fn terminal_of(&self, view: ViewId) -> Option<TerminalKey> {
+    pub fn terminal_key(&self, view: ViewId) -> Option<TerminalKey> {
         let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
         let (_, key) = held.find(|(id, _)| *id == view)?;
         *key
@@ -77,12 +77,10 @@ impl Project {
 
     #[must_use]
     pub fn view_of(&self, terminal: TerminalKey) -> Option<(WorktreeId, ViewId)> {
-        let mut held = self.worktrees().iter().flat_map(|worktree| {
-            let on_terminal = worktree.terminals.iter().filter(|(_, key)| *key == Some(terminal));
-            on_terminal.map(|(id, _)| (worktree.id, *id))
-        });
-        let first = held.next()?;
-        held.next().is_none().then_some(first)
+        self.worktrees().iter().find_map(|worktree| {
+            let (view, _) = worktree.terminals.iter().find(|(_, key)| *key == Some(terminal))?;
+            Some((worktree.id, *view))
+        })
     }
 }
 
@@ -182,12 +180,23 @@ impl Projected {
 
 pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
     let projects = kept.iter().map(project).collect::<Result<Vec<Project>, String>>()?;
-    let count: usize = projects.iter().map(|it| it.worktrees().len()).sum();
-    if count <= WORKTREES_MAX {
-        Ok(projects)
-    } else {
-        Err(format!("they hold {count} worktrees, over the {WORKTREES_MAX} kept"))
+    let worktrees: Vec<&Worktree> = projects.iter().flat_map(Project::worktrees).collect();
+    let count = worktrees.len();
+    if count > WORKTREES_MAX {
+        return Err(format!("they hold {count} worktrees, over the {WORKTREES_MAX} kept"));
     }
+    let views: usize = worktrees.iter().map(|it| it.terminals.len()).sum();
+    if views > VIEWS_MAX {
+        return Err(format!("they hold {views} views, over the {VIEWS_MAX} kept"));
+    }
+    let mut keyed = BTreeSet::new();
+    for key in worktrees.iter().flat_map(|it| &it.terminals).filter_map(|(_, key)| *key) {
+        if !keyed.insert(key) {
+            return Err(format!("two views hold terminal {}", key.id));
+        }
+    }
+    assert!(keyed.len() <= views, "each view holds at most one terminal");
+    Ok(projects)
 }
 
 fn kept(projects: Option<&api::Projects>) -> &[api::Project] {
@@ -340,8 +349,8 @@ mod tests {
         let terminal = ViewId::of(21).unwrap();
         let project = projected.project(&Machine::Local, seven()).unwrap();
         assert_eq!(project.view_of(keyed(4)), Some((worktree(11), terminal)));
-        assert_eq!(project.terminal_of(terminal), Some(keyed(4)));
-        assert_eq!(project.terminal_of(ViewId::of(22).unwrap()), None, "a lost one is no view");
+        assert_eq!(project.terminal_key(terminal), Some(keyed(4)));
+        assert_eq!(project.terminal_key(ViewId::of(22).unwrap()), None, "a lost one is no view");
         assert_eq!(projected.project(&Machine::Local, ProjectId::of(8).unwrap()), None);
         let (tabs, titles) = projected.tabs(&Machine::Local, worktree(11));
         let names: Vec<&str> = tabs.iter().map(|tab| tab.name.as_str()).collect();
@@ -379,19 +388,23 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_two_views_claim_leads_to_neither_and_one_made_again_to_its_own_view() {
+    fn a_terminal_made_again_under_an_id_in_use_leads_to_its_own_view() {
         let mut host = host();
         let made_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
         let remade = api::TerminalKey { id: 5, made_at };
-        let terminals = &mut rows(kept(&mut host))[1].terminals;
-        terminals.push(terminal(24, terminal::Found::Key(key(4)), None));
-        terminals.push(terminal(25, terminal::Found::Key(remade), None));
+        rows(kept(&mut host))[1].terminals.push(terminal(25, terminal::Found::Key(remade), None));
         let projected = Projected::adapted(&host).unwrap();
         let project = projected.project(&Machine::Local, seven()).unwrap();
-        assert_eq!(project.view_of(keyed(4)), None, "two views claim terminal 4");
         let view = |id| Some((worktree(12), ViewId::of(id).unwrap()));
         assert_eq!(project.view_of(keyed(5)), view(23));
         assert_eq!(project.view_of(TerminalKey::of(&remade).unwrap()), view(25));
+    }
+
+    #[test]
+    fn a_machine_that_lists_one_terminal_in_two_views_is_refused_its_projects() {
+        let mut host = host();
+        rows(kept(&mut host))[1].terminals.push(terminal(24, terminal::Found::Key(key(4)), None));
+        assert_eq!(Projected::adapted(&host), Err("two views hold terminal 4".to_owned()));
     }
 
     #[test]
@@ -460,6 +473,20 @@ mod tests {
         let nixos = Machine::Remote("nixos".parse().unwrap());
         assert!(projected.reaches(&nixos), "a machine that lists too many is reached still");
         assert!(projected.projects(&nixos).is_empty(), "with no project to go to");
+    }
+
+    #[test]
+    fn a_machine_that_lists_more_views_than_lunetad_keeps_is_refused_its_projects() {
+        let listing = |count: u64| {
+            let mut host = host();
+            let lost = |id| terminal(id, terminal::Found::Lost(()), None);
+            rows(kept(&mut host))[0].terminals = (1..=count).map(lost).collect();
+            Projected::adapted(&host)
+        };
+        let most = u64::try_from(VIEWS_MAX).unwrap() - 1;
+        assert!(listing(most).is_ok(), "{VIEWS_MAX} views, with the second worktree's one");
+        let over = format!("they hold {} views, over the {VIEWS_MAX} kept", VIEWS_MAX + 1);
+        assert_eq!(listing(most + 1), Err(over));
     }
 
     #[test]
