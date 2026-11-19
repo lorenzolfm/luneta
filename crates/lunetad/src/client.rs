@@ -38,16 +38,32 @@ const SAID_MAX: u64 = 4096;
 
 pub type Daemon = DaemonClient<Within<Channel>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answerer {
+    Lunetad,
+    Mux,
+}
+
+impl fmt::Display for Answerer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Answerer::Lunetad => "lunetad",
+            Answerer::Mux => "luneta-mux",
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Within<S> {
     inner: S,
+    answerer: Answerer,
     answer: Duration,
 }
 
 impl<S> Within<S> {
-    pub(crate) fn new(inner: S, answer: Duration) -> Within<S> {
+    pub(crate) fn new(inner: S, answerer: Answerer, answer: Duration) -> Within<S> {
         assert!(!answer.is_zero(), "a call waits some time for its answer");
-        Within { inner, answer }
+        Within { inner, answerer, answer }
     }
 }
 
@@ -65,19 +81,20 @@ where
     }
 
     fn call(&mut self, request: R) -> Self::Future {
-        let (answer, asked) = (self.answer, self.inner.call(request));
+        let (answerer, answer) = (self.answerer, self.answer);
+        let asked = self.inner.call(request);
         Box::pin(async move {
             match tokio::time::timeout(answer, asked).await {
-                Ok(answered) => answered.map_err(Into::into),
-                Err(_) => Err(Status::deadline_exceeded(unanswered(answer)).into()),
+                Ok(heard) => heard.map_err(Into::into),
+                Err(_) => Err(Status::deadline_exceeded(unanswered(answerer, answer)).into()),
             }
         })
     }
 }
 
 #[must_use]
-pub fn unanswered(within: Duration) -> String {
-    format!("lunetad did not answer in {}s", within.as_secs_f64())
+pub fn unanswered(answerer: Answerer, within: Duration) -> String {
+    format!("{answerer} did not answer in {}s", within.as_secs_f64())
 }
 
 pub async fn connect(folder: &Folder) -> Result<Daemon, Error> {
@@ -92,7 +109,7 @@ pub async fn connect(folder: &Folder) -> Result<Daemon, Error> {
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, ANSWER)))
+    Ok(DaemonClient::new(Within::new(channel, Answerer::Lunetad, ANSWER)))
 }
 
 pub async fn through(command: std::process::Command) -> Result<Daemon, Error> {
@@ -109,7 +126,7 @@ pub async fn through(command: std::process::Command) -> Result<Daemon, Error> {
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, ANSWER_THROUGH)))
+    Ok(DaemonClient::new(Within::new(channel, Answerer::Lunetad, ANSWER_THROUGH)))
 }
 
 fn went() -> io::Error {
@@ -234,14 +251,15 @@ mod tests {
     use tonic::Code;
     use tower::{service_fn, BoxError};
 
-    use super::{unanswered, Within};
+    use super::{unanswered, Answerer, Within};
     use crate::api::daemon_client::DaemonClient;
 
     #[test]
     fn a_call_past_its_answer_says_lunetad_did_not_answer_in_time() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         let silent = service_fn(|_: Request<Body>| pending::<Result<Response<Body>, BoxError>>());
-        let mut daemon = DaemonClient::new(Within::new(silent, Duration::from_secs(1)));
+        let within = Within::new(silent, Answerer::Lunetad, Duration::from_secs(1));
+        let mut daemon = DaemonClient::new(within);
         let late = runtime.block_on(daemon.info(())).unwrap_err();
         let said = (late.code(), late.message());
         assert_eq!(said, (Code::DeadlineExceeded, "lunetad did not answer in 1s"));
@@ -249,7 +267,8 @@ mod tests {
 
     #[test]
     fn a_bound_in_part_of_a_second_is_said_exactly() {
-        assert_eq!(unanswered(Duration::from_millis(1500)), "lunetad did not answer in 1.5s");
-        assert_eq!(unanswered(Duration::from_millis(250)), "lunetad did not answer in 0.25s");
+        let said = |answerer, millis| unanswered(answerer, Duration::from_millis(millis));
+        assert_eq!(said(Answerer::Mux, 1500), "luneta-mux did not answer in 1.5s");
+        assert_eq!(said(Answerer::Lunetad, 250), "lunetad did not answer in 0.25s");
     }
 }

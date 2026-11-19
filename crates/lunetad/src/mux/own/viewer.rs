@@ -10,9 +10,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::{Status, Streaming};
 
-use super::api::{self, from_viewer, to_viewer, typed};
+use super::api::{self, from_viewer, mux_client::MuxClient, to_viewer, typed};
 use super::frames::{colours, Frame};
-use super::server::{connect, refused, runtime, socket, Reached};
+use super::server::{connect, refused, runtime, socket, Reached, ANSWER};
 use super::TerminalKey;
 use crate::api::{frames_request, On, FramesRequest};
 use crate::folder::Folder;
@@ -143,8 +143,8 @@ pub async fn relayed(
     let socket = socket().map_err(|failure| Status::failed_precondition(failure.to_string()))?;
     let unreached =
         |error: io::Error| Status::unavailable(format!("{}: {error}", socket.display()));
-    let mut client = match connect(&socket, None).await.map_err(unreached)? {
-        Reached::Matched(client) => client,
+    let mut client = match connect(&socket, ANSWER).await.map_err(unreached)? {
+        Reached::Matched(channel) => MuxClient::new(channel),
         Reached::Unreached => return Err(Status::unavailable("luneta-mux does not run")),
         Reached::Unmatched(unmatched) => return Err(Status::unavailable(unmatched.to_string())),
     };
@@ -170,8 +170,8 @@ async fn hearing(
     let sent = ReceiverStream::new(sent);
     let heard = match reach {
         Reach::Mux { socket, runs_in } => {
-            let mut client = match connect(socket, None).await {
-                Ok(Reached::Matched(client)) => client,
+            let mut client = match connect(socket, ANSWER).await {
+                Ok(Reached::Matched(channel)) => MuxClient::new(channel),
                 Ok(Reached::Unreached) => return Err("luneta-mux does not run".to_owned()),
                 Ok(Reached::Unmatched(unmatched)) => return Err(unmatched.to_string()),
                 Err(error) => return Err(format!("{}: {error}", socket.display())),
