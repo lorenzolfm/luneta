@@ -62,7 +62,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use lunetad::{folder, release, SessionName};
+use lunetad::{folder, release};
 
 #[derive(Parser)]
 #[command(
@@ -75,12 +75,13 @@ use lunetad::{folder, release, SessionName};
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[arg(
-        help = "The session to attach to, made in this directory if none runs by that name. \
-                Without one, luneta joins a session that runs: the one named for this directory, \
-                as the picker names it, or else the one you looked at last, or else the newest. \
-                It makes the one named for this directory only where none runs"
+        help = "A project's name, to show it wherever luneta starts. In a project of a clone wt \
+                made, a name no project has is a branch: luneta shows its worktree, made as \
+                `n w` makes one if there is none. Outside every project, a project of that name \
+                is made of this directory. Without a name, luneta shows the worktree of this \
+                directory, or else the one you used last"
     )]
-    session: Option<String>,
+    name: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -146,14 +147,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let folder: Result<PathBuf, String> = folder::find().map_err(|unfound| format!("{unfound}, to find lunetad in"));
     let Some(command) = cli.command else {
-        let session = match cli.session.as_deref().map(SessionName::parse).transpose() {
-            Ok(session) => session,
-            Err(refusal) => {
-                eprintln!("luneta: no such session to make: {refusal}");
-                return ExitCode::FAILURE;
-            },
-        };
-        return host::run(session.as_ref(), folder);
+        return host::run(cli.name.as_deref(), folder);
     };
     let command = match command {
         Command::Worktree { repo, of } => return pull::make(&repo, &of),

@@ -23,7 +23,7 @@ use lunetad::Directory;
 
 use crate::daemon;
 use crate::machines::Machine;
-use crate::projected::{self, Project};
+use crate::projected::{self, Holds, Project};
 use crate::sidebar::Reorder;
 
 const ASKING: Duration = Duration::from_secs(15);
@@ -202,11 +202,9 @@ pub fn add_worktree(
     path: &Path,
     machine: &Machine,
     (project, folder): (ProjectId, &str),
-    name: Option<&str>,
-    argv: Vec<String>,
 ) -> Result<Landed, String> {
-    let (project, folder, name) = (project.get(), folder.to_owned(), name.map(str::to_owned));
-    let change = Change::AddWorktree(AddWorktree { project, folder, name, argv });
+    let (project, folder) = (project.get(), folder.to_owned());
+    let change = Change::AddWorktree(AddWorktree { project, folder, name: None, argv: Vec::new() });
     let added = changed_on(path, on(machine), change).and_then(landed);
     added.map_err(|unmade| unmade.said_of("worktree"))
 }
@@ -377,15 +375,24 @@ fn chosen(
         }
     }
     let holding = projects.iter().find(|project| holds(&project.dir, cwd))?;
-    if let Some(name) = name
-        && name != holding.name
-    {
-        let (cwd, holding) = (cwd.display(), &holding.name);
-        return Some(Err(Tried::Failed(format!(
-            "{cwd} is in project {holding}, and no project is made inside another"
-        ))));
+    Some(match name {
+        Some(name) => branched_in(path, holding, name),
+        None => at_folder(path, holding, folder),
+    })
+}
+
+fn branched_in(path: &Path, holding: &Project, name: &str) -> Result<Landing, Tried> {
+    assert_ne!(holding.name, name, "a name a project has goes to that project");
+    match holding.holds {
+        Holds::Clone(_) => {},
+        Holds::Folder(_) => {
+            let one = projects::folder_has_one_worktree(&holding.name);
+            return Err(Tried::Failed(format!("{name} names no project, and {one}")));
+        },
     }
-    Some(at_folder(path, holding, folder))
+    let branch = Branch::parse(name).map_err(|why| format!("no worktree made: {why}"))?;
+    let made = branched(path, &Machine::Local, holding.id, &branch);
+    made.map(Landing::Worktree).map_err(Tried::Failed)
 }
 
 pub fn start(
@@ -395,6 +402,7 @@ pub fn start(
     seen: impl Fn(ProjectId) -> Option<SystemTime>,
 ) -> Result<Option<Landing>, String> {
     let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
+    let name = name.map(str::trim);
     twice(|| started(path, name, cwd, folder, &seen))
 }
 

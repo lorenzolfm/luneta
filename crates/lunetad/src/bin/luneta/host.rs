@@ -27,10 +27,10 @@ use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, Name, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::rebases::{Rebased, Unrebased};
-use lunetad::{Destination, Direction, Growth, SessionName};
+use lunetad::{Destination, Direction, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -441,7 +441,7 @@ struct App {
     quit_asked: bool,
 }
 
-pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
+pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
     let unkept = log::start(Process::Luneta).err();
     let dir = match env::current_dir() {
         Ok(dir) => dir,
@@ -459,7 +459,6 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
         Ok(cwd) => cwd,
         Err(why) => return did_not_start(&format!("no directory to start in: {why}")),
     };
-    let named = session.map(SessionName::as_str);
     let seen = |project| {
         news.last_seen(crate::ledger::Session::Project(project))
     };
@@ -1939,12 +1938,10 @@ impl App {
                 self.go(&on, &place);
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Add { on, project, folder, name } => {
+            Picked::Add { on, project, folder } => {
                 let project = project.id();
                 self.make_worktree(on, move |lunetad, on| {
-                    let named = name.as_ref().map(Name::as_str);
-                    let at = (project, folder.as_str());
-                    let added = worktrees::add_worktree(lunetad, on, at, named, Vec::new());
+                    let added = worktrees::add_worktree(lunetad, on, (project, folder.as_str()));
                     added.map(Landing::Worktree)
                 });
                 self.give(Focus::on(self.focus.side.session()));
