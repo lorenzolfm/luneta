@@ -62,7 +62,7 @@ fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
     window.send(SPLIT);
-    let split = eventually("a second terminal opens in the view", || {
+    let split = eventually("a second terminal opens in the layout", || {
         let terminals = shown(&owned, &dir.path)?.terminals;
         let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
         (found.count() == 2).then_some(terminals)

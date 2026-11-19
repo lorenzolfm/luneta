@@ -9,7 +9,7 @@ use std::time::Duration;
 use notify::RecursiveMode;
 
 use crate::mux::own::server::{self, Followed, SOCKET};
-use crate::views;
+use crate::layouts;
 use crate::watch::{self, Troubles};
 
 const UNREACHED_TRIES: u32 = 50;
@@ -17,7 +17,7 @@ const UNREACHED_TRIES: u32 = 50;
 const UNREACHED_PAUSE: Duration = Duration::from_millis(20);
 
 pub fn follow(
-    views: SyncSender<views::Command>,
+    layouts: SyncSender<layouts::Command>,
     (wake, woken): (SyncSender<()>, Receiver<()>),
     running: Arc<AtomicBool>,
     sweep: Duration,
@@ -50,7 +50,7 @@ pub fn follow(
                     troubles.say(format!("luneta-mux's terminals: {why}"));
                 }
                 troubles.done();
-                views.send(views::Command::Listed(terminals)).is_ok()
+                layouts.send(layouts::Command::Listed(terminals)).is_ok()
             });
             running.store(false, Ordering::Relaxed);
             let listens_soon = socket.as_deref().is_some_and(Path::exists);
@@ -58,20 +58,20 @@ pub fn follow(
             let retried = listens_soon && unreached < UNREACHED_TRIES;
             let unlisted = match followed {
                 Ok(Followed::Unreached { .. }) if retried => None,
-                Ok(Followed::Unreached { at }) => Some(views::Command::Unreached { since: at }),
-                Ok(Followed::Emptied { since }) => Some(views::Command::Emptied { since }),
+                Ok(Followed::Unreached { at }) => Some(layouts::Command::Unreached { since: at }),
+                Ok(Followed::Emptied { since }) => Some(layouts::Command::Emptied { since }),
                 Ok(Followed::LetGo) => return,
                 Err(failure) => {
                     troubles.say(format!("luneta-mux's terminals: {failure}"));
                     troubles.done();
-                    Some(views::Command::Crashed)
+                    Some(layouts::Command::Crashed)
                 },
             };
             if !unreached_now {
                 unreached = 0;
             }
             if let Some(unlisted) = unlisted
-                && views.send(unlisted).is_err()
+                && layouts.send(unlisted).is_err()
             {
                 return;
             }

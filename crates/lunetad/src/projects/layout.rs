@@ -307,14 +307,14 @@ impl<L: Leaf> Tree<L> {
 
     pub fn of_preorder(preorder: Vec<Preordered<L>>) -> Result<Tree<L>, String> {
         if preorder.len() > NODES_MAX {
-            return Err(format!("a view holds at most {PANES_MAX} terminals"));
+            return Err(format!("a layout holds at most {PANES_MAX} terminals"));
         }
         let mut nodes: Vec<Option<Node<L>>> = Vec::with_capacity(preorder.len());
         nodes.push(None);
         let mut open = vec![ROOT];
         for found in preorder {
             let Some(slot) = open.pop() else {
-                return Err("a view holds nodes after its last terminal".to_owned());
+                return Err("a layout holds nodes after its last terminal".to_owned());
             };
             nodes[slot] = Some(match found {
                 Preordered::Pane(leaf) => Node::Pane(leaf),
@@ -330,7 +330,7 @@ impl<L: Leaf> Tree<L> {
             });
         }
         if !open.is_empty() {
-            return Err("a split of a view lacks a half".to_owned());
+            return Err("a split of a layout lacks a half".to_owned());
         }
         let filled = "a preorder that ends with no open slot fills every node";
         let nodes: Vec<Node<L>> = nodes.into_iter().map(|node| node.expect(filled)).collect();
@@ -340,7 +340,7 @@ impl<L: Leaf> Tree<L> {
         panes.sort_unstable();
         panes.dedup();
         if panes.len() != count {
-            return Err("a view holds a terminal twice".to_owned());
+            return Err("a layout holds a terminal twice".to_owned());
         }
         tree.assert_shaped();
         Ok(tree)
@@ -824,8 +824,8 @@ fn assert_tiled<L: Leaf>(laid: &[(&L, Rect)], size: Size) {
     let mut area = 0;
     for (place, (leaf, rect)) in laid.iter().enumerate() {
         let pane = leaf.id();
-        assert!(rect.right() <= columns, "pane {pane} at {rect:?} is off a view of {size:?}");
-        assert!(rect.bottom() <= rows, "pane {pane} at {rect:?} is off a view of {size:?}");
+        assert!(rect.right() <= columns, "pane {pane} at {rect:?} is off a layout of {size:?}");
+        assert!(rect.bottom() <= rows, "pane {pane} at {rect:?} is off a layout of {size:?}");
         assert!(rect.columns >= COLUMNS_MIN, "pane {pane} at {rect:?} is narrower than a pane");
         assert!(rect.rows >= ROWS_MIN, "pane {pane} at {rect:?} is shorter than a pane");
         for (other, over) in &laid[place + 1..] {
@@ -834,7 +834,7 @@ fn assert_tiled<L: Leaf>(laid: &[(&L, Rect)], size: Size) {
         }
         area += rect.area();
     }
-    assert_eq!(area, Rect::whole(size).area(), "the panes tile a view of {size:?}");
+    assert_eq!(area, Rect::whole(size).area(), "the panes tile a layout of {size:?}");
 }
 
 fn touching(from: Rect, to: Rect, direction: Direction) -> Option<u16> {
@@ -921,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_pane_takes_the_view_and_its_frame_takes_a_cell_each_side() {
+    fn a_lone_pane_takes_the_layout_and_its_frame_takes_a_cell_each_side() {
         let tree = Tree::one(pane(1));
         assert_eq!(tree.rects(size(80, 24)), [(pane(1), rect(0, 0, 80, 24))]);
         assert_eq!(rect(0, 0, 80, 24).inner(), size(78, 22));
@@ -932,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn splits_halve_the_pane_split_and_tile_the_view() {
+    fn splits_halve_the_pane_split_and_tile_the_layout() {
         let tree = three(size(80, 24));
         assert_eq!(
             tree.rects(size(80, 24)),
@@ -951,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn a_view_too_small_for_its_panes_is_fitted_up_to_them() {
+    fn a_layout_too_small_for_its_panes_is_fitted_up_to_them() {
         let tree = three(size(80, 24));
         for (asked, fitted) in [((4, 2), (10, 6)), ((9, 40), (10, 40)), ((80, 24), (80, 24))] {
             assert_eq!(tree.fitted(size(asked.0, asked.1)), size(fitted.0, fitted.1));
@@ -960,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_has_room_only_where_the_view_holds_it() {
+    fn a_pane_has_room_only_where_the_layout_holds_it() {
         let at = size(10, 6);
         let tree = three(at);
         assert_eq!(tree.room(pane(1), Towards::Down, pane(4), at), Some(size(3, 1)));

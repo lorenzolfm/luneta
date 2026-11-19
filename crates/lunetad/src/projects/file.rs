@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Closing, Dir, Holds, Id, Line, Name, Project, Projects};
-use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, TerminalId, Used, View};
-use super::{Workstream, WorkstreamId, Worktree};
+use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, TerminalId, Used};
+use super::{Layout, Workstream, WorkstreamId, Worktree};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{SPOT_LOOK, TERMINALS_MAX, WORKSTREAMS_MAX};
 use crate::agent::Harness;
@@ -35,15 +35,17 @@ const SAID_TRIES: u32 = 20;
 
 const SAID_PAUSE: Duration = Duration::from_millis(10);
 
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
-const WITHOUT_VIEWS: u32 = 1;
+const WITHOUT_LAYOUTS: u32 = 1;
 
 const WITHOUT_UNRUN: u32 = 2;
 
 const WITHOUT_NAMES_OR_USE: u32 = 3;
 
 const UNROOTED: u32 = 5;
+
+const LAID_AS_VIEW: u32 = 6;
 
 const CHAR_BYTES_MAX: usize = 4;
 
@@ -103,7 +105,9 @@ struct KeptWorkstream {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    view: Option<KeptView>,
+    layout: Option<KeptLayout>,
+    #[serde(default, skip_serializing)]
+    view: Option<KeptLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     used_millis: Option<u64>,
 }
@@ -116,7 +120,9 @@ struct KeptWorktree {
     name: Option<String>,
     worktree: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    view: Option<KeptView>,
+    layout: Option<KeptLayout>,
+    #[serde(default, skip_serializing)]
+    view: Option<KeptLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     used_millis: Option<u64>,
 }
@@ -147,19 +153,20 @@ struct UnrootedWorkstream {
     #[serde(default)]
     below: String,
     #[serde(default)]
-    view: Option<KeptView>,
+    view: Option<KeptLayout>,
     #[serde(default)]
     used_millis: Option<u64>,
 }
 
 struct Counted<'a> {
-    view: Option<&'a KeptView>,
+    layout: Option<&'a KeptLayout>,
+    view: Option<&'a KeptLayout>,
     used_millis: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct KeptView {
+struct KeptLayout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     full: Option<String>,
     tree: Vec<KeptNode>,
@@ -620,8 +627,8 @@ fn parse(
     draw: &mut impl FnMut() -> io::Result<Id>,
 ) -> Result<Read, String> {
     let Versioned { version } = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    if !(WITHOUT_VIEWS..=VERSION).contains(&version) {
-        let read = format!("this lunetad reads only {WITHOUT_VIEWS} to {VERSION}");
+    if !(WITHOUT_LAYOUTS..=VERSION).contains(&version) {
+        let read = format!("this lunetad reads only {WITHOUT_LAYOUTS} to {VERSION}");
         return Err(format!("it is of version {version}, and {read}"));
     }
     if version > UNROOTED {
@@ -648,7 +655,8 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     projects: usize,
     workstreams: impl Fn() -> I,
 ) -> Result<(), String> {
-    let nodes = || workstreams().filter_map(|it| it.view).flat_map(|view| &view.tree);
+    let laid = || workstreams().filter_map(|it| it.layout.or(it.view));
+    let nodes = || laid().flat_map(|layout| &layout.tree);
     if projects > PROJECTS_MAX {
         return Err(format!("it holds over {PROJECTS_MAX} projects"));
     }
@@ -658,8 +666,14 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     if nodes().filter(|node| matches!(node, KeptNode::Terminal(_))).count() > TERMINALS_MAX {
         return Err(format!("it holds over {TERMINALS_MAX} terminals"));
     }
-    if version == WITHOUT_VIEWS && workstreams().any(|it| it.view.is_some()) {
-        return Err(format!("it is of version {WITHOUT_VIEWS}, which holds no views"));
+    if version <= LAID_AS_VIEW && workstreams().any(|it| it.layout.is_some()) {
+        return Err(format!("it is of version {version}, which keeps layouts as \"view\""));
+    }
+    if version > LAID_AS_VIEW && workstreams().any(|it| it.view.is_some()) {
+        return Err(format!("it is of version {version}, which keeps layouts as \"layout\""));
+    }
+    if version == WITHOUT_LAYOUTS && laid().next().is_some() {
+        return Err(format!("it is of version {WITHOUT_LAYOUTS}, which holds no layouts"));
     }
     let unrun = |node: &KeptNode| {
         matches!(node, KeptNode::Terminal(KeptTerminal { runs: KeptRuns::Unrun(_), .. }))
@@ -710,15 +724,15 @@ fn root_projects(
     draw: &mut impl FnMut() -> io::Result<Id>,
 ) -> Result<Vec<Project>, String> {
     let terminal_count = |workstreams: &mut dyn Iterator<Item = &Workstream>| -> usize {
-        workstreams.map(|it| it.view.len()).sum()
+        workstreams.map(|it| it.layout.len()).sum()
     };
     let terminals: usize =
         unrooted.iter().map(|it| terminal_count(&mut it.workstreams.iter().map(|(_, it)| it))).sum();
     let mut taken: BTreeSet<Id> = BTreeSet::new();
     for project in &unrooted {
         let workstreams = project.workstreams.iter().map(|(_, it)| it);
-        let views = workstreams.clone().map(|it| &it.view);
-        let terminals = views.flat_map(|view| view.terminals().map(|it| it.id().id()));
+        let layouts = workstreams.clone().map(|it| &it.layout);
+        let terminals = layouts.flat_map(|layout| layout.terminals().map(|it| it.id().id()));
         let ids = std::iter::once(project.id.id()).chain(workstreams.map(|it| it.id.id()));
         for id in ids.chain(terminals) {
             if !taken.insert(id) {
@@ -852,14 +866,14 @@ fn shape_clone(
     let used_last = |(at, (_, it)): &(usize, &(Worktree, Workstream))| (it.used, std::cmp::Reverse(*at));
     let last = merged.iter().enumerate().max_by_key(used_last).map(|(at, _)| at);
     let Some(last) = last else {
-        if own.iter().all(|it| it.view.is_empty()) {
+        if own.iter().all(|it| it.layout.is_empty()) {
             return Ok(Holds::Clone(Vec::new()));
         }
         return one_of(own, fresh).map(Holds::Folder);
     };
     let (_, into) = &mut merged[last];
     for workstream in own {
-        into.view = std::mem::take(&mut into.view).joined(workstream.view)?;
+        into.layout = std::mem::take(&mut into.layout).joined(workstream.layout)?;
     }
     Ok(Holds::Clone(merged))
 }
@@ -879,14 +893,14 @@ fn one_of(
 }
 
 fn join(held: &mut Workstream, other: Workstream) -> Result<(), String> {
-    let terminals = held.view.len() + other.view.len();
-    let view = std::mem::take(&mut held.view).joined(other.view)?;
+    let terminals = held.layout.len() + other.layout.len();
+    let layout = std::mem::take(&mut held.layout).joined(other.layout)?;
     if other.used > held.used {
-        *held = Workstream { view, ..other };
+        *held = Workstream { layout, ..other };
     } else {
-        held.view = view;
+        held.layout = layout;
     }
-    assert_eq!(held.view.len(), terminals, "workstreams joined keep every terminal");
+    assert_eq!(held.layout.len(), terminals, "workstreams joined keep every terminal");
     Ok(())
 }
 
@@ -931,18 +945,20 @@ impl KeptProject {
 fn read_workstream(
     id: &str,
     name: Option<&str>,
-    view: Option<KeptView>,
+    layout: Option<KeptLayout>,
     used_millis: Option<u64>,
 ) -> Result<Workstream, String> {
     let id: WorkstreamId = id.parse()?;
-    let view = match view {
-        None => View::default(),
-        Some(view) => view.read().map_err(|why| format!("workstream {id}'s view: {why}"))?,
+    let layout = match layout {
+        None => Layout::default(),
+        Some(layout) => {
+            layout.read().map_err(|why| format!("workstream {id}'s layout: {why}"))?
+        },
     };
     Ok(Workstream {
         id,
         renamed: name.map(Name::parse).transpose()?,
-        view,
+        layout,
         used: used_millis.map(Used::read).transpose().map_err(|why| {
             format!("workstream {id}: {why}")
         })?,
@@ -951,37 +967,43 @@ fn read_workstream(
 
 impl KeptWorkstream {
     fn read(self) -> Result<Workstream, String> {
-        read_workstream(&self.id, self.name.as_deref(), self.view, self.used_millis)
+        let layout = self.layout.or(self.view);
+        read_workstream(&self.id, self.name.as_deref(), layout, self.used_millis)
     }
 
     fn of(workstream: &Workstream) -> KeptWorkstream {
         KeptWorkstream {
             id: workstream.id.to_string(),
             name: workstream.renamed.as_ref().map(|name| name.0.clone()),
-            view: KeptView::of(&workstream.view),
+            layout: KeptLayout::of(&workstream.layout),
+            view: None,
             used_millis: workstream.used.map(Used::millis),
         }
     }
 
     fn counted(&self) -> Counted<'_> {
-        Counted { view: self.view.as_ref(), used_millis: self.used_millis }
+        let (layout, view) = (self.layout.as_ref(), self.view.as_ref());
+        Counted { layout, view, used_millis: self.used_millis }
     }
 }
 
 impl KeptWorktree {
     fn read(self) -> Result<(Worktree, Workstream), String> {
-        let workstream = read_workstream(&self.id, self.name.as_deref(), self.view, self.used_millis)?;
+        let layout = self.layout.or(self.view);
+        let workstream = read_workstream(&self.id, self.name.as_deref(), layout, self.used_millis)?;
         let at = |why: String| format!("workstream {}: {why}", workstream.id);
         Ok((Worktree::parse(&self.worktree).map_err(at)?, workstream))
     }
 
     fn of(worktree: &Worktree, workstream: &Workstream) -> KeptWorktree {
-        let KeptWorkstream { id, name, view, used_millis } = KeptWorkstream::of(workstream);
-        KeptWorktree { id, name, worktree: worktree.as_str().to_owned(), view, used_millis }
+        let KeptWorkstream { id, name, layout, view, used_millis } = KeptWorkstream::of(workstream);
+        let worktree = worktree.as_str().to_owned();
+        KeptWorktree { id, name, worktree, layout, view, used_millis }
     }
 
     fn counted(&self) -> Counted<'_> {
-        Counted { view: self.view.as_ref(), used_millis: self.used_millis }
+        let (layout, view) = (self.layout.as_ref(), self.view.as_ref());
+        Counted { layout, view, used_millis: self.used_millis }
     }
 }
 
@@ -1000,12 +1022,12 @@ impl UnrootedWorkstream {
     }
 
     fn counted(&self) -> Counted<'_> {
-        Counted { view: self.view.as_ref(), used_millis: self.used_millis }
+        Counted { layout: None, view: self.view.as_ref(), used_millis: self.used_millis }
     }
 }
 
-impl KeptView {
-    fn read(self) -> Result<View, String> {
+impl KeptLayout {
+    fn read(self) -> Result<Layout, String> {
         let full = self.full.as_deref().map(str::parse).transpose()?;
         let tree = self.tree.into_iter().map(|node| match node {
             KeptNode::Split(KeptSplit { towards, share }) => {
@@ -1013,17 +1035,18 @@ impl KeptView {
             },
             KeptNode::Terminal(terminal) => terminal.read().map(Preordered::Pane),
         });
-        View::read(tree.collect::<Result<_, String>>()?, full)
+        Layout::read(tree.collect::<Result<_, String>>()?, full)
     }
 
-    fn of(view: &View) -> Option<KeptView> {
-        let tree = view.tree()?.preorder().into_iter().map(|node| match node {
+    fn of(layout: &Layout) -> Option<KeptLayout> {
+        let tree = layout.tree()?.preorder().into_iter().map(|node| match node {
             Preordered::Split { towards, share } => {
                 KeptNode::Split(KeptSplit { towards: KeptTowards::of(towards), share })
             },
             Preordered::Pane(terminal) => KeptNode::Terminal(KeptTerminal::of(terminal)),
         });
-        Some(KeptView { full: view.full().map(|full| full.to_string()), tree: tree.collect() })
+        let full = layout.full().map(|full| full.to_string());
+        Some(KeptLayout { full, tree: tree.collect() })
     }
 }
 
@@ -1300,7 +1323,7 @@ mod tests {
         let change = Change::AddProject { spot: alone("/home/me/Vault"), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
         let want = r#"{
-  "version": 6,
+  "version": 7,
   "projects": [
     {
       "id": "0000000000000001",
@@ -1335,12 +1358,14 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        let before = want.replace(r#""version": 6"#, r#""version": 5"#);
+        let six = want.replace(r#""version": 7"#, r#""version": 6"#);
+        assert_eq!(parse(&six), Ok(projects.clone()));
+        let before = want.replace(r#""version": 7"#, r#""version": 5"#);
         assert!(parse(&before).unwrap_err().contains("unknown field `holds`"));
     }
 
     #[test]
-    fn a_view_is_kept_as_its_terminals_in_preorder_with_what_each_runs() {
+    fn a_layout_is_kept_as_its_terminals_in_preorder_with_what_each_runs() {
         let mut projects = Projects::default();
         let ids = [1, 2].map(|id| Id::of(id).unwrap());
         let mut drawn = ids.into_iter();
@@ -1373,7 +1398,7 @@ mod tests {
         let fill = Change::Fill { workstream, full: Some(vim) };
         (projects, _) = projects.changed(fill, &mut draw).unwrap();
         let want = r#"{
-  "version": 6,
+  "version": 7,
   "projects": [
     {
       "id": "0000000000000001",
@@ -1384,7 +1409,7 @@ mod tests {
           {
             "id": "0000000000000002",
             "worktree": "top",
-            "view": {
+            "layout": {
               "full": "0000000000000005",
               "tree": [
                 {
@@ -1437,12 +1462,21 @@ mod tests {
 }
 "#;
         assert_eq!(written(&projects), want);
-        assert_eq!(parse(want), Ok(projects));
+        assert_eq!(parse(want), Ok(projects.clone()));
+        let viewed = want.replace(r#""version": 7"#, r#""version": 6"#);
+        let viewed = viewed.replace(r#""layout": {"#, r#""view": {"#);
+        assert_eq!(parse(&viewed), Ok(projects));
+        let unviewed = want.replace(r#""version": 7"#, r#""version": 6"#);
+        let refused = "it is of version 6, which keeps layouts as \"view\"";
+        assert_eq!(parse(&unviewed), Err(refused.to_owned()));
+        let relaid = want.replace(r#""layout": {"#, r#""view": {"#);
+        let refused = "it is of version 7, which keeps layouts as \"layout\"";
+        assert_eq!(parse(&relaid), Err(refused.to_owned()));
         let before = r#"{"version": 1, "projects": [{"id": "0000000000000001", "name": "luneta",
             "dir": "/w/luneta", "workstreams": [{"id": "0000000000000002", "below": "top",
             "view": {"tree": [{"terminal": {"id": "0000000000000004", "folder": "/w/luneta/top",
             "runs": "shell"}}]}}]}]}"#;
-        assert_eq!(parse(before), Err("it is of version 1, which holds no views".to_owned()));
+        assert_eq!(parse(before), Err("it is of version 1, which holds no layouts".to_owned()));
     }
 
     #[test]
@@ -1498,16 +1532,16 @@ mod tests {
         let named = "the first keeps its id, and its folder's name becomes its clone's";
         assert_eq!(held, (1, "luneta", &dir("/w/luneta"), true), "{named}");
         let (first, main) = &rows(luneta)[0];
-        assert_eq!((main.id().get(), first.as_str(), main.view().len()), (3, "main", 2));
+        assert_eq!((main.id().get(), first.as_str(), main.layout().len()), (3, "main", 2));
         let renamed = main.renamed().map(Name::as_str);
         assert_eq!(renamed, Some("kept"), "the one used last stands for both");
         let feat = row(luneta, "feat");
-        assert_eq!((feat.id().get(), feat.view().len()), (5, 1), "a folder below a worktree is it");
+        assert_eq!((feat.id().get(), feat.layout().len()), (5, 1), "a folder below a worktree is it");
         let nested = row(luneta, "team/x");
-        let held = (nested.id().get(), nested.view().len());
+        let held = (nested.id().get(), nested.layout().len());
         assert_eq!(held, (10, 1), "a folder in a nested worktree is that worktree's");
         let fix = row(luneta, "fix");
-        assert!(fix.view().is_empty() && fix.id().get() > 100, "a worktree listed is given one");
+        assert!(fix.layout().is_empty() && fix.id().get() > 100, "a worktree listed is given one");
         assert_eq!(rows(luneta).len(), 4);
         let held = (is_clone(vault), vault.workstreams().count());
         assert_eq!(held, (false, 1), "a folder gone stays");
@@ -1607,7 +1641,7 @@ mod tests {
         let project = r#"{"id": "0000000000000001", "name": "a", "dir": "/a"}"#;
         let refused = [
             ("{", "EOF"),
-            (r#"{"version": 7, "projects": []}"#, "version 7, and this lunetad reads only 1 to 6"),
+            (r#"{"version": 8, "projects": []}"#, "version 8, and this lunetad reads only 1 to 7"),
             (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),
             (
@@ -1655,13 +1689,13 @@ mod tests {
                 "view": {"full": "0000000000000003",
                 "tree": [{"terminal": {"id": "0000000000000003", "folder": "/a",
                 "runs": "shell"}}]}}]}]}"#,
-                "a view of one terminal shows it whole already",
+                "a layout of one terminal shows it whole already",
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
                 "workstreams": [{"id": "0000000000000002", "below": "b",
                 "view": {"tree": []}}]}]}"#,
-                "workstream 0000000000000002's view: a view holds no terminal",
+                "workstream 0000000000000002's layout: a layout holds no terminal",
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
@@ -1794,7 +1828,7 @@ mod tests {
         assert!(why.starts_with(&format!("{}: ", file.display())), "{why}");
         assert!(matches!(flushed, Err(Failed::Unwritten(_))), "{flushed:?}");
         assert_eq!(fs::read_to_string(&file).unwrap(), written);
-        let emptied = |projects: &Projects| projects.find(workstream).unwrap().1.view().is_empty();
+        let emptied = |projects: &Projects| projects.find(workstream).unwrap().1.layout().is_empty();
         let [told] = heard(&commands).try_into().unwrap();
         assert!(emptied(&told.unwrap()), "the core hears of the close");
         assert!(emptied(store.projects().unwrap()));
@@ -1878,7 +1912,7 @@ mod tests {
     }
 
     #[test]
-    fn a_change_to_a_view_alone_is_written_when_flushed_or_with_the_next_change() {
+    fn a_change_to_a_layout_alone_is_written_when_flushed_or_with_the_next_change() {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         let (core, commands) = channel();
@@ -1899,7 +1933,7 @@ mod tests {
         let beside = Placed::Beside { at: one, towards: Towards::Right };
         store.change(opened(two, beside)).unwrap();
         let read = || parse(&fs::read_to_string(&file).unwrap()).unwrap();
-        let full = |projects: &Projects| projects.find(workstream).unwrap().1.view().full();
+        let full = |projects: &Projects| projects.find(workstream).unwrap().1.layout().full();
 
         store.change(Change::Fill { workstream, full: Some(two) }).unwrap();
         assert_eq!(full(store.projects().unwrap()), Some(two));

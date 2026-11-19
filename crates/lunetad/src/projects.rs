@@ -16,7 +16,7 @@ use crate::api;
 use crate::core::{self, Command};
 use crate::mux::own::TerminalKey;
 use crate::watch::Troubles;
-use crate::{views, SessionName};
+use crate::{layouts, SessionName};
 
 mod file;
 pub(crate) mod layout;
@@ -27,7 +27,7 @@ pub use file::{forget, holder, kept, take, Changed, Elsewhere, Failed, Forgotten
 pub use file::{Store, Unheld};
 pub use layout::{Size, FRAME_CELLS, PANES_MAX};
 pub use spot::{Spot, LOOK as SPOT_LOOK, WORKTREES_MAX};
-pub use view::{Line, Placed, Runs, Session, Terminal, View, LINE_BYTES_MAX, SESSION_BYTES_MAX};
+pub use view::{Layout, Line, Placed, Runs, Session, Terminal, LINE_BYTES_MAX, SESSION_BYTES_MAX};
 
 pub const PROJECTS_MAX: usize = 64;
 
@@ -477,7 +477,7 @@ impl Project {
     }
 
     fn terminal_count(&self) -> usize {
-        self.workstreams().map(|it| it.view.len()).sum()
+        self.workstreams().map(|it| it.layout.len()).sum()
     }
 }
 
@@ -485,13 +485,13 @@ impl Project {
 pub struct Workstream {
     id: WorkstreamId,
     renamed: Option<Name>,
-    view: View,
+    layout: Layout,
     used: Option<Used>,
 }
 
 impl Workstream {
     fn new(id: WorkstreamId, renamed: Option<Name>) -> Workstream {
-        Workstream { id, renamed, view: View::default(), used: None }
+        Workstream { id, renamed, layout: Layout::default(), used: None }
     }
 
     #[must_use]
@@ -505,8 +505,8 @@ impl Workstream {
     }
 
     #[must_use]
-    pub fn view(&self) -> &View {
-        &self.view
+    pub fn layout(&self) -> &Layout {
+        &self.layout
     }
 
     #[must_use]
@@ -830,7 +830,7 @@ impl Projects {
         for (at, project) in projects.iter().enumerate() {
             let workstreams = project.workstreams().map(|workstream| workstream.id.0);
             let terminals = project.workstreams().flat_map(|workstream| {
-                workstream.view.terminals().map(|terminal| layout::Leaf::id(terminal).0)
+                workstream.layout.terminals().map(|terminal| layout::Leaf::id(terminal).0)
             });
             for id in std::iter::once(project.id.0).chain(workstreams).chain(terminals) {
                 if !ids.insert(id) {
@@ -1006,7 +1006,7 @@ impl Projects {
                     let name = &project.name.0;
                     return Err(format!("workstream {workstream} is project {name}'s own folder"));
                 }
-                let held = held.view.len();
+                let held = held.layout.len();
                 if held > 0 {
                     return Err(format!("workstream {workstream} holds {held} terminals still"));
                 }
@@ -1034,8 +1034,8 @@ impl Projects {
                 None
             },
             Change::RenameTerminal { terminal, to } => {
-                let view = changed.view_of(terminal)?;
-                view.terminal_mut(terminal).expect("its view holds it").renamed(to);
+                let layout = changed.layout_of(terminal)?;
+                layout.terminal_mut(terminal).expect("its layout holds it").renamed(to);
                 None
             },
             Change::Open { workstream, terminal, placed, size } => {
@@ -1047,15 +1047,15 @@ impl Projects {
                     let many = format!("there are {TERMINALS_MAX} terminals");
                     return Err(format!("{many}, as many as are kept"));
                 }
-                changed.workstream_mut(workstream)?.view.opened(terminal, placed, size)?;
+                changed.workstream_mut(workstream)?.layout.opened(terminal, placed, size)?;
                 None
             },
             Change::Close { terminal } | Change::Unopen { terminal } => {
                 let held_in = self.holding(terminal).map(|(workstream, _)| workstream.id());
                 let workstream = held_in.ok_or_else(|| unknown("terminal", terminal))?;
-                changed.view_of(terminal)?.closed(terminal);
+                changed.layout_of(terminal)?.closed(terminal);
                 assert!(changed.find(workstream).is_some(), "{workstream} stays, if empty");
-                assert!(!changed.holds(terminal.0), "terminal {terminal} left its view");
+                assert!(!changed.holds(terminal.0), "terminal {terminal} left its layout");
                 None
             },
             Change::Move { terminal, to, size } => {
@@ -1065,7 +1065,7 @@ impl Projects {
                     return Err(format!("terminal {terminal} is in workstream {to} already"));
                 }
                 let (_, target) = self.find(to).ok_or_else(|| unknown("workstream", to))?;
-                let placed = match target.view.tree() {
+                let placed = match target.layout.tree() {
                     None => Placed::Alone,
                     Some(tree) => {
                         let room = tree.room_beside_largest(terminal, size);
@@ -1074,35 +1074,35 @@ impl Projects {
                         Placed::Beside { at, towards }
                     },
                 };
-                let view = changed.view_of(terminal)?;
-                let moved = view.terminal_mut(terminal).expect("its view holds it").clone();
-                view.closed(terminal);
+                let layout = changed.layout_of(terminal)?;
+                let moved = layout.terminal_mut(terminal).expect("its layout holds it").clone();
+                layout.closed(terminal);
                 assert!(changed.find(from).is_some(), "{from} stays, if empty");
-                changed.workstream_mut(to)?.view.opened(moved, placed, size)?;
+                changed.workstream_mut(to)?.layout.opened(moved, placed, size)?;
                 let held_in = changed.holding(terminal).map(|(workstream, _)| workstream.id());
                 assert_eq!(held_in, Some(to), "terminal {terminal} moved to workstream {to}");
                 None
             },
             Change::Resize { terminal, sides, growth, size } => {
-                changed.view_of(terminal)?.resized(terminal, sides, growth, size)?;
+                changed.layout_of(terminal)?.resized(terminal, sides, growth, size)?;
                 None
             },
             Change::Swap { one, other } => {
-                let view = changed.view_of(one)?;
-                if !view.holds(other) {
-                    return Err(format!("terminals {one} and {other} are in two views"));
+                let layout = changed.layout_of(one)?;
+                if !layout.holds(other) {
+                    return Err(format!("terminals {one} and {other} are in two layouts"));
                 }
-                view.swapped(one, other)?;
+                layout.swapped(one, other)?;
                 None
             },
             Change::Fill { workstream, full } => {
-                changed.workstream_mut(workstream)?.view.filled(full)?;
+                changed.workstream_mut(workstream)?.layout.filled(full)?;
                 None
             },
             Change::Ran(ran) => {
                 for Ran { terminal, folder, runs } in ran {
-                    let view = changed.view_of(terminal)?;
-                    view.terminal_mut(terminal).expect("its view holds it").ran(folder, runs);
+                    let layout = changed.layout_of(terminal)?;
+                    layout.terminal_mut(terminal).expect("its layout holds it").ran(folder, runs);
                 }
                 None
             },
@@ -1115,10 +1115,10 @@ impl Projects {
         let mut changed = self.clone();
         match closing {
             Closing::Workstream(workstream) => {
-                let closed = std::mem::take(&mut changed.workstream_mut(workstream)?.view);
+                let closed = std::mem::take(&mut changed.workstream_mut(workstream)?.layout);
                 for terminal in closed.terminals() {
                     let id = layout::Leaf::id(terminal);
-                    assert!(!changed.holds(id.0), "terminal {id} goes with its workstream's view");
+                    assert!(!changed.holds(id.0), "terminal {id} goes with its workstream's layout");
                 }
                 assert!(changed.find(workstream).is_some(), "workstream {workstream} stays, empty");
             },
@@ -1132,7 +1132,7 @@ impl Projects {
                 for workstream in closed.workstreams() {
                     let id = workstream.id;
                     assert!(changed.find(id).is_none(), "workstream {id} goes with its project");
-                    for terminal in workstream.view.terminals() {
+                    for terminal in workstream.layout.terminals() {
                         let id = layout::Leaf::id(terminal);
                         assert!(!changed.holds(id.0), "terminal {id} goes with its project");
                     }
@@ -1257,11 +1257,11 @@ impl Projects {
             return Ok(());
         };
         let rows = self.rows(project)?;
-        let terminals: usize = rows.iter().map(|(_, it)| it.view.len()).sum();
+        let terminals: usize = rows.iter().map(|(_, it)| it.layout.len()).sum();
         rows.retain(|(worktree, it)| {
-            !seen.contains(&it.id) || worktrees.contains(worktree) || !it.view.is_empty()
+            !seen.contains(&it.id) || worktrees.contains(worktree) || !it.layout.is_empty()
         });
-        let kept: usize = rows.iter().map(|(_, it)| it.view.len()).sum();
+        let kept: usize = rows.iter().map(|(_, it)| it.layout.len()).sum();
         assert_eq!(kept, terminals, "a listing of worktrees drops no terminal");
         for worktree in worktrees {
             self.worktree_made(project, worktree, None, draw)?;
@@ -1283,7 +1283,7 @@ impl Projects {
         };
         let holding = |worktree: &Worktree| {
             let folder = root.at(worktree);
-            own.view.terminals().filter(|it| folder.below(it.folder()).is_some()).count()
+            own.layout.terminals().filter(|it| folder.below(it.folder()).is_some()).count()
         };
         let most = worktrees.iter().enumerate().max_by_key(|(at, it)| (holding(it), Reverse(*at)));
         let Some((_, home)) = most else {
@@ -1318,7 +1318,7 @@ impl Projects {
     }
 
     fn terminal_count(&self) -> usize {
-        self.workstreams().map(|(_, workstream)| workstream.view.len()).sum()
+        self.workstreams().map(|(_, workstream)| workstream.layout.len()).sum()
     }
 
     pub fn workstreams(&self) -> impl Iterator<Item = (&Project, &Workstream)> {
@@ -1351,14 +1351,15 @@ impl Projects {
     #[must_use]
     pub fn holding(&self, terminal: TerminalId) -> Option<(&Workstream, &Terminal)> {
         self.workstreams().find_map(|(_, workstream)| {
-            let tree = workstream.view.tree()?;
+            let tree = workstream.layout.tree()?;
             Some((workstream, tree.get(terminal)?))
         })
     }
 
     pub fn terminals(&self) -> impl Iterator<Item = (&Workstream, &Terminal)> {
-        self.workstreams()
-            .flat_map(|(_, workstream)| workstream.view.terminals().map(move |it| (workstream, it)))
+        self.workstreams().flat_map(|(_, workstream)| {
+            workstream.layout.terminals().map(move |it| (workstream, it))
+        })
     }
 
     #[must_use]
@@ -1366,17 +1367,17 @@ impl Projects {
         self.projects.iter().any(|project| {
             project.id.0 == id
                 || project.workstreams().any(|workstream| {
-                    workstream.id.0 == id || workstream.view.holds(TerminalId(id))
+                    workstream.id.0 == id || workstream.layout.holds(TerminalId(id))
                 })
         })
     }
 
-    fn view_of(&mut self, terminal: TerminalId) -> Result<&mut View, String> {
+    fn layout_of(&mut self, terminal: TerminalId) -> Result<&mut Layout, String> {
         self.projects
             .iter_mut()
             .flat_map(Project::workstreams_mut)
-            .map(|workstream| &mut workstream.view)
-            .find(|view| view.holds(terminal))
+            .map(|workstream| &mut workstream.layout)
+            .find(|layout| layout.holds(terminal))
             .ok_or_else(|| unknown("terminal", terminal))
     }
 
@@ -1476,7 +1477,7 @@ fn reordered<T, I: Ord + Copy>(
 
 pub fn follow(
     core: SyncSender<Command>,
-    views: SyncSender<views::Command>,
+    layouts: SyncSender<layouts::Command>,
     sweep: Duration,
 ) -> io::Result<()> {
     thread::Builder::new().name("folders".to_owned()).spawn(move || {
@@ -1514,7 +1515,7 @@ pub fn follow(
                 let Some(worktrees) = rooted.cloned() else {
                     continue;
                 };
-                if views.send(views::Command::Rooted { root, worktrees }).is_err() {
+                if layouts.send(layouts::Command::Rooted { root, worktrees }).is_err() {
                     return;
                 }
             }
@@ -1529,7 +1530,7 @@ pub fn follow(
                         continue;
                     },
                 };
-                if views.send(views::Command::Worktrees { root, worktrees, seen }).is_err() {
+                if layouts.send(layouts::Command::Worktrees { root, worktrees, seen }).is_err() {
                     return;
                 }
             }
@@ -2041,7 +2042,7 @@ mod tests {
         let main = workstream(&mut projects, luneta, "/w/luneta/main");
         opened(&mut projects, main, 100, Placed::Alone);
         projects = projects.closed(Closing::Workstream(main)).unwrap();
-        assert!(view(&projects, main).is_empty(), "a workstream closes its terminals and stays");
+        assert!(layout(&projects, main).is_empty(), "a workstream closes its terminals and stays");
         assert!(projects.project_of(luneta).is_some());
     }
 
@@ -2111,29 +2112,29 @@ mod tests {
         terminal
     }
 
-    fn view(projects: &Projects, workstream: WorkstreamId) -> &View {
-        projects.find(workstream).unwrap().1.view()
+    fn layout(projects: &Projects, workstream: WorkstreamId) -> &Layout {
+        projects.find(workstream).unwrap().1.layout()
     }
 
     #[test]
-    fn a_view_opens_closes_and_fills_itself_with_one_of_its_terminals() {
+    fn a_layout_opens_closes_and_fills_itself_with_one_of_its_terminals() {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let main = workstream(&mut projects, luneta, "/w/luneta/main");
-        assert!(view(&projects, main).is_empty());
+        assert!(layout(&projects, main).is_empty());
         let one = opened(&mut projects, main, 100, Placed::Alone);
         let right = Placed::Beside { at: one, towards: layout::Towards::Right };
         let two = opened(&mut projects, main, 101, right);
-        assert_eq!(view(&projects, main).tree().unwrap().panes(), [one, two]);
+        assert_eq!(layout(&projects, main).tree().unwrap().panes(), [one, two]);
         assert_eq!(projects.holding(two).map(|(it, _)| it.id()), Some(main));
 
         (projects, _) = change(&projects, Change::Swap { one, other: two }).unwrap();
-        assert_eq!(view(&projects, main).tree().unwrap().panes(), [two, one]);
+        assert_eq!(layout(&projects, main).tree().unwrap().panes(), [two, one]);
         let fill = |full| Change::Fill { workstream: main, full };
         (projects, _) = change(&projects, fill(Some(two))).unwrap();
-        assert_eq!(view(&projects, main).full(), Some(two));
+        assert_eq!(layout(&projects, main).full(), Some(two));
         let swap = change(&projects, Change::Swap { one, other: two });
-        assert!(swap.unwrap_err().contains("moves none"), "a full view moves no terminal");
+        assert!(swap.unwrap_err().contains("moves none"), "a full layout moves no terminal");
         let (sides, grow) = (layout::Sides::One(layout::Direction::Left), layout::Growth::Grow);
         let size = Size::of(80, 24).unwrap();
         let resize = Change::Resize { terminal: one, sides, growth: grow, size };
@@ -2142,12 +2143,12 @@ mod tests {
         assert!(change(&projects, fill(Some(gone))).unwrap_err().contains("holds no terminal"));
 
         (projects, _) = change(&projects, Change::Close { terminal: two }).unwrap();
-        assert_eq!(view(&projects, main).full(), None, "a view of one fills itself with none");
+        assert_eq!(layout(&projects, main).full(), None, "a layout of one fills itself with none");
         assert!(change(&projects, fill(Some(one))).unwrap_err().contains("whole already"));
         let refused = change(&projects, Change::ForgetWorkstream { workstream: main });
         assert!(refused.unwrap_err().contains("holds 1 terminals still"));
         (projects, _) = change(&projects, Change::Close { terminal: one }).unwrap();
-        assert!(view(&projects, main).is_empty(), "a workstream stays with its last terminal gone");
+        assert!(layout(&projects, main).is_empty(), "a workstream stays with its last terminal gone");
     }
 
     #[test]
@@ -2160,7 +2161,7 @@ mod tests {
         let two = opened(&mut projects, main, 101, right);
         (projects, _) = change(&projects, Change::Close { terminal: one }).unwrap();
         let held_in = projects.holding(two).map(|(it, _)| it.id());
-        assert_eq!(held_in, Some(main), "a terminal not its view's last leaves the workstream");
+        assert_eq!(held_in, Some(main), "a terminal not its layout's last leaves the workstream");
         (projects, _) = change(&projects, Change::Close { terminal: two }).unwrap();
         let left = projects.all()[0].workstreams().map(|it| it.id);
         assert_eq!(left.collect::<Vec<_>>(), [main]);
@@ -2170,7 +2171,7 @@ mod tests {
     }
 
     #[test]
-    fn a_moved_terminal_leaves_its_view_whole_for_another() {
+    fn a_moved_terminal_leaves_its_layout_whole_for_another() {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let main = workstream(&mut projects, luneta, "/w/luneta/main");
@@ -2183,8 +2184,8 @@ mod tests {
         let size = Size::of(80, 24).unwrap();
         let moving = |terminal, to| Change::Move { terminal, to, size };
         (projects, _) = change(&projects, moving(two, feat)).unwrap();
-        assert_eq!(view(&projects, main).tree().unwrap().panes(), [one]);
-        assert_eq!(view(&projects, feat).tree().unwrap().panes(), [two]);
+        assert_eq!(layout(&projects, main).tree().unwrap().panes(), [one]);
+        assert_eq!(layout(&projects, feat).tree().unwrap().panes(), [two]);
         let (_, moved) = projects.holding(two).unwrap();
         assert_eq!(moved.name().map(Name::as_str), Some("tests"), "a terminal moves whole");
         assert!(change(&projects, moving(two, feat)).unwrap_err().contains("already"));
@@ -2192,8 +2193,8 @@ mod tests {
         assert!(change(&projects, moving(two, nowhere)).unwrap_err().contains("no workstream"));
 
         (projects, _) = change(&projects, moving(one, feat)).unwrap();
-        assert_eq!(view(&projects, feat).tree().unwrap().panes(), [two, one]);
-        assert!(view(&projects, main).is_empty(), "a workstream stays with its last moved out");
+        assert_eq!(layout(&projects, feat).tree().unwrap().panes(), [two, one]);
+        assert!(layout(&projects, main).is_empty(), "a workstream stays with its last moved out");
     }
 
     #[test]
@@ -2224,7 +2225,7 @@ mod tests {
         let main = workstream(&mut projects, luneta, "/w/luneta/main");
         let one = opened(&mut projects, main, 100, Placed::Alone);
         (projects, _) = change(&projects, Change::Unopen { terminal: one }).unwrap();
-        assert!(view(&projects, main).is_empty());
+        assert!(layout(&projects, main).is_empty());
         let left = projects.all()[0].workstreams().map(|it| it.id);
         assert_eq!(left.collect::<Vec<_>>(), [main], "a workstream an open failed in stays");
         let gone = change(&projects, Change::Unopen { terminal: one });
@@ -2407,7 +2408,7 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_is_placed_only_where_its_view_has_it_and_its_id_is_free() {
+    fn a_terminal_is_placed_only_where_its_layout_has_it_and_its_id_is_free() {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let main = workstream(&mut projects, luneta, "/w/luneta/main");
@@ -2420,7 +2421,7 @@ mod tests {
         };
         let at = TerminalId::of(9).unwrap();
         let nowhere = Placed::Beside { at, towards: layout::Towards::Down };
-        assert!(change(&projects, open(100, nowhere)).unwrap_err().contains("view is empty"));
+        assert!(change(&projects, open(100, nowhere)).unwrap_err().contains("layout is empty"));
         let one = opened(&mut projects, main, 100, Placed::Alone);
         assert!(change(&projects, open(101, Placed::Alone)).unwrap_err().contains("already"));
         assert!(change(&projects, open(100, nowhere)).unwrap_err().contains("is taken"));

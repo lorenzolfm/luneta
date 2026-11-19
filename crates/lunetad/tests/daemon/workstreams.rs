@@ -102,7 +102,7 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
     let show = lunetad::show(folder, at, here, size, false, move |it| drop(heard.send(it)));
     let argv = ["sleep", "600"].map(str::to_owned).to_vec();
     show.ask(Asked::Open { beside: Beside::Alone, argv });
-    let laid = eventually("the view lays out the terminal", || match hearing.try_recv() {
+    let laid = eventually("the layout lays out the terminal", || match hearing.try_recv() {
         Ok(Heard::Laid(laid)) if !laid.is_empty() => Some(laid),
         Ok(_) | Err(_) => None,
     });

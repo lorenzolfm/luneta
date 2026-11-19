@@ -312,7 +312,7 @@ impl Inbox {
 
 struct App {
     right: Option<Viewed>,
-    view_number_dropped: u64,
+    shown_number_dropped: u64,
     runs_in: Option<TerminalKey>,
     projected: Projected,
     seated: Option<OwnPane>,
@@ -534,7 +534,7 @@ fn run_in(
     };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let lunetad = daemon.clone().unwrap_or_default();
-    let (size, greeting, here) = (view_size(areas.1), greeting(colours), Machine::Local);
+    let (size, greeting, here) = (layout_size(areas.1), greeting(colours), Machine::Local);
     let right = start.map(|start| {
         Viewed::start(1, lunetad.clone(), here, start, size, greeting, runs_in, &events)
     });
@@ -543,7 +543,7 @@ fn run_in(
     let focused = true;
     let mut app = App {
         right,
-        view_number_dropped: 0,
+        shown_number_dropped: 0,
         runs_in,
         projected: Projected::default(),
         seated: None,
@@ -603,9 +603,9 @@ fn greeting(colours: Colours) -> Greeting {
     Greeting { foreground, background }
 }
 
-fn view_size(area: Rect) -> lunetad::projects::Size {
+fn layout_size(area: Rect) -> lunetad::projects::Size {
     let size = window(area);
-    viewed::view_size(size.columns, size.lines)
+    viewed::layout_size(size.columns, size.lines)
 }
 
 fn caught<T>(named: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
@@ -2057,9 +2057,9 @@ impl App {
         if let Some(right) = &mut self.right {
             right.go(on, workstream);
         } else {
-            let (size, greeting) = (view_size(self.areas.1), greeting(self.colours));
+            let (size, greeting) = (layout_size(self.areas.1), greeting(self.colours));
             let (folder, events) = (self.lunetad.clone(), &self.events);
-            let (number, on) = (self.view_number_dropped + 1, on.clone());
+            let (number, on) = (self.shown_number_dropped + 1, on.clone());
             let runs_in = self.runs_in;
             let started =
                 Viewed::start(number, folder, on, workstream, size, greeting, runs_in, events);
@@ -2104,8 +2104,9 @@ impl App {
     fn unview(&mut self) {
         if let Some(right) = self.right.take() {
             let number = right.number();
-            assert!(number > self.view_number_dropped, "a view's number grows past the last dropped");
-            self.view_number_dropped = number;
+            let dropped = self.shown_number_dropped;
+            assert!(number > dropped, "a shown number grows past the last dropped");
+            self.shown_number_dropped = number;
         }
         self.sidebar.unseat();
         self.seated = None;
@@ -2160,9 +2161,9 @@ impl App {
             Heeded::Emptied => self.leave_view(),
             Heeded::Forgotten(why) => {
                 self.leave_view();
-                self.sidebar.notify(format!("lunetad's view: {why}"));
+                self.sidebar.notify(format!("lunetad's layout: {why}"));
             },
-            Heeded::Lost(why) => self.sidebar.notify(format!("lunetad's view: {why}")),
+            Heeded::Lost(why) => self.sidebar.notify(format!("lunetad's layout: {why}")),
         }
         self.seat();
     }

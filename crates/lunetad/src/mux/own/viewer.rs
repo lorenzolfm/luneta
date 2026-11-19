@@ -14,7 +14,7 @@ use super::api::{self, from_viewer, to_viewer, typed};
 use super::frames::{colours, Frame};
 use super::server::{connect, refused, runtime, socket};
 use super::TerminalKey;
-use crate::api::{view_request, On, ViewRequest};
+use crate::api::{frames_request, On, FramesRequest};
 use crate::folder::Folder;
 use crate::projects::PANES_MAX;
 use crate::remote::Destination;
@@ -116,7 +116,7 @@ pub enum Reach {
     On { lunetad: Folder, destination: Destination },
 }
 
-pub fn view<Told: FnMut(Seen) + Send + 'static>(
+pub fn start<Told: FnMut(Seen) + Send + 'static>(
     reach: Reach,
     greeting: Greeting,
     told: Told,
@@ -181,10 +181,10 @@ async fn hearing(
             let reached = crate::connect(lunetad).await;
             let mut daemon = reached.map_err(|error| format!("lunetad is not reached: {error}"))?;
             let on = Some(On { destination: destination.to_string() });
-            let hello = view_request::Hello { on, greeting: Some(greeting.greeted(None)) };
-            let first = ViewRequest { event: Some(view_request::Event::Hello(hello)) };
-            let said = |said| ViewRequest { event: Some(view_request::Event::Said(said)) };
-            let heard = daemon.view(tokio_stream::once(first).chain(sent.map(said))).await;
+            let hello = frames_request::Hello { on, greeting: Some(greeting.greeted(None)) };
+            let first = FramesRequest { event: Some(frames_request::Event::Hello(hello)) };
+            let said = |said| FramesRequest { event: Some(frames_request::Event::Said(said)) };
+            let heard = daemon.frames(tokio_stream::once(first).chain(sent.map(said))).await;
             heard.map_err(|status| said_by_lunetad(&status))
         },
     };

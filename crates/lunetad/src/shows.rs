@@ -134,25 +134,25 @@ impl Laid {
 
     pub fn heard(laid: show_response::Laid) -> Result<Laid, String> {
         use show_response::laid::Shown as Said;
-        let workstream = WorkstreamId::of(laid.workstream).ok_or("a view of workstream 0")?;
-        let size = laid.size.ok_or("a view of no size")?;
-        let size = Size::of(size.columns, size.rows).map_err(|why| format!("a view's {why}"))?;
+        let workstream = WorkstreamId::of(laid.workstream).ok_or("a layout of workstream 0")?;
+        let size = laid.size.ok_or("a layout of no size")?;
+        let size = Size::of(size.columns, size.rows).map_err(|why| format!("a layout's {why}"))?;
         if laid.panes.len() > PANES_MAX {
-            return Err(format!("a view of {} terminals, over {PANES_MAX}", laid.panes.len()));
+            return Err(format!("a layout of {} terminals, over {PANES_MAX}", laid.panes.len()));
         }
         let mut others = laid.panes.into_iter().map(pane).collect::<Result<Vec<Pane>, String>>()?;
         tiles(&others, size)?;
         let (focused, full) = match laid.shown {
             None if others.is_empty() => return Ok(Laid { workstream, size, shown: None }),
-            None => return Err("a view of terminals focuses none".to_owned()),
+            None => return Err("a layout of terminals focuses none".to_owned()),
             Some(Said::Tiled(focused)) => (focused, false),
             Some(Said::Full(_)) if others.len() == 1 => {
-                return Err("a view of one terminal fills itself with it".to_owned());
+                return Err("a layout of one terminal fills itself with it".to_owned());
             },
             Some(Said::Full(full)) => (full, true),
         };
         let at = others.iter().position(|pane| pane.terminal.get() == focused);
-        let unheld = || format!("a view focuses terminal {focused:016x}, which it lays out not");
+        let unheld = || format!("a layout focuses terminal {focused:016x}, which it lays out not");
         let focused = others.remove(at.ok_or_else(unheld)?);
         Ok(Laid { workstream, size, shown: Some(Showing { focused, others, full }) })
     }
@@ -160,7 +160,7 @@ impl Laid {
 
 fn pane(pane: show_response::Pane) -> Result<Pane, String> {
     use show_response::pane::Found as Said;
-    let terminal = TerminalId::of(pane.terminal).ok_or("a view lays out terminal 0")?;
+    let terminal = TerminalId::of(pane.terminal).ok_or("a layout lays out terminal 0")?;
     let rect = pane.rect.ok_or_else(|| format!("terminal {terminal} has no place"))?;
     let side = |cells: u32| u16::try_from(cells).ok();
     let sides = (side(rect.column), side(rect.row), side(rect.columns), side(rect.rows));
@@ -183,11 +183,11 @@ fn tiles(panes: &[Pane], size: Size) -> Result<(), String> {
     let (columns, rows) = size.get();
     for (at, one) in panes.iter().enumerate() {
         if right(one.rect) > u32::from(columns) || bottom(one.rect) > u32::from(rows) {
-            return Err(format!("terminal {} is placed off its view", one.terminal));
+            return Err(format!("terminal {} is placed off its layout", one.terminal));
         }
         for other in &panes[at + 1..] {
             if one.terminal == other.terminal {
-                return Err(format!("a view lays out terminal {} twice", one.terminal));
+                return Err(format!("a layout lays out terminal {} twice", one.terminal));
             }
             if let Some(key) = one.key()
                 && other.key() == Some(key)
@@ -203,7 +203,7 @@ fn tiles(panes: &[Pane], size: Size) -> Result<(), String> {
     let covered: u64 = panes.iter().map(|pane| cells(pane.rect)).sum();
     let whole = u64::from(columns) * u64::from(rows);
     if !panes.is_empty() && covered != whole {
-        return Err(format!("a view's terminals cover {covered} of its {whole} cells"));
+        return Err(format!("a layout's terminals cover {covered} of its {whole} cells"));
     }
     Ok(())
 }
@@ -277,7 +277,7 @@ impl Asked {
 
 fn edged_heard(edged: &show_response::Edged) -> Result<Heard, String> {
     let workstream = WorkstreamId::of(edged.workstream).ok_or("an edge of workstream 0")?;
-    let direction = crate::views::direction_of(edged.direction);
+    let direction = crate::layouts::direction_of(edged.direction);
     let direction = direction.map_err(|why| format!("an edge: {why}"))?;
     Ok(Heard::Edged { workstream, direction })
 }
@@ -312,7 +312,7 @@ impl Show {
 }
 
 fn untaken() -> String {
-    format!("lunetad has yet to take the last {SAID_MAX} words sent its view")
+    format!("lunetad has yet to take the last {SAID_MAX} words sent its layout")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -358,8 +358,8 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
         };
         told(last);
     };
-    if let Err((mut told, error)) = streams::on_thread("lunetad view", told, showing) {
-        told(Heard::Lost(format!("no thread for a view of lunetad's: {error}")));
+    if let Err((mut told, error)) = streams::on_thread("lunetad layout", told, showing) {
+        told(Heard::Lost(format!("no thread for a layout of lunetad's: {error}")));
     }
     Show { outbox }
 }
@@ -387,7 +387,7 @@ async fn stream(
             Some(Next::Heard(Ok(said))) => said,
             Some(Next::Heard(Err(status))) => return ended(&status),
             Some(Next::LetGo) | None => {
-                return Heard::Lost("lunetad let go of luneta's view".to_owned());
+                return Heard::Lost("lunetad let go of luneta's layout".to_owned());
             },
             Some(Next::GaveUp(why)) => return Heard::Lost(why),
             Some(Next::Said(asked)) => {
@@ -412,10 +412,12 @@ async fn stream(
             },
             Some(show_response::Event::Sent(workstream)) => match WorkstreamId::of(workstream) {
                 Some(workstream) => told(Heard::Sent(workstream)),
-                None => return Heard::Lost("lunetad sent luneta's view to workstream 0".to_owned()),
+                None => {
+                    return Heard::Lost("lunetad sent luneta's layout to workstream 0".to_owned());
+                },
             },
             Some(show_response::Event::Refused(why)) => told(Heard::Refused(why)),
-            None => return Heard::Lost("lunetad said nothing to luneta's view".to_owned()),
+            None => return Heard::Lost("lunetad said nothing to luneta's layout".to_owned()),
         }
     }
 }
@@ -479,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn a_view_reads_where_its_terminals_tile_it_and_one_is_focused() {
+    fn a_layout_reads_where_its_terminals_tile_it_and_one_is_focused() {
         let read = Laid::heard(laid(halves(), Some(tiled(2)))).unwrap();
         let terminals: Vec<u64> = read.panes().map(|pane| pane.terminal.get()).collect();
         assert_eq!(terminals, [2, 1], "the focused terminal first");
@@ -510,16 +512,16 @@ mod tests {
     }
 
     #[test]
-    fn a_view_ends_forgotten_only_when_lunetad_finds_no_workstream() {
+    fn a_layout_ends_forgotten_only_when_lunetad_finds_no_workstream() {
         let forgotten = Status::not_found("workstream 9 is forgotten");
         assert_eq!(ended(&forgotten), Heard::Forgotten("workstream 9 is forgotten".to_owned()));
-        let gone = Status::unavailable("the views have stopped");
-        assert_eq!(ended(&gone), Heard::Lost("the views have stopped".to_owned()));
+        let gone = Status::unavailable("the layouts have stopped");
+        assert_eq!(ended(&gone), Heard::Lost("the layouts have stopped".to_owned()));
         assert_eq!(ended(&Status::internal("")), Heard::Lost("Internal error".to_owned()));
     }
 
     #[test]
-    fn a_view_that_does_not_tile_or_focus_as_one_does_is_not_read() {
+    fn a_layout_that_does_not_tile_or_focus_as_one_does_is_not_read() {
         let gap = vec![placed(1, (0, 0, 40, 24), None), placed(2, (41, 0, 39, 24), None)];
         let over = vec![placed(1, (0, 0, 41, 24), None), placed(2, (40, 0, 40, 24), None)];
         let off = vec![placed(1, (0, 0, 40, 24), None), placed(2, (40, 0, 41, 24), None)];

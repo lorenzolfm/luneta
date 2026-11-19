@@ -44,7 +44,7 @@ pub mod terminate;
 mod topics;
 pub mod transcripts;
 pub mod turns;
-mod views;
+mod layouts;
 mod watch;
 pub mod zoxide;
 

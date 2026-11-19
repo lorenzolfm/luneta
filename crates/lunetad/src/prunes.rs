@@ -195,7 +195,7 @@ impl Occupied {
                 UnreadSeat::Terminal(key) if !terminals.iter().any(|(it, _)| *it == Some(key)) => {
                     return Err(format!(
                         "lunetad cannot read the session file of agent {pid}, which runs in a \
-                         terminal no view holds"
+                         terminal no layout holds"
                     ));
                 },
                 UnreadSeat::Terminal(_) | UnreadSeat::Zellij { .. } | UnreadSeat::Unplaced => {},
@@ -242,7 +242,7 @@ fn terminals(host: &api::Host) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, St
     let kept = match host.projects.as_ref().and_then(|projects| projects.held.as_ref()) {
         None => return Ok(Vec::new()),
         Some(Held::Unkept(why)) => {
-            return Err(format!("lunetad keeps no views, and may leave out a terminal: {why}"));
+            return Err(format!("lunetad keeps no layouts, and may leave out a terminal: {why}"));
         },
         Some(Held::Kept(kept)) => kept,
     };
@@ -1059,7 +1059,7 @@ mod tests {
         api::projects::Held::Kept(api::projects::Kept { projects: vec![project], version: None })
     }
 
-    fn in_view(folder: &str, found: api::terminal::Found) -> api::Terminal {
+    fn in_layout(folder: &str, found: api::terminal::Found) -> api::Terminal {
         api::Terminal { folder: folder.to_owned(), found: Some(found), ..api::Terminal::default() }
     }
 
@@ -1068,12 +1068,12 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_of_a_view_keeps_its_folder_found_or_lost() {
+    fn a_terminal_of_a_layout_keeps_its_folder_found_or_lost() {
         use api::terminal::Found;
         let host = viewed(kept(vec![
-            in_view("/w/a/src", Found::Key(terminal_key(4))),
-            in_view("/w/b", Found::Lost(())),
-            in_view("/w/c", Found::Looking(())),
+            in_layout("/w/a/src", Found::Key(terminal_key(4))),
+            in_layout("/w/b", Found::Lost(())),
+            in_layout("/w/c", Found::Looking(())),
         ]));
         let occupied = Occupied::of(&host).unwrap();
         for held in ["/w/a", "/w/b", "/w/c"] {
@@ -1081,12 +1081,12 @@ mod tests {
         }
         assert_eq!(occupied.why_in(Path::new("/w/d")), None);
         let unkept = viewed(api::projects::Held::Unkept("a newer file".to_owned()));
-        let why = "lunetad keeps no views, and may leave out a terminal: a newer file";
+        let why = "lunetad keeps no layouts, and may leave out a terminal: a newer file";
         assert_eq!(Occupied::of(&unkept), Err(why.to_owned()));
     }
 
     #[test]
-    fn a_file_unread_in_a_terminal_no_view_holds_could_be_anywhere() {
+    fn a_file_unread_in_a_terminal_no_layout_holds_could_be_anywhere() {
         use api::terminal::Found;
         let terminal = Some(terminal_key(4));
         let file = api::UnreadFile { pid: 9, terminal, ..api::UnreadFile::default() };
@@ -1095,10 +1095,10 @@ mod tests {
             unread_files: vec![file.clone()],
             ..viewed(kept(terminals))
         };
-        assert!(Occupied::of(&host(vec![in_view("/w/a", Found::Key(terminal_key(4)))])).is_ok());
+        assert!(Occupied::of(&host(vec![in_layout("/w/a", Found::Key(terminal_key(4)))])).is_ok());
         let unheld = "lunetad cannot read the session file of agent 9, which runs in a terminal no \
-                      view holds";
-        for terminals in [vec![], vec![in_view("/w/a", Found::Key(terminal_key(5)))]] {
+                      layout holds";
+        for terminals in [vec![], vec![in_layout("/w/a", Found::Key(terminal_key(5)))]] {
             assert_eq!(Occupied::of(&host(terminals)), Err(unheld.to_owned()));
         }
     }
