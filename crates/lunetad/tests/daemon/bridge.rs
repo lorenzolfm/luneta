@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::io::{Read as _, Write as _};
+use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -7,44 +7,38 @@ use lunetad::api::WatchRequest;
 use lunetad::{Unbridged, BRIDGED};
 
 use crate::demand::Detached;
-use crate::host::{folder_in, start, Host, Running, Vars, LUNETA};
+use crate::host::{folder_in, start, Host, Running, LUNETA};
 
 const OPENING: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
 
 const SETTINGS: u8 = 0x4;
 
-fn bridge(host: &Host) -> impl FnMut() -> Command + Send + 'static {
-    let runtime = host.runtime.path().to_owned();
-    let home = host.home.path().to_owned();
-    let sockets = host.sockets.path().to_owned();
-    let bin = host.zellij.bin().to_owned();
-    move || {
-        let vars = Vars {
-            runtime: Some(&runtime),
-            home: Some(&home),
-            zellij: Some(&sockets),
-            bin: Some(&bin),
-            ..Vars::default()
-        };
-        let mut command = vars.command(LUNETA);
-        command.arg("bridge");
-        command
-    }
+fn bridge(host: &Host) -> Command {
+    let mut command = host.vars().command(LUNETA);
+    command.arg("bridge");
+    command
 }
 
-fn sh(script: &'static str) -> impl FnMut() -> Command + Send + 'static {
-    move || {
-        let mut command = Command::new("sh");
-        command.args(["-c", script]);
-        command
-    }
+fn sh(script: &str) -> Command {
+    let mut command = Command::new("sh");
+    command.args(["-c", script]);
+    command
+}
+
+fn went(error: &(dyn Error + 'static)) -> bool {
+    let mut sources = std::iter::successors(Some(error), |&error| error.source());
+    let went = |error: &io::Error| error.kind() == ErrorKind::NotConnected;
+    sources.any(|error| match error.downcast_ref::<Unbridged>() {
+        Some(Unbridged::Io(error)) => went(error),
+        _ => error.downcast_ref::<io::Error>().is_some_and(went),
+    })
 }
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
 }
 
-fn unbridged(command: impl FnMut() -> Command + Send + 'static, is: impl Fn(&Unbridged) -> bool) {
+fn unbridged(command: Command, is: impl Fn(&Unbridged) -> bool) {
     let error = runtime().block_on(lunetad::through(command)).expect_err("it reached one");
     let first: &(dyn Error + 'static) = &error;
     let mut sources = std::iter::successors(Some(first), |&error| error.source());
@@ -67,20 +61,35 @@ fn a_client_asks_the_daemon_of_the_folder_through_luneta_bridge() {
 }
 
 #[test]
-fn a_client_makes_a_command_afresh_for_one_that_stalls() {
+fn a_client_runs_its_command_once_and_one_that_stalls_ends_it() {
     let host = Host::new();
     let daemon = start(host.vars()).unwrap();
-    let mut stalled = Some(sh("echo lunetad; exec sleep 60"));
-    let mut bridge = bridge(&host);
-    let commands = move || match stalled.take() {
-        Some(mut stalled) => stalled(),
-        None => bridge(),
-    };
     runtime().block_on(async {
-        let mut bridged = lunetad::through(commands).await.unwrap();
-        bridged.info(()).await.expect_err("a stalled command answered");
+        let mut stalled = lunetad::through(sh("echo lunetad; exec sleep 60")).await.unwrap();
+        stalled.info(()).await.expect_err("a stalled command answered");
+        let again = stalled.info(()).await.expect_err("it ran a command again");
+        assert!(went(&again), "{again:?}");
+        let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
         let info = bridged.info(()).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
+    });
+}
+
+#[test]
+fn a_client_reaches_no_daemon_but_the_one_it_dialed() {
+    let host = Host::new();
+    let first = start(host.vars()).unwrap();
+    let folder = folder_in(host.runtime.path()).unwrap();
+    runtime().block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        assert_eq!(daemon.info(()).await.unwrap().into_inner().pid, first.pid());
+        drop(first);
+        let second = start(host.vars()).unwrap();
+        let lost = daemon.info(()).await.expect_err("it reached the second daemon");
+        let again = daemon.info(()).await.expect_err("it reached the second daemon");
+        assert!(went(&again), "{lost:?}, then {again:?}");
+        let mut fresh = lunetad::connect(&folder).await.unwrap();
+        assert_eq!(fresh.info(()).await.unwrap().into_inner().pid, second.pid());
     });
 }
 
@@ -117,7 +126,7 @@ fn luneta_bridge_ends_as_either_end_hangs_up() {
     let host = Host::new();
     let daemon = start(host.vars()).unwrap();
     let piped = || {
-        let mut command = bridge(&host)();
+        let mut command = bridge(&host);
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
         command
     };

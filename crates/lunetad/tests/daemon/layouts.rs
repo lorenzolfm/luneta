@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
 use lunetad::projects::{Size, WorktreeId};
 use lunetad::folder::Folder;
+use lunetad::release;
 use lunetad::{Asked, Beside, Destination, Heard, Where, BRIDGE_HELD_MAX};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -26,7 +28,7 @@ use tonic::{Code, Status, Streaming};
 
 use crate::agents::file_of_pid;
 use crate::host::{eventually, folder_in, script, start, Host};
-use crate::own::Owned;
+use crate::own::{self, Owned};
 use crate::projects::{self, asked, kept, project, worktree};
 use crate::remote::{hosts, reached, FakeSsh};
 use crate::starts::{directory, makes_shells, mouse, projects_of, Window};
@@ -1077,6 +1079,109 @@ fn an_agent_resumes_when_lunetad_starts_with_no_mux() {
     again.until("the terminal restored", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
     let said = eventually("the agent is started again", || fs::read_to_string(&asked).ok());
     assert_eq!(said, "--resume resumed-7c22\n");
+}
+
+#[test]
+fn lunetad_stops_a_luneta_mux_that_says_no_build_and_restores_its_terminals() {
+    let mut owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    let terminal = heard_in_below(&owned, &mut shown, "sleep 602");
+    drop(shown);
+    owned.stop_daemon();
+    owned.kill_mux();
+    let mut older = owned.stand_in_mux(None);
+    owned.start_daemon();
+    let stopped = older.ended_within(Duration::from_secs(5));
+    let stopped = stopped.expect("lunetad stops the luneta-mux that says no build");
+    assert_eq!(stopped.signal(), Some(rustix::process::Signal::TERM.as_raw()));
+    let mut again = Shown::new(&owned, worktree, 80, 24);
+    let restored = |laid: &Laid| laid.panes.iter().all(|pane| key(pane).is_some());
+    let laid = again.until("the terminal restored", restored);
+    assert_eq!(laid.panes.iter().map(|pane| pane.view).collect::<Vec<_>>(), [terminal]);
+    let restored = mux_key(key(&laid.panes[0]).unwrap());
+    eventually("its last command is typed at the prompt", || {
+        owned.dumped(restored).contains("sleep 602").then_some(())
+    });
+    let (pid, own) = (older.pid(), release::SAID.as_str());
+    let said = format!("luneta-mux (pid {pid}) says no build, as one older than {own} does");
+    let log = logged(&owned);
+    assert!(log.contains(&format!("{said}, and is stopped")), "{log}");
+}
+
+#[test]
+fn lunetad_stops_a_luneta_mux_of_an_older_build_and_names_both() {
+    let mut owned = Owned::new();
+    owned.stop_daemon();
+    owned.kill_mux();
+    let theirs = older_build();
+    let mut other = owned.stand_in_mux(Some(&theirs));
+    owned.start_daemon();
+    let stopped = other.ended_within(Duration::from_secs(5));
+    let stopped = stopped.expect("lunetad stops the luneta-mux of an older build");
+    assert_eq!(stopped.signal(), Some(rustix::process::Signal::TERM.as_raw()));
+    let (pid, own) = (other.pid(), release::SAID.as_str());
+    let said = format!("luneta-mux {theirs} (pid {pid}) is another build than {own}, and is stopped");
+    eventually("lunetad says why it stopped it", || logged(&owned).contains(&said).then_some(()));
+}
+
+#[test]
+fn lunetad_leaves_a_newer_luneta_mux_be_and_restores_its_terminals_once_it_ends() {
+    let mut owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    let terminal = heard_in_below(&owned, &mut shown, "sleep 604");
+    drop(shown);
+    owned.stop_daemon();
+    owned.kill_mux();
+    let theirs = newer_build();
+    let mut newer = owned.stand_in_mux(Some(&theirs));
+    owned.start_daemon();
+    let (pid, own) = (newer.pid(), release::SAID.as_str());
+    let said = format!("luneta-mux {theirs} (pid {pid}) is newer than {own}");
+    let left = format!("{said}, so lunetad leaves it be: open a luneta of its build, or end it");
+    eventually("lunetad says why it leaves it be", || logged(&owned).contains(&left).then_some(()));
+    assert_eq!(newer.ended_within(Duration::from_secs(1)), None, "{}", logged(&owned));
+    drop(newer);
+    let mut again = Shown::new(&owned, worktree, 80, 24);
+    let restored = |laid: &Laid| laid.panes.iter().all(|pane| key(pane).is_some());
+    let laid = again.until("the terminal restored", restored);
+    assert_eq!(laid.panes.iter().map(|pane| pane.view).collect::<Vec<_>>(), [terminal]);
+    let log = logged(&owned);
+    assert!(!log.contains(&format!("{said}, and is stopped")), "{log}");
+    let tried = |line: &str| line.contains("is not restored") && line.contains(&said);
+    assert!(!log.lines().any(tried), "{log}");
+}
+
+#[test]
+fn lunetad_stops_no_luneta_mux_it_started_of_another_build_and_names_its_path() {
+    let mut owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    heard_in_below(&owned, &mut shown, "sleep 603");
+    drop(shown);
+    owned.stop_daemon();
+    owned.kill_mux();
+    let beside = own::beside_a_stand_in_mux(&older_build());
+    owned.start_daemon_from(&beside.path().join("lunetad"));
+    let own = release::SAID.as_str();
+    let from = fs::canonicalize(beside.path()).unwrap().join("luneta-mux");
+    let from = from.display();
+    let refused = format!("is another build than {own}, though lunetad started it from {from}");
+    eventually("lunetad says the luneta-mux it started is another build", || {
+        logged(&owned).contains(&refused).then_some(())
+    });
+    let log = logged(&owned);
+    assert!(!log.contains(&format!("is another build than {own}, and is stopped")), "{log}");
+}
+
+fn older_build() -> String {
+    release::spelled("0.0.0", release::BUILT)
+}
+
+fn newer_build() -> String {
+    let built = release::BUILT.map_or(1, |built| built + 1);
+    release::spelled(release::VERSION, Some(built))
 }
 
 #[test]

@@ -30,7 +30,6 @@ mod process;
 pub mod program;
 pub mod projects;
 pub mod prunes;
-pub mod release;
 mod remote;
 pub mod sayings;
 pub mod screens;
@@ -54,6 +53,7 @@ pub use client::{connect, listening, stream, through, Unbridged, BRIDGED, REACH}
 pub use daemon::{serve, Claim};
 pub use directory::Directory;
 pub use folder::Refusal;
+pub use luneta_protocol::release;
 pub use process::var;
 pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
 pub use shows::{

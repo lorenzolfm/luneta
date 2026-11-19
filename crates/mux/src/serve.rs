@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use luneta_protocol::release;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::{oneshot, watch};
@@ -116,6 +117,11 @@ impl mux_server::Mux for Service {
         let client = self.mux.view(greeting, out.clone(), gone)?;
         tokio::spawn(listen_to_viewer(Arc::clone(&self.mux), client, heard, out));
         Ok(Response::new(Viewed { going: ReceiverStream::new(going), let_go, ended: false }))
+    }
+
+    async fn info(&self, _: Request<api::InfoRequest>) -> Answer<api::InfoResponse> {
+        let (version, built) = (release::VERSION.to_owned(), release::BUILT);
+        Ok(Response::new(api::InfoResponse { version, built }))
     }
 
 }

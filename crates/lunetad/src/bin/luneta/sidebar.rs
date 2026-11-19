@@ -753,6 +753,7 @@ impl Away {
             Some(Stopped::Silent(())) => "no answer",
             Some(Stopped::Lost(())) => "lost",
             Some(Stopped::Unwatched(())) => "not watched",
+            Some(Stopped::Unmatched(())) => "another build",
             None => "unreached",
         };
         let since = unreached.since.and_then(|at| SystemTime::try_from(at).ok());

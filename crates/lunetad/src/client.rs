@@ -35,33 +35,41 @@ const _: () = assert!(QUIET.as_millis() + ROUND_TRIP.as_millis() < ANSWER_THROUG
 const SAID_MAX: u64 = 4096;
 
 pub async fn connect(folder: &Folder) -> Result<DaemonClient<Channel>, Error> {
-    let socket = folder.socket();
+    let mut socket = Some(folder.socket());
     let channel = Endpoint::from_static("http://lunetad")
         .connect_timeout(CONNECT)
         .timeout(ANSWER)
         .connect_with_connector(service_fn(move |_: Uri| {
-            let socket = socket.clone();
-            async move { mine(UnixStream::connect(socket).await?).map(TokioIo::new) }
+            let socket = socket.take();
+            async move {
+                let socket = socket.ok_or_else(went)?;
+                mine(UnixStream::connect(socket).await?).map(TokioIo::new)
+            }
         }))
         .await?;
     Ok(DaemonClient::new(channel))
 }
 
-pub async fn through<F>(mut command: F) -> Result<DaemonClient<Channel>, Error>
-where
-    F: FnMut() -> std::process::Command + Send + 'static,
-{
+pub async fn through(command: std::process::Command) -> Result<DaemonClient<Channel>, Error> {
+    let mut command = Some(command);
     let channel = Endpoint::from_static("http://lunetad")
         .timeout(ANSWER_THROUGH)
         .http2_keep_alive_interval(QUIET)
         .keep_alive_timeout(ROUND_TRIP)
         .keep_alive_while_idle(true)
         .connect_with_connector(service_fn(move |_: Uri| {
-            let command = command();
-            async move { Piped::bridged(command).await.map(TokioIo::new) }
+            let command = command.take();
+            async move {
+                let command = command.ok_or_else(went)?;
+                Piped::bridged(command).await.map(TokioIo::new)
+            }
         }))
         .await?;
     Ok(DaemonClient::new(channel))
+}
+
+fn went() -> io::Error {
+    io::Error::new(ErrorKind::NotConnected, "the lunetad reached went")
 }
 
 #[derive(Debug)]

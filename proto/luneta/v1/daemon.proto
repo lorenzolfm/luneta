@@ -521,6 +521,7 @@ message Remote {
       google.protobuf.Empty silent = 6;
       google.protobuf.Empty lost = 7;
       google.protobuf.Empty unwatched = 8;
+      google.protobuf.Empty unmatched = 10;
     }
     Projects projects = 9;
 

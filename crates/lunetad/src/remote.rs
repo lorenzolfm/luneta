@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use notify::RecursiveMode;
 use tokio::sync::mpsc as wakes;
 use tokio::sync::oneshot;
-use tokio::sync::watch::Receiver;
+use tokio::sync::watch::{self as latest, Receiver};
 use tokio::sync::Semaphore;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
@@ -28,7 +28,7 @@ use crate::api;
 use crate::client::{self, Unbridged};
 use crate::core::Command;
 use crate::log::{self, causes};
-use crate::state;
+use crate::{release, state};
 use crate::watch::{self, Troubles};
 
 pub const FILE: &str = "hosts";
@@ -121,9 +121,15 @@ pub struct Bridges(Mutex<HashMap<Destination, Bridge>>);
 
 struct Bridge {
     watch: u64,
-    daemon: Option<DaemonClient<Channel>>,
+    daemon: latest::Sender<Kept>,
     wake: wakes::Sender<()>,
     held: Arc<Semaphore>,
+}
+
+enum Kept {
+    None,
+    Coming,
+    Daemon(DaemonClient<Channel>),
 }
 
 pub struct Bridging {
@@ -132,13 +138,20 @@ pub struct Bridging {
 }
 
 impl Bridges {
-    pub fn to(&self, destination: &Destination) -> Option<Bridging> {
-        let bridges = locked(&self.0);
-        let bridge = bridges.get(destination)?;
-        if bridge.daemon.is_none() {
-            let _ = bridge.wake.try_send(());
+    pub async fn to(&self, destination: &Destination) -> Option<Bridging> {
+        let (mut kept, held) = {
+            let bridges = locked(&self.0);
+            let bridge = bridges.get(destination)?;
+            if matches!(*bridge.daemon.borrow(), Kept::None) {
+                let _ = bridge.wake.try_send(());
+            }
+            (bridge.daemon.subscribe(), Arc::clone(&bridge.held))
+        };
+        let kept = kept.wait_for(|kept| !matches!(kept, Kept::Coming)).await.ok()?;
+        match &*kept {
+            Kept::Daemon(daemon) => Some(Bridging { daemon: daemon.clone(), held }),
+            Kept::None | Kept::Coming => None,
         }
-        Some(Bridging { daemon: bridge.daemon.clone()?, held: Arc::clone(&bridge.held) })
     }
 }
 
@@ -152,7 +165,8 @@ struct Bridged {
 impl Bridged {
     fn new(bridges: Arc<Bridges>, destination: Destination, watch: u64) -> Self {
         let (wake, woken) = wakes::channel(1);
-        let bridge = Bridge { watch, daemon: None, wake, held: Arc::new(Semaphore::new(HELD_MAX)) };
+        let (daemon, held) = (latest::Sender::new(Kept::None), Arc::new(Semaphore::new(HELD_MAX)));
+        let bridge = Bridge { watch, daemon, wake, held };
         locked(&bridges.0).insert(destination.clone(), bridge);
         Bridged { bridges, destination, watch, woken }
     }
@@ -162,11 +176,25 @@ impl Bridged {
     }
 
     fn agree(&self, seen: &Seen, daemon: Option<&DaemonClient<Channel>>) {
+        let kept = match (seen, daemon) {
+            (Seen::Answered { .. } | Seen::Broke { .. }, Some(daemon)) => {
+                Kept::Daemon(daemon.clone())
+            },
+            (Seen::Answered { .. } | Seen::Broke { .. }, None)
+            | (Seen::Reaching { .. } | Seen::Unreached { .. }, _) => Kept::None,
+        };
+        self.keep(kept);
+    }
+
+    fn coming(&self, seen: &Seen) {
+        if let Seen::Broke { .. } = seen {
+            self.keep(Kept::Coming);
+        }
+    }
+
+    fn keep(&self, kept: Kept) {
         if let Some(bridge) = self.own(&mut locked(&self.bridges.0)) {
-            bridge.daemon = match seen {
-                Seen::Answered { .. } | Seen::Broke { .. } => daemon.cloned(),
-                Seen::Reaching { .. } | Seen::Unreached { .. } => None,
-            };
+            bridge.daemon.send_replace(kept);
         }
     }
 
@@ -240,6 +268,7 @@ pub enum Stopped {
     Silent,
     Lost,
     Unwatched,
+    Unmatched,
 }
 
 impl Stopped {
@@ -262,6 +291,7 @@ impl Stopped {
             Stopped::Silent => unreached::Stopped::Silent(()),
             Stopped::Lost => unreached::Stopped::Lost(()),
             Stopped::Unwatched => unreached::Stopped::Unwatched(()),
+            Stopped::Unmatched => unreached::Stopped::Unmatched(()),
         }
     }
 }
@@ -457,7 +487,7 @@ async fn watched(
     folder: PathBuf,
 ) {
     let destination = bridged.destination.clone();
-    let mut daemon = None;
+    let mut connected = None;
     let mut seen = Seen::Reaching { since: SystemTime::now() };
     let said = Arc::default();
     loop {
@@ -466,13 +496,13 @@ async fn watched(
         }
         bridged.awake();
         let question = standing.borrow().question(seen.after());
-        let asked = asked(&destination, &mut daemon, question, &said, &folder).await;
+        let asked = asked(&bridged, &seen, &mut connected, question, &said, &folder).await;
         let (version, host) = match asked {
             Ok(answered) => answered,
             Err(why) => {
                 let logged = matches!(&seen, Seen::Unreached { why: logged, .. } if *logged == why);
                 seen = seen.failed(why);
-                bridged.agree(&seen, daemon.as_ref());
+                bridged.agree(&seen, connected.as_ref());
                 if let Seen::Unreached { why: (why, _), .. } = &seen
                     && !logged
                 {
@@ -494,7 +524,7 @@ async fn watched(
         let told_already = seen.after() == Some(version);
         let projects = host.projects.clone();
         seen = Seen::Answered { after: version, at: SystemTime::now(), projects };
-        bridged.agree(&seen, daemon.as_ref());
+        bridged.agree(&seen, connected.as_ref());
         if told_already {
             continue;
         }
@@ -582,42 +612,61 @@ fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached)
 }
 
 async fn asked(
-    destination: &Destination,
-    daemon: &mut Option<DaemonClient<Channel>>,
+    bridged: &Bridged,
+    seen: &Seen,
+    connected: &mut Option<DaemonClient<Channel>>,
     question: api::WatchRequest,
     said: &Arc<Mutex<Said>>,
     folder: &Path,
 ) -> Result<(api::Version, api::Host), (String, Stopped)> {
-    let daemon = if let Some(daemon) = daemon {
+    let daemon = if let Some(daemon) = connected {
         daemon
     } else {
-        let reached = client::through(ssh(destination, said, folder)).await;
-        daemon.insert(reached.map_err(|error| unreached(&error))?)
+        bridged.coming(seen);
+        let daemon = connected.insert(matched(&bridged.destination, said, folder).await?);
+        bridged.agree(seen, Some(&*daemon));
+        daemon
     };
     let watched = daemon.watch(question).await;
-    let host = watched.map_err(|status| unreached(&status))?.into_inner();
-    let unversioned = "an answer with no version, which this lunetad does not read";
-    let version = host.version.ok_or_else(|| (unversioned.to_owned(), Stopped::Lost))?;
-    Ok((version, host))
+    let answered = watched.map_err(|status| unreached(&status)).and_then(|host| {
+        let host = host.into_inner();
+        let unversioned = "an answer with no version, which this lunetad does not read";
+        let version = host.version.ok_or_else(|| (unversioned.to_owned(), Stopped::Lost))?;
+        Ok((version, host))
+    });
+    if answered.is_err() {
+        *connected = None;
+    }
+    answered
 }
 
-fn ssh(
+async fn matched(
     destination: &Destination,
     said: &Arc<Mutex<Said>>,
     folder: &Path,
-) -> impl FnMut() -> Process + Send + 'static {
-    let sharing = sharing(folder, destination);
-    let destination = destination.0.clone();
-    let said = Arc::clone(said);
-    move || {
-        let mut ssh = Process::new("ssh");
-        ssh.args(["-T", "-o", "BatchMode=yes"]).args(&sharing);
-        ssh.args([&destination, "luneta", "bridge"]);
-        if let Ok(saying) = heard(&destination, &said) {
-            ssh.stderr(saying);
-        }
-        ssh
+) -> Result<DaemonClient<Channel>, (String, Stopped)> {
+    let reached = client::through(ssh(destination, said, folder)).await;
+    let mut daemon = reached.map_err(|error| unreached(&error))?;
+    let info = daemon.info(()).await.map_err(|status| unreached(&status))?.into_inner();
+    match release::of(&info.version, info.built) {
+        release::Of::Own => Ok(daemon),
+        release::Of::Other(other) => Err((unmatched(&other, info.pid), Stopped::Unmatched)),
     }
+}
+
+fn unmatched(other: &release::Other, pid: u32) -> String {
+    let own = release::SAID.as_str();
+    format!("lunetad {other} (pid {pid}) is another build than this one, {own}")
+}
+
+fn ssh(destination: &Destination, said: &Arc<Mutex<Said>>, folder: &Path) -> Process {
+    let mut ssh = Process::new("ssh");
+    ssh.args(["-T", "-o", "BatchMode=yes"]).args(sharing(folder, destination));
+    ssh.args([&destination.0, "luneta", "bridge"]);
+    if let Ok(saying) = heard(&destination.0, said) {
+        ssh.stderr(saying);
+    }
+    ssh
 }
 
 #[derive(Default)]
@@ -736,9 +785,9 @@ mod tests {
         drop(ending);
         let watch = locked(&bridges.0).get(&destination).map(|bridge| bridge.watch);
         assert_eq!(watch, Some(2));
-        assert!(bridges.to(&destination).is_some());
+        assert!(runtime.block_on(bridges.to(&destination)).is_some());
         drop(later);
-        assert!(bridges.to(&destination).is_none());
+        assert!(runtime.block_on(bridges.to(&destination)).is_none());
     }
 
     #[test]
@@ -753,18 +802,18 @@ mod tests {
             runtime.block_on(waits).is_ok()
         };
 
-        assert!(bridges.to(&destination).is_none());
-        assert!(bridges.to(&destination).is_none());
+        assert!(runtime.block_on(bridges.to(&destination)).is_none());
+        assert!(runtime.block_on(bridges.to(&destination)).is_none());
         assert!(woke(&mut watch, Duration::from_secs(10)));
         assert!(!woke(&mut watch, Duration::from_millis(100)));
 
-        assert!(bridges.to(&destination).is_none());
+        assert!(runtime.block_on(bridges.to(&destination)).is_none());
         watch.awake();
         assert!(!woke(&mut watch, Duration::from_millis(100)));
 
         let daemon = DaemonClient::new(Channel::from_static("http://[::1]:1").connect_lazy());
         watch.agree(&answered(), Some(&daemon));
-        assert!(bridges.to(&destination).is_some());
+        assert!(runtime.block_on(bridges.to(&destination)).is_some());
         assert!(!woke(&mut watch, Duration::from_millis(100)));
     }
 

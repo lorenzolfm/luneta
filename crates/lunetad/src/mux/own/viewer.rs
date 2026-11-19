@@ -12,7 +12,7 @@ use tonic::{Status, Streaming};
 
 use super::api::{self, from_viewer, to_viewer, typed};
 use super::frames::{colours, Frame};
-use super::server::{connect, refused, runtime, socket};
+use super::server::{connect, refused, runtime, socket, Reached};
 use super::TerminalKey;
 use crate::api::{frames_request, On, FramesRequest};
 use crate::folder::Folder;
@@ -143,8 +143,11 @@ pub async fn relayed(
     let socket = socket().map_err(|failure| Status::failed_precondition(failure.to_string()))?;
     let unreached =
         |error: io::Error| Status::unavailable(format!("{}: {error}", socket.display()));
-    let client = connect(&socket, None).await.map_err(unreached)?;
-    let mut client = client.ok_or_else(|| Status::unavailable("luneta-mux does not run"))?;
+    let mut client = match connect(&socket, None).await.map_err(unreached)? {
+        Reached::Matched(client) => client,
+        Reached::Unreached => return Err(Status::unavailable("luneta-mux does not run")),
+        Reached::Unmatched(unmatched) => return Err(Status::unavailable(unmatched.to_string())),
+    };
     Ok(client.show(said).await?.into_inner())
 }
 
@@ -168,8 +171,9 @@ async fn hearing(
     let heard = match reach {
         Reach::Mux { socket, runs_in } => {
             let mut client = match connect(socket, None).await {
-                Ok(Some(client)) => client,
-                Ok(None) => return Err("luneta-mux does not run".to_owned()),
+                Ok(Reached::Matched(client)) => client,
+                Ok(Reached::Unreached) => return Err("luneta-mux does not run".to_owned()),
+                Ok(Reached::Unmatched(unmatched)) => return Err(unmatched.to_string()),
                 Err(error) => return Err(format!("{}: {error}", socket.display())),
             };
             let hello = from_viewer::Event::Hello(greeting.greeted(*runs_in));

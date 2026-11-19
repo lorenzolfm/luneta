@@ -36,13 +36,13 @@ use lunetad::images::{self, Png};
 use lunetad::issues::Filed;
 use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Wanted, Work};
 use lunetad::transcripts::SessionId;
-use lunetad::{Directory, SessionName};
+use lunetad::{release, Directory, SessionName};
 use rustix::process::{kill_process, test_kill_process, Pid, Signal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
-use crate::demand::{stop, Detached};
+use crate::demand::{bridged_stand_in, stop, Detached};
 use crate::host::{
     answered, eventually, folder_in, script, shared_script, start, start_as, Host, Vars,
     LUNETA, LUNETAD,
@@ -101,6 +101,14 @@ exec "$to/$destination"
 
     pub fn runs_luneta(&self, destination: &str, vars: Vars) {
         script(&self.to.join(format!("{destination}.luneta")), &luneta(&vars, "\"$@\""));
+    }
+
+    fn reaches_a_stand_in(&self, destination: &str, version: &str) {
+        script(&self.to.join(destination), &bridged_stand_in(version));
+    }
+
+    fn reaches_a_stand_in_slowly(&self, destination: &str, version: &str, secs: u32) {
+        script(&self.to.join(destination), &format!("sleep {secs}\n{}", bridged_stand_in(version)));
     }
 
     fn reaches_slowly(&self, destination: &str, vars: Vars, secs: u32) {
@@ -264,6 +272,21 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
 }
 
 #[test]
+fn a_machine_whose_lunetad_is_another_build_is_unreached_and_says_both() {
+    let here = Host::new();
+    let stamp = release::BUILT.map_or(1, |built| built + 1);
+    let other = release::spelled(release::VERSION, Some(stamp));
+    FakeSsh::new(here.zellij.bin()).reaches_a_stand_in("far", &other);
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    let unreached = unreached(&here, "far");
+    assert_eq!(unreached.stopped, Some(Stopped::Unmatched(())), "{}", unreached.why);
+    let why = &unreached.why;
+    assert!(why.starts_with(&format!("lunetad {other} (pid ")), "{why}");
+    assert!(why.ends_with(&format!("is another build than this one, {}", *release::SAID)), "{why}");
+}
+
+#[test]
 fn what_another_machine_is_told_to_say_comes_with_its_host() {
     let here = Host::new();
     let far = Host::new();
@@ -368,6 +391,36 @@ fn a_question_while_a_machine_is_reached_again_is_handed_on() {
     assert!(checked.as_ref().is_ok_and(Result::is_ok), "{checked:?}");
     assert_eq!(ssh.runs("far"), runs + 1);
     let _again = Detached { host: &far, pid: far.host().version.unwrap().pid };
+}
+
+#[test]
+fn a_question_while_a_machine_is_reached_again_is_asked_of_no_other_build() {
+    let here = Host::new();
+    let far = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    ssh.reaches("far", far.vars());
+    let far_daemon = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+
+    let stamp = release::BUILT.map_or(1, |built| built + 1);
+    ssh.reaches_a_stand_in_slowly("far", &release::spelled(release::VERSION, Some(stamp)), 2);
+    let runs = ssh.runs("far");
+    drop(far_daemon);
+    eventually("ssh runs to far again", || (ssh.runs("far") > runs).then_some(()));
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let checked = runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let on = Some(On { destination: "far".to_owned() });
+        let check = CheckNameRequest { on, name: "fresh".to_owned() };
+        tokio::time::timeout(Duration::from_secs(10), daemon.check_name(check)).await
+    });
+    let refused = checked.expect("it was answered in time").expect_err("another build answered");
+    assert_eq!(refused.message(), "lunetad does not reach far now", "{refused:?}");
+    let unreached = unreached(&here, "far");
+    assert_eq!(unreached.stopped, Some(Stopped::Unmatched(())), "{}", unreached.why);
 }
 
 #[test]

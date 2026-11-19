@@ -41,8 +41,8 @@ use crate::zellij::{self, Seat};
 #[derive(Subcommand)]
 pub enum Command {
     #[command(
-        about = "Say which lunetad runs, and for how long it has. Where none runs, it says so and \
-                 exits 5"
+        about = "Say which lunetad runs, and for how long it has, and whether it is another build \
+                 than this luneta. Where none runs, it says so and exits 5"
     )]
     Info,
     #[command(
@@ -58,7 +58,7 @@ pub enum Command {
     #[command(
         about = "Wait for the host to change, and write it out as the protocol encodes it, for a \
                  program to read. lunetad is started where none runs, and again where an older \
-                 one does"
+                 one does. A lunetad of another build that it does not replace is refused"
     )]
     Watch {
         #[arg(
@@ -74,8 +74,8 @@ pub enum Command {
         about = "Hand on what comes on stdin to lunetad's socket, and what comes on the socket to \
                  stdout, until either end hangs up, for a client on another host to ask it \
                  through ssh. lunetad is started where none runs, and again where an older one \
-                 does, and once it answers, `lunetad` and a newline go to stdout before anything \
-                 it says"
+                 does, a lunetad of another build that it does not replace is refused, and once \
+                 it answers, `lunetad` and a newline go to stdout before anything it says"
     )]
     Bridge,
     #[command(
@@ -244,7 +244,7 @@ fn version(spelled: &str) -> Result<Version, String> {
 
 pub fn run(command: &Command, folder: &Path) -> ExitCode {
     match command {
-        Command::Info => ask(folder, daemon::running(folder), info),
+        Command::Info => ask(folder, daemon::of_any_build(folder), info),
         Command::Agents => ask(folder, daemon::running(folder), agents),
         Command::Sessions => ask(folder, daemon::running(folder), sessions),
         Command::Watch { after } => {
@@ -460,6 +460,9 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     match started.and_then(|at| at.elapsed().ok()) {
         Some(up) => println!("lunetad {build} (pid {}), up {}", info.pid, span(up.as_secs())),
         None => println!("lunetad {build} (pid {})", info.pid),
+    }
+    if let release::Of::Other(other) = release::of(&info.version, info.built) {
+        eprintln!("luneta: {}", daemon::unmatched(&other, info.pid));
     }
     Ok(())
 }

@@ -473,7 +473,7 @@ impl Daemon for Host {
     async fn go(&self, request: Request<GoRequest>) -> Result<Response<()>, Status> {
         let GoRequest { on, at, to, pane } = request.into_inner();
         let (at, to) = (named("at", &at)?, named("to", &to)?);
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let (at, to) = (at.to_string(), to.to_string());
             return daemon.go(GoRequest { on: None, at, to, pane }).await;
         }
@@ -489,7 +489,7 @@ impl Daemon for Host {
     ) -> Result<Response<ListClientsResponse>, Status> {
         let ListClientsRequest { on, session } = request.into_inner();
         let session = named("session", &session)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let session = session.to_string();
             return daemon.list_clients(ListClientsRequest { on: None, session }).await;
         }
@@ -509,7 +509,7 @@ impl Daemon for Host {
         if seats.is_empty() {
             return Err(Status::invalid_argument("seats: the client was in none"));
         }
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let seats = seats.iter().map(SessionName::to_string).collect();
             return daemon.refuge(RefugeRequest { on: None, seats }).await;
         }
@@ -532,7 +532,7 @@ impl Daemon for Host {
 
     async fn open(&self, request: Request<OpenRequest>) -> Result<Response<OpenResponse>, Status> {
         let (on, open) = asked_open(request.into_inner())?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             return daemon.open(open.asked(None)).await;
         }
         let opened = task::spawn_blocking(move || opens::opening(&open)).await;
@@ -547,7 +547,7 @@ impl Daemon for Host {
     ) -> Result<Response<ListSkillsResponse>, Status> {
         let ListSkillsRequest { on, dir, harness } = request.into_inner();
         let dir = directory("dir", dir)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let asked = ListSkillsRequest { on: None, dir: dir.into(), harness };
             return daemon.list_skills(asked).await;
         }
@@ -571,7 +571,7 @@ impl Daemon for Host {
         let KeepPrintedRequest { on, session, pane, typed } = request.into_inner();
         let session = named("session", &session)?;
         let typed = Said::new(typed).ok_or_else(|| Status::invalid_argument("typed: it is empty"))?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let (session, typed) = (session.to_string(), typed.into());
             return daemon.keep_printed(KeepPrintedRequest { on: None, session, pane, typed }).await;
         }
@@ -602,7 +602,7 @@ impl Daemon for Host {
         let KeepChecksRequest { on, url } = request.into_inner();
         let page = checks::PullPage::parse(&url)
             .map_err(|why| Status::invalid_argument(format!("url: {why}")))?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let answer = daemon.keep_checks(KeepChecksRequest { on: None, url }).await?;
             return Ok(Response::new(Box::pin(answer.into_inner())));
         }
@@ -622,7 +622,7 @@ impl Daemon for Host {
             Some(dir) => Starts::In(directory("dir", dir)?),
             None => Starts::Home,
         };
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let dir = starts.dir().map(str::to_owned);
             return daemon.name_session(NameSessionRequest { on: None, dir }).await;
         }
@@ -640,7 +640,7 @@ impl Daemon for Host {
         let CheckNameRequest { on, name } = request.into_inner();
         let name = SessionName::parse(&name)
             .map_err(|why| Status::invalid_argument(format!("name: {why}")))?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let name = name.to_string();
             return daemon.check_name(CheckNameRequest { on: None, name }).await;
         }
@@ -655,7 +655,7 @@ impl Daemon for Host {
         request: Request<ListDirsRequest>,
     ) -> Result<Response<ListDirsResponse>, Status> {
         let ListDirsRequest { on } = request.into_inner();
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             return daemon.list_dirs(ListDirsRequest { on: None }).await;
         }
         let visited = task::spawn_blocking(zoxide::visited_free).await;
@@ -671,7 +671,7 @@ impl Daemon for Host {
     ) -> Result<Response<ListContentsResponse>, Status> {
         let ListContentsRequest { on, dir } = request.into_inner();
         let dir = directory("dir", dir)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             return daemon.list_contents(ListContentsRequest { on: None, dir: dir.into() }).await;
         }
         let listed = task::spawn_blocking(move || eza::listed(&dir)).await;
@@ -686,7 +686,7 @@ impl Daemon for Host {
     ) -> Result<Response<DumpScreenResponse>, Status> {
         let DumpScreenRequest { on, session, pane } = request.into_inner();
         let session = named("session", &session)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let session = session.to_string();
             return daemon.dump_screen(DumpScreenRequest { on: None, session, pane }).await;
         }
@@ -700,7 +700,7 @@ impl Daemon for Host {
         let StartRequest { on, at, to, cwd } = request.into_inner();
         let (at, to) = (named("at", &at)?, named("to", &to)?);
         let cwd = cwd.map(|cwd| directory("cwd", cwd)).transpose()?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(String::from));
             return daemon.start(StartRequest { on: None, at, to, cwd }).await;
         }
@@ -717,7 +717,7 @@ impl Daemon for Host {
     ) -> Result<Response<ClosesResponse>, Status> {
         let ClosesRequest { on, session, pane } = request.into_inner();
         let session = named("session", &session)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let session = session.to_string();
             return daemon.closes(ClosesRequest { on: None, session, pane }).await;
         }
@@ -747,7 +747,7 @@ impl Daemon for Host {
             },
             None => return Err(Status::invalid_argument("closes: neither a pane nor a tab")),
         };
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             return daemon.close(close.asked(None, &session, started)).await;
         }
         let closed = task::spawn_blocking(move || closes::closed(&session, started, &close));
@@ -763,7 +763,7 @@ impl Daemon for Host {
     ) -> Result<Response<OtherTabsResponse>, Status> {
         let OtherTabsRequest { on, session, pane } = request.into_inner();
         let session = named("session", &session)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let session = session.to_string();
             return daemon.other_tabs(OtherTabsRequest { on: None, session, pane }).await;
         }
@@ -781,7 +781,7 @@ impl Daemon for Host {
         let TurnIntoTabRequest { on, session, pane, started_at } = request.into_inner();
         let session = named("session", &session)?;
         let started = started_of(started_at)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let (session, started_at) = (session.to_string(), Some(started.into()));
             let asked = TurnIntoTabRequest { on: None, session, pane, started_at };
             return daemon.turn_into_tab(asked).await;
@@ -802,7 +802,7 @@ impl Daemon for Host {
         let TurnIntoPanesRequest { on, session, pane, beside, started_at } = request.into_inner();
         let session = named("session", &session)?;
         let started = started_of(started_at)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let (session, started_at) = (session.to_string(), Some(started.into()));
             let asked = TurnIntoPanesRequest { on: None, session, pane, beside, started_at };
             return daemon.turn_into_panes(asked).await;
@@ -824,7 +824,7 @@ impl Daemon for Host {
         let KillRequest { on, session, started_at } = request.into_inner();
         let session = named("session", &session)?;
         let started = started_of(started_at)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let (session, started_at) = (session.to_string(), Some(started.into()));
             return daemon.kill(KillRequest { on: None, session, started_at }).await;
         }
@@ -840,7 +840,7 @@ impl Daemon for Host {
         request: Request<ListExitedRequest>,
     ) -> Result<Response<ListExitedResponse>, Status> {
         let ListExitedRequest { on } = request.into_inner();
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             return daemon.list_exited(ListExitedRequest { on: None }).await;
         }
         let listed = task::spawn_blocking(Zellij::exited).await;
@@ -864,7 +864,7 @@ impl Daemon for Host {
     ) -> Result<Response<()>, Status> {
         let DeleteExitedRequest { on, session } = request.into_inner();
         let session = named("session", &session)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let session = session.to_string();
             return daemon.delete_exited(DeleteExitedRequest { on: None, session }).await;
         }
@@ -882,7 +882,7 @@ impl Daemon for Host {
         let session = named("session", &session)?;
         let to = SessionName::parse(&to)
             .map_err(|why| Status::invalid_argument(format!("to: {why}")))?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let (session, to) = (session.to_string(), to.to_string());
             return daemon.rename_session(RenameSessionRequest { on: None, session, to }).await;
         }
@@ -899,7 +899,7 @@ impl Daemon for Host {
     ) -> Result<Response<TranscriptEndsResponse>, Status> {
         let TranscriptEndsRequest { on, ids, share } = request.into_inner();
         let reading = Reading::of(&ids, share).map_err(Status::invalid_argument)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             return daemon.transcript_ends(reading.asked(None)).await;
         }
         let Some(projects) = self.claude_folder.as_ref().map(|it| it.join("projects")) else {
@@ -915,7 +915,7 @@ impl Daemon for Host {
 
     async fn ask(&self, request: Request<AskRequest>) -> Result<Response<Self::AskStream>, Status> {
         let (on, asked) = Asked::of(request.into_inner()).map_err(Status::invalid_argument)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let steps = daemon.ask(asked.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(steps)));
         }
@@ -941,7 +941,7 @@ impl Daemon for Host {
     ) -> Result<Response<Self::PasteStream>, Status> {
         let (on, pasted) = Pasted::of(request.into_inner()).map_err(Status::invalid_argument)?;
         let unasked = |why: Status| Status::failed_precondition(why.message());
-        if let Some(mut daemon) = self.bridged(on).map_err(unasked)? {
+        if let Some(mut daemon) = self.bridged(on).await.map_err(unasked)? {
             let answer = daemon.paste(pasted.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
@@ -957,7 +957,7 @@ impl Daemon for Host {
     ) -> Result<Response<Self::PrunesStream>, Status> {
         let PrunesRequest { on, dir } = request.into_inner();
         let dir = directory("dir", dir)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let answer = daemon.prunes(prunes::asked(None, &dir)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
@@ -980,7 +980,7 @@ impl Daemon for Host {
     ) -> Result<Response<Self::PruneStream>, Status> {
         let PruneRequest { on, dir, agreed } = request.into_inner();
         let dir = directory("dir", dir)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let told = PruneRequest { on: None, dir: dir.into(), agreed };
             let answer = daemon.prune(told).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
@@ -1010,7 +1010,7 @@ impl Daemon for Host {
     ) -> Result<Response<Self::FileIssueStream>, Status> {
         let (on, filing) = Filing::of(request.into_inner()).map_err(Status::invalid_argument)?;
         let unreached = |status: Status| Unfiled::Refused(status.message().to_owned()).status();
-        if let Some(mut daemon) = self.bridged(on).map_err(unreached)? {
+        if let Some(mut daemon) = self.bridged(on).await.map_err(unreached)? {
             let answer = daemon.file_issue(filing.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
@@ -1024,7 +1024,7 @@ impl Daemon for Host {
     ) -> Result<Response<IssueRepositoriesResponse>, Status> {
         let IssueRepositoriesRequest { on, dir } = request.into_inner();
         let dir = directory("dir", dir)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let request = IssueRepositoriesRequest { on: None, dir: dir.to_string() };
             return daemon.issue_repositories(request).await;
         }
@@ -1053,7 +1053,7 @@ impl Daemon for Host {
         if on.is_some() && runs_in.is_some() {
             return Err(Status::invalid_argument(RUNS_IN_ON));
         }
-        if let Some((mut daemon, permit)) = self.bridged_held(on)? {
+        if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
             let hello = Hello { worktree, size, runs_in: None, again, on: None };
             let first = ShowRequest { event: Some(Event::Hello(hello)) };
             let rest = heard.map_while(Result::ok);
@@ -1128,7 +1128,7 @@ impl Daemon for Host {
             drop(refuse.send(Status::invalid_argument(refusal)));
             None
         });
-        if let Some((mut daemon, permit)) = self.bridged_held(on)? {
+        if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
             let hello = Hello { on: None, greeting: Some(greeting) };
             let first = FramesRequest { event: Some(Event::Hello(hello)) };
             let rest = said.map(|said| FramesRequest { event: Some(Event::Said(said)) });
@@ -1146,7 +1146,7 @@ impl Daemon for Host {
         request: Request<ChangeProjectsRequest>,
     ) -> Result<Response<ChangeProjectsResponse>, Status> {
         let ChangeProjectsRequest { on, change } = request.into_inner();
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             return daemon.change_projects(ChangeProjectsRequest { on: None, change }).await;
         }
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
@@ -1166,7 +1166,7 @@ impl Daemon for Host {
         let unnamed = || Status::invalid_argument("project: no id is 0");
         let project = ProjectId::of(project).ok_or_else(unnamed)?;
         let branch = asked_branch(&branch)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let (project, branch) = (project.get(), branch.as_str().to_owned());
             let asked = MakeWorktreeRequest { on: None, project, branch };
             let answer = daemon.make_worktree(asked).await?.into_inner();
@@ -1209,7 +1209,7 @@ impl Daemon for Host {
             return Err(Status::invalid_argument("the first part does not say what the image is"));
         };
         let size = Size::new(size).map_err(Status::invalid_argument)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        if let Some(mut daemon) = self.bridged(on).await? {
             let image = Image { on: None, size: size.get() };
             let image = KeepImageRequest { part: Some(Part::Image(image)) };
             let rest = parts.map_while(Result::ok);
@@ -1438,15 +1438,15 @@ fn unfinished(error: &task::JoinError) -> Status {
 }
 
 impl Host {
-    fn bridged(&self, on: Option<api::On>) -> Result<Option<DaemonClient<Channel>>, Status> {
-        Ok(self.bridge(on)?.map(|(_, bridging)| bridging.daemon))
+    async fn bridged(&self, on: Option<api::On>) -> Result<Option<DaemonClient<Channel>>, Status> {
+        Ok(self.bridge(on).await?.map(|(_, bridging)| bridging.daemon))
     }
 
-    fn bridged_held(
+    async fn bridged_held(
         &self,
         on: Option<api::On>,
     ) -> Result<Option<(DaemonClient<Channel>, OwnedSemaphorePermit)>, Status> {
-        let Some((destination, Bridging { daemon, held })) = self.bridge(on)? else {
+        let Some((destination, Bridging { daemon, held })) = self.bridge(on).await? else {
             return Ok(None);
         };
         let full = |_| {
@@ -1456,13 +1456,16 @@ impl Host {
         Ok(Some((daemon, held.try_acquire_owned().map_err(full)?)))
     }
 
-    fn bridge(&self, on: Option<api::On>) -> Result<Option<(Destination, Bridging)>, Status> {
+    async fn bridge(
+        &self,
+        on: Option<api::On>,
+    ) -> Result<Option<(Destination, Bridging)>, Status> {
         let Some(api::On { destination }) = on else {
             return Ok(None);
         };
         let destination: Destination =
             destination.parse().map_err(|why: String| Status::invalid_argument(why))?;
-        let Some(bridging) = self.bridges.to(&destination) else {
+        let Some(bridging) = self.bridges.to(&destination).await else {
             return Err(Status::unavailable(format!("lunetad does not reach {destination} now")));
         };
         Ok(Some((destination, bridging)))

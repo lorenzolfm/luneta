@@ -25,7 +25,7 @@ use rustix::pty::{self, OpenptFlags};
 use rustix::termios::{self, Winsize};
 use tempfile::TempDir;
 
-use crate::demand::{answering, moved, stand_in_watched_as, stop, Detached};
+use crate::demand::{answering, moved, stop, Detached};
 use crate::host::{eventually, script, Host, Running, Vars, LUNETA};
 use crate::own::Owned;
 use crate::projects::{project, worktree};
@@ -492,38 +492,6 @@ fn a_daemon_that_goes_away_is_started_again_in_moments() {
     let took = went.elapsed();
     let _daemon = Detached { host: &owned.host, pid };
     assert!(took < Duration::from_secs(1), "it took {took:?}");
-}
-
-#[test]
-fn an_answer_of_another_daemon_than_the_one_reached_is_dropped() {
-    const OTHER: u32 = 1;
-    let mut owned = Owned::new();
-    let dir = work_in(&owned, "work");
-    let command = luneta(owned.host.vars(), &dir.path);
-    let notes = owned.host.home.path().join("notes");
-    let mut stand_in = None;
-    let ended = on_terminal_with(command, |luneta| {
-        eventually("luneta shows work", || shown(&owned, &dir.path));
-        owned.stop_daemon();
-        stand_in = Some(stand_in_watched_as(&owned.host, OTHER, &notes));
-        thread::sleep(RUNS);
-        stop(luneta.pid());
-    });
-    assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
-    let stand_in = stand_in.unwrap();
-
-    let log = log_of(&owned.host);
-    let note = format!(
-        "lunetad (pid {OTHER}) answered in the place of the one luneta reached (pid {})",
-        stand_in.pid()
-    );
-    assert!(log.contains(&note), "{log}");
-
-    let notes = fs::read_to_string(&notes).unwrap();
-    let asked = |what| notes.lines().filter(|line| *line == what).count();
-    let (infos, watches) = (asked("info"), asked("watch"));
-    assert!(infos >= 3, "it reached for a daemon {infos} times: {notes}");
-    assert!(infos.abs_diff(watches) <= 1, "{infos} of Info to {watches} of Watch: {notes}");
 }
 
 #[test]
