@@ -91,13 +91,6 @@ pub struct Pulled {
     argv: Vec<String>,
 }
 
-#[derive(Debug)]
-enum Doomed {
-    View(TerminalKey),
-    Worktree { worktree: WorktreeId, seen: Vec<ViewId> },
-    Project { project: ProjectId, worktrees: Vec<WorktreeId>, seen: Vec<ViewId> },
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Naming {
     Idle,
@@ -122,6 +115,12 @@ impl Opener {
 const NAMING: &str = "luneta names a session already: try again once it has made it";
 
 const NAMING_PANICKED: &str = "luneta could not name the session: naming it panicked";
+
+const RENAME_PANICKED: &str = "luneta could not ask lunetad for the rename: asking panicked";
+
+const CLOSE_PANICKED: &str = "luneta could not ask lunetad for the close: asking panicked";
+
+const WORK_PANICKED: &str = "luneta could not ask lunetad for the work: asking panicked";
 
 pub const NOT_YET: &str = "luneta does not do that to a worktree yet";
 
@@ -149,6 +148,7 @@ pub enum Event {
     Reached { claude_folder: Option<PathBuf> },
     Daemon(Result<Host, String>),
     Notice(String),
+    Unclosed { on: Machine, act: Act, ticket: u64, why: String },
     Moved { ticket: u64, kept: Option<Version> },
     Unmoved { on: Machine, ticket: u64, order: Reorder, unmoved: Unmoved },
     Copy(Clip),
@@ -751,8 +751,8 @@ fn layout_size(area: Rect) -> lunetad::projects::Size {
     viewed::layout_size(size.columns, size.lines)
 }
 
-fn caught<T>(named: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    panic::catch_unwind(AssertUnwindSafe(named)).unwrap_or_else(|_| Err(NAMING_PANICKED.to_owned()))
+fn caught<T>(panicked: &str, asked: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    panic::catch_unwind(AssertUnwindSafe(asked)).unwrap_or_else(|_| Err(panicked.to_owned()))
 }
 
 fn gone(projected: &Projected, home: &Home) -> bool {
@@ -764,7 +764,7 @@ fn fetch_work(lunetad: &Path, events: &Sender<Event>, home: &Home) {
     let (number, on, project) = (home.number(), home.machine().clone(), home.project());
     let (lunetad, events) = (lunetad.to_owned(), events.clone());
     thread::spawn(move || {
-        let listed = caught(|| worktrees::work(&lunetad, &on, project));
+        let listed = caught(WORK_PANICKED, || worktrees::work(&lunetad, &on, project));
         let _ = events.send(Event::Work { number, listed });
     });
 }
@@ -947,6 +947,9 @@ impl App {
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Notice(notice) => self.sidebar.notify(notice),
+            Event::Unclosed { on, act, ticket, why } => {
+                self.sidebar.unclosed(&on, &act, ticket, format!("menu: not closed: {why}"));
+            },
             Event::Moved { ticket, kept } => self.sidebar.moved(ticket, kept),
             Event::Unmoved { on, ticket, order, unmoved } => {
                 let note = match unmoved {
@@ -1835,7 +1838,7 @@ impl App {
                 self.go(&on, &place);
                 self.leave();
             },
-            Asked::Delete { on, act } => self.project_act(&on, &act),
+            Asked::Delete { on, act, ticket } => self.project_act(on, act, ticket),
             Asked::Open { asking, on, project, beside, command } => {
                 self.project_open(asking, &on, project, beside, command);
             },
@@ -1859,13 +1862,13 @@ impl App {
                 }
                 self.naming_on(move || {
                     let made = || worktrees::project_made(&on, &folder, name.as_ref());
-                    let made = caught(made).map_err(|why| format!("menu: {why}"));
+                    let made = caught(NAMING_PANICKED, made).map_err(|why| format!("menu: {why}"));
                     Made::Project { on, made }
                 });
                 self.leave();
             },
             Asked::Rename { on, rename } => {
-                self.change(on, move |on| {
+                self.change(on, RENAME_PANICKED, move |on| {
                     let renamed = match &rename {
                         Rename::Terminal(terminal, to) => {
                             worktrees::renamed_terminal(on, *terminal, to.as_ref())
@@ -1887,7 +1890,7 @@ impl App {
                 }
                 let lunetad = self.lunetad.clone();
                 self.naming_on(move || {
-                    let made = caught(|| {
+                    let made = caught(NAMING_PANICKED, || {
                         let (project, first) = (project.as_ref(), command.clone());
                         let made = worktrees::pulled(&lunetad, &on, project, &cwd, &name, first)?;
                         Ok(Pulled { on, worktree: made, argv: command })
@@ -1980,11 +1983,12 @@ impl App {
     fn change(
         &mut self,
         on: Machine,
+        panicked: &'static str,
         change: impl FnOnce(&Machine) -> Result<(), String> + Send + 'static,
     ) {
         let events = self.events.clone();
         self.keep_change(thread::spawn(move || {
-            if let Err(why) = caught(|| change(&on)) {
+            if let Err(why) = caught(panicked, || change(&on)) {
                 let _ = events.send(Event::Notice(format!("menu: {why}")));
             }
         }));
@@ -2000,36 +2004,22 @@ impl App {
         movers.chain(self.changes.drain(..)).collect()
     }
 
-    fn project_act(&mut self, on: &Machine, act: &Act) {
-        match act {
-            Act::Worktree { worktree, seen, .. } => {
-                let (worktree, seen) = (*worktree, seen.clone());
-                self.project_act_delete(on, Doomed::Worktree { worktree, seen });
-            },
-            Act::Project { project, worktrees, seen, .. } => {
-                let (project, worktrees, seen) = (*project, worktrees.clone(), seen.clone());
-                self.project_act_delete(on, Doomed::Project { project, worktrees, seen });
-            },
-            Act::View { view: ViewKey::Terminal(key), .. } => {
-                self.project_act_delete(on, Doomed::View(*key));
-            },
-        }
-    }
-
-    fn project_act_delete(&mut self, on: &Machine, doomed: Doomed) {
-        let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
+    fn project_act(&mut self, on: Machine, act: Act, ticket: u64) {
+        let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
         self.keep_change(thread::spawn(move || {
-            let closed = caught(|| match &doomed {
-                Doomed::View(key) => worktrees::closed_view(&lunetad, &on, *key),
-                Doomed::Worktree { worktree, seen } => {
+            let closed = caught(CLOSE_PANICKED, || match &act {
+                Act::View { view: ViewKey::Terminal(key), .. } => {
+                    worktrees::closed_view(&lunetad, &on, *key)
+                },
+                Act::Worktree { worktree, seen, .. } => {
                     worktrees::closed(&lunetad, &on, *worktree, seen)
                 },
-                Doomed::Project { project, worktrees, seen } => {
+                Act::Project { project, worktrees, seen, .. } => {
                     worktrees::closed_project(&lunetad, &on, *project, worktrees, seen)
                 },
             });
             if let Err(why) = closed {
-                let _ = events.send(Event::Notice(format!("menu: not closed: {why}")));
+                let _ = events.send(Event::Unclosed { on, act, ticket, why });
             }
         }));
     }
@@ -2101,7 +2091,8 @@ impl App {
                 }
             },
             Picked::Delete { on, act } => {
-                self.project_act(&on, &act);
+                let ticket = self.sidebar.ticket();
+                self.project_act(on, act, ticket);
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Chord(chord) => {
@@ -2482,7 +2473,7 @@ impl App {
         }
         let lunetad = self.lunetad.clone();
         self.naming_on(move || {
-            let made = caught(|| made(&lunetad, &on));
+            let made = caught(NAMING_PANICKED, || made(&lunetad, &on));
             Made::Worktree { on, made, argv: Vec::new() }
         });
     }
