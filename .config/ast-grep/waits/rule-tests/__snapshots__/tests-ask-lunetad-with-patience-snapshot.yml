@@ -1,0 +1,38 @@
+id: tests-ask-lunetad-with-patience
+snapshots:
+  async fn f() { let daemon = lunetad::connect(&folder, PATIENCE / 2).await; }:
+    labels:
+    - source: lunetad::connect(&folder, PATIENCE / 2)
+      style: primary
+      start: 28
+      end: 67
+    - source: lunetad::connect
+      style: secondary
+      start: 28
+      end: 44
+  async fn f() { let daemon = lunetad::connect(&folder, QUIET).await; }:
+    labels:
+    - source: lunetad::connect(&folder, QUIET)
+      style: primary
+      start: 28
+      end: 60
+    - source: lunetad::connect
+      style: secondary
+      start: 28
+      end: 44
+  async fn f() { let daemon = lunetad::connect(&folder, lunetad::ANSWER).await; }:
+    labels:
+    - source: lunetad::connect(&folder, lunetad::ANSWER)
+      style: primary
+      start: 28
+      end: 70
+    - source: lunetad::connect
+      style: secondary
+      start: 28
+      end: 44
+  fn f() { let deadline = lunetad::ANSWER; }:
+    labels:
+    - source: lunetad::ANSWER
+      style: primary
+      start: 24
+      end: 39

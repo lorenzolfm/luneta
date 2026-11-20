@@ -182,7 +182,7 @@ async fn hearing(
             heard.map_err(|status| refused(&status).to_string())
         },
         Reach::On { lunetad, destination } => {
-            let reached = crate::connect(lunetad).await;
+            let reached = crate::connect(lunetad, crate::ANSWER).await;
             let mut daemon = reached.map_err(|error| format!("lunetad is not reached: {error}"))?;
             let on = Some(On { destination: destination.to_string() });
             let hello = frames_request::Hello { on, greeting: Some(greeting.greeted(None)) };

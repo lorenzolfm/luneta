@@ -81,7 +81,7 @@ pub async fn of_any_build(path: &Path) -> Result<Daemon, Unreached> {
     let refused = |refusal: folder::Refusal| Unreached::Failed(refusal.to_string());
     let folder = folder::open(path).map_err(refused)?;
     let folder = folder.ok_or_else(|| Unreached::NoneRuns(path.to_owned()))?;
-    let error = match lunetad::connect(&folder).await {
+    let error = match lunetad::connect(&folder, lunetad::ANSWER).await {
         Ok(daemon) => return Ok(daemon),
         Err(error) => error,
     };
@@ -104,7 +104,7 @@ pub async fn current(path: &Path) -> Result<Current, String> {
     let mut doubted: Option<u32> = None;
     let starting = OnceCell::new();
     loop {
-        let why = match lunetad::connect(&folder).await {
+        let why = match lunetad::connect(&folder, lunetad::ANSWER).await {
             Ok(mut daemon) => match daemon.info(()).await {
                 Ok(info) => {
                     let info = info.into_inner();

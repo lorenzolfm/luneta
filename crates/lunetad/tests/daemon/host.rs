@@ -8,7 +8,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, 
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use luneta_waits::{Patience, Span};
+use luneta_waits::{Patience, Span, PATIENCE};
 use lunetad::api::{self, WatchRequest};
 use lunetad::folder::{self, Folder};
 use tempfile::TempDir;
@@ -519,7 +519,7 @@ impl Host {
         let folder = folder_in(self.runtime.path()).expect("no daemon has made its folder");
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            let mut daemon = lunetad::connect(&folder).await.unwrap();
+            let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
             let asked = WatchRequest { after: None, kept: None, shown: false };
             daemon.watch(asked).await.unwrap().into_inner()
         })
