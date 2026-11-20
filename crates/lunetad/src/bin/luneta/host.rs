@@ -2021,7 +2021,7 @@ impl App {
         let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
         self.keep_change(thread::spawn(move || {
             let asked = || match &act {
-                Act::View { view: ViewKey::Terminal(key), .. } => {
+                Act::View(ViewKey::Terminal(key)) => {
                     worktrees::closed_view(&lunetad, &on, *key)
                 },
                 Act::Worktree { worktree, seen, .. } => {
@@ -2096,8 +2096,8 @@ impl App {
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Plan { on, session, closes } => {
-                let plan = self.sidebar.plan(&on, &session, closes);
+            Picked::Plan { on, session, scope } => {
+                let plan = self.sidebar.plan(&on, &session, scope);
                 if let Some(Over::Picker(picker)) = &mut self.focus.over {
                     let did = picker.planned(plan);
                     self.picked(did);

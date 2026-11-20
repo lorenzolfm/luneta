@@ -42,7 +42,7 @@ use crate::alerts::{self, Reach};
 use crate::aloud;
 use crate::brief::{Brief, Note, Over, Transcript};
 use crate::checks;
-use crate::close::{self, Act, Closes, Plan, Scope, Subject, Untold};
+use crate::close::{self, Act, Plan, Scope, Untold};
 use crate::copied::{Copied, Excerpt};
 use crate::folds::{Fold, Folds};
 use crate::gruvbox;
@@ -2183,7 +2183,6 @@ impl Sidebar {
         let here_key = placed.and_then(|place| news_key(&self.shelves, machine, place));
         let heard = seen.ok();
         let seated = heard.map_or_default(|seen| seen.seated());
-        let unread = heard.filter(|_| self.away.is_none()).map(Seen::unread_seats);
         let statuses: HashMap<&str, &lunetad::api::GitStatus> = heard
             .iter()
             .flat_map(|seen| seen.git_statuses)
@@ -2195,24 +2194,13 @@ impl Sidebar {
             let mut worktrees = Vec::with_capacity(known.worktrees.len());
             for worktree in &known.worktrees {
                 let views = worktree.views.iter();
-                let held = views.clone().filter_map(|(_, view)| keyed(view));
-                let held: Vec<TerminalKey> = held.collect();
                 let agents = views.clone().filter_map(|(id, view)| {
                     Some((listed.key(*id), *seated.get(&keyed(view)?)?))
                 });
-                let waiting = agents.clone().filter(|(key, agent)| {
+                let waiting = agents.filter(|(key, agent)| {
                     let (marked, _) = agent_marked(&self.news, agent, *key, here_key == Some(*key));
                     marked.mark == Mark::Waiting
                 });
-                let ending = match &unread {
-                    Some(Ok(seats)) => {
-                        let doing = agents.clone().map(|(_, agent)| close::Doing::from(agent));
-                        let files = close::unread_in(seats, &held).map(|(_, doing)| doing);
-                        Ok(doing.chain(files).collect())
-                    },
-                    Some(Err(unplaced)) => Err(Untold::Unplaced(*unplaced)),
-                    None => Err(Untold::Away),
-                };
                 let branch = statuses.get(worktree.folder.as_str()).and_then(|status| {
                     Some(checkout(&GitStatus::of_api(status)?, None)?.branch)
                 });
@@ -2227,9 +2215,7 @@ impl Sidebar {
                     seen: worktree.seen,
                     used: worktree.used,
                     terminals: terminals.collect(),
-                    held: worktree.terminals.clone(),
                     waiting: waiting.count(),
-                    ending,
                 });
             }
             let (project, dir) = (known.project.clone(), known.dir.clone());
@@ -3807,20 +3793,8 @@ impl Sidebar {
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
             Wants::Rebase { dir, branch } => Asked::Rebase { menu: number, on, dir, branch },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
-            Wants::Plan { session, scope: Scope::View(view) } => {
-                let plan = self.plan(&on, &session, Closes::View(view));
-                self.planned(plan)
-            },
-            Wants::Plan { session, scope: Scope::Worktree(worktree) } => {
-                let plan = self.closes_of(&on, worktree).and_then(|closes| {
-                    self.plan(&on, &session, closes)
-                });
-                self.planned(plan)
-            },
-            Wants::Plan { session, scope: Scope::Project } => {
-                let plan = self.project_closes(&on, &session).and_then(|closes| {
-                    self.plan(&on, &session, closes)
-                });
+            Wants::Plan { session, scope } => {
+                let plan = self.plan(&on, &session, scope);
                 self.planned(plan)
             },
         }
@@ -3957,34 +3931,38 @@ impl Sidebar {
             .collect()
     }
 
-    pub fn plan(&self, on: &Machine, listed: &Listed, closes: Closes) -> Result<Plan, String> {
+    pub fn plan(&self, on: &Machine, listed: &Listed, scope: Scope) -> Result<Plan, String> {
         if let Some(why) = self.out_of_reach(on) {
             return Err(why);
         }
-        Ok(close::plan(&self.subject(on, listed, closes)))
+        let act = match scope {
+            Scope::View(view) => Act::View(view),
+            Scope::Worktree(worktree) => self.worktree_closes(on, worktree)?,
+            Scope::Project => self.project_closes(on, listed)?,
+        };
+        let agents = self.agents_in(on, listed);
+        Ok(Plan::of(act, agents.as_deref().map_err(|untold| *untold)))
     }
 
-    fn project_closes(&self, on: &Machine, listed: &Listed) -> Result<Closes, String> {
+    fn project_closes(&self, on: &Machine, listed: &Listed) -> Result<Act, String> {
         let unlisted = || format!("project {} is no longer listed", listed.name());
         let project = listed.project();
         let known = shelf(&self.shelves, on).iter().find(|known| known.project.id() == project);
         let known = known.ok_or_else(unlisted)?;
         let worktrees = known.worktrees.iter().map(|worktree| worktree.place.worktree).collect();
         let seen = known.worktrees.iter().flat_map(|worktree| worktree.terminals.iter().copied());
-        Ok(Closes::Project { project, worktrees, seen: seen.collect() })
+        let session = listed.name().clone();
+        Ok(Act::Project { session, project, worktrees, seen: seen.collect() })
     }
 
-    fn closes_of(&self, on: &Machine, worktree: WorktreeId) -> Result<Closes, String> {
-        if let Some(why) = self.out_of_reach(on) {
-            return Err(why);
-        }
+    fn worktree_closes(&self, on: &Machine, worktree: WorktreeId) -> Result<Act, String> {
         let worktrees = shelf(&self.shelves, on).iter().flat_map(|known| &known.worktrees);
         let mut held = worktrees.filter(|it| it.place.worktree == worktree);
         let Some(found) = held.next() else {
             return Err(format!("worktree {worktree} is no longer listed"));
         };
-        let views = found.views.iter().map(|(_, view)| view.id).collect();
-        Ok(Closes::Worktree { worktree, views, seen: found.terminals.clone() })
+        let views = found.views.iter().filter_map(|(_, view)| keyed(view)).collect();
+        Ok(Act::Worktree { worktree, views, seen: found.terminals.clone() })
     }
 
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
@@ -3996,19 +3974,20 @@ impl Sidebar {
         }
     }
 
-    fn subject<'a>(&'a self, on: &Machine, listed: &'a Listed, closes: Closes) -> Subject<'a> {
-        let mut agents = Err(Untold::Away);
-        if let Some(seen) = self.seen(on)
-            && self.away.is_none()
-        {
-            agents = seen.unread_seats().map_err(Untold::Unplaced).map(|unread_seats| {
-                let (seated, held) = (seen.seated(), seen.held_by(listed));
-                let doing = seated.iter().filter(|(key, _)| held.contains(key));
-                let doing = doing.map(|(key, agent)| (key.id.get(), close::Doing::from(*agent)));
-                doing.chain(close::unread_in(&unread_seats, &held)).collect()
-            });
-        }
-        Subject { session: listed, closes, agents }
+    fn agents_in(
+        &self,
+        on: &Machine,
+        listed: &Listed,
+    ) -> Result<Vec<(TerminalKey, close::Doing)>, Untold> {
+        let Some(seen) = self.seen(on).filter(|_| self.away.is_none()) else {
+            return Err(Untold::Away);
+        };
+        seen.unread_seats().map_err(Untold::Unplaced).map(|unread_seats| {
+            let (seated, held) = (seen.seated(), seen.held_by(listed));
+            let doing = seated.iter().filter(|(key, _)| held.contains(key));
+            let doing = doing.map(|(key, agent)| (*key, close::Doing::from(*agent)));
+            doing.chain(close::unread_in(&unread_seats, &held)).collect()
+        })
     }
 
     fn brief(&mut self, taken: Taken, briefed: Briefed) -> Asked {
@@ -6189,9 +6168,9 @@ mod tests {
         let place = Place::Worktree(WorktreePlace { project, worktree });
         sidebar.light(Spot::Local(place));
         type_in(&mut sidebar, "d");
-        let session = session_name("luneta");
         let seen = [1, 2].map(|id| ViewId::of(id).unwrap()).to_vec();
-        let act = Act::Worktree { session, worktree, views: vec![1, 2], seen };
+        let views = [1, 2].map(|id| ViewKey::terminal(id).key()).to_vec();
+        let act = Act::Worktree { worktree, views, seen };
         let asked = sidebar.key(&char('d'), moment(160_000));
         assert_eq!(asked, close_here(act, 1));
         let landing = match &sidebar.lit {
@@ -8698,7 +8677,7 @@ mod tests {
         sidebar.step(1);
         sidebar.key(&char('d'), now);
         let fast = now + Duration::from_millis(50);
-        let act = Act::View { session: session_name("older"), view: view_key(10, 2) };
+        let act = Act::View(view_key(10, 2));
         assert_eq!(sidebar.key(&char('d'), fast), close_here(act, 1));
         assert!(sidebar.open().is_none());
         let later = now + 10 * PAUSE;
@@ -9051,7 +9030,7 @@ mod tests {
         sidebar.light(Spot::Local(Place::View(ViewPlace { session: twin.clone(), view })));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        let act = Act::View { session: session_name("twin"), view };
+        let act = Act::View(view);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(act, 1));
     }
 
@@ -10031,10 +10010,7 @@ mod tests {
             let asks = format!("Close the view? luneta cannot tell which agents it ends: {why}");
             assert!(lines.contains(&note), "{lines:#?}");
             assert!(lines.contains(&asks.as_str()), "{lines:#?}");
-            let act = Act::View {
-                session: session_name("newer"),
-                view: view_key(20, 1),
-            };
+            let act = Act::View(view_key(20, 1));
             assert_eq!(sidebar.key(&char('y'), moment(160_000)), close_here(act, 1));
         }
     }
@@ -10050,10 +10026,7 @@ mod tests {
             sidebar.hear(Host { unread: 1, unread_files, ..host });
             sidebar.end(true);
             type_in(&mut sidebar, "d");
-            let act = Act::View {
-                session: session_name("newer"),
-                view: view_key(20, 1),
-            };
+            let act = Act::View(view_key(20, 1));
             let went = sidebar.key(&char('d'), moment(160_000));
             let lines = screen(&mut sidebar, true, 120, 16);
             let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
@@ -10069,9 +10042,8 @@ mod tests {
         let in_own = UnreadFile { pid: 200, terminal: Some(key_in(1, 1)) };
         let in_other = UnreadFile { terminal: Some(key_in(10, 1)), ..in_own };
         let worktree = tab_of(1, 0);
-        let (twin, views) = (session_name("twin"), vec![1]);
-        let seen = vec![ViewId::of(1).unwrap()];
-        let close = Act::Worktree { session: twin, worktree, views, seen };
+        let (views, seen) = (vec![view_key(1, 1).key()], vec![ViewId::of(1).unwrap()]);
+        let close = Act::Worktree { worktree, views, seen };
         for (file, asks) in [(in_own, true), (in_other, false)] {
             let mut sidebar = fresh();
             let views = || vec![view(1, 0, "/w/luneta/main", "fish")];
@@ -10133,7 +10105,7 @@ mod tests {
     }
 
     fn closes_nvim() -> Act {
-        Act::View { session: session_name("older"), view: view_key(10, 2) }
+        Act::View(view_key(10, 2))
     }
 
     fn close_nvim(sidebar: &mut Sidebar) -> u64 {
@@ -10225,7 +10197,7 @@ mod tests {
         assert_ne!(lit_place(&sidebar), landing, "{apart}");
         let mut sidebar = on_the_last_row();
         type_in(&mut sidebar, "d");
-        let closes = Act::View { session: session_name("last"), view: view_key(2, 2) };
+        let closes = Act::View(view_key(2, 2));
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(closes, 1));
         type_in(&mut sidebar, "j");
         sidebar.hear(last_with(&[1]));
@@ -10266,7 +10238,7 @@ mod tests {
         assert_eq!(bottom(&mut sidebar), " <y> Yes <BS> Back <ESC> Close");
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13], " Close the view? 1 agent, 1");
-        let act = Act::View { session: session_name("older"), view: view_key(1, 1) };
+        let act = Act::View(view_key(1, 1));
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), close_here(act, 1));
         sidebar.light(Spot::Local(Place::Session(own_listed("older", 1))));
         type_in(&mut sidebar, "d");
@@ -11253,7 +11225,7 @@ mod tests {
         let lines = screen(&mut sidebar, true, 120, 16);
         let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
         assert!(lines.contains(&"Close the view? 1 agent, 1 waiting"), "{lines:#?}");
-        let act = Act::View { session: session_name("main"), view: view_key(20, 1) };
+        let act = Act::View(view_key(20, 1));
         let there = Asked::Close { on: Machine::Remote(nixos()), act, ticket: 1 };
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), there);
         assert!(sidebar.open().is_none());
@@ -11265,9 +11237,8 @@ mod tests {
         let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
         assert!(lines.contains(&"Close the worktree? 1 agent, 1 waiting"), "{lines:#?}");
         let act = Act::Worktree {
-            session: session_name("main"),
             worktree: place.worktree,
-            views: vec![1, 2],
+            views: vec![view_key(20, 1).key(), view_key(20, 2).key()],
             seen: vec![ViewId::of(1).unwrap(), ViewId::of(2).unwrap()],
         };
         let on = Machine::Remote(nixos());

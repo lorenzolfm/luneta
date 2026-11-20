@@ -767,9 +767,14 @@ fn answer(key: &KeyEvent, asked: char) -> Answer {
 
 #[derive(Clone, Debug)]
 struct Close {
-    key: char,
     session: Listed,
     scope: Scope,
+}
+
+impl Close {
+    fn key(&self) -> char {
+        yes_key(self.scope.action())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1477,10 +1482,10 @@ impl Menu {
             Did::Stays(Menu { number, target: target.clone(), stage }, wants)
         };
         let chained = Chain::offered(target, &offer);
-        let closing = |keys: Keys, action: Action, session: &Listed, scope: Scope| {
-            let (key, session) = (yes_key(action), session.clone());
+        let closing = |keys: Keys, session: &Listed, scope: Scope| {
+            let session = session.clone();
             let wants = Wants::Plan { session: session.clone(), scope };
-            let close = Close { key, session, scope };
+            let close = Close { session, scope };
             stays(Stage::Planning { keys, close, agreed: None }, wants)
         };
         let wrong = |reason: String| Did::Closed(Done::Wrong(reason));
@@ -1533,14 +1538,14 @@ impl Menu {
                 stays(Stage::Typing { keys, chain }, Wants::Nothing)
             },
             Offer::CloseView(row) => {
-                closing(keys, Action::CloseView, &row.session, Scope::View(row.view))
+                closing(keys, &row.session, Scope::View(row.view))
             },
             Offer::CloseWorktree(row) => {
                 let scope = Scope::Worktree(row.place.worktree);
-                closing(keys, Action::CloseWorktree, row.place.project.listed(), scope)
+                closing(keys, row.place.project.listed(), scope)
             },
             Offer::CloseProject(listed) => {
-                closing(keys, Action::CloseProject, listed, Scope::Project)
+                closing(keys, listed, Scope::Project)
             },
             Offer::ForgetMachine(destination) => Did::Closed(Done::Forget(destination.clone())),
             Offer::DeleteMerged(dir) => {
@@ -1644,7 +1649,7 @@ impl Menu {
                     stays(Stage::Swept { keys, dir, plan }, Wants::Nothing)
                 },
             },
-            Stage::Asking { keys, close, plan, asks } => match answer(key, close.key) {
+            Stage::Asking { keys, close, plan, asks } => match answer(key, close.key()) {
                 Answer::Yes => {
                     let session = close.session.clone();
                     let wants = Wants::Plan { session, scope: close.scope };
@@ -2756,7 +2761,7 @@ mod tests {
 
     use super::*;
     use crate::actions::GIT;
-    use crate::close::{self, Closes, Doing, Subject};
+    use crate::close::Doing;
     use crate::printed::Kept;
     use crate::pull::{At, Found, Link, Readied, Ready, Work};
     use crate::sidebar::Listed;
@@ -4128,10 +4133,17 @@ mod tests {
         assert_eq!(keyed(40, &any).1, Spots::default());
     }
 
+    fn planned(act: Act, agents: Vec<(u32, Doing)>) -> Plan {
+        let agents: Vec<_> = agents.into_iter().map(|(id, doing)| (at(id), doing)).collect();
+        Plan::of(act, Ok(&agents))
+    }
+
+    fn at(id: u32) -> lunetad::mux::TerminalKey {
+        ViewKey::terminal(id).key()
+    }
+
     fn plan(agents: Vec<(u32, Doing)>) -> Plan {
-        let session = listed();
-        let closes = Closes::View(ViewKey::terminal(4));
-        close::plan(&Subject { session: &session, closes, agents: Ok(agents) })
+        planned(Act::View(ViewKey::terminal(4)), agents)
     }
 
     #[test]
@@ -4141,8 +4153,7 @@ mod tests {
         let scope = Scope::View(ViewKey::terminal(4));
         assert_eq!(wants, Wants::Plan { session: listed(), scope });
         let done = closed(menu.planned(Ok(plan(vec![(4, Doing::Idle)]))));
-        let act = Act::View { session: listed().name().clone(), view: ViewKey::terminal(4) };
-        assert_eq!(done, Done::Act(Machine::Local, act));
+        assert_eq!(done, Done::Act(Machine::Local, Act::View(ViewKey::terminal(4))));
         let (menu, _) = stays(opened(worktree_on(Machine::Local), Some('d')));
         let (_, wants) = stays(menu.key(&char('d')));
         let (session, scope) = (project().listed().clone(), Scope::Worktree(worktree()));
@@ -4177,21 +4188,17 @@ mod tests {
         let asking = text(&menu.lines(31, 9, 0).0);
         assert_eq!(asking[1..3], [" Close the view? 1 agent, 1", " waiting"]);
         let (menu, _) = stays(menu.key(&char('y')));
-        let act = Act::View { session: listed().name().clone(), view: ViewKey::terminal(4) };
+        let act = Act::View(ViewKey::terminal(4));
         assert_eq!(closed(menu.planned(Ok(plan(waiting())))), Done::Act(Machine::Local, act));
     }
 
     fn worktree_plan(agents: Vec<(u32, Doing)>) -> Plan {
-        let session = project().listed().clone();
-        let (views, seen) = (vec![4, 5], worktree_seen());
-        let closes = Closes::Worktree { worktree: worktree(), views, seen };
-        close::plan(&Subject { session: &session, closes, agents: Ok(agents) })
+        planned(worktree_act(), agents)
     }
 
     fn worktree_act() -> Act {
-        let session = project().listed().name().clone();
-        let (views, seen) = (vec![4, 5], worktree_seen());
-        Act::Worktree { session, worktree: worktree(), views, seen }
+        let (views, seen) = (vec![at(4), at(5)], worktree_seen());
+        Act::Worktree { worktree: worktree(), views, seen }
     }
 
     fn worktree_seen() -> Vec<ViewId> {
@@ -4223,22 +4230,13 @@ mod tests {
     #[test]
     fn d_d_on_a_project_closes_it_with_its_worktrees_always_asking_first() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
-        let worktrees = vec![worktree()];
-        let closes = || Closes::Project {
-            project: project().id(),
-            worktrees: worktrees.clone(),
-            seen: worktree_seen(),
-        };
-        let planned = |agents: Vec<(u32, Doing)>| {
-            let session = project().listed().clone();
-            close::plan(&Subject { session: &session, closes: closes(), agents: Ok(agents) })
-        };
         let act = Act::Project {
             session: project().listed().name().clone(),
             project: project().id(),
-            worktrees: worktrees.clone(),
+            worktrees: vec![worktree()],
             seen: worktree_seen(),
         };
+        let planned = |agents: Vec<(u32, Doing)>| planned(act.clone(), agents);
         for on in [Machine::Local, vps()] {
             let (menu, _) = stays(opened(project_on(on.clone()), Some('d')));
             let (menu, wants) = stays(menu.key(&char('d')));

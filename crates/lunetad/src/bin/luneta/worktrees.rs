@@ -517,14 +517,6 @@ fn changed_there(machine: &Machine, change: Change) -> Result<(), Unchanged> {
     made_there(machine, change).map(drop)
 }
 
-pub fn closed_there(
-    machine: &Machine,
-    worktree: WorktreeId,
-    seen: &[ViewId],
-) -> Result<(), Unchanged> {
-    changed_there(machine, close(worktree, seen))
-}
-
 pub fn renamed_project(
     machine: &Machine,
     project: ProjectId,
