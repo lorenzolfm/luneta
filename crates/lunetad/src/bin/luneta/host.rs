@@ -953,10 +953,7 @@ impl App {
             },
             Event::Moved { ticket, kept } => self.sidebar.moved(ticket, kept),
             Event::Unmoved { on, ticket, order, unmoved } => {
-                let note = match unmoved {
-                    Unchanged::Refused(why) | Unchanged::Nests(why) => format!("not moved: {why}"),
-                    Unchanged::InDoubt(why) => format!("may have moved: {why}"),
-                };
+                let note = unmoved.said("not moved", "the rows may have moved");
                 self.sidebar.unmoved(&on, ticket, &order, note);
             },
             Event::Copy(clip) => self.clip(terminal, clip)?,
@@ -1881,8 +1878,8 @@ impl App {
                             (worktrees::renamed_project(on, *project, to), "project")
                         },
                     };
-                    let maybe = format!("the {noun} may be renamed");
-                    renamed.map_err(|unchanged| unchanged.said("not renamed", &maybe))
+                    let in_doubt = format!("the {noun} may be renamed");
+                    renamed.map_err(|unchanged| unchanged.said("not renamed", &in_doubt))
                 });
             },
             Asked::Make { menu, on, project, cwd, name, command } => {
@@ -2022,8 +2019,8 @@ impl App {
                         (closed, "project")
                     },
                 };
-                let maybe = format!("the {noun} may be closed");
-                closed.map_err(|unchanged| unchanged.said("not closed", &maybe))
+                let in_doubt = format!("the {noun} may be closed");
+                closed.map_err(|unchanged| unchanged.said("not closed", &in_doubt))
             });
             if let Err(why) = closed {
                 let _ = events.send(Event::Unclosed { on, act, ticket, why });

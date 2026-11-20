@@ -757,14 +757,15 @@ impl Picker {
                 if let Err(unchanged) = renamed {
                     let to = to.as_str();
                     let refused = format!("{from} is not called {to}");
-                    let maybe = format!("{from} may be called {to}");
-                    self.error = Some(unchanged.said(&refused, &maybe));
+                    let in_doubt = format!("{from} may be called {to}");
+                    self.error = Some(unchanged.said(&refused, &in_doubt));
                 }
             },
             Heard::Closed { name, closed } => {
                 if let Err(unchanged) = closed {
-                    let maybe = format!("{name} may be closed");
-                    self.error = Some(unchanged.said(&format!("{name} stays"), &maybe));
+                    let refused = format!("{name} stays");
+                    let in_doubt = format!("{name} may be closed");
+                    self.error = Some(unchanged.said(&refused, &in_doubt));
                 }
             },
             Heard::Dirs { on, ask, visited } => {
