@@ -1,15 +1,18 @@
 { pkgs, testRun }:
+let
+  inherit (pkgs) lib;
+  awk = lib.getExe pkgs.gawk;
+  jq = lib.getExe pkgs.jq;
+  ps = lib.getExe' pkgs.procps "ps";
+  realpath = lib.getExe' pkgs.coreutils "realpath";
+  seq = lib.getExe' pkgs.coreutils "seq";
+  sleep = lib.getExe' pkgs.coreutils "sleep";
+in
 pkgs.writeShellApplication {
   name = "luneta-nextest";
   meta.description = "cargo nextest run on luneta's tests, failing if they leave a luneta-mux from target/ running";
-  runtimeInputs = [
-    pkgs.coreutils
-    pkgs.gawk
-    pkgs.jq
-    pkgs.procps
-  ];
   text = ''
-    target="$(cargo metadata --locked --no-deps --format-version 1 | jq -r .target_directory)"
+    target="$(cargo metadata --locked --no-deps --format-version 1 | ${jq} -r .target_directory)"
     case "$target" in
       /*) ;;
       *)
@@ -17,10 +20,10 @@ pkgs.writeShellApplication {
         exit 2
         ;;
     esac
-    resolved="$(realpath -m -- "$target")/"
-    given="$(realpath -ms -- "$target")/"
+    resolved="$(${realpath} -m -- "$target")/"
+    given="$(${realpath} -ms -- "$target")/"
     muxes() {
-      ps -A -o pid= -o args= | awk -v resolved="$resolved" -v given="$given" -v before="$1" '
+      ${ps} -A -o pid= -o args= | ${awk} -v resolved="$resolved" -v given="$given" -v before="$1" '
         function from(folder) {
           if (index(args, folder) != 1) return 0
           return substr(args, length(folder) + 1) ~ /^([^ ]*\/)?luneta-mux( |$)/
@@ -36,9 +39,9 @@ pkgs.writeShellApplication {
     tested=0
     cargo nextest run --locked ${testRun} "$@" || tested=$?
     left="$(muxes "$before")"
-    for _ in $(seq 100); do
+    for _ in $(${seq} 100); do
       [ -z "$left" ] && break
-      sleep 0.1
+      ${sleep} 0.1
       left="$(muxes "$before")"
     done
     if [ -n "$left" ]; then
@@ -47,7 +50,7 @@ pkgs.writeShellApplication {
         shown+=(-p "$pid")
       done
       printf 'luneta-nextest: the tests left luneta-mux running 10s after they ended:\n' >&2
-      ps -o pid= -o etime= -o args= "''${shown[@]}" >&2 || true
+      ${ps} -o pid= -o etime= -o args= "''${shown[@]}" >&2 || true
       [ "$tested" -ne 0 ] || tested=1
     fi
     exit "$tested"
