@@ -27,7 +27,7 @@ use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
 use lunetad::{eza, screens, Destination, Directory, SessionName};
 
-use crate::actions::{self, Action, Spec};
+use crate::actions::{self, Action, Pasted, Spec};
 use crate::alerts::Doing;
 use crate::away::{self, Away};
 use crate::close::{self, Act, Deletes, Ends, Plan, Untold};
@@ -859,10 +859,10 @@ impl Picker {
         self.aiming = false;
         let text: String = text.chars().filter(|c| !c.is_control()).collect();
         match &mut self.stage {
-            Stage::Search => {
-                self.term.push_str(&text);
-                self.rebuild(true);
-            },
+            Stage::Search => self.edit_term(|term| {
+                term.push_str(&text);
+                true
+            }),
             Stage::Rename { input, .. } => input.push_str(&text),
             Stage::Chain { chain, .. } => chain.paste(&text),
             Stage::Planning { .. } | Stage::Asking { .. } | Stage::Closing { .. } => {},
@@ -1108,14 +1108,14 @@ impl Picker {
                 Picked::Nothing
             },
             KeyCode::Backspace => {
-                if self.term.pop().is_some() {
-                    self.rebuild(true);
-                }
+                self.edit_term(|term| term.pop().is_some());
                 Picked::Nothing
             },
             KeyCode::Char(c) if plain(key) => {
-                self.term.push(c);
-                self.rebuild(true);
+                self.edit_term(|term| {
+                    term.push(c);
+                    true
+                });
                 Picked::Nothing
             },
             _ => Picked::Nothing,
@@ -1291,8 +1291,8 @@ impl Picker {
             return None;
         };
         let work = Work::parse(&self.term, target.cwd().cloned())?;
-        let row = |(pull, action)| {
-            let name = format!("{} {}", titled(action), work.tab());
+        let row = |(pull, pasted): (Pull, Pasted)| {
+            let name = format!("{} {}", titled(pasted.action()), work.tab());
             let (target, work) = (Rc::clone(target), work.clone());
             Row::plain(Key::Pasted { target, work, pull }, name)
         };
@@ -1490,6 +1490,12 @@ impl Picker {
         let projects = self.shelved(on).into_iter().flat_map(|shelved| &shelved.projects);
         let projects = projects.map(|housed| housed.project.listed().name().as_str());
         self.here_session(on).into_iter().chain(projects).collect()
+    }
+
+    fn edit_term(&mut self, edit: impl FnOnce(&mut String) -> bool) {
+        if edit(&mut self.term) {
+            self.rebuild(true);
+        }
     }
 
     fn rebuild(&mut self, snap: bool) {

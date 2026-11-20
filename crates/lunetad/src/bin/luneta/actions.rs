@@ -178,6 +178,35 @@ impl Command {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pasted {
+    Worktree,
+    Review,
+    Tackle,
+}
+
+impl Pasted {
+    const ALL: [Pasted; 3] = [Pasted::Worktree, Pasted::Review, Pasted::Tackle];
+
+    #[must_use]
+    pub const fn key(self) -> char {
+        match self {
+            Pasted::Worktree => 'w',
+            Pasted::Review => 'r',
+            Pasted::Tackle => 't',
+        }
+    }
+
+    #[must_use]
+    pub const fn action(self) -> Action {
+        match self {
+            Pasted::Worktree => Action::PastedWorktree,
+            Pasted::Review => Action::PastedReview,
+            Pasted::Tackle => Action::PastedTackle,
+        }
+    }
+}
+
 const fn spec(
     name: &'static str,
     keywords: &'static [&'static str],
@@ -323,14 +352,16 @@ impl Action {
                 spec("Quit luneta", &["detach", "exit", "leave"], quit, EVERY)
             },
             Action::PastedWorktree => {
-                spec("worktree", &["checkout", "branch"], Key::Pasted('w'), EVERY)
+                let worktree = Key::Pasted(Pasted::Worktree.key());
+                spec("worktree", &["checkout", "branch"], worktree, EVERY)
             },
             Action::PastedReview => {
-                let review = Key::Pasted('r');
+                let review = Key::Pasted(Pasted::Review.key());
                 spec("/thermo-nuclear-review", &["critique", "pull request"], review, EVERY)
             },
             Action::PastedTackle => {
-                spec("tackle", &["issue", "work"], Key::Pasted('t'), EVERY)
+                let tackle = Key::Pasted(Pasted::Tackle.key());
+                spec("tackle", &["issue", "work"], tackle, EVERY)
             },
             Action::Swap => anywhere("Sidebar or views", &["focus", "switch"], SWAP),
             Action::ViewLeft => {
@@ -474,11 +505,33 @@ const _: () = {
                 let menu = "a key of the sidebar and the menu opens no group of the menu";
                 assert!(!is_group(&MENU_GROUPS, path[0]), "{}", menu);
             },
-            Key::Pasted(_) | Key::Chord(_) => {},
+            Key::Pasted(key) => {
+                let answers = "a key for a pasted link is a Pasted's key";
+                assert!(pasted_key(key), "{}", answers);
+            },
+            Key::Chord(_) => {},
         }
         at += 1;
     }
+    let mut at = 0;
+    while at < Pasted::ALL.len() {
+        let pasted = Pasted::ALL[at];
+        let keyed = matches!(pasted.action().key(), Key::Pasted(key) if key == pasted.key());
+        assert!(keyed, "{}", "a Pasted's action is keyed as it");
+        at += 1;
+    }
 };
+
+const fn pasted_key(key: char) -> bool {
+    let mut at = 0;
+    while at < Pasted::ALL.len() {
+        if Pasted::ALL[at].key() == key {
+            return true;
+        }
+        at += 1;
+    }
+    false
+}
 
 #[cfg(test)]
 mod tests {

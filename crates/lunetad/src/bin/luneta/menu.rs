@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::actions::{
-    self, Action, Command, Key, Noun, MENU_GROUPS, OPEN, REVIEW, ROW_GROUPS, YANK,
+    self, Action, Command, Key, Noun, Pasted, MENU_GROUPS, OPEN, REVIEW, ROW_GROUPS, YANK,
 };
 use crate::agents::{self, Harness, Picked};
 use crate::brief;
@@ -214,16 +214,16 @@ impl Asks {
 impl Pull {
     const ALL: [Pull; 2] = [Pull::Worktree, Pull::Agent];
 
-    pub fn offered(work: &Work) -> [(Pull, Action); 2] {
+    pub fn offered(work: &Work) -> [(Pull, Pasted); 2] {
         let asks = Asks::of(work);
-        Pull::ALL.map(|pull| (pull, pull.action(asks)))
+        Pull::ALL.map(|pull| (pull, pull.pasted(asks)))
     }
 
-    const fn action(self, asks: Asks) -> Action {
+    const fn pasted(self, asks: Asks) -> Pasted {
         match (self, asks) {
-            (Pull::Worktree, _) => Action::PastedWorktree,
-            (Pull::Agent, Asks::Review) => Action::PastedReview,
-            (Pull::Agent, Asks::Tackle) => Action::PastedTackle,
+            (Pull::Worktree, _) => Pasted::Worktree,
+            (Pull::Agent, Asks::Review) => Pasted::Review,
+            (Pull::Agent, Asks::Tackle) => Pasted::Tackle,
         }
     }
 
@@ -242,15 +242,8 @@ impl Pull {
             return None;
         }
         let mut offered = Pull::offered(work).into_iter();
-        offered.find(|(_, action)| pasted_key(*action) == c).map(|(pull, _)| pull)
+        offered.find(|(_, pasted)| pasted.key() == c).map(|(pull, _)| pull)
     }
-}
-
-fn pasted_key(action: Action) -> char {
-    let Key::Pasted(key) = action.key() else {
-        unreachable!("{action:?} answers a pasted link, and so is keyed as one");
-    };
-    key
 }
 
 enum Entry {
@@ -1298,6 +1291,20 @@ enum Wait {
     Unopened,
 }
 
+enum Launch {
+    Shell,
+    Agent(Vec<String>),
+}
+
+impl Launch {
+    fn argv(self) -> Vec<String> {
+        match self {
+            Launch::Shell => Vec::new(),
+            Launch::Agent(argv) => argv,
+        }
+    }
+}
+
 impl Wait {
     fn doing(&self, work: &Work) -> String {
         match self {
@@ -1703,24 +1710,24 @@ impl Menu {
             let stage = Stage::Pull { work, agent, step: Step::Choosing { wrong } };
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         }
-        let command = match (pull, &readied) {
-            (Pull::Worktree, _) => Vec::new(),
+        let launch = match (pull, &readied) {
+            (Pull::Worktree, _) => Launch::Shell,
             (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
-                agents::on_skill(agent, REVIEW, Some(&link.url()))
+                Launch::Agent(agents::on_skill(agent, REVIEW, Some(&link.url())))
             },
             (Pull::Agent, Readied::Link(link)) => {
-                agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[])
+                Launch::Agent(agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[]))
             },
             (Pull::Agent, Readied::File { real }) => {
-                agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
+                let words = format!("{TACKLE} {real}");
+                Launch::Agent(agents::on_words(agent, words, &[real.as_str()]))
             },
         };
-        assert_eq!(command.is_empty(), pull == Pull::Worktree, "w opens a shell, an agent its own");
-        match (at, pull) {
-            (At::There((session, view)), Pull::Worktree) => {
+        match (at, launch) {
+            (At::There((session, view)), Launch::Shell) => {
                 Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })))
             },
-            (At::There((session, view)), Pull::Agent) => {
+            (At::There((session, view)), Launch::Agent(command)) => {
                 let row = ViewRow {
                     session: session.clone(),
                     view,
@@ -1736,8 +1743,8 @@ impl Menu {
                 let wants = Wants::Open { session, view, command };
                 Did::Stays(Menu { number, target, stage }, wants)
             },
-            (At::Unopened, _) => {
-                let wants = Wants::Make { cwd: folder, name: work.tab(), command };
+            (At::Unopened, launch) => {
+                let wants = Wants::Make { cwd: folder, name: work.tab(), command: launch.argv() };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Unopened) };
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
@@ -1955,8 +1962,10 @@ impl Menu {
             Stage::Pull { work, agent, step } => {
                 let body = match step {
                     Step::Choosing { wrong } => {
-                        let entry =
-                            |(_, action)| Entry::Act { key: pasted_key(action), action };
+                        let entry = |(_, pasted): (Pull, Pasted)| Entry::Act {
+                            key: pasted.key(),
+                            action: pasted.action(),
+                        };
                         let entries = Pull::offered(work).map(entry);
                         spots = entry_spots(&entries, width).map(Choice::Key);
                         let mut body: Vec<_> =
