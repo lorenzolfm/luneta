@@ -736,7 +736,7 @@ pub enum Why {
 }
 
 impl Why {
-    pub fn changed(self, dir: &str) -> Option<String> {
+    pub fn said(self, dir: &str) -> Option<String> {
         match self {
             Why::Heard => Some(format!("the watch on {dir} heard it change")),
             Why::Swept => Some(format!("the sweep found {dir} changed")),
@@ -755,11 +755,11 @@ struct Asked {
 
 impl Asked {
     fn due(&self, sweep: Duration) -> Instant {
-        self.ended
-            + match self.next {
-                Why::Heard | Why::Moved => self.took,
-                Why::Swept => self.took.max(sweep),
-            }
+        let wait = match self.next {
+            Why::Heard | Why::Moved => self.took,
+            Why::Swept => self.took.max(sweep),
+        };
+        self.ended + wait
     }
 
     fn within(&self, top: &Path) -> bool {

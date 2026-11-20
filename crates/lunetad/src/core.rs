@@ -181,7 +181,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let before = known.branch(&dir).map(str::to_owned);
                 let changed = known.statuses.get(&dir).is_some_and(|was| *was != status);
                 known.statuses.insert(dir.clone(), status);
-                if changed && let Some(said) = why.and_then(|why| why.changed(&dir)) {
+                if changed && let Some(said) = why.and_then(|why| why.said(&dir)) {
                     log::say(&said);
                 }
                 if known.branch(&dir).is_some_and(|now| before.as_deref() != Some(now)) {
