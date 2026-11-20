@@ -423,8 +423,8 @@ impl Daemon for Host {
         let waiter = Waiter::of(&request);
         let _waits = self.watchers.waits(waiter);
         let parked = match waiter {
-            Waiter::Client => Parked::Said,
-            Waiter::Window | Waiter::Daemon(_) => Parked::Unsaid,
+            Waiter::Client => Parked::Aloud,
+            Waiter::Window | Waiter::Daemon(_) => Parked::Quietly,
         };
         let after = request.after.map(|version| After { version, parked });
         let watched = match timeout(WATCH, self.watched(after)).await {

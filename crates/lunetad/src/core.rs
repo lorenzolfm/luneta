@@ -83,8 +83,8 @@ pub struct After {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Parked {
-    Unsaid,
-    Said,
+    Quietly,
+    Aloud,
 }
 
 pub struct Wakes {
@@ -547,16 +547,19 @@ impl Known {
         };
         self.waiting.retain(|waiting| !waiting.is_closed());
         assert!(self.waiting.len() <= WAITING_MAX);
+        if answer.is_closed() {
+            return;
+        }
         if self.waiting.len() == WAITING_MAX {
             let _ = answer.send(None);
             return;
         }
         self.waiting.push(answer);
         match parked {
-            Parked::Unsaid => {},
-            Parked::Said => {
+            Parked::Quietly => {},
+            Parked::Aloud => {
                 let api::Version { pid, seq } = version;
-                log::say(&format!("a client waits for a change past {pid}:{seq}"));
+                log::say(&format!("a watch waits for a change past {pid}:{seq}"));
             },
         }
     }

@@ -1307,7 +1307,8 @@ fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     let (first, _) = host.watch(None);
     let version = first.version.unwrap();
     assert_eq!(version.pid, daemon.pid());
-    let parked = format!("lunetad: a client waits for a change past {}:{}", version.pid, version.seq);
+    let Version { pid, seq } = version;
+    let parked = format!("lunetad: a watch waits for a change past {pid}:{seq}");
     let parked = |line: &str| line == parked;
 
     let (same, lasted) = host.watch(Some(version));
