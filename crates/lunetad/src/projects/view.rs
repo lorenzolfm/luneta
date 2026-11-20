@@ -128,6 +128,14 @@ impl Opens {
     }
 
     #[must_use]
+    pub fn to_api(&self) -> Vec<String> {
+        match self {
+            Opens::Shell => Vec::new(),
+            Opens::Command(argv) => argv.words.clone(),
+        }
+    }
+
+    #[must_use]
     pub fn runs(&self) -> Runs {
         match self {
             Opens::Shell => Runs::Shell,
@@ -143,10 +151,17 @@ pub struct Argv {
 }
 
 impl Argv {
-    fn parse(words: Vec<String>) -> Result<Argv, String> {
-        assert!(!words.is_empty(), "an argv names its program");
+    pub fn parse(words: Vec<String>) -> Result<Argv, String> {
+        if words.is_empty() {
+            return Err("an argv names no program".to_owned());
+        }
         let line = Line::parse(&quoted(&words))?;
         Ok(Argv { words, line })
+    }
+
+    #[must_use]
+    pub fn words(&self) -> &[String] {
+        &self.words
     }
 
     #[must_use]

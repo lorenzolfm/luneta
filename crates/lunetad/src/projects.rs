@@ -2966,7 +2966,10 @@ mod tests {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let argv = ["cargo", "test", "it's"].map(str::to_owned).to_vec();
-        let opens = Opens::of(argv).unwrap();
+        let opens = Opens::of(argv.clone()).unwrap();
+        assert_eq!(opens.to_api(), argv, "it says the words it was parsed from");
+        assert_eq!(Opens::of(Opens::Shell.to_api()), Ok(Opens::Shell));
+        assert!(Argv::parse(Vec::new()).unwrap_err().contains("no program"));
         let spot = spot_at("/w/luneta", "fix");
         let fixing = Change::AddWorktree { project: luneta, spot, name: None, opens };
         let Made::Worktree(fix) = add(&mut projects, fixing) else {

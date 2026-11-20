@@ -27,7 +27,7 @@ use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, Opens, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::asks::Marked;
 use lunetad::rebases::{Rebased, Unrebased};
@@ -83,14 +83,14 @@ use crate::width::Width;
 
 pub enum Made {
     Project { on: Machine, made: Result<ProjectId, String> },
-    Worktree { on: Machine, made: Result<Landing, String>, argv: Vec<String> },
+    Worktree { on: Machine, made: Result<Landing, String> },
     Pulled { menu: u64, made: Result<Pulled, String> },
 }
 
 pub struct Pulled {
     on: Machine,
     worktree: Landed,
-    argv: Vec<String>,
+    opens: Opens,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1894,7 +1894,7 @@ impl App {
             Asked::Rename { on, rename } => {
                 self.rename(on, rename);
             },
-            Asked::Make { menu, on, cwd, name, command } => {
+            Asked::Make { menu, on, cwd, name, opens } => {
                 let busy = |busy: &str| format!("menu: {}", worktrees::unopened(&cwd, &name, busy));
                 if self.refuse_naming(Some(menu), busy) {
                     return;
@@ -1902,8 +1902,8 @@ impl App {
                 let lunetad = self.lunetad.clone();
                 self.naming_on(move || {
                     let made = caught(NAMING_PANICKED, || {
-                        let made = worktrees::pulled(&lunetad, &on, &cwd, &name, command.clone())?;
-                        Ok(Pulled { on, worktree: made, argv: command })
+                        let made = worktrees::pulled(&lunetad, &on, &cwd, &name, &opens)?;
+                        Ok(Pulled { on, worktree: made, opens })
                     });
                     Made::Pulled { menu, made }
                 });
@@ -2500,7 +2500,7 @@ impl App {
         let lunetad = self.lunetad.clone();
         self.naming_on(move || {
             let made = caught(NAMING_PANICKED, || made(&lunetad, &on));
-            Made::Worktree { on, made, argv: Vec::new() }
+            Made::Worktree { on, made }
         });
     }
 
@@ -2526,12 +2526,12 @@ impl App {
         assert_eq!(self.naming, Naming::Busy, "a session was named that `name` did not name");
         self.naming = Naming::Idle;
         match made {
-            Made::Worktree { on, made: Ok(Landing::Worktree(made)), argv } => {
-                self.go_opening(&on, made, argv);
+            Made::Worktree { on, made: Ok(Landing::Worktree(made)) } => {
+                self.go_worktree(&on, made.worktree(), None);
                 self.give_opened(Opener::LetGo);
             },
             Made::Project { on, made: Ok(project) }
-            | Made::Worktree { on, made: Ok(Landing::Unopened(project)), .. } => {
+            | Made::Worktree { on, made: Ok(Landing::Unopened(project)) } => {
                 self.go_home(&on, project);
                 self.give_opened(Opener::LetGo);
             },
@@ -2542,13 +2542,11 @@ impl App {
         }
     }
 
-    fn go_opening(&mut self, on: &Machine, landed: Landed, argv: Vec<String>) {
+    fn go_opening(&mut self, on: &Machine, landed: Landed, opens: Opens) {
         let worktree = landed.worktree();
         self.go_worktree(on, worktree, None);
-        if let Landed::Found(_) = landed
-            && !argv.is_empty()
-        {
-            self.shown().open_in(worktree, argv);
+        if let (Landed::Found(_), Opens::Command(argv)) = (landed, opens) {
+            self.shown().open_in(worktree, argv.words().to_vec());
         }
     }
 
@@ -2558,8 +2556,8 @@ impl App {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: {why}")),
         };
-        let Pulled { on, worktree, argv } = made;
-        self.go_opening(&on, worktree, argv);
+        let Pulled { on, worktree, opens } = made;
+        self.go_opening(&on, worktree, opens);
         self.give_opened(opener);
     }
 

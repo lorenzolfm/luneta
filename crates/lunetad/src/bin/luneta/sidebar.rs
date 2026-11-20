@@ -22,7 +22,7 @@ use lunetad::changes::Unchanged;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links::{self, Branch};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, Dir, Holders, Plain, ProjectId, Used, ViewId, WorktreeId};
+use lunetad::projects::{self, Dir, Holders, Opens, Plain, ProjectId, Used, ViewId, WorktreeId};
 use lunetad::projects::CLONE_WORKTREES_MAX;
 use lunetad::prunes;
 use lunetad::rebases::{Rebased, Unrebased};
@@ -1163,7 +1163,7 @@ pub enum Asked {
         on: Machine,
         cwd: Directory,
         name: String,
-        command: Vec<String>,
+        opens: Opens,
     },
     Pull {
         menu: u64,
@@ -3803,9 +3803,7 @@ impl Sidebar {
                 Asked::Printed { menu: number, on, session, view, ended }
             },
             Wants::Checks { page } => Asked::Checks { menu: number, on, page },
-            Wants::Make { cwd, name, command } => {
-                Asked::Make { menu: number, on, cwd, name, command }
-            },
+            Wants::Make { cwd, name, opens } => Asked::Make { menu: number, on, cwd, name, opens },
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
             Wants::Rebase { dir, branch } => Asked::Rebase { menu: number, on, dir, branch },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
@@ -9108,7 +9106,7 @@ mod tests {
             on: Machine::Local,
             cwd: directory("/w/n/feat"),
             name: "#5".to_owned(),
-            command: Vec::new(),
+            opens: Opens::Shell,
         };
         assert_eq!(sidebar.pulled(1, Ok(Found { on: Machine::Local, ready })), asked);
         assert_eq!(sidebar.made_for(1), Some(Held::Open));

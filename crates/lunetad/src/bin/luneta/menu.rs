@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::said::Said;
 use lunetad::links::Branch;
-use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, Argv, Opens, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::rebases::{self, Came, Rebased, Unrebased};
 use lunetad::{Destination, Directory, SessionName};
@@ -1238,7 +1238,7 @@ pub enum Wants {
     Pull(Work, Wanted),
     Printed { session: Listed, view: ViewKey, ended: Ended },
     Checks { page: PullPage },
-    Make { cwd: Directory, name: String, command: Vec<String> },
+    Make { cwd: Directory, name: String, opens: Opens },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1305,20 +1305,6 @@ enum Wait {
     Pulling(Pull),
     Opening,
     Unopened,
-}
-
-enum Launch {
-    Shell,
-    Agent(Vec<String>),
-}
-
-impl Launch {
-    fn argv(self) -> Vec<String> {
-        match self {
-            Launch::Shell => Vec::new(),
-            Launch::Agent(argv) => argv,
-        }
-    }
 }
 
 impl Wait {
@@ -1726,24 +1712,29 @@ impl Menu {
             let stage = Stage::Pull { work, agent, step: Step::Choosing { wrong } };
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         }
-        let launch = match (pull, &readied) {
-            (Pull::Worktree, _) => Launch::Shell,
+        let argv = match (pull, &readied) {
+            (Pull::Worktree, _) => None,
             (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
-                Launch::Agent(agents::on_skill(agent, REVIEW, Some(&link.url())))
+                Some(agents::on_skill(agent, REVIEW, Some(&link.url())))
             },
             (Pull::Agent, Readied::Link(link)) => {
-                Launch::Agent(agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[]))
+                Some(agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[]))
             },
             (Pull::Agent, Readied::File { real }) => {
                 let words = format!("{TACKLE} {real}");
-                Launch::Agent(agents::on_words(agent, words, &[real.as_str()]))
+                Some(agents::on_words(agent, words, &[real.as_str()]))
             },
         };
-        match (at, launch) {
-            (At::There((session, view)), Launch::Shell) => {
+        let opens = match argv.map(Argv::parse).transpose() {
+            Ok(argv) => argv.map_or(Opens::Shell, Opens::Command),
+            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
+        };
+        match (at, opens) {
+            (At::There((session, view)), Opens::Shell) => {
                 Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })))
             },
-            (At::There((session, view)), Launch::Agent(command)) => {
+            (At::There((session, view)), Opens::Command(argv)) => {
+                let command = argv.words().to_vec();
                 let row = ViewRow {
                     session: session.clone(),
                     view,
@@ -1759,8 +1750,8 @@ impl Menu {
                 let wants = Wants::Open { session, view, command };
                 Did::Stays(Menu { number, target, stage }, wants)
             },
-            (At::Unopened, launch) => {
-                let wants = Wants::Make { cwd: folder, name: work.tab(), command: launch.argv() };
+            (At::Unopened, opens) => {
+                let wants = Wants::Make { cwd: folder, name: work.tab(), opens };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Unopened) };
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
@@ -4423,6 +4414,10 @@ mod tests {
         Found { on: Machine::Local, ready }
     }
 
+    fn agent(argv: Vec<String>) -> Opens {
+        Opens::Command(Argv::parse(argv).expect("an agent's argv"))
+    }
+
     #[test]
     fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
         let menu = Menu::pull(1, view_row(), link(), CLAUDE);
@@ -4473,10 +4468,10 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
+        for (key, opens) in [('w', Opens::Shell), ('r', agent(review.clone()))] {
             let (menu, wants) = stays(pulling(key).pulled(ready(At::Unopened)));
             let (cwd, name) = (directory(&folder), "#2736".to_owned());
-            assert_eq!(wants, Wants::Make { cwd, name, command });
+            assert_eq!(wants, Wants::Make { cwd, name, opens });
             assert_eq!(menu.target(), &Target::Machine(Machine::Local), "no view is in it");
             assert!(menu.opens_pulled());
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
@@ -4515,9 +4510,9 @@ mod tests {
             "pi",
             "/skill:thermo-nuclear-review https://github.com/cashubtc/cdk/pull/2736",
         ];
-        let command = review.map(str::to_owned).to_vec();
+        let opens = agent(review.map(str::to_owned).to_vec());
         let (cwd, name) = (directory(&folder), "#2736".to_owned());
-        assert_eq!(wants, Wants::Make { cwd, name, command });
+        assert_eq!(wants, Wants::Make { cwd, name, opens });
     }
 
     #[test]
@@ -4549,9 +4544,9 @@ mod tests {
         };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
         let tackle = ["claude", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
-        let command = tackle.map(str::to_owned).to_vec();
+        let opens = agent(tackle.map(str::to_owned).to_vec());
         let (cwd, name) = (directory(&folder), "#2736".to_owned());
-        assert_eq!(wants, Wants::Make { cwd, name, command });
+        assert_eq!(wants, Wants::Make { cwd, name, opens });
     }
 
     #[test]
@@ -4633,21 +4628,31 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        let made = |command| {
+        let made = |opens| {
             let (cwd, name) = (directory(folder), "sync-rework".to_owned());
-            Wants::Make { cwd, name, command }
+            Wants::Make { cwd, name, opens }
         };
-        assert_eq!(wants, made(command));
+        assert_eq!(wants, made(agent(command)));
 
         let pressed = |key: char| {
             stays(Menu::pull(1, view_row(), file(), CLAUDE).key(&char(key))).0
         };
         let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
-        assert_eq!(wants, made(Vec::new()));
+        assert_eq!(wants, made(Opens::Shell));
 
         assert_eq!(
             closed(pressed('w').pulled(Err("no such file".to_owned()))),
             Done::Wrong("menu: docs/plans/sync-rework.md: no such file".to_owned())
+        );
+
+        let bell = Readied::File { real: "/w/cdk/main/\u{7}.md".to_owned() };
+        let bell = Ready { work: bell, ..ready() };
+        assert_eq!(
+            closed(pressed('t').pulled(Ok(here(bell)))),
+            Done::Wrong(
+                "menu: docs/plans/sync-rework.md: a command line holds a control character"
+                    .to_owned()
+            )
         );
     }
 
