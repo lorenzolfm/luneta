@@ -94,8 +94,9 @@ impl Ends {
         Ok(Ends { signals })
     }
 
-    pub fn pending(&mut self) -> Option<Ended> {
-        self.signals.pending().next().map(Ended::by)
+    pub fn after<T>(&mut self, step: impl FnOnce() -> T) -> Result<T, Ended> {
+        let done = step();
+        self.signals.pending().next().map(Ended::by).map_or(Ok(done), Err)
     }
 
     fn tell(mut self, events: Sender<Event>) {
@@ -615,11 +616,11 @@ mod tests {
     }
 
     #[test]
-    fn a_signal_that_comes_before_luneta_reads_its_terminal_is_its_end() {
+    fn a_signal_that_comes_during_a_step_before_luneta_reads_its_terminal_is_its_end() {
         let mut ends = Ends::heard().expect("luneta hears its end signals");
-        assert_eq!(ends.pending(), None);
-        signal_hook::low_level::raise(SIGTERM).expect("a signal is sent");
-        let ended = ends.pending().expect("the signal is pending");
+        assert_eq!(ends.after(|| "done"), Ok("done"));
+        let raised = || signal_hook::low_level::raise(SIGTERM).expect("a signal is sent");
+        let ended = ends.after(raised).expect_err("the signal ends luneta");
         assert_eq!(ended, Ended(SIGTERM));
         assert_eq!(ended.to_string(), "ended by signal 15");
     }

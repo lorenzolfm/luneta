@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::io::{self, Write as _};
 use std::iter;
+use std::mem;
 use std::num::NonZeroU16;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -461,8 +462,9 @@ struct App {
 }
 
 pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
+    let heard = input::Ends::heard();
     let unkept = log::start(Process::Luneta).err();
-    let mut ends = match input::Ends::heard() {
+    let mut ends = match heard {
         Ok(ends) => ends,
         Err(error) => return did_not_start(&format!("its end signals are not heard: {error}")),
     };
@@ -489,19 +491,14 @@ pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
         Ok(runs_in) => runs_in,
         Err(why) => return did_not_start(&why),
     };
-    let start = match worktrees::start(&lunetad, named, &cwd, seen) {
-        Ok(start) => start,
-        Err(refusal) => return did_not_start(&format!("no worktree to show: {refusal}")),
+    let start = match ends.after(|| worktrees::start(&lunetad, named, &cwd, seen)) {
+        Ok(Ok(start)) => start,
+        Ok(Err(refusal)) => return did_not_start(&format!("no worktree to show: {refusal}")),
+        Err(ended) => return did_not_start(&ended.to_string()),
     };
-    if let Some(ended) = ends.pending() {
-        return did_not_start(&ended.to_string());
-    }
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
-        Err(error) => match ends.pending() {
-            Some(ended) => return did_not_start(&ended.to_string()),
-            None => return did_not_start(&format!("no terminal: {error}")),
-        },
+        Err(error) => return did_not_start(&format!("no terminal: {error}")),
     };
     let hidden = terminal.hide_cursor();
     let restore = std::panic::take_hook();
@@ -549,8 +546,9 @@ pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
     let popped =
         if answers.kitty { execute!(io::stdout(), PopKeyboardEnhancementFlags) } else { Ok(()) };
     let restored = put_back(&mut io::stdout());
+    let shown = give_back(terminal);
     let left = ratatui::try_restore();
-    let put = popped.and(restored).and(left);
+    let put = popped.and(restored).and(shown).and(left);
     if let Err(error) = &put {
         log::say(&format!("its terminal was not put back: {error}"));
     }
@@ -601,6 +599,12 @@ fn wait_for(sent: Vec<JoinHandle<()>>, slow: Duration, said: impl FnOnce()) {
         said();
         let _ = ending.recv();
     }
+}
+
+fn give_back(mut terminal: DefaultTerminal) -> io::Result<()> {
+    let shown = terminal.show_cursor();
+    mem::forget(terminal);
+    shown
 }
 
 fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {

@@ -22,6 +22,7 @@ use lunetad::program::alone;
 use rustix::fs::{Mode, OFlags};
 use rustix::io::{fcntl_setfd, FdFlags};
 use rustix::pty::{self, OpenptFlags};
+use rustix::process::{Pid, Signal};
 use rustix::termios::{self, Winsize};
 use tempfile::TempDir;
 
@@ -522,6 +523,25 @@ fn the_log_says_luneta_ended_by_a_signal() {
     assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
     let log = log_of(&owned.host);
     assert!(log.contains("ends: ended by signal 15"), "{log}");
+}
+
+#[test]
+fn a_window_closed_while_luneta_starts_ends_it_as_a_failure() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let (controller, tty) = terminal();
+    let mut luneta = spawn_on(&tty, &mut luneta(owned.host.vars(), &dir.path));
+    drop(tty);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    drop(controller);
+    hang_up(luneta.pid());
+    let status = luneta.ended("luneta ends");
+    assert_eq!(status.code(), Some(1), "{}", log_of(&owned.host));
+}
+
+fn hang_up(pid: u32) {
+    let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    rustix::process::kill_process(pid, Signal::HUP).unwrap();
 }
 
 #[test]
