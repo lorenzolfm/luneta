@@ -95,14 +95,28 @@ pub enum Command {
     Unreached { since: Instant },
     Worktrees { root: Dir, subfolders: BTreeSet<Subfolder>, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, subfolders: BTreeSet<Subfolder> },
-    CloneRoot { project: ProjectId, answer: oneshot::Sender<Result<Dir, NotCloned>> },
+    Root { project: ProjectId, answer: oneshot::Sender<Result<Root, Unrooted>> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NotCloned {
+pub enum Root {
+    Clone(Dir),
+    Folder { dir: Dir, name: Name },
+}
+
+impl Root {
+    #[must_use]
+    pub fn dir(&self) -> &Dir {
+        match self {
+            Root::Clone(dir) | Root::Folder { dir, .. } => dir,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unrooted {
     Unkept(String),
     Unknown,
-    Folder(Name),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -502,8 +516,8 @@ impl Layouts {
                     self.troubles.say(format!("{root}: its worktrees are not kept: {why}"));
                 }
             },
-            Command::CloneRoot { project, answer } => {
-                let _ = answer.send(self.clone_root(project));
+            Command::Root { project, answer } => {
+                let _ = answer.send(self.root(project));
             },
             Command::Rooted { root, subfolders } => {
                 let rooted = Change::Rooted { root: root.clone(), subfolders };
@@ -826,13 +840,14 @@ impl Layouts {
         Ok(taken.then_some(Made::Taken(worktree)))
     }
 
-    fn clone_root(&self, project: ProjectId) -> Result<Dir, NotCloned> {
-        let projects = self.kept().map_err(NotCloned::Unkept)?;
-        let held = projects.project_of(project).ok_or(NotCloned::Unknown)?;
-        match held.holds() {
-            Holds::Clone(_) => Ok(held.dir().clone()),
-            Holds::Folder(_) => Err(NotCloned::Folder(held.name().clone())),
-        }
+    fn root(&self, project: ProjectId) -> Result<Root, Unrooted> {
+        let projects = self.kept().map_err(Unrooted::Unkept)?;
+        let held = projects.project_of(project).ok_or(Unrooted::Unknown)?;
+        let dir = held.dir().clone();
+        Ok(match held.holds() {
+            Holds::Clone(_) => Root::Clone(dir),
+            Holds::Folder(_) => Root::Folder { dir, name: held.name().clone() },
+        })
     }
 
     fn kept(&self) -> Result<&Projects, String> {

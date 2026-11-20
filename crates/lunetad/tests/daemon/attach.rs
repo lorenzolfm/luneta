@@ -6,7 +6,7 @@ use std::time::Duration;
 use lunetad::api::terminal::Found;
 use serde_json::json;
 
-use crate::host::{eventually, LUNETA};
+use crate::host::{eventually, script, LUNETA};
 use crate::own::Owned;
 use crate::projects::{project, worktree};
 use crate::starts::{cloned, directory, mouse, projects_of, shown, work_in, Window, SPLIT};
@@ -18,6 +18,8 @@ const TYPED: &str = "printf 'own-%s\\n' 42\r";
 const PRINTED: &str = "own-42";
 
 const HERE: &str = "luneta runs here";
+
+const UNHOSTED: &str = "no remote on GitHub, so nothing is listed here";
 
 const LEFT: &str = "\x1b[104;5u";
 
@@ -292,7 +294,9 @@ fn a_worktree_opened_or_made_while_luneta_shows_none_takes_the_keys() {
     unshow(&mut window);
     let erased = "\x7f".repeat(root.chars().count());
     window.send(&format!("np{erased}{}\r\r", other.path.display()));
-    typed_in(&mut window, &other.path, 2);
+    eventually("the new project's home shows", || window.shows(UNHOSTED).then_some(()));
+    window.send("own-2");
+    eventually("its prompt takes the keys", || window.shows("› own-2_").then_some(()));
 }
 
 #[test]
@@ -305,10 +309,9 @@ fn a_menu_opened_while_a_project_is_made_keeps_the_keys() {
     let other = directory("other");
     let erased = "\x7f".repeat(dir.path.display().to_string().chars().count());
     window.send(&format!("{SIDEBAR}np{erased}{}\r\r{SIDEBAR}n", other.path.display()));
-    eventually(&format!("luneta shows {}", other.path.display()), || {
-        let terminals = shown(&owned, &other.path)?.terminals;
-        let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
-        (found.count() == 1 && tops(&window).len() == 1).then_some(())
+    let named = format!(" other  {}", other.path.parent().unwrap().file_name().unwrap().display());
+    eventually("luneta shows the new project's home", || {
+        (window.shows(&named) && window.shows(UNHOSTED)).then_some(())
     });
     eventually("the menu opened meanwhile stays open", || window.shows("─ New ─").then_some(()));
 }
@@ -394,27 +397,26 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
 }
 
 #[test]
-fn a_click_on_a_project_s_row_goes_to_its_worktree_used_last() {
+fn a_click_on_a_project_s_row_goes_to_its_home_and_one_on_a_worktree_s_back() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     let main = eventually("luneta shows work", || shown(&owned, &dir.path)).id;
-    let id_of = |name: &str| projects_of(&owned).into_iter().find(|it| it.name == name).unwrap().id;
+    let project = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().id;
     let root = dir.path.parent().unwrap();
     worktree_added(root, "docs");
-    let docs = worktree(&owned.host, id_of("work"), &root.join("docs"));
-    let far = work_in(&owned, "other");
-    let other = worktree(&owned.host, id_of("other"), &far.path);
+    let docs = worktree(&owned.host, project, &root.join("docs"));
     let used = |id: u64| used(&owned, id);
     window.send(RIGHT);
     eventually("Ctrl l goes to docs", || (used(docs) > used(main)).then_some(()));
-    let row = sidebar_row(&window, "▾ other");
-    click(&mut window, row);
-    eventually("a click on other's row goes there", || (used(other) > used(docs)).then_some(()));
     let row = sidebar_row(&window, "▾ work");
     click(&mut window, row);
-    eventually("a click on work's row goes to docs, the worktree used last there", || {
-        (used(docs) > used(other)).then_some(())
+    eventually("a click on work's row shows its home", || window.shows(UNHOSTED).then_some(()));
+    assert!(used(docs) > used(main), "the home goes to no worktree");
+    let row = sidebar_row(&window, "▾ main");
+    click(&mut window, row);
+    eventually("a click on main's row goes there, out of the home", || {
+        (used(main) > used(docs) && !window.shows(UNHOSTED)).then_some(())
     });
 }
 
@@ -449,14 +451,71 @@ fn a_tie_for_the_worktree_used_last_goes_to_the_first_listed_wherever_luneta_pic
     });
     let row = sidebar_row(&window, "▾ other");
     click(&mut window, row);
-    eventually("a click on other's row goes to its first", || {
-        (gone_to() == [two, three]).then_some(())
-    });
+    eventually("a click on other's row shows its home", || window.shows(UNHOSTED).then_some(()));
+    assert_eq!(gone_to(), [two], "and goes to none of other's worktrees");
     drop(window);
-    let _window = Window::open(&owned.host, &directory("anywhere"), &["named"]);
-    eventually("a luneta started by the project's name goes to its first", || {
-        (gone_to() == [two, three, five]).then_some(())
+    let window = Window::open(&owned.host, &directory("anywhere"), &["named"]);
+    eventually("a luneta started by the project's name shows its home", || {
+        window.shows(UNHOSTED).then_some(())
     });
+    assert_eq!(gone_to(), [two], "and goes to none of named's worktrees");
+}
+
+#[test]
+fn a_home_s_talk_goes_on_while_luneta_shows_a_worktree_and_esc_stops_only_its_turn() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let home = owned.host.home.path().to_owned();
+    let at = home.display();
+    let claude = format!(
+        r#"n=$(cat "{at}/turns" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "{at}/turns"
+echo "$@" > "{at}/args-$n"
+echo "${{LUNETA_TURN_BEFORE:-none}}" > "{at}/before-$n"
+cat > /dev/null
+echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
+case "$n" in
+    1) sleep 2; echo '{{"type":"result","subtype":"success","is_error":false,"result":"Started all three."}}'; touch "{at}/answered" ;;
+    2) sleep 60 ;;
+    *) echo '{{"type":"result","subtype":"success","is_error":false,"result":"Went on."}}' ;;
+esac
+"#
+    );
+    script(&owned.host.bin().join("claude"), &claude);
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    let row = sidebar_row(&window, "▾ work");
+    click(&mut window, row);
+    eventually("a click on work's row shows its home", || window.shows(UNHOSTED).then_some(()));
+    window.send("tackle these\r");
+    eventually("the agent's turn began", || home.join("turns").exists().then_some(()));
+    let row = sidebar_row(&window, "▾ main");
+    click(&mut window, row);
+    eventually("luneta shows main, out of the home", || (!window.shows(UNHOSTED)).then_some(()));
+    eventually("the agent answered while the home was not shown", || {
+        home.join("answered").exists().then_some(())
+    });
+    let row = sidebar_row(&window, "▾ work");
+    click(&mut window, row);
+    eventually("the home comes back with its talk and the answer", || {
+        (window.shows("tackle these") && window.shows("Started all three.")).then_some(())
+    });
+    window.send("more\r");
+    eventually("the second turn began", || {
+        (fs::read_to_string(home.join("turns")).ok()?.trim() == "2").then_some(())
+    });
+    window.send(ESC);
+    eventually("Esc stops the turn", || window.shows("stopped: the agent was ended").then_some(()));
+    assert!(window.shows("Started all three."), "and the talk stays");
+    window.send("again\r");
+    eventually("the next turn answers", || window.shows("Went on.").then_some(()));
+    let args = fs::read_to_string(home.join("args-3")).unwrap();
+    assert!(args.contains("--resume 7c22"), "it goes on in the same session: {args}");
+    let before = |turn: u32| fs::read_to_string(home.join(format!("before-{turn}"))).unwrap();
+    assert_ne!(before(2).trim(), "none", "a turn after one that answered has that one before it");
+    assert_eq!(before(3).trim(), "none", "and a turn after a stopped one has none, so prune plans again");
+    assert!(!window.shows("it ended with no answer"), "the stopped turn's end is heard by none");
 }
 
 fn sidebar_row(window: &Window, text: &str) -> usize {

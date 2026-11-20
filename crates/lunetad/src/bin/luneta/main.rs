@@ -21,6 +21,7 @@ mod dictation;
 mod due;
 mod folds;
 mod gruvbox;
+mod home;
 mod host;
 mod hush;
 mod icons;

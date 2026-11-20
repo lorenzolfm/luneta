@@ -592,6 +592,15 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in makes no worktree"))
     }
 
+    type ListWorkStream = tokio_stream::Empty<Result<api::ListWorkResponse, Status>>;
+
+    async fn list_work(
+        &self,
+        _: Request<api::ListWorkRequest>,
+    ) -> Result<Response<Self::ListWorkStream>, Status> {
+        Err(Status::unimplemented("a stand-in lists no work"))
+    }
+
     async fn list_skills(
         &self,
         _: Request<ListSkillsRequest>,

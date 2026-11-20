@@ -13,7 +13,9 @@ use lunetad::api::projects::{Held, Kept};
 use lunetad::api::worktree::Seen;
 use lunetad::api::{self, ChangeProjectsRequest, ChangeProjectsResponse as Answered, On, Stage};
 use lunetad::api::make_worktree_response::Landed;
-use lunetad::api::MakeWorktreeRequest;
+use lunetad::api::list_work_response::work::Issues;
+use lunetad::api::list_work_response::{Issue, Listed as Said, OpenIssues, Pull as ListedPull, Work};
+use lunetad::api::{ListWorkRequest, ListWorkResponse, MakeWorktreeRequest};
 use lunetad::api::Version;
 use tonic::{Code, Status};
 
@@ -64,6 +66,33 @@ fn branched_on(
         assert!(answer.message().await?.is_none(), "and only once");
         Ok(made.landed)
     })
+}
+
+fn work_on(host: &Host, on: Option<&str>, project: u64) -> Result<ListWorkResponse, Status> {
+    let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let on = on.map(|on| On { destination: on.to_owned() });
+        let mut answer = daemon.list_work(ListWorkRequest { on, project }).await?.into_inner();
+        let listed = answer.message().await?.expect("lunetad answers once");
+        assert!(answer.message().await?.is_none(), "and only once");
+        Ok(listed)
+    })
+}
+
+fn work_of(listed: ListWorkResponse) -> Work {
+    match listed.listed {
+        Some(Said::Work(work)) => work,
+        listed => panic!("lunetad listed no work but {listed:?}"),
+    }
+}
+
+const GITHUB: &str = "git@github.com:o/n.git";
+
+fn on_github(folder: &Path) {
+    git(folder.parent().unwrap(), &["init", "-q", "-b", "main", &folder.display().to_string()]);
+    git(folder, &["remote", "add", "upstream", GITHUB]);
 }
 
 fn changed(host: &Host, change: Change) -> Result<u64, Status> {
@@ -665,4 +694,134 @@ fn a_branch_s_worktree_is_made_in_a_clone_on_its_machine_and_opens_with_a_shell(
     let refused = branched(u64::MAX, "feat").unwrap_err();
     assert_eq!(refused.code(), Code::NotFound, "{refused:?}");
     assert_eq!(opened().len(), 2, "no refusal made a row");
+}
+
+#[test]
+fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (clone, vault) = (scratch.join("luneta"), scratch.join("Vault"));
+    let (notes, down, off) = (scratch.join("notes"), scratch.join("down"), scratch.join("off"));
+    cloned_as_wt(&scratch, &scratch.join("up"), &clone);
+    git(&clone.join(".bare"), &["remote", "add", "upstream", GITHUB]);
+    on_github(&vault);
+    on_github(&down);
+    on_github(&off);
+    fs::create_dir_all(&notes).unwrap();
+    let luneta = project(&far, &clone, None);
+    let backup = project(&far, &vault, None);
+    let notes_project = project(&far, &notes, None);
+    let down_project = project(&far, &down, None);
+    let off_project = project(&far, &off, None);
+    let issues = serde_json::json!([
+        {"number": 507, "title": "Open a project on a home view", "labels": [{"name": "enhancement"}]},
+        {"number": 498, "title": "Menu says no project", "labels": []},
+    ]);
+    let pulls = serde_json::json!([
+        {"number": 524, "title": "Say view, not pane", "isDraft": true, "headRefName": "issue-511",
+         "author": {"login": "lorenzolfm"}},
+        {"number": 526, "title": "Match each place once", "isDraft": false,
+         "headRefName": "issue-523", "author": null},
+    ]);
+    far.gh.work(&issues, &pulls);
+
+    let listed = work_of(work_on(&here, Some("far"), luneta).unwrap());
+    let labels = vec!["enhancement".to_owned()];
+    let issue = |number, title: &str, labels| Issue { number, title: title.to_owned(), labels };
+    let open = vec![
+        issue(507, "Open a project on a home view", labels),
+        issue(498, "Menu says no project", vec![]),
+    ];
+    assert_eq!(listed.issues, Some(Issues::Open(OpenIssues { issues: open, more: false })));
+    let pull = |number, title: &str, draft, branch: &str, author: Option<&str>| ListedPull {
+        number,
+        title: title.to_owned(),
+        draft,
+        branch: branch.to_owned(),
+        author: author.map(str::to_owned),
+    };
+    assert_eq!(
+        listed.pulls,
+        [
+            pull(524, "Say view, not pane", true, "issue-511", Some("lorenzolfm")),
+            pull(526, "Match each place once", false, "issue-523", None),
+        ]
+    );
+    assert!(!listed.more_pulls, "gh listed all that are open");
+    let mut worked = far.gh.worked();
+    worked.sort();
+    let at = text(&clone);
+    assert_eq!(
+        worked,
+        [
+            format!("{at} issue list --state open --limit 51 --json number,title,labels"),
+            format!(
+                "{at} pr list --state open --limit 51 --json number,title,isDraft,headRefName,author"
+            ),
+        ],
+        "gh lists the open ones and one past the most, in the clone's root, on far"
+    );
+    assert!(here.gh.worked().is_empty(), "and not where the asker is");
+
+    let many: Vec<_> = (1..=51).map(|number| serde_json::json!({"number": number, "title": "t"})).collect();
+    far.gh.work(&serde_json::Value::Array(many), &pulls);
+    let listed = work_of(work_on(&far, None, backup).unwrap());
+    let Some(Issues::Open(open)) = &listed.issues else {
+        panic!("lunetad listed no open issues but {:?}", listed.issues);
+    };
+    let numbers: Vec<u32> = open.issues.iter().map(|issue| issue.number).collect();
+    assert_eq!(numbers, (1..=50).collect::<Vec<_>>(), "a folder's work is listed in the folder");
+    assert!(open.more && !listed.more_pulls, "and past 50 it says there are more");
+    assert!(far.gh.worked().iter().any(|it| it.starts_with(&format!("{} ", text(&vault)))));
+
+    let unhosted = work_on(&here, Some("far"), notes_project).unwrap();
+    assert_eq!(unhosted.listed, Some(Said::Unhosted(())), "a folder with no remote on GitHub");
+    let in_notes = format!("{} ", text(&notes));
+    assert!(!far.gh.worked().iter().any(|it| it.starts_with(&in_notes)), "and gh is not run there");
+
+    far.gh.issues_off(true);
+    let listed = work_of(work_on(&here, Some("far"), off_project).unwrap());
+    assert_eq!(listed.issues, Some(Issues::Off(())), "a repository with its issues off says so");
+    assert_eq!(listed.pulls.len(), 2, "and lists its pull requests still");
+    let viewed = format!("{} repo view --json hasIssuesEnabled", text(&off));
+    assert!(far.gh.worked().contains(&viewed), "{:?}", far.gh.worked());
+    far.gh.issues_off(false);
+
+    far.gh.refuse_work("HTTP 502: Bad Gateway (https://api.github.com/graphql)");
+    let refused = work_on(&here, Some("far"), down_project).unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+    let said = "gh issue list --state open: HTTP 502: Bad Gateway (https://api.github.com/graphql)";
+    assert_eq!(refused.message(), said, "where the issues are on, a list gh refused is refused");
+    let refused = work_on(&here, Some("far"), 0).unwrap_err();
+    let unnamed = (Code::InvalidArgument, "project: no id is 0");
+    assert_eq!((refused.code(), refused.message()), unnamed);
+    let refused = work_on(&here, Some("far"), u64::MAX).unwrap_err();
+    assert_eq!(refused.code(), Code::NotFound, "{refused:?}");
+}
+
+#[test]
+fn a_folder_s_work_is_listed_once_for_all_who_ask_within_a_while() {
+    let host = Host::new();
+    let _lunetad = start(host.vars()).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let notes = fs::canonicalize(scratch.path()).unwrap().join("notes");
+    on_github(&notes);
+    let notes = project(&host, &notes, None);
+    host.gh.slow_work();
+    thread::scope(|scope| {
+        let asks: Vec<_> = (0..3).map(|_| scope.spawn(|| work_on(&host, None, notes))).collect();
+        for ask in asks {
+            assert!(ask.join().unwrap().is_ok());
+        }
+    });
+    assert_eq!(host.gh.worked().len(), 2, "one issue list and one pull request list for all three");
+    work_on(&host, None, notes).unwrap();
+    assert_eq!(host.gh.worked().len(), 2, "and the next ask is answered from what they listed");
 }

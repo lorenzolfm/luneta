@@ -286,8 +286,29 @@ impl fmt::Display for ViewKey {
 pub struct Seat {
     pub on: Machine,
     pub project: ProjectId,
-    pub worktree: WorktreeId,
-    pub terminal: Option<TerminalKey>,
+    pub at: Sitting,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sitting {
+    Home,
+    Worktree { worktree: WorktreeId, terminal: Option<TerminalKey> },
+}
+
+impl Seat {
+    fn worktree(&self) -> Option<WorktreeId> {
+        match self.at {
+            Sitting::Worktree { worktree, .. } => Some(worktree),
+            Sitting::Home => None,
+        }
+    }
+
+    fn terminal(&self) -> Option<TerminalKey> {
+        match self.at {
+            Sitting::Worktree { terminal, .. } => terminal,
+            Sitting::Home => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1985,7 +2006,7 @@ impl Sidebar {
     pub fn sit(&mut self, seat: Seat) {
         let was = self.seat.take().filter(|was| was.on == seat.on && was.project == seat.project);
         let unmoved = was.as_ref() == Some(&seat);
-        let (project, worktree, terminal) = (seat.project, seat.worktree, seat.terminal);
+        let (project, worktree, terminal) = (seat.project, seat.worktree(), seat.terminal());
         self.seat = Some(seat);
         if unmoved {
             return;
@@ -1993,11 +2014,13 @@ impl Sidebar {
         if was.is_none() {
             self.unfold_project(project);
         }
-        if was.as_ref().map(|was| was.worktree) != Some(worktree) {
+        if let Some(worktree) = worktree
+            && was.as_ref().and_then(Seat::worktree) != Some(worktree)
+        {
             let on = self.on().clone();
             self.folds.set(Fold::Worktree(&on, worktree), false);
         }
-        let moved = was.and_then(|was| was.terminal) != terminal;
+        let moved = was.as_ref().and_then(Seat::terminal) != terminal;
         if moved && let Some(terminal) = terminal {
             self.unfold_home(project, terminal);
         }
@@ -2053,7 +2076,8 @@ impl Sidebar {
         let seat = self.seat.as_ref()?;
         let known = self.known_of(seat.project)?;
         let mut worktrees = known.worktrees.iter();
-        let worktree = worktrees.find(|worktree| worktree.place.worktree == seat.worktree)?;
+        let seated = seat.worktree()?;
+        let worktree = worktrees.find(|worktree| worktree.place.worktree == seated)?;
         Some(worktree.place.clone())
     }
 
@@ -2075,7 +2099,7 @@ impl Sidebar {
 
     fn here_place(&self) -> Result<ViewPlace, &'static str> {
         let seat = self.seat.as_ref().ok_or(NO_HERE_VIEW)?;
-        let terminal = seat.terminal.ok_or(NO_HERE_VIEW)?;
+        let terminal = seat.terminal().ok_or(NO_HERE_VIEW)?;
         self.view_place(seat.project, terminal).ok_or(NO_HERE_VIEW)
     }
 
@@ -5964,13 +5988,14 @@ mod tests {
         let mut worktrees = known.worktrees.iter();
         let home = worktrees.find(|it| it.views.iter().any(|(_, it)| keyed(it) == Some(terminal)));
         let worktree = home.expect("a worktree holds the view luneta sits on").place.worktree;
-        sidebar.sit(Seat { on: Machine::Local, project, worktree, terminal: Some(terminal) });
+        let at = Sitting::Worktree { worktree, terminal: Some(terminal) };
+        sidebar.sit(Seat { on: Machine::Local, project, at });
     }
 
     fn seat_in(project: u64, view: Option<u32>) -> Seat {
         let terminal = view.map(|view| view_key(project, view).key());
         let (worktree, project) = (tab_of(project, 0), ProjectId::of(project).unwrap());
-        Seat { on: Machine::Local, project, worktree, terminal }
+        Seat { on: Machine::Local, project, at: Sitting::Worktree { worktree, terminal } }
     }
 
     fn kept(projects: Vec<api::Project>) -> api::Projects {
@@ -6661,7 +6686,8 @@ mod tests {
         let older = |view| ViewPlace { session: own_listed("older", 1), view: view_key(1, view) };
         sit(&mut sidebar, &Place::View(older(1)));
         assert_eq!(sidebar.here_place(), Ok(older(1)));
-        sidebar.sit(Seat { worktree: tab_of(1, 1), ..seat_in(1, None) });
+        let at = Sitting::Worktree { worktree: tab_of(1, 1), terminal: None };
+        sidebar.sit(Seat { at, ..seat_in(1, None) });
         assert_eq!(sidebar.here_place(), Err(NO_HERE_VIEW), "not the view of the worktree left");
         sit(&mut sidebar, &Place::View(older(2)));
         assert_eq!(sidebar.here_place(), Ok(older(2)));
@@ -11097,7 +11123,7 @@ mod tests {
         sidebar.hear(machines());
         let there = listed("main", 20);
         let (on, project, worktree) = (Machine::Remote(nixos()), there.project(), tab_of(20, 0));
-        sidebar.sit(Seat { on, project, worktree, terminal: None });
+        sidebar.sit(Seat { on, project, at: Sitting::Worktree { worktree, terminal: None } });
         let project = ProjectRow::of(there);
         let place = WorktreePlace { project, worktree: tab_of(20, 0) };
         assert_eq!(sidebar.listing().shown, Some((Machine::Remote(nixos()), place)));

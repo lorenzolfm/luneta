@@ -37,17 +37,17 @@ use crate::api::{
     FileIssueRequest, FileIssueResponse, InfoResponse, IssueRepositoriesRequest,
     IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest,
     KeepImageResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
-    ListDirsRequest, ListDirsResponse, ListSkillsRequest, ListSkillsResponse,
-    MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest, PasteResponse, PrintedFile,
-    PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, RebaseRequest, RebaseResponse,
-    SayRequest, ShowRequest,
-    ShowResponse, TranscriptEndsRequest, TranscriptEndsResponse, FramesRequest,
+    ListDirsRequest, ListDirsResponse, ListSkillsRequest, ListSkillsResponse, ListWorkRequest,
+    ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest, PasteResponse,
+    PrintedFile, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, RebaseRequest,
+    RebaseResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
+    TranscriptEndsResponse, FramesRequest,
 };
 use crate::asks::{Asked, Step};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::projects::{Ask, Changed, Lock, Made, Plain, ProjectId, Store, WorktreeId};
-use crate::layouts::{self, NotCloned};
+use crate::layouts::{self, Root, Unrooted};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
 use crate::prunes::{self, Occupied};
@@ -64,7 +64,7 @@ use crate::agent::Agent;
 use crate::checks::{Failing, Log};
 use crate::{
     changes, checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed,
-    projects, release, remote, skills, topics, watch, zoxide, Harness,
+    projects, release, remote, skills, topics, watch, work, zoxide, Harness,
 };
 
 const SWEEP: Duration = Duration::from_secs(2);
@@ -188,7 +188,8 @@ pub async fn serve(
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
-    let host = Host { started, claude_folder, core, watchers, bridges, layouts };
+    let listings = Arc::new(work::Listings::default());
+    let host = Host { started, claude_folder, core, watchers, bridges, layouts, listings };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     let ended = async move {
@@ -392,6 +393,7 @@ struct Host {
     watchers: Arc<Watchers>,
     bridges: Arc<Bridges>,
     layouts: SyncSender<layouts::Command>,
+    listings: Arc<work::Listings>,
 }
 
 #[tonic::async_trait]
@@ -800,10 +802,13 @@ impl Daemon for Host {
         }
         let layouts = self.layouts.clone();
         let answer = late(move || {
-            let asked =
-                layouts::ask(&layouts, |answer| layouts::Command::CloneRoot { project, answer });
-            let root = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
-            let root = root.map_err(|not| not_cloned(project, not))?;
+            let root = match rooted(&layouts, project)? {
+                Root::Clone(root) => root,
+                Root::Folder { name, .. } => {
+                    let one = projects::folder_has_one_worktree(name.as_str());
+                    return Err(Status::failed_precondition(one));
+                },
+            };
             let of = Of::Branch(branch);
             let folder = links::worktree(root.as_str(), &of).map_err(branch_unready)?;
             let unopened = |status: Status| {
@@ -820,6 +825,29 @@ impl Daemon for Host {
                 made => unreachable!("an added worktree is made or found, not {made:?}"),
             };
             Ok(MakeWorktreeResponse { landed: Some(landed) })
+        });
+        Ok(Response::new(Box::pin(answer)))
+    }
+
+    type ListWorkStream = Pin<Box<dyn Stream<Item = Result<ListWorkResponse, Status>> + Send>>;
+
+    async fn list_work(
+        &self,
+        request: Request<ListWorkRequest>,
+    ) -> Result<Response<Self::ListWorkStream>, Status> {
+        let ListWorkRequest { on, project } = request.into_inner();
+        let unnamed = || Status::invalid_argument("project: no id is 0");
+        let project = ProjectId::of(project).ok_or_else(unnamed)?;
+        if let Some(mut daemon) = self.bridged(on).await? {
+            let asked = ListWorkRequest { on: None, project: project.get() };
+            let answer = daemon.list_work(asked).await?.into_inner();
+            return Ok(Response::new(Box::pin(answer)));
+        }
+        let (layouts, listings) = (self.layouts.clone(), Arc::clone(&self.listings));
+        let answer = late(move || {
+            let root = rooted(&layouts, project)?;
+            let listed = listings.list(root.dir()).map_err(Status::failed_precondition)?;
+            Ok(listed.answer())
         });
         Ok(Response::new(Box::pin(answer)))
     }
@@ -985,14 +1013,13 @@ fn asked_branch(branch: &str) -> Result<Branch, Status> {
     }
 }
 
-fn not_cloned(project: ProjectId, not: NotCloned) -> Status {
-    match not {
-        NotCloned::Unkept(why) => Status::failed_precondition(why),
-        NotCloned::Unknown => Status::not_found(format!("no project has the id {project}")),
-        NotCloned::Folder(name) => {
-            Status::failed_precondition(projects::folder_has_one_worktree(name.as_str()))
-        },
-    }
+fn rooted(layouts: &SyncSender<layouts::Command>, project: ProjectId) -> Result<Root, Status> {
+    let asked = layouts::ask(layouts, |answer| layouts::Command::Root { project, answer });
+    let root = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
+    root.map_err(|not| match not {
+        Unrooted::Unkept(why) => Status::failed_precondition(why),
+        Unrooted::Unknown => Status::not_found(format!("no project has the id {project}")),
+    })
 }
 
 fn branch_unready(why: Unready) -> Status {

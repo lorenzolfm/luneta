@@ -3,7 +3,8 @@ use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lunetad::asks::{self, Asked, Step, Turn};
+use lunetad::asks::{self, Asked, Marked, Step, Turn};
+use lunetad::projects::Dir;
 use lunetad::transcripts::SessionId;
 use lunetad::{Destination, Directory};
 use ratatui::buffer::Buffer;
@@ -22,11 +23,14 @@ use crate::sidebar::{self, ACCENT};
 
 const TITLE: &str = "Ask";
 
+const STOPPED: &str = "stopped: the agent was ended where it was";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Keyed {
     Nothing,
     Send,
     Close,
+    Interrupt,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -88,6 +92,41 @@ impl Ask {
         }
     }
 
+    pub fn homed(number: u64, on: &Machine, dir: &Dir, project: &str) -> Self {
+        let works = match on {
+            Machine::Local => Works::Here(PathBuf::from(dir.as_str())),
+            Machine::Remote(on) => Works::There { on: on.clone(), cwd: Some(Directory::from(dir)) },
+        };
+        let dir = dir.as_str();
+        let highlighted = format!(
+            "The user asks from the work view of project {project}, in {dir}, which lists the \
+             project's open issues and pull requests on GitHub: \"this project\" means it, and \
+             you run in its folder."
+        );
+        Ask {
+            number,
+            works,
+            highlighted,
+            session: None,
+            turned: None,
+            talk: Vec::new(),
+            typed: String::new(),
+            turn: None,
+        }
+    }
+
+    pub fn rehome(&mut self, on: &Machine, dir: &Dir, project: &str) {
+        if self.session.is_some() {
+            return;
+        }
+        if self.turn.is_some() {
+            return;
+        }
+        let Ask { works, highlighted, .. } = Ask::homed(self.number, on, dir, project);
+        self.works = works;
+        self.highlighted = highlighted;
+    }
+
     pub fn number(&self) -> u64 {
         self.number
     }
@@ -97,7 +136,7 @@ impl Ask {
         let control = key.modifiers == KeyModifiers::CONTROL;
         match key.code {
             KeyCode::Esc if bare => return Keyed::Close,
-            KeyCode::Char('c') if control => return Keyed::Close,
+            KeyCode::Char('c') if control => return Keyed::Interrupt,
             _ if self.turn.is_some() => return Keyed::Nothing,
             KeyCode::Enter if bare && !self.typed.trim().is_empty() => return Keyed::Send,
             KeyCode::Backspace if bare => {
@@ -127,7 +166,7 @@ impl Ask {
         self.typed.push_str(&text);
     }
 
-    pub fn send(&mut self, events: &Sender<Event>) {
+    pub fn send(&mut self, marked: Marked, events: &Sender<Event>) {
         if self.turn.is_some() {
             return;
         }
@@ -145,7 +184,8 @@ impl Ask {
         };
         let (resumed, highlighted) = (self.session.clone(), self.highlighted.clone());
         let asked = placed.and_then(|(on, cwd)| {
-            Ok((on, Asked::new(cwd, &words, resumed, highlighted, turn)?))
+            let asked = Asked::new(cwd, &words, resumed, highlighted, turn)?;
+            Ok((on, asked.marking(marked)))
         });
         self.talk.push(Said::You(words));
         let (on, asked) = match asked {
@@ -201,6 +241,19 @@ impl Ask {
 
     pub fn turning(&self) -> bool {
         self.turn.is_some()
+    }
+
+    pub fn stop(&mut self, number: u64) {
+        assert!(number > self.number, "a stopped talk is numbered past its turn's");
+        if self.turn.take().is_some() {
+            self.talk.push(Said::Wrong(STOPPED.to_owned()));
+            self.turned = None;
+        }
+        self.number = number;
+    }
+
+    pub fn talked(&self, inner: usize, now: SystemTime) -> Vec<Line<'static>> {
+        self.lines(inner, sidebar::frame(now))
     }
 
     pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
@@ -471,7 +524,7 @@ mod tests {
         assert!(ask.turn.is_none());
         assert_eq!(ask.key(&key(KeyCode::Esc)), Keyed::Close);
         let interrupt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(ask.key(&interrupt), Keyed::Close);
+        assert_eq!(ask.key(&interrupt), Keyed::Interrupt);
     }
 
     #[test]
@@ -535,6 +588,27 @@ mod tests {
             assert_eq!(unread.works, Works::Unread { why: why.clone() });
             assert_eq!(top(&unread), "┌─ Ask ────────────────────────────────┐");
         }
+
+        let home = |on: &Machine| Ask::homed(7, on, &Dir::parse("/w/luneta").unwrap(), "luneta").works;
+        assert_eq!(home(&Machine::Local), Works::Here(PathBuf::from("/w/luneta")));
+        assert_eq!(home(&nixos()), there(Some("/w/luneta")));
+    }
+
+    #[test]
+    fn a_stopped_turn_ends_its_talk_goes_on_under_a_new_number_and_it_is_no_turn_before() {
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        ask.talk.push(Said::You("tackle these".to_owned()));
+        (ask.turn, ask.turned) = (Some(at_a_turn()), Some(7));
+        let session = SessionId::parse("7c22").unwrap();
+        ask.heard(Heard::Step(Step::Session(session.clone())));
+        ask.stop(2);
+        assert!(!ask.turning());
+        assert_eq!((ask.number(), ask.session.clone()), (2, Some(session)), "the next turn resumes it");
+        let stopped = [Said::You("tackle these".to_owned()), Said::Wrong(STOPPED.to_owned())];
+        assert_eq!(ask.talk, stopped);
+        assert_eq!(ask.turned, None, "the next turn has none before it, so no plan the user never read is agreed to");
+        ask.stop(3);
+        assert_eq!((ask.number(), ask.talk.len()), (3, 2), "a stop with no turn says nothing");
     }
 
     #[test]
@@ -542,7 +616,7 @@ mod tests {
         let mut ask = Ask::new(1, &unread_on(Machine::Local), Path::new("/w"));
         typed(&mut ask, "close it");
         let (events, _heard) = mpsc::channel();
-        ask.send(&events);
+        ask.send(Marked::default(), &events);
         let wrong = "ask: where view 4 works, \"w\" is no absolute path".to_owned();
         assert_eq!(ask.talk, [Said::You("close it".to_owned()), Said::Wrong(wrong)]);
         assert!(!ask.turning());
