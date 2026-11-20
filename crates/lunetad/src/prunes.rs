@@ -1045,6 +1045,12 @@ mod tests {
     }
 
     #[test]
+    fn the_luneta_skill_quotes_why_a_worktree_with_a_view_stays() {
+        let skill = crate::asks::SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(skill.contains(A_VIEW), "the skill quotes {A_VIEW:?}");
+    }
+
+    #[test]
     fn a_file_unread_in_a_terminal_no_layout_holds_could_be_anywhere() {
         use api::terminal::Found;
         let terminal = Some(terminal_key(4));

@@ -15,6 +15,8 @@ use crate::machines::Machine;
 use crate::start::UNFINISHED;
 use crate::worktrees::{self, Landed, Opening};
 
+pub const IN_DOUBT: &str = "no telling how the rebase ended";
+
 pub fn run(dir: Option<&Path>, path: &Path) -> ExitCode {
     let dir = match agreed::directory(dir) {
         Ok(dir) => dir,
@@ -24,7 +26,7 @@ pub fn run(dir: Option<&Path>, path: &Path) -> ExitCode {
         Ok(rebased) => rebased,
         Err(Unrebased::Refused(why)) => return failed(&format!("no rebase: {why}")),
         Err(Unrebased::InDoubt(why)) => {
-            eprintln!("luneta: no telling how the rebase ended, and it may wait for you: {why}");
+            eprintln!("luneta: {IN_DOUBT}, and it may wait for you: {why}");
             return ExitCode::from(UNFINISHED);
         },
     };
