@@ -1,8 +1,10 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Containment {
@@ -39,12 +41,45 @@ pub(crate) fn contained<T>(run: impl FnOnce() -> T) -> Result<T, Panicked> {
     panic::catch_unwind(AssertUnwindSafe(run)).map_err(|_| Panicked)
 }
 
-pub(crate) fn uncontained() -> Uncontained {
+pub(crate) struct Shared<T>(Mutex<T>);
+
+impl<T> Shared<T> {
+    pub(crate) fn new(value: T) -> Shared<T> {
+        Shared(Mutex::new(value))
+    }
+
+    pub(crate) fn lock(&self) -> Held<'_, T> {
+        let uncontained = uncontained();
+        let held = self.0.lock().expect("a thread panicked while it held shared state");
+        Held { held, _uncontained: uncontained }
+    }
+}
+
+pub(crate) struct Held<'a, T> {
+    held: MutexGuard<'a, T>,
+    _uncontained: Uncontained,
+}
+
+impl<T> Deref for Held<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.held
+    }
+}
+
+impl<T> DerefMut for Held<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.held
+    }
+}
+
+fn uncontained() -> Uncontained {
     let after = [Containment::Unset, Containment::Contained];
     Uncontained { _containing: Containing::to(Containment::Uncontained, &after) }
 }
 
-pub(crate) struct Uncontained {
+struct Uncontained {
     _containing: Containing,
 }
 
@@ -82,49 +117,95 @@ mod tests {
 
     const PANICS: &str = "LUNETA_MUX_TEST_PANICS";
 
-    fn panicking(panics: &str) -> (std::process::ExitStatus, String) {
+    #[derive(Clone, Copy)]
+    enum Way {
+        InATask,
+        Caught,
+        Contained,
+        UncontainedInContained,
+        ContainedAfterUncontained,
+        TheModelInContained,
+        ContainedInUncontained,
+        UncontainedInUncontained,
+        EndedOutOfOrder,
+        HookedTwice,
+    }
+
+    impl Way {
+        const ALL: [Way; 10] = [
+            Way::InATask,
+            Way::Caught,
+            Way::Contained,
+            Way::UncontainedInContained,
+            Way::ContainedAfterUncontained,
+            Way::TheModelInContained,
+            Way::ContainedInUncontained,
+            Way::UncontainedInUncontained,
+            Way::EndedOutOfOrder,
+            Way::HookedTwice,
+        ];
+
+        fn name(self) -> &'static str {
+            match self {
+                Way::InATask => "in a task",
+                Way::Caught => "caught",
+                Way::Contained => "contained",
+                Way::UncontainedInContained => "uncontained in contained",
+                Way::ContainedAfterUncontained => "contained after uncontained",
+                Way::TheModelInContained => "the model in contained",
+                Way::ContainedInUncontained => "contained in uncontained",
+                Way::UncontainedInUncontained => "uncontained in uncontained",
+                Way::EndedOutOfOrder => "ended out of order",
+                Way::HookedTwice => "hooked twice",
+            }
+        }
+    }
+
+    fn panicking(way: Way) -> (std::process::ExitStatus, String) {
         let mut command = Command::new(env::current_exe().unwrap());
-        command.args(["panics::tests::panics", "--exact", "--ignored"]);
-        command.env(PANICS, panics).stdin(Stdio::null()).stdout(Stdio::null());
+        command.args(["panics::tests::panics", "--exact", "--ignored", "--nocapture"]);
+        command.env(PANICS, way.name()).stdin(Stdio::null()).stdout(Stdio::null());
         let output = command.output().unwrap();
         (output.status, String::from_utf8_lossy(&output.stderr).into_owned())
     }
 
-    fn assert_aborts(panics: &str) {
-        let (status, said) = panicking(panics);
+    fn assert_aborts(way: Way) {
+        let (status, said) = panicking(way);
         let abort = rustix::process::Signal::ABORT.as_raw();
-        assert_eq!(status.signal(), Some(abort), "{panics}: {status}\n{said}");
+        assert_eq!(status.signal(), Some(abort), "{}: {status}\n{said}", way.name());
     }
 
-    fn assert_runs_on(panics: &str) {
-        let (status, said) = panicking(panics);
-        assert_eq!(status.code(), Some(0), "{panics}: {status}\n{said}");
+    fn assert_runs_on(way: Way) {
+        let (status, said) = panicking(way);
+        assert_eq!(status.code(), Some(0), "{}: {status}\n{said}", way.name());
     }
 
     #[test]
     #[ignore = "the process that panics as one test asks, which that test runs"]
     fn panics() {
-        let Ok(panics) = env::var(PANICS) else {
+        let Ok(name) = env::var(PANICS) else {
             return;
         };
+        let way = Way::ALL.into_iter().find(|way| way.name() == name);
+        let way = way.unwrap_or_else(|| panic!("{name} is no way to panic"));
         let undumped = rustix::process::Rlimit { current: Some(0), maximum: Some(0) };
         rustix::process::setrlimit(rustix::process::Resource::Core, undumped).unwrap();
-        abort_on_panic();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        match panics.as_str() {
-            "in a task" => {
+        abort_on_panic();
+        match way {
+            Way::InATask => {
                 let task = runtime.spawn(async { panic!("a task's assertion fails") });
                 assert!(runtime.block_on(task).is_err(), "the task panicked");
             },
-            "caught" => {
+            Way::Caught => {
                 let caught = std::panic::catch_unwind(|| panic!("a handler's assertion fails"));
                 assert!(caught.is_err(), "the panic was caught");
             },
-            "contained" => {
+            Way::Contained => {
                 let ran = std::thread::spawn(|| contained(|| panic!("a terminal's assertion fails")));
                 assert!(ran.join().unwrap().is_err(), "the panic was contained");
             },
-            "uncontained in contained" => {
+            Way::UncontainedInContained => {
                 let ran = std::thread::spawn(|| {
                     contained(|| {
                         let _uncontained = uncontained();
@@ -133,7 +214,7 @@ mod tests {
                 });
                 assert!(ran.join().unwrap().is_err(), "the panic was contained");
             },
-            "contained after uncontained" => {
+            Way::ContainedAfterUncontained => {
                 let ran = std::thread::spawn(|| {
                     contained(|| {
                         drop(uncontained());
@@ -142,74 +223,73 @@ mod tests {
                 });
                 assert!(ran.join().unwrap().is_err(), "the panic was contained");
             },
-            "the model in contained" => {
+            Way::TheModelInContained => {
                 let ran = std::thread::spawn(|| contained(mux::tests::panic_holding_the_model));
                 assert!(ran.join().unwrap().is_err(), "the panic was contained");
             },
-            "contained in uncontained" => {
+            Way::ContainedInUncontained => {
                 let _uncontained = uncontained();
                 assert!(contained(|| ()).is_ok(), "the run was contained");
             },
-            "uncontained in uncontained" => {
+            Way::UncontainedInUncontained => {
                 let _uncontained = uncontained();
                 drop(uncontained());
             },
-            "ended out of order" => {
+            Way::EndedOutOfOrder => {
                 let ran = std::thread::spawn(|| contained(|| std::mem::forget(uncontained())));
                 assert!(ran.join().unwrap().is_ok(), "the run was contained");
             },
-            "hooked twice" => abort_on_panic(),
-            unknown => unreachable!("{unknown} is no way to panic"),
+            Way::HookedTwice => abort_on_panic(),
         }
     }
 
     #[test]
     fn a_panic_in_a_spawned_task_aborts_the_process() {
-        assert_aborts("in a task");
+        assert_aborts(Way::InATask);
     }
 
     #[test]
     fn a_panic_caught_as_tonic_catches_a_handler_s_aborts_the_process() {
-        assert_aborts("caught");
+        assert_aborts(Way::Caught);
     }
 
     #[test]
     fn a_contained_panic_runs_on() {
-        assert_runs_on("contained");
+        assert_runs_on(Way::Contained);
     }
 
     #[test]
     fn an_uncontained_panic_aborts_even_within_a_contained_run() {
-        assert_aborts("uncontained in contained");
+        assert_aborts(Way::UncontainedInContained);
     }
 
     #[test]
     fn a_contained_run_stays_contained_once_an_uncontained_one_inside_it_ends() {
-        assert_runs_on("contained after uncontained");
+        assert_runs_on(Way::ContainedAfterUncontained);
     }
 
     #[test]
     fn a_panic_while_a_contained_run_holds_the_model_aborts() {
-        assert_aborts("the model in contained");
+        assert_aborts(Way::TheModelInContained);
     }
 
     #[test]
     fn a_run_contained_while_the_model_is_held_aborts() {
-        assert_aborts("contained in uncontained");
+        assert_aborts(Way::ContainedInUncontained);
     }
 
     #[test]
     fn holding_the_model_twice_aborts() {
-        assert_aborts("uncontained in uncontained");
+        assert_aborts(Way::UncontainedInUncontained);
     }
 
     #[test]
     fn containment_ended_out_of_order_aborts() {
-        assert_aborts("ended out of order");
+        assert_aborts(Way::EndedOutOfOrder);
     }
 
     #[test]
     fn setting_the_hook_twice_aborts() {
-        assert_aborts("hooked twice");
+        assert_aborts(Way::HookedTwice);
     }
 }
