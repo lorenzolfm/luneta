@@ -173,8 +173,8 @@ fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
     let socket = socket()?;
     let stopped = Instant::now();
     let deadline = stopped + STOPPING;
+    let mut left = STOPPING;
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
         let answered = match runtime.block_on(connect(&socket, left.min(ANSWER))) {
             Ok(Reached::Unmatched(still)) if still.pid == unmatched.pid => {
                 "it still answers".to_owned()
@@ -182,12 +182,13 @@ fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
             Ok(Reached::Unreached | Reached::Matched(_) | Reached::Unmatched(_)) => return Ok(()),
             Err(error) => format!("its socket says {error}"),
         };
-        if Instant::now() >= deadline {
+        thread::sleep(LOOK);
+        left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
             let waited = stopped.elapsed().as_millis();
             let runs = format!("{unmatched}, and {waited}ms after it was stopped {answered}");
             return Err(Failure::Own(runs));
         }
-        thread::sleep(LOOK);
     }
 }
 
@@ -201,10 +202,10 @@ fn unanswered(within: Duration) -> String {
 }
 
 pub(super) fn refused(status: &Status) -> Failure {
-    Failure::Own(said(status))
+    Failure::Own(said_by_mux(status))
 }
 
-fn said(status: &Status) -> String {
+fn said_by_mux(status: &Status) -> String {
     match status.message() {
         "" => status.code().description().to_owned(),
         said => said.to_owned(),
@@ -220,6 +221,7 @@ fn listened_in() -> Result<PathBuf, Failure> {
 }
 
 pub(super) async fn connect(socket: &Path, within: Duration) -> io::Result<Reached> {
+    assert!(!within.is_zero(), "a build is asked for some time");
     assert!(within <= ANSWER, "a build is asked for no longer than any answer is waited for");
     let (first, pid) = match UnixStream::connect(socket).await {
         Ok(stream) => mine(stream)?,
@@ -248,7 +250,7 @@ pub(super) async fn connect(socket: &Path, within: Duration) -> io::Result<Reach
     let mut client = MuxClient::new(channel.clone());
     let asked = tokio::time::timeout(within, client.info(api::InfoRequest {})).await;
     let late = || {
-        let late = format!("luneta-mux did not say its build in {}ms", within.as_millis());
+        let late = format!("luneta-mux did not say its build in {}s", within.as_secs_f64());
         io::Error::new(ErrorKind::TimedOut, late)
     };
     let build = match asked.map_err(|_| late())? {
@@ -549,9 +551,11 @@ impl Terminals {
         let refusals_max = 2 * pastes.len();
         let server = reached()?;
         let mut client = server.client.clone();
-        let drained = server.runtime.block_on(async move {
-            let shown = async move {
-                let mut heard = client.show(tokio_stream::iter(words)).await?.into_inner();
+        let reasons = server.runtime.block_on(async move {
+            let deadline = tokio::time::Instant::now() + ANSWER;
+            let shown = client.show(tokio_stream::iter(words)).await;
+            let mut heard = shown.map_err(|status| refused(&status))?.into_inner();
+            let drained = async move {
                 let mut reasons = Vec::new();
                 while let Some(word) = heard.message().await? {
                     if let Some(api::to_viewer::Event::Refused(refusal)) = word.event {
@@ -563,13 +567,15 @@ impl Terminals {
                 }
                 Ok::<_, Status>(reasons)
             };
-            tokio::time::timeout(ANSWER, shown).await
-        });
-        match drained {
-            Ok(Ok(reasons)) if reasons.is_empty() => Ok(()),
-            Ok(Ok(reasons)) => Err(Failure::Own(reasons.join("; "))),
-            Ok(Err(status)) => Err(refused(&status)),
-            Err(_) => Err(Failure::Own("luneta-mux kept showing the pastes too long".to_owned())),
+            let kept = || Failure::Own("luneta-mux kept showing the pastes too long".to_owned());
+            let reasons = tokio::time::timeout_at(deadline, drained).await.map_err(|_| kept())?;
+            reasons.map_err(|status| refused(&status))
+        })?;
+        assert!(reasons.len() <= refusals_max, "the drain stops at its most refusals");
+        if reasons.is_empty() {
+            Ok(())
+        } else {
+            Err(Failure::Own(reasons.join("; ")))
         }
     }
 
@@ -592,8 +598,8 @@ impl Terminals {
         match reached()?.ask(|mut client| async move { client.close_terminal(request).await }) {
             Err(status) if status.code() == Code::NotFound => Ok(()),
             Err(status) if matches!(status.code(), Code::Cancelled | Code::DeadlineExceeded) => {
-                let (unanswered, id) = (said(&status), key.id);
-                Err(Failure::Own(format!("{unanswered}, and terminal {id} may close still")))
+                let late = said_by_mux(&status);
+                Err(Failure::Own(format!("{late}, and terminal {} may close still", key.id)))
             },
             asked => asked.map(drop).map_err(|status| refused(&status)),
         }
