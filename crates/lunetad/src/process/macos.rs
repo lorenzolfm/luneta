@@ -38,11 +38,11 @@ pub fn started(pid: u32) -> Option<SystemTime> {
 pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
     let pid = libc::c_int::try_from(pid).map_err(|_| io::Error::from(Errno::INVAL))?;
     let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
-    let name_length = libc::c_uint::try_from(name.len()).expect("three names fit a c_uint");
+    let name_count = libc::c_uint::try_from(name.len()).expect("three names fit a c_uint");
     let mut size: libc::size_t = 0;
     let sized = unsafe {
         let into = ptr::null_mut();
-        libc::sysctl(name.as_mut_ptr(), name_length, into, &raw mut size, ptr::null_mut(), 0)
+        libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
     };
     if sized == -1 {
         return Err(io::Error::last_os_error());
@@ -50,16 +50,15 @@ pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
     let mut procargs = vec![0_u8; size];
     let read = unsafe {
         let into = procargs.as_mut_ptr().cast();
-        libc::sysctl(name.as_mut_ptr(), name_length, into, &raw mut size, ptr::null_mut(), 0)
+        libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
     };
     if read == -1 {
         return Err(io::Error::last_os_error());
     }
     assert!(size <= procargs.len(), "sysctl wrote {size} bytes into {}", procargs.len());
     procargs.truncate(size);
-    let short = "KERN_PROCARGS2 holds fewer arguments than its argc";
-    super::environ_in_procargs(&procargs)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, short))
+    let unparsed = |why| io::Error::new(io::ErrorKind::InvalidData, why);
+    super::environ_in_procargs(&procargs).map_err(unparsed)
 }
 
 #[must_use]
