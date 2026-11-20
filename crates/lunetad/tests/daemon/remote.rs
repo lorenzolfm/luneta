@@ -1481,6 +1481,40 @@ fn a_link_whose_clone_no_project_holds_and_none_can_be_named_for_makes_nothing()
 }
 
 #[test]
+fn a_link_makes_nothing_in_a_bare_repository_a_session_works_in_and_runs_none_of_its_hooks() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_issue_7(&host, &scratch);
+    let (up, thing) = (scratch.join("up"), scratch.join("vendor/thing"));
+    let planted = thing.join(".bare");
+    let (from, to) = (up.display().to_string(), planted.display().to_string());
+    git(&scratch, &["clone", "-q", "--bare", &from, &to]);
+    let github = "git@github.com:o/n.git";
+    git(&planted, &["remote", "add", "upstream", github]);
+    git(&planted, &["config", &format!("url.{}.insteadOf", up.display()), github]);
+    let hooked = scratch.join("hooked");
+    script(&planted.join("hooks/post-checkout"), &format!("touch '{}'\n", hooked.display()));
+    let _daemon = start(host.vars()).unwrap();
+    let link = Work::Link(Link::parse("https://github.com/o/n/issues/7").unwrap());
+    let pasted = Pasted::new(link, vec![view_in(&planted)]);
+
+    let made = pasted_here(&host, &pasted).unwrap();
+    assert_eq!(made.folder.as_str(), clone.join("issue-7").display().to_string(), "zoxide's clone");
+    script(&host.bin().join("zoxide"), "exit 0\n");
+    let refused = pasted_here(&host, &pasted).unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+    let why = format!(
+        "{} is in a bare repository of o/n, not in a worktree of it; luneta reads a bare \
+         repository only through its worktrees, as a clone can hold one committed as plain files",
+        planted.display()
+    );
+    assert_eq!(refused.message(), why);
+    assert!(!thing.join("issue-7").exists(), "no worktree is made beside it");
+    assert!(!hooked.exists(), "its hook never runs");
+}
+
+#[test]
 fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
     let here = Host::new();
     let far = Host::new();

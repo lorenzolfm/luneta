@@ -31,6 +31,11 @@ const MAKING: Duration = Duration::from_mins(3);
 
 const ANSWER: Duration = Duration::from_secs(5);
 
+const BARE_UNREAD: &str = "fatal: cannot use bare repository ";
+
+const READ_BY_WORKTREES: &str = "luneta reads a bare repository only through its worktrees, as \
+                                 a clone can hold one committed as plain files";
+
 const ASKING: Duration = Duration::from_secs(30);
 
 pub const PATIENCE: Duration = Duration::from_secs(3 * MAKING.as_secs() + ASKING.as_secs() + 60);
@@ -231,7 +236,7 @@ impl File {
 
     fn repository(&self, real: &str) -> Result<String, String> {
         let beside = Path::new(real).parent().and_then(Path::to_str).unwrap_or(real);
-        match common_dir(beside) {
+        match git::common_within(beside, ANSWER) {
             Common::Of(_) => return Ok(beside.to_owned()),
             Common::Unsaid(why) => {
                 return Err(format!("git did not say what repository it is in: {why}"));
@@ -241,7 +246,7 @@ impl File {
         let from = self.from.as_ref().ok_or(
             "it is in no repository, and the row highlighted works in no directory to go by",
         )?;
-        match common_dir(from.as_str()) {
+        match git::common_within(from.as_str(), ANSWER) {
             Common::Of(_) => Ok(from.to_string()),
             Common::NoRepository => {
                 Err(format!("it is in no repository, nor is {from}, the row highlighted"))
@@ -442,6 +447,7 @@ enum Layout {
     Wt(Dir),
     WtRefused(String),
     BareElsewhere,
+    InBare,
     Git,
     Unsaid,
 }
@@ -958,7 +964,9 @@ fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
     };
     let refused = |(dir, it): (&'_ String, &'_ Looked)| match &it.repository()?.layout {
         Layout::WtRefused(why) => Some((dir.clone(), why.clone())),
-        Layout::Wt(_) | Layout::BareElsewhere | Layout::Git | Layout::Unsaid => None,
+        Layout::Wt(_) | Layout::BareElsewhere | Layout::InBare | Layout::Git | Layout::Unsaid => {
+            None
+        },
     };
     if let Some(dir) = laid_out(Layout::Git) {
         return Unready::Failed(format!(
@@ -976,6 +984,12 @@ fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
         return Unready::Failed(format!(
             "{dir} is in a clone of {repository} that wt made in a folder luneta cannot keep: \
              {why}"
+        ));
+    }
+    if let Some(dir) = laid_out(Layout::InBare) {
+        return Unready::Failed(format!(
+            "{dir} is in a bare repository of {repository}, not in a worktree of it; \
+             {READ_BY_WORKTREES}"
         ));
     }
     if let Some(dir) = laid_out(Layout::Unsaid) {
@@ -1010,15 +1024,6 @@ fn cloned(
         }
     }
     best.map(|(_, at, root)| (at, root))
-}
-
-fn common_dir(dir: &str) -> Common {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "rev-parse", "--path-format=absolute"]))
-        .arg("--git-common-dir")
-        .env("LC_ALL", "C");
-    let ran = program::run(&mut git, ANSWER);
-    Common::of(ran.map_err(|error| format!("it could not be run: {error}")).and_then(Ran::answer))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1062,8 +1067,10 @@ fn remote_keys_in(dir: &str, keys: &str) -> Remotes {
 }
 
 fn layout(dir: &str) -> Layout {
-    let Common::Of(common) = common_dir(dir) else {
-        return Layout::Unsaid;
+    let common = match git::common_within(dir, ANSWER) {
+        Common::Of(common) => common,
+        Common::Unsaid(why) if why.starts_with(BARE_UNREAD) => return Layout::InBare,
+        Common::NoRepository | Common::Unsaid(_) => return Layout::Unsaid,
     };
     match projects::clone_of(&common, ANSWER) {
         Ok(CloneRoot::Of(root)) => Layout::Wt(root),
@@ -1289,6 +1296,9 @@ fn wt_made(dir: &str) -> Result<Dir, String> {
             "{dir} is in a bare repository that is not a .bare, and wt would make the worktree \
              inside it; wt clone it first"
         )),
+        Layout::InBare => Err(format!(
+            "{dir} is in a bare repository, not in a worktree of it; {READ_BY_WORKTREES}"
+        )),
         Layout::Git => Err(format!(
             "{dir} is in a clone git made, and wt would make the worktree in its .git; wt clone \
              it first"
@@ -1340,6 +1350,8 @@ mod tests {
 
     const BY_BARE_ELSEWHERE: Repository =
         Repository { by: Remote::Origin, layout: Layout::BareElsewhere };
+
+    const IN_BARE: Repository = Repository { by: Remote::Origin, layout: Layout::InBare };
 
     const UNSAID: Repository = Repository { by: Remote::Origin, layout: Layout::Unsaid };
 
@@ -1655,6 +1667,17 @@ mod tests {
                 ("/w/cdk.git", of(BY_BARE_ELSEWHERE)),
             ])),
             bare
+        );
+        assert_eq!(
+            no_clone(&link(), &seen(&[
+                ("/a/cdk", of(UNSAID)),
+                ("/v/cdk/.bare", of(IN_BARE)),
+                ("/mnt/stuck", stuck()),
+            ])),
+            Unready::Failed(format!(
+                "/v/cdk/.bare is in a bare repository of cashubtc/cdk, not in a worktree of it; \
+                 {READ_BY_WORKTREES}"
+            ))
         );
         let unsaid = || {
             Unready::Failed(
@@ -2070,37 +2093,43 @@ mod tests {
     }
 
     #[test]
-    fn luneta_makes_worktrees_only_beside_a_bare_where_wt_makes_them_too() {
+    fn luneta_makes_worktrees_only_from_a_worktree_of_a_bare_where_wt_makes_them_too() {
         let scratch = tempfile::tempdir().unwrap();
         let scratch = fs::canonicalize(scratch.path()).unwrap();
+        let worked = |bare: &Path, at: &Path| {
+            let (bare, at) = (bare.to_str().unwrap(), at.to_str().unwrap());
+            assert!(git(&scratch, &["init", "-q", "--bare", bare]).is_some());
+            assert!(git(bare, &["worktree", "add", "-q", "--orphan", "-b", "main", at]).is_some());
+            at.to_owned()
+        };
         let bare = scratch.join("cdk/.bare");
-        let bare = bare.to_str().unwrap();
-        assert!(git(&scratch, &["init", "-q", "--bare", bare]).is_some());
-        let found = Repo::discover(Some(Path::new(bare))).unwrap();
+        let main = worked(&bare, &scratch.join("cdk/main"));
+        let found = Repo::discover(Some(Path::new(&main))).unwrap();
         let wt = found.container().unwrap().join("issue-7");
         let root = Dir::parse(scratch.join("cdk").to_str().unwrap()).unwrap();
-        assert_eq!(layout(bare), Layout::Wt(root.clone()));
-        assert_eq!(wt_made(bare), Ok(root.clone()));
+        assert_eq!(layout(&main), Layout::Wt(root.clone()));
+        assert_eq!(wt_made(&main), Ok(root.clone()));
+        assert_eq!(lands(&root, &Holders::default()), Ok(()));
         assert_eq!(Some(wt_makes(&root, "issue-7").as_str()), wt.to_str());
-        for name in ["infra/.git", "cdk.git"] {
+        let bare = bare.to_str().unwrap();
+        assert_eq!(layout(bare), Layout::InBare);
+        let alone = format!("{bare} is in a bare repository, not in a worktree of it");
+        assert_eq!(wt_made(bare), Err(format!("{alone}; {READ_BY_WORKTREES}")));
+        for (name, itself) in [("infra/.git", Layout::BareElsewhere), ("cdk.git", Layout::InBare)] {
             let elsewhere = scratch.join(name);
-            let elsewhere = elsewhere.to_str().unwrap();
-            assert!(git(&scratch, &["init", "-q", "--bare", elsewhere]).is_some());
-            let found = Repo::discover(Some(Path::new(elsewhere))).unwrap();
-            assert!(found.container().is_ok(), "wt makes worktrees in {elsewhere}");
-            assert_eq!(layout(elsewhere), Layout::BareElsewhere);
+            let main = worked(&elsewhere, &scratch.join(format!("{name}-main")));
+            let found = Repo::discover(Some(Path::new(&main))).unwrap();
+            assert!(found.container().is_ok(), "wt makes worktrees in {name}");
+            assert_eq!(layout(&main), Layout::BareElsewhere);
+            assert_eq!(layout(elsewhere.to_str().unwrap()), itself, "{name} itself");
         }
         let unkept = scratch.join("lun\teta");
-        let bare = unkept.join(".bare");
-        assert!(git(&scratch, &["init", "-q", "--bare", bare.to_str().unwrap()]).is_some());
+        let main = worked(&unkept.join(".bare"), &unkept.join("main"));
         let why = format!("{:?}: a path holds a control character", unkept.to_str().unwrap());
-        assert_eq!(layout(bare.to_str().unwrap()), Layout::WtRefused(why.clone()));
+        assert_eq!(layout(&main), Layout::WtRefused(why.clone()));
         assert_eq!(
-            wt_made(bare.to_str().unwrap()),
-            Err(format!(
-                "{} is in a clone wt made in a folder luneta cannot keep: {why}",
-                bare.display()
-            ))
+            wt_made(&main),
+            Err(format!("{main} is in a clone wt made in a folder luneta cannot keep: {why}"))
         );
         let plain = scratch.join("plain");
         assert!(git(&scratch, &["init", "-q", plain.to_str().unwrap()]).is_some());
@@ -2111,16 +2140,6 @@ mod tests {
         let found = Repo::discover(Some(worked.as_path())).unwrap();
         assert!(found.container().is_err(), "wt makes no worktree beside a .bare with a work tree");
         assert_eq!(layout(worked.to_str().unwrap()), Layout::Git);
-    }
-
-    #[test]
-    fn a_clone_lands_from_its_own_bare_as_from_its_worktrees() {
-        let scratch = tempfile::tempdir().unwrap();
-        let scratch = fs::canonicalize(scratch.path()).unwrap();
-        let bare = scratch.join("cdk/.bare");
-        let bare = bare.to_str().unwrap();
-        assert!(git(&scratch, &["init", "-q", "--bare", bare]).is_some());
-        assert_eq!(wt_made(bare).and_then(|root| lands(&root, &Holders::default())), Ok(()));
     }
 
     #[test]

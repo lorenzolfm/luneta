@@ -136,7 +136,7 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
     assert!(plain.contains("is in a clone git made"), "{plain}");
     git(&scratch, &["clone", "-q", "--bare", &up.display().to_string(), "infra.git"]);
     let bare = refused(&started(&owned.host, &scratch.join("infra.git"), "feat", &[]));
-    assert!(bare.contains("is in a bare repository that is not a .bare"), "{bare}");
+    assert!(bare.contains("is in a bare repository, not in a worktree of it"), "{bare}");
     let nowhere = refused(&started(&owned.host, &scratch, "feat", &[]));
     assert!(nowhere.starts_with("luneta: wt add: "), "{nowhere}");
 }

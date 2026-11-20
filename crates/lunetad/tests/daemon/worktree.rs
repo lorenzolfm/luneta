@@ -114,17 +114,39 @@ fn in_a_bare_repository_that_is_not_a_dot_bare_none_is_made_and_why_comes_last_o
     let (up, bare) = (scratch.join("up"), scratch.join("infra.git"));
     origin(&up);
     git(&scratch, &["clone", "-q", "--bare", &up.display().to_string(), "infra.git"]);
+    git(&bare, &["worktree", "add", "-q", "../infra", "main"]);
 
-    let refused = worktree(&bare, "feat");
+    let infra = scratch.join("infra");
+    let refused = worktree(&infra, "feat");
     assert!(!refused.status.success());
     assert_eq!(refused.stdout, b"");
     let why = format!(
         "luneta: {} is in a bare repository that is not a .bare, and wt would make the worktree \
          inside it; wt clone it first",
-        bare.display()
+        infra.display()
     );
     assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
     assert!(!bare.join("feat").exists());
+}
+
+#[test]
+fn in_a_clone_s_bare_itself_none_is_made_and_why_comes_last_on_stderr() {
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (up, clone) = (scratch.join("up"), scratch.join("clone"));
+    cloned_as_wt(&scratch, &up, &clone);
+
+    let bare = clone.join(".bare");
+    let refused = worktree(&bare, "feat");
+    assert!(!refused.status.success());
+    assert_eq!(refused.stdout, b"");
+    let why = format!(
+        "luneta: {} is in a bare repository, not in a worktree of it; luneta reads a bare \
+         repository only through its worktrees, as a clone can hold one committed as plain files",
+        bare.display()
+    );
+    assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
+    assert!(!clone.join("feat").exists());
 }
 
 #[test]
