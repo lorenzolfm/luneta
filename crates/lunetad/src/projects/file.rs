@@ -2258,10 +2258,7 @@ mod tests {
         };
         store.change(opened(one, Placed::Alone)).unwrap();
         store.change(opened(two, Placed::Beside { at: one, towards: Towards::Right })).unwrap();
-        let listing = || {
-            let watched = core::ask(&core, |answer| Command::Watch { after: None, answer });
-            watched.flatten().expect("the core answers a watch at once").version
-        };
+        let listing = || core::ask(&core, Command::Host).expect("the core answers").version;
         let before = (listing(), store.revision());
 
         let (sides, growth) = (Sides::One(Direction::Left), Growth::Grow);

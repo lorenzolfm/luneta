@@ -44,7 +44,7 @@ use crate::api::{
     TranscriptEndsResponse, FramesRequest,
 };
 use crate::asks::{Asked, Step};
-use crate::core::{self, After, Command, Parked, Wakes};
+use crate::core::{self, After, Command, Full, Parked, Wakes};
 use crate::directory::Directory;
 use crate::projects::{Ask, Changed, Holders, Lock, Made, Opened, Opens, ProjectId, Store};
 use crate::projects::WorktreeId;
@@ -90,12 +90,11 @@ pub fn parked_watch(version: api::Version) -> String {
     format!("a watch waits for a change past {pid}:{seq}")
 }
 
-async fn says_parked(asked: Option<api::Version>, told: Option<oneshot::Receiver<api::Version>>) {
+async fn says_parked(told: Option<oneshot::Receiver<api::Version>>) {
     let Some(told) = told else {
         return;
     };
     if let Ok(Ok(version)) = timeout(WATCH, told).await {
-        assert_eq!(Some(version), asked);
         log::say(&parked_watch(version));
     }
 }
@@ -438,6 +437,9 @@ impl Daemon for Host {
         let request = request.into_inner();
         let waiter = Waiter::of(&request);
         let _waits = self.watchers.waits(waiter);
+        let Some(version) = request.after else {
+            return self.host().await.map(Response::new);
+        };
         let (parked, told) = match waiter {
             Waiter::Client => {
                 let (tell, told) = oneshot::channel();
@@ -445,12 +447,11 @@ impl Daemon for Host {
             },
             Waiter::Window | Waiter::Daemon(_) => (Parked::Quietly, None),
         };
-        let after = request.after.map(|version| After { version, parked });
-        let watching = timeout(WATCH, self.watched(after));
-        let (watched, ()) = tokio::join!(watching, says_parked(request.after, told));
+        let watching = timeout(WATCH, self.watched(After { version, parked }));
+        let (watched, ()) = tokio::join!(watching, says_parked(told));
         let watched = match watched {
             Ok(watched) => watched,
-            Err(_) => self.watched(None).await,
+            Err(_) => self.host().await,
         };
         watched.map(Response::new)
     }
@@ -580,7 +581,7 @@ impl Daemon for Host {
             let answer = daemon.paste(pasted.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let holders = holders(&self.watched(None).await?)?;
+        let holders = holders(&self.host().await?)?;
         let answer = late(move || pasted.answer(&holders).map_err(unready));
         Ok(Response::new(Box::pin(answer)))
     }
@@ -597,7 +598,7 @@ impl Daemon for Host {
             let answer = daemon.prunes(prunes::asked(None, &dir)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let host = self.watched(None).await?;
+        let host = self.host().await?;
         let occupied = Occupied::of(&host).map_err(Status::failed_precondition)?;
         let here = env::current_dir().ok();
         let answer = late(move || {
@@ -626,8 +627,7 @@ impl Daemon for Host {
         let here = env::current_dir().ok();
         let answer = late(move || {
             let occupied = || {
-                let host = core::ask(&core, |answer| Command::Watch { after: None, answer });
-                let host = host.flatten().ok_or("lunetad's core did not say")?;
+                let host = core::ask(&core, Command::Host).ok_or("lunetad's core did not say")?;
                 Occupied::of(&host)
             };
             let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied, here.as_deref())
@@ -1141,9 +1141,13 @@ impl Host {
         answered.await.map_err(|_| stopped())
     }
 
-    async fn watched(&self, after: Option<After>) -> Result<api::Host, Status> {
+    async fn host(&self) -> Result<api::Host, Status> {
+        self.ask(Command::Host).await
+    }
+
+    async fn watched(&self, after: After) -> Result<api::Host, Status> {
         let host = self.ask(|answer| Command::Watch { after, answer }).await?;
-        host.ok_or_else(|| Status::resource_exhausted("too many clients wait for the host"))
+        host.map_err(|Full| Status::resource_exhausted("too many clients wait for the host"))
     }
 }
 
