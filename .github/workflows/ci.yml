@@ -55,14 +55,16 @@ jobs:
       - name: actions/checkout v7
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: cachix/install-nix-action v31
+      - &install-nix
+        name: cachix/install-nix-action v31
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
             keep-outputs = true
 
-      - name: nix-community/cache-nix-action v7
+      - &nix-store
+        name: nix-community/cache-nix-action v7
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
         with:
           primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml', 'deny.toml', '.github/workflows/ci.yml') }}
@@ -74,7 +76,8 @@ jobs:
           purge-created: 0
           purge-primary-key: never
 
-      - name: Root the flake's inputs so the saved store keeps them
+      - &root-inputs
+        name: Root the flake's inputs so the saved store keeps them
         shell: bash
         run: >-
           nix flake archive --json
@@ -144,38 +147,18 @@ jobs:
       - name: actions/checkout v7
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: cachix/install-nix-action v31
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-            keep-outputs = true
+      - *install-nix
 
-      - name: nix-community/cache-nix-action v7
-        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
-        with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml', 'deny.toml', '.github/workflows/ci.yml') }}
-          restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
-          save: ${{ github.ref == 'refs/heads/main' }}
-          gc-max-store-size: 0
-          purge: ${{ github.ref == 'refs/heads/main' }}
-          purge-prefixes: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
-          purge-created: 0
-          purge-primary-key: never
+      - *nix-store
 
-      - name: Root the flake's inputs so the saved store keeps them
-        shell: bash
-        run: >-
-          nix flake archive --json
-          | jq -er '.inputs | .. | objects | .path | strings'
-          | xargs -r nix build --out-link "$RUNNER_TEMP/inputs"
+      - *root-inputs
 
       - name: Restore the tests' target/, with actions/cache v6.1.0
         id: target
         if: runner.os == 'macOS'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
-          path: |
+          path: &target-paths |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
@@ -209,9 +192,5 @@ jobs:
           && steps.target.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
+          path: *target-paths
           key: ${{ steps.target.outputs.cache-primary-key }}
