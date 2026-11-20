@@ -541,7 +541,7 @@ impl Ready<usize> {
     #[must_use]
     pub fn answer(self) -> PasteResponse {
         let Ready { at, folder, branch, moved_off, work } = self;
-        let place = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
+        let place = |at: usize| u32::try_from(at).expect("Pasted::of caps worked at 1024");
         let at = match at {
             At::There(at) => paste_response::At::There(place(at)),
             At::Unopened => paste_response::At::Unopened(()),

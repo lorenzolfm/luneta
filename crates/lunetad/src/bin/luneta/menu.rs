@@ -1282,7 +1282,7 @@ enum Step {
 enum Wait {
     Pulling(Pull),
     Opening,
-    Making,
+    Unopened,
 }
 
 impl Wait {
@@ -1292,7 +1292,7 @@ impl Wait {
                 Wanted::AtHead => format!("Syncing {}…", work.tab()),
                 Wanted::AsItIs => format!("Making a worktree of {}…", work.tab()),
             },
-            Wait::Opening | Wait::Making => format!("Opening {}…", work.tab()),
+            Wait::Opening | Wait::Unopened => format!("Opening {}…", work.tab()),
         }
     }
 }
@@ -1389,14 +1389,14 @@ impl Menu {
     }
 
     pub fn opens_pulled(&self) -> bool {
-        matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Making), .. })
+        matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Unopened), .. })
     }
 
     pub fn making(&self) -> Option<&Work> {
         match &self.stage {
             Stage::Pull { work, step: Step::Waiting(Wait::Pulling(_)), .. } => Some(work),
             Stage::Pull {
-                step: Step::Choosing { .. } | Step::Waiting(Wait::Opening | Wait::Making),
+                step: Step::Choosing { .. } | Step::Waiting(Wait::Opening | Wait::Unopened),
                 ..
             }
             | Stage::Choosing(_)
@@ -1733,7 +1733,7 @@ impl Menu {
             },
             (At::Unopened, _) => {
                 let wants = Wants::Make { cwd: dir, name: work.tab(), command };
-                let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making) };
+                let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Unopened) };
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
         }
