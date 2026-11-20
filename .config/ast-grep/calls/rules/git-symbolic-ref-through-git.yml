@@ -1,0 +1,15 @@
+id: git-symbolic-ref-through-git
+language: rust
+files:
+  - crates/*/src/**
+ignores:
+  - crates/lunetad/src/git.rs
+message: >-
+  Read a symbolic ref through lunetad::git::pointed, or a worktree's branch
+  through git::branch: they strip the ref's folder from its whole name, where
+  `symbolic-ref --short` would say heads/x on a branch x beside a tag x.
+rule:
+  regex: symbolic-ref
+  any:
+    - kind: string_literal
+    - kind: raw_string_literal

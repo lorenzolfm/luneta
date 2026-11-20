@@ -1,0 +1,13 @@
+id: git-diff-through-diff-index
+valid:
+  - "fn f() { git(&[\"diff-index\", \"-M\", \"--numstat\", &fork]); }"
+  - "fn f() { cell.set_diff_option(CellDiffOption::Skip); }"
+  - "fn f() { say(\"the diffs differ\"); }"
+  - "fn f() { say(\"git diff-index said more lines\"); }"
+invalid:
+  - "fn f() { git(&[\"diff\", \"--numstat\", &fork]); }"
+  - "fn f() { git.arg(\"diff\"); }"
+  - "fn f() { sh(\"git diff --stat HEAD\"); }"
+  - "fn f() { sh(\"git -C dir diff --numstat\"); }"
+  - "fn f() { sh(\"git --no-pager diff\"); }"
+  - "const SCRIPT: &str = r#\"git diff HEAD\"#;"

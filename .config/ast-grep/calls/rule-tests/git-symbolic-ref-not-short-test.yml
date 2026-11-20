@@ -1,0 +1,12 @@
+id: git-symbolic-ref-not-short
+valid:
+  - "fn f() { git(&bare, &[\"symbolic-ref\", \"refs/remotes/origin/HEAD\", \"refs/remotes/origin/main\"]); }"
+  - "fn f() { git(dir, &[\"rev-parse\", \"--short\", \"HEAD\"]); }"
+  - "fn f() { git.args([\"symbolic-ref\", \"--quiet\", \"HEAD\"]); }"
+  - "fn f() { git.arg(\"symbolic-ref\").arg(\"--quiet\"); let s = run(&[\"rev-parse\", \"--short\"]); }"
+invalid:
+  - "fn f() { git(dir, &[\"symbolic-ref\", \"--short\", \"HEAD\"]); }"
+  - "fn f() { git.args([\"symbolic-ref\", \"-q\", \"--short\", \"HEAD\"]); }"
+  - "fn f() { sh(\"git symbolic-ref --short HEAD\"); }"
+  - "fn f() { git.arg(\"symbolic-ref\").arg(\"--short\").arg(\"HEAD\"); }"
+  - "const GH: &str = r#\"branch=$(git symbolic-ref --short HEAD) || exit 1\"#;"

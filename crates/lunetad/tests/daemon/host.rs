@@ -228,7 +228,8 @@ if [ -f "$pulls/switch" ]; then
     git switch -q "$(cat "$pulls/switch")" || exit 1
     rm "$pulls/switch"
 fi
-branch=$(git symbolic-ref --short HEAD) || exit 1
+branch=$(git symbolic-ref --quiet HEAD) || exit 1
+branch=${branch#refs/heads/}
 echo "${GH_REPO:+$GH_REPO }$branch" >> "$pulls/asked"
 while [ -f "$pulls/$branch.hung" ]; do sleep 0.05; done
 if [ -f "$pulls/$branch.fails" ]; then

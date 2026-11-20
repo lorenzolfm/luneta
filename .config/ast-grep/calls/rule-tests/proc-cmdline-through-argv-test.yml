@@ -1,0 +1,11 @@
+id: proc-cmdline-through-argv
+valid:
+  - "fn f(pid: u32) { process::argv(pid); }"
+  - "fn f() { say(\"m A; m 'C;cmdline_url=make%20test'\"); }"
+  - "fn f() { const RAW: &[u8] = b\"cmdline=\"; }"
+  - "const SCRIPT: &str = r#\"m 'C;cmdline_url=ls'\"#;"
+invalid:
+  - "fn f(pid: u32) { fs::read(format!(\"/proc/{pid}/cmdline\")); }"
+  - "fn f(pid: u32) { fs::read(proc(pid, \"cmdline\")); }"
+  - "fn f() { fs::read(\"/proc/self/cmdline\"); }"
+  - "const SCRIPT: &str = r#\"cat /proc/$pid/cmdline\"#;"

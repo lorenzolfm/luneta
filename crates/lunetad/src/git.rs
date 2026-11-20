@@ -176,12 +176,20 @@ pub fn holder(common: &str) -> Option<String> {
 }
 
 pub fn branch(dir: &str) -> Option<String> {
+    branch_within(dir, LIMIT)
+}
+
+pub fn branch_within(dir: &str, limit: Duration) -> Option<String> {
     let mut git = Command::new("git");
-    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]))
-        .args(["symbolic-ref", "--quiet", "HEAD"]);
-    let said = program::run(&mut git, LIMIT).ok()?.answer().ok()?;
-    let head = String::from_utf8(said).ok()?;
-    Some(head.strip_suffix('\n')?.strip_prefix("refs/heads/")?.to_owned())
+    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]));
+    pointed(git, "HEAD", "refs/heads/", limit)
+}
+
+pub fn pointed(mut git: Command, name: &str, under: &str, limit: Duration) -> Option<String> {
+    assert!(under.starts_with("refs/") && under.ends_with('/'), "{under} names no refs folder");
+    git.args(["symbolic-ref", "--quiet", name]);
+    let said = one_line(program::run(&mut git, limit).ok()?.answer().ok()?)?;
+    Some(said.strip_prefix(under)?.to_owned()).filter(|pointed| !pointed.is_empty())
 }
 
 pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
@@ -887,7 +895,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{Changed, Common, DefaultBranch, changed, stamp};
+    use super::{Changed, Common, DefaultBranch, branch, changed, stamp};
 
     fn git(dir: &Path, args: &[&str]) -> bool {
         let mut git = std::process::Command::new("git");
@@ -918,6 +926,22 @@ mod tests {
         for unnamed in ["refs/remotes/origin/", "refs/heads/", "refs/remotes/originals/main"] {
             assert_eq!(DefaultBranch::of(unnamed), None, "{unnamed}");
         }
+    }
+
+    #[test]
+    fn a_branch_reads_as_its_whole_name_beside_a_tag_of_that_name_and_unborn() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| git(dir.path(), args);
+        let at = dir.path().to_str().unwrap();
+        assert!(git(&["init", "-q", "-b", "x"]));
+        assert_eq!(branch(at).as_deref(), Some("x"));
+        assert!(git(&["commit", "-q", "--allow-empty", "-m", "x"]));
+        assert!(git(&["tag", "x"]));
+        assert_eq!(branch(at).as_deref(), Some("x"));
+        assert!(git(&["switch", "-q", "-c", "team/x"]));
+        assert_eq!(branch(at).as_deref(), Some("team/x"));
+        assert!(git(&["switch", "-q", "--detach"]));
+        assert_eq!(branch(at), None);
     }
 
     #[test]

@@ -1,0 +1,24 @@
+id: git-symbolic-ref-not-short
+language: rust
+files:
+  - crates/**
+message: >-
+  `git symbolic-ref --short` says heads/x on a branch x beside a tag x: read
+  the whole ref and strip its folder, as lunetad::git::pointed does.
+rule:
+  any:
+    - regex: symbolic-ref.*--short|--short.*symbolic-ref
+      any:
+        - kind: string_literal
+        - kind: raw_string_literal
+    - kind: string_literal
+      regex: ^"--short"$
+      inside:
+        stopBy: end
+        any:
+          - kind: expression_statement
+          - kind: let_declaration
+        has:
+          stopBy: end
+          kind: string_literal
+          regex: ^"symbolic-ref"$

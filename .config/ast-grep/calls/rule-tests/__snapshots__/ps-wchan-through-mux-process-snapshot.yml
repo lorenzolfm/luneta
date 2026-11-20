@@ -1,0 +1,26 @@
+id: ps-wchan-through-mux-process
+snapshots:
+  'const SCRIPT: &str = r#"ps -o tty,stat,wchan,comm"#;':
+    labels:
+    - source: r#"ps -o tty,stat,wchan,comm"#
+      style: primary
+      start: 21
+      end: 51
+  fn f() { sh("ps -o tty,stat,wchan,comm"); }:
+    labels:
+    - source: '"ps -o tty,stat,wchan,comm"'
+      style: primary
+      start: 12
+      end: 39
+  'fn f(pid: &str) { Command::new("ps").args(["-o", "wchan=,pid=", "-p", pid]); }':
+    labels:
+    - source: '"wchan=,pid="'
+      style: primary
+      start: 49
+      end: 62
+  'fn f(pid: u32) { fs::read_to_string(format!("/proc/{pid}/wchan")); }':
+    labels:
+    - source: '"/proc/{pid}/wchan"'
+      style: primary
+      start: 44
+      end: 63

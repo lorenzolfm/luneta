@@ -5,4 +5,6 @@ allow-panic-in-tests = true
 
 disallowed-methods = [
   { path = "luneta_protocol::v1::Agent::harness", reason = "absent means Claude Code: read it with `runs_in`" },
+  { path = "sysinfo::Process::cmd", reason = "on macOS it drops an empty argument and reads the first environment entry as the last: read arguments with `process::mine`, from KERN_PROCARGS2" },
+  { path = "sysinfo::Process::environ", reason = "on macOS it starts one entry late after an empty argument: read it with `process::environ` or `process::mine`, from KERN_PROCARGS2" },
 ]

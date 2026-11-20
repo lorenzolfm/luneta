@@ -398,11 +398,8 @@ fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, Strin
 }
 
 fn default_heard(common: &str, remote: &str) -> Option<String> {
-    let mut git = on_repository(common);
-    git.args(["symbolic-ref", "--quiet", &format!("refs/remotes/{remote}/HEAD")]);
-    let said = says(git, GIT_SAYS, "symbolic-ref").ok()?;
-    let said = String::from_utf8_lossy(&said);
-    said.trim_end().strip_prefix(&format!("refs/remotes/{remote}/")).map(str::to_owned)
+    let head = format!("refs/remotes/{remote}/HEAD");
+    git::pointed(on_repository(common), &head, &format!("refs/remotes/{remote}/"), GIT_SAYS)
 }
 
 fn remote_default(common: &str, remote: &str) -> Result<Option<String>, String> {

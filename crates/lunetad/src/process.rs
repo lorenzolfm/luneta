@@ -70,7 +70,14 @@ pub fn var(name: &str) -> Result<Option<String>, String> {
 const EXEC_PATH_ALIGNMENT: usize = size_of::<u64>();
 
 #[cfg(any(target_os = "macos", test))]
-fn environ_in_procargs(procargs: &[u8]) -> Result<Vec<OsString>, &'static str> {
+#[derive(Debug, PartialEq, Eq)]
+struct Laid {
+    argv: Vec<OsString>,
+    environ: Vec<OsString>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn laid_in_procargs(procargs: &[u8]) -> Result<Laid, &'static str> {
     let fewer = "KERN_PROCARGS2 holds fewer arguments than its argc";
     let (count, strings) = procargs
         .split_first_chunk::<{ size_of::<i32>() }>()
@@ -92,8 +99,10 @@ fn environ_in_procargs(procargs: &[u8]) -> Result<Vec<OsString>, &'static str> {
     if rest.len() < argument_count {
         return Err(fewer);
     }
+    let mut argv = Vec::with_capacity(argument_count);
     for _ in 0..argument_count {
         let argument_end = rest.iter().position(|byte| *byte == 0).ok_or(fewer)?;
+        argv.push(OsString::from_vec(rest[..argument_end].to_vec()));
         rest = &rest[argument_end + 1..];
     }
     let environ_start = rest.iter().position(|byte| *byte != 0).unwrap_or(rest.len());
@@ -105,7 +114,7 @@ fn environ_in_procargs(procargs: &[u8]) -> Result<Vec<OsString>, &'static str> {
         }
         environ.push(OsString::from_vec(entry.to_vec()));
     }
-    Ok(environ)
+    Ok(Laid { argv, environ })
 }
 
 pub fn ends(pid: u32) -> io::Result<()> {
@@ -187,6 +196,25 @@ mod tests {
         assert_eq!(given, [OsString::from("LUNETA_GIVEN=a b=c"), path_given], "{read:?}");
     }
 
+    #[test]
+    fn a_process_of_mine_reads_its_empty_arguments_and_its_whole_environment() {
+        let path = env::var_os("PATH").expect("the tests run with a PATH");
+        let mut given = Command::new("sh");
+        given.args(["-c", "echo; read -r line", "", ""]);
+        given.stdin(Stdio::piped()).stdout(Stdio::piped());
+        given.env_clear().env("PATH", &path).env("LUNETA_GIVEN", "a b=c");
+        let mut child = given.spawn().unwrap();
+        child.stdout.as_mut().unwrap().read_exact(&mut [0; 1]).expect("it says it runs");
+        let found = super::mine(&["sh", "bash"]).into_iter().find(|it| it.id.pid == child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let found = found.expect("this user's shell is found");
+        assert_eq!(found.argv[1..], ["-c", "echo; read -r line", "", ""], "{found:?}");
+        let given = OsString::from("LUNETA_GIVEN=a b=c");
+        assert!(found.environ.contains(&given), "{found:?}");
+        assert!(found.environ.iter().any(|it| it.as_encoded_bytes().starts_with(b"PATH=")));
+    }
+
     fn procargs(argument_count: i32, path: &str, strings: &[&str]) -> Vec<u8> {
         let mut procargs = argument_count.to_ne_bytes().to_vec();
         let mut padded = path.as_bytes().to_vec();
@@ -202,9 +230,9 @@ mod tests {
     #[test]
     fn an_environment_starts_after_as_many_arguments_as_argc() {
         let read = |argument_count, path, strings: &[&str]| {
-            let read = super::environ_in_procargs(&procargs(argument_count, path, strings));
-            read.map(|entries| {
-                entries.into_iter().map(|it| it.into_string().unwrap()).collect::<Vec<_>>()
+            let read = super::laid_in_procargs(&procargs(argument_count, path, strings));
+            read.map(|laid| {
+                laid.environ.into_iter().map(|it| it.into_string().unwrap()).collect::<Vec<_>>()
             })
         };
         let given = |entries: &[&str]| Ok(entries.iter().map(|it| (*it).to_owned()).collect());
@@ -226,9 +254,10 @@ mod tests {
         assert_eq!(read(3, "/bin/sleep", &["sleep", "60"]), fewer, "its end ends no argument");
         assert_eq!(read(-1, "/bin/sleep", &[]), Err("KERN_PROCARGS2 holds a negative argc"));
         let raw = |argument_count: i32, strings: &[u8]| {
-            super::environ_in_procargs(&[&argument_count.to_ne_bytes()[..], strings].concat())
+            super::laid_in_procargs(&[&argument_count.to_ne_bytes()[..], strings].concat())
+                .map(|laid| laid.environ)
         };
-        assert_eq!(super::environ_in_procargs(&[1, 0]), Err("KERN_PROCARGS2 holds no argc"));
+        assert_eq!(super::laid_in_procargs(&[1, 0]), Err("KERN_PROCARGS2 holds no argc"));
         let unended = Err("KERN_PROCARGS2's exec path does not end");
         assert_eq!(raw(0, b"/bin/true"), unended);
         let unpadded = Err("KERN_PROCARGS2 ends in its exec path's padding");
@@ -237,7 +266,24 @@ mod tests {
         assert_eq!(raw(1, b"/bin/x\0y\0A=b\0"), misaligned);
         let cut = [&procargs(1, "/bin/sh", &["sh", "A=b"])[..], b"B="].concat();
         let cut_entry = Err("KERN_PROCARGS2's environment does not end");
-        assert_eq!(super::environ_in_procargs(&cut), cut_entry);
+        assert_eq!(super::laid_in_procargs(&cut), cut_entry);
+    }
+
+    #[test]
+    fn arguments_read_as_argc_strings_after_the_exec_path_empty_ones_too() {
+        let read = |argument_count, path, strings: &[&str]| {
+            let laid = super::laid_in_procargs(&procargs(argument_count, path, strings)).unwrap();
+            laid.argv.into_iter().map(|it| it.into_string().unwrap()).collect::<Vec<_>>()
+        };
+        let empty_argument = ["echo", "", "x", "A=b", "", "main_stack="];
+        assert_eq!(read(3, "/bin/echo", &empty_argument), ["echo", "", "x"]);
+        let empty_last = ["sh", "-c", "", "A=b", ""];
+        assert_eq!(read(3, "/bin/sh", &empty_last), ["sh", "-c", ""]);
+        let empty_first = ["", "60", "A=b", ""];
+        assert_eq!(read(2, "/bin/sleep", &empty_first), ["", "60"]);
+        let unpadded = ["", "A=b", ""];
+        assert_eq!(read(1, "/bin/sh", &unpadded), [""]);
+        assert_eq!(read(0, "/bin/true", &["", ""]), Vec::<String>::new());
     }
 
     #[test]

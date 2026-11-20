@@ -3,6 +3,7 @@ let
   inherit (pkgs) lib;
   comments = ../.config/ast-grep/comments;
   waits = ../.config/ast-grep/waits;
+  calls = ../.config/ast-grep/calls;
   grammar = language: "${pkgs.tree-sitter-grammars."tree-sitter-${language}"}/parser";
   extensions = {
     fish = [ "fish" ];
@@ -36,10 +37,12 @@ let
       ruleDirs = [
         "${comments}/rules"
         "${waits}/rules"
+        "${calls}/rules"
       ];
       testConfigs = [
         { testDir = "${comments}/rule-tests"; }
         { testDir = "${waits}/rule-tests"; }
+        { testDir = "${calls}/rule-tests"; }
       ];
       customLanguages = builtins.mapAttrs (language: extensions: {
         libraryPath = grammar language;
@@ -107,6 +110,13 @@ pkgs.writeShellApplication {
       fi
     done <"$inspect"
     for path in "''${found[@]}"; do
+      case $path in
+        *.sh | *.bash)
+          echo "luneta-comments: $path is a shell script file; it lives inline in a nix file, as writeShellApplication's text, so nix is the only way to run it" >&2
+          status=1
+          continue
+          ;;
+      esac
       if [[ -z ''${ruled[$path]-} ]]; then
         echo "luneta-comments: no rule says what a comment is in $path" >&2
         status=1

@@ -31,11 +31,15 @@ pub fn started(pid: u32) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_secs(secs.checked_add(1)?))
 }
 
+pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
+    Ok(laid(pid)?.environ)
+}
+
 #[expect(
     unsafe_code,
     reason = "sysctl writes into the buffer it is handed, and no further than the length it is told"
 )]
-pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
+fn laid(pid: u32) -> io::Result<super::Laid> {
     let pid = libc::c_int::try_from(pid).map_err(|_| io::Error::from(Errno::INVAL))?;
     let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
     let name_count = libc::c_uint::try_from(name.len()).expect("three names fit a c_uint");
@@ -58,16 +62,13 @@ pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
     assert!(size <= procargs.len(), "sysctl wrote {size} bytes into {}", procargs.len());
     procargs.truncate(size);
     let unparsed = |why| io::Error::new(io::ErrorKind::InvalidData, why);
-    super::environ_in_procargs(&procargs).map_err(unparsed)
+    super::laid_in_procargs(&procargs).map_err(unparsed)
 }
 
 #[must_use]
 pub fn mine(names: &[&str]) -> Vec<Found> {
     let mut system = System::new();
-    let refresh = ProcessRefreshKind::nothing()
-        .with_user(UpdateKind::Always)
-        .with_cmd(UpdateKind::Always)
-        .with_environ(UpdateKind::Always);
+    let refresh = ProcessRefreshKind::nothing().with_user(UpdateKind::Always);
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
     let uid = rustix::process::getuid().as_raw();
     let mut found = Vec::new();
@@ -83,8 +84,10 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
         let Some(start) = start.and_then(Start::spelled) else {
             continue;
         };
-        let argv = process.cmd().iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
-        let environ = process.environ().to_vec();
+        let Ok(super::Laid { argv, environ }) = laid(pid.as_u32()) else {
+            continue;
+        };
+        let argv = argv.into_iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
         let id = Id { pid: pid.as_u32(), start };
         found.push(Found { id, name: name.to_owned(), argv, environ });
     }

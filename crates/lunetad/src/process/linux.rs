@@ -68,6 +68,14 @@ fn nul_split(raw: &[u8]) -> Vec<OsString> {
     entries.map(|entry| OsString::from_vec(entry.to_vec())).collect()
 }
 
+fn arguments(cmdline: &[u8]) -> Vec<&[u8]> {
+    if cmdline.is_empty() {
+        return Vec::new();
+    }
+    let ended = cmdline.strip_suffix(&[0]).unwrap_or(cmdline);
+    ended.split(|byte| *byte == 0).collect()
+}
+
 #[must_use]
 pub fn mine(names: &[&str]) -> Vec<Found> {
     let Ok(listed) = fs::read_dir("/proc") else {
@@ -98,8 +106,8 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
         let Ok(cmdline) = fs::read(proc(pid, "cmdline")) else {
             continue;
         };
-        let argv = nul_split(&cmdline).into_iter().map(|arg| arg.to_string_lossy().into_owned());
-        let argv = argv.collect();
+        let argv = arguments(&cmdline).into_iter();
+        let argv = argv.map(|arg| String::from_utf8_lossy(arg).into_owned()).collect();
         let id = Id { pid, start };
         found.push(Found { id, name: name.to_owned(), argv, environ });
     }
@@ -191,11 +199,23 @@ impl Domain {
 
 #[cfg(test)]
 mod tests {
-    use super::start_in;
+    use super::{arguments, start_in};
 
     fn stat(state: &str, threads: u32) -> String {
         let before = "1 7 7 0 -1 4194304 0 0 0 0 0 0 0 0 20 0";
         format!("7 (a) b) {state} {before} {threads} 0 6630522 16 2 18446744073709551615")
+    }
+
+    #[test]
+    fn a_cmdline_reads_as_its_arguments_empty_ones_too_and_none_before_it_is_laid_out() {
+        let read = |cmdline: &[u8]| {
+            let read = arguments(cmdline).into_iter();
+            read.map(|arg| String::from_utf8(arg.to_vec()).unwrap()).collect::<Vec<_>>()
+        };
+        assert_eq!(read(b"sh\0-c\0\0\0"), ["sh", "-c", "", ""]);
+        assert_eq!(read(b"\0"), [""]);
+        assert_eq!(read(b"claude --resume"), ["claude --resume"]);
+        assert_eq!(read(b""), Vec::<String>::new());
     }
 
     #[test]
