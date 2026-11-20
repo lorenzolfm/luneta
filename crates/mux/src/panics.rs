@@ -77,6 +77,8 @@ mod tests {
         let Ok(panics) = env::var(PANICS) else {
             return;
         };
+        let undumped = rustix::process::Rlimit { current: Some(0), maximum: Some(0) };
+        rustix::process::setrlimit(rustix::process::Resource::Core, undumped).unwrap();
         abort_on_panic();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         match panics.as_str() {
