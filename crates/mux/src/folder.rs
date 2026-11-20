@@ -4,6 +4,7 @@ use std::io::{self, ErrorKind};
 use std::os::unix::fs::{
     DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _,
 };
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 
 pub const SOCKET: &str = "mux.sock";
@@ -43,17 +44,14 @@ pub struct Claim {
 }
 
 impl Claim {
-    #[must_use]
-    pub fn socket(&self) -> &Path {
-        &self.socket
-    }
-
-    pub fn bound(&self) -> io::Result<Bound> {
-        Bound::of(&self.socket).map_err(|error| {
+    pub fn bind(&self) -> io::Result<(UnixListener, Bound)> {
+        let listener = UnixListener::bind(&self.socket)?;
+        let bound = Bound::of(&self.socket).map_err(|error| {
             let socket = self.socket.display();
             let left = format!("{socket} is left as it is, as it is not known to be ours: {error}");
             io::Error::new(error.kind(), left)
-        })
+        })?;
+        Ok((listener, bound))
     }
 }
 

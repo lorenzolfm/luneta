@@ -247,8 +247,9 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     if let Err(error) = pty::raise_files_limit() {
         eprintln!("luneta-mux: the limit of open files stays as it was: {error}");
     }
-    let listener = UnixListener::bind(claim.socket())?;
-    let bound = claim.bound()?;
+    let (listener, bound) = claim.bind()?;
+    listener.set_nonblocking(true)?;
+    let listener = UnixListener::from_std(listener)?;
     let mux = Mux::new();
     let mut watched = mux.watched();
     eprintln!("luneta-mux: listening on {}", bound.socket().display());
