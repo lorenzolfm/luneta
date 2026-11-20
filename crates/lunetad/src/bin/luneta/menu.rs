@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::actions::{
-    self, Action, Command, Key, Noun, MENU_GROUPS, OPEN, REVIEW, ROW_GROUPS, YANK,
+    self, Action, Command, Key, Noun, Pasted, MENU_GROUPS, OPEN, REVIEW, ROW_GROUPS, YANK,
 };
 use crate::agents::{self, Harness, Picked};
 use crate::brief;
@@ -214,11 +214,16 @@ impl Asks {
 impl Pull {
     const ALL: [Pull; 2] = [Pull::Worktree, Pull::Agent];
 
-    const fn action(self, asks: Asks) -> Action {
+    pub fn offered(work: &Work) -> [(Pull, Pasted); 2] {
+        let asks = Asks::of(work);
+        Pull::ALL.map(|pull| (pull, pull.pasted(asks)))
+    }
+
+    const fn pasted(self, asks: Asks) -> Pasted {
         match (self, asks) {
-            (Pull::Worktree, _) => Action::PastedWorktree,
-            (Pull::Agent, Asks::Review) => Action::PastedReview,
-            (Pull::Agent, Asks::Tackle) => Action::PastedTackle,
+            (Pull::Worktree, _) => Pasted::Worktree,
+            (Pull::Agent, Asks::Review) => Pasted::Review,
+            (Pull::Agent, Asks::Tackle) => Pasted::Tackle,
         }
     }
 
@@ -229,22 +234,15 @@ impl Pull {
         }
     }
 
-    fn pressed(key: &KeyEvent, asks: Asks) -> Option<Pull> {
+    fn pressed(key: &KeyEvent, work: &Work) -> Option<Pull> {
         let KeyCode::Char(c) = key.code else {
             return None;
         };
         if !bare(key) {
             return None;
         }
-        Pull::ALL.into_iter().find(|pull| pull.key(asks) == c)
-    }
-
-    fn key(self, asks: Asks) -> char {
-        let action = self.action(asks);
-        let Key::Pasted(key) = action.key() else {
-            unreachable!("{action:?} answers a pasted link, and so is keyed as one");
-        };
-        key
+        let mut offered = Pull::offered(work).into_iter();
+        offered.find(|(_, pasted)| pasted.key() == c).map(|(pull, _)| pull)
     }
 }
 
@@ -1059,6 +1057,14 @@ pub fn spelled(action: Action, origin: Origin) -> String {
     }
 }
 
+#[must_use]
+pub fn whence(work: &Work) -> String {
+    match work {
+        Work::Link(link) => link.repository(),
+        Work::File(file) => sidebar::short_cwd(file.path()),
+    }
+}
+
 fn typed_path(path: &[char]) -> String {
     path.iter().map(char::to_string).collect::<Vec<_>>().join(" ")
 }
@@ -1285,6 +1291,20 @@ enum Wait {
     Unopened,
 }
 
+enum Launch {
+    Shell,
+    Agent(Vec<String>),
+}
+
+impl Launch {
+    fn argv(self) -> Vec<String> {
+        match self {
+            Launch::Shell => Vec::new(),
+            Launch::Agent(argv) => argv,
+        }
+    }
+}
+
 impl Wait {
     fn doing(&self, work: &Work) -> String {
         match self {
@@ -1323,6 +1343,12 @@ impl Menu {
     pub fn pull(number: u64, target: Target, work: Work, agent: Harness) -> Menu {
         let step = Step::Choosing { wrong: None };
         Menu { number, target, stage: Stage::Pull { work, agent, step } }
+    }
+
+    pub fn start_pull(number: u64, target: Target, work: Work, agent: Harness, pull: Pull) -> Did {
+        let wants = Wants::Pull(work.clone(), pull.wanted(Asks::of(&work)));
+        let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Pulling(pull)) };
+        Did::Stays(Menu { number, target, stage }, wants)
     }
 
     pub fn number(&self) -> u64 {
@@ -1592,13 +1618,8 @@ impl Menu {
                 stays(Stage::Pull { work, agent, step }, Wants::Keep(agent))
             },
             Stage::Pull { work, agent, step: step @ Step::Choosing { .. } } => {
-                let asks = Asks::of(&work);
-                match Pull::pressed(key, asks) {
-                    Some(pull) => {
-                        let wants = Wants::Pull(work.clone(), pull.wanted(asks));
-                        let step = Step::Waiting(Wait::Pulling(pull));
-                        stays(Stage::Pull { work, agent, step }, wants)
-                    },
+                match Pull::pressed(key, &work) {
+                    Some(pull) => Menu::start_pull(number, target.clone(), work, agent, pull),
                     None => stays(Stage::Pull { work, agent, step }, Wants::Nothing),
                 }
             },
@@ -1689,24 +1710,24 @@ impl Menu {
             let stage = Stage::Pull { work, agent, step: Step::Choosing { wrong } };
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         }
-        let command = match (pull, &readied) {
-            (Pull::Worktree, _) => Vec::new(),
+        let launch = match (pull, &readied) {
+            (Pull::Worktree, _) => Launch::Shell,
             (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
-                agents::on_skill(agent, REVIEW, Some(&link.url()))
+                Launch::Agent(agents::on_skill(agent, REVIEW, Some(&link.url())))
             },
             (Pull::Agent, Readied::Link(link)) => {
-                agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[])
+                Launch::Agent(agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[]))
             },
             (Pull::Agent, Readied::File { real }) => {
-                agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
+                let words = format!("{TACKLE} {real}");
+                Launch::Agent(agents::on_words(agent, words, &[real.as_str()]))
             },
         };
-        assert_eq!(command.is_empty(), pull == Pull::Worktree, "w opens a shell, an agent its own");
-        match (at, pull) {
-            (At::There((session, view)), Pull::Worktree) => {
+        match (at, launch) {
+            (At::There((session, view)), Launch::Shell) => {
                 Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })))
             },
-            (At::There((session, view)), Pull::Agent) => {
+            (At::There((session, view)), Launch::Agent(command)) => {
                 let row = ViewRow {
                     session: session.clone(),
                     view,
@@ -1722,8 +1743,8 @@ impl Menu {
                 let wants = Wants::Open { session, view, command };
                 Did::Stays(Menu { number, target, stage }, wants)
             },
-            (At::Unopened, _) => {
-                let wants = Wants::Make { cwd: folder, name: work.tab(), command };
+            (At::Unopened, launch) => {
+                let wants = Wants::Make { cwd: folder, name: work.tab(), command: launch.argv() };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Unopened) };
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
@@ -1941,11 +1962,11 @@ impl Menu {
             Stage::Pull { work, agent, step } => {
                 let body = match step {
                     Step::Choosing { wrong } => {
-                        let asks = Asks::of(work);
-                        let entry = |pull: Pull| {
-                            Entry::Act { key: pull.key(asks), action: pull.action(asks) }
+                        let entry = |(_, pasted): (Pull, Pasted)| Entry::Act {
+                            key: pasted.key(),
+                            action: pasted.action(),
                         };
-                        let entries = Pull::ALL.map(entry);
+                        let entries = Pull::offered(work).map(entry);
                         spots = entry_spots(&entries, width).map(Choice::Key);
                         let mut body: Vec<_> =
                             entries.iter().map(|entry| entry_line(entry, inner)).collect();
@@ -1960,11 +1981,7 @@ impl Menu {
                         waiting(&wait.doing(work), width, Style::new().fg(NAME), frame)
                     },
                 };
-                let from = match work {
-                    Work::Link(link) => link.repository(),
-                    Work::File(file) => sidebar::short_cwd(file.path()),
-                };
-                (work.tab(), from, body, keyed(width, &[(Hint::Esc, "Close")]))
+                (work.tab(), whence(work), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
             Stage::Choosing(keys)
             | Stage::Planning { keys, .. }

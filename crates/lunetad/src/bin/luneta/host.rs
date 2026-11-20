@@ -2124,6 +2124,11 @@ impl App {
                 let asked = self.sidebar.act_in_menu(&target, action, origin);
                 self.follow(asked);
             },
+            Picked::Pull { target, work, pull, origin } => {
+                self.give(Focus::on(self.focus.side));
+                let asked = self.sidebar.pull_in_menu(target, work, pull, origin);
+                self.follow(asked);
+            },
             Picked::Row { target, action } => {
                 self.give(Focus::on(self.focus.side));
                 let asked = self.sidebar.act_on_row(&target, action, SystemTime::now());
