@@ -1157,7 +1157,6 @@ impl Picker {
                     Picked::Nothing
                 },
                 Lone::NoneOpen => {
-                    assert!(self.scope.is_none(), "a project row is listed only while unscoped");
                     let (on, project) = (on.clone(), project.id());
                     self.scope = Some(Scope { on, project, back: Back::To(self.list) });
                     self.list = List::Worktrees;
@@ -3019,6 +3018,24 @@ mod tests {
         assert_eq!(rows(&picker), ["notes › jots"], "o w's list for notes, not the palette");
         assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Nothing);
         assert_eq!(keyed_action(&picker).0, "notes", "back in the palette, on notes");
+    }
+
+    #[test]
+    fn enter_on_a_project_with_none_open_from_o_w_s_palette_lists_that_project_s_instead() {
+        let luneta = project("luneta", 1).id();
+        let mut picker = Picker::opening(1, none_open(), (Machine::Local, luneta), at_host());
+        assert_eq!(rows(&picker), ["luneta › old", "luneta › spike"]);
+        assert_eq!(press(&mut picker, KeyCode::BackTab), Picked::Nothing);
+        typed(&mut picker, "notes");
+        assert_eq!(keyed_action(&picker).0, "notes");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert_eq!(rows(&picker), ["notes › jots"], "notes's list, not luneta's");
+        assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Nothing);
+        assert_eq!(keyed_action(&picker).0, "notes", "back in the palette, on notes");
+        assert_eq!(press(&mut picker, KeyCode::Tab), Picked::Nothing);
+        let open = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
+        assert_eq!(rows(&picker), open, "luneta's o w scope went with the step back");
+        assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Close);
     }
 
     #[test]

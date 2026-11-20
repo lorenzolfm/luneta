@@ -821,7 +821,8 @@ struct KnownWorktree {
 impl Known {
     fn of(said: &api::Project) -> Option<Known> {
         let project = ProjectRow::of_api(said)?;
-        let rows = said.worktrees()?;
+        let holds = said.holds.as_ref()?;
+        let rows = holds.worktrees();
         let worktrees = rows.iter().zip(0..).filter_map(|(worktree, tab)| {
             let id = WorktreeId::of(worktree.id)?;
             let place = WorktreePlace { project: project.clone(), worktree: id };
@@ -847,15 +848,19 @@ impl Known {
         let worktrees: Vec<KnownWorktree> = worktrees.collect();
         let order = rows.iter().filter_map(|it| WorktreeId::of(it.id)).collect();
         let dir = Dir::parse(&said.dir).expect("lunetad says a project's folder as one it keeps");
-        let unopened = Known::unopened_of(said, &dir, &worktrees);
+        let unopened = Known::unopened_of(holds, &dir, &worktrees);
         Some(Known { project, dir, worktrees, order, unopened })
     }
 
-    fn unopened_of(said: &api::Project, dir: &Dir, worktrees: &[KnownWorktree]) -> Unopened {
+    fn unopened_of(
+        holds: &api::project::Holds,
+        dir: &Dir,
+        worktrees: &[KnownWorktree],
+    ) -> Unopened {
         use api::project::clone::Listing as Said;
-        let clone = match &said.holds {
-            Some(api::project::Holds::Clone(clone)) => clone,
-            Some(api::project::Holds::Folder(_)) | None => return Unopened::Folder,
+        let clone = match holds {
+            api::project::Holds::Clone(clone) => clone,
+            api::project::Holds::Folder(_) => return Unopened::Folder,
         };
         let listed = match &clone.listing {
             Some(Said::Unopened(listed)) => &listed.subfolders,
