@@ -166,10 +166,9 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
         },
         What::Branch(branch) => {
             let repo = utf8(&cwd)?;
-            if let Some(clone) = links::holder(repo) {
-                links::lands(&clone, &worktrees::holders(path)?)?;
-            }
-            let folder = worktrees::real(&links::made(repo, &Of::Branch(branch.clone()))?)?;
+            let holders = worktrees::holders(path)?;
+            let made = links::made_landing(repo, &Of::Branch(branch.clone()), &holders)?;
+            let folder = worktrees::real(&made)?;
             let at = Directory::parse(utf8(&folder)?.to_owned())?;
             let landed = worktrees::joined_as(path, &at, branch.as_str(), Vec::new())?;
             Ok(Started::Worktree { worktree: landed.worktree(), folder, left: Left::Done })

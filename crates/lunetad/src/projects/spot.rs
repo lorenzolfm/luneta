@@ -20,6 +20,7 @@ const _: () = assert!(CLONE_WORKTREES_MAX <= WORKTREES_MAX);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloneRoot {
     Of(Dir),
+    Worked,
     NoBare,
     Unparsed(String),
 }
@@ -44,14 +45,20 @@ impl Spot {
             },
         };
         let top = toplevel(folder, until, look)?;
-        match clone_root(&common) {
+        match clone_within(&common, until, look)? {
             CloneRoot::Of(root) => {
                 let subfolders = listed(&root, until, look)?;
                 let subfolder = top.and_then(|top| root.subfolder(&top));
                 let subfolder = subfolder.filter(|it| subfolders.contains(it));
                 return Ok(Spot::in_clone(root, subfolder, subfolders));
             },
-            CloneRoot::NoBare | CloneRoot::Unparsed(_) => {},
+            CloneRoot::Unparsed(why) => {
+                return Err(format!(
+                    "{} is in a clone wt made in a folder luneta cannot keep: {why}",
+                    folder.0
+                ));
+            },
+            CloneRoot::Worked | CloneRoot::NoBare => {},
         }
         let dir = top.filter(|top| top.below(folder).is_some());
         Ok(Spot::in_folder(folder.clone(), dir.unwrap_or_else(|| folder.clone())))
@@ -173,8 +180,39 @@ fn ran(git: &mut Command, asked: &str, until: Instant, look: Duration) -> Result
     ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
 
-#[must_use]
-pub fn clone_root(common: &str) -> CloneRoot {
+pub fn clone_of(common: &str, look: Duration) -> Result<CloneRoot, String> {
+    clone_within(common, Instant::now() + look, look)
+}
+
+fn clone_within(common: &str, until: Instant, look: Duration) -> Result<CloneRoot, String> {
+    let mut git = Command::new("git");
+    git::local(&mut git).arg(format!("--git-dir={common}")).current_dir("/");
+    git.args(["config", "--type=bool", "--get", "core.bare"]).env("LC_ALL", "C");
+    let ran = program::run(&mut git, left(until, look)?);
+    let ran = ran.map_err(|error| format!("git config core.bare did not run: {error}"))?;
+    Ok(clone_root(common, bare(ran)?))
+}
+
+fn bare(ran: Ran) -> Result<bool, String> {
+    if let Ran::Ended { status, stdout, stderr } = &ran
+        && status.code() == Some(1)
+        && stdout.is_empty()
+        && stderr.is_empty()
+    {
+        return Ok(false);
+    }
+    let said = ran.answer().map_err(|why| format!("git config core.bare: {why}"))?;
+    match said.as_slice() {
+        b"true\n" => Ok(true),
+        b"false\n" => Ok(false),
+        _ => Err(format!("git said core.bare is {:?}", String::from_utf8_lossy(&said))),
+    }
+}
+
+fn clone_root(common: &str, bare: bool) -> CloneRoot {
+    if !bare {
+        return CloneRoot::Worked;
+    }
     let bare = Path::new(common);
     if bare.file_name().and_then(|name| name.to_str()) != Some(BARE) {
         return CloneRoot::NoBare;
@@ -232,15 +270,17 @@ mod tests {
 
     #[test]
     fn a_clone_s_root_is_the_folder_that_holds_its_bare_repository() {
-        assert_eq!(clone_root("/w/luneta/.bare"), CloneRoot::Of(dir("/w/luneta")));
-        assert_eq!(clone_root("/w/luneta/.git"), CloneRoot::NoBare);
-        assert_eq!(clone_root("/w/luneta.bare"), CloneRoot::NoBare);
+        assert_eq!(clone_root("/w/luneta/.bare", true), CloneRoot::Of(dir("/w/luneta")));
+        assert_eq!(clone_root("/w/luneta/.bare", false), CloneRoot::Worked);
+        assert_eq!(clone_root("/w/luneta/.git", false), CloneRoot::Worked);
+        assert_eq!(clone_root("/w/luneta/.git", true), CloneRoot::NoBare);
+        assert_eq!(clone_root("/w/luneta.bare", true), CloneRoot::NoBare);
         assert_eq!(
-            clone_root("/.bare"),
+            clone_root("/.bare", true),
             CloneRoot::Unparsed("/ holds every folder, and so is no project's".to_owned())
         );
         assert_eq!(
-            clone_root("/w/lun\teta/.bare"),
+            clone_root("/w/lun\teta/.bare", true),
             CloneRoot::Unparsed("\"/w/lun\\teta\": a path holds a control character".to_owned())
         );
     }
@@ -316,6 +356,26 @@ mod tests {
         assert_eq!(clone_at(None).dir(), &real(&clone));
         let none_left = Spot::of(&real(&clone), Duration::ZERO).unwrap_err();
         assert!(none_left.contains("did not answer in 0ms"), "{none_left}");
+    }
+
+    #[test]
+    fn a_bare_with_a_work_tree_is_no_clone_and_a_clone_luneta_cannot_keep_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let scratch = fs::canonicalize(scratch.path()).unwrap();
+        let (sep, worked) = (scratch.join("sep/.bare"), scratch.join("sep/main"));
+        let sep = format!("--separate-git-dir={}", sep.display());
+        git(&scratch, &["init", "-q", "-b", "main", &sep, worked.to_str().unwrap()]);
+        let worked = real(&worked);
+        assert_eq!(Spot::of(&worked, LOOK), Ok(Spot::in_folder(worked.clone(), worked.clone())));
+
+        let unkept = scratch.join("lun\teta");
+        fs::create_dir_all(unkept.join(".bare")).unwrap();
+        git(&unkept.join(".bare"), &["init", "-q", "--bare", "-b", "main"]);
+        fs::write(unkept.join(".git"), "gitdir: ./.bare\n").unwrap();
+        let out = scratch.join("out");
+        git(&unkept, &["worktree", "add", "-q", "--orphan", "-b", "main", out.to_str().unwrap()]);
+        let refused = Spot::of(&real(&out), LOOK).unwrap_err();
+        assert!(refused.contains("in a clone wt made in a folder luneta cannot keep"), "{refused}");
     }
 
     #[test]

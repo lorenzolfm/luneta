@@ -1420,9 +1420,9 @@ fn a_link_whose_clone_a_folder_s_project_holds_makes_nothing() {
             let refused = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), worked)).await;
             let refused = refused.unwrap_err();
             assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
-            let (main, notes) = (clone.join("main"), notes.display());
+            let notes = notes.display();
             let one = "notes is a folder, and its own is its one worktree";
-            let held = format!("{} is in {notes}, project notes's folder; {one}", main.display());
+            let held = format!("{} is in {notes}, project notes's folder; {one}", clone.display());
             assert_eq!(refused.message(), format!("nothing made: {held}"));
         }
     });
