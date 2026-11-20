@@ -87,7 +87,7 @@ impl fmt::Display for Unreached {
             Lost::Gone => write!(f, "{socket} is gone")?,
             Lost::Replaced => write!(f, "{socket} is another file now")?,
         }
-        write!(f, ", so nothing reaches luneta-mux again")
+        write!(f, ", so nothing reaches it again")
     }
 }
 

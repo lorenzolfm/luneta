@@ -139,7 +139,7 @@ pub fn start<Told: FnMut(Seen) + Send + 'static>(
 
 pub async fn relayed(
     said: impl Stream<Item = api::FromViewer> + Send + 'static,
-) -> Result<Streaming<api::ToViewer>, Status> {
+) -> Result<impl Stream<Item = Result<api::ToViewer, Status>> + Send + 'static, Status> {
     let socket = socket().map_err(|failure| Status::failed_precondition(failure.to_string()))?;
     let unreached =
         |error: io::Error| Status::unavailable(unreached_at(&socket, &error));
@@ -148,7 +148,12 @@ pub async fn relayed(
         Reached::Unreached => return Err(Status::unavailable("luneta-mux does not run")),
         Reached::Unmatched(unmatched) => return Err(Status::unavailable(unmatched.to_string())),
     };
-    Ok(streams.show(said).await?.into_inner())
+    let heard = streams.show(said).await.map_err(|status| relayed_from_mux(&status))?;
+    Ok(heard.into_inner().map(|heard| heard.map_err(|status| relayed_from_mux(&status))))
+}
+
+fn relayed_from_mux(status: &Status) -> Status {
+    Status::new(status.code(), refused(status).to_string())
 }
 
 fn said_by_lunetad(status: &Status) -> String {

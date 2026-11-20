@@ -1096,9 +1096,10 @@ fn a_layout_restores_its_terminals_when_the_mux_s_socket_goes() {
     assert_eq!(laid.views.iter().map(|view| view.id).collect::<Vec<_>>(), [terminal]);
     let listing = owned.listing();
     assert!(tagged(&listing, terminal).is_some(), "the new mux holds the terminal");
-    let gone = format!("{} is gone, so nothing reaches luneta-mux again", socket.display());
+    let gone = format!("{} is gone, so nothing reaches it again", socket.display());
     let log = logged(&owned);
-    assert!(log.contains(&gone), "{log}");
+    assert!(log.contains(&format!("as luneta-mux ended: {gone}")), "{log}");
+    assert!(!log.contains("luneta-mux again"), "{log}");
 }
 
 #[test]
@@ -1659,6 +1660,10 @@ fn frames_are_refused_words_out_of_turn_a_machine_misnamed_and_a_terminal_here_n
     assert_eq!(refused(again), invalid("a hello comes only first"));
     let nothing = vec![hello(None, greeted), FramesRequest { event: None }];
     assert_eq!(refused(nothing), invalid("a word of the frames says nothing"));
+    let unsaid = mux_api::FromViewer { event: None };
+    let unsaid = FramesRequest { event: Some(frames_request::Event::Said(unsaid)) };
+    let relayed = refused(vec![hello(None, greeted), unsaid]);
+    assert_eq!(relayed, invalid("luneta-mux: event is missing"), "the relay says who refused");
     assert_eq!(refused(vec![hello(None, None)]), invalid("the hello greets nobody"));
     let misnamed = refused(vec![hello(Some("-oops"), greeted)]).expect("a misnamed machine");
     assert_eq!(misnamed.0, Code::InvalidArgument, "{misnamed:?}");

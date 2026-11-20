@@ -53,7 +53,7 @@ fn a_server_whose_folder_goes_ends_and_so_do_its_terminals_programs() {
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         fs::remove_dir_all(server.socket().parent().unwrap()).unwrap();
         let socket = server.socket();
-        let why = format!("{} is gone, so nothing reaches luneta-mux again", socket.display());
+        let why = format!("{} is gone, so nothing reaches it again", socket.display());
         let unreached = api::watched::ended::Why::Unreached(api::watched::Unreached { why });
         assert_eq!(watched_end(&mut watch).await, unreached);
         drop((watch, mux));
