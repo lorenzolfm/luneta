@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::{program, Harness};
+use crate::{program, Directory, Harness};
 
 const FIND: &str = r#"dir=$(cd "$1" 2>/dev/null && pwd -P) || exit 0
 config=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
@@ -95,21 +95,21 @@ impl std::fmt::Display for Name {
     }
 }
 
-pub fn found_in(cwd: &str, harness: Harness) -> Result<Vec<Skill>, String> {
+pub fn found_in(cwd: &Directory, harness: Harness) -> Result<Vec<Skill>, String> {
     match harness {
         Harness::ClaudeCode => claude_found_in(cwd),
         Harness::Pi => {
             let set = |name: &str| env::var_os(name).map(PathBuf::from);
             let home = set("HOME");
             let agent = set("PI_CODING_AGENT_DIR").or_else(|| Some(home.as_ref()?.join(PI_AGENT)));
-            Ok(pi_found(Path::new(cwd), home.as_deref(), agent.as_deref()))
+            Ok(pi_found(Path::new(cwd.as_str()), home.as_deref(), agent.as_deref()))
         },
     }
 }
 
-fn claude_found_in(cwd: &str) -> Result<Vec<Skill>, String> {
+fn claude_found_in(cwd: &Directory) -> Result<Vec<Skill>, String> {
     let mut finder = Command::new("sh");
-    finder.args(["-c", FIND, "sh", cwd]);
+    finder.args(["-c", FIND, "sh", cwd.as_str()]);
     program::run(&mut finder, LIMIT)
         .map_err(|error| format!("skills: the finder could not be run: {error}"))
         .and_then(|ran| ran.answer().map_err(|why| format!("skills: {why}")))
