@@ -2545,8 +2545,11 @@ impl App {
     fn go_opening(&mut self, on: &Machine, landed: Landed, opens: Opens) {
         let worktree = landed.worktree();
         self.go_worktree(on, worktree, None);
-        if let (Landed::Found(_), Opens::Command(argv)) = (landed, opens) {
-            self.shown().open_in(worktree, argv.words().to_vec());
+        match (landed, opens) {
+            (Landed::Found(_), Opens::Command(argv)) => {
+                self.shown().open_in(worktree, argv.words().to_vec());
+            },
+            (Landed::Made(_), _) | (Landed::Found(_), Opens::Shell) => {},
         }
     }
 

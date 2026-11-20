@@ -131,7 +131,10 @@ impl Opens {
     pub fn to_api(&self) -> Vec<String> {
         match self {
             Opens::Shell => Vec::new(),
-            Opens::Command(argv) => argv.words.clone(),
+            Opens::Command(argv) => {
+                assert!(!argv.words.is_empty(), "a command never says a shell on the wire");
+                argv.words.clone()
+            },
         }
     }
 

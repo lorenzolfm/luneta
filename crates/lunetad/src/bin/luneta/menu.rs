@@ -1725,9 +1725,12 @@ impl Menu {
                 Some(agents::on_words(agent, words, &[real.as_str()]))
             },
         };
-        let opens = match argv.map(Argv::parse).transpose() {
-            Ok(argv) => argv.map_or(Opens::Shell, Opens::Command),
-            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
+        let opens = match argv {
+            None => Opens::Shell,
+            Some(argv) => match Argv::parse(argv) {
+                Ok(argv) => Opens::Command(argv),
+                Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
+            },
         };
         match (at, opens) {
             (At::There((session, view)), Opens::Shell) => {

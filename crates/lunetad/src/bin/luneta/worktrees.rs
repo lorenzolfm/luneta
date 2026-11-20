@@ -457,8 +457,11 @@ pub fn pulled(
     name: &str,
     opens: &Opens,
 ) -> Result<Landed, String> {
-    let (folder, tab, argv) = (cwd.to_string(), name.to_owned(), opens.to_api());
-    let change = Change::Pull(Pull { folder, name: tab, argv });
+    let change = Change::Pull(Pull {
+        folder: cwd.to_string(),
+        name: name.to_owned(),
+        argv: opens.to_api(),
+    });
     let pulled = changed_on(path, on(machine), change).and_then(landed);
     pulled.map_err(|unchanged| said_unopened(unchanged, cwd, name))
 }
