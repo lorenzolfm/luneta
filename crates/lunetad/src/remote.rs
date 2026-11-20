@@ -893,7 +893,7 @@ mod tests {
 
     fn unreached_daemon() -> client::Daemon {
         let channel = Channel::from_static("http://[::1]:1").connect_lazy();
-        DaemonClient::new(client::Within::new(channel, client::ANSWER))
+        DaemonClient::new(client::Within::new(channel, client::ANSWER, client::unanswered))
     }
 
     fn answered() -> Seen {

@@ -24,6 +24,8 @@ use tower::service_fn;
 use super::api::{self, mux_client::MuxClient};
 use super::frames::colours;
 use super::{in_no_terminal, TerminalKey};
+use crate::changes::Unchanged;
+use crate::client::Within;
 use crate::mux::{Failure, Runs};
 use crate::projects::{Line, Size, VIEWS_MAX};
 use crate::shells::{Doing, Front};
@@ -94,41 +96,62 @@ impl fmt::Display for Unmatched {
 
 pub(super) enum Reached {
     Unreached,
-    Matched(MuxClient<Channel>),
+    Matched(Matched),
     Unmatched(Unmatched),
+}
+
+pub(super) struct Matched(Channel);
+
+impl Matched {
+    pub(super) fn streams(self) -> Streams {
+        Streams(MuxClient::new(self.0))
+    }
+}
+
+pub(super) struct Streams(MuxClient<Channel>);
+
+impl Streams {
+    pub(super) async fn show(
+        &mut self,
+        words: impl tonic::IntoStreamingRequest<Message = api::FromViewer>,
+    ) -> Result<Response<Streaming<api::ToViewer>>, Status> {
+        self.0.show(words).await
+    }
+
+    async fn watch(&mut self) -> Result<Response<Streaming<api::Watched>>, Status> {
+        self.0.watch(api::WatchRequest {}).await
+    }
 }
 
 struct Server {
     runtime: Runtime,
-    client: MuxClient<Channel>,
+    client: MuxClient<Within<Channel>>,
 }
 
 impl Server {
+    fn matched(runtime: Runtime, Matched(channel): Matched) -> Server {
+        Server { runtime, client: MuxClient::new(Within::new(channel, ANSWER, unanswered)) }
+    }
+
     fn reached() -> Result<Option<Server>, Failure> {
-        match Server::reached_on(runtime()?, Some(ANSWER))? {
-            (runtime, Reached::Matched(client)) => Ok(Some(Server { runtime, client })),
+        match Server::reached_on(runtime()?)? {
+            (runtime, Reached::Matched(matched)) => Ok(Some(Server::matched(runtime, matched))),
             (_, Reached::Unreached) => Ok(None),
             (_, Reached::Unmatched(unmatched)) => Err(Failure::Own(unmatched.to_string())),
         }
     }
 
-    fn reached_on(
-        runtime: Runtime,
-        answer: Option<Duration>,
-    ) -> Result<(Runtime, Reached), Failure> {
+    fn reached_on(runtime: Runtime) -> Result<(Runtime, Reached), Failure> {
         let socket = socket()?;
-        match runtime.block_on(connect(&socket, answer)) {
+        match runtime.block_on(connect(&socket)) {
             Ok(reached) => Ok((runtime, reached)),
             Err(error) => Err(Failure::Own(format!("{}: {error}", socket.display()))),
         }
     }
 
-    fn matched_on(
-        runtime: Runtime,
-        answer: Option<Duration>,
-    ) -> Result<Result<Server, Runtime>, Failure> {
-        match Server::reached_on(runtime, answer)? {
-            (runtime, Reached::Matched(client)) => Ok(Ok(Server { runtime, client })),
+    fn matched_on(runtime: Runtime) -> Result<Result<Server, Runtime>, Failure> {
+        match Server::reached_on(runtime)? {
+            (runtime, Reached::Matched(matched)) => Ok(Ok(Server::matched(runtime, matched))),
             (runtime, Reached::Unreached) => Ok(Err(runtime)),
             (runtime, Reached::Unmatched(unmatched)) => {
                 stop(&runtime, &unmatched)?;
@@ -143,7 +166,7 @@ impl Server {
         runtime
     }
 
-    fn ask<T, F>(&self, asking: impl FnOnce(MuxClient<Channel>) -> F) -> Result<T, Status>
+    fn ask<T, F>(&self, asking: impl FnOnce(MuxClient<Within<Channel>>) -> F) -> Result<T, Status>
     where
         F: Future<Output = Result<Response<T>, Status>>,
     {
@@ -174,15 +197,21 @@ fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
     let socket = socket()?;
     let stopped = Instant::now();
     let deadline = stopped + STOPPING;
+    let mut answered = "it neither answers nor goes".to_owned();
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let answered = match runtime.block_on(connect(&socket, Some(left.min(ANSWER)))) {
-            Ok(Reached::Unmatched(still)) if still.pid == unmatched.pid => {
-                "it still answers".to_owned()
+        let asked = runtime.block_on(async {
+            tokio::time::timeout_at(deadline.into(), connect(&socket)).await
+        });
+        match asked {
+            Ok(Ok(Reached::Unmatched(still))) if still.pid == unmatched.pid => {
+                "it still answers".clone_into(&mut answered);
             },
-            Ok(Reached::Unreached | Reached::Matched(_) | Reached::Unmatched(_)) => return Ok(()),
-            Err(error) => format!("its socket says {error}"),
-        };
+            Ok(Ok(Reached::Unreached | Reached::Matched(_) | Reached::Unmatched(_))) => {
+                return Ok(());
+            },
+            Ok(Err(error)) => answered = format!("its socket says {error}"),
+            Err(_) => {},
+        }
         if Instant::now() >= deadline {
             let waited = stopped.elapsed().as_millis();
             let runs = format!("{unmatched}, and {waited}ms after it was stopped {answered}");
@@ -197,10 +226,18 @@ pub(super) fn runtime() -> Result<Runtime, Failure> {
     runtime.map_err(|error| Failure::Own(format!("no runtime: {error}")))
 }
 
+fn unanswered(within: Duration) -> String {
+    format!("it did not answer in {}s", within.as_secs_f64())
+}
+
 pub(super) fn refused(status: &Status) -> Failure {
+    Failure::Own(said_by_mux(status))
+}
+
+fn said_by_mux(status: &Status) -> String {
     match status.message() {
-        "" => Failure::Own(status.code().description().to_owned()),
-        said => Failure::Own(said.to_owned()),
+        "" => status.code().description().to_owned(),
+        said => said.to_owned(),
     }
 }
 
@@ -212,7 +249,7 @@ fn listened_in() -> Result<PathBuf, Failure> {
     folder::find().map_err(|unfound| Failure::Own(unfound.to_string()))
 }
 
-pub(super) async fn connect(socket: &Path, answer: Option<Duration>) -> io::Result<Reached> {
+pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
     let (first, pid) = match UnixStream::connect(socket).await {
         Ok(stream) => mine(stream)?,
         Err(error)
@@ -223,11 +260,8 @@ pub(super) async fn connect(socket: &Path, answer: Option<Duration>) -> io::Resu
         Err(error) => return Err(error),
     };
     let first = Arc::new(Mutex::new(Some(first)));
-    let mut endpoint = Endpoint::from_static("http://luneta-mux").connect_timeout(CONNECT);
-    if let Some(answer) = answer {
-        endpoint = endpoint.timeout(answer);
-    }
-    let channel = endpoint
+    let channel = Endpoint::from_static("http://luneta-mux")
+        .connect_timeout(CONNECT)
         .connect_with_connector(service_fn(move |_: Uri| {
             let first = first.lock().unwrap_or_else(PoisonError::into_inner).take();
             async move {
@@ -237,14 +271,13 @@ pub(super) async fn connect(socket: &Path, answer: Option<Duration>) -> io::Resu
         }))
         .await
         .map_err(io::Error::other)?;
-    let mut client = MuxClient::new(channel);
     if pid.is_some() && Pid::from_raw(MATCHED.load(Ordering::Relaxed)) == pid {
-        return Ok(Reached::Matched(client));
+        return Ok(Reached::Matched(Matched(channel)));
     }
-    let within = answer.unwrap_or(ANSWER);
-    let asked = tokio::time::timeout(within, client.info(api::InfoRequest {})).await;
+    let mut client = MuxClient::new(channel.clone());
+    let asked = tokio::time::timeout(ANSWER, client.info(api::InfoRequest {})).await;
     let late = || {
-        let late = format!("luneta-mux did not say its build in {}ms", within.as_millis());
+        let late = format!("luneta-mux did not say its build in {}s", ANSWER.as_secs_f64());
         io::Error::new(ErrorKind::TimedOut, late)
     };
     let build = match asked.map_err(|_| late())? {
@@ -255,7 +288,7 @@ pub(super) async fn connect(socket: &Path, answer: Option<Duration>) -> io::Resu
                     if let Some(pid) = pid {
                         MATCHED.store(pid.as_raw_pid(), Ordering::Relaxed);
                     }
-                    return Ok(Reached::Matched(client));
+                    return Ok(Reached::Matched(Matched(channel)));
                 },
                 release::Of::Other(other) => Some(other),
             }
@@ -373,8 +406,8 @@ pub fn followed(
     mut told: impl FnMut(Vec<String>, TerminalsListed) -> bool,
 ) -> Result<Followed, Failure> {
     let at = Instant::now();
-    let server = match Server::reached_on(runtime()?, None)? {
-        (runtime, Reached::Matched(client)) => Server { runtime, client },
+    let (runtime, mut streams) = match Server::reached_on(runtime()?)? {
+        (runtime, Reached::Matched(matched)) => (runtime, matched.streams()),
         (_, Reached::Unreached) => return Ok(Followed::Unreached { at }),
         (_, Reached::Unmatched(unmatched)) if unmatched.is_newer() => {
             return Ok(Followed::Newer(unmatched.left_be()));
@@ -385,10 +418,10 @@ pub fn followed(
         },
     };
     let since = Instant::now();
-    let watched = server.ask(|mut client| async move { client.watch(api::WatchRequest {}).await });
-    let mut stream: Streaming<api::Watched> = watched.map_err(|status| refused(&status))?;
+    let watched = runtime.block_on(streams.watch());
+    let mut stream = watched.map_err(|status| refused(&status))?.into_inner();
     loop {
-        let watched = server.runtime.block_on(stream.message());
+        let watched = runtime.block_on(stream.message());
         let listing = match heard(watched.map_err(|status| refused(&status))?, since)? {
             Heard::Listing(listing) => listing,
             Heard::Ended(followed) => return Ok(followed),
@@ -545,9 +578,11 @@ impl Terminals {
         let refusals_max = 2 * pastes.len();
         let server = reached()?;
         let mut client = server.client.clone();
-        let drained = server.runtime.block_on(async move {
-            let shown = async move {
-                let mut heard = client.show(tokio_stream::iter(words)).await?.into_inner();
+        let reasons = server.runtime.block_on(async move {
+            let deadline = tokio::time::Instant::now() + ANSWER;
+            let shown = client.show(tokio_stream::iter(words)).await;
+            let mut heard = shown.map_err(|status| refused(&status))?.into_inner();
+            let drained = async move {
                 let mut reasons = Vec::new();
                 while let Some(word) = heard.message().await? {
                     if let Some(api::to_viewer::Event::Refused(refusal)) = word.event {
@@ -559,13 +594,15 @@ impl Terminals {
                 }
                 Ok::<_, Status>(reasons)
             };
-            tokio::time::timeout(ANSWER, shown).await
-        });
-        match drained {
-            Ok(Ok(reasons)) if reasons.is_empty() => Ok(()),
-            Ok(Ok(reasons)) => Err(Failure::Own(reasons.join("; "))),
-            Ok(Err(status)) => Err(refused(&status)),
-            Err(_) => Err(Failure::Own("luneta-mux kept showing the pastes too long".to_owned())),
+            let kept = || Failure::Own("luneta-mux kept showing the pastes too long".to_owned());
+            let reasons = tokio::time::timeout_at(deadline, drained).await.map_err(|_| kept())?;
+            reasons.map_err(|status| refused(&status))
+        })?;
+        assert!(reasons.len() <= refusals_max, "the drain stops at its most refusals");
+        if reasons.is_empty() {
+            Ok(())
+        } else {
+            Err(Failure::Own(reasons.join("; ")))
         }
     }
 
@@ -586,13 +623,18 @@ impl Terminals {
     pub fn closed(&self, key: TerminalKey) -> Result<(), Failure> {
         let request = api::CloseTerminalRequest { terminal: Some(key.said()) };
         match reached()?.ask(|mut client| async move { client.close_terminal(request).await }) {
+            Ok(_) => Ok(()),
             Err(status) if status.code() == Code::NotFound => Ok(()),
-            Err(status) if matches!(status.code(), Code::Cancelled | Code::DeadlineExceeded) => {
-                let unanswered = format!("luneta-mux did not answer in time ({})", status.message());
-                let id = key.id;
-                Err(Failure::Own(format!("{unanswered}, and terminal {id} may close still")))
+            Err(status) => {
+                let said = said_by_mux(&status);
+                match Unchanged::of(&status) {
+                    Unchanged::Refused(_) => Err(Failure::Own(said)),
+                    Unchanged::InDoubt(_) => {
+                        let id = key.id;
+                        Err(Failure::Own(format!("{said}, and terminal {id} may close still")))
+                    },
+                }
             },
-            asked => asked.map(drop).map_err(|status| refused(&status)),
         }
     }
 }
@@ -618,7 +660,7 @@ fn on_started<T>(
         if Instant::now() >= deadline {
             return Err(Failure::Own("no server answered in time".to_owned()));
         }
-        let server = match Server::matched_on(runtime, Some(ANSWER))? {
+        let server = match Server::matched_on(runtime)? {
             Ok(server) => server,
             Err(runtime) => started(runtime, deadline)?,
         };
@@ -659,7 +701,7 @@ fn started(mut runtime: Runtime, deadline: Instant) -> Result<Server, Failure> {
         };
         let again = Instant::now() + AGAIN;
         while Instant::now() < again {
-            runtime = match Server::matched_on(runtime, Some(ANSWER))? {
+            runtime = match Server::matched_on(runtime)? {
                 Ok(server) => return Ok(server),
                 Err(runtime) => runtime,
             };
@@ -677,8 +719,10 @@ fn listened(
     deadline: Instant,
 ) -> Result<Result<Server, Runtime>, Failure> {
     loop {
-        runtime = match Server::reached_on(runtime, Some(ANSWER))? {
-            (runtime, Reached::Matched(client)) => return Ok(Ok(Server { runtime, client })),
+        runtime = match Server::reached_on(runtime)? {
+            (runtime, Reached::Matched(matched)) => {
+                return Ok(Ok(Server::matched(runtime, matched)));
+            },
             (runtime, Reached::Unreached) => runtime,
             (runtime, Reached::Unmatched(unmatched)) => {
                 stop(&runtime, &unmatched)?;

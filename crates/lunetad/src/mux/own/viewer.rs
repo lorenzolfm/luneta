@@ -143,12 +143,12 @@ pub async fn relayed(
     let socket = socket().map_err(|failure| Status::failed_precondition(failure.to_string()))?;
     let unreached =
         |error: io::Error| Status::unavailable(format!("{}: {error}", socket.display()));
-    let mut client = match connect(&socket, None).await.map_err(unreached)? {
-        Reached::Matched(client) => client,
+    let mut streams = match connect(&socket).await.map_err(unreached)? {
+        Reached::Matched(matched) => matched.streams(),
         Reached::Unreached => return Err(Status::unavailable("luneta-mux does not run")),
         Reached::Unmatched(unmatched) => return Err(Status::unavailable(unmatched.to_string())),
     };
-    Ok(client.show(said).await?.into_inner())
+    Ok(streams.show(said).await?.into_inner())
 }
 
 fn said_by_lunetad(status: &Status) -> String {
@@ -170,15 +170,15 @@ async fn hearing(
     let sent = ReceiverStream::new(sent);
     let heard = match reach {
         Reach::Mux { socket, runs_in } => {
-            let mut client = match connect(socket, None).await {
-                Ok(Reached::Matched(client)) => client,
+            let mut streams = match connect(socket).await {
+                Ok(Reached::Matched(matched)) => matched.streams(),
                 Ok(Reached::Unreached) => return Err("luneta-mux does not run".to_owned()),
                 Ok(Reached::Unmatched(unmatched)) => return Err(unmatched.to_string()),
                 Err(error) => return Err(format!("{}: {error}", socket.display())),
             };
             let hello = from_viewer::Event::Hello(greeting.greeted(*runs_in));
             let first = api::FromViewer { event: Some(hello) };
-            let heard = client.show(tokio_stream::once(first).chain(sent)).await;
+            let heard = streams.show(tokio_stream::once(first).chain(sent)).await;
             heard.map_err(|status| refused(&status).to_string())
         },
         Reach::On { lunetad, destination } => {

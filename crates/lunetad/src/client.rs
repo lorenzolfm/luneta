@@ -42,12 +42,13 @@ pub type Daemon = DaemonClient<Within<Channel>>;
 pub struct Within<S> {
     inner: S,
     answer: Duration,
+    unanswered: fn(Duration) -> String,
 }
 
 impl<S> Within<S> {
-    pub(crate) fn new(inner: S, answer: Duration) -> Within<S> {
+    pub(crate) fn new(inner: S, answer: Duration, unanswered: fn(Duration) -> String) -> Self {
         assert!(!answer.is_zero(), "a call waits some time for its answer");
-        Within { inner, answer }
+        Within { inner, answer, unanswered }
     }
 }
 
@@ -65,10 +66,11 @@ where
     }
 
     fn call(&mut self, request: R) -> Self::Future {
-        let (answer, asked) = (self.answer, self.inner.call(request));
+        let (answer, unanswered) = (self.answer, self.unanswered);
+        let asked = self.inner.call(request);
         Box::pin(async move {
             match tokio::time::timeout(answer, asked).await {
-                Ok(answered) => answered.map_err(Into::into),
+                Ok(heard) => heard.map_err(Into::into),
                 Err(_) => Err(Status::deadline_exceeded(unanswered(answer)).into()),
             }
         })
@@ -92,7 +94,7 @@ pub async fn connect(folder: &Folder) -> Result<Daemon, Error> {
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, ANSWER)))
+    Ok(DaemonClient::new(Within::new(channel, ANSWER, unanswered)))
 }
 
 pub async fn through(command: std::process::Command) -> Result<Daemon, Error> {
@@ -109,7 +111,7 @@ pub async fn through(command: std::process::Command) -> Result<Daemon, Error> {
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, ANSWER_THROUGH)))
+    Ok(DaemonClient::new(Within::new(channel, ANSWER_THROUGH, unanswered)))
 }
 
 fn went() -> io::Error {
@@ -241,7 +243,7 @@ mod tests {
     fn a_call_past_its_answer_says_lunetad_did_not_answer_in_time() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         let silent = service_fn(|_: Request<Body>| pending::<Result<Response<Body>, BoxError>>());
-        let mut daemon = DaemonClient::new(Within::new(silent, Duration::from_secs(1)));
+        let mut daemon = DaemonClient::new(Within::new(silent, Duration::from_secs(1), unanswered));
         let late = runtime.block_on(daemon.info(())).unwrap_err();
         let said = (late.code(), late.message());
         assert_eq!(said, (Code::DeadlineExceeded, "lunetad did not answer in 1s"));
