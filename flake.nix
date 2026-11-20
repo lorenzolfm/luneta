@@ -179,26 +179,35 @@
 
           daemonDeps = craneLib.buildDepsOnly daemon;
 
-          lunetad = craneLib.buildPackage (
-            daemon
-            // {
-              src = testSrc;
-              cargoArtifacts = daemonDeps;
+          lunetadWith =
+            built:
+            craneLib.buildPackage (
+              daemon
+              // {
+                src = testSrc;
+                cargoArtifacts = daemonDeps;
 
-              NEXTEST_SHOW_PROGRESS = "counter";
-              checkPhaseCargoCommand = ''
-                cargo nextest run --cargo-profile "$CARGO_PROFILE" --profile ci \
-                  --test-threads "$NIX_BUILD_CORES" --locked ${testRun}
-                cargoWithProfile test --doc --locked ${testRun}
-              '';
+                NEXTEST_SHOW_PROGRESS = "counter";
+                checkPhaseCargoCommand = ''
+                  cargo nextest run --cargo-profile "$CARGO_PROFILE" --profile ci \
+                    --test-threads "$NIX_BUILD_CORES" --locked ${testRun}
+                  cargoWithProfile test --doc --locked ${testRun}
+                '';
 
-              meta = {
-                description = "The luneta daemon, its CLI, and luneta's own multiplexer";
-                homepage = "https://github.com/lorenzolfm/luneta";
-                license = pkgs.lib.licenses.mit;
-                mainProgram = "lunetad";
-                platforms = systems;
-              };
+                meta = {
+                  description = "The luneta daemon, its CLI, and luneta's own multiplexer";
+                  homepage = "https://github.com/lorenzolfm/luneta";
+                  license = pkgs.lib.licenses.mit;
+                  mainProgram = "lunetad";
+                  platforms = systems;
+                };
+              }
+              // built
+            );
+
+          lunetad = lunetadWith (
+            {
+              doCheck = false;
             }
             // pkgs.lib.optionalAttrs (self ? rev) {
               LUNETA_BUILT = toString self.lastModified;
@@ -261,6 +270,7 @@
 
           checks = {
             inherit clippy deny;
+            lunetad = lunetadWith { LUNETA_BUILT = "1"; };
             statix = nixLint pkgs.statix "check .";
             deadnix = nixLint pkgs.deadnix "--hidden --fail .";
             comments =
