@@ -1,6 +1,8 @@
 use std::env;
 use std::ffi::OsString;
 use std::io;
+#[cfg(any(target_os = "macos", test))]
+use std::os::unix::ffi::OsStringExt as _;
 
 use rustix::io::Errno;
 use rustix::process::Pid;
@@ -20,10 +22,25 @@ compile_error!("lunetad reads processes on Linux and macOS, and on nothing else 
 
 pub use os::{environ, mine, signalled, start, started, Domain};
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id {
     pub pid: u32,
-    pub start: String,
+    pub start: Start,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Start(String);
+
+impl Start {
+    #[must_use]
+    pub fn spelled(spelling: String) -> Option<Start> {
+        (!spelling.is_empty()).then_some(Start(spelling))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +66,48 @@ pub fn var(name: &str) -> Result<Option<String>, String> {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+const EXEC_PATH_ALIGNMENT: usize = size_of::<u64>();
+
+#[cfg(any(target_os = "macos", test))]
+fn environ_in_procargs(procargs: &[u8]) -> Result<Vec<OsString>, &'static str> {
+    let fewer = "KERN_PROCARGS2 holds fewer arguments than its argc";
+    let (count, strings) = procargs
+        .split_first_chunk::<{ size_of::<i32>() }>()
+        .ok_or("KERN_PROCARGS2 holds no argc")?;
+    let argument_count = usize::try_from(i32::from_ne_bytes(*count))
+        .map_err(|_| "KERN_PROCARGS2 holds a negative argc")?;
+    let path_end = strings
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or("KERN_PROCARGS2's exec path does not end")?;
+    let arguments_start = (path_end + 1).next_multiple_of(EXEC_PATH_ALIGNMENT);
+    let padding = strings
+        .get(path_end..arguments_start)
+        .ok_or("KERN_PROCARGS2 ends in its exec path's padding")?;
+    if padding.iter().any(|byte| *byte != 0) {
+        return Err("KERN_PROCARGS2 pads its exec path with more than zeros");
+    }
+    let mut rest = &strings[arguments_start..];
+    if rest.len() < argument_count {
+        return Err(fewer);
+    }
+    for _ in 0..argument_count {
+        let argument_end = rest.iter().position(|byte| *byte == 0).ok_or(fewer)?;
+        rest = &rest[argument_end + 1..];
+    }
+    let environ_start = rest.iter().position(|byte| *byte != 0).unwrap_or(rest.len());
+    let mut environ = Vec::new();
+    for entry in rest[environ_start..].split_inclusive(|byte| *byte == 0) {
+        let entry = entry.strip_suffix(&[0]).ok_or("KERN_PROCARGS2's environment does not end")?;
+        if entry.is_empty() {
+            break;
+        }
+        environ.push(OsString::from_vec(entry.to_vec()));
+    }
+    Ok(environ)
+}
+
 pub fn ends(pid: u32) -> io::Result<()> {
     match i32::try_from(pid).ok().and_then(Pid::from_raw) {
         Some(pid) => os::ends(pid),
@@ -58,7 +117,11 @@ pub fn ends(pid: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::env;
+    use std::ffi::OsString;
+    use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, SystemTime};
@@ -101,6 +164,80 @@ mod tests {
         child.wait().unwrap();
         assert_eq!(super::start(pid), None);
         assert!(heard_within(pid, Duration::from_secs(5)), "ended, and waited for");
+    }
+
+    #[test]
+    fn an_environment_reads_as_it_was_given() {
+        let path = env::var_os("PATH").expect("the tests run with a PATH");
+        let mut given = Command::new("sh");
+        given.arg0("").args(["-c", "echo; read -r line"]);
+        given.stdin(Stdio::piped()).stdout(Stdio::piped());
+        given.env_clear().env("PATH", &path).env("LUNETA_GIVEN", "a b=c");
+        let mut child = given.spawn().unwrap();
+        child.stdout.as_mut().unwrap().read_exact(&mut [0; 1]).expect("it says it runs");
+        let read = super::environ(child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let read = read.expect("this user's process has an environment that reads");
+        assert!(read.len() >= 2, "{read:?}");
+        let mut given = read[..2].to_vec();
+        given.sort_unstable();
+        let mut path_given = OsString::from("PATH=");
+        path_given.push(path);
+        assert_eq!(given, [OsString::from("LUNETA_GIVEN=a b=c"), path_given], "{read:?}");
+    }
+
+    fn procargs(argument_count: i32, path: &str, strings: &[&str]) -> Vec<u8> {
+        let mut procargs = argument_count.to_ne_bytes().to_vec();
+        let mut padded = path.as_bytes().to_vec();
+        padded.resize((path.len() + 1).next_multiple_of(8), 0);
+        procargs.extend_from_slice(&padded);
+        for string in strings {
+            procargs.extend_from_slice(string.as_bytes());
+            procargs.push(0);
+        }
+        procargs
+    }
+
+    #[test]
+    fn an_environment_starts_after_as_many_arguments_as_argc() {
+        let read = |argument_count, path, strings: &[&str]| {
+            let read = super::environ_in_procargs(&procargs(argument_count, path, strings));
+            read.map(|entries| {
+                entries.into_iter().map(|it| it.into_string().unwrap()).collect::<Vec<_>>()
+            })
+        };
+        let given = |entries: &[&str]| Ok(entries.iter().map(|it| (*it).to_owned()).collect());
+        let laid = ["sleep", "60", "A=b", "PATH=/bin", "", "", "ptr_munge="];
+        assert_eq!(read(2, "/bin/sleep", &laid), given(&["A=b", "PATH=/bin"]));
+        let empty_argument = ["echo", "", "x", "A=b", "", "main_stack="];
+        assert_eq!(read(3, "/bin/echo", &empty_argument), given(&["A=b"]), "an empty argument");
+        let empty_first = ["", "60", "A=b", "B=c", ""];
+        assert_eq!(read(2, "/bin/sleep", &empty_first), given(&["A=b", "B=c"]), "an empty first");
+        let unpadded = ["", "A=b", ""];
+        assert_eq!(read(1, "/bin/sh", &unpadded), given(&["A=b"]), "a path its alignment fits");
+        let titled = [&["claude"][..], &[""; 17], &["A=b", ""]].concat();
+        let why = "a title leaves zeros where its arguments were";
+        assert_eq!(read(3, "/usr/bin/node", &titled), given(&["A=b"]), "{why}");
+        assert_eq!(read(0, "/bin/true", &["", ""]), given(&[]));
+
+        let fewer = Err("KERN_PROCARGS2 holds fewer arguments than its argc");
+        assert_eq!(read(5, "/bin/sleep", &["sleep", "60"]), fewer);
+        assert_eq!(read(3, "/bin/sleep", &["sleep", "60"]), fewer, "its end ends no argument");
+        assert_eq!(read(-1, "/bin/sleep", &[]), Err("KERN_PROCARGS2 holds a negative argc"));
+        let raw = |argument_count: i32, strings: &[u8]| {
+            super::environ_in_procargs(&[&argument_count.to_ne_bytes()[..], strings].concat())
+        };
+        assert_eq!(super::environ_in_procargs(&[1, 0]), Err("KERN_PROCARGS2 holds no argc"));
+        let unended = Err("KERN_PROCARGS2's exec path does not end");
+        assert_eq!(raw(0, b"/bin/true"), unended);
+        let unpadded = Err("KERN_PROCARGS2 ends in its exec path's padding");
+        assert_eq!(raw(0, b"/bin/x\0"), unpadded);
+        let misaligned = Err("KERN_PROCARGS2 pads its exec path with more than zeros");
+        assert_eq!(raw(1, b"/bin/x\0y\0A=b\0"), misaligned);
+        let cut = [&procargs(1, "/bin/sh", &["sh", "A=b"])[..], b"B="].concat();
+        let cut_entry = Err("KERN_PROCARGS2's environment does not end");
+        assert_eq!(super::environ_in_procargs(&cut), cut_entry);
     }
 
     #[test]

@@ -93,7 +93,7 @@ pub struct SessionFiles {
     dir: PathBuf,
     domain: process::Domain,
     seen: HashMap<u32, Seen>,
-    terminals: HashMap<(u32, String), Option<TerminalKey>>,
+    terminals: HashMap<process::Id, Result<Option<TerminalKey>, String>>,
     troubles: Troubles,
     scanned: bool,
 }
@@ -146,12 +146,9 @@ impl SessionFiles {
         self.seen = seen;
 
         let mut terminals = HashMap::with_capacity(self.seen.len());
-        let mut terminal_of = |pid: u32, start: String| {
-            let key = (pid, start);
-            let terminal = self.terminals.remove(&key).unwrap_or_else(|| {
-                terminal_or_trouble(pid, mux::terminal_of(pid), &mut self.troubles)
-            });
-            terminals.insert(key, terminal);
+        let mut terminal_of = |id: process::Id| {
+            let terminal = self.terminals.remove(&id).unwrap_or_else(|| mux::terminal_of(&id));
+            terminals.insert(id, terminal.clone());
             terminal
         };
         let mut agents = Vec::with_capacity(self.seen.len());
@@ -162,7 +159,8 @@ impl SessionFiles {
                 Seen::Torn { before: None, .. } => continue,
                 Seen::Unread => {
                     if let Some(start) = process::start(pid) {
-                        unread.push(Unread { pid, terminal: terminal_of(pid, start) });
+                        let terminal = terminal_of(process::Id { pid, start }).ok().flatten();
+                        unread.push(Unread { pid, terminal });
                     }
                     continue;
                 },
@@ -170,11 +168,13 @@ impl SessionFiles {
             if !local(&self.domain, file) {
                 continue;
             }
-            let start = file.proc_start.spelled();
-            if process::start(pid).as_ref() != Some(&start) {
+            let spelled = file.proc_start.spelled();
+            let Some(start) = process::start(pid).filter(|start| start.as_str() == spelled) else {
                 continue;
-            }
-            agents.push(agent(pid, file, terminal_of(pid, start)));
+            };
+            let read = terminal_of(process::Id { pid, start });
+            let terminal = terminal_or_trouble(pid, read, &mut self.troubles);
+            agents.push(agent(pid, file, terminal));
         }
         self.terminals = terminals;
         assert!(agents.len() + unread.len() <= self.seen.len());

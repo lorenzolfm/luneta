@@ -1,8 +1,12 @@
 use std::collections::HashSet;
 use std::fs::{self, Permissions};
+#[cfg(target_os = "linux")]
+use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{ChildStdin, Command};
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -43,6 +47,11 @@ impl Host {
 
     pub fn runtime(&self) -> &Path {
         self.runtime.path()
+    }
+
+    pub fn logged(&self) -> String {
+        let log = self.home.path().join(".local/state/luneta/luneta.log");
+        fs::read_to_string(log).unwrap_or_default()
     }
 
     pub fn pi_folder(&self) -> PathBuf {
@@ -87,6 +96,39 @@ pub fn process(terminal: Option<u32>) -> Running {
         command.env("LUNETA_MUX_TERMINAL_MADE", MADE_NANOS.to_string());
     }
     Running::spawn(&mut command)
+}
+
+pub struct Hidden {
+    pub pid: u32,
+    _runs: Option<(Running, ChildStdin, TempDir)>,
+}
+
+#[cfg(target_os = "linux")]
+pub fn hidden() -> Hidden {
+    let scratch = tempfile::tempdir().unwrap();
+    let sh = scratch.path().join("sh");
+    let path = std::env::var_os("PATH").expect("the tests run with a PATH");
+    let found = std::env::split_paths(&path).map(|dir| dir.join("sh")).find(|it| it.is_file());
+    let installed = Command::new("install").arg("-m111").arg(found.unwrap()).arg(&sh).status();
+    assert!(installed.unwrap().success());
+    let mut waits = Command::new(&sh);
+    waits.args(["-c", "echo; read -r line"]).stdin(Stdio::piped()).stdout(Stdio::piped());
+    let mut hidden = Running::spawn(&mut waits);
+    let (waiting, mut said) = hidden.piped();
+    said.read_exact(&mut [0; 1]).expect("it says it runs");
+    Hidden { pid: hidden.pid(), _runs: Some((hidden, waiting, scratch)) }
+}
+
+#[cfg(target_os = "macos")]
+pub fn hidden() -> Hidden {
+    let listed = Command::new("/bin/ps").args(["-axo", "pid=,uid="]).output().unwrap();
+    let listed = String::from_utf8(listed.stdout).unwrap();
+    let root_s = listed.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        let pid = fields.next()?.parse::<u32>().ok()?;
+        (pid > 1 && fields.next()? == "0").then_some(pid)
+    });
+    Hidden { pid: root_s.min().expect("root runs more than launchd"), _runs: None }
 }
 
 #[cfg(target_os = "linux")]
@@ -349,6 +391,20 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     drop(newer);
     assert!(left.exists());
     eventually("five files are unread", || (host.list().unread == 5).then_some(()));
+}
+
+#[test]
+fn a_file_that_does_not_read_says_nothing_of_its_pid_s_terminal() {
+    let host = Host::new();
+    let hidden = hidden();
+    fs::write(host.file_of(hidden.pid), "{").unwrap();
+    let _daemon = start(host.vars()).unwrap();
+
+    eventually("its file is unread", || (host.list().unread == 1).then_some(()));
+    let log = host.logged();
+    let unread = format!("{} does not read as a session file", host.file_of(hidden.pid).display());
+    assert!(log.contains(&unread), "{log}");
+    assert!(!log.contains(&format!("agent {} shows in no view", hidden.pid)), "{log}");
 }
 
 #[test]

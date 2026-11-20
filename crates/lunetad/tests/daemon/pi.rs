@@ -9,7 +9,7 @@ use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Harness, Status};
 use serde_json::{json, Value};
 
-use crate::agents::{process, terminal, Host, MADE_NANOS};
+use crate::agents::{hidden, process, terminal, Host, MADE_NANOS};
 use crate::host::{eventually, start, start_as, Daemon, Running, Vars, LUNETAD};
 
 const PI: &str = r#"
@@ -334,6 +334,25 @@ fn a_file_stands_only_for_the_process_that_wrote_it() {
     let ids: Vec<&str> = found.agents.iter().map(|agent| agent.session_id.as_str()).collect();
     assert_eq!(ids, ["running"]);
     assert_eq!(found.unread, 0);
+}
+
+#[test]
+fn a_file_no_process_of_its_pid_wrote_says_nothing_of_that_process_s_terminal() {
+    let host = Host::new();
+    let _daemon = start(host.vars()).unwrap();
+    let hidden = hidden();
+    let pid = hidden.pid;
+    let file = host.runtime().join(format!("luneta/pi/{pid}.json"));
+    let mut of_another = says("of another");
+    of_another["procStart"] = json!("1");
+    fs::write(&file, of_another.to_string()).unwrap();
+
+    let unwritten = format!("{}: no process of its pid wrote it", file.display());
+    let log = eventually("its file is found", || {
+        let log = host.logged();
+        log.contains(&unwritten).then_some(log)
+    });
+    assert!(!log.contains(&format!("agent {pid} shows in no view")), "{log}");
 }
 
 #[test]

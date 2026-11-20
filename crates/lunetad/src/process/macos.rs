@@ -10,7 +10,7 @@ use sysinfo::{
     Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind,
 };
 
-use super::{Found, Id, Unended};
+use super::{Found, Id, Start, Unended};
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
     let mut system = System::new();
@@ -20,9 +20,9 @@ fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) ->
 }
 
 #[must_use]
-pub fn start(pid: u32) -> Option<String> {
+pub fn start(pid: u32) -> Option<Start> {
     let secs = with(pid, ProcessRefreshKind::nothing(), Process::start_time)?;
-    Some(lstart(i64::try_from(secs).ok()?))
+    Start::spelled(lstart(i64::try_from(secs).ok()?))
 }
 
 #[must_use]
@@ -31,10 +31,34 @@ pub fn started(pid: u32) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_secs(secs.checked_add(1)?))
 }
 
-#[must_use]
-pub fn environ(pid: u32) -> Option<Vec<OsString>> {
-    let refresh = ProcessRefreshKind::nothing().with_environ(UpdateKind::Always);
-    with(pid, refresh, |process| process.environ().to_vec())
+#[expect(
+    unsafe_code,
+    reason = "sysctl writes into the buffer it is handed, and no further than the length it is told"
+)]
+pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
+    let pid = libc::c_int::try_from(pid).map_err(|_| io::Error::from(Errno::INVAL))?;
+    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let name_count = libc::c_uint::try_from(name.len()).expect("three names fit a c_uint");
+    let mut size: libc::size_t = 0;
+    let sized = unsafe {
+        let into = ptr::null_mut();
+        libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
+    };
+    if sized == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut procargs = vec![0_u8; size];
+    let read = unsafe {
+        let into = procargs.as_mut_ptr().cast();
+        libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
+    };
+    if read == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    assert!(size <= procargs.len(), "sysctl wrote {size} bytes into {}", procargs.len());
+    procargs.truncate(size);
+    let unparsed = |why| io::Error::new(io::ErrorKind::InvalidData, why);
+    super::environ_in_procargs(&procargs).map_err(unparsed)
 }
 
 #[must_use]
@@ -55,7 +79,8 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
         if !mine || process.status() == ProcessStatus::Zombie {
             continue;
         }
-        let Some(start) = i64::try_from(process.start_time()).ok().map(lstart) else {
+        let start = i64::try_from(process.start_time()).ok().map(lstart);
+        let Some(start) = start.and_then(Start::spelled) else {
             continue;
         };
         let argv = process.cmd().iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
@@ -66,12 +91,12 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
     found
 }
 
-fn living_start(pid: u32) -> Option<String> {
+fn living_start(pid: u32) -> Option<Start> {
     let living = |process: &Process| {
         (process.status() != ProcessStatus::Zombie).then(|| process.start_time())
     };
     let secs = with(pid, ProcessRefreshKind::nothing(), living)??;
-    Some(lstart(i64::try_from(secs).ok()?))
+    Start::spelled(lstart(i64::try_from(secs).ok()?))
 }
 
 #[expect(
