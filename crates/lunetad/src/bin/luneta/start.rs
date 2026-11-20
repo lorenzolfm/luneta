@@ -16,6 +16,8 @@ use crate::worktrees::{self, Landed, Landing, Opening, Went};
 
 pub const UNFINISHED: u8 = 4;
 
+pub const ELSEWHERE: &str = "no luneta is on this terminal";
+
 const ASKING: Duration = Duration::from_secs(30);
 
 const TACKLE: &str = "Tackle";
@@ -132,7 +134,7 @@ fn went(path: &Path, worktree: WorktreeId) -> bool {
     match worktrees::bring(path, worktree, from) {
         Ok(Went::Taken) => true,
         Ok(Went::Elsewhere) => {
-            eprintln!("luneta: no luneta is on this terminal, so none went there");
+            eprintln!("luneta: {ELSEWHERE}, so none went there");
             true
         },
         Err(unchanged) => {

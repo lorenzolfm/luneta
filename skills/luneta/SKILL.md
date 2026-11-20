@@ -46,6 +46,7 @@ luneta prune [--repo <dir>] [--yes <plan>]
 luneta rebase [<dir>]
 luneta ssh <destination>
 luneta say [--now] [<text>]
+luneta say --stop
 luneta terminate [--yes <plan>]
 luneta info
 ```
@@ -65,7 +66,8 @@ luneta info
 - `terminate` ends luneta on every machine and forgets every project: see
   [Reset luneta](#reset-luneta).
 - `info` says which lunetad runs, for how long, and whether it is another build
-  than this luneta. `luneta watch` is for programs, not for you.
+  than this luneta. `luneta watch [--after <pid>:<seq>]` is for programs, not
+  for you.
 
 ## What the user does in luneta
 

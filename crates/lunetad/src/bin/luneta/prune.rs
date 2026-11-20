@@ -18,6 +18,8 @@ use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 
+pub const UNTOLD: &str = "cannot tell where the views are";
+
 pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let turn = match agreed::turn_here() {
         Ok(turn) => turn,
@@ -84,7 +86,7 @@ fn failed(why: &str) -> ExitCode {
 }
 
 fn untold(why: &str) -> String {
-    format!("luneta cannot tell where the views are, so it deletes nothing: {why}")
+    format!("luneta {UNTOLD}, so it deletes nothing: {why}")
 }
 
 fn said_of(outcomes: &[Outcome]) -> ExitCode {

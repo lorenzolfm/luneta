@@ -95,7 +95,7 @@ impl std::fmt::Display for Label {
     }
 }
 
-const MOVES: [(Label, &str); 10] = [
+pub const MOVES: [(Label, &str); 10] = [
     (Label::Two('j', 'k'), "Next row, row before"),
     (Label::Two('g', 'g'), "First row"),
     (Label::char('G'), "Last row"),
@@ -108,7 +108,7 @@ const MOVES: [(Label, &str); 10] = [
     (Label::code(KeyCode::Esc), "Back to the view"),
 ];
 
-const MENU_MOVES: [(Label, &str); 3] = [
+pub const MENU_MOVES: [(Label, &str); 3] = [
     (Label::code(KeyCode::Tab), "use another agent"),
     (Label::code(KeyCode::Backspace), "back a group"),
     (Label::code(KeyCode::Esc), "close"),
@@ -1819,7 +1819,7 @@ impl Menu {
                 return Did::Closed(Done::Wrong(format!("menu: {branch}: {why}")));
             },
             Err(Unrebased::InDoubt(why)) => {
-                let why = format!("menu: {branch}: no telling how the rebase ended: {why}");
+                let why = format!("menu: {branch}: {}: {why}", rebase::IN_DOUBT);
                 return Did::Closed(Done::Wrong(why));
             },
         };
