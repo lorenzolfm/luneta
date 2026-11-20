@@ -1274,7 +1274,7 @@ impl Layouts {
         let key = match self.known.get(&terminal.id()) {
             Some(known) => Some(known.key),
             None => self.mux.tagged(&tag(view)).map_err(|failure| {
-                let unlooked = format!("terminal {view} is not looked for in luneta-mux");
+                let unlooked = format!("terminal {view} is not looked for");
                 Failed::Unclosed(format!("{unlooked}: {failure}"))
             })?,
         };

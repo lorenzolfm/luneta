@@ -145,7 +145,7 @@ impl Server {
         let socket = socket()?;
         match runtime.block_on(connect(&socket)) {
             Ok(reached) => Ok((runtime, reached)),
-            Err(error) => Err(Failure::Own(format!("{}: {error}", socket.display()))),
+            Err(error) => Err(Failure::Own(unreached_at(&socket, &error))),
         }
     }
 
@@ -223,7 +223,7 @@ fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
 
 pub(super) fn runtime() -> Result<Runtime, Failure> {
     let runtime = runtime::Builder::new_current_thread().enable_all().build();
-    runtime.map_err(|error| Failure::Own(format!("no runtime: {error}")))
+    runtime.map_err(|error| Failure::Own(format!("no runtime to reach luneta-mux: {error}")))
 }
 
 fn unanswered(within: Duration) -> String {
@@ -231,7 +231,11 @@ fn unanswered(within: Duration) -> String {
 }
 
 pub(super) fn refused(status: &Status) -> Failure {
-    Failure::Own(said_by_mux(status))
+    Failure::Refused(said_by_mux(status))
+}
+
+pub(super) fn unreached_at(socket: &Path, error: &io::Error) -> String {
+    format!("luneta-mux at {}: {error}", socket.display())
 }
 
 fn said_by_mux(status: &Status) -> String {
@@ -277,7 +281,7 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
     let mut client = MuxClient::new(channel.clone());
     let asked = tokio::time::timeout(ANSWER, client.info(api::InfoRequest {})).await;
     let late = || {
-        let late = format!("luneta-mux did not say its build in {}s", ANSWER.as_secs_f64());
+        let late = format!("it did not say its build in {}s", ANSWER.as_secs_f64());
         io::Error::new(ErrorKind::TimedOut, late)
     };
     let build = match asked.map_err(|_| late())? {
@@ -294,7 +298,7 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
             }
         },
         Err(status) if status.code() == Code::Unimplemented => None,
-        Err(status) => return Err(io::Error::other(refused(&status).to_string())),
+        Err(status) => return Err(io::Error::other(said_by_mux(&status))),
     };
     Ok(Reached::Unmatched(Unmatched { pid, build }))
 }
@@ -302,7 +306,7 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
 fn mine(stream: UnixStream) -> io::Result<(UnixStream, Option<Pid>)> {
     let peer = stream.peer_cred()?;
     if peer.uid() != rustix::process::getuid().as_raw() {
-        let refusal = "another user's process listens on luneta-mux's socket";
+        let refusal = "another user's process listens there";
         return Err(io::Error::new(ErrorKind::PermissionDenied, refusal));
     }
     Ok((stream, peer.pid().and_then(Pid::from_raw)))
@@ -384,7 +388,7 @@ enum Heard {
 fn heard(watched: Option<api::Watched>, since: Instant) -> Result<Heard, Failure> {
     use api::watched::ended::Why;
     let Some(watched) = watched else {
-        return Err(Failure::Own("its watch ended with no word why".to_owned()));
+        return Err(Failure::Own("luneta-mux's watch ended with no word why".to_owned()));
     };
     let ended = match watched.is {
         Some(api::watched::Is::Listing(listing)) => return Ok(Heard::Listing(listing)),
@@ -602,7 +606,7 @@ impl Terminals {
         if reasons.is_empty() {
             Ok(())
         } else {
-            Err(Failure::Own(reasons.join("; ")))
+            Err(Failure::Refused(reasons.join("; ")))
         }
     }
 
@@ -628,10 +632,10 @@ impl Terminals {
             Err(status) => {
                 let said = said_by_mux(&status);
                 match Unchanged::of(&status) {
-                    Unchanged::Refused(_) => Err(Failure::Own(said)),
+                    Unchanged::Refused(_) => Err(Failure::Refused(said)),
                     Unchanged::InDoubt(_) => {
                         let id = key.id;
-                        Err(Failure::Own(format!("{said}, and terminal {id} may close still")))
+                        Err(Failure::Refused(format!("{said}, and terminal {id} may close still")))
                     },
                 }
             },
@@ -658,7 +662,7 @@ fn on_started<T>(
     let mut runtime = runtime()?;
     loop {
         if Instant::now() >= deadline {
-            return Err(Failure::Own("no server answered in time".to_owned()));
+            return Err(Failure::Own("no luneta-mux answered in time".to_owned()));
         }
         let server = match Server::matched_on(runtime)? {
             Ok(server) => server,
@@ -678,7 +682,7 @@ fn on_started<T>(
 fn gone_by(server: &Server, deadline: Instant) -> Result<(), Failure> {
     while server.ask(|mut client| async move { client.list(api::ListRequest {}).await }).is_ok() {
         if Instant::now() >= deadline {
-            return Err(Failure::Own("the server that ends did not go in time".to_owned()));
+            return Err(Failure::Own("the luneta-mux that ends did not go in time".to_owned()));
         }
         thread::sleep(LOOK);
     }
@@ -708,7 +712,7 @@ fn started(mut runtime: Runtime, deadline: Instant) -> Result<Server, Failure> {
             thread::sleep(LOOK);
         }
         if Instant::now() >= deadline {
-            return Err(Failure::Own("another held its folder for too long".to_owned()));
+            return Err(Failure::Own("another luneta-mux held its folder too long".to_owned()));
         }
     }
 }
@@ -729,18 +733,19 @@ fn listened(
                 runtime
             },
         };
-        let ended = started.child.try_wait().map_err(|error| Failure::Own(error.to_string()))?;
+        let unlooked = |error| Failure::Own(format!("the luneta-mux started is unread: {error}"));
+        let ended = started.child.try_wait().map_err(unlooked)?;
         match ended {
             None => {},
             Some(status) if status.code() == Some(i32::from(ANOTHER_RUNS)) => {
                 return Ok(Err(runtime));
             },
             Some(status) => {
-                return Err(Failure::Own(format!("it ended as it started, with {status}")));
+                return Err(Failure::Own(format!("luneta-mux ended as it started, with {status}")));
             },
         }
         if Instant::now() >= deadline {
-            return Err(Failure::Own("it did not listen in time".to_owned()));
+            return Err(Failure::Own("luneta-mux did not listen in time".to_owned()));
         }
         thread::sleep(LOOK);
     }
@@ -763,7 +768,7 @@ impl Started {
             }
         };
         let thread = thread::Builder::new().name("luneta-mux".to_owned()).spawn(reaping);
-        thread.map_err(|error| Failure::Own(format!("no thread to reap it: {error}")))?;
+        thread.map_err(|error| Failure::Own(format!("no thread to reap luneta-mux: {error}")))?;
         let program = program();
         let mut command = Command::new(&program);
         command.arg(&folder);
@@ -782,7 +787,7 @@ impl Started {
 
     fn given_up(mut self, why: Failure) -> Failure {
         if let Err(error) = self.child.kill() {
-            log::say(&format!("luneta-mux, given up on as {why}, was not killed: {error}"));
+            log::say(&format!("the server given up on, as {why}, was not killed: {error}"));
         }
         self.reaped();
         why

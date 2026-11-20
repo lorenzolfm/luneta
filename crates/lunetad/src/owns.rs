@@ -67,13 +67,13 @@ pub fn follow(
                 },
                 Ok(Followed::Emptied { since }) => Some(layouts::Command::Emptied { since }),
                 Ok(Followed::Lost(why)) => {
-                    troubles.say(format!("luneta-mux's terminals: luneta-mux: {why}"));
+                    troubles.say(format!("terminals are not followed: {why}"));
                     troubles.done();
                     Some(layouts::Command::Crashed)
                 },
                 Ok(Followed::LetGo) => return,
                 Err(failure) => {
-                    troubles.say(format!("luneta-mux's terminals: {failure}"));
+                    troubles.say(format!("terminals are not followed: {failure}"));
                     troubles.done();
                     Some(layouts::Command::Crashed)
                 },

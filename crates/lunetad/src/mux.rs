@@ -11,14 +11,15 @@ pub use own::{OwnMade, TerminalKey};
 #[derive(Debug)]
 pub enum Failure {
     Own(String),
+    Refused(String),
     Unread(String),
 }
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Failure::Own(said) => write!(f, "luneta-mux: {said}"),
-            Failure::Unread(why) => f.write_str(why),
+            Failure::Own(why) | Failure::Unread(why) => f.write_str(why),
+            Failure::Refused(said) => write!(f, "luneta-mux: {said}"),
         }
     }
 }
