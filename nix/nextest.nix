@@ -10,6 +10,13 @@ pkgs.writeShellApplication {
   ];
   text = ''
     target="$(cargo metadata --locked --no-deps --format-version 1 | jq -r .target_directory)"
+    case "$target" in
+      /*) ;;
+      *)
+        printf 'luneta-nextest: cargo metadata gave %s as the target folder, not an absolute path, so no luneta-mux could be told apart\n' "$target" >&2
+        exit 2
+        ;;
+    esac
     resolved="$(realpath -m -- "$target")/"
     given="$(realpath -ms -- "$target")/"
     muxes() {
