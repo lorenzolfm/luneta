@@ -68,10 +68,7 @@ pub fn argv(pid: u32) -> Option<Vec<String>> {
     let mut line = Vec::with_capacity(ARGV_BYTES_MAX);
     let most = u64::try_from(ARGV_BYTES_MAX).expect("16 KiB fit a u64");
     cmdline.take(most).read_to_end(&mut line).ok()?;
-    if line.is_empty() {
-        return None;
-    }
-    let args = arguments(&line).into_iter();
+    let args = arguments(&line)?.into_iter();
     Some(args.map(|arg| String::from_utf8_lossy(arg).into_owned()).collect())
 }
 

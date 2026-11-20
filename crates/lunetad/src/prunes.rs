@@ -398,8 +398,7 @@ fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, Strin
 }
 
 fn default_heard(common: &str, remote: &str) -> Result<Option<String>, String> {
-    let head = format!("refs/remotes/{remote}/HEAD");
-    git::pointed(on_repository(common), &head, &format!("refs/remotes/{remote}/"), GIT_SAYS)
+    git::pointed(on_repository(common), git::Symbolic::RemoteHead(remote), GIT_SAYS)
 }
 
 fn remote_default(common: &str, remote: &str) -> Result<Option<String>, String> {

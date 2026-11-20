@@ -10,9 +10,9 @@ use sysinfo::{
     Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind,
 };
 
-use luneta_protocol::process::{laid_in_procargs, Laid};
+use luneta_protocol::process::{laid_in_procargs, EXEC_STRINGS_BYTES_MAX};
 
-use super::{Found, Id, Mine, Start, Unended, Unreadable, EXEC_STRINGS_BYTES_MAX};
+use super::{Found, Id, Mine, Start, Unended, Unread, Unreadable};
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
     let mut system = System::new();
@@ -33,16 +33,23 @@ pub fn started(pid: u32) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_secs(secs.checked_add(1)?))
 }
 
-pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
-    Ok(laid(pid)?.environ)
+pub fn environ(pid: u32) -> Result<Vec<OsString>, Unread> {
+    let procargs = procargs(pid)?;
+    laid_in_procargs(&procargs).and_then(|laid| laid.environ()).map_err(unparsed)
+}
+
+fn unparsed(why: &str) -> Unread {
+    Unread::Failed(why.to_owned())
 }
 
 #[expect(
     unsafe_code,
     reason = "sysctl writes into the buffer it is handed, and no further than the length it is told"
 )]
-fn laid(pid: u32) -> io::Result<Laid> {
-    let pid = libc::c_int::try_from(pid).map_err(|_| io::Error::from(Errno::INVAL))?;
+fn procargs(pid: u32) -> Result<Vec<u8>, Unread> {
+    let Ok(pid) = libc::c_int::try_from(pid) else {
+        return Err(Unread::Failed(format!("pid {pid} does not fit a c_int")));
+    };
     let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
     let name_count = libc::c_uint::try_from(name.len()).expect("three names fit a c_uint");
     let mut size: libc::size_t = 0;
@@ -51,12 +58,12 @@ fn laid(pid: u32) -> io::Result<Laid> {
         libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
     };
     if sized == -1 {
-        return Err(io::Error::last_os_error());
+        return Err(unread(&io::Error::last_os_error()));
     }
     if size > EXEC_STRINGS_BYTES_MAX {
         let most = EXEC_STRINGS_BYTES_MAX;
         let why = format!("KERN_PROCARGS2 of {size} bytes runs past the {most} exec lays out");
-        return Err(io::Error::new(io::ErrorKind::InvalidData, why));
+        return Err(Unread::Failed(why));
     }
     let mut procargs = vec![0_u8; size];
     let read = unsafe {
@@ -64,16 +71,19 @@ fn laid(pid: u32) -> io::Result<Laid> {
         libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
     };
     if read == -1 {
-        return Err(io::Error::last_os_error());
+        return Err(unread(&io::Error::last_os_error()));
     }
     assert!(size <= procargs.len(), "sysctl wrote {size} bytes into {}", procargs.len());
     procargs.truncate(size);
-    let unparsed = |why| io::Error::new(io::ErrorKind::InvalidData, why);
-    laid_in_procargs(&procargs).map_err(unparsed)
+    Ok(procargs)
 }
 
-fn gone(error: &io::Error) -> bool {
-    matches!(Errno::from_io_error(error), Some(Errno::INVAL | Errno::SRCH))
+fn unread(error: &io::Error) -> Unread {
+    if matches!(Errno::from_io_error(error), Some(Errno::INVAL | Errno::SRCH)) {
+        Unread::Gone
+    } else {
+        Unread::Failed(error.to_string())
+    }
 }
 
 #[must_use]
@@ -96,16 +106,19 @@ pub fn mine(names: &[&str]) -> Mine {
             continue;
         };
         let id = Id { pid: pid.as_u32(), start };
-        let Laid { argv, environ } = match laid(pid.as_u32()) {
-            Ok(laid) => laid,
-            Err(error) if gone(&error) => continue,
-            Err(error) => {
-                let why = error.to_string();
+        let read = procargs(pid.as_u32()).and_then(|procargs| {
+            let laid = laid_in_procargs(&procargs).map_err(unparsed)?;
+            let environ = laid.environ().map_err(unparsed)?;
+            Ok((laid.argv, environ))
+        });
+        let (argv, environ) = match read {
+            Ok(read) => read,
+            Err(Unread::Gone) => continue,
+            Err(Unread::Failed(why)) => {
                 seen.unreadable.push(Unreadable { id, name: name.to_owned(), why });
                 continue;
             },
         };
-        let argv = argv.into_iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
         seen.found.push(Found { id, name: name.to_owned(), argv, environ });
     }
     seen

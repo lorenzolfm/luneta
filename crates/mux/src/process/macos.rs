@@ -2,13 +2,11 @@ use std::ffi::{c_int, c_void};
 use std::mem::{MaybeUninit, size_of};
 use std::ptr;
 
-use luneta_protocol::process::laid_in_procargs;
+use luneta_protocol::process::{EXEC_STRINGS_BYTES_MAX, laid_in_procargs};
 
 use super::{CHILDREN_MAX, Group, Process, Terminal};
 
 const NO_DEVICE: u32 = u32::MAX;
-
-const ARGS_BYTES_MAX: usize = 1024 * 1024;
 
 pub fn process(pid: u32) -> Option<Process> {
     let size = c_int::try_from(size_of::<libc::proc_bsdinfo>()).expect("proc_bsdinfo is small");
@@ -79,10 +77,10 @@ pub fn argv(pid: u32) -> Option<Vec<String>> {
     let sized = unsafe {
         libc::sysctl(name.as_mut_ptr(), 3, ptr::null_mut(), &raw mut size, ptr::null_mut(), 0)
     };
-    if sized != 0 || size == 0 {
+    if sized != 0 || size == 0 || size > EXEC_STRINGS_BYTES_MAX {
         return None;
     }
-    let mut bytes = vec![0_u8; size.min(ARGS_BYTES_MAX)];
+    let mut bytes = vec![0_u8; size];
     let mut size = bytes.len();
     #[expect(
         unsafe_code,

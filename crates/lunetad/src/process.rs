@@ -20,17 +20,6 @@ compile_error!("lunetad reads processes on Linux and macOS, and on nothing else 
 
 pub use os::{environ, mine, signalled, start, started, Domain};
 
-pub const EXEC_STRINGS_BYTES_MAX: usize = 6 * 1024 * 1024;
-
-const _: () = assert!(
-    EXEC_STRINGS_BYTES_MAX >= 6 * 1024 * 1024,
-    "Linux lays out at most 6 MiB of arguments and environment, 3/4 of its 8 MiB _STK_LIM"
-);
-const _: () = assert!(
-    EXEC_STRINGS_BYTES_MAX >= 1024 * 1024,
-    "macOS lays out at most 1 MiB of arguments and environment, its kern.argmax"
-);
-
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id {
     pub pid: u32,
@@ -56,8 +45,14 @@ impl Start {
 pub struct Found {
     pub id: Id,
     pub name: String,
-    pub argv: Vec<String>,
+    pub argv: Vec<OsString>,
     pub environ: Vec<OsString>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unread {
+    Gone,
+    Failed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

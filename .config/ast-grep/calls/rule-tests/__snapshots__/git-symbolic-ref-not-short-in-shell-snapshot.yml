@@ -1,0 +1,56 @@
+id: git-symbolic-ref-not-short-in-shell
+snapshots:
+  branch=$(git symbolic-ref --short HEAD):
+    labels:
+    - source: git symbolic-ref --short HEAD
+      style: primary
+      start: 9
+      end: 38
+    - source: git
+      style: secondary
+      start: 9
+      end: 12
+    - source: symbolic-ref
+      style: secondary
+      start: 13
+      end: 25
+    - source: --short
+      style: secondary
+      start: 26
+      end: 33
+  git -C "$dir" symbolic-ref --short HEAD:
+    labels:
+    - source: git -C "$dir" symbolic-ref --short HEAD
+      style: primary
+      start: 0
+      end: 39
+    - source: git
+      style: secondary
+      start: 0
+      end: 3
+    - source: symbolic-ref
+      style: secondary
+      start: 14
+      end: 26
+    - source: --short
+      style: secondary
+      start: 27
+      end: 34
+  git symbolic-ref -q --short HEAD:
+    labels:
+    - source: git symbolic-ref -q --short HEAD
+      style: primary
+      start: 0
+      end: 32
+    - source: git
+      style: secondary
+      start: 0
+      end: 3
+    - source: symbolic-ref
+      style: secondary
+      start: 4
+      end: 16
+    - source: --short
+      style: secondary
+      start: 20
+      end: 27

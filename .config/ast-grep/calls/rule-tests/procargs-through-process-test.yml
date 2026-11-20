@@ -1,0 +1,8 @@
+id: procargs-through-process
+valid:
+  - "fn f(pid: u32) { process::environ(pid); }"
+  - "fn f() { let why = \"KERN_PROCARGS2 holds no argc\"; }"
+  - "fn f() { let name = [libc::CTL_KERN, libc::KERN_PROC, pid]; }"
+invalid:
+  - "fn f() { let name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid]; }"
+  - "use libc::KERN_PROCARGS2;"

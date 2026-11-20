@@ -1,0 +1,14 @@
+id: procargs-through-process
+snapshots:
+  fn f() { let name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid]; }:
+    labels:
+    - source: KERN_PROCARGS2
+      style: primary
+      start: 43
+      end: 57
+  use libc::KERN_PROCARGS2;:
+    labels:
+    - source: KERN_PROCARGS2
+      style: primary
+      start: 10
+      end: 24

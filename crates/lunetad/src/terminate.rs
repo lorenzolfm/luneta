@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -24,7 +25,7 @@ const _: () = assert!(!KILL_WAIT.is_zero(), "a process has a while to end at its
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Luneta {
     pub id: Id,
-    pub argv: Vec<String>,
+    pub argv: Vec<OsString>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -182,7 +183,7 @@ mod tests {
 
     fn given(pid: u32, name: &str, arguments: &[&str], environ: &[&str]) -> process::Found {
         let id = Id { pid, start: Start::spelled("1".to_owned()).unwrap() };
-        let argv = [name].iter().chain(arguments).map(|&argument| argument.to_owned()).collect();
+        let argv = [name].iter().chain(arguments).map(OsString::from).collect();
         let environ = environ.iter().map(OsString::from).collect();
         process::Found { id, name: name.to_owned(), argv, environ }
     }

@@ -12,9 +12,9 @@ use rustix::io::{retry_on_intr, Errno};
 use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
 use rustix::time::{clock_gettime, ClockId};
 
-use luneta_protocol::process::arguments;
+use luneta_protocol::process::{arguments, entries, EXEC_STRINGS_BYTES_MAX};
 
-use super::{Found, Id, Mine, Start, Unended, Unreadable, EXEC_STRINGS_BYTES_MAX};
+use super::{Found, Id, Mine, Start, Unended, Unread, Unreadable};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -23,6 +23,22 @@ fn proc(pid: u32, leaf: &str) -> PathBuf {
 #[must_use]
 pub fn start(pid: u32) -> Option<Start> {
     start_in(&fs::read_to_string(proc(pid, "stat")).ok()?).and_then(Start::spelled)
+}
+
+const PF_EXITING: u64 = 0x4;
+
+fn exiting(pid: u32) -> bool {
+    fs::read_to_string(proc(pid, "stat")).map_or(true, |stat| exiting_in(&stat))
+}
+
+fn exiting_in(stat: &str) -> bool {
+    let Some(close) = stat.rfind(')') else {
+        return false;
+    };
+    let mut fields = stat[close + 1..].split_whitespace();
+    let ended = fields.next().is_some_and(|state| matches!(state, "Z" | "X"));
+    let flags = fields.nth(5).and_then(|flags| flags.parse::<u64>().ok());
+    ended || flags.is_some_and(|flags| flags & PF_EXITING != 0)
 }
 
 fn start_in(stat: &str) -> Option<String> {
@@ -61,29 +77,30 @@ pub fn started(pid: u32) -> Option<SystemTime> {
     now.checked_sub(Duration::new(secs, nanos).saturating_sub(after_boot))
 }
 
-pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
-    Ok(nul_split(&exec_strings(pid, "environ")?))
+pub fn environ(pid: u32) -> Result<Vec<OsString>, Unread> {
+    Ok(entries(&exec_strings(pid, "environ")?))
 }
 
-fn exec_strings(pid: u32, leaf: &str) -> io::Result<Vec<u8>> {
+fn exec_strings(pid: u32, leaf: &str) -> Result<Vec<u8>, Unread> {
     let most = u64::try_from(EXEC_STRINGS_BYTES_MAX).expect("6 MiB fit a u64");
     let mut read = Vec::new();
-    File::open(proc(pid, leaf))?.take(most + 1).read_to_end(&mut read)?;
+    let file = File::open(proc(pid, leaf)).map_err(|error| unread(pid, &error))?;
+    file.take(most + 1).read_to_end(&mut read).map_err(|error| unread(pid, &error))?;
     if read.len() > EXEC_STRINGS_BYTES_MAX {
         let most = EXEC_STRINGS_BYTES_MAX;
         let why = format!("/proc/{pid}/{leaf} runs past the {most} bytes exec lays out");
-        return Err(io::Error::new(io::ErrorKind::InvalidData, why));
+        return Err(Unread::Failed(why));
     }
     Ok(read)
 }
 
-fn gone(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::NotFound || Errno::from_io_error(error) == Some(Errno::SRCH)
-}
-
-fn nul_split(raw: &[u8]) -> Vec<OsString> {
-    let entries = raw.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
-    entries.map(|entry| OsString::from_vec(entry.to_vec())).collect()
+fn unread(pid: u32, error: &io::Error) -> Unread {
+    let unfound = error.kind() == io::ErrorKind::NotFound;
+    if unfound || Errno::from_io_error(error) == Some(Errno::SRCH) || exiting(pid) {
+        Unread::Gone
+    } else {
+        Unread::Failed(error.to_string())
+    }
 }
 
 #[must_use]
@@ -114,15 +131,16 @@ pub fn mine(names: &[&str]) -> Mine {
         let read = environ(pid).and_then(|environ| Ok((environ, exec_strings(pid, "cmdline")?)));
         let (environ, cmdline) = match read {
             Ok(read) => read,
-            Err(error) if gone(&error) => continue,
-            Err(error) => {
-                let why = error.to_string();
+            Err(Unread::Gone) => continue,
+            Err(Unread::Failed(why)) => {
                 seen.unreadable.push(Unreadable { id, name: name.to_owned(), why });
                 continue;
             },
         };
-        let argv = arguments(&cmdline).into_iter();
-        let argv = argv.map(|arg| String::from_utf8_lossy(arg).into_owned()).collect();
+        let Some(argv) = arguments(&cmdline) else {
+            continue;
+        };
+        let argv = argv.into_iter().map(|arg| OsString::from_vec(arg.to_vec())).collect();
         seen.found.push(Found { id, name: name.to_owned(), argv, environ });
     }
     seen
@@ -217,7 +235,7 @@ mod tests {
 
     use rustix::io::Errno;
 
-    use super::{gone, start_in};
+    use super::{exiting_in, start_in, unread, Unread};
 
     fn stat(state: &str, threads: u32) -> String {
         let before = "1 7 7 0 -1 4194304 0 0 0 0 0 0 0 0 20 0";
@@ -225,12 +243,28 @@ mod tests {
     }
 
     #[test]
-    fn a_process_that_ended_reads_as_gone_and_one_that_did_not_read_as_unreadable() {
-        let read = |pid: u32| super::exec_strings(pid, "cmdline").map(|_| ()).unwrap_err();
-        assert!(gone(&read(u32::MAX)), "no process has the last pid");
-        assert!(gone(&io::Error::from(Errno::SRCH)), "one that ended as it was read");
-        assert!(!gone(&io::Error::from(Errno::ACCESS)));
-        assert!(!gone(&io::Error::new(io::ErrorKind::InvalidData, "too long")));
+    fn a_process_that_ended_reads_as_gone_and_one_that_did_not_read_as_failed() {
+        let read = super::exec_strings(u32::MAX, "cmdline").map(|_| ());
+        assert_eq!(read, Err(Unread::Gone), "no process has the last pid");
+        let me = std::process::id();
+        let ended = unread(me, &io::Error::from(Errno::SRCH));
+        assert_eq!(ended, Unread::Gone, "one that ended as it was read");
+        let refused = unread(me, &io::Error::from(Errno::ACCESS));
+        assert_eq!(refused, Unread::Failed(io::Error::from(Errno::ACCESS).to_string()));
+        let ending = unread(u32::MAX, &io::Error::from(Errno::ACCESS));
+        assert_eq!(ending, Unread::Gone, "an ending process refuses its environment");
+    }
+
+    #[test]
+    fn a_process_is_exiting_from_its_flags_or_as_a_zombie() {
+        let flagged = |state: &str, flags: u64| {
+            format!("7 (a) b) {state} 1 7 7 0 -1 {flags} 0 0 0 0 0 0 0 0 20 0 1 0 6630522")
+        };
+        assert!(!exiting_in(&flagged("S", 0x40_0000)), "PF_RANDOMIZE alone");
+        assert!(exiting_in(&flagged("D", 0x40_0004)), "PF_EXITING");
+        assert!(exiting_in(&flagged("Z", 0)));
+        assert!(exiting_in(&flagged("X", 0)));
+        assert!(!exiting_in("7 (a"), "no state to read");
     }
 
     #[test]
