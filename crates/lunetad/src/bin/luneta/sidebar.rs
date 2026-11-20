@@ -2778,14 +2778,10 @@ impl Sidebar {
         let at = if seek { best.or(held) } else { held.or(best) };
         let at = at.unwrap_or(0);
         let stop = (at..self.rows.len()).chain((0..at).rev()).find(|index| self.stops(*index));
-        let Some(stop) = stop.map(|index| self.rows[index].spot()) else {
-            self.lit = None;
-            return;
-        };
-        if self.lit_spot() == Some(&stop) {
-            return;
+        match stop {
+            Some(index) => self.light(self.rows[index].spot()),
+            None => self.lit = None,
         }
-        self.light(stop);
     }
 
     fn stops(&self, at: usize) -> bool {
@@ -2820,7 +2816,9 @@ impl Sidebar {
     }
 
     fn light(&mut self, spot: Spot) {
-        self.lit = Some(Lit::On(spot));
+        if self.lit_spot() != Some(&spot) {
+            self.lit = Some(Lit::On(spot));
+        }
     }
 
     fn lit_index(&self) -> Option<usize> {
@@ -2899,7 +2897,10 @@ impl Sidebar {
             return;
         }
         if folded {
-            self.lit = row.map(Lit::On);
+            match row {
+                Some(row) => self.light(row),
+                None => self.lit = None,
+            }
         }
         self.rebuild();
     }
@@ -10150,6 +10151,61 @@ mod tests {
         refuse(&mut sidebar, later);
         sidebar.hear(without_nvim());
         assert_eq!(lit_place(&sidebar), where_nvim_going_by_itself_leaves_it());
+    }
+
+    fn last_with(views: &[u32]) -> Host {
+        let shells = views.iter().map(|id| view(*id, 0, "/w/luneta/main", "fish")).collect();
+        let first = own_session("first", 1, vec![view(1, 0, "/w/luneta/main", "fish")]);
+        host(vec![first, own_session("last", 2, shells)], Vec::new())
+    }
+
+    fn on_the_last_row() -> Sidebar {
+        let mut sidebar = fresh();
+        sidebar.hear(last_with(&[1, 2]));
+        sidebar.focus(Keys::Sidebar);
+        sidebar.step(9);
+        assert_eq!(lit_place(&sidebar), Some(own_view_of("last", 2, 2)));
+        sidebar
+    }
+
+    #[test]
+    fn a_key_that_leaves_the_highlight_on_its_row_keeps_the_landing() {
+        let mut sidebar = on_the_last_row();
+        sidebar.hear(last_with(&[1]));
+        let landing = Some(own_view_of("last", 2, 1));
+        let apart = "a view gone by itself leaves the highlight apart from the landing";
+        assert_ne!(lit_place(&sidebar), landing, "{apart}");
+        let mut sidebar = on_the_last_row();
+        type_in(&mut sidebar, "d");
+        let closes = Act::View { session: session_name("last"), view: view_key(2, 2) };
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(closes, 1));
+        type_in(&mut sidebar, "j");
+        sidebar.hear(last_with(&[1]));
+        assert_eq!(lit_place(&sidebar), landing, "j on the last row moves nothing");
+    }
+
+    fn twins(first: bool) -> Host {
+        let views = || vec![view(1, 0, "/w/luneta/main", "fish")];
+        let mut sessions = vec![own_session("twin", 2, views()), own_session("last", 3, views())];
+        if first {
+            sessions.insert(0, own_session("twin", 1, views()));
+        }
+        host(sessions, Vec::new())
+    }
+
+    #[test]
+    fn a_project_s_delete_lands_on_another_project_of_its_name() {
+        let mut sidebar = fresh();
+        sidebar.hear(twins(true));
+        sidebar.focus(Keys::Sidebar);
+        sidebar.light(Spot::Local(Place::Session(Listed::new_project("twin", 1))));
+        type_in(&mut sidebar, "d");
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing, "it asks first");
+        let deleted = project_deleted("twin", 1, &[1000], &[1]);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted, 1));
+        sidebar.hear(twins(false));
+        let twin = Some(Place::Session(Listed::new_project("twin", 2)));
+        assert_eq!(lit_place(&sidebar), twin, "the other twin stays, so the highlight lands on it");
     }
 
     #[test]

@@ -118,18 +118,15 @@ impl Act {
     }
 
     pub fn closes(&self, place: &Place) -> bool {
-        match (self, place.terminal_id()) {
-            (
-                Act::View { session, .. }
-                | Act::Worktree { session, .. }
-                | Act::Project { session, .. },
-                Some(view),
-            ) => place.session() == session.as_str() && self.takes(view),
-            (Act::Worktree { worktree, .. }, None) => {
-                matches!(place, Place::Worktree(at) if at.worktree == *worktree)
+        match (self, place) {
+            (Act::View { view, .. }, Place::View(at)) => at.view == *view,
+            (Act::Worktree { worktree, .. }, Place::Worktree(at)) => at.worktree == *worktree,
+            (Act::Worktree { session, views, .. }, Place::View(at)) => {
+                place.session() == session.as_str() && views.contains(&at.view.terminal_id())
             },
-            (Act::View { .. }, None) => false,
-            (Act::Project { session, .. }, None) => place.session() == session.as_str(),
+            (Act::Project { project, .. }, _) => place.listed().project() == *project,
+            (Act::View { .. }, Place::Session(_) | Place::Worktree(_))
+            | (Act::Worktree { .. }, Place::Session(_)) => false,
         }
     }
 }
