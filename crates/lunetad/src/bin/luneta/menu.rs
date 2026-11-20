@@ -1706,10 +1706,6 @@ impl Menu {
                 agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
             },
         };
-        let dir = match Directory::parse(folder.clone()) {
-            Ok(dir) => dir,
-            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
-        };
         assert_eq!(command.is_empty(), pull == Pull::Worktree, "w opens a shell, an agent its own");
         match (at, pull) {
             (At::There((session, view)), Pull::Worktree) => {
@@ -1720,7 +1716,7 @@ impl Menu {
                     session: session.clone(),
                     view,
                     terminal: None,
-                    cwd: Cwd::At(dir),
+                    cwd: Cwd::At(folder),
                     branch,
                     repository: None,
                     pull_request: None,
@@ -1732,7 +1728,7 @@ impl Menu {
                 Did::Stays(Menu { number, target, stage }, wants)
             },
             (At::Unopened, _) => {
-                let wants = Wants::Make { cwd: dir, name: work.tab(), command };
+                let wants = Wants::Make { cwd: folder, name: work.tab(), command };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Unopened) };
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
@@ -4440,7 +4436,7 @@ mod tests {
         let folder = "/w/cdk/feat-x".to_owned();
         let branch = Some("feat/x".to_owned());
         let ready = |at| {
-            let (folder, branch) = (folder.clone(), branch.clone());
+            let (folder, branch) = (directory(&folder), branch.clone());
             let work = Readied::Link(pull_request());
             Ok(here(Ready { at, folder, branch, moved_off: false, work }))
         };
@@ -4486,7 +4482,7 @@ mod tests {
         let work = Readied::Link(pull_request());
         let branch = Some("feat/x".to_owned());
         let at = At::Unopened;
-        let ready = Ready { at, folder: folder.clone(), branch, moved_off: false, work };
+        let ready = Ready { at, folder: directory(&folder), branch, moved_off: false, work };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
         let review = [
             "pi",
@@ -4519,7 +4515,7 @@ mod tests {
         let folder = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
             at: At::Unopened,
-            folder: folder.clone(),
+            folder: directory(&folder),
             branch: Some("issue-2736".to_owned()),
             moved_off: false,
             work: Readied::Link(link),
@@ -4538,7 +4534,7 @@ mod tests {
         let (menu, _) = stays(Menu::pull(1, view_row(), issue.clone(), CLAUDE).key(&char('t')));
         let ready = Ready {
             at: At::Unopened,
-            folder: "/w/cdk/issue-2736".to_owned(),
+            folder: directory("/w/cdk/issue-2736"),
             branch: Some("dev-docs".to_owned()),
             moved_off: true,
             work: Readied::Link(link),
@@ -4595,7 +4591,7 @@ mod tests {
         let (folder, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");
         let ready = || Ready {
             at: At::Unopened,
-            folder: folder.to_owned(),
+            folder: directory(folder),
             branch: Some("md-sync-rework".to_owned()),
             moved_off: false,
             work: Readied::File { real: real.to_owned() },
@@ -4634,7 +4630,7 @@ mod tests {
         let other = Listed::new_project("cdk", 2);
         let ready = |at| {
             let work = Readied::Link(pull_request());
-            let folder = "/w/cdk/feat-x".to_owned();
+            let folder = directory("/w/cdk/feat-x");
             let ready = Ready { at, folder, branch: None, moved_off: false, work };
             Ok(Found { on: vps(), ready })
         };
@@ -4655,7 +4651,7 @@ mod tests {
         let other = Listed::new_project("cdk", 2);
         let found = |at| {
             let work = Readied::Link(pull_request());
-            let folder = "/w/cdk/feat-x".to_owned();
+            let folder = directory("/w/cdk/feat-x");
             let ready = Ready { at, folder, branch: None, moved_off: false, work };
             Ok(Found { on: vps(), ready })
         };

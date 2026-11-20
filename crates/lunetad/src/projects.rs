@@ -163,6 +163,10 @@ impl Name {
         Ok(Name(text.to_owned()))
     }
 
+    pub fn of_folder(dir: &Dir) -> Result<Name, String> {
+        Name::parse(dir.last())
+    }
+
     pub fn of_project(text: &str) -> Result<Name, String> {
         let name = Name::parse(text)?;
         SessionName::listed(text).map_err(|why| format!("{text:?} names no project: {why}"))?;
@@ -520,21 +524,29 @@ pub struct Plain {
     pub name: String,
 }
 
-impl Plain {
-    pub fn of_api(projects: &[api::Project]) -> Result<Vec<Plain>, String> {
-        let mut plain = Vec::new();
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Holders {
+    pub plain: Vec<Plain>,
+    pub clones: Vec<Dir>,
+}
+
+impl Holders {
+    pub fn of_api(projects: &[api::Project]) -> Result<Holders, String> {
+        let mut holders = Holders::default();
         for project in projects {
+            let dir = || {
+                let dir = Dir::parse(&project.dir);
+                dir.map_err(|why| format!("project {}: {why}", project.name))
+            };
             match &project.holds {
                 Some(api::project::Holds::Folder(_)) => {
-                    let dir = Dir::parse(&project.dir);
-                    let dir = dir.map_err(|why| format!("project {}: {why}", project.name))?;
-                    plain.push(Plain { dir, name: project.name.clone() });
+                    holders.plain.push(Plain { dir: dir()?, name: project.name.clone() });
                 },
-                Some(api::project::Holds::Clone(_)) => {},
+                Some(api::project::Holds::Clone(_)) => holders.clones.push(dir()?),
                 None => return Err(format!("lunetad says not what project {} holds", project.name)),
             }
         }
-        Ok(plain)
+        Ok(holders)
     }
 }
 
@@ -1288,7 +1300,7 @@ impl Projects {
         let dir = spot.dir().clone();
         let name = match name {
             Some(name) => name,
-            None => Name::parse(dir.last()).map_err(|why| format!("name it: {why}"))?,
+            None => Name::of_folder(&dir).map_err(|why| format!("name it: {why}"))?,
         };
         if self.projects.len() >= PROJECTS_MAX {
             return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
@@ -2196,7 +2208,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_s_plain_projects_are_its_folders_and_one_it_reads_not_refuses_it() {
+    fn a_listing_s_holders_are_its_folders_and_its_clones_and_one_it_reads_not_refuses_it() {
         let folder = |name: &str, dir: &str| api::Project {
             name: name.to_owned(),
             dir: dir.to_owned(),
@@ -2205,13 +2217,17 @@ mod tests {
         };
         let clone = api::project::Holds::Clone(api::project::Clone::default());
         let luneta = api::Project { holds: Some(clone), ..folder("luneta", "/w/luneta") };
-        let plain = Plain::of_api(&[folder("notes", "/n"), luneta.clone()]).unwrap();
-        assert_eq!(plain, [Plain { dir: dir("/n"), name: "notes".to_owned() }]);
-        let unsaid = api::Project { holds: None, ..luneta };
-        let said = Plain::of_api(&[folder("notes", "/n"), unsaid]);
+        let holders = Holders::of_api(&[folder("notes", "/n"), luneta.clone()]).unwrap();
+        let plain = vec![Plain { dir: dir("/n"), name: "notes".to_owned() }];
+        assert_eq!(holders, Holders { plain, clones: vec![dir("/w/luneta")] });
+        let unsaid = api::Project { holds: None, ..luneta.clone() };
+        let said = Holders::of_api(&[folder("notes", "/n"), unsaid]);
         assert_eq!(said, Err("lunetad says not what project luneta holds".to_owned()));
-        let relative = Plain::of_api(&[folder("notes", "n")]).unwrap_err();
+        let relative = Holders::of_api(&[folder("notes", "n")]).unwrap_err();
         assert!(relative.starts_with("project notes: "), "{relative}");
+        let cloned_relative = api::Project { dir: "w/luneta".to_owned(), ..luneta };
+        let relative = Holders::of_api(&[cloned_relative]).unwrap_err();
+        assert!(relative.starts_with("project luneta: "), "{relative}");
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use std::thread;
 
 use lunetad::links::{self, Pasted, Unready};
-use lunetad::projects::Plain;
+use lunetad::projects::Holders;
 pub use lunetad::links::{At, Kind, Link, Of, Readied, Wanted, Work};
 use lunetad::log;
 
@@ -38,23 +38,23 @@ pub struct Asking {
     pub wanted: Wanted,
     pub worked: Vec<Worked>,
     pub others: Others,
-    pub plain_here: Vec<Plain>,
+    pub held_here: Holders,
 }
 
 pub fn prepare(menu: u64, asking: Asking, events: &Sender<Event>) {
     let due = Due::new(events, move |found| Event::Pulled { menu, found });
-    let Asking { on, work, wanted, worked, others, plain_here } = asking;
-    let ask = move |on: &Machine, pasted: &Pasted| asked(on, pasted, &plain_here);
+    let Asking { on, work, wanted, worked, others, held_here } = asking;
+    let ask = move |on: &Machine, pasted: &Pasted| asked(on, pasted, &held_here);
     thread::spawn(move || due.pay(first_found(on, &work, wanted, worked, others, ask)));
 }
 
 fn asked(
     on: &Machine,
     pasted: &Pasted,
-    plain_here: &[Plain],
+    held_here: &Holders,
 ) -> Result<links::Ready<usize>, Unready> {
     match on {
-        Machine::Local => pasted.ready(plain_here),
+        Machine::Local => pasted.ready(held_here),
         Machine::Remote(destination) => {
             let reached = Away::reach(destination, away::ANSWER);
             let unreached = |why| Unready::Failed(format!("{destination}: {why}"));
@@ -174,9 +174,13 @@ pub fn fetch_upstream(dir: &str, branch: &str) -> ExitCode {
 mod tests {
     use std::cell::RefCell;
 
-    use lunetad::Destination;
+    use lunetad::{Destination, Directory};
 
     use super::*;
+
+    fn directory(path: &str) -> Directory {
+        Directory::parse(path.to_owned()).unwrap()
+    }
 
     fn far() -> Destination {
         "far".parse().unwrap()
@@ -191,14 +195,14 @@ mod tests {
     }
 
     fn view(id: u32, dir: &str) -> Worked {
-        let works = links::Worked { dir: dir.to_owned(), pull: None, here: false };
+        let works = links::Worked { dir: directory(dir), pull: None, here: false };
         let session = Listed::new_project("main", 1);
         Worked { session, view: ViewKey::terminal(id), works }
     }
 
     fn there(at: usize) -> links::Ready<usize> {
         let work = Readied::Link(Link::parse("https://github.com/cashubtc/cdk/pull/5").unwrap());
-        let folder = "/w/x".to_owned();
+        let folder = directory("/w/x");
         links::Ready { at: At::There(at), folder, branch: None, moved_off: false, work }
     }
 

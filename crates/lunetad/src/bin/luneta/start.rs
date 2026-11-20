@@ -165,7 +165,7 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
         What::Branch(branch) => {
             let repo = utf8(&cwd)?;
             if let Some(clone) = links::holder(repo) {
-                links::held_by_no_folder(&clone, &worktrees::plain(path)?)?;
+                links::lands(&clone, &worktrees::holders(path)?)?;
             }
             let folder = worktrees::real(&links::made(repo, &Of::Branch(branch.clone()))?)?;
             let at = Directory::parse(utf8(&folder)?.to_owned())?;
@@ -178,14 +178,14 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
 }
 
 fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
-    let dir = utf8(cwd)?.to_owned();
+    let dir = Directory::parse(utf8(cwd)?.to_owned())?;
     let dirs = worktrees::dirs(path)?.into_iter().filter(|other| *other != dir);
     let others = dirs.map(|dir| Worked { dir, pull: None, here: false }).collect::<Vec<_>>();
     let here = Worked { dir, pull: None, here: true };
     let worked = std::iter::once(here).chain(others).collect();
-    let plain = worktrees::plain(path)?;
-    let ready = Pasted::new(Work::Link(link.clone()), worked).ready(&plain).map_err(said)?;
-    let folder = PathBuf::from(&ready.folder);
+    let holders = worktrees::holders(path)?;
+    let ready = Pasted::new(Work::Link(link.clone()), worked).ready(&holders).map_err(said)?;
+    let folder = PathBuf::from(ready.folder.as_str());
     let off = Work::Link(link.clone()).off_branch(ready.branch.as_deref());
     let off = off.filter(|_| ready.moved_off);
     let agent = match (link.kind(), &off) {
@@ -195,8 +195,7 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
         },
         (Kind::Issue, Some(_)) | (Kind::Pull, _) => Vec::new(),
     };
-    let at = Directory::parse(ready.folder.clone())?;
-    let landed = worktrees::joined_as(path, &at, &link.tab(), agent.clone())?;
+    let landed = worktrees::joined_as(path, &ready.folder, &link.tab(), agent.clone())?;
     let worktree = landed.worktree();
     let left = match (link.kind(), landed, off) {
         (Kind::Pull, _, _)

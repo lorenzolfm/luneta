@@ -1896,8 +1896,8 @@ impl App {
                     Made::Pulled { menu, made }
                 });
             },
-            Asked::Pull { menu, on, work, wanted, worked, others, plain_here } => {
-                let asking = pull::Asking { on, work, wanted, worked, others, plain_here };
+            Asked::Pull { menu, on, work, wanted, worked, others, held_here } => {
+                let asking = pull::Asking { on, work, wanted, worked, others, held_here };
                 pull::prepare(menu, asking, &self.events);
             },
             Asked::Prunes { menu, on, dir } => prune::plan(menu, on, dir, &self.events),

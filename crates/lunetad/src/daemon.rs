@@ -46,7 +46,7 @@ use crate::api::{
 use crate::asks::{Asked, Step};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Ask, Changed, Lock, Made, Plain, ProjectId, Store, WorktreeId};
+use crate::projects::{Ask, Changed, Holders, Lock, Made, ProjectId, Store, WorktreeId};
 use crate::layouts::{self, Root, Unrooted};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
@@ -551,8 +551,8 @@ impl Daemon for Host {
             let answer = daemon.paste(pasted.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let plain = plain(&self.watched(None).await?)?;
-        let answer = late(move || pasted.answer(&plain).map_err(unready));
+        let holders = holders(&self.watched(None).await?)?;
+        let answer = late(move || pasted.answer(&holders).map_err(unready));
         Ok(Response::new(Box::pin(answer)))
     }
 
@@ -817,7 +817,7 @@ impl Daemon for Host {
                 Status::aborted(format!("{folder} is {of}'s worktree, and it is not opened: {why}"))
             };
             let (project, argv) = (project.get(), Vec::new());
-            let add = AddWorktree { project, folder: folder.clone(), name: None, argv };
+            let add = AddWorktree { project, folder: folder.to_string(), name: None, argv };
             let add = change_projects_request::Change::AddWorktree(add);
             let Changed { made, .. } = change_made(&layouts, add).map_err(unopened)?;
             let landed = match made {
@@ -959,10 +959,12 @@ where
     ReceiverStream::new(answered)
 }
 
-fn plain(host: &api::Host) -> Result<Vec<Plain>, Status> {
+fn holders(host: &api::Host) -> Result<Holders, Status> {
     let held = host.projects.as_ref().and_then(|projects| projects.held.as_ref());
     match held.expect("lunetad's own host says whether it keeps its projects") {
-        api::projects::Held::Kept(kept) => Plain::of_api(&kept.projects).map_err(Status::internal),
+        api::projects::Held::Kept(kept) => {
+            Holders::of_api(&kept.projects).map_err(Status::internal)
+        },
         api::projects::Held::Unkept(why) => {
             let unkept = format!("nothing made: lunetad keeps no projects: {why}");
             Err(Status::failed_precondition(unkept))

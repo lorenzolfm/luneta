@@ -20,7 +20,7 @@ use crate::api::{On, PasteRequest, PasteResponse};
 use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common};
 use crate::program::{self, Ran};
-use crate::projects::{self, Dir, Plain};
+use crate::projects::{self, Dir, Holders, Name, Spot, SPOT_LOOK};
 use crate::{zoxide, Destination, Directory};
 
 pub(crate) mod sync;
@@ -501,7 +501,7 @@ fn remote(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worked {
-    pub dir: String,
+    pub dir: Directory,
     pub pull: Option<Link>,
     pub here: bool,
 }
@@ -515,7 +515,7 @@ pub enum At<P> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ready<P> {
     pub at: At<P>,
-    pub folder: String,
+    pub folder: Directory,
     pub branch: Option<String>,
     pub moved_off: bool,
     pub work: Readied,
@@ -550,6 +550,7 @@ impl Ready<usize> {
             Readied::Link(_) => None,
             Readied::File { real } => Some(real),
         };
+        let folder = folder.into();
         PasteResponse { at: Some(at), folder, branch, file, at_head: false, moved_off }
     }
 }
@@ -631,9 +632,7 @@ impl Pasted {
             return Err(format!("worked: more than {WORKED_MAX} views"));
         }
         let view = |AskedWorked { dir, pull, here }| {
-            if !dir.starts_with('/') {
-                return Err(format!("worked: {dir:?} is no absolute path"));
-            }
+            let dir = Directory::parse(dir).map_err(|why| format!("worked: {why}"))?;
             let pull = pull
                 .map(|page| Link::parse(&page).ok_or(page))
                 .transpose()
@@ -647,7 +646,7 @@ impl Pasted {
     #[must_use]
     pub fn asked(&self, on: Option<On>) -> PasteRequest {
         let view = |Worked { dir, pull, here }: &Worked| AskedWorked {
-            dir: dir.clone(),
+            dir: dir.clone().into(),
             pull: pull.as_ref().map(Link::url),
             here: *here,
         };
@@ -663,16 +662,16 @@ impl Pasted {
         PasteRequest { on, work: Some(work), worked, at_head, reads_moved_off }
     }
 
-    pub fn ready(&self, plain: &[Plain]) -> Result<Ready<usize>, Unready> {
+    pub fn ready(&self, holders: &Holders) -> Result<Ready<usize>, Unready> {
         let (worked, reads_moved_off) = (self.worked.as_slice(), self.reads_moved_off);
         match &self.work {
-            Work::Link(link) => ready(link, self.wanted, reads_moved_off, worked, plain),
-            Work::File(file) => ready_file(file, reads_moved_off, worked, plain),
+            Work::Link(link) => ready(link, self.wanted, reads_moved_off, worked, holders),
+            Work::File(file) => ready_file(file, reads_moved_off, worked, holders),
         }
     }
 
-    pub fn answer(&self, plain: &[Plain]) -> Result<PasteResponse, Unready> {
-        let answer = self.ready(plain)?.answer();
+    pub fn answer(&self, holders: &Holders) -> Result<PasteResponse, Unready> {
+        let answer = self.ready(holders)?.answer();
         Ok(PasteResponse { at_head: self.wanted == Wanted::AtHead, ..answer })
     }
 
@@ -705,9 +704,7 @@ impl Pasted {
             return Err("started no review: its lunetad is too old to sync with the pull request"
                 .to_owned());
         }
-        if !folder.starts_with('/') {
-            return Err(format!("folder: {folder:?} is no absolute path"));
-        }
+        let folder = Directory::parse(folder).map_err(|why| format!("folder: {why}"))?;
         let work = match (&self.work, file) {
             (Work::Link(link), None) => Readied::Link(link.clone()),
             (Work::Link(_), Some(file)) => return Err(format!("file: {file:?} is of no link")),
@@ -717,9 +714,11 @@ impl Pasted {
             },
             (Work::File(_), None) => return Err("it does not say where the file is".to_owned()),
         };
-        let place = |at: u32| usize::try_from(at).unwrap_or(usize::MAX);
         let at = match at {
-            Some(paste_response::At::There(at)) => At::There(place(at)),
+            Some(paste_response::At::There(at)) => {
+                let at = usize::try_from(at);
+                At::There(at.map_err(|_| "there: it names a view luneta did not send".to_owned())?)
+            },
             Some(paste_response::At::Unopened(())) => At::Unopened,
             None => {
                 return Err("it says where the key goes in words this luneta cannot read, as a \
@@ -736,7 +735,7 @@ fn ready(
     wanted: Wanted,
     reads_moved_off: bool,
     worked: &[Worked],
-    plain: &[Plain],
+    holders: &Holders,
 ) -> Result<Ready<usize>, Unready> {
     let mut seen: HashMap<String, Looked> = HashMap::new();
     let mut hosts: HashMap<String, Option<String>> = HashMap::new();
@@ -749,18 +748,18 @@ fn ready(
         Some(Found::There(at)) => {
             kind_holds(link)?;
             let dir = &worked[at].dir;
-            synced(dir, link, wanted, None)?;
-            let (folder, branch) = (dir.clone(), branch(dir));
+            synced(dir.as_str(), link, wanted, None)?;
+            let (folder, branch) = (dir.clone(), branch(dir.as_str()));
             let work = Readied::Link(link.clone());
             return Ok(Ready { at: At::There(at), folder, branch, moved_off: false, work });
         },
-        Some(Found::InClone(at)) => worked[at].dir.clone(),
+        Some(Found::InClone(at)) => worked[at].dir.to_string(),
         None => match clone(link, &mut repository_of)? {
             Some(dir) => dir,
             None => return Err(no_clone(link, &seen)),
         },
     };
-    held_by_no_folder(&repository, plain)?;
+    lands(&repository, holders)?;
     kind_holds(link)?;
     let work = Readied::Link(link.clone());
     let remote = seen.get(&repository).and_then(Looked::remote);
@@ -774,7 +773,7 @@ fn ready(
         base(&repository, remote, &branch)?;
     }
     let ready = made_worktree(&repository, &link.wt(), worked, work)?;
-    synced(&ready.folder, link, wanted, remote)?;
+    synced(ready.folder.as_str(), link, wanted, remote)?;
     Ok(ready)
 }
 
@@ -791,12 +790,23 @@ fn synced(
     }
 }
 
-pub fn held_by_no_folder(repository: &str, plain: &[Plain]) -> Result<(), String> {
+pub fn lands(repository: &str, holders: &Holders) -> Result<(), String> {
     let real = directory(repository).ok_or_else(|| format!("{repository} is no folder now"))?;
-    let real = Dir::parse(&real).map_err(|why| format!("{repository}: {why}"))?;
-    match plain.iter().find(|it| it.dir.below(&real).is_some()) {
-        Some(held) => Err(format!("nothing made: {}", projects::held_by_folder(&real, held))),
-        None => Ok(()),
+    let real = Dir::parse(real.as_str()).map_err(|why| format!("{repository}: {why}"))?;
+    if let Some(held) = holders.plain.iter().find(|it| it.dir.below(&real).is_some()) {
+        return Err(format!("nothing made: {}", projects::held_by_folder(&real, held)));
+    }
+    let spot = Spot::of(&real, SPOT_LOOK).map_err(|why| format!("nothing made: {why}"))?;
+    let root = spot.dir();
+    if !spot.is_clone() || holders.clones.contains(root) {
+        return Ok(());
+    }
+    match Name::of_folder(root) {
+        Ok(_) => Ok(()),
+        Err(why) => Err(format!(
+            "nothing made: no project holds {}, and one made for it cannot be named: {why}",
+            root.as_str()
+        )),
     }
 }
 
@@ -814,12 +824,12 @@ fn ready_file(
     file: &File,
     reads_moved_off: bool,
     worked: &[Worked],
-    plain: &[Plain],
+    holders: &Holders,
 ) -> Result<Ready<usize>, Unready> {
     let real = file.real()?;
     let repository = file.repository(&real)?;
     wt_made(&repository)?;
-    held_by_no_folder(&repository, plain)?;
+    lands(&repository, holders)?;
     let branch = file.branch();
     let work = Readied::File { real };
     if reads_moved_off && let Some(moved) = moved_off(&repository, &branch)? {
@@ -830,7 +840,7 @@ fn ready_file(
 }
 
 struct MovedOff {
-    folder: String,
+    folder: Directory,
     on: Option<String>,
 }
 
@@ -885,11 +895,11 @@ fn made_worktree(
 ) -> Result<Ready<usize>, Unready> {
     let folder = worktree(dir, of)?;
     let at = opened_in(&folder, worked);
-    Ok(Ready { at, branch: branch(&folder), moved_off: false, folder, work })
+    Ok(Ready { at, branch: branch(folder.as_str()), moved_off: false, folder, work })
 }
 
-fn opened_in(folder: &str, worked: &[Worked]) -> At<usize> {
-    let in_it = worked.iter().enumerate().filter(|(_, it)| it.dir == folder);
+fn opened_in(folder: &Directory, worked: &[Worked]) -> At<usize> {
+    let in_it = worked.iter().enumerate().filter(|(_, it)| it.dir == *folder);
     match in_it.min_by_key(|(at, it)| (!it.here, *at)) {
         Some((at, _)) => At::There(at),
         None => At::Unopened,
@@ -914,7 +924,7 @@ fn found(
         return Some(Found::There(at));
     }
     let in_clone = worked.iter().enumerate().filter_map(|(at, it)| {
-        let repository = repository_of(&it.dir).filter(|of| of.layout == Layout::Wt)?;
+        let repository = repository_of(it.dir.as_str()).filter(|of| of.layout == Layout::Wt)?;
         Some((!it.here, repository.by, at))
     });
     in_clone.min().map(|(_, _, at)| Found::InClone(at))
@@ -1096,7 +1106,7 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
 
-pub fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
+pub fn worktree(dir: &str, of: &Of) -> Result<Directory, Unready> {
     let mut luneta = Command::new(luneta()?);
     git::local(luneta.args(["worktree", "--repo", dir, "--", &of.to_string()]));
     let ran = program::run_alone(&mut luneta, MAKING)
@@ -1104,7 +1114,7 @@ pub fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
     worktree_said(ran)
 }
 
-fn worktree_said(ran: Ran) -> Result<String, Unready> {
+fn worktree_said(ran: Ran) -> Result<Directory, Unready> {
     match ran {
         Ran::Ended { status, stdout, .. } if status.success() => {
             let printed = String::from_utf8_lossy(&stdout);
@@ -1254,9 +1264,9 @@ fn wt_made(dir: &str) -> Result<(), String> {
     }
 }
 
-fn directory(path: &str) -> Option<String> {
+fn directory(path: &str) -> Option<Directory> {
     let real = fs::canonicalize(path).ok().filter(|real| real.is_dir())?;
-    real.into_os_string().into_string().ok()
+    Directory::parse(real.into_os_string().into_string().ok()?).ok()
 }
 
 pub(crate) fn failure(stderr: &str) -> Option<String> {
@@ -1278,7 +1288,7 @@ mod tests {
 
     fn worked(dir: &str, pull: Option<&str>, here: bool) -> Worked {
         let pull = pull.map(|page| Link::parse(page).expect("a pull request's page"));
-        Worked { dir: dir.to_owned(), pull, here }
+        Worked { dir: directory(dir), pull, here }
     }
 
     fn by_wt(by: Remote) -> Repository {
@@ -1919,7 +1929,7 @@ mod tests {
         let of_link = || Readied::Link(issue());
         let of_file = || Readied::File { real: "/w/cdk/main/plan.md".to_owned() };
         for at in [At::There(1), At::Unopened] {
-            let folder = "/w/cdk/issue-2736".to_owned();
+            let folder = directory("/w/cdk/issue-2736");
             let branch = Some("issue-2736".to_owned());
             let ready = Ready { at, folder, branch, moved_off: false, work: of_link() };
             assert_eq!(asked_of_link.answered(ready.clone().answer()), Ok(ready.clone()));
@@ -1928,7 +1938,7 @@ mod tests {
         }
         let there = |work| Ready {
             at: At::There(1),
-            folder: "/w/x".to_owned(),
+            folder: directory("/w/x"),
             branch: None,
             moved_off: false,
             work,
@@ -1952,7 +1962,7 @@ mod tests {
     fn an_answer_that_does_not_say_the_worktree_is_at_the_head_is_refused() {
         let asked = Pasted::new(Work::Link(link()), Vec::new()).wanting(Wanted::AtHead);
         let at = At::There(0);
-        let (folder, branch, work) = ("/w/x".to_owned(), None, Readied::Link(link()));
+        let (folder, branch, work) = (directory("/w/x"), None, Readied::Link(link()));
         let ready = Ready { at, folder, branch, moved_off: false, work };
         let synced = PasteResponse { at_head: true, ..ready.clone().answer() };
         assert_eq!(asked.answered(synced), Ok(ready.clone()));
@@ -2006,7 +2016,7 @@ mod tests {
     fn a_place_names_the_view_luneta_said_of_it() {
         fn ready<P>(at: At<P>) -> Ready<P> {
             let work = Readied::File { real: "/w/plan.md".to_owned() };
-            Ready { at, folder: "/w".to_owned(), branch: None, moved_off: false, work }
+            Ready { at, folder: directory("/w"), branch: None, moved_off: false, work }
         }
         let views = ["dots:1", "cdk:4"];
         assert_eq!(ready(At::There(1)).placed(&views), Ok(ready(At::There("cdk:4"))));
