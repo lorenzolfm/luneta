@@ -34,7 +34,7 @@ const MAIN: &str = "it is the repository's main worktree";
 const LOCKED: &str = "it is locked";
 const HOLDS_ANOTHER: &str = "another worktree is in it";
 const CHANGED: &str = "it has modified or untracked files";
-pub const A_VIEW: &str = "it has a view";
+const A_VIEW: &str = "it has a view";
 const AN_AGENT: &str = "an agent works in it";
 const RUNS_HERE: &str = "this runs from it";
 const DEFAULT: &str = "it is the default branch";
@@ -1042,6 +1042,12 @@ mod tests {
         held.projects[0].holds = None;
         let why = "lunetad says not what project luneta holds";
         assert_eq!(Occupied::of(&viewed(unsaid)), Err(why.to_owned()));
+    }
+
+    #[test]
+    fn the_luneta_skill_quotes_why_a_worktree_with_a_view_stays() {
+        let skill = crate::asks::SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(skill.contains(A_VIEW), "the skill quotes {A_VIEW:?}");
     }
 
     #[test]

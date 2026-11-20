@@ -69,10 +69,15 @@ luneta info
   than this luneta. `luneta watch [--after <pid>:<seq>]` is for programs, not
   for you.
 
+In luneta's ask box, only the commands its prompt lists run, and Claude Code
+denies the others. Where one you need is denied there, tell the user to run it
+in a terminal instead.
+
 ## What the user does in luneta
 
-Past what `start` and `rebase` open, no command opens, closes, moves or renames
-a view, a worktree's row or a project, and only `start` takes the user anywhere.
+Past what `start` and `rebase` open, the worktrees `prune` deletes, and what
+`terminate` ends and forgets, no command opens, closes, moves or renames a view,
+a worktree's row or a project, and only `start` takes the user anywhere.
 The user does those in luneta, whose menu (`Alt a`) and palette (`Super k`) list
 each action by name. When they ask you for one, tell them which:
 
@@ -100,8 +105,8 @@ luneta start https://github.com/o/app/pull/7   # a pull request, checked out in 
 - A folder of the name goes before a branch of it. `~` is the user's home,
   quoted or not. Quote `'#42'`, or the shell drops it as a comment.
 - A folder inside a worktree starts that worktree. A clone's root starts the
-  worktree used last there. Where none was used, it opens nothing, prints the
-  root, and says on stderr to start a branch in it.
+  worktree used last there. Where it has no worktree, it opens nothing, prints
+  the root, and says on stderr to start a branch in it.
 - A branch needs a clone `wt clone` made, and you in it: in a plain clone it
   makes nothing and says why. Tell the user.
 - `'#42'` asks gh in the directory you run in, so run it in the issue's

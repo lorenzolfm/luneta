@@ -95,7 +95,7 @@ impl std::fmt::Display for Label {
     }
 }
 
-pub const MOVES: [(Label, &str); 10] = [
+pub(crate) const MOVES: [(Label, &str); 10] = [
     (Label::Two('j', 'k'), "Next row, row before"),
     (Label::Two('g', 'g'), "First row"),
     (Label::char('G'), "Last row"),
@@ -108,7 +108,7 @@ pub const MOVES: [(Label, &str); 10] = [
     (Label::code(KeyCode::Esc), "Back to the view"),
 ];
 
-pub const MENU_MOVES: [(Label, &str); 3] = [
+pub(crate) const MENU_MOVES: [(Label, &str); 3] = [
     (Label::code(KeyCode::Tab), "use another agent"),
     (Label::code(KeyCode::Backspace), "back a group"),
     (Label::code(KeyCode::Esc), "close"),

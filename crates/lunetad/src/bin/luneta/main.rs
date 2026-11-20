@@ -181,7 +181,6 @@ mod tests {
 
     use clap::{ArgAction, CommandFactory as _};
     use lunetad::asks::SKILL;
-    use lunetad::prunes;
 
     use super::*;
     use crate::actions::Action;
@@ -478,7 +477,7 @@ mod tests {
     #[test]
     fn the_luneta_skill_quotes_what_luneta_says_and_how_it_exits() {
         let skill = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
-        let says = [prunes::A_VIEW, rebase::IN_DOUBT, prune::UNTOLD, start::ELSEWHERE];
+        let says = [rebase::IN_DOUBT, prune::UNTOLD, start::ELSEWHERE];
         let unsaid: Vec<&str> = says.into_iter().filter(|said| !skill.contains(said)).collect();
         assert_eq!(unsaid, Vec::<&str>::new());
         let codes = [0, 1, agreed::PLANNED, start::UNFINISHED, daemon::NONE_RUNS];
