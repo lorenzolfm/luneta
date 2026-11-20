@@ -7,6 +7,7 @@ use tonic::Status;
 
 use crate::api;
 use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
+use crate::folder::Unreached;
 use crate::id::{ClientId, TerminalId};
 use crate::terminal::{self, Exit, Handle, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
@@ -31,7 +32,7 @@ pub enum Listed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ending {
     Emptied,
-    Unreached(String),
+    Unreached(Unreached),
 }
 
 #[derive(Default)]
@@ -87,8 +88,8 @@ impl Mux {
         self.change(Model::end_if_empty);
     }
 
-    pub fn end_unreached(&self, why: String) -> Option<usize> {
-        self.change(|model| model.end_unreached(why))
+    pub fn end_unreached(&self, unreached: Unreached) -> Option<usize> {
+        self.change(|model| model.end_unreached(unreached))
     }
 
     fn lock(&self) -> MutexGuard<'_, Model> {
@@ -108,6 +109,9 @@ impl Mux {
             Some(ending) => Listed::Ended(ending.clone()),
         };
         self.listing.send_if_modified(|said| {
+            if let Listed::Ended(_) = said {
+                assert_eq!(*said, listed, "a listing that ended stays as it ended");
+            }
             let modified = *said != listed;
             *said = listed;
             modified
@@ -257,8 +261,8 @@ impl Model {
             Some(Ending::Emptied) => {
                 Err(Status::unavailable("luneta-mux is ending, as nothing is left in it"))
             },
-            Some(Ending::Unreached(why)) => {
-                Err(Status::unavailable(format!("luneta-mux is ending: {why}")))
+            Some(Ending::Unreached(unreached)) => {
+                Err(Status::unavailable(format!("luneta-mux is ending: {unreached}")))
             },
         }
     }
@@ -269,7 +273,7 @@ impl Model {
         }
     }
 
-    fn end_unreached(&mut self, why: String) -> Option<usize> {
+    fn end_unreached(&mut self, unreached: Unreached) -> Option<usize> {
         if self.ending.is_some() {
             return None;
         }
@@ -277,7 +281,7 @@ impl Model {
         for terminal in self.terminals.drain(..) {
             terminal.handle.close();
         }
-        self.end_as(Ending::Unreached(why));
+        self.end_as(Ending::Unreached(unreached));
         Some(closed)
     }
 

@@ -49,7 +49,11 @@ impl Claim {
     }
 
     pub fn bound(&self) -> io::Result<Bound> {
-        Bound::of(&self.socket)
+        Bound::of(&self.socket).map_err(|error| {
+            let socket = self.socket.display();
+            let left = format!("{socket} is left as it is, as it is not known to be ours: {error}");
+            io::Error::new(error.kind(), left)
+        })
     }
 }
 
@@ -60,11 +64,33 @@ pub struct Bound {
     inode: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Found {
     Ours,
+    Lost(Unreached),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unreached {
+    socket: PathBuf,
+    lost: Lost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lost {
     Gone,
     Replaced,
+}
+
+impl fmt::Display for Unreached {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let socket = self.socket.display();
+        match self.lost {
+            Lost::Gone => write!(f, "{socket} is gone")?,
+            Lost::Replaced => write!(f, "{socket} is another file now")?,
+        }
+        write!(f, ", so nothing reaches luneta-mux again")
+    }
 }
 
 impl Bound {
@@ -72,8 +98,7 @@ impl Bound {
         assert!(socket.is_absolute(), "{} is looked at from any folder", socket.display());
         let found = fs::symlink_metadata(socket)?;
         if !found.file_type().is_socket() {
-            let what = format!("{} is no socket just after it was bound", socket.display());
-            return Err(io::Error::other(what));
+            return Err(io::Error::other("it is no socket just after it was bound"));
         }
         Ok(Bound { socket: socket.to_owned(), device: found.dev(), inode: found.ino() })
     }
@@ -84,6 +109,7 @@ impl Bound {
     }
 
     pub fn found(&self) -> io::Result<Found> {
+        let lost = |lost| Ok(Found::Lost(Unreached { socket: self.socket.clone(), lost }));
         match fs::symlink_metadata(&self.socket) {
             Ok(found)
                 if found.file_type().is_socket()
@@ -91,20 +117,20 @@ impl Bound {
             {
                 Ok(Found::Ours)
             },
-            Ok(_) => Ok(Found::Replaced),
+            Ok(_) => lost(Lost::Replaced),
             Err(error)
                 if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
             {
-                Ok(Found::Gone)
+                lost(Lost::Gone)
             },
             Err(error) => Err(error),
         }
     }
 
     pub fn unbind(&self) -> io::Result<()> {
-        if self.found()? != Found::Ours {
+        let Found::Ours = self.found()? else {
             return Ok(());
-        }
+        };
         match fs::remove_file(&self.socket) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),

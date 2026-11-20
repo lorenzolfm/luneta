@@ -54,13 +54,16 @@ fn a_server_whose_folder_goes_ends_and_so_do_its_terminals_programs() {
         assert_eq!(programs.len(), 2);
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         fs::remove_dir_all(server.socket().parent().unwrap()).unwrap();
-        let ending = loop {
-            match watch.message().await {
-                Ok(Some(_)) => {},
-                Ok(None) => panic!("the watch ended as if every terminal had ended"),
-                Err(ending) => break ending,
+        let ending = tokio::time::timeout(PATIENCE, async {
+            loop {
+                match watch.message().await {
+                    Ok(Some(_)) => {},
+                    Ok(None) => panic!("the watch ended as if every terminal had ended"),
+                    Err(ending) => break ending,
+                }
             }
-        };
+        });
+        let ending = ending.await.expect("the watch ended within PATIENCE");
         let socket = server.socket();
         let gone = format!("{} is gone, so nothing reaches luneta-mux again", socket.display());
         assert_eq!((ending.code(), ending.message()), (Code::Unavailable, gone.as_str()));

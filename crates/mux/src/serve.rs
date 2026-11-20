@@ -65,7 +65,9 @@ impl mux_server::Mux for Service {
         let listings = WatchStream::new(self.mux.watched()).map_while(|listed| match listed {
             Listed::Holds(listing) => Some(Ok(listing)),
             Listed::Ended(Ending::Emptied) => None,
-            Listed::Ended(Ending::Unreached(why)) => Some(Err(Status::unavailable(why))),
+            Listed::Ended(Ending::Unreached(unreached)) => {
+                Some(Err(Status::unavailable(unreached.to_string())))
+            },
         });
         Ok(Response::new(Box::pin(listings)))
     }
@@ -207,32 +209,34 @@ impl Stream for Viewed {
 
 async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
     let watched = mux.watched();
-    let mut unsure = false;
+    let mut error_said = false;
     loop {
         tokio::time::sleep(SOCKET_LOOK).await;
         if matches!(*watched.borrow(), Listed::Ended(_)) {
             return;
         }
-        let socket = bound.socket().display();
-        let why = match bound.found() {
+        let unreached = match bound.found() {
             Ok(Found::Ours) => {
-                unsure = false;
+                error_said = false;
                 continue;
             },
-            Ok(Found::Gone) => format!("{socket} is gone"),
-            Ok(Found::Replaced) => format!("{socket} is another file now"),
+            Ok(Found::Lost(unreached)) => unreached,
             Err(error) => {
-                if !unsure {
+                if !error_said {
+                    let socket = bound.socket().display();
                     eprintln!("luneta-mux: {socket} is not looked at, so it runs on: {error}");
                 }
-                unsure = true;
+                error_said = true;
                 continue;
             },
         };
-        let why = format!("{why}, so nothing reaches luneta-mux again");
-        if let Some(closed) = mux.end_unreached(why.clone()) {
-            let terminals = if closed == 1 { "terminal" } else { "terminals" };
-            eprintln!("luneta-mux: {why}: it closed its {closed} {terminals} and ends");
+        if let Some(closed) = mux.end_unreached(unreached.clone()) {
+            let closed = match closed {
+                0 => "it held no terminal".to_owned(),
+                1 => "it closed its 1 terminal".to_owned(),
+                closed => format!("it closed its {closed} terminals"),
+            };
+            eprintln!("luneta-mux: {unreached}: {closed} and ends");
         }
         assert!(matches!(*watched.borrow(), Listed::Ended(_)), "the listing ends with the server");
         return;
@@ -254,7 +258,13 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
         tokio::time::sleep(FIRST_TERMINAL).await;
         unused.end_if_unused();
     });
-    tokio::spawn(end_once_unreached(Arc::clone(&mux), bound.clone()));
+    let looked = tokio::spawn(end_once_unreached(Arc::clone(&mux), bound.clone()));
+    tokio::spawn(async move {
+        if let Err(error) = looked.await {
+            eprintln!("luneta-mux: its look at its socket failed, so it aborts: {error}");
+            std::process::abort();
+        }
+    });
     let ended = async move {
         while matches!(*watched.borrow_and_update(), Listed::Holds(_)) {
             if watched.changed().await.is_err() {
