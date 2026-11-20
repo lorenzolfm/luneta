@@ -91,9 +91,10 @@ impl Ask {
     }
 
     pub fn homed(number: u64, on: &Machine, dir: &str, project: &str) -> Self {
-        let works = match on {
-            Machine::Local => Works::Here(PathBuf::from(dir)),
-            Machine::Remote(on) => Works::There { on: on.clone(), cwd: Some(dir.to_owned()) },
+        let works = match (on, Directory::parse(dir.to_owned())) {
+            (_, Err(why)) => Works::Unread { why: format!("where project {project} is, {why}") },
+            (Machine::Local, Ok(dir)) => Works::Here(PathBuf::from(dir.as_str())),
+            (Machine::Remote(on), Ok(dir)) => Works::There { on: on.clone(), cwd: Some(dir) },
         };
         let highlighted = format!(
             "The user asks from the work view of project {project}, in {dir}, which lists the \
@@ -580,6 +581,14 @@ mod tests {
             let unread = Ask::new(6, &unread_on(on), Path::new("/w"));
             assert_eq!(unread.works, Works::Unread { why: why.clone() });
             assert_eq!(top(&unread), "┌─ Ask ────────────────────────────────┐");
+        }
+
+        let home = |on: &Machine, dir: &str| Ask::homed(7, on, dir, "luneta").works;
+        assert_eq!(home(&Machine::Local, "/w/luneta"), Works::Here(PathBuf::from("/w/luneta")));
+        assert_eq!(home(&nixos(), "/w/luneta"), there(Some("/w/luneta")));
+        let why = "where project luneta is, \"w\" is no absolute path".to_owned();
+        for on in [Machine::Local, nixos()] {
+            assert_eq!(home(&on, "w"), Works::Unread { why: why.clone() });
         }
     }
 
