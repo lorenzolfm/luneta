@@ -67,7 +67,7 @@ use crate::{
     projects, release, remote, skills, topics, watch, work, zoxide, Harness,
 };
 
-const SWEEP: Duration = Duration::from_secs(2);
+pub const SWEEP: Duration = Duration::from_secs(2);
 
 const GIT_STATUS_SWEEP: Duration = Duration::from_secs(5);
 
@@ -79,7 +79,7 @@ const PENDING_CHECKS_SWEEP: Duration = Duration::from_secs(15);
 
 const KEEPS_SWEEP: Duration = Duration::from_hours(1);
 
-const WATCH: Duration = Duration::from_secs(4);
+pub const WATCH: Duration = Duration::from_secs(4);
 
 const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
 
@@ -97,7 +97,7 @@ const UNTALKED: &str = "the turn ended with no answer, as the daemon's runner of
 
 const IN_FLIGHT: u32 = 128 * 1024;
 
-const ALONE: Duration = Duration::from_secs(30);
+pub const ALONE: Duration = Duration::from_secs(30);
 
 const _: () =
     assert!(ALONE.as_secs() > SWEEP.as_secs(), "lunetad is alone over more than one look");

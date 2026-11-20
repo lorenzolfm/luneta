@@ -2,6 +2,7 @@
 let
   inherit (pkgs) lib;
   comments = ../.config/ast-grep/comments;
+  waits = ../.config/ast-grep/waits;
   grammar = language: "${pkgs.tree-sitter-grammars."tree-sitter-${language}"}/parser";
   extensions = {
     fish = [ "fish" ];
@@ -32,8 +33,14 @@ let
   };
   config = pkgs.writeText "comments.yml" (
     builtins.toJSON {
-      ruleDirs = [ "${comments}/rules" ];
-      testConfigs = [ { testDir = "${comments}/rule-tests"; } ];
+      ruleDirs = [
+        "${comments}/rules"
+        "${waits}/rules"
+      ];
+      testConfigs = [
+        { testDir = "${comments}/rule-tests"; }
+        { testDir = "${waits}/rule-tests"; }
+      ];
       customLanguages = builtins.mapAttrs (language: extensions: {
         libraryPath = grammar language;
         inherit extensions;

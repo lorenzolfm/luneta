@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{BufRead, BufReader};
@@ -6,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Duration, Instant};
 
+use luneta_waits::{Patience, Span};
 use lunetad::api::{self, WatchRequest};
 use lunetad::folder::{self, Folder};
 use tempfile::TempDir;
@@ -550,17 +551,24 @@ impl Running {
         (self.child.stdin.take().unwrap(), self.child.stdout.take().unwrap())
     }
 
-    pub fn ended_within(&mut self, limit: Duration) -> Option<ExitStatus> {
-        let deadline = Instant::now() + limit;
-        loop {
-            if let Some(ended) = self.child.try_wait().unwrap() {
-                return Some(ended);
-            }
-            if Instant::now() >= deadline {
-                return None;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
+    pub fn ended(&mut self, what: &str) -> ExitStatus {
+        luneta_waits::ended(what, &mut self.child)
+    }
+
+    pub async fn ended_async(&mut self, what: &str) -> ExitStatus {
+        luneta_waits::ended_async(what, &mut self.child).await
+    }
+
+    pub fn exit_status(&mut self) -> Option<ExitStatus> {
+        self.child.try_wait().unwrap()
+    }
+
+    pub fn runs_on(&mut self, what: &str) {
+        luneta_waits::runs_on(what, &mut self.child);
+    }
+
+    pub fn runs_through(&mut self, span: Span, what: &str) {
+        luneta_waits::through(span, what, || self.child.try_wait().unwrap());
     }
 }
 
@@ -582,19 +590,40 @@ impl Daemon {
         self.process.pid()
     }
 
-    pub fn ended_within(&mut self, limit: Duration) -> Option<ExitStatus> {
-        self.process.ended_within(limit)
+    pub fn ended(&mut self, what: &str) -> ExitStatus {
+        self.process.ended(what)
     }
 
-    pub fn said_after(&mut self, wait: Duration) -> &[String] {
-        let deadline = Instant::now() + wait;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let Ok(line) = self.heard.recv_timeout(left) else {
-                return &self.said;
-            };
+    pub async fn ended_async(&mut self, what: &str) -> ExitStatus {
+        self.process.ended_async(what).await
+    }
+
+    pub fn exit_status(&mut self) -> Option<ExitStatus> {
+        self.process.exit_status()
+    }
+
+    pub fn runs_on(&mut self, what: &str) {
+        self.process.runs_on(what);
+    }
+
+    pub fn runs_through(&mut self, span: Span, what: &str) {
+        self.process.runs_through(span, what);
+    }
+
+    pub fn said(&mut self) -> &[String] {
+        self.said.extend(self.heard.try_iter());
+        &self.said
+    }
+
+    pub fn says(&mut self, what: &str, said: impl Fn(&str) -> bool) -> &[String] {
+        let patience = Patience::begun();
+        while !self.said.iter().any(|line| said(line)) {
+            let before = &self.said;
+            let waited = fmt::from_fn(|f| write!(f, "{what}, after {before:?}"));
+            let line = patience.heard(waited, &self.heard);
             self.said.push(line);
         }
+        &self.said
     }
 }
 
@@ -627,8 +656,7 @@ pub fn answered(command: &mut Command) -> Output {
     let child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let (tell, heard) = mpsc::channel();
     thread::spawn(move || tell.send(child.wait_with_output()));
-    let output = heard.recv_timeout(Duration::from_secs(15));
-    output.expect("it never answered, or what it left running holds what it writes").unwrap()
+    luneta_waits::heard("it answers, and leaves nothing running that holds what it writes", &heard).unwrap()
 }
 
 pub fn info(vars: Vars) -> String {
@@ -637,15 +665,4 @@ pub fn info(vars: Vars) -> String {
     let why = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "luneta info failed: {why}");
     said
-}
-
-pub fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(found) = check() {
-            return found;
-        }
-        assert!(Instant::now() < deadline, "never came to be: {what}");
-        thread::sleep(Duration::from_millis(50));
-    }
 }

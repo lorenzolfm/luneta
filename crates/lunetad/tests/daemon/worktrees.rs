@@ -3,12 +3,13 @@ use std::path::Path;
 use std::process::Output;
 use std::sync::mpsc;
 
+use luneta_waits::eventually;
 use lunetad::api::projects::Held;
 use lunetad::api::Project;
 use lunetad::projects::{Size, WorktreeId};
 use lunetad::{Asked, Beside, Heard, Where};
 
-use crate::host::{eventually, folder_in, script, Host, LUNETA};
+use crate::host::{folder_in, script, Host, LUNETA};
 use crate::own::Owned;
 use crate::projects::{project, worktree};
 use crate::worktree::{cloned_as_wt, git};
@@ -210,7 +211,7 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     git(&bare, &["config", &format!("url.{}.insteadOf", up.display()), github]);
     host.gh.issue(7, "https://github.com/o/n/issues/7");
     let asked = host.home.path().join("claude-asked");
-    let claude = format!("printf '%s\\n' \"$@\" > {}\nexec sleep 600\n", asked.display());
+    let claude = format!("printf '%s\\n' \"$@\" > {0}.part && mv {0}.part {0}\nexec sleep 600\n", asked.display());
     script(&host.bin().join("claude"), &claude);
 
     let issue = clone.join("issue-7");

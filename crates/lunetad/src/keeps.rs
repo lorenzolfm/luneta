@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::folder;
 
-const KEPT: Duration = Duration::from_hours(24);
+pub const KEPT: Duration = Duration::from_hours(24);
 
 const PATTERN: [char; 7] = ['*', '?', '[', ']', '\\', '(', ')'];
 

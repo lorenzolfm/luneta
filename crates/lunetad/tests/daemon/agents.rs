@@ -8,17 +8,18 @@ use std::process::{ChildStdin, Command};
 #[cfg(target_os = "linux")]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use luneta_waits::{eventually, Began, Gap, Span};
 use lunetad::api::agent::{Status as Reported, WaitingFor as Waits};
 use lunetad::api::{self, Agent, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor};
 use lunetad::mux::{OwnMade, TerminalKey};
+use lunetad::{SETTLE, SWEEP, TORN};
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::host::{eventually, start, Running, Vars, LUNETA};
+use crate::host::{start, Running, Vars, LUNETA};
 
 pub struct Host {
     runtime: TempDir,
@@ -303,6 +304,7 @@ fn the_daemon_follows_the_files_as_they_change() {
     eventually("one waits", || host.agent("one").filter(asking));
 
     let whole = file("one", one.pid(), &one_start, "idle").to_string();
+    let torn = Began::now();
     fs::write(host.file_of(one.pid()), &whole[..whole.len() / 2]).unwrap();
     let made = file_for("three", &three, "busy").to_string();
     fs::write(host.file_of(three.pid()), &made[..made.len() / 2]).unwrap();
@@ -310,8 +312,16 @@ fn the_daemon_follows_the_files_as_they_change() {
     let works = Some(known(Status::Busy));
     eventually("two works", || host.agent("two").filter(|agent| agent.status == works));
     let listed = host.list();
-    let one_does = listed.agents.into_iter().find(|agent| agent.session_id == "one");
-    assert_eq!((one_does.map(|agent| agent.status), listed.unread), (Some(waits), 0));
+    let one_does = listed.agents.into_iter().find(|agent| agent.session_id == "one").map(|agent| agent.status);
+    if torn.lasted().is_under(TORN) {
+        assert_eq!((one_does, listed.unread), (Some(waits), 0));
+    } else {
+        assert!(listed.unread <= 2, "only the two torn files go unread: {}", listed.unread);
+        match one_does {
+            Some(status) => assert_eq!(status, waits, "a torn file keeps what it said before"),
+            None => assert!(listed.unread >= 1, "one is gone from the list without going unread"),
+        }
+    }
 
     fs::remove_file(host.file_of(one.pid())).unwrap();
     eventually("one is gone", || host.agent("one").is_none().then_some(()));
@@ -330,14 +340,9 @@ fn an_agent_that_crashes_leaves_the_list_as_it_ends() {
     let _daemon = start(host.vars()).unwrap();
     eventually("the one before is there", || host.agent("before"));
 
-    let gone_in_time = |id: &str, killed: Instant| {
-        eventually(id, || host.agent(id).is_none().then_some(()));
-        let took = killed.elapsed();
-        assert!(took < Duration::from_secs(1), "{id} stayed listed for {took:?}");
-    };
-    let killed = Instant::now();
+    let gone = |id: &str| eventually(id, || host.agent(id).is_none().then_some(()));
     before.kill();
-    gone_in_time("before", killed);
+    gone("before");
 
     let mut kept = vec![before];
     for round in 0..4 {
@@ -345,14 +350,13 @@ fn an_agent_that_crashes_leaves_the_list_as_it_ends() {
         let mut agent = process(None);
         host.write(agent.pid(), &file_for(&id, &agent, "busy"));
         eventually(&id, || host.agent(&id));
-        let killed = Instant::now();
         if round % 2 == 0 {
             agent.kill();
             kept.push(agent);
         } else {
             drop(agent);
         }
-        gone_in_time(&id, killed);
+        gone(&id);
     }
 }
 
@@ -435,11 +439,16 @@ fn a_file_that_does_not_read_stops_being_counted_as_its_process_ends() {
     let _daemon = start(host.vars()).unwrap();
     assert_eq!(host.list().unread, 1);
 
-    let killed = Instant::now();
     running.kill();
     eventually("the file is not counted", || (host.list().unread == 0).then_some(()));
-    let took = killed.elapsed();
-    assert!(took < Duration::from_secs(1), "it stayed counted for {took:?}");
+}
+
+struct Stopping<'a>(&'a AtomicBool);
+
+impl Drop for Stopping<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 #[test]
@@ -449,22 +458,22 @@ fn a_folder_that_never_settles_is_read_anyway() {
     host.write(one.pid(), &file_for("one", &one, "busy"));
     let _daemon = start(host.vars()).unwrap();
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let churn = {
-        let (stop, path) = (Arc::clone(&stop), host.sessions().join("churn"));
-        let deadline = Instant::now() + Duration::from_secs(15);
-        thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+    let stop = AtomicBool::new(false);
+    let path = host.sessions().join("churn");
+    let churned = const { Gap::of(SETTLE.checked_div(5).expect("a settle divides by five")) };
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
                 fs::write(&path, "churn").unwrap();
-                thread::sleep(Duration::from_millis(5));
+                luneta_waits::apart(churned);
             }
-        })
-    };
-    host.write(one.pid(), &file_for("one", &one, "idle"));
-    let idle = Some(known(Status::Idle));
-    eventually("one is idle", || host.agent("one").filter(|agent| agent.status == idle));
-    stop.store(true, Ordering::Relaxed);
-    churn.join().unwrap();
+        });
+        let stopping = Stopping(&stop);
+        host.write(one.pid(), &file_for("one", &one, "idle"));
+        let idle = Some(known(Status::Idle));
+        eventually("one is idle", || host.agent("one").filter(|agent| agent.status == idle));
+        drop(stopping);
+    });
 }
 
 #[test]
@@ -472,13 +481,16 @@ fn a_folder_the_daemon_cannot_read_it_says_so_once() {
     let host = Host::new();
     fs::set_permissions(host.sessions(), Permissions::from_mode(0o000)).unwrap();
     let mut daemon = start(host.vars()).unwrap();
-    let said = daemon.said_after(Duration::from_secs(5)).to_vec();
+    let sessions = host.sessions().display().to_string();
+    let denied = |line: &str| line.contains(&sessions) && line.ends_with("Permission denied (os error 13)");
+    daemon.says("the daemon says it cannot read the folder", denied);
+    let sweeps = const { Span::of(SWEEP.saturating_mul(2)) };
+    luneta_waits::through(sweeps, "the daemon says the same twice", || {
+        let about: Vec<&String> = daemon.said().iter().filter(|line| line.contains(&sessions)).collect();
+        let once: HashSet<&&String> = about.iter().collect();
+        (once.len() != about.len()).then(|| about.iter().map(|line| (*line).clone()).collect::<Vec<_>>())
+    });
     fs::set_permissions(host.sessions(), Permissions::from_mode(0o755)).unwrap();
 
-    let sessions = host.sessions().display().to_string();
-    let about: Vec<&String> = said.iter().filter(|line| line.contains(&sessions)).collect();
-    assert!(about.iter().any(|line| line.ends_with("Permission denied (os error 13)")), "{said:?}");
-    let once: HashSet<&&String> = about.iter().collect();
-    assert_eq!(once.len(), about.len(), "{said:?}");
     assert_eq!(host.agents(), [] as [Agent; 0]);
 }

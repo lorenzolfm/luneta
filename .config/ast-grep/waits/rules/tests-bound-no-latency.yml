@@ -1,0 +1,17 @@
+id: tests-bound-no-latency
+language: rust
+files:
+  - crates/*/tests/**
+message: >-
+  A test asserts no upper bound on how long something takes, since a loaded
+  machine misses it: wait for the event, or assert a lower bound with
+  Lasted::at_least.
+rule:
+  kind: token_tree
+  regex: \bis_under\b
+  inside:
+    stopBy: end
+    kind: macro_invocation
+    has:
+      field: macro
+      regex: ^(debug_)?assert(_eq|_ne)?$

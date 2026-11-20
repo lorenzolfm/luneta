@@ -1,0 +1,58 @@
+id: tests-bound-no-latency
+snapshots:
+  fn f() { assert!(began.lasted().is_under(QUIET)); }:
+    labels:
+    - source: (began.lasted().is_under(QUIET))
+      style: primary
+      start: 16
+      end: 48
+    - source: assert
+      style: secondary
+      start: 9
+      end: 15
+    - source: assert!(began.lasted().is_under(QUIET))
+      style: secondary
+      start: 9
+      end: 48
+  fn f() { assert!(lasted.is_under(SWEEP), "{lasted:?}"); }:
+    labels:
+    - source: (lasted.is_under(SWEEP), "{lasted:?}")
+      style: primary
+      start: 16
+      end: 54
+    - source: assert
+      style: secondary
+      start: 9
+      end: 15
+    - source: assert!(lasted.is_under(SWEEP), "{lasted:?}")
+      style: secondary
+      start: 9
+      end: 54
+  fn f() { assert_eq!(lasted.is_under(SWEEP), true); }:
+    labels:
+    - source: (lasted.is_under(SWEEP), true)
+      style: primary
+      start: 19
+      end: 49
+    - source: assert_eq
+      style: secondary
+      start: 9
+      end: 18
+    - source: assert_eq!(lasted.is_under(SWEEP), true)
+      style: secondary
+      start: 9
+      end: 49
+  fn f() { debug_assert!(!lasted.is_under(SWEEP)); }:
+    labels:
+    - source: (!lasted.is_under(SWEEP))
+      style: primary
+      start: 22
+      end: 47
+    - source: debug_assert
+      style: secondary
+      start: 9
+      end: 21
+    - source: debug_assert!(!lasted.is_under(SWEEP))
+      style: secondary
+      start: 9
+      end: 47

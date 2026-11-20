@@ -7,8 +7,8 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
 
+use luneta_waits::{eventually, Began, Span};
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
     self, AskRequest, AskResponse, FileIssueRequest, FileIssueResponse, IssueRepositoriesRequest,
@@ -19,17 +19,15 @@ use lunetad::api::{
     RebaseRequest, RebaseResponse,
     TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
 };
-use lunetad::{folder, release, Claim};
+use lunetad::{folder, release, Claim, ALONE, SWEEP};
 use prost::Message as _;
 use rustix::process::{Pid, Signal};
 use tokio_stream::wrappers::UnixListenerStream;
 use tokio_stream::{pending, StreamExt as _};
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::host::{
-    answered, eventually, folder_in, info, install, script, start, Host, Running, Vars, LUNETA,
-    LUNETAD, SOCKET,
-};
+use crate::host::{answered, folder_in, info, install, script, start, Host, Running, Vars, LUNETA, LUNETAD, SOCKET};
+use crate::terminate::gone;
 
 const OLDER: &str = "0.0.1";
 
@@ -239,7 +237,7 @@ fn a_luneta_whose_daemon_finds_the_folder_held_waits_for_it() {
 fn stopped_as_it_starts(elsewhere: &tempfile::TempDir) -> PathBuf {
     let spawned = elsewhere.path().join("spawned");
     let stand_in = format!(
-        "echo >> '{}'\necho 'lunetad: listening on it' >&2\nkill -TERM $$\n",
+        "echo $$ >> '{}'\necho 'lunetad: listening on it' >&2\nkill -TERM $$\n",
         spawned.display()
     );
     script(&elsewhere.path().join("lunetad"), &stand_in);
@@ -255,8 +253,10 @@ fn a_luneta_whose_lunetad_is_stopped_as_it_starts_waits_for_the_next() {
 
     thread::scope(|scope| {
         let asking = scope.spawn(|| watch(&host, &luneta));
-        eventually("luneta starts a lunetad", || spawned.exists().then_some(()));
-        thread::sleep(Duration::from_millis(300));
+        let stopped = eventually("luneta starts a lunetad", || {
+            fs::read_to_string(&spawned).ok()?.trim().parse::<u32>().ok()
+        });
+        eventually("luneta sees its lunetad stopped", || gone(stopped).then_some(()));
         let next = start(host.vars()).unwrap();
         assert_eq!(pid(&asking.join().unwrap()), next.pid());
     });
@@ -313,11 +313,11 @@ fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     let kept = format!("but {} is 0.0.0, no newer, so luneta leaves it be", real.display());
     assert!(said.contains(&format!("lunetad {OLDER} (pid {})", older.pid())), "{said}");
     assert!(said.contains(&kept), "{said}");
-    assert_eq!(older.ended_within(Duration::ZERO), None);
+    assert_eq!(older.exit_status(), None);
 
     let current = watch(&host, Path::new(LUNETA));
     let _daemon = Detached { host: &host, pid: pid(&current) };
-    let ended = older.ended_within(Duration::from_secs(5)).expect("the older daemon runs on");
+    let ended = older.ended("luneta stops the older daemon");
     assert_eq!(ended.signal(), Some(Signal::TERM.as_raw()));
     assert_ne!(pid(&current), older.pid());
     let said = info(host.vars());
@@ -333,19 +333,19 @@ fn luneta_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
     let mut after = stand_in(&later, &stamped(u64::MAX), None);
     let said = refused(&later, Path::new(LUNETA));
     assert!(said.contains(&format!("is newer than this luneta, {}", *release::SAID)), "{said}");
-    assert_eq!(after.ended_within(Duration::ZERO), None);
+    assert_eq!(after.exit_status(), None);
 
     let host = Host::new();
     let mut before = stand_in(&host, &stamped(0), None);
     if release::BUILT.is_some() {
         let reached = pid(&watch(&host, Path::new(LUNETA)));
         let _daemon = Detached { host: &host, pid: reached };
-        assert!(before.ended_within(Duration::from_secs(5)).is_some(), "the stamped daemon runs on");
+        before.ended("luneta stops the stamped daemon");
         assert_ne!(reached, before.pid());
     } else {
         let said = refused(&host, Path::new(LUNETA));
         assert!(said.contains(&format!("lunetad {} (pid ", stamped(0))), "{said}");
-        assert_eq!(before.ended_within(Duration::ZERO), None);
+        assert_eq!(before.exit_status(), None);
     }
 }
 
@@ -370,7 +370,7 @@ fn lunetas_that_find_an_older_daemon_at_once_reach_the_one_in_its_place() {
         asking.into_iter().map(|asked| asked.join().unwrap()).collect()
     });
     let _daemon = Detached { host: &host, pid: pids[0] };
-    assert!(older.ended_within(Duration::from_secs(5)).is_some(), "the older daemon runs on");
+    older.ended("luneta stops the older daemon");
     assert!(pids.iter().all(|pid| *pid == pids[0] && *pid != older.pid()), "{pids:?}");
 }
 
@@ -383,7 +383,7 @@ fn luneta_watch_refuses_a_daemon_newer_than_it_and_leaves_it_be() {
     let both = format!("lunetad {NEWER} (pid {pid}) is newer than this luneta, {own}");
     assert!(said.contains(&both), "{said}");
     assert!(said.contains(&format!("`kill {pid}`")), "{said}");
-    assert_eq!(newer.ended_within(Duration::ZERO), None);
+    assert_eq!(newer.exit_status(), None);
 }
 
 #[test]
@@ -404,7 +404,7 @@ fn the_cli_asks_no_daemon_of_another_build_and_info_says_it_is_one() {
         assert!(output.status.success(), "{said}");
         assert!(out.starts_with(&theirs), "{out}");
         assert!(said.contains(&theirs) && said.contains(release::SAID.as_str()), "{said}");
-        assert_eq!(other.ended_within(Duration::ZERO), None);
+        assert_eq!(other.exit_status(), None);
     }
 }
 
@@ -416,8 +416,8 @@ fn luneta_watch_stops_no_process_but_the_one_the_kernel_says_listens() {
     let said = refused(&host, Path::new(LUNETA));
     let listens = "but the kernel says another process listens on its socket, so luneta stops none";
     assert!(said.contains(listens), "{said}");
-    assert_eq!(decoy.ended_within(Duration::ZERO), None);
-    assert_eq!(older.ended_within(Duration::ZERO), None);
+    assert_eq!(decoy.exit_status(), None);
+    assert_eq!(older.exit_status(), None);
 }
 
 #[test]
@@ -725,16 +725,17 @@ fn the_daemon_ends_once_nothing_has_kept_it_for_a_while() {
     let mut daemon = start(host.vars()).unwrap();
     host.host();
     let _silent = UnixStream::connect(host.runtime.path().join(SOCKET)).unwrap();
-    let alone = Instant::now();
-    assert_eq!(daemon.ended_within(Duration::from_secs(25)), None);
-    let ended = daemon.ended_within(Duration::from_secs(20)).expect("the daemon runs on");
-    let took = alone.elapsed();
+    let alone = Began::now();
+    let early = const { Span::of(ALONE.saturating_sub(SWEEP)) };
+    daemon.runs_through(early, "the daemon ends before it is alone long enough");
+    let ended = daemon.ended("the daemon ends once alone");
+    let lasted = alone.lasted();
 
     assert!(ended.success(), "{ended}");
-    assert!(took >= Duration::from_secs(30), "{took:?}");
+    lasted.at_least(ALONE, "the daemon ends only once alone that long");
     assert!(!host.runtime.path().join(SOCKET).exists());
-    let said = daemon.said_after(Duration::from_secs(1));
-    assert!(said.iter().any(|line| line.contains("no terminal for 30s")), "{said:?}");
+    let none = format!("no terminal for {}s", ALONE.as_secs());
+    daemon.says("the daemon says why it ends", |line| line.contains(&none));
 }
 
 fn the_daemon_runs_on_while_a_client_watches_it() {
@@ -742,14 +743,15 @@ fn the_daemon_runs_on_while_a_client_watches_it() {
     let mut daemon = start(host.vars()).unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let watched = Instant::now() + Duration::from_secs(36);
     runtime.block_on(async {
         let mut watching = lunetad::connect(&folder).await.unwrap();
         let mut after = None;
-        while Instant::now() < watched {
+        let watched = const { Span::of(ALONE.saturating_add(SWEEP.saturating_mul(3))) };
+        luneta_waits::repeated_through(watched, "the daemon answers a watch", async || {
             let asked = watching.watch(WatchRequest { after, kept: None, shown: false }).await;
             after = asked.expect("the daemon ended").into_inner().version;
-        }
+        })
+        .await;
     });
-    assert_eq!(daemon.ended_within(Duration::ZERO), None);
+    assert_eq!(daemon.exit_status(), None);
 }

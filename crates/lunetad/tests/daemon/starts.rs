@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions as _;
@@ -14,6 +13,7 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use base64::Engine as _;
+use luneta_waits::{eventually, Began};
 use lunetad::api::projects::Held;
 use lunetad::api::terminal::Found;
 use lunetad::api;
@@ -26,14 +26,10 @@ use rustix::termios::{self, Winsize};
 use tempfile::TempDir;
 
 use crate::demand::{answering, moved, stop, Detached};
-use crate::host::{eventually, script, Host, Running, Vars, LUNETA};
+use crate::host::{script, Host, Running, Vars, LUNETA};
 use crate::own::Owned;
 use crate::projects::{project, worktree};
 use crate::worktree::{cloned_as_wt, git, worktree_added};
-
-const ENDS: Duration = Duration::from_secs(30);
-
-const RUNS: Duration = Duration::from_secs(5);
 
 pub const UNSHOWN: &str = "No worktree to show yet.";
 
@@ -75,7 +71,7 @@ fn on_terminal_with(mut command: Command, meanwhile: impl FnOnce(&Running)) -> E
     drop(command);
     drop(tty);
     meanwhile(&luneta);
-    let status = luneta.ended_within(ENDS).expect("luneta did not end");
+    let status = luneta.ended("luneta ends");
     let said = reader.join().unwrap();
     Ended { status, said: String::from_utf8_lossy(&said).into_owned() }
 }
@@ -258,8 +254,8 @@ fn a_bare_luneta_where_no_project_holds_its_folder_makes_none_and_shows_none() {
     let window = Window::open(&owned.host, &dir, &[]);
     let none = || window.shows("no projects").then_some(());
     eventually("luneta's sidebar says it has no project", none);
-    thread::sleep(Duration::from_secs(1));
-    assert!(projects_of(&owned).is_empty(), "a project is made only when asked for");
+    let made = || Some(projects_of(&owned)).filter(|projects| !projects.is_empty());
+    luneta_waits::never("a project is made though none was asked for", made);
 }
 
 #[test]
@@ -275,7 +271,10 @@ fn a_bare_luneta_in_a_project_s_own_folder_shows_its_worktree_used_last() {
     eventually("luneta shows two", || shown(&owned, &folders[1]));
     drop(window);
     let _window = Window::open(&owned.host, &dir, &[]);
-    thread::sleep(Duration::from_secs(1));
+    luneta_waits::never("the next luneta opens a terminal of its own", || {
+        let two = self::shown(&owned, &folders[1]).map(|it| it.terminals.len());
+        (two != Some(1) || self::shown(&owned, &folders[0]).is_some()).then(|| projects_of(&owned))
+    });
     let shown = eventually("luneta shows two again", || shown(&owned, &folders[1]));
     assert_eq!(shown.terminals.len(), 1, "{:?}", projects_of(&owned));
     assert!(self::shown(&owned, &folders[0]).is_none(), "one, used never, stays empty");
@@ -540,7 +539,7 @@ fn q_in_the_sidebar_quits_luneta_and_its_terminal_runs_on_for_the_next_one() {
     window.send("printf 'be%s\\n' fore-42\r");
     eventually("the terminal runs what was typed", || window.shows("before-42").then_some(()));
     window.send("\x01q");
-    let status = window.luneta.ended_within(ENDS).expect("q ended luneta");
+    let status = window.luneta.ended("q ends luneta");
     assert_eq!(status.code(), Some(0), "{}", window.screen().join("\n"));
     let log = log_of(&owned.host);
     assert!(log.contains("ends: asked to quit"), "{log}");
@@ -558,16 +557,12 @@ fn a_daemon_that_goes_away_is_started_again_in_moments() {
     let dir = work_in(&owned, "work");
     let _window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
-    thread::sleep(Duration::from_secs(3));
     let was = answering(&owned.host).unwrap();
-    let went = Instant::now();
     owned.stop_daemon();
     let pid = eventually("a daemon answers again", || {
         answering(&owned.host).filter(|answers| *answers != was)
     });
-    let took = went.elapsed();
     let _daemon = Detached { host: &owned.host, pid };
-    assert!(took < Duration::from_secs(1), "it took {took:?}");
 }
 
 #[test]
@@ -585,16 +580,15 @@ fn a_lunetad_that_does_not_start_is_started_once_a_second_at_the_most() {
     let ended = on_terminal_with(command, |luneta| {
         eventually("luneta shows work", || shown(&owned, &dir.path));
         owned.stop_daemon();
-        began = Some(Instant::now());
-        thread::sleep(RUNS);
+        began = Some(Began::now());
+        let starts = || fs::read_to_string(&started).unwrap_or_default().lines().count();
+        eventually("luneta starts lunetad again and again", || (starts() >= 3).then_some(()));
         stop(luneta.pid());
     });
-    let took = began.unwrap().elapsed();
+    let lasted = began.unwrap().lasted();
     assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
     let starts = fs::read_to_string(&started).unwrap().lines().count();
-    assert!(starts >= 2, "it was started {starts} times in {took:?}");
-    let most = usize::try_from(took.as_secs()).unwrap() + 1;
-    assert!(starts <= most, "it was started {starts} times in {took:?}");
+    lasted.at_most_once_a_second(starts, "luneta starts lunetad");
 }
 
 

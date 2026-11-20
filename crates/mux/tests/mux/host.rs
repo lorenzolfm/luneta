@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::future::Future;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc as std_mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
 
 use hyper_util::rt::TokioIo;
 use luneta_mux::api::{self, mux_client::MuxClient};
+use luneta_waits::Patience;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -18,8 +18,6 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
 pub const LUNETA_MUX: &str = env!("CARGO_BIN_EXE_luneta-mux");
-
-pub const PATIENCE: Duration = Duration::from_secs(20);
 
 pub fn run<F: Future<Output = ()>>(test: F) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -32,18 +30,18 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn start() -> Server {
-        Server::started(Command::new(LUNETA_MUX))
+    pub async fn start() -> Server {
+        Server::started(Command::new(LUNETA_MUX)).await
     }
 
-    pub fn start_with_files(files: u32) -> Server {
+    pub async fn start_with_files(files: u32) -> Server {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "ulimit -Sn \"$1\" && exec \"$0\" \"$2\"", LUNETA_MUX]);
         command.arg(files.to_string());
-        Server::started(command)
+        Server::started(command).await
     }
 
-    fn started(mut command: Command) -> Server {
+    async fn started(mut command: Command) -> Server {
         let runtime = tempfile::tempdir().unwrap();
         command
             .arg(runtime.path().join("luneta"))
@@ -57,7 +55,7 @@ impl Server {
             .stderr(Stdio::piped());
         let mut child = command.spawn().unwrap();
         let stderr = child.stderr.take().unwrap();
-        let (said, heard) = std_mpsc::channel();
+        let (said, mut heard) = mpsc::unbounded_channel();
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
@@ -65,10 +63,10 @@ impl Server {
                 let _ = said.send(line);
             }
         });
-        let deadline = Instant::now() + PATIENCE;
+        let patience = Patience::begun();
         loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let line = heard.recv_timeout(left).expect("luneta-mux said it listens");
+            let line = patience.awaited("luneta-mux says it listens", heard.recv()).await;
+            let line = line.expect("luneta-mux says it listens before its stderr closes");
             if line.starts_with("luneta-mux: listening on ") {
                 break;
             }
@@ -99,14 +97,7 @@ impl Server {
     }
 
     pub async fn ended(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + PATIENCE;
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                return status;
-            }
-            assert!(Instant::now() < deadline, "luneta-mux did not end");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        luneta_waits::ended_async("luneta-mux ends", &mut self.child).await
     }
 }
 
@@ -154,13 +145,11 @@ pub async fn watched_until(
     what: &str,
     test: impl Fn(&api::Listing) -> bool,
 ) -> api::Listing {
-    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let patience = Patience::begun();
     let mut last = None;
     loop {
-        let next = tokio::time::timeout_at(deadline, watch.message()).await;
-        let Ok(next) = next else {
-            panic!("the watch never said {what}: last {last:#?}");
-        };
+        let waited = fmt::from_fn(|f| write!(f, "the watch says {what}: last {last:#?}"));
+        let next = patience.awaited(waited, watch.message()).await;
         let listing = next.unwrap().expect("the watch went on");
         if test(&listing) {
             return listing;
@@ -213,9 +202,13 @@ impl Viewer {
         }
     }
 
-    pub async fn next(&mut self) -> Result<Option<api::to_viewer::Event>, tonic::Status> {
-        let next = tokio::time::timeout(PATIENCE, self.from.message()).await;
-        let Some(message) = next.expect("the server said something in time")? else {
+    pub async fn next(
+        &mut self,
+        patience: Patience,
+        what: &str,
+    ) -> Result<Option<api::to_viewer::Event>, tonic::Status> {
+        let next = patience.awaited(what, self.from.message()).await;
+        let Some(message) = next? else {
             return Ok(None);
         };
         let event = message.event.expect("a viewer hears an event");
@@ -227,8 +220,9 @@ impl Viewer {
     }
 
     pub async fn until(&mut self, what: &str, test: impl Fn(&Viewer) -> bool) {
+        let patience = Patience::begun();
         while !test(self) {
-            let next = self.next().await.unwrap();
+            let next = self.next(patience, what).await.unwrap();
             assert!(next.is_some(), "the stream ended before {what}");
         }
     }

@@ -1,0 +1,16 @@
+id: waits-spans-are-constant
+language: rust
+files:
+  - crates/*/tests/**
+message: >-
+  A window or a gap is made in a const, so a span past its bound fails the
+  build, not the test that reaches it: write const { Span::of(...) }.
+rule:
+  kind: call_expression
+  regex: ^(luneta_waits::)?(Span|Gap)::of\(
+  not:
+    inside:
+      stopBy: end
+      any:
+        - kind: const_block
+        - kind: const_item

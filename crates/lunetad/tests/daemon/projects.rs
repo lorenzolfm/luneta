@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
 
+use luneta_waits::{eventually, Span};
 use lunetad::api::change_projects_request::{
     AddProject, AddWorktree, Change, CloseWorktree, Pull, ReorderProjects, ReorderWorktrees, Start,
 };
@@ -18,9 +18,10 @@ use lunetad::api::list_work_response::{Issue, Listed as Said, OpenIssues, Pull a
 use lunetad::api::{ListWorkRequest, ListWorkResponse, MakeWorktreeRequest};
 use lunetad::api::Version;
 use lunetad::changes::Unchanged;
+use lunetad::SWEEP;
 use tonic::{Code, Status};
 
-use crate::host::{eventually, folder_in, start, Host};
+use crate::host::{folder_in, start, Host};
 use crate::remote::{hosts, reached, FakeSsh};
 use crate::worktree::{cloned_as_wt, git, worktree_added};
 
@@ -337,8 +338,9 @@ fn a_clone_s_worktrees_made_or_removed_outside_luneta_are_listed_unopened_on_the
     let opened = (vec![feat.clone()], vec![main.clone()]);
     eventually("one opened is a row", || (listed(&host) == opened).then_some(()));
     git(&clone.join(".bare"), &["worktree", "remove", "--force", "../feat-2"]);
-    thread::sleep(Duration::from_secs(3));
-    assert_eq!(listed(&host), opened, "a worktree removed keeps its row while it holds a terminal");
+    let keeps = "a worktree removed keeps its row while it holds a terminal";
+    let sweeps = const { Span::of(SWEEP.saturating_mul(2)) };
+    luneta_waits::through(sweeps, keeps, || Some(listed(&host)).filter(|now| *now != opened));
     let Held::Kept(Kept { projects, .. }) = held(&host) else { panic!("the projects are kept") };
     let seen = projects[0].worktrees().unwrap()[0].terminals.iter().map(|it| it.id).collect();
     let closing = Change::CloseWorktree(CloseWorktree { worktree: made, seen });
@@ -463,8 +465,8 @@ fn a_projects_file_lunetad_cannot_read_is_left_as_it_is_and_no_change_is_kept() 
     fs::write(&file, newer).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let mut daemon = start(host.vars()).unwrap();
-    let said = daemon.said_after(Duration::ZERO).join("\n");
-    assert!(said.contains("of version 11, and this lunetad reads only 1 to 10"), "{said}");
+    let unread = "of version 11, and this lunetad reads only 1 to 10";
+    daemon.says("lunetad says it cannot read the file", |line| line.contains(unread));
 
     let add = AddProject { dir: text(scratch.path()), name: None };
     let refused = changed(&host, Change::AddProject(add)).unwrap_err();

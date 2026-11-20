@@ -49,7 +49,7 @@ fn signal_front(listing: &api::Listing, signal: rustix::process::Signal) {
 #[test]
 fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let body = "m A; m 'C;cmdline_url=make%20test'; stty -echo; read x; stty echo; m 'D;3'\n\
@@ -84,7 +84,7 @@ fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
 #[test]
 fn a_job_stopped_and_brought_back_reads_as_its_command() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let body = "set -m\n\
@@ -130,7 +130,7 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
 #[test]
 fn the_marks_of_a_shell_the_command_runs_are_none_of_the_terminal_s() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let inner = "m A; m 'C;cmdline_url=ls'; m 'D;0'; stty -echo; read x; stty echo";
@@ -161,7 +161,7 @@ fn the_marks_of_a_shell_the_command_runs_are_none_of_the_terminal_s() {
 #[test]
 fn a_job_in_front_under_one_that_is_not_reads_as_asking() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let body = "m A; m 'C;cmdline_url=nested'; bash -c 'set -m; head -n1; true'; m 'D;0'\n\

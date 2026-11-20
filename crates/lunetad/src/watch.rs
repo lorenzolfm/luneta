@@ -12,7 +12,7 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::{log, process};
 
-const SETTLE: Duration = Duration::from_millis(25);
+pub const SETTLE: Duration = Duration::from_millis(25);
 
 const SETTLE_MAX: Duration = Duration::from_millis(250);
 

@@ -1,0 +1,8 @@
+id: waits-spans-are-constant
+valid:
+  - "fn f() { through(const { Span::of(SWEEP.saturating_mul(2)) }, \"a\", g); }"
+  - "const SWEEPS: Span = Span::of(SWEEP.saturating_mul(3));"
+  - "fn f() { apart(const { Gap::of(SETTLE) }); }"
+invalid:
+  - "fn f() { through(Span::of(span), \"a\", g); }"
+  - "fn f() { apart(luneta_waits::Gap::of(SETTLE)); }"

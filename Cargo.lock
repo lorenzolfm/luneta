@@ -1393,6 +1393,7 @@ dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",
  "luneta-protocol",
+ "luneta-waits",
  "percent-encoding",
  "prost",
  "prost-types",
@@ -1416,6 +1417,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "luneta-waits"
+version = "0.3.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "lunetad"
 version = "0.3.0"
 dependencies = [
@@ -1429,6 +1437,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "luneta-protocol",
+ "luneta-waits",
  "notify",
  "prost",
  "prost-types",

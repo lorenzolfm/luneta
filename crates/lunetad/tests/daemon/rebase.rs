@@ -2,13 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use luneta_waits::eventually;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::On;
 use lunetad::rebases::{self, Came, Rebased};
 use lunetad::Directory;
 
-use crate::host::{Host, LUNETA, answered, eventually, folder_in, script, start};
+use crate::host::{Host, LUNETA, answered, folder_in, script, start};
 use crate::own::Owned;
 use crate::remote::{FakeSsh, hosts, reached};
 use crate::starts::{Window, makes_shells, shown, work_in};
@@ -80,7 +81,7 @@ fn luneta_rebase_moves_a_branch_onto_upstream_and_hands_its_conflicts_to_an_agen
     let repository = Repository::new(&scratch);
     let fix = &repository.fix;
     let asked = host.home.path().join("claude-asked");
-    let claude = format!("printf '%s\\n' \"$@\" > {}\nexec sleep 600\n", asked.display());
+    let claude = format!("printf '%s\\n' \"$@\" > {0}.part && mv {0}.part {0}\nexec sleep 600\n", asked.display());
     script(&host.bin().join("claude"), &claude);
 
     commit(fix, "own", "o\n");
@@ -164,7 +165,7 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
     tracking(&clone);
     git(&dir.path, &["switch", "-q", "-c", "fix"]);
     let asked = host.home.path().join("claude-asked");
-    let claude = format!("printf '%s\\n' \"$@\" > {}\nexec sleep 600\n", asked.display());
+    let claude = format!("printf '%s\\n' \"$@\" > {0}.part && mv {0}.part {0}\nexec sleep 600\n", asked.display());
     script(&host.bin().join("claude"), &claude);
     commit(&dir.path, "own", "o\n");
     commit(&up, "theirs", "t\n");
