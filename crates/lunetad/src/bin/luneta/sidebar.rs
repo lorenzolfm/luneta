@@ -2436,9 +2436,9 @@ impl Sidebar {
         let mut counts = Counts::default();
         let mut rows = Vec::new();
         let mut homes = HashMap::new();
-        let mut best: Option<(usize, Fit)> = None;
-        let mut weigh = |at: usize, fit: Fit| {
-            if best.is_none_or(|(_, top)| fit > top) {
+        let mut best: Option<(Spot, Fit)> = None;
+        let mut weigh = |at: Spot, fit: Fit| {
+            if best.as_ref().is_none_or(|(_, top)| fit > *top) {
                 best = Some((at, fit));
             }
         };
@@ -2460,7 +2460,6 @@ impl Sidebar {
                 continue;
             }
             let machine_folded = finder.is_none() && self.folds.contains(Fold::Machine(&machine));
-            let machine_at = rows.len();
             let mut machine_rows = Vec::new();
             let (mut machine_tally, mut machine_here) = (Tally::default(), false);
             let agents = heard.as_ref().map_or_default(Seen::seated);
@@ -2535,12 +2534,11 @@ impl Sidebar {
                     .as_ref()
                     .and_then(|finder| finder.session(listed.name.as_str()))
                     .unzip();
-                let project_at = machine_at + 1 + machine_rows.len();
                 let mut project_rows = Vec::new();
-                let mut lead: Option<(usize, Fit)> = None;
-                let mut found_at = |at: usize, fit: Fit, weigh: &mut dyn FnMut(usize, Fit)| {
-                    weigh(at, fit);
-                    if lead.is_none_or(|(_, top)| fit > top) {
+                let mut lead: Option<(Spot, Fit)> = None;
+                let mut found_at = |at: Spot, fit: Fit, weigh: &mut dyn FnMut(Spot, Fit)| {
+                    weigh(at.clone(), fit);
+                    if lead.as_ref().is_none_or(|(_, top)| fit > *top) {
                         lead = Some((at, fit));
                     }
                 };
@@ -2587,6 +2585,9 @@ impl Sidebar {
                             };
                             let here = on && here_view.as_ref() == Some(&place);
                             let icon = program.and_then(icons::of);
+                            let found = found.map(|fit| {
+                                (Spot::on(&machine, Place::View(place.clone())), fit)
+                            });
                             let (machine, session) = (machine.clone(), place.session);
                             let (view, view_id) = (place.view, *view_id);
                             let row = move |bracket| Row::View {
@@ -2618,7 +2619,6 @@ impl Sidebar {
                         } else {
                             Under::Empty
                         };
-                        let worktree_at = project_at + 1 + project_rows.len();
                         let here = on && here_worktree.as_ref() == Some(&worktree.place);
                         project_rows.push(Row::Worktree {
                             machine: machine.clone(),
@@ -2634,12 +2634,13 @@ impl Sidebar {
                             busy: tally.busy > 0,
                         });
                         if let Some(found) = worktree_found {
-                            found_at(worktree_at, found, &mut weigh);
+                            let at = Spot::on(&machine, Place::Worktree(worktree.place.clone()));
+                            found_at(at, found, &mut weigh);
                         }
                         let count = shown.len();
                         for (at, (row, found)) in shown.into_iter().enumerate() {
-                            if let Some(found) = found {
-                                found_at(project_at + 1 + project_rows.len(), found, &mut weigh);
+                            if let Some((at, found)) = found {
+                                found_at(at, found, &mut weigh);
                             }
                             let bracket = Bracket::of(at, count).map(|sits| (sits, colour));
                             project_rows.push(row(bracket));
@@ -2650,15 +2651,14 @@ impl Sidebar {
                     continue;
                 }
                 if let Some(named) = named {
-                    weigh(lead.map_or(project_at, |(at, _)| at), named);
+                    let project_spot = || Spot::on(&machine, Place::Session(listed.clone()));
+                    weigh(lead.map_or_else(project_spot, |(at, _)| at), named);
                 }
                 let under = if project_rows.is_empty() {
                     if folded { Under::Folded } else { Under::Empty }
                 } else {
                     Under::Rows
                 };
-                let rows_above = machine_at + 1 + machine_rows.len();
-                assert_eq!(rows_above, project_at, "a project's rows count from its own row");
                 machine_rows.push(Row::Project {
                     machine: machine.clone(),
                     project: known.project.clone(),
@@ -2682,7 +2682,6 @@ impl Sidebar {
                 dot: machine_tally.dots > 0,
                 busy: machine_tally.busy > 0,
             };
-            assert_eq!(rows.len(), machine_at, "a machine's rows count from its own row");
             rows.push(Row::Machine { machine, name, away, heads });
             rows.append(&mut machine_rows);
         }
@@ -2716,7 +2715,8 @@ impl Sidebar {
             self.lit = landing.clone().map(Lit::On);
         }
         self.due = due;
-        self.settle(best.map(|(at, _)| at), seek);
+        let best = best.map(|(at, _)| self.row_of(&at).expect("a search's best match has a row"));
+        self.settle(best, seek);
     }
 
     fn row_for(&self, spot: &Spot) -> Option<Spot> {
