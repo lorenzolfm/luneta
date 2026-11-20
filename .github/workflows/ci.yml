@@ -61,7 +61,7 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-            keep-outputs = true
+            keep-outputs = ${{ runner.os == 'Linux' }}
 
       - &nix-store
         name: nix-community/cache-nix-action v7
