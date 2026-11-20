@@ -2568,7 +2568,6 @@ impl Sidebar {
                             if worktree_folded { &[][..] } else { worktree.views.as_slice() };
                         let listing = listing.iter().zip(by_view);
                         for ((view_id, view), Shows { marked, ran, unread }) in listing {
-                            let cwd = view.cwd.as_deref();
                             let command = view.command.as_deref();
                             let program = agent(view)
                                 .and_then(|agent| icons::agent(agent.runs_in()))
@@ -2577,7 +2576,7 @@ impl Sidebar {
                                 Some(ran) => ran.to_owned(),
                                 None => label(agent(view), view),
                             };
-                            let dir = agent(view).map_or(cwd, |agent| Some(agent_dir(agent, view)));
+                            let dir = view_dir(agent(view), view);
                             let (found, hits) = finder
                                 .as_ref()
                                 .and_then(|finder| finder.view(&label, None, &view.tab_name, dir))
@@ -3428,12 +3427,9 @@ impl Sidebar {
         let seen = self.seen(machine);
         let shown = self.view_of(machine, &session, view.terminal_id());
         let agents = seen.as_ref().map(Seen::seated);
-        let cwd = Cwd::of(shown.and_then(|shown| {
-            let agents = agents.as_ref()?;
-            match keyed(shown).and_then(|key| agents.get(&key)) {
-                Some(agent) => Some(agent_dir(agent, shown).to_owned()),
-                None => shown.cwd.clone(),
-            }
+        let cwd = Cwd::of(shown.zip(agents.as_ref()).and_then(|(shown, agents)| {
+            let agent = keyed(shown).and_then(|key| agents.get(&key).copied());
+            view_dir(agent, shown).map(str::to_owned)
         }));
         let dir = cwd.at().map(Directory::as_str);
         let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
@@ -3893,11 +3889,9 @@ impl Sidebar {
         let pulls = pull_requests(seen.pull_requests);
         let mut worked = Vec::new();
         for (listed, view) in seen.views() {
-            let dir = match keyed(view).and_then(|key| agents.get(&key)) {
-                Some(agent) => Some(agent_dir(agent, view)),
-                None => view.cwd.as_deref(),
-            };
-            let Some(dir) = dir.and_then(|dir| Directory::parse(dir.to_owned()).ok()) else {
+            let agent = keyed(view).and_then(|key| agents.get(&key).copied());
+            let dir = view_dir(agent, view).and_then(|dir| Directory::parse(dir.to_owned()).ok());
+            let Some(dir) = dir else {
                 continue;
             };
             let pull = pulls.get(dir.as_str()).and_then(|it| Link::parse(it.url.as_deref()?));
@@ -4886,6 +4880,10 @@ fn transcript(agent: &Agent) -> Transcript {
 
 fn agent_dir<'a>(agent: &'a Agent, view: &'a View) -> &'a str {
     view.cwd.as_deref().unwrap_or(&agent.cwd)
+}
+
+fn view_dir<'a>(agent: Option<&'a Agent>, view: &'a View) -> Option<&'a str> {
+    view.cwd.as_deref().or(agent.map(|agent| agent.cwd.as_str()))
 }
 
 fn label(agent: Option<&Agent>, view: &View) -> String {
