@@ -76,7 +76,8 @@ impl Away {
 
     pub fn skills(&mut self, dir: &Directory, harness: Harness) -> Result<Vec<Skill>, String> {
         let harness = Some(harness.to_api().into());
-        let request = ListSkillsRequest { on: Some(self.on()), dir: dir.to_string(), harness };
+        let dir = dir.as_str().to_owned();
+        let request = ListSkillsRequest { on: Some(self.on()), dir, harness };
         let listed = self.ask(|mut daemon| async move { daemon.list_skills(request).await })?;
         let skill = |skill: lunetad::api::list_skills_response::Skill| {
             let runs = if skill.only_you { Runs::OnlyForYou } else { Runs::ForAnyone };

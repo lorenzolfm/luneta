@@ -13,17 +13,17 @@ use crate::machines::Machine;
 
 pub fn find(
     on: &Machine,
-    cwd: &Directory,
+    dir: &Directory,
     harness: Harness,
     events: &Sender<Event>,
     said: impl FnOnce(Result<Vec<Skill>, String>) -> Event + Send + 'static,
 ) {
-    let (on, cwd, events) = (on.clone(), cwd.clone(), events.clone());
+    let (on, dir, events) = (on.clone(), dir.clone(), events.clone());
     thread::spawn(move || {
         let skills = match &on {
-            Machine::Local => lunetad::skills::found_in(cwd.as_str(), harness),
+            Machine::Local => lunetad::skills::found_in(dir.as_str(), harness),
             Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                .and_then(|mut away| away.skills(&cwd, harness)),
+                .and_then(|mut away| away.skills(&dir, harness)),
         };
         let _ = events.send(said(skills));
     });
@@ -44,7 +44,7 @@ pub enum Skills {
 }
 
 pub struct Search {
-    cwd: Directory,
+    dir: Directory,
     term: String,
     skills: Skills,
     found: Vec<Found>,
@@ -52,13 +52,13 @@ pub struct Search {
 }
 
 impl Search {
-    pub fn new(cwd: Directory) -> Self {
+    pub fn new(dir: Directory) -> Self {
         let (term, found) = (String::new(), Vec::new());
-        Search { cwd, term, skills: Skills::Finding, found, selected: 0 }
+        Search { dir, term, skills: Skills::Finding, found, selected: 0 }
     }
 
-    pub fn cwd(&self) -> &Directory {
-        &self.cwd
+    pub fn dir(&self) -> &Directory {
+        &self.dir
     }
 
     pub fn term(&self) -> &str {
