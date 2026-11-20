@@ -231,17 +231,29 @@ fn unanswered(within: Duration) -> String {
 }
 
 pub(super) fn refused(status: &Status) -> Failure {
-    Failure::Refused(said_by_mux(status))
+    Failure::Called(Reply::of(status))
 }
 
 pub(super) fn unreached_at(socket: &Path, error: &io::Error) -> String {
+    assert!(socket.is_absolute(), "luneta-mux's socket is found in an absolute folder");
     format!("luneta-mux at {}: {error}", socket.display())
 }
 
-fn said_by_mux(status: &Status) -> String {
-    match status.message() {
-        "" => status.code().description().to_owned(),
-        said => said.to_owned(),
+#[derive(Debug)]
+pub struct Reply(String);
+
+impl Reply {
+    fn of(status: &Status) -> Reply {
+        match status.message() {
+            "" => Reply(status.code().description().to_owned()),
+            said => Reply(said.to_owned()),
+        }
+    }
+}
+
+impl fmt::Display for Reply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -298,7 +310,7 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
             }
         },
         Err(status) if status.code() == Code::Unimplemented => None,
-        Err(status) => return Err(io::Error::other(said_by_mux(&status))),
+        Err(status) => return Err(io::Error::other(Reply::of(&status).to_string())),
     };
     Ok(Reached::Unmatched(Unmatched { pid, build }))
 }
@@ -606,7 +618,7 @@ impl Terminals {
         if reasons.is_empty() {
             Ok(())
         } else {
-            Err(Failure::Refused(reasons.join("; ")))
+            Err(Failure::Called(Reply(reasons.join("; "))))
         }
     }
 
@@ -630,12 +642,13 @@ impl Terminals {
             Ok(_) => Ok(()),
             Err(status) if status.code() == Code::NotFound => Ok(()),
             Err(status) => {
-                let said = said_by_mux(&status);
+                let said = Reply::of(&status);
                 match Unchanged::of(&status) {
-                    Unchanged::Refused(_) => Err(Failure::Refused(said)),
+                    Unchanged::Refused(_) => Err(Failure::Called(said)),
                     Unchanged::InDoubt(_) => {
                         let id = key.id;
-                        Err(Failure::Refused(format!("{said}, and terminal {id} may close still")))
+                        let said = format!("{said}, and terminal {id} may close still");
+                        Err(Failure::Called(Reply(said)))
                     },
                 }
             },
@@ -733,8 +746,8 @@ fn listened(
                 runtime
             },
         };
-        let unlooked = |error| Failure::Own(format!("the luneta-mux started is unread: {error}"));
-        let ended = started.child.try_wait().map_err(unlooked)?;
+        let unread = |error| Failure::Own(format!("the luneta-mux started is unread: {error}"));
+        let ended = started.child.try_wait().map_err(unread)?;
         match ended {
             None => {},
             Some(status) if status.code() == Some(i32::from(ANOTHER_RUNS)) => {
