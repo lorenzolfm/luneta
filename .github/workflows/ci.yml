@@ -74,6 +74,13 @@ jobs:
           purge-created: 0
           purge-primary-key: never
 
+      - name: Keep the flake's inputs in the store
+        shell: bash
+        run: >-
+          nix flake archive --json
+          | jq -r '.inputs | .. | .path? // empty'
+          | xargs nix build --out-link "$RUNNER_TEMP/inputs"
+
       - name: Build the dev CLI
         run: nix build --no-link .#dev
 
@@ -156,6 +163,13 @@ jobs:
           purge-created: 0
           purge-primary-key: never
 
+      - name: Keep the flake's inputs in the store
+        shell: bash
+        run: >-
+          nix flake archive --json
+          | jq -r '.inputs | .. | .path? // empty'
+          | xargs nix build --out-link "$RUNNER_TEMP/inputs"
+
       - name: Restore the tests' target/, with actions/cache v6.1.0
         id: target
         if: runner.os == 'macOS'
@@ -164,6 +178,7 @@ jobs:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
             target/
           key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix', 'rust-toolchain.toml', '.cargo/config.toml') }}
 
@@ -197,5 +212,6 @@ jobs:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
             target/
           key: ${{ steps.target.outputs.cache-primary-key }}
