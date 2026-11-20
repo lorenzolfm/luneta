@@ -1,0 +1,20 @@
+id: tests-ask-lunetad-with-patience
+language: rust
+files:
+  - crates/*/tests/**
+message: >-
+  A test's call to lunetad waits for its answer as long as a wait for an
+  event: connect with luneta_waits::PATIENCE, since lunetad's own deadline
+  runs out on a loaded machine.
+rule:
+  any:
+    - kind: call_expression
+      has:
+        field: function
+        regex: ^lunetad::connect$
+      not:
+        has:
+          field: arguments
+          regex: ^\(.*,\s*(luneta_waits::)?PATIENCE\s*\)$
+    - kind: scoped_identifier
+      regex: ^lunetad::ANSWER$

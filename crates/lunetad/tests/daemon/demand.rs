@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
-use luneta_waits::{eventually, Began, Span};
+use luneta_waits::{eventually, Began, Span, PATIENCE};
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
     self, AskRequest, AskResponse, FileIssueRequest, FileIssueResponse, IssueRepositoriesRequest,
@@ -75,7 +75,7 @@ fn told(host: &Host) -> Option<InfoResponse> {
     let folder = folder_in(host.runtime.path())?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.ok()?;
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.ok()?;
         Some(daemon.info(()).await.ok()?.into_inner())
     })
 }
@@ -744,7 +744,7 @@ fn the_daemon_runs_on_while_a_client_watches_it() {
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut watching = lunetad::connect(&folder).await.unwrap();
+        let mut watching = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let mut after = None;
         let watched = const { Span::of(ALONE.saturating_add(SWEEP.saturating_mul(3))) };
         luneta_waits::repeated_through(watched, "the daemon answers a watch", async || {

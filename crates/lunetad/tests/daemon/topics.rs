@@ -2,7 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use luneta_waits::{eventually, Span};
+use luneta_waits::{eventually, Span, PATIENCE};
 use lunetad::api::{self, remote::Reached, WatchRequest};
 use lunetad::SWEEP;
 use serde_json::json;
@@ -61,7 +61,7 @@ fn seen(host: &Host) -> api::Host {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let asked = WatchRequest { after: None, kept: None, shown: true };
         daemon.watch(asked).await.unwrap().into_inner()
     })

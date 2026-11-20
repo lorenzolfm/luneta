@@ -377,7 +377,7 @@ async fn stream(
     inbox: Inbox<Asked>,
     told: &mut impl FnMut(Heard),
 ) -> Heard {
-    let mut daemon = match crate::connect(folder).await {
+    let mut daemon = match crate::connect(folder, crate::ANSWER).await {
         Ok(daemon) => daemon,
         Err(error) => return Heard::Lost(format!("lunetad is not reached: {error}")),
     };

@@ -3,7 +3,7 @@ use std::fs;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
-use luneta_waits::{eventually, Patience, Span, QUIET};
+use luneta_waits::{eventually, Patience, Span, PATIENCE, QUIET};
 use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use lunetad::api::show_response::{self, view::Found, Laid, View};
 use lunetad::api::change_projects_request::{
@@ -94,7 +94,7 @@ impl<'a> Shown<'a> {
         let (asks, asked) = mpsc::channel(16);
         asks.try_send(ShowRequest { event: Some(Event::Hello(hello)) }).unwrap();
         let heard = owned.block_on(async move {
-            let mut daemon = lunetad::connect(&folder).await.unwrap();
+            let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
             daemon.show(ReceiverStream::new(asked)).await.unwrap().into_inner()
         });
         let (refused, edged, sent) = (Vec::new(), Vec::new(), Vec::new());
@@ -1585,7 +1585,7 @@ fn a_bridge_holds_its_most_shows_and_layouts_open_and_keeps_room_for_questions()
     let folder = folder_in(here.runtime.path()).unwrap();
     let on = || Some(On { destination: "far".to_owned() });
     far.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let mut held = Vec::new();
         for _ in 0..BRIDGE_HELD_MAX {
             let shown = shown_through(&mut daemon, worktree).await;
@@ -1633,7 +1633,7 @@ fn frames_are_refused_words_out_of_turn_a_machine_misnamed_and_a_terminal_here_n
     let refused = |words: Vec<FramesRequest>| -> Option<(Code, String)> {
         let folder = folder.clone();
         owned.block_on(async move {
-            let mut daemon = lunetad::connect(&folder).await.unwrap();
+            let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
             let mut heard = match daemon.frames(tokio_stream::iter(words)).await {
                 Ok(answer) => answer.into_inner(),
                 Err(refused) => return Some((refused.code(), refused.message().to_owned())),
@@ -1669,7 +1669,7 @@ fn frames_are_refused_words_out_of_turn_a_machine_misnamed_and_a_terminal_here_n
     let hello = Hello { worktree, size, runs_in, again: false, on };
     let words = vec![ShowRequest { event: Some(Event::Hello(hello)) }];
     let show_refused = owned.block_on(async move {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         daemon.show(tokio_stream::iter(words)).await.err()
     });
     let show_refused = show_refused.map(|it| (it.code(), it.message().to_owned()));

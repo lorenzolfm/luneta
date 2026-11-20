@@ -82,7 +82,7 @@ pub fn unanswered(within: Duration) -> String {
     format!("lunetad did not answer in {}s", within.as_secs_f64())
 }
 
-pub async fn connect(folder: &Folder) -> Result<Daemon, Error> {
+pub async fn connect(folder: &Folder, answer: Duration) -> Result<Daemon, Error> {
     let mut socket = Some(folder.socket());
     let channel = Endpoint::from_static("http://lunetad")
         .connect_timeout(CONNECT)
@@ -94,7 +94,7 @@ pub async fn connect(folder: &Folder) -> Result<Daemon, Error> {
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, ANSWER, unanswered)))
+    Ok(DaemonClient::new(Within::new(channel, answer, unanswered)))
 }
 
 pub async fn through(command: std::process::Command) -> Result<Daemon, Error> {

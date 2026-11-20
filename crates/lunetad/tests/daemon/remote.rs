@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use luneta_waits::{eventually, Began, Span, QUIET};
+use luneta_waits::{eventually, Began, Span, PATIENCE, QUIET};
 use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::keep_image_request::{Image, Part};
@@ -372,7 +372,7 @@ fn a_machine_whose_daemon_ends_is_reached_again() {
     eventually("far's daemon is started again", || {
         let folder = folder_in(far.runtime.path())?;
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        runtime.block_on(lunetad::connect(&folder)).ok().map(|_| ())
+        runtime.block_on(lunetad::connect(&folder, PATIENCE)).ok().map(|_| ())
     });
     project_named(&far, "later");
     reached(&here, "far", |far| names(far) == ["later"]);
@@ -397,7 +397,7 @@ fn a_question_while_a_machine_is_reached_again_is_handed_on() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let checked = runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let on = Some(On { destination: "far".to_owned() });
         luneta_waits::awaited("far answers once reached again", daemon.list_skills(skills_on(on))).await
     });
@@ -425,7 +425,7 @@ fn a_question_while_a_machine_is_reached_again_is_asked_of_no_other_build() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let checked = runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let on = Some(On { destination: "far".to_owned() });
         luneta_waits::awaited("far answers once reached again", daemon.list_skills(skills_on(on))).await
     });
@@ -472,7 +472,7 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = crate::host::folder_in(here.runtime.path()).unwrap();
     runtime.block_on(luneta_waits::awaited("the host comes to rest", async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let mut after = None;
         loop {
             let asked = WatchRequest { after, kept: None, shown: false };
@@ -489,7 +489,7 @@ fn watch_through(host: &Host, span: Span) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = crate::host::folder_in(host.runtime.path()).unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let mut after = None;
         luneta_waits::repeated_through(span, "the daemon answers a watch", async || {
             let asked = daemon.watch(WatchRequest { after, kept: None, shown: false }).await;
@@ -561,7 +561,7 @@ fn refused_question(host: &Host, destination: &str) -> Status {
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let on = Some(On { destination: destination.to_owned() });
         daemon.list_skills(skills_on(on)).await.unwrap_err()
     })
@@ -702,7 +702,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let dir_of_skills = dir.path().to_str().unwrap().to_owned();
         let skills = ListSkillsRequest { on: on("far"), dir: dir_of_skills.clone(), harness: None };
         let found = daemon.list_skills(skills).await.unwrap();
@@ -865,7 +865,7 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let first = ask("far", Some(&dir), "which agents run", true);
         let (steps, ended) = turn(&mut daemon, first).await;
         let ran = Step::Ran { id: "toolu_1".to_owned(), command: "luneta agents".to_owned() };
@@ -946,7 +946,7 @@ fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let started = Began::now();
         let slow = ask("far", None, "please-be-slow", true);
         let (steps, ended) = turn(&mut daemon, slow).await;
@@ -1000,7 +1000,7 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let on = |destination: &str| Some(On { destination: destination.to_owned() });
         let file = |on, dir: &Path, words: &str| FileIssueRequest {
             on,
@@ -1131,7 +1131,7 @@ fn another_machine_s_directories_are_listed_there() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let listed = daemon.list_dirs(ListDirsRequest { on: on("far") }).await.unwrap();
         let named: Vec<(String, String)> =
             listed.into_inner().dirs.into_iter().map(|dir| (dir.path, dir.name)).collect();
@@ -1191,7 +1191,7 @@ fn an_image_is_kept_on_another_machine_through_the_bridge() {
     };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let image = png(5 * 1024 * 1024);
         let asked = Png::new(image.clone()).unwrap().asked(on("far"));
         let mut answer = daemon.keep_image(asked).await.unwrap().into_inner();
@@ -1260,7 +1260,7 @@ fn a_daemon_stopped_as_an_image_comes_leaves_no_image_of_it() {
     let came = png(16);
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut client = lunetad::connect(&folder).await.unwrap();
+        let mut client = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let (send, parts) = tokio::sync::mpsc::channel(2);
         send.send(image_of(None, 1024)).await.unwrap();
         send.send(bytes_of(&came)).await.unwrap();
@@ -1361,7 +1361,7 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
         let link = Work::Link(issue.clone());
         let worked = |dir: &str| links::Worked { dir: absolute(dir), pull: None, here: false };
@@ -1414,7 +1414,7 @@ fn a_link_whose_clone_a_folder_s_project_holds_makes_nothing() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let link = Work::Link(Link::parse("https://github.com/o/n/issues/7").unwrap());
         for worked in [vec![view_in(&clone.join("main"))], Vec::new()] {
             let refused = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), worked)).await;
@@ -1452,7 +1452,7 @@ fn a_link_whose_clone_no_project_holds_and_none_can_be_named_for_makes_nothing()
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let link = Work::Link(Link::parse("https://github.com/o/n/issues/7").unwrap());
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         for worked in [vec![view_in(&clone.join("main"))], Vec::new()] {
             let refused = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), worked)).await;
             let refused = refused.unwrap_err();
@@ -1471,7 +1471,7 @@ fn a_link_whose_clone_no_project_holds_and_none_can_be_named_for_makes_nothing()
 
     project(&far, &clone, Some("n"));
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let made = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), Vec::new())).await;
         let made = made.unwrap();
         assert_eq!(made.at, At::Unopened);
@@ -1542,7 +1542,7 @@ fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let link = Work::Link(Link::parse("https://github.com/o/n/pull/7").unwrap());
         let none = Pasted::new(link.clone(), Vec::new());
         let none = pasted_on(&mut daemon, "far", &none).await.unwrap_err();
@@ -1611,7 +1611,7 @@ fn ssh_says_what_host_a_remote_names_and_is_asked_of_no_option() {
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let link = Work::Link(Link::parse("https://github.com/o/n/pull/7").unwrap());
         let answers = [
             (&option, Code::NotFound, "no session works in o/n"),
@@ -1683,7 +1683,7 @@ fn pasted_here(host: &Host, pasted: &Pasted) -> Result<Ready<usize>, Status> {
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let mut answer = daemon.paste(pasted.asked(None)).await?.into_inner();
         let ready = answer.message().await?.expect("an answer");
         Ok(pasted.answered(ready).expect("an answer luneta reads"))
@@ -1774,7 +1774,7 @@ fn r_on_a_far_machine_s_view_syncs_there_or_says_why_it_did_not() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let head = pushed(&far, &up, "feat", "second");
         let ready = pasted_on(&mut daemon, "far", &pasted).await.unwrap();
         assert_eq!(ready.at, At::There(0));
@@ -2077,7 +2077,7 @@ fn a_machine_whose_answer_stalls_may_have_made_the_worktree() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let _stalled = ssh.stalls_answers("far");
     let said = runtime.block_on(async {
-        let daemon = lunetad::connect(&folder).await.unwrap();
+        let daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
         let pasted = Pasted::new(Work::Link(issue), Vec::new());
         pasted.ready_on(daemon, &"far".parse().unwrap(), lunetad::REACH).await
@@ -2112,7 +2112,7 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let file = |path: &str, from: Option<&str>| {
             let from = from.map(|from| Directory::parse(from.to_owned()).unwrap());
             Work::File(links::File::parse(path, from).unwrap())
@@ -2231,7 +2231,7 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
         let link = Work::Link(issue.clone());
         let views = vec![view_in(&main)];

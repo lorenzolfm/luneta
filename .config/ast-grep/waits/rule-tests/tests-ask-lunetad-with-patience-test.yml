@@ -1,0 +1,10 @@
+id: tests-ask-lunetad-with-patience
+valid:
+  - "async fn f() { let daemon = lunetad::connect(&folder, PATIENCE).await; }"
+  - "async fn f() { let daemon = lunetad::connect(&folder, luneta_waits::PATIENCE).await; }"
+  - "async fn f() { let stream = tokio::net::UnixStream::connect(socket).await; }"
+invalid:
+  - "async fn f() { let daemon = lunetad::connect(&folder, lunetad::ANSWER).await; }"
+  - "async fn f() { let daemon = lunetad::connect(&folder, QUIET).await; }"
+  - "async fn f() { let daemon = lunetad::connect(&folder, PATIENCE / 2).await; }"
+  - "fn f() { let deadline = lunetad::ANSWER; }"
