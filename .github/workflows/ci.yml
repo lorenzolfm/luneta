@@ -74,12 +74,12 @@ jobs:
           purge-created: 0
           purge-primary-key: never
 
-      - name: Keep the flake's inputs in the store
+      - name: Root the flake's inputs so the saved store keeps them
         shell: bash
         run: >-
           nix flake archive --json
-          | jq -r '.inputs | .. | .path? // empty'
-          | xargs nix build --out-link "$RUNNER_TEMP/inputs"
+          | jq -er '.inputs | .. | objects | .path | strings'
+          | xargs -r nix build --out-link "$RUNNER_TEMP/inputs"
 
       - name: Build the dev CLI
         run: nix build --no-link .#dev
@@ -163,12 +163,12 @@ jobs:
           purge-created: 0
           purge-primary-key: never
 
-      - name: Keep the flake's inputs in the store
+      - name: Root the flake's inputs so the saved store keeps them
         shell: bash
         run: >-
           nix flake archive --json
-          | jq -r '.inputs | .. | .path? // empty'
-          | xargs nix build --out-link "$RUNNER_TEMP/inputs"
+          | jq -er '.inputs | .. | objects | .path | strings'
+          | xargs -r nix build --out-link "$RUNNER_TEMP/inputs"
 
       - name: Restore the tests' target/, with actions/cache v6.1.0
         id: target
