@@ -175,21 +175,34 @@ pub fn holder(common: &str) -> Option<String> {
     holder.to_str().map(str::to_owned)
 }
 
-pub fn branch(dir: &str) -> Option<String> {
+pub fn branch(dir: &str) -> Result<Option<String>, String> {
     branch_within(dir, LIMIT)
 }
 
-pub fn branch_within(dir: &str, limit: Duration) -> Option<String> {
+pub fn branch_within(dir: &str, limit: Duration) -> Result<Option<String>, String> {
     let mut git = Command::new("git");
     local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]));
-    pointed(git, "HEAD", "refs/heads/", limit)
+    pointed(git, "HEAD", "refs/heads/", limit).map_err(|why| format!("in {dir}: {why}"))
 }
 
-pub fn pointed(mut git: Command, name: &str, under: &str, limit: Duration) -> Option<String> {
-    assert!(under.starts_with("refs/") && under.ends_with('/'), "{under} names no refs folder");
+pub fn pointed(
+    mut git: Command,
+    name: &str,
+    under: &str,
+    limit: Duration,
+) -> Result<Option<String>, String> {
+    assert!(under.starts_with("refs/"), "{under} is outside refs/");
+    assert!(under.ends_with('/'), "{under} names no folder");
     git.args(["symbolic-ref", "--quiet", name]);
-    let said = one_line(program::run(&mut git, limit).ok()?.answer().ok()?)?;
-    Some(said.strip_prefix(under)?.to_owned()).filter(|pointed| !pointed.is_empty())
+    let asked = format!("git symbolic-ref {name}");
+    let ran = program::run(&mut git, limit)
+        .map_err(|error| format!("{asked} could not be run: {error}"))?;
+    let said = match ran {
+        Ran::Ended { status, .. } if status.code() == Some(1) => return Ok(None),
+        ran => ran.answer().map_err(|why| format!("{asked}: {why}"))?,
+    };
+    let said = one_line(said).ok_or_else(|| format!("{asked} said no one line"))?;
+    Ok(said.strip_prefix(under).filter(|pointed| !pointed.is_empty()).map(str::to_owned))
 }
 
 pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
@@ -895,7 +908,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{Changed, Common, DefaultBranch, branch, changed, stamp};
+    use super::{Changed, Common, DefaultBranch, branch, changed, pointed, stamp};
 
     fn git(dir: &Path, args: &[&str]) -> bool {
         let mut git = std::process::Command::new("git");
@@ -933,15 +946,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| git(dir.path(), args);
         let at = dir.path().to_str().unwrap();
+        let named = |name: &str| Ok(Some(name.to_owned()));
         assert!(git(&["init", "-q", "-b", "x"]));
-        assert_eq!(branch(at).as_deref(), Some("x"));
+        assert_eq!(branch(at), named("x"));
         assert!(git(&["commit", "-q", "--allow-empty", "-m", "x"]));
         assert!(git(&["tag", "x"]));
-        assert_eq!(branch(at).as_deref(), Some("x"));
+        assert_eq!(branch(at), named("x"));
         assert!(git(&["switch", "-q", "-c", "team/x"]));
-        assert_eq!(branch(at).as_deref(), Some("team/x"));
+        assert_eq!(branch(at), named("team/x"));
         assert!(git(&["switch", "-q", "--detach"]));
-        assert_eq!(branch(at), None);
+        assert_eq!(branch(at), Ok(None));
+    }
+
+    #[test]
+    fn a_git_that_fails_says_why_where_a_ref_pointed_nowhere_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().to_str().unwrap();
+        let gone = dir.path().join("gone");
+        let unmade = branch(gone.to_str().unwrap()).expect_err("no repository is there");
+        assert!(unmade.contains("git symbolic-ref HEAD"), "{unmade}");
+        assert!(git(dir.path(), &["init", "-q", "-b", "x"]));
+        let remote = |head: &str| {
+            let mut git = std::process::Command::new("git");
+            super::local(git.args(["-C", at]));
+            pointed(git, head, "refs/remotes/origin/", Duration::from_secs(60))
+        };
+        assert_eq!(remote("refs/remotes/origin/HEAD"), Ok(None), "an origin never heard of");
+        assert!(git(dir.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/x"]));
+        assert_eq!(remote("refs/remotes/origin/HEAD"), Ok(None), "it points outside the folder");
     }
 
     #[test]

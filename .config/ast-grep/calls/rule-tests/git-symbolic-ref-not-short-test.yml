@@ -4,9 +4,12 @@ valid:
   - "fn f() { git(dir, &[\"rev-parse\", \"--short\", \"HEAD\"]); }"
   - "fn f() { git.args([\"symbolic-ref\", \"--quiet\", \"HEAD\"]); }"
   - "fn f() { git.arg(\"symbolic-ref\").arg(\"--quiet\"); let s = run(&[\"rev-parse\", \"--short\"]); }"
+  - "fn f() { git.arg(\"symbolic-ref\").arg(\"--quiet\"); }\nfn g() { git.arg(\"--short\"); }"
 invalid:
   - "fn f() { git(dir, &[\"symbolic-ref\", \"--short\", \"HEAD\"]); }"
   - "fn f() { git.args([\"symbolic-ref\", \"-q\", \"--short\", \"HEAD\"]); }"
   - "fn f() { sh(\"git symbolic-ref --short HEAD\"); }"
   - "fn f() { git.arg(\"symbolic-ref\").arg(\"--short\").arg(\"HEAD\"); }"
+  - "fn f() { git.arg(\"symbolic-ref\"); git.arg(\"--short\"); git.arg(\"HEAD\"); }"
+  - "fn f() { let mut git = cmd(); git.arg(\"symbolic-ref\"); let short = \"--short\"; git.arg(short); }"
   - "const GH: &str = r#\"branch=$(git symbolic-ref --short HEAD) || exit 1\"#;"

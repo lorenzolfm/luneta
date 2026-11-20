@@ -16,10 +16,10 @@ snapshots:
       style: secondary
       start: 20
       end: 34
-    - source: git(dir, &["symbolic-ref", "--short", "HEAD"]);
+    - source: '["symbolic-ref", "--short", "HEAD"]'
       style: secondary
-      start: 9
-      end: 56
+      start: 19
+      end: 54
   fn f() { git.arg("symbolic-ref").arg("--short").arg("HEAD"); }:
     labels:
     - source: '"--short"'
@@ -30,10 +30,24 @@ snapshots:
       style: secondary
       start: 17
       end: 31
-    - source: git.arg("symbolic-ref").arg("--short").arg("HEAD");
+    - source: fn f() { git.arg("symbolic-ref").arg("--short").arg("HEAD"); }
       style: secondary
-      start: 9
-      end: 60
+      start: 0
+      end: 62
+  fn f() { git.arg("symbolic-ref"); git.arg("--short"); git.arg("HEAD"); }:
+    labels:
+    - source: '"--short"'
+      style: primary
+      start: 42
+      end: 51
+    - source: '"symbolic-ref"'
+      style: secondary
+      start: 17
+      end: 31
+    - source: fn f() { git.arg("symbolic-ref"); git.arg("--short"); git.arg("HEAD"); }
+      style: secondary
+      start: 0
+      end: 72
   fn f() { git.args(["symbolic-ref", "-q", "--short", "HEAD"]); }:
     labels:
     - source: '"--short"'
@@ -44,10 +58,24 @@ snapshots:
       style: secondary
       start: 19
       end: 33
-    - source: git.args(["symbolic-ref", "-q", "--short", "HEAD"]);
+    - source: '["symbolic-ref", "-q", "--short", "HEAD"]'
       style: secondary
-      start: 9
-      end: 61
+      start: 18
+      end: 59
+  fn f() { let mut git = cmd(); git.arg("symbolic-ref"); let short = "--short"; git.arg(short); }:
+    labels:
+    - source: '"--short"'
+      style: primary
+      start: 67
+      end: 76
+    - source: '"symbolic-ref"'
+      style: secondary
+      start: 38
+      end: 52
+    - source: fn f() { let mut git = cmd(); git.arg("symbolic-ref"); let short = "--short"; git.arg(short); }
+      style: secondary
+      start: 0
+      end: 95
   fn f() { sh("git symbolic-ref --short HEAD"); }:
     labels:
     - source: '"git symbolic-ref --short HEAD"'

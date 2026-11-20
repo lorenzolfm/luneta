@@ -1,6 +1,8 @@
 use std::fs::{self, File};
 use std::io::Read as _;
 
+use luneta_protocol::process::arguments;
+
 use super::{ARGV_BYTES_MAX, CHILDREN_MAX, Group, Process, Terminal};
 
 const TASKS_MAX: usize = 256;
@@ -66,11 +68,10 @@ pub fn argv(pid: u32) -> Option<Vec<String>> {
     let mut line = Vec::with_capacity(ARGV_BYTES_MAX);
     let most = u64::try_from(ARGV_BYTES_MAX).expect("16 KiB fit a u64");
     cmdline.take(most).read_to_end(&mut line).ok()?;
-    let line = line.strip_suffix(b"\0").unwrap_or(&line);
     if line.is_empty() {
         return None;
     }
-    let args = line.split(|byte| *byte == 0);
+    let args = arguments(&line).into_iter();
     Some(args.map(|arg| String::from_utf8_lossy(arg).into_owned()).collect())
 }
 

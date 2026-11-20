@@ -13,12 +13,23 @@ rule:
         - kind: raw_string_literal
     - kind: string_literal
       regex: ^"--short"$
-      inside:
-        stopBy: end
-        any:
-          - kind: expression_statement
-          - kind: let_declaration
-        has:
-          stopBy: end
-          kind: string_literal
-          regex: ^"symbolic-ref"$
+      any:
+        - inside:
+            stopBy: end
+            kind: array_expression
+            has:
+              stopBy: end
+              kind: string_literal
+              regex: ^"symbolic-ref"$
+        - all:
+            - not:
+                inside:
+                  stopBy: end
+                  kind: array_expression
+            - inside:
+                stopBy: end
+                kind: function_item
+                has:
+                  stopBy: end
+                  kind: string_literal
+                  regex: ^"symbolic-ref"$

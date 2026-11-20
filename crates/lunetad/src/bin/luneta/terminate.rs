@@ -13,7 +13,7 @@ use clap::CommandFactory as _;
 use lunetad::asks::Turn;
 use lunetad::program::{self, Ran};
 use lunetad::projects::{self, Forgotten, Projects};
-use lunetad::terminate::{self, Folders, Id, Running, Unended};
+use lunetad::terminate::{self, Folders, Id, Running, Unended, Unreadable};
 use lunetad::{Destination, HostsLine, HostsParsed};
 use signal_hook::consts::SIGHUP;
 
@@ -184,8 +184,18 @@ impl Here {
             Ok(kept) => format!("forgets {}", kept_said(*kept)),
             Err(why) => format!("forgets its projects file, which does not read: {why}"),
         };
-        format!("{runs}; {kept}")
+        format!("{runs}; {kept}{}", unreadable_said(&self.running.unreadable))
     }
+}
+
+fn unreadable_said(unreadable: &[Unreadable]) -> String {
+    if unreadable.is_empty() {
+        return String::new();
+    }
+    let each = |it: &Unreadable| {
+        format!("{} (pid {}), whose arguments do not read: {}", it.name, it.id.pid, it.why)
+    };
+    format!("; leaves {}", listed(&unreadable.iter().map(each).collect::<Vec<_>>()))
 }
 
 fn uncounted_said(why: &str) -> String {
@@ -696,6 +706,7 @@ mod tests {
             lunetads: vec![id(4)],
             muxes: vec![id(5)],
             served: vec![PathBuf::from("/run/user/1000/luneta")],
+            unreadable: Vec::new(),
         };
         let agents = Counted::Agents(Agents { count: 3, busy: 1 });
         let projects = Ok(Kept { projects: 4, worktrees: 9 });
@@ -729,6 +740,22 @@ mod tests {
         let projects = Ok(Kept { projects: 0, worktrees: 0 });
         let here = Here { running, agents: Counted::Unasked, projects };
         assert_eq!(here.says(), "ends 1 luneta; keeps no project to forget");
+
+        let unreadable = |pid: u32, name: &str| Unreadable {
+            id: id(pid),
+            name: name.to_owned(),
+            why: "KERN_PROCARGS2 holds a negative argc".to_owned(),
+        };
+        let unreadable = vec![unreadable(2, "lunetad"), unreadable(3, "luneta-mux")];
+        let running = Running { lunetas: vec![luneta(1, &[])], unreadable, ..Running::default() };
+        let projects = Ok(Kept { projects: 0, worktrees: 0 });
+        let here = Here { running, agents: Counted::Unasked, projects };
+        assert_eq!(
+            here.says(),
+            "ends 1 luneta; keeps no project to forget; leaves lunetad (pid 2), whose arguments do \
+             not read: KERN_PROCARGS2 holds a negative argc and luneta-mux (pid 3), whose \
+             arguments do not read: KERN_PROCARGS2 holds a negative argc"
+        );
     }
 
     #[test]

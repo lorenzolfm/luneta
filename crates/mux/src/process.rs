@@ -68,7 +68,8 @@ impl Group {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -118,6 +119,23 @@ mod tests {
         rustix::process::kill_process(raw, rustix::process::Signal::CONT).expect("it goes on");
         child.stdin.take().expect("its stdin").write_all(b"\n").expect("it reads a line");
         child.wait().expect("it ends");
+    }
+
+    #[test]
+    fn a_lone_empty_argument_reads_as_one() {
+        let mut child = Command::new("sh")
+            .arg0("")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("sh starts");
+        let script = b"echo x\n";
+        child.stdin.as_mut().expect("its stdin").write_all(script).expect("it reads its script");
+        child.stdout.as_mut().expect("its stdout").read_exact(&mut [0; 2]).expect("it runs");
+        let read = argv(child.id());
+        drop(child.stdin.take());
+        child.wait().expect("it ends");
+        assert_eq!(read, Some(vec![String::new()]));
     }
 
     #[test]

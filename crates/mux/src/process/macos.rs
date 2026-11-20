@@ -1,6 +1,8 @@
-use std::ffi::{CStr, c_int, c_void};
+use std::ffi::{c_int, c_void};
 use std::mem::{MaybeUninit, size_of};
 use std::ptr;
+
+use luneta_protocol::process::laid_in_procargs;
 
 use super::{CHILDREN_MAX, Group, Process, Terminal};
 
@@ -102,39 +104,6 @@ pub fn argv(pid: u32) -> Option<Vec<String>> {
     }
     assert!(size <= bytes.len(), "sysctl wrote {size} bytes into {}", bytes.len());
     bytes.truncate(size);
-    args_of(&bytes)
-}
-
-fn args_of(bytes: &[u8]) -> Option<Vec<String>> {
-    let count = usize::try_from(i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?)).ok()?;
-    let rest = bytes.get(4..)?;
-    let path = CStr::from_bytes_until_nul(rest).ok()?;
-    let mut rest = &rest[path.to_bytes_with_nul().len()..];
-    while let Some(after) = rest.strip_prefix(b"\0") {
-        rest = after;
-    }
-    let mut args = Vec::with_capacity(count.min(1024));
-    for _ in 0..count {
-        let arg = CStr::from_bytes_until_nul(rest).ok()?;
-        args.push(arg.to_string_lossy().into_owned());
-        rest = &rest[arg.to_bytes_with_nul().len()..];
-    }
-    (!args.is_empty()).then_some(args)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_arguments_read_by_their_count() {
-        let mut bytes = 3_i32.to_ne_bytes().to_vec();
-        bytes.extend_from_slice(b"/bin/sh\0\0\0\0sh\0\0-c x\0HOME=/h\0");
-        let args = args_of(&bytes).expect("they read");
-        assert_eq!(args, ["sh", "", "-c x"]);
-        let mut short = 3_i32.to_ne_bytes().to_vec();
-        short.extend_from_slice(b"/bin/sh\0sh\0");
-        assert_eq!(args_of(&short), None);
-        assert_eq!(args_of(b"\x01\0"), None);
-    }
+    let argv = laid_in_procargs(&bytes).ok()?.argv;
+    (!argv.is_empty()).then(|| argv.iter().map(|arg| arg.to_string_lossy().into_owned()).collect())
 }

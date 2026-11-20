@@ -6,7 +6,7 @@ use rustix::process::Signal;
 
 use crate::{folder, process, projects};
 
-pub use crate::process::{Id, Start, Unended};
+pub use crate::process::{Id, Start, Unended, Unreadable};
 
 pub const LUNETA: &str = "luneta";
 
@@ -33,6 +33,7 @@ pub struct Running {
     pub lunetads: Vec<Id>,
     pub muxes: Vec<Id>,
     pub served: Vec<PathBuf>,
+    pub unreadable: Vec<process::Unreadable>,
 }
 
 impl Running {
@@ -70,8 +71,10 @@ pub fn running(folders: &Folders) -> Running {
     running_of(process::mine(&[LUNETA, LUNETAD, MUX]), &folders.each(), std::process::id())
 }
 
-fn running_of(found: Vec<process::Found>, folders: &[&Path], me: u32) -> Running {
-    let mut running = Running::default();
+fn running_of(mine: process::Mine, folders: &[&Path], me: u32) -> Running {
+    let process::Mine { found, unreadable } = mine;
+    let unreadable = unreadable.into_iter().filter(|it| it.id.pid != me).collect();
+    let mut running = Running { unreadable, ..Running::default() };
     for found in found {
         if found.id.pid == me {
             continue;
@@ -97,6 +100,7 @@ fn running_of(found: Vec<process::Found>, folders: &[&Path], me: u32) -> Running
     running.lunetas.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     running.lunetads.sort_unstable();
     running.muxes.sort_unstable();
+    running.unreadable.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     running
 }
 
@@ -168,6 +172,10 @@ mod tests {
         runs.wait().unwrap();
     }
 
+    fn mine(found: Vec<process::Found>) -> process::Mine {
+        process::Mine { found, unreadable: Vec::new() }
+    }
+
     fn found(pid: u32, name: &str, environ: &[&str]) -> process::Found {
         given(pid, name, &[], environ)
     }
@@ -188,7 +196,7 @@ mod tests {
             given(2, MUX, &["/tmp/test/luneta"], &ours),
             given(3, MUX, &[], &ours),
         ];
-        let running = running_of(listed, &[folder], 0);
+        let running = running_of(mine(listed), &[folder], 0);
         let muxes: Vec<u32> = running.muxes.into_iter().map(|id| id.pid).collect();
         assert_eq!(muxes, [1, 3]);
     }
@@ -206,7 +214,7 @@ mod tests {
             found(7, LUNETA, &["XDG_RUNTIME_DIR=/run/user/1000"]),
             found(8, LUNETAD, &["XDG_RUNTIME_DIR=/run/user/1000", "XDG_RUNTIME_DIR=/tmp"]),
         ];
-        let running = running_of(listed, &[folder], 7);
+        let running = running_of(mine(listed), &[folder], 7);
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
         let front_ends = pids(running.luneta_ids());
         let (daemons, muxes) = (pids(running.lunetads), pids(running.muxes));
@@ -221,7 +229,7 @@ mod tests {
             found(2, MUX, &[]),
             found(3, LUNETA, &["XDG_RUNTIME_DIR=/tmp/test", "TMPDIR=/var/T/nix-shell.b"]),
         ];
-        let running = running_of(listed, &[&folder], 0);
+        let running = running_of(mine(listed), &[&folder], 0);
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
         let (daemons, muxes) = (pids(running.lunetads), pids(running.muxes));
         assert_eq!((running.lunetas, daemons, muxes), (vec![], vec![1], vec![2]));
@@ -236,11 +244,28 @@ mod tests {
             found(3, LUNETA, &["XDG_RUNTIME_DIR=/run/user/1000"]),
             found(4, LUNETAD, &["XDG_RUNTIME_DIR=/tmp/other"]),
         ];
-        let running = running_of(listed, &[folder, holder], 0);
+        let running = running_of(mine(listed), &[folder, holder], 0);
         assert_eq!(running.served, [holder.to_owned()]);
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
         let front_ends = pids(running.luneta_ids());
         let (daemons, muxes) = (pids(running.lunetads), pids(running.muxes));
         assert_eq!((front_ends, daemons, muxes), (vec![3], vec![1], vec![2]));
+    }
+
+    #[test]
+    fn a_process_that_did_not_read_is_said_and_never_ended() {
+        let folder = Path::new("/run/user/1000/luneta");
+        let unreadable = |pid: u32, name: &str| process::Unreadable {
+            id: Id { pid, start: Start::spelled("1".to_owned()).unwrap() },
+            name: name.to_owned(),
+            why: "KERN_PROCARGS2 holds a negative argc".to_owned(),
+        };
+        let found = vec![found(1, LUNETAD, &["XDG_RUNTIME_DIR=/run/user/1000"])];
+        let unread = vec![unreadable(4, MUX), unreadable(2, LUNETAD), unreadable(3, LUNETA)];
+        let running = running_of(process::Mine { found, unreadable: unread }, &[folder], 3);
+        assert_eq!(running.unreadable, [unreadable(2, LUNETAD), unreadable(4, MUX)]);
+        let daemons: Vec<u32> = running.lunetads.iter().map(|id| id.pid).collect();
+        assert_eq!(daemons, [1]);
+        assert_eq!(running.muxes, []);
     }
 }

@@ -397,13 +397,13 @@ fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, Strin
     Ok(Some(RemoteBranch { remote: remote.to_owned(), branch: there.to_owned() }))
 }
 
-fn default_heard(common: &str, remote: &str) -> Option<String> {
+fn default_heard(common: &str, remote: &str) -> Result<Option<String>, String> {
     let head = format!("refs/remotes/{remote}/HEAD");
     git::pointed(on_repository(common), &head, &format!("refs/remotes/{remote}/"), GIT_SAYS)
 }
 
 fn remote_default(common: &str, remote: &str) -> Result<Option<String>, String> {
-    if let Some(default) = default_heard(common, remote) {
+    if let Some(default) = default_heard(common, remote)? {
         return Ok(Some(default));
     }
     let mut git = on_repository(common);

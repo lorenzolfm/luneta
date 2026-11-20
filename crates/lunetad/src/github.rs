@@ -263,7 +263,7 @@ fn view(dir: &str, (repository, branch): &Branch, forks: &Forks) -> Result<Answe
     let own = find(dir, None)?;
     let settled = own.as_ref().is_some_and(|found| found.pull_request.state != State::Closed);
     let beyond = if settled { Ok(None) } else { in_parent(dir, repository, branch, forks) };
-    if git::branch(dir).as_deref() != Some(branch.as_str()) {
+    if git::branch(dir)?.as_deref() != Some(branch.as_str()) {
         return Ok(Answer::Moved);
     }
     Ok(match beyond {

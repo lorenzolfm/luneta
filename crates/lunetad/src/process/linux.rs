@@ -1,6 +1,6 @@
 use std::ffi::OsString;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read as _};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt as _;
@@ -12,7 +12,9 @@ use rustix::io::{retry_on_intr, Errno};
 use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
 use rustix::time::{clock_gettime, ClockId};
 
-use super::{Found, Id, Start, Unended};
+use luneta_protocol::process::arguments;
+
+use super::{Found, Id, Mine, Start, Unended, Unreadable, EXEC_STRINGS_BYTES_MAX};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -60,7 +62,23 @@ pub fn started(pid: u32) -> Option<SystemTime> {
 }
 
 pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
-    Ok(nul_split(&fs::read(proc(pid, "environ"))?))
+    Ok(nul_split(&exec_strings(pid, "environ")?))
+}
+
+fn exec_strings(pid: u32, leaf: &str) -> io::Result<Vec<u8>> {
+    let most = u64::try_from(EXEC_STRINGS_BYTES_MAX).expect("6 MiB fit a u64");
+    let mut read = Vec::new();
+    File::open(proc(pid, leaf))?.take(most + 1).read_to_end(&mut read)?;
+    if read.len() > EXEC_STRINGS_BYTES_MAX {
+        let most = EXEC_STRINGS_BYTES_MAX;
+        let why = format!("/proc/{pid}/{leaf} runs past the {most} bytes exec lays out");
+        return Err(io::Error::new(io::ErrorKind::InvalidData, why));
+    }
+    Ok(read)
+}
+
+fn gone(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || Errno::from_io_error(error) == Some(Errno::SRCH)
 }
 
 fn nul_split(raw: &[u8]) -> Vec<OsString> {
@@ -68,21 +86,13 @@ fn nul_split(raw: &[u8]) -> Vec<OsString> {
     entries.map(|entry| OsString::from_vec(entry.to_vec())).collect()
 }
 
-fn arguments(cmdline: &[u8]) -> Vec<&[u8]> {
-    if cmdline.is_empty() {
-        return Vec::new();
-    }
-    let ended = cmdline.strip_suffix(&[0]).unwrap_or(cmdline);
-    ended.split(|byte| *byte == 0).collect()
-}
-
 #[must_use]
-pub fn mine(names: &[&str]) -> Vec<Found> {
+pub fn mine(names: &[&str]) -> Mine {
     let Ok(listed) = fs::read_dir("/proc") else {
-        return Vec::new();
+        return Mine::default();
     };
     let uid = rustix::process::getuid().as_raw();
-    let mut found = Vec::new();
+    let mut seen = Mine::default();
     for entry in listed.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
             continue;
@@ -100,18 +110,22 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
         let Some(start) = start(pid) else {
             continue;
         };
-        let Ok(environ) = environ(pid) else {
-            continue;
-        };
-        let Ok(cmdline) = fs::read(proc(pid, "cmdline")) else {
-            continue;
+        let id = Id { pid, start };
+        let read = environ(pid).and_then(|environ| Ok((environ, exec_strings(pid, "cmdline")?)));
+        let (environ, cmdline) = match read {
+            Ok(read) => read,
+            Err(error) if gone(&error) => continue,
+            Err(error) => {
+                let why = error.to_string();
+                seen.unreadable.push(Unreadable { id, name: name.to_owned(), why });
+                continue;
+            },
         };
         let argv = arguments(&cmdline).into_iter();
         let argv = argv.map(|arg| String::from_utf8_lossy(arg).into_owned()).collect();
-        let id = Id { pid, start };
-        found.push(Found { id, name: name.to_owned(), argv, environ });
+        seen.found.push(Found { id, name: name.to_owned(), argv, environ });
     }
-    found
+    seen
 }
 
 #[must_use]
@@ -199,7 +213,11 @@ impl Domain {
 
 #[cfg(test)]
 mod tests {
-    use super::{arguments, start_in};
+    use std::io;
+
+    use rustix::io::Errno;
+
+    use super::{gone, start_in};
 
     fn stat(state: &str, threads: u32) -> String {
         let before = "1 7 7 0 -1 4194304 0 0 0 0 0 0 0 0 20 0";
@@ -207,15 +225,12 @@ mod tests {
     }
 
     #[test]
-    fn a_cmdline_reads_as_its_arguments_empty_ones_too_and_none_before_it_is_laid_out() {
-        let read = |cmdline: &[u8]| {
-            let read = arguments(cmdline).into_iter();
-            read.map(|arg| String::from_utf8(arg.to_vec()).unwrap()).collect::<Vec<_>>()
-        };
-        assert_eq!(read(b"sh\0-c\0\0\0"), ["sh", "-c", "", ""]);
-        assert_eq!(read(b"\0"), [""]);
-        assert_eq!(read(b"claude --resume"), ["claude --resume"]);
-        assert_eq!(read(b""), Vec::<String>::new());
+    fn a_process_that_ended_reads_as_gone_and_one_that_did_not_read_as_unreadable() {
+        let read = |pid: u32| super::exec_strings(pid, "cmdline").map(|_| ()).unwrap_err();
+        assert!(gone(&read(u32::MAX)), "no process has the last pid");
+        assert!(gone(&io::Error::from(Errno::SRCH)), "one that ended as it was read");
+        assert!(!gone(&io::Error::from(Errno::ACCESS)));
+        assert!(!gone(&io::Error::new(io::ErrorKind::InvalidData, "too long")));
     }
 
     #[test]

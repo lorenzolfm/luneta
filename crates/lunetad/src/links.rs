@@ -758,7 +758,7 @@ fn ready(
             kind_holds(link)?;
             let dir = &worked[at].dir;
             synced(dir.as_str(), link, wanted, None)?;
-            let (folder, branch) = (dir.clone(), git::branch_within(dir.as_str(), ANSWER));
+            let (folder, branch) = (dir.clone(), branch_of(dir.as_str())?);
             let work = Readied::Link(link.clone());
             return Ok(Ready { at: At::There(at), folder, branch, moved_off: false, work });
         },
@@ -897,8 +897,12 @@ fn made_worktree(
 ) -> Result<Ready<usize>, Unready> {
     let folder = worktree(dir, of)?;
     let at = opened_in(&folder, worked);
-    let branch = git::branch_within(folder.as_str(), ANSWER);
+    let branch = branch_of(folder.as_str())?;
     Ok(Ready { at, branch, moved_off: false, folder, work })
+}
+
+fn branch_of(dir: &str) -> Result<Option<String>, Unready> {
+    git::branch_within(dir, ANSWER).map_err(|why| Unready::InDoubt(format!("no branch read {why}")))
 }
 
 fn opened_in(folder: &Directory, worked: &[Worked]) -> At<usize> {
