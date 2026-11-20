@@ -7,7 +7,7 @@ publish = false
 description = "The one way luneta's tests wait: on an event, under one patience no loaded machine runs out of"
 
 [dependencies]
-tokio = { version = "1.53.1", features = ["time"] }
+tokio = { version = "1.53.1", features = ["rt", "time"] }
 
 [lints]
 workspace = true
