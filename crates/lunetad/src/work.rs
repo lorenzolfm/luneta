@@ -44,6 +44,21 @@ const PULLS: [&str; 4] = ["pr", "list", "--state", "open"];
 
 const PULL_FIELDS: &str = "number,title,isDraft,headRefName,author";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Item {
+    Issue(NonZeroU32),
+    Pull(NonZeroU32),
+}
+
+impl Item {
+    #[must_use]
+    pub fn number(self) -> NonZeroU32 {
+        match self {
+            Item::Issue(number) | Item::Pull(number) => number,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Issue {
     pub number: NonZeroU32,

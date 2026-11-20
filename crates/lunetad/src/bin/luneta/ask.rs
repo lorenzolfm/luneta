@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lunetad::asks::{self, Asked, Marked, Step, Turn};
+use lunetad::projects::Dir;
 use lunetad::transcripts::SessionId;
 use lunetad::{Destination, Directory};
 use ratatui::buffer::Buffer;
@@ -90,12 +91,12 @@ impl Ask {
         }
     }
 
-    pub fn homed(number: u64, on: &Machine, dir: &str, project: &str) -> Self {
-        let works = match (on, Directory::parse(dir.to_owned())) {
-            (_, Err(why)) => Works::Unread { why: format!("where project {project} is, {why}") },
-            (Machine::Local, Ok(dir)) => Works::Here(PathBuf::from(dir.as_str())),
-            (Machine::Remote(on), Ok(dir)) => Works::There { on: on.clone(), cwd: Some(dir) },
+    pub fn homed(number: u64, on: &Machine, dir: &Dir, project: &str) -> Self {
+        let works = match on {
+            Machine::Local => Works::Here(PathBuf::from(dir.as_str())),
+            Machine::Remote(on) => Works::There { on: on.clone(), cwd: Some(Directory::from(dir)) },
         };
+        let dir = dir.as_str();
         let highlighted = format!(
             "The user asks from the work view of project {project}, in {dir}, which lists the \
              project's open issues and pull requests on GitHub: \"this project\" means it, and \
@@ -113,7 +114,7 @@ impl Ask {
         }
     }
 
-    pub fn rehome(&mut self, on: &Machine, dir: &str, project: &str) {
+    pub fn rehome(&mut self, on: &Machine, dir: &Dir, project: &str) {
         if self.session.is_some() {
             return;
         }
@@ -586,13 +587,9 @@ mod tests {
             assert_eq!(top(&unread), "┌─ Ask ────────────────────────────────┐");
         }
 
-        let home = |on: &Machine, dir: &str| Ask::homed(7, on, dir, "luneta").works;
-        assert_eq!(home(&Machine::Local, "/w/luneta"), Works::Here(PathBuf::from("/w/luneta")));
-        assert_eq!(home(&nixos(), "/w/luneta"), there(Some("/w/luneta")));
-        let why = "where project luneta is, \"w\" is no absolute path".to_owned();
-        for on in [Machine::Local, nixos()] {
-            assert_eq!(home(&on, "w"), Works::Unread { why: why.clone() });
-        }
+        let home = |on: &Machine| Ask::homed(7, on, &Dir::parse("/w/luneta").unwrap(), "luneta").works;
+        assert_eq!(home(&Machine::Local), Works::Here(PathBuf::from("/w/luneta")));
+        assert_eq!(home(&nixos()), there(Some("/w/luneta")));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use lunetad::api::projects::Held;
 use lunetad::api::{self, remote, terminal, Host};
 use lunetad::log;
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{ProjectId, Used, ViewId, WorktreeId, VIEWS_MAX, WORKTREES_MAX};
+use lunetad::projects::{Dir, ProjectId, Used, ViewId, WorktreeId, VIEWS_MAX, WORKTREES_MAX};
 use lunetad::Destination;
 
 use crate::host::NOT_YET;
@@ -33,7 +33,7 @@ pub enum Holds {
 pub struct Project {
     pub id: ProjectId,
     pub name: String,
-    pub dir: String,
+    pub dir: Dir,
     pub holds: Holds,
 }
 
@@ -45,10 +45,16 @@ pub fn route(on: &Machine, view: ViewKey) -> Result<TerminalKey, String> {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum Holding {
+    #[default]
+    Unread,
+    Read(Vec<Project>),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Projected {
-    here: Vec<Project>,
-    far: BTreeMap<Destination, Vec<Project>>,
-    read: bool,
+    here: Holding,
+    far: BTreeMap<Destination, Holding>,
 }
 
 impl Project {
@@ -91,23 +97,31 @@ impl Projected {
         let named = machines::named_once(&host.remotes);
         for (remote, destination) in host.remotes.iter().zip(named) {
             if let Some(remote::Reached::Host(far)) = &remote.reached {
-                let projects = listed(kept(far.projects.as_ref())).unwrap_or_else(|why| {
+                let holding = held(far.projects.as_ref()).unwrap_or_else(|why| {
                     log::say(&format!("{}'s projects: {why}", remote.destination));
-                    Vec::new()
+                    Holding::Unread
                 });
                 if let Some(destination) = destination {
-                    let held = far_projects.insert(destination, projects);
+                    let held = far_projects.insert(destination, holding);
                     assert!(held.is_none(), "named_once names each machine once");
                 }
             }
         }
-        let here = listed(kept(host.projects.as_ref()))?;
-        Ok(Projected { here, far: far_projects, read: true })
+        let here = held(host.projects.as_ref())?;
+        Ok(Projected { here, far: far_projects })
+    }
+
+    fn held_on(&self, on: &Machine) -> Option<&Holding> {
+        match on {
+            Machine::Local => Some(&self.here),
+            Machine::Remote(destination) => self.far.get(destination),
+        }
     }
 
     #[must_use]
-    pub fn read(&self) -> bool {
-        self.read
+    pub fn lacks(&self, on: &Machine, id: ProjectId) -> bool {
+        let holding = self.held_on(on);
+        matches!(holding, Some(Holding::Read(projects)) if projects.iter().all(|it| it.id != id))
     }
 
     #[must_use]
@@ -120,9 +134,9 @@ impl Projected {
 
     #[must_use]
     pub fn projects(&self, on: &Machine) -> &[Project] {
-        match on {
-            Machine::Local => &self.here,
-            Machine::Remote(destination) => self.far.get(destination).map_or(&[], Vec::as_slice),
+        match self.held_on(on) {
+            Some(Holding::Read(projects)) => projects,
+            Some(Holding::Unread) | None => &[],
         }
     }
 
@@ -205,10 +219,10 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
     Ok(projects)
 }
 
-fn kept(projects: Option<&api::Projects>) -> &[api::Project] {
+fn held(projects: Option<&api::Projects>) -> Result<Holding, String> {
     match projects.and_then(|projects| projects.held.as_ref()) {
-        Some(Held::Kept(kept)) => &kept.projects,
-        Some(Held::Unkept(_)) | None => &[],
+        Some(Held::Kept(kept)) => listed(&kept.projects).map(Holding::Read),
+        Some(Held::Unkept(_)) | None => Ok(Holding::Unread),
     }
 }
 
@@ -255,7 +269,8 @@ fn project(project: &api::Project) -> Result<Project, String> {
         },
         None => return Err(format!("project {named} says not what it holds")),
     };
-    Ok(Project { id, name: project.name.clone(), dir: project.dir.clone(), holds })
+    let dir = Dir::parse(&project.dir).map_err(|why| format!("project {named}'s folder: {why}"))?;
+    Ok(Project { id, name: project.name.clone(), dir, holds })
 }
 
 #[cfg(test)]
@@ -479,6 +494,7 @@ mod tests {
         let nixos = Machine::Remote("nixos".parse().unwrap());
         assert!(projected.reaches(&nixos), "a machine that lists too many is reached still");
         assert!(projected.projects(&nixos).is_empty(), "with no project to go to");
+        assert!(!projected.lacks(&nixos, seven()), "and none it is known to lack");
     }
 
     #[test]
@@ -509,6 +525,36 @@ mod tests {
         let nixos = Machine::Remote("nixos".parse().unwrap());
         assert!(projected.reaches(&nixos), "a machine luneta cannot read is reached still");
         assert!(projected.projects(&nixos).is_empty(), "with none of its projects, not some");
+        assert!(!projected.lacks(&nixos, seven()), "and none it is known to lack");
+    }
+
+    #[test]
+    fn a_machine_lacks_a_project_only_once_its_projects_are_read_and_hold_it_not() {
+        let (here, eight) = (Machine::Local, ProjectId::of(8).unwrap());
+        let read = Projected::adapted(&host()).unwrap();
+        assert!(!read.lacks(&here, seven()), "it holds 7");
+        assert!(read.lacks(&here, eight), "and lacks 8");
+        let unkept = Held::Unkept("it changed since lunetad read it".to_owned());
+        let unkept = Host { projects: Some(api::Projects { held: Some(unkept) }), ..Host::default() };
+        let unheld = [Projected::default(), Projected::adapted(&unkept).unwrap()];
+        let unsaid = Projected::adapted(&Host::default()).unwrap();
+        for unread in unheld.iter().chain([&unsaid]) {
+            assert!(unread.projects(&here).is_empty(), "{unread:?}");
+            assert!(!unread.lacks(&here, eight), "nothing is lacked where nothing was read: {unread:?}");
+        }
+        let far = Machine::Remote("nixos".parse().unwrap());
+        assert!(!read.lacks(&far, eight), "nor on a machine not reached");
+    }
+
+    #[test]
+    fn a_project_whose_folder_is_no_absolute_path_is_refused() {
+        let mut unrooted = host();
+        kept(&mut unrooted).dir = "w".to_owned();
+        let refused = Projected::adapted(&unrooted).unwrap_err();
+        assert_eq!(refused, "project bitwarden backup's folder: \"w\" is no absolute path");
+        let projected = Projected::adapted(&host()).unwrap();
+        let dir = &projected.project(&Machine::Local, seven()).unwrap().dir;
+        assert_eq!(dir.as_str(), "/w");
     }
 
     #[test]

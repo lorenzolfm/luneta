@@ -16,7 +16,8 @@ use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
 use crate::mux;
-use crate::{git, program, work};
+use crate::work::{self, Item};
+use crate::{git, program};
 
 pub const MODEL: &str = "sonnet";
 
@@ -158,8 +159,7 @@ pub struct Asked {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Marked {
-    issues: BTreeSet<NonZeroU32>,
-    pulls: BTreeSet<NonZeroU32>,
+    marked: BTreeSet<Item>,
 }
 
 impl Marked {
@@ -167,25 +167,66 @@ impl Marked {
         issues: impl IntoIterator<Item = NonZeroU32>,
         pulls: impl IntoIterator<Item = NonZeroU32>,
     ) -> Result<Marked, String> {
-        let issues = Marked::of_kind("issues", issues)?;
-        let pulls = Marked::of_kind("pull requests", pulls)?;
-        Ok(Marked { issues, pulls })
+        let mut marked = Marked::default();
+        marked.of_kind("issues", issues.into_iter().map(Item::Issue))?;
+        marked.of_kind("pull requests", pulls.into_iter().map(Item::Pull))?;
+        Ok(marked)
     }
 
-    fn of_kind(
-        kind: &str,
-        numbers: impl IntoIterator<Item = NonZeroU32>,
-    ) -> Result<BTreeSet<NonZeroU32>, String> {
-        let mut marked = BTreeSet::new();
-        for number in numbers {
-            if marked.len() == work::LISTED_MAX {
+    fn of_kind(&mut self, kind: &str, items: impl IntoIterator<Item = Item>) -> Result<(), String> {
+        for item in items {
+            if self.like(item) == work::LISTED_MAX {
                 return Err(format!("marked: at most {} {kind}", work::LISTED_MAX));
             }
-            if !marked.insert(number) {
-                return Err(format!("marked: #{number} is among the {kind} twice"));
+            if !self.marked.insert(item) {
+                return Err(format!("marked: #{} is among the {kind} twice", item.number()));
             }
         }
-        Ok(marked)
+        Ok(())
+    }
+
+    pub fn toggle(&mut self, item: Item) {
+        if self.marked.remove(&item) {
+            return;
+        }
+        assert!(self.like(item) < work::LISTED_MAX, "at most so many of a kind are listed to mark");
+        self.marked.insert(item);
+    }
+
+    pub fn retain(&mut self, kept: impl Fn(&Item) -> bool) {
+        self.marked.retain(kept);
+    }
+
+    pub fn clear(&mut self) {
+        self.marked.clear();
+    }
+
+    #[must_use]
+    pub fn contains(&self, item: &Item) -> bool {
+        self.marked.contains(item)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Item> {
+        self.marked.iter()
+    }
+
+    fn like(&self, item: Item) -> usize {
+        let kind = |item: &Item| matches!(item, Item::Issue(_));
+        self.marked.iter().filter(|marked| kind(marked) == kind(&item)).count()
+    }
+
+    fn issues(&self) -> impl Iterator<Item = NonZeroU32> + '_ {
+        self.marked.iter().filter_map(|item| match item {
+            Item::Issue(number) => Some(*number),
+            Item::Pull(_) => None,
+        })
+    }
+
+    fn pulls(&self) -> impl Iterator<Item = NonZeroU32> + '_ {
+        self.marked.iter().filter_map(|item| match item {
+            Item::Pull(number) => Some(*number),
+            Item::Issue(_) => None,
+        })
     }
 
     fn read(issues: Vec<u32>, pulls: Vec<u32>) -> Result<Marked, String> {
@@ -197,7 +238,7 @@ impl Marked {
     }
 
     fn line(&self) -> Option<String> {
-        let listed = |kind: &str, numbers: &BTreeSet<NonZeroU32>| {
+        let listed = |kind: &str, numbers: Vec<NonZeroU32>| {
             let numbers: Vec<String> = numbers.iter().map(|number| format!("#{number}")).collect();
             let (last, rest) = numbers.split_last()?;
             Some(match rest {
@@ -205,8 +246,8 @@ impl Marked {
                 rest => format!("{kind}s {} and {last}", rest.join(", ")),
             })
         };
-        let issues = listed("issue", &self.issues);
-        let pulls = listed("pull request", &self.pulls);
+        let issues = listed("issue", self.issues().collect());
+        let pulls = listed("pull request", self.pulls().collect());
         let marked = match (issues, pulls) {
             (None, None) => return None,
             (Some(one), None) | (None, Some(one)) => one,
@@ -270,8 +311,8 @@ impl Asked {
             highlighted: self.highlighted.clone(),
             turn: self.turn.key,
             before: self.turn.before,
-            marked_issues: self.marked.issues.iter().map(|number| number.get()).collect(),
-            marked_pulls: self.marked.pulls.iter().map(|number| number.get()).collect(),
+            marked_issues: self.marked.issues().map(NonZeroU32::get).collect(),
+            marked_pulls: self.marked.pulls().map(NonZeroU32::get).collect(),
         }
     }
 
@@ -568,6 +609,19 @@ mod tests {
         assert_eq!(Marked::new(numbers(1..=51), numbers(1..=1)), refused);
         let twice = Marked::new(numbers(1..=1), [NonZeroU32::MIN, NonZeroU32::MIN]);
         assert_eq!(twice, Err("marked: #1 is among the pull requests twice".to_owned()));
+    }
+
+    #[test]
+    fn a_mark_made_again_is_taken_off_and_an_issue_and_a_pull_request_of_one_number_are_two() {
+        let one = NonZeroU32::MIN;
+        let mut marked = Marked::default();
+        marked.toggle(Item::Issue(one));
+        marked.toggle(Item::Pull(one));
+        assert_eq!(marked, Marked::new([one], [one]).unwrap());
+        marked.toggle(Item::Issue(one));
+        assert_eq!(marked, Marked::new([], [one]).unwrap(), "a second mark takes it off");
+        marked.retain(|item| matches!(item, Item::Issue(_)));
+        assert_eq!(marked, Marked::default());
     }
 
     #[test]

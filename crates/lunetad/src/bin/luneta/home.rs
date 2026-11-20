@@ -1,12 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lunetad::asks::Marked;
-use lunetad::projects::ProjectId;
-use lunetad::work::{self, Listed, Work};
+use lunetad::projects::{Dir, ProjectId};
+use lunetad::work::{self, Item, Listed, Work};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -38,12 +38,6 @@ const UNHOSTED: &str = "no remote on GitHub, so nothing is listed here";
 
 const ASK_ROWS_MIN: u16 = 4;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Item {
-    Issue(NonZeroU32),
-    Pull(NonZeroU32),
-}
-
 #[derive(Debug)]
 enum Listing {
     Asking,
@@ -67,7 +61,7 @@ enum Next {
 #[expect(clippy::large_enum_variant, reason = "a home holds one, which goes from Not to As once")]
 enum Named {
     Not { asks: u64 },
-    As { name: String, dir: String, ask: Ask },
+    As { name: String, dir: Dir, ask: Ask },
 }
 
 #[derive(Debug)]
@@ -78,7 +72,13 @@ pub struct Home {
     named: Named,
     listing: Listing,
     cursor: Option<Item>,
-    marked: BTreeSet<Item>,
+    marked: Marked,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Key {
+    pub on: Machine,
+    pub project: ProjectId,
 }
 
 impl Home {
@@ -90,7 +90,7 @@ impl Home {
             named: Named::Not { asks },
             listing: Listing::Asking,
             cursor: None,
-            marked: BTreeSet::new(),
+            marked: Marked::default(),
         }
     }
 
@@ -106,8 +106,8 @@ impl Home {
         self.project
     }
 
-    pub fn is_of(&self, on: &Machine, project: ProjectId) -> bool {
-        self.on == *on && self.project == project
+    pub fn which(&self) -> Key {
+        Key { on: self.on.clone(), project: self.project }
     }
 
     pub fn ask_numbered(&mut self, number: u64) -> Option<&mut Ask> {
@@ -117,14 +117,14 @@ impl Home {
         }
     }
 
-    pub fn named(&mut self, name: &str, dir: &str) {
+    pub fn named(&mut self, name: &str, dir: &Dir) {
         match &mut self.named {
             Named::Not { asks } => {
                 let ask = Ask::homed(*asks, &self.on, dir, name);
-                self.named = Named::As { name: name.to_owned(), dir: dir.to_owned(), ask };
+                self.named = Named::As { name: name.to_owned(), dir: dir.clone(), ask };
             },
             Named::As { name: named, dir: homed, ask } => {
-                if (named.as_str(), homed.as_str()) != (name, dir) {
+                if named != name || homed != dir {
                     name.clone_into(named);
                     dir.clone_into(homed);
                     ask.rehome(&self.on, dir, name);
@@ -229,7 +229,7 @@ impl Home {
         };
         match ask.key(key) {
             ask::Keyed::Nothing => {},
-            ask::Keyed::Send => ask.send(marks(&self.marked), events),
+            ask::Keyed::Send => ask.send(self.marked.clone(), events),
             ask::Keyed::Close if ask.turning() => {
                 *asks += 1;
                 ask.stop(*asks);
@@ -262,9 +262,7 @@ impl Home {
             return;
         };
         assert!(self.items().contains(&item), "only a listed item is marked");
-        if !self.marked.remove(&item) {
-            self.marked.insert(item);
-        }
+        self.marked.toggle(item);
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -307,8 +305,8 @@ impl Home {
         assert!(rows <= area.height, "the prompt's box fits in the home");
         let asked = Rect::new(area.x, area.bottom() - rows, area.width, rows);
         let right = match &self.on {
-            Machine::Local => sidebar::short_cwd(dir),
-            Machine::Remote(on) => format!("{} on {on}", sidebar::short_cwd(dir)),
+            Machine::Local => sidebar::short_cwd(dir.as_str()),
+            Machine::Remote(on) => format!("{} on {on}", sidebar::short_cwd(dir.as_str())),
         };
         menu::boxed(buffer, asked, &menu::rule(ASK_TITLE, &right, inner), &talk);
         let lists = Rect::new(area.x, area.y, area.width, area.height - rows);
@@ -329,7 +327,7 @@ impl Home {
             Named::As { name, dir, .. } => Line::from(vec![
                 Span::raw(" "),
                 Span::styled(name.clone(), Style::new().fg(gruvbox::FG1).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("  {}", sidebar::short_cwd(dir)), dim),
+                Span::styled(format!("  {}", sidebar::short_cwd(dir.as_str())), dim),
             ]),
             Named::Not { .. } => Line::styled(" …", dim),
         };
@@ -405,53 +403,63 @@ impl Home {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Kept {
-    homes: Vec<Home>,
+#[derive(Debug)]
+struct Held {
+    shown: u64,
+    home: Home,
 }
 
-impl Kept {
-    pub fn take(&mut self, on: &Machine, project: ProjectId) -> Option<Home> {
-        let at = self.homes.iter().position(|home| home.is_of(on, project))?;
-        let taken = self.homes.remove(at);
-        assert!(!self.homes.iter().any(|home| home.is_of(on, project)), "a project's home is kept once");
-        Some(taken)
-    }
+#[derive(Debug, Default)]
+pub struct Homes {
+    held: HashMap<Key, Held>,
+    shown: u64,
+    made: u64,
+}
 
+impl Homes {
     #[must_use]
-    pub fn keep(&mut self, home: Home) -> Option<Home> {
-        let of = |kept: &Home| kept.is_of(home.machine(), home.project());
-        assert!(!self.homes.iter().any(of), "a project's home is kept once");
-        assert!(self.homes.len() <= KEPT_MAX, "luneta keeps so many homes at most");
-        let mut dropped = None;
-        if self.homes.len() == KEPT_MAX {
-            let idle = self.homes.iter().position(|kept| !kept.turning());
-            dropped = Some(self.homes.remove(idle.unwrap_or(0)));
+    pub fn show(&mut self, key: &Key, make: impl FnOnce(u64) -> Home) -> Option<Home> {
+        self.shown += 1;
+        if let Some(held) = self.held.get_mut(key) {
+            held.shown = self.shown;
+            return None;
         }
-        self.homes.push(home);
-        assert!(self.homes.len() <= KEPT_MAX, "luneta keeps so many homes at most");
+        assert!(self.held.len() <= KEPT_MAX, "luneta keeps so many homes at most");
+        let dropped = (self.held.len() == KEPT_MAX).then(|| self.make_room());
+        self.made += 1;
+        let home = make(self.made);
+        assert_eq!(home.which(), *key, "a home is made for the project it is shown for");
+        self.held.insert(key.clone(), Held { shown: self.shown, home });
         dropped
     }
 
+    fn make_room(&mut self) -> Home {
+        let oldest = |idle: bool| {
+            let held = self.held.iter().filter(|(_, held)| !idle || !held.home.turning());
+            held.min_by_key(|(_, held)| held.shown).map(|(key, _)| key.clone())
+        };
+        let oldest = oldest(true).or_else(|| oldest(false));
+        let dropped = oldest.and_then(|key| self.held.remove(&key));
+        dropped.expect("a full list of homes holds one to drop").home
+    }
+
+    pub fn shown(&self, key: &Key) -> &Home {
+        let held = self.held.get(key).expect("a shown home is held");
+        &held.home
+    }
+
+    pub fn shown_mut(&mut self, key: &Key) -> &mut Home {
+        let held = self.held.get_mut(key).expect("a shown home is held");
+        &mut held.home
+    }
+
     pub fn forget(&mut self, gone: impl Fn(&Home) -> bool) {
-        self.homes.retain(|home| !gone(home));
+        self.held.retain(|_, held| !gone(&held.home));
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Home> {
-        self.homes.iter_mut()
+        self.held.values_mut().map(|held| &mut held.home)
     }
-}
-
-fn marks(marked: &BTreeSet<Item>) -> Marked {
-    let numbers = |issues: bool| {
-        let each = marked.iter().filter_map(move |item| match (item, issues) {
-            (Item::Issue(number), true) | (Item::Pull(number), false) => Some(*number),
-            (Item::Issue(_), false) | (Item::Pull(_), true) => None,
-        });
-        each.collect::<Vec<_>>()
-    };
-    let marked = Marked::new(numbers(true), numbers(false));
-    marked.expect("only what is listed is marked, and gh lists only so many")
 }
 
 fn row(
@@ -520,7 +528,7 @@ mod tests {
 
     fn home() -> Home {
         let mut home = Home::new(1, 1, Machine::Local, ProjectId::of(3).unwrap());
-        home.named("luneta", "/w/luneta");
+        home.named("luneta", &Dir::parse("/w/luneta").unwrap());
         home
     }
 
@@ -556,10 +564,10 @@ mod tests {
         home.listed(Ok(listed()), now);
         press(&mut home, KeyCode::Tab);
         press(&mut home, KeyCode::Tab);
-        assert_eq!(marks(&home.marked), Marked::new([number(507)], [number(524)]).unwrap());
+        assert_eq!(home.marked, Marked::new([number(507)], [number(524)]).unwrap());
         press(&mut home, KeyCode::Up);
         press(&mut home, KeyCode::BackTab);
-        assert_eq!(marks(&home.marked), Marked::new([], [number(524)]).unwrap(), "a second mark takes it off");
+        assert_eq!(home.marked, Marked::new([], [number(524)]).unwrap(), "a second mark takes it off");
         press(&mut home, KeyCode::Down);
         assert_eq!(
             shown(&home, 60, 14)[..9],
@@ -616,7 +624,7 @@ mod tests {
         home.listed(Ok(listed()), now + AGAIN);
         press(&mut home, KeyCode::Tab);
         press(&mut home, KeyCode::Tab);
-        assert_eq!(marks(&home.marked), Marked::new([number(507)], [number(524)]).unwrap());
+        assert_eq!(home.marked, Marked::new([number(507)], [number(524)]).unwrap());
         home.relist(now + AGAIN * 2);
         home.listed(Err("HTTP 502".to_owned()), now + AGAIN * 2);
         let lines = shown(&home, 60, 14);
@@ -625,7 +633,7 @@ mod tests {
         home.relist(now + AGAIN * 3);
         let issues: [(u32, &str, &[&str]); 1] = [(98, "Menu says no", &[])];
         home.listed(Ok(work(&issues, &[(524, "Say view", "issue-511", false)])), now + AGAIN * 3);
-        assert_eq!(marks(&home.marked), Marked::new([], [number(524)]).unwrap(), "#507 was closed");
+        assert_eq!(home.marked, Marked::new([], [number(524)]).unwrap(), "#507 was closed");
         assert_eq!(home.cursor, Some(Item::Issue(number(98))), "the cursor stays on its row");
         press(&mut home, KeyCode::Down);
         assert_eq!(home.cursor, Some(Item::Issue(number(98))), "and no further than the last");
@@ -643,14 +651,14 @@ mod tests {
         home.listed(Ok(work(&issues, &pulls)), now + AGAIN);
         assert_eq!(home.cursor, Some(Item::Issue(number(507))), "a row above came, and the cursor kept #507");
         press(&mut home, KeyCode::Tab);
-        assert_eq!(marks(&home.marked), Marked::new([number(507)], []).unwrap());
+        assert_eq!(home.marked, Marked::new([number(507)], []).unwrap());
         assert_eq!(home.cursor, Some(Item::Issue(number(98))));
         press(&mut home, KeyCode::Up);
         home.relist(now + AGAIN * 2);
         let issues: [(u32, &str, &[&str]); 1] = [(98, "Menu says no", &[])];
         home.listed(Ok(work(&issues, &pulls)), now + AGAIN * 2);
         assert_eq!(home.cursor, Some(Item::Issue(number(98))), "#507 closed, and #98 took its place");
-        assert_eq!(marks(&home.marked), Marked::default());
+        assert_eq!(home.marked, Marked::default());
     }
 
     #[test]
@@ -669,7 +677,7 @@ mod tests {
         let lines = shown(&home, 60, 14);
         assert_eq!(lines[2], " no remote on GitHub, so nothing is listed here");
         press(&mut home, KeyCode::Tab);
-        assert_eq!(marks(&home.marked), Marked::default());
+        assert_eq!(home.marked, Marked::default());
         assert_eq!(home.due(), Some(now + AGAIN * 2), "it asks again, as a remote may be added");
         home.relist(now + AGAIN * 2);
         home.listed(Err("git did not say the remotes".to_owned()), now + AGAIN * 2);
@@ -687,7 +695,7 @@ mod tests {
         let unnamed = shown(&home, 60, 14);
         assert_eq!(unnamed[..3], [" …", "", "   asking gh for the open issues and pull requests…"]);
         assert!(unnamed[3..].iter().all(String::is_empty), "and no prompt shows: {unnamed:?}");
-        home.named("luneta", "/w/luneta");
+        home.named("luneta", &Dir::parse("/w/luneta").unwrap());
         assert_eq!((home.known(), home.ask_numbered(1).is_some()), (true, true));
         assert!(home.ask_numbered(2).is_none(), "a prompt is heard only by its own number");
         let named = shown(&home, 60, 14);
@@ -695,24 +703,26 @@ mod tests {
     }
 
     #[test]
-    fn a_home_taken_back_never_makes_room_and_the_oldest_idle_one_does() {
+    fn a_home_shown_again_is_not_made_again_and_the_one_shown_longest_ago_makes_room() {
         let of = |id: u64| ProjectId::of(id).unwrap();
-        let home_of = |id: u64| Home::new(id, id, Machine::Local, of(id));
-        let mut kept = Kept::default();
+        let key = |id: u64| Key { on: Machine::Local, project: of(id) };
+        let made = |id: u64| move |number| Home::new(number, number, Machine::Local, of(id));
+        let mut homes = Homes::default();
         for id in 1..=u64::try_from(KEPT_MAX).unwrap() {
-            assert!(kept.keep(home_of(id)).is_none(), "room is left up to the most");
+            assert!(homes.show(&key(id), made(id)).is_none(), "room is left up to the most");
         }
-        let taken = kept.take(&Machine::Local, of(1));
-        assert_eq!(taken.map(|home| home.number()), Some(1), "the oldest is taken back, not dropped");
-        assert!(kept.keep(home_of(17)).is_none(), "the one taken back made room");
-        let dropped = kept.keep(home_of(18));
-        assert_eq!(dropped.map(|home| home.number()), Some(2), "the oldest idle home makes room");
-        assert!(kept.take(&Machine::Local, of(2)).is_none());
-        let far = Machine::Remote("nixos".parse().unwrap());
-        assert!(kept.take(&far, of(3)).is_none(), "a home is of its machine as well as its project");
-        kept.forget(|home| home.project() == of(3));
-        assert!(kept.take(&Machine::Local, of(3)).is_none(), "a forgotten home is kept no more");
-        assert_eq!(kept.take(&Machine::Local, of(4)).map(|home| home.number()), Some(4));
+        let again = homes.show(&key(1), |_| panic!("a held home is shown again, not made"));
+        assert!(again.is_none());
+        assert_eq!(homes.shown(&key(1)).number(), 1);
+        let dropped = homes.show(&key(17), made(17));
+        assert_eq!(dropped.map(|home| home.number()), Some(2), "1 was shown since, so 2 is the oldest");
+        assert_eq!(homes.shown(&key(17)).number(), 17);
+        homes.forget(|home| home.project() == of(3));
+        let far = Key { on: Machine::Remote("nixos".parse().unwrap()), project: of(3) };
+        let dropped = homes.show(&far, |number| Home::new(number, number, far.on.clone(), far.project));
+        assert!(dropped.is_none(), "the forgotten home made room");
+        assert_eq!(homes.shown(&far).machine(), &far.on, "a home is of its machine as well as its project");
+        assert_eq!(homes.iter_mut().count(), KEPT_MAX);
     }
 
     #[test]
@@ -724,7 +734,7 @@ mod tests {
         let mut asks = 1;
         start_over(&mut home, &mut asks);
         assert_eq!(asks, 2, "a new talk takes the next number");
-        assert_eq!(marks(&home.marked), Marked::default());
+        assert_eq!(home.marked, Marked::default());
         assert!(home.ask_numbered(1).is_none() && home.ask_numbered(2).is_some());
         assert!(shown(&home, 60, 14).contains(&"│ › _                                                      │".to_owned()));
     }

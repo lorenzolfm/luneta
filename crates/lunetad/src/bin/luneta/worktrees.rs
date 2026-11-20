@@ -360,7 +360,8 @@ fn holds(dir: &str, folder: &Path) -> bool {
 }
 
 fn at_folder(path: &Path, project: &Project, folder: &str) -> Result<Landing, Tried> {
-    assert!(holds(&project.dir, Path::new(folder)), "{folder} is in {}", project.dir);
+    let dir = project.dir.as_str();
+    assert!(holds(dir, Path::new(folder)), "{folder} is in {dir}");
     let started = in_kept(path, project.id, started_at(path, folder))?;
     Ok(started.map_or(Landing::Unopened(project.id), Landing::Worktree))
 }
@@ -386,7 +387,7 @@ fn chosen(
             },
         }
     }
-    let holding = projects.iter().find(|project| holds(&project.dir, cwd))?;
+    let holding = projects.iter().find(|project| holds(project.dir.as_str(), cwd))?;
     let landed = match name {
         Some(name) => branched_in(path, holding, name),
         None => at_folder(path, holding, folder),
@@ -609,7 +610,7 @@ fn joined(path: &Path, folder: &str, argv: Vec<String>) -> Result<Landed, Unmade
 }
 
 pub fn dirs(path: &Path) -> Result<Vec<String>, String> {
-    Ok(kept(path)?.into_iter().map(|project| project.dir).collect())
+    Ok(kept(path)?.into_iter().map(|project| project.dir.as_str().to_owned()).collect())
 }
 
 pub fn folder_of(path: &Path, worktree: WorktreeId) -> Result<PathBuf, String> {
