@@ -1861,7 +1861,7 @@ impl App {
                 self.go(&on, &place);
                 self.leave();
             },
-            Asked::Delete { on, act, ticket } => self.project_act(on, act, ticket),
+            Asked::Close { on, act, ticket } => self.project_act(on, act, ticket),
             Asked::Open { asking, on, project, beside, command } => {
                 self.project_open(asking, &on, project, beside, command);
             },
@@ -2096,14 +2096,14 @@ impl App {
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Plan { on, session, deletes } => {
-                let plan = self.sidebar.plan(&on, &session, deletes);
+            Picked::Plan { on, session, closes } => {
+                let plan = self.sidebar.plan(&on, &session, closes);
                 if let Some(Over::Picker(picker)) = &mut self.focus.over {
                     let did = picker.planned(plan);
                     self.picked(did);
                 }
             },
-            Picked::Delete { on, act } => {
+            Picked::Act { on, act } => {
                 let ticket = self.sidebar.ticket();
                 self.project_act(on, act, ticket);
                 self.give(Focus::on(self.focus.side.session()));

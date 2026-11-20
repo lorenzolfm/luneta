@@ -30,7 +30,7 @@ use lunetad::{eza, screens, Destination, Directory, SessionName};
 use crate::actions::{self, Action, Pasted, Spec};
 use crate::alerts::Doing;
 use crate::away::{self, Away};
-use crate::close::{self, Act, Deletes, Ends, Plan, Untold};
+use crate::close::{self, Act, Closes, Ends, Plan, Untold};
 use crate::gruvbox;
 use crate::host::Event;
 use crate::screen;
@@ -272,8 +272,8 @@ pub enum Picked {
     Go { on: Machine, place: Place },
     Add { on: Machine, project: ProjectRow, folder: Directory },
     Make { on: Machine, session: SessionName, cwd: Directory },
-    Plan { on: Machine, session: Listed, deletes: Deletes },
-    Delete { on: Machine, act: Act },
+    Plan { on: Machine, session: Listed, closes: Closes },
+    Act { on: Machine, act: Act },
     Chord(actions::Chord),
     Menu { target: Target, origin: Origin, action: Action },
     Row { target: Target, action: Action },
@@ -873,7 +873,7 @@ impl Picker {
             self.stage = Stage::Asking { on, place, plan, asks };
             return Picked::Nothing;
         }
-        Picked::Delete { on, act: plan.act }
+        Picked::Act { on, act: plan.act }
     }
 
     pub fn due(&self) -> Option<Instant> {
@@ -1060,7 +1060,7 @@ impl Picker {
                 Picked::Nothing
             },
             KeyCode::Enter => self.enter(),
-            KeyCode::Delete => self.delete(),
+            KeyCode::Delete => self.close_selected(),
             KeyCode::Down => {
                 self.rows_mut().step(1);
                 Picked::Nothing
@@ -1319,7 +1319,7 @@ impl Picker {
         Some(Branch::parse(&self.term).map(|branch| Key::New { on, project, branch }))
     }
 
-    fn delete(&mut self) -> Picked {
+    fn close_selected(&mut self) -> Picked {
         let Some(key) = self.rows().selected().map(|row| row.key.clone()) else {
             return Picked::Nothing;
         };
@@ -1367,8 +1367,8 @@ impl Picker {
     }
 
     fn plan(&mut self, on: Machine, place: ViewPlace, agreed: Option<Plan>) -> Picked {
-        let deletes = Deletes::View(place.view);
-        let picked = Picked::Plan { on: on.clone(), session: place.session.clone(), deletes };
+        let closes = Closes::View(place.view);
+        let picked = Picked::Plan { on: on.clone(), session: place.session.clone(), closes };
         self.stage = Stage::Planning { on, place, agreed };
         picked
     }
@@ -3073,7 +3073,7 @@ mod tests {
     }
 
     #[test]
-    fn no_row_is_a_spot_while_a_delete_waits_or_asks() {
+    fn no_row_is_a_spot_while_a_close_waits_or_asks() {
         let mut picker = opened(busy(works()));
         down_to(&mut picker, "luneta › main");
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
@@ -3534,8 +3534,8 @@ mod tests {
         let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, at_host());
         picker.asks();
         let c = listed("c", 30);
-        let deletes = || Deletes::View(ViewKey::terminal(4));
-        let planning = Picked::Plan { on: Machine::Local, session: c.clone(), deletes: deletes() };
+        let closes = || Closes::View(ViewKey::terminal(4));
+        let planning = Picked::Plan { on: Machine::Local, session: c.clone(), closes: closes() };
         let act = || Act::View { session: c.name().clone(), view: ViewKey::terminal(4) };
         let plan = |doing: Doing| Plan::of(act(), Ok(&[(4, doing)]));
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
@@ -3550,7 +3550,7 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Char('y')), planning);
         assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), Picked::Nothing);
         assert_eq!(press(&mut picker, KeyCode::Char('y')), planning);
-        let ended = Picked::Delete { on: Machine::Local, act: act() };
+        let ended = Picked::Act { on: Machine::Local, act: act() };
         assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), ended);
 
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
@@ -3565,8 +3565,8 @@ mod tests {
         };
         let mut picker = Picker::open(1, List::Agents, listing, Machine::Local, at_host());
         picker.asks();
-        let deletes = Deletes::View(ViewKey::terminal(4));
-        let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), deletes };
+        let closes = Closes::View(ViewKey::terminal(4));
+        let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), closes };
         assert_eq!(press(&mut picker, KeyCode::Delete), plan);
         assert_eq!(picker.asks(), []);
     }
@@ -3877,8 +3877,8 @@ mod tests {
         press(&mut picker, KeyCode::Down);
         let fix = Picked::Go { on: nixos(), place: Place::View(at(ViewKey::terminal(2))) };
         assert_eq!(press(&mut picker, KeyCode::Enter), fix);
-        let deletes = Deletes::View(ViewKey::terminal(2));
-        let plan = Picked::Plan { on: nixos(), session: listed("api", 40), deletes };
+        let closes = Closes::View(ViewKey::terminal(2));
+        let plan = Picked::Plan { on: nixos(), session: listed("api", 40), closes };
         assert_eq!(press(&mut picker, KeyCode::Delete), plan);
     }
 

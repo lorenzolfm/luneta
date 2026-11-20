@@ -20,7 +20,7 @@ pub enum Scope {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Deletes {
+pub enum Closes {
     View(ViewKey),
     Worktree { worktree: WorktreeId, views: Vec<u32>, seen: Vec<ViewId> },
     Project { project: ProjectId, worktrees: Vec<WorktreeId>, seen: Vec<ViewId> },
@@ -77,7 +77,7 @@ pub fn unread_in<'a>(
 #[derive(Debug)]
 pub struct Subject<'a> {
     pub session: &'a Listed,
-    pub deletes: Deletes,
+    pub closes: Closes,
     pub agents: Result<Vec<(u32, Doing)>, Untold>,
 }
 
@@ -147,13 +147,13 @@ pub struct Plan {
 
 pub fn plan(subject: &Subject) -> Plan {
     let session = subject.session.name().clone();
-    let act = match &subject.deletes {
-        Deletes::View(view) => Act::View { session, view: *view },
-        Deletes::Worktree { worktree, views, seen } => {
+    let act = match &subject.closes {
+        Closes::View(view) => Act::View { session, view: *view },
+        Closes::Worktree { worktree, views, seen } => {
             let (worktree, views, seen) = (*worktree, views.clone(), seen.clone());
             Act::Worktree { session, worktree, views, seen }
         },
-        Deletes::Project { project, worktrees, seen } => {
+        Closes::Project { project, worktrees, seen } => {
             let (worktrees, seen) = (worktrees.clone(), seen.clone());
             Act::Project { session, project: *project, worktrees, seen }
         },
@@ -260,12 +260,12 @@ mod tests {
         Listed::new_project("luneta", 3)
     }
 
-    fn subject(session: &Listed, deletes: Deletes, agents: Vec<(u32, Doing)>) -> Subject<'_> {
-        Subject { session, deletes, agents: Ok(agents) }
+    fn subject(session: &Listed, closes: Closes, agents: Vec<(u32, Doing)>) -> Subject<'_> {
+        Subject { session, closes, agents: Ok(agents) }
     }
 
-    fn view() -> Deletes {
-        Deletes::View(ViewKey::terminal(4))
+    fn view() -> Closes {
+        Closes::View(ViewKey::terminal(4))
     }
 
     #[test]
@@ -282,12 +282,12 @@ mod tests {
         let worktrees = vec![WorktreeId::of(31).unwrap()];
         let seen = vec![ViewId::of(4).unwrap()];
         let project_id = ProjectId::of(6).unwrap();
-        let deletes = || Deletes::Project {
+        let closes = || Closes::Project {
             project: project_id,
             worktrees: worktrees.clone(),
             seen: seen.clone(),
         };
-        let planned = |agents| plan(&subject(&project, deletes(), agents));
+        let planned = |agents| plan(&subject(&project, closes(), agents));
         let session = project.name().clone();
         let (worktrees, seen) = (worktrees.clone(), seen.clone());
         let act = Act::Project { session, project: project_id, worktrees, seen };
@@ -301,12 +301,12 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_s_delete_asks_first_only_for_an_agent_at_work_in_its_views() {
+    fn a_worktree_s_close_asks_first_only_for_an_agent_at_work_in_its_views() {
         let luneta = luneta();
         let worktree = WorktreeId::of(31).unwrap();
         let seen = vec![ViewId::of(4).unwrap(), ViewId::of(5).unwrap()];
-        let deletes = || Deletes::Worktree { worktree, views: vec![4, 5], seen: seen.clone() };
-        let planned = |agents| plan(&subject(&luneta, deletes(), agents));
+        let closes = || Closes::Worktree { worktree, views: vec![4, 5], seen: seen.clone() };
+        let planned = |agents| plan(&subject(&luneta, closes(), agents));
         assert_eq!(planned(vec![(6, Doing::Busy), (4, Doing::Idle)]).question(), None);
         let asks = planned(vec![(5, Doing::Waiting)]).question();
         assert_eq!(asks.as_deref(), Some("Close the worktree? 1 agent, 1 waiting"));
@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn a_delete_asks_first_only_where_an_agent_at_work_would_end() {
+    fn a_close_asks_first_only_where_an_agent_at_work_would_end() {
         let agents = vec![
             (4, Doing::Idle),
             (5, Doing::Busy),
@@ -326,9 +326,9 @@ mod tests {
         ];
         let luneta = luneta();
         let question =
-            |deletes: Deletes| plan(&subject(&luneta, deletes, agents.clone())).question();
+            |closes: Closes| plan(&subject(&luneta, closes, agents.clone())).question();
         assert_eq!(question(view()), None);
-        let unknown = Deletes::View(ViewKey::terminal(7));
+        let unknown = Closes::View(ViewKey::terminal(7));
         assert_eq!(question(unknown), Some("Close the view? 1 agent, 1 unknown".to_owned()));
     }
 }

@@ -42,7 +42,7 @@ use crate::alerts::{self, Reach};
 use crate::aloud;
 use crate::brief::{Brief, Note, Over, Transcript};
 use crate::checks;
-use crate::close::{self, Act, Deletes, Plan, Scope, Subject, Untold};
+use crate::close::{self, Act, Closes, Plan, Scope, Subject, Untold};
 use crate::copied::{Copied, Excerpt};
 use crate::folds::{Fold, Folds};
 use crate::gruvbox;
@@ -1151,7 +1151,7 @@ pub enum Asked {
     CopyText(Excerpt),
     Browse(Link),
     Leave,
-    Delete { on: Machine, act: Act, ticket: u64 },
+    Close { on: Machine, act: Act, ticket: u64 },
     Open { asking: Held, on: Machine, project: ProjectId, beside: ViewKey, command: Vec<String> },
     NewWorktree { on: Machine, project: ProjectId, branch: Branch },
     Welcome { asking: Held, on: Machine, session: Listed, view: ViewKey },
@@ -1205,7 +1205,7 @@ impl Asked {
             | Asked::CopyText(_)
             | Asked::Browse(_)
             | Asked::Leave
-            | Asked::Delete { .. }
+            | Asked::Close { .. }
             | Asked::Open { .. }
             | Asked::NewWorktree { .. }
             | Asked::Welcome { .. }
@@ -3735,7 +3735,7 @@ impl Sidebar {
                         self.say_of(taken, said);
                         Asked::Nothing
                     },
-                    Done::Act(on, act) => self.delete(on, act),
+                    Done::Act(on, act) => self.close(on, act),
                     Done::Brief(briefed) => self.brief(taken, briefed),
                     Done::Ask(target) => Asked::Ask(target),
                     Done::Issue(repository) => Asked::Issue(repository),
@@ -3808,18 +3808,18 @@ impl Sidebar {
             Wants::Rebase { dir, branch } => Asked::Rebase { menu: number, on, dir, branch },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
             Wants::Plan { session, scope: Scope::View(view) } => {
-                let plan = self.plan(&on, &session, Deletes::View(view));
+                let plan = self.plan(&on, &session, Closes::View(view));
                 self.planned(plan)
             },
             Wants::Plan { session, scope: Scope::Worktree(worktree) } => {
-                let plan = self.deletes_of(&on, worktree).and_then(|deletes| {
-                    self.plan(&on, &session, deletes)
+                let plan = self.closes_of(&on, worktree).and_then(|closes| {
+                    self.plan(&on, &session, closes)
                 });
                 self.planned(plan)
             },
             Wants::Plan { session, scope: Scope::Project } => {
-                let plan = self.project_deletes(&on, &session).and_then(|deletes| {
-                    self.plan(&on, &session, deletes)
+                let plan = self.project_closes(&on, &session).and_then(|closes| {
+                    self.plan(&on, &session, closes)
                 });
                 self.planned(plan)
             },
@@ -3957,24 +3957,24 @@ impl Sidebar {
             .collect()
     }
 
-    pub fn plan(&self, on: &Machine, listed: &Listed, deletes: Deletes) -> Result<Plan, String> {
+    pub fn plan(&self, on: &Machine, listed: &Listed, closes: Closes) -> Result<Plan, String> {
         if let Some(why) = self.out_of_reach(on) {
             return Err(why);
         }
-        Ok(close::plan(&self.subject(on, listed, deletes)))
+        Ok(close::plan(&self.subject(on, listed, closes)))
     }
 
-    fn project_deletes(&self, on: &Machine, listed: &Listed) -> Result<Deletes, String> {
+    fn project_closes(&self, on: &Machine, listed: &Listed) -> Result<Closes, String> {
         let unlisted = || format!("project {} is no longer listed", listed.name());
         let project = listed.project();
         let known = shelf(&self.shelves, on).iter().find(|known| known.project.id() == project);
         let known = known.ok_or_else(unlisted)?;
         let worktrees = known.worktrees.iter().map(|worktree| worktree.place.worktree).collect();
         let seen = known.worktrees.iter().flat_map(|worktree| worktree.terminals.iter().copied());
-        Ok(Deletes::Project { project, worktrees, seen: seen.collect() })
+        Ok(Closes::Project { project, worktrees, seen: seen.collect() })
     }
 
-    fn deletes_of(&self, on: &Machine, worktree: WorktreeId) -> Result<Deletes, String> {
+    fn closes_of(&self, on: &Machine, worktree: WorktreeId) -> Result<Closes, String> {
         if let Some(why) = self.out_of_reach(on) {
             return Err(why);
         }
@@ -3984,7 +3984,7 @@ impl Sidebar {
             return Err(format!("worktree {worktree} is no longer listed"));
         };
         let views = found.views.iter().map(|(_, view)| view.id).collect();
-        Ok(Deletes::Worktree { worktree, views, seen: found.terminals.clone() })
+        Ok(Closes::Worktree { worktree, views, seen: found.terminals.clone() })
     }
 
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
@@ -3996,7 +3996,7 @@ impl Sidebar {
         }
     }
 
-    fn subject<'a>(&'a self, on: &Machine, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
+    fn subject<'a>(&'a self, on: &Machine, listed: &'a Listed, closes: Closes) -> Subject<'a> {
         let mut agents = Err(Untold::Away);
         if let Some(seen) = self.seen(on)
             && self.away.is_none()
@@ -4008,7 +4008,7 @@ impl Sidebar {
                 doing.chain(close::unread_in(&unread_seats, &held)).collect()
             });
         }
-        Subject { session: listed, deletes, agents }
+        Subject { session: listed, closes, agents }
     }
 
     fn brief(&mut self, taken: Taken, briefed: Briefed) -> Asked {
@@ -4084,7 +4084,7 @@ impl Sidebar {
         }
     }
 
-    fn delete(&mut self, on: Machine, act: Act) -> Asked {
+    fn close(&mut self, on: Machine, act: Act) -> Asked {
         let ticket = self.ticket();
         let takes = |spot: &Spot| closed_by(&act, &on, spot);
         if let Some(spot) = self.lit_spot().filter(|lit| takes(lit)).cloned() {
@@ -4094,7 +4094,7 @@ impl Sidebar {
             let landing = landing.map(|index| self.rows[index].spot());
             self.lit = Some(Lit::Closing { spot, ticket, landing });
         }
-        Asked::Delete { on, act, ticket }
+        Asked::Close { on, act, ticket }
     }
 
     pub fn unclosed(&mut self, on: &Machine, act: &Act, ticket: u64, unchanged: Unchanged) {
@@ -5741,11 +5741,11 @@ mod tests {
         SessionName::parse(name).unwrap()
     }
 
-    fn delete_here(act: Act, ticket: u64) -> Asked {
-        Asked::Delete { on: Machine::Local, act, ticket }
+    fn close_here(act: Act, ticket: u64) -> Asked {
+        Asked::Close { on: Machine::Local, act, ticket }
     }
 
-    fn project_deleted(name: &str, id: u64, worktrees: &[u64], seen: &[u64]) -> Act {
+    fn project_closed(name: &str, id: u64, worktrees: &[u64], seen: &[u64]) -> Act {
         let (project, worktrees) = (ProjectId::of(id).unwrap(), worktrees.iter());
         let worktrees = worktrees.map(|it| WorktreeId::of(*it).unwrap()).collect();
         let seen = seen.iter().map(|it| ViewId::of(*it).unwrap()).collect();
@@ -6177,7 +6177,7 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_s_row_deletes_the_worktree_with_its_views() {
+    fn a_worktree_s_row_closes_the_worktree_with_its_views() {
         let mut sidebar = fresh();
         let fix = worktree_of(31, "fix", "/w/fix", &[1, 2]);
         let main = worktree_of(32, "main", "/w/main", &[3]);
@@ -6193,7 +6193,7 @@ mod tests {
         let seen = [1, 2].map(|id| ViewId::of(id).unwrap()).to_vec();
         let act = Act::Worktree { session, worktree, views: vec![1, 2], seen };
         let asked = sidebar.key(&char('d'), moment(160_000));
-        assert_eq!(asked, delete_here(act, 1));
+        assert_eq!(asked, close_here(act, 1));
         let landing = match &sidebar.lit {
             Some(Lit::Closing { landing, .. }) => landing.clone(),
             Some(Lit::On(_)) | None => None,
@@ -8605,7 +8605,7 @@ mod tests {
             (" c  Skills ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
             (" r  Rename the view…", Some(on_legend('r'))),
-            (" d  Delete ▸", Some(on_legend('d'))),
+            (" d  Close ▸", Some(on_legend('d'))),
             (" b  Brief ▸", Some(on_legend('b'))),
         ]);
         sidebar.keys_clicked(Keyed::Legend, &char('n'), moment(160_000));
@@ -8665,13 +8665,13 @@ mod tests {
         step_onto_its_first_view(&mut sidebar);
         sidebar.key(&char('?'), moment(160_000));
         sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
-        let delete = clicks(&mut sidebar, 18);
-        assert_eq!(delete[0].1, Some(on_menu(KeyCode::Char('d'))), "{delete:?}");
+        let group = clicks(&mut sidebar, 18);
+        assert_eq!(group[0].1, Some(on_menu(KeyCode::Char('d'))), "{group:?}");
         let clicked = sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
         assert_eq!(clicked, Asked::Nothing);
-        assert_eq!(clicks(&mut sidebar, 18), delete);
-        let deleted = sidebar.chose(1, Choice::Key(char('d')), moment(160_000));
-        assert_eq!(deleted, Asked::Nothing);
+        assert_eq!(clicks(&mut sidebar, 18), group);
+        let chosen = sidebar.chose(1, Choice::Key(char('d')), moment(160_000));
+        assert_eq!(chosen, Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 20);
         assert!(lines.iter().any(|line| line.starts_with(" Close the view?")), "{lines:#?}");
     }
@@ -8689,9 +8689,9 @@ mod tests {
         sidebar.key(&char('d'), now);
         assert_eq!(sidebar.due(now), Some(PAUSE));
         let before = now + PAUSE - Duration::from_millis(1);
-        assert!(!shows_at(&mut sidebar, before, "─ Delete ─"));
-        assert!(!shows_at(&mut sidebar, before, " d  Delete ▸"));
-        assert!(shows_at(&mut sidebar, now + PAUSE, "─ Delete ─"));
+        assert!(!shows_at(&mut sidebar, before, "─ Close ─"));
+        assert!(!shows_at(&mut sidebar, before, " d  Close ▸"));
+        assert!(shows_at(&mut sidebar, now + PAUSE, "─ Close ─"));
         assert_eq!(sidebar.due(now + PAUSE), None);
 
         sidebar.close_menu();
@@ -8699,11 +8699,11 @@ mod tests {
         sidebar.key(&char('d'), now);
         let fast = now + Duration::from_millis(50);
         let act = Act::View { session: session_name("older"), view: view_key(10, 2) };
-        assert_eq!(sidebar.key(&char('d'), fast), delete_here(act, 1));
+        assert_eq!(sidebar.key(&char('d'), fast), close_here(act, 1));
         assert!(sidebar.open().is_none());
         let later = now + 10 * PAUSE;
-        assert!(!shows_at(&mut sidebar, later, "─ Delete ─"));
-        assert!(!shows_at(&mut sidebar, later, " d  Delete ▸"));
+        assert!(!shows_at(&mut sidebar, later, "─ Close ─"));
+        assert!(!shows_at(&mut sidebar, later, " d  Close ▸"));
         assert_eq!(sidebar.due(later), None);
     }
 
@@ -8751,7 +8751,7 @@ mod tests {
         sidebar.key(&char('?'), now);
         sidebar.key(&char('d'), now);
         assert_eq!(sidebar.due(now), None);
-        assert!(shows_at(&mut sidebar, now, "─ Delete ─"));
+        assert!(shows_at(&mut sidebar, now, "─ Close ─"));
         sidebar.close_menu();
         sidebar.key(&char('?'), now);
         sidebar.key(&char('y'), now);
@@ -8999,7 +8999,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_project_is_deleted_by_its_id() {
+    fn an_empty_project_is_closed_by_its_id() {
         let mut sidebar = fresh();
         let own = own_session("own", 1, Vec::new());
         let sessions = vec![own_session("here", 2, Vec::new()), own];
@@ -9012,14 +9012,14 @@ mod tests {
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing, "it asks first");
             sidebar.key(&char('d'), moment(160_000))
         };
-        let deleted = |ticket| delete_here(project_deleted("own", 1, &[], &[]), ticket);
-        assert_eq!(remove(&mut sidebar), deleted(1));
+        let closed = |ticket| close_here(project_closed("own", 1, &[], &[]), ticket);
+        assert_eq!(remove(&mut sidebar), closed(1));
         sidebar.sit(seat_in(2, None));
-        assert_eq!(remove(&mut sidebar), deleted(2));
+        assert_eq!(remove(&mut sidebar), closed(2));
     }
 
     #[test]
-    fn an_own_client_is_where_its_server_says_and_closes_its_project_to_delete_it() {
+    fn an_own_client_is_where_its_server_says_and_d_d_closes_its_project() {
         let mut sidebar = fresh();
         let views = || vec![view(1, 0, "/w/luneta/main", "fish")];
         let sessions = vec![own_session("twin", 1, views()), own_session("newest", 2, Vec::new())];
@@ -9034,12 +9034,12 @@ mod tests {
         sidebar.light(Spot::Local(Place::Session(twin)));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing, "it asks first");
-        let deleted = project_deleted("twin", 1, &[1000], &[1]);
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted, 1));
+        let closed = project_closed("twin", 1, &[1000], &[1]);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(closed, 1));
     }
 
     #[test]
-    fn luneta_unseated_sits_in_no_project_and_its_delete_closes_the_view() {
+    fn luneta_unseated_sits_in_no_project_and_its_d_d_closes_the_view() {
         let mut sidebar = fresh();
         let views = || vec![view(1, 0, "/w/luneta/main", "fish")];
         let sessions = vec![own_session("twin", 1, views()), own_session("newest", 2, Vec::new())];
@@ -9052,7 +9052,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
         let act = Act::View { session: session_name("twin"), view };
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(act, 1));
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(act, 1));
     }
 
     #[test]
@@ -10010,7 +10010,7 @@ mod tests {
     }
 
     #[test]
-    fn a_delete_asks_first_while_luneta_cannot_tell_the_agents() {
+    fn a_close_asks_first_while_luneta_cannot_tell_the_agents() {
         let unread = "lunetad cannot read 1 of Claude Code's session files";
         let unplaced = format!("{unread}, nor tell where its agent runs");
         let away: fn(&mut Sidebar) = |sidebar| sidebar.lost("gone".to_owned());
@@ -10035,12 +10035,12 @@ mod tests {
                 session: session_name("newer"),
                 view: view_key(20, 1),
             };
-            assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(act, 1));
+            assert_eq!(sidebar.key(&char('y'), moment(160_000)), close_here(act, 1));
         }
     }
 
     #[test]
-    fn a_delete_asks_first_where_an_agent_s_session_file_does_not_read() {
+    fn a_close_asks_first_where_an_agent_s_session_file_does_not_read() {
         for (view, asks) in [(1, true), (7, false)] {
             let mut sidebar = two_sessions();
             sidebar.focus(Keys::Sidebar);
@@ -10060,7 +10060,7 @@ mod tests {
             let note = "lunetad cannot read 1 of Claude Code's session files";
             assert!(lines.contains(&note), "{lines:#?}");
             let asked = lines.contains(&"Close the view? 1 agent, 1 unknown");
-            assert_eq!((went == delete_here(act, 1), asked), (!asks, asks), "view {view}");
+            assert_eq!((went == close_here(act, 1), asked), (!asks, asks), "view {view}");
         }
     }
 
@@ -10086,12 +10086,12 @@ mod tests {
             let lines = screen(&mut sidebar, true, 60, 16);
             let question = " Close the worktree? 1 agent, 1 unknown";
             let asked = lines.iter().any(|line| line.trim_end() == question);
-            assert_eq!((went == delete_here(close.clone(), 1), asked), (!asks, asks), "{lines:#?}");
+            assert_eq!((went == close_here(close.clone(), 1), asked), (!asks, asks), "{lines:#?}");
         }
     }
 
     #[test]
-    fn a_delete_goes_past_the_view_to_a_project_s_row_whose_delete_asks_first() {
+    fn a_close_goes_past_the_view_to_a_project_s_row_whose_close_asks_first() {
         let mut sidebar = on_nvim();
         close_nvim(&mut sidebar);
         assert!(sidebar.open().is_none());
@@ -10105,7 +10105,7 @@ mod tests {
         let lines = screen(&mut sidebar, true, 40, 16);
         assert_eq!(lines[14], " Close project newer? no agent", "{lines:?}");
         let asked = sidebar.key(&char('d'), moment(160_000));
-        let newer = matches!(&asked, Asked::Delete { act: Act::Project { session, .. }, .. }
+        let newer = matches!(&asked, Asked::Close { act: Act::Project { session, .. }, .. }
             if session.as_str() == "newer");
         assert!(newer, "{asked:?}");
     }
@@ -10139,10 +10139,10 @@ mod tests {
     fn close_nvim(sidebar: &mut Sidebar) -> u64 {
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let asked = sidebar.key(&char('d'), moment(160_000));
-        let Asked::Delete { ticket, .. } = asked else {
+        let Asked::Close { ticket, .. } = asked else {
             panic!("d d closes the view: {asked:?}");
         };
-        assert_eq!(asked, delete_here(closes_nvim(), ticket));
+        assert_eq!(asked, close_here(closes_nvim(), ticket));
         ticket
     }
 
@@ -10150,12 +10150,12 @@ mod tests {
         let mut sidebar = on_nvim();
         sidebar.hear(without_nvim());
         let left = lit_place(&sidebar);
-        assert_ne!(left, Some(past_nvim()), "it lands apart from where a delete of it goes");
+        assert_ne!(left, Some(past_nvim()), "it lands apart from where a close of it goes");
         left
     }
 
     #[test]
-    fn a_delete_s_landing_goes_once_the_highlight_moves() {
+    fn a_close_s_landing_goes_once_the_highlight_moves() {
         let mut sidebar = on_nvim();
         close_nvim(&mut sidebar);
         type_in(&mut sidebar, "hl");
@@ -10183,7 +10183,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_close_drops_the_landing_of_its_own_delete_only() {
+    fn a_refused_close_drops_the_landing_of_its_own_close_only() {
         let (mut sidebar, _) = nvim_closed_twice_with_the_others_refused();
         sidebar.hear(without_nvim());
         let kept = "an earlier d d's refusal or the picker's leaves the later d d's landing";
@@ -10226,7 +10226,7 @@ mod tests {
         let mut sidebar = on_the_last_row();
         type_in(&mut sidebar, "d");
         let closes = Act::View { session: session_name("last"), view: view_key(2, 2) };
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(closes, 1));
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(closes, 1));
         type_in(&mut sidebar, "j");
         sidebar.hear(last_with(&[1]));
         assert_eq!(lit_place(&sidebar), landing, "j on the last row moves nothing");
@@ -10242,22 +10242,22 @@ mod tests {
     }
 
     #[test]
-    fn a_project_s_delete_lands_on_another_project_of_its_name() {
+    fn a_project_s_close_lands_on_another_project_of_its_name() {
         let mut sidebar = fresh();
         sidebar.hear(twins(true));
         sidebar.focus(Keys::Sidebar);
         sidebar.light(Spot::Local(Place::Session(Listed::new_project("twin", 1))));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing, "it asks first");
-        let deleted = project_deleted("twin", 1, &[1000], &[1]);
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted, 1));
+        let closed = project_closed("twin", 1, &[1000], &[1]);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(closed, 1));
         sidebar.hear(twins(false));
         let twin = Some(Place::Session(Listed::new_project("twin", 2)));
         assert_eq!(lit_place(&sidebar), twin, "the other twin stays, so the highlight lands on it");
     }
 
     #[test]
-    fn a_delete_that_ends_an_agent_at_work_asks_and_looks_again() {
+    fn a_close_that_ends_an_agent_at_work_asks_and_looks_again() {
         let mut sidebar = own_two_sessions();
         sit(&mut sidebar, &own_view_of("older", 1, 1));
         sidebar.focus(Keys::Sidebar);
@@ -10267,14 +10267,14 @@ mod tests {
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13], " Close the view? 1 agent, 1");
         let act = Act::View { session: session_name("older"), view: view_key(1, 1) };
-        assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(act, 1));
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), close_here(act, 1));
         sidebar.light(Spot::Local(Place::Session(own_listed("older", 1))));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13..15], [" Close project older? 1 agent,", " 1 waiting"]);
-        let deleted = project_deleted("older", 1, &[1000, 1001], &[1, 2]);
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted, 2));
+        let closed = project_closed("older", 1, &[1000, 1001], &[1, 2]);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(closed, 2));
         assert!(sidebar.open().is_none());
     }
 
@@ -11254,7 +11254,7 @@ mod tests {
         let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
         assert!(lines.contains(&"Close the view? 1 agent, 1 waiting"), "{lines:#?}");
         let act = Act::View { session: session_name("main"), view: view_key(20, 1) };
-        let there = Asked::Delete { on: Machine::Remote(nixos()), act, ticket: 1 };
+        let there = Asked::Close { on: Machine::Remote(nixos()), act, ticket: 1 };
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), there);
         assert!(sidebar.open().is_none());
         let place = WorktreePlace { project: project_row("main", 20), worktree: tab_of(20, 0) };
@@ -11271,12 +11271,12 @@ mod tests {
             seen: vec![ViewId::of(1).unwrap(), ViewId::of(2).unwrap()],
         };
         let on = Machine::Remote(nixos());
-        assert_eq!(sidebar.key(&char('y'), moment(160_000)), Asked::Delete { on, act, ticket: 2 });
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), Asked::Close { on, act, ticket: 2 });
         assert!(sidebar.open().is_none());
     }
 
     #[test]
-    fn a_delete_on_a_machine_lunetad_no_longer_reaches_deletes_nothing() {
+    fn a_close_on_a_machine_lunetad_no_longer_reaches_closes_nothing() {
         for answers in [true, false] {
             let mut sidebar = fresh();
             let mut host = machines();
