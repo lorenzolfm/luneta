@@ -178,6 +178,8 @@ mod tests {
     fn assert_runs_on(way: Way) {
         let (status, said) = panicking(way);
         assert_eq!(status.code(), Some(0), "{}: {status}\n{said}", way.name());
+        let panicked = said.contains("a terminal's assertion fails");
+        assert!(panicked, "{}: the child ran no panic, so nothing proves it ran on\n{said}", way.name());
     }
 
     #[test]
