@@ -25,9 +25,9 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 
 const COLOUR_LONGEST: usize = 32;
 
-pub fn read(events: Sender<Event>) {
+pub fn read(events: Sender<Event>, ends: Ends) {
     resizes(events.clone());
-    hangups(events.clone());
+    ends.tell(events.clone());
     thread::spawn(move || {
         if let Err(error) = listen(&events) {
             let _ = events.send(Event::InputEnded(error));
@@ -76,22 +76,38 @@ fn resizes(events: Sender<Event>) {
     });
 }
 
-fn hangups(events: Sender<Event>) {
-    const ENDS: [i32; 2] = [SIGHUP, SIGTERM];
-    let Ok(mut signals) = Signals::new(ENDS) else {
-        return;
-    };
-    let ending = Arc::new(AtomicBool::new(false));
-    for signal in ENDS {
-        let _ = flag::register_conditional_default(signal, Arc::clone(&ending));
-        let _ = flag::register(signal, Arc::clone(&ending));
-    }
-    thread::spawn(move || {
-        if let Some(signal) = signals.forever().next() {
-            let ended = io::Error::other(format!("ended by signal {signal}"));
-            let _ = events.send(Event::InputEnded(ended));
+pub struct Ends {
+    signals: Signals,
+}
+
+impl Ends {
+    pub fn heard() -> io::Result<Ends> {
+        const ENDS: [i32; 2] = [SIGHUP, SIGTERM];
+        let signals = Signals::new(ENDS)?;
+        let ending = Arc::new(AtomicBool::new(false));
+        for signal in ENDS {
+            flag::register_conditional_default(signal, Arc::clone(&ending))?;
+            flag::register(signal, Arc::clone(&ending))?;
         }
-    });
+        Ok(Ends { signals })
+    }
+
+    pub fn ended(&mut self) -> Option<String> {
+        self.signals.pending().next().map(ended_by)
+    }
+
+    fn tell(mut self, events: Sender<Event>) {
+        thread::spawn(move || {
+            if let Some(signal) = self.signals.forever().next() {
+                let ended = io::Error::other(ended_by(signal));
+                let _ = events.send(Event::InputEnded(ended));
+            }
+        });
+    }
+}
+
+fn ended_by(signal: i32) -> String {
+    format!("ended by signal {signal}")
 }
 
 fn terminal() -> io::Result<File> {
@@ -582,6 +598,14 @@ mod tests {
 
     fn typed(c: char) -> Sent {
         pressed(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_signal_that_comes_before_luneta_reads_its_terminal_is_its_end() {
+        let mut ends = Ends::heard().expect("luneta hears its end signals");
+        assert_eq!(ends.ended(), None);
+        signal_hook::low_level::raise(SIGTERM).expect("a signal is sent");
+        assert_eq!(ends.ended().as_deref(), Some("ended by signal 15"));
     }
 
     #[test]

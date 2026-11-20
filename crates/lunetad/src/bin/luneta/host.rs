@@ -462,6 +462,10 @@ struct App {
 
 pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
     let unkept = log::start(Process::Luneta).err();
+    let mut ends = match input::Ends::heard() {
+        Ok(ends) => ends,
+        Err(error) => return did_not_start(&format!("its end signals are not heard: {error}")),
+    };
     let dir = match env::current_dir() {
         Ok(dir) => dir,
         Err(error) => return did_not_start(&format!("no directory to start in: {error}")),
@@ -489,6 +493,9 @@ pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
         Ok(start) => start,
         Err(refusal) => return did_not_start(&format!("no worktree to show: {refusal}")),
     };
+    if let Some(ended) = ends.ended() {
+        return did_not_start(&ended);
+    }
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(error) => return did_not_start(&format!("no terminal: {error}")),
@@ -503,7 +510,7 @@ pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
     }));
     let (events, inbox) = mpsc::channel();
     let mut inbox = Inbox::new(inbox);
-    input::read(events.clone());
+    input::read(events.clone(), ends);
     let answers = answers::ask(&mut inbox);
     let mut sent = Vec::new();
     let ran = execute!(
