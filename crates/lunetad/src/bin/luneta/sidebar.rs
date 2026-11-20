@@ -901,19 +901,7 @@ fn closed_by(act: &Act, on: &Machine, spot: &Spot) -> bool {
     let Some(place) = spot.place() else {
         return false;
     };
-    match (act, place.terminal_id()) {
-        (Act::View { session, view, .. }, Some(at)) => {
-            place.session() == session.as_str() && at == view.terminal_id()
-        },
-        (Act::Worktree { session, views, .. }, Some(at)) => {
-            place.session() == session.as_str() && views.contains(&at)
-        },
-        (Act::Worktree { worktree, .. }, None) => {
-            matches!(place, Place::Worktree(at) if at.worktree == *worktree)
-        },
-        (Act::View { .. }, None) => false,
-        (Act::Project { session, .. }, _) => place.session() == session.as_str(),
-    }
+    act.closes(place)
 }
 
 fn keyed(view: &View) -> Option<TerminalKey> {
@@ -1151,7 +1139,7 @@ pub enum Asked {
     CopyText(Excerpt),
     Browse(Link),
     Leave,
-    Delete { on: Machine, act: Act },
+    Delete { on: Machine, act: Act, ticket: u64 },
     Open { asking: Held, on: Machine, project: ProjectId, beside: ViewKey, command: Vec<String> },
     NewWorktree { on: Machine, project: ProjectId, branch: Branch },
     Welcome { asking: Held, on: Machine, session: Listed, view: ViewKey },
@@ -1363,13 +1351,13 @@ pub struct Sidebar {
 #[derive(Debug)]
 enum Lit {
     On(Spot),
-    Closing { gone: Spot, act: Act, after: Option<Spot> },
+    Closing { spot: Spot, ticket: u64, landing: Option<Spot> },
 }
 
 impl Lit {
     fn spot(&self) -> &Spot {
         match self {
-            Lit::On(spot) | Lit::Closing { gone: spot, .. } => spot,
+            Lit::On(spot) | Lit::Closing { spot, .. } => spot,
         }
     }
 }
@@ -1819,8 +1807,8 @@ impl Sidebar {
         }
         self.unpend();
         if holds {
-            if self.here_row.is_some() {
-                self.light(self.here_row.clone());
+            if let Some(here) = self.here_row.clone() {
+                self.light(here);
             }
         } else {
             self.end_mode();
@@ -2138,7 +2126,7 @@ impl Sidebar {
     }
 
     pub fn on_header(&self) -> Option<Machine> {
-        match self.cursor()? {
+        match self.lit_spot()? {
             Spot::Machine(machine) => Some(machine.clone()),
             Spot::Local(_) | Spot::Remote(..) => None,
         }
@@ -2710,10 +2698,10 @@ impl Sidebar {
         if lifted_gone {
             self.moving = Moving::Still;
         }
-        if let Some(Lit::Closing { gone, after, .. }) = &self.lit
-            && self.row_of(gone).is_none()
+        if let Some(Lit::Closing { spot, landing, .. }) = &self.lit
+            && self.row_of(spot).is_none()
         {
-            self.lit = after.clone().map(Lit::On);
+            self.lit = landing.clone().map(Lit::On);
         }
         self.due = due;
         self.settle(best.map(|(at, _)| at), seek);
@@ -2786,14 +2774,18 @@ impl Sidebar {
     }
 
     fn settle(&mut self, best: Option<usize>, seek: bool) {
-        let held = self.cursor().and_then(|spot| self.row_of(&self.row_for(spot)?));
+        let held = self.lit_spot().and_then(|spot| self.row_of(&self.row_for(spot)?));
         let at = if seek { best.or(held) } else { held.or(best) };
         let at = at.unwrap_or(0);
         let stop = (at..self.rows.len()).chain((0..at).rev()).find(|index| self.stops(*index));
-        let stop = stop.map(|index| self.rows[index].spot());
-        if self.cursor() != stop.as_ref() {
-            self.light(stop);
+        let Some(stop) = stop.map(|index| self.rows[index].spot()) else {
+            self.lit = None;
+            return;
+        };
+        if self.lit_spot() == Some(&stop) {
+            return;
         }
+        self.light(stop);
     }
 
     fn stops(&self, at: usize) -> bool {
@@ -2823,16 +2815,16 @@ impl Sidebar {
         }
     }
 
-    fn cursor(&self) -> Option<&Spot> {
+    fn lit_spot(&self) -> Option<&Spot> {
         self.lit.as_ref().map(Lit::spot)
     }
 
-    fn light(&mut self, spot: Option<Spot>) {
-        self.lit = spot.map(Lit::On);
+    fn light(&mut self, spot: Spot) {
+        self.lit = Some(Lit::On(spot));
     }
 
-    fn cursor_index(&self) -> Option<usize> {
-        let spot = self.cursor()?;
+    fn lit_index(&self) -> Option<usize> {
+        let spot = self.lit_spot()?;
         Some(self.row_of(spot).expect("the highlight is on a row"))
     }
 
@@ -2841,24 +2833,24 @@ impl Sidebar {
         let Some(last) = stops.len().checked_sub(1) else {
             return;
         };
-        let now = self.cursor_index().and_then(|at| stops.iter().position(|stop| *stop == at));
+        let now = self.lit_index().and_then(|at| stops.iter().position(|stop| *stop == at));
         let next = match now {
             Some(now) => now.saturating_add_signed(by).min(last),
             None => 0,
         };
-        self.light(Some(self.rows[stops[next]].spot()));
+        self.light(self.rows[stops[next]].spot());
     }
 
     fn end(&mut self, last: bool) {
         let mut stops = (0..self.rows.len()).filter(|at| self.stops(*at));
         let stop = if last { stops.next_back() } else { stops.next() };
         if let Some(stop) = stop {
-            self.light(Some(self.rows[stop].spot()));
+            self.light(self.rows[stop].spot());
         }
     }
 
     fn toggle(&mut self) {
-        let Some(spot) = self.cursor().cloned() else {
+        let Some(spot) = self.lit_spot().cloned() else {
             return;
         };
         let Some(folding) = self.folding(&spot) else {
@@ -2869,7 +2861,7 @@ impl Sidebar {
     }
 
     fn fold(&mut self, folded: bool) {
-        let Some(spot) = self.cursor().cloned() else {
+        let Some(spot) = self.lit_spot().cloned() else {
             return;
         };
         let Some(folding) = self.folding(&spot) else {
@@ -2907,7 +2899,7 @@ impl Sidebar {
             return;
         }
         if folded {
-            self.light(row);
+            self.lit = row.map(Lit::On);
         }
         self.rebuild();
     }
@@ -3073,7 +3065,7 @@ impl Sidebar {
     }
 
     fn highlighted_link(&self) -> Result<Link, String> {
-        let row = self.cursor().and_then(|spot| self.row_of(spot));
+        let row = self.lit_spot().and_then(|spot| self.row_of(spot));
         let checked_out = |row: &Row| match row {
             Row::Worktree { named, .. } => named.checkout().cloned(),
             Row::View { .. } => self.row_of(&self.worktree_of(&row.spot())?).and_then(|at| {
@@ -3166,13 +3158,13 @@ impl Sidebar {
     }
 
     fn select(&mut self) {
-        let Some(spot) = self.cursor().cloned() else {
+        let Some(spot) = self.lit_spot().cloned() else {
             return;
         };
         let Some(movable) = Movable::of(self.worktree_of(&spot).unwrap_or(spot)) else {
             return;
         };
-        self.light(Some(movable.spot()));
+        self.light(movable.spot());
         self.enter(Mode::Reorder(movable));
     }
 
@@ -3182,7 +3174,7 @@ impl Sidebar {
             return;
         };
         let project = Movable::Project(machine.clone(), place.project.clone());
-        self.light(Some(project.spot()));
+        self.light(project.spot());
         self.mode = Mode::Reorder(project);
     }
 
@@ -3211,7 +3203,7 @@ impl Sidebar {
         let spans = self.spans(anchor);
         let rows = spans.rows();
         let index = |at: usize| rows.iter().position(|span| span.contains(&at));
-        let (from, to) = (index(self.row_of(&anchor.spot())?)?, index(self.cursor_index()?)?);
+        let (from, to) = (index(self.row_of(&anchor.spot())?)?, index(self.lit_index()?)?);
         Some((spans, from.min(to)..from.max(to) + 1))
     }
 
@@ -3305,9 +3297,8 @@ impl Sidebar {
             unheard.wait = unheard.wait.again();
             unheard.ticket
         } else {
-            self.tickets += 1;
             let wait = Wait::Answers { asked: NonZeroUsize::MIN, landed: None };
-            let ticket = self.tickets;
+            let ticket = self.ticket();
             self.unheard.push(Unheard { ticket, on: on.clone(), shown: wanted, wait });
             ticket
         };
@@ -3403,7 +3394,7 @@ impl Sidebar {
     }
 
     fn target(&self) -> Option<Target> {
-        let spot = self.cursor().cloned()?;
+        let spot = self.lit_spot().cloned()?;
         self.row_of(&spot)?;
         match spot {
             Spot::Machine(machine) => Some(Target::Machine(machine)),
@@ -3601,7 +3592,7 @@ impl Sidebar {
         }
         self.notice = None;
         let Some(target) = target else {
-            if self.cursor().is_none() {
+            if self.lit_spot().is_none() {
                 self.say(format!("menu: no row is highlighted for {work} to open the menu on"));
             }
             return;
@@ -4059,27 +4050,34 @@ impl Sidebar {
     }
 
     fn delete(&mut self, on: Machine, act: Act) -> Asked {
+        let ticket = self.ticket();
         let takes = |spot: &Spot| closed_by(&act, &on, spot);
-        if let Some(gone) = self.cursor().filter(|cursor| takes(cursor)).cloned() {
-            let at = self.row_of(&gone).expect("the highlight is on a row");
+        if let Some(spot) = self.lit_spot().filter(|lit| takes(lit)).cloned() {
+            let at = self.row_of(&spot).expect("the highlight is on a row");
             let stays = |index: &usize| self.stops(*index) && !takes(&self.rows[*index].spot());
-            let after = (at..self.rows.len()).chain((0..at).rev()).find(stays);
-            let after = after.map(|index| self.rows[index].spot());
-            self.lit = Some(Lit::Closing { gone, act: act.clone(), after });
+            let landing = (at..self.rows.len()).chain((0..at).rev()).find(stays);
+            let landing = landing.map(|index| self.rows[index].spot());
+            self.lit = Some(Lit::Closing { spot, ticket, landing });
         }
-        Asked::Delete { on, act }
+        Asked::Delete { on, act, ticket }
     }
 
-    pub fn unclosed(&mut self, on: &Machine, act: &Act, notice: String) {
-        if let Some(Lit::Closing { gone, act: closing, .. }) = &self.lit
-            && gone.machine() == *on
-            && closing == act
+    pub fn unclosed(&mut self, on: &Machine, act: &Act, ticket: u64, notice: String) {
+        if let Some(Lit::Closing { spot, ticket: armed, .. }) = &self.lit
+            && *armed == ticket
         {
+            let closes = "the close a ticket names closes the row its d d left lit";
+            assert!(closed_by(act, on, spot), "{closes}");
             let listed = "a closing row stays listed: rebuild lands past it once it goes";
-            assert!(self.row_of(gone).is_some(), "{listed}");
-            self.lit = Some(Lit::On(gone.clone()));
+            assert!(self.row_of(spot).is_some(), "{listed}");
+            self.lit = Some(Lit::On(spot.clone()));
         }
         self.notify(notice);
+    }
+
+    pub fn ticket(&mut self) -> u64 {
+        self.tickets += 1;
+        self.tickets
     }
 
     pub fn made_for(&mut self, menu: u64) -> Option<Held> {
@@ -4094,7 +4092,7 @@ impl Sidebar {
     }
 
     fn toggle_unread(&mut self, now: SystemTime) {
-        let Some(spot) = self.cursor() else {
+        let Some(spot) = self.lit_spot() else {
             return;
         };
         let Some(Row::View { session, view_id, unread, marked, .. }) =
@@ -4165,7 +4163,7 @@ impl Sidebar {
     }
 
     fn go(&mut self) -> Asked {
-        let Some(spot) = self.cursor().cloned() else {
+        let Some(spot) = self.lit_spot().cloned() else {
             return Asked::Nothing;
         };
         let Some((on, place)) = spot.placed() else {
@@ -4253,7 +4251,7 @@ impl Sidebar {
             Moving::Down { at, .. } if over && mouse.row == at.y => self.click(at, area),
             Moving::Lifted(Lift { lifted: movable, .. }) => {
                 let line = mouse.row.saturating_sub(area.y);
-                self.light(Some(movable.spot()));
+                self.light(movable.spot());
                 let spans = self.spans(&movable);
                 match self.landing(&movable, line, over) {
                     Some((landed, _)) if landed != spans => self.keep(&landed),
@@ -4293,19 +4291,19 @@ impl Sidebar {
         let typed = self.typed();
         let Some((on, place)) = spot.clone().placed() else {
             if !typed {
-                self.light(Some(spot));
+                self.light(spot);
                 self.toggle();
             }
             return Asked::Take;
         };
         let on_triangle = triangle.is_some_and(|triangle| at.x.saturating_sub(area.x) <= triangle);
         if on_triangle && !typed {
-            self.light(Some(spot));
+            self.light(spot);
             self.toggle();
             return Asked::Take;
         }
         if stops {
-            self.light(Some(spot));
+            self.light(spot);
         }
         self.go_to(on, place)
     }
@@ -4383,7 +4381,7 @@ impl Sidebar {
 
     fn highlight(&self) -> Highlight {
         if self.keys.held() {
-            return Highlight::Lit(self.cursor_index());
+            return Highlight::Lit(self.lit_index());
         }
         let row = self.here_row.as_ref().and_then(|spot| self.row_of(spot));
         row.map_or(Highlight::Off, Highlight::Resting)
@@ -4758,7 +4756,7 @@ impl Sidebar {
         if !self.has_keys() {
             return None;
         }
-        let machine = self.cursor()?.machine();
+        let machine = self.lit_spot()?.machine();
         match self.machine_row(&machine) {
             (name, Some(Away::Unreached { why, ssh_said: Some(said), .. }), _) => {
                 Some(format!("{name}: {why}; ssh said \"{said}\""))
@@ -5701,8 +5699,8 @@ mod tests {
         SessionName::parse(name).unwrap()
     }
 
-    fn delete_here(act: Act) -> Asked {
-        Asked::Delete { on: Machine::Local, act }
+    fn delete_here(act: Act, ticket: u64) -> Asked {
+        Asked::Delete { on: Machine::Local, act, ticket }
     }
 
     fn project_deleted(name: &str, id: u64, worktrees: &[u64], seen: &[u64]) -> Act {
@@ -5720,18 +5718,18 @@ mod tests {
         Sidebar { this: "mac".to_owned(), ..Sidebar::default() }
     }
 
-    fn cursor(sidebar: &Sidebar) -> Option<Place> {
-        match sidebar.cursor()? {
+    fn lit_place(sidebar: &Sidebar) -> Option<Place> {
+        match sidebar.lit_spot()? {
             Spot::Local(place) => Some(place.clone()),
             Spot::Machine(_) | Spot::Remote(..) => None,
         }
     }
 
     fn step_onto_its_first_view(sidebar: &mut Sidebar) {
-        let project = cursor(sidebar).expect("the highlight is on a row of this machine");
+        let project = lit_place(sidebar).expect("the highlight is on a row of this machine");
         assert!(matches!(project, Place::Session(_)), "it starts on a project's row: {project:?}");
         sidebar.step(1);
-        let view = cursor(sidebar).expect("a step keeps the highlight on this machine");
+        let view = lit_place(sidebar).expect("a step keeps the highlight on this machine");
         assert!(matches!(view, Place::View(_)), "one step down lands on a view: {view:?}");
         assert_eq!(view.listed(), project.listed(), "the view is the project's own");
     }
@@ -6076,7 +6074,7 @@ mod tests {
         assert_eq!(rows_shown(&mut sidebar), [" ▾ empty", " ▾ solo", "  ▾ fresh"]);
         sidebar.focus(Keys::Sidebar);
         let empty = Place::Session(listed("empty", 7));
-        assert_eq!(cursor(&sidebar), Some(empty.clone()));
+        assert_eq!(lit_place(&sidebar), Some(empty.clone()));
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(empty));
         type_in(&mut sidebar, "jj");
@@ -6147,20 +6145,20 @@ mod tests {
         let worktree = WorktreeId::of(31).unwrap();
         let project = project_row("luneta", 7);
         let place = Place::Worktree(WorktreePlace { project, worktree });
-        sidebar.light(Some(Spot::Local(place)));
+        sidebar.light(Spot::Local(place));
         type_in(&mut sidebar, "d");
         let session = session_name("luneta");
         let seen = [1, 2].map(|id| ViewId::of(id).unwrap()).to_vec();
         let act = Act::Worktree { session, worktree, views: vec![1, 2], seen };
         let asked = sidebar.key(&char('d'), moment(160_000));
-        assert_eq!(asked, Asked::Delete { on: Machine::Local, act });
-        let after = match &sidebar.lit {
-            Some(Lit::Closing { after, .. }) => after.clone(),
+        assert_eq!(asked, delete_here(act, 1));
+        let landing = match &sidebar.lit {
+            Some(Lit::Closing { landing, .. }) => landing.clone(),
             Some(Lit::On(_)) | None => None,
         };
-        let past = "the cursor goes past the worktree's views";
+        let past = "the highlight lands past the worktree's views";
         let next = ViewPlace { session: listed("luneta", 7), view: ViewKey::terminal(3) };
-        assert_eq!(after, Some(Spot::Local(Place::View(next))), "{past}");
+        assert_eq!(landing, Some(Spot::Local(Place::View(next))), "{past}");
     }
 
     #[test]
@@ -6233,10 +6231,10 @@ mod tests {
             Spot::Machine(Machine::Remote(nixos())),
             Spot::Remote(nixos(), Place::Session(listed("main", 20))),
         ] {
-            sidebar.light(Some(spot));
+            sidebar.light(spot);
             assert_eq!(sidebar.unreached(), Some(said.clone()));
         }
-        sidebar.light(Some(Spot::Local(Place::Session(listed("here", 10)))));
+        sidebar.light(Spot::Local(Place::Session(listed("here", 10))));
         assert_eq!(sidebar.unreached(), None);
     }
 
@@ -6369,14 +6367,14 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), moment(160_000));
         sidebar.key(&KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE), moment(160_000));
-        let cursor = sidebar.cursor().cloned();
+        let cursor = sidebar.lit_spot().cloned();
         let (titled, lit, fg, dim) = draw(&mut sidebar);
         assert_eq!((titled, fg, dim, lit.is_empty()), (2, ACCENT, false, false));
         sidebar.focus(Keys::Lent);
         assert_eq!(draw(&mut sidebar), (1, lit.clone(), gruvbox::FG1, true));
         sidebar.focus(Keys::Sidebar);
         assert_eq!(draw(&mut sidebar), (2, lit, ACCENT, false));
-        assert_eq!(sidebar.cursor().cloned(), cursor);
+        assert_eq!(sidebar.lit_spot().cloned(), cursor);
     }
 
     #[test]
@@ -6577,15 +6575,15 @@ mod tests {
         let nvim = Some(view_of("older", 10, 2));
         let newer = Some(Place::Session(listed("newer", 20)));
         let shell = Some(view_of("newer", 20, 1));
-        assert_eq!(cursor(&sidebar), older);
+        assert_eq!(lit_place(&sidebar), older);
         let mut went = Vec::new();
         for _ in 0..5 {
             sidebar.step(1);
-            went.push(cursor(&sidebar));
+            went.push(lit_place(&sidebar));
         }
         assert_eq!(went, [fold, nvim, newer, shell.clone(), shell]);
         sidebar.step(-9);
-        assert_eq!(cursor(&sidebar), older);
+        assert_eq!(lit_place(&sidebar), older);
     }
 
     #[test]
@@ -6593,14 +6591,14 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         let newer = Some(Place::Session(listed("newer", 20)));
-        sidebar.light(Some(Spot::Local(view_of("older", 10, 2))));
+        sidebar.light(Spot::Local(view_of("older", 10, 2)));
         type_in(&mut sidebar, "j");
         let (lines, lit) = seen(&mut sidebar, true, 32, 24);
         let lit: Vec<&str> = lit.iter().map(|y| lines[usize::from(*y)].as_str()).collect();
         assert_eq!(lit.len(), 1, "{lit:?}");
         assert!(lit[0].starts_with(" ▾ newer ─"), "{lit:?}");
         type_in(&mut sidebar, "h");
-        assert_eq!(cursor(&sidebar), newer);
+        assert_eq!(lit_place(&sidebar), newer);
         assert!(folded(&sidebar, "newer"));
         assert!(!folded(&sidebar, "older"));
         assert!(!sidebar.folds.contains(Fold::Machine(&Machine::Local)));
@@ -6609,7 +6607,7 @@ mod tests {
         assert_eq!(rows_shown(&mut sidebar).last().map(String::as_str), Some(" ▸ newer"));
         type_in(&mut sidebar, "l");
         assert!(!folded(&sidebar, "newer"));
-        assert_eq!(cursor(&sidebar), newer);
+        assert_eq!(lit_place(&sidebar), newer);
         type_in(&mut sidebar, "  ");
         assert!(!folded(&sidebar, "newer"));
         type_in(&mut sidebar, " ");
@@ -6627,37 +6625,37 @@ mod tests {
         let shift_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         let g = key(KeyCode::Char('g'));
         sidebar.key(&shift_g, moment(160_000));
-        assert_eq!(cursor(&sidebar), last);
+        assert_eq!(lit_place(&sidebar), last);
         sidebar.key(&g, moment(160_000));
-        assert_eq!(cursor(&sidebar), last);
+        assert_eq!(lit_place(&sidebar), last);
         sidebar.key(&g, moment(160_000));
-        assert_eq!(cursor(&sidebar), first);
+        assert_eq!(lit_place(&sidebar), first);
         sidebar.key(&key(KeyCode::End), moment(160_000));
-        assert_eq!(cursor(&sidebar), last);
+        assert_eq!(lit_place(&sidebar), last);
         sidebar.key(&key(KeyCode::Home), moment(160_000));
-        assert_eq!(cursor(&sidebar), first);
+        assert_eq!(lit_place(&sidebar), first);
         let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
         for pressed in [key(KeyCode::End), g, key(KeyCode::Char('k')), g, ctrl_x, g] {
             sidebar.key(&pressed, moment(160_000));
         }
-        assert_eq!(cursor(&sidebar), second);
+        assert_eq!(lit_place(&sidebar), second);
         let area = Rect::new(0, 0, 32, 11);
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
-        assert_eq!(cursor(&sidebar), second);
+        assert_eq!(lit_place(&sidebar), second);
         sidebar.mouse(mouse(MouseEventKind::Moved, 0, 0), area);
         sidebar.key(&g, moment(160_000));
-        assert_eq!(cursor(&sidebar), first);
+        assert_eq!(lit_place(&sidebar), first);
         sidebar.key(&g, moment(160_000));
         assert_eq!(click(&mut sidebar, 1, 9, area), Asked::Take);
         let folded = Some(Place::Session(listed("newer", 20)));
         sidebar.key(&g, moment(160_000));
-        assert_eq!(cursor(&sidebar), folded);
+        assert_eq!(lit_place(&sidebar), folded);
         sidebar.focus(Keys::Terminal);
         sidebar.focus(Keys::Sidebar);
         sidebar.key(&g, moment(160_000));
-        assert_eq!(cursor(&sidebar), folded);
+        assert_eq!(lit_place(&sidebar), folded);
         let esc = key(KeyCode::Esc);
         assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Nothing);
         assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Leave);
@@ -6691,7 +6689,7 @@ mod tests {
         step_onto_its_first_view(&mut sidebar);
         type_in(&mut sidebar, "hh");
         let older = Place::Session(listed("older", 10));
-        assert_eq!(cursor(&sidebar), Some(older.clone()));
+        assert_eq!(lit_place(&sidebar), Some(older.clone()));
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(older));
         let lines = screen(&mut sidebar, false, 32, 7);
         assert!(lines[4].starts_with(" ▸ older"), "{lines:?}");
@@ -6760,12 +6758,12 @@ mod tests {
     fn a_gone_view_leaves_the_highlight_in_its_session() {
         let mut sidebar = two_sessions();
         sidebar.step(2);
-        assert_eq!(cursor(&sidebar), Some(view_of("older", 10, 2)));
+        assert_eq!(lit_place(&sidebar), Some(view_of("older", 10, 2)));
         sidebar.hear(host(
             vec![session("older", 10, vec![view(1, 0, "/w/luneta/main", "claude")])],
             Vec::new(),
         ));
-        assert_eq!(cursor(&sidebar), Some(Place::Session(listed("older", 10))));
+        assert_eq!(lit_place(&sidebar), Some(Place::Session(listed("older", 10))));
     }
 
     #[test]
@@ -7752,9 +7750,9 @@ mod tests {
             let worktree = WorktreeId::of(id).unwrap();
             Spot::Local(Place::Worktree(WorktreePlace { project: project.clone(), worktree }))
         };
-        sidebar.light(Some(place(31)));
+        sidebar.light(place(31));
         type_in(&mut sidebar, " ");
-        sidebar.light(Some(place(32)));
+        sidebar.light(place(32));
         type_in(&mut sidebar, " ");
         let lines = screen(&mut sidebar, false, 32, 12);
         let folded = ["  ▸ issue-489 +120 -34 #538  !", "  ▸ tidy", "       fix #246", ""];
@@ -8209,7 +8207,7 @@ mod tests {
     #[test]
     fn y_p_asks_for_the_highlighted_row_s_link_and_the_legend_comes_back() {
         let mut sidebar = pulls();
-        sidebar.light(Some(Spot::Local(view_of("s", 10, 1))));
+        sidebar.light(Spot::Local(view_of("s", 10, 1)));
         let now = moment(160_000);
         assert_eq!(sidebar.key(&char('y'), now), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now + PAUSE);
@@ -8252,7 +8250,7 @@ mod tests {
     fn y_waits_for_one_key_and_esc_only_drops_it() {
         let mut sidebar = pulls();
         let one = Spot::Local(view_of("s", 10, 1));
-        sidebar.light(Some(one.clone()));
+        sidebar.light(one.clone());
         let now = moment(160_000);
         let esc = KeyEvent::from(KeyCode::Esc);
         sidebar.key(&char('y'), now);
@@ -8262,10 +8260,10 @@ mod tests {
 
         sidebar.key(&char('y'), now);
         sidebar.key(&char('j'), now);
-        assert_eq!(cursor(&sidebar), Some(view_of("s", 10, 2)));
+        assert_eq!(lit_place(&sidebar), Some(view_of("s", 10, 2)));
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
 
-        sidebar.light(Some(one));
+        sidebar.light(one);
         let area = Rect::new(0, 0, 32, 24);
         sidebar.key(&char('y'), now);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 10, 4), area);
@@ -8279,7 +8277,7 @@ mod tests {
     #[test]
     fn a_click_on_y_then_on_p_copies() {
         let mut sidebar = pulls();
-        sidebar.light(Some(Spot::Local(view_of("s", 10, 1))));
+        sidebar.light(Spot::Local(view_of("s", 10, 1)));
         let now = moment(160_000);
         sidebar.key(&char('?'), now);
         assert_eq!(sidebar.keys_clicked(Keyed::Legend, &char('y'), now), Asked::Nothing);
@@ -8303,7 +8301,7 @@ mod tests {
         let now = moment(160_000);
         for (spot, note) in rows {
             let mut sidebar = pulls();
-            sidebar.light(Some(spot));
+            sidebar.light(spot);
             sidebar.key(&char('y'), now);
             assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing, "{note}");
             assert_eq!(sidebar.notice.as_deref(), Some(note));
@@ -8322,7 +8320,7 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Some(Spot::Local(view_of("s", 10, 1))));
+        sidebar.light(Spot::Local(view_of("s", 10, 1)));
         sidebar
     }
 
@@ -8372,7 +8370,7 @@ mod tests {
     #[test]
     fn o_p_and_y_p_take_another_machine_s_link_too() {
         let mut sidebar = pulls();
-        sidebar.light(Some(Spot::Local(view_of("s", 10, 1))));
+        sidebar.light(Spot::Local(view_of("s", 10, 1)));
         let now = moment(160_000);
         assert_eq!(open_pull(&mut sidebar, now), Asked::Browse(link()));
         assert_eq!(sidebar.copied, None, "what opens shows");
@@ -8390,7 +8388,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let place = ViewPlace { session: listed("main", 20), view: view_key(20, 1) };
         let place = Place::View(place);
-        sidebar.light(Some(Spot::Remote(nixos(), place)));
+        sidebar.light(Spot::Remote(nixos(), place));
         assert_eq!(open_pull(&mut sidebar, now), Asked::Browse(far_link.clone()));
         sidebar.key(&char('y'), now);
         assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(far_link));
@@ -8402,7 +8400,7 @@ mod tests {
         let grouped = Action::row().filter(|(_, path)| path.len() == 2);
         for (action, path) in grouped {
             let mut sidebar = pulls();
-            sidebar.light(Some(Spot::Local(view_of("s", 10, 1))));
+            sidebar.light(Spot::Local(view_of("s", 10, 1)));
             assert_eq!(sidebar.key(&char(path[0]), now), Asked::Nothing, "{path:?} opens a group");
             let asked = sidebar.key(&char(path[1]), now);
             let said = asked != Asked::Nothing || sidebar.notice.is_some();
@@ -8413,7 +8411,7 @@ mod tests {
     #[test]
     fn o_w_asks_for_the_worktrees_not_open_of_the_row_s_project_on_its_machine() {
         let mut sidebar = pulls();
-        sidebar.light(Some(Spot::Local(view_of("s", 10, 1))));
+        sidebar.light(Spot::Local(view_of("s", 10, 1)));
         let now = moment(160_000);
         let opening = |sidebar: &mut Sidebar| {
             assert_eq!(sidebar.key(&char('o'), now), Asked::Nothing, "o opens a group");
@@ -8428,7 +8426,7 @@ mod tests {
         sidebar.hear(machines());
         sidebar.focus(Keys::Sidebar);
         let place = ViewPlace { session: listed("main", 20), view: view_key(20, 1) };
-        sidebar.light(Some(Spot::Remote(nixos(), Place::View(place))));
+        sidebar.light(Spot::Remote(nixos(), Place::View(place)));
         assert_eq!(opening(&mut sidebar), (Machine::Remote(nixos()), "main".to_owned()));
     }
 
@@ -8511,16 +8509,16 @@ mod tests {
     fn a_click_on_a_number_copies_and_does_nothing_else() {
         let mut sidebar = pulls();
         sidebar.focus(Keys::Terminal);
-        let here = sidebar.cursor().cloned();
+        let here = sidebar.lit_spot().cloned();
         let now = moment(160_000);
         sidebar.notify("what went wrong before".to_owned());
         assert_eq!(sidebar.number_clicked(link()), Asked::Copy(link()));
-        assert_eq!(sidebar.cursor().cloned(), here);
+        assert_eq!(sidebar.lit_spot().cloned(), here);
         assert_eq!(sidebar.keys, Keys::Terminal);
         assert_eq!(sidebar.notice, None);
 
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Some(Spot::Local(view_of("s", 10, 1))));
+        sidebar.light(Spot::Local(view_of("s", 10, 1)));
         sidebar.key(&char('y'), now);
         sidebar.number_clicked(link());
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
@@ -8659,7 +8657,7 @@ mod tests {
         sidebar.key(&char('d'), now);
         let fast = now + Duration::from_millis(50);
         let act = Act::View { session: session_name("older"), view: view_key(10, 2) };
-        assert_eq!(sidebar.key(&char('d'), fast), delete_here(act));
+        assert_eq!(sidebar.key(&char('d'), fast), delete_here(act, 1));
         assert!(sidebar.open().is_none());
         let later = now + 10 * PAUSE;
         assert!(!shows_at(&mut sidebar, later, "─ Delete ─"));
@@ -8702,10 +8700,10 @@ mod tests {
         assert!(!shows_at(&mut sidebar, now, legend));
         assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), now), Asked::Leave);
 
-        let here = sidebar.cursor().cloned();
+        let here = sidebar.lit_spot().cloned();
         sidebar.key(&char('?'), now);
         sidebar.key(&char('j'), now);
-        assert_ne!(sidebar.cursor().cloned(), here);
+        assert_ne!(sidebar.lit_spot().cloned(), here);
         assert!(!shows_at(&mut sidebar, now, legend));
 
         sidebar.key(&char('?'), now);
@@ -8728,7 +8726,7 @@ mod tests {
     fn question_mark_in_the_legend_lists_every_key_and_esc_closes_it() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        let here = sidebar.cursor().cloned();
+        let here = sidebar.lit_spot().cloned();
         let now = moment(160_000);
         assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
         assert!(!shows_at(&mut sidebar, now, "─ All keys ─"));
@@ -8778,7 +8776,7 @@ mod tests {
         assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), now), Asked::Nothing);
         assert!(!shows_at(&mut sidebar, now, "─ All keys ─"));
         assert!(!shows_at(&mut sidebar, now, " b  Brief ▸"));
-        assert_eq!(sidebar.cursor().cloned(), here);
+        assert_eq!(sidebar.lit_spot().cloned(), here);
     }
 
     #[test]
@@ -8949,7 +8947,7 @@ mod tests {
         assert_eq!(branched(&mut sidebar, "feat"), made);
         assert!(sidebar.open().is_none());
 
-        sidebar.light(Some(Spot::Local(own_view_of("young", 2, 1))));
+        sidebar.light(Spot::Local(own_view_of("young", 2, 1)));
         type_in(&mut sidebar, "n");
         let (project, branch) = (ProjectId::of(2).unwrap(), Branch::parse("fix").unwrap());
         let made = Asked::NewWorktree { on: Machine::Local, project, branch };
@@ -8967,15 +8965,15 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let remove = |sidebar: &mut Sidebar| {
             let own = Listed::new_project("own", 1);
-            sidebar.light(Some(Spot::Local(Place::Session(own))));
+            sidebar.light(Spot::Local(Place::Session(own)));
             type_in(sidebar, "d");
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing, "it asks first");
             sidebar.key(&char('d'), moment(160_000))
         };
-        let deleted = delete_here(project_deleted("own", 1, &[], &[]));
-        assert_eq!(remove(&mut sidebar), deleted);
+        let deleted = |ticket| delete_here(project_deleted("own", 1, &[], &[]), ticket);
+        assert_eq!(remove(&mut sidebar), deleted(1));
         sidebar.sit(seat_in(2, None));
-        assert_eq!(remove(&mut sidebar), deleted);
+        assert_eq!(remove(&mut sidebar), deleted(2));
     }
 
     #[test]
@@ -8991,11 +8989,11 @@ mod tests {
         let here = ViewPlace { session: twin.clone(), view: view_key(1, 1) };
         assert_eq!(sidebar.here_place(), Ok(here));
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Some(Spot::Local(Place::Session(twin))));
+        sidebar.light(Spot::Local(Place::Session(twin)));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing, "it asks first");
         let deleted = project_deleted("twin", 1, &[1000], &[1]);
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted));
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted, 1));
     }
 
     #[test]
@@ -9008,11 +9006,11 @@ mod tests {
         sidebar.unseat();
         assert_eq!(sidebar.seated_in(), None);
         let (twin, view) = (Listed::new_project("twin", 1), view_key(1, 1));
-        sidebar.light(Some(Spot::Local(Place::View(ViewPlace { session: twin.clone(), view }))));
+        sidebar.light(Spot::Local(Place::View(ViewPlace { session: twin.clone(), view })));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
         let act = Act::View { session: session_name("twin"), view };
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(act));
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(act, 1));
     }
 
     #[test]
@@ -9309,7 +9307,7 @@ mod tests {
 
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Some(Spot::Local(Place::Session(listed("older", 10)))));
+        sidebar.light(Spot::Local(Place::Session(listed("older", 10))));
         sidebar.paste("/w/plan.md");
         let Asked::Pull { work, .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
@@ -9404,7 +9402,7 @@ mod tests {
         sidebar.hear(host(vec![session("s", 10, vec![unsaid])], agents));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "j");
-        assert_eq!(cursor(&sidebar), Some(view_of("s", 10, 1)));
+        assert_eq!(lit_place(&sidebar), Some(view_of("s", 10, 1)));
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 13, moment(160_000) + PAUSE);
         assert_eq!(lines[6], "─ New ─────────── luneta/main ─", "{lines:?}");
@@ -9422,7 +9420,7 @@ mod tests {
         sidebar.hear(host(vec![session("s", 10, vec![failed, busy])], Vec::new()));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "j");
-        assert_eq!(cursor(&sidebar), Some(view_of("s", 10, 1)));
+        assert_eq!(lit_place(&sidebar), Some(view_of("s", 10, 1)));
         type_in(&mut sidebar, "c");
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
         let command = Said::new("cargo test".to_owned()).unwrap();
@@ -9567,7 +9565,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "hhjj");
         assert!(folded(&sidebar, "older"));
-        assert_eq!(cursor(&sidebar), Some(own_view_of("young", 2, 1)));
+        assert_eq!(lit_place(&sidebar), Some(own_view_of("young", 2, 1)));
         let standing = |sidebar: &mut Sidebar| {
             let area = Rect::new(0, 0, 32, 14);
             let mut buffer = Buffer::empty(area);
@@ -9729,19 +9727,19 @@ mod tests {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
         let bipa = Spot::Local(Place::Session(listed("bipa", 10)));
-        sidebar.light(None);
+        sidebar.lit = None;
         assert_eq!(sidebar.aimed_row(), Aim::Unplaced(PALETTE_NO_ROW));
-        sidebar.light(Some(bipa.clone()));
+        sidebar.light(bipa.clone());
         let Aim::At { target, .. } = sidebar.aimed_row() else {
             panic!("the palette aims at the highlighted row");
         };
         sidebar.key(&char('j'), moment(160_000));
-        assert_ne!(sidebar.cursor().cloned(), Some(bipa.clone()), "j moves the highlight");
+        assert_ne!(sidebar.lit_spot().cloned(), Some(bipa.clone()), "j moves the highlight");
         let asked = sidebar.act_on_row(&target, Action::Reorder, moment(160_000));
         assert_eq!(asked, Asked::Nothing);
         assert_eq!(sidebar.holding(), Holding::Nothing, "its row is no longer highlighted");
         assert_eq!(sidebar.notice.as_deref(), Some(PALETTE_ROW_GONE));
-        sidebar.light(Some(bipa));
+        sidebar.light(bipa);
         sidebar.act_on_row(&target, Action::Reorder, moment(160_000));
         assert_eq!(sidebar.holding(), Holding::Reorder, "on the row it named, it runs");
     }
@@ -9819,7 +9817,7 @@ mod tests {
         sidebar.step(-2);
         type_in(&mut sidebar, "h");
         let tab = WorktreePlace { project: project_row("older", 10), worktree: tab_of(10, 0) };
-        assert_eq!(cursor(&sidebar), Some(Place::Worktree(tab)));
+        assert_eq!(lit_place(&sidebar), Some(Place::Worktree(tab)));
         type_in(&mut sidebar, "b");
         assert_eq!(sidebar.key(&char('h'), moment(160_000)), brief(session()));
         type_in(&mut sidebar, "b");
@@ -9850,13 +9848,13 @@ mod tests {
         let note = "brief: luneta reads only Claude Code's transcripts so far";
 
         for (place, key) in [(view_of("both", 10, 1), 'h'), (view_of("alone", 20, 3), 's')] {
-            sidebar.light(Some(Spot::Local(place)));
+            sidebar.light(Spot::Local(place));
             type_in(&mut sidebar, "b");
             assert_eq!(sidebar.key(&char(key), moment(160_000)), Asked::Nothing, "{key}");
             assert_eq!(sidebar.notice.as_deref(), Some(note), "{key}");
         }
 
-        sidebar.light(Some(Spot::Local(view_of("both", 10, 1))));
+        sidebar.light(Spot::Local(view_of("both", 10, 1)));
         type_in(&mut sidebar, "b");
         let told = |id: u32, name: &str, cwd: &str, transcript| Note {
             on: Machine::Local,
@@ -9939,29 +9937,29 @@ mod tests {
             (session(), 'h', Over::Session(on(), main())),
             (Spot::Remote(nixos(), view.clone()), 'h', Over::Agent(on(), main(), 1)),
         ] {
-            sidebar.light(Some(spot));
+            sidebar.light(spot);
             type_in(&mut sidebar, "b");
             assert_eq!(sidebar.key(&char(key), moment(160_000)), brief(over), "{key}");
         }
         let here = || Spot::Local(Place::Session(listed("main", 10)));
-        sidebar.light(Some(here()));
+        sidebar.light(here());
         type_in(&mut sidebar, "bs");
         assert_eq!(sidebar.notice.as_deref(), Some("brief: no agents in main"));
-        sidebar.light(Some(Spot::Remote(nixos(), view)));
+        sidebar.light(Spot::Remote(nixos(), view));
         type_in(&mut sidebar, "b");
         let mut host = machines();
         host.remotes[0] = remote("nixos", down(100));
         sidebar.hear(host.clone());
         assert_eq!(sidebar.key(&char('h'), moment(160_000)), Asked::Nothing);
         assert_eq!(sidebar.notice.as_deref(), Some("brief: lunetad does not reach nixos now"));
-        sidebar.light(Some(here()));
+        sidebar.light(here());
         type_in(&mut sidebar, "b");
         assert_eq!(sidebar.key(&char('z'), moment(160_000)), Asked::Nothing);
         let nowhere = "brief: no agents to brief you on; lunetad does not reach nixos, me@vps, pi \
                        now";
         assert_eq!(sidebar.notice.as_deref(), Some(nowhere));
         sidebar.hear(machines());
-        sidebar.light(Some(session()));
+        sidebar.light(session());
         type_in(&mut sidebar, "b");
         host.remotes.remove(0);
         sidebar.hear(host);
@@ -9995,7 +9993,7 @@ mod tests {
                 session: session_name("newer"),
                 view: view_key(20, 1),
             };
-            assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(act));
+            assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(act, 1));
         }
     }
 
@@ -10020,7 +10018,7 @@ mod tests {
             let note = "lunetad cannot read 1 of Claude Code's session files";
             assert!(lines.contains(&note), "{lines:#?}");
             let asked = lines.contains(&"Close the view? 1 agent, 1 unknown");
-            assert_eq!((went == delete_here(act), asked), (!asks, asks), "view {view}");
+            assert_eq!((went == delete_here(act, 1), asked), (!asks, asks), "view {view}");
         }
     }
 
@@ -10040,13 +10038,13 @@ mod tests {
             sidebar.hear(Host { unread: 1, unread_files, ..host(sessions, Vec::new()) });
             let place = WorktreePlace { project: project_row("twin", 1), worktree };
             sidebar.focus(Keys::Sidebar);
-            sidebar.light(Some(Spot::Local(Place::Worktree(place))));
+            sidebar.light(Spot::Local(Place::Worktree(place)));
             type_in(&mut sidebar, "d");
             let went = sidebar.key(&char('d'), moment(160_000));
             let lines = screen(&mut sidebar, true, 60, 16);
             let question = " Close the worktree? 1 agent, 1 unknown";
             let asked = lines.iter().any(|line| line.trim_end() == question);
-            assert_eq!((went == delete_here(close.clone()), asked), (!asks, asks), "{lines:#?}");
+            assert_eq!((went == delete_here(close.clone(), 1), asked), (!asks, asks), "{lines:#?}");
         }
     }
 
@@ -10057,9 +10055,9 @@ mod tests {
         assert!(sidebar.open().is_none());
         sidebar.hear(with_nvim());
         let waits = "a listing heard before the close lands leaves the highlight on the view";
-        assert_eq!(cursor(&sidebar), Some(view_of("older", 10, 2)), "{waits}");
+        assert_eq!(lit_place(&sidebar), Some(view_of("older", 10, 2)), "{waits}");
         sidebar.hear(without_nvim());
-        assert_eq!(cursor(&sidebar), Some(past_nvim()));
+        assert_eq!(lit_place(&sidebar), Some(past_nvim()));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 40, 16);
@@ -10084,7 +10082,7 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         sidebar.step(2);
-        assert_eq!(cursor(&sidebar), Some(view_of("older", 10, 2)));
+        assert_eq!(lit_place(&sidebar), Some(view_of("older", 10, 2)));
         sidebar
     }
 
@@ -10096,15 +10094,20 @@ mod tests {
         Act::View { session: session_name("older"), view: view_key(10, 2) }
     }
 
-    fn close_nvim(sidebar: &mut Sidebar) {
+    fn close_nvim(sidebar: &mut Sidebar) -> u64 {
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(closes_nvim()));
+        let asked = sidebar.key(&char('d'), moment(160_000));
+        let Asked::Delete { ticket, .. } = asked else {
+            panic!("d d closes the view: {asked:?}");
+        };
+        assert_eq!(asked, delete_here(closes_nvim(), ticket));
+        ticket
     }
 
     fn where_nvim_going_by_itself_leaves_it() -> Option<Place> {
         let mut sidebar = on_nvim();
         sidebar.hear(without_nvim());
-        let left = cursor(&sidebar);
+        let left = lit_place(&sidebar);
         assert_ne!(left, Some(past_nvim()), "it lands apart from where a delete of it goes");
         left
     }
@@ -10115,31 +10118,38 @@ mod tests {
         close_nvim(&mut sidebar);
         type_in(&mut sidebar, "hl");
         let back = "h folds its worktree and l unfolds it, back onto the view";
-        assert_eq!(cursor(&sidebar), Some(view_of("older", 10, 2)), "{back}");
+        assert_eq!(lit_place(&sidebar), Some(view_of("older", 10, 2)), "{back}");
         sidebar.hear(without_nvim());
-        assert_eq!(cursor(&sidebar), where_nvim_going_by_itself_leaves_it());
+        assert_eq!(lit_place(&sidebar), where_nvim_going_by_itself_leaves_it());
+    }
+
+    fn refuse(sidebar: &mut Sidebar, ticket: u64) {
+        let refused = "menu: not closed: lunetad refused";
+        sidebar.unclosed(&Machine::Local, &closes_nvim(), ticket, refused.to_owned());
+        assert_eq!(sidebar.notice.as_deref(), Some(refused));
+        assert_eq!(lit_place(sidebar), Some(view_of("older", 10, 2)));
+    }
+
+    fn nvim_closed_twice_with_the_others_refused() -> (Sidebar, u64) {
+        let mut sidebar = on_nvim();
+        let earlier = close_nvim(&mut sidebar);
+        let picked = sidebar.ticket();
+        let later = close_nvim(&mut sidebar);
+        refuse(&mut sidebar, earlier);
+        refuse(&mut sidebar, picked);
+        (sidebar, later)
     }
 
     #[test]
     fn a_refused_close_drops_the_landing_of_its_own_delete_only() {
-        let left = where_nvim_going_by_itself_leaves_it();
-        let fish = Act::View { session: session_name("newer"), view: view_key(20, 1) };
-        let session = session_name("older");
-        let worktree = Act::Worktree { session, worktree: tab_of(10, 1), views: vec![2], seen: vec![] };
-        for (on, refused, lands) in [
-            (Machine::Local, fish, Some(past_nvim())),
-            (Machine::Local, worktree, Some(past_nvim())),
-            (Machine::Remote(nixos()), closes_nvim(), Some(past_nvim())),
-            (Machine::Local, closes_nvim(), left),
-        ] {
-            let mut sidebar = on_nvim();
-            close_nvim(&mut sidebar);
-            sidebar.unclosed(&on, &refused, "menu: not closed: lunetad refused".to_owned());
-            assert_eq!(sidebar.notice.as_deref(), Some("menu: not closed: lunetad refused"));
-            assert_eq!(cursor(&sidebar), Some(view_of("older", 10, 2)));
-            sidebar.hear(without_nvim());
-            assert_eq!(cursor(&sidebar), lands, "{on:?} {refused:?}");
-        }
+        let (mut sidebar, _) = nvim_closed_twice_with_the_others_refused();
+        sidebar.hear(without_nvim());
+        let kept = "an earlier d d's refusal or the picker's leaves the later d d's landing";
+        assert_eq!(lit_place(&sidebar), Some(past_nvim()), "{kept}");
+        let (mut sidebar, later) = nvim_closed_twice_with_the_others_refused();
+        refuse(&mut sidebar, later);
+        sidebar.hear(without_nvim());
+        assert_eq!(lit_place(&sidebar), where_nvim_going_by_itself_leaves_it());
     }
 
     #[test]
@@ -10153,14 +10163,14 @@ mod tests {
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13], " Close the view? 1 agent, 1");
         let act = Act::View { session: session_name("older"), view: view_key(1, 1) };
-        assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(act));
-        sidebar.light(Some(Spot::Local(Place::Session(own_listed("older", 1)))));
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(act, 1));
+        sidebar.light(Spot::Local(Place::Session(own_listed("older", 1))));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13..15], [" Delete project older? 1", " agent, 1 waiting"]);
         let deleted = project_deleted("older", 1, &[1000, 1001], &[1, 2]);
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted));
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted, 2));
         assert!(sidebar.open().is_none());
     }
 
@@ -10181,12 +10191,12 @@ mod tests {
         let mut sidebar = searched();
         let view = |view| Some(view_of("bipa", 10, view));
         type_in(&mut sidebar, "/pi");
-        assert_eq!(cursor(&sidebar), view(3));
+        assert_eq!(lit_place(&sidebar), view(3));
         sidebar.key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), moment(160_000));
         sidebar.hear(sidebar.host.clone().expect("heard"));
-        assert_eq!(cursor(&sidebar), view(1));
+        assert_eq!(lit_place(&sidebar), view(1));
         type_in(&mut sidebar, "x");
-        assert_eq!(cursor(&sidebar), view(3));
+        assert_eq!(lit_place(&sidebar), view(3));
     }
 
     fn drawn_rows(sidebar: &mut Sidebar) -> (Vec<String>, Vec<usize>) {
@@ -10297,7 +10307,7 @@ mod tests {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
         assert_eq!(sidebar.holding(), Holding::Nothing);
-        sidebar.light(Some(Spot::Local(Place::Session(listed("bipa", 10)))));
+        sidebar.light(Spot::Local(Place::Session(listed("bipa", 10))));
         type_in(&mut sidebar, "v");
         assert_eq!(sidebar.holding(), Holding::Reorder, "v reorders");
         sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000));
@@ -10385,14 +10395,14 @@ mod tests {
         let mut sidebar = searched();
         let area = Rect::new(0, 0, 32, 26);
         framed(&mut sidebar, area);
-        let here = sidebar.cursor().cloned();
+        let here = sidebar.lit_spot().cloned();
         assert_eq!(swept(&mut sidebar, area, (7, 6), (13, 6)), copied("a-p-i-x"));
         assert_eq!(swept(&mut sidebar, area, (13, 6), (9, 6)), copied("p-i-x"));
         dragged(&mut sidebar, area, (7, 6), (9, 6));
         let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 13, 6), area);
         assert_eq!(up, copied("a-p-i-x"));
         assert_eq!(swept(&mut sidebar, area, (2, 0), (8, 0)), copied("luneta"));
-        assert_eq!(sidebar.cursor().cloned(), here);
+        assert_eq!(sidebar.lit_spot().cloned(), here);
 
         dragged(&mut sidebar, area, (9, 6), (11, 6));
         let left = MouseButton::Left;
@@ -10759,13 +10769,13 @@ mod tests {
         let nixos_machine = Machine::Remote(nixos());
         let header = Spot::Machine(nixos_machine.clone());
         let project = Spot::Remote(nixos(), Place::Session(listed("main", 20)));
-        sidebar.light(Some(Spot::Remote(nixos(), view_of("main", 20, 1))));
+        sidebar.light(Spot::Remote(nixos(), view_of("main", 20, 1)));
         type_in(&mut sidebar, "hh");
-        assert_eq!(sidebar.cursor().cloned(), Some(project.clone()));
+        assert_eq!(sidebar.lit_spot().cloned(), Some(project.clone()));
         assert!(!sidebar.folds.contains(Fold::Machine(&nixos_machine)));
         type_in(&mut sidebar, "h");
         assert!(sidebar.folds.contains(Fold::Machine(&nixos_machine)));
-        assert_eq!(sidebar.cursor().cloned(), Some(header.clone()));
+        assert_eq!(sidebar.lit_spot().cloned(), Some(header.clone()));
         let folded = [
             " ▾ \u{f108} mac ═════════════════════",
             " ▾ main ──────────────────────",
@@ -10782,7 +10792,7 @@ mod tests {
         type_in(&mut sidebar, "l");
         assert!(!sidebar.folds.contains(Fold::Machine(&nixos_machine)));
         assert!(sidebar.row_of(&project).is_some());
-        sidebar.light(Some(header.clone()));
+        sidebar.light(header.clone());
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Nothing);
         assert!(sidebar.folds.contains(Fold::Machine(&nixos_machine)));
@@ -10796,10 +10806,10 @@ mod tests {
         assert_eq!(lines[4], " ▾ \u{f108} nixos ════════════════ ●1");
 
         let vps = Machine::Remote("me@vps".parse().unwrap());
-        sidebar.light(Some(Spot::Machine(vps.clone())));
+        sidebar.light(Spot::Machine(vps.clone()));
         sidebar.key(&enter, moment(160_000));
         assert!(!sidebar.folds.contains(Fold::Machine(&vps)));
-        assert_eq!(sidebar.cursor(), Some(&Spot::Machine(vps)), "it has no projects to fold");
+        assert_eq!(sidebar.lit_spot(), Some(&Spot::Machine(vps)), "it has no projects to fold");
     }
 
     #[test]
@@ -10845,16 +10855,16 @@ mod tests {
         let machine = Machine::Remote(nixos());
         let (main, tab) = (ProjectId::of(20).unwrap(), tab_of(20, 0));
         let fix = view_of("main", 20, 1);
-        sidebar.light(Some(Spot::Remote(nixos(), fix)));
+        sidebar.light(Spot::Remote(nixos(), fix));
         type_in(&mut sidebar, "h");
         assert!(sidebar.folds.contains(Fold::Worktree(&machine, tab)));
         assert!(!sidebar.folds.contains(Fold::Project(&machine, main)));
         let place = WorktreePlace { project: project_row("main", 20), worktree: tab };
-        assert_eq!(sidebar.cursor().cloned(), Some(Spot::Remote(nixos(), Place::Worktree(place))));
+        assert_eq!(sidebar.lit_spot(), Some(&Spot::Remote(nixos(), Place::Worktree(place))));
         type_in(&mut sidebar, "h");
         assert!(sidebar.folds.contains(Fold::Project(&machine, main)));
         let project = Spot::Remote(nixos(), Place::Session(listed("main", 20)));
-        assert_eq!(sidebar.cursor().cloned(), Some(project));
+        assert_eq!(sidebar.lit_spot().cloned(), Some(project));
         assert!(!folded(&sidebar, "main"), "this machine's main folds apart");
         type_in(&mut sidebar, "l");
         assert!(!sidebar.folds.contains(Fold::Project(&machine, main)));
@@ -10878,7 +10888,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let place = ViewPlace { session: listed("main", 20), view: view_key(20, 1) };
         let spot = Spot::Remote(nixos(), Place::View(place));
-        sidebar.light(Some(spot.clone()));
+        sidebar.light(spot.clone());
         let now = moment(160_000);
         assert_eq!(sidebar.key(&char('g'), now - PAUSE), Asked::Nothing);
         assert_eq!(clicks(&mut sidebar, 17), [
@@ -10904,7 +10914,7 @@ mod tests {
         sidebar.key(&char('g'), now);
         sidebar.key(&char('g'), now);
         assert!(sidebar.open().is_none(), "g g opens no menu");
-        assert_ne!(sidebar.cursor().cloned(), Some(spot), "g g goes to the first row");
+        assert_ne!(sidebar.lit_spot().cloned(), Some(spot), "g g goes to the first row");
     }
 
     #[test]
@@ -10924,7 +10934,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let place = ViewPlace { session: listed("main", 20), view: view_key(20, 1) };
         let place = Place::View(place);
-        sidebar.light(Some(Spot::Remote(nixos(), place)));
+        sidebar.light(Spot::Remote(nixos(), place));
         let now = moment(160_000);
         let on = Machine::Remote(nixos());
         sidebar.key(&char('d'), now);
@@ -11036,7 +11046,7 @@ mod tests {
         host.remotes[0] = remote("nixos", up(vec![work()], Vec::new()));
         sidebar.hear(host.clone());
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Some(Spot::Remote(nixos(), Place::Session(listed("work", 20)))));
+        sidebar.light(Spot::Remote(nixos(), Place::Session(listed("work", 20))));
         sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
         let number = sidebar.open().map_or(0, Menu::number);
         let on = Machine::Remote(nixos());
@@ -11074,10 +11084,10 @@ mod tests {
         host.remotes[0] = remote("nixos", up(vec![work], Vec::new()));
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Some(Spot::Local(view_of("main", 10, 1))));
+        sidebar.light(Spot::Local(view_of("main", 10, 1)));
         sidebar.key(&char('h'), moment(160_000));
         let place = WorktreePlace { project: project_row("main", 10), worktree: tab_of(10, 0) };
-        assert_eq!(sidebar.cursor().cloned(), Some(Spot::Local(Place::Worktree(place))));
+        assert_eq!(sidebar.lit_spot().cloned(), Some(Spot::Local(Place::Worktree(place))));
 
         let nixos = Machine::Remote(nixos());
         let vps = Machine::Remote("me@vps".parse().unwrap());
@@ -11114,7 +11124,7 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Some(Spot::Machine(Machine::Remote("me@vps".parse().unwrap()))));
+        sidebar.light(Spot::Machine(Machine::Remote("me@vps".parse().unwrap())));
         sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
         assert!(sidebar.open().is_some());
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Nothing);
@@ -11132,18 +11142,18 @@ mod tests {
         host.remotes[0] = remote("nixos", up(vec![session("main", 20, views)], agents));
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Some(Spot::Remote(nixos(), view_of("main", 20, 1))));
+        sidebar.light(Spot::Remote(nixos(), view_of("main", 20, 1)));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 120, 16);
         let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
         assert!(lines.contains(&"Close the view? 1 agent, 1 waiting"), "{lines:#?}");
         let act = Act::View { session: session_name("main"), view: view_key(20, 1) };
-        let there = Asked::Delete { on: Machine::Remote(nixos()), act };
+        let there = Asked::Delete { on: Machine::Remote(nixos()), act, ticket: 1 };
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), there);
         assert!(sidebar.open().is_none());
         let place = WorktreePlace { project: project_row("main", 20), worktree: tab_of(20, 0) };
-        sidebar.light(Some(Spot::Remote(nixos(), Place::Worktree(place.clone()))));
+        sidebar.light(Spot::Remote(nixos(), Place::Worktree(place.clone())));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 120, 16);
@@ -11156,7 +11166,7 @@ mod tests {
             seen: vec![ViewId::of(1).unwrap(), ViewId::of(2).unwrap()],
         };
         let on = Machine::Remote(nixos());
-        assert_eq!(sidebar.key(&char('y'), moment(160_000)), Asked::Delete { on, act });
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), Asked::Delete { on, act, ticket: 2 });
         assert!(sidebar.open().is_none());
     }
 
@@ -11169,7 +11179,7 @@ mod tests {
             sidebar.focus(Keys::Sidebar);
             let (project, worktree) = (project_row("main", 20), tab_of(20, 0));
             let place = WorktreePlace { project, worktree };
-            sidebar.light(Some(Spot::Remote(nixos(), Place::Worktree(place))));
+            sidebar.light(Spot::Remote(nixos(), Place::Worktree(place)));
             type_in(&mut sidebar, "d");
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
             host.remotes[0] = remote("nixos", down(100));
@@ -11205,9 +11215,9 @@ mod tests {
             (far("me@vps"), Some("unreachable"), Vec::new()),
             (far("pi"), Some("reaching…"), Vec::new()),
         ]);
-        sidebar.light(Some(Spot::Machine(Machine::Remote(nixos()))));
+        sidebar.light(Spot::Machine(Machine::Remote(nixos())));
         assert_eq!(sidebar.on_header(), Some(Machine::Remote(nixos())));
-        sidebar.light(Some(Spot::Remote(nixos(), Place::Session(listed("main", 20)))));
+        sidebar.light(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
         assert_eq!(sidebar.on_header(), None);
     }
 
@@ -11231,12 +11241,12 @@ mod tests {
         let tab = |id| WorktreePlace { project: project_row("main", id),
             worktree: tab_of(id, 0),
         };
-        sidebar.light(Some(Spot::Local(Place::Worktree(tab(10)))));
+        sidebar.light(Spot::Local(Place::Worktree(tab(10))));
         type_in(&mut sidebar, "n");
         let (project, branch) = (ProjectId::of(10).unwrap(), Branch::parse("feat").unwrap());
         let made = Asked::NewWorktree { on: Machine::Local, project, branch };
         assert_eq!(branched(&mut sidebar, "feat"), made);
-        sidebar.light(Some(Spot::Remote(nixos(), Place::Worktree(tab(20)))));
+        sidebar.light(Spot::Remote(nixos(), Place::Worktree(tab(20))));
         type_in(&mut sidebar, "n");
         let (project, branch) = (ProjectId::of(20).unwrap(), Branch::parse("feat").unwrap());
         let far = Asked::NewWorktree { on: Machine::Remote(nixos()), project, branch };
@@ -11254,7 +11264,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let worktree = WorktreeId::of(31).unwrap();
         let place = WorktreePlace { project: project_row("notes", 8), worktree };
-        sidebar.light(Some(Spot::Local(Place::Worktree(place))));
+        sidebar.light(Spot::Local(Place::Worktree(place)));
         type_in(&mut sidebar, "n");
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Nothing);
         assert!(sidebar.open().is_none(), "no box asks for a branch");
@@ -11321,7 +11331,7 @@ mod tests {
         let lines = screen(&mut sidebar, false, 32, 14);
         assert_eq!(lines[11], " ▸ \u{f108} me@mac · this machine", "{lines:?}");
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Some(Spot::Machine(Machine::Remote("me@mac".parse().unwrap()))));
+        sidebar.light(Spot::Machine(Machine::Remote("me@mac".parse().unwrap())));
         let said = format!("me@mac: {}", lunetad::THIS_MACHINE);
         assert_eq!(sidebar.unreached(), Some(said));
     }
@@ -11367,7 +11377,7 @@ mod tests {
 
         type_in(&mut sidebar, "Gk");
         let vps = "me@vps".parse().unwrap();
-        assert_eq!(sidebar.cursor().cloned(), Some(Spot::Machine(Machine::Remote(vps))));
+        assert_eq!(sidebar.lit_spot().cloned(), Some(Spot::Machine(Machine::Remote(vps))));
         type_in(&mut sidebar, "d");
         let forget = Asked::Forget("me@vps".parse().unwrap());
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), forget);
@@ -11384,7 +11394,7 @@ mod tests {
         sidebar.hear(two_each());
         sidebar.focus(Keys::Sidebar);
         let shift = |sidebar: &mut Sidebar, c: char| sidebar.key(&char(c), moment(160_000));
-        sidebar.light(Some(Spot::Local(Place::Session(listed("main", 10)))));
+        sidebar.light(Spot::Local(Place::Session(listed("main", 10))));
         type_in(&mut sidebar, "v");
         let asked = |on: Machine, seen: &[u64], ids: &[u64], ticket| {
             Asked::Move { on, order: projects(seen, ids), ticket }
@@ -11396,7 +11406,7 @@ mod tests {
         sidebar.key(&esc, moment(160_000));
 
         let far = |name: &str, id| Spot::Remote(nixos(), Place::Session(listed(name, id)));
-        sidebar.light(Some(far("dev", 40)));
+        sidebar.light(far("dev", 40));
         type_in(&mut sidebar, "v");
         let nixos_moved = asked(Machine::Remote(nixos()), &[20, 40], &[40, 20], 2);
         assert_eq!(shift(&mut sidebar, 'K'), nixos_moved);
@@ -11410,9 +11420,9 @@ mod tests {
         let first = WorktreePlace { project: project_row("older", 10),
             worktree: tab_of(10, 0),
         };
-        sidebar.light(Some(Spot::Local(view_of("older", 10, 1))));
+        sidebar.light(Spot::Local(view_of("older", 10, 1)));
         type_in(&mut sidebar, "v");
-        assert_eq!(sidebar.cursor().cloned(), Some(Spot::Local(Place::Worktree(first))));
+        assert_eq!(sidebar.lit_spot().cloned(), Some(Spot::Local(Place::Worktree(first))));
         let asked = sidebar.key(&char('J'), moment(160_000));
         let (first, second) = (tab_of(10, 0), tab_of(10, 1));
         let (seen, wanted) = (vec![first, second], vec![second, first]);
@@ -11452,7 +11462,7 @@ mod tests {
         let heard = sidebar.host.clone().expect("heard");
         sidebar.hear(in_order(&heard, &[10, 20, 30], 1));
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Some(Spot::Local(Place::Session(listed("bipa", 10)))));
+        sidebar.light(Spot::Local(Place::Session(listed("bipa", 10))));
         type_in(&mut sidebar, "v");
         (sidebar, heard)
     }

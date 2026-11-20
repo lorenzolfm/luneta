@@ -8,7 +8,7 @@ use lunetad::projects::{ProjectId, ViewId, WorktreeId};
 use lunetad::seats::Unread;
 use lunetad::SessionName;
 
-use crate::sidebar::{Listed, ViewKey};
+use crate::sidebar::{Listed, Place, ViewKey};
 
 const UNTOLD: &str = "luneta cannot tell which agents it ends";
 
@@ -114,6 +114,22 @@ impl Act {
             Act::View { view: closed, .. } => view == closed.terminal_id(),
             Act::Worktree { views, .. } => views.contains(&view),
             Act::Project { .. } => true,
+        }
+    }
+
+    pub fn closes(&self, place: &Place) -> bool {
+        match (self, place.terminal_id()) {
+            (
+                Act::View { session, .. }
+                | Act::Worktree { session, .. }
+                | Act::Project { session, .. },
+                Some(view),
+            ) => place.session() == session.as_str() && self.takes(view),
+            (Act::Worktree { worktree, .. }, None) => {
+                matches!(place, Place::Worktree(at) if at.worktree == *worktree)
+            },
+            (Act::View { .. }, None) => false,
+            (Act::Project { session, .. }, None) => place.session() == session.as_str(),
         }
     }
 }
