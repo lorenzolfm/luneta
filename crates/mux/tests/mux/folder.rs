@@ -1,13 +1,13 @@
 use std::fs;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 use luneta_mux::api;
+use luneta_waits::Patience;
 use rustix::process::{Pid, test_kill_process};
 use tonic::Code;
 
-use crate::host::{LUNETA_MUX, PATIENCE, Server, listed, new_terminal, run, script, shell, size};
+use crate::host::{LUNETA_MUX, Server, listed, new_terminal, run, script, shell, size};
 
 fn programs(listing: &api::Listing) -> Vec<Pid> {
     let pid = |terminal: &api::Terminal| match &terminal.program {
@@ -20,11 +20,9 @@ fn programs(listing: &api::Listing) -> Vec<Pid> {
 }
 
 async fn ended(pid: Pid) {
-    let deadline = Instant::now() + PATIENCE;
-    while test_kill_process(pid).is_ok() {
-        assert!(Instant::now() < deadline, "program {pid:?} runs on");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let what = format!("program {pid:?} ends");
+    luneta_waits::eventually_async(&what, async || test_kill_process(pid).is_err().then_some(()))
+        .await;
 }
 
 #[test]
@@ -45,7 +43,7 @@ fn it_listens_only_in_the_one_absolute_folder_it_is_given() {
 #[test]
 fn a_server_whose_folder_goes_ends_and_so_do_its_terminals_programs() {
     run(async {
-        let mut server = Server::start();
+        let mut server = Server::start().await;
         let mut mux = server.client().await;
         let held = script("exec sleep 600", api::Ends::Holds);
         new_terminal(&mut mux, held, b"held", size(20, 4)).await;
@@ -54,16 +52,14 @@ fn a_server_whose_folder_goes_ends_and_so_do_its_terminals_programs() {
         assert_eq!(programs.len(), 2);
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         fs::remove_dir_all(server.socket().parent().unwrap()).unwrap();
-        let ending = tokio::time::timeout(PATIENCE, async {
-            loop {
-                match watch.message().await {
-                    Ok(Some(_)) => {},
-                    Ok(None) => panic!("the watch ended as if every terminal had ended"),
-                    Err(ending) => break ending,
-                }
+        let patience = Patience::begun();
+        let ending = loop {
+            match patience.awaited("the watch ends", watch.message()).await {
+                Ok(Some(_)) => {},
+                Ok(None) => panic!("the watch ended as if every terminal had ended"),
+                Err(ending) => break ending,
             }
-        });
-        let ending = ending.await.expect("the watch ended within PATIENCE");
+        };
         let socket = server.socket();
         let gone = format!("{} is gone, so nothing reaches luneta-mux again", socket.display());
         assert_eq!((ending.code(), ending.message()), (Code::Unavailable, gone.as_str()));
@@ -78,7 +74,7 @@ fn a_server_whose_folder_goes_ends_and_so_do_its_terminals_programs() {
 #[test]
 fn a_server_whose_socket_another_takes_ends_and_leaves_that_socket_be() {
     run(async {
-        let mut server = Server::start();
+        let mut server = Server::start().await;
         let mut mux = server.client().await;
         new_terminal(&mut mux, shell(), b"shell", size(20, 4)).await;
         drop(mux);
