@@ -15,7 +15,7 @@ use lunetad::{SETTLE, WATCH};
 use prost::Message as _;
 use serde_json::json;
 
-use crate::host::{start, Host, LUNETA};
+use crate::host::{start, Daemon, Host, LUNETA};
 use crate::projects::{asked, project};
 
 impl Host {
@@ -273,15 +273,28 @@ fn on_branch(name: &'static str) -> impl Fn(&Checkout) -> bool {
     move |it| matches!(&it.head, Some(Head::Branch(branch)) if branch.name == name)
 }
 
-fn shows_at_once(
-    host: &Host,
-    cwd: &str,
-    what: &str,
-    change: impl FnOnce(),
-    shows: impl Fn(&Checkout) -> bool,
-) {
-    change();
-    eventually(what, || checkout(host, cwd).filter(|it| shows(it)));
+const HEARD_MAX: usize = 8;
+
+struct AtOnce<'a> {
+    daemon: &'a mut Daemon,
+    host: &'a Host,
+    cwd: &'a str,
+}
+
+impl AtOnce<'_> {
+    fn shows(&mut self, what: &str, change: impl FnOnce(), shows: impl Fn(&Checkout) -> bool) {
+        let heard = format!("lunetad: the watch on {} heard it change", self.cwd);
+        let heard = |line: &str| line == heard;
+        let before = self.daemon.said().iter().filter(|line| heard(line)).count();
+        change();
+        for times in before + 1..=before + HEARD_MAX {
+            self.daemon.says_times(&format!("the watch hears {what}"), times, heard);
+            if checkout(self.host, self.cwd).is_some_and(|it| shows(&it)) {
+                return;
+            }
+        }
+        panic!("the watch heard {HEARD_MAX} changes after {what}, and none of them showed it");
+    }
 }
 
 fn says_at_once_as_a_checkout_changes(format: &str) {
@@ -304,7 +317,7 @@ fn says_at_once_as_a_checkout_changes(format: &str) {
     assert!(git(&repo, &["worktree", "add", "-q", "-b", "work", &spelled(&tree), "origin/main"]));
     assert!(git(&repo, &["worktree", "add", "-q", "--detach", &spelled(&beside)]));
     assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
-    let _daemon = start(host.vars()).unwrap();
+    let mut daemon = start(host.vars()).unwrap();
     let (_, src) = watched(&host, &spelled(&tree.join("src")));
     assert_eq!(src, spelled(&tree), "a folder in a checkout is its checkout's project");
     eventually("git says how the tree stands", || checkout(&host, &src));
@@ -318,46 +331,46 @@ fn says_at_once_as_a_checkout_changes(format: &str) {
     };
     let upstream = |it: &Checkout| branch(it)?.upstream.map(|it| (it.ahead, it.behind));
     let clean = |it: &Checkout| changes(it) == Changes::default();
-    let (host, src) = (&host, src.as_str());
+    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &src };
 
     let edited = || edit("src/lib.rs", "edited\n");
-    shows_at_once(host, src, "an edit in src", edited, |it| changes(it).modified == 1);
+    at_once.shows("an edit in src", edited, |it| changes(it).modified == 1);
     let made = || {
         fs::create_dir(tree.join("src/new")).unwrap();
         edit("src/new/mod.rs", "new\n");
     };
-    shows_at_once(host, src, "a directory new in src", made, |it| changes(it).untracked == 1);
+    at_once.shows("a directory new in src", made, |it| changes(it).untracked == 1);
     let staged = |it: &Checkout| changes(it).staged == 1 && changes(it).untracked == 0;
-    shows_at_once(host, src, "it staged", || in_tree(&["add", "src/new"]), staged);
+    at_once.shows("it staged", || in_tree(&["add", "src/new"]), staged);
     let committed = |it: &Checkout| clean(it) && upstream(it) == Some((1, 0));
-    shows_at_once(host, src, "a commit", || in_tree(&["commit", "-q", "-am", "work"]), committed);
+    at_once.shows("a commit", || in_tree(&["commit", "-q", "-am", "work"]), committed);
     let modified = |it: &Checkout| changes(it).modified == 1;
     let edited = || edit("src/new/mod.rs", "edited\n");
-    shows_at_once(host, src, "an edit in the directory committed", edited, modified);
+    at_once.shows("an edit in the directory committed", edited, modified);
     let made_anew = || {
         fs::remove_dir_all(tree.join("src/new")).unwrap();
         made();
     };
-    shows_at_once(host, src, "the directory made anew", made_anew, clean);
-    shows_at_once(host, src, "an edit in the one made anew", edited, modified);
+    at_once.shows("the directory made anew", made_anew, clean);
+    at_once.shows("an edit in the one made anew", edited, modified);
     let fetched = || {
         commit(&elsewhere, "README", "start\n");
         assert!(git(&elsewhere, &["push", "-q"]));
         assert!(git(&beside, &["fetch", "-q"]));
     };
     let behind = |it: &Checkout| upstream(it) == Some((1, 1));
-    shows_at_once(host, src, "a fetch in another work tree", fetched, behind);
+    at_once.shows("a fetch in another work tree", fetched, behind);
     let stashed = |count: u32| move |it: &Checkout| clean(it) && it.stashes == count;
-    shows_at_once(host, src, "a stash", || in_tree(&["stash", "-q"]), stashed(1));
+    at_once.shows("a stash", || in_tree(&["stash", "-q"]), stashed(1));
     let stash = || {
         edit("src/lib.rs", "kept\n");
         in_tree(&["stash", "-q"]);
     };
-    shows_at_once(host, src, "another stash", stash, stashed(2));
+    at_once.shows("another stash", stash, stashed(2));
     let dropped = || in_tree(&["stash", "drop", "-q", "stash@{1}"]);
-    shows_at_once(host, src, "the first stash dropped", dropped, stashed(1));
+    at_once.shows("the first stash dropped", dropped, stashed(1));
     let other = |it: &Checkout| branch(it).is_some_and(|branch| branch.name == "other");
-    shows_at_once(host, src, "a checkout", || in_tree(&["switch", "-q", "-c", "other"]), other);
+    at_once.shows("a checkout", || in_tree(&["switch", "-q", "-c", "other"]), other);
 }
 
 #[test]
@@ -377,16 +390,17 @@ fn git_says_at_once_as_a_repository_made_in_another_changes() {
     let (top, src) = (tree.path(), tree.path().join("src"));
     fs::create_dir(&src).unwrap();
     let cwd = src.display().to_string();
-    let _daemon = start(host.vars()).unwrap();
+    let mut daemon = start(host.vars()).unwrap();
     assert_eq!(watched(&host, &cwd).1, cwd, "src is in no repository yet");
     assert!(git(top, &["init", "-q", "-b", "main"]));
     commit(top, "src/lib.rs", "start\n");
     eventually("git says how the tree stands", || checkout(&host, &cwd));
 
     let made = || assert!(git(&src, &["init", "-q", "-b", "inner"]));
-    shows_at_once(&host, &cwd, "a work tree made in src", made, on_branch("inner"));
+    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    at_once.shows("a work tree made in src", made, on_branch("inner"));
     let switched = || assert!(git(&src, &["switch", "-q", "-c", "other"]));
-    shows_at_once(&host, &cwd, "a branch checked out in it", switched, on_branch("other"));
+    at_once.shows("a branch checked out in it", switched, on_branch("other"));
 }
 
 #[test]
@@ -396,7 +410,7 @@ fn a_git_folder_that_does_not_read_leaves_the_checkout_it_is_in_watched() {
     let (top, src) = (tree.path(), tree.path().join("src"));
     fs::create_dir(&src).unwrap();
     let cwd = src.display().to_string();
-    let _daemon = start(host.vars()).unwrap();
+    let mut daemon = start(host.vars()).unwrap();
     assert_eq!(watched(&host, &cwd).1, cwd, "src is in no repository yet");
     assert!(git(top, &["init", "-q", "-b", "main"]));
     commit(top, "src/lib.rs", "start\n");
@@ -408,7 +422,8 @@ fn a_git_folder_that_does_not_read_leaves_the_checkout_it_is_in_watched() {
 
     let modified = |it: &Checkout| it.changes.unwrap_or_default().modified == 1;
     let edited = || fs::write(src.join("lib.rs"), "edited\n").unwrap();
-    shows_at_once(&host, &cwd, "an edit beside it", edited, modified);
+    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    at_once.shows("an edit beside it", edited, modified);
     mode(0o755);
 }
 
@@ -417,15 +432,16 @@ fn git_says_at_once_as_a_repository_begins_where_there_was_none() {
     let host = Host::new();
     let dir = scratch();
     let cwd = dir.path().display().to_string();
-    let _daemon = start(host.vars()).unwrap();
+    let mut daemon = start(host.vars()).unwrap();
     watched(&host, &cwd);
     in_no_repository(&host, &cwd);
 
     let made = || assert!(git(dir.path(), &["init", "-q", "-b", "first"]));
     let first = on_branch("first");
-    shows_at_once(&host, &cwd, "a work tree made where there was none", made, first);
+    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    at_once.shows("a work tree made where there was none", made, first);
     let switched = || assert!(git(dir.path(), &["switch", "-q", "-c", "other"]));
-    shows_at_once(&host, &cwd, "a branch checked out in it", switched, on_branch("other"));
+    at_once.shows("a branch checked out in it", switched, on_branch("other"));
 }
 
 #[test]
@@ -436,7 +452,7 @@ fn git_says_at_once_as_a_repository_begins_in_a_directory_made_again() {
     let work = dir.path().join("work");
     fs::create_dir(&work).unwrap();
     let cwd = work.display().to_string();
-    let _daemon = start(host.vars()).unwrap();
+    let mut daemon = start(host.vars()).unwrap();
     watched(&host, &cwd);
     in_no_repository(&host, &cwd);
 
@@ -445,7 +461,8 @@ fn git_says_at_once_as_a_repository_begins_in_a_directory_made_again() {
     fs::create_dir(&work).unwrap();
     eventually("git is asked again", || (noted.statuses() > asked).then_some(()));
     let made = || assert!(git(&work, &["init", "-q", "-b", "first"]));
-    shows_at_once(&host, &cwd, "a work tree made in it", made, on_branch("first"));
+    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    at_once.shows("a work tree made in it", made, on_branch("first"));
 }
 
 #[test]
@@ -504,7 +521,7 @@ fn git_says_at_once_as_a_directory_moved_into_a_checkout_changes() {
     assert!(git(&top, &["init", "-q", "-b", "main"]));
     commit(&top, "src/lib.rs", "start\n");
     let cwd = top.display().to_string();
-    let _daemon = start(host.vars()).unwrap();
+    let mut daemon = start(host.vars()).unwrap();
     watched(&host, &cwd);
     eventually("git says how the tree stands", || checkout(&host, &cwd));
 
@@ -516,10 +533,11 @@ fn git_says_at_once_as_a_directory_moved_into_a_checkout_changes() {
         fs::rename(path("came"), top.join("src")).unwrap();
     };
     let modified = |it: &Checkout| changes(it).modified == 1;
-    shows_at_once(&host, &cwd, "a directory moved in", moved_in, modified);
+    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    at_once.shows("a directory moved in", moved_in, modified);
     let edited = || fs::write(top.join("src/lib.rs"), "start\n").unwrap();
     let clean = |it: &Checkout| changes(it) == Changes::default();
-    shows_at_once(&host, &cwd, "an edit in the one moved in", edited, clean);
+    at_once.shows("an edit in the one moved in", edited, clean);
 }
 
 #[test]
@@ -534,7 +552,7 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
     fs::create_dir_all(&build).unwrap();
     symlink(top.join("target"), top.join(".git/refs/target")).unwrap();
     let cwd = top.display().to_string();
-    let _daemon = start(host.vars()).unwrap();
+    let mut daemon = start(host.vars()).unwrap();
     watched(&host, &cwd);
     let untracked = |count| {
         let changes = |it: &Checkout| it.changes.unwrap_or_default();
@@ -543,7 +561,8 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
     eventually("git says how the tree stands", || checkout(&host, &cwd).filter(untracked(0)));
 
     let turns_up = |name: &'static str| move || fs::write(top.join(name), "").unwrap();
-    shows_at_once(&host, &cwd, "a file that turns up", turns_up("one"), untracked(1));
+    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    at_once.shows("a file that turns up", turns_up("one"), untracked(1));
     let asked = noted.statuses();
     for step in 0..20 {
         let made = build.join(format!("step{step}"));
@@ -554,7 +573,7 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
     }
     let asked_again = || Some(noted.statuses()).filter(|now| *now != asked);
     luneta_waits::never("git is asked as the build writes", asked_again);
-    shows_at_once(&host, &cwd, "another that turns up", turns_up("two"), untracked(2));
+    at_once.shows("another that turns up", turns_up("two"), untracked(2));
 }
 
 #[test]
