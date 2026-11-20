@@ -474,7 +474,8 @@ fn a_bring_sends_the_clients_on_the_terminal_it_is_asked_from_to_the_worktree() 
     assert_eq!(taken(there, from), Some(Made::Taken(there)));
     assert_eq!(on.until_sent(), there, "the client on the terminal is sent");
     let unknown = TerminalKey { id: from.id + 100, made_at: from.made_at };
-    assert_eq!(taken(there, unknown), None, "no client is on a terminal not known");
+    let untaken = Some(Made::Untaken(()));
+    assert_eq!(taken(there, unknown), untaken, "no client is on a terminal not known");
     off.ask(focus(right));
     off.until("the other client on the right", |laid| focused_of(laid) == Some(right));
     on.ask(focus(left));

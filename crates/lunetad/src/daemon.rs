@@ -774,7 +774,8 @@ impl Daemon for Host {
         request: Request<ChangeProjectsRequest>,
     ) -> Result<Response<ChangeProjectsResponse>, Status> {
         let ChangeProjectsRequest { on, change } = request.into_inner();
-        if let Some(mut daemon) = self.bridged(on).await? {
+        let unsent = |unreached: Status| changes::unsent(&unreached);
+        if let Some(mut daemon) = self.bridged(on).await.map_err(unsent)? {
             return daemon.change_projects(ChangeProjectsRequest { on: None, change }).await;
         }
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
@@ -1049,6 +1050,7 @@ fn change_answered(
         Made::Worktree(worktree) => change_projects_response::Made::Worktree(worktree.get()),
         Made::Found(worktree) => change_projects_response::Made::Found(worktree.get()),
         Made::Taken(worktree) => change_projects_response::Made::Taken(worktree.get()),
+        Made::Untaken => change_projects_response::Made::Untaken(()),
     });
     Ok(ChangeProjectsResponse { made, kept: Some(kept.to_api()) })
 }

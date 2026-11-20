@@ -654,6 +654,7 @@ pub enum Made {
     Worktree(WorktreeId),
     Found(WorktreeId),
     Taken(WorktreeId),
+    Untaken,
 }
 
 #[derive(Debug)]

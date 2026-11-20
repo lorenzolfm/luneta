@@ -2,18 +2,18 @@ use tonic::{Code, Status};
 
 use crate::projects::Failed;
 
-const REFUSALS: [Code; 5] = [
+const REFUSALS: [Code; 6] = [
     Code::InvalidArgument,
     Code::FailedPrecondition,
     Code::Aborted,
     Code::NotFound,
+    Code::AlreadyExists,
     Code::Unimplemented,
 ];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Unchanged {
     Refused(String),
-    Nests(String),
     InDoubt(String),
 }
 
@@ -21,11 +21,41 @@ impl Unchanged {
     #[must_use]
     pub fn of(status: &Status) -> Unchanged {
         let why = status.message().to_owned();
-        match status.code() {
-            Code::AlreadyExists => Unchanged::Nests(why),
-            code if REFUSALS.contains(&code) => Unchanged::Refused(why),
-            _ => Unchanged::InDoubt(why),
+        if REFUSALS.contains(&status.code()) {
+            Unchanged::Refused(why)
+        } else {
+            Unchanged::InDoubt(why)
         }
+    }
+
+    #[must_use]
+    pub fn said(self, refused: &str, in_doubt: &str) -> String {
+        match self {
+            Unchanged::Refused(why) => format!("{refused}: {why}"),
+            Unchanged::InDoubt(why) => format!("{why}, so {in_doubt}"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unadded {
+    Nests(String),
+    Unchanged(Unchanged),
+}
+
+impl Unadded {
+    #[must_use]
+    pub fn of(status: &Status) -> Unadded {
+        match status.code() {
+            Code::AlreadyExists => Unadded::Nests(status.message().to_owned()),
+            _ => Unadded::Unchanged(Unchanged::of(status)),
+        }
+    }
+}
+
+impl From<Unchanged> for Unadded {
+    fn from(unchanged: Unchanged) -> Unadded {
+        Unadded::Unchanged(unchanged)
     }
 }
 
@@ -42,19 +72,26 @@ pub fn status(failed: Failed) -> Status {
     Status::new(code, failed.said())
 }
 
+#[must_use]
+pub fn unsent(status: &Status) -> Status {
+    Status::failed_precondition(status.message())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn left(failed: &Failed) -> fn(String) -> Unchanged {
+    fn left(failed: &Failed) -> fn(String) -> Unadded {
         match failed {
             Failed::NotKept(_)
             | Failed::Stale(_)
             | Failed::Refused(_)
             | Failed::Unwritten(_)
-            | Failed::Gone(_) => Unchanged::Refused,
-            Failed::Nests(_) => Unchanged::Nests,
-            Failed::Unclosed(_) | Failed::Unopened(_) | Failed::KeptUntold => Unchanged::InDoubt,
+            | Failed::Gone(_) => |why| Unadded::Unchanged(Unchanged::Refused(why)),
+            Failed::Nests(_) => Unadded::Nests,
+            Failed::Unclosed(_) | Failed::Unopened(_) | Failed::KeptUntold => {
+                |why| Unadded::Unchanged(Unchanged::InDoubt(why))
+            },
         }
     }
 
@@ -75,7 +112,13 @@ mod tests {
         for failed in every {
             let left = left(&failed);
             let sent = status(failed);
-            assert_eq!(Unchanged::of(&sent), left(sent.message().to_owned()), "{sent:?}");
+            let read = left(sent.message().to_owned());
+            assert_eq!(Unadded::of(&sent), read, "{sent:?}");
+            let unchanged = match read {
+                Unadded::Nests(why) => Unchanged::Refused(why),
+                Unadded::Unchanged(unchanged) => unchanged,
+            };
+            assert_eq!(Unchanged::of(&sent), unchanged, "a change that adds nothing: {sent:?}");
         }
     }
 
@@ -96,5 +139,20 @@ mod tests {
         }
         let older = Status::unimplemented(why());
         assert_eq!(Unchanged::of(&older), Unchanged::Refused(why()), "a lunetad older than it");
+    }
+
+    #[test]
+    fn a_change_the_bridge_never_sent_reads_as_a_refusal() {
+        let unreached = Status::unavailable("lunetad does not reach far now");
+        let unsent = unsent(&unreached);
+        let refused = Unchanged::Refused("lunetad does not reach far now".to_owned());
+        assert_eq!(Unchanged::of(&unsent), refused);
+    }
+
+    #[test]
+    fn only_what_kept_nothing_is_said_unchanged() {
+        let said = |unchanged: Unchanged| unchanged.said("not closed", "it may be closed");
+        assert_eq!(said(Unchanged::Refused("w".to_owned())), "not closed: w");
+        assert_eq!(said(Unchanged::InDoubt("w".to_owned())), "w, so it may be closed");
     }
 }
