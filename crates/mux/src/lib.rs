@@ -1,6 +1,7 @@
 pub mod api;
 pub mod screen;
 pub mod folder;
+pub mod panics;
 pub mod serve;
 
 mod asked;

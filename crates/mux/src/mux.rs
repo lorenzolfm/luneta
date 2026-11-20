@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,6 +10,7 @@ use crate::api;
 use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
 use crate::folder::Unreached;
 use crate::id::{ClientId, TerminalId};
+use crate::panics::{self, Uncontained};
 use crate::terminal::{self, Exit, Handle, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
 
@@ -21,6 +23,25 @@ const _: () = assert!(SHOWN_MAX <= TERMINALS_MAX);
 pub struct Mux {
     model: Mutex<Model>,
     listing: watch::Sender<Listed>,
+}
+
+struct Held<'a> {
+    model: MutexGuard<'a, Model>,
+    _uncontained: Uncontained,
+}
+
+impl Deref for Held<'_> {
+    type Target = Model;
+
+    fn deref(&self) -> &Model {
+        &self.model
+    }
+}
+
+impl DerefMut for Held<'_> {
+    fn deref_mut(&mut self) -> &mut Model {
+        &mut self.model
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -110,8 +131,10 @@ impl Mux {
         self.change(|model| model.end_unreached(unreached))
     }
 
-    fn lock(&self) -> MutexGuard<'_, Model> {
-        self.model.lock().expect("a thread panicked while it held the model")
+    fn lock(&self) -> Held<'_> {
+        let uncontained = panics::uncontained();
+        let model = self.model.lock().expect("a thread panicked while it held the model");
+        Held { model, _uncontained: uncontained }
     }
 
     fn change<T>(&self, change: impl FnOnce(&mut Model) -> T) -> T {

@@ -262,13 +262,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
         tokio::time::sleep(FIRST_TERMINAL).await;
         unused.end_if_unused();
     });
-    let looked = tokio::spawn(end_once_unreached(Arc::clone(&mux), bound.clone()));
-    tokio::spawn(async move {
-        if let Err(error) = looked.await {
-            eprintln!("luneta-mux: its look at its socket failed, so it aborts: {error}");
-            std::process::abort();
-        }
-    });
+    tokio::spawn(end_once_unreached(Arc::clone(&mux), bound.clone()));
     let ended = async move {
         while matches!(*watched.borrow_and_update(), Listed::Holds(_)) {
             if watched.changed().await.is_err() {
