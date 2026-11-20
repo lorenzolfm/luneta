@@ -106,7 +106,7 @@ impl Act {
         match self {
             Act::View { .. } => "Close the view".to_owned(),
             Act::Worktree { .. } => "Close the worktree".to_owned(),
-            Act::Project { session, .. } => format!("Delete project {session}"),
+            Act::Project { session, .. } => format!("Close project {session}"),
         }
     }
 
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn a_project_s_delete_kills_it_and_always_asks_first_by_the_project_s_name() {
+    fn a_project_s_close_kills_it_and_always_asks_first_by_the_project_s_name() {
         let project = Listed::new_project("luneta", 6);
         let worktrees = vec![WorktreeId::of(31).unwrap()];
         let seen = vec![ViewId::of(4).unwrap()];
@@ -292,12 +292,12 @@ mod tests {
         let (worktrees, seen) = (worktrees.clone(), seen.clone());
         let act = Act::Project { session, project: project_id, worktrees, seen };
         let busy = planned(vec![(4, Doing::Busy)]);
-        assert_eq!(busy.act, act, "an own project is deleted with what was seen of it");
-        assert_eq!(busy.question().as_deref(), Some("Delete project luneta? 1 agent, 1 busy"));
+        assert_eq!(busy.act, act, "an own project is closed with what was seen of it");
+        assert_eq!(busy.question().as_deref(), Some("Close project luneta? 1 agent, 1 busy"));
         let idle = planned(vec![(4, Doing::Idle), (5, Doing::Shell)]).question();
-        assert_eq!(idle.as_deref(), Some("Delete project luneta? 1 agent"));
+        assert_eq!(idle.as_deref(), Some("Close project luneta? 1 agent"));
         let unused = planned(Vec::new()).question();
-        assert_eq!(unused.as_deref(), Some("Delete project luneta? no agent"));
+        assert_eq!(unused.as_deref(), Some("Close project luneta? no agent"));
     }
 
     #[test]

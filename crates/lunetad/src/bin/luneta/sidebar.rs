@@ -10103,7 +10103,7 @@ mod tests {
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 40, 16);
-        assert_eq!(lines[14], " Delete project newer? no agent", "{lines:?}");
+        assert_eq!(lines[14], " Close project newer? no agent", "{lines:?}");
         let asked = sidebar.key(&char('d'), moment(160_000));
         let newer = matches!(&asked, Asked::Delete { act: Act::Project { session, .. }, .. }
             if session.as_str() == "newer");
@@ -10272,7 +10272,7 @@ mod tests {
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
-        assert_eq!(lines[13..15], [" Delete project older? 1", " agent, 1 waiting"]);
+        assert_eq!(lines[13..15], [" Close project older? 1 agent,", " 1 waiting"]);
         let deleted = project_deleted("older", 1, &[1000, 1001], &[1, 2]);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted, 2));
         assert!(sidebar.open().is_none());

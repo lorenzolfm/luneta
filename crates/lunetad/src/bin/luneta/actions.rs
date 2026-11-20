@@ -122,7 +122,7 @@ actions! {
     RenameProject,
     CloseView,
     CloseWorktree,
-    DeleteProject,
+    CloseProject,
     ForgetMachine,
     DeleteMerged,
     Rebase,
@@ -298,9 +298,9 @@ impl Action {
                 menu(&['d', 'd']),
                 WORKTREE,
             ),
-            Action::DeleteProject => spec(
-                "delete the project",
-                &["remove", "forget", "close", "worktrees"],
+            Action::CloseProject => spec(
+                "close the project",
+                &["remove", "forget", "delete", "worktrees"],
                 menu(&['d', 'd']),
                 PROJECT,
             ),

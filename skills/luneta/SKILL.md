@@ -82,7 +82,7 @@ The user does those in luneta, whose menu (`Alt a`) and palette (`Super k`) list
 each action by name. When they ask you for one, tell them which:
 
 - "new view" opens a shell beside the view they are on.
-- "close the view", "close the worktree" and "delete the project" end the
+- "close the view", "close the worktree" and "close the project" end the
   shells and agents in their views.
 - "/thermo-nuclear-review", "/tigerstyle" and
   "/make-illegal-states-unrepresentable" start an agent on that skill beside

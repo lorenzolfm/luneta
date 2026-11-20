@@ -635,7 +635,7 @@ impl Chain {
             | Offer::NewWelcome(_)
             | Offer::CloseView(_)
             | Offer::CloseWorktree(_)
-            | Offer::DeleteProject(_)
+            | Offer::CloseProject(_)
             | Offer::ForgetMachine(_)
             | Offer::DeleteMerged(_)
             | Offer::Rebase(_)
@@ -799,7 +799,7 @@ enum Offer<'t> {
     Rename(Renames),
     CloseView(&'t ViewRow),
     CloseWorktree(&'t WorktreeRow),
-    DeleteProject(&'t Listed),
+    CloseProject(&'t Listed),
     ForgetMachine(&'t Destination),
     DeleteMerged(Directory),
     Rebase(Rebases<'t>),
@@ -939,8 +939,8 @@ impl Target {
             },
             (Action::CloseView, Target::View(_, row)) => Offer::CloseView(row),
             (Action::CloseWorktree, Target::Worktree(_, row)) => Offer::CloseWorktree(row),
-            (Action::DeleteProject, Target::Project(_, target)) => {
-                Offer::DeleteProject(target.project.listed())
+            (Action::CloseProject, Target::Project(_, target)) => {
+                Offer::CloseProject(target.project.listed())
             },
             (Action::ForgetMachine, Target::Machine(Machine::Remote(destination))) => {
                 Offer::ForgetMachine(destination)
@@ -1092,7 +1092,7 @@ fn started(keys: &Keys, row: &ViewRow, skill: &str) -> Result<Wants, String> {
 }
 
 const ASKS_FIRST: [Action; 4] =
-    [Action::CloseView, Action::CloseWorktree, Action::DeleteProject, Action::DeleteMerged];
+    [Action::CloseView, Action::CloseWorktree, Action::CloseProject, Action::DeleteMerged];
 
 const _: () = {
     let mut at = 0;
@@ -1539,8 +1539,8 @@ impl Menu {
                 let scope = Scope::Worktree(row.place.worktree);
                 deleting(keys, Action::CloseWorktree, row.place.project.listed(), scope)
             },
-            Offer::DeleteProject(listed) => {
-                deleting(keys, Action::DeleteProject, listed, Scope::Project)
+            Offer::CloseProject(listed) => {
+                deleting(keys, Action::CloseProject, listed, Scope::Project)
             },
             Offer::ForgetMachine(destination) => Did::Closed(Done::Forget(destination.clone())),
             Offer::DeleteMerged(dir) => {
@@ -3947,7 +3947,7 @@ mod tests {
             " <ESC> - Close",
         ]);
         assert_eq!(at(project_on(Machine::Local), Some('d')), [
-            " d  delete the project",
+            " d  close the project",
             " <BS> - Back, <ESC> - Close",
         ]);
         assert_eq!(at(session_row(), Some('n')), [
@@ -4246,7 +4246,7 @@ mod tests {
             assert_eq!(wants, Wants::Plan { session, scope });
             let (menu, _) = stays(menu.planned(Ok(planned(vec![(4, Doing::Busy)]))));
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [
-                " Delete project luneta? 1",
+                " Close project luneta? 1",
                 " agent, 1 busy",
             ]);
             let (menu, _) = stays(menu.key(&char('d')));
@@ -4256,7 +4256,7 @@ mod tests {
             let (menu, _) = stays(menu.key(&char('d')));
             let (menu, _) = stays(menu.planned(Ok(planned(Vec::new()))));
             let asks = text(&menu.lines(31, 9, 0).0)[1..3].to_vec();
-            assert_eq!(asks, [" Delete project luneta? no", " agent"]);
+            assert_eq!(asks, [" Close project luneta? no", " agent"]);
             let (menu, _) = stays(menu.key(&char('d')));
             assert_eq!(closed(menu.planned(Ok(planned(Vec::new())))), Done::Act(on, act.clone()));
         }
