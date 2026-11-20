@@ -44,7 +44,7 @@ use crate::api::{
     TranscriptEndsResponse, FramesRequest,
 };
 use crate::asks::{Asked, Step};
-use crate::core::{self, Command, Wakes};
+use crate::core::{self, After, Command, Parked, Wakes};
 use crate::directory::Directory;
 use crate::projects::{Ask, Changed, Holders, Lock, Made, Opened, Opens, ProjectId, Store};
 use crate::projects::WorktreeId;
@@ -420,8 +420,13 @@ impl Daemon for Host {
         request: Request<api::WatchRequest>,
     ) -> Result<Response<api::Host>, Status> {
         let request = request.into_inner();
-        let _waits = self.watchers.waits(Waiter::of(&request));
-        let after = request.after;
+        let waiter = Waiter::of(&request);
+        let _waits = self.watchers.waits(waiter);
+        let parked = match waiter {
+            Waiter::Client => Parked::Said,
+            Waiter::Window | Waiter::Daemon(_) => Parked::Unsaid,
+        };
+        let after = request.after.map(|version| After { version, parked });
         let watched = match timeout(WATCH, self.watched(after)).await {
             Ok(watched) => watched,
             Err(_) => self.watched(None).await,
@@ -1115,7 +1120,7 @@ impl Host {
         answered.await.map_err(|_| stopped())
     }
 
-    async fn watched(&self, after: Option<api::Version>) -> Result<api::Host, Status> {
+    async fn watched(&self, after: Option<After>) -> Result<api::Host, Status> {
         let host = self.ask(|answer| Command::Watch { after, answer }).await?;
         host.ok_or_else(|| Status::resource_exhausted("too many clients wait for the host"))
     }

@@ -72,7 +72,19 @@ pub enum Command {
     Claudes(oneshot::Sender<Vec<Agent>>),
     AllAgents(oneshot::Sender<Vec<Agent>>),
     List(oneshot::Sender<api::ListAgentsResponse>),
-    Watch { after: Option<api::Version>, answer: oneshot::Sender<Option<api::Host>> },
+    Watch { after: Option<After>, answer: oneshot::Sender<Option<api::Host>> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct After {
+    pub version: api::Version,
+    pub parked: Parked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Parked {
+    Unsaid,
+    Said,
 }
 
 pub struct Wakes {
@@ -522,19 +534,30 @@ impl Known {
         }
     }
 
-    fn watch(&mut self, after: Option<api::Version>, answer: oneshot::Sender<Option<api::Host>>) {
+    fn watch(&mut self, after: Option<After>, answer: oneshot::Sender<Option<api::Host>>) {
         self.update();
-        assert_eq!(self.host.version, Some(self.version()));
-        if after != Some(self.version()) {
-            let _ = answer.send(Some(self.host.clone()));
-            return;
-        }
+        let version = self.version();
+        assert_eq!(self.host.version, Some(version));
+        let parked = match after {
+            Some(after) if after.version == version => after.parked,
+            Some(_) | None => {
+                let _ = answer.send(Some(self.host.clone()));
+                return;
+            },
+        };
         self.waiting.retain(|waiting| !waiting.is_closed());
         assert!(self.waiting.len() <= WAITING_MAX);
-        if self.waiting.len() < WAITING_MAX {
-            self.waiting.push(answer);
-        } else {
+        if self.waiting.len() == WAITING_MAX {
             let _ = answer.send(None);
+            return;
+        }
+        self.waiting.push(answer);
+        match parked {
+            Parked::Unsaid => {},
+            Parked::Said => {
+                let api::Version { pid, seq } = version;
+                log::say(&format!("a client waits for a change past {pid}:{seq}"));
+            },
         }
     }
 }

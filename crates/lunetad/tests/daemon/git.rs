@@ -1302,21 +1302,25 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
 #[test]
 fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     let host = Host::new();
-    let daemon = start(host.vars()).unwrap();
+    let mut daemon = start(host.vars()).unwrap();
 
     let (first, _) = host.watch(None);
     let version = first.version.unwrap();
     assert_eq!(version.pid, daemon.pid());
+    let parked = format!("lunetad: a client waits for a change past {}:{}", version.pid, version.seq);
+    let parked = |line: &str| line == parked;
 
     let (same, lasted) = host.watch(Some(version));
     assert_eq!(same.version, Some(version));
     lasted.at_least(WATCH, "luneta watch waits a whole watch for a change");
+    daemon.says_times("the watch says it waits", 1, parked);
 
     let play = scratch();
     let play = play.path().join("play");
     fs::create_dir(&play).unwrap();
     let (changed, _) = thread::scope(|scope| {
         let waiting = scope.spawn(|| host.watch(Some(version)));
+        daemon.says_times("the next watch says it waits", 2, parked);
         watched(&host, &play.display().to_string());
         waiting.join().unwrap()
     });
