@@ -477,6 +477,17 @@ pub enum Rename {
     Project(ProjectId, projects::Name),
 }
 
+impl Rename {
+    #[must_use]
+    pub fn noun(&self) -> &'static str {
+        match self {
+            Rename::Terminal(..) => "view",
+            Rename::Worktree(..) => "worktree",
+            Rename::Project(..) => "project",
+        }
+    }
+}
+
 #[expect(clippy::large_enum_variant, reason = "one is made on each Enter, and goes at once")]
 enum Entered {
     Done(Done),
