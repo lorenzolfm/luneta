@@ -526,3 +526,12 @@ fn refuse_if_full(count: usize, max: usize, what: &str) -> Result<(), Status> {
     }
     Err(Status::resource_exhausted(format!("luneta-mux holds {max} {what} at most")))
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::Mux;
+
+    pub(crate) fn panic_holding_the_model() {
+        Mux::new().change(|_| panic!("the model's assertion fails"));
+    }
+}
