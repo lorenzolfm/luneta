@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   code:
     runs-on: ubuntu-latest
@@ -43,6 +47,9 @@ jobs:
     needs: code
     if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
 
     steps:
       - name: actions/checkout v7
@@ -62,6 +69,10 @@ jobs:
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
+          purge: ${{ github.ref == 'refs/heads/main' }}
+          purge-prefixes: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
+          purge-created: 0
+          purge-primary-key: never
 
       - name: Build the dev CLI
         run: nix build --no-link .#dev
@@ -118,6 +129,9 @@ jobs:
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      actions: write
 
     steps:
       - name: actions/checkout v7
@@ -137,6 +151,10 @@ jobs:
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
+          purge: ${{ github.ref == 'refs/heads/main' }}
+          purge-prefixes: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
+          purge-created: 0
+          purge-primary-key: never
 
       - name: Restore the tests' target/, with actions/cache v6.1.0
         id: target
