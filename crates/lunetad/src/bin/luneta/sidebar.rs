@@ -317,8 +317,14 @@ pub struct HereAgent {
     pub on: Machine,
     pub session: SessionName,
     pub view: u32,
-    pub dir: String,
+    pub dir: AgentDir,
     pub harness: agents::Harness,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentDir {
+    At(Directory),
+    Unread { why: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1163,7 +1169,7 @@ pub enum Asked {
         others: Others,
         held_here: Holders,
     },
-    Find { menu: u64, on: Machine, cwd: String, agent: agents::Harness },
+    Find { menu: u64, on: Machine, dir: Directory, agent: agents::Harness },
     Printed { menu: u64, on: Machine, session: Listed, view: ViewKey, ended: menu::Ended },
     Checks { menu: u64, on: Machine, page: checks::PullPage },
     Brief(Brief),
@@ -2116,11 +2122,18 @@ impl Sidebar {
         let agent = seated.get(&place.view.key())?;
         let view = self.view_of(self.on(), &place.session, place.view.terminal_id())?;
         let harness = agents::of(agent).filter(|_| agent.at_a_prompt())?;
+        let dir = match Directory::parse(agent_dir(agent, view).to_owned()) {
+            Ok(dir) => AgentDir::At(dir),
+            Err(why) => {
+                let why = format!("skills: where view {} works, {why}", place.view);
+                AgentDir::Unread { why }
+            },
+        };
         Some(HereAgent {
             on: self.on().clone(),
             session: place.session.name().clone(),
             view: place.view.terminal_id(),
-            dir: agent_dir(agent, view).to_owned(),
+            dir,
             harness,
         })
     }
@@ -2555,7 +2568,6 @@ impl Sidebar {
                             if worktree_folded { &[][..] } else { worktree.views.as_slice() };
                         let listing = listing.iter().zip(by_view);
                         for ((view_id, view), Shows { marked, ran, unread }) in listing {
-                            let cwd = view.cwd.as_deref();
                             let command = view.command.as_deref();
                             let program = agent(view)
                                 .and_then(|agent| icons::agent(agent.runs_in()))
@@ -2564,7 +2576,7 @@ impl Sidebar {
                                 Some(ran) => ran.to_owned(),
                                 None => label(agent(view), view),
                             };
-                            let dir = agent(view).map_or(cwd, |agent| Some(agent_dir(agent, view)));
+                            let dir = view_dir(agent(view), view);
                             let (found, hits) = finder
                                 .as_ref()
                                 .and_then(|finder| finder.view(&label, None, &view.tab_name, dir))
@@ -3415,12 +3427,9 @@ impl Sidebar {
         let seen = self.seen(machine);
         let shown = self.view_of(machine, &session, view.terminal_id());
         let agents = seen.as_ref().map(Seen::seated);
-        let cwd = Cwd::of(shown.and_then(|shown| {
-            let agents = agents.as_ref()?;
-            match keyed(shown).and_then(|key| agents.get(&key)) {
-                Some(agent) => Some(agent_dir(agent, shown).to_owned()),
-                None => shown.cwd.clone(),
-            }
+        let cwd = Cwd::of(shown.zip(agents.as_ref()).and_then(|(shown, agents)| {
+            let agent = keyed(shown).and_then(|key| agents.get(&key).copied());
+            view_dir(agent, shown).map(str::to_owned)
         }));
         let dir = cwd.at().map(Directory::as_str);
         let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
@@ -3750,10 +3759,10 @@ impl Sidebar {
                 self.keep_agent(harness);
                 Asked::Nothing
             },
-            Wants::Skills { cwd, agent } => Asked::Find { menu: number, on, cwd, agent },
-            Wants::Refind { cwd, agent } => {
+            Wants::Skills { dir, agent } => Asked::Find { menu: number, on, dir, agent },
+            Wants::Refind { dir, agent } => {
                 self.keep_agent(agent);
-                Asked::Find { menu: number, on, cwd, agent }
+                Asked::Find { menu: number, on, dir, agent }
             },
             Wants::Open { .. } => {
                 unreachable!("an open is asked of the host before the menu is kept")
@@ -3880,11 +3889,9 @@ impl Sidebar {
         let pulls = pull_requests(seen.pull_requests);
         let mut worked = Vec::new();
         for (listed, view) in seen.views() {
-            let dir = match keyed(view).and_then(|key| agents.get(&key)) {
-                Some(agent) => Some(agent_dir(agent, view)),
-                None => view.cwd.as_deref(),
-            };
-            let Some(dir) = dir.and_then(|dir| Directory::parse(dir.to_owned()).ok()) else {
+            let agent = keyed(view).and_then(|key| agents.get(&key).copied());
+            let dir = view_dir(agent, view).and_then(|dir| Directory::parse(dir.to_owned()).ok());
+            let Some(dir) = dir else {
                 continue;
             };
             let pull = pulls.get(dir.as_str()).and_then(|it| Link::parse(it.url.as_deref()?));
@@ -4873,6 +4880,10 @@ fn transcript(agent: &Agent) -> Transcript {
 
 fn agent_dir<'a>(agent: &'a Agent, view: &'a View) -> &'a str {
     view.cwd.as_deref().unwrap_or(&agent.cwd)
+}
+
+fn view_dir<'a>(agent: Option<&'a Agent>, view: &'a View) -> Option<&'a str> {
+    view.cwd.as_deref().or(agent.map(|agent| agent.cwd.as_str()))
 }
 
 fn label(agent: Option<&Agent>, view: &View) -> String {
@@ -8863,9 +8874,9 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         step_onto_its_first_view(&mut sidebar);
         sidebar.key(&char('m'), moment(160_000));
-        let cwd = "/w/luneta/main".to_owned();
+        let dir = directory("/w/luneta/main");
         let agent = agents::Harness::ClaudeCode;
-        let find = Asked::Find { menu: 1, on: Machine::Local, cwd: cwd.clone(), agent };
+        let find = Asked::Find { menu: 1, on: Machine::Local, dir, agent };
         assert_eq!(sidebar.key(&char('/'), moment(160_000)), find);
         let name = |name: &str| Name::new(name.to_owned()).expect("a name");
         let skill = |named: &str| Skill {
@@ -9600,6 +9611,7 @@ mod tests {
                 view(2, 0, "/w/b", "fish"),
                 view(3, 0, "/w/c", "fish"),
                 view(4, 0, "/w/d", "pi"),
+                view(5, 0, "w", "claude"),
             ];
             let printing = agent("s", 3, Status::Busy, None);
             let printing = Agent { entrypoint: Some("sdk-cli".to_owned()), ..printing };
@@ -9608,7 +9620,8 @@ mod tests {
                 entrypoint: Some("tui".to_owned()),
                 ..agent("s", 4, Status::Idle, None)
             };
-            let agents = vec![agent("s", 1, Status::Idle, None), printing, pi];
+            let relative = agent("s", 5, Status::Idle, None);
+            let agents = vec![agent("s", 1, Status::Idle, None), printing, pi, relative];
             let agents = agents.into_iter().map(|agent| {
                 let view = agent.terminal.as_ref().expect("an agent of a view of a project's").id;
                 in_own(agent, 1, view)
@@ -9619,15 +9632,20 @@ mod tests {
             sidebar.here_agent()
         };
         let session = SessionName::listed("s").expect("a name");
-        let (dir, harness) = ("/w/a".to_owned(), agents::Harness::ClaudeCode);
+        let (dir, harness) = (AgentDir::At(directory("/w/a")), agents::Harness::ClaudeCode);
         let here = HereAgent { on: Machine::Local, session, view: 1, dir, harness };
         assert_eq!(on_view(1), Some(here));
         assert_eq!(on_view(2), None);
         assert_eq!(on_view(3), None);
         let session = SessionName::listed("s").expect("a name");
-        let (dir, harness) = ("/w/d".to_owned(), agents::Harness::Pi);
+        let (dir, harness) = (AgentDir::At(directory("/w/d")), agents::Harness::Pi);
         let here = HereAgent { on: Machine::Local, session, view: 4, dir, harness };
         assert_eq!(on_view(4), Some(here));
+        let session = SessionName::listed("s").expect("a name");
+        let why = "skills: where view 5 works, \"w\" is no absolute path".to_owned();
+        let (dir, harness) = (AgentDir::Unread { why }, agents::Harness::ClaudeCode);
+        let here = HereAgent { on: Machine::Local, session, view: 5, dir, harness };
+        assert_eq!(on_view(5), Some(here));
     }
 
     #[test]

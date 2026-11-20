@@ -309,6 +309,7 @@ fn a_file_stands_only_for_the_process_that_wrote_it() {
         json!({ "cwd": "/w", "status": "idle", "statusSince": 1_000 }),
         json!({ "sessionId": "no status", "cwd": "/w", "statusSince": 1_000 }),
         json!({ "sessionId": "no date", "cwd": "/w", "status": "idle" }),
+        json!({ "sessionId": "relative", "cwd": "w", "status": "idle", "statusSince": 1_000 }),
     ];
     let _unread: Vec<Running> = unread
         .iter()

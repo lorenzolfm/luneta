@@ -4,6 +4,7 @@ use std::thread;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 pub use lunetad::skills::{Name, Runs, Skill};
+use lunetad::Directory;
 
 use crate::agents::Harness;
 use crate::away::{self, Away};
@@ -12,17 +13,17 @@ use crate::machines::Machine;
 
 pub fn find(
     on: &Machine,
-    cwd: &str,
+    dir: &Directory,
     harness: Harness,
     events: &Sender<Event>,
     said: impl FnOnce(Result<Vec<Skill>, String>) -> Event + Send + 'static,
 ) {
-    let (on, cwd, events) = (on.clone(), cwd.to_owned(), events.clone());
+    let (on, dir, events) = (on.clone(), dir.clone(), events.clone());
     thread::spawn(move || {
         let skills = match &on {
-            Machine::Local => lunetad::skills::found_in(&cwd, harness),
+            Machine::Local => lunetad::skills::found_in(dir.as_str(), harness),
             Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                .and_then(|mut away| away.skills(&cwd, harness)),
+                .and_then(|mut away| away.skills(&dir, harness)),
         };
         let _ = events.send(said(skills));
     });
@@ -43,6 +44,7 @@ pub enum Skills {
 }
 
 pub struct Search {
+    dir: Directory,
     term: String,
     skills: Skills,
     found: Vec<Found>,
@@ -50,8 +52,13 @@ pub struct Search {
 }
 
 impl Search {
-    pub fn new() -> Self {
-        Search { term: String::new(), skills: Skills::Finding, found: Vec::new(), selected: 0 }
+    pub fn new(dir: Directory) -> Self {
+        let (term, found) = (String::new(), Vec::new());
+        Search { dir, term, skills: Skills::Finding, found, selected: 0 }
+    }
+
+    pub fn dir(&self) -> &Directory {
+        &self.dir
     }
 
     pub fn term(&self) -> &str {
@@ -168,7 +175,7 @@ mod tests {
 
     #[test]
     fn a_search_narrows_the_skills_to_the_best_match_first() {
-        let mut search = Search::new();
+        let mut search = Search::new(Directory::parse("/w/luneta".to_owned()).unwrap());
         search.push('r');
         search.push('e');
         assert_eq!(search.count(), 0);

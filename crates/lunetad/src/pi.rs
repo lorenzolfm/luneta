@@ -9,11 +9,12 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Harness, Status,
+    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Harness, Status,
 };
 use crate::mux::{self, TerminalKey};
 use crate::watch::{self, Troubles};
 use crate::{log, process};
+use crate::Directory;
 
 const EXTENSION: &str = include_str!("pi/luneta.ts");
 
@@ -38,8 +39,8 @@ pub fn folder() -> Option<PathBuf> {
 struct File {
     #[serde(deserialize_with = "nonempty")]
     session_id: Said,
-    #[serde(deserialize_with = "nonempty")]
-    cwd: Said,
+    #[serde(deserialize_with = "absolute")]
+    cwd: Directory,
     #[serde(deserialize_with = "nonempty")]
     status: Said,
     status_since: u64,

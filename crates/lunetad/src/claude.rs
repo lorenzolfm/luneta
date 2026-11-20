@@ -10,12 +10,13 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Harness, Name, Source,
-    Status, Unread,
+    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Harness, Name,
+    Source, Status, Unread,
 };
 use crate::mux::{self, TerminalKey};
 use crate::{log, process, program};
 use crate::watch::{self, Troubles};
+use crate::Directory;
 
 pub const TORN: Duration = Duration::from_secs(1);
 
@@ -40,8 +41,8 @@ pub fn folder() -> Option<PathBuf> {
 struct File {
     #[serde(deserialize_with = "nonempty")]
     session_id: Said,
-    #[serde(deserialize_with = "nonempty")]
-    cwd: Said,
+    #[serde(deserialize_with = "absolute")]
+    cwd: Directory,
     proc_start: Start,
     pid_domain: Option<String>,
     status: Option<String>,

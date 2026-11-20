@@ -1206,8 +1206,8 @@ pub enum Wants {
     Nothing,
     Cloned(ProjectId),
     Keep(Harness),
-    Skills { cwd: String, agent: Harness },
-    Refind { cwd: String, agent: Harness },
+    Skills { dir: Directory, agent: Harness },
+    Refind { dir: Directory, agent: Harness },
     Plan { session: Listed, scope: Scope },
     Prunes { dir: Directory },
     Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
@@ -1458,9 +1458,9 @@ impl Menu {
         let wrong = |reason: String| Did::Closed(Done::Wrong(reason));
         match offer {
             Offer::SearchSkills(row) => match row.beside() {
-                Ok(Beside { cwd, .. }) => {
-                    keys.search = Some(Search::new());
-                    let wants = Wants::Skills { cwd: cwd.into(), agent: keys.agent.harness() };
+                Ok(Beside { cwd: dir, .. }) => {
+                    keys.search = Some(Search::new(dir.clone()));
+                    let wants = Wants::Skills { dir, agent: keys.agent.harness() };
                     stays(Stage::Choosing(keys), wants)
                 },
                 Err(reason) => wrong(reason),
@@ -1541,14 +1541,9 @@ impl Menu {
         match stage {
             Stage::Choosing(mut keys) => match (keys.key(key), &target) {
                 (Pressed::Close, _) => Did::Closed(Done::Nothing),
-                (Pressed::Switched(agent), Target::View(_, row))
-                    if let Some(search) = &mut keys.search =>
-                {
+                (Pressed::Switched(agent), _) if let Some(search) = &mut keys.search => {
                     search.refind();
-                    let wants = match row.beside() {
-                        Ok(Beside { cwd, .. }) => Wants::Refind { cwd: cwd.into(), agent },
-                        Err(_) => Wants::Keep(agent),
-                    };
+                    let wants = Wants::Refind { dir: search.dir().clone(), agent };
                     stays(Stage::Choosing(keys), wants)
                 },
                 (Pressed::Switched(agent), _) => stays(Stage::Choosing(keys), Wants::Keep(agent)),
@@ -4014,7 +4009,7 @@ mod tests {
     fn slash_searches_the_skills_and_enter_starts_an_agent_on_the_one_picked() {
         let (menu, _) = stays(opened(view_row(), None));
         let (mut menu, wants) = stays(menu.key(&char('/')));
-        assert_eq!(wants, Wants::Skills { cwd: "/w/luneta/main".to_owned(), agent: CLAUDE });
+        assert_eq!(wants, Wants::Skills { dir: main_dir(), agent: CLAUDE });
         assert_eq!(
             text(&menu.lines(31, 6, 0).0)[..3],
             ["─ Skills ──────── luneta/main ─", " _", " finding skills…"]
@@ -4041,8 +4036,7 @@ mod tests {
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         let (menu, _) = stays(menu.key(&char('t')));
         let (mut menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
-        let cwd = "/w/luneta/main".to_owned();
-        assert_eq!(wants, Wants::Refind { cwd, agent: Harness::Pi });
+        assert_eq!(wants, Wants::Refind { dir: main_dir(), agent: Harness::Pi });
         assert_eq!(text(&menu.lines(31, 6, 0).0)[..3], [
             "─ Skills ──────── luneta/main ─",
             " t_",

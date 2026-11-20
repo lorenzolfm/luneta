@@ -70,8 +70,8 @@ use crate::picker::{self, List, Palette, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found};
 use crate::sidebar::{
-    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat, Sidebar, Sitting,
-    ViewKey, ViewPlace,
+    self, AgentDir, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat,
+    Sidebar, Sitting, ViewKey, ViewPlace,
 };
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
@@ -1929,9 +1929,9 @@ impl App {
                     self.keep_change(deleting);
                 }
             },
-            Asked::Find { menu, on, cwd, agent } => {
+            Asked::Find { menu, on, dir, agent } => {
                 let said = move |skills| Event::Skills { menu, agent, skills };
-                skills::find(&on, &cwd, agent, &self.events, said);
+                skills::find(&on, &dir, agent, &self.events, said);
             },
             Asked::Printed { menu, on, view, ended, .. } => {
                 printed::read(menu, projected::route(&on, view), ended, &self.events);
@@ -2178,6 +2178,9 @@ impl App {
         let number = self.dictations;
         let dictation = if speech::fetched() {
             let skills = self.nameable(number, &under);
+            if let Skills::Failed(why) = &skills {
+                self.sidebar.notify(why.clone());
+            }
             let speech = self.speech.get_or_insert_with(Speech::start);
             let listening = speech.listen(number, &self.events);
             Dictation::hearing(number, listening, skills, self.releases, Instant::now())
@@ -2195,8 +2198,12 @@ impl App {
         let Where::Session(Some(agent)) = under else {
             return Skills::Found(Vec::new());
         };
+        let dir = match &agent.dir {
+            AgentDir::At(dir) => dir,
+            AgentDir::Unread { why } => return Skills::Failed(why.clone()),
+        };
         let said = move |skills| Event::Nameable { number, skills };
-        skills::find(&agent.on, &agent.dir, agent.harness, &self.events, said);
+        skills::find(&agent.on, dir, agent.harness, &self.events, said);
         Skills::Finding
     }
 
