@@ -8,7 +8,8 @@ use lunetad::projects::{ProjectId, ViewId, WorktreeId};
 use lunetad::seats::Unread;
 use lunetad::SessionName;
 
-use crate::sidebar::{Listed, Place, ViewKey};
+use crate::actions::Action;
+use crate::sidebar::{Place, ViewKey};
 
 const UNTOLD: &str = "luneta cannot tell which agents it ends";
 
@@ -19,11 +20,15 @@ pub enum Scope {
     Project,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Deletes {
-    View(ViewKey),
-    Worktree { worktree: WorktreeId, views: Vec<u32>, seen: Vec<ViewId> },
-    Project { project: ProjectId, worktrees: Vec<WorktreeId>, seen: Vec<ViewId> },
+impl Scope {
+    #[must_use]
+    pub fn action(self) -> Action {
+        match self {
+            Scope::View(_) => Action::CloseView,
+            Scope::Worktree(_) => Action::CloseWorktree,
+            Scope::Project => Action::CloseProject,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,23 +73,16 @@ impl fmt::Display for Untold {
 pub fn unread_in<'a>(
     unread: &'a [Unread],
     held: &'a [TerminalKey],
-) -> impl Iterator<Item = (u32, Doing)> + 'a {
+) -> impl Iterator<Item = (TerminalKey, Doing)> + 'a {
     let placed = unread.iter().filter_map(|file| file.terminal);
     let held = placed.filter(move |key| held.contains(key));
-    held.map(|key| (key.id.get(), Doing::Unknown))
-}
-
-#[derive(Debug)]
-pub struct Subject<'a> {
-    pub session: &'a Listed,
-    pub deletes: Deletes,
-    pub agents: Result<Vec<(u32, Doing)>, Untold>,
+    held.map(|key| (key, Doing::Unknown))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    View { session: SessionName, view: ViewKey },
-    Worktree { session: SessionName, worktree: WorktreeId, views: Vec<u32>, seen: Vec<ViewId> },
+    View(ViewKey),
+    Worktree { worktree: WorktreeId, views: Vec<TerminalKey>, seen: Vec<ViewId> },
     Project {
         session: SessionName,
         project: ProjectId,
@@ -96,7 +94,7 @@ pub enum Act {
 impl Act {
     pub fn noun(&self) -> &'static str {
         match self {
-            Act::View { .. } => "view",
+            Act::View(_) => "view",
             Act::Worktree { .. } => "worktree",
             Act::Project { .. } => "project",
         }
@@ -104,36 +102,34 @@ impl Act {
 
     fn what(&self) -> String {
         match self {
-            Act::View { .. } => "Close the view".to_owned(),
+            Act::View(_) => "Close the view".to_owned(),
             Act::Worktree { .. } => "Close the worktree".to_owned(),
-            Act::Project { session, .. } => format!("Delete project {session}"),
+            Act::Project { session, .. } => format!("Close project {session}"),
         }
     }
 
     fn always_asks(&self) -> bool {
         match self {
-            Act::View { .. } | Act::Worktree { .. } => false,
+            Act::View(_) | Act::Worktree { .. } => false,
             Act::Project { .. } => true,
         }
     }
 
-    pub fn takes(&self, view: u32) -> bool {
+    pub fn takes(&self, terminal: TerminalKey) -> bool {
         match self {
-            Act::View { view: closed, .. } => view == closed.terminal_id(),
-            Act::Worktree { views, .. } => views.contains(&view),
+            Act::View(view) => terminal == view.key(),
+            Act::Worktree { views, .. } => views.contains(&terminal),
             Act::Project { .. } => true,
         }
     }
 
     pub fn closes(&self, place: &Place) -> bool {
         match (self, place) {
-            (Act::View { view, .. }, Place::View(at)) => at.view == *view,
+            (Act::View(view), Place::View(at)) => at.view == *view,
             (Act::Worktree { worktree, .. }, Place::Worktree(at)) => at.worktree == *worktree,
-            (Act::Worktree { session, views, .. }, Place::View(at)) => {
-                place.session() == session.as_str() && views.contains(&at.view.terminal_id())
-            },
+            (Act::Worktree { views, .. }, Place::View(at)) => views.contains(&at.view.key()),
             (Act::Project { project, .. }, _) => place.listed().project() == *project,
-            (Act::View { .. }, Place::Session(_) | Place::Worktree(_))
+            (Act::View(_), Place::Session(_) | Place::Worktree(_))
             | (Act::Worktree { .. }, Place::Session(_)) => false,
         }
     }
@@ -143,22 +139,6 @@ impl Act {
 pub struct Plan {
     pub act: Act,
     ending: Result<Ending, Untold>,
-}
-
-pub fn plan(subject: &Subject) -> Plan {
-    let session = subject.session.name().clone();
-    let act = match &subject.deletes {
-        Deletes::View(view) => Act::View { session, view: *view },
-        Deletes::Worktree { worktree, views, seen } => {
-            let (worktree, views, seen) = (*worktree, views.clone(), seen.clone());
-            Act::Worktree { session, worktree, views, seen }
-        },
-        Deletes::Project { project, worktrees, seen } => {
-            let (worktrees, seen) = (worktrees.clone(), seen.clone());
-            Act::Project { session, project: *project, worktrees, seen }
-        },
-    };
-    Plan::of(act, subject.agents.as_deref().map_err(|untold| *untold))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -209,9 +189,10 @@ impl Ending {
 }
 
 impl Plan {
-    pub fn of(act: Act, agents: Result<&[(u32, Doing)], Untold>) -> Self {
+    pub fn of(act: Act, agents: Result<&[(TerminalKey, Doing)], Untold>) -> Self {
         let ending = agents.map(|agents| {
-            Ending::of(agents.iter().filter(|(view, _)| act.takes(*view)).map(|(_, doing)| *doing))
+            let taken = agents.iter().filter(|(terminal, _)| act.takes(*terminal));
+            Ending::of(taken.map(|(_, doing)| *doing))
         });
         Plan { act, ending }
     }
@@ -220,35 +201,10 @@ impl Plan {
         let what = self.act.what();
         match self.ending {
             Ok(ending) if self.act.always_asks() => Some(format!("{what}? {}", ending.says())),
-            ending => asked(&what, ending),
+            Ok(ending) if !ending.at_work() => None,
+            Ok(ending) => Some(format!("{what}? {}", ending.says())),
+            Err(untold) => Some(format!("{what}? {UNTOLD}: {untold}")),
         }
-    }
-
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Ends {
-    pub seen: Vec<ViewId>,
-    ending: Result<Ending, Untold>,
-}
-
-impl Ends {
-    pub fn of(seen: &[ViewId], doing: Result<&[Doing], Untold>) -> Ends {
-        let mut seen = seen.to_vec();
-        seen.sort_unstable();
-        Ends { seen, ending: doing.map(|doing| Ending::of(doing.iter().copied())) }
-    }
-
-    pub fn question(&self, what: &str) -> Option<String> {
-        asked(what, self.ending)
-    }
-}
-
-fn asked(what: &str, ending: Result<Ending, Untold>) -> Option<String> {
-    match ending {
-        Ok(ending) if !ending.at_work() => None,
-        Ok(ending) => Some(format!("{what}? {}", ending.says())),
-        Err(untold) => Some(format!("{what}? {UNTOLD}: {untold}")),
     }
 }
 
@@ -256,79 +212,73 @@ fn asked(what: &str, ending: Result<Ending, Untold>) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn luneta() -> Listed {
-        Listed::new_project("luneta", 3)
+    fn at(id: u32) -> TerminalKey {
+        ViewKey::terminal(id).key()
     }
 
-    fn subject(session: &Listed, deletes: Deletes, agents: Vec<(u32, Doing)>) -> Subject<'_> {
-        Subject { session, deletes, agents: Ok(agents) }
-    }
-
-    fn view() -> Deletes {
-        Deletes::View(ViewKey::terminal(4))
+    fn planned(act: &Act, agents: &[(u32, Doing)]) -> Plan {
+        let agents: Vec<_> = agents.iter().map(|(id, doing)| (at(*id), *doing)).collect();
+        Plan::of(act.clone(), Ok(&agents))
     }
 
     #[test]
-    fn a_view_closes_alone() {
-        let luneta = luneta();
-        let planned = plan(&subject(&luneta, view(), Vec::new())).act;
-        let session = luneta.name().clone();
-        assert_eq!(planned, Act::View { session, view: ViewKey::terminal(4) });
+    fn a_scope_closes_by_its_own_action() {
+        assert_eq!(Scope::View(ViewKey::terminal(4)).action(), Action::CloseView);
+        let worktree = WorktreeId::of(31).unwrap();
+        assert_eq!(Scope::Worktree(worktree).action(), Action::CloseWorktree);
+        assert_eq!(Scope::Project.action(), Action::CloseProject);
     }
 
     #[test]
-    fn a_project_s_delete_kills_it_and_always_asks_first_by_the_project_s_name() {
-        let project = Listed::new_project("luneta", 6);
+    fn a_project_s_close_kills_it_and_always_asks_first_by_the_project_s_name() {
+        let session = SessionName::parse("luneta").unwrap();
         let worktrees = vec![WorktreeId::of(31).unwrap()];
         let seen = vec![ViewId::of(4).unwrap()];
-        let project_id = ProjectId::of(6).unwrap();
-        let deletes = || Deletes::Project {
-            project: project_id,
-            worktrees: worktrees.clone(),
-            seen: seen.clone(),
-        };
-        let planned = |agents| plan(&subject(&project, deletes(), agents));
-        let session = project.name().clone();
-        let (worktrees, seen) = (worktrees.clone(), seen.clone());
-        let act = Act::Project { session, project: project_id, worktrees, seen };
-        let busy = planned(vec![(4, Doing::Busy)]);
-        assert_eq!(busy.act, act, "an own project is deleted with what was seen of it");
-        assert_eq!(busy.question().as_deref(), Some("Delete project luneta? 1 agent, 1 busy"));
-        let idle = planned(vec![(4, Doing::Idle), (5, Doing::Shell)]).question();
-        assert_eq!(idle.as_deref(), Some("Delete project luneta? 1 agent"));
-        let unused = planned(Vec::new()).question();
-        assert_eq!(unused.as_deref(), Some("Delete project luneta? no agent"));
+        let project = ProjectId::of(6).unwrap();
+        let act = Act::Project { session, project, worktrees, seen };
+        let busy = planned(&act, &[(4, Doing::Busy)]).question();
+        assert_eq!(busy.as_deref(), Some("Close project luneta? 1 agent, 1 busy"));
+        let idle = planned(&act, &[(4, Doing::Idle), (5, Doing::Shell)]).question();
+        assert_eq!(idle.as_deref(), Some("Close project luneta? 1 agent"));
+        let unused = planned(&act, &[]).question();
+        assert_eq!(unused.as_deref(), Some("Close project luneta? no agent"));
     }
 
     #[test]
-    fn a_worktree_s_delete_asks_first_only_for_an_agent_at_work_in_its_views() {
-        let luneta = luneta();
+    fn a_worktree_s_close_asks_first_only_for_an_agent_at_work_in_its_views() {
         let worktree = WorktreeId::of(31).unwrap();
         let seen = vec![ViewId::of(4).unwrap(), ViewId::of(5).unwrap()];
-        let deletes = || Deletes::Worktree { worktree, views: vec![4, 5], seen: seen.clone() };
-        let planned = |agents| plan(&subject(&luneta, deletes(), agents));
-        assert_eq!(planned(vec![(6, Doing::Busy), (4, Doing::Idle)]).question(), None);
-        let asks = planned(vec![(5, Doing::Waiting)]).question();
+        let act = Act::Worktree { worktree, views: vec![at(4), at(5)], seen };
+        assert_eq!(planned(&act, &[(6, Doing::Busy), (4, Doing::Idle)]).question(), None);
+        let asks = planned(&act, &[(5, Doing::Waiting)]).question();
         assert_eq!(asks.as_deref(), Some("Close the worktree? 1 agent, 1 waiting"));
-        let session = luneta.name().clone();
-        let act = Act::Worktree { session, worktree, views: vec![4, 5], seen: seen.clone() };
-        assert_eq!(planned(Vec::new()).act, act);
     }
 
     #[test]
-    fn a_delete_asks_first_only_where_an_agent_at_work_would_end() {
-        let agents = vec![
+    fn a_close_takes_a_terminal_only_by_its_whole_key() {
+        let made = lunetad::mux::own::OwnMade::from_nanos(1);
+        let again = TerminalKey { made, ..at(4) };
+        let view = Act::View(ViewKey::terminal(4));
+        let worktree = WorktreeId::of(31).unwrap();
+        let views = Act::Worktree { worktree, views: vec![at(4)], seen: Vec::new() };
+        assert!(view.takes(at(4)) && views.takes(at(4)));
+        assert!(!view.takes(again) && !views.takes(again), "an id made again is another terminal");
+    }
+
+    #[test]
+    fn a_close_asks_first_only_where_an_agent_at_work_would_end() {
+        let agents = [
             (4, Doing::Idle),
             (5, Doing::Busy),
             (6, Doing::Waiting),
             (7, Doing::Unknown),
             (8, Doing::Shell),
         ];
-        let luneta = luneta();
-        let question =
-            |deletes: Deletes| plan(&subject(&luneta, deletes, agents.clone())).question();
-        assert_eq!(question(view()), None);
-        let unknown = Deletes::View(ViewKey::terminal(7));
-        assert_eq!(question(unknown), Some("Close the view? 1 agent, 1 unknown".to_owned()));
+        let question = |view| planned(&Act::View(ViewKey::terminal(view)), &agents).question();
+        assert_eq!(question(4), None);
+        assert_eq!(question(7), Some("Close the view? 1 agent, 1 unknown".to_owned()));
+        let untold = Plan::of(Act::View(ViewKey::terminal(4)), Err(Untold::Away)).question();
+        let says = "Close the view? luneta cannot tell which agents it ends: lunetad does not";
+        assert!(untold.is_some_and(|asks| asks.starts_with(says)));
     }
 }

@@ -46,7 +46,7 @@ pub const QUIT: char = 'q';
 pub const GIT: char = 'g';
 
 pub const MENU_GROUPS: [(char, &str); 5] =
-    [(SKILLS, "Skills"), ('n', "New"), ('d', "Delete"), ('b', "Brief"), (GIT, "Git")];
+    [(SKILLS, "Skills"), ('n', "New"), ('d', "Close"), ('b', "Brief"), (GIT, "Git")];
 
 pub const ROW_GROUPS: [(char, &str); 2] = [(YANK, "Yank"), (OPEN, "Open")];
 
@@ -122,7 +122,7 @@ actions! {
     RenameProject,
     CloseView,
     CloseWorktree,
-    DeleteProject,
+    CloseProject,
     ForgetMachine,
     DeleteMerged,
     Rebase,
@@ -298,9 +298,9 @@ impl Action {
                 menu(&['d', 'd']),
                 WORKTREE,
             ),
-            Action::DeleteProject => spec(
-                "delete the project",
-                &["remove", "forget", "close", "worktrees"],
+            Action::CloseProject => spec(
+                "close the project",
+                &["remove", "forget", "delete", "worktrees"],
                 menu(&['d', 'd']),
                 PROJECT,
             ),

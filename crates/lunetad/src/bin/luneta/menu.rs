@@ -635,7 +635,7 @@ impl Chain {
             | Offer::NewWelcome(_)
             | Offer::CloseView(_)
             | Offer::CloseWorktree(_)
-            | Offer::DeleteProject(_)
+            | Offer::CloseProject(_)
             | Offer::ForgetMachine(_)
             | Offer::DeleteMerged(_)
             | Offer::Rebase(_)
@@ -766,10 +766,15 @@ fn answer(key: &KeyEvent, asked: char) -> Answer {
 }
 
 #[derive(Clone, Debug)]
-struct Delete {
-    key: char,
+struct Close {
     session: Listed,
     scope: Scope,
+}
+
+impl Close {
+    fn key(&self) -> char {
+        yes_key(self.scope.action())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -799,7 +804,7 @@ enum Offer<'t> {
     Rename(Renames),
     CloseView(&'t ViewRow),
     CloseWorktree(&'t WorktreeRow),
-    DeleteProject(&'t Listed),
+    CloseProject(&'t Listed),
     ForgetMachine(&'t Destination),
     DeleteMerged(Directory),
     Rebase(Rebases<'t>),
@@ -939,8 +944,8 @@ impl Target {
             },
             (Action::CloseView, Target::View(_, row)) => Offer::CloseView(row),
             (Action::CloseWorktree, Target::Worktree(_, row)) => Offer::CloseWorktree(row),
-            (Action::DeleteProject, Target::Project(_, target)) => {
-                Offer::DeleteProject(target.project.listed())
+            (Action::CloseProject, Target::Project(_, target)) => {
+                Offer::CloseProject(target.project.listed())
             },
             (Action::ForgetMachine, Target::Machine(Machine::Remote(destination))) => {
                 Offer::ForgetMachine(destination)
@@ -1092,7 +1097,7 @@ fn started(keys: &Keys, row: &ViewRow, skill: &str) -> Result<Wants, String> {
 }
 
 const ASKS_FIRST: [Action; 4] =
-    [Action::CloseView, Action::CloseWorktree, Action::DeleteProject, Action::DeleteMerged];
+    [Action::CloseView, Action::CloseWorktree, Action::CloseProject, Action::DeleteMerged];
 
 const _: () = {
     let mut at = 0;
@@ -1283,8 +1288,8 @@ pub struct Menu {
 
 enum Stage {
     Choosing(Keys),
-    Planning { keys: Keys, delete: Delete, agreed: Option<Plan> },
-    Asking { keys: Keys, delete: Delete, plan: Plan, asks: String },
+    Planning { keys: Keys, close: Close, agreed: Option<Plan> },
+    Asking { keys: Keys, close: Close, plan: Plan, asks: String },
     Sweeping { keys: Keys, dir: Directory },
     Swept { keys: Keys, dir: Directory, plan: prunes::Plan },
     Pruning { keys: Keys, dir: Directory, count: usize },
@@ -1477,11 +1482,11 @@ impl Menu {
             Did::Stays(Menu { number, target: target.clone(), stage }, wants)
         };
         let chained = Chain::offered(target, &offer);
-        let deleting = |keys: Keys, action: Action, session: &Listed, scope: Scope| {
-            let (key, session) = (yes_key(action), session.clone());
+        let closing = |keys: Keys, session: &Listed, scope: Scope| {
+            let session = session.clone();
             let wants = Wants::Plan { session: session.clone(), scope };
-            let delete = Delete { key, session, scope };
-            stays(Stage::Planning { keys, delete, agreed: None }, wants)
+            let close = Close { session, scope };
+            stays(Stage::Planning { keys, close, agreed: None }, wants)
         };
         let wrong = |reason: String| Did::Closed(Done::Wrong(reason));
         match offer {
@@ -1533,14 +1538,14 @@ impl Menu {
                 stays(Stage::Typing { keys, chain }, Wants::Nothing)
             },
             Offer::CloseView(row) => {
-                deleting(keys, Action::CloseView, &row.session, Scope::View(row.view))
+                closing(keys, &row.session, Scope::View(row.view))
             },
             Offer::CloseWorktree(row) => {
                 let scope = Scope::Worktree(row.place.worktree);
-                deleting(keys, Action::CloseWorktree, row.place.project.listed(), scope)
+                closing(keys, row.place.project.listed(), scope)
             },
-            Offer::DeleteProject(listed) => {
-                deleting(keys, Action::DeleteProject, listed, Scope::Project)
+            Offer::CloseProject(listed) => {
+                closing(keys, listed, Scope::Project)
             },
             Offer::ForgetMachine(destination) => Did::Closed(Done::Forget(destination.clone())),
             Offer::DeleteMerged(dir) => {
@@ -1644,16 +1649,16 @@ impl Menu {
                     stays(Stage::Swept { keys, dir, plan }, Wants::Nothing)
                 },
             },
-            Stage::Asking { keys, delete, plan, asks } => match answer(key, delete.key) {
+            Stage::Asking { keys, close, plan, asks } => match answer(key, close.key()) {
                 Answer::Yes => {
-                    let session = delete.session.clone();
-                    let wants = Wants::Plan { session, scope: delete.scope };
-                    stays(Stage::Planning { keys, delete, agreed: Some(plan) }, wants)
+                    let session = close.session.clone();
+                    let wants = Wants::Plan { session, scope: close.scope };
+                    stays(Stage::Planning { keys, close, agreed: Some(plan) }, wants)
                 },
                 Answer::Back => stays(Stage::Choosing(keys), Wants::Nothing),
                 Answer::Close => Did::Closed(Done::Nothing),
                 Answer::Nothing => {
-                    stays(Stage::Asking { keys, delete, plan, asks }, Wants::Nothing)
+                    stays(Stage::Asking { keys, close, plan, asks }, Wants::Nothing)
                 },
             },
         }
@@ -1661,7 +1666,7 @@ impl Menu {
 
     pub fn planned(self, plan: Result<Plan, String>) -> Did {
         let Menu { number, target, stage } = self;
-        let Stage::Planning { keys, delete, agreed } = stage else {
+        let Stage::Planning { keys, close, agreed } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let plan = match plan {
@@ -1670,7 +1675,7 @@ impl Menu {
         };
         let asks = if agreed.as_ref() == Some(&plan) { None } else { plan.question() };
         if let Some(asks) = asks {
-            let stage = Stage::Asking { keys, delete, plan, asks };
+            let stage = Stage::Asking { keys, close, plan, asks };
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         }
         Did::Closed(Done::Act(target.machine().clone(), plan.act))
@@ -2756,7 +2761,7 @@ mod tests {
 
     use super::*;
     use crate::actions::GIT;
-    use crate::close::{self, Deletes, Doing, Subject};
+    use crate::close::Doing;
     use crate::printed::Kept;
     use crate::pull::{At, Found, Link, Readied, Ready, Work};
     use crate::sidebar::Listed;
@@ -2962,7 +2967,7 @@ mod tests {
                 " c  Skills ▸",
                 " n  New ▸",
                 " r  Rename the view…",
-                " d  Delete ▸",
+                " d  Close ▸",
                 " g  Git ▸",
                 " b  Brief ▸",
                 " q  Quit luneta",
@@ -3001,7 +3006,7 @@ mod tests {
                 " c  Skills ▸",
                 " n  New ▸",
                 " r  Rename the view…",
-                " d  Delete ▸",
+                " d  Close ▸",
                 " b  Brief ▸",
             ]
         );
@@ -3009,7 +3014,7 @@ mod tests {
             " a  Ask",
             " n  New ▸",
             " r  Rename the project…",
-            " d  Delete ▸",
+            " d  Close ▸",
             " b  Brief ▸",
         ]);
         assert_eq!(text(&legend(None, 31, 15).0).len(), 7);
@@ -3649,7 +3654,7 @@ mod tests {
             " c  Skills ▸",
             " n  New ▸",
             " r  Rename the view…",
-            " d  Delete ▸",
+            " d  Close ▸",
             " g  Git ▸",
             " b  Brief ▸",
             " q  Quit luneta",
@@ -3732,7 +3737,7 @@ mod tests {
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
-                "─ Delete ──────── luneta/main ─",
+                "─ Close ───────── luneta/main ─",
                 " d  close the view",
                 " m  delete merged worktrees",
                 " <BS> - Back, <ESC> - Close",
@@ -3769,7 +3774,7 @@ mod tests {
         assert_eq!(
             text(&menu.lines(33, 20, 0).0),
             [
-                "─ Delete ─────────────── luneta ─",
+                "─ Close ──────────────── luneta ─",
                 " Delete 3 merged worktrees?",
                 "",
                 " issue-282  #297  4.5 GB",
@@ -3782,7 +3787,7 @@ mod tests {
         assert_eq!(
             text(&menu.lines(33, 7, 0).0),
             [
-                "─ Delete ─────────────── luneta ─",
+                "─ Close ──────────────── luneta ─",
                 " Delete 3 merged worktrees?",
                 "",
                 " issue-282  #297  4.5 GB",
@@ -3805,7 +3810,7 @@ mod tests {
         assert_eq!(
             text(&menu.lines(33, 6, 0).0),
             [
-                "─ Delete ─────────────── luneta ─",
+                "─ Close ──────────────── luneta ─",
                 " No merged worktree to delete",
                 "",
                 " Keeps k1: it is locked",
@@ -3886,7 +3891,7 @@ mod tests {
         assert_eq!(
             text(&listed.lines(33, 9, 0).0),
             [
-                "─ Delete ─────────────── luneta ─",
+                "─ Close ──────────────── luneta ─",
                 " No merged worktree to delete",
                 "",
                 " <BS> - Back, <ESC> - Close",
@@ -3912,7 +3917,7 @@ mod tests {
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
-                "─ Delete ──────────────────────",
+                "─ Close ───────────────────────",
                 " d  forget the machine",
                 " <BS> - Back, <ESC> - Close",
             ]
@@ -3941,13 +3946,13 @@ mod tests {
             " a  Ask",
             " n  New ▸",
             " r  Rename the project…",
-            " d  Delete ▸",
+            " d  Close ▸",
             " b  Brief ▸",
             " q  Quit luneta",
             " <ESC> - Close",
         ]);
         assert_eq!(at(project_on(Machine::Local), Some('d')), [
-            " d  delete the project",
+            " d  close the project",
             " <BS> - Back, <ESC> - Close",
         ]);
         assert_eq!(at(session_row(), Some('n')), [
@@ -3961,7 +3966,7 @@ mod tests {
             " i  File issue",
             " n  New ▸",
             " r  Rename the worktree…",
-            " d  Delete ▸",
+            " d  Close ▸",
             " g  Git ▸",
             " b  Brief ▸",
             " q  Quit luneta",
@@ -3980,7 +3985,7 @@ mod tests {
         assert_eq!(at(remote_header(), None), [
             " a  Ask",
             " n  New ▸",
-            " d  Delete ▸",
+            " d  Close ▸",
             " b  Brief ▸",
             " q  Quit luneta",
             " <ESC> - Close",
@@ -4128,21 +4133,27 @@ mod tests {
         assert_eq!(keyed(40, &any).1, Spots::default());
     }
 
+    fn planned(act: Act, agents: Vec<(u32, Doing)>) -> Plan {
+        let agents: Vec<_> = agents.into_iter().map(|(id, doing)| (at(id), doing)).collect();
+        Plan::of(act, Ok(&agents))
+    }
+
+    fn at(id: u32) -> lunetad::mux::TerminalKey {
+        ViewKey::terminal(id).key()
+    }
+
     fn plan(agents: Vec<(u32, Doing)>) -> Plan {
-        let session = listed();
-        let deletes = Deletes::View(ViewKey::terminal(4));
-        close::plan(&Subject { session: &session, deletes, agents: Ok(agents) })
+        planned(Act::View(ViewKey::terminal(4)), agents)
     }
 
     #[test]
-    fn a_delete_with_no_agent_at_work_to_end_goes_ahead_at_once() {
+    fn a_close_with_no_agent_at_work_to_end_goes_ahead_at_once() {
         let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
         let scope = Scope::View(ViewKey::terminal(4));
         assert_eq!(wants, Wants::Plan { session: listed(), scope });
         let done = closed(menu.planned(Ok(plan(vec![(4, Doing::Idle)]))));
-        let act = Act::View { session: listed().name().clone(), view: ViewKey::terminal(4) };
-        assert_eq!(done, Done::Act(Machine::Local, act));
+        assert_eq!(done, Done::Act(Machine::Local, Act::View(ViewKey::terminal(4))));
         let (menu, _) = stays(opened(worktree_on(Machine::Local), Some('d')));
         let (_, wants) = stays(menu.key(&char('d')));
         let (session, scope) = (project().listed().clone(), Scope::Worktree(worktree()));
@@ -4150,7 +4161,7 @@ mod tests {
     }
 
     #[test]
-    fn a_delete_that_would_end_an_agent_at_work_asks_first() {
+    fn a_close_that_would_end_an_agent_at_work_asks_first() {
         let busy = || vec![(4, Doing::Busy)];
         let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('d')));
@@ -4159,7 +4170,7 @@ mod tests {
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
-                "─ Delete ──────── luneta/main ─",
+                "─ Close ───────── luneta/main ─",
                 " Close the view? 1 agent, 1",
                 " busy",
                 " <y> Yes <BS> Back <ESC> Close",
@@ -4177,21 +4188,17 @@ mod tests {
         let asking = text(&menu.lines(31, 9, 0).0);
         assert_eq!(asking[1..3], [" Close the view? 1 agent, 1", " waiting"]);
         let (menu, _) = stays(menu.key(&char('y')));
-        let act = Act::View { session: listed().name().clone(), view: ViewKey::terminal(4) };
+        let act = Act::View(ViewKey::terminal(4));
         assert_eq!(closed(menu.planned(Ok(plan(waiting())))), Done::Act(Machine::Local, act));
     }
 
     fn worktree_plan(agents: Vec<(u32, Doing)>) -> Plan {
-        let session = project().listed().clone();
-        let (views, seen) = (vec![4, 5], worktree_seen());
-        let deletes = Deletes::Worktree { worktree: worktree(), views, seen };
-        close::plan(&Subject { session: &session, deletes, agents: Ok(agents) })
+        planned(worktree_act(), agents)
     }
 
     fn worktree_act() -> Act {
-        let session = project().listed().name().clone();
-        let (views, seen) = (vec![4, 5], worktree_seen());
-        Act::Worktree { session, worktree: worktree(), views, seen }
+        let (views, seen) = (vec![at(4), at(5)], worktree_seen());
+        Act::Worktree { worktree: worktree(), views, seen }
     }
 
     fn worktree_seen() -> Vec<ViewId> {
@@ -4221,24 +4228,15 @@ mod tests {
     }
 
     #[test]
-    fn d_d_on_a_project_deletes_it_with_its_worktrees_always_asking_first() {
+    fn d_d_on_a_project_closes_it_with_its_worktrees_always_asking_first() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
-        let worktrees = vec![worktree()];
-        let deletes = || Deletes::Project {
-            project: project().id(),
-            worktrees: worktrees.clone(),
-            seen: worktree_seen(),
-        };
-        let planned = |agents: Vec<(u32, Doing)>| {
-            let session = project().listed().clone();
-            close::plan(&Subject { session: &session, deletes: deletes(), agents: Ok(agents) })
-        };
         let act = Act::Project {
             session: project().listed().name().clone(),
             project: project().id(),
-            worktrees: worktrees.clone(),
+            worktrees: vec![worktree()],
             seen: worktree_seen(),
         };
+        let planned = |agents: Vec<(u32, Doing)>| planned(act.clone(), agents);
         for on in [Machine::Local, vps()] {
             let (menu, _) = stays(opened(project_on(on.clone()), Some('d')));
             let (menu, wants) = stays(menu.key(&char('d')));
@@ -4246,7 +4244,7 @@ mod tests {
             assert_eq!(wants, Wants::Plan { session, scope });
             let (menu, _) = stays(menu.planned(Ok(planned(vec![(4, Doing::Busy)]))));
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [
-                " Delete project luneta? 1",
+                " Close project luneta? 1",
                 " agent, 1 busy",
             ]);
             let (menu, _) = stays(menu.key(&char('d')));
@@ -4256,7 +4254,7 @@ mod tests {
             let (menu, _) = stays(menu.key(&char('d')));
             let (menu, _) = stays(menu.planned(Ok(planned(Vec::new()))));
             let asks = text(&menu.lines(31, 9, 0).0)[1..3].to_vec();
-            assert_eq!(asks, [" Delete project luneta? no", " agent"]);
+            assert_eq!(asks, [" Close project luneta? no", " agent"]);
             let (menu, _) = stays(menu.key(&char('d')));
             assert_eq!(closed(menu.planned(Ok(planned(Vec::new())))), Done::Act(on, act.clone()));
         }
@@ -4298,7 +4296,7 @@ mod tests {
             boxed(" i  File issue"),
             boxed(" c  Skills ▸"),
             boxed(" n  New ▸"),
-            boxed(" d  Delete ▸"),
+            boxed(" d  Close ▸"),
             boxed(" g  Git ▸"),
             boxed(" b  Brief ▸"),
             boxed(" q  Quit luneta"),
@@ -4357,7 +4355,8 @@ mod tests {
         assert_eq!(clicked(&menu, "Skills ▸"), Some(pressed(KeyCode::Char('c'))));
         assert_eq!(clicked(&menu, " /  Search"), Some(pressed(KeyCode::Char('/'))));
         assert_eq!(clicked(&menu, "<ESC>"), Some(pressed(KeyCode::Esc)));
-        assert_eq!(clicked(&menu, "Close"), Some(pressed(KeyCode::Esc)));
+        assert_eq!(clicked(&menu, "- Close"), Some(pressed(KeyCode::Esc)));
+        assert_eq!(clicked(&menu, "Close ▸"), Some(pressed(KeyCode::Char('d'))));
         assert_eq!(clicked(&menu, "─ luneta"), None);
 
         let (menu, _) = stays(menu.key(&char('c')));
@@ -4366,7 +4365,7 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_a_delete_asks_first_as_its_key_does() {
+    fn a_click_on_a_close_asks_first_as_its_key_does() {
         let (menu, _) = stays(opened(view_row(), Some('d')));
         assert_eq!(clicked(&menu, "close the view"), Some(pressed(KeyCode::Char('d'))));
         let (menu, _) = stays(menu.key(&char('d')));
