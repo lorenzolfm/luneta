@@ -1,8 +1,10 @@
 use std::fs::{self, FileTimes, Permissions};
+#[cfg(target_os = "linux")]
+use std::io::Read as _;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, ChildStdout, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::api::agent::Status as Reported;
@@ -334,6 +336,57 @@ fn a_file_stands_only_for_the_process_that_wrote_it() {
     let ids: Vec<&str> = found.agents.iter().map(|agent| agent.session_id.as_str()).collect();
     assert_eq!(ids, ["running"]);
     assert_eq!(found.unread, 0);
+}
+
+#[cfg(target_os = "linux")]
+fn hidden() -> (Running, ChildStdin, tempfile::TempDir) {
+    let scratch = tempfile::tempdir().unwrap();
+    let sh = scratch.path().join("sh");
+    let path = std::env::var_os("PATH").expect("the tests run with a PATH");
+    let found = std::env::split_paths(&path).map(|dir| dir.join("sh")).find(|it| it.is_file());
+    let installed = Command::new("install").arg("-m111").arg(found.unwrap()).arg(&sh).status();
+    assert!(installed.unwrap().success());
+    let mut waits = Command::new(&sh);
+    waits.args(["-c", "echo; read -r line"]).stdin(Stdio::piped()).stdout(Stdio::piped());
+    let mut hidden = Running::spawn(&mut waits);
+    let (waiting, mut said) = hidden.piped();
+    said.read_exact(&mut [0; 1]).expect("it says it runs");
+    (hidden, waiting, scratch)
+}
+
+#[cfg(target_os = "macos")]
+fn root_s() -> u32 {
+    let listed = Command::new("/bin/ps").args(["-axo", "pid=,uid="]).output().unwrap();
+    let listed = String::from_utf8(listed.stdout).unwrap();
+    let root_s = listed.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        let pid = fields.next()?.parse::<u32>().ok()?;
+        (pid > 1 && fields.next()? == "0").then_some(pid)
+    });
+    root_s.min().expect("root runs more than launchd")
+}
+
+#[test]
+fn a_file_no_process_of_its_pid_wrote_says_nothing_of_that_process_s_terminal() {
+    let host = Host::new();
+    let _daemon = start(host.vars()).unwrap();
+    #[cfg(target_os = "linux")]
+    let hidden = hidden();
+    #[cfg(target_os = "linux")]
+    let pid = hidden.0.pid();
+    #[cfg(target_os = "macos")]
+    let pid = root_s();
+    let file = host.runtime().join(format!("luneta/pi/{pid}.json"));
+    let mut of_another = says("of another");
+    of_another["procStart"] = json!("1");
+    fs::write(&file, of_another.to_string()).unwrap();
+
+    let unwritten = format!("{}: no process of its pid wrote it", file.display());
+    let log = eventually("its file is found", || {
+        let log = host.logged();
+        log.contains(&unwritten).then_some(log)
+    });
+    assert!(!log.contains(&format!("agent {pid} shows in no view")), "{log}");
 }
 
 #[test]

@@ -45,6 +45,11 @@ impl Host {
         self.runtime.path()
     }
 
+    pub fn logged(&self) -> String {
+        let log = self.home.path().join(".local/state/luneta/luneta.log");
+        fs::read_to_string(log).unwrap_or_default()
+    }
+
     pub fn pi_folder(&self) -> PathBuf {
         self.home.path().join(".pi/agent")
     }

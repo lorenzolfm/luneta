@@ -10,7 +10,7 @@ use sysinfo::{
     Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind,
 };
 
-use super::{Found, Id, Unended};
+use super::{Found, Id, Start, Unended};
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
     let mut system = System::new();
@@ -20,9 +20,9 @@ fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) ->
 }
 
 #[must_use]
-pub fn start(pid: u32) -> Option<String> {
+pub fn start(pid: u32) -> Option<Start> {
     let secs = with(pid, ProcessRefreshKind::nothing(), Process::start_time)?;
-    Some(lstart(i64::try_from(secs).ok()?))
+    Start::spelled(lstart(i64::try_from(secs).ok()?))
 }
 
 #[must_use]
@@ -79,7 +79,8 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
         if !mine || process.status() == ProcessStatus::Zombie {
             continue;
         }
-        let Some(start) = i64::try_from(process.start_time()).ok().map(lstart) else {
+        let start = i64::try_from(process.start_time()).ok().map(lstart);
+        let Some(start) = start.and_then(Start::spelled) else {
             continue;
         };
         let argv = process.cmd().iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
@@ -90,12 +91,12 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
     found
 }
 
-fn living_start(pid: u32) -> Option<String> {
+fn living_start(pid: u32) -> Option<Start> {
     let living = |process: &Process| {
         (process.status() != ProcessStatus::Zombie).then(|| process.start_time())
     };
     let secs = with(pid, ProcessRefreshKind::nothing(), living)??;
-    Some(lstart(i64::try_from(secs).ok()?))
+    Start::spelled(lstart(i64::try_from(secs).ok()?))
 }
 
 #[expect(

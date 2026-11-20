@@ -12,15 +12,15 @@ use rustix::io::{retry_on_intr, Errno};
 use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
 use rustix::time::{clock_gettime, ClockId};
 
-use super::{Found, Id, Unended};
+use super::{Found, Id, Start, Unended};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
 }
 
 #[must_use]
-pub fn start(pid: u32) -> Option<String> {
-    start_in(&fs::read_to_string(proc(pid, "stat")).ok()?)
+pub fn start(pid: u32) -> Option<Start> {
+    start_in(&fs::read_to_string(proc(pid, "stat")).ok()?).and_then(Start::spelled)
 }
 
 fn start_in(stat: &str) -> Option<String> {
@@ -47,7 +47,7 @@ pub fn ends(pid: Pid) -> io::Result<()> {
 
 #[must_use]
 pub fn started(pid: u32) -> Option<SystemTime> {
-    let ticks = start(pid)?.parse::<u64>().ok()?.checked_add(1)?;
+    let ticks = start(pid)?.as_str().parse::<u64>().ok()?.checked_add(1)?;
     let per_second = rustix::param::clock_ticks_per_second();
     let secs = ticks.checked_div(per_second)?;
     let nanos = (ticks % per_second * 1_000_000_000).div_ceil(per_second);

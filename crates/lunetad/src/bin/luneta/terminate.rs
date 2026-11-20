@@ -676,7 +676,7 @@ fn left_said(name: &str, id: &Id, why: Unended) -> String {
 
 #[cfg(test)]
 mod tests {
-    use lunetad::terminate::Luneta;
+    use lunetad::terminate::{Luneta, Start};
 
     use super::*;
 
@@ -686,7 +686,7 @@ mod tests {
     }
 
     fn id(pid: u32) -> Id {
-        Id { pid, start: "1".to_owned() }
+        Id { pid, start: Start::spelled("1".to_owned()).unwrap() }
     }
 
     #[test]

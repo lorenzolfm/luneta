@@ -6,7 +6,7 @@ use rustix::process::Signal;
 
 use crate::{folder, process, projects};
 
-pub use crate::process::{Id, Unended};
+pub use crate::process::{Id, Start, Unended};
 
 pub const LUNETA: &str = "luneta";
 
@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn a_process_that_took_an_ended_one_s_pid_is_left_alone() {
         let mut runs = Command::new("sleep").arg("60").spawn().unwrap();
-        let earlier = Id { pid: runs.id(), start: "0".to_owned() };
+        let earlier = Id { pid: runs.id(), start: Start::spelled("0".to_owned()).unwrap() };
         assert_eq!(end(&[earlier]), []);
         assert!(runs.try_wait().unwrap().is_none(), "another process of its pid was ended");
         runs.kill().unwrap();
@@ -173,7 +173,7 @@ mod tests {
     }
 
     fn given(pid: u32, name: &str, arguments: &[&str], environ: &[&str]) -> process::Found {
-        let id = Id { pid, start: "1".to_owned() };
+        let id = Id { pid, start: Start::spelled("1".to_owned()).unwrap() };
         let argv = [name].iter().chain(arguments).map(|&argument| argument.to_owned()).collect();
         let environ = environ.iter().map(OsString::from).collect();
         process::Found { id, name: name.to_owned(), argv, environ }

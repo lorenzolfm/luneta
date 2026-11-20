@@ -107,24 +107,30 @@ impl AgentFiles {
                 continue;
             };
             let id = process::Id { pid, start };
-            let found = self.processes.remove(&id).or_else(|| {
-                let started = process::started(pid)?;
-                let terminal = terminal_or_trouble(pid, mux::terminal_of(&id), &mut self.troubles);
-                Some(Process { started, terminal })
-            });
-            let Some(found) = found else {
+            let cached = self.processes.remove(&id);
+            let Some(started) = cached.map(|it| it.started).or_else(|| process::started(pid)) else {
                 continue;
             };
-            let file = read(&path, &id.start, found.started);
-            processes.insert(id, found);
-            match file {
-                Ok(Some(file)) => agents.push(agent(pid, file, found)),
+            match read(&path, id.start.as_str(), started) {
+                Ok(Some(file)) => {
+                    let terminal = cached.map_or_else(
+                        || terminal_or_trouble(pid, mux::terminal_of(&id), &mut self.troubles),
+                        |it| it.terminal,
+                    );
+                    let found = Process { started, terminal };
+                    processes.insert(id, found);
+                    agents.push(agent(pid, file, found));
+                },
                 Ok(None) => {
                     let why = format!("{}: no process of its pid wrote it", path.display());
                     self.troubles.say(why);
                 },
-                Err(error) if error.kind() == ErrorKind::NotFound => {},
-                Err(error) => self.troubles.say(format!("{}: {error}", path.display())),
+                Err(error) => {
+                    processes.extend(cached.map(|it| (id, it)));
+                    if error.kind() != ErrorKind::NotFound {
+                        self.troubles.say(format!("{}: {error}", path.display()));
+                    }
+                },
             }
         }
         self.processes = processes;

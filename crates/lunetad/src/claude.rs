@@ -170,10 +170,10 @@ impl SessionFiles {
             if !local(&self.domain, file) {
                 continue;
             }
-            let start = file.proc_start.spelled();
-            if process::start(pid).as_ref() != Some(&start) {
+            let spelled = file.proc_start.spelled();
+            let Some(start) = process::start(pid).filter(|start| start.as_str() == spelled) else {
                 continue;
-            }
+            };
             agents.push(agent(pid, file, terminal_of(process::Id { pid, start })));
         }
         self.terminals = terminals;

@@ -36,7 +36,6 @@ pub enum Runs<'a> {
 }
 
 pub fn terminal_of(id: &process::Id) -> Result<Option<TerminalKey>, String> {
-    assert!(!id.start.is_empty(), "a process's start is never spelled empty");
     let environ = process::environ(id.pid);
     if process::start(id.pid).as_ref() == Some(&id.start) {
         match environ {

@@ -25,7 +25,22 @@ pub use os::{environ, mine, signalled, start, started, Domain};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id {
     pub pid: u32,
-    pub start: String,
+    pub start: Start,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Start(String);
+
+impl Start {
+    #[must_use]
+    pub fn spelled(spelling: String) -> Option<Start> {
+        (!spelling.is_empty()).then_some(Start(spelling))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
