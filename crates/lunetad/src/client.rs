@@ -28,7 +28,7 @@ pub const REACH: Duration = Duration::from_secs(10);
 
 const ROUND_TRIP: Duration = Duration::from_secs(5);
 
-const ANSWER_THROUGH: Duration = ANSWER.saturating_add(ROUND_TRIP);
+pub(crate) const ANSWER_THROUGH: Duration = ANSWER.saturating_add(ROUND_TRIP);
 
 const QUIET: Duration = Duration::from_secs(3);
 
