@@ -7,6 +7,7 @@ use tonic::Status;
 
 use crate::api;
 use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
+use crate::folder::Unreached;
 use crate::id::{ClientId, TerminalId};
 use crate::terminal::{self, Exit, Handle, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
@@ -19,15 +20,45 @@ const _: () = assert!(SHOWN_MAX <= TERMINALS_MAX);
 
 pub struct Mux {
     model: Mutex<Model>,
-    listing: watch::Sender<Option<api::Listing>>,
+    listing: watch::Sender<Listed>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Listed {
+    Holds(api::Listing),
+    Ended(Ending),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ending {
+    Emptied,
+    Unreached(Unreached),
+}
+
+impl Ending {
+    #[must_use]
+    pub fn said(&self) -> api::watched::Ended {
+        let why = match self {
+            Ending::Emptied => api::watched::ended::Why::Emptied(api::watched::Emptied {}),
+            Ending::Unreached(unreached) => {
+                let why = unreached.to_string();
+                api::watched::ended::Why::Unreached(api::watched::Unreached { why })
+            },
+        };
+        api::watched::Ended { why: Some(why) }
+    }
+}
+
+enum Model {
+    Holds(Holding),
+    Ended(Ending),
 }
 
 #[derive(Default)]
-struct Model {
+struct Holding {
     last: Ids,
     terminals: Vec<Terminal>,
     viewing: BTreeMap<ClientId, Viewing>,
-    ended: bool,
 }
 
 #[derive(Default)]
@@ -63,16 +94,20 @@ struct Viewing {
 impl Mux {
     #[must_use]
     pub fn new() -> Arc<Mux> {
-        let (listing, _) = watch::channel(Some(api::Listing::default()));
-        Arc::new(Mux { model: Mutex::new(Model::default()), listing })
+        let (listing, _) = watch::channel(Listed::Holds(api::Listing::default()));
+        Arc::new(Mux { model: Mutex::new(Model::Holds(Holding::default())), listing })
     }
 
-    pub fn watched(&self) -> watch::Receiver<Option<api::Listing>> {
+    pub fn watched(&self) -> watch::Receiver<Listed> {
         self.listing.subscribe()
     }
 
     pub fn end_if_unused(&self) {
         self.change(Model::end_if_empty);
+    }
+
+    pub fn end_unreached(&self, unreached: Unreached) -> Option<usize> {
+        self.change(|model| model.end_unreached(unreached))
     }
 
     fn lock(&self) -> MutexGuard<'_, Model> {
@@ -82,15 +117,16 @@ impl Mux {
     fn change<T>(&self, change: impl FnOnce(&mut Model) -> T) -> T {
         let mut model = self.lock();
         let changed = change(&mut model);
-        if model.ended {
-            assert!(model.terminals.is_empty(), "the server ended with a terminal");
-            assert!(model.viewing.is_empty(), "the server ended with a viewer");
-        }
-        model.settle();
-        let listing = (!model.ended).then(|| model.listing());
+        let listed = match &mut *model {
+            Model::Holds(holding) => {
+                holding.settle();
+                Listed::Holds(holding.listing())
+            },
+            Model::Ended(ending) => Listed::Ended(ending.clone()),
+        };
         self.listing.send_if_modified(|said| {
-            let modified = *said != listing;
-            *said = listing;
+            let modified = *said != listed;
+            *said = listed;
             modified
         });
         changed
@@ -103,13 +139,13 @@ impl Mux {
         size: Size,
     ) -> Result<TerminalKey, Status> {
         self.change(|model| {
-            model.refuse_if_ended()?;
-            refuse_if_full(model.terminals.len(), TERMINALS_MAX, "terminals")?;
-            let id = TerminalId::next(&mut model.last.terminal);
-            assert!(model.index_of(id).is_none(), "terminal {id} is new");
+            let holding = model.holding()?;
+            refuse_if_full(holding.terminals.len(), TERMINALS_MAX, "terminals")?;
+            let id = TerminalId::next(&mut holding.last.terminal);
+            assert!(holding.index_of(id).is_none(), "terminal {id} is new");
             let key = TerminalKey { id, made: SystemTime::now() };
             let terminal = spawned(self, key, tag, opens, size)?;
-            model.terminals.push(terminal);
+            holding.terminals.push(terminal);
             Ok(key)
         })
     }
@@ -147,12 +183,12 @@ impl Mux {
         gone: oneshot::Sender<()>,
     ) -> Result<ClientId, Status> {
         self.change(|model| {
-            model.refuse_if_ended()?;
-            refuse_if_full(model.viewing.len(), CLIENTS_MAX, "clients")?;
-            let client = ClientId::next(&mut model.last.client);
+            let holding = model.holding()?;
+            refuse_if_full(holding.viewing.len(), CLIENTS_MAX, "clients")?;
+            let client = ClientId::next(&mut holding.last.client);
             let Greeting { colours, runs_in } = greeting;
             let viewing = Viewing { out, colours, runs_in, shows: BTreeMap::new(), _gone: gone };
-            let was = model.viewing.insert(client, viewing);
+            let was = holding.viewing.insert(client, viewing);
             assert!(was.is_none(), "viewer {client} is new");
             Ok(client)
         })
@@ -168,23 +204,31 @@ impl Mux {
 
     pub fn typed(&self, client: ClientId, terminal: TerminalKey) -> Result<Handle, Status> {
         let model = self.lock();
-        let viewing = model.viewing.get(&client).ok_or_else(|| no_client(client))?;
+        let Model::Holds(holding) = &*model else {
+            return Err(no_client(client));
+        };
+        let viewing = holding.viewing.get(&client).ok_or_else(|| no_client(client))?;
         if !viewing.shows.contains_key(&terminal) {
             let not_shown = format!("terminal {} is not shown", terminal.id);
             return Err(Status::failed_precondition(not_shown));
         }
-        let terminal = model.terminal(terminal).expect("a shown terminal is the model's");
+        let terminal = holding.terminal(terminal).expect("a shown terminal is the model's");
         Ok(terminal.handle.clone())
     }
 
     pub fn unview(&self, client: ClientId) {
         self.change(|model| {
-            model.viewing.remove(&client);
+            if let Model::Holds(holding) = model {
+                holding.viewing.remove(&client);
+            }
         });
     }
 
     pub fn listing(&self) -> api::Listing {
-        self.lock().listing()
+        match &*self.lock() {
+            Model::Holds(holding) => holding.listing(),
+            Model::Ended(_) => api::Listing::default(),
+        }
     }
 
     pub fn lost(&self, terminal: TerminalId) {
@@ -232,40 +276,86 @@ impl Mux {
 }
 
 impl Model {
-    fn refuse_if_ended(&self) -> Result<(), Status> {
-        if self.ended {
-            return Err(Status::unavailable("luneta-mux is ending, as nothing is left in it"));
+    fn holding(&mut self) -> Result<&mut Holding, Status> {
+        match self {
+            Model::Holds(holding) => Ok(holding),
+            Model::Ended(Ending::Emptied) => {
+                Err(Status::unavailable("luneta-mux is ending, as nothing is left in it"))
+            },
+            Model::Ended(Ending::Unreached(unreached)) => {
+                Err(Status::unavailable(format!("luneta-mux is ending: {unreached}")))
+            },
         }
-        Ok(())
     }
 
     fn end_if_empty(&mut self) {
-        if self.terminals.is_empty() {
-            self.ended = true;
-            self.viewing.clear();
+        if let Model::Holds(holding) = self
+            && holding.terminals.is_empty()
+        {
+            *self = Model::Ended(Ending::Emptied);
         }
     }
 
+    fn end_unreached(&mut self, unreached: Unreached) -> Option<usize> {
+        let Model::Holds(holding) = self else {
+            return None;
+        };
+        let closed = holding.terminals.len();
+        for terminal in holding.terminals.drain(..) {
+            terminal.handle.close();
+        }
+        *self = Model::Ended(Ending::Unreached(unreached));
+        Some(closed)
+    }
+
+    fn close(&mut self, terminal: TerminalId) {
+        if let Model::Holds(holding) = self
+            && holding.close(terminal)
+        {
+            self.end_if_empty();
+        }
+    }
+
+    fn terminal_of_id_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
+        let Model::Holds(holding) = self else {
+            return None;
+        };
+        holding.terminals.iter_mut().find(|found| found.key.id == terminal)
+    }
+
+    fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
+        let Model::Holds(holding) = self else {
+            return Err(unmade(key));
+        };
+        holding.terminal(key)
+    }
+
+    fn terminal_mut(&mut self, key: TerminalKey) -> Result<&mut Terminal, Status> {
+        let Model::Holds(holding) = self else {
+            return Err(unmade(key));
+        };
+        holding.terminals.iter_mut().find(|found| found.key == key).ok_or_else(|| unmade(key))
+    }
+
+    fn show(
+        &mut self,
+        client: ClientId,
+        keys: &BTreeSet<TerminalKey>,
+    ) -> Result<Vec<Status>, Status> {
+        let Model::Holds(holding) = self else {
+            return Err(no_client(client));
+        };
+        holding.show(client, keys)
+    }
+}
+
+impl Holding {
     fn index_of(&self, terminal: TerminalId) -> Option<usize> {
         self.terminals.iter().position(|found| found.key.id == terminal)
     }
 
-    fn terminal_of_id_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
-        self.terminals.iter_mut().find(|found| found.key.id == terminal)
-    }
-
     fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
-        self.terminals
-            .iter()
-            .find(|found| found.key == key)
-            .ok_or_else(|| Status::not_found(format!("no terminal {} made then", key.id)))
-    }
-
-    fn terminal_mut(&mut self, key: TerminalKey) -> Result<&mut Terminal, Status> {
-        self.terminals
-            .iter_mut()
-            .find(|found| found.key == key)
-            .ok_or_else(|| Status::not_found(format!("no terminal {} made then", key.id)))
+        self.terminals.iter().find(|found| found.key == key).ok_or_else(|| unmade(key))
     }
 
     fn show(
@@ -301,16 +391,16 @@ impl Model {
         Ok(gone)
     }
 
-    fn close(&mut self, terminal: TerminalId) {
+    fn close(&mut self, terminal: TerminalId) -> bool {
         let Some(index) = self.index_of(terminal) else {
-            return;
+            return false;
         };
         let closed = self.terminals.remove(index);
         closed.handle.close();
         for viewing in self.viewing.values_mut() {
             viewing.shows.remove(&closed.key);
         }
-        self.end_if_empty();
+        true
     }
 
     fn settle(&mut self) {
@@ -397,6 +487,10 @@ fn spawned(
         program: Program::Runs { pid: started.pid, ends: opens.ends, foreground: None, ran: None },
         handle: started.handle,
     })
+}
+
+fn unmade(key: TerminalKey) -> Status {
+    Status::not_found(format!("no terminal {} made then", key.id))
 }
 
 fn no_client(client: ClientId) -> Status {

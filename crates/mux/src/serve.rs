@@ -1,5 +1,4 @@
-use std::fs;
-use std::io::{self, ErrorKind};
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -16,15 +15,19 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::{self, mux_server};
 use crate::asked::{self, Dumped, Opens, Size, Tag, TerminalKey, ViewerHeard};
-use crate::folder::Claim;
+use crate::folder::{Bound, Claim, Found};
 use crate::id::ClientId;
-use crate::mux::Mux;
+use crate::mux::{Listed, Mux};
 use crate::terminal::{CLIENT_MESSAGES, ToTerminal, UNREAD_BYTES_MAX, ViewerOut};
 use crate::pty;
 
 pub const FIRST_TERMINAL: Duration = Duration::from_secs(30);
 
 const DRAIN: Duration = Duration::from_secs(5);
+
+const SOCKET_LOOK: Duration = Duration::from_secs(1);
+
+const _: () = assert!(!SOCKET_LOOK.is_zero(), "a look at the socket waits between looks");
 
 const STREAMS_MAX: u32 = 256;
 
@@ -56,11 +59,20 @@ impl mux_server::Mux for Service {
         Ok(Response::new(self.mux.listing()))
     }
 
-    type WatchStream = Pin<Box<dyn Stream<Item = Result<api::Listing, Status>> + Send>>;
+    type WatchStream = Pin<Box<dyn Stream<Item = Result<api::Watched, Status>> + Send>>;
 
     async fn watch(&self, _: Request<api::WatchRequest>) -> Answer<Self::WatchStream> {
-        let listings = WatchStream::new(self.mux.watched()).map_while(|listing| listing.map(Ok));
-        Ok(Response::new(Box::pin(listings)))
+        let watched = self.mux.watched();
+        let holds = WatchStream::new(watched.clone()).map_while(|listed| match listed {
+            Listed::Holds(listing) => Some(api::watched::Is::Listing(listing)),
+            Listed::Ended(_) => None,
+        });
+        let ended = WatchStream::new(watched).filter_map(|listed| match listed {
+            Listed::Holds(_) => None,
+            Listed::Ended(ending) => Some(api::watched::Is::Ended(ending.said())),
+        });
+        let watched = holds.chain(ended.take(1)).map(|is| Ok(api::Watched { is: Some(is) }));
+        Ok(Response::new(Box::pin(watched)))
     }
 
     async fn new_terminal(
@@ -198,31 +210,73 @@ impl Stream for Viewed {
     }
 }
 
+async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
+    let watched = mux.watched();
+    let mut error_said = false;
+    loop {
+        tokio::time::sleep(SOCKET_LOOK).await;
+        if matches!(*watched.borrow(), Listed::Ended(_)) {
+            return;
+        }
+        let unreached = match bound.found() {
+            Ok(Found::Ours) => {
+                error_said = false;
+                continue;
+            },
+            Ok(Found::Lost(unreached)) => unreached,
+            Err(error) => {
+                if !error_said {
+                    let socket = bound.socket().display();
+                    eprintln!("luneta-mux: {socket} is not looked at, so it runs on: {error}");
+                }
+                error_said = true;
+                continue;
+            },
+        };
+        if let Some(closed) = mux.end_unreached(unreached.clone()) {
+            let closed = match closed {
+                0 => "it held no terminal".to_owned(),
+                1 => "it closed its 1 terminal".to_owned(),
+                closed => format!("it closed its {closed} terminals"),
+            };
+            eprintln!("luneta-mux: {unreached}: {closed} and ends");
+        }
+        assert!(matches!(*watched.borrow(), Listed::Ended(_)), "the listing ends with the server");
+        return;
+    }
+}
+
 pub async fn serve(claim: Claim) -> io::Result<()> {
     if let Err(error) = pty::raise_files_limit() {
         eprintln!("luneta-mux: the limit of open files stays as it was: {error}");
     }
-    let listener = UnixListener::bind(claim.socket())?;
+    let (listener, bound) = claim.bind()?;
+    listener.set_nonblocking(true)?;
+    let listener = UnixListener::from_std(listener)?;
     let mux = Mux::new();
     let mut watched = mux.watched();
-    let socket = claim.socket().to_owned();
-    eprintln!("luneta-mux: listening on {}", socket.display());
+    eprintln!("luneta-mux: listening on {}", bound.socket().display());
     let (begun, mut beginning) = watch::channel(false);
     let unused = Arc::clone(&mux);
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_TERMINAL).await;
         unused.end_if_unused();
     });
+    let looked = tokio::spawn(end_once_unreached(Arc::clone(&mux), bound.clone()));
+    tokio::spawn(async move {
+        if let Err(error) = looked.await {
+            eprintln!("luneta-mux: its look at its socket failed, so it aborts: {error}");
+            std::process::abort();
+        }
+    });
     let ended = async move {
-        while watched.borrow_and_update().is_some() {
+        while matches!(*watched.borrow_and_update(), Listed::Holds(_)) {
             if watched.changed().await.is_err() {
                 break;
             }
         }
-        match fs::remove_file(&socket) {
-            Ok(()) => {},
-            Err(error) if error.kind() == ErrorKind::NotFound => {},
-            Err(error) => eprintln!("luneta-mux: {}: {error}", socket.display()),
+        if let Err(error) = bound.unbind() {
+            eprintln!("luneta-mux: {}: {error}", bound.socket().display());
         }
         let _ = begun.send(true);
     };
