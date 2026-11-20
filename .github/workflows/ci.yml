@@ -2,195 +2,63 @@ name: ci
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
-  code:
-    runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.diff.outputs.changed }}
-
+  warm:
+    runs-on: macos-latest
+    timeout-minutes: 60
     steps:
-      - name: actions/checkout v7
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 2
-
-      - name: Whether anything but Markdown the build doesn't read changed
-        id: diff
-        env:
-          BEFORE: ${{ github.event.before }}
-        run: |
-          base=HEAD^
-          if [[ $GITHUB_EVENT_NAME == push ]]; then
-            git fetch --depth=1 origin "$BEFORE"
-            base="$BEFORE"
-          fi
-          files="$(git diff --no-renames --name-only "$base" HEAD)"
-          docs="$(grep -xE '.*\.md' <<<"$files" | grep -vxF skills/luneta/SKILL.md || true)"
-          changed=true
-          if [[ -n $files && $docs == "$files" ]]; then
-            changed=false
-          fi
-          echo "$files"
-          echo "changed=$changed" | tee -a "$GITHUB_OUTPUT"
-
-  clippy:
-    needs: code
-    if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: write
-
-    steps:
-      - name: actions/checkout v7
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - &install-nix
-        name: cachix/install-nix-action v31
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-            keep-outputs = true
-
-      - &nix-store
-        name: nix-community/cache-nix-action v7
-        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
-        with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml', 'deny.toml', '.github/workflows/ci.yml') }}
-          restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
-          save: ${{ github.ref == 'refs/heads/main' }}
-          gc-max-store-size: 0
-          purge: ${{ github.ref == 'refs/heads/main' }}
-          purge-prefixes: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
-          purge-created: 0
-          purge-primary-key: never
-
-      - &root-inputs
-        name: Root the flake's inputs so the saved store keeps them
-        shell: bash
-        run: >-
-          nix flake archive --json
-          | jq -er '.inputs | .. | objects | .path | strings'
-          | xargs -r nix build --out-link "$RUNNER_TEMP/inputs"
-
-      - name: Build the dev CLI
-        run: nix build --no-link .#dev
-
-      - name: Lints
-        run: >-
-          nix build -L --keep-going --out-link lint
-          .#checks.x86_64-linux.statix
-          .#checks.x86_64-linux.deadnix
-          .#checks.x86_64-linux.comments
-
-      - name: Bans, licenses and sources
-        run: nix build -L --out-link deny .#checks.x86_64-linux.deny
-
-      - name: Clippy
-        run: nix build -L --out-link clippy .#checks.x86_64-linux.clippy
-
-      - name: Clippy for the Mac
-        if: ${{ !cancelled() }}
-        run: nix run .#dev.commands.clippy-cross
-
-      - name: Advisories
-        run: nix run .#dev -- deny advisories
-
-  breaking:
-    needs: code
-    if: >-
-      ${{ !cancelled() && needs.code.outputs.changed != 'false'
-      && github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: actions/checkout v7
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: cachix/install-nix-action v31
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+            keep-outputs = true
 
-      - name: Breaking changes to the protocol
+      - name: Restore main's macOS store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+        with:
+          primary-key: nix-probe-625-never
+          restore-prefixes-first-match: nix-daemon-macOS-ARM64-
+          save: false
+
+      - name: Store size
         run: |
-          git update-ref refs/remotes/origin/main HEAD^
-          nix run .#dev.commands.lint -- --breaking
+          df -h /nix /tmp
+          sudo du -sk /nix/store
+          sudo find /nix/store | wc -l
 
-  daemon:
-    needs: code
-    if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      actions: write
+      - name: Inventory
+        run: python3 probe/inventory.py
 
+  cold:
+    runs-on: macos-latest
+    timeout-minutes: 90
     steps:
-      - name: actions/checkout v7
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - *install-nix
-
-      - *nix-store
-
-      - *root-inputs
-
-      - name: Restore the tests' target/, with actions/cache v6.1.0
-        id: target
-        if: runner.os == 'macOS'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - name: cachix/install-nix-action v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
         with:
-          path: &target-paths |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            keep-outputs = true
 
-      - name: Test the daemon outside the sandbox
-        if: runner.os == 'macOS'
-        env:
-          CARGO_INCREMENTAL: 0
-          NEXTEST_DOUBLE_SPAWN: 0
+      - name: Fetch the flake inputs from GitHub
+        run: time nix flake archive --json
+
+      - name: Dry run of the devshell
+        run: nix build --dry-run .#devShells.aarch64-darwin.default.inputDerivation
+
+      - name: Develop from cache.nixos.org alone
+        run: time nix develop --profile "$RUNNER_TEMP/devshell" -c true
+
+      - name: Store size
         run: |
-          nix develop --profile devshell -c sh -ec '
-            cargo nextest run --locked --profile ci $LUNETA_TEST_RUN
-            cargo test --doc --locked $LUNETA_TEST_RUN
-          '
-
-      - name: Check the daemon without the tests' features
-        if: runner.os == 'macOS'
-        env:
-          CARGO_INCREMENTAL: 0
-        run: nix develop -c cargo check --locked -p lunetad
-
-      - name: Build the daemon, and on Linux test it
-        if: runner.os != 'macOS' || steps.target.outputs.cache-hit != 'true'
-        run: nix build -L .#lunetad
-
-      - name: Save the tests' target/, with actions/cache v6.1.0
-        if: >-
-          runner.os == 'macOS' && github.ref == 'refs/heads/main'
-          && steps.target.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: *target-paths
-          key: ${{ steps.target.outputs.cache-primary-key }}
+          sudo du -sk /nix/store
+          sudo find /nix/store | wc -l
