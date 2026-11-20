@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::File;
 use std::io::{self, IsTerminal as _, Read as _};
 use std::os::fd::AsFd as _;
@@ -25,9 +26,11 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 
 const COLOUR_LONGEST: usize = 32;
 
-pub fn read(events: Sender<Event>) {
+const END_SIGNALS: [i32; 2] = [SIGHUP, SIGTERM];
+
+pub fn read(events: Sender<Event>, ends: Ends) {
     resizes(events.clone());
-    hangups(events.clone());
+    ends.tell(events.clone());
     thread::spawn(move || {
         if let Err(error) = listen(&events) {
             let _ = events.send(Event::InputEnded(error));
@@ -76,22 +79,50 @@ fn resizes(events: Sender<Event>) {
     });
 }
 
-fn hangups(events: Sender<Event>) {
-    const ENDS: [i32; 2] = [SIGHUP, SIGTERM];
-    let Ok(mut signals) = Signals::new(ENDS) else {
-        return;
-    };
-    let ending = Arc::new(AtomicBool::new(false));
-    for signal in ENDS {
-        let _ = flag::register_conditional_default(signal, Arc::clone(&ending));
-        let _ = flag::register(signal, Arc::clone(&ending));
-    }
-    thread::spawn(move || {
-        if let Some(signal) = signals.forever().next() {
-            let ended = io::Error::other(format!("ended by signal {signal}"));
-            let _ = events.send(Event::InputEnded(ended));
+pub struct Ends {
+    signals: Signals,
+}
+
+impl Ends {
+    pub fn heard() -> io::Result<Ends> {
+        let signals = Signals::new(END_SIGNALS)?;
+        let heard_once = Arc::new(AtomicBool::new(false));
+        for signal in END_SIGNALS {
+            flag::register_conditional_default(signal, Arc::clone(&heard_once))?;
+            flag::register(signal, Arc::clone(&heard_once))?;
         }
-    });
+        Ok(Ends { signals })
+    }
+
+    pub fn after<T>(&mut self, step: impl FnOnce() -> T) -> Result<T, Ended> {
+        let done = step();
+        self.signals.pending().next().map(Ended::by).map_or(Ok(done), Err)
+    }
+
+    fn tell(mut self, events: Sender<Event>) {
+        thread::spawn(move || {
+            if let Some(signal) = self.signals.forever().next() {
+                let ended = Ended::by(signal);
+                let _ = events.send(Event::InputEnded(io::Error::other(ended.to_string())));
+            }
+        });
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Ended(i32);
+
+impl Ended {
+    fn by(signal: i32) -> Ended {
+        assert!(END_SIGNALS.contains(&signal), "signal {signal} is not one luneta ends by");
+        Ended(signal)
+    }
+}
+
+impl fmt::Display for Ended {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ended by signal {}", self.0)
+    }
 }
 
 fn terminal() -> io::Result<File> {
@@ -582,6 +613,16 @@ mod tests {
 
     fn typed(c: char) -> Sent {
         pressed(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_signal_that_comes_during_a_step_before_luneta_reads_its_terminal_is_its_end() {
+        let mut ends = Ends::heard().expect("luneta hears its end signals");
+        assert_eq!(ends.after(|| "done"), Ok("done"));
+        let raised = || signal_hook::low_level::raise(SIGTERM).expect("a signal is sent");
+        let ended = ends.after(raised).expect_err("the signal ends luneta");
+        assert_eq!(ended, Ended(SIGTERM));
+        assert_eq!(ended.to_string(), "ended by signal 15");
     }
 
     #[test]
