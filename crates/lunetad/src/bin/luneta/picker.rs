@@ -22,7 +22,7 @@ use unicode_width::UnicodeWidthStr;
 
 use lunetad::changes::Unchanged;
 use lunetad::links::{Branch, Work};
-use lunetad::projects::{self, Name, ProjectId, Seen, Used, ViewId};
+use lunetad::projects::{self, ProjectId, Seen, Used, ViewId};
 use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
 use lunetad::{eza, screens, Destination, Directory, SessionName};
@@ -288,7 +288,6 @@ pub enum Heard {
         asked: Option<ViewKey>,
         peek: Result<(u32, String), String>,
     },
-    Renamed { from: String, to: Name, renamed: Result<(), Unchanged> },
     Closed { name: String, closed: Result<(), Unchanged> },
     Dirs { on: Machine, ask: u64, visited: Result<Vec<Dir>, String> },
     Listed { on: Machine, path: Directory, listed: Result<String, String> },
@@ -297,25 +296,9 @@ pub enum Heard {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
     Peek { on: Machine, session: Listed, asked: Option<ViewKey> },
-    Rename { on: Machine, renames: Renames, to: Name },
     Close { on: Machine, place: WorktreePlace, name: String, seen: Vec<ViewId> },
     Dirs { on: Machine, ask: u64 },
     List { on: Machine, path: Directory },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Renames {
-    Worktree { place: WorktreePlace, name: String },
-    Project(ProjectRow),
-}
-
-impl Renames {
-    fn name(&self) -> &str {
-        match self {
-            Renames::Worktree { name, .. } => name,
-            Renames::Project(project) => project.listed().name().as_str(),
-        }
-    }
 }
 
 pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>) {
@@ -333,17 +316,6 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
                 Heard::Peek { on, session, asked, peek }
             })
         },
-        Ask::Rename { on, renames, to } => Box::new(move || {
-            let renamed = match &renames {
-                Renames::Worktree { place, .. } => {
-                    worktrees::renamed_worktree(&on, place.worktree, Some(&to))
-                },
-                Renames::Project(project) => {
-                    worktrees::renamed_project(&on, project.id(), &to)
-                },
-            };
-            Heard::Renamed { from: renames.name().to_owned(), to, renamed }
-        }),
         Ask::Close { on, place, name, seen } => Box::new(move || {
             let closed = worktrees::closed_there(&on, place.worktree, &seen);
             Heard::Closed { name, closed }
@@ -496,7 +468,6 @@ impl Rows {
 #[derive(Debug)]
 enum Stage {
     Search,
-    Rename { on: Machine, renames: Renames, input: String },
     Planning { on: Machine, place: ViewPlace, agreed: Option<Plan> },
     Asking { on: Machine, place: ViewPlace, plan: Plan, asks: String },
     Closing { on: Machine, place: WorktreePlace, name: String, ends: Ends, asks: String },
@@ -507,6 +478,7 @@ enum Stage {
 enum Aimed {
     Palette,
     Project(ProjectRow),
+    Worktree { place: WorktreePlace, name: String },
 }
 
 struct Shot {
@@ -777,14 +749,6 @@ impl Picker {
                 };
                 self.peeks.insert((on, session, asked), peek);
             },
-            Heard::Renamed { from, to, renamed } => {
-                if let Err(unchanged) = renamed {
-                    let to = to.as_str();
-                    let refused = format!("{from} is not called {to}");
-                    let in_doubt = format!("{from} may be called {to}");
-                    self.error = Some(unchanged.said(&refused, &in_doubt));
-                }
-            },
             Heard::Closed { name, closed } => {
                 if let Err(unchanged) = closed {
                     let refused = format!("{name} stays");
@@ -823,7 +787,6 @@ impl Picker {
         self.aiming = false;
         let picked = match std::mem::replace(&mut self.stage, Stage::Search) {
             Stage::Search => self.search_key(key),
-            Stage::Rename { on, renames, input } => self.rename_key(key, on, renames, input),
             Stage::Planning { on, place, agreed } => {
                 if key.code != KeyCode::Esc {
                     self.stage = Stage::Planning { on, place, agreed };
@@ -863,7 +826,6 @@ impl Picker {
                 term.push_str(&text);
                 true
             }),
-            Stage::Rename { input, .. } => input.push_str(&text),
             Stage::Chain { chain, .. } => chain.paste(&text),
             Stage::Planning { .. } | Stage::Asking { .. } | Stage::Closing { .. } => {},
         }
@@ -986,16 +948,16 @@ impl Picker {
         } else {
             Layout { results: layout.full, preview: None, ..layout }
         };
-        if let Stage::Rename { on, renames, input } = &self.stage {
-            let spots = self.draw_rename(buffer, &layout, on, renames, input);
-            return Drawn::Picker { number: self.number, area, spots };
-        }
         if let Stage::Chain { chain, on, aimed } = &self.stage {
             let aimed = match aimed {
                 Aimed::Palette => self.aimed_at(),
                 Aimed::Project(project) => {
                     let named = self.housed(on, project).map_or(project, |it| &it.project);
                     there(named.listed().name().as_str(), on)
+                },
+                Aimed::Worktree { place, name } => {
+                    let named = self.worktree(on, place).map_or(name, |it| &it.name);
+                    there(named, on)
                 },
             };
             let spots = self.draw_chain(buffer, &layout, chain, &aimed);
@@ -1415,13 +1377,15 @@ impl Picker {
         if self.list != List::Worktrees {
             return;
         }
-        let (on, renames) = match self.worktrees.selected().map(|row| &row.key) {
+        let (on, renames, aimed) = match self.worktrees.selected().map(|row| &row.key) {
             Some(Key::Worktree { on, place }) => {
                 let name = self.row_worktree(on, place).name.clone();
-                (on.clone(), Renames::Worktree { place: place.clone(), name })
+                let renames = menu::Renames::Worktree(place.worktree);
+                (on.clone(), renames, Aimed::Worktree { place: place.clone(), name })
             },
             Some(Key::Project { on, project, .. }) => {
-                (on.clone(), Renames::Project(project.clone()))
+                let renames = menu::Renames::Project(project.id());
+                (on.clone(), renames, Aimed::Project(project.clone()))
             },
             Some(
                 Key::Machine { .. }
@@ -1434,56 +1398,8 @@ impl Picker {
             )
             | None => return,
         };
-        if let Some(why) = self.out_of_reach(&on) {
-            self.error = Some(format!("{} keeps its name: {why}", renames.name()));
-            return;
-        }
-        self.stage = Stage::Rename { on, renames, input: String::new() };
-    }
-
-    fn rename_key(
-        &mut self,
-        key: &KeyEvent,
-        on: Machine,
-        renames: Renames,
-        mut input: String,
-    ) -> Picked {
-        match key.code {
-            KeyCode::Esc => return Picked::Nothing,
-            KeyCode::Enter => {
-                let Ok(to) = self.rename_to(&on, &renames, &input) else {
-                    self.stage = Stage::Rename { on, renames, input };
-                    return Picked::Nothing;
-                };
-                self.asking.push(Ask::Rename { on, renames, to });
-                return Picked::Nothing;
-            },
-            KeyCode::Backspace => {
-                input.pop();
-            },
-            KeyCode::Char(c) if plain(key) => input.push(c),
-            _ => {},
-        }
-        self.stage = Stage::Rename { on, renames, input };
-        Picked::Nothing
-    }
-
-    fn rename_to(&self, on: &Machine, renames: &Renames, name: &str) -> Result<Name, String> {
-        let name = match renames {
-            Renames::Worktree { .. } => Name::parse(name)?,
-            Renames::Project(_) => Name::of_project(name)?,
-        };
-        if name.as_str() == renames.name() {
-            return Err("already called that".to_owned());
-        }
-        let listed = match renames {
-            Renames::Worktree { place, .. } => self.worktree(on, place).is_some(),
-            Renames::Project(project) => self.housed(on, project).is_some(),
-        };
-        if !listed {
-            return Err(format!("{} is listed no more", renames.name()));
-        }
-        Ok(name)
+        assert!(matches!(self.stage, Stage::Search), "Ctrl r chains from the list alone");
+        self.stage = Stage::Chain { chain: Chain::rename(renames), on, aimed };
     }
 
     fn taken(&self, on: &Machine) -> Vec<&str> {
@@ -2171,7 +2087,6 @@ impl Picker {
                 vec![(Hint::Char('y'), "Yes"), (Hint::AnyOtherKey, "No")]
             },
             (Stage::Planning { .. }, _) => vec![(Hint::Esc, "Give up")],
-            (Stage::Rename { .. }, _) => vec![(Hint::Enter, "Rename"), (Hint::Esc, "Cancel")],
             (Stage::Chain { chain, .. }, _) => {
                 vec![(Hint::Enter, chain.enter()), (Hint::Esc, "Back")]
             },
@@ -2203,34 +2118,6 @@ impl Picker {
                 (Hint::Esc, "Close"),
             ],
         }
-    }
-
-    fn draw_rename(
-        &self,
-        buffer: &mut Buffer,
-        layout: &Layout,
-        on: &Machine,
-        renames: &Renames,
-        input: &str,
-    ) -> Spots<Pick> {
-        if let Some(full) = layout.full {
-            let inner = usize::from(full.width.saturating_sub(2));
-            let mut lines = vec![Line::default()];
-            let mut what = there(&format!("renaming \"{}\"", renames.name()), on);
-            match renames {
-                Renames::Worktree { place, .. } if self.is_shown(on, place) => {
-                    what.push_str(", the worktree you are in");
-                },
-                Renames::Worktree { .. } => {},
-                Renames::Project(_) => what.push_str(", a project"),
-            }
-            lines.extend(menu::wrap(&what, inner, Style::new().fg(gruvbox::GREY)));
-            framed(buffer, full, "Rename", "", lines);
-        }
-        let width = usize::from(layout.input.width.saturating_sub(2));
-        let action = self.rename_to(on, renames, input).map(|_| there("Rename", on));
-        draw_input(buffer, layout, "Rename", typed(input, action, width));
-        self.draw_help(buffer, layout.help)
     }
 }
 
@@ -2564,7 +2451,7 @@ impl Layout {
 mod tests {
     use std::time::UNIX_EPOCH;
 
-    use lunetad::projects::WorktreeId;
+    use lunetad::projects::{Name, WorktreeId};
     use ratatui::layout::Position;
 
     use super::*;
@@ -3358,61 +3245,90 @@ mod tests {
         assert_eq!(picker.asks(), [Ask::Close { on: Machine::Local, place, name, seen }]);
     }
 
+    fn renamed(on: Machine, rename: menu::Rename) -> Picked {
+        Picked::Done { done: Done::Rename(on, rename), origin: Origin::Views }
+    }
+
     #[test]
-    fn ctrl_r_renames_the_highlighted_worktree_or_empty_project() {
+    fn ctrl_r_renames_the_highlighted_worktree_or_empty_project_in_the_chain() {
         let mut picker = opened(works());
         control(&mut picker, 'r');
-        assert!(said(&picker).contains(r#"renaming "api""#), "{}", said(&picker));
-        let refused = [("", "a name is empty"), ("api", "already called that")];
-        for (to, why) in refused {
-            retyped(&mut picker, to);
-            press(&mut picker, KeyCode::Enter);
-            assert!(picker.asks().is_empty(), "{to}");
-            assert!(said(&picker).contains(why), "{to}: {}", said(&picker));
-        }
-        retyped(&mut picker, "gateway");
-        assert!(said(&picker).contains("<ENTER> Rename"), "{}", said(&picker));
-        press(&mut picker, KeyCode::Enter);
-        let renames = Renames::Worktree { place: api(), name: "api".to_owned() };
-        let to = Name::parse("gateway").unwrap();
-        assert_eq!(picker.asks(), [Ask::Rename { on: Machine::Local, renames, to: to.clone() }]);
-        assert!(!said(&picker).contains("renaming"), "{}", said(&picker));
-        let refused = Err(Unchanged::Refused("lunetad: no".to_owned()));
-        let heard = |renamed| Heard::Renamed { from: "api".to_owned(), to: to.clone(), renamed };
-        picker.heard(heard(refused));
-        assert!(said(&picker).contains("api is not called gateway: lunetad: no"));
-        picker.heard(heard(Err(Unchanged::InDoubt("it dropped".to_owned()))));
-        let maybe = "it dropped, so api may be called gateway";
-        assert!(said(&picker).contains(maybe), "{}", said(&picker));
-        assert!(!said(&picker).contains("not called"), "{}", said(&picker));
+        let asked = said(&picker);
+        assert!(asked.contains("─ Rename ─"), "{asked}");
+        assert!(asked.contains("its new name; with none, it goes back"), "{asked}");
+        assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Nothing);
+        assert_eq!(lit(&picker), "web › api", "Esc goes back to the list");
 
         press(&mut picker, KeyCode::Up);
         control(&mut picker, 'r');
-        let yours = r#"renaming "fix", the worktree you are in"#;
-        assert!(said(&picker).contains(yours), "{}", said(&picker));
-        press(&mut picker, KeyCode::Esc);
+        let mut renamed_fix = works();
+        renamed_fix.shelves[0].projects[0].worktrees[1].name = "fixed".to_owned();
+        picker.listed(renamed_fix);
+        typed(&mut picker, "patch");
+        let input = drawn(&picker);
+        let rule = text(&input, Rect::new(0, 0, 200, 50)).join(" ");
+        assert!(rule.contains("─ fixed ─"), "the box names the worktree as listed: {rule}");
+        let patch = Some(Name::parse("patch").unwrap());
+        let fixed = menu::Rename::Worktree(fix().worktree, patch);
+        assert_eq!(press(&mut picker, KeyCode::Enter), renamed(Machine::Local, fixed));
+        assert!(picker.asks().is_empty(), "the sidebar asks lunetad, not the picker");
+
         down_to(&mut picker, "notes");
         control(&mut picker, 'r');
-        assert!(said(&picker).contains(r#"renaming "notes", a project"#), "{}", said(&picker));
+        assert!(said(&picker).contains("its new name"), "{}", said(&picker));
+        assert!(!said(&picker).contains("with none"), "a project keeps a name");
         typed(&mut picker, "jots/old");
-        press(&mut picker, KeyCode::Enter);
-        assert_eq!(picker.asks(), [] as [Ask; 0]);
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
         assert!(said(&picker).contains("names no project"), "{}", said(&picker));
-        retyped(&mut picker, "jots");
-        press(&mut picker, KeyCode::Enter);
-        let renames = Renames::Project(project("notes", 2));
-        let to = Name::parse("jots").unwrap();
-        assert_eq!(picker.asks(), [Ask::Rename { on: Machine::Local, renames, to }]);
+        for _ in "jots/old".chars() {
+            press(&mut picker, KeyCode::Backspace);
+        }
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert!(said(&picker).contains("a project keeps a name"), "{}", said(&picker));
+        typed(&mut picker, "jots");
+        let jots = menu::Rename::Project(project("notes", 2).id(), Name::parse("jots").unwrap());
+        assert_eq!(press(&mut picker, KeyCode::Enter), renamed(Machine::Local, jots));
+    }
 
-        press(&mut picker, KeyCode::Up);
-        control(&mut picker, 'r');
-        typed(&mut picker, "docs-2");
-        let mut gone = works();
-        gone.shelves[0].projects[0].worktrees.pop();
-        picker.listed(gone);
-        press(&mut picker, KeyCode::Enter);
-        assert_eq!(picker.asks(), [] as [Ask; 0]);
-        assert!(said(&picker).contains("docs is listed no more"), "{}", said(&picker));
+    #[test]
+    fn a_worktree_renamed_from_its_row_or_the_palette_reads_the_same_names_the_same_way() {
+        let from_row = |to: &str| {
+            let mut picker = opened(works());
+            press(&mut picker, KeyCode::Up);
+            assert_eq!(lit(&picker), "luneta › fix");
+            control(&mut picker, 'r');
+            typed(&mut picker, to);
+            (press(&mut picker, KeyCode::Enter), picker)
+        };
+        let from_palette = |to: &str| {
+            let mut picker = palette(Origin::Views);
+            typed(&mut picker, "rename the worktree");
+            assert_eq!(keyed_action(&picker).0, "Rename the worktree…");
+            press(&mut picker, KeyCode::Enter);
+            typed(&mut picker, to);
+            (press(&mut picker, KeyCode::Enter), picker)
+        };
+        let named = |to: &str| Some(Name::parse(to).unwrap());
+        let long = "x".repeat(projects::NAME_CHARS_MAX + 1);
+        let cases = [
+            ("", Some(None)),
+            ("fix", Some(named("fix"))),
+            ("fixed", Some(named("fixed"))),
+            (long.as_str(), None),
+        ];
+        for (to, outcome) in cases {
+            let ((row, row_picker), (palette, palette_picker)) = (from_row(to), from_palette(to));
+            assert_eq!(row, palette, "{to:?}");
+            let Some(name) = outcome else {
+                assert_eq!(row, Picked::Nothing, "{to:?}");
+                let why = format!("longer than {}", projects::NAME_CHARS_MAX);
+                assert!(said(&row_picker).contains(&why), "{}", said(&row_picker));
+                assert!(said(&palette_picker).contains(&why), "{}", said(&palette_picker));
+                continue;
+            };
+            let rename = menu::Rename::Worktree(fix().worktree, name);
+            assert_eq!(row, renamed(Machine::Local, rename), "{to:?}");
+        }
     }
 
     fn machines() -> Listing {
@@ -3470,12 +3386,10 @@ mod tests {
         let close = Ask::Close { on: nixos(), place: gateway.clone(), name, seen };
         assert_eq!(picker.asks(), [close]);
         control(&mut picker, 'r');
-        assert!(said(&picker).contains(r#"renaming "gateway" on nixos"#), "{}", said(&picker));
+        assert!(said(&picker).contains("─ gateway on nixos ─"), "{}", said(&picker));
         typed(&mut picker, "gw");
-        press(&mut picker, KeyCode::Enter);
-        let renames = Renames::Worktree { place: gateway, name: "gateway".to_owned() };
-        let to = Name::parse("gw").unwrap();
-        assert_eq!(picker.asks(), [Ask::Rename { on: nixos(), renames, to }]);
+        let gw = menu::Rename::Worktree(gateway.worktree, Some(Name::parse("gw").unwrap()));
+        assert_eq!(press(&mut picker, KeyCode::Enter), renamed(nixos(), gw));
 
         down_to(&mut picker, "old › stale");
         let far = Machine::Remote("far".parse().unwrap());
@@ -3483,10 +3397,6 @@ mod tests {
         press(&mut picker, KeyCode::Delete);
         assert_eq!(picker.asks(), [] as [Ask; 0]);
         let why = "stale stays: lunetad does not reach far now";
-        assert!(said(&picker).contains(why), "{}", said(&picker));
-        control(&mut picker, 'r');
-        assert!(!said(&picker).contains("renaming"), "{}", said(&picker));
-        let why = "stale keeps its name: lunetad does not reach far now";
         assert!(said(&picker).contains(why), "{}", said(&picker));
         down_to(&mut picker, "mini");
         assert!(said(&picker).contains("mini keeps no project"), "{}", said(&picker));
