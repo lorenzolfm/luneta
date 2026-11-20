@@ -34,6 +34,8 @@ pub const FRESH: Duration = Duration::from_secs(15);
 
 const LISTINGS_MAX: usize = PROJECTS_MAX;
 
+const WAITERS_MAX: usize = LISTINGS_MAX;
+
 const ISSUES: [&str; 4] = ["issue", "list", "--state", "open"];
 
 const ISSUE_FIELDS: &str = "number,title,labels";
@@ -188,10 +190,10 @@ pub struct Listings {
 
 impl Listings {
     pub fn list(&self, dir: &Dir) -> Result<Listed, String> {
-        let slots = locked(&self.slots);
-        let running = |slots: &mut Slots| matches!(slots.seen(dir, Instant::now()), Seen::Running);
-        let waited = self.done.wait_timeout_while(slots, PATIENCE, running);
-        let (mut slots, _) = waited.unwrap_or_else(PoisonError::into_inner);
+        let mut slots = locked(&self.slots);
+        if slots.seen(dir, Instant::now()) == Seen::Running {
+            slots = self.list_waited(slots, dir)?;
+        }
         let now = Instant::now();
         match slots.seen(dir, now) {
             Seen::Running => {
@@ -208,11 +210,30 @@ impl Listings {
         self.done.notify_all();
         listed.unwrap_or_else(|panic| panic::resume_unwind(panic))
     }
+
+    fn list_waited<'a>(
+        &self,
+        mut slots: MutexGuard<'a, Slots>,
+        dir: &Dir,
+    ) -> Result<MutexGuard<'a, Slots>, String> {
+        assert!(slots.waiters <= WAITERS_MAX, "so many wait at most");
+        if slots.waiters == WAITERS_MAX {
+            return Err(format!("lunetad has {WAITERS_MAX} asks waiting on gh already, its most"));
+        }
+        slots.waiters += 1;
+        let running = |slots: &mut Slots| matches!(slots.seen(dir, Instant::now()), Seen::Running);
+        let waited = self.done.wait_timeout_while(slots, PATIENCE, running);
+        let (mut slots, _) = waited.unwrap_or_else(PoisonError::into_inner);
+        assert!(slots.waiters > 0, "a waiter is counted until it wakes");
+        slots.waiters -= 1;
+        Ok(slots)
+    }
 }
 
 #[derive(Debug, Default)]
 struct Slots {
     slots: BTreeMap<Dir, Slot>,
+    waiters: usize,
 }
 
 #[derive(Debug)]
@@ -504,6 +525,33 @@ mod tests {
         }
         let refused = Err("lunetad lists the work of 64 folders at once, its most".to_owned());
         assert_eq!(running.run(&dirs[LISTINGS_MAX], now), refused);
+    }
+
+    #[test]
+    fn an_ask_past_the_most_that_wait_is_refused_at_once_and_a_waiter_counts_until_it_wakes() {
+        let (listings, luneta) = (Listings::default(), dir("/w/luneta"));
+        locked(&listings.slots).run(&luneta, Instant::now()).unwrap();
+        locked(&listings.slots).waiters = WAITERS_MAX;
+        let refused = Err(format!("lunetad has {WAITERS_MAX} asks waiting on gh already, its most"));
+        let started = Instant::now();
+        assert_eq!(listings.list(&luneta), refused);
+        assert!(started.elapsed() < PATIENCE, "the refusal waits for nothing");
+        assert_eq!(locked(&listings.slots).waiters, WAITERS_MAX, "a refused ask counts no waiter");
+
+        locked(&listings.slots).waiters = WAITERS_MAX - 1;
+        let came = thread::scope(|scope| {
+            let waiting = scope.spawn(|| listings.list(&luneta));
+            let counted = (0..1000).any(|_| {
+                thread::sleep(Duration::from_millis(1));
+                locked(&listings.slots).waiters == WAITERS_MAX
+            });
+            assert!(counted, "the ask waits on the listing that runs, and counts itself");
+            locked(&listings.slots).ran(&luneta, Some((Instant::now(), Ok(Listed::Unhosted))));
+            listings.done.notify_all();
+            waiting.join().unwrap()
+        });
+        assert_eq!(came, Ok(Listed::Unhosted), "the waiter takes the listing that came");
+        assert_eq!(locked(&listings.slots).waiters, WAITERS_MAX - 1, "and counts itself no more");
     }
 
     #[test]

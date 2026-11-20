@@ -114,7 +114,10 @@ impl Ask {
     }
 
     pub fn rehome(&mut self, on: &Machine, dir: &str, project: &str) {
-        if self.session.is_some() || self.turn.is_some() {
+        if self.session.is_some() {
+            return;
+        }
+        if self.turn.is_some() {
             return;
         }
         let Ask { works, highlighted, .. } = Ask::homed(self.number, on, dir, project);

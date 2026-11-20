@@ -48,6 +48,7 @@ pub fn route(on: &Machine, view: ViewKey) -> Result<TerminalKey, String> {
 pub struct Projected {
     here: Vec<Project>,
     far: BTreeMap<Destination, Vec<Project>>,
+    read: bool,
 }
 
 impl Project {
@@ -101,7 +102,12 @@ impl Projected {
             }
         }
         let here = listed(kept(host.projects.as_ref()))?;
-        Ok(Projected { here, far: far_projects })
+        Ok(Projected { here, far: far_projects, read: true })
+    }
+
+    #[must_use]
+    pub fn read(&self) -> bool {
+        self.read
     }
 
     #[must_use]

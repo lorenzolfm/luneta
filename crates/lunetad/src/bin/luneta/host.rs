@@ -42,7 +42,7 @@ use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange};
 use crate::ask::{self, Ask, Keyed};
-use crate::home::Home;
+use crate::home::{self, Home};
 use crate::attached;
 use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
@@ -128,8 +128,6 @@ pub const NOT_YET: &str = "luneta does not do that to a worktree yet";
 const WELCOME_MENU: &str = "the menu is for terminals: d d closes this welcome view";
 
 const HOME_MENU: &str = "the menu is for terminals: the project's is on its row in the sidebar";
-
-const HOMES_KEPT_MAX: usize = 16;
 
 const UNSHOWN: [&str; 2] =
     ["No worktree to show yet.", "o w on a project's row opens one."];
@@ -411,7 +409,7 @@ enum Homed {
 struct App {
     right: Option<Right>,
     homes: u64,
-    kept_homes: Vec<Home>,
+    kept_homes: home::Kept,
     shown_number_dropped: u64,
     runs_in: Option<TerminalKey>,
     projected: Projected,
@@ -684,7 +682,7 @@ fn run_in(
     let mut app = App {
         right,
         homes: 0,
-        kept_homes: Vec::new(),
+        kept_homes: home::Kept::default(),
         shown_number_dropped: 0,
         runs_in,
         projected: Projected::default(),
@@ -759,11 +757,13 @@ fn caught<T>(named: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
 }
 
 fn gone(projected: &Projected, home: &Home) -> bool {
+    let listed = projected.read() && projected.reaches(home.machine());
     let unlisted = projected.project(home.machine(), home.project()).is_none();
-    home.known() && projected.reaches(home.machine()) && unlisted
+    home.known() && listed && unlisted
 }
 
 fn fetch_work(lunetad: &Path, events: &Sender<Event>, home: &Home) {
+    assert!(home.fetching(), "a home is fetched for only once it asks, and so once at a time");
     let (number, on, project) = (home.number(), home.machine().clone(), home.project());
     let (lunetad, events) = (lunetad.to_owned(), events.clone());
     thread::spawn(move || {
@@ -925,9 +925,7 @@ impl App {
             },
             Event::Reached { claude_folder } => self.claude_folder = claude_folder,
             Event::Daemon(Ok(host)) => {
-                let adapted = Projected::adapted(&host);
-                let read = adapted.is_ok();
-                self.projected = adapted.unwrap_or_else(|why| {
+                self.projected = Projected::adapted(&host).unwrap_or_else(|why| {
                     self.sidebar.notify(format!("lunetad's projects: {why}"));
                     Projected::default()
                 });
@@ -935,13 +933,12 @@ impl App {
                     let (tabs, titles) = self.projected.tabs(right.machine(), right.worktree());
                     right.tabs(tabs, titles);
                 }
-                let homed = self.name_home();
-                if read && homed == Some(Homed::Gone) {
-                    self.leave_view();
-                }
-                if read {
+                if self.projected.read() {
+                    if self.name_home() == Some(Homed::Gone) {
+                        self.forget_home();
+                    }
                     let projected = &self.projected;
-                    self.kept_homes.retain(|home| !gone(projected, home));
+                    self.kept_homes.forget(|home| gone(projected, home));
                 }
                 self.sidebar.heard(host);
                 self.seat();
@@ -1451,20 +1448,19 @@ impl App {
         let Some(Right::Home(home)) = &mut self.right else {
             return;
         };
-        if home.asks(now) {
+        if home.relist(now) {
             fetch_work(&self.lunetad, &self.events, home);
         }
     }
 
     fn go_home(&mut self, on: &Machine, project: ProjectId) {
-        let shown = |home: &Home| home.machine() == on && home.project() == project;
-        if matches!(&self.right, Some(Right::Home(home)) if shown(home)) {
+        if matches!(&self.right, Some(Right::Home(home)) if home.is_of(on, project)) {
             return;
         }
+        let kept = self.kept_homes.take(on, project);
         self.drop_shown();
-        let kept = self.kept_homes.iter().position(|home| home.machine() == on && home.project() == project);
-        let home = if let Some(at) = kept {
-            self.kept_homes.remove(at)
+        let home = if let Some(home) = kept {
+            home
         } else {
             self.homes += 1;
             self.asks += 1;
@@ -1509,14 +1505,22 @@ impl App {
     }
 
     fn keep_home(&mut self, home: Home) {
-        let same = |kept: &Home| kept.machine() == home.machine() && kept.project() == home.project();
-        assert!(!self.kept_homes.iter().any(same), "a project's home is kept once");
-        if self.kept_homes.len() == HOMES_KEPT_MAX {
-            let idle = self.kept_homes.iter().position(|kept| !kept.turning());
-            self.kept_homes.remove(idle.unwrap_or(0));
+        let Some(dropped) = self.kept_homes.keep(home) else {
+            return;
+        };
+        if dropped.turning() {
+            let project = self.projected.project(dropped.machine(), dropped.project());
+            let name = project.map_or("a project", |project| project.name.as_str());
+            let most = home::KEPT_MAX;
+            self.sidebar.notify(format!("luneta keeps {most} homes at most: {name}'s went, and its turn's agent ended"));
         }
-        self.kept_homes.push(home);
-        assert!(self.kept_homes.len() <= HOMES_KEPT_MAX, "luneta keeps so many homes at most");
+    }
+
+    fn forget_home(&mut self) {
+        let Some(Right::Home(gone)) = self.right.take() else {
+            unreachable!("only a shown home is forgotten");
+        };
+        self.go_other_than(gone.machine(), None);
     }
 
     fn homes_mut(&mut self) -> impl Iterator<Item = &mut Home> {
@@ -2411,14 +2415,18 @@ impl App {
             Some(Right::Home(home)) => (home.machine().clone(), None),
             None => return,
         };
+        self.go_other_than(&on, left);
+    }
+
+    fn go_other_than(&mut self, on: &Machine, left: Option<WorktreeId>) {
         let held = |machine: &Machine| {
             let projects = self.projected.projects(machine).iter();
             let worktrees = projects.flat_map(projected::Project::worktrees);
             let open = worktrees.filter(|it| !it.terminals.is_empty());
-            let others = open.filter(|it| *machine != on || Some(it.id) != left);
+            let others = open.filter(|it| machine != on || Some(it.id) != left);
             projects::last_used(others.map(|it| (it.id, it.used)))
         };
-        let other = held(&on).map(|id| (on.clone(), id));
+        let other = held(on).map(|id| (on.clone(), id));
         let other = other.or_else(|| held(&Machine::Local).map(|id| (Machine::Local, id)));
         match other {
             Some((machine, other)) => self.go_worktree(&machine, other, None),
@@ -2837,7 +2845,8 @@ mod tests {
 
     #[test]
     fn a_home_is_gone_only_from_a_machine_reached_that_lists_its_project_no_more() {
-        let (projected, project) = (Projected::default(), ProjectId::of(3).unwrap());
+        let projected = Projected::adapted(&lunetad::api::Host::default()).unwrap();
+        let project = ProjectId::of(3).unwrap();
         let named = |on: Machine| {
             let mut home = Home::new(1, 1, on, project);
             home.named("luneta", "/w/luneta");
@@ -2848,6 +2857,8 @@ mod tests {
         assert!(!gone(&projected, &named(far)), "a machine not reached just now keeps its home");
         let unnamed = Home::new(1, 1, Machine::Local, project);
         assert!(!gone(&projected, &unnamed), "a home never named has not gone");
+        let unread = Projected::default();
+        assert!(!gone(&unread, &named(Machine::Local)), "no home is gone while lunetad's projects are unread");
     }
 
     #[test]

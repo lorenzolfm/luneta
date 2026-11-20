@@ -22,6 +22,8 @@ use crate::sidebar::{self, ACCENT};
 
 pub const AGAIN: Duration = Duration::from_secs(60);
 
+pub const KEPT_MAX: usize = 16;
+
 const _: () = assert!(work::FRESH.as_millis() < AGAIN.as_millis());
 
 const ASK_TITLE: &str = "Ask";
@@ -104,6 +106,10 @@ impl Home {
         self.project
     }
 
+    pub fn is_of(&self, on: &Machine, project: ProjectId) -> bool {
+        self.on == *on && self.project == project
+    }
+
     pub fn ask_numbered(&mut self, number: u64) -> Option<&mut Ask> {
         match &mut self.named {
             Named::As { ask, .. } if ask.number() == number => Some(ask),
@@ -118,7 +124,7 @@ impl Home {
                 self.named = Named::As { name: name.to_owned(), dir: dir.to_owned(), ask };
             },
             Named::As { name: named, dir: homed, ask } => {
-                if named != name || homed != dir {
+                if (named.as_str(), homed.as_str()) != (name, dir) {
                     name.clone_into(named);
                     dir.clone_into(homed);
                     ask.rehome(&self.on, dir, name);
@@ -131,7 +137,14 @@ impl Home {
         matches!(self.named, Named::As { .. })
     }
 
-    pub fn asks(&mut self, now: Instant) -> bool {
+    pub fn fetching(&self) -> bool {
+        match self.listing {
+            Listing::Asking | Listing::Came { next: Next::Asking, .. } => true,
+            Listing::Came { next: Next::At(_), .. } => false,
+        }
+    }
+
+    pub fn relist(&mut self, now: Instant) -> bool {
         let Listing::Came { next, .. } = &mut self.listing else {
             return false;
         };
@@ -170,6 +183,15 @@ impl Home {
         let near = was.map_or(0, |was| was.min(items.len().saturating_sub(1)));
         let kept = self.cursor.filter(|item| items.contains(item));
         self.cursor = kept.or_else(|| items.get(near).copied());
+        self.held_on(&items);
+    }
+
+    fn held_on(&self, items: &[Item]) {
+        assert_eq!(self.cursor.is_some(), !items.is_empty(), "the cursor is on an item once any is listed");
+        if let Some(cursor) = self.cursor {
+            assert!(items.contains(&cursor), "the cursor is on a listed item");
+        }
+        assert!(self.marked.iter().all(|marked| items.contains(marked)), "only what is listed is marked");
     }
 
     fn at(&self, items: &[Item]) -> Option<usize> {
@@ -224,6 +246,7 @@ impl Home {
         let items = self.items();
         let at = self.at(&items).map_or(0, |at| at.saturating_sub(1));
         self.cursor = items.get(at).copied();
+        self.held_on(&items);
     }
 
     fn step_down(&mut self) {
@@ -231,12 +254,14 @@ impl Home {
         let last = items.len().saturating_sub(1);
         let at = self.at(&items).map_or(0, |at| (at + 1).min(last));
         self.cursor = items.get(at).copied();
+        self.held_on(&items);
     }
 
     fn mark(&mut self) {
         let Some(item) = self.cursor else {
             return;
         };
+        assert!(self.items().contains(&item), "only a listed item is marked");
         if !self.marked.remove(&item) {
             self.marked.insert(item);
         }
@@ -380,6 +405,43 @@ impl Home {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct Kept {
+    homes: Vec<Home>,
+}
+
+impl Kept {
+    pub fn take(&mut self, on: &Machine, project: ProjectId) -> Option<Home> {
+        let at = self.homes.iter().position(|home| home.is_of(on, project))?;
+        let taken = self.homes.remove(at);
+        assert!(!self.homes.iter().any(|home| home.is_of(on, project)), "a project's home is kept once");
+        Some(taken)
+    }
+
+    #[must_use]
+    pub fn keep(&mut self, home: Home) -> Option<Home> {
+        let of = |kept: &Home| kept.is_of(home.machine(), home.project());
+        assert!(!self.homes.iter().any(of), "a project's home is kept once");
+        assert!(self.homes.len() <= KEPT_MAX, "luneta keeps so many homes at most");
+        let mut dropped = None;
+        if self.homes.len() == KEPT_MAX {
+            let idle = self.homes.iter().position(|kept| !kept.turning());
+            dropped = Some(self.homes.remove(idle.unwrap_or(0)));
+        }
+        self.homes.push(home);
+        assert!(self.homes.len() <= KEPT_MAX, "luneta keeps so many homes at most");
+        dropped
+    }
+
+    pub fn forget(&mut self, gone: impl Fn(&Home) -> bool) {
+        self.homes.retain(|home| !gone(home));
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Home> {
+        self.homes.iter_mut()
+    }
+}
+
 fn marks(marked: &BTreeSet<Item>) -> Marked {
     let numbers = |issues: bool| {
         let each = marked.iter().filter_map(move |item| match (item, issues) {
@@ -489,7 +551,7 @@ mod tests {
     #[test]
     fn the_lists_show_pull_requests_then_issues_and_tab_marks_and_steps_on() {
         let (mut home, now) = (home(), Instant::now());
-        assert!(!home.asks(now), "a new home is asking already");
+        assert!(!home.relist(now), "a new home is asking already");
         assert_eq!(shown(&home, 60, 12)[2], "   asking gh for the open issues and pull requests…");
         home.listed(Ok(listed()), now);
         press(&mut home, KeyCode::Tab);
@@ -533,13 +595,16 @@ mod tests {
     fn the_work_is_asked_once_at_a_time_and_again_a_minute_after_it_came() {
         let (mut home, now) = (home(), Instant::now());
         assert_eq!(home.due(), None);
-        assert!(!home.asks(now + AGAIN), "a new home asks no more while its first ask is out");
+        assert!(home.fetching(), "a new home is fetched for");
+        assert!(!home.relist(now + AGAIN), "a new home asks no more while its first ask is out");
         home.listed(Ok(listed()), now);
+        assert!(!home.fetching());
         assert_eq!(home.due(), Some(now + AGAIN));
-        assert!(!home.asks(now + AGAIN.saturating_sub(Duration::from_millis(1))));
-        assert!(home.asks(now + AGAIN));
+        assert!(!home.relist(now + AGAIN.saturating_sub(Duration::from_millis(1))));
+        assert!(home.relist(now + AGAIN));
+        assert!(home.fetching(), "a home due again is fetched for");
         assert_eq!(home.due(), None);
-        assert!(!home.asks(now + AGAIN * 2), "and not again while it is asked");
+        assert!(!home.relist(now + AGAIN * 2), "and not again while it is asked");
     }
 
     #[test]
@@ -547,17 +612,17 @@ mod tests {
         let (mut home, now) = (home(), Instant::now());
         home.listed(Err("gh is not on the PATH".to_owned()), now);
         assert_eq!(shown(&home, 60, 10)[2], " gh lists nothing here: gh is not on the PATH");
-        home.asks(now + AGAIN);
+        home.relist(now + AGAIN);
         home.listed(Ok(listed()), now + AGAIN);
         press(&mut home, KeyCode::Tab);
         press(&mut home, KeyCode::Tab);
         assert_eq!(marks(&home.marked), Marked::new([number(507)], [number(524)]).unwrap());
-        home.asks(now + AGAIN * 2);
+        home.relist(now + AGAIN * 2);
         home.listed(Err("HTTP 502".to_owned()), now + AGAIN * 2);
         let lines = shown(&home, 60, 14);
         assert_eq!(lines[1], " not listed again: HTTP 502");
         assert!(lines[4].contains("#524"), "{lines:?}");
-        home.asks(now + AGAIN * 3);
+        home.relist(now + AGAIN * 3);
         let issues: [(u32, &str, &[&str]); 1] = [(98, "Menu says no", &[])];
         home.listed(Ok(work(&issues, &[(524, "Say view", "issue-511", false)])), now + AGAIN * 3);
         assert_eq!(marks(&home.marked), Marked::new([], [number(524)]).unwrap(), "#507 was closed");
@@ -572,7 +637,7 @@ mod tests {
         home.listed(Ok(listed()), now);
         press(&mut home, KeyCode::Down);
         assert_eq!(home.cursor, Some(Item::Issue(number(507))));
-        home.asks(now + AGAIN);
+        home.relist(now + AGAIN);
         let pulls = [(545, "Fresh", "issue-544", false), (524, "Say view, not pane", "issue-511", true)];
         let issues: [(u32, &str, &[&str]); 2] = [(507, "Open a project", &[]), (98, "Menu says no", &[])];
         home.listed(Ok(work(&issues, &pulls)), now + AGAIN);
@@ -581,7 +646,7 @@ mod tests {
         assert_eq!(marks(&home.marked), Marked::new([number(507)], []).unwrap());
         assert_eq!(home.cursor, Some(Item::Issue(number(98))));
         press(&mut home, KeyCode::Up);
-        home.asks(now + AGAIN * 2);
+        home.relist(now + AGAIN * 2);
         let issues: [(u32, &str, &[&str]); 1] = [(98, "Menu says no", &[])];
         home.listed(Ok(work(&issues, &pulls)), now + AGAIN * 2);
         assert_eq!(home.cursor, Some(Item::Issue(number(98))), "#507 closed, and #98 took its place");
@@ -598,7 +663,7 @@ mod tests {
         let lines = shown(&home, 60, 14);
         assert_eq!(lines[2], " Pull requests · 0");
         assert_eq!(lines[5], " Issues · 50+");
-        home.asks(now + AGAIN);
+        home.relist(now + AGAIN);
         home.listed(Ok(Listed::Unhosted), now + AGAIN);
         assert_eq!(home.cursor, None, "nothing is listed to be on");
         let lines = shown(&home, 60, 14);
@@ -606,7 +671,7 @@ mod tests {
         press(&mut home, KeyCode::Tab);
         assert_eq!(marks(&home.marked), Marked::default());
         assert_eq!(home.due(), Some(now + AGAIN * 2), "it asks again, as a remote may be added");
-        home.asks(now + AGAIN * 2);
+        home.relist(now + AGAIN * 2);
         home.listed(Err("git did not say the remotes".to_owned()), now + AGAIN * 2);
         assert_eq!(shown(&home, 60, 14)[2], " gh lists nothing here: git did not say the remotes");
     }
@@ -627,6 +692,27 @@ mod tests {
         assert!(home.ask_numbered(2).is_none(), "a prompt is heard only by its own number");
         let named = shown(&home, 60, 14);
         assert!(named.contains(&"│ › _                                                      │".to_owned()), "{named:?}");
+    }
+
+    #[test]
+    fn a_home_taken_back_never_makes_room_and_the_oldest_idle_one_does() {
+        let of = |id: u64| ProjectId::of(id).unwrap();
+        let home_of = |id: u64| Home::new(id, id, Machine::Local, of(id));
+        let mut kept = Kept::default();
+        for id in 1..=u64::try_from(KEPT_MAX).unwrap() {
+            assert!(kept.keep(home_of(id)).is_none(), "room is left up to the most");
+        }
+        let taken = kept.take(&Machine::Local, of(1));
+        assert_eq!(taken.map(|home| home.number()), Some(1), "the oldest is taken back, not dropped");
+        assert!(kept.keep(home_of(17)).is_none(), "the one taken back made room");
+        let dropped = kept.keep(home_of(18));
+        assert_eq!(dropped.map(|home| home.number()), Some(2), "the oldest idle home makes room");
+        assert!(kept.take(&Machine::Local, of(2)).is_none());
+        let far = Machine::Remote("nixos".parse().unwrap());
+        assert!(kept.take(&far, of(3)).is_none(), "a home is of its machine as well as its project");
+        kept.forget(|home| home.project() == of(3));
+        assert!(kept.take(&Machine::Local, of(3)).is_none(), "a forgotten home is kept no more");
+        assert_eq!(kept.take(&Machine::Local, of(4)).map(|home| home.number()), Some(4));
     }
 
     #[test]

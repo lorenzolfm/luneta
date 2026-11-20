@@ -196,7 +196,7 @@ impl Marked {
         Marked::new(numbered(issues)?, numbered(pulls)?)
     }
 
-    fn told(&self) -> Option<String> {
+    fn line(&self) -> Option<String> {
         let listed = |kind: &str, numbers: &BTreeSet<NonZeroU32>| {
             let numbers: Vec<String> = numbers.iter().map(|number| format!("#{number}")).collect();
             let (last, rest) = numbers.split_last()?;
@@ -313,7 +313,7 @@ fn system(highlighted: &str) -> String {
 }
 
 fn told(marked: &Marked, words: &str) -> String {
-    match marked.told() {
+    match marked.line() {
         Some(marked) => format!("{marked}\n\n{words}"),
         None => words.to_owned(),
     }
