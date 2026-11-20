@@ -397,6 +397,7 @@ pub enum Key {
 pub enum Lone {
     Folder(Directory),
     Clone,
+    NoneOpen,
     Unlisted(String),
 }
 
@@ -408,7 +409,7 @@ impl Lone {
         match &housed.unopened {
             Unopened::Folder => Some(Lone::Folder((&housed.dir).into())),
             Unopened::Listed(folders) if folders.is_empty() => Some(Lone::Clone),
-            Unopened::Listed(_) => None,
+            Unopened::Listed(_) => Some(Lone::NoneOpen),
             Unopened::Unlisted(why) => Some(Lone::Unlisted(why.clone())),
         }
     }
@@ -416,6 +417,7 @@ impl Lone {
     fn tag(&self) -> &'static str {
         match self {
             Lone::Folder(_) | Lone::Clone => "no worktree",
+            Lone::NoneOpen => "none open",
             Lone::Unlisted(_) => "not listed",
         }
     }
@@ -470,6 +472,13 @@ impl Rows {
 
     fn selected(&self) -> Option<&Row> {
         self.rows.get(self.at?)
+    }
+
+    fn light(&mut self, fits: impl Fn(&Key) -> bool) {
+        if let Some(at) = self.rows.iter().position(|row| fits(&row.key)) {
+            self.at = Some(at);
+        }
+        assert_eq!(self.at.is_some(), !self.rows.is_empty(), "a row is lit while there is one");
     }
 
     fn step(&mut self, by: isize) {
@@ -607,9 +616,22 @@ pub struct Picker {
     asking: Vec<Ask>,
     aim: Machine,
     aiming: bool,
-    scope: Option<(Machine, ProjectId)>,
+    scope: Option<Scope>,
     palette: Palette,
     actions: Rows,
+}
+
+#[derive(Debug)]
+struct Scope {
+    on: Machine,
+    project: ProjectId,
+    back: Back,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Back {
+    Close,
+    To(List),
 }
 
 impl Picker {
@@ -620,7 +642,7 @@ impl Picker {
         palette: Palette,
     ) -> Picker {
         let mut picker = Picker::open(number, List::Worktrees, listing, on.clone(), palette);
-        picker.scope = Some((on, project));
+        picker.scope = Some(Scope { on, project, back: Back::Close });
         picker.rebuild(true);
         picker
     }
@@ -1048,7 +1070,7 @@ impl Picker {
             return Picked::Nothing;
         }
         match key.code {
-            KeyCode::Esc => Picked::Close,
+            KeyCode::Esc => self.escape(),
             KeyCode::Tab => {
                 self.list = self.list.next();
                 Picked::Nothing
@@ -1098,6 +1120,22 @@ impl Picker {
         }
     }
 
+    fn escape(&mut self) -> Picked {
+        let Some(Scope { on, project, back: Back::To(list) }) = self.scope.take_if(|scope| {
+            matches!(scope.back, Back::To(_))
+        }) else {
+            return Picked::Close;
+        };
+        self.list = list;
+        self.term.clear();
+        self.rebuild(true);
+        let row = |key: &Key| {
+            matches!(key, Key::Project { on: at, project: row, .. } if *at == on && row.id() == project)
+        };
+        self.rows_mut().light(row);
+        Picked::Nothing
+    }
+
     fn enter(&mut self) -> Picked {
         let Some(row) = self.rows().selected() else {
             return Picked::Nothing;
@@ -1116,6 +1154,16 @@ impl Picker {
                     let (chain, on) = (Chain::branch(project.id()), on.clone());
                     let aimed = Aimed::Project(project.clone());
                     self.stage = Stage::Chain { chain, on, aimed };
+                    Picked::Nothing
+                },
+                Lone::NoneOpen => {
+                    let (on, project) = (on.clone(), project.id());
+                    self.scope = Some(Scope { on, project, back: Back::To(self.list) });
+                    self.list = List::Worktrees;
+                    self.term.clear();
+                    self.rebuild(true);
+                    let listed = self.worktrees.rows.len();
+                    assert!(listed > 0, "a project with none open lists its worktrees not open");
                     Picked::Nothing
                 },
                 Lone::Unlisted(_) => Picked::Nothing,
@@ -1221,10 +1269,8 @@ impl Picker {
         let mut ranked: Vec<(Tier, Kind, Row)> = actions.chain(places).collect();
         ranked.sort_by_key(|(tier, kind, _)| (*tier, *kind));
         let mut rows: Vec<Row> = ranked.into_iter().map(|(.., row)| row).collect();
-        if rows.is_empty()
-            && let Some(Ok(key)) = self.new_key()
-        {
-            rows.push(Row::plain(key, self.term.clone()));
+        if rows.is_empty() {
+            rows = self.typed_rows();
         }
         rows
     }
@@ -1256,6 +1302,26 @@ impl Picker {
     fn here_project(&self) -> Option<(&Machine, &Housed)> {
         let (on, place) = self.listing.shown.as_ref()?;
         Some((on, self.housed(on, &place.project)?))
+    }
+
+    fn typed_rows(&self) -> Vec<Row> {
+        let named = self.unopened_named();
+        if !named.is_empty() {
+            return named;
+        }
+        match self.new_key() {
+            Some(Ok(key)) => vec![Row::plain(key, self.term.clone())],
+            Some(Err(_)) | None => Vec::new(),
+        }
+    }
+
+    fn unopened_named(&self) -> Vec<Row> {
+        let Some((on, housed)) = self.here_project() else {
+            return Vec::new();
+        };
+        let named = housed.unopened.folders().iter().filter(|folder| folder.last() == self.term);
+        let found: Vec<Found<'_>> = named.map(|folder| unopened_found(on, housed, folder)).collect();
+        matched(None, candidates_of(&found))
     }
 
     fn new_key(&self) -> Option<Result<Key, String>> {
@@ -1408,11 +1474,8 @@ impl Picker {
             grouped(&mut agents, self.agent_rows(finder.as_ref(), &on, runs), rule);
         }
         let mut worktrees = self.worktree_rows(finder.as_ref());
-        if worktrees.is_empty()
-            && self.scope.is_none()
-            && let Some(Ok(key)) = self.new_key()
-        {
-            worktrees.push(Row::plain(key, self.term.clone()));
+        if worktrees.is_empty() && self.scope.is_none() {
+            worktrees = self.typed_rows();
         }
         let (dirs, aimed) = self.dir_rows();
         let actions = self.action_rows(finder.as_ref());
@@ -1434,7 +1497,7 @@ impl Picker {
     }
 
     fn worktree_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
-        if let Some((on, project)) = &self.scope {
+        if let Some(Scope { on, project, .. }) = &self.scope {
             return self.worktree_rows_scoped(finder, on, *project);
         }
         self.listed_worktrees(finder)
@@ -1443,7 +1506,6 @@ impl Picker {
     fn listed_worktrees(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
         let tagged = self.tagged();
         let mut found = Vec::new();
-        let mut unopened_found = Vec::new();
         let mut machines = Vec::new();
         for shelved in &self.listing.shelves {
             let on = &shelved.on;
@@ -1452,11 +1514,17 @@ impl Picker {
             }
             for housed in &shelved.projects {
                 let project = housed.project.listed().name().as_str();
-                unopened_found.extend(unopened_of(on, housed));
                 if let Some(lone) = Lone::of(housed) {
                     assert!(housed.worktrees.is_empty(), "{project} alone has no worktree open");
                     let unopened = housed.unopened.folders();
-                    assert!(unopened.is_empty(), "{project} alone lists no worktree not open");
+                    match lone {
+                        Lone::NoneOpen => {
+                            assert!(!unopened.is_empty(), "{project} has worktrees, none open");
+                        },
+                        Lone::Folder(_) | Lone::Clone | Lone::Unlisted(_) => {
+                            assert!(unopened.is_empty(), "{project} alone lists no worktree");
+                        },
+                    }
                     let (on, row) = (on.clone(), housed.project.clone());
                     let key = Key::Project { on, project: row, lone };
                     let dir = sidebar::short_cwd(housed.dir.as_str());
@@ -1471,7 +1539,6 @@ impl Picker {
             }
         }
         found.sort_by_key(|(used, ..)| Reverse(*used));
-        found.extend(unopened_found);
         let mut rows = matched(finder, candidates_of(&found));
         if finder.is_none() {
             rows.extend(machines);
@@ -1799,7 +1866,7 @@ impl Picker {
         vec![tag, Span::raw("  ")]
     }
 
-    fn scoped_empty(&self, (on, project): &(Machine, ProjectId)) -> String {
+    fn scoped_empty(&self, Scope { on, project, .. }: &Scope) -> String {
         let shelved = self.listing.shelves.iter().filter(|shelved| shelved.on == *on);
         let mut housed = shelved.flat_map(|shelved| &shelved.projects);
         let Some(housed) = housed.find(|housed| housed.project.id() == *project) else {
@@ -1887,6 +1954,10 @@ impl Picker {
                     Lone::Clone => format!(
                         "{name} is a clone with no worktree: Enter asks for a branch and makes \
                          its worktree, as n w does",
+                    ),
+                    Lone::NoneOpen => format!(
+                        "{name} has no worktree open: Enter lists its worktrees not open, as o w \
+                         does",
                     ),
                     Lone::Unlisted(why) => unlisted(name, why),
                 };
@@ -2013,6 +2084,7 @@ impl Picker {
                     Ok(there("Start a worktree", on))
                 },
                 Key::Project { on, lone: Lone::Clone, .. } => Ok(there("New worktree", on)),
+                Key::Project { on, lone: Lone::NoneOpen, .. } => Ok(there("Open a worktree", on)),
                 Key::Project { project, lone: Lone::Unlisted(why), .. } => {
                     Err(unlisted(project.listed().name(), why))
                 },
@@ -2210,14 +2282,16 @@ fn grouped(into: &mut Vec<Row>, mut rows: Vec<Row>, rule: Option<String>) -> Opt
 }
 
 fn unopened_of<'a>(on: &'a Machine, housed: &'a Housed) -> impl Iterator<Item = Found<'a>> {
+    housed.unopened.folders().iter().map(move |unopened| unopened_found(on, housed, unopened))
+}
+
+fn unopened_found<'a>(on: &Machine, housed: &Housed, unopened: &projects::Dir) -> Found<'a> {
     let project = housed.project.listed().name().as_str();
-    housed.unopened.folders().iter().map(move |unopened| {
-        let name = format!("{project} › {}", unopened.last());
-        let folder = sidebar::short_cwd(unopened.as_str());
-        let (row, at) = (housed.project.clone(), unopened.into());
-        let key = Key::Unopened { on: on.clone(), project: row, folder: at };
-        (None, name, Some(UNOPENED), folder, key)
-    })
+    let name = format!("{project} › {}", unopened.last());
+    let folder = sidebar::short_cwd(unopened.as_str());
+    let (row, at) = (housed.project.clone(), unopened.into());
+    let key = Key::Unopened { on: on.clone(), project: row, folder: at };
+    (None, name, Some(UNOPENED), folder, key)
 }
 
 fn candidates_of<'a>(
@@ -2880,21 +2954,88 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_not_open_is_listed_after_the_open_and_enter_opens_it() {
+    fn super_j_lists_the_open_worktrees_alone_and_a_project_with_none_open_once() {
         let mut picker = opened(with_unopened(works()));
         let open = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
-        let unopened = ["luneta › old", "luneta › spike", "web › legacy"];
-        assert_eq!(rows(&picker), [&open[..], &unopened[..]].concat());
-        let (lines, _) = list(&picker);
-        assert!(lines[5].ends_with("not open"), "{lines:?}");
-        down_to(&mut picker, "luneta › spike");
-        assert!(said(&picker).contains("<ENTER> Open"), "{}", said(&picker));
-        let opens = Picked::Add {
+        assert_eq!(rows(&picker), open, "no worktree that is not open is listed");
+        typed(&mut picker, "spik");
+        assert_eq!(rows(&picker), ["+ spik"], "a part of a name not open is n w's row");
+        typed(&mut picker, "e");
+        assert_eq!(rows(&picker), ["luneta › spike"], "a whole folder name not open is that folder");
+        let spike = Picked::Add {
             on: Machine::Local,
             project: project("luneta", 1),
             folder: directory("/home/you/luneta/spike"),
         };
+        assert_eq!(press(&mut picker, KeyCode::Enter), spike, "whatever branch spike holds");
+
+        let mut picker = opened(none_open());
+        assert_eq!(rows(&picker), open, "notes is one row, not its worktree");
+        down_to(&mut picker, "notes");
+        assert!(list(&picker).1.unwrap().ends_with("none open"), "{:?}", list(&picker));
+        assert!(said(&picker).contains("<ENTER> Open a worktree"), "{}", said(&picker));
+        let shown = text(&drawn(&picker), parts().1).join(" ");
+        let words = "notes has no worktree open: Enter lists its worktrees not open, as o w does";
+        assert!(shown.contains(words), "{shown}");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert_eq!(rows(&picker), ["notes › jots"], "Enter lists notes's as o w does");
+        assert!(said(&picker).contains("<ENTER> Open"), "{}", said(&picker));
+        let opens = Picked::Add {
+            on: Machine::Local,
+            project: project("notes", 2),
+            folder: directory("/home/you/notes/jots"),
+        };
         assert_eq!(press(&mut picker, KeyCode::Enter), opens);
+    }
+
+    fn none_open() -> Listing {
+        let mut listing = with_unopened(works());
+        let jots = projects::Dir::parse("/home/you/notes/jots").unwrap();
+        listing.shelves[0].projects[1].unopened = Unopened::Listed(vec![jots]);
+        listing
+    }
+
+    #[test]
+    fn esc_in_a_project_with_none_open_goes_back_to_its_row_and_esc_again_closes() {
+        let mut picker = opened(none_open());
+        down_to(&mut picker, "notes");
+        press(&mut picker, KeyCode::Enter);
+        typed(&mut picker, "jo");
+        assert_eq!(rows(&picker), ["notes › jots"]);
+        assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Nothing);
+        let open = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
+        assert_eq!(rows(&picker), open, "back on Super j's list, the search let go");
+        assert_eq!(lit(&picker), "notes", "on the row Enter was pressed on");
+        assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Close);
+    }
+
+    #[test]
+    fn enter_on_a_project_with_none_open_in_the_palette_lists_its_worktrees_and_esc_goes_back() {
+        let mut picker = palette_on(none_open(), at_fix(Origin::Views));
+        typed(&mut picker, "notes");
+        assert_eq!(keyed_action(&picker).0, "notes");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert_eq!(rows(&picker), ["notes › jots"], "o w's list for notes, not the palette");
+        assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Nothing);
+        assert_eq!(keyed_action(&picker).0, "notes", "back in the palette, on notes");
+    }
+
+    #[test]
+    fn enter_on_a_project_with_none_open_from_o_w_s_palette_lists_that_project_s_instead() {
+        let luneta = project("luneta", 1).id();
+        let mut picker = Picker::opening(1, none_open(), (Machine::Local, luneta), at_host());
+        assert_eq!(rows(&picker), ["luneta › old", "luneta › spike"]);
+        assert_eq!(press(&mut picker, KeyCode::BackTab), Picked::Nothing);
+        typed(&mut picker, "notes");
+        assert_eq!(keyed_action(&picker).0, "notes");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert_eq!(rows(&picker), ["notes › jots"], "notes's list, not luneta's");
+        assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Nothing);
+        assert_eq!(keyed_action(&picker).0, "notes", "back in the palette, on notes");
+        assert_eq!(press(&mut picker, KeyCode::Tab), Picked::Nothing);
+        let open = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
+        assert_eq!(rows(&picker), open, "luneta's o w scope went with the step back");
+        assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Close);
     }
 
     #[test]
