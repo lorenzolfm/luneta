@@ -674,6 +674,17 @@ enum Stage {
   STAGE_MERGED = 5;
 }
 
+message Opens {
+  oneof runs {
+    google.protobuf.Empty shell = 1;
+    Argv command = 2;
+  }
+}
+
+message Argv {
+  repeated string words = 1;
+}
+
 message ChangeProjectsRequest {
   On on = 1;
   oneof change {
@@ -703,7 +714,7 @@ message ChangeProjectsRequest {
     fixed64 project = 1;
     string folder = 2;
     optional string name = 3;
-    repeated string argv = 4;
+    Opens opens = 4;
   }
 
   message Start {
@@ -713,13 +724,13 @@ message ChangeProjectsRequest {
 
   message Join {
     string folder = 1;
-    repeated string argv = 2;
+    Opens opens = 2;
   }
 
   message Pull {
     string folder = 1;
     string name = 2;
-    repeated string argv = 3;
+    Opens opens = 3;
   }
 
   message RenameProject {
@@ -871,7 +882,7 @@ message ShowRequest {
       google.protobuf.Empty focused = 3;
       google.protobuf.Empty alone = 4;
     }
-    repeated string argv = 5;
+    Opens opens = 5;
   }
 
   message Focus {

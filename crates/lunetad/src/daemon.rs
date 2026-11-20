@@ -46,7 +46,7 @@ use crate::api::{
 use crate::asks::{Asked, Step};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Ask, Changed, Holders, Lock, Made, ProjectId, Store, WorktreeId};
+use crate::projects::{Ask, Changed, Holders, Lock, Made, Opens, ProjectId, Store, WorktreeId};
 use crate::layouts::{self, Root, Unrooted};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
@@ -818,8 +818,8 @@ impl Daemon for Host {
                 let why = status.message();
                 Status::aborted(format!("{folder} is {of}'s worktree, and it is not opened: {why}"))
             };
-            let (project, argv) = (project.get(), Vec::new());
-            let add = AddWorktree { project, folder: folder.to_string(), name: None, argv };
+            let (project, opens) = (project.get(), Some(Opens::Shell.to_api()));
+            let add = AddWorktree { project, folder: folder.to_string(), name: None, opens };
             let add = change_projects_request::Change::AddWorktree(add);
             let Changed { made, .. } = change_made(&layouts, add).map_err(unopened)?;
             let landed = match made {

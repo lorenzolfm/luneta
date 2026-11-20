@@ -27,7 +27,8 @@ pub use file::{forget, holder, kept, take, Changed, Elsewhere, Failed, Forgotten
 pub use file::{Store, Unheld};
 pub use layout::{Size, FRAME_CELLS, LAYOUT_VIEWS_MAX};
 pub use spot::{clone_of, subfolders, CloneRoot, Spot, CLONE_WORKTREES_MAX, LOOK as SPOT_LOOK};
-pub use view::{quoted, Argv, Layout, Line, Opens, Placed, Runs, Session, Terminal, TerminalViewId};
+pub use view::{quoted, shell_if_empty, Argv, Layout, Line, Opens, Placed, Runs, Session};
+pub use view::{Terminal, TerminalViewId};
 pub use view::View;
 pub use view::{LINE_BYTES_MAX, SESSION_BYTES_MAX};
 
@@ -709,12 +710,12 @@ impl Ask {
                 spot: spot(&dir).map_err(field("dir"))?,
                 name: named.as_deref().map(Name::of_project).transpose().map_err(field("name"))?,
             },
-            Asked::AddWorktree(asked::AddWorktree { project, folder, name: named, argv }) => {
+            Asked::AddWorktree(asked::AddWorktree { project, folder, name: named, opens }) => {
                 Change::AddWorktree {
                     project: id("project", project).map(ProjectId)?,
                     spot: spot(&folder).map_err(field("folder"))?,
                     name: name(named).map_err(field("name"))?,
-                    opens: Opens::of(argv).map_err(field("argv"))?,
+                    opens: Opens::of_api(opens).map_err(field("opens"))?,
                 }
             },
             Asked::Start(asked::Start { folder, name: named }) => Change::Start {
@@ -722,14 +723,14 @@ impl Ask {
                 name: named.as_deref().map(Name::of_project).transpose().map_err(field("name"))?,
                 opens: Opens::Shell,
             },
-            Asked::Pull(asked::Pull { folder, name, argv }) => Change::Pull {
+            Asked::Pull(asked::Pull { folder, name, opens }) => Change::Pull {
                 spot: spot(&folder).map_err(field("folder"))?,
                 name: Name::parse(&name).map_err(field("name"))?,
-                opens: Opens::of(argv).map_err(field("argv"))?,
+                opens: Opens::of_api(opens).map_err(field("opens"))?,
             },
-            Asked::Join(asked::Join { folder, argv }) => Change::Join {
+            Asked::Join(asked::Join { folder, opens }) => Change::Join {
                 spot: spot(&folder).map_err(field("folder"))?,
-                opens: Opens::of(argv).map_err(field("argv"))?,
+                opens: Opens::of_api(opens).map_err(field("opens"))?,
             },
             Asked::RenameProject(asked::RenameProject { project, to }) => Change::RenameProject {
                 project: id("project", project).map(ProjectId)?,
@@ -2243,7 +2244,7 @@ mod tests {
         let pull = Change::Pull {
             spot: spot_at("/n/cdk", "fix"),
             name: name("fix"),
-            opens: Opens::of(vec!["claude".to_owned()]).unwrap(),
+            opens: Opens::Command(Argv::parse(vec!["claude".to_owned()]).unwrap()),
         };
         let said = change(&projects, pull).unwrap_err();
         let one = "n is a folder, and its own is its one worktree";
@@ -2962,11 +2963,22 @@ mod tests {
     }
 
     #[test]
-    fn an_opens_says_the_words_it_was_parsed_from() {
+    fn an_opens_reads_back_what_it_says_and_a_command_names_its_program() {
         let argv = ["cargo", "test", "it's"].map(str::to_owned).to_vec();
-        assert_eq!(Opens::of(argv.clone()).unwrap().to_api(), argv);
-        assert_eq!(Opens::of(Opens::Shell.to_api()), Ok(Opens::Shell));
-        assert!(Argv::parse(Vec::new()).unwrap_err().contains("no program"));
+        let command = Opens::Command(Argv::parse(argv.clone()).unwrap());
+        assert_eq!(Opens::of_api(Some(command.to_api())), Ok(command));
+        assert_eq!(Opens::of_api(Some(Opens::Shell.to_api())), Ok(Opens::Shell));
+        let said = Opens::of_api(Some(shell_if_empty(argv.clone())));
+        assert_eq!(said, Ok(Opens::Command(Argv::parse(argv).unwrap())));
+        assert_eq!(Opens::of_api(Some(shell_if_empty(Vec::new()))), Ok(Opens::Shell));
+        let nothing = "it says nothing to open".to_owned();
+        assert_eq!(Opens::of_api(None), Err(nothing.clone()));
+        assert_eq!(Opens::of_api(Some(api::Opens { runs: None })), Err(nothing));
+        let empty = api::opens::Runs::Command(api::Argv { words: Vec::new() });
+        let empty = Opens::of_api(Some(api::Opens { runs: Some(empty) }));
+        assert_eq!(empty, Err("an argv names no program".to_owned()));
+        let unnamed = Argv::parse(vec![String::new(), "x".to_owned()]);
+        assert_eq!(unnamed, Err("an argv names its program with an empty word".to_owned()));
     }
 
     #[test]
@@ -2974,7 +2986,7 @@ mod tests {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let argv = ["cargo", "test", "it's"].map(str::to_owned).to_vec();
-        let opens = Opens::of(argv).unwrap();
+        let opens = Opens::Command(Argv::parse(argv).unwrap());
         let spot = spot_at("/w/luneta", "fix");
         let fixing = Change::AddWorktree { project: luneta, spot, name: None, opens };
         let Made::Worktree(fix) = add(&mut projects, fixing) else {
@@ -2986,7 +2998,7 @@ mod tests {
         assert_eq!(first.runs(), &Runs::Command(line));
         let (same, found) = change(&projects, add_in(luneta, spot_at("/w/luneta", "fix"))).unwrap();
         assert_eq!((same == projects, found), (true, Some(Made::Found(fix))), "opens no other");
-        assert!(Opens::of(vec!["\u{7}".to_owned()]).unwrap_err().contains("control character"));
+        assert!(Argv::parse(vec!["\u{7}".to_owned()]).unwrap_err().contains("control character"));
 
         let start = starting(folder("/w/vault"));
         let Made::Worktree(own) = add(&mut projects, start) else {

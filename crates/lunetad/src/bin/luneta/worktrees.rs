@@ -190,7 +190,8 @@ pub fn add_worktree(
     (project, folder): (ProjectId, &str),
 ) -> Result<Landed, String> {
     let (project, folder) = (project.get(), folder.to_owned());
-    let change = Change::AddWorktree(AddWorktree { project, folder, name: None, argv: Vec::new() });
+    let opens = Some(Opens::Shell.to_api());
+    let change = Change::AddWorktree(AddWorktree { project, folder, name: None, opens });
     let added = changed_on(path, on(machine), change).and_then(landed);
     added.map_err(|unchanged| said_unmade(unchanged, "worktree"))
 }
@@ -460,7 +461,7 @@ pub fn pulled(
     let change = Change::Pull(Pull {
         folder: cwd.to_string(),
         name: name.to_owned(),
-        argv: opens.to_api(),
+        opens: Some(opens.to_api()),
     });
     let pulled = changed_on(path, on(machine), change).and_then(landed);
     pulled.map_err(|unchanged| said_unopened(unchanged, cwd, name))
@@ -581,7 +582,8 @@ pub fn joined_as(
 }
 
 fn joined(path: &Path, folder: &str, argv: Vec<String>) -> Result<Landed, Unchanged> {
-    let change = Change::Join(Join { folder: folder.to_owned(), argv });
+    let opens = Some(projects::shell_if_empty(argv));
+    let change = Change::Join(Join { folder: folder.to_owned(), opens });
     changed_on(path, None, change).and_then(landed)
 }
 

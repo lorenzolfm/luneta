@@ -12,7 +12,7 @@ use crate::api::{self, show_request, show_response};
 use crate::folder::Folder;
 use crate::mux::TerminalKey;
 use crate::remote::Destination;
-use crate::projects::{Size, ViewId, WorktreeId, FRAME_CELLS, LAYOUT_VIEWS_MAX};
+use crate::projects::{shell_if_empty, Size, ViewId, WorktreeId, FRAME_CELLS, LAYOUT_VIEWS_MAX};
 use crate::streams::{self, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
@@ -256,7 +256,8 @@ impl Asked {
                     Beside::Largest => Said::Largest(()),
                     Beside::Focused => Said::Focused(()),
                 };
-                Event::Open(show_request::Open { beside: Some(beside), argv })
+                let opens = Some(shell_if_empty(argv));
+                Event::Open(show_request::Open { beside: Some(beside), opens })
             },
             Asked::Welcome => Event::Welcome(()),
             Asked::Close(view) => Event::Close(view.get()),

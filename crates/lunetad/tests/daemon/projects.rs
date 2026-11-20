@@ -17,6 +17,7 @@ use lunetad::api::list_work_response::work::Issues;
 use lunetad::api::list_work_response::{Issue, Listed as Said, OpenIssues, Pull as ListedPull, Work};
 use lunetad::api::{ListWorkRequest, ListWorkResponse, MakeWorktreeRequest};
 use lunetad::api::Version;
+use lunetad::projects::shell_if_empty;
 use lunetad::changes::Unchanged;
 use lunetad::SWEEP;
 use tonic::{Code, Status};
@@ -112,8 +113,8 @@ pub const FIRST: [&str; 2] = ["sleep", "600"];
 
 pub fn worktree(host: &Host, project: u64, folder: &Path) -> u64 {
     let folder = folder.to_str().unwrap().to_owned();
-    let argv = FIRST.map(str::to_owned).to_vec();
-    let add = AddWorktree { project, folder, name: None, argv };
+    let opens = Some(shell_if_empty(FIRST.map(str::to_owned).to_vec()));
+    let add = AddWorktree { project, folder, name: None, opens };
     changed(host, Change::AddWorktree(add)).unwrap()
 }
 
@@ -296,7 +297,8 @@ fn a_folder_that_goes_is_kept_and_said_to_be_missing() {
     let back = || (seen(&host) == (false, no_branch)).then_some(());
     eventually("the folder is back", back);
     let nowhere = text(&scratch.join("nowhere"));
-    let add = AddWorktree { project: notes, folder: nowhere, name: None, argv: Vec::new() };
+    let opens = Some(shell_if_empty(Vec::new()));
+    let add = AddWorktree { project: notes, folder: nowhere, name: None, opens };
     let refused = changed(&host, Change::AddWorktree(add)).unwrap_err();
     assert_eq!(refused.code(), Code::InvalidArgument);
     assert!(refused.message().starts_with("folder: "), "{}", refused.message());
@@ -437,8 +439,8 @@ fn a_worktree_whose_first_terminal_does_not_start_is_not_made_nor_a_project_made
     let unopened = format!("{two} is two's worktree, and it is not opened: ");
     assert!(said.starts_with(&unopened), "{said}");
     assert!(said.contains("no terminal opens in worktree"), "{said}");
-    let argv = FIRST.map(str::to_owned).to_vec();
-    let add = AddWorktree { project: luneta, folder: text(&clone.join("two")), name: None, argv };
+    let opens = Some(shell_if_empty(FIRST.map(str::to_owned).to_vec()));
+    let add = AddWorktree { project: luneta, folder: text(&clone.join("two")), name: None, opens };
     let start = |folder: &Path| Change::Start(Start { folder: text(folder), name: None });
     for change in [Change::AddWorktree(add), start(&plain), start(&elo.join("main"))] {
         let refused = changed(&owned.host, change).unwrap_err();
@@ -454,6 +456,34 @@ fn a_worktree_whose_first_terminal_does_not_start_is_not_made_nor_a_project_made
     assert_eq!(rows, [main], "no worktree stays with no view");
     let two = worktree(&owned.host, luneta, &clone.join("two"));
     assert_ne!(two, main, "and lunetad opens one again once the mux answers");
+}
+
+#[test]
+fn a_pull_that_finds_its_worktree_runs_its_command_there_and_a_shell_pull_opens_nothing() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let clone = scratch.join("luneta");
+    cloned_as_wt(&scratch, &scratch.join("up"), &clone);
+    let _daemon = start(host.vars()).unwrap();
+    let luneta = project(&host, &clone, None);
+    let main = worktree(&host, luneta, &clone.join("main"));
+    let pull = |words: &[&str]| {
+        let opens = Some(shell_if_empty(words.iter().map(|word| (*word).to_owned()).collect()));
+        Change::Pull(Pull { folder: text(&clone.join("main")), name: "main".to_owned(), opens })
+    };
+    let review = ["sleep", "601"];
+    assert_eq!(made(&host, pull(&[])).unwrap(), Some(Made::Found(main)));
+    assert_eq!(made(&host, pull(&review)).unwrap(), Some(Made::Found(main)));
+    let want = vec![vec![Some(FIRST.join(" ")), Some(review.join(" "))]];
+    let opened = || {
+        let mut commands = commands_of(&mut held(&host));
+        for terminals in &mut commands {
+            terminals.sort();
+        }
+        (commands == want).then_some(())
+    };
+    eventually("the pull's command runs beside the first, the shell's opens none", opened);
 }
 
 #[test]
@@ -605,7 +635,7 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     let pull = Pull {
         folder: text(&link.join("luneta/pr-7")),
         name: "pr-7".to_owned(),
-        argv: FIRST.map(str::to_owned).to_vec(),
+        opens: Some(shell_if_empty(FIRST.map(str::to_owned).to_vec())),
     };
     let Some(Made::Worktree(pr) | Made::Found(pr)) = asked(Change::Pull(pull)) else {
         panic!("a pull goes to the worktree, made by it or by the sweep");
@@ -616,7 +646,7 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     let into_unheld_clone = Pull {
         folder: text(&link.join("cdk/fix")),
         name: "fix".to_owned(),
-        argv: FIRST.map(str::to_owned).to_vec(),
+        opens: Some(shell_if_empty(FIRST.map(str::to_owned).to_vec())),
     };
     let Some(Made::Worktree(fix) | Made::Found(fix)) = asked(Change::Pull(into_unheld_clone)) else {
         panic!("a pull into a clone of no project goes to the worktree in one made for it");

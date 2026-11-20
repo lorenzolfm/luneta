@@ -27,7 +27,7 @@ use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, Opens, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::asks::Marked;
 use lunetad::rebases::{Rebased, Unrebased};
@@ -78,7 +78,7 @@ use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::projected::{self, Projected};
 use crate::viewed::{self, Heeded, Viewed};
-use crate::worktrees::{self, Arrival, Landed, Landing};
+use crate::worktrees::{self, Arrival, Landing};
 use crate::width::Width;
 
 pub enum Made {
@@ -89,8 +89,7 @@ pub enum Made {
 
 pub struct Pulled {
     on: Machine,
-    worktree: Landed,
-    opens: Opens,
+    worktree: WorktreeId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1903,7 +1902,7 @@ impl App {
                 self.naming_on(move || {
                     let made = caught(NAMING_PANICKED, || {
                         let made = worktrees::pulled(&lunetad, &on, &cwd, &name, &opens)?;
-                        Ok(Pulled { on, worktree: made, opens })
+                        Ok(Pulled { on, worktree: made.worktree() })
                     });
                     Made::Pulled { menu, made }
                 });
@@ -2542,25 +2541,14 @@ impl App {
         }
     }
 
-    fn go_opening(&mut self, on: &Machine, landed: Landed, opens: Opens) {
-        let worktree = landed.worktree();
-        self.go_worktree(on, worktree, None);
-        match (landed, opens) {
-            (Landed::Found(_), Opens::Command(argv)) => {
-                self.shown().open_in(worktree, argv.words().to_vec());
-            },
-            (Landed::Made(_), _) | (Landed::Found(_), Opens::Shell) => {},
-        }
-    }
-
     fn pulled_made(&mut self, menu: u64, made: Result<Pulled, String>) {
         let opener = self.sidebar.made_for(menu).map_or(Opener::LetGo, Opener::of);
         let made = match made {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: {why}")),
         };
-        let Pulled { on, worktree, opens } = made;
-        self.go_opening(&on, worktree, opens);
+        let Pulled { on, worktree } = made;
+        self.go_worktree(&on, worktree, None);
         self.give_opened(opener);
     }
 

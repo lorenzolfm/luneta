@@ -728,14 +728,6 @@ impl Viewed {
         self.watch();
     }
 
-    pub fn open_in(&mut self, worktree: WorktreeId, argv: Vec<String>) {
-        if worktree != self.layout.worktree {
-            return;
-        }
-        self.opened.insert(worktree);
-        self.ask(Asked::Open { beside: Beside::Largest, argv });
-    }
-
     pub fn welcome(&mut self) {
         self.opened.insert(self.layout.worktree);
         self.ask(Asked::Welcome);

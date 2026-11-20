@@ -123,7 +123,7 @@ pub enum Unrooted {
 pub enum Asked {
     Size(Size),
     Go(WorktreeId),
-    Open { beside: Beside, argv: Vec<String> },
+    Open { beside: Beside, opens: Opens },
     Welcome,
     Close(ViewId),
     Focus(Focus),
@@ -165,7 +165,7 @@ impl Asked {
             Event::Hello(_) => return Err("a hello comes only first".to_owned()),
             Event::Size(size) => Asked::Size(size_of(Some(size))?),
             Event::Go(worktree) => Asked::Go(id("go", worktree).map(WorktreeId::new)?),
-            Event::Open(show_request::Open { beside, argv }) => {
+            Event::Open(show_request::Open { beside, opens }) => {
                 use show_request::open::Beside as Said;
                 let beside = match beside.ok_or("open: it says no side to open beside")? {
                     Said::Largest(()) => Beside::Largest,
@@ -173,13 +173,13 @@ impl Asked {
                     Said::Alone(()) => Beside::Alone,
                     Said::Towards(towards) => Beside::Towards(towards_of(towards)?),
                 };
-                if argv.first().is_some_and(String::is_empty) {
-                    return Err("open: the program to run is named by no word".to_owned());
-                }
-                if argv.len() > ARGV_MAX {
+                if let Some(api::Opens { runs: Some(api::opens::Runs::Command(argv)) }) = &opens
+                    && argv.words.len() > ARGV_MAX
+                {
                     return Err(format!("open: a command line is at most {ARGV_MAX} words"));
                 }
-                Asked::Open { beside, argv }
+                let opens = Opens::of_api(opens).map_err(|why| format!("open: {why}"))?;
+                Asked::Open { beside, opens }
             },
             Event::Welcome(()) => Asked::Welcome,
             Event::Close(view) => Asked::Close(id("close", view).map(ViewId::new)?),
@@ -613,14 +613,40 @@ impl Layouts {
         let Some(opens) = change.opens().cloned() else {
             return self.store.change(change);
         };
+        let opens_found = matches!(change, Change::Pull { opens: Opens::Command(_), .. });
         let held: BTreeSet<ProjectId> = self.store.projects().map_or_default(|projects| {
             projects.all().iter().map(Project::id).collect()
         });
         let made = self.store.change(change)?;
-        if let Some(Made::Worktree(worktree)) = made {
-            self.first_made(worktree, &opens, &held).map_err(Failed::Unopened)?;
+        match (made, opens_found) {
+            (Some(Made::Worktree(worktree)), _) => {
+                self.first_made(worktree, &opens, &held).map_err(Failed::Unopened)?;
+            },
+            (Some(Made::Found(worktree)), true) => self.found_opened(worktree, &opens)?,
+            (Some(Made::Found(_)), false)
+            | (Some(Made::Project(_) | Made::Taken(_) | Made::Untaken) | None, _) => {},
         }
         Ok(made)
+    }
+
+    fn found_opened(&mut self, worktree: WorktreeId, opens: &Opens) -> Result<(), Failed> {
+        let terminal = self.store.fresh_terminal()?;
+        let projects = self.store.projects().expect("projects just changed are kept");
+        let (project, found) = projects.find(worktree).expect("a worktree just found is held");
+        let shown = self.clients.values().filter(|it| it.worktree == worktree);
+        let size = fit(shown, found.layout(), &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let view = terminal.view();
+        let placing = placement(found.layout(), None, Beside::Largest, view, size);
+        let (placed, inner) = placing.map_err(Failed::Refused)?;
+        let folder = project.folder(worktree).expect("a worktree held has its folder");
+        let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
+        let made = Terminal::new(terminal, folder, opens.runs());
+        self.store.change(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
+        let unopened = |why| format!("no terminal opens in worktree {worktree}: {why}");
+        self.spawned(terminal, &cwd, opens, inner).map_err(unopened).map_err(Failed::Unopened)?;
+        let last_focus = self.layout(worktree).map(Layout::last_focus);
+        assert_eq!(last_focus, Ok(Some(view)), "terminal {terminal} opens focused in its worktree");
+        Ok(())
     }
 
     fn first_made(
@@ -894,7 +920,7 @@ impl Layouts {
                 moved.focus = focus;
                 self.went(to);
             },
-            Asked::Open { beside, argv } => self.open(client, beside, &argv)?,
+            Asked::Open { beside, opens } => self.open(client, beside, &opens)?,
             Asked::Welcome => self.welcome(client)?,
             Asked::Close(view) => {
                 if !self.layout(worktree)?.holds(view) {
@@ -999,8 +1025,7 @@ impl Layouts {
         fit(shown, found.layout(), &self.known).map_or(size, |fit| fit.size)
     }
 
-    fn open(&mut self, client: ClientId, beside: Beside, argv: &[String]) -> Result<(), String> {
-        let opens = Opens::of(argv.to_vec()).map_err(|why| format!("open: {why}"))?;
+    fn open(&mut self, client: ClientId, beside: Beside, opens: &Opens) -> Result<(), String> {
         let Client { worktree, focus, .. } = self.clients[&client];
         let size = self.size_of(client);
         let terminal = self.store.fresh_terminal().map_err(Failed::said)?;
@@ -1021,7 +1046,7 @@ impl Layouts {
         let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
         let made = Terminal::new(terminal, folder, opens.runs());
         self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
-        self.spawned(terminal, &cwd, &opens, inner)?;
+        self.spawned(terminal, &cwd, opens, inner)?;
         self.client(client).focus = Some(terminal.view());
         let last_focus = self.layout(worktree).map(Layout::last_focus);
         assert_eq!(last_focus, Ok(Some(terminal.view())), "terminal {terminal} opens focused");
@@ -1934,6 +1959,7 @@ mod tests {
 
     use super::*;
     use crate::agent::{Harness, Status};
+    use crate::projects::shell_if_empty;
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
 
@@ -2158,19 +2184,21 @@ mod tests {
         let three = ViewId::of(3).unwrap();
         assert_eq!(Asked::of_api(terminal), Ok(Asked::Focus(Focus::View(three))));
         let right = show_request::Towards::Right.into();
-        let open = show_request::Open { beside: Some(open::Beside::Towards(right)), argv: vec![] };
+        let shell = || Some(Opens::Shell.to_api());
+        let towards = Some(open::Beside::Towards(right));
+        let open = show_request::Open { beside: towards, opens: shell() };
         let towards = Beside::Towards(Towards::Right);
-        let asked = Asked::Open { beside: towards, argv: vec![] };
+        let asked = Asked::Open { beside: towards, opens: Opens::Shell };
         assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
         let largest = || Some(open::Beside::Largest(()));
-        let open = show_request::Open { beside: largest(), argv: vec![] };
-        let asked = Asked::Open { beside: Beside::Largest, argv: vec![] };
+        let open = show_request::Open { beside: largest(), opens: shell() };
+        let asked = Asked::Open { beside: Beside::Largest, opens: Opens::Shell };
         assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
-        let open = show_request::Open { beside: Some(open::Beside::Focused(())), argv: vec![] };
-        let asked = Asked::Open { beside: Beside::Focused, argv: vec![] };
+        let open = show_request::Open { beside: Some(open::Beside::Focused(())), opens: shell() };
+        let asked = Asked::Open { beside: Beside::Focused, opens: Opens::Shell };
         assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
-        let open = show_request::Open { beside: Some(open::Beside::Alone(())), argv: vec![] };
-        let asked = Asked::Open { beside: Beside::Alone, argv: vec![] };
+        let open = show_request::Open { beside: Some(open::Beside::Alone(())), opens: shell() };
+        let asked = Asked::Open { beside: Beside::Alone, opens: Opens::Shell };
         assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
         let (one_side, every) = (resize::Sides::Direction, Some(resize::Sides::Every(())));
         let (grow, shrink) = (show_request::Growth::Grow, show_request::Growth::Shrink);
@@ -2190,11 +2218,15 @@ mod tests {
             Event::Resize(show_request::Resize { sides: every, growth: 0 }),
             Event::Resize(show_request::Resize { sides: every, growth: 3 }),
             Event::Size(show_request::Size { columns: 0, rows: 24 }),
-            Event::Open(show_request::Open { beside: None, argv: vec![] }),
-            Event::Open(show_request::Open { beside: largest(), argv: vec![String::new()] }),
+            Event::Open(show_request::Open { beside: None, opens: Some(Opens::Shell.to_api()) }),
+            Event::Open(show_request::Open { beside: largest(), opens: None }),
             Event::Open(show_request::Open {
                 beside: largest(),
-                argv: vec!["x".to_owned(); ARGV_MAX + 1],
+                opens: Some(shell_if_empty(vec![String::new()])),
+            }),
+            Event::Open(show_request::Open {
+                beside: largest(),
+                opens: Some(shell_if_empty(vec!["x".to_owned(); ARGV_MAX + 1])),
             }),
             Event::Hello(show_request::Hello { worktree: 1, ..Default::default() }),
         ];
