@@ -770,6 +770,19 @@ fn caught<T>(panicked: &str, asked: impl FnOnce() -> Result<T, String>) -> Resul
     panic::catch_unwind(AssertUnwindSafe(asked)).unwrap_or_else(|_| Err(panicked.to_owned()))
 }
 
+fn doubted<T>(
+    panicked: &str,
+    asked: impl FnOnce() -> Result<T, Unchanged>,
+) -> Result<T, Unchanged> {
+    panic::catch_unwind(AssertUnwindSafe(asked))
+        .unwrap_or_else(|_| Err(Unchanged::InDoubt(panicked.to_owned())))
+}
+
+fn unrenamed(rename: &Rename, unchanged: Unchanged) -> String {
+    let in_doubt = format!("the {} may be renamed", rename.noun());
+    format!("menu: {}", unchanged.said("not renamed", &in_doubt))
+}
+
 fn gone(projected: &Projected, home: &Home) -> bool {
     home.known() && projected.lacks(home.machine(), home.project())
 }
@@ -806,9 +819,8 @@ impl Mover {
                 if stopped.holds(ticket) {
                     continue;
                 }
-                let asked = AssertUnwindSafe(|| worktrees::reordered(&lunetad, &on, &order));
-                let unsure = |_| Err(Unchanged::InDoubt(MOVE_PANICKED.to_owned()));
-                let event = match panic::catch_unwind(asked).unwrap_or_else(unsure) {
+                let asked = || worktrees::reordered(&lunetad, &on, &order);
+                let event = match doubted(MOVE_PANICKED, asked) {
                     Ok(kept) => Event::Moved { ticket, kept },
                     Err(unmoved) => {
                         stopped.stop(ticket);
@@ -1880,21 +1892,7 @@ impl App {
                 self.leave();
             },
             Asked::Rename { on, rename } => {
-                self.change(on, RENAME_PANICKED, move |on| {
-                    let (renamed, noun) = match &rename {
-                        Rename::Terminal(terminal, to) => {
-                            (worktrees::renamed_terminal(on, *terminal, to.as_ref()), "view")
-                        },
-                        Rename::Worktree(worktree, to) => {
-                            (worktrees::renamed_worktree(on, *worktree, to.as_ref()), "worktree")
-                        },
-                        Rename::Project(project, to) => {
-                            (worktrees::renamed_project(on, *project, to), "project")
-                        },
-                    };
-                    let in_doubt = format!("the {noun} may be renamed");
-                    renamed.map_err(|unchanged| unchanged.said("not renamed", &in_doubt))
-                });
+                self.rename(on, rename);
             },
             Asked::Make { menu, on, cwd, name, command } => {
                 let busy = |busy: &str| format!("menu: {}", worktrees::unopened(&cwd, &name, busy));
@@ -1992,16 +1990,20 @@ impl App {
         }
     }
 
-    fn change(
-        &mut self,
-        on: Machine,
-        panicked: &'static str,
-        change: impl FnOnce(&Machine) -> Result<(), String> + Send + 'static,
-    ) {
+    fn rename(&mut self, on: Machine, rename: Rename) {
         let events = self.events.clone();
         self.keep_change(thread::spawn(move || {
-            if let Err(why) = caught(panicked, || change(&on)) {
-                let _ = events.send(Event::Notice(format!("menu: {why}")));
+            let asked = || match &rename {
+                Rename::Terminal(terminal, to) => {
+                    worktrees::renamed_terminal(&on, *terminal, to.as_ref())
+                },
+                Rename::Worktree(worktree, to) => {
+                    worktrees::renamed_worktree(&on, *worktree, to.as_ref())
+                },
+                Rename::Project(project, to) => worktrees::renamed_project(&on, *project, to),
+            };
+            if let Err(unchanged) = doubted(RENAME_PANICKED, asked) {
+                let _ = events.send(Event::Notice(unrenamed(&rename, unchanged)));
             }
         }));
     }
@@ -2019,7 +2021,7 @@ impl App {
     fn project_act(&mut self, on: Machine, act: Act, ticket: u64) {
         let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
         self.keep_change(thread::spawn(move || {
-            let asked = AssertUnwindSafe(|| match &act {
+            let asked = || match &act {
                 Act::View { view: ViewKey::Terminal(key), .. } => {
                     worktrees::closed_view(&lunetad, &on, *key)
                 },
@@ -2029,9 +2031,8 @@ impl App {
                 Act::Project { project, worktrees, seen, .. } => {
                     worktrees::closed_project(&lunetad, &on, *project, worktrees, seen)
                 },
-            });
-            let unsure = |_| Err(Unchanged::InDoubt(CLOSE_PANICKED.to_owned()));
-            if let Err(unchanged) = panic::catch_unwind(asked).unwrap_or_else(unsure) {
+            };
+            if let Err(unchanged) = doubted(CLOSE_PANICKED, asked) {
                 let _ = events.send(Event::Unclosed { on, act, ticket, unchanged });
             }
         }));
@@ -2868,6 +2869,19 @@ mod tests {
         for unread in unread {
             assert!(!gone(&unread, &named(Machine::Local)), "no home is gone while lunetad's projects are unread");
         }
+    }
+
+    #[test]
+    fn a_rename_that_panics_says_the_rename_may_be_made_and_never_that_naming_failed() {
+        let view = Rename::Terminal(ViewId::of(4).unwrap(), None);
+        let panicked = doubted(RENAME_PANICKED, || -> Result<(), Unchanged> { panic!("dropped") });
+        let said = unrenamed(&view, panicked.unwrap_err());
+        let maybe = "menu: luneta could not ask lunetad for the rename: asking panicked, so the view may be renamed";
+        assert_eq!(said, maybe);
+        assert!(!said.contains("name the session"), "{said}");
+        let refused = doubted(RENAME_PANICKED, || Err::<(), _>(Unchanged::Refused("taken".to_owned())));
+        assert_eq!(unrenamed(&view, refused.unwrap_err()), "menu: not renamed: taken");
+        assert_eq!(doubted(RENAME_PANICKED, || Ok(7)), Ok(7));
     }
 
     #[test]
