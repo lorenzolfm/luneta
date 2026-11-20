@@ -267,7 +267,39 @@ impl Revision {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Changed {
     pub made: Option<Made>,
+    pub opened: Option<Opened>,
     pub kept: Revision,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Opened {
+    View(ViewId),
+    Unopened(String),
+}
+
+impl Opened {
+    pub fn of_api(
+        said: Option<api::change_projects_response::Opened>,
+    ) -> Result<Option<Opened>, String> {
+        use api::change_projects_response::Opened as Said;
+        match said {
+            None => Ok(None),
+            Some(Said::View(view)) => {
+                let view = ViewId::of(view).ok_or("opened: it names view 0")?;
+                Ok(Some(Opened::View(view)))
+            },
+            Some(Said::Unopened(why)) => Ok(Some(Opened::Unopened(why))),
+        }
+    }
+
+    #[must_use]
+    pub fn to_api(self) -> api::change_projects_response::Opened {
+        use api::change_projects_response::Opened as Said;
+        match self {
+            Opened::View(view) => Said::View(view.get()),
+            Opened::Unopened(why) => Said::Unopened(why),
+        }
+    }
 }
 
 enum Keeping {

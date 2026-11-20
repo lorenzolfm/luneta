@@ -78,19 +78,18 @@ use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::projected::{self, Projected};
 use crate::viewed::{self, Heeded, Viewed};
-use crate::worktrees::{self, Arrival, Landed, Landing};
+use crate::worktrees::{self, Arrival, Landing};
 use crate::width::Width;
 
 pub enum Made {
     Project { on: Machine, made: Result<ProjectId, String> },
-    Worktree { on: Machine, made: Result<Landing, String>, argv: Vec<String> },
+    Worktree { on: Machine, made: Result<Landing, String> },
     Pulled { menu: u64, made: Result<Pulled, String> },
 }
 
 pub struct Pulled {
     on: Machine,
-    worktree: Landed,
-    argv: Vec<String>,
+    pulled: worktrees::Pulled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1894,7 +1893,7 @@ impl App {
             Asked::Rename { on, rename } => {
                 self.rename(on, rename);
             },
-            Asked::Make { menu, on, cwd, name, command } => {
+            Asked::Make { menu, on, cwd, name, opens } => {
                 let busy = |busy: &str| format!("menu: {}", worktrees::unopened(&cwd, &name, busy));
                 if self.refuse_naming(Some(menu), busy) {
                     return;
@@ -1902,8 +1901,8 @@ impl App {
                 let lunetad = self.lunetad.clone();
                 self.naming_on(move || {
                     let made = caught(NAMING_PANICKED, || {
-                        let made = worktrees::pulled(&lunetad, &on, &cwd, &name, command.clone())?;
-                        Ok(Pulled { on, worktree: made, argv: command })
+                        let pulled = worktrees::pulled(&lunetad, &on, &cwd, &name, &opens)?;
+                        Ok(Pulled { on, pulled })
                     });
                     Made::Pulled { menu, made }
                 });
@@ -2500,7 +2499,7 @@ impl App {
         let lunetad = self.lunetad.clone();
         self.naming_on(move || {
             let made = caught(NAMING_PANICKED, || made(&lunetad, &on));
-            Made::Worktree { on, made, argv: Vec::new() }
+            Made::Worktree { on, made }
         });
     }
 
@@ -2526,12 +2525,12 @@ impl App {
         assert_eq!(self.naming, Naming::Busy, "a session was named that `name` did not name");
         self.naming = Naming::Idle;
         match made {
-            Made::Worktree { on, made: Ok(Landing::Worktree(made)), argv } => {
-                self.go_opening(&on, made, argv);
+            Made::Worktree { on, made: Ok(Landing::Worktree(made)) } => {
+                self.go_worktree(&on, made.worktree(), None);
                 self.give_opened(Opener::LetGo);
             },
             Made::Project { on, made: Ok(project) }
-            | Made::Worktree { on, made: Ok(Landing::Unopened(project)), .. } => {
+            | Made::Worktree { on, made: Ok(Landing::Unopened(project)) } => {
                 self.go_home(&on, project);
                 self.give_opened(Opener::LetGo);
             },
@@ -2542,25 +2541,23 @@ impl App {
         }
     }
 
-    fn go_opening(&mut self, on: &Machine, landed: Landed, argv: Vec<String>) {
-        let worktree = landed.worktree();
-        self.go_worktree(on, worktree, None);
-        if let Landed::Found(_) = landed
-            && !argv.is_empty()
-        {
-            self.shown().open_in(worktree, argv);
-        }
-    }
-
     fn pulled_made(&mut self, menu: u64, made: Result<Pulled, String>) {
         let opener = self.sidebar.made_for(menu).map_or(Opener::LetGo, Opener::of);
         let made = match made {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: {why}")),
         };
-        let Pulled { on, worktree, argv } = made;
-        self.go_opening(&on, worktree, argv);
+        let Pulled { on, pulled } = made;
+        let (worktree, focus, unrun) = match pulled {
+            worktrees::Pulled::Went(worktree) => (worktree, None, None),
+            worktrees::Pulled::Opened { worktree, view } => (worktree, Some(view), None),
+            worktrees::Pulled::Unopened { worktree, why } => (worktree, None, Some(why)),
+        };
+        self.go_worktree(&on, worktree, focus);
         self.give_opened(opener);
+        if let Some(why) = unrun {
+            self.sidebar.notify(format!("menu: {why}"));
+        }
     }
 
     fn give_opened(&mut self, opener: Opener) {

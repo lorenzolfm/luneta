@@ -16,7 +16,7 @@ use lunetad::api::{frames_request, On, FramesRequest};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
 use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
-use lunetad::projects::{Size, WorktreeId};
+use lunetad::projects::{shell_if_empty, Size, WorktreeId};
 use lunetad::folder::Folder;
 use lunetad::Daemon;
 use lunetad::release;
@@ -118,8 +118,8 @@ impl<'a> Shown<'a> {
 
     fn open_beside(&mut self, beside: open::Beside, words: &[&str]) -> u64 {
         let before = self.terminals();
-        let argv = words.iter().map(|word| (*word).to_owned()).collect();
-        self.ask(Event::Open(show_request::Open { beside: Some(beside), argv }));
+        let opens = Some(shell_if_empty(words.iter().map(|word| (*word).to_owned()).collect()));
+        self.ask(Event::Open(show_request::Open { beside: Some(beside), opens }));
         let laid = self.until("a terminal more", |laid| laid.views.len() == before.len() + 1);
         let new = laid.views.iter().find(|view| !before.contains(&view.id));
         let new = new.expect("the layout holds a new terminal").id;
@@ -670,8 +670,8 @@ fn two_layouts_that_each_open_a_terminal_alone_in_one_empty_worktree_open_one() 
     let mut one = Shown::new(&owned, worktree, 80, 24);
     let mut other = Shown::new(&owned, worktree, 80, 24);
     let alone = || {
-        let argv = WAITS.iter().map(|word| (*word).to_owned()).collect();
-        Event::Open(show_request::Open { beside: Some(open::Beside::Alone(())), argv })
+        let opens = Some(shell_if_empty(WAITS.iter().map(|word| (*word).to_owned()).collect()));
+        Event::Open(show_request::Open { beside: Some(open::Beside::Alone(())), opens })
     };
     one.ask(alone());
     other.ask(alone());
@@ -710,8 +710,8 @@ fn an_open_the_layout_refuses_makes_no_terminal_in_the_mux() {
     let mut shown = Shown::new(&owned, worktree, 1000, 1000);
     let opened: Vec<u64> = (0..64).map(|_| shown.open()).collect();
     let largest = open::Beside::Largest(());
-    let argv = WAITS.iter().map(|word| (*word).to_owned()).collect();
-    shown.ask(Event::Open(show_request::Open { beside: Some(largest), argv }));
+    let opens = Some(shell_if_empty(WAITS.iter().map(|word| (*word).to_owned()).collect()));
+    shown.ask(Event::Open(show_request::Open { beside: Some(largest), opens }));
     assert!(shown.until_refused().contains("no view has room"));
     let listing = owned.listing();
     assert_eq!(listing.terminals.len(), opened.len(), "the mux holds only the layouts' terminals");
@@ -823,7 +823,8 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     let gone = || watched_worktree(&owned, closing).is_none().then_some(());
     eventually("a worktree closed goes", gone);
     let largest = Some(open::Beside::Largest(()));
-    shown.ask(Event::Open(show_request::Open { beside: largest, argv: Vec::new() }));
+    let opens = Some(shell_if_empty(Vec::new()));
+    shown.ask(Event::Open(show_request::Open { beside: largest, opens }));
     assert!(shown.until_refused().contains("is gone"), "a client left behind opens nothing");
     shown.ask(Event::Go(other));
     let there = shown.until("the client goes on to another", |laid| laid.worktree == other);
