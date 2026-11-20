@@ -1023,7 +1023,11 @@ impl Projects {
         let holding = self.project_of(project).expect("the project a spot is inside is held");
         let plain = holding.plain()?;
         let own = if spot.is_clone() { spot.place() } else { spot.repository()?.clone() };
-        let below = plain.dir.below(&own)?;
+        let Some(below) = plain.dir.below(&own) else {
+            assert!(!spot.is_clone(), "{} holds {}, a clone's spot inside it", plain.dir.0, own.0);
+            assert!(own.below(&plain.dir).is_some(), "{} holds {}", own.0, plain.dir.0);
+            return None;
+        };
         (below != Below::OWN).then_some((own, plain))
     }
 
