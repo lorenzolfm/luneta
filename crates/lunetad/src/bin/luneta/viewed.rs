@@ -673,7 +673,7 @@ impl Viewed {
             Seen::Refused(why) => return Heeded::Note(format!("luneta-mux refused: {why}")),
             Seen::Lost(why) => {
                 self.unwatch();
-                return Heeded::Note(format!("luneta's viewer of luneta-mux: {why}"));
+                return Heeded::Note(format!("luneta's viewer: {why}"));
             },
         };
         let frame = framed.frame();

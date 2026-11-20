@@ -1342,6 +1342,8 @@ fn lunetad_stops_no_luneta_mux_it_started_of_another_build_and_names_its_path() 
     });
     let log = logged(&owned);
     assert!(!log.contains(&format!("is another build than {own}, and is stopped")), "{log}");
+    assert!(log.contains(&format!(": luneta-mux {} (pid ", older_build())), "{log}");
+    assert!(!log.contains("luneta-mux: luneta-mux"), "a notice names luneta-mux once: {log}");
 }
 
 fn older_build() -> String {
