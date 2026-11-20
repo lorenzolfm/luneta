@@ -181,15 +181,47 @@ mod tests {
 
     use super::*;
 
-    fn commands_named(skill: &str) -> Vec<String> {
-        let mut named = Vec::new();
+    const BY_THE_USER: &str = "## What the user does in luneta\n";
+
+    fn cli() -> clap::Command {
+        let mut cli = Cli::command();
+        cli.build();
+        cli
+    }
+
+    fn listed(cli: &clap::Command) -> impl Iterator<Item = &clap::Command> {
+        let visible = cli.get_subcommands().filter(|command| !command.is_hide_set());
+        visible.filter(|command| command.get_name() != "help")
+    }
+
+    fn lists(command: &clap::Command, flag: &str) -> bool {
+        let spelled = |argument: &clap::Arg| argument.get_long() == Some(flag);
+        command.get_arguments().any(|argument| spelled(argument) && !argument.is_hide_set())
+    }
+
+    fn long(word: &str) -> Option<&str> {
+        let (_, flag) = word.split_once("--")?;
+        let flag = flag.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').next();
+        flag.filter(|flag| !flag.is_empty())
+    }
+
+    fn shown(skill: &str) -> Vec<String> {
+        let mut shown = Vec::new();
         let mut prose = String::new();
         let mut fence: Option<&str> = None;
         for line in skill.lines() {
             match (fence, line.trim_start().strip_prefix("```")) {
-                (None, Some(info)) => fence = Some(info.trim()),
+                (None, Some(info)) => {
+                    let info = info.trim();
+                    let known = matches!(info, "sh" | "text");
+                    assert!(known, "the skill opens a {info:?} block, not sh or text");
+                    fence = Some(info);
+                },
                 (Some(_), Some(_)) => fence = None,
-                (Some("sh"), None) => named.push(line.split(" # ").next().unwrap_or(line).to_owned()),
+                (Some("sh"), None) => {
+                    let command = line.split_once(" # ").map_or(line, |(command, _)| command);
+                    shown.push(command.to_owned());
+                },
                 (Some(_), None) => {},
                 (None, None) => {
                     prose.push_str(line);
@@ -198,14 +230,19 @@ mod tests {
             }
         }
         assert!(fence.is_none(), "the skill leaves a code block open");
-        named.extend(prose.split('`').skip(1).step_by(2).map(|span| span.replace('\n', " ")));
-        let named = named.into_iter().map(|said| said.trim().to_owned());
-        named.filter(|said| said.starts_with("luneta ")).collect()
+        let ticks = prose.matches('`').count();
+        let paired = ticks.is_multiple_of(2);
+        assert!(paired, "the skill's prose has {ticks} backticks, one unpaired");
+        shown.extend(prose.split('`').skip(1).step_by(2).map(|span| span.replace('\n', " ")));
+        shown.into_iter().map(|said| said.trim().to_owned()).collect()
+    }
+
+    fn commands_named(skill: &str) -> Vec<String> {
+        shown(skill).into_iter().filter(|said| said.starts_with("luneta ")).collect()
     }
 
     fn unlisted(skill: &str) -> Vec<String> {
-        let mut cli = Cli::command();
-        cli.build();
+        let cli = cli();
         let mut unlisted = Vec::new();
         for said in commands_named(skill) {
             let mut words = said.split_whitespace().skip(1);
@@ -218,30 +255,72 @@ mod tests {
                 unlisted.push(format!("luneta {verb}"));
                 continue;
             };
-            for flag in words.filter_map(|word| word.split_once("--").map(|(_, flag)| flag)) {
-                let flag = flag.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').next();
-                let Some(flag) = flag.filter(|flag| !flag.is_empty()) else {
-                    continue;
-                };
-                let listed = command.get_arguments().any(|argument| {
-                    argument.get_long() == Some(flag) && !argument.is_hide_set()
-                });
-                if !listed {
+            for flag in words.filter_map(long) {
+                if !lists(command, flag) {
                     unlisted.push(format!("luneta {verb} --{flag}"));
                 }
+            }
+        }
+        for said in shown(skill).iter().filter(|said| said.starts_with("--")) {
+            let Some(flag) = long(said) else {
+                continue;
+            };
+            let mut commands = std::iter::once(&cli).chain(listed(&cli));
+            if !commands.any(|command| lists(command, flag)) {
+                unlisted.push(format!("--{flag}"));
             }
         }
         unlisted
     }
 
+    fn unnamed(skill: &str) -> Vec<String> {
+        let named = commands_named(skill);
+        let verbs = named.iter().filter_map(|said| said.split_whitespace().nth(1));
+        let verbs: Vec<&str> = verbs.collect();
+        let cli = cli();
+        let verbs_listed = listed(&cli).map(clap::Command::get_name);
+        let unnamed = verbs_listed.filter(|verb| !verbs.contains(verb));
+        unnamed.map(|verb| format!("luneta {verb}")).collect()
+    }
+
+    fn unlabelled(skill: &str) -> Vec<String> {
+        let section = skill.split_once(BY_THE_USER).map(|(_, section)| section);
+        let section = section.expect("the skill says what the user does in luneta");
+        let section = section.split_once("\n## ").map_or(section, |(section, _)| section);
+        let marks = section.matches('"').count();
+        assert!(marks > 0, "the skill quotes no action of luneta's by name");
+        let paired = marks.is_multiple_of(2);
+        assert!(paired, "the skill's actions have {marks} quote marks, one unpaired");
+        let labels = actions::Action::ALL.map(|action| action.spec().name);
+        let quoted = section.split('"').skip(1).step_by(2);
+        let quoted = quoted.map(|name| name.split_whitespace().collect::<Vec<_>>().join(" "));
+        quoted.filter(|name| !labels.contains(&name.as_str())).collect()
+    }
+
     #[test]
-    fn the_luneta_skill_names_only_commands_and_flags_luneta_help_lists() {
-        let named = commands_named(SKILL);
-        assert!(named.len() >= 8, "the skill names {} luneta commands: {named:?}", named.len());
+    fn the_luneta_skill_names_each_command_luneta_help_lists_and_no_other() {
+        assert_eq!(unnamed(SKILL), Vec::<String>::new());
         assert_eq!(unlisted(SKILL), Vec::<String>::new());
         let stale = "Run `luneta\nhere`, then:\n\n```sh\nluneta prune --beside x   # no such \
-                     flag\nluneta terminate --here\n```\n\n```text\nluneta go a\n```\n";
-        let said = ["luneta prune --beside", "luneta terminate --here", "luneta here"];
-        assert_eq!(unlisted(stale), said, "a verb gone, a flag it lacks, and a hidden flag");
+                     flag\nluneta terminate --here\n```\n\n```text\nluneta go a\n```\n\nPass \
+                     `--beside\n<dir>` or `--yes <plan>`.\n";
+        let said = ["luneta prune --beside", "luneta terminate --here", "luneta here", "--beside"];
+        let why = "a verb gone, a flag it lacks, a hidden flag, and a flag no command lists";
+        assert_eq!(unlisted(stale), said, "{why}");
+        assert!(unnamed(stale).contains(&"luneta agents".to_owned()), "{:?}", unnamed(stale));
+    }
+
+    #[test]
+    #[should_panic(expected = "block, not sh or text")]
+    fn a_code_block_neither_sh_nor_text_fails_the_luneta_skill() {
+        shown("```bash\nluneta here\n```\n");
+    }
+
+    #[test]
+    fn the_luneta_skill_names_only_actions_luneta_lists() {
+        assert_eq!(unlabelled(SKILL), Vec::<String>::new());
+        let stale = "## What the user does in luneta\n\n- \"new view\" or \"split the\n  \
+                     view\".\n\n## Next\n\n\"not an action\"\n";
+        assert_eq!(unlabelled(stale), ["split the view"], "a name the menu lacks, across a line");
     }
 }
