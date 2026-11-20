@@ -89,7 +89,7 @@ pub enum Made {
 
 pub struct Pulled {
     on: Machine,
-    worktree: WorktreeId,
+    pulled: worktrees::Pulled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1901,8 +1901,8 @@ impl App {
                 let lunetad = self.lunetad.clone();
                 self.naming_on(move || {
                     let made = caught(NAMING_PANICKED, || {
-                        let made = worktrees::pulled(&lunetad, &on, &cwd, &name, &opens)?;
-                        Ok(Pulled { on, worktree: made.worktree() })
+                        let pulled = worktrees::pulled(&lunetad, &on, &cwd, &name, &opens)?;
+                        Ok(Pulled { on, pulled })
                     });
                     Made::Pulled { menu, made }
                 });
@@ -2547,9 +2547,17 @@ impl App {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: {why}")),
         };
-        let Pulled { on, worktree } = made;
-        self.go_worktree(&on, worktree, None);
+        let Pulled { on, pulled } = made;
+        let (worktree, focus, unrun) = match pulled {
+            worktrees::Pulled::Went(worktree) => (worktree, None, None),
+            worktrees::Pulled::Opened { worktree, view } => (worktree, Some(view), None),
+            worktrees::Pulled::Unopened { worktree, why } => (worktree, None, Some(why)),
+        };
+        self.go_worktree(&on, worktree, focus);
         self.give_opened(opener);
+        if let Some(why) = unrun {
+            self.sidebar.notify(format!("menu: {why}"));
+        }
     }
 
     fn give_opened(&mut self, opener: Opener) {

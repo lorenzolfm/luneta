@@ -24,7 +24,7 @@ mod spot;
 mod view;
 
 pub use file::{forget, holder, kept, take, Changed, Elsewhere, Failed, Forgotten, Lock, Revision};
-pub use file::{Store, Unheld};
+pub use file::{Opened, Store, Unheld};
 pub use layout::{Size, FRAME_CELLS, LAYOUT_VIEWS_MAX};
 pub use spot::{clone_of, subfolders, CloneRoot, Spot, CLONE_WORKTREES_MAX, LOOK as SPOT_LOOK};
 pub use view::{quoted, shell_if_empty, Argv, Layout, Line, Opens, Placed, Runs, Session};

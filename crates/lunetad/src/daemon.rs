@@ -46,7 +46,8 @@ use crate::api::{
 use crate::asks::{Asked, Step};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Ask, Changed, Holders, Lock, Made, Opens, ProjectId, Store, WorktreeId};
+use crate::projects::{Ask, Changed, Holders, Lock, Made, Opened, Opens, ProjectId, Store};
+use crate::projects::WorktreeId;
 use crate::layouts::{self, Root, Unrooted};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
@@ -1048,7 +1049,7 @@ fn change_answered(
     layouts: &SyncSender<layouts::Command>,
     change: change_projects_request::Change,
 ) -> Result<ChangeProjectsResponse, Status> {
-    let Changed { made, kept } = change_made(layouts, change)?;
+    let Changed { made, opened, kept } = change_made(layouts, change)?;
     let made = made.map(|made| match made {
         Made::Project(project) => change_projects_response::Made::Project(project.get()),
         Made::Worktree(worktree) => change_projects_response::Made::Worktree(worktree.get()),
@@ -1056,7 +1057,8 @@ fn change_answered(
         Made::Taken(worktree) => change_projects_response::Made::Taken(worktree.get()),
         Made::Untaken => change_projects_response::Made::Untaken(()),
     });
-    Ok(ChangeProjectsResponse { made, kept: Some(kept.to_api()) })
+    let opened = opened.map(Opened::to_api);
+    Ok(ChangeProjectsResponse { made, kept: Some(kept.to_api()), opened })
 }
 
 fn unfinished(error: &task::JoinError) -> Status {

@@ -16,7 +16,8 @@ use lunetad::api::{self, ChangeProjectsRequest, ListWorkRequest, MakeWorktreeReq
 use lunetad::api::{Version, WatchRequest};
 use lunetad::changes::{Unadded, Unchanged};
 use lunetad::mux::own::TerminalKey;
-use lunetad::projects::{self, Holders, Name, Opens, ProjectId, Size, ViewId, WorktreeId};
+use lunetad::projects::{self, Holders, Name, Opened, Opens, ProjectId, Size, ViewId};
+use lunetad::projects::WorktreeId;
 use lunetad::links::{self, Branch, Unready};
 use lunetad::work::{self, Listed};
 use lunetad::{Asked, Beside, Daemon, Heard};
@@ -457,14 +458,45 @@ pub fn pulled(
     cwd: &Directory,
     name: &str,
     opens: &Opens,
-) -> Result<Landed, String> {
+) -> Result<Pulled, String> {
     let change = Change::Pull(Pull {
         folder: cwd.to_string(),
         name: name.to_owned(),
         opens: Some(opens.to_api()),
     });
-    let pulled = changed_on(path, on(machine), change).and_then(landed);
-    pulled.map_err(|unchanged| said_unopened(unchanged, cwd, name))
+    let pulled = change_answered(path, on(machine), change, Unchanged::of).and_then(pulled_of);
+    match pulled {
+        Ok(Pulled::Unopened { worktree, why }) => {
+            let why = format!("{cwd} is {name}'s worktree, and its command does not run: {why}");
+            Ok(Pulled::Unopened { worktree, why })
+        },
+        Ok(pulled @ (Pulled::Went(_) | Pulled::Opened { .. })) => Ok(pulled),
+        Err(unchanged) => Err(said_unopened(unchanged, cwd, name)),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Pulled {
+    Went(WorktreeId),
+    Opened { worktree: WorktreeId, view: ViewId },
+    Unopened { worktree: WorktreeId, why: String },
+}
+
+fn pulled_of(answered: ChangeProjectsResponse) -> Result<Pulled, Unchanged> {
+    let ChangeProjectsResponse { made, opened, .. } = answered;
+    let opened = Opened::of_api(opened).map_err(Unchanged::InDoubt)?;
+    match (landed(made)?, opened) {
+        (Landed::Made(worktree) | Landed::Found(worktree), None) => Ok(Pulled::Went(worktree)),
+        (Landed::Found(worktree), Some(Opened::View(view))) => {
+            Ok(Pulled::Opened { worktree, view })
+        },
+        (Landed::Found(worktree), Some(Opened::Unopened(why))) => {
+            Ok(Pulled::Unopened { worktree, why })
+        },
+        (Landed::Made(worktree), Some(opened)) => Err(Unchanged::InDoubt(format!(
+            "luneta can't read lunetad's answer: worktree {worktree} is made, and {opened:?} too"
+        ))),
+    }
 }
 
 pub fn unopened(folder: &Directory, tab: &str, why: &str) -> String {
@@ -736,5 +768,26 @@ mod tests {
         assert_eq!(project, Err(format!("{unread}, so the project may be made")));
         assert!(matches!(project_of(Some(Made::Project(4))), Ok(id) if id.get() == 4));
         assert!(matches!(landed(Some(Made::Found(5))), Ok(Landed::Found(id)) if id.get() == 5));
+    }
+
+    #[test]
+    fn a_pull_goes_to_its_worktree_and_a_found_one_says_what_its_command_opened() {
+        use lunetad::api::change_projects_response::Opened as Said;
+        let answer = |made, opened| ChangeProjectsResponse { made, opened, kept: None };
+        let (worktree, view) = (WorktreeId::of(5).unwrap(), ViewId::of(9).unwrap());
+        let made = answer(Some(Made::Worktree(5)), None);
+        assert_eq!(pulled_of(made), Ok(Pulled::Went(worktree)));
+        let found = answer(Some(Made::Found(5)), None);
+        assert_eq!(pulled_of(found), Ok(Pulled::Went(worktree)));
+        let opened = answer(Some(Made::Found(5)), Some(Said::View(9)));
+        assert_eq!(pulled_of(opened), Ok(Pulled::Opened { worktree, view }));
+        let unopened = answer(Some(Made::Found(5)), Some(Said::Unopened("no room".to_owned())));
+        let why = "no room".to_owned();
+        assert_eq!(pulled_of(unopened), Ok(Pulled::Unopened { worktree, why }));
+        let zero = Unchanged::InDoubt("opened: it names view 0".to_owned());
+        assert_eq!(pulled_of(answer(Some(Made::Found(5)), Some(Said::View(0)))), Err(zero));
+        let both = answer(Some(Made::Worktree(5)), Some(Said::View(9)));
+        let both = pulled_of(both).unwrap_err();
+        assert!(matches!(&both, Unchanged::InDoubt(why) if why.contains("is made")), "{both:?}");
     }
 }

@@ -793,6 +793,10 @@ message ChangeProjectsResponse {
     google.protobuf.Empty untaken = 6;
   }
   Version kept = 5;
+  oneof opened {
+    fixed64 view = 7;
+    string unopened = 8;
+  }
 }
 
 message MakeWorktreeRequest {

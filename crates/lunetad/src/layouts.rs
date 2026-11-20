@@ -24,7 +24,7 @@ use crate::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, R
 use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
 use crate::projects::{Holds, Name, Spot, Worktree};
 use crate::projects::{WorktreeId, FRAME_CELLS, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
-use crate::projects::{quoted, Opens, Subfolder, WORKTREES_MAX};
+use crate::projects::{self, quoted, Opens, Subfolder, WORKTREES_MAX};
 use crate::shells::Doing;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
@@ -453,19 +453,22 @@ impl Layouts {
     fn heard(&mut self, command: Command) {
         match command {
             Command::Change { change, answer } => {
+                let alone = |made| (made, None);
                 let changed = match change {
                     Ask::Change(change) => self.changed_opening(change),
                     Ask::CloseWorktree { worktree, seen } => {
-                        self.close_worktree(worktree, &seen)
+                        self.close_worktree(worktree, &seen).map(alone)
                     },
                     Ask::CloseProject { project, worktrees, seen } => {
-                        self.close_project(project, &worktrees, &seen)
+                        self.close_project(project, &worktrees, &seen).map(alone)
                     },
-                    Ask::Bring { worktree, from } => self.bring(worktree, from).map(Some),
-                    Ask::CloseView(terminal) => self.close_view(terminal),
+                    Ask::Bring { worktree, from } => {
+                        self.bring(worktree, from).map(|made| alone(Some(made)))
+                    },
+                    Ask::CloseView(terminal) => self.close_view(terminal).map(alone),
                 };
                 let kept = self.store.revision();
-                let _ = answer.send(changed.map(|made| Changed { made, kept }));
+                let _ = answer.send(changed.map(|(made, opened)| Changed { made, opened, kept }));
             },
             Command::Came { worktree, size, runs_in, again, out, answer } => {
                 let _ = answer.send(self.came(worktree, size, runs_in, again, out));
@@ -609,44 +612,50 @@ impl Layouts {
         }
     }
 
-    fn changed_opening(&mut self, change: Change) -> Result<Option<Made>, Failed> {
+    fn changed_opening(
+        &mut self,
+        change: Change,
+    ) -> Result<(Option<Made>, Option<projects::Opened>), Failed> {
         let Some(opens) = change.opens().cloned() else {
-            return self.store.change(change);
+            return self.store.change(change).map(|made| (made, None));
         };
         let opens_found = matches!(change, Change::Pull { opens: Opens::Command(_), .. });
         let held: BTreeSet<ProjectId> = self.store.projects().map_or_default(|projects| {
             projects.all().iter().map(Project::id).collect()
         });
         let made = self.store.change(change)?;
-        match (made, opens_found) {
+        let opened = match (made, opens_found) {
             (Some(Made::Worktree(worktree)), _) => {
                 self.first_made(worktree, &opens, &held).map_err(Failed::Unopened)?;
+                None
             },
-            (Some(Made::Found(worktree)), true) => self.found_opened(worktree, &opens)?,
+            (Some(Made::Found(worktree)), true) => {
+                let opened = self.found_opened(worktree, &opens);
+                Some(opened.map_or_else(projects::Opened::Unopened, projects::Opened::View))
+            },
             (Some(Made::Found(_)), false)
-            | (Some(Made::Project(_) | Made::Taken(_) | Made::Untaken) | None, _) => {},
-        }
-        Ok(made)
+            | (Some(Made::Project(_) | Made::Taken(_) | Made::Untaken) | None, _) => None,
+        };
+        Ok((made, opened))
     }
 
-    fn found_opened(&mut self, worktree: WorktreeId, opens: &Opens) -> Result<(), Failed> {
-        let terminal = self.store.fresh_terminal()?;
-        let projects = self.store.projects().expect("projects just changed are kept");
+    fn found_opened(&mut self, worktree: WorktreeId, opens: &Opens) -> Result<ViewId, String> {
+        let terminal = self.store.fresh_terminal().map_err(Failed::said)?;
+        let projects = self.kept()?;
         let (project, found) = projects.find(worktree).expect("a worktree just found is held");
         let shown = self.clients.values().filter(|it| it.worktree == worktree);
         let size = fit(shown, found.layout(), &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
         let view = terminal.view();
-        let placing = placement(found.layout(), None, Beside::Largest, view, size);
-        let (placed, inner) = placing.map_err(Failed::Refused)?;
+        let (placed, inner) = placement(found.layout(), None, Beside::Largest, view, size)?;
         let folder = project.folder(worktree).expect("a worktree held has its folder");
         let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
         let made = Terminal::new(terminal, folder, opens.runs());
-        self.store.change(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
+        self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
         let unopened = |why| format!("no terminal opens in worktree {worktree}: {why}");
-        self.spawned(terminal, &cwd, opens, inner).map_err(unopened).map_err(Failed::Unopened)?;
+        self.spawned(terminal, &cwd, opens, inner).map_err(unopened)?;
         let last_focus = self.layout(worktree).map(Layout::last_focus);
         assert_eq!(last_focus, Ok(Some(view)), "terminal {terminal} opens focused in its worktree");
-        Ok(())
+        Ok(view)
     }
 
     fn first_made(
