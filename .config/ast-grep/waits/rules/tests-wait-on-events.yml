@@ -10,7 +10,7 @@ rule:
     - kind: scoped_identifier
       has:
         field: path
-        regex: ^((std|core)::time::)?Duration$
+        regex: ^(((std|core|tokio)::)?time::)?Duration$
     - kind: identifier
       regex: ^(sleep|sleep_until|timeout|timeout_at|interval)$
     - kind: field_identifier

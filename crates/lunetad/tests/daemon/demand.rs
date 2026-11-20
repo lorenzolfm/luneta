@@ -314,7 +314,7 @@ fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     let kept = format!("but {} is 0.0.0, no newer, so luneta leaves it be", real.display());
     assert!(said.contains(&format!("lunetad {OLDER} (pid {})", older.pid())), "{said}");
     assert!(said.contains(&kept), "{said}");
-    assert_eq!(older.has_ended(), None);
+    assert_eq!(older.exit_status(), None);
 
     let current = watch(&host, Path::new(LUNETA));
     let _daemon = Detached { host: &host, pid: pid(&current) };
@@ -334,7 +334,7 @@ fn luneta_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
     let mut after = stand_in(&later, &stamped(u64::MAX), None);
     let said = refused(&later, Path::new(LUNETA));
     assert!(said.contains(&format!("is newer than this luneta, {}", *release::SAID)), "{said}");
-    assert_eq!(after.has_ended(), None);
+    assert_eq!(after.exit_status(), None);
 
     let host = Host::new();
     let mut before = stand_in(&host, &stamped(0), None);
@@ -346,7 +346,7 @@ fn luneta_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
     } else {
         let said = refused(&host, Path::new(LUNETA));
         assert!(said.contains(&format!("lunetad {} (pid ", stamped(0))), "{said}");
-        assert_eq!(before.has_ended(), None);
+        assert_eq!(before.exit_status(), None);
     }
 }
 
@@ -384,7 +384,7 @@ fn luneta_watch_refuses_a_daemon_newer_than_it_and_leaves_it_be() {
     let both = format!("lunetad {NEWER} (pid {pid}) is newer than this luneta, {own}");
     assert!(said.contains(&both), "{said}");
     assert!(said.contains(&format!("`kill {pid}`")), "{said}");
-    assert_eq!(newer.has_ended(), None);
+    assert_eq!(newer.exit_status(), None);
 }
 
 #[test]
@@ -405,7 +405,7 @@ fn the_cli_asks_no_daemon_of_another_build_and_info_says_it_is_one() {
         assert!(output.status.success(), "{said}");
         assert!(out.starts_with(&theirs), "{out}");
         assert!(said.contains(&theirs) && said.contains(release::SAID.as_str()), "{said}");
-        assert_eq!(other.has_ended(), None);
+        assert_eq!(other.exit_status(), None);
     }
 }
 
@@ -417,8 +417,8 @@ fn luneta_watch_stops_no_process_but_the_one_the_kernel_says_listens() {
     let said = refused(&host, Path::new(LUNETA));
     let listens = "but the kernel says another process listens on its socket, so luneta stops none";
     assert!(said.contains(listens), "{said}");
-    assert_eq!(decoy.has_ended(), None);
-    assert_eq!(older.has_ended(), None);
+    assert_eq!(decoy.exit_status(), None);
+    assert_eq!(older.exit_status(), None);
 }
 
 #[test]
@@ -743,14 +743,14 @@ fn the_daemon_runs_on_while_a_client_watches_it() {
     let mut daemon = start(host.vars()).unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let watched = Instant::now() + ALONE + SWEEP * 3;
     runtime.block_on(async {
         let mut watching = lunetad::connect(&folder).await.unwrap();
         let mut after = None;
-        while Instant::now() < watched {
+        luneta_waits::repeated_through(ALONE + SWEEP * 3, async || {
             let asked = watching.watch(WatchRequest { after, kept: None, shown: false }).await;
             after = asked.expect("the daemon ended").into_inner().version;
-        }
+        })
+        .await;
     });
-    assert_eq!(daemon.has_ended(), None);
+    assert_eq!(daemon.exit_status(), None);
 }

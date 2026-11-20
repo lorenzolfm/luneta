@@ -23,7 +23,7 @@ fn nanos(key: api::TerminalKey) -> i128 {
 #[test]
 fn a_terminal_is_listed_with_its_tag_and_size_and_a_viewer_types_in_it() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"work 1", size(40, 10)).await;
         let listing = listed(&mut mux).await;
@@ -42,7 +42,7 @@ fn a_terminal_is_listed_with_its_tag_and_size_and_a_viewer_types_in_it() {
 #[test]
 fn a_terminal_takes_the_size_it_is_given_and_not_its_viewer_s() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"sized", size(40, 10)).await;
         let mut viewer = Viewer::new(&mut mux).await;
@@ -66,7 +66,7 @@ fn a_terminal_takes_the_size_it_is_given_and_not_its_viewer_s() {
 #[test]
 fn a_terminal_s_tag_changes_and_the_watch_says_so() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let key = new_terminal(&mut mux, shell(), b"before", size(40, 10)).await;
@@ -82,7 +82,7 @@ fn a_terminal_s_tag_changes_and_the_watch_says_so() {
 #[test]
 fn a_viewer_sees_the_terminals_it_shows_and_no_others() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let one = script("echo one; read x", api::Ends::Holds);
         let one = new_terminal(&mut mux, one, b"1", size(20, 4)).await;
@@ -102,7 +102,7 @@ fn a_viewer_sees_the_terminals_it_shows_and_no_others() {
 #[test]
 fn a_viewer_that_shows_a_terminal_again_gets_its_whole_screen_again() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let one = script("echo one; read x", api::Ends::Holds);
         let key = new_terminal(&mut mux, one, b"1", size(20, 4)).await;
@@ -126,7 +126,7 @@ fn a_viewer_that_shows_a_terminal_again_gets_its_whole_screen_again() {
 #[test]
 fn typing_in_a_terminal_not_shown_is_refused_and_the_viewer_goes_on() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let mut viewer = Viewer::new(&mut mux).await;
@@ -142,7 +142,7 @@ fn typing_in_a_terminal_not_shown_is_refused_and_the_viewer_goes_on() {
 #[test]
 fn a_viewer_never_shows_the_terminal_it_runs_in() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let home = new_terminal(&mut mux, shell(), b"home", size(40, 10)).await;
         let greeting = api::Greeting { colours: None, runs_in: Some(home) };
@@ -157,7 +157,7 @@ fn a_viewer_never_shows_the_terminal_it_runs_in() {
 #[test]
 fn a_terminal_named_with_another_time_is_not_found() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let other = Some(made_at_another_time(key));
@@ -181,7 +181,7 @@ fn a_terminal_named_with_another_time_is_not_found() {
 #[test]
 fn a_terminal_s_program_sees_the_terminal_s_ids_and_not_zellij_s() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let says = "echo \"$LUNETA_MUX_TERMINAL ${ZELLIJ_SESSION_NAME-none}\"; \
             echo \"$LUNETA_MUX_TERMINAL_MADE\"; read x";
@@ -196,7 +196,7 @@ fn a_terminal_s_program_sees_the_terminal_s_ids_and_not_zellij_s() {
 #[test]
 fn a_terminal_dumps_its_text() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let key =
@@ -219,7 +219,7 @@ fn a_terminal_dumps_its_text() {
 #[test]
 fn a_held_terminal_says_how_its_program_ended_and_a_closing_one_leaves() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let held =
@@ -246,7 +246,7 @@ fn a_held_terminal_says_how_its_program_ended_and_a_closing_one_leaves() {
 #[test]
 fn a_tag_is_said_and_bounded() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let made = |tag: Vec<u8>| api::NewTerminalRequest {
             opens: Some(shell()),
@@ -264,7 +264,7 @@ fn a_tag_is_said_and_bounded() {
 #[test]
 fn a_showing_that_repeats_a_terminal_ends_the_viewer() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let mut viewer = Viewer::new(&mut mux).await;
@@ -284,7 +284,7 @@ fn a_showing_that_repeats_a_terminal_ends_the_viewer() {
 #[test]
 fn showing_a_terminal_the_mux_does_not_hold_is_refused_and_the_others_are_shown() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let gone = new_terminal(&mut mux, shell(), b"gone", size(40, 10)).await;
@@ -303,7 +303,7 @@ fn showing_a_terminal_the_mux_does_not_hold_is_refused_and_the_others_are_shown(
 #[test]
 fn a_closed_terminal_leaves_what_its_viewers_show() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let one = new_terminal(&mut mux, shell(), b"1", size(40, 10)).await;
         let two = new_terminal(&mut mux, shell(), b"2", size(40, 10)).await;
@@ -321,7 +321,7 @@ fn a_closed_terminal_leaves_what_its_viewers_show() {
 #[test]
 fn the_last_terminal_to_close_ends_the_server() {
     run(async {
-        let mut server = Server::start();
+        let mut server = Server::start().await;
         let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let mut viewer = Viewer::new(&mut mux).await;
@@ -329,7 +329,7 @@ fn the_last_terminal_to_close_ends_the_server() {
         mux.close_terminal(api::CloseTerminalRequest { terminal: Some(key) }).await.unwrap();
         while viewer.next().await.unwrap().is_some() {}
         drop((viewer, mux));
-        assert!(server.ended().success());
+        assert!(server.ended().await.success());
         assert!(gone(&server.socket()));
     });
 }
@@ -337,7 +337,7 @@ fn the_last_terminal_to_close_ends_the_server() {
 #[test]
 fn a_closed_terminal_s_id_is_never_given_again() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let first = new_terminal(&mut mux, shell(), b"1", size(40, 10)).await;
         let second = new_terminal(&mut mux, shell(), b"2", size(40, 10)).await;
@@ -350,7 +350,7 @@ fn a_closed_terminal_s_id_is_never_given_again() {
 #[test]
 fn a_terminal_works_where_it_says_on_this_machine() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let says = "printf '\\033]7;file://elsewhere/tmp\\007'; echo one; read x; \
             printf '\\033]7;file:///tmp\\007'; echo two; read x";
@@ -375,7 +375,7 @@ const THIRTY_LINES: &str = "i=1; while [ $i -le 30 ]; do echo line$i; i=$((i + 1
 #[test]
 fn each_viewer_looks_back_in_the_scrollback_on_its_own() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let lines = script(THIRTY_LINES, api::Ends::Holds);
         let key = new_terminal(&mut mux, lines, b"t", size(20, 5)).await;
@@ -398,7 +398,7 @@ fn each_viewer_looks_back_in_the_scrollback_on_its_own() {
 #[test]
 fn a_viewer_back_in_the_scrollback_stays_on_its_rows() {
     run(async {
-        let server = Server::start();
+        let server = Server::start().await;
         let mut mux = server.client().await;
         let lines = format!("{THIRTY_LINES}; echo more1; echo more2; echo more3; read x");
         let key = new_terminal(&mut mux, script(&lines, api::Ends::Holds), b"t", size(20, 5)).await;

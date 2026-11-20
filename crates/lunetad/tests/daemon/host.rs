@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{BufRead, BufReader};
@@ -8,6 +9,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
+use luneta_waits::Patience;
 use lunetad::api::{self, WatchRequest};
 use lunetad::folder::{self, Folder};
 use tempfile::TempDir;
@@ -554,7 +556,11 @@ impl Running {
         luneta_waits::ended(what, &mut self.child)
     }
 
-    pub fn has_ended(&mut self) -> Option<ExitStatus> {
+    pub async fn ended_async(&mut self, what: &str) -> ExitStatus {
+        luneta_waits::ended_async(what, &mut self.child).await
+    }
+
+    pub fn exit_status(&mut self) -> Option<ExitStatus> {
         self.child.try_wait().unwrap()
     }
 
@@ -589,8 +595,12 @@ impl Daemon {
         self.process.ended(what)
     }
 
-    pub fn has_ended(&mut self) -> Option<ExitStatus> {
-        self.process.has_ended()
+    pub async fn ended_async(&mut self, what: &str) -> ExitStatus {
+        self.process.ended_async(what).await
+    }
+
+    pub fn exit_status(&mut self) -> Option<ExitStatus> {
+        self.process.exit_status()
     }
 
     pub fn runs_on(&mut self, what: &str) {
@@ -607,8 +617,11 @@ impl Daemon {
     }
 
     pub fn says(&mut self, what: &str, said: impl Fn(&str) -> bool) -> &[String] {
+        let patience = Patience::begun();
         while !self.said.iter().any(|line| said(line)) {
-            let line = luneta_waits::heard(what, &self.heard);
+            let before = &self.said;
+            let waited = fmt::from_fn(|f| write!(f, "{what}, after {before:?}"));
+            let line = patience.heard(waited, &self.heard);
             self.said.push(line);
         }
         &self.said

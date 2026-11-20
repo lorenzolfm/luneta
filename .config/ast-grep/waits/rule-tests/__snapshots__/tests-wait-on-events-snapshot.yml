@@ -48,6 +48,26 @@ snapshots:
       style: secondary
       start: 17
       end: 36
+  fn f() { let d = time::Duration::from_millis(1); }:
+    labels:
+    - source: time::Duration::from_millis
+      style: primary
+      start: 17
+      end: 44
+    - source: time::Duration
+      style: secondary
+      start: 17
+      end: 31
+  fn f() { let d = tokio::time::Duration::from_millis(1); }:
+    labels:
+    - source: tokio::time::Duration::from_millis
+      style: primary
+      start: 17
+      end: 51
+    - source: tokio::time::Duration
+      style: secondary
+      start: 17
+      end: 38
   fn f() { sleep(d); }:
     labels:
     - source: sleep

@@ -564,7 +564,7 @@ fn used(owned: &Owned, worktree: u64) -> Option<(i64, i32)> {
 fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
     eventually(&format!("both lunetas show {name}"), || {
         for window in &mut windows {
-            let ended = window.luneta.has_ended();
+            let ended = window.luneta.exit_status();
             assert!(ended.is_none(), "a luneta ended, {ended:?}: {:?}", window.screen());
         }
         let shows = |window: &Window| window.shows(name);

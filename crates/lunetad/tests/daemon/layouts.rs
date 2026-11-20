@@ -1,8 +1,9 @@
+use std::fmt::{self, Display};
 use std::fs;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
-use luneta_waits::{eventually, QUIET};
+use luneta_waits::{eventually, Patience, QUIET};
 use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use lunetad::api::show_response::{self, view::Found, Laid, View};
 use lunetad::api::change_projects_request::{
@@ -53,6 +54,17 @@ fn size(columns: u32, rows: u32) -> show_request::Size {
 
 fn rect(column: u32, row: u32, columns: u32, rows: u32) -> show_response::Rect {
     show_response::Rect { column, row, columns, rows }
+}
+
+fn word(
+    owned: &Owned,
+    heard: &mut Streaming<ShowResponse>,
+    patience: Patience,
+    what: impl Display,
+) -> show_response::Event {
+    let word = owned.block_on(patience.awaited(what, heard.message()));
+    let word = word.unwrap().expect("the layout goes on");
+    word.event.expect("a word says something")
 }
 
 impl<'a> Shown<'a> {
@@ -126,9 +138,11 @@ impl<'a> Shown<'a> {
         {
             return laid.clone();
         }
+        let patience = Patience::begun();
         loop {
-            let waited = format!("{what}, last {:?}, refused {:?}", self.laid, self.refused);
-            match self.word(&waited) {
+            let (laid, refused) = (&self.laid, &self.refused);
+            let waited = fmt::from_fn(|f| write!(f, "{what}, last {laid:?}, refused {refused:?}"));
+            match word(self.owned, &mut self.heard, patience, waited) {
                 show_response::Event::Laid(laid) => {
                     let found = done(&laid);
                     self.laid = Some(laid.clone());
@@ -144,19 +158,13 @@ impl<'a> Shown<'a> {
         }
     }
 
-    fn word(&mut self, what: &str) -> show_response::Event {
-        let heard = &mut self.heard;
-        let word = self.owned.block_on(luneta_waits::awaited(what, heard.message()));
-        let word = word.unwrap().expect("the layout goes on");
-        word.event.expect("a word says something")
-    }
-
     fn until_refused(&mut self) -> String {
+        let patience = Patience::begun();
         loop {
             if let Some(why) = self.refused.pop() {
                 return why;
             }
-            match self.word("a refusal comes") {
+            match word(self.owned, &mut self.heard, patience, "a refusal comes") {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => return why,
                 show_response::Event::Edged(edged) => self.edged.push(edged),
@@ -167,11 +175,12 @@ impl<'a> Shown<'a> {
     }
 
     fn until_edged(&mut self) -> show_response::Edged {
+        let patience = Patience::begun();
         loop {
             if !self.edged.is_empty() {
                 return self.edged.remove(0);
             }
-            match self.word("an edge comes") {
+            match word(self.owned, &mut self.heard, patience, "an edge comes") {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => panic!("refused, not edged: {why}"),
                 show_response::Event::Edged(edged) => return edged,
@@ -182,11 +191,12 @@ impl<'a> Shown<'a> {
     }
 
     fn until_left(&mut self) -> u64 {
+        let patience = Patience::begun();
         loop {
             if !self.left.is_empty() {
                 return self.left.remove(0);
             }
-            match self.word("a leave comes") {
+            match word(self.owned, &mut self.heard, patience, "a leave comes") {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => self.refused.push(why),
                 show_response::Event::Edged(edged) => self.edged.push(edged),
@@ -197,11 +207,12 @@ impl<'a> Shown<'a> {
     }
 
     fn until_sent(&mut self) -> u64 {
+        let patience = Patience::begun();
         loop {
             if !self.sent.is_empty() {
                 return self.sent.remove(0);
             }
-            match self.word("a send comes") {
+            match word(self.owned, &mut self.heard, patience, "a send comes") {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => panic!("refused, not sent: {why}"),
                 show_response::Event::Edged(edged) => self.edged.push(edged),
@@ -1570,16 +1581,12 @@ fn a_bridge_holds_its_most_shows_and_layouts_open_and_keeps_room_for_questions()
         assert!(checked.is_ok(), "{checked:?}");
 
         drop(held.pop());
-        let room = async {
-            loop {
-                match shown_through(&mut daemon, worktree).await {
-                    Ok(again) => return again,
-                    Err(full) if full.code() == Code::ResourceExhausted => tokio::task::yield_now().await,
-                    Err(refused) => panic!("a show let go makes room for another: {refused:?}"),
-                }
-            }
+        let room = async || match shown_through(&mut daemon, worktree).await {
+            Ok(again) => Some(again),
+            Err(full) if full.code() == Code::ResourceExhausted => None,
+            Err(refused) => panic!("a show let go makes room for another: {refused:?}"),
         };
-        held.push(luneta_waits::awaited("a show let go makes room for another", room).await);
+        held.push(luneta_waits::eventually_async("a show let go makes room for another", room).await);
     });
 }
 
@@ -1734,10 +1741,11 @@ fn seen_and_typed_into(
         text: String::new(),
     };
     viewer.typed(key, typed::Event::Key(enter));
+    let patience = Patience::begun();
     let mut lines = Vec::new();
     loop {
-        let waited = format!("the terminal shows seen-42, not only {:?}", text_of(&lines));
-        let seen = luneta_waits::heard(&waited, &seeing);
+        let waited = fmt::from_fn(|f| write!(f, "the terminal shows seen-42, not only {:?}", text_of(&lines)));
+        let seen = patience.heard(waited, &seeing);
         let framed = match seen {
             Seen::Frame(framed) => framed,
             Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),

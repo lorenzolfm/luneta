@@ -312,9 +312,15 @@ fn the_daemon_follows_the_files_as_they_change() {
     let works = Some(known(Status::Busy));
     eventually("two works", || host.agent("two").filter(|agent| agent.status == works));
     let listed = host.list();
+    let one_does = listed.agents.into_iter().find(|agent| agent.session_id == "one").map(|agent| agent.status);
     if torn.elapsed() < TORN {
-        let one_does = listed.agents.into_iter().find(|agent| agent.session_id == "one");
-        assert_eq!((one_does.map(|agent| agent.status), listed.unread), (Some(waits), 0));
+        assert_eq!((one_does, listed.unread), (Some(waits), 0));
+    } else {
+        assert!(listed.unread <= 2, "only the two torn files go unread: {}", listed.unread);
+        match one_does {
+            Some(status) => assert_eq!(status, waits, "a torn file keeps what it said before"),
+            None => assert!(listed.unread >= 1, "one is gone from the list without going unread"),
+        }
     }
 
     fs::remove_file(host.file_of(one.pid())).unwrap();

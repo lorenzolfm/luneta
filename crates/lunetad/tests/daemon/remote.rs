@@ -24,7 +24,7 @@ use lunetad::images::{self, Png};
 use lunetad::issues::Filed;
 use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Wanted, Work};
 use lunetad::transcripts::SessionId;
-use lunetad::{release, Daemon, Directory, ALONE, SWEEP};
+use lunetad::{release, Daemon, Directory, ALONE, KEPT, SWEEP};
 use rustix::process::{kill_process, test_kill_process, Pid, Signal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Status};
@@ -486,16 +486,16 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
 }
 
 fn watch_through(host: &Host, span: Duration) {
-    let until = Instant::now() + span;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = crate::host::folder_in(host.runtime.path()).unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let mut after = None;
-        while Instant::now() < until {
+        luneta_waits::repeated_through(span, async || {
             let asked = daemon.watch(WatchRequest { after, kept: None, shown: false }).await;
             after = asked.expect("the daemon ended").into_inner().version;
-        }
+        })
+        .await;
     });
 }
 
@@ -510,7 +510,7 @@ pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
     reached(&here, "far", |_| true);
 
     watch_through(&here, ALONE + SWEEP * 3);
-    assert_eq!(far_daemon.has_ended(), None);
+    assert_eq!(far_daemon.exit_status(), None);
     assert_eq!(ssh.bridges("far").len(), 1);
 }
 
@@ -906,9 +906,10 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
             assert_eq!(steps.message().await.unwrap().map(Step::of), Some(Ok(Some(step))));
         }
         let stuck = far.home.path().join("stuck");
-        let stuck = eventually("claude there says its pid", || {
+        let stuck = luneta_waits::eventually_async("claude there says its pid", async || {
             fs::read_to_string(&stuck).ok().and_then(|pid| pid.trim().parse().ok())
-        });
+        })
+        .await;
         let stuck = Pid::from_raw(stuck).unwrap();
         assert!(test_kill_process(stuck).is_ok());
         drop(steps);
@@ -1267,7 +1268,7 @@ fn a_daemon_stopped_as_an_image_comes_leaves_no_image_of_it() {
         let written = || async move { written().then_some(()) };
         luneta_waits::eventually_async("what came of the image is written", written).await;
         stop(daemon.pid());
-        let ended = daemon.ended("the daemon ends");
+        let ended = daemon.ended_async("the daemon ends").await;
         assert_eq!(ended.signal(), Some(Signal::TERM.as_raw()), "it runs nothing on its way out");
         let png = |file: &PathBuf| file.extension() == Some("png".as_ref());
         assert!(!found().iter().any(png), "{:?}", found());
@@ -1276,7 +1277,8 @@ fn a_daemon_stopped_as_an_image_comes_leaves_no_image_of_it() {
 
 #[test]
 fn a_daemon_that_starts_takes_away_the_files_past_their_day() {
-    let (past_its_day, young) = (SystemTime::UNIX_EPOCH, SystemTime::now());
+    let (now, slack) = (SystemTime::now(), KEPT / 24);
+    let (past_its_day, young) = (now - (KEPT + slack), now - slack);
     let folder = |path: PathBuf| {
         DirBuilder::new().mode(0o700).create(&path).unwrap();
         path

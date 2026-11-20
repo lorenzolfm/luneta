@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::future::Future;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc as std_mpsc;
 use std::thread;
 
 use hyper_util::rt::TokioIo;
 use luneta_mux::api::{self, mux_client::MuxClient};
+use luneta_waits::Patience;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -29,18 +30,18 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn start() -> Server {
-        Server::started(Command::new(LUNETA_MUX))
+    pub async fn start() -> Server {
+        Server::started(Command::new(LUNETA_MUX)).await
     }
 
-    pub fn start_with_files(files: u32) -> Server {
+    pub async fn start_with_files(files: u32) -> Server {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "ulimit -Sn \"$1\" && exec \"$0\" \"$2\"", LUNETA_MUX]);
         command.arg(files.to_string());
-        Server::started(command)
+        Server::started(command).await
     }
 
-    fn started(mut command: Command) -> Server {
+    async fn started(mut command: Command) -> Server {
         let runtime = tempfile::tempdir().unwrap();
         command
             .arg(runtime.path().join("luneta"))
@@ -54,7 +55,7 @@ impl Server {
             .stderr(Stdio::piped());
         let mut child = command.spawn().unwrap();
         let stderr = child.stderr.take().unwrap();
-        let (said, heard) = std_mpsc::channel();
+        let (said, mut heard) = mpsc::unbounded_channel();
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
@@ -62,7 +63,14 @@ impl Server {
                 let _ = said.send(line);
             }
         });
-        while !luneta_waits::heard("luneta-mux says it listens", &heard).starts_with("luneta-mux: listening on ") {}
+        let patience = Patience::begun();
+        loop {
+            let line = patience.awaited("luneta-mux says it listens", heard.recv()).await;
+            let line = line.expect("luneta-mux says it listens before its stderr closes");
+            if line.starts_with("luneta-mux: listening on ") {
+                break;
+            }
+        }
         Server { child, runtime }
     }
 
@@ -88,8 +96,8 @@ impl Server {
         MuxClient::new(channel)
     }
 
-    pub fn ended(&mut self) -> ExitStatus {
-        luneta_waits::ended("luneta-mux ends", &mut self.child)
+    pub async fn ended(&mut self) -> ExitStatus {
+        luneta_waits::ended_async("luneta-mux ends", &mut self.child).await
     }
 }
 
@@ -137,10 +145,11 @@ pub async fn watched_until(
     what: &str,
     test: impl Fn(&api::Listing) -> bool,
 ) -> api::Listing {
+    let patience = Patience::begun();
     let mut last = None;
     loop {
-        let waited = format!("the watch says {what}: last {last:#?}");
-        let next = luneta_waits::awaited(&waited, watch.message()).await;
+        let waited = fmt::from_fn(|f| write!(f, "the watch says {what}: last {last:#?}"));
+        let next = patience.awaited(waited, watch.message()).await;
         let listing = next.unwrap().expect("the watch went on");
         if test(&listing) {
             return listing;

@@ -51,6 +51,7 @@ pub use claude::{folder as claude_folder, one_answer, TORN};
 pub use client::{connect, listening, stream, through, unanswered, Daemon, Unbridged};
 pub use client::{BRIDGED, REACH};
 pub use daemon::{serve, Claim, ALONE, SWEEP, WATCH};
+pub use keeps::KEPT;
 pub use directory::Directory;
 pub use folder::Refusal;
 pub use luneta_protocol::release;

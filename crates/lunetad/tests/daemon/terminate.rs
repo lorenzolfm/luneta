@@ -81,7 +81,7 @@ fn luneta_terminate_ends_lunetad_the_mux_its_terminals_and_lunetas_and_forgets_t
     assert_eq!(planned.code, Some(3), "{}", planned.stderr);
     let says = "ends 1 luneta command, lunetad and luneta-mux; forgets 1 project and 1 worktree";
     assert_eq!(planned.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
-    assert!(mux.has_ended().is_none(), "a plan ends nothing");
+    assert!(mux.exit_status().is_none(), "a plan ends nothing");
     assert!(kept(&owned.host).exists());
 
     let ended = terminate(owned.host.vars(), Some(&plan_in(&planned)));
@@ -93,7 +93,7 @@ fn luneta_terminate_ends_lunetad_the_mux_its_terminals_and_lunetas_and_forgets_t
     bridge.ended("luneta bridge ends");
     eventually("the terminal's program ends with luneta-mux", || gone(shell).then_some(()));
     assert!(!kept(&owned.host).exists());
-    let ended_elsewhere = untouched.has_ended();
+    let ended_elsewhere = untouched.exit_status();
     assert!(ended_elsewhere.is_none(), "the lunetad of another folder ended");
 
     let again = terminate(owned.host.vars(), None);
@@ -156,7 +156,7 @@ fn luneta_terminate_ends_luneta_on_each_machine_ssh_reaches_and_skips_the_others
     let skipped = "gone: skipped, as ssh does not reach it, and so luneta runs on there and keeps \
                    its projects: ssh: Could not resolve hostname gone";
     assert!(gone_line.starts_with(skipped), "{gone_line}");
-    assert!(far_daemon.has_ended().is_none(), "a plan ends nothing");
+    assert!(far_daemon.exit_status().is_none(), "a plan ends nothing");
 
     let ended = terminate(here_host.vars(), Some(&plan_in(&planned)));
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
