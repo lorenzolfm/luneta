@@ -12,7 +12,9 @@ use tokio::sync::oneshot;
 use crate::agent::{Agent, Unread};
 use crate::api;
 use crate::claude::Scan;
+use crate::git;
 use crate::github::Found;
+use crate::log;
 use crate::mux::own::server::{self, Is};
 use crate::titles::{self, Titled};
 use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage, Subfolder};
@@ -52,7 +54,7 @@ pub enum Command {
     Agents(Scan),
     PiAgents(Vec<Agent>),
     Terminals(BTreeMap<ViewId, Located>),
-    GitStatus { dir: String, status: GitStatus },
+    GitStatus { dir: String, status: GitStatus, why: Option<git::Why> },
     PullRequests(BTreeMap<String, Found>),
     Topics(HashMap<SessionId, Said>),
     Hosts(Named),
@@ -172,12 +174,16 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     wake(&wakes.git);
                 }
             },
-            Command::GitStatus { dir, status } => {
+            Command::GitStatus { dir, status, why } => {
                 if !known.dirs().contains(&dir) {
                     continue;
                 }
                 let before = known.branch(&dir).map(str::to_owned);
+                let changed = known.statuses.get(&dir).is_some_and(|was| *was != status);
                 known.statuses.insert(dir.clone(), status);
+                if changed && let Some(said) = why.and_then(|why| why.changed(&dir)) {
+                    log::say(&said);
+                }
                 if known.branch(&dir).is_some_and(|now| before.as_deref() != Some(now)) {
                     wake(&wakes.github);
                 }

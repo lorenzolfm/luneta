@@ -728,17 +728,38 @@ impl Placed {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Why {
+    Heard,
+    Moved,
+    Swept,
+}
+
+impl Why {
+    pub fn changed(self, dir: &str) -> Option<String> {
+        match self {
+            Why::Heard => Some(format!("the watch on {dir} heard it change")),
+            Why::Swept => Some(format!("the sweep found {dir} changed")),
+            Why::Moved => None,
+        }
+    }
+}
+
 struct Asked {
     ended: Instant,
     took: Duration,
-    changed: bool,
+    next: Why,
     placed: Placed,
     trouble: Option<String>,
 }
 
 impl Asked {
     fn due(&self, sweep: Duration) -> Instant {
-        self.ended + if self.changed { self.took } else { self.took.max(sweep) }
+        self.ended
+            + match self.next {
+                Why::Heard | Why::Moved => self.took,
+                Why::Swept => self.took.max(sweep),
+            }
     }
 
     fn within(&self, top: &Path) -> bool {
@@ -795,14 +816,14 @@ pub fn follow(
             for (top, tree) in &trees {
                 if tree.heard.swap(false, Ordering::SeqCst) {
                     let within = asked.values_mut().filter(|was| was.within(top));
-                    within.for_each(|was| was.changed = true);
+                    within.for_each(|was| was.next = Why::Heard);
                 }
             }
             for was in asked.values_mut() {
                 if let Placed::Outside(outside) = &was.placed
                     && outside.heard.swap(false, Ordering::SeqCst)
                 {
-                    was.changed = true;
+                    was.next = Why::Heard;
                 }
             }
             let now = Instant::now();
@@ -811,7 +832,9 @@ pub fn follow(
             due.sort_by_key(|dir| asked.get(dir).map(|was| was.due(sweep)));
             for dir in due {
                 let started = Instant::now();
-                let before = asked.remove(&dir).map(|was| was.placed);
+                let was = asked.remove(&dir);
+                let why = was.as_ref().map(|was| was.next);
+                let before = was.map(|was| was.placed);
                 let (placed, said, moved) = ask(&dir, before, &mut trees, &wake, &mut troubles);
                 let (took, ended) = (started.elapsed(), Instant::now());
                 let trouble = match &said {
@@ -821,9 +844,10 @@ pub fn follow(
                 if let Some(trouble) = &trouble {
                     troubles.say(trouble.clone());
                 }
-                asked.insert(dir.clone(), Asked { ended, took, changed: moved, placed, trouble });
+                let next = if moved { Why::Moved } else { Why::Swept };
+                asked.insert(dir.clone(), Asked { ended, took, next, placed, trouble });
                 if let Ok((status, _)) = said
-                    && core.send(core::Command::GitStatus { dir, status }).is_err()
+                    && core.send(core::Command::GitStatus { dir, status, why }).is_err()
                 {
                     return;
                 }
