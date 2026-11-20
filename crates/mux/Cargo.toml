@@ -34,6 +34,7 @@ tonic-prost-build = "0.14.6"
 
 [dev-dependencies]
 hyper-util = { version = "0.1.21", features = ["tokio"] }
+luneta-waits = { path = "../waits" }
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
 

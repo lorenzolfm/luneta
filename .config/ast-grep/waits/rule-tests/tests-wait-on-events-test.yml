@@ -1,0 +1,16 @@
+id: tests-wait-on-events
+valid:
+  - "fn f(span: Duration) {}"
+  - "fn f() { luneta_waits::eventually(\"a\", || Some(())); }"
+  - "fn f() { let took = began.elapsed(); }"
+  - "fn f() { g(QUIET * 2); }"
+invalid:
+  - "fn f() { thread::sleep(d); }"
+  - "fn f() { std::thread::sleep(d); }"
+  - "async fn f() { tokio::time::sleep(d).await; }"
+  - "async fn f() { tokio::time::timeout(d, g()).await; }"
+  - "fn f() { sleep(d); }"
+  - "fn f() { let d = Duration::from_secs(1); }"
+  - "fn f() { let d = std::time::Duration::from_millis(1); }"
+  - "fn f() { g(Duration::ZERO); }"
+  - "fn f() { heard.recv_timeout(d); }"

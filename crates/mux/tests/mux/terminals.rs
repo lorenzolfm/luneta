@@ -329,7 +329,7 @@ fn the_last_terminal_to_close_ends_the_server() {
         mux.close_terminal(api::CloseTerminalRequest { terminal: Some(key) }).await.unwrap();
         while viewer.next().await.unwrap().is_some() {}
         drop((viewer, mux));
-        assert!(server.ended().await.success());
+        assert!(server.ended().success());
         assert!(gone(&server.socket()));
     });
 }

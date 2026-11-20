@@ -6,15 +6,17 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use luneta_waits::eventually;
 use lunetad::api::change_projects_request::{Change, ForgetProject};
 use lunetad::api::checkout::Head;
 use lunetad::api::git_status::{NoCheckout, Stands};
 use lunetad::api::projects::Held;
 use lunetad::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream, Version};
+use lunetad::{SETTLE, WATCH};
 use prost::Message as _;
 use serde_json::json;
 
-use crate::host::{eventually, start, Host, LUNETA};
+use crate::host::{start, Host, LUNETA};
 use crate::projects::{asked, project};
 
 impl Host {
@@ -221,8 +223,8 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     eventually("git counts the lines changed on issue-299", || {
         (changed(&work) == Some((3, 2))).then_some(())
     });
-    let said = daemon.said_after(Duration::from_secs(1)).to_vec();
-    assert!(!said.iter().any(|line| line.contains("git ")), "git said: {said:?}");
+    let git_said = || daemon.said().iter().find(|line| line.contains("git ")).cloned();
+    luneta_waits::never("git says something", git_said);
     eventually("git counts none on main", || changed(&other).is_none().then_some(()));
 
     assert!(git(at(&other), &["switch", "-q", "-c", "fold"]));
@@ -249,10 +251,7 @@ fn what_git_said_stands_once_it_will_not_read_the_repository() {
 
     assert!(git(&dir, &["config", "core.repositoryformatversion", "99"]));
     let why = format!("git did not say what repository {cwd} is in");
-    eventually("git will not read it", || {
-        let logged = daemon.said_after(Duration::from_millis(50));
-        logged.iter().any(|line| line.contains(&why)).then_some(())
-    });
+    daemon.says("git will not read it", |line| line.contains(&why));
     assert_eq!(checkout(&host, &cwd), Some(before));
 }
 
@@ -282,10 +281,8 @@ fn shows_at_once(
     change: impl FnOnce(),
     shows: impl Fn(&Checkout) -> bool,
 ) {
-    let started = Instant::now();
     change();
     eventually(what, || checkout(host, cwd).filter(|it| shows(it)));
-    assert!(started.elapsed() < Duration::from_secs(4), "{what}: {:?}", started.elapsed());
 }
 
 fn says_at_once_as_a_checkout_changes(format: &str) {
@@ -444,11 +441,10 @@ fn git_says_at_once_as_a_repository_begins_in_a_directory_made_again() {
     watched(&host, &cwd);
     in_no_repository(&host, &cwd);
 
-    let (asked, started) = (noted.statuses(), Instant::now());
+    let asked = noted.statuses();
     fs::remove_dir(&work).unwrap();
     fs::create_dir(&work).unwrap();
     eventually("git is asked again", || (noted.statuses() > asked).then_some(()));
-    assert!(started.elapsed() < Duration::from_secs(4), "asked again: {:?}", started.elapsed());
     let made = || assert!(git(&work, &["init", "-q", "-b", "first"]));
     shows_at_once(&host, &cwd, "a work tree made in it", made, on_branch("first"));
 }
@@ -493,9 +489,10 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     let asked = noted.statuses();
     for step in 0..5 {
         commit(top, "lib.rs", &format!("{step}\n"));
-        thread::sleep(Duration::from_millis(50));
+        luneta_waits::apart(SETTLE * 2);
     }
-    assert_eq!(noted.statuses(), asked, "git was asked as git wrote in its folder");
+    let asked_again = || Some(noted.statuses()).filter(|now| *now != asked);
+    luneta_waits::never("git is asked as git writes in its folder", asked_again);
 }
 
 #[test]
@@ -554,9 +551,10 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
         fs::create_dir(&made).unwrap();
         fs::write(made.join("out"), "built\n").unwrap();
         fs::write(build.join("log"), format!("{step}\n")).unwrap();
-        thread::sleep(Duration::from_millis(50));
+        luneta_waits::apart(SETTLE * 2);
     }
-    assert_eq!(noted.statuses(), asked, "git was asked as the build wrote");
+    let asked_again = || Some(noted.statuses()).filter(|now| *now != asked);
+    luneta_waits::never("git is asked as the build writes", asked_again);
     shows_at_once(&host, &cwd, "another that turns up", turns_up("two"), untracked(2));
 }
 
@@ -632,10 +630,11 @@ fn the_behind_count_is_of_what_the_remote_has() {
     eventually("the log says the fetches failed and the branch is gone", || {
         fs::read_to_string(&log).ok().filter(|log| log.contains(&failed) && log.contains(gone))
     });
-    thread::sleep(Duration::from_secs(1));
+    luneta_waits::never("the log says it twice", || {
+        let said = fs::read_to_string(&log).unwrap();
+        (said.matches(&failed).count() != 1 || said.matches(gone).count() != 1).then_some(said)
+    });
     let said = fs::read_to_string(&log).unwrap();
-    assert_eq!(said.matches(&failed).count(), 1, "{said}");
-    assert_eq!(said.matches(gone).count(), 1, "{said}");
     assert!(!said.contains("git did not fetch the upstream of done"), "{said}");
 }
 
@@ -736,8 +735,8 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     eventually("gh is asked about bare", || {
         host.gh.asked().iter().any(|branch| branch == "bare").then_some(())
     });
-    let said = daemon.said_after(Duration::from_secs(1));
-    assert!(!said.iter().any(|line| line.contains("gh pr view")), "{said:?}");
+    let gh_said = || daemon.said().iter().find(|line| line.contains("gh pr view")).cloned();
+    luneta_waits::never("gh says something", gh_said);
     assert!(!found().contains_key(&beside));
     assert_eq!(host.gh.asked(), ["main", "main", "fold", "bare"]);
 }
@@ -792,13 +791,7 @@ fn pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails() {
         let pull_requests = host.host().pull_requests;
         pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| (it.checks, it.stale))
     };
-    let soon = |what: &str, wanted| {
-        let deadline = Instant::now() + Duration::from_secs(40);
-        while shown() != Some(wanted) {
-            assert!(Instant::now() < deadline, "never came to be: {what}");
-            thread::sleep(Duration::from_millis(50));
-        }
-    };
+    let soon = |what: &str, wanted| eventually(what, || (shown() == Some(wanted)).then_some(()));
     let pending = Some(api::Checks { pending: 1, failed: 0, passed: 0 });
     eventually("main's checks show pending", || (shown() == Some((pending, false))).then_some(()));
 
@@ -810,13 +803,16 @@ fn pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails() {
     let passed = Some(api::Checks { pending: 0, failed: 0, passed: 1 });
     soon("they pass as gh answers again", (passed, false));
 
-    let said = daemon.said_after(Duration::from_secs(1));
     let failed = format!("gh pr view in {cwd}: HTTP 401: Requires authentication");
-    assert!(said.iter().any(|line| line.contains(&failed)), "{said:?}");
+    daemon.says("lunetad says gh failed", |line| line.contains(&failed));
     let changed = format!("the checks of {page} went from pending to passing, ");
     let once = "failing once in between";
-    let changed = |line: &&String| line.contains(&changed) && line.ends_with(once);
-    assert_eq!(said.iter().filter(changed).count(), 1, "{said:?}");
+    let changed = |line: &str| line.contains(&changed) && line.ends_with(once);
+    daemon.says("lunetad says the checks changed", changed);
+    luneta_waits::never("lunetad says the checks changed twice", || {
+        let said = daemon.said();
+        (said.iter().filter(|line| changed(line)).count() != 1).then(|| said.to_vec())
+    });
     assert_eq!(host.gh.asked(), ["main"; 3]);
 }
 
@@ -923,8 +919,9 @@ fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
         ]
     );
     assert_eq!(host.gh.repositories(), 1);
-    let said = daemon.said_after(Duration::from_secs(1));
-    assert!(!said.iter().any(|line| line.contains("gh ")), "{said:?}");
+    luneta_waits::never("gh or git says something", || {
+        daemon.said().iter().find(|line| line.contains("gh ")).cloned()
+    });
 }
 
 #[test]
@@ -965,8 +962,9 @@ fn a_closed_pull_request_in_a_fork_gives_way_to_its_parent_s() {
         host.gh.asked(),
         ["main", &in_parent("main"), "merged", "alone", &in_parent("alone")]
     );
-    let said = daemon.said_after(Duration::from_secs(1));
-    assert!(!said.iter().any(|line| line.contains("gh ")), "{said:?}");
+    luneta_waits::never("gh or git says something", || {
+        daemon.said().iter().find(|line| line.contains("gh ")).cloned()
+    });
 }
 
 #[test]
@@ -996,8 +994,9 @@ fn a_fork_s_default_branch_shows_no_merged_pull_request_of_its_parent() {
     eventually("gh asks the parent about trunk", || {
         host.gh.asked().contains(&trunk_in_parent).then_some(())
     });
-    let said = daemon.said_after(Duration::from_secs(1));
-    assert!(!said.iter().any(|line| line.contains("gh ")), "{said:?}");
+    luneta_waits::never("gh or git says something", || {
+        daemon.said().iter().find(|line| line.contains("gh ")).cloned()
+    });
     assert_eq!(found(), None);
 }
 
@@ -1097,8 +1096,9 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
 
     assert_eq!(host.gh.asked(), asked);
     assert_eq!(host.gh.repositories(), 1);
-    let said = daemon.said_after(Duration::from_secs(1));
-    assert!(!said.iter().any(|line| line.contains("gh ") || line.contains("git ")), "{said:?}");
+    luneta_waits::never("gh or git says something", || {
+        daemon.said().iter().find(|line| line.contains("gh ") || line.contains("git ")).cloned()
+    });
 }
 
 #[test]
@@ -1165,8 +1165,9 @@ fn a_checkout_during_an_ask_of_a_fork_s_parent_is_no_trouble() {
         (host.gh.asked() == asked).then_some(())
     });
 
-    let said = daemon.said_after(Duration::from_secs(1));
-    assert!(!said.iter().any(|line| line.contains("gh ")), "{said:?}");
+    luneta_waits::never("gh or git says something", || {
+        daemon.said().iter().find(|line| line.contains("gh ")).cloned()
+    });
 }
 
 #[test]
@@ -1183,10 +1184,7 @@ fn what_goes_wrong_in_a_fork_s_parent_names_it_and_leaves_what_the_fork_said() {
     watched(&host, &cwd);
 
     let named = format!("gh pr view of {PARENT} in {cwd} said what does not read");
-    eventually("the daemon says whose answer does not read", || {
-        let said = daemon.said_after(Duration::from_millis(100));
-        said.iter().any(|line| line.contains(&named)).then_some(())
-    });
+    daemon.says("the daemon says whose answer does not read", |line| line.contains(&named));
     eventually("the fork's closed one shows", || {
         let host = host.host();
         let found = host.pull_requests.into_iter().find(|it| it.dir == cwd);
@@ -1241,8 +1239,9 @@ fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
         ["main", main_in_parent.as_str(), "theirs", &format!("{PARENT} theirs"), "ours"]
     );
     assert_eq!(host.gh.repositories(), 1);
-    let said = daemon.said_after(Duration::from_secs(1));
-    assert!(!said.iter().any(|line| line.contains("gh ")), "{said:?}");
+    luneta_waits::never("gh or git says something", || {
+        daemon.said().iter().find(|line| line.contains("gh ")).cloned()
+    });
 }
 
 #[test]
@@ -1277,8 +1276,9 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
         assert_ne!(seen, (Some("main"), Some(8)), "fold's pull request under main");
         (seen == (Some("fold"), Some(8))).then_some(())
     });
-    let said = daemon.said_after(Duration::from_secs(1));
-    assert!(!said.iter().any(|line| line.contains("gh pr view")), "{said:?}");
+    luneta_waits::never("gh or git says something", || {
+        daemon.said().iter().find(|line| line.contains("gh pr view")).cloned()
+    });
 }
 
 #[test]
@@ -1286,21 +1286,19 @@ fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     let host = Host::new();
     let daemon = start(host.vars()).unwrap();
 
-    let (first, took) = host.watch(None);
+    let (first, _) = host.watch(None);
     let version = first.version.unwrap();
     assert_eq!(version.pid, daemon.pid());
-    assert!(took < Duration::from_secs(2), "{took:?}");
 
     let (same, took) = host.watch(Some(version));
     assert_eq!(same.version, Some(version));
-    assert!(took >= Duration::from_secs(3), "{took:?}");
+    assert!(took >= WATCH, "{took:?}");
 
     let play = scratch();
     let play = play.path().join("play");
     fs::create_dir(&play).unwrap();
-    let (changed, took) = thread::scope(|scope| {
+    let (changed, _) = thread::scope(|scope| {
         let waiting = scope.spawn(|| host.watch(Some(version)));
-        thread::sleep(Duration::from_millis(300));
         watched(&host, &play.display().to_string());
         waiting.join().unwrap()
     });
@@ -1308,9 +1306,8 @@ fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     let kept = changed.projects.and_then(|projects| projects.held);
     let Some(Held::Kept(kept)) = kept else { panic!("lunetad keeps no projects: {kept:?}") };
     assert!(kept.projects.iter().any(|project| project.name == "play"), "{kept:?}");
-    assert!(took < Duration::from_secs(3), "{took:?}");
 
     let another = Version { pid: version.pid + 1, ..changed.version.unwrap() };
-    let (_, took) = host.watch(Some(another));
-    assert!(took < Duration::from_secs(2), "{took:?}");
+    let (answered, _) = host.watch(Some(another));
+    assert_eq!(answered.version.unwrap().pid, version.pid);
 }

@@ -1,19 +1,20 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use luneta_waits::eventually;
 use lunetad::api::{self, remote::Reached, WatchRequest};
+use lunetad::SWEEP;
 use serde_json::json;
 
 use crate::agents::{file_for, process};
-use crate::host::{eventually, folder_in, script, start, Host, Running};
+use crate::host::{folder_in, script, start, Host, Running};
 use crate::remote::{hosts, FakeSsh};
 
 const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
 
-const SWEEPS: Duration = Duration::from_secs(5);
+const SWEEPS: Duration = SWEEP.saturating_mul(3);
 
 fn claude_that_names_topics(host: &Host) {
     let told = told_file(host);
@@ -79,11 +80,9 @@ fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt() {
     let _agent = agent_at_work(&host);
     prompted(&host, "fold the sessions");
 
-    let until = Instant::now() + SWEEPS;
-    while Instant::now() < until {
-        assert_eq!(topic(&host.host().agents), None);
-        thread::sleep(Duration::from_millis(100));
-    }
+    luneta_waits::through(SWEEPS, "a topic is named with no window to show it", || {
+        topic(&host.host().agents).map(str::to_owned)
+    });
     assert_eq!(calls(&host), Vec::<String>::new());
 
     eventually("the topic is named", || {
@@ -147,11 +146,9 @@ fn a_window_here_has_another_machine_name_its_agents_topics() {
             _ => Vec::new(),
         }
     };
-    let until = Instant::now() + SWEEPS;
-    while Instant::now() < until {
-        assert_eq!(topic(&far_agents(&here.host())), None);
-        thread::sleep(Duration::from_millis(100));
-    }
+    luneta_waits::through(SWEEPS, "a topic is named with no window to show it", || {
+        topic(&far_agents(&here.host())).map(str::to_owned)
+    });
     assert_eq!(calls(&far), Vec::<String>::new());
 
     eventually("the topic comes through this daemon", || {
@@ -161,17 +158,13 @@ fn a_window_here_has_another_machine_name_its_agents_topics() {
     assert_eq!(calls(&here), Vec::<String>::new(), "each machine pays for its own");
 
     let mut prompts = 0;
-    let unseen = Instant::now() + Duration::from_mins(1);
-    loop {
-        assert!(Instant::now() < unseen, "two daemons keep each other shown");
+    eventually("two daemons stop keeping each other shown", || {
         here.host();
         far.host();
         let before = calls(&far).len();
         prompts += 1;
         prompted(&far, &format!("prompt {prompts}"));
-        thread::sleep(SWEEPS);
-        if calls(&far).len() == before {
-            break;
-        }
-    }
+        let called = luneta_waits::seen_within(SWEEPS, || (calls(&far).len() != before).then_some(()));
+        called.is_none().then_some(())
+    });
 }

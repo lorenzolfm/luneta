@@ -1,7 +1,5 @@
-use std::time::Duration;
-
 use luneta_mux::api;
-use tokio::time::Instant;
+use luneta_waits::QUIET;
 
 use crate::host::{Server, Viewer, new_terminal, run, script, size, watched_until};
 
@@ -14,12 +12,9 @@ fn answers_a_program_never_reads_are_held_to_a_bound() {
             yes \"$(printf '\\033[c')\" | tr -d '\\n' | head -c 30000000; read x";
         new_terminal(&mut mux, script(asks, api::Ends::Holds), b"asks", size(80, 24)).await;
         let before = server.resident_kib();
-        let deadline = Instant::now() + Duration::from_secs(4);
-        while Instant::now() < deadline {
-            let grown = server.resident_kib().saturating_sub(before);
-            assert!(grown < 64 * 1024, "the server grew by {grown} KiB");
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        luneta_waits::through(QUIET * 4, "the server grows by 64 MiB or more, in KiB", || {
+            Some(server.resident_kib().saturating_sub(before)).filter(|grown| *grown >= 64 * 1024)
+        });
     });
 }
 

@@ -1,0 +1,68 @@
+id: tests-wait-on-events
+snapshots:
+  async fn f() { tokio::time::sleep(d).await; }:
+    labels:
+    - source: sleep
+      style: primary
+      start: 28
+      end: 33
+  async fn f() { tokio::time::timeout(d, g()).await; }:
+    labels:
+    - source: timeout
+      style: primary
+      start: 28
+      end: 35
+  fn f() { g(Duration::ZERO); }:
+    labels:
+    - source: Duration::ZERO
+      style: primary
+      start: 11
+      end: 25
+    - source: Duration
+      style: secondary
+      start: 11
+      end: 19
+  fn f() { heard.recv_timeout(d); }:
+    labels:
+    - source: recv_timeout
+      style: primary
+      start: 15
+      end: 27
+  fn f() { let d = Duration::from_secs(1); }:
+    labels:
+    - source: Duration::from_secs
+      style: primary
+      start: 17
+      end: 36
+    - source: Duration
+      style: secondary
+      start: 17
+      end: 25
+  fn f() { let d = std::time::Duration::from_millis(1); }:
+    labels:
+    - source: std::time::Duration::from_millis
+      style: primary
+      start: 17
+      end: 49
+    - source: std::time::Duration
+      style: secondary
+      start: 17
+      end: 36
+  fn f() { sleep(d); }:
+    labels:
+    - source: sleep
+      style: primary
+      start: 9
+      end: 14
+  fn f() { std::thread::sleep(d); }:
+    labels:
+    - source: sleep
+      style: primary
+      start: 22
+      end: 27
+  fn f() { thread::sleep(d); }:
+    labels:
+    - source: sleep
+      style: primary
+      start: 17
+      end: 22

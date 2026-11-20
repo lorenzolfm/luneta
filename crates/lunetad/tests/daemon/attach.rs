@@ -1,12 +1,11 @@
 use std::fs;
 use std::path::Path;
-use std::thread;
-use std::time::Duration;
 
+use luneta_waits::{eventually, QUIET};
 use lunetad::api::terminal::Found;
 use serde_json::json;
 
-use crate::host::{eventually, script, LUNETA};
+use crate::host::{script, LUNETA};
 use crate::own::Owned;
 use crate::projects::{project, worktree};
 use crate::starts::{cloned, directory, mouse, projects_of, shown, work_in, Window, SPLIT};
@@ -352,8 +351,7 @@ fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_worktree_beside_but_not_past_the_proj
     eventually("the tab bar lists docs", || window.shows("docs").then_some(()));
     let used = |id: u64| used(&owned, id);
     window.send(LEFT);
-    thread::sleep(Duration::from_secs(1));
-    assert_eq!(used(second), None, "Ctrl h stops at the project's first worktree");
+    luneta_waits::never("Ctrl h goes past the project's first worktree", || used(second));
     window.send(RIGHT);
     eventually("Ctrl l goes to docs", || (used(second) > used(first)).then_some(()));
     window.send(LEFT);
@@ -552,8 +550,7 @@ fn a_worktree_s_last_view_closed_takes_luneta_to_the_one_used_before_with_no_not
         let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
         (worktrees.all(|it| it.id != gone) && window.shows(PRINTED)).then_some(())
     });
-    thread::sleep(Duration::from_secs(1));
-    assert!(window.shows(PRINTED), "luneta stays on main: {:?}", window.screen());
+    luneta_waits::never("luneta leaves main", || (!window.shows(PRINTED)).then(|| window.screen()));
     assert!(!window.shows("lunetad's layout"), "luneta leaves docs with no note");
 }
 
@@ -567,7 +564,7 @@ fn used(owned: &Owned, worktree: u64) -> Option<(i64, i32)> {
 fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
     eventually(&format!("both lunetas show {name}"), || {
         for window in &mut windows {
-            let ended = window.luneta.ended_within(Duration::ZERO);
+            let ended = window.luneta.has_ended();
             assert!(ended.is_none(), "a luneta ended, {ended:?}: {:?}", window.screen());
         }
         let shows = |window: &Window| window.shows(name);
@@ -597,6 +594,6 @@ fn a_luneta_started_in_a_shell_of_the_view_it_shows_leaves_the_view_its_size() {
     let first = eventually("the shell is sized", size);
     window.send(&format!("{LUNETA}\r"));
     eventually("the inner luneta says it runs there", || window.shows(HERE).then_some(()));
-    std::thread::sleep(Duration::from_secs(2));
-    assert_eq!(size(), Some(first), "{:?}", window.screen());
+    let resized = || (size() != Some(first)).then(|| (size(), window.screen()));
+    luneta_waits::through(QUIET * 2, "the inner luneta resizes its view", resized);
 }

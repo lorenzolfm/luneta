@@ -3,12 +3,13 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
+use luneta_waits::eventually;
 use lunetad::mux::own::api::mux_client::MuxClient;
 use lunetad::mux::own::api::{self as mux_api, InfoRequest, InfoResponse, ListRequest, Listing};
 use lunetad::mux::own::server;
+use lunetad::{ALONE, SWEEP};
 use tempfile::TempDir;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::codegen::{http, Body, BoxFuture, Context, Poll, Service, StdError};
@@ -19,7 +20,7 @@ use tonic::Status;
 use tonic_prost::ProstCodec;
 
 use crate::demand::build_of;
-use crate::host::{eventually, script, start, start_as, Daemon, Host, Running, LUNETAD};
+use crate::host::{script, start, start_as, Daemon, Host, Running, LUNETAD};
 
 const STAND_IN_MUX: &str = "LUNETA_TEST_STAND_IN_MUX_FOLDER";
 
@@ -85,8 +86,8 @@ impl Owned {
         self.daemon = None;
     }
 
-    pub fn daemon_ended_within(&mut self, limit: Duration) -> Option<std::process::ExitStatus> {
-        self.daemon.as_mut().expect("a daemon was started").ended_within(limit)
+    pub fn daemon_ended(&mut self, what: &str) -> std::process::ExitStatus {
+        self.daemon.as_mut().expect("a daemon was started").ended(what)
     }
 
     pub fn start_daemon(&mut self) {
@@ -320,5 +321,5 @@ pub fn the_daemon_runs_on_while_a_terminal_does() {
     eventually("the server listens", || socket.exists().then_some(()));
     owned.new_terminal(b"kept");
     let daemon = owned.daemon.as_mut().unwrap();
-    assert_eq!(daemon.ended_within(Duration::from_secs(36)), None);
+    daemon.runs_through(ALONE + SWEEP * 3, "the daemon ends while a terminal runs");
 }

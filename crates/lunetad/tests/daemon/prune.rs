@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use luneta_waits::eventually;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::{On, PrunesRequest};
@@ -11,7 +12,7 @@ use lunetad::Directory;
 use serde_json::json;
 use tonic::Code;
 
-use crate::host::{Daemon, Host, LUNETA, LUNETAD, answered, eventually, folder_in, start, start_as};
+use crate::host::{Daemon, Host, LUNETA, LUNETAD, answered, folder_in, start, start_as};
 use crate::projects::{project, worktree};
 use crate::remote::{FakeSsh, hosts, reached};
 use crate::worktree::{cloned_as_wt, git};

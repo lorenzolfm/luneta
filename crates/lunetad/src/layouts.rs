@@ -40,7 +40,7 @@ const ARGV_MAX: usize = LINE_BYTES_MAX / 2;
 
 const TAG: &str = "luneta terminal ";
 
-const RESTORE_PAUSE: Duration = Duration::from_secs(10);
+pub const RESTORE_PAUSE: Duration = Duration::from_secs(10);
 
 const RESTORE_ATTEMPTS_MAX: u32 = 3;
 

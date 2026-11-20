@@ -17,7 +17,7 @@ use crate::mux::{self, TerminalKey};
 use crate::{log, process, program};
 use crate::watch::{self, Troubles};
 
-const TORN: Duration = Duration::from_secs(1);
+pub const TORN: Duration = Duration::from_secs(1);
 
 pub fn one_answer(model: &str, system: &str, prompt: &str) -> io::Result<(Command, Stdio)> {
     let mut claude = Command::new("claude");

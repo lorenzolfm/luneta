@@ -1,7 +1,6 @@
 use std::error::Error;
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use lunetad::api::WatchRequest;
 use lunetad::{Unbridged, BRIDGED};
@@ -134,7 +133,7 @@ fn luneta_bridge_ends_as_either_end_hangs_up() {
     let mut left = Running::spawn(&mut piped());
     let (stdin, _stdout) = left.piped();
     drop(stdin);
-    let ended = left.ended_within(Duration::from_secs(5)).expect("it outlived its client");
+    let ended = left.ended("luneta bridge ends with its client");
     assert!(ended.success(), "{ended}");
 
     let mut bridged = Running::spawn(&mut piped());
@@ -147,6 +146,6 @@ fn luneta_bridge_ends_as_either_end_hangs_up() {
     stdout.read_exact(&mut frame).unwrap();
     assert_eq!(frame[3], SETTINGS, "{frame:?}");
     drop(daemon);
-    let ended = bridged.ended_within(Duration::from_secs(5)).expect("it outlived its daemon");
+    let ended = bridged.ended("luneta bridge ends with its daemon");
     assert!(ended.success(), "{ended}");
 }

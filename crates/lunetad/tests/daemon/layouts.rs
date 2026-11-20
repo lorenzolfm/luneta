@@ -1,9 +1,8 @@
 use std::fs;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
-use std::thread;
-use std::time::{Duration, Instant};
 
+use luneta_waits::{eventually, QUIET};
 use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use lunetad::api::show_response::{self, view::Found, Laid, View};
 use lunetad::api::change_projects_request::{
@@ -20,13 +19,13 @@ use lunetad::projects::{Size, WorktreeId};
 use lunetad::folder::Folder;
 use lunetad::Daemon;
 use lunetad::release;
-use lunetad::{Asked, Beside, Destination, Heard, Where, BRIDGE_HELD_MAX};
+use lunetad::{Asked, Beside, Destination, Heard, Where, BRIDGE_HELD_MAX, RESTORE_PAUSE, SWEEP};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Status, Streaming};
 
 use crate::agents::file_of_pid;
-use crate::host::{eventually, folder_in, script, start, Host};
+use crate::host::{folder_in, script, start, Host};
 use crate::own::{self, Owned};
 use crate::projects::{self, asked, kept, project, worktree};
 use crate::remote::{hosts, reached, skills_on, FakeSsh};
@@ -35,13 +34,7 @@ use crate::worktree::{cloned_as_wt, git, worktree_added};
 
 const WAITS: [&str; 2] = ["sleep", "600"];
 
-const HEARD_IN: Duration = Duration::from_secs(10);
-
-const RESTORE_PAUSE: Duration = Duration::from_secs(10);
-
 const RESTORE_ATTEMPTS_MAX: u32 = 3;
-
-const READ_RUNS_SWEEPS: Duration = Duration::from_secs(5);
 
 struct Shown<'a> {
     owned: &'a Owned,
@@ -134,12 +127,8 @@ impl<'a> Shown<'a> {
             return laid.clone();
         }
         loop {
-            let heard = self.heard_in_time();
-            let (last, refused) = (&self.laid, &self.refused);
-            let never = |_| panic!("never heard: {what}, last {last:?}, refused {refused:?}");
-            let heard = heard.unwrap_or_else(never);
-            let word = heard.unwrap().expect("the layout goes on");
-            match word.event.expect("a word says something") {
+            let waited = format!("{what}, last {:?}, refused {:?}", self.laid, self.refused);
+            match self.word(&waited) {
                 show_response::Event::Laid(laid) => {
                     let found = done(&laid);
                     self.laid = Some(laid.clone());
@@ -155,11 +144,11 @@ impl<'a> Shown<'a> {
         }
     }
 
-    fn heard_in_time(
-        &mut self,
-    ) -> Result<Result<Option<ShowResponse>, tonic::Status>, tokio::time::error::Elapsed> {
+    fn word(&mut self, what: &str) -> show_response::Event {
         let heard = &mut self.heard;
-        self.owned.block_on(async { tokio::time::timeout(HEARD_IN, heard.message()).await })
+        let word = self.owned.block_on(luneta_waits::awaited(what, heard.message()));
+        let word = word.unwrap().expect("the layout goes on");
+        word.event.expect("a word says something")
     }
 
     fn until_refused(&mut self) -> String {
@@ -167,9 +156,7 @@ impl<'a> Shown<'a> {
             if let Some(why) = self.refused.pop() {
                 return why;
             }
-            let heard = self.heard_in_time();
-            let word = heard.expect("a refusal comes").unwrap().expect("the layout goes on");
-            match word.event.expect("a word says something") {
+            match self.word("a refusal comes") {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => return why,
                 show_response::Event::Edged(edged) => self.edged.push(edged),
@@ -184,9 +171,7 @@ impl<'a> Shown<'a> {
             if !self.edged.is_empty() {
                 return self.edged.remove(0);
             }
-            let heard = self.heard_in_time();
-            let word = heard.expect("an edge comes").unwrap().expect("the layout goes on");
-            match word.event.expect("a word says something") {
+            match self.word("an edge comes") {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => panic!("refused, not edged: {why}"),
                 show_response::Event::Edged(edged) => return edged,
@@ -201,9 +186,7 @@ impl<'a> Shown<'a> {
             if !self.left.is_empty() {
                 return self.left.remove(0);
             }
-            let heard = self.heard_in_time();
-            let word = heard.expect("a leave comes").unwrap().expect("the layout goes on");
-            match word.event.expect("a word says something") {
+            match self.word("a leave comes") {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => self.refused.push(why),
                 show_response::Event::Edged(edged) => self.edged.push(edged),
@@ -218,9 +201,7 @@ impl<'a> Shown<'a> {
             if !self.sent.is_empty() {
                 return self.sent.remove(0);
             }
-            let heard = self.heard_in_time();
-            let word = heard.expect("a send comes").unwrap().expect("the layout goes on");
-            match word.event.expect("a word says something") {
+            match self.word("a send comes") {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => panic!("refused, not sent: {why}"),
                 show_response::Event::Edged(edged) => self.edged.push(edged),
@@ -1097,7 +1078,6 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
     let mut shown = Shown::new(&owned, worktree, 80, 24);
     let stays = heard_in_below(&owned, &mut shown, "sleep 602");
     let closes = heard_in_below(&owned, &mut shown, "sleep 606");
-    let crashed = Instant::now();
     let laid = restored_after_kill(&owned, &mut shown);
     for view in &laid.views {
         let restored = mux_key(key(view).unwrap());
@@ -1113,7 +1093,6 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
     eventually("the closed terminal leaves the mux", || {
         tagged(&owned.listing(), closes).is_none().then_some(())
     });
-    thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()));
     let laid = restored_after_kill(&owned, &mut shown);
     assert_eq!(terminals(&laid), [stays], "a closed terminal stays closed");
     let again = mux_key(key(&laid.views[0]).unwrap());
@@ -1134,11 +1113,7 @@ fn a_terminal_that_luneta_mux_keeps_ending_after_is_given_up_and_left_lost() {
     let worktree = worktree_in_home(&owned);
     let mut shown = Shown::new(&owned, worktree, 80, 24);
     heard_in_below(&owned, &mut shown, "sleep 607");
-    let mut crashed = Instant::now();
-    restored_after_kill(&owned, &mut shown);
-    for _ in 1..RESTORE_ATTEMPTS_MAX {
-        thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()));
-        crashed = Instant::now();
+    for _ in 0..RESTORE_ATTEMPTS_MAX {
         restored_after_kill(&owned, &mut shown);
     }
     owned.kill_mux();
@@ -1146,9 +1121,9 @@ fn a_terminal_that_luneta_mux_keeps_ending_after_is_given_up_and_left_lost() {
     eventually("the terminal is given up", || {
         logged(&owned).contains("given up after 3 attempts").then_some(())
     });
-    thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()) + Duration::from_secs(3));
-    let unrun = std::os::unix::net::UnixStream::connect(owned.socket()).is_err();
-    assert!(unrun, "no luneta-mux is started again for a terminal given up");
+    let started = || std::os::unix::net::UnixStream::connect(owned.socket()).ok();
+    let again = "a luneta-mux is started again for a terminal given up";
+    luneta_waits::through(RESTORE_PAUSE + SWEEP * 2, again, started);
     assert!(lost(&shown.until("the terminal still lost", |_| true).views[0]));
 }
 
@@ -1172,9 +1147,9 @@ fn a_line_typed_by_a_restore_outlives_a_restart_of_lunetad() {
     owned.start_daemon();
     let mut again = Shown::new(&owned, worktree, 80, 24);
     again.until("the terminal found", |laid| laid.views.iter().all(|view| key(view).is_some()));
-    thread::sleep(READ_RUNS_SWEEPS);
-    let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.contains(unrun), "the line is still kept, left unrun: {file}");
+    luneta_waits::through(SWEEP * 3, "the line is no longer kept, left unrun", || {
+        Some(fs::read_to_string(kept(&owned.host)).unwrap()).filter(|file| !file.contains(unrun))
+    });
     let laid = restored_after_kill(&owned, &mut again);
     assert_eq!(laid.views.iter().map(|view| view.id).collect::<Vec<_>>(), [terminal]);
     let typed = mux_key(key(&laid.views[0]).unwrap());
@@ -1234,7 +1209,8 @@ fn an_agent_resumes_when_lunetad_starts_with_no_mux() {
     });
     let asked = owned.host.home.path().join("claude-asked");
     let claude = owned.host.bin().join("claude");
-    script(&claude, &format!("echo \"$*\" > '{}'\nexec sleep 600\n", asked.display()));
+    let wrote = format!("echo \"$*\" > '{0}.part' && mv '{0}.part' '{0}'\nexec sleep 600\n", asked.display());
+    script(&claude, &wrote);
     drop(shown);
     owned.stop_daemon();
     owned.kill_mux();
@@ -1256,8 +1232,7 @@ fn lunetad_stops_a_luneta_mux_that_says_no_build_and_restores_its_terminals() {
     owned.kill_mux();
     let mut older = owned.stand_in_mux(None);
     owned.start_daemon();
-    let stopped = older.ended_within(Duration::from_secs(5));
-    let stopped = stopped.expect("lunetad stops the luneta-mux that says no build");
+    let stopped = older.ended("lunetad stops the luneta-mux that says no build");
     assert_eq!(stopped.signal(), Some(rustix::process::Signal::TERM.as_raw()));
     let mut again = Shown::new(&owned, worktree, 80, 24);
     let restored = |laid: &Laid| laid.views.iter().all(|view| key(view).is_some());
@@ -1281,8 +1256,7 @@ fn lunetad_stops_a_luneta_mux_of_an_older_build_and_names_both() {
     let theirs = older_build();
     let mut other = owned.stand_in_mux(Some(&theirs));
     owned.start_daemon();
-    let stopped = other.ended_within(Duration::from_secs(5));
-    let stopped = stopped.expect("lunetad stops the luneta-mux of an older build");
+    let stopped = other.ended("lunetad stops the luneta-mux of an older build");
     assert_eq!(stopped.signal(), Some(rustix::process::Signal::TERM.as_raw()));
     let (pid, own) = (other.pid(), release::SAID.as_str());
     let said = format!("luneta-mux {theirs} (pid {pid}) is another build than {own}, and is stopped");
@@ -1305,7 +1279,7 @@ fn lunetad_leaves_a_newer_luneta_mux_be_and_restores_its_terminals_once_it_ends(
     let said = format!("luneta-mux {theirs} (pid {pid}) is newer than {own}");
     let left = format!("{said}, so lunetad leaves it be: open a luneta of its build, or end it");
     eventually("lunetad says why it leaves it be", || logged(&owned).contains(&left).then_some(()));
-    assert_eq!(newer.ended_within(Duration::from_secs(1)), None, "{}", logged(&owned));
+    newer.runs_on("lunetad stops a newer luneta-mux");
     drop(newer);
     let mut again = Shown::new(&owned, worktree, 80, 24);
     let restored = |laid: &Laid| laid.views.iter().all(|view| key(view).is_some());
@@ -1535,7 +1509,7 @@ fn a_layout_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
     let told = move |it| drop(heard.send(it));
     let at = Where::On(nowhere.clone());
     let _show = lunetad::show(lunetad.clone(), at, worktree, size, false, told);
-    match hearing.recv_timeout(HEARD_IN).expect("lunetad answers a layout of nowhere") {
+    match luneta_waits::heard("lunetad answers a layout of nowhere", &hearing) {
         Heard::Lost(why) => assert_eq!(why, "lunetad does not reach nowhere now"),
         other => panic!("a layout of a machine not reached is lost, not {other:?}"),
     }
@@ -1543,7 +1517,7 @@ fn a_layout_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
     let greeting = Greeting { foreground: None, background: None };
     let reach = Reach::On { lunetad, destination: nowhere };
     let _viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
-    match seeing.recv_timeout(HEARD_IN).expect("lunetad answers a viewer of nowhere") {
+    match luneta_waits::heard("lunetad answers a viewer of nowhere", &seeing) {
         Seen::Lost(why) => assert_eq!(why, "lunetad does not reach nowhere now"),
         other => panic!("a viewer of a machine not reached is lost, not {other:?}"),
     }
@@ -1591,23 +1565,21 @@ fn a_bridge_holds_its_most_shows_and_layouts_open_and_keeps_room_for_questions()
         let refused = daemon.frames(tokio_stream::iter(words)).await.err();
         let refused = refused.expect("a layout past the most is refused");
         assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
-        let checked = tokio::time::timeout(HEARD_IN, daemon.list_skills(skills_on(on()))).await;
-        assert!(checked.as_ref().is_ok_and(Result::is_ok), "{checked:?}");
+        let checked = daemon.list_skills(skills_on(on()));
+        let checked = luneta_waits::awaited("lunetad answers a call past the most", checked).await;
+        assert!(checked.is_ok(), "{checked:?}");
 
         drop(held.pop());
-        let deadline = tokio::time::Instant::now() + HEARD_IN;
-        loop {
-            match shown_through(&mut daemon, worktree).await {
-                Ok(again) => break held.push(again),
-                Err(full)
-                    if full.code() == Code::ResourceExhausted
-                        && tokio::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                },
-                Err(refused) => panic!("a show let go makes room for another: {refused:?}"),
+        let room = async {
+            loop {
+                match shown_through(&mut daemon, worktree).await {
+                    Ok(again) => return again,
+                    Err(full) if full.code() == Code::ResourceExhausted => tokio::task::yield_now().await,
+                    Err(refused) => panic!("a show let go makes room for another: {refused:?}"),
+                }
             }
-        }
+        };
+        held.push(luneta_waits::awaited("a show let go makes room for another", room).await);
     });
 }
 
@@ -1644,7 +1616,7 @@ fn frames_are_refused_words_out_of_turn_a_machine_misnamed_and_a_terminal_here_n
                     }
                 }
             };
-            tokio::time::timeout(HEARD_IN, ended).await.expect("the layout ends when its words do")
+            luneta_waits::awaited("the layout ends when its words do", ended).await
         })
     };
     let invalid = |why: &str| Some((Code::InvalidArgument, why.to_owned()));
@@ -1693,18 +1665,11 @@ fn luneta_shows_another_machine_s_worktree_types_there_and_opens_a_terminal_besi
     let mut window = Window::open(&here.host, &directory("project"), &[]);
     window.spot_of("faraway");
     assert!(!window.shows("far-is-42"));
-    let mut clicked: Option<Instant> = None;
     eventually("luneta shows far's terminal", || {
-        if window.shows("far-is-42") {
-            return Some(());
-        }
-        if clicked.is_none_or(|at| at.elapsed() >= Duration::from_secs(2)) {
-            let (row, column) = window.spot_of("yonder");
-            let row = (row + 1, column + 4);
-            window.send(&[mouse(0, row, 'M'), mouse(0, row, 'm')].concat());
-            clicked = Some(Instant::now());
-        }
-        None
+        let (row, column) = window.spot_of("yonder");
+        let row = (row + 1, column + 4);
+        window.send(&[mouse(0, row, 'M'), mouse(0, row, 'm')].concat());
+        luneta_waits::seen_within(QUIET * 2, || window.shows("far-is-42").then_some(()))
     });
     window.send("echo typed-$((40 + 2))\r");
     eventually("far's terminal shows what was typed here", || {
@@ -1740,7 +1705,7 @@ fn seen_and_typed_into(
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
     let show = lunetad::show(folder, at, worktree, size, false, told);
-    let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the layout out") {
+    let laid = || match luneta_waits::heard("lunetad lays the layout out", &hearing) {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
             panic!("the layout is not laid out: {why}")
@@ -1770,12 +1735,9 @@ fn seen_and_typed_into(
     };
     viewer.typed(key, typed::Event::Key(enter));
     let mut lines = Vec::new();
-    let deadline = std::time::Instant::now() + 3 * HEARD_IN;
     loop {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        let Ok(seen) = seeing.recv_timeout(left) else {
-            panic!("the terminal never showed seen-42: {:?}", text_of(&lines));
-        };
+        let waited = format!("the terminal shows seen-42, not only {:?}", text_of(&lines));
+        let seen = luneta_waits::heard(&waited, &seeing);
         let framed = match seen {
             Seen::Frame(framed) => framed,
             Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
@@ -1806,7 +1768,7 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
     let show = lunetad::show(folder, Where::Here { runs_in: None }, worktree, size, false, told);
-    let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the layout out") {
+    let laid = || match luneta_waits::heard("lunetad lays the layout out", &hearing) {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
             panic!("the layout is not laid out: {why}")
@@ -1826,20 +1788,17 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let reach = Reach::Mux { socket: owned.socket(), runs_in: None };
     let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
-    let frame = |within: Duration| match seeing.recv_timeout(within) {
-        Ok(Seen::Frame(framed)) => Some(framed),
-        Ok(Seen::Refused(why) | Seen::Lost(why)) => panic!("the terminal is not seen: {why}"),
-        Err(_) => None,
+    let frame = |what: &str| match luneta_waits::heard(what, &seeing) {
+        Seen::Frame(framed) => framed,
+        Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
     };
+    let unheld = || seeing.try_recv().ok().map(|seen| format!("{seen:?}"));
     let mut held = Vec::new();
     for told in 0..FRAMES_MAX {
-        let framed = frame(HEARD_IN);
-        held.push(framed.unwrap_or_else(|| panic!("frame {told} of {FRAMES_MAX} came")));
+        held.push(frame(&format!("frame {told} of {FRAMES_MAX} comes")));
     }
-    let still = Duration::from_millis(500);
-    assert!(frame(still).is_none(), "no frame comes past {FRAMES_MAX} that luneta still holds");
+    luneta_waits::never("a frame comes past those luneta still holds", unheld);
     drop(held.pop());
-    let again = frame(HEARD_IN);
-    assert!(again.is_some(), "a frame comes once luneta lets one go");
-    assert!(frame(still).is_none(), "only one frame comes for the one let go");
+    let _again = frame("a frame comes once luneta lets one go");
+    luneta_waits::never("more than one frame comes for the one let go", unheld);
 }

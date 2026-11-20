@@ -5,7 +5,7 @@ in
 {
   name = "lint";
   usage = "[--breaking]";
-  help = "statix, deadnix, no comments and buf breaking; --breaking runs that one alone";
+  help = "statix, deadnix, no comments, no clock waits in tests and buf breaking; --breaking runs that one alone";
   tools = [
     pkgs.buf
     pkgs.deadnix

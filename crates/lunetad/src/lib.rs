@@ -47,14 +47,16 @@ pub mod work;
 pub mod zoxide;
 
 pub use agent::Harness;
-pub use claude::{folder as claude_folder, one_answer};
+pub use claude::{folder as claude_folder, one_answer, TORN};
 pub use client::{connect, listening, stream, through, unanswered, Daemon, Unbridged};
 pub use client::{BRIDGED, REACH};
-pub use daemon::{serve, Claim};
+pub use daemon::{serve, Claim, ALONE, SWEEP, WATCH};
 pub use directory::Directory;
 pub use folder::Refusal;
 pub use luneta_protocol::release;
 pub use process::var;
+pub use watch::SETTLE;
+pub use layouts::RESTORE_PAUSE;
 pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
 pub use shows::{
     show, Asked, Beside, Direction, Found, Growth, Heard, Laid, View, Rect, Show, Where,

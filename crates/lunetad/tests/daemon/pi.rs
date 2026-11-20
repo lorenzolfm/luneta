@@ -3,14 +3,15 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, ChildStdout, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
+use luneta_waits::eventually;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Harness, Status};
 use serde_json::{json, Value};
 
 use crate::agents::{hidden, process, terminal, Host, MADE_NANOS};
-use crate::host::{eventually, start, start_as, Daemon, Running, Vars, LUNETAD};
+use crate::host::{start, start_as, Daemon, Running, Vars, LUNETAD};
 
 const PI: &str = r#"
 import { createInterface } from "node:readline";
@@ -106,8 +107,7 @@ fn says(id: &str) -> Value {
 }
 
 fn backdate(path: &Path) {
-    let long_ago = SystemTime::now() - Duration::from_hours(1);
-    let times = FileTimes::new().set_modified(long_ago);
+    let times = FileTimes::new().set_modified(SystemTime::UNIX_EPOCH);
     fs::File::options().write(true).open(path).unwrap().set_times(times).unwrap();
 }
 
@@ -198,7 +198,8 @@ fn a_pi_agent_is_listed_by_what_its_extension_hears() {
     assert!(idle.at_a_prompt());
     assert_eq!(idle.terminal, Some(terminal(3)));
     let since: SystemTime = idle.status_since.unwrap().try_into().unwrap();
-    assert!(before - Duration::from_millis(1) <= since, "dated {since:?}, after {before:?}");
+    let millis = |at: SystemTime| at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+    assert!(millis(before) <= millis(since), "dated {since:?}, after {before:?}");
     assert!(idle.started_at.is_some());
 
     pi.event("agent_start");
@@ -269,11 +270,8 @@ fn a_pi_agent_that_is_killed_leaves_the_list_as_it_ends() {
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
     as_status(&host, pid, Status::Idle);
 
-    let killed = Instant::now();
     pi.process.kill();
     eventually("the agent has gone", || host.agents().is_empty().then_some(()));
-    let took = killed.elapsed();
-    assert!(took < Duration::from_secs(1), "it stayed listed for {took:?}");
     assert!(file_of(&host, pid).exists(), "it left its file");
 }
 

@@ -1,0 +1,17 @@
+id: tests-wait-on-events
+language: rust
+files:
+  - crates/*/tests/**
+message: >-
+  A test waits on an event, never on the clock: wait through luneta_waits,
+  whose one patience no loaded machine runs out of.
+rule:
+  any:
+    - kind: scoped_identifier
+      has:
+        field: path
+        regex: ^((std|core)::time::)?Duration$
+    - kind: identifier
+      regex: ^(sleep|sleep_until|timeout|timeout_at|interval)$
+    - kind: field_identifier
+      regex: ^(recv_timeout|recv_deadline|wait_timeout|wait_timeout_while|park_timeout)$

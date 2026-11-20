@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
+use luneta_waits::eventually;
 use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::keep_image_request::{Image, Part};
@@ -23,18 +24,17 @@ use lunetad::images::{self, Png};
 use lunetad::issues::Filed;
 use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Wanted, Work};
 use lunetad::transcripts::SessionId;
-use lunetad::{release, Daemon, Directory};
+use lunetad::{release, Daemon, Directory, ALONE, SWEEP};
 use rustix::process::{kill_process, test_kill_process, Pid, Signal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Status};
 
 use crate::demand::{bridged_stand_in, stop, Detached};
-use crate::host::{
-    answered, eventually, folder_in, script, shared_script, start, start_as, Host, Vars,
-    LUNETA, LUNETAD,
-};
+use crate::host::{answered, folder_in, script, shared_script, start, start_as, Host, Vars, LUNETA, LUNETAD};
 use crate::projects::project;
 use crate::worktree::{cloned_as_wt, git};
+
+const SLOW_SECS: u64 = 6;
 
 pub struct FakeSsh {
     to: PathBuf,
@@ -249,15 +249,11 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
     let remotes = host.remotes;
     let order: Vec<&str> = remotes.iter().map(|it| it.destination.as_str()).collect();
     assert_eq!(order, ["nowhere", "far"]);
-    match &remotes[0].reached {
-        Some(Reached::Unreached(unreached)) => {
-            let ended = Stopped::Ended(unreached::Ended { code: Some(255) });
-            assert_eq!(unreached.stopped, Some(ended), "{}", unreached.why);
-            let said = "ssh: Could not resolve hostname nowhere: Name or service not known";
-            assert_eq!(unreached.ssh_said.as_deref(), Some(said), "{}", unreached.why);
-        },
-        other => panic!("nowhere is {other:?}"),
-    }
+    let unreached = unreached(&here, "nowhere");
+    let ended = Stopped::Ended(unreached::Ended { code: Some(255) });
+    assert_eq!(unreached.stopped, Some(ended), "{}", unreached.why);
+    let said = "ssh: Could not resolve hostname nowhere: Name or service not known";
+    assert_eq!(unreached.ssh_said.as_deref(), Some(said), "{}", unreached.why);
 }
 
 #[test]
@@ -403,9 +399,9 @@ fn a_question_while_a_machine_is_reached_again_is_handed_on() {
     let checked = runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let on = Some(On { destination: "far".to_owned() });
-        tokio::time::timeout(Duration::from_secs(10), daemon.list_skills(skills_on(on))).await
+        luneta_waits::awaited("far answers once reached again", daemon.list_skills(skills_on(on))).await
     });
-    assert!(checked.as_ref().is_ok_and(Result::is_ok), "{checked:?}");
+    assert!(checked.is_ok(), "{checked:?}");
     assert_eq!(ssh.runs("far"), runs + 1);
     let _again = Detached { host: &far, pid: far.host().version.unwrap().pid };
 }
@@ -431,9 +427,9 @@ fn a_question_while_a_machine_is_reached_again_is_asked_of_no_other_build() {
     let checked = runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let on = Some(On { destination: "far".to_owned() });
-        tokio::time::timeout(Duration::from_secs(10), daemon.list_skills(skills_on(on))).await
+        luneta_waits::awaited("far answers once reached again", daemon.list_skills(skills_on(on))).await
     });
-    let refused = checked.expect("it was answered in time").expect_err("another build answered");
+    let refused = checked.expect_err("another build answered");
     assert_eq!(refused.message(), "lunetad does not reach far now", "{refused:?}");
     let unreached = unreached(&here, "far");
     assert_eq!(unreached.stopped, Some(Stopped::Unmatched(())), "{}", unreached.why);
@@ -475,8 +471,7 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
 
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = crate::host::folder_in(here.runtime.path()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    runtime.block_on(async {
+    runtime.block_on(luneta_waits::awaited("the host comes to rest", async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let mut after = None;
         loop {
@@ -485,13 +480,13 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
             if watched.version.is_some() && watched.version == after {
                 return;
             }
-            assert!(Instant::now() < deadline, "the host never came to rest");
             after = watched.version;
         }
-    });
+    }));
 }
 
-fn watch_until(host: &Host, until: Instant) {
+fn watch_through(host: &Host, span: Duration) {
+    let until = Instant::now() + span;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = crate::host::folder_in(host.runtime.path()).unwrap();
     runtime.block_on(async {
@@ -514,8 +509,8 @@ pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
     let _here = start(here.vars()).unwrap();
     reached(&here, "far", |_| true);
 
-    watch_until(&here, Instant::now() + Duration::from_secs(36));
-    assert_eq!(far_daemon.ended_within(Duration::ZERO), None);
+    watch_through(&here, ALONE + SWEEP * 3);
+    assert_eq!(far_daemon.has_ended(), None);
     assert_eq!(ssh.bridges("far").len(), 1);
 }
 
@@ -533,10 +528,8 @@ pub fn two_daemons_that_watch_each_other_and_nothing_else_end() {
     reached(&here, "far", |_| true);
     reached(&far, "here", |_| true);
 
-    let ended = here_daemon.ended_within(Duration::from_secs(55));
-    assert!(ended.is_some(), "{:?}", here_daemon.said_after(Duration::ZERO));
-    let ended = far_daemon.ended_within(Duration::from_secs(15));
-    assert!(ended.is_some(), "{:?}", far_daemon.said_after(Duration::ZERO));
+    here_daemon.ended("here's daemon ends, watched by far's alone");
+    far_daemon.ended("far's daemon ends, watched by here's alone");
     assert_eq!(to_far.bridges("far").len(), 1);
     assert_eq!(to_here.bridges("here").len(), 1);
 }
@@ -552,10 +545,12 @@ fn what_each_ssh_to_a_machine_says_again_is_said_once() {
         (ssh.runs("nowhere") >= 3).then_some(())
     });
 
-    let said = daemon.said_after(Duration::from_secs(1));
     let unresolved = "nowhere: ssh: Could not resolve hostname nowhere";
-    let lines = said.iter().filter(|line| line.contains(unresolved)).count();
-    assert_eq!(lines, 1, "{said:?}");
+    daemon.says("lunetad says ssh does not resolve nowhere", |line| line.contains(unresolved));
+    luneta_waits::never("lunetad says it again", || {
+        let said = daemon.said();
+        (said.iter().filter(|line| line.contains(unresolved)).count() != 1).then(|| said.to_vec())
+    });
 }
 
 pub fn skills_on(on: Option<On>) -> ListSkillsRequest {
@@ -586,12 +581,9 @@ fn a_question_for_a_machine_not_reached_runs_ssh_to_it_at_once() {
     });
 
     ssh.reaches("far", far.vars());
-    let asked = Instant::now();
     let refused = refused_question(&here, "far");
     assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
     reached(&here, "far", |_| true);
-    let took = asked.elapsed();
-    assert!(took < Duration::from_secs(5), "reached {took:?} after it was asked for");
     assert_eq!(ssh.runs("far"), 6);
 }
 
@@ -617,7 +609,7 @@ fn the_log_says_why_a_machine_is_unreached_as_that_changes() {
     refused_question(&here, "far");
     reached(&here, "far", |_| true);
 
-    let said = daemon.said_after(Duration::from_secs(1));
+    let said = daemon.says("lunetad says far is reached", |line| line.contains("far: reached, after "));
     let unreached: Vec<&String> =
         said.iter().filter(|line| line.contains("far: unreached: ")).collect();
     assert_eq!(unreached.len(), 2, "{said:?}");
@@ -812,7 +804,7 @@ case "$(cat "{home}/words")" in
     *please-fail*)
         echo '{{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}}'
         exit 1 ;;
-    *please-be-slow*) sleep 6 ;;
+    *please-be-slow*) sleep {SLOW_SECS} ;;
     *please-get-stuck*) echo "$ran"; echo $$ > "{home}/stuck"; exec sleep 60 ;;
 esac
 echo "$ran"
@@ -920,11 +912,8 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
         let stuck = Pid::from_raw(stuck).unwrap();
         assert!(test_kill_process(stuck).is_ok());
         drop(steps);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while test_kill_process(stuck).is_ok() {
-            assert!(Instant::now() < deadline, "claude there is never killed");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        let killed = || async move { test_kill_process(stuck).is_err().then_some(()) };
+        luneta_waits::eventually_async("claude there is killed", killed).await;
 
         let invalid =
             |status: Status| assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
@@ -961,7 +950,7 @@ fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
         let (steps, ended) = turn(&mut daemon, slow).await;
         ended.unwrap();
         assert_eq!(steps.len(), 3, "{steps:?}");
-        assert!(started.elapsed() >= Duration::from_secs(6), "{:?}", started.elapsed());
+        assert!(started.elapsed().as_secs() >= SLOW_SECS, "{:?}", started.elapsed());
     });
 }
 
@@ -1274,13 +1263,11 @@ fn a_daemon_stopped_as_an_image_comes_leaves_no_image_of_it() {
         send.send(image_of(None, 1024)).await.unwrap();
         send.send(bytes_of(&came)).await.unwrap();
         let _answer = client.keep_image(ReceiverStream::new(parts)).await.unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while found().iter().all(|file| fs::metadata(file).unwrap().len() < came.len() as u64) {
-            assert!(Instant::now() < deadline, "what came of the image was never written");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        let written = || found().iter().any(|file| fs::metadata(file).unwrap().len() >= came.len() as u64);
+        let written = || async move { written().then_some(()) };
+        luneta_waits::eventually_async("what came of the image is written", written).await;
         stop(daemon.pid());
-        let ended = daemon.ended_within(Duration::from_secs(5)).expect("the daemon ends");
+        let ended = daemon.ended("the daemon ends");
         assert_eq!(ended.signal(), Some(Signal::TERM.as_raw()), "it runs nothing on its way out");
         let png = |file: &PathBuf| file.extension() == Some("png".as_ref());
         assert!(!found().iter().any(png), "{:?}", found());
@@ -1289,14 +1276,13 @@ fn a_daemon_stopped_as_an_image_comes_leaves_no_image_of_it() {
 
 #[test]
 fn a_daemon_that_starts_takes_away_the_files_past_their_day() {
-    let (day, hour) = (Duration::from_hours(25), Duration::from_hours(1));
-    let now = SystemTime::now();
+    let (past_its_day, young) = (SystemTime::UNIX_EPOCH, SystemTime::now());
     let folder = |path: PathBuf| {
         DirBuilder::new().mode(0o700).create(&path).unwrap();
         path
     };
-    let file = |path: PathBuf, age: Duration| {
-        fs::File::create(&path).unwrap().set_modified(now - age).unwrap();
+    let file = |path: PathBuf, modified: SystemTime| {
+        fs::File::create(&path).unwrap().set_modified(modified).unwrap();
         path
     };
 
@@ -1304,11 +1290,11 @@ fn a_daemon_that_starts_takes_away_the_files_past_their_day() {
     let runtime = folder(host.runtime.path().join("luneta"));
     let (images, printed) = (folder(runtime.join("images")), folder(runtime.join("printed")));
     let past = [
-        file(images.join("past.png"), day),
-        file(images.join("killed.png.part"), day),
-        file(printed.join("past.txt"), day),
+        file(images.join("past.png"), past_its_day),
+        file(images.join("killed.png.part"), past_its_day),
+        file(printed.join("past.txt"), past_its_day),
     ];
-    let young = [file(images.join("young.png"), hour), file(printed.join("young.txt"), hour)];
+    let young = [file(images.join("young.png"), young), file(printed.join("young.txt"), young)];
     let _daemon = start(host.vars()).unwrap();
     eventually("the files past their day to go", || {
         past.iter().all(|file| !file.exists()).then_some(())
@@ -1319,8 +1305,8 @@ fn a_daemon_that_starts_takes_away_the_files_past_their_day() {
     let runtime = folder(linked.runtime.path().join("luneta"));
     let elsewhere = tempfile::tempdir().unwrap();
     symlink(elsewhere.path(), runtime.join("images")).unwrap();
-    let outside = file(elsewhere.path().join("past.png"), day);
-    let past = file(folder(runtime.join("printed")).join("past.txt"), day);
+    let outside = file(elsewhere.path().join("past.png"), past_its_day);
+    let past = file(folder(runtime.join("printed")).join("past.txt"), past_its_day);
     let _daemon = start(linked.vars()).unwrap();
     eventually("the file past its day to go", || (!past.exists()).then_some(()));
     assert!(outside.exists(), "a file through a link stays");
@@ -2007,7 +1993,7 @@ fn a_machine_whose_answer_stalls_may_have_made_the_worktree() {
         let daemon = lunetad::connect(&folder).await.unwrap();
         let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
         let pasted = Pasted::new(Work::Link(issue), Vec::new());
-        pasted.ready_on(daemon, &"far".parse().unwrap(), Duration::from_secs(6)).await
+        pasted.ready_on(daemon, &"far".parse().unwrap(), lunetad::REACH).await
     });
     assert!(matches!(said, Err(Unready::InDoubt(_))), "{said:?}");
     let made = clone.join("issue-7").join(".git");

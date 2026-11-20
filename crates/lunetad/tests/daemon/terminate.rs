@@ -1,18 +1,16 @@
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
+use luneta_waits::eventually;
 use lunetad::api::projects::Held;
 use lunetad::mux::own::api::terminal::Program;
 use rustix::process::{test_kill_process, Pid};
 
-use crate::host::{answered, eventually, start, Host, Running, Vars, LUNETA, LUNETAD};
+use crate::host::{answered, start, Host, Running, Vars, LUNETA, LUNETAD};
 use crate::own::{built_server, Owned};
 use crate::projects::{kept, project, worktree};
 use crate::remote::{hosts, FakeSsh};
-
-const ENDS: Duration = Duration::from_secs(5);
 
 struct Said {
     code: Option<i32>,
@@ -45,7 +43,7 @@ fn here(line: &str) -> &str {
     said
 }
 
-fn gone(pid: u32) -> bool {
+pub fn gone(pid: u32) -> bool {
     test_kill_process(Pid::from_raw(i32::try_from(pid).unwrap()).unwrap()).is_err()
 }
 
@@ -83,19 +81,19 @@ fn luneta_terminate_ends_lunetad_the_mux_its_terminals_and_lunetas_and_forgets_t
     assert_eq!(planned.code, Some(3), "{}", planned.stderr);
     let says = "ends 1 luneta command, lunetad and luneta-mux; forgets 1 project and 1 worktree";
     assert_eq!(planned.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
-    assert!(mux.ended_within(Duration::ZERO).is_none(), "a plan ends nothing");
+    assert!(mux.has_ended().is_none(), "a plan ends nothing");
     assert!(kept(&owned.host).exists());
 
     let ended = terminate(owned.host.vars(), Some(&plan_in(&planned)));
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
     let says = "ended 1 luneta command, lunetad and luneta-mux; forgot 1 project and 1 worktree";
     assert_eq!(ended.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
-    assert!(owned.daemon_ended_within(ENDS).is_some(), "lunetad runs on");
-    assert!(mux.ended_within(ENDS).is_some(), "luneta-mux runs on");
-    assert!(bridge.ended_within(ENDS).is_some(), "luneta bridge runs on");
+    owned.daemon_ended("lunetad ends");
+    mux.ended("luneta-mux ends");
+    bridge.ended("luneta bridge ends");
     eventually("the terminal's program ends with luneta-mux", || gone(shell).then_some(()));
     assert!(!kept(&owned.host).exists());
-    let ended_elsewhere = untouched.ended_within(Duration::ZERO);
+    let ended_elsewhere = untouched.has_ended();
     assert!(ended_elsewhere.is_none(), "the lunetad of another folder ended");
 
     let again = terminate(owned.host.vars(), None);
@@ -132,9 +130,9 @@ fn luneta_terminate_ends_the_lunetad_that_keeps_the_projects_and_its_mux_from_an
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
     let says = "ended lunetad and luneta-mux; forgot 1 project and 1 worktree";
     assert_eq!(ended.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
-    let keeps = "the lunetad that keeps the projects runs on";
-    assert!(owned.daemon_ended_within(ENDS).is_some(), "{keeps}");
-    assert!(mux.ended_within(ENDS).is_some(), "the luneta-mux of {keeps}");
+    let keeps = "the lunetad that keeps the projects ends";
+    owned.daemon_ended(keeps);
+    mux.ended(&format!("the luneta-mux of {keeps}"));
 }
 
 #[test]
@@ -158,7 +156,7 @@ fn luneta_terminate_ends_luneta_on_each_machine_ssh_reaches_and_skips_the_others
     let skipped = "gone: skipped, as ssh does not reach it, and so luneta runs on there and keeps \
                    its projects: ssh: Could not resolve hostname gone";
     assert!(gone_line.starts_with(skipped), "{gone_line}");
-    assert!(far_daemon.ended_within(Duration::ZERO).is_none(), "a plan ends nothing");
+    assert!(far_daemon.has_ended().is_none(), "a plan ends nothing");
 
     let ended = terminate(here_host.vars(), Some(&plan_in(&planned)));
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
@@ -168,7 +166,7 @@ fn luneta_terminate_ends_luneta_on_each_machine_ssh_reaches_and_skips_the_others
     assert_eq!(here(local), "nothing of luneta ran; kept no project to forget");
     assert_eq!(far_line, "far: ended lunetad; forgot 1 project and 1 worktree");
     assert_eq!(gone_again, gone_line);
-    assert!(far_daemon.ended_within(ENDS).is_some(), "far's lunetad runs on");
+    far_daemon.ended("far's lunetad ends");
     assert!(!kept(&far).exists());
     assert!(!Path::new(&kept(&here_host)).exists());
 }
@@ -212,8 +210,8 @@ fn luneta_terminate_forgets_again_what_a_lunetad_started_meanwhile_kept() {
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
     let says = "ended 2 lunetads and luneta-mux; forgot 1 project and 1 worktree";
     assert_eq!(ended.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
-    assert!(daemon.ended_within(ENDS).is_some(), "lunetad runs on");
-    assert!(writer.ended_within(ENDS).is_some(), "luneta-mux runs on");
+    daemon.ended("lunetad ends");
+    writer.ended("luneta-mux ends");
     assert!(fs::read_to_string(&log).unwrap().contains("listening on"), "no lunetad started");
     assert!(!kept(&host).exists(), "what the lunetad started meanwhile kept is kept still");
 }
@@ -308,12 +306,12 @@ fn luneta_terminate_here_ends_nothing_in_luneta_s_terminal_or_on_a_key_that_chan
     let stale = here_ending(host.vars(), "0000000000000000", &[]);
     assert_eq!(stale.code, Some(1), "{}", stale.stderr);
     assert!(stale.stderr.contains("changed since: ends lunetad"), "{}", stale.stderr);
-    assert!(daemon.ended_within(Duration::from_millis(500)).is_none(), "lunetad was ended");
+    daemon.runs_on("a refused plan ends lunetad");
 
     let ended = here_ending(host.vars(), &key, &[]);
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
     assert_eq!(ended.lines, ["ended lunetad; kept no project to forget"]);
-    assert!(daemon.ended_within(ENDS).is_some(), "lunetad runs on");
+    daemon.ended("lunetad ends");
 }
 
 #[test]
@@ -331,6 +329,6 @@ fn luneta_terminate_ends_nothing_on_a_plan_that_changed_since_it_was_said() {
     assert_eq!(refused.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
     assert!(refused.stderr.contains("told yes to another plan than this"), "{}", refused.stderr);
     assert_ne!(plan_in(&refused), plan);
-    assert!(daemon.ended_within(Duration::from_millis(500)).is_none(), "lunetad was ended");
+    daemon.runs_on("a refused plan ends lunetad");
     assert!(kept(&host).exists());
 }
