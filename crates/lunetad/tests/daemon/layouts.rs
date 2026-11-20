@@ -3,7 +3,7 @@ use std::fs;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
-use luneta_waits::{eventually, Patience, QUIET};
+use luneta_waits::{eventually, Patience, Span, QUIET};
 use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use lunetad::api::show_response::{self, view::Found, Laid, View};
 use lunetad::api::change_projects_request::{
@@ -1134,7 +1134,8 @@ fn a_terminal_that_luneta_mux_keeps_ending_after_is_given_up_and_left_lost() {
     });
     let started = || std::os::unix::net::UnixStream::connect(owned.socket()).ok();
     let again = "a luneta-mux is started again for a terminal given up";
-    luneta_waits::through(RESTORE_PAUSE + SWEEP * 2, again, started);
+    let paused = const { Span::of(RESTORE_PAUSE.saturating_add(SWEEP.saturating_mul(2))) };
+    luneta_waits::through(paused, again, started);
     assert!(lost(&shown.until("the terminal still lost", |_| true).views[0]));
 }
 
@@ -1158,7 +1159,8 @@ fn a_line_typed_by_a_restore_outlives_a_restart_of_lunetad() {
     owned.start_daemon();
     let mut again = Shown::new(&owned, worktree, 80, 24);
     again.until("the terminal found", |laid| laid.views.iter().all(|view| key(view).is_some()));
-    luneta_waits::through(SWEEP * 3, "the line is no longer kept, left unrun", || {
+    let sweeps = const { Span::of(SWEEP.saturating_mul(3)) };
+    luneta_waits::through(sweeps, "the line is no longer kept, left unrun", || {
         Some(fs::read_to_string(kept(&owned.host)).unwrap()).filter(|file| !file.contains(unrun))
     });
     let laid = restored_after_kill(&owned, &mut again);
@@ -1676,7 +1678,8 @@ fn luneta_shows_another_machine_s_worktree_types_there_and_opens_a_terminal_besi
         let (row, column) = window.spot_of("yonder");
         let row = (row + 1, column + 4);
         window.send(&[mouse(0, row, 'M'), mouse(0, row, 'm')].concat());
-        luneta_waits::seen_within(QUIET * 2, || window.shows("far-is-42").then_some(()))
+        let quiet = const { Span::of(QUIET.saturating_mul(2)) };
+        luneta_waits::seen_within(quiet, || window.shows("far-is-42").then_some(()))
     });
     window.send("echo typed-$((40 + 2))\r");
     eventually("far's terminal shows what was typed here", || {
@@ -1796,17 +1799,18 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let reach = Reach::Mux { socket: owned.socket(), runs_in: None };
     let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
-    let frame = |what: &str| match luneta_waits::heard(what, &seeing) {
+    let frame = |patience: Patience, what: &str| match patience.heard(what, &seeing) {
         Seen::Frame(framed) => framed,
         Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
     };
     let unheld = || seeing.try_recv().ok().map(|seen| format!("{seen:?}"));
     let mut held = Vec::new();
+    let patience = Patience::begun();
     for told in 0..FRAMES_MAX {
-        held.push(frame(&format!("frame {told} of {FRAMES_MAX} comes")));
+        held.push(frame(patience, &format!("frame {told} of {FRAMES_MAX} comes")));
     }
     luneta_waits::never("a frame comes past those luneta still holds", unheld);
     drop(held.pop());
-    let _again = frame("a frame comes once luneta lets one go");
+    let _again = frame(Patience::begun(), "a frame comes once luneta lets one go");
     luneta_waits::never("more than one frame comes for the one let go", unheld);
 }

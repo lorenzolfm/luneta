@@ -4,14 +4,21 @@ files:
   - crates/*/tests/**
 message: >-
   A test waits on an event, never on the clock: wait through luneta_waits,
-  whose one patience no loaded machine runs out of.
+  whose one patience no loaded machine runs out of, and time a span with
+  luneta_waits::Began.
 rule:
   any:
     - kind: scoped_identifier
       has:
         field: path
         regex: ^(((std|core|tokio)::)?time::)?Duration$
+    - kind: use_as_clause
+      has:
+        field: path
+        regex: Duration$
     - kind: identifier
-      regex: ^(sleep|sleep_until|timeout|timeout_at|interval)$
+      regex: ^(sleep|sleep_ms|sleep_until|timeout|timeout_at|interval|interval_at|park_timeout|park_timeout_ms|recv_timeout|recv_deadline|wait_timeout|wait_timeout_ms|wait_timeout_while|elapsed|Instant)$
+    - kind: type_identifier
+      regex: ^Instant$
     - kind: field_identifier
-      regex: ^(recv_timeout|recv_deadline|wait_timeout|wait_timeout_while|park_timeout)$
+      regex: ^(recv_timeout|recv_deadline|wait_timeout|wait_timeout_ms|wait_timeout_while|park_timeout|elapsed)$

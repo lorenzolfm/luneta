@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use luneta_waits::{eventually, QUIET};
+use luneta_waits::{eventually, Span, QUIET};
 use lunetad::api::terminal::Found;
 use serde_json::json;
 
@@ -595,5 +595,6 @@ fn a_luneta_started_in_a_shell_of_the_view_it_shows_leaves_the_view_its_size() {
     window.send(&format!("{LUNETA}\r"));
     eventually("the inner luneta says it runs there", || window.shows(HERE).then_some(()));
     let resized = || (size() != Some(first)).then(|| (size(), window.screen()));
-    luneta_waits::through(QUIET * 2, "the inner luneta resizes its view", resized);
+    let quiet = const { Span::of(QUIET.saturating_mul(2)) };
+    luneta_waits::through(quiet, "the inner luneta resizes its view", resized);
 }

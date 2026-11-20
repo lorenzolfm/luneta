@@ -1,0 +1,10 @@
+id: tests-bound-no-latency
+valid:
+  - "fn f() { if torn.lasted().is_under(TORN) { g(); } }"
+  - "fn f() { lasted.at_least(ALONE, \"a\"); }"
+  - "fn f() { assert!(listed.unread <= 2, \"{}\", listed.unread); }"
+invalid:
+  - "fn f() { assert!(began.lasted().is_under(QUIET)); }"
+  - "fn f() { assert!(lasted.is_under(SWEEP), \"{lasted:?}\"); }"
+  - "fn f() { assert_eq!(lasted.is_under(SWEEP), true); }"
+  - "fn f() { debug_assert!(!lasted.is_under(SWEEP)); }"

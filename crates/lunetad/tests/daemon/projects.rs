@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use luneta_waits::eventually;
+use luneta_waits::{eventually, Span};
 use lunetad::api::change_projects_request::{
     AddProject, AddWorktree, Change, CloseWorktree, Pull, ReorderProjects, ReorderWorktrees, Start,
 };
@@ -339,7 +339,8 @@ fn a_clone_s_worktrees_made_or_removed_outside_luneta_are_listed_unopened_on_the
     eventually("one opened is a row", || (listed(&host) == opened).then_some(()));
     git(&clone.join(".bare"), &["worktree", "remove", "--force", "../feat-2"]);
     let keeps = "a worktree removed keeps its row while it holds a terminal";
-    luneta_waits::through(SWEEP * 2, keeps, || Some(listed(&host)).filter(|now| *now != opened));
+    let sweeps = const { Span::of(SWEEP.saturating_mul(2)) };
+    luneta_waits::through(sweeps, keeps, || Some(listed(&host)).filter(|now| *now != opened));
     let Held::Kept(Kept { projects, .. }) = held(&host) else { panic!("the projects are kept") };
     let seen = projects[0].worktrees().unwrap()[0].terminals.iter().map(|it| it.id).collect();
     let closing = Change::CloseWorktree(CloseWorktree { worktree: made, seen });

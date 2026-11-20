@@ -1,4 +1,5 @@
 use luneta_mux::api;
+use luneta_waits::Patience;
 use tonic::Code;
 
 use crate::host::{
@@ -111,8 +112,10 @@ fn a_viewer_that_shows_a_terminal_again_gets_its_whole_screen_again() {
         viewer.until_row(key.id, "one").await;
         viewer.show(&[]).await;
         viewer.show(&[key]).await;
+        let patience = Patience::begun();
         loop {
-            let event = viewer.next().await.unwrap().expect("the stream goes on");
+            let next = viewer.next(patience, "the whole screen again").await.unwrap();
+            let event = next.expect("the stream goes on");
             if let api::to_viewer::Event::Frame(frame) = event
                 && frame.terminal == Some(key)
                 && matches!(frame.rows, Some(api::frame::Rows::Whole(_)))
@@ -269,8 +272,9 @@ fn a_showing_that_repeats_a_terminal_ends_the_viewer() {
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let mut viewer = Viewer::new(&mut mux).await;
         viewer.show(&[key, key]).await;
+        let patience = Patience::begun();
         let refusal = loop {
-            match viewer.next().await {
+            match viewer.next(patience, "a refusal of the repeated terminal").await {
                 Ok(Some(_)) => {},
                 Ok(None) => panic!("the stream ended without a refusal"),
                 Err(refusal) => break refusal,
@@ -327,7 +331,8 @@ fn the_last_terminal_to_close_ends_the_server() {
         let mut viewer = Viewer::new(&mut mux).await;
         viewer.show(&[key]).await;
         mux.close_terminal(api::CloseTerminalRequest { terminal: Some(key) }).await.unwrap();
-        while viewer.next().await.unwrap().is_some() {}
+        let patience = Patience::begun();
+        while viewer.next(patience, "the stream ends").await.unwrap().is_some() {}
         drop((viewer, mux));
         assert!(server.ended().await.success());
         assert!(gone(&server.socket()));

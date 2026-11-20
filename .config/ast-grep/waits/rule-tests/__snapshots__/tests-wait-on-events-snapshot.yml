@@ -12,6 +12,12 @@ snapshots:
       style: primary
       start: 28
       end: 35
+  fn f() { assert!(began.elapsed() < QUIET); }:
+    labels:
+    - source: elapsed
+      style: primary
+      start: 23
+      end: 30
   fn f() { g(Duration::ZERO); }:
     labels:
     - source: Duration::ZERO
@@ -28,6 +34,18 @@ snapshots:
       style: primary
       start: 15
       end: 27
+  fn f() { let _ = Receiver::recv_timeout(&heard, d); }:
+    labels:
+    - source: recv_timeout
+      style: primary
+      start: 27
+      end: 39
+  fn f() { let began = Instant::now(); }:
+    labels:
+    - source: Instant
+      style: primary
+      start: 21
+      end: 28
   fn f() { let d = Duration::from_secs(1); }:
     labels:
     - source: Duration::from_secs
@@ -68,21 +86,61 @@ snapshots:
       style: secondary
       start: 17
       end: 38
+  fn f() { let took = SystemTime::now().elapsed(); }:
+    labels:
+    - source: elapsed
+      style: primary
+      start: 38
+      end: 45
   fn f() { sleep(d); }:
     labels:
     - source: sleep
       style: primary
       start: 9
       end: 14
+  fn f() { std::thread::park_timeout(d); }:
+    labels:
+    - source: park_timeout
+      style: primary
+      start: 22
+      end: 34
   fn f() { std::thread::sleep(d); }:
     labels:
     - source: sleep
       style: primary
       start: 22
       end: 27
+  fn f() { std::thread::sleep_ms(5); }:
+    labels:
+    - source: sleep_ms
+      style: primary
+      start: 22
+      end: 30
   fn f() { thread::sleep(d); }:
     labels:
     - source: sleep
       style: primary
       start: 17
+      end: 22
+  'fn f(began: Option<Instant>) {}':
+    labels:
+    - source: Instant
+      style: primary
+      start: 19
+      end: 26
+  use std::time::Duration as Span;:
+    labels:
+    - source: std::time::Duration as Span
+      style: primary
+      start: 4
+      end: 31
+    - source: std::time::Duration
+      style: secondary
+      start: 4
+      end: 23
+  use std::time::Instant;:
+    labels:
+    - source: Instant
+      style: primary
+      start: 15
       end: 22

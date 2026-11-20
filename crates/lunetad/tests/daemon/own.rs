@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use hyper_util::rt::TokioIo;
-use luneta_waits::eventually;
+use luneta_waits::{eventually, Span};
 use lunetad::mux::own::api::mux_client::MuxClient;
 use lunetad::mux::own::api::{self as mux_api, InfoRequest, InfoResponse, ListRequest, Listing};
 use lunetad::mux::own::server;
@@ -321,5 +321,6 @@ pub fn the_daemon_runs_on_while_a_terminal_does() {
     eventually("the server listens", || socket.exists().then_some(()));
     owned.new_terminal(b"kept");
     let daemon = owned.daemon.as_mut().unwrap();
-    daemon.runs_through(ALONE + SWEEP * 3, "the daemon ends while a terminal runs");
+    let kept = const { Span::of(ALONE.saturating_add(SWEEP.saturating_mul(3))) };
+    daemon.runs_through(kept, "the daemon ends while a terminal runs");
 }

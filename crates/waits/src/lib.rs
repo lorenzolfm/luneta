@@ -1,6 +1,6 @@
 #![expect(clippy::panic, reason = "a wait that runs out fails the test that waited, with what it waited for")]
 
-use std::fmt::{Debug, Display};
+use std::fmt::{self, Debug, Display};
 use std::future::IntoFuture;
 use std::process::{Child, ExitStatus};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -16,6 +16,75 @@ const LOOK: Duration = Duration::from_millis(20);
 const _: () = assert!(LOOK.as_millis() < QUIET.as_millis(), "a quiet window is looked at more than once");
 
 const _: () = assert!(QUIET.as_millis() < PATIENCE.as_millis(), "a quiet window is shorter than any wait for an event");
+
+const QUIETLY: Span = Span::of(QUIET);
+
+#[derive(Clone, Copy, Debug)]
+pub struct Span(Duration);
+
+impl Span {
+    #[must_use]
+    pub const fn of(span: Duration) -> Span {
+        assert!(!span.is_zero(), "a window of no time sees nothing");
+        let past = span.as_nanos() > PATIENCE.as_nanos();
+        assert!(!past, "a window longer than any wait for an event waits on the clock");
+        Span(span)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Gap(Duration);
+
+impl Gap {
+    #[must_use]
+    pub const fn of(gap: Duration) -> Gap {
+        assert!(!gap.is_zero(), "writes kept apart by no time are not kept apart");
+        let past = gap.as_nanos() > QUIET.as_nanos();
+        assert!(!past, "apart spaces writes past a settle, it is no wait for an event");
+        Gap(gap)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Began(Instant);
+
+impl Began {
+    #[must_use]
+    pub fn now() -> Began {
+        Began(Instant::now())
+    }
+
+    #[must_use]
+    pub fn lasted(self) -> Lasted {
+        Lasted(self.0.elapsed())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Lasted(Duration);
+
+impl Lasted {
+    pub fn at_least(self, span: Duration, what: &str) {
+        assert!(self.0 >= span, "{what}: it lasted {self:?}, under {span:?}");
+    }
+
+    pub fn at_most_once_a_second(self, times: usize, what: &str) {
+        let most = self.0.as_secs().saturating_add(1);
+        let times = u64::try_from(times).expect("a count of times fits in u64");
+        assert!(times <= most, "{what}: {times} times in {self:?}");
+    }
+
+    #[must_use]
+    pub fn is_under(self, span: Duration) -> bool {
+        self.0 < span
+    }
+}
+
+impl Debug for Lasted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Debug::fmt(&self.0, f)
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Patience {
@@ -72,18 +141,17 @@ pub async fn eventually_async<T>(what: &str, mut check: impl AsyncFnMut() -> Opt
 }
 
 pub fn never<T: Debug>(what: &str, check: impl FnMut() -> Option<T>) {
-    through(QUIET, what, check);
+    through(QUIETLY, what, check);
 }
 
-pub fn through<T: Debug>(span: Duration, what: &str, check: impl FnMut() -> Option<T>) {
+pub fn through<T: Debug>(span: Span, what: &str, check: impl FnMut() -> Option<T>) {
     if let Some(found) = seen_within(span, check) {
         panic!("{what}: {found:?}");
     }
 }
 
-pub async fn through_async<T: Debug>(span: Duration, what: &str, mut check: impl FnMut() -> Option<T>) {
-    a_window(span);
-    let end = Instant::now() + span;
+pub async fn through_async<T: Debug>(span: Span, what: &str, mut check: impl FnMut() -> Option<T>) {
+    let end = Instant::now() + span.0;
     loop {
         if let Some(found) = check() {
             panic!("{what}: {found:?}");
@@ -96,10 +164,9 @@ pub async fn through_async<T: Debug>(span: Duration, what: &str, mut check: impl
     }
 }
 
-pub fn seen_within<T>(span: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
+pub fn seen_within<T>(span: Span, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     blocks_no_runtime();
-    a_window(span);
-    let end = Instant::now() + span;
+    let end = Instant::now() + span.0;
     loop {
         if let Some(found) = check() {
             return Some(found);
@@ -112,11 +179,11 @@ pub fn seen_within<T>(span: Duration, mut check: impl FnMut() -> Option<T>) -> O
     }
 }
 
-pub async fn repeated_through(span: Duration, mut step: impl AsyncFnMut()) {
-    a_window(span);
-    let end = Instant::now() + span;
+pub async fn repeated_through(span: Span, what: &str, mut step: impl AsyncFnMut()) {
+    let end = Instant::now() + span.0;
+    let patience = Patience { deadline: end + PATIENCE };
     while Instant::now() < end {
-        step().await;
+        patience.awaited(what, step()).await;
     }
 }
 
@@ -141,16 +208,9 @@ pub fn runs_on(what: &str, child: &mut Child) {
     never(what, || child.try_wait().expect("a child's status reads"));
 }
 
-pub fn apart(span: Duration) {
+pub fn apart(gap: Gap) {
     blocks_no_runtime();
-    assert!(!span.is_zero(), "writes kept apart by no time are not kept apart");
-    assert!(span <= QUIET, "apart spaces writes past a settle, it is no wait for an event: {span:?}");
-    thread::sleep(span);
-}
-
-fn a_window(span: Duration) {
-    assert!(!span.is_zero(), "a window of no time sees nothing");
-    assert!(span <= PATIENCE, "a window longer than any wait for an event waits on the clock: {span:?}");
+    thread::sleep(gap.0);
 }
 
 fn blocks_no_runtime() {

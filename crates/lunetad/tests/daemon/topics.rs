@@ -1,9 +1,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::time::Duration;
 
-use luneta_waits::eventually;
+use luneta_waits::{eventually, Span};
 use lunetad::api::{self, remote::Reached, WatchRequest};
 use lunetad::SWEEP;
 use serde_json::json;
@@ -14,7 +13,7 @@ use crate::remote::{hosts, FakeSsh};
 
 const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
 
-const SWEEPS: Duration = SWEEP.saturating_mul(3);
+const SWEEPS: Span = Span::of(SWEEP.saturating_mul(3));
 
 fn claude_that_names_topics(host: &Host) {
     let told = told_file(host);

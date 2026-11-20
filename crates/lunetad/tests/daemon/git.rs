@@ -4,9 +4,8 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
 
-use luneta_waits::eventually;
+use luneta_waits::{eventually, Began, Gap, Lasted};
 use lunetad::api::change_projects_request::{Change, ForgetProject};
 use lunetad::api::checkout::Head;
 use lunetad::api::git_status::{NoCheckout, Stands};
@@ -20,17 +19,17 @@ use crate::host::{start, Host, LUNETA};
 use crate::projects::{asked, project};
 
 impl Host {
-    fn watch(&self, after: Option<Version>) -> (api::Host, Duration) {
+    fn watch(&self, after: Option<Version>) -> (api::Host, Lasted) {
         let mut command = self.vars().command(LUNETA);
         command.arg("watch");
         if let Some(after) = after {
             command.arg(format!("--after={}:{}", after.pid, after.seq));
         }
-        let asked = Instant::now();
+        let asked = Began::now();
         let output = command.stderr(Stdio::inherit()).output().unwrap();
-        let took = asked.elapsed();
+        let lasted = asked.lasted();
         assert!(output.status.success(), "luneta watch failed");
-        (api::Host::decode(output.stdout.as_slice()).unwrap(), took)
+        (api::Host::decode(output.stdout.as_slice()).unwrap(), lasted)
     }
 }
 
@@ -489,7 +488,7 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     let asked = noted.statuses();
     for step in 0..5 {
         commit(top, "lib.rs", &format!("{step}\n"));
-        luneta_waits::apart(SETTLE * 2);
+        luneta_waits::apart(const { Gap::of(SETTLE.saturating_mul(2)) });
     }
     let asked_again = || Some(noted.statuses()).filter(|now| *now != asked);
     luneta_waits::never("git is asked as git writes in its folder", asked_again);
@@ -551,7 +550,7 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
         fs::create_dir(&made).unwrap();
         fs::write(made.join("out"), "built\n").unwrap();
         fs::write(build.join("log"), format!("{step}\n")).unwrap();
-        luneta_waits::apart(SETTLE * 2);
+        luneta_waits::apart(const { Gap::of(SETTLE.saturating_mul(2)) });
     }
     let asked_again = || Some(noted.statuses()).filter(|now| *now != asked);
     luneta_waits::never("git is asked as the build writes", asked_again);
@@ -1290,9 +1289,9 @@ fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     let version = first.version.unwrap();
     assert_eq!(version.pid, daemon.pid());
 
-    let (same, took) = host.watch(Some(version));
+    let (same, lasted) = host.watch(Some(version));
     assert_eq!(same.version, Some(version));
-    assert!(took >= WATCH, "{took:?}");
+    lasted.at_least(WATCH, "luneta watch waits a whole watch for a change");
 
     let play = scratch();
     let play = play.path().join("play");

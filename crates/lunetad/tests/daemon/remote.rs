@@ -5,9 +5,9 @@ use std::os::unix::fs::{symlink, DirBuilderExt as _, PermissionsExt as _};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
-use luneta_waits::eventually;
+use luneta_waits::{eventually, Began, Span, QUIET};
 use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::keep_image_request::{Image, Part};
@@ -34,7 +34,7 @@ use crate::host::{answered, folder_in, script, shared_script, start, start_as, H
 use crate::projects::project;
 use crate::worktree::{cloned_as_wt, git};
 
-const SLOW_SECS: u64 = 6;
+const SLOW: Duration = QUIET.saturating_mul(6);
 
 pub struct FakeSsh {
     to: PathBuf,
@@ -485,13 +485,13 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
     }));
 }
 
-fn watch_through(host: &Host, span: Duration) {
+fn watch_through(host: &Host, span: Span) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = crate::host::folder_in(host.runtime.path()).unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let mut after = None;
-        luneta_waits::repeated_through(span, async || {
+        luneta_waits::repeated_through(span, "the daemon answers a watch", async || {
             let asked = daemon.watch(WatchRequest { after, kept: None, shown: false }).await;
             after = asked.expect("the daemon ended").into_inner().version;
         })
@@ -509,7 +509,7 @@ pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
     let _here = start(here.vars()).unwrap();
     reached(&here, "far", |_| true);
 
-    watch_through(&here, ALONE + SWEEP * 3);
+    watch_through(&here, const { Span::of(ALONE.saturating_add(SWEEP.saturating_mul(3))) });
     assert_eq!(far_daemon.exit_status(), None);
     assert_eq!(ssh.bridges("far").len(), 1);
 }
@@ -790,6 +790,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
 
 fn claude_that_takes_turns(host: &Host) {
     let home = host.home.path().display();
+    let slow = SLOW.as_secs_f64();
     let text = format!(
         r#"cat > "{home}/words"
 {{ echo "cwd=$(pwd -P)"
@@ -804,7 +805,7 @@ case "$(cat "{home}/words")" in
     *please-fail*)
         echo '{{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}}'
         exit 1 ;;
-    *please-be-slow*) sleep {SLOW_SECS} ;;
+    *please-be-slow*) sleep {slow} ;;
     *please-get-stuck*) echo "$ran"; echo $$ > "{home}/stuck"; exec sleep 60 ;;
 esac
 echo "$ran"
@@ -946,12 +947,12 @@ fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let started = Instant::now();
+        let started = Began::now();
         let slow = ask("far", None, "please-be-slow", true);
         let (steps, ended) = turn(&mut daemon, slow).await;
         ended.unwrap();
         assert_eq!(steps.len(), 3, "{steps:?}");
-        assert!(started.elapsed().as_secs() >= SLOW_SECS, "{:?}", started.elapsed());
+        started.lasted().at_least(SLOW, "a slow turn is answered only once claude ends it");
     });
 }
 

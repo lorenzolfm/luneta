@@ -9,9 +9,9 @@ use std::process::{ChildStdin, Command};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use luneta_waits::eventually;
+use luneta_waits::{eventually, Began, Gap, Span};
 use lunetad::api::agent::{Status as Reported, WaitingFor as Waits};
 use lunetad::api::{self, Agent, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor};
 use lunetad::mux::{OwnMade, TerminalKey};
@@ -304,7 +304,7 @@ fn the_daemon_follows_the_files_as_they_change() {
     eventually("one waits", || host.agent("one").filter(asking));
 
     let whole = file("one", one.pid(), &one_start, "idle").to_string();
-    let torn = Instant::now();
+    let torn = Began::now();
     fs::write(host.file_of(one.pid()), &whole[..whole.len() / 2]).unwrap();
     let made = file_for("three", &three, "busy").to_string();
     fs::write(host.file_of(three.pid()), &made[..made.len() / 2]).unwrap();
@@ -313,7 +313,7 @@ fn the_daemon_follows_the_files_as_they_change() {
     eventually("two works", || host.agent("two").filter(|agent| agent.status == works));
     let listed = host.list();
     let one_does = listed.agents.into_iter().find(|agent| agent.session_id == "one").map(|agent| agent.status);
-    if torn.elapsed() < TORN {
+    if torn.lasted().is_under(TORN) {
         assert_eq!((one_does, listed.unread), (Some(waits), 0));
     } else {
         assert!(listed.unread <= 2, "only the two torn files go unread: {}", listed.unread);
@@ -460,11 +460,12 @@ fn a_folder_that_never_settles_is_read_anyway() {
 
     let stop = AtomicBool::new(false);
     let path = host.sessions().join("churn");
+    let churned = const { Gap::of(SETTLE.checked_div(5).expect("a settle divides by five")) };
     thread::scope(|scope| {
         scope.spawn(|| {
             while !stop.load(Ordering::Relaxed) {
                 fs::write(&path, "churn").unwrap();
-                luneta_waits::apart(SETTLE / 5);
+                luneta_waits::apart(churned);
             }
         });
         let stopping = Stopping(&stop);
@@ -483,7 +484,8 @@ fn a_folder_the_daemon_cannot_read_it_says_so_once() {
     let sessions = host.sessions().display().to_string();
     let denied = |line: &str| line.contains(&sessions) && line.ends_with("Permission denied (os error 13)");
     daemon.says("the daemon says it cannot read the folder", denied);
-    luneta_waits::through(SWEEP * 2, "the daemon says the same twice", || {
+    let sweeps = const { Span::of(SWEEP.saturating_mul(2)) };
+    luneta_waits::through(sweeps, "the daemon says the same twice", || {
         let about: Vec<&String> = daemon.said().iter().filter(|line| line.contains(&sessions)).collect();
         let once: HashSet<&&String> = about.iter().collect();
         (once.len() != about.len()).then(|| about.iter().map(|line| (*line).clone()).collect::<Vec<_>>())

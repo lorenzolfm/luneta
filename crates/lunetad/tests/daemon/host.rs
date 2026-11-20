@@ -7,9 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::Duration;
 
-use luneta_waits::Patience;
+use luneta_waits::{Patience, Span};
 use lunetad::api::{self, WatchRequest};
 use lunetad::folder::{self, Folder};
 use tempfile::TempDir;
@@ -568,7 +567,7 @@ impl Running {
         luneta_waits::runs_on(what, &mut self.child);
     }
 
-    pub fn runs_through(&mut self, span: Duration, what: &str) {
+    pub fn runs_through(&mut self, span: Span, what: &str) {
         luneta_waits::through(span, what, || self.child.try_wait().unwrap());
     }
 }
@@ -607,7 +606,7 @@ impl Daemon {
         self.process.runs_on(what);
     }
 
-    pub fn runs_through(&mut self, span: Duration, what: &str) {
+    pub fn runs_through(&mut self, span: Span, what: &str) {
         self.process.runs_through(span, what);
     }
 

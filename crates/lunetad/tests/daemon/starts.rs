@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions as _;
@@ -14,7 +13,7 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use base64::Engine as _;
-use luneta_waits::eventually;
+use luneta_waits::{eventually, Began};
 use lunetad::api::projects::Held;
 use lunetad::api::terminal::Found;
 use lunetad::api;
@@ -581,16 +580,15 @@ fn a_lunetad_that_does_not_start_is_started_once_a_second_at_the_most() {
     let ended = on_terminal_with(command, |luneta| {
         eventually("luneta shows work", || shown(&owned, &dir.path));
         owned.stop_daemon();
-        began = Some(Instant::now());
+        began = Some(Began::now());
         let starts = || fs::read_to_string(&started).unwrap_or_default().lines().count();
         eventually("luneta starts lunetad again and again", || (starts() >= 3).then_some(()));
         stop(luneta.pid());
     });
-    let took = began.unwrap().elapsed();
+    let lasted = began.unwrap().lasted();
     assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
     let starts = fs::read_to_string(&started).unwrap().lines().count();
-    let most = usize::try_from(took.as_secs()).unwrap() + 1;
-    assert!(starts <= most, "it was started {starts} times in {took:?}");
+    lasted.at_most_once_a_second(starts, "luneta starts lunetad");
 }
 
 

@@ -7,9 +7,8 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Instant;
 
-use luneta_waits::eventually;
+use luneta_waits::{eventually, Began, Span};
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
     self, AskRequest, AskResponse, FileIssueRequest, FileIssueResponse, IssueRepositoriesRequest,
@@ -726,13 +725,14 @@ fn the_daemon_ends_once_nothing_has_kept_it_for_a_while() {
     let mut daemon = start(host.vars()).unwrap();
     host.host();
     let _silent = UnixStream::connect(host.runtime.path().join(SOCKET)).unwrap();
-    let alone = Instant::now();
-    daemon.runs_through(ALONE.saturating_sub(SWEEP), "the daemon ends before it is alone long enough");
+    let alone = Began::now();
+    let early = const { Span::of(ALONE.saturating_sub(SWEEP)) };
+    daemon.runs_through(early, "the daemon ends before it is alone long enough");
     let ended = daemon.ended("the daemon ends once alone");
-    let took = alone.elapsed();
+    let lasted = alone.lasted();
 
     assert!(ended.success(), "{ended}");
-    assert!(took >= ALONE, "{took:?}");
+    lasted.at_least(ALONE, "the daemon ends only once alone that long");
     assert!(!host.runtime.path().join(SOCKET).exists());
     let none = format!("no terminal for {}s", ALONE.as_secs());
     daemon.says("the daemon says why it ends", |line| line.contains(&none));
@@ -746,7 +746,8 @@ fn the_daemon_runs_on_while_a_client_watches_it() {
     runtime.block_on(async {
         let mut watching = lunetad::connect(&folder).await.unwrap();
         let mut after = None;
-        luneta_waits::repeated_through(ALONE + SWEEP * 3, async || {
+        let watched = const { Span::of(ALONE.saturating_add(SWEEP.saturating_mul(3))) };
+        luneta_waits::repeated_through(watched, "the daemon answers a watch", async || {
             let asked = watching.watch(WatchRequest { after, kept: None, shown: false }).await;
             after = asked.expect("the daemon ended").into_inner().version;
         })

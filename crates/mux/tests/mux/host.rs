@@ -202,8 +202,12 @@ impl Viewer {
         }
     }
 
-    pub async fn next(&mut self) -> Result<Option<api::to_viewer::Event>, tonic::Status> {
-        let next = luneta_waits::awaited("the server says something", self.from.message()).await;
+    pub async fn next(
+        &mut self,
+        patience: Patience,
+        what: &str,
+    ) -> Result<Option<api::to_viewer::Event>, tonic::Status> {
+        let next = patience.awaited(what, self.from.message()).await;
         let Some(message) = next? else {
             return Ok(None);
         };
@@ -216,8 +220,9 @@ impl Viewer {
     }
 
     pub async fn until(&mut self, what: &str, test: impl Fn(&Viewer) -> bool) {
+        let patience = Patience::begun();
         while !test(self) {
-            let next = self.next().await.unwrap();
+            let next = self.next(patience, what).await.unwrap();
             assert!(next.is_some(), "the stream ended before {what}");
         }
     }
