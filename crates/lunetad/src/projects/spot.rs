@@ -18,6 +18,13 @@ const BARE: &str = ".bare";
 const _: () = assert!(CLONE_WORKTREES_MAX <= WORKTREES_MAX);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloneRoot {
+    Of(Dir),
+    NoBare,
+    Unparsed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Spot(Place);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,11 +44,14 @@ impl Spot {
             },
         };
         let top = toplevel(folder, until, look)?;
-        if let Some(root) = clone_root(&common) {
-            let subfolders = listed(&root, until, look)?;
-            let subfolder = top.and_then(|top| root.subfolder(&top));
-            let subfolder = subfolder.filter(|it| subfolders.contains(it));
-            return Ok(Spot::in_clone(root, subfolder, subfolders));
+        match clone_root(&common) {
+            CloneRoot::Of(root) => {
+                let subfolders = listed(&root, until, look)?;
+                let subfolder = top.and_then(|top| root.subfolder(&top));
+                let subfolder = subfolder.filter(|it| subfolders.contains(it));
+                return Ok(Spot::in_clone(root, subfolder, subfolders));
+            },
+            CloneRoot::NoBare | CloneRoot::Unparsed(_) => {},
         }
         let dir = top.filter(|top| top.below(folder).is_some());
         Ok(Spot::in_folder(folder.clone(), dir.unwrap_or_else(|| folder.clone())))
@@ -164,9 +174,16 @@ fn ran(git: &mut Command, asked: &str, until: Instant, look: Duration) -> Result
 }
 
 #[must_use]
-pub fn clone_root(common: &str) -> Option<Dir> {
-    let root = common.strip_suffix(BARE)?.strip_suffix('/')?;
-    Dir::parse(root).ok()
+pub fn clone_root(common: &str) -> CloneRoot {
+    let bare = Path::new(common);
+    if bare.file_name().and_then(|name| name.to_str()) != Some(BARE) {
+        return CloneRoot::NoBare;
+    }
+    let root = bare.parent().and_then(Path::to_str).expect("a named path of a str has a parent");
+    match Dir::parse(root) {
+        Ok(root) => CloneRoot::Of(root),
+        Err(why) => CloneRoot::Unparsed(why),
+    }
 }
 
 fn porcelain(root: &Dir, said: &[u8]) -> Result<BTreeSet<Subfolder>, String> {
@@ -215,11 +232,17 @@ mod tests {
 
     #[test]
     fn a_clone_s_root_is_the_folder_that_holds_its_bare_repository() {
-        assert_eq!(clone_root("/w/luneta/.bare"), Some(dir("/w/luneta")));
-        assert_eq!(clone_root("/w/luneta/.git"), None);
-        assert_eq!(clone_root("/w/luneta.bare"), None);
-        assert_eq!(clone_root("/.bare"), None);
-        assert_eq!(clone_root("/w/lun\teta/.bare"), None);
+        assert_eq!(clone_root("/w/luneta/.bare"), CloneRoot::Of(dir("/w/luneta")));
+        assert_eq!(clone_root("/w/luneta/.git"), CloneRoot::NoBare);
+        assert_eq!(clone_root("/w/luneta.bare"), CloneRoot::NoBare);
+        assert_eq!(
+            clone_root("/.bare"),
+            CloneRoot::Unparsed("/ holds every folder, and so is no project's".to_owned())
+        );
+        assert_eq!(
+            clone_root("/w/lun\teta/.bare"),
+            CloneRoot::Unparsed("\"/w/lun\\teta\": a path holds a control character".to_owned())
+        );
     }
 
     #[test]

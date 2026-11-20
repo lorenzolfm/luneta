@@ -20,7 +20,7 @@ use crate::api::{On, PasteRequest, PasteResponse};
 use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common};
 use crate::program::{self, Ran};
-use crate::projects::{self, Dir, Holders, Name, Spot, SPOT_LOOK};
+use crate::projects::{self, CloneRoot, Dir, Holders, Name, Spot, SPOT_LOOK};
 use crate::{zoxide, Destination, Directory};
 
 pub(crate) mod sync;
@@ -437,15 +437,16 @@ impl Remote {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Layout {
-    Wt,
-    GitBare,
+    Wt(Dir),
+    WtRefused(String),
+    BareElsewhere,
     Git,
     Unsaid,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Repository {
     by: Remote,
     layout: Layout,
@@ -459,9 +460,9 @@ enum Looked {
 }
 
 impl Looked {
-    fn repository(&self) -> Option<Repository> {
+    fn repository(&self) -> Option<&Repository> {
         match self {
-            Looked::Of(repository, _) => Some(*repository),
+            Looked::Of(repository, _) => Some(repository),
             Looked::NotOf | Looked::Unsaid(_) => None,
         }
     }
@@ -743,9 +744,10 @@ fn ready(
     let mut repository_of = |dir: &str| {
         let host_of =
             |host: &str| hosts.entry(host.to_owned()).or_insert_with(|| ssh_host(host)).clone();
-        seen.entry(dir.to_owned()).or_insert_with(|| repository(dir, link, host_of)).repository()
+        let looked = seen.entry(dir.to_owned()).or_insert_with(|| repository(dir, link, host_of));
+        looked.repository().cloned()
     };
-    let repository = match found(link, worked, &mut repository_of) {
+    let (repository, root) = match found(link, worked, &mut repository_of) {
         Some(Found::There(at)) => {
             kind_holds(link)?;
             let dir = &worked[at].dir;
@@ -754,9 +756,9 @@ fn ready(
             let work = Readied::Link(link.clone());
             return Ok(Ready { at: At::There(at), folder, branch, moved_off: false, work });
         },
-        Some(Found::InClone(at)) => worked[at].dir.to_string(),
+        Some(Found::InClone(at, root)) => (worked[at].dir.to_string(), root),
         None => match clone(link, &mut repository_of)? {
-            Some(dir) => dir,
+            Some(cloned) => cloned,
             None => return Err(no_clone(link, &seen)),
         },
     };
@@ -765,7 +767,7 @@ fn ready(
     let work = Readied::Link(link.clone());
     let remote = seen.get(&repository).and_then(Looked::remote);
     if let Some(branch) = link.branch() {
-        if reads_moved_off && let Some(moved) = moved_off(&repository, &branch)? {
+        if reads_moved_off && let Some(moved) = moved_off(&repository, &root, &branch)? {
             return Ok(moved.ready(worked, work));
         }
         let remote = remote.ok_or_else(|| {
@@ -829,11 +831,11 @@ fn ready_file(
 ) -> Result<Ready<usize>, Unready> {
     let real = file.real()?;
     let repository = file.repository(&real)?;
-    wt_made(&repository)?;
+    let root = wt_made(&repository)?;
     lands(&repository, holders)?;
     let branch = file.branch();
     let work = Readied::File { real };
-    if reads_moved_off && let Some(moved) = moved_off(&repository, &branch)? {
+    if reads_moved_off && let Some(moved) = moved_off(&repository, &root, &branch)? {
         return Ok(moved.ready(worked, work));
     }
     base(&repository, ORIGIN, &branch)?;
@@ -853,13 +855,8 @@ impl MovedOff {
     }
 }
 
-fn moved_off(dir: &str, own: &str) -> Result<Option<MovedOff>, String> {
-    let Common::Of(common) = common_dir(dir) else {
-        return Err(format!("git does not say what repository {dir} is"));
-    };
-    let Some(there) = wt_makes(&common, own) else {
-        return Err(format!("{dir} is in no clone wt made"));
-    };
+fn moved_off(dir: &str, root: &Dir, own: &str) -> Result<Option<MovedOff>, String> {
+    let there = wt_makes(root, own);
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "worktree", "list", "--porcelain"]));
     let ran = program::run(&mut git, ANSWER)
@@ -873,8 +870,8 @@ fn moved_off(dir: &str, own: &str) -> Result<Option<MovedOff>, String> {
     Ok(directory(&there).map(|folder| MovedOff { folder, on: on.map(str::to_owned) }))
 }
 
-fn wt_makes(common: &str, branch: &str) -> Option<String> {
-    projects::clone_root(common).map(|root| format!("{}/{branch}", root.as_str()))
+fn wt_makes(root: &Dir, branch: &str) -> String {
+    format!("{}/{branch}", root.as_str())
 }
 
 fn sits_off<'a>(listed: &'a str, there: &str, own: &str) -> Option<&'a str> {
@@ -911,7 +908,7 @@ fn opened_in(folder: &Directory, worked: &[Worked]) -> At<usize> {
 #[derive(Debug, PartialEq, Eq)]
 enum Found {
     There(usize),
-    InClone(usize),
+    InClone(usize, Dir),
 }
 
 fn found(
@@ -926,16 +923,19 @@ fn found(
         return Some(Found::There(at));
     }
     let in_clone = worked.iter().enumerate().filter_map(|(at, it)| {
-        let repository = repository_of(it.dir.as_str()).filter(|of| of.layout == Layout::Wt)?;
-        Some((!it.here, repository.by, at))
+        let Repository { by, layout: Layout::Wt(root) } = repository_of(it.dir.as_str())? else {
+            return None;
+        };
+        Some((!it.here, by, at, root))
     });
-    in_clone.min().map(|(_, _, at)| Found::InClone(at))
+    let first = in_clone.min_by_key(|(away, by, at, _)| (*away, *by, *at));
+    first.map(|(_, _, at, root)| Found::InClone(at, root))
 }
 
 fn clone(
     link: &Link,
     repository_of: impl FnMut(&str) -> Option<Repository>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<(String, Dir)>, String> {
     let repository = link.repository();
     let dirs: Vec<String> = zoxide::visited()
         .map_err(|why| {
@@ -944,12 +944,12 @@ fn clone(
         .into_iter()
         .map(|dir| dir.path.into())
         .collect();
-    Ok(cloned(&dirs, repository_of).map(|dir| dirs[dir].clone()))
+    Ok(cloned(&dirs, repository_of).map(|(at, root)| (dirs[at].clone(), root)))
 }
 
 fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
     let repository = link.repository();
-    let laid_out = move |layout: Layout| {
+    let laid_out = |layout: Layout| {
         let of_it = move |(_, it): &(&String, &Looked)| {
             it.repository().is_some_and(|it| it.layout == layout)
         };
@@ -959,44 +959,60 @@ fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
         Looked::Unsaid(why) => Some((dir.clone(), why.clone())),
         Looked::Of(..) | Looked::NotOf => None,
     };
-    match (laid_out(Layout::Git), laid_out(Layout::GitBare), laid_out(Layout::Unsaid)) {
-        (Some(dir), _, _) => Unready::Failed(format!(
+    let refused = |(dir, it): (&'_ String, &'_ Looked)| match &it.repository()?.layout {
+        Layout::WtRefused(why) => Some((dir.clone(), why.clone())),
+        Layout::Wt(_) | Layout::BareElsewhere | Layout::Git | Layout::Unsaid => None,
+    };
+    if let Some(dir) = laid_out(Layout::Git) {
+        return Unready::Failed(format!(
             "{dir} is in a clone of {repository} that git made, and wt would make the worktree \
              in its .git; wt clone it first"
-        )),
-        (None, Some(dir), _) => Unready::Failed(format!(
+        ));
+    }
+    if let Some(dir) = laid_out(Layout::BareElsewhere) {
+        return Unready::Failed(format!(
             "{dir} is in a bare clone of {repository} that is not a .bare, and wt would make \
              the worktree inside it; wt clone it first"
-        )),
-        (None, None, Some(dir)) => Unready::Failed(format!(
+        ));
+    }
+    if let Some((dir, why)) = seen.iter().filter_map(refused).min() {
+        return Unready::Failed(format!(
+            "{dir} is in a clone of {repository} that wt made in a folder luneta cannot keep: \
+             {why}"
+        ));
+    }
+    if let Some(dir) = laid_out(Layout::Unsaid) {
+        return Unready::Failed(format!(
             "git did not say whether {dir}, of {repository}, is in a clone wt made"
-        )),
-        (None, None, None) => match seen.iter().filter_map(unsaid).min() {
-            Some((dir, why)) => Unready::Failed(format!(
-                "git did not say whether {dir} is of {repository}: {why}"
-            )),
-            None => Unready::Nowhere(format!(
-                "no session works in {repository}, nor does zoxide know a clone of it; wt clone \
-                 it first"
-            )),
+        ));
+    }
+    match seen.iter().filter_map(unsaid).min() {
+        Some((dir, why)) => {
+            Unready::Failed(format!("git did not say whether {dir} is of {repository}: {why}"))
         },
+        None => Unready::Nowhere(format!(
+            "no session works in {repository}, nor does zoxide know a clone of it; wt clone it \
+             first"
+        )),
     }
 }
 
 fn cloned(
     dirs: &[String],
     mut repository_of: impl FnMut(&str) -> Option<Repository>,
-) -> Option<usize> {
-    let mut best: Option<(Remote, usize)> = None;
+) -> Option<(usize, Dir)> {
+    let mut best: Option<(Remote, usize, Dir)> = None;
     for (at, dir) in dirs.iter().enumerate() {
-        if let Some(Repository { by, layout: Layout::Wt }) = repository_of(dir) {
-            best = Some(best.map_or((by, at), |was| was.min((by, at))));
+        if let Some(Repository { by, layout: Layout::Wt(root) }) = repository_of(dir) {
+            if best.as_ref().is_none_or(|(was, _, _)| by < *was) {
+                best = Some((by, at, root));
+            }
             if by == Remote::Origin {
                 break;
             }
         }
     }
-    best.map(|(_, at)| at)
+    best.map(|(_, at, root)| (at, root))
 }
 
 #[must_use]
@@ -1061,8 +1077,11 @@ fn layout(dir: &str) -> Layout {
     git::local(git.args(["-C", dir, "config", "--type=bool", "--get", "core.bare"]));
     match said(&mut git).as_deref() {
         Some("true") => match common_dir(dir) {
-            Common::Of(common) if projects::clone_root(&common).is_some() => Layout::Wt,
-            Common::Of(_) => Layout::GitBare,
+            Common::Of(common) => match projects::clone_root(&common) {
+                CloneRoot::Of(root) => Layout::Wt(root),
+                CloneRoot::NoBare => Layout::BareElsewhere,
+                CloneRoot::Unparsed(why) => Layout::WtRefused(why),
+            },
             Common::NoRepository | Common::Unsaid(_) => Layout::Unsaid,
         },
         Some("false") => Layout::Git,
@@ -1263,10 +1282,13 @@ fn git_reads(dir: &str) -> Result<(), String> {
     }
 }
 
-fn wt_made(dir: &str) -> Result<(), String> {
+fn wt_made(dir: &str) -> Result<Dir, String> {
     match layout(dir) {
-        Layout::Wt => Ok(()),
-        Layout::GitBare => Err(format!(
+        Layout::Wt(root) => Ok(root),
+        Layout::WtRefused(why) => {
+            Err(format!("{dir} is in a clone wt made in a folder luneta cannot keep: {why}"))
+        },
+        Layout::BareElsewhere => Err(format!(
             "{dir} is in a bare repository that is not a .bare, and wt would make the worktree \
              inside it; wt clone it first"
         )),
@@ -1306,7 +1328,11 @@ mod tests {
     }
 
     fn by_wt(by: Remote) -> Repository {
-        Repository { by, layout: Layout::Wt }
+        Repository { by, layout: Layout::Wt(root()) }
+    }
+
+    fn root() -> Dir {
+        Dir::parse("/w/cdk").expect("an absolute path")
     }
 
     fn of(repository: Repository) -> Looked {
@@ -1315,7 +1341,8 @@ mod tests {
 
     const BY_GIT: Repository = Repository { by: Remote::Origin, layout: Layout::Git };
 
-    const BY_GIT_BARE: Repository = Repository { by: Remote::Origin, layout: Layout::GitBare };
+    const BY_BARE_ELSEWHERE: Repository =
+        Repository { by: Remote::Origin, layout: Layout::BareElsewhere };
 
     const UNSAID: Repository = Repository { by: Remote::Origin, layout: Layout::Unsaid };
 
@@ -1515,16 +1542,16 @@ mod tests {
             worked("/cdk/main", None, false),
             worked("/cdk-upstream/master", None, false),
         ];
-        assert_eq!(found(&link(), &away, remotes), Some(Found::InClone(2)));
+        assert_eq!(found(&link(), &away, remotes), Some(Found::InClone(2, root())));
         let here = [
             worked("/cdk/main", None, false),
             worked("/dots", None, true),
             worked("/cdk/main", None, true),
             worked("/cdk-upstream/master", None, false),
         ];
-        assert_eq!(found(&link(), &here, remotes), Some(Found::InClone(2)));
+        assert_eq!(found(&link(), &here, remotes), Some(Found::InClone(2, root())));
         let by_git = [worked("/cdk-git", None, true), worked("/cdk/main", None, false)];
-        assert_eq!(found(&link(), &by_git, remotes), Some(Found::InClone(1)));
+        assert_eq!(found(&link(), &by_git, remotes), Some(Found::InClone(1, root())));
         assert_eq!(found(&link(), &by_git[..1], remotes), None);
         let checked_out = [
             worked("/cdk/main", None, true),
@@ -1533,7 +1560,7 @@ mod tests {
         ];
         assert_eq!(found(&link(), &checked_out, remotes), Some(Found::There(2)));
         let fork = [worked("/cdk/main", Some(&fork), true)];
-        assert_eq!(found(&link(), &fork, remotes), Some(Found::InClone(0)));
+        assert_eq!(found(&link(), &fork, remotes), Some(Found::InClone(0, root())));
     }
 
     #[test]
@@ -1543,13 +1570,13 @@ mod tests {
         let remotes = |dir: &str| match dir {
             "/fork/main" | "/fork" => Some(by_wt(Remote::Other)),
             "/upstream" => Some(by_wt(Remote::Origin)),
-            "/bare" => Some(BY_GIT_BARE),
+            "/bare" => Some(BY_BARE_ELSEWHERE),
             "/git" => Some(BY_GIT),
             "/unsaid" => Some(UNSAID),
             _ => None,
         };
-        assert_eq!(cloned(&dirs, remotes), Some(5));
-        assert_eq!(cloned(&dirs[..5], remotes), Some(3));
+        assert_eq!(cloned(&dirs, remotes), Some((5, root())));
+        assert_eq!(cloned(&dirs[..5], remotes), Some((3, root())));
         assert_eq!(cloned(&dirs[..3], remotes), None);
     }
 
@@ -1597,17 +1624,40 @@ mod tests {
         assert_eq!(
             no_clone(&link(), &seen(&[
                 ("/a/cdk", of(UNSAID)),
-                ("/w/cdk.git", of(BY_GIT_BARE)),
+                ("/w/cdk.git", of(BY_BARE_ELSEWHERE)),
                 ("/mnt/stuck", stuck()),
             ])),
             bare
         );
         assert_eq!(
             no_clone(&link(), &seen(&[
-                ("/w/cdk.git", of(BY_GIT_BARE)),
+                ("/w/cdk.git", of(BY_BARE_ELSEWHERE)),
                 ("/w/cdk/src", of(BY_GIT)),
             ])),
             by_git()
+        );
+        let refused = Repository {
+            by: Remote::Origin,
+            layout: Layout::WtRefused("\"/w/c\\tdk\": a path holds a control character".to_owned()),
+        };
+        let unkept = Unready::Failed(
+            "/w/c\tdk/main is in a clone of cashubtc/cdk that wt made in a folder luneta cannot \
+             keep: \"/w/c\\tdk\": a path holds a control character"
+                .to_owned(),
+        );
+        assert_eq!(
+            no_clone(&link(), &seen(&[
+                ("/a/cdk", of(UNSAID)),
+                ("/w/c\tdk/main", of(refused.clone())),
+            ])),
+            unkept
+        );
+        assert_eq!(
+            no_clone(&link(), &seen(&[
+                ("/w/c\tdk/main", of(refused)),
+                ("/w/cdk.git", of(BY_BARE_ELSEWHERE)),
+            ])),
+            bare
         );
         let unsaid = || {
             Unready::Failed(
@@ -2029,24 +2079,32 @@ mod tests {
         let bare = scratch.join("cdk/.bare");
         let bare = bare.to_str().unwrap();
         assert!(git(&scratch, &["init", "-q", "--bare", bare]).is_some());
-        let Common::Of(common) = common_dir(bare) else { panic!("no repository at {bare}") };
         let found = Repo::discover(Some(Path::new(bare))).unwrap();
         let wt = found.container().unwrap().join("issue-7");
-        assert_eq!(wt_makes(&common, "issue-7").as_deref(), wt.to_str());
-        assert_eq!(layout(bare), Layout::Wt);
-        assert_eq!(wt_made(bare), Ok(()));
+        let root = Dir::parse(scratch.join("cdk").to_str().unwrap()).unwrap();
+        assert_eq!(layout(bare), Layout::Wt(root.clone()));
+        assert_eq!(wt_made(bare), Ok(root.clone()));
+        assert_eq!(Some(wt_makes(&root, "issue-7").as_str()), wt.to_str());
         for name in ["infra/.git", "cdk.git"] {
             let elsewhere = scratch.join(name);
             let elsewhere = elsewhere.to_str().unwrap();
             assert!(git(&scratch, &["init", "-q", "--bare", elsewhere]).is_some());
-            let Common::Of(common) = common_dir(elsewhere) else {
-                panic!("no repository at {elsewhere}")
-            };
             let found = Repo::discover(Some(Path::new(elsewhere))).unwrap();
             assert!(found.container().is_ok(), "wt makes worktrees in {elsewhere}");
-            assert_eq!(wt_makes(&common, "issue-7"), None);
-            assert_eq!(layout(elsewhere), Layout::GitBare);
+            assert_eq!(layout(elsewhere), Layout::BareElsewhere);
         }
+        let unkept = scratch.join("lun\teta");
+        let bare = unkept.join(".bare");
+        assert!(git(&scratch, &["init", "-q", "--bare", bare.to_str().unwrap()]).is_some());
+        let why = format!("{:?}: a path holds a control character", unkept.to_str().unwrap());
+        assert_eq!(layout(bare.to_str().unwrap()), Layout::WtRefused(why.clone()));
+        assert_eq!(
+            wt_made(bare.to_str().unwrap()),
+            Err(format!(
+                "{} is in a clone wt made in a folder luneta cannot keep: {why}",
+                bare.display()
+            ))
+        );
         let plain = scratch.join("plain");
         assert!(git(&scratch, &["init", "-q", plain.to_str().unwrap()]).is_some());
         assert_eq!(layout(plain.to_str().unwrap()), Layout::Git);
