@@ -1328,8 +1328,12 @@ async fn pasted_on(
 }
 
 fn clone_with_issue_7(host: &Host, scratch: &Path) -> PathBuf {
+    clone_named_with_issue_7(host, scratch, "n")
+}
+
+fn clone_named_with_issue_7(host: &Host, scratch: &Path, name: &str) -> PathBuf {
     host.gh.issue(7, "https://github.com/o/n/issues/7");
-    let (up, clone) = (scratch.join("up"), scratch.join("n"));
+    let (up, clone) = (scratch.join("up"), scratch.join(name));
     cloned_as_wt(scratch, &up, &clone);
     let bare = clone.join(".bare");
     let github = "git@github.com:o/n.git";
@@ -1360,16 +1364,15 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
         let link = Work::Link(issue.clone());
-        let worked = |dir: &str| links::Worked { dir: dir.to_owned(), pull: None, here: false };
+        let worked = |dir: &str| links::Worked { dir: absolute(dir), pull: None, here: false };
         let session = Pasted::new(link.clone(), vec![worked("/nowhere/at/all"), worked(&main)]);
         let ready = pasted_on(&mut daemon, "far", &session).await.unwrap();
         let folder = clone.join("issue-7").display().to_string();
         let branch = Some("issue-7".to_owned());
-        let session_at = At::Session(1);
         let work = Readied::Link(issue);
         let answer = Ready {
-            at: session_at,
-            folder: folder.clone(),
+            at: At::Unopened,
+            folder: absolute(&folder),
             branch,
             moved_off: false,
             work,
@@ -1381,14 +1384,11 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
         assert_eq!(here.gh.issues(), [] as [String; 0]);
 
         let made = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), Vec::new())).await;
-        let Ready { at: At::Clone { cwd, name }, folder: again, .. } = made.unwrap() else {
-            panic!("no session to make");
-        };
-        let held = clone.display().to_string();
-        assert_eq!((cwd.as_str(), name.as_str(), again), (held.as_str(), "n", folder));
+        assert_eq!(made.unwrap(), answer, "the clone zoxide knows, with no view in it");
 
-        let relative = Pasted::new(link.clone(), vec![worked("n/main")]);
-        let relative = pasted_on(&mut daemon, "far", &relative).await.unwrap_err();
+        let mut relative = session.asked(Some(On { destination: "far".to_owned() }));
+        relative.worked[1].dir = "n/main".to_owned();
+        let relative = daemon.paste(relative).await.unwrap_err();
         assert_eq!(relative.code(), Code::InvalidArgument, "{relative:?}");
         let nowhere = pasted_on(&mut daemon, "nowhere", &session).await.unwrap_err();
         assert_eq!(nowhere.code(), Code::FailedPrecondition, "{nowhere:?}");
@@ -1435,6 +1435,52 @@ fn a_link_whose_clone_a_folder_s_project_holds_makes_nothing() {
 }
 
 #[test]
+fn a_link_whose_clone_no_project_holds_and_none_can_be_named_for_makes_nothing() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let long = "n".repeat(65);
+    let clone = clone_named_with_issue_7(&far, &scratch, &long);
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let link = Work::Link(Link::parse("https://github.com/o/n/issues/7").unwrap());
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        for worked in [vec![view_in(&clone.join("main"))], Vec::new()] {
+            let refused = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), worked)).await;
+            let refused = refused.unwrap_err();
+            assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+            let unheld = format!("nothing made: no project holds {}", clone.display());
+            let unnamed = format!("the name \"{long}\" is longer than 64 characters");
+            let why = format!("{unheld}, and one made for it cannot be named: {unnamed}");
+            assert_eq!(refused.message(), why);
+        }
+    });
+    assert!(!clone.join("issue-7").exists(), "no worktree is made for the issue");
+    let mut branches = Command::new("git");
+    branches.arg("-C").arg(clone.join(".bare")).args(["branch", "--list", "issue-7"]);
+    let branches = branches.output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&branches.stdout), "", "nor its branch");
+
+    project(&far, &clone, Some("n"));
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let made = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), Vec::new())).await;
+        let made = made.unwrap();
+        assert_eq!(made.at, At::Unopened);
+        assert_eq!(made.folder.as_str(), clone.join("issue-7").display().to_string());
+    });
+    assert!(clone.join("issue-7").join(".git").is_file(), "a clone a project holds keeps its name");
+}
+
+#[test]
 fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
     let here = Host::new();
     let far = Host::new();
@@ -1478,7 +1524,7 @@ fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
         assert!(far.gh.issues().is_empty(), "{:?}", far.gh.issues());
 
         let in_dir = |dir: &Path| links::Worked {
-            dir: dir.display().to_string(),
+            dir: absolute(&dir.display().to_string()),
             pull: None,
             here: false,
         };
@@ -1538,7 +1584,7 @@ fn ssh_says_what_host_a_remote_names_and_is_asked_of_no_option() {
             (&renamed, Code::FailedPrecondition, "that git made"),
         ];
         for (dir, code, says) in answers {
-            let view = links::Worked { dir: dir.display().to_string(), pull: None, here: false };
+            let view = view_in(dir);
             let asked = Pasted::new(link.clone(), vec![view]).asked(None);
             let mut answer = daemon.paste(asked).await.unwrap().into_inner();
             let why = answer.message().await.unwrap_err();
@@ -1610,8 +1656,12 @@ fn pasted_here(host: &Host, pasted: &Pasted) -> Result<Ready<usize>, Status> {
     })
 }
 
+fn absolute(path: &str) -> Directory {
+    Directory::parse(path.to_owned()).unwrap()
+}
+
 fn view_in(dir: &Path) -> links::Worked {
-    links::Worked { dir: dir.display().to_string(), pull: None, here: false }
+    links::Worked { dir: absolute(&dir.display().to_string()), pull: None, here: false }
 }
 
 #[test]
@@ -1626,8 +1676,8 @@ fn r_brings_the_worktree_wt_found_to_the_pull_request_s_head() {
     let pasted = reviewing_pull_7(vec![view_in(&main)]);
     let at_head = |head: &str, how: &str| {
         let ready = pasted_here(&host, &pasted).unwrap();
-        assert_eq!(ready.at, At::Session(0), "{how}");
-        assert_eq!(ready.folder, feat.display().to_string(), "{how}");
+        assert_eq!(ready.at, At::Unopened, "{how}");
+        assert_eq!(ready.folder.as_str(), feat.display().to_string(), "{how}");
         assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head, "{how}");
     };
 
@@ -1963,7 +2013,7 @@ fn r_syncs_a_pull_request_from_a_fork_s_main() {
 
     let head = opened("from the fork", false);
     let ready = pasted_here(&host, &pasted).unwrap();
-    assert_eq!(ready.folder, folder.display().to_string());
+    assert_eq!(ready.folder.as_str(), folder.display().to_string());
     assert_eq!(ready.branch.as_deref(), Some("f-main"));
     assert_eq!(git_said(&folder, &["rev-parse", "HEAD"]), head);
 
@@ -2033,7 +2083,7 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
             let from = from.map(|from| Directory::parse(from.to_owned()).unwrap());
             Work::File(links::File::parse(path, from).unwrap())
         };
-        let worked = |dir: &str| links::Worked { dir: dir.to_owned(), pull: None, here: false };
+        let worked = |dir: &str| links::Worked { dir: absolute(dir), pull: None, here: false };
         let views = vec![worked("/nowhere/at/all"), worked(&main)];
         let asked = Pasted::new(file(&plan, Some("/nowhere/at/all")), views.clone());
         let ready = pasted_on(&mut daemon, "far", &asked).await.unwrap();
@@ -2041,8 +2091,8 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         let branch = Some("md-sync-rework".to_owned());
         let of_plan = || Readied::File { real: plan.clone() };
         let answer = Ready {
-            at: At::Session(1),
-            folder: folder.clone(),
+            at: At::Unopened,
+            folder: absolute(&folder),
             branch: branch.clone(),
             moved_off: false,
             work: of_plan(),
@@ -2057,32 +2107,31 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         let asked = Pasted::new(file(&plan, None), in_it);
         let again = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         assert_eq!(again.at, At::There(2));
-        assert_eq!(again.folder, folder);
+        assert_eq!(again.folder.as_str(), folder);
 
         let asked = Pasted::new(file(&plan, None), vec![worked("/nowhere/at/all")]);
         let made = pasted_on(&mut daemon, "far", &asked).await.unwrap();
-        let At::Clone { cwd, name } = made.at else { panic!("no session to make") };
-        assert_eq!((cwd.as_str(), name.as_str()), (&*clone.display().to_string(), "n"));
+        assert_eq!(made, answer, "the file's own clone, with no view in it");
 
         let home = far.home.path().canonicalize().unwrap();
         fs::write(home.join("errand.md"), "written down").unwrap();
         let asked = Pasted::new(file("~/errand.md", Some(&main)), views.clone());
         let errand = pasted_on(&mut daemon, "far", &asked).await.unwrap();
-        assert_eq!(errand.at, At::Session(1));
-        assert_eq!(errand.folder, clone.join("md-errand").display().to_string());
+        assert_eq!(errand.at, At::Unopened);
+        assert_eq!(errand.folder.as_str(), clone.join("md-errand").display().to_string());
         let real = home.join("errand.md").display().to_string();
         assert_eq!(errand.work, Readied::File { real });
 
         let asked = Pasted::new(file("docs/plans/Sync Rework.md", Some(&main)), views.clone());
         let relative = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         assert_eq!(relative.work, of_plan());
-        assert_eq!(relative.folder, folder);
+        assert_eq!(relative.folder.as_str(), folder);
 
         let named = plans.join("main.md");
         fs::write(&named, "written down").unwrap();
         let asked = Pasted::new(file(&named.display().to_string(), None), views.clone());
         let of_main = pasted_on(&mut daemon, "far", &asked).await.unwrap();
-        assert_eq!(of_main.folder, clone.join("md-main").display().to_string());
+        assert_eq!(of_main.folder.as_str(), clone.join("md-main").display().to_string());
         assert_eq!(of_main.branch.as_deref(), Some("md-main"));
 
         let mine = here.home.path().canonicalize().unwrap().join("mine.md");
@@ -2156,9 +2205,9 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
         let folder = moved.display().to_string();
 
         let opened = pasted_on(&mut daemon, "far", &asked).await.unwrap();
-        let (at, work) = (At::Session(0), Readied::Link(issue));
+        let (at, work) = (At::Unopened, Readied::Link(issue));
         let branch = Some("feat".to_owned());
-        let answer = Ready { at, folder: folder.clone(), branch, moved_off: true, work };
+        let answer = Ready { at, folder: absolute(&folder), branch, moved_off: true, work };
         assert_eq!(opened, answer);
         assert_eq!(rev_parse_verify(&main, "refs/heads/issue-7"), None);
 
@@ -2168,24 +2217,23 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
 
         let none = Pasted::new(link.clone(), Vec::new());
         let made = pasted_on(&mut daemon, "far", &none).await.unwrap();
-        assert!(matches!(made.at, At::Clone { .. }), "{made:?}");
-        assert_eq!(made.folder, folder);
+        assert_eq!(made, answer, "the clone zoxide knows, with no view in it");
 
         git(&moved, &["switch", "-q", "--detach"]);
         let detached = pasted_on(&mut daemon, "far", &asked).await.unwrap();
-        assert_eq!((detached.folder, detached.branch), (folder.clone(), None));
+        assert_eq!((detached.folder, detached.branch), (absolute(&folder), None));
         assert!(detached.moved_off);
 
         git(&moved, &["switch", "-q", "-c", "issue-7"]);
         let on_it = pasted_on(&mut daemon, "far", &asked).await.unwrap();
-        assert_eq!(on_it.folder, folder);
+        assert_eq!(on_it.folder.as_str(), folder);
         assert_eq!(on_it.branch.as_deref(), Some("issue-7"));
         assert!(!on_it.moved_off);
 
         git(&moved, &["switch", "-q", "--detach"]);
         git(&bare, &["worktree", "add", "-q", "../beside", "issue-7"]);
         let beside = pasted_on(&mut daemon, "far", &asked).await.unwrap();
-        assert_eq!(beside.folder, clone.join("beside").display().to_string());
+        assert_eq!(beside.folder.as_str(), clone.join("beside").display().to_string());
         assert!(!beside.moved_off);
 
         fs::create_dir(clone.join("issue-8")).unwrap();
@@ -2208,9 +2256,9 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
         let file = Work::File(links::File::parse(&plan, None).unwrap());
         let asked = Pasted::new(file, views.clone());
         let opened = pasted_on(&mut daemon, "far", &asked).await.unwrap();
-        let (at, work) = (At::Session(0), Readied::File { real: plan.clone() });
+        let (at, work) = (At::Unopened, Readied::File { real: plan.clone() });
         let branch = Some("other".to_owned());
-        assert_eq!(opened, Ready { at, folder: moved, branch, moved_off: true, work });
+        assert_eq!(opened, Ready { at, folder: absolute(&moved), branch, moved_off: true, work });
         assert_eq!(rev_parse_verify(&main, "refs/heads/md-plan"), None);
 
         git(&bare, &["worktree", "add", "-q", "-b", "nine", "../issue-9", "main"]);

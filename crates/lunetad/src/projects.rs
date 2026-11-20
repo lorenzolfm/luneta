@@ -163,6 +163,10 @@ impl Name {
         Ok(Name(text.to_owned()))
     }
 
+    pub fn of_folder(dir: &Dir) -> Result<Name, String> {
+        Name::parse(dir.last())
+    }
+
     pub fn of_project(text: &str) -> Result<Name, String> {
         let name = Name::parse(text)?;
         SessionName::listed(text).map_err(|why| format!("{text:?} names no project: {why}"))?;
@@ -520,21 +524,29 @@ pub struct Plain {
     pub name: String,
 }
 
-impl Plain {
-    pub fn of_api(projects: &[api::Project]) -> Result<Vec<Plain>, String> {
-        let mut plain = Vec::new();
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Holders {
+    pub plain: Vec<Plain>,
+    pub clones: Vec<Dir>,
+}
+
+impl Holders {
+    pub fn of_api(projects: &[api::Project]) -> Result<Holders, String> {
+        let mut holders = Holders::default();
         for project in projects {
+            let dir = || {
+                let dir = Dir::parse(&project.dir);
+                dir.map_err(|why| format!("project {}: {why}", project.name))
+            };
             match &project.holds {
                 Some(api::project::Holds::Folder(_)) => {
-                    let dir = Dir::parse(&project.dir);
-                    let dir = dir.map_err(|why| format!("project {}: {why}", project.name))?;
-                    plain.push(Plain { dir, name: project.name.clone() });
+                    holders.plain.push(Plain { dir: dir()?, name: project.name.clone() });
                 },
-                Some(api::project::Holds::Clone(_)) => {},
+                Some(api::project::Holds::Clone(_)) => holders.clones.push(dir()?),
                 None => return Err(format!("lunetad says not what project {} holds", project.name)),
             }
         }
-        Ok(plain)
+        Ok(holders)
     }
 }
 
@@ -607,7 +619,7 @@ pub enum Change {
     AddProject { spot: Spot, name: Option<Name> },
     AddWorktree { project: ProjectId, spot: Spot, name: Option<Name>, opens: Opens },
     Start { spot: Spot, name: Option<Name>, opens: Opens },
-    Pull { spot: Spot, project: Option<Name>, name: Name, opens: Opens },
+    Pull { spot: Spot, name: Name, opens: Opens },
     Join { spot: Spot, opens: Opens },
     Listed { root: Dir, subfolders: BTreeSet<Subfolder>, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, subfolders: BTreeSet<Subfolder> },
@@ -710,13 +722,8 @@ impl Ask {
                 name: named.as_deref().map(Name::of_project).transpose().map_err(field("name"))?,
                 opens: Opens::Shell,
             },
-            Asked::Pull(asked::Pull { folder, project, name, argv }) => Change::Pull {
+            Asked::Pull(asked::Pull { folder, name, argv }) => Change::Pull {
                 spot: spot(&folder).map_err(field("folder"))?,
-                project: project
-                    .as_deref()
-                    .map(Name::of_project)
-                    .transpose()
-                    .map_err(field("project"))?,
                 name: Name::parse(&name).map_err(field("name"))?,
                 opens: Opens::of(argv).map_err(field("argv"))?,
             },
@@ -1065,10 +1072,10 @@ impl Projects {
                     Some(made) => Some(self.landed(&mut changed, made, &opens, &mut draw)?),
                 }
             },
-            Change::Pull { spot, project, name, opens } => {
+            Change::Pull { spot, name, opens } => {
                 let (project, within) = match self.inside(&spot) {
                     Some(found) => found,
-                    None => changed.made_inside(&spot, project, &mut draw)?,
+                    None => changed.made_inside(&spot, None, &mut draw)?,
                 };
                 let made = changed.worktree_in(project, within, Some(name), &mut draw)?;
                 let held = changed.project_of(project).ok_or_else(|| unknown("project", project))?;
@@ -1293,7 +1300,7 @@ impl Projects {
         let dir = spot.dir().clone();
         let name = match name {
             Some(name) => name,
-            None => Name::parse(dir.last()).map_err(|why| format!("name it: {why}"))?,
+            None => Name::of_folder(&dir).map_err(|why| format!("name it: {why}"))?,
         };
         if self.projects.len() >= PROJECTS_MAX {
             return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
@@ -2177,12 +2184,11 @@ mod tests {
     }
 
     #[test]
-    fn a_pull_makes_its_worktree_in_its_clone_s_project_or_in_one_made_there() {
+    fn a_pull_makes_its_worktree_in_its_clone_s_project_or_in_one_made_there_named_for_it() {
         let mut projects = Projects::default();
         let luneta = clone(&mut projects, "/w/luneta", &[]);
         let pull = |root: &str| Change::Pull {
             spot: spot_at(root, "pr-7"),
-            project: Some(name("cloned")),
             name: name("pr-7"),
             opens: Opens::Shell,
         };
@@ -2196,28 +2202,13 @@ mod tests {
             panic!("a pull makes a worktree");
         };
         let (project, worktree) = projects.find(made).unwrap();
-        assert_eq!((project.name(), project.dir()), (&name("cloned"), &dir("/w/elo")));
+        assert_eq!((project.name(), project.dir()), (&name("elo"), &dir("/w/elo")), "its clone's");
         assert_eq!(project.folder(worktree.id()), Some(dir("/w/elo/pr-7")));
-        let (project, name_of) = (Some(name("w")), name("pr-7"));
-        let spot = spot_at("/w", "pr-7");
-        let around = Change::Pull { spot, project, name: name_of, opens: Opens::Shell };
-        assert!(matches!(refused(&projects, around), Err(Refused::Nests(_))));
-
-        let unnamed = Change::Pull {
-            spot: spot_at("/w/cdk", "fix"),
-            project: None,
-            name: name("fix"),
-            opens: Opens::Shell,
-        };
-        let Made::Worktree(fix) = add(&mut projects, unnamed) else {
-            panic!("a pull that names no project makes one");
-        };
-        let (project, _) = projects.find(fix).unwrap();
-        assert_eq!((project.name(), project.dir()), (&name("cdk"), &dir("/w/cdk")), "its clone's");
+        assert!(matches!(refused(&projects, pull("/w")), Err(Refused::Nests(_))));
     }
 
     #[test]
-    fn a_listing_s_plain_projects_are_its_folders_and_one_it_reads_not_refuses_it() {
+    fn a_listing_s_holders_are_its_folders_and_its_clones_and_one_it_reads_not_refuses_it() {
         let folder = |name: &str, dir: &str| api::Project {
             name: name.to_owned(),
             dir: dir.to_owned(),
@@ -2226,13 +2217,17 @@ mod tests {
         };
         let clone = api::project::Holds::Clone(api::project::Clone::default());
         let luneta = api::Project { holds: Some(clone), ..folder("luneta", "/w/luneta") };
-        let plain = Plain::of_api(&[folder("notes", "/n"), luneta.clone()]).unwrap();
-        assert_eq!(plain, [Plain { dir: dir("/n"), name: "notes".to_owned() }]);
-        let unsaid = api::Project { holds: None, ..luneta };
-        let said = Plain::of_api(&[folder("notes", "/n"), unsaid]);
+        let holders = Holders::of_api(&[folder("notes", "/n"), luneta.clone()]).unwrap();
+        let plain = vec![Plain { dir: dir("/n"), name: "notes".to_owned() }];
+        assert_eq!(holders, Holders { plain, clones: vec![dir("/w/luneta")] });
+        let unsaid = api::Project { holds: None, ..luneta.clone() };
+        let said = Holders::of_api(&[folder("notes", "/n"), unsaid]);
         assert_eq!(said, Err("lunetad says not what project luneta holds".to_owned()));
-        let relative = Plain::of_api(&[folder("notes", "n")]).unwrap_err();
+        let relative = Holders::of_api(&[folder("notes", "n")]).unwrap_err();
         assert!(relative.starts_with("project notes: "), "{relative}");
+        let cloned_relative = api::Project { dir: "w/luneta".to_owned(), ..luneta };
+        let relative = Holders::of_api(&[cloned_relative]).unwrap_err();
+        assert!(relative.starts_with("project luneta: "), "{relative}");
     }
 
     #[test]
@@ -2242,7 +2237,6 @@ mod tests {
         let before = projects.clone();
         let pull = Change::Pull {
             spot: spot_at("/n/cdk", "fix"),
-            project: Some(name("cdk")),
             name: name("fix"),
             opens: Opens::of(vec!["claude".to_owned()]).unwrap(),
         };

@@ -15,13 +15,13 @@ use wt::cmd::follow::Upstream;
 use wt::repo::Repo;
 
 use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
-use crate::api::paste_response::{self, Clone as MadeClone};
+use crate::api::paste_response;
 use crate::api::{On, PasteRequest, PasteResponse};
 use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common};
 use crate::program::{self, Ran};
-use crate::projects::{self, Dir, Plain};
-use crate::{names, zoxide, Destination, Directory, SessionName};
+use crate::projects::{self, Dir, Holders, Name, Spot, SPOT_LOOK};
+use crate::{zoxide, Destination, Directory};
 
 pub(crate) mod sync;
 
@@ -229,10 +229,10 @@ impl File {
         Ok(Path::new(from.as_str()).join(&self.path))
     }
 
-    fn repository(&self, real: &str) -> Result<(String, String), String> {
+    fn repository(&self, real: &str) -> Result<String, String> {
         let beside = Path::new(real).parent().and_then(Path::to_str).unwrap_or(real);
         match common_dir(beside) {
-            Common::Of(common) => return Ok((beside.to_owned(), common)),
+            Common::Of(_) => return Ok(beside.to_owned()),
             Common::Unsaid(why) => {
                 return Err(format!("git did not say what repository it is in: {why}"));
             },
@@ -242,7 +242,7 @@ impl File {
             "it is in no repository, and the row highlighted works in no directory to go by",
         )?;
         match common_dir(from.as_str()) {
-            Common::Of(common) => Ok((from.to_string(), common)),
+            Common::Of(_) => Ok(from.to_string()),
             Common::NoRepository => {
                 Err(format!("it is in no repository, nor is {from}, the row highlighted"))
             },
@@ -501,7 +501,7 @@ fn remote(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worked {
-    pub dir: String,
+    pub dir: Directory,
     pub pull: Option<Link>,
     pub here: bool,
 }
@@ -509,14 +509,13 @@ pub struct Worked {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum At<P> {
     There(P),
-    Session(P),
-    Clone { cwd: Directory, name: SessionName },
+    Unopened,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ready<P> {
     pub at: At<P>,
-    pub folder: String,
+    pub folder: Directory,
     pub branch: Option<String>,
     pub moved_off: bool,
     pub work: Readied,
@@ -534,8 +533,7 @@ impl Ready<usize> {
         let view = |at: usize| among.get(at).cloned().ok_or(at);
         let at = match at {
             At::There(at) => At::There(view(at)?),
-            At::Session(at) => At::Session(view(at)?),
-            At::Clone { cwd, name } => At::Clone { cwd, name },
+            At::Unopened => At::Unopened,
         };
         Ok(Ready { at, folder, branch, moved_off, work })
     }
@@ -543,18 +541,16 @@ impl Ready<usize> {
     #[must_use]
     pub fn answer(self) -> PasteResponse {
         let Ready { at, folder, branch, moved_off, work } = self;
-        let place = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
+        let place = |at: usize| u32::try_from(at).expect("Pasted::of caps worked at 1024");
         let at = match at {
             At::There(at) => paste_response::At::There(place(at)),
-            At::Session(at) => paste_response::At::Session(place(at)),
-            At::Clone { cwd, name } => {
-                paste_response::At::Clone(MadeClone { cwd: cwd.into(), name: name.to_string() })
-            },
+            At::Unopened => paste_response::At::Unopened(()),
         };
         let file = match work {
             Readied::Link(_) => None,
             Readied::File { real } => Some(real),
         };
+        let folder = folder.into();
         PasteResponse { at: Some(at), folder, branch, file, at_head: false, moved_off }
     }
 }
@@ -636,9 +632,7 @@ impl Pasted {
             return Err(format!("worked: more than {WORKED_MAX} views"));
         }
         let view = |AskedWorked { dir, pull, here }| {
-            if !dir.starts_with('/') {
-                return Err(format!("worked: {dir:?} is no absolute path"));
-            }
+            let dir = Directory::parse(dir).map_err(|why| format!("worked: {why}"))?;
             let pull = pull
                 .map(|page| Link::parse(&page).ok_or(page))
                 .transpose()
@@ -652,7 +646,7 @@ impl Pasted {
     #[must_use]
     pub fn asked(&self, on: Option<On>) -> PasteRequest {
         let view = |Worked { dir, pull, here }: &Worked| AskedWorked {
-            dir: dir.clone(),
+            dir: dir.clone().into(),
             pull: pull.as_ref().map(Link::url),
             here: *here,
         };
@@ -668,16 +662,16 @@ impl Pasted {
         PasteRequest { on, work: Some(work), worked, at_head, reads_moved_off }
     }
 
-    pub fn ready(&self, plain: &[Plain]) -> Result<Ready<usize>, Unready> {
+    pub fn ready(&self, holders: &Holders) -> Result<Ready<usize>, Unready> {
         let (worked, reads_moved_off) = (self.worked.as_slice(), self.reads_moved_off);
         match &self.work {
-            Work::Link(link) => ready(link, self.wanted, reads_moved_off, worked, plain),
-            Work::File(file) => ready_file(file, reads_moved_off, worked, plain),
+            Work::Link(link) => ready(link, self.wanted, reads_moved_off, worked, holders),
+            Work::File(file) => ready_file(file, reads_moved_off, worked, holders),
         }
     }
 
-    pub fn answer(&self, plain: &[Plain]) -> Result<PasteResponse, Unready> {
-        let answer = self.ready(plain)?.answer();
+    pub fn answer(&self, holders: &Holders) -> Result<PasteResponse, Unready> {
+        let answer = self.ready(holders)?.answer();
         Ok(PasteResponse { at_head: self.wanted == Wanted::AtHead, ..answer })
     }
 
@@ -710,9 +704,7 @@ impl Pasted {
             return Err("started no review: its lunetad is too old to sync with the pull request"
                 .to_owned());
         }
-        if !folder.starts_with('/') {
-            return Err(format!("folder: {folder:?} is no absolute path"));
-        }
+        let folder = Directory::parse(folder).map_err(|why| format!("folder: {why}"))?;
         let work = match (&self.work, file) {
             (Work::Link(link), None) => Readied::Link(link.clone()),
             (Work::Link(_), Some(file)) => return Err(format!("file: {file:?} is of no link")),
@@ -722,16 +714,12 @@ impl Pasted {
             },
             (Work::File(_), None) => return Err("it does not say where the file is".to_owned()),
         };
-        let place = |at: u32| usize::try_from(at).unwrap_or(usize::MAX);
         let at = match at {
-            Some(paste_response::At::There(at)) => At::There(place(at)),
-            Some(paste_response::At::Session(at)) => At::Session(place(at)),
-            Some(paste_response::At::Clone(MadeClone { cwd, name })) => {
-                let cwd = Directory::parse(cwd).map_err(|why| format!("clone: {why}"))?;
-                let name = SessionName::parse(&name)
-                    .map_err(|why| format!("clone: \"{name}\" names no session: {why}"))?;
-                At::Clone { cwd, name }
+            Some(paste_response::At::There(at)) => {
+                let at = usize::try_from(at);
+                At::There(at.map_err(|_| "there: it names a view luneta did not send".to_owned())?)
             },
+            Some(paste_response::At::Unopened(())) => At::Unopened,
             None => {
                 return Err("it says where the key goes in words this luneta cannot read, as a \
                             newer lunetad does"
@@ -747,7 +735,7 @@ fn ready(
     wanted: Wanted,
     reads_moved_off: bool,
     worked: &[Worked],
-    plain: &[Plain],
+    holders: &Holders,
 ) -> Result<Ready<usize>, Unready> {
     let mut seen: HashMap<String, Looked> = HashMap::new();
     let mut hosts: HashMap<String, Option<String>> = HashMap::new();
@@ -756,36 +744,36 @@ fn ready(
             |host: &str| hosts.entry(host.to_owned()).or_insert_with(|| ssh_host(host)).clone();
         seen.entry(dir.to_owned()).or_insert_with(|| repository(dir, link, host_of)).repository()
     };
-    let (repository, going) = match found(link, worked, &mut repository_of) {
+    let repository = match found(link, worked, &mut repository_of) {
         Some(Found::There(at)) => {
             kind_holds(link)?;
             let dir = &worked[at].dir;
-            synced(dir, link, wanted, None)?;
-            let (folder, branch) = (dir.clone(), branch(dir));
+            synced(dir.as_str(), link, wanted, None)?;
+            let (folder, branch) = (dir.clone(), branch(dir.as_str()));
             let work = Readied::Link(link.clone());
             return Ok(Ready { at: At::There(at), folder, branch, moved_off: false, work });
         },
-        Some(Found::Session(at)) => (worked[at].dir.clone(), Going::Session(at)),
+        Some(Found::InClone(at)) => worked[at].dir.to_string(),
         None => match clone(link, &mut repository_of)? {
-            Some((dir, cwd, name)) => (dir, Going::Clone { cwd, name }),
+            Some(dir) => dir,
             None => return Err(no_clone(link, &seen)),
         },
     };
-    held_by_no_folder(&repository, plain)?;
+    lands(&repository, holders)?;
     kind_holds(link)?;
     let work = Readied::Link(link.clone());
     let remote = seen.get(&repository).and_then(Looked::remote);
     if let Some(branch) = link.branch() {
         if reads_moved_off && let Some(moved) = moved_off(&repository, &branch)? {
-            return Ok(moved.ready(going, worked, work));
+            return Ok(moved.ready(worked, work));
         }
         let remote = remote.ok_or_else(|| {
             format!("git does not say a remote of {repository} is {}", link.repository())
         })?;
         base(&repository, remote, &branch)?;
     }
-    let ready = made_worktree(&repository, &link.wt(), going, worked, work)?;
-    synced(&ready.folder, link, wanted, remote)?;
+    let ready = made_worktree(&repository, &link.wt(), worked, work)?;
+    synced(ready.folder.as_str(), link, wanted, remote)?;
     Ok(ready)
 }
 
@@ -802,12 +790,23 @@ fn synced(
     }
 }
 
-pub fn held_by_no_folder(repository: &str, plain: &[Plain]) -> Result<(), String> {
+pub fn lands(repository: &str, holders: &Holders) -> Result<(), String> {
     let real = directory(repository).ok_or_else(|| format!("{repository} is no folder now"))?;
-    let real = Dir::parse(&real).map_err(|why| format!("{repository}: {why}"))?;
-    match plain.iter().find(|it| it.dir.below(&real).is_some()) {
-        Some(held) => Err(format!("nothing made: {}", projects::held_by_folder(&real, held))),
-        None => Ok(()),
+    let real = Dir::parse(real.as_str()).map_err(|why| format!("{repository}: {why}"))?;
+    if let Some(held) = holders.plain.iter().find(|it| it.dir.below(&real).is_some()) {
+        return Err(format!("nothing made: {}", projects::held_by_folder(&real, held)));
+    }
+    let spot = Spot::of(&real, SPOT_LOOK).map_err(|why| format!("nothing made: {why}"))?;
+    let root = spot.dir();
+    if !spot.is_clone() || holders.clones.contains(root) {
+        return Ok(());
+    }
+    match Name::of_folder(root) {
+        Ok(_) => Ok(()),
+        Err(why) => Err(format!(
+            "nothing made: no project holds {}, and one made for it cannot be named: {why}",
+            root.as_str()
+        )),
     }
 }
 
@@ -825,42 +824,30 @@ fn ready_file(
     file: &File,
     reads_moved_off: bool,
     worked: &[Worked],
-    plain: &[Plain],
+    holders: &Holders,
 ) -> Result<Ready<usize>, Unready> {
     let real = file.real()?;
-    let (repository, common) = file.repository(&real)?;
+    let repository = file.repository(&real)?;
     wt_made(&repository)?;
-    held_by_no_folder(&repository, plain)?;
-    let mut seen: HashMap<String, bool> = HashMap::new();
-    let session = session_among(worked, |dir| {
-        let same = |of: Common| matches!(of, Common::Of(of) if of == common);
-        let in_it = *seen.entry(dir.to_owned()).or_insert_with(|| same(common_dir(dir)));
-        in_it.then_some(())
-    });
-    let going = if let Some(at) = session {
-        Going::Session(at)
-    } else {
-        let (cwd, name) = session_for(&repository)?;
-        Going::Clone { cwd, name }
-    };
+    lands(&repository, holders)?;
     let branch = file.branch();
     let work = Readied::File { real };
     if reads_moved_off && let Some(moved) = moved_off(&repository, &branch)? {
-        return Ok(moved.ready(going, worked, work));
+        return Ok(moved.ready(worked, work));
     }
     base(&repository, ORIGIN, &branch)?;
-    made_worktree(&repository, &Of::Branch(Branch(branch)), going, worked, work)
+    made_worktree(&repository, &Of::Branch(Branch(branch)), worked, work)
 }
 
 struct MovedOff {
-    folder: String,
+    folder: Directory,
     on: Option<String>,
 }
 
 impl MovedOff {
-    fn ready(self, going: Going, worked: &[Worked], work: Readied) -> Ready<usize> {
+    fn ready(self, worked: &[Worked], work: Readied) -> Ready<usize> {
         let MovedOff { folder, on: branch } = self;
-        let at = going_to(&folder, going, worked);
+        let at = opened_in(&folder, worked);
         Ready { at, folder, branch, moved_off: true, work }
     }
 }
@@ -903,33 +890,26 @@ fn sits_off<'a>(listed: &'a str, there: &str, own: &str) -> Option<&'a str> {
 fn made_worktree(
     dir: &str,
     of: &Of,
-    going: Going,
     worked: &[Worked],
     work: Readied,
 ) -> Result<Ready<usize>, Unready> {
     let folder = worktree(dir, of)?;
-    let at = going_to(&folder, going, worked);
-    Ok(Ready { at, branch: branch(&folder), moved_off: false, folder, work })
+    let at = opened_in(&folder, worked);
+    Ok(Ready { at, branch: branch(folder.as_str()), moved_off: false, folder, work })
 }
 
-fn going_to(folder: &str, going: Going, worked: &[Worked]) -> At<usize> {
-    let in_it = worked.iter().enumerate().filter(|(_, it)| it.dir == folder);
-    match (in_it.min_by_key(|(at, it)| (!it.here, *at)), going) {
-        (Some((at, _)), _) => At::There(at),
-        (None, Going::Session(at)) => At::Session(at),
-        (None, Going::Clone { cwd, name }) => At::Clone { cwd, name },
+fn opened_in(folder: &Directory, worked: &[Worked]) -> At<usize> {
+    let in_it = worked.iter().enumerate().filter(|(_, it)| it.dir == *folder);
+    match in_it.min_by_key(|(at, it)| (!it.here, *at)) {
+        Some((at, _)) => At::There(at),
+        None => At::Unopened,
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Found {
     There(usize),
-    Session(usize),
-}
-
-enum Going {
-    Session(usize),
-    Clone { cwd: Directory, name: SessionName },
+    InClone(usize),
 }
 
 fn found(
@@ -943,23 +923,17 @@ fn found(
     if let Some((at, _)) = there {
         return Some(Found::There(at));
     }
-    let by_wt = |dir: &str| repository_of(dir).filter(|it| it.layout == Layout::Wt).map(|it| it.by);
-    session_among(worked, by_wt).map(Found::Session)
-}
-
-fn session_among<R: Ord>(
-    worked: &[Worked],
-    mut rank: impl FnMut(&str) -> Option<R>,
-) -> Option<usize> {
-    let ranked = worked.iter().enumerate();
-    let ranked = ranked.filter_map(|(at, it)| Some((!it.here, rank(&it.dir)?, at)));
-    ranked.min().map(|(_, _, at)| at)
+    let in_clone = worked.iter().enumerate().filter_map(|(at, it)| {
+        let repository = repository_of(it.dir.as_str()).filter(|of| of.layout == Layout::Wt)?;
+        Some((!it.here, repository.by, at))
+    });
+    in_clone.min().map(|(_, _, at)| Found::InClone(at))
 }
 
 fn clone(
     link: &Link,
     repository_of: impl FnMut(&str) -> Option<Repository>,
-) -> Result<Option<(String, Directory, SessionName)>, String> {
+) -> Result<Option<String>, String> {
     let repository = link.repository();
     let dirs: Vec<String> = zoxide::visited()
         .map_err(|why| {
@@ -968,20 +942,7 @@ fn clone(
         .into_iter()
         .map(|dir| dir.path.into())
         .collect();
-    let Some(dir) = cloned(&dirs, repository_of) else {
-        return Ok(None);
-    };
-    let dir = dirs[dir].clone();
-    let (cwd, name) = session_for(&dir)?;
-    Ok(Some((dir, cwd, name)))
-}
-
-fn session_for(dir: &str) -> Result<(Directory, SessionName), String> {
-    let cwd = holder(dir).ok_or_else(|| format!("git does not say what repository {dir} is"))?;
-    let cwd = Directory::parse(cwd)?;
-    let name = names::session_for(Path::new(cwd.as_str()))
-        .ok_or_else(|| format!("no session can be named for {cwd}"))?;
-    Ok((cwd, name))
+    Ok(cloned(&dirs, repository_of).map(|dir| dirs[dir].clone()))
 }
 
 fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
@@ -1145,7 +1106,7 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
 
-pub fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
+pub fn worktree(dir: &str, of: &Of) -> Result<Directory, Unready> {
     let mut luneta = Command::new(luneta()?);
     git::local(luneta.args(["worktree", "--repo", dir, "--", &of.to_string()]));
     let ran = program::run_alone(&mut luneta, MAKING)
@@ -1153,7 +1114,7 @@ pub fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
     worktree_said(ran)
 }
 
-fn worktree_said(ran: Ran) -> Result<String, Unready> {
+fn worktree_said(ran: Ran) -> Result<Directory, Unready> {
     match ran {
         Ran::Ended { status, stdout, .. } if status.success() => {
             let printed = String::from_utf8_lossy(&stdout);
@@ -1303,9 +1264,9 @@ fn wt_made(dir: &str) -> Result<(), String> {
     }
 }
 
-fn directory(path: &str) -> Option<String> {
+fn directory(path: &str) -> Option<Directory> {
     let real = fs::canonicalize(path).ok().filter(|real| real.is_dir())?;
-    real.into_os_string().into_string().ok()
+    Directory::parse(real.into_os_string().into_string().ok()?).ok()
 }
 
 pub(crate) fn failure(stderr: &str) -> Option<String> {
@@ -1327,7 +1288,7 @@ mod tests {
 
     fn worked(dir: &str, pull: Option<&str>, here: bool) -> Worked {
         let pull = pull.map(|page| Link::parse(page).expect("a pull request's page"));
-        Worked { dir: dir.to_owned(), pull, here }
+        Worked { dir: directory(dir), pull, here }
     }
 
     fn by_wt(by: Remote) -> Repository {
@@ -1523,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_goes_to_the_view_with_the_branch_or_else_a_session_of_the_repository() {
+    fn a_key_goes_to_the_view_with_the_branch_or_else_a_view_in_a_clone_of_the_repository() {
         let remotes = |dir: &str| match dir {
             "/cdk/main" | "/cdk/2736" => Some(by_wt(Remote::Other)),
             "/cdk-upstream/master" => Some(by_wt(Remote::Origin)),
@@ -1538,16 +1499,16 @@ mod tests {
             worked("/cdk/main", None, false),
             worked("/cdk-upstream/master", None, false),
         ];
-        assert_eq!(found(&link(), &away, remotes), Some(Found::Session(2)));
+        assert_eq!(found(&link(), &away, remotes), Some(Found::InClone(2)));
         let here = [
             worked("/cdk/main", None, false),
             worked("/dots", None, true),
             worked("/cdk/main", None, true),
             worked("/cdk-upstream/master", None, false),
         ];
-        assert_eq!(found(&link(), &here, remotes), Some(Found::Session(2)));
+        assert_eq!(found(&link(), &here, remotes), Some(Found::InClone(2)));
         let by_git = [worked("/cdk-git", None, true), worked("/cdk/main", None, false)];
-        assert_eq!(found(&link(), &by_git, remotes), Some(Found::Session(1)));
+        assert_eq!(found(&link(), &by_git, remotes), Some(Found::InClone(1)));
         assert_eq!(found(&link(), &by_git[..1], remotes), None);
         let checked_out = [
             worked("/cdk/main", None, true),
@@ -1556,7 +1517,7 @@ mod tests {
         ];
         assert_eq!(found(&link(), &checked_out, remotes), Some(Found::There(2)));
         let fork = [worked("/cdk/main", Some(&fork), true)];
-        assert_eq!(found(&link(), &fork, remotes), Some(Found::Session(0)));
+        assert_eq!(found(&link(), &fork, remotes), Some(Found::InClone(0)));
     }
 
     #[test]
@@ -1840,13 +1801,11 @@ mod tests {
                 .to_owned())
         );
 
-        let common = |dir: &str| format!("{dir}/.git");
-        let docs = path("repo/docs");
         let own = file(&inside, Some(&row)).repository(&inside);
-        assert_eq!(own, Ok((docs, common(&repo))));
+        assert_eq!(own, Ok(path("repo/docs")));
         let outside = path("notes/plan.md");
         let by_row = file(&outside, Some(&row)).repository(&outside);
-        assert_eq!(by_row, Ok((row.clone(), common(&row))));
+        assert_eq!(by_row, Ok(row.clone()));
         assert_eq!(
             file(&outside, None).repository(&outside),
             Err("it is in no repository, and the row highlighted works in no directory to go by"
@@ -1969,10 +1928,8 @@ mod tests {
         let asked_of_file = Pasted::new(Work::File(plan), Vec::new());
         let of_link = || Readied::Link(issue());
         let of_file = || Readied::File { real: "/w/cdk/main/plan.md".to_owned() };
-        let name = SessionName::parse("cdk").unwrap();
-        let clone = At::Clone { cwd: directory("/w/cdk"), name };
-        for at in [At::There(1), At::Session(0), clone] {
-            let folder = "/w/cdk/issue-2736".to_owned();
+        for at in [At::There(1), At::Unopened] {
+            let folder = directory("/w/cdk/issue-2736");
             let branch = Some("issue-2736".to_owned());
             let ready = Ready { at, folder, branch, moved_off: false, work: of_link() };
             assert_eq!(asked_of_link.answered(ready.clone().answer()), Ok(ready.clone()));
@@ -1981,7 +1938,7 @@ mod tests {
         }
         let there = |work| Ready {
             at: At::There(1),
-            folder: "/w/x".to_owned(),
+            folder: directory("/w/x"),
             branch: None,
             moved_off: false,
             work,
@@ -1999,24 +1956,13 @@ mod tests {
             "file: \"/w/cdk/main/plan.md\" is of no link"
         );
         assert!(refused(PasteResponse { at: None, ..answer() }).contains("a newer lunetad does"));
-        let made = |cwd: &str, name: &str| PasteResponse {
-            at: Some(paste_response::At::Clone(MadeClone {
-                cwd: cwd.to_owned(),
-                name: name.to_owned(),
-            })),
-            ..answer()
-        };
-        let unnamed = refused(made("/w", "a/b"));
-        assert_eq!(unnamed, "clone: \"a/b\" names no session: name cannot contain '/'");
-        let relative = refused(made("w", "cdk"));
-        assert_eq!(relative, "clone: \"w\" is no absolute path");
     }
 
     #[test]
     fn an_answer_that_does_not_say_the_worktree_is_at_the_head_is_refused() {
         let asked = Pasted::new(Work::Link(link()), Vec::new()).wanting(Wanted::AtHead);
         let at = At::There(0);
-        let (folder, branch, work) = ("/w/x".to_owned(), None, Readied::Link(link()));
+        let (folder, branch, work) = (directory("/w/x"), None, Readied::Link(link()));
         let ready = Ready { at, folder, branch, moved_off: false, work };
         let synced = PasteResponse { at_head: true, ..ready.clone().answer() };
         assert_eq!(asked.answered(synced), Ok(ready.clone()));
@@ -2070,10 +2016,11 @@ mod tests {
     fn a_place_names_the_view_luneta_said_of_it() {
         fn ready<P>(at: At<P>) -> Ready<P> {
             let work = Readied::File { real: "/w/plan.md".to_owned() };
-            Ready { at, folder: "/w".to_owned(), branch: None, moved_off: false, work }
+            Ready { at, folder: directory("/w"), branch: None, moved_off: false, work }
         }
         let views = ["dots:1", "cdk:4"];
-        assert_eq!(ready(At::Session(1)).placed(&views), Ok(ready(At::Session("cdk:4"))));
+        assert_eq!(ready(At::There(1)).placed(&views), Ok(ready(At::There("cdk:4"))));
         assert_eq!(ready(At::There(2)).placed(&views), Err(2));
+        assert_eq!(ready(At::Unopened).placed(&views), Ok(ready(At::Unopened)));
     }
 }

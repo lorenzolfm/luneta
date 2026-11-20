@@ -178,19 +178,13 @@ message PasteRequest {
 message PasteResponse {
   oneof at {
     uint32 there = 1;
-    uint32 session = 2;
-    Clone clone = 3;
+    google.protobuf.Empty unopened = 2;
   }
-  string folder = 4;
-  optional string branch = 5;
-  optional string file = 6;
-  bool at_head = 7;
-  bool moved_off = 8;
-
-  message Clone {
-    string cwd = 1;
-    string name = 2;
-  }
+  string folder = 3;
+  optional string branch = 4;
+  optional string file = 5;
+  bool at_head = 6;
+  bool moved_off = 7;
 }
 
 message WatchRequest {
@@ -724,9 +718,8 @@ message ChangeProjectsRequest {
 
   message Pull {
     string folder = 1;
-    optional string project = 2;
-    string name = 3;
-    repeated string argv = 4;
+    string name = 2;
+    repeated string argv = 3;
   }
 
   message RenameProject {

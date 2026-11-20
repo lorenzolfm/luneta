@@ -1882,7 +1882,7 @@ impl App {
                     renamed.map_err(|unchanged| unchanged.said("not renamed", &in_doubt))
                 });
             },
-            Asked::Make { menu, on, project, cwd, name, command } => {
+            Asked::Make { menu, on, cwd, name, command } => {
                 let busy = |busy: &str| format!("menu: {}", worktrees::unopened(&cwd, &name, busy));
                 if self.refuse_naming(Some(menu), busy) {
                     return;
@@ -1890,15 +1890,14 @@ impl App {
                 let lunetad = self.lunetad.clone();
                 self.naming_on(move || {
                     let made = caught(NAMING_PANICKED, || {
-                        let (project, first) = (project.as_ref(), command.clone());
-                        let made = worktrees::pulled(&lunetad, &on, project, &cwd, &name, first)?;
+                        let made = worktrees::pulled(&lunetad, &on, &cwd, &name, command.clone())?;
                         Ok(Pulled { on, worktree: made, argv: command })
                     });
                     Made::Pulled { menu, made }
                 });
             },
-            Asked::Pull { menu, on, work, wanted, worked, others, plain_here } => {
-                let asking = pull::Asking { on, work, wanted, worked, others, plain_here };
+            Asked::Pull { menu, on, work, wanted, worked, others, held_here } => {
+                let asking = pull::Asking { on, work, wanted, worked, others, held_here };
                 pull::prepare(menu, asking, &self.events);
             },
             Asked::Prunes { menu, on, dir } => prune::plan(menu, on, dir, &self.events),

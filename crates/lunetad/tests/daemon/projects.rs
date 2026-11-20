@@ -604,7 +604,6 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
 
     let pull = Pull {
         folder: text(&link.join("luneta/pr-7")),
-        project: Some("cloned".to_owned()),
         name: "pr-7".to_owned(),
         argv: FIRST.map(str::to_owned).to_vec(),
     };
@@ -614,14 +613,13 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     assert!(folders().contains(&(pr, text(&real.join("luneta/pr-7")))), "in project luneta");
     cloned_as_wt(&real, &real.join("up-cdk"), &real.join("cdk"));
     worktree_added(&real.join("cdk"), "fix");
-    let unnamed = Pull {
+    let into_unheld_clone = Pull {
         folder: text(&link.join("cdk/fix")),
-        project: None,
         name: "fix".to_owned(),
         argv: FIRST.map(str::to_owned).to_vec(),
     };
-    let Some(Made::Worktree(fix) | Made::Found(fix)) = asked(Change::Pull(unnamed)) else {
-        panic!("a pull that names no project goes to the worktree too");
+    let Some(Made::Worktree(fix) | Made::Found(fix)) = asked(Change::Pull(into_unheld_clone)) else {
+        panic!("a pull into a clone of no project goes to the worktree in one made for it");
     };
     let Held::Kept(kept) = held(&far) else { panic!("far keeps its projects") };
     let held_in = |it: &&api::Project| it.worktrees().unwrap().iter().any(|it| it.id == fix);

@@ -1216,7 +1216,7 @@ pub enum Wants {
     Pull(Work, Wanted),
     Printed { session: Listed, view: ViewKey, ended: Ended },
     Checks { page: PullPage },
-    Make { project: Option<SessionName>, cwd: Directory, name: String, command: Vec<String> },
+    Make { cwd: Directory, name: String, command: Vec<String> },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1282,7 +1282,7 @@ enum Step {
 enum Wait {
     Pulling(Pull),
     Opening,
-    Making(Option<SessionName>),
+    Unopened,
 }
 
 impl Wait {
@@ -1292,8 +1292,7 @@ impl Wait {
                 Wanted::AtHead => format!("Syncing {}…", work.tab()),
                 Wanted::AsItIs => format!("Making a worktree of {}…", work.tab()),
             },
-            Wait::Opening | Wait::Making(None) => format!("Opening {}…", work.tab()),
-            Wait::Making(Some(session)) => format!("Making session {session}…"),
+            Wait::Opening | Wait::Unopened => format!("Opening {}…", work.tab()),
         }
     }
 }
@@ -1390,14 +1389,14 @@ impl Menu {
     }
 
     pub fn opens_pulled(&self) -> bool {
-        matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Making(_)), .. })
+        matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Unopened), .. })
     }
 
     pub fn making(&self) -> Option<&Work> {
         match &self.stage {
             Stage::Pull { work, step: Step::Waiting(Wait::Pulling(_)), .. } => Some(work),
             Stage::Pull {
-                step: Step::Choosing { .. } | Step::Waiting(Wait::Opening | Wait::Making(_)),
+                step: Step::Choosing { .. } | Step::Waiting(Wait::Opening | Wait::Unopened),
                 ..
             }
             | Stage::Choosing(_)
@@ -1707,21 +1706,17 @@ impl Menu {
                 agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
             },
         };
-        let dir = match Directory::parse(folder.clone()) {
-            Ok(dir) => dir,
-            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
-        };
         assert_eq!(command.is_empty(), pull == Pull::Worktree, "w opens a shell, an agent its own");
-        let project = match (at, pull) {
+        match (at, pull) {
             (At::There((session, view)), Pull::Worktree) => {
-                return Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })));
+                Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })))
             },
             (At::There((session, view)), Pull::Agent) => {
                 let row = ViewRow {
                     session: session.clone(),
                     view,
                     terminal: None,
-                    cwd: Cwd::At(dir),
+                    cwd: Cwd::At(folder),
                     branch,
                     repository: None,
                     pull_request: None,
@@ -1730,14 +1725,14 @@ impl Menu {
                 let target = Target::View(on, row);
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Opening) };
                 let wants = Wants::Open { session, view, command };
-                return Did::Stays(Menu { number, target, stage }, wants);
+                Did::Stays(Menu { number, target, stage }, wants)
             },
-            (At::Session(_), _) => None,
-            (At::Clone { cwd: _, name }, _) => Some(name),
-        };
-        let wants = Wants::Make { project: project.clone(), cwd: dir, name: work.tab(), command };
-        let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(project)) };
-        Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
+            (At::Unopened, _) => {
+                let wants = Wants::Make { cwd: folder, name: work.tab(), command };
+                let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Unopened) };
+                Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
+            },
+        }
     }
 
     pub fn off_branch(&self, found: &Result<Found, String>) -> Option<String> {
@@ -4441,7 +4436,7 @@ mod tests {
         let folder = "/w/cdk/feat-x".to_owned();
         let branch = Some("feat/x".to_owned());
         let ready = |at| {
-            let (folder, branch) = (folder.clone(), branch.clone());
+            let (folder, branch) = (directory(&folder), branch.clone());
             let work = Readied::Link(pull_request());
             Ok(here(Ready { at, folder, branch, moved_off: false, work }))
         };
@@ -4451,12 +4446,11 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        let session = || At::Session((other.clone(), ViewKey::terminal(7)));
         for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
-            let (menu, wants) = stays(pulling(key).pulled(ready(session())));
+            let (menu, wants) = stays(pulling(key).pulled(ready(At::Unopened)));
             let (cwd, name) = (directory(&folder), "#2736".to_owned());
-            assert_eq!(wants, Wants::Make { project: None, cwd, name, command });
-            assert_eq!(menu.target(), &Target::Machine(Machine::Local), "not the session's row");
+            assert_eq!(wants, Wants::Make { cwd, name, command });
+            assert_eq!(menu.target(), &Target::Machine(Machine::Local), "no view is in it");
             assert!(menu.opens_pulled());
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
@@ -4484,12 +4478,11 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('r')));
         let (menu, wants) = stays(menu.key(&tab));
         assert_eq!(wants, Wants::Nothing);
-        let other = Listed::new_project("cdk", 2);
         let folder = "/w/cdk/feat-x".to_owned();
         let work = Readied::Link(pull_request());
-        let at = At::Session((other.clone(), ViewKey::terminal(7)));
         let branch = Some("feat/x".to_owned());
-        let ready = Ready { at, folder: folder.clone(), branch, moved_off: false, work };
+        let at = At::Unopened;
+        let ready = Ready { at, folder: directory(&folder), branch, moved_off: false, work };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
         let review = [
             "pi",
@@ -4497,7 +4490,7 @@ mod tests {
         ];
         let command = review.map(str::to_owned).to_vec();
         let (cwd, name) = (directory(&folder), "#2736".to_owned());
-        assert_eq!(wants, Wants::Make { project: None, cwd, name, command });
+        assert_eq!(wants, Wants::Make { cwd, name, command });
     }
 
     #[test]
@@ -4519,11 +4512,10 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.key(&char('t')));
         assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
-        let other = Listed::new_project("cdk", 2);
         let folder = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
-            at: At::Session((other.clone(), ViewKey::terminal(7))),
-            folder: folder.clone(),
+            at: At::Unopened,
+            folder: directory(&folder),
             branch: Some("issue-2736".to_owned()),
             moved_off: false,
             work: Readied::Link(link),
@@ -4532,7 +4524,7 @@ mod tests {
         let tackle = ["claude", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
         let command = tackle.map(str::to_owned).to_vec();
         let (cwd, name) = (directory(&folder), "#2736".to_owned());
-        assert_eq!(wants, Wants::Make { project: None, cwd, name, command });
+        assert_eq!(wants, Wants::Make { cwd, name, command });
     }
 
     #[test]
@@ -4540,10 +4532,9 @@ mod tests {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
         let (menu, _) = stays(Menu::pull(1, view_row(), issue.clone(), CLAUDE).key(&char('t')));
-        let name = SessionName::parse("cdk").unwrap();
         let ready = Ready {
-            at: At::Clone { cwd: directory("/w/cdk"), name },
-            folder: "/w/cdk/issue-2736".to_owned(),
+            at: At::Unopened,
+            folder: directory("/w/cdk/issue-2736"),
             branch: Some("dev-docs".to_owned()),
             moved_off: true,
             work: Readied::Link(link),
@@ -4597,11 +4588,10 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('t')));
         assert_eq!(wants, Wants::Pull(file(), Wanted::AsItIs));
         assert_eq!(text(&menu.lines(38, 9, 0).0)[1], " ⠋ Making a worktree of sync-rework…");
-        let other = Listed::new_project("cdk", 2);
         let (folder, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");
         let ready = || Ready {
-            at: At::Session((other.clone(), ViewKey::terminal(7))),
-            folder: folder.to_owned(),
+            at: At::Unopened,
+            folder: directory(folder),
             branch: Some("md-sync-rework".to_owned()),
             moved_off: false,
             work: Readied::File { real: real.to_owned() },
@@ -4618,7 +4608,7 @@ mod tests {
         .to_vec();
         let made = |command| {
             let (cwd, name) = (directory(folder), "sync-rework".to_owned());
-            Wants::Make { project: None, cwd, name, command }
+            Wants::Make { cwd, name, command }
         };
         assert_eq!(wants, made(command));
 
@@ -4635,39 +4625,12 @@ mod tests {
     }
 
     #[test]
-    fn a_session_luneta_makes_for_a_pull_request_opens_its_tab_once_there() {
-        let name = SessionName::parse("cdk").unwrap();
-        let at = At::Clone { cwd: directory("/w/cdk"), name: name.clone() };
-        let work = Readied::Link(pull_request());
-        let folder = "/w/cdk/feat-x".to_owned();
-        let ready = Ready { at, folder, branch: None, moved_off: false, work };
-        let (menu, wants) = stays(pulling('w').pulled(Ok(here(ready))));
-        assert_eq!(
-            wants,
-            Wants::Make {
-                project: Some(name),
-                cwd: directory("/w/cdk/feat-x"),
-                name: "#2736".to_owned(),
-                command: Vec::new(),
-            }
-        );
-        assert!(menu.opens_pulled());
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Making session cdk…");
-        assert!(menu.turning());
-        let why = "no session works in cashubtc/cdk".to_owned();
-        assert_eq!(
-            closed(pulling('r').pulled(Err(why))),
-            Done::Wrong("menu: cashubtc/cdk#2736: no session works in cashubtc/cdk".to_owned())
-        );
-    }
-
-    #[test]
     fn the_keys_for_a_link_pasted_on_another_machine_s_row_open_there() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let other = Listed::new_project("cdk", 2);
         let ready = |at| {
             let work = Readied::Link(pull_request());
-            let folder = "/w/cdk/feat-x".to_owned();
+            let folder = directory("/w/cdk/feat-x");
             let ready = Ready { at, folder, branch: None, moved_off: false, work };
             Ok(Found { on: vps(), ready })
         };
@@ -4675,15 +4638,11 @@ mod tests {
         let place = Place::View(ViewPlace { session: other.clone(), view: ViewKey::terminal(9) });
         let there = ready(At::There((other.clone(), ViewKey::terminal(9))));
         assert_eq!(closed(pulling_on(row(), 'w').pulled(there)), Done::Go(vps(), place));
-        let at = At::Session((other, ViewKey::terminal(7)));
-        let (menu, _) = stays(pulling_on(row(), 'w').pulled(ready(at)));
-        assert_eq!(menu.target(), &Target::Machine(vps()), "the machine that found it");
-        let name = SessionName::parse("cdk").unwrap();
-        let clone = At::Clone { cwd: directory("/w/cdk"), name };
-        let header = Target::Machine(vps());
-        let (menu, wants) = stays(pulling_on(header.clone(), 'w').pulled(ready(clone)));
-        assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
-        assert_eq!(menu.target(), &header);
+        for asked in [row(), Target::Machine(vps())] {
+            let (menu, wants) = stays(pulling_on(asked, 'w').pulled(ready(At::Unopened)));
+            assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
+            assert_eq!(menu.target(), &Target::Machine(vps()), "the machine that found it");
+        }
     }
 
     #[test]
@@ -4692,7 +4651,7 @@ mod tests {
         let other = Listed::new_project("cdk", 2);
         let found = |at| {
             let work = Readied::Link(pull_request());
-            let folder = "/w/cdk/feat-x".to_owned();
+            let folder = directory("/w/cdk/feat-x");
             let ready = Ready { at, folder, branch: None, moved_off: false, work };
             Ok(Found { on: vps(), ready })
         };
@@ -4710,9 +4669,7 @@ mod tests {
             let goes = pulling_on(row.clone(), 'w').pulled(found(at));
             assert_eq!(closed(goes), Done::Go(vps(), place));
 
-            let name = SessionName::parse("cdk").unwrap();
-            let clone = At::Clone { cwd: directory("/w/cdk"), name };
-            let (menu, wants) = stays(pulling_on(row, 'r').pulled(found(clone)));
+            let (menu, wants) = stays(pulling_on(row, 'r').pulled(found(At::Unopened)));
             assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
             assert_eq!(menu.target(), &Target::Machine(vps()));
         }
