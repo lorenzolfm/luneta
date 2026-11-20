@@ -149,7 +149,7 @@ pub enum Event {
     Reached { claude_folder: Option<PathBuf> },
     Daemon(Result<Host, String>),
     Notice(String),
-    Unclosed { on: Machine, act: Act, ticket: u64, why: String },
+    Unclosed { on: Machine, act: Act, ticket: u64, unchanged: Unchanged },
     Moved { ticket: u64, kept: Option<Version> },
     Unmoved { on: Machine, ticket: u64, order: Reorder, unmoved: Unchanged },
     Copy(Clip),
@@ -948,8 +948,8 @@ impl App {
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Notice(notice) => self.sidebar.notify(notice),
-            Event::Unclosed { on, act, ticket, why } => {
-                self.sidebar.unclosed(&on, &act, ticket, format!("menu: {why}"));
+            Event::Unclosed { on, act, ticket, unchanged } => {
+                self.sidebar.unclosed(&on, &act, ticket, unchanged);
             },
             Event::Moved { ticket, kept } => self.sidebar.moved(ticket, kept),
             Event::Unmoved { on, ticket, order, unmoved } => {
@@ -2006,24 +2006,20 @@ impl App {
     fn project_act(&mut self, on: Machine, act: Act, ticket: u64) {
         let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
         self.keep_change(thread::spawn(move || {
-            let closed = caught(CLOSE_PANICKED, || {
-                let (closed, noun) = match &act {
-                    Act::View { view: ViewKey::Terminal(key), .. } => {
-                        (worktrees::closed_view(&lunetad, &on, *key), "view")
-                    },
-                    Act::Worktree { worktree, seen, .. } => {
-                        (worktrees::closed(&lunetad, &on, *worktree, seen), "worktree")
-                    },
-                    Act::Project { project, worktrees: held, seen, .. } => {
-                        let closed = worktrees::closed_project(&lunetad, &on, *project, held, seen);
-                        (closed, "project")
-                    },
-                };
-                let in_doubt = format!("the {noun} may be closed");
-                closed.map_err(|unchanged| unchanged.said("not closed", &in_doubt))
+            let asked = AssertUnwindSafe(|| match &act {
+                Act::View { view: ViewKey::Terminal(key), .. } => {
+                    worktrees::closed_view(&lunetad, &on, *key)
+                },
+                Act::Worktree { worktree, seen, .. } => {
+                    worktrees::closed(&lunetad, &on, *worktree, seen)
+                },
+                Act::Project { project, worktrees, seen, .. } => {
+                    worktrees::closed_project(&lunetad, &on, *project, worktrees, seen)
+                },
             });
-            if let Err(why) = closed {
-                let _ = events.send(Event::Unclosed { on, act, ticket, why });
+            let unsure = |_| Err(Unchanged::InDoubt(CLOSE_PANICKED.to_owned()));
+            if let Err(unchanged) = panic::catch_unwind(asked).unwrap_or_else(unsure) {
+                let _ = events.send(Event::Unclosed { on, act, ticket, unchanged });
             }
         }));
     }

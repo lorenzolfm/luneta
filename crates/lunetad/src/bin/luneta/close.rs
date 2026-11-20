@@ -94,6 +94,14 @@ pub enum Act {
 }
 
 impl Act {
+    pub fn noun(&self) -> &'static str {
+        match self {
+            Act::View { .. } => "view",
+            Act::Worktree { .. } => "worktree",
+            Act::Project { .. } => "project",
+        }
+    }
+
     fn what(&self) -> String {
         match self {
             Act::View { .. } => "Close the view".to_owned(),

@@ -18,6 +18,7 @@ use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::shell::Doing;
 use lunetad::api::{self, Agent, Front, Harness, Host, View, Saying, Shell, Status, UnreadFile};
+use lunetad::changes::Unchanged;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links::{self, Branch};
 use lunetad::mux::TerminalKey;
@@ -4063,7 +4064,7 @@ impl Sidebar {
         Asked::Delete { on, act, ticket }
     }
 
-    pub fn unclosed(&mut self, on: &Machine, act: &Act, ticket: u64, notice: String) {
+    pub fn unclosed(&mut self, on: &Machine, act: &Act, ticket: u64, unchanged: Unchanged) {
         if let Some(Lit::Closing { spot, ticket: armed, .. }) = &self.lit
             && *armed == ticket
         {
@@ -4071,9 +4072,12 @@ impl Sidebar {
             assert!(closed_by(act, on, spot), "{closes}");
             let listed = "a closing row stays listed: rebuild lands past it once it goes";
             assert!(self.row_of(spot).is_some(), "{listed}");
-            self.lit = Some(Lit::On(spot.clone()));
+            if let Unchanged::Refused(_) = unchanged {
+                self.lit = Some(Lit::On(spot.clone()));
+            }
         }
-        self.notify(notice);
+        let in_doubt = format!("the {} may be closed", act.noun());
+        self.notify(format!("menu: {}", unchanged.said("not closed", &in_doubt)));
     }
 
     pub fn ticket(&mut self) -> u64 {
@@ -10125,9 +10129,9 @@ mod tests {
     }
 
     fn refuse(sidebar: &mut Sidebar, ticket: u64) {
-        let refused = "menu: not closed: lunetad refused";
-        sidebar.unclosed(&Machine::Local, &closes_nvim(), ticket, refused.to_owned());
-        assert_eq!(sidebar.notice.as_deref(), Some(refused));
+        let refused = Unchanged::Refused("lunetad refused".to_owned());
+        sidebar.unclosed(&Machine::Local, &closes_nvim(), ticket, refused);
+        assert_eq!(sidebar.notice.as_deref(), Some("menu: not closed: lunetad refused"));
         assert_eq!(lit_place(sidebar), Some(view_of("older", 10, 2)));
     }
 
@@ -10151,6 +10155,13 @@ mod tests {
         refuse(&mut sidebar, later);
         sidebar.hear(without_nvim());
         assert_eq!(lit_place(&sidebar), where_nvim_going_by_itself_leaves_it());
+        let (mut sidebar, later) = nvim_closed_twice_with_the_others_refused();
+        let late = Unchanged::InDoubt("lunetad did not answer in 15s".to_owned());
+        sidebar.unclosed(&Machine::Local, &closes_nvim(), later, late);
+        let maybe = "menu: lunetad did not answer in 15s, so the view may be closed";
+        assert_eq!(sidebar.notice.as_deref(), Some(maybe));
+        sidebar.hear(without_nvim());
+        assert_eq!(lit_place(&sidebar), Some(past_nvim()), "a close in doubt keeps its landing");
     }
 
     fn last_with(views: &[u32]) -> Host {
