@@ -214,6 +214,11 @@ impl Asks {
 impl Pull {
     const ALL: [Pull; 2] = [Pull::Worktree, Pull::Agent];
 
+    pub fn offered(work: &Work) -> [(Pull, Action); 2] {
+        let asks = Asks::of(work);
+        Pull::ALL.map(|pull| (pull, pull.action(asks)))
+    }
+
     const fn action(self, asks: Asks) -> Action {
         match (self, asks) {
             (Pull::Worktree, _) => Action::PastedWorktree,
@@ -1059,6 +1064,14 @@ pub fn spelled(action: Action, origin: Origin) -> String {
     }
 }
 
+#[must_use]
+pub fn whence(work: &Work) -> String {
+    match work {
+        Work::Link(link) => link.repository(),
+        Work::File(file) => sidebar::short_cwd(file.path()),
+    }
+}
+
 fn typed_path(path: &[char]) -> String {
     path.iter().map(char::to_string).collect::<Vec<_>>().join(" ")
 }
@@ -1323,6 +1336,12 @@ impl Menu {
     pub fn pull(number: u64, target: Target, work: Work, agent: Harness) -> Menu {
         let step = Step::Choosing { wrong: None };
         Menu { number, target, stage: Stage::Pull { work, agent, step } }
+    }
+
+    pub fn chose(number: u64, target: Target, work: Work, agent: Harness, pull: Pull) -> Did {
+        let wants = Wants::Pull(work.clone(), pull.wanted(Asks::of(&work)));
+        let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Pulling(pull)) };
+        Did::Stays(Menu { number, target, stage }, wants)
     }
 
     pub fn number(&self) -> u64 {
@@ -1594,11 +1613,7 @@ impl Menu {
             Stage::Pull { work, agent, step: step @ Step::Choosing { .. } } => {
                 let asks = Asks::of(&work);
                 match Pull::pressed(key, asks) {
-                    Some(pull) => {
-                        let wants = Wants::Pull(work.clone(), pull.wanted(asks));
-                        let step = Step::Waiting(Wait::Pulling(pull));
-                        stays(Stage::Pull { work, agent, step }, wants)
-                    },
+                    Some(pull) => Menu::chose(number, target.clone(), work, agent, pull),
                     None => stays(Stage::Pull { work, agent, step }, Wants::Nothing),
                 }
             },
@@ -1960,11 +1975,7 @@ impl Menu {
                         waiting(&wait.doing(work), width, Style::new().fg(NAME), frame)
                     },
                 };
-                let from = match work {
-                    Work::Link(link) => link.repository(),
-                    Work::File(file) => sidebar::short_cwd(file.path()),
-                };
-                (work.tab(), from, body, keyed(width, &[(Hint::Esc, "Close")]))
+                (work.tab(), whence(work), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
             Stage::Choosing(keys)
             | Stage::Planning { keys, .. }

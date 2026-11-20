@@ -52,7 +52,7 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::{self, Machine};
 use crate::menu::{
-    self, AllKeys, Briefed, Choice, Cwd, Did, Done, Hint, Label, Menu, Origin, ViewRow,
+    self, AllKeys, Briefed, Choice, Cwd, Did, Done, Hint, Label, Menu, Origin, Pull, ViewRow,
     ProjectTarget, Ran, Rename, Target, Top, Wants, WorktreeRow,
 };
 use crate::news::News;
@@ -3600,12 +3600,9 @@ impl Sidebar {
         let Some(work) = Work::parse(text, from) else {
             return;
         };
-        let making = self.open().into_iter().chain(self.working.values()).filter_map(Menu::making);
-        if making.into_iter().any(|making| *making == work) {
-            self.notice = Some(format!("{} is on its way", work.tab()));
+        if self.on_its_way(&work) {
             return;
         }
-        self.notice = None;
         let Some(target) = target else {
             if self.lit_spot().is_none() {
                 self.say(format!("menu: no row is highlighted for {work} to open the menu on"));
@@ -3621,6 +3618,32 @@ impl Sidebar {
         };
         self.menus += 1;
         self.put(Menu::pull(self.menus, target, work, self.agent.harness()), placed);
+    }
+
+    pub fn pull_in_menu(
+        &mut self,
+        target: Target,
+        work: Work,
+        pull: Pull,
+        origin: Origin,
+    ) -> Asked {
+        if self.on_its_way(&work) {
+            return Asked::Nothing;
+        }
+        self.end_mode();
+        self.menus += 1;
+        let did = Menu::chose(self.menus, target, work, self.agent.harness(), pull);
+        if origin == Origin::Views {
+            self.let_go();
+        }
+        self.menu_did(Placed::of(origin), did)
+    }
+
+    fn on_its_way(&mut self, work: &Work) -> bool {
+        let making = self.open().into_iter().chain(self.working.values()).filter_map(Menu::making);
+        let on_its_way = making.into_iter().any(|making| making == work);
+        self.notice = on_its_way.then(|| format!("{} is on its way", work.tab()));
+        on_its_way
     }
 
     pub fn chose(&mut self, menu: u64, choice: Choice, now: SystemTime) -> Asked {
@@ -9218,6 +9241,26 @@ mod tests {
         assert_eq!(sidebar.open().map(Menu::number), Some(2));
         assert_eq!(sidebar.notice, None);
         assert!(sidebar.working.is_empty());
+    }
+
+    #[test]
+    fn a_pull_picked_in_the_palette_asks_as_its_key_in_the_pasted_menu_does() {
+        let page = "https://github.com/lorenzolfm/luneta/pull/5";
+        let mut pasted = own_two_sessions();
+        pasted.focus(Keys::Sidebar);
+        pasted.paste(page);
+        let keyed = pasted.key(&char('r'), moment(160_000));
+        assert!(matches!(keyed, Asked::Pull { .. }), "{keyed:?}");
+        let mut picked = own_two_sessions();
+        picked.focus(Keys::Sidebar);
+        let target = picked.target().expect("a row is highlighted");
+        let work = Work::parse(page, None).expect("a pull request's link");
+        let pull = |sidebar: &mut Sidebar| {
+            sidebar.pull_in_menu(target.clone(), work.clone(), Pull::Agent, Origin::Sidebar)
+        };
+        assert_eq!(pull(&mut picked), keyed);
+        assert_eq!(pull(&mut picked), Asked::Nothing);
+        assert_eq!(picked.notice.as_deref(), Some("#5 is on its way"));
     }
 
     #[test]

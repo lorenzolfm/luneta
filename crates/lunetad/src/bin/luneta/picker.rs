@@ -21,7 +21,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use lunetad::changes::Unchanged;
-use lunetad::links::Branch;
+use lunetad::links::{Branch, Work};
 use lunetad::projects::{self, Name, ProjectId, Seen, Used, ViewId};
 use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
@@ -35,7 +35,7 @@ use crate::gruvbox;
 use crate::host::Event;
 use crate::screen;
 use crate::machines::Machine;
-use crate::menu::{self, Chain, Chained, Done, Hint, Origin, Target};
+use crate::menu::{self, Chain, Chained, Done, Hint, Origin, Pull, Target};
 use crate::sidebar::{
     self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, ViewKey, ViewPlace, Place,
     ProjectRow, WorktreePlace,
@@ -277,6 +277,7 @@ pub enum Picked {
     Chord(actions::Chord),
     Menu { target: Target, origin: Origin, action: Action },
     Row { target: Target, action: Action },
+    Pull { target: Target, work: Work, pull: Pull, origin: Origin },
     Done { done: Done, origin: Origin },
 }
 
@@ -391,6 +392,7 @@ pub enum Key {
     Dir { on: Machine, path: Directory, session: SessionName },
     New { on: Machine, project: ProjectRow, branch: Branch },
     Action(Action, Run),
+    Pasted { target: Rc<Target>, work: Work, pull: Pull },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1187,6 +1189,10 @@ impl Picker {
                 let (action, run) = (*action, run.clone());
                 self.act(action, run)
             },
+            Key::Pasted { target, work, pull } => {
+                let (target, work, pull) = (Target::clone(target), work.clone(), *pull);
+                Picked::Pull { target, work, pull, origin: self.palette.origin }
+            },
         }
     }
 
@@ -1252,6 +1258,9 @@ impl Picker {
     }
 
     fn action_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
+        if let Some(pasted) = self.pasted_rows() {
+            return pasted;
+        }
         let fitting = Action::ALL.into_iter().filter_map(|it| Some((it, self.run(it)?)));
         let worktrees = self.listed_worktrees(finder);
         let worktrees = worktrees.into_iter().filter(|row| !matches!(row.key, Key::Machine { .. }));
@@ -1273,6 +1282,19 @@ impl Picker {
             rows = self.typed_rows();
         }
         rows
+    }
+
+    fn pasted_rows(&self) -> Option<Vec<Row>> {
+        let Aim::At { target, .. } = &self.palette.aim else {
+            return None;
+        };
+        let work = Work::parse(&self.term, target.cwd().cloned())?;
+        let row = |(pull, action)| {
+            let name = format!("{} {}", titled(action), work.tab());
+            let (target, work) = (Rc::clone(target), work.clone());
+            Row::plain(Key::Pasted { target, work, pull }, name)
+        };
+        Some(Pull::offered(&work).into_iter().map(row).collect())
     }
 
     fn aimed_at(&self) -> String {
@@ -1353,9 +1375,11 @@ impl Picker {
                 self.error = Some("a worktree not open has no views to close".to_owned());
                 Picked::Nothing
             },
-            Key::Machine { .. } | Key::Dir { .. } | Key::New { .. } | Key::Action(..) => {
-                Picked::Nothing
-            },
+            Key::Machine { .. }
+            | Key::Dir { .. }
+            | Key::New { .. }
+            | Key::Action(..)
+            | Key::Pasted { .. } => Picked::Nothing,
         }
     }
 
@@ -1403,7 +1427,8 @@ impl Picker {
                 | Key::Dir { .. }
                 | Key::New { .. }
                 | Key::Unopened { .. }
-                | Key::Action(..),
+                | Key::Action(..)
+                | Key::Pasted { .. },
             )
             | None => return,
         };
@@ -1621,7 +1646,13 @@ impl Picker {
             Some(Key::Unopened { on, folder, .. }) => {
                 Some(Preview::Dir((on.clone(), folder.clone())))
             },
-            Some(Key::Project { .. } | Key::Machine { .. } | Key::New { .. } | Key::Action(..))
+            Some(
+                Key::Project { .. }
+                | Key::Machine { .. }
+                | Key::New { .. }
+                | Key::Action(..)
+                | Key::Pasted { .. },
+            )
             | None => None,
         };
         match (preview, &self.wanted) {
@@ -1823,6 +1854,9 @@ impl Picker {
                 let key = menu::spelled(*action, self.palette.origin);
                 (None, Style::new().fg(gruvbox::FG1), vec![Span::styled(key, dim)])
             },
+            Key::Pasted { work, .. } => {
+                (None, Style::new().fg(gruvbox::FG1), vec![Span::styled(menu::whence(work), dim)])
+            },
         };
         let right_width: usize = right.iter().map(|span| span.content.width()).sum();
         let lead_width = lead.as_ref().map_or(0, |lead| lead.content.width() + 1);
@@ -1989,7 +2023,7 @@ impl Picker {
                 let looked = (on.clone(), place.project.listed().clone(), Some(focus));
                 (right, Line::from(caption), looked)
             },
-            Key::Action(..) => {
+            Key::Action(..) | Key::Pasted { .. } => {
                 unreachable!("actions are listed in the Actions list, which previews none")
             },
             Key::Agent { on, place } => {
@@ -2098,7 +2132,7 @@ impl Picker {
                     let project = project.listed().name();
                     Ok(format!("New worktree \"{branch}\" in {project}"))
                 },
-                Key::Action(..) => Ok("Run".to_owned()),
+                Key::Action(..) | Key::Pasted { .. } => Ok("Run".to_owned()),
             },
             None if self.list == List::Worktrees
                 && self.scope.is_none()
@@ -4160,6 +4194,35 @@ mod tests {
             panic!("nothing found offers to make what was typed: {made:?}");
         };
         assert_eq!((branch.as_str(), *project), ("zzz", fix().project.id()));
+    }
+
+    #[test]
+    fn a_pasted_link_lists_what_the_menu_offers_for_it_and_enter_pulls_it_on_the_target() {
+        let issue = "https://github.com/lorenzolfm/luneta/issues/648";
+        let mut picker = palette(Origin::Views);
+        picker.paste(&format!("{issue}\n"));
+        assert_eq!(every_action(&mut picker), ["Worktree #648", "Tackle #648"]);
+        assert_eq!(keyed_action(&picker).1, "lorenzolfm/luneta");
+        let work = Work::parse(issue, None).expect("an issue's link");
+        let origin = Origin::Views;
+        let tackle = Picked::Pull { target: fix_view(), work, pull: Pull::Agent, origin };
+        assert_eq!(press(&mut picker, KeyCode::Enter), tackle);
+
+        let pr = "https://github.com/lorenzolfm/luneta/pull/650";
+        let mut picker = palette(Origin::Sidebar);
+        typed(&mut picker, pr);
+        assert_eq!(every_action(&mut picker), ["Worktree #650", "/thermo-nuclear-review #650"]);
+        press(&mut picker, KeyCode::Up);
+        let work = Work::parse(pr, None).expect("a pull request's link");
+        let origin = Origin::Sidebar;
+        let worktree = Picked::Pull { target: fix_view(), work, pull: Pull::Worktree, origin };
+        assert_eq!(press(&mut picker, KeyCode::Enter), worktree);
+
+        let why = "palette: luneta does not know yet which view its client is on";
+        let unplaced = Palette { aim: Aim::Unplaced(why), origin: Origin::Views };
+        let mut picker = palette_on(works(), unplaced);
+        picker.paste(issue);
+        assert!(!every_action(&mut picker).iter().any(|row| row.contains("#648")));
     }
 
     #[test]
