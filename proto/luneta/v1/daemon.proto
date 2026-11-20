@@ -786,6 +786,7 @@ message ChangeProjectsResponse {
     fixed64 worktree = 2;
     fixed64 found = 3;
     fixed64 taken = 4;
+    google.protobuf.Empty untaken = 6;
   }
   Version kept = 5;
 }

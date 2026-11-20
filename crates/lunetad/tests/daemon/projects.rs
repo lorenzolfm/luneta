@@ -17,6 +17,7 @@ use lunetad::api::list_work_response::work::Issues;
 use lunetad::api::list_work_response::{Issue, Listed as Said, OpenIssues, Pull as ListedPull, Work};
 use lunetad::api::{ListWorkRequest, ListWorkResponse, MakeWorktreeRequest};
 use lunetad::api::Version;
+use lunetad::changes::Unchanged;
 use tonic::{Code, Status};
 
 use crate::host::{eventually, folder_in, start, Host};
@@ -30,6 +31,7 @@ pub fn asked(host: &Host, change: Change) -> Result<Option<u64>, Status> {
 fn asked_on(host: &Host, on: Option<&str>, change: Change) -> Result<Option<u64>, Status> {
     let made = |made| match made {
         Made::Project(id) | Made::Worktree(id) | Made::Found(id) | Made::Taken(id) => id,
+        Made::Untaken(()) => panic!("lunetad took luneta nowhere, and names no id"),
     };
     answered_on(host, on, change).map(|answered| answered.made.map(made))
 }
@@ -574,6 +576,10 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     let link = scratch.path().join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let luneta = project(&far, &real.join("luneta"), None);
+    let close = Change::CloseWorktree(CloseWorktree { worktree: 1, seen: Vec::new() });
+    let unsent = answered_on(&here, Some("nowhere"), close).unwrap_err();
+    let unreached = Unchanged::Refused("lunetad does not reach nowhere now".to_owned());
+    assert_eq!(Unchanged::of(&unsent), unreached, "a change no bridge sent is refused");
     let asked = |change| answered_on(&here, Some("far"), change).unwrap().made;
     let start = |at: &str| {
         let start = Start { folder: text(&link.join(at)), name: None };

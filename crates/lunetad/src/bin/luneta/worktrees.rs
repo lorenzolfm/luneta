@@ -14,7 +14,7 @@ use lunetad::api::make_worktree_response::Landed as Answered;
 use lunetad::api::projects::Held;
 use lunetad::api::{self, ChangeProjectsRequest, ListWorkRequest, MakeWorktreeRequest, On};
 use lunetad::api::{Version, WatchRequest};
-use lunetad::changes::Unchanged;
+use lunetad::changes::{Unadded, Unchanged};
 use lunetad::mux::own::TerminalKey;
 use lunetad::projects::{self, Name, Plain, ProjectId, Size, ViewId, WorktreeId};
 use lunetad::links::{self, Branch, Unready};
@@ -39,7 +39,7 @@ fn said_unmade(unchanged: Unchanged, what: &str) -> String {
 
 fn said_unopened(unchanged: Unchanged, folder: &Directory, tab: &str) -> String {
     match unchanged {
-        Unchanged::Refused(why) | Unchanged::Nests(why) => unopened(folder, tab, &why),
+        Unchanged::Refused(why) => unopened(folder, tab, &why),
         Unchanged::InDoubt(why) => format!("{why}, so {folder}, {tab}'s worktree, may be opened"),
     }
 }
@@ -131,28 +131,31 @@ fn kept_as_said(path: &Path) -> Result<Vec<api::Project>, String> {
     })
 }
 
-fn change_answered(
+fn change_answered<E: From<Unchanged>>(
     path: &Path,
     on: Option<On>,
     change: Change,
-) -> Result<ChangeProjectsResponse, Unchanged> {
+    read: fn(&Status) -> E,
+) -> Result<ChangeProjectsResponse, E> {
     let request = ChangeProjectsRequest { on, change: Some(change) };
     let asking = async |daemon: &mut Daemon| match daemon.change_projects(request).await {
         Ok(answered) => Ok(answered.into_inner()),
-        Err(status) => Err(Unchanged::of(&status)),
+        Err(status) => Err(read(&status)),
     };
-    let answered = asked_or(path, ASKING, asking, Unchanged::InDoubt);
-    answered.unwrap_or_else(|unasked| Err(Unchanged::Refused(unasked)))
+    let late = |late| E::from(Unchanged::InDoubt(late));
+    let answered = asked_or(path, ASKING, asking, late);
+    answered.unwrap_or_else(|unasked| Err(E::from(Unchanged::Refused(unasked))))
 }
 
 fn changed_on(path: &Path, on: Option<On>, change: Change) -> Result<Option<Made>, Unchanged> {
-    change_answered(path, on, change).map(|answered| answered.made)
+    change_answered(path, on, change, Unchanged::of).map(|answered| answered.made)
 }
 
-fn add_project(path: &Path, dir: &str, name: Option<&str>) -> Result<ProjectId, Unchanged> {
+fn add_project(path: &Path, dir: &str, name: Option<&str>) -> Result<ProjectId, Unadded> {
     let (dir, name) = (dir.to_owned(), name.map(str::to_owned));
     let change = Change::AddProject(AddProject { dir, name });
-    project_of(changed_on(path, None, change)?)
+    let answered = change_answered(path, None, change, Unadded::of)?;
+    project_of(answered.made).map_err(Unadded::from)
 }
 
 fn project_of(made: Option<Made>) -> Result<ProjectId, Unchanged> {
@@ -314,7 +317,7 @@ pub fn reordered(
             Change::ReorderWorktrees(ReorderWorktrees { project, worktrees, seen })
         },
     };
-    change_answered(path, on(machine), change).map(|answered| answered.kept)
+    change_answered(path, on(machine), change, Unchanged::of).map(|answered| answered.kept)
 }
 
 fn holds(dir: &str, folder: &Path) -> bool {
@@ -416,11 +419,12 @@ fn started(
     };
     let unmade = match add_project(path, folder, Some(name)) {
         Ok(_) => None,
-        Err(refused @ Unchanged::Refused(_)) => {
+        Err(Unadded::Unchanged(refused @ Unchanged::Refused(_))) => {
             return Err(Tried::Failed(said_unmade(refused, "project")));
         },
-        Err(unchanged @ (Unchanged::Nests(_) | Unchanged::InDoubt(_))) => {
-            Some(said_unmade(unchanged, "project"))
+        Err(Unadded::Nests(why)) => Some(said_unmade(Unchanged::Refused(why), "project")),
+        Err(Unadded::Unchanged(in_doubt @ Unchanged::InDoubt(_))) => {
+            Some(said_unmade(in_doubt, "project"))
         },
     };
     let unlisted = |unlisted: String| Tried::Failed(unmade.clone().unwrap_or(unlisted));
@@ -560,7 +564,7 @@ impl Landed {
 pub fn worked_in(path: &Path, folder: &Path, argv: Vec<String>) -> Result<Landed, String> {
     let folder = folder.to_str().ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
     joined(path, folder, argv).map_err(|unchanged| match unchanged {
-        Unchanged::Refused(why) | Unchanged::Nests(why) => why,
+        Unchanged::Refused(why) => why,
         Unchanged::InDoubt(why) => format!("{why}, so lunetad may keep {folder} as a worktree"),
     })
 }
@@ -601,7 +605,7 @@ pub fn bring(path: &Path, worktree: WorktreeId, from: TerminalKey) -> Result<Wen
     let change = Change::Bring(Bring { worktree: worktree.get(), from: Some(from) });
     changed_on(path, None, change).and_then(|made| match made {
         Some(Made::Taken(taken)) if taken == worktree.get() => Ok(Went::Taken),
-        None => Ok(Went::Elsewhere),
+        Some(Made::Untaken(())) => Ok(Went::Elsewhere),
         made => Err(unread(made, "taken worktree")),
     })
 }

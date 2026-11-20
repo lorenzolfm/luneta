@@ -461,7 +461,7 @@ impl Layouts {
                     Ask::CloseProject { project, worktrees, seen } => {
                         self.close_project(project, &worktrees, &seen)
                     },
-                    Ask::Bring { worktree, from } => self.bring(worktree, from),
+                    Ask::Bring { worktree, from } => self.bring(worktree, from).map(Some),
                     Ask::CloseView(terminal) => self.close_view(terminal),
                 };
                 let kept = self.store.revision();
@@ -811,18 +811,14 @@ impl Layouts {
         }
     }
 
-    fn bring(
-        &mut self,
-        worktree: WorktreeId,
-        from: TerminalKey,
-    ) -> Result<Option<Made>, Failed> {
+    fn bring(&mut self, worktree: WorktreeId, from: TerminalKey) -> Result<Made, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         if projects.find(worktree).is_none() {
             return Err(Failed::Refused(format!("no worktree has the id {worktree}")));
         }
         let held = self.known.iter().find(|(_, known)| known.key == from);
         let Some((&held, _)) = held else {
-            return Ok(None);
+            return Ok(Made::Untaken);
         };
         let sent = api::ShowResponse { event: Some(show_response::Event::Sent(worktree.get())) };
         let on = self.clients.iter().filter(|(_, it)| it.focus == Some(held.view()));
@@ -837,7 +833,7 @@ impl Layouts {
                 self.clients.remove(&client);
             }
         }
-        Ok(taken.then_some(Made::Taken(worktree)))
+        Ok(if taken { Made::Taken(worktree) } else { Made::Untaken })
     }
 
     fn root(&self, project: ProjectId) -> Result<Root, Unrooted> {
