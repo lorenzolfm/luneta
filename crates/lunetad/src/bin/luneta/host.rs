@@ -493,12 +493,15 @@ pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
         Ok(start) => start,
         Err(refusal) => return did_not_start(&format!("no worktree to show: {refusal}")),
     };
-    if let Some(ended) = ends.ended() {
-        return did_not_start(&ended);
+    if let Some(ended) = ends.pending() {
+        return did_not_start(&ended.to_string());
     }
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
-        Err(error) => return did_not_start(&format!("no terminal: {error}")),
+        Err(error) => match ends.pending() {
+            Some(ended) => return did_not_start(&ended.to_string()),
+            None => return did_not_start(&format!("no terminal: {error}")),
+        },
     };
     let hidden = terminal.hide_cursor();
     let restore = std::panic::take_hook();
@@ -576,7 +579,7 @@ pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
 
 fn did_not_start(why: &str) -> ExitCode {
     say_ends(why);
-    eprintln!("luneta: {why}");
+    let _ = writeln!(io::stderr(), "luneta: {why}");
     ExitCode::FAILURE
 }
 
