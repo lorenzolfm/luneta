@@ -141,7 +141,7 @@ pub fn size(columns: u32, rows: u32) -> api::Size {
 }
 
 pub async fn watched_until(
-    watch: &mut Streaming<api::Listing>,
+    watch: &mut Streaming<api::Watched>,
     what: &str,
     test: impl Fn(&api::Listing) -> bool,
 ) -> api::Listing {
@@ -150,11 +150,30 @@ pub async fn watched_until(
     loop {
         let waited = fmt::from_fn(|f| write!(f, "the watch says {what}: last {last:#?}"));
         let next = patience.awaited(waited, watch.message()).await;
-        let listing = next.unwrap().expect("the watch went on");
+        let watched = next.unwrap().expect("the watch went on");
+        let Some(api::watched::Is::Listing(listing)) = watched.is else {
+            panic!("the watch ended before it said {what}: {:?}", watched.is);
+        };
         if test(&listing) {
             return listing;
         }
         last = Some(listing);
+    }
+}
+
+pub async fn watched_end(watch: &mut Streaming<api::Watched>) -> api::watched::ended::Why {
+    let patience = Patience::begun();
+    loop {
+        let next = patience.awaited("the watch says why it ended", watch.message()).await;
+        let watched = next.unwrap().expect("the watch says why before it ends");
+        match watched.is.expect("the watch says something") {
+            api::watched::Is::Listing(_) => {},
+            api::watched::Is::Ended(ended) => {
+                let after = patience.awaited("the watch ends", watch.message()).await;
+                assert!(after.unwrap().is_none(), "the watch ends once it says why");
+                return ended.why.expect("the watch says why it ended");
+            },
+        }
     }
 }
 

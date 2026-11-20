@@ -8,7 +8,7 @@ import "google/protobuf/timestamp.proto";
 service Mux {
   rpc Dump(DumpRequest) returns (DumpResponse);
   rpc List(ListRequest) returns (Listing);
-  rpc Watch(WatchRequest) returns (stream Listing);
+  rpc Watch(WatchRequest) returns (stream Watched);
   rpc NewTerminal(NewTerminalRequest) returns (NewTerminalResponse);
   rpc CloseTerminal(CloseTerminalRequest) returns (CloseTerminalResponse);
   rpc SizeTerminal(SizeTerminalRequest) returns (SizeTerminalResponse);
@@ -101,6 +101,26 @@ message WatchRequest {}
 
 message Listing {
   repeated Terminal terminals = 1;
+}
+
+message Watched {
+  oneof is {
+    Listing listing = 1;
+    Ended ended = 2;
+  }
+
+  message Ended {
+    oneof why {
+      Emptied emptied = 1;
+      Unreached unreached = 2;
+    }
+  }
+
+  message Emptied {}
+
+  message Unreached {
+    string why = 1;
+  }
 }
 
 message Terminal {

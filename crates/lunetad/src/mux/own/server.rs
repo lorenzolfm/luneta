@@ -339,7 +339,34 @@ pub enum Followed {
     Unmatched,
     Newer(String),
     Emptied { since: Instant },
+    Lost(String),
     LetGo,
+}
+
+enum Heard {
+    Listing(api::Listing),
+    Ended(Followed),
+}
+
+fn heard(watched: Option<api::Watched>, since: Instant) -> Result<Heard, Failure> {
+    use api::watched::ended::Why;
+    let Some(watched) = watched else {
+        return Err(Failure::Own("its watch ended with no word why".to_owned()));
+    };
+    let ended = match watched.is {
+        Some(api::watched::Is::Listing(listing)) => return Ok(Heard::Listing(listing)),
+        Some(api::watched::Is::Ended(ended)) => ended,
+        None => return Err(Failure::Unread("luneta-mux's watch said nothing".to_owned())),
+    };
+    let followed = match ended.why {
+        Some(Why::Emptied(api::watched::Emptied {})) => Followed::Emptied { since },
+        Some(Why::Unreached(api::watched::Unreached { why })) => Followed::Lost(why),
+        None => {
+            let unread = "luneta-mux's watch ended, and why is unread".to_owned();
+            return Err(Failure::Unread(unread));
+        },
+    };
+    Ok(Heard::Ended(followed))
 }
 
 pub fn followed(
@@ -359,11 +386,12 @@ pub fn followed(
     };
     let since = Instant::now();
     let watched = server.ask(|mut client| async move { client.watch(api::WatchRequest {}).await });
-    let mut stream: Streaming<api::Listing> = watched.map_err(|status| refused(&status))?;
+    let mut stream: Streaming<api::Watched> = watched.map_err(|status| refused(&status))?;
     loop {
-        let heard = server.runtime.block_on(stream.message());
-        let Some(listing) = heard.map_err(|status| refused(&status))? else {
-            return Ok(Followed::Emptied { since });
+        let watched = server.runtime.block_on(stream.message());
+        let listing = match heard(watched.map_err(|status| refused(&status))?, since)? {
+            Heard::Listing(listing) => listing,
+            Heard::Ended(followed) => return Ok(followed),
         };
         let (terminals, mut unread, unsaid) = terminals(listing.terminals);
         let whole = unread.is_empty();
@@ -729,6 +757,22 @@ fn program() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_watch_that_says_it_emptied_is_heard_as_emptied() {
+        use api::watched::{Emptied, Ended, Is, Unreached, ended::Why};
+        let since = Instant::now();
+        let ended = |why| Some(api::Watched { is: Some(Is::Ended(Ended { why })) });
+        let emptied = heard(ended(Some(Why::Emptied(Emptied {}))), since);
+        assert!(matches!(emptied, Ok(Heard::Ended(Followed::Emptied { since: at })) if at == since));
+        let why = "/run/luneta/mux.sock is gone".to_owned();
+        let lost = heard(ended(Some(Why::Unreached(Unreached { why: why.clone() }))), since);
+        assert!(matches!(lost, Ok(Heard::Ended(Followed::Lost(said))) if said == why));
+        assert!(matches!(heard(None, since), Err(Failure::Own(_))), "a watch that just ends");
+        assert!(matches!(heard(ended(None), since), Err(Failure::Unread(_))));
+        let silent = heard(Some(api::Watched { is: None }), since);
+        assert!(matches!(silent, Err(Failure::Unread(_))));
+    }
 
     #[test]
     fn a_shell_listed_that_does_not_read_is_left_out_alone() {

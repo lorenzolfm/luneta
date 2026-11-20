@@ -35,6 +35,20 @@ pub enum Ending {
     Unreached(Unreached),
 }
 
+impl Ending {
+    #[must_use]
+    pub fn said(&self) -> api::watched::Ended {
+        let why = match self {
+            Ending::Emptied => api::watched::ended::Why::Emptied(api::watched::Emptied {}),
+            Ending::Unreached(unreached) => {
+                let why = unreached.to_string();
+                api::watched::ended::Why::Unreached(api::watched::Unreached { why })
+            },
+        };
+        api::watched::Ended { why: Some(why) }
+    }
+}
+
 enum Model {
     Holds(Holding),
     Ended(Ending),

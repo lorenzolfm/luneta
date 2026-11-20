@@ -3,11 +3,11 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
 
 use luneta_mux::api;
-use luneta_waits::Patience;
 use rustix::process::{Pid, test_kill_process};
-use tonic::Code;
 
-use crate::host::{LUNETA_MUX, Server, listed, new_terminal, run, script, shell, size};
+use crate::host::{
+    LUNETA_MUX, Server, listed, new_terminal, run, script, shell, size, watched_end,
+};
 
 fn programs(listing: &api::Listing) -> Vec<Pid> {
     let pid = |terminal: &api::Terminal| match &terminal.program {
@@ -52,17 +52,10 @@ fn a_server_whose_folder_goes_ends_and_so_do_its_terminals_programs() {
         assert_eq!(programs.len(), 2);
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         fs::remove_dir_all(server.socket().parent().unwrap()).unwrap();
-        let patience = Patience::begun();
-        let ending = loop {
-            match patience.awaited("the watch ends", watch.message()).await {
-                Ok(Some(_)) => {},
-                Ok(None) => panic!("the watch ended as if every terminal had ended"),
-                Err(ending) => break ending,
-            }
-        };
         let socket = server.socket();
-        let gone = format!("{} is gone, so nothing reaches luneta-mux again", socket.display());
-        assert_eq!((ending.code(), ending.message()), (Code::Unavailable, gone.as_str()));
+        let why = format!("{} is gone, so nothing reaches luneta-mux again", socket.display());
+        let unreached = api::watched::ended::Why::Unreached(api::watched::Unreached { why });
+        assert_eq!(watched_end(&mut watch).await, unreached);
         drop((watch, mux));
         assert!(server.ended().await.success());
         for program in programs {

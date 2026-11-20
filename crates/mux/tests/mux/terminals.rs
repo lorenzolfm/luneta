@@ -3,7 +3,8 @@ use luneta_waits::Patience;
 use tonic::Code;
 
 use crate::host::{
-    Server, Viewer, gone, listed, new_terminal, run, script, shell, size, watched_until,
+    Server, Viewer, gone, listed, new_terminal, run, script, shell, size, watched_end,
+    watched_until,
 };
 
 fn terminal<'a>(listing: &'a api::Listing, key: &api::TerminalKey) -> Option<&'a api::Terminal> {
@@ -330,10 +331,13 @@ fn the_last_terminal_to_close_ends_the_server() {
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let mut viewer = Viewer::new(&mut mux).await;
         viewer.show(&[key]).await;
+        let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         mux.close_terminal(api::CloseTerminalRequest { terminal: Some(key) }).await.unwrap();
         let patience = Patience::begun();
         while viewer.next(patience, "the stream ends").await.unwrap().is_some() {}
-        drop((viewer, mux));
+        let emptied = api::watched::ended::Why::Emptied(api::watched::Emptied {});
+        assert_eq!(watched_end(&mut watch).await, emptied);
+        drop((viewer, watch, mux));
         assert!(server.ended().await.success());
         assert!(gone(&server.socket()));
     });

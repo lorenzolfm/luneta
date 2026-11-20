@@ -17,7 +17,7 @@ use crate::api::{self, mux_server};
 use crate::asked::{self, Dumped, Opens, Size, Tag, TerminalKey, ViewerHeard};
 use crate::folder::{Bound, Claim, Found};
 use crate::id::ClientId;
-use crate::mux::{Ending, Listed, Mux};
+use crate::mux::{Listed, Mux};
 use crate::terminal::{CLIENT_MESSAGES, ToTerminal, UNREAD_BYTES_MAX, ViewerOut};
 use crate::pty;
 
@@ -59,17 +59,20 @@ impl mux_server::Mux for Service {
         Ok(Response::new(self.mux.listing()))
     }
 
-    type WatchStream = Pin<Box<dyn Stream<Item = Result<api::Listing, Status>> + Send>>;
+    type WatchStream = Pin<Box<dyn Stream<Item = Result<api::Watched, Status>> + Send>>;
 
     async fn watch(&self, _: Request<api::WatchRequest>) -> Answer<Self::WatchStream> {
-        let listings = WatchStream::new(self.mux.watched()).map_while(|listed| match listed {
-            Listed::Holds(listing) => Some(Ok(listing)),
-            Listed::Ended(Ending::Emptied) => None,
-            Listed::Ended(Ending::Unreached(unreached)) => {
-                Some(Err(Status::unavailable(unreached.to_string())))
-            },
+        let watched = self.mux.watched();
+        let holds = WatchStream::new(watched.clone()).map_while(|listed| match listed {
+            Listed::Holds(listing) => Some(api::watched::Is::Listing(listing)),
+            Listed::Ended(_) => None,
         });
-        Ok(Response::new(Box::pin(listings)))
+        let ended = WatchStream::new(watched).filter_map(|listed| match listed {
+            Listed::Holds(_) => None,
+            Listed::Ended(ending) => Some(api::watched::Is::Ended(ending.said())),
+        });
+        let watched = holds.chain(ended.take(1)).map(|is| Ok(api::Watched { is: Some(is) }));
+        Ok(Response::new(Box::pin(watched)))
     }
 
     async fn new_terminal(
