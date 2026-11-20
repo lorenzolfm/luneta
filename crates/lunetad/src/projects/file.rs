@@ -1258,7 +1258,7 @@ mod tests {
     }
 
     fn alone(at: &str) -> Spot {
-        Spot::in_folder(dir(at), dir(at))
+        Spot::in_folder(dir(at))
     }
 
     fn tree(at: &str) -> Subfolder {
@@ -1309,7 +1309,7 @@ mod tests {
     }
 
     fn parse(text: &str) -> Result<Projects, String> {
-        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), dir.clone())));
+        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone())));
         rooted_as(text, alone).map(|read| read.projects)
     }
 
@@ -1495,7 +1495,7 @@ mod tests {
             "worktree": "old"
           },"#;
         let with_unopened = want.replace(r#""clone": ["#, unopened);
-        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), dir.clone())));
+        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone())));
         for before in [7, 8] {
             let version = format!(r#""version": {before}"#);
             let before = with_unopened.replace(r#""version": 10"#, &version);
@@ -1673,7 +1673,7 @@ mod tests {
             "dir": "/a", "workstreams": [{"id": "0000000000000002"},
             {"id": "0000000000000003", "below": "b", "used_millis": 7}]}, {"id": "0000000000000004",
             "name": "c", "dir": "/c"}]}"#;
-        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), dir.clone())));
+        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone())));
         let read = rooted_as(text, alone).unwrap();
         assert!(read.migrated, "an old file is rooted, and so written again at once");
         let kept = read.projects;

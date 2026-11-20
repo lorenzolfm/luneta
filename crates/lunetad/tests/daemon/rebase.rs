@@ -11,6 +11,7 @@ use lunetad::Directory;
 
 use crate::host::{Host, LUNETA, answered, folder_in, script, start};
 use crate::own::Owned;
+use crate::projects::project;
 use crate::remote::{FakeSsh, hosts, reached};
 use crate::starts::{Window, makes_shells, shown, work_in};
 use crate::worktree::{cloned_as_wt, git};
@@ -118,6 +119,38 @@ fn luneta_rebase_moves_a_branch_onto_upstream_and_hands_its_conflicts_to_an_agen
     assert_eq!(again.status.code(), Some(UNFINISHED), "{}", stderr(&again));
     eventually("a second agent starts", || fs::read_to_string(&asked).ok());
     assert_eq!(terminals_in(host, fix), 2, "beside the first");
+}
+
+#[test]
+fn a_rebase_in_a_repository_a_folder_s_project_holds_starts_no_agent_in_the_folder() {
+    let owned = Owned::new();
+    let host = &owned.host;
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let repository = Repository::new(&scratch);
+    let notes = scratch.join("notes");
+    let plain = notes.join("foo");
+    git(&scratch, &["clone", "-q", &repository.up.display().to_string(), &plain.display().to_string()]);
+    for (key, value) in [("user.name", "t"), ("user.email", "t@t"), ("core.hooksPath", "/dev/null")] {
+        git(&plain, &["config", key, value]);
+    }
+    project(host, &notes, None);
+    let asked = host.home.path().join("claude-asked");
+    script(&host.bin().join("claude"), &format!("touch {}\nexec sleep 600\n", asked.display()));
+
+    commit(&plain, "theirs", "mine\n");
+    commit(&repository.up, "theirs", "yours\n");
+    let stopped = rebased(host, &plain);
+    let why = stderr(&stopped);
+    assert_eq!(stopped.status.code(), Some(UNFINISHED), "{why}");
+    let one = "notes is a folder, and its own is its one worktree";
+    let (plain_s, notes_s) = (plain.display(), notes.display());
+    let held = format!("{plain_s} is in {notes_s}, project notes's folder; {one}");
+    let waits = format!("luneta: no agent started, and the rebase waits for you: {held}\n");
+    assert!(why.ends_with(&waits), "{why}");
+    assert!(plain.join(".git/rebase-merge").is_dir(), "the rebase waits");
+    assert!(!asked.exists(), "no agent starts in the folder");
+    assert_eq!(terminals_in(host, &notes), 0, "nor does the folder's worktree open");
 }
 
 #[test]

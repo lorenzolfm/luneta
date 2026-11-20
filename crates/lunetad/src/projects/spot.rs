@@ -31,7 +31,7 @@ pub struct Spot(Place);
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Place {
     Clone { root: Dir, subfolder: Option<Subfolder>, subfolders: BTreeSet<Subfolder> },
-    Folder { asked: Dir, dir: Dir },
+    Folder { asked: Dir, repository: Option<Dir> },
 }
 
 impl Spot {
@@ -39,7 +39,7 @@ impl Spot {
         let until = Instant::now() + look;
         let common = match git::common_within(folder.as_str(), left(until, look)?) {
             Common::Of(common) => common,
-            Common::NoRepository => return Ok(Spot::in_folder(folder.clone(), folder.clone())),
+            Common::NoRepository => return Ok(Spot::in_folder(folder.clone())),
             Common::Unsaid(why) => {
                 return Err(format!("git did not say what repository {} is in: {why}", folder.0));
             },
@@ -60,8 +60,10 @@ impl Spot {
             },
             CloneRoot::Worked | CloneRoot::NoBare => {},
         }
-        let dir = top.filter(|top| top.below(folder).is_some());
-        Ok(Spot::in_folder(folder.clone(), dir.unwrap_or_else(|| folder.clone())))
+        Ok(match top.filter(|top| top.below(folder).is_some()) {
+            Some(top) => Spot::in_repository(folder.clone(), top),
+            None => Spot::in_folder(folder.clone()),
+        })
     }
 
     #[must_use]
@@ -84,9 +86,14 @@ impl Spot {
     }
 
     #[must_use]
-    pub fn in_folder(asked: Dir, dir: Dir) -> Spot {
-        assert!(dir.below(&asked).is_some(), "{} holds {}, the folder asked", dir.0, asked.0);
-        Spot(Place::Folder { asked, dir })
+    pub fn in_folder(asked: Dir) -> Spot {
+        Spot(Place::Folder { asked, repository: None })
+    }
+
+    #[must_use]
+    pub fn in_repository(asked: Dir, top: Dir) -> Spot {
+        assert!(top.below(&asked).is_some(), "{} holds {}, the folder asked", top.0, asked.0);
+        Spot(Place::Folder { asked, repository: Some(top) })
     }
 
     #[must_use]
@@ -102,7 +109,15 @@ impl Spot {
     pub fn dir(&self) -> &Dir {
         match &self.0 {
             Place::Clone { root, .. } => root,
-            Place::Folder { dir, .. } => dir,
+            Place::Folder { asked, repository } => repository.as_ref().unwrap_or(asked),
+        }
+    }
+
+    #[must_use]
+    pub fn repository(&self) -> Option<&Dir> {
+        match &self.0 {
+            Place::Clone { .. } => None,
+            Place::Folder { repository, .. } => repository.as_ref(),
         }
     }
 
@@ -344,14 +359,14 @@ mod tests {
         assert_eq!(of(&real(&clone.join("main"))), Ok(clone_at(Some("main"))));
         assert_eq!(of(&real(&clone.join("main/crates"))), Ok(clone_at(Some("main"))));
         let src = real(&plain.join("src"));
-        assert_eq!(of(&src), Ok(Spot::in_folder(src.clone(), real(&plain))));
+        assert_eq!(of(&src), Ok(Spot::in_repository(src.clone(), real(&plain))));
         let linked = scratch.join("linked");
         std::os::unix::fs::symlink(&plain, &linked).unwrap();
         let through = dir(linked.join("src").to_str().unwrap());
-        let alone_there = Spot::in_folder(through.clone(), through.clone());
+        let alone_there = Spot::in_folder(through.clone());
         assert_eq!(of(&through), Ok(alone_there), "the top git names is real");
         let notes = real(&alone.join("notes"));
-        assert_eq!(of(&notes), Ok(Spot::in_folder(notes.clone(), notes.clone())));
+        assert_eq!(of(&notes), Ok(Spot::in_folder(notes.clone())));
         assert_eq!(clone_at(Some("main")).place(), real(&clone.join("main")));
         assert_eq!(clone_at(None).dir(), &real(&clone));
         let none_left = Spot::of(&real(&clone), Duration::ZERO).unwrap_err();
@@ -366,7 +381,7 @@ mod tests {
         let sep = format!("--separate-git-dir={}", sep.display());
         git(&scratch, &["init", "-q", "-b", "main", &sep, worked.to_str().unwrap()]);
         let worked = real(&worked);
-        assert_eq!(Spot::of(&worked, LOOK), Ok(Spot::in_folder(worked.clone(), worked.clone())));
+        assert_eq!(Spot::of(&worked, LOOK), Ok(Spot::in_repository(worked.clone(), worked.clone())));
 
         let unkept = scratch.join("lun\teta");
         fs::create_dir_all(unkept.join(".bare")).unwrap();
@@ -387,6 +402,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "the folder asked")]
     fn a_folder_s_spot_holds_the_folder_asked() {
-        let _ = Spot::in_folder(dir("/w/elo"), dir("/w/luneta"));
+        let _ = Spot::in_repository(dir("/w/elo"), dir("/w/luneta"));
     }
 }

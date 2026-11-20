@@ -1018,14 +1018,13 @@ impl Projects {
         self.projects.iter().find_map(|project| Some((project.id, project.within(spot)?)))
     }
 
-    fn swallower(&self, spot: &Spot) -> Option<Plain> {
-        if spot.is_clone() {
-            let (project, _) = self.inside(spot)?;
-            let holding = self.project_of(project).expect("the project a spot is inside is held");
-            holding.plain().filter(|plain| plain.dir != spot.place())
-        } else {
-            None
-        }
+    fn swallower(&self, spot: &Spot) -> Option<(Dir, Plain)> {
+        let (project, _) = self.inside(spot)?;
+        let holding = self.project_of(project).expect("the project a spot is inside is held");
+        let plain = holding.plain()?;
+        let own = if spot.is_clone() { spot.place() } else { spot.repository()?.clone() };
+        let below = plain.dir.below(&own)?;
+        (below != Below::OWN).then_some((own, plain))
     }
 
     fn stale(&self, change: &Change) -> Option<String> {
@@ -1089,8 +1088,8 @@ impl Projects {
                 Some(self.landed(&mut changed, made, &opens, &mut draw)?)
             },
             Change::Join { spot, opens } => {
-                if let Some(plain) = self.swallower(&spot) {
-                    return Err(held_by_folder(&spot.place(), &plain));
+                if let Some((own, plain)) = self.swallower(&spot) {
+                    return Err(held_by_folder(&own, &plain));
                 }
                 let (project, within) = match self.inside(&spot) {
                     Some(found) => found,
@@ -1099,9 +1098,11 @@ impl Projects {
                 let joined = changed.worktree_in(project, within, None, &mut draw)?;
                 let held = changed.project_of(project).ok_or_else(|| unknown("project", project))?;
                 let joined = joined.ok_or_else(|| held.unplaced(&spot))?;
+                let at = held.folder(joined).expect("a joined worktree has a folder");
                 if spot.is_clone() {
-                    let at = held.folder(joined);
-                    assert_eq!(at, Some(spot.place()), "a clone's worktree is joined at its folder");
+                    assert_eq!(at, spot.place(), "a clone's worktree is joined at its folder");
+                } else if let Some(top) = spot.repository() {
+                    assert!(top.nests(&at), "{} is joined at {}, in its repository", top.0, at.0);
                 }
                 Some(self.landed(&mut changed, joined, &opens, &mut draw)?)
             },
@@ -1860,7 +1861,7 @@ mod tests {
     }
 
     fn folder(at: &str) -> Spot {
-        Spot::in_folder(dir(at), dir(at))
+        Spot::in_folder(dir(at))
     }
 
     fn tree(at: &str) -> Subfolder {
@@ -2263,6 +2264,28 @@ mod tests {
         let own = projects.project_of(fix).unwrap().worktrees().next().unwrap().id();
         let (_, found) = change(&projects, joining(spot_at("/m/cdk", "fix"))).unwrap();
         assert_eq!(found, Some(Made::Found(own)), "a folder's project at the worktree holds it");
+    }
+
+    #[test]
+    fn a_join_of_a_repository_inside_a_folder_s_project_is_refused_and_its_own_found() {
+        let mut projects = Projects::default();
+        let notes = project(&mut projects, "/n");
+        let before = projects.clone();
+        let repository = Spot::in_repository(dir("/n/foo/src"), dir("/n/foo"));
+        let said = change(&projects, joining(repository)).unwrap_err();
+        let one = "n is a folder, and its own is its one worktree";
+        assert_eq!(said, format!("/n/foo is in /n, project n's folder; {one}"));
+        let top = change(&projects, joining(Spot::in_repository(dir("/n/foo"), dir("/n/foo"))));
+        assert_eq!(top.unwrap_err(), said, "the repository's top is refused as its subfolder is");
+        assert_eq!(projects, before);
+        let own = projects.project_of(notes).unwrap().worktrees().next().unwrap().id();
+        let (_, found) = change(&projects, joining(Spot::in_repository(dir("/n/src"), dir("/n")))).unwrap();
+        assert_eq!(found, Some(Made::Found(own)), "a subfolder of the folder's own repository");
+        let foo = project(&mut projects, "/m/foo/docs");
+        let own = projects.project_of(foo).unwrap().worktrees().next().unwrap().id();
+        let inside = Spot::in_repository(dir("/m/foo/docs/a"), dir("/m/foo"));
+        let (_, found) = change(&projects, joining(inside)).unwrap();
+        assert_eq!(found, Some(Made::Found(own)), "a folder's project inside the repository");
     }
 
     #[test]
