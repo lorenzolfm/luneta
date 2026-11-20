@@ -397,6 +397,7 @@ pub enum Key {
 pub enum Lone {
     Folder(Directory),
     Clone,
+    Closed,
     Unlisted(String),
 }
 
@@ -408,7 +409,7 @@ impl Lone {
         match &housed.unopened {
             Unopened::Folder => Some(Lone::Folder((&housed.dir).into())),
             Unopened::Listed(folders) if folders.is_empty() => Some(Lone::Clone),
-            Unopened::Listed(_) => None,
+            Unopened::Listed(_) => Some(Lone::Closed),
             Unopened::Unlisted(why) => Some(Lone::Unlisted(why.clone())),
         }
     }
@@ -416,6 +417,7 @@ impl Lone {
     fn tag(&self) -> &'static str {
         match self {
             Lone::Folder(_) | Lone::Clone => "no worktree",
+            Lone::Closed => "none open",
             Lone::Unlisted(_) => "not listed",
         }
     }
@@ -1118,6 +1120,12 @@ impl Picker {
                     self.stage = Stage::Chain { chain, on, aimed };
                     Picked::Nothing
                 },
+                Lone::Closed => {
+                    self.scope = Some((on.clone(), project.id()));
+                    self.term.clear();
+                    self.rebuild(true);
+                    Picked::Nothing
+                },
                 Lone::Unlisted(_) => Picked::Nothing,
             },
             Key::Unopened { on, project, folder } => {
@@ -1443,7 +1451,6 @@ impl Picker {
     fn listed_worktrees(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
         let tagged = self.tagged();
         let mut found = Vec::new();
-        let mut unopened_found = Vec::new();
         let mut machines = Vec::new();
         for shelved in &self.listing.shelves {
             let on = &shelved.on;
@@ -1452,11 +1459,8 @@ impl Picker {
             }
             for housed in &shelved.projects {
                 let project = housed.project.listed().name().as_str();
-                unopened_found.extend(unopened_of(on, housed));
                 if let Some(lone) = Lone::of(housed) {
                     assert!(housed.worktrees.is_empty(), "{project} alone has no worktree open");
-                    let unopened = housed.unopened.folders();
-                    assert!(unopened.is_empty(), "{project} alone lists no worktree not open");
                     let (on, row) = (on.clone(), housed.project.clone());
                     let key = Key::Project { on, project: row, lone };
                     let dir = sidebar::short_cwd(housed.dir.as_str());
@@ -1471,7 +1475,6 @@ impl Picker {
             }
         }
         found.sort_by_key(|(used, ..)| Reverse(*used));
-        found.extend(unopened_found);
         let mut rows = matched(finder, candidates_of(&found));
         if finder.is_none() {
             rows.extend(machines);
@@ -1888,6 +1891,10 @@ impl Picker {
                         "{name} is a clone with no worktree: Enter asks for a branch and makes \
                          its worktree, as n w does",
                     ),
+                    Lone::Closed => format!(
+                        "{name} has no worktree open: Enter lists its worktrees not open, as o w \
+                         does",
+                    ),
                     Lone::Unlisted(why) => unlisted(name, why),
                 };
                 framed(buffer, area, &row.name, "", said(caption, &words));
@@ -2013,6 +2020,7 @@ impl Picker {
                     Ok(there("Start a worktree", on))
                 },
                 Key::Project { on, lone: Lone::Clone, .. } => Ok(there("New worktree", on)),
+                Key::Project { on, lone: Lone::Closed, .. } => Ok(there("Open a worktree", on)),
                 Key::Project { project, lone: Lone::Unlisted(why), .. } => {
                     Err(unlisted(project.listed().name(), why))
                 },
@@ -2880,19 +2888,31 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_not_open_is_listed_after_the_open_and_enter_opens_it() {
+    fn super_j_lists_the_open_worktrees_alone_and_a_project_with_none_open_once() {
         let mut picker = opened(with_unopened(works()));
         let open = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
-        let unopened = ["luneta › old", "luneta › spike", "web › legacy"];
-        assert_eq!(rows(&picker), [&open[..], &unopened[..]].concat());
-        let (lines, _) = list(&picker);
-        assert!(lines[5].ends_with("not open"), "{lines:?}");
-        down_to(&mut picker, "luneta › spike");
+        assert_eq!(rows(&picker), open, "no worktree that is not open is listed");
+        typed(&mut picker, "spike");
+        assert_eq!(rows(&picker), ["+ spike"], "only n w's row, which opens spike as n w does");
+
+        let mut listing = with_unopened(works());
+        let jots = projects::Dir::parse("/home/you/notes/jots").unwrap();
+        listing.shelves[0].projects[1].unopened = Unopened::Listed(vec![jots]);
+        let mut picker = opened(listing);
+        assert_eq!(rows(&picker), open, "notes is one row, not its worktree");
+        down_to(&mut picker, "notes");
+        assert!(list(&picker).1.unwrap().ends_with("none open"), "{:?}", list(&picker));
+        assert!(said(&picker).contains("<ENTER> Open a worktree"), "{}", said(&picker));
+        let shown = text(&drawn(&picker), parts().1).join(" ");
+        let words = "notes has no worktree open: Enter lists its worktrees not open, as o w does";
+        assert!(shown.contains(words), "{shown}");
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+        assert_eq!(rows(&picker), ["notes › jots"], "Enter lists notes's as o w does");
         assert!(said(&picker).contains("<ENTER> Open"), "{}", said(&picker));
         let opens = Picked::Add {
             on: Machine::Local,
-            project: project("luneta", 1),
-            folder: directory("/home/you/luneta/spike"),
+            project: project("notes", 2),
+            folder: directory("/home/you/notes/jots"),
         };
         assert_eq!(press(&mut picker, KeyCode::Enter), opens);
     }
