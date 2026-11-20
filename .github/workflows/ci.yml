@@ -201,7 +201,7 @@ jobs:
           NEXTEST_DOUBLE_SPAWN: 0
         run: |
           nix develop --profile devshell -c sh -ec '
-            cargo nextest run --locked --profile ci $LUNETA_TEST_RUN
+            luneta-nextest --profile ci
             cargo test --doc --locked $LUNETA_TEST_RUN
           '
 

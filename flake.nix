@@ -155,6 +155,8 @@
 
           testRun = "-p lunetad -p luneta-protocol -p luneta-mux";
 
+          nextest = import ./nix/nextest.nix { inherit pkgs testRun; };
+
           daemon = {
             pname = "lunetad";
             inherit version src;
@@ -189,8 +191,8 @@
 
                 NEXTEST_SHOW_PROGRESS = "counter";
                 checkPhaseCargoCommand = ''
-                  cargo nextest run --cargo-profile "$CARGO_PROFILE" --profile ci \
-                    --test-threads "$NIX_BUILD_CORES" --locked ${testRun}
+                  ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
+                    --test-threads "$NIX_BUILD_CORES"
                   cargoWithProfile test --doc --locked ${testRun}
                 '';
 
@@ -235,6 +237,7 @@
               buildTools
               clippyRun
               testRun
+              nextest
               ;
             testTools = daemon.nativeCheckInputs;
             compileEnv = ''
@@ -287,6 +290,7 @@
           shell = pkgs.mkShell {
             packages = buildTools ++ [
               dev
+              nextest
               pkgs.cargo-nextest
               pkgs.nodejs
             ];

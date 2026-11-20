@@ -5,6 +5,7 @@
   compileEnv,
   clippyRun,
   testRun,
+  nextest,
   testTools,
 }:
 let
@@ -27,6 +28,7 @@ let
       compileEnv
       clippyRun
       testRun
+      nextest
       testKit
       ;
   };
