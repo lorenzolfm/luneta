@@ -440,7 +440,7 @@ impl Daemon for Host {
         }
         let harness = Harness::said(harness)
             .map_err(|why| Status::invalid_argument(format!("harness: {why}")))?;
-        let found = task::spawn_blocking(move || skills::found_in(dir.as_str(), harness)).await;
+        let found = task::spawn_blocking(move || skills::found_in(&dir, harness)).await;
         let found = found.map_err(|error| unfinished(&error))?;
         let skills = found.map_err(Status::failed_precondition)?;
         let skill = |skills::Skill { name, description, runs }| Skill {
