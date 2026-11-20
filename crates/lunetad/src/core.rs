@@ -75,16 +75,16 @@ pub enum Command {
     Watch { after: Option<After>, answer: oneshot::Sender<Option<api::Host>> },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct After {
     pub version: api::Version,
     pub parked: Parked,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Parked {
     Quietly,
-    Aloud,
+    Aloud(oneshot::Sender<api::Version>),
 }
 
 pub struct Wakes {
@@ -555,11 +555,11 @@ impl Known {
             return;
         }
         self.waiting.push(answer);
+        assert!(self.waiting.len() <= WAITING_MAX);
         match parked {
             Parked::Quietly => {},
-            Parked::Aloud => {
-                let api::Version { pid, seq } = version;
-                log::say(&format!("a watch waits for a change past {pid}:{seq}"));
+            Parked::Aloud(tell) => {
+                let _ = tell.send(version);
             },
         }
     }

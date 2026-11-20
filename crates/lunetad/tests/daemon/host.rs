@@ -616,18 +616,18 @@ impl Daemon {
     }
 
     pub fn says(&mut self, what: &str, said: impl Fn(&str) -> bool) -> &[String] {
-        self.says_times(what, 1, said)
+        self.says_at_least(what, 1, said)
     }
 
-    pub fn says_times(
+    pub fn says_at_least(
         &mut self,
         what: &str,
-        times: usize,
+        count_min: usize,
         said: impl Fn(&str) -> bool,
     ) -> &[String] {
-        assert!(times > 0);
+        assert!(count_min > 0);
         let patience = Patience::begun();
-        while self.said.iter().filter(|line| said(line)).count() < times {
+        while self.said.iter().filter(|line| said(line)).count() < count_min {
             let before = &self.said;
             let waited = fmt::from_fn(|f| write!(f, "{what}, after {before:?}"));
             let line = patience.heard(waited, &self.heard);

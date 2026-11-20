@@ -11,7 +11,7 @@ use lunetad::api::checkout::Head;
 use lunetad::api::git_status::{NoCheckout, Stands};
 use lunetad::api::projects::Held;
 use lunetad::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream, Version};
-use lunetad::{SETTLE, WATCH};
+use lunetad::{parked_watch, SETTLE, WATCH};
 use prost::Message as _;
 use serde_json::json;
 
@@ -288,7 +288,7 @@ impl AtOnce<'_> {
         let before = self.daemon.said().iter().filter(|line| heard(line)).count();
         change();
         for times in before + 1..=before + HEARD_MAX {
-            self.daemon.says_times(&format!("the watch hears {what}"), times, heard);
+            self.daemon.says_at_least(&format!("the watch hears {what}"), times, heard);
             if checkout(self.host, self.cwd).is_some_and(|it| shows(&it)) {
                 return;
             }
@@ -1307,21 +1307,20 @@ fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     let (first, _) = host.watch(None);
     let version = first.version.unwrap();
     assert_eq!(version.pid, daemon.pid());
-    let Version { pid, seq } = version;
-    let parked = format!("lunetad: a watch waits for a change past {pid}:{seq}");
+    let parked = format!("lunetad: {}", parked_watch(version));
     let parked = |line: &str| line == parked;
 
     let (same, lasted) = host.watch(Some(version));
     assert_eq!(same.version, Some(version));
     lasted.at_least(WATCH, "luneta watch waits a whole watch for a change");
-    daemon.says_times("the watch says it waits", 1, parked);
+    daemon.says_at_least("the watch says it waits", 1, parked);
 
     let play = scratch();
     let play = play.path().join("play");
     fs::create_dir(&play).unwrap();
     let (changed, _) = thread::scope(|scope| {
         let waiting = scope.spawn(|| host.watch(Some(version)));
-        daemon.says_times("the next watch says it waits", 2, parked);
+        daemon.says_at_least("the next watch says it waits", 2, parked);
         watched(&host, &play.display().to_string());
         waiting.join().unwrap()
     });

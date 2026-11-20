@@ -84,6 +84,22 @@ pub const WATCH: Duration = Duration::from_secs(4);
 
 const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
 
+#[must_use]
+pub fn parked_watch(version: api::Version) -> String {
+    let api::Version { pid, seq } = version;
+    format!("a watch waits for a change past {pid}:{seq}")
+}
+
+async fn says_parked(asked: Option<api::Version>, told: Option<oneshot::Receiver<api::Version>>) {
+    let Some(told) = told else {
+        return;
+    };
+    if let Ok(Ok(version)) = timeout(WATCH, told).await {
+        assert_eq!(Some(version), asked);
+        log::say(&parked_watch(version));
+    }
+}
+
 const QUESTIONS_MAX: u32 = 16;
 
 const BRIDGED_ASKS_MIN: usize = 4;
@@ -422,12 +438,17 @@ impl Daemon for Host {
         let request = request.into_inner();
         let waiter = Waiter::of(&request);
         let _waits = self.watchers.waits(waiter);
-        let parked = match waiter {
-            Waiter::Client => Parked::Aloud,
-            Waiter::Window | Waiter::Daemon(_) => Parked::Quietly,
+        let (parked, told) = match waiter {
+            Waiter::Client => {
+                let (tell, told) = oneshot::channel();
+                (Parked::Aloud(tell), Some(told))
+            },
+            Waiter::Window | Waiter::Daemon(_) => (Parked::Quietly, None),
         };
         let after = request.after.map(|version| After { version, parked });
-        let watched = match timeout(WATCH, self.watched(after)).await {
+        let watching = timeout(WATCH, self.watched(after));
+        let (watched, ()) = tokio::join!(watching, says_parked(request.after, told));
+        let watched = match watched {
             Ok(watched) => watched,
             Err(_) => self.watched(None).await,
         };
