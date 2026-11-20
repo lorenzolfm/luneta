@@ -72,7 +72,23 @@ pub enum Command {
     Claudes(oneshot::Sender<Vec<Agent>>),
     AllAgents(oneshot::Sender<Vec<Agent>>),
     List(oneshot::Sender<api::ListAgentsResponse>),
-    Watch { after: Option<api::Version>, answer: oneshot::Sender<Option<api::Host>> },
+    Host(oneshot::Sender<api::Host>),
+    Watch { after: After, answer: oneshot::Sender<Result<api::Host, Full>> },
+}
+
+#[derive(Debug)]
+pub struct Full;
+
+#[derive(Debug)]
+pub struct After {
+    pub version: api::Version,
+    pub parked: Parked,
+}
+
+#[derive(Debug)]
+pub enum Parked {
+    Quietly,
+    Aloud(oneshot::Sender<api::Version>),
 }
 
 pub struct Wakes {
@@ -131,7 +147,7 @@ struct Known {
     listed: BTreeMap<Dir, Listing>,
     host: api::Host,
     seq: u64,
-    waiting: Vec<oneshot::Sender<Option<api::Host>>>,
+    waiting: Vec<oneshot::Sender<Result<api::Host, Full>>>,
     sayings: Sayings,
 }
 
@@ -260,6 +276,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let (unread, unread_files) = known.unread();
                 let agents = known.agents();
                 let _ = answer.send(api::ListAgentsResponse { agents, unread, unread_files });
+                continue;
+            },
+            Command::Host(answer) => {
+                let _ = answer.send(known.now());
                 continue;
             },
             Command::Watch { after, answer } => {
@@ -518,23 +538,41 @@ impl Known {
         host.version = Some(self.version());
         self.host = host;
         for waiting in self.waiting.drain(..) {
-            let _ = waiting.send(Some(self.host.clone()));
+            let _ = waiting.send(Ok(self.host.clone()));
         }
     }
 
-    fn watch(&mut self, after: Option<api::Version>, answer: oneshot::Sender<Option<api::Host>>) {
+    fn now(&mut self) -> api::Host {
         self.update();
         assert_eq!(self.host.version, Some(self.version()));
-        if after != Some(self.version()) {
-            let _ = answer.send(Some(self.host.clone()));
+        self.host.clone()
+    }
+
+    fn watch(&mut self, after: After, answer: oneshot::Sender<Result<api::Host, Full>>) {
+        self.update();
+        let version = self.version();
+        assert_eq!(self.host.version, Some(version));
+        let After { version: asked, parked } = after;
+        if asked != version {
+            let _ = answer.send(Ok(self.host.clone()));
             return;
         }
         self.waiting.retain(|waiting| !waiting.is_closed());
         assert!(self.waiting.len() <= WAITING_MAX);
-        if self.waiting.len() < WAITING_MAX {
-            self.waiting.push(answer);
-        } else {
-            let _ = answer.send(None);
+        if answer.is_closed() {
+            return;
+        }
+        if self.waiting.len() == WAITING_MAX {
+            let _ = answer.send(Err(Full));
+            return;
+        }
+        self.waiting.push(answer);
+        assert!(self.waiting.len() <= WAITING_MAX);
+        match parked {
+            Parked::Quietly => {},
+            Parked::Aloud(tell) => {
+                let _ = tell.send(version);
+            },
         }
     }
 }
@@ -554,8 +592,7 @@ mod tests {
             reached: Reached::Host(api::remote::Host::default()),
         };
         let told = || {
-            let host = ask(&core, |answer| Command::Watch { after: None, answer });
-            let remotes = host.flatten().unwrap().remotes.into_iter();
+            let remotes = ask(&core, Command::Host).unwrap().remotes.into_iter();
             remotes.map(|remote| (remote.destination, remote.reached.unwrap())).collect::<Vec<_>>()
         };
         let said = |name: &str, reached| (name.to_owned(), reached);
