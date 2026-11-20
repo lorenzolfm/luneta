@@ -14,7 +14,6 @@ use crate::api;
 use crate::claude::Scan;
 use crate::git;
 use crate::github::Found;
-use crate::log;
 use crate::mux::own::server::{self, Is};
 use crate::titles::{self, Titled};
 use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage, Subfolder};
@@ -54,7 +53,12 @@ pub enum Command {
     Agents(Scan),
     PiAgents(Vec<Agent>),
     Terminals(BTreeMap<ViewId, Located>),
-    GitStatus { dir: String, status: GitStatus, why: Option<git::Why> },
+    GitStatus {
+        dir: String,
+        status: GitStatus,
+        why: Option<git::Why>,
+        answer: oneshot::Sender<Option<String>>,
+    },
     PullRequests(BTreeMap<String, Found>),
     Topics(HashMap<SessionId, Said>),
     Hosts(Named),
@@ -174,16 +178,15 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     wake(&wakes.git);
                 }
             },
-            Command::GitStatus { dir, status, why } => {
+            Command::GitStatus { dir, status, why, answer } => {
                 if !known.dirs().contains(&dir) {
+                    let _ = answer.send(None);
                     continue;
                 }
                 let before = known.branch(&dir).map(str::to_owned);
                 let changed = known.statuses.get(&dir).is_some_and(|was| *was != status);
                 known.statuses.insert(dir.clone(), status);
-                if changed && let Some(said) = why.and_then(|why| why.said(&dir)) {
-                    log::say(&said);
-                }
+                let _ = answer.send(why.filter(|_| changed).and_then(|why| why.said(&dir)));
                 if known.branch(&dir).is_some_and(|now| before.as_deref() != Some(now)) {
                     wake(&wakes.github);
                 }

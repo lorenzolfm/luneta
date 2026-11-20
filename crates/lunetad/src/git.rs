@@ -20,6 +20,7 @@ use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::core;
+use crate::log;
 use crate::program::{self, Ran};
 use crate::watch::{self, Troubles};
 
@@ -846,10 +847,13 @@ pub fn follow(
                 }
                 let next = if moved { Why::Moved } else { Why::Swept };
                 asked.insert(dir.clone(), Asked { ended, took, next, placed, trouble });
-                if let Ok((status, _)) = said
-                    && core.send(core::Command::GitStatus { dir, status, why }).is_err()
-                {
-                    return;
+                if let Ok((status, _)) = said {
+                    let stored = |answer| core::Command::GitStatus { dir, status, why, answer };
+                    match core::ask(&core, stored) {
+                        Some(Some(line)) => log::say(&line),
+                        Some(None) => {},
+                        None => return,
+                    }
                 }
                 if woken.try_recv().is_ok() {
                     continue 'sweep;
