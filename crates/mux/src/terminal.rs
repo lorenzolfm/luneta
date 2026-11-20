@@ -2,7 +2,6 @@ use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::sync::Arc;
@@ -25,6 +24,7 @@ use crate::front::Front;
 use crate::id::{ClientId, TerminalId};
 use crate::marks::Mark;
 use crate::mux::Mux;
+use crate::panics::{self, Panicked};
 use crate::process::{self, Group};
 use crate::pty::Pty;
 use crate::ran::{Job, Now, Shell};
@@ -250,10 +250,10 @@ pub fn start(
             looks: Looks::first(),
             told: Told::default(),
         };
-        let failed = match panic::catch_unwind(AssertUnwindSafe(|| thread.run())) {
+        let failed = match panics::contained(|| thread.run()) {
             Ok(Ok(())) => None,
             Ok(Err(error)) => Some(error.to_string()),
-            Err(_) => Some("it panicked".to_owned()),
+            Err(Panicked) => Some("it panicked".to_owned()),
         };
         if let Some(failed) = failed {
             eprintln!("luneta-mux: terminal {terminal} failed: {failed}");

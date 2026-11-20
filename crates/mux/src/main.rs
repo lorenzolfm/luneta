@@ -1,8 +1,9 @@
 use std::process::ExitCode;
 
-use luneta_mux::{folder, serve};
+use luneta_mux::{folder, panics, serve};
 
 fn main() -> ExitCode {
+    panics::abort_on_panic();
     if let Err(error) = rustix::process::setsid()
         && error != rustix::io::Errno::PERM
     {

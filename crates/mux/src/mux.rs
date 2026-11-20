@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{oneshot, watch};
@@ -9,6 +9,7 @@ use crate::api;
 use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
 use crate::folder::Unreached;
 use crate::id::{ClientId, TerminalId};
+use crate::panics::Shared;
 use crate::terminal::{self, Exit, Handle, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
 
@@ -19,7 +20,7 @@ pub const CLIENTS_MAX: usize = 256;
 const _: () = assert!(SHOWN_MAX <= TERMINALS_MAX);
 
 pub struct Mux {
-    model: Mutex<Model>,
+    model: Shared<Model>,
     listing: watch::Sender<Listed>,
 }
 
@@ -95,7 +96,7 @@ impl Mux {
     #[must_use]
     pub fn new() -> Arc<Mux> {
         let (listing, _) = watch::channel(Listed::Holds(api::Listing::default()));
-        Arc::new(Mux { model: Mutex::new(Model::Holds(Holding::default())), listing })
+        Arc::new(Mux { model: Shared::new(Model::Holds(Holding::default())), listing })
     }
 
     pub fn watched(&self) -> watch::Receiver<Listed> {
@@ -110,12 +111,8 @@ impl Mux {
         self.change(|model| model.end_unreached(unreached))
     }
 
-    fn lock(&self) -> MutexGuard<'_, Model> {
-        self.model.lock().expect("a thread panicked while it held the model")
-    }
-
     fn change<T>(&self, change: impl FnOnce(&mut Model) -> T) -> T {
-        let mut model = self.lock();
+        let mut model = self.model.lock();
         let changed = change(&mut model);
         let listed = match &mut *model {
             Model::Holds(holding) => {
@@ -173,7 +170,7 @@ impl Mux {
     }
 
     pub fn terminal(&self, key: TerminalKey) -> Result<Handle, Status> {
-        Ok(self.lock().terminal(key)?.handle.clone())
+        Ok(self.model.lock().terminal(key)?.handle.clone())
     }
 
     pub fn view(
@@ -203,7 +200,7 @@ impl Mux {
     }
 
     pub fn typed(&self, client: ClientId, terminal: TerminalKey) -> Result<Handle, Status> {
-        let model = self.lock();
+        let model = self.model.lock();
         let Model::Holds(holding) = &*model else {
             return Err(no_client(client));
         };
@@ -225,7 +222,7 @@ impl Mux {
     }
 
     pub fn listing(&self) -> api::Listing {
-        match &*self.lock() {
+        match &*self.model.lock() {
             Model::Holds(holding) => holding.listing(),
             Model::Ended(_) => api::Listing::default(),
         }
@@ -502,4 +499,13 @@ fn refuse_if_full(count: usize, max: usize, what: &str) -> Result<(), Status> {
         return Ok(());
     }
     Err(Status::resource_exhausted(format!("luneta-mux holds {max} {what} at most")))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::Mux;
+
+    pub(crate) fn panic_holding_the_model() {
+        Mux::new().change(|_| panic!("the model's assertion fails"));
+    }
 }
