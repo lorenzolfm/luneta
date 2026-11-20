@@ -11,6 +11,7 @@ use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
 use crate::mux::TerminalKey;
 use crate::watch::Troubles;
+use crate::Directory;
 
 const FILE_BYTES_MAX: u64 = 64 * 1024;
 
@@ -19,7 +20,7 @@ pub struct Agent {
     pub pid: u32,
     pub harness: Harness,
     pub session_id: Said,
-    pub cwd: Said,
+    pub cwd: Directory,
     pub status: Status,
     pub status_since: Option<SystemTime>,
     pub started_at: Option<SystemTime>,
@@ -217,6 +218,10 @@ pub fn file_text(path: &Path) -> io::Result<Vec<u8>> {
 
 pub fn nonempty<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Said, D::Error> {
     Said::new(String::deserialize(text)?).ok_or_else(|| serde::de::Error::custom("it is empty"))
+}
+
+pub fn absolute<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Directory, D::Error> {
+    Directory::parse(String::deserialize(text)?).map_err(serde::de::Error::custom)
 }
 
 pub fn terminal_or_trouble(

@@ -1956,7 +1956,7 @@ mod tests {
             pid,
             harness: Harness::ClaudeCode,
             session_id: Said::new("7c22-ab".to_owned()).unwrap(),
-            cwd: Said::new("/w".to_owned()).unwrap(),
+            cwd: Directory::parse("/w".to_owned()).unwrap(),
             status: Status::Idle,
             status_since: None,
             started_at: Some(SystemTime::UNIX_EPOCH),
