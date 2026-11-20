@@ -318,7 +318,7 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
 fn mine(stream: UnixStream) -> io::Result<(UnixStream, Option<Pid>)> {
     let peer = stream.peer_cred()?;
     if peer.uid() != rustix::process::getuid().as_raw() {
-        let refusal = "another user's process listens there";
+        let refusal = "another user's process listens on that socket";
         return Err(io::Error::new(ErrorKind::PermissionDenied, refusal));
     }
     Ok((stream, peer.pid().and_then(Pid::from_raw)))
@@ -358,7 +358,7 @@ fn doing(is: &api::ran::Is) -> Result<Doing, String> {
                 api::Front::Asking => Front::Asking,
                 api::Front::Interactive => Front::Interactive,
                 api::Front::Unspecified => {
-                    return Err("what its command does, in a word of a newer luneta-mux's".into());
+                    return Err("what its command does, in a word of a newer build's".into());
                 },
             };
             let since = time(going.since, "since")?;
@@ -647,8 +647,8 @@ impl Terminals {
                     Unchanged::Refused(_) => Err(Failure::Called(said)),
                     Unchanged::InDoubt(_) => {
                         let id = key.id;
-                        let said = format!("{said}, and terminal {id} may close still");
-                        Err(Failure::Called(Reply(said)))
+                        let called = Failure::Called(said);
+                        Err(Failure::Own(format!("{called}, and terminal {id} may close still")))
                     },
                 }
             },
@@ -800,7 +800,7 @@ impl Started {
 
     fn given_up(mut self, why: Failure) -> Failure {
         if let Err(error) = self.child.kill() {
-            log::say(&format!("the server given up on, as {why}, was not killed: {error}"));
+            log::say(&format!("lunetad gave up, as {why}, and did not kill it: {error}"));
         }
         self.reaped();
         why

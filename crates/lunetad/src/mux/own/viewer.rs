@@ -158,6 +158,13 @@ fn said_by_lunetad(status: &Status) -> String {
     }
 }
 
+fn heard_from(reach: &Reach, status: &Status) -> String {
+    match reach {
+        Reach::Mux { .. } => refused(status).to_string(),
+        Reach::On { .. } => said_by_lunetad(status),
+    }
+}
+
 fn untaken() -> String {
     format!("luneta-mux has yet to take the last {SAID_MAX} events sent its viewer")
 }
@@ -211,8 +218,8 @@ async fn stream(
     loop {
         let said = match next.next().await {
             Some(Next::Heard(Ok(said))) => said,
-            Some(Next::Heard(Err(status))) => return refused(&status).to_string(),
-            Some(Next::LetGo) | None => return "luneta-mux let go of luneta's viewer".to_owned(),
+            Some(Next::Heard(Err(status))) => return heard_from(reach, &status),
+            Some(Next::LetGo) | None => return "luneta-mux let go of it".to_owned(),
             Some(Next::GaveUp(why)) => return why,
             Some(Next::Said(saying)) => {
                 if let Err(TrySendError::Full(_)) = sending.try_send(saying.said()) {
