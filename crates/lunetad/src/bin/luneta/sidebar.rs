@@ -2436,9 +2436,9 @@ impl Sidebar {
         let mut counts = Counts::default();
         let mut rows = Vec::new();
         let mut homes = HashMap::new();
-        let mut best: Option<(usize, Fit)> = None;
-        let mut weigh = |at: usize, fit: Fit| {
-            if best.is_none_or(|(_, top)| fit > top) {
+        let mut best: Option<(Spot, Fit)> = None;
+        let mut weigh = |at: Spot, fit: Fit| {
+            if best.as_ref().is_none_or(|(_, top)| fit > *top) {
                 best = Some((at, fit));
             }
         };
@@ -2460,9 +2460,7 @@ impl Sidebar {
                 continue;
             }
             let machine_folded = finder.is_none() && self.folds.contains(Fold::Machine(&machine));
-            let machine_at = rows.len();
-            let heads = Heads::Nothing;
-            rows.push(Row::Machine { machine: machine.clone(), name, away, heads });
+            let mut machine_rows = Vec::new();
             let (mut machine_tally, mut machine_here) = (Tally::default(), false);
             let agents = heard.as_ref().map_or_default(Seen::seated);
             let statuses: HashMap<&str, &lunetad::api::GitStatus> = heard
@@ -2536,22 +2534,11 @@ impl Sidebar {
                     .as_ref()
                     .and_then(|finder| finder.session(listed.name.as_str()))
                     .unzip();
-                let project_at = rows.len();
-                rows.push(Row::Project {
-                    machine: machine.clone(),
-                    project: known.project.clone(),
-                    hits: name_hits.unwrap_or_default(),
-                    under: Under::Empty,
-                    here: project_here,
-                    colour,
-                    waiting: tally.waiting,
-                    dot: tally.dots > 0,
-                    busy: tally.busy > 0,
-                });
-                let mut lead: Option<(usize, Fit)> = None;
-                let mut found_at = |at: usize, fit: Fit, weigh: &mut dyn FnMut(usize, Fit)| {
-                    weigh(at, fit);
-                    if lead.is_none_or(|(_, top)| fit > top) {
+                let mut project_rows = Vec::new();
+                let mut lead: Option<(Spot, Fit)> = None;
+                let mut found_at = |at: Spot, fit: Fit, weigh: &mut dyn FnMut(Spot, Fit)| {
+                    weigh(at.clone(), fit);
+                    if lead.as_ref().is_none_or(|(_, top)| fit > *top) {
                         lead = Some((at, fit));
                     }
                 };
@@ -2598,6 +2585,9 @@ impl Sidebar {
                             };
                             let here = on && here_view.as_ref() == Some(&place);
                             let icon = program.and_then(icons::of);
+                            let found = found.map(|fit| {
+                                (Spot::on(&machine, Place::View(place.clone())), fit)
+                            });
                             let (machine, session) = (machine.clone(), place.session);
                             let (view, view_id) = (place.view, *view_id);
                             let row = move |bracket| Row::View {
@@ -2629,9 +2619,8 @@ impl Sidebar {
                         } else {
                             Under::Empty
                         };
-                        let worktree_at = rows.len();
                         let here = on && here_worktree.as_ref() == Some(&worktree.place);
-                        rows.push(Row::Worktree {
+                        project_rows.push(Row::Worktree {
                             machine: machine.clone(),
                             place: worktree.place.clone(),
                             named: Named::of(worktree.name.clone(), checkout),
@@ -2645,51 +2634,56 @@ impl Sidebar {
                             busy: tally.busy > 0,
                         });
                         if let Some(found) = worktree_found {
-                            found_at(worktree_at, found, &mut weigh);
+                            let at = Spot::on(&machine, Place::Worktree(worktree.place.clone()));
+                            found_at(at, found, &mut weigh);
                         }
                         let count = shown.len();
                         for (at, (row, found)) in shown.into_iter().enumerate() {
-                            if let Some(found) = found {
-                                found_at(rows.len(), found, &mut weigh);
+                            if let Some((at, found)) = found {
+                                found_at(at, found, &mut weigh);
                             }
                             let bracket = Bracket::of(at, count).map(|sits| (sits, colour));
-                            rows.push(row(bracket));
+                            project_rows.push(row(bracket));
                         }
                     }
                 }
-                if finder.is_some() && named.is_none() && rows.len() == project_at + 1 {
-                    rows.truncate(project_at);
+                if finder.is_some() && named.is_none() && project_rows.is_empty() {
                     continue;
                 }
                 if let Some(named) = named {
-                    weigh(lead.map_or(project_at, |(at, _)| at), named);
+                    let project_spot = || Spot::on(&machine, Place::Session(listed.clone()));
+                    weigh(lead.map_or_else(project_spot, |(at, _)| at), named);
                 }
-                let under = if rows.len() > project_at + 1 {
-                    Under::Rows
-                } else if folded {
-                    Under::Folded
+                let under = if project_rows.is_empty() {
+                    if folded { Under::Folded } else { Under::Empty }
                 } else {
-                    Under::Empty
+                    Under::Rows
                 };
-                if let Row::Project { under: was, .. } = &mut rows[project_at] {
-                    *was = under;
-                }
+                machine_rows.push(Row::Project {
+                    machine: machine.clone(),
+                    project: known.project.clone(),
+                    hits: name_hits.unwrap_or_default(),
+                    under,
+                    here: project_here,
+                    colour,
+                    waiting: tally.waiting,
+                    dot: tally.dots > 0,
+                    busy: tally.busy > 0,
+                });
+                machine_rows.append(&mut project_rows);
             }
-            if finder.is_some() && rows.len() == machine_at + 1 {
-                rows.truncate(machine_at);
+            if finder.is_some() && machine_rows.is_empty() {
                 continue;
             }
-            let Row::Machine { heads, .. } = &mut rows[machine_at] else {
-                unreachable!("row {machine_at} is this machine's");
-            };
-            assert_eq!(*heads, Heads::Nothing, "a machine's heads are set once");
-            *heads = Heads::Projects {
+            let heads = Heads::Projects {
                 folded: machine_folded,
                 here: machine_here,
                 waiting: machine_tally.waiting,
                 dot: machine_tally.dots > 0,
                 busy: machine_tally.busy > 0,
             };
+            rows.push(Row::Machine { machine, name, away, heads });
+            rows.append(&mut machine_rows);
         }
         if finder.is_none() {
             assert!(!rows.is_empty(), "this machine always has a row");
@@ -2721,7 +2715,8 @@ impl Sidebar {
             self.lit = landing.clone().map(Lit::On);
         }
         self.due = due;
-        self.settle(best.map(|(at, _)| at), seek);
+        let best = best.map(|(at, _)| self.row_of(&at).expect("a search's best match has a row"));
+        self.settle(best, seek);
     }
 
     fn row_for(&self, spot: &Spot) -> Option<Spot> {
@@ -11775,6 +11770,23 @@ mod tests {
             ]
         );
         assert_eq!(lines[HEADER + 4], "");
+    }
+
+    #[test]
+    fn a_search_lights_its_best_match_under_rows_found_on_machines_and_projects_above() {
+        let notes = session("quartz notes", 50, vec![view(1, 0, "/w/n", "vim")]);
+        let old = session("quartz old", 30, vec![view(1, 0, "/w/o", "top")]);
+        let views = vec![view(1, 0, "/w/x", "htop"), view(2, 0, "/w/x", "quartz")];
+        let lab = session("quartz lab", 40, [views, vec![view(3, 0, "/w/x", "quill")]].concat());
+        let mut sidebar = fresh();
+        sidebar.hear(machines_with(vec![notes], vec![old, lab]));
+        type_in(&mut sidebar, "/quartz");
+        let (rows, lit) = drawn_rows(&mut sidebar);
+        assert_eq!(rows.len(), 12, "{rows:?}");
+        assert!(rows[10].ends_with(" quartz") && rows[11].ends_with(" quill"), "{rows:?}");
+        assert_eq!(lit, [8, 10], "the view and its worktree: {rows:?}");
+        let quartz = Spot::on(&Machine::Remote(nixos()), view_of("quartz lab", 40, 2));
+        assert_eq!(sidebar.lit_spot(), Some(&quartz));
     }
 
     #[test]
