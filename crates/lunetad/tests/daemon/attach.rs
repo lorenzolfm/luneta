@@ -472,6 +472,7 @@ fn a_home_s_talk_goes_on_while_luneta_shows_a_worktree_and_esc_stops_only_its_tu
 n=$((n + 1))
 echo "$n" > "{at}/turns"
 echo "$@" > "{at}/args-$n"
+echo "${{LUNETA_TURN_BEFORE:-none}}" > "{at}/before-$n"
 cat > /dev/null
 echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
 case "$n" in
@@ -511,6 +512,9 @@ esac
     eventually("the next turn answers", || window.shows("Went on.").then_some(()));
     let args = fs::read_to_string(home.join("args-3")).unwrap();
     assert!(args.contains("--resume 7c22"), "it goes on in the same session: {args}");
+    let before = |turn: u32| fs::read_to_string(home.join(format!("before-{turn}"))).unwrap();
+    assert_ne!(before(2).trim(), "none", "a turn after one that answered has that one before it");
+    assert_eq!(before(3).trim(), "none", "and a turn after a stopped one has none, so prune plans again");
     assert!(!window.shows("it ended with no answer"), "the stopped turn's end is heard by none");
 }
 

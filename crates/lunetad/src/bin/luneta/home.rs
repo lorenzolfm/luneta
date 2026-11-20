@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lunetad::asks::Marked;
 use lunetad::projects::{Dir, ProjectId};
-use lunetad::work::{self, Item, Listed, Work};
+use lunetad::work::{self, Issues, Item, Listed, Work};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -35,6 +35,8 @@ const UNMARKED: &str = "◇";
 const ASKING: &str = "asking gh for the open issues and pull requests…";
 
 const UNHOSTED: &str = "no remote on GitHub, so nothing is listed here";
+
+const ISSUES_OFF: &str = "   the repository has its issues turned off on GitHub";
 
 const ASK_ROWS_MIN: u16 = 4;
 
@@ -203,7 +205,7 @@ impl Home {
             return Vec::new();
         };
         let pulls = work.pulls().iter().map(|pull| Item::Pull(pull.number));
-        pulls.chain(work.issues().iter().map(|issue| Item::Issue(issue.number))).collect()
+        pulls.chain(work.issues().open().iter().map(|issue| Item::Issue(issue.number))).collect()
     }
 
     pub fn key(&mut self, key: &KeyEvent, asks: &mut u64, events: &Sender<Event>) {
@@ -228,12 +230,12 @@ impl Home {
             return;
         };
         match ask.key(key) {
-            ask::Keyed::Nothing => {},
             ask::Keyed::Send => ask.send(self.marked.clone(), events),
-            ask::Keyed::Close if ask.turning() => {
+            ask::Keyed::Close | ask::Keyed::Interrupt if ask.turning() => {
                 *asks += 1;
                 ask.stop(*asks);
             },
+            ask::Keyed::Nothing | ask::Keyed::Interrupt => {},
             ask::Keyed::Close => {
                 *asks += 1;
                 *ask = Ask::homed(*asks, &self.on, dir, name);
@@ -366,7 +368,7 @@ impl Home {
             Shown::Listed { work, .. } => work,
         };
         let numbered = |number: NonZeroU32| format!("#{number}");
-        let numbers = work.issues().iter().map(|it| it.number).chain(work.pulls().iter().map(|it| it.number));
+        let numbers = work.issues().open().iter().map(|it| it.number).chain(work.pulls().iter().map(|it| it.number));
         let number_width = numbers.map(|number| numbered(number).len()).max().unwrap_or(0);
         let (mut lines, mut at) = (Vec::new(), None);
         let heading = |title: &str, count: usize, more: bool| {
@@ -388,11 +390,19 @@ impl Home {
             lines.push(row(width, (here, marked), (&numbered(pull.number), number_width), &pull.title, &side));
         }
         lines.push(Line::default());
-        lines.push(heading("Issues", work.issues().len(), work.more().issues));
-        if work.issues().is_empty() {
+        let issues = match work.issues() {
+            Issues::Open(issues) => issues,
+            Issues::Off => {
+                lines.push(Line::styled(" Issues", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
+                lines.push(Line::styled(ISSUES_OFF, dim));
+                return (lines, at);
+            },
+        };
+        lines.push(heading("Issues", issues.len(), work.more().issues));
+        if issues.is_empty() {
             lines.push(Line::styled("   no open issues", dim));
         }
-        for issue in work.issues() {
+        for issue in issues {
             let here = self.cursor == Some(Item::Issue(issue.number));
             at = at.or(here.then_some(lines.len()));
             let marked = self.marked.contains(&Item::Issue(issue.number));
@@ -517,7 +527,7 @@ mod tests {
             branch: (*branch).to_owned(),
             author: None,
         });
-        Listed::Work(Work::new(issues.collect(), pulls.collect(), More::default()).unwrap())
+        Listed::Work(Work::new(Issues::Open(issues.collect()), pulls.collect(), More::default()).unwrap())
     }
 
     fn listed() -> Listed {
@@ -662,11 +672,32 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_with_its_issues_off_lists_its_pull_requests_and_says_its_issues_are_off() {
+        let (mut home, now) = (home(), Instant::now());
+        let pull = Pull {
+            number: number(524),
+            title: "Say view, not pane".to_owned(),
+            draft: false,
+            branch: "issue-511".to_owned(),
+            author: None,
+        };
+        home.listed(Ok(Listed::Work(Work::new(Issues::Off, vec![pull], More::default()).unwrap())), now);
+        let lines = shown(&home, 60, 14);
+        assert_eq!(lines[2], " Pull requests · 1");
+        assert!(lines[3].starts_with(" › ◇ #524  Say view, not pane") && lines[3].ends_with("issue-511"), "{lines:?}");
+        assert_eq!(lines[5..7], [" Issues", ISSUES_OFF]);
+        press(&mut home, KeyCode::Tab);
+        assert_eq!(home.marked, Marked::new([], [number(524)]).unwrap());
+        press(&mut home, KeyCode::Down);
+        assert_eq!(home.cursor, Some(Item::Pull(number(524))), "no issue is listed to go down to");
+    }
+
+    #[test]
     fn a_full_list_says_there_are_more_and_a_project_off_github_says_it_lists_nothing() {
         let (mut home, now) = (home(), Instant::now());
         let issues = (1..=50).map(|at| Issue { number: number(at), title: "many".to_owned(), labels: vec![] });
         let more = More { issues: true, pulls: false };
-        let full = Work::new(issues.collect(), vec![], more).unwrap();
+        let full = Work::new(Issues::Open(issues.collect()), vec![], more).unwrap();
         home.listed(Ok(Listed::Work(full)), now);
         let lines = shown(&home, 60, 14);
         assert_eq!(lines[2], " Pull requests · 0");
@@ -726,12 +757,17 @@ mod tests {
     }
 
     #[test]
-    fn esc_starts_the_talk_over_and_forgets_the_marks() {
+    fn esc_starts_the_talk_over_and_forgets_the_marks_and_ctrl_c_with_no_turn_does_not() {
         let (mut home, now) = (home(), Instant::now());
         home.listed(Ok(listed()), now);
         press(&mut home, KeyCode::Tab);
         press(&mut home, KeyCode::Char('x'));
         let mut asks = 1;
+        let (events, _heard) = mpsc::channel();
+        home.key(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), &mut asks, &events);
+        assert_eq!((asks, home.marked.iter().count()), (1, 1), "Ctrl c stops a turn, and there is none");
+        assert!(home.ask_numbered(1).is_some());
+        assert!(shown(&home, 60, 14).contains(&"│ › x_                                                     │".to_owned()));
         start_over(&mut home, &mut asks);
         assert_eq!(asks, 2, "a new talk takes the next number");
         assert_eq!(home.marked, Marked::default());

@@ -136,8 +136,21 @@ if [ "$1 $2 $3 $4" = "issue list --state open" ] || [ "$1 $2 $3 $4" = "pr list -
         cat "$pulls/work-fails" >&2
         exit 1
     fi
+    if [ "$1" = issue ] && [ -f "$pulls/issues-off" ]; then
+        echo "the 'o/n' repository has disabled issues" >&2
+        exit 1
+    fi
     [ -f "$pulls/work-$1" ] && exec cat "$pulls/work-$1"
     echo '[]'
+    exit 0
+fi
+if [ "$*" = "repo view --json hasIssuesEnabled" ]; then
+    echo "$(pwd -P) $*" >> "$pulls/worked"
+    if [ -f "$pulls/issues-off" ]; then
+        echo '{"hasIssuesEnabled":false}'
+        exit 0
+    fi
+    echo '{"hasIssuesEnabled":true}'
     exit 0
 fi
 if [ "$1 $2" = "issue create" ]; then
@@ -312,6 +325,15 @@ exec cat "$said"
 
     pub fn slow_work(&self) {
         fs::write(self.pulls.join("work-slow"), "").unwrap();
+    }
+
+    pub fn issues_off(&self, off: bool) {
+        let file = self.pulls.join("issues-off");
+        if off {
+            fs::write(file, "").unwrap();
+        } else {
+            fs::remove_file(file).unwrap();
+        }
     }
 
     pub fn refuse_work(&self, why: &str) {

@@ -10,8 +10,10 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
+use crate::api::list_work_response::work::Issues as SaidIssues;
 use crate::api::list_work_response::{
-    Issue as SaidIssue, Listed as SaidListed, Pull as SaidPull, Work as SaidWork,
+    Issue as SaidIssue, Listed as SaidListed, OpenIssues as SaidOpenIssues, Pull as SaidPull,
+    Work as SaidWork,
 };
 use crate::api::ListWorkResponse;
 use crate::directory::Directory;
@@ -44,6 +46,8 @@ const PULLS: [&str; 4] = ["pr", "list", "--state", "open"];
 
 const PULL_FIELDS: &str = "number,title,isDraft,headRefName,author";
 
+const REPOSITORY: [&str; 4] = ["repo", "view", "--json", "hasIssuesEnabled"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Item {
     Issue(NonZeroU32),
@@ -75,15 +79,31 @@ pub struct Pull {
     pub author: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Issues {
+    Open(Vec<Issue>),
+    Off,
+}
+
+impl Issues {
+    #[must_use]
+    pub fn open(&self) -> &[Issue] {
+        match self {
+            Issues::Open(open) => open,
+            Issues::Off => &[],
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct More {
     pub issues: bool,
     pub pulls: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Work {
-    issues: Vec<Issue>,
+    issues: Issues,
     pulls: Vec<Pull>,
     more: More,
 }
@@ -113,10 +133,10 @@ impl Listed {
 }
 
 impl Work {
-    pub fn new(issues: Vec<Issue>, pulls: Vec<Pull>, more: More) -> Result<Work, String> {
-        full("issues", issues.len(), more.issues)?;
+    pub fn new(issues: Issues, pulls: Vec<Pull>, more: More) -> Result<Work, String> {
+        full("issues", issues.open().len(), more.issues)?;
         full("pull requests", pulls.len(), more.pulls)?;
-        for issue in &issues {
+        for issue in issues.open() {
             titled(issue.number, &issue.title)?;
             if issue.labels.len() > LABELS_MAX {
                 return Err(format!("#{} has more than {LABELS_MAX} labels", issue.number));
@@ -136,7 +156,7 @@ impl Work {
     }
 
     #[must_use]
-    pub fn issues(&self) -> &[Issue] {
+    pub fn issues(&self) -> &Issues {
         &self.issues
     }
 
@@ -152,11 +172,17 @@ impl Work {
 
     fn answer(&self) -> SaidWork {
         let Work { issues, pulls, more } = self;
-        let issues = issues.iter().map(|issue| SaidIssue {
-            number: issue.number.get(),
-            title: issue.title.clone(),
-            labels: issue.labels.clone(),
-        });
+        let issues = match issues {
+            Issues::Open(open) => {
+                let open = open.iter().map(|issue| SaidIssue {
+                    number: issue.number.get(),
+                    title: issue.title.clone(),
+                    labels: issue.labels.clone(),
+                });
+                SaidIssues::Open(SaidOpenIssues { issues: open.collect(), more: more.issues })
+            },
+            Issues::Off => SaidIssues::Off(()),
+        };
         let pulls = pulls.iter().map(|pull| SaidPull {
             number: pull.number.get(),
             title: pull.title.clone(),
@@ -164,24 +190,24 @@ impl Work {
             branch: pull.branch.clone(),
             author: pull.author.clone(),
         });
-        SaidWork {
-            issues: issues.collect(),
-            pulls: pulls.collect(),
-            more_issues: more.issues,
-            more_pulls: more.pulls,
-        }
+        SaidWork { issues: Some(issues), pulls: pulls.collect(), more_pulls: more.pulls }
     }
 
     fn of(said: SaidWork) -> Result<Work, String> {
-        let SaidWork { issues, pulls, more_issues, more_pulls } = said;
+        let SaidWork { issues, pulls, more_pulls } = said;
         let number = |number| NonZeroU32::new(number).ok_or("an issue or pull request of number 0");
-        let issues = issues.into_iter().map(|SaidIssue { number: at, title, labels }| {
-            Ok(Issue { number: number(at)?, title, labels })
-        });
+        let (issues, more_issues) = match issues.ok_or("issues: neither open nor off")? {
+            SaidIssues::Open(SaidOpenIssues { issues, more }) => {
+                let open = issues.into_iter().map(|SaidIssue { number: at, title, labels }| {
+                    Ok(Issue { number: number(at)?, title, labels })
+                });
+                (Issues::Open(open.collect::<Result<Vec<_>, &str>>()?), more)
+            },
+            SaidIssues::Off(()) => (Issues::Off, false),
+        };
         let pulls = pulls.into_iter().map(|SaidPull { number: at, title, draft, branch, author }| {
             Ok(Pull { number: number(at)?, title, draft, branch, author })
         });
-        let issues = issues.collect::<Result<Vec<_>, &str>>()?;
         let pulls = pulls.collect::<Result<Vec<_>, &str>>()?;
         Work::new(issues, pulls, More { issues: more_issues, pulls: more_pulls })
     }
@@ -341,6 +367,12 @@ struct Author {
     login: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Repository {
+    has_issues_enabled: bool,
+}
+
 fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
     if issues::remotes(&Directory::from(dir))?.is_empty() {
         return Ok(Listed::Unhosted);
@@ -350,15 +382,19 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
         .name("work-pulls".to_owned())
         .spawn(move || gh::<ListedPull>(&folder, &PULLS, PULL_FIELDS))
         .map_err(|error| format!("no thread to list pull requests in: {error}"))?;
-    let issues = gh::<ListedIssue>(dir.as_str(), &ISSUES, ISSUE_FIELDS);
-    let pulls = pulls.join().unwrap_or_else(|panic| panic::resume_unwind(panic));
-    let (issues, more_issues) = issues?;
-    let (pulls, more_pulls) = pulls?;
-    let issues = issues.into_iter().map(|ListedIssue { number, title, labels }| {
+    let asked = Instant::now();
+    let issue = |ListedIssue { number, title, labels }: ListedIssue| {
         let labels = labels.into_iter().map(|label| cut(label.name, NAME_BYTES_MAX));
         let labels = labels.filter(|label| !label.is_empty()).take(LABELS_MAX).collect();
         Issue { number, title: cut(title, TITLE_BYTES_MAX), labels }
-    });
+    };
+    let issues = match gh::<ListedIssue>(dir.as_str(), &ISSUES, ISSUE_FIELDS) {
+        Ok((issues, more)) => Ok((Issues::Open(issues.into_iter().map(issue).collect()), more)),
+        Err(unlisted) => issues_off(dir.as_str(), asked, unlisted).map(|()| (Issues::Off, false)),
+    };
+    let pulls = pulls.join().unwrap_or_else(|panic| panic::resume_unwind(panic));
+    let (issues, more_issues) = issues?;
+    let (pulls, more_pulls) = pulls?;
     let pulls = pulls.into_iter().map(|pull| {
         if pull.head_ref_name.is_empty() {
             return Err(format!("gh lists pull request #{} with no branch", pull.number));
@@ -374,7 +410,7 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
     });
     let pulls = pulls.collect::<Result<Vec<_>, String>>()?;
     let more = More { issues: more_issues, pulls: more_pulls };
-    let work = Work::new(issues.collect(), pulls, more);
+    let work = Work::new(issues, pulls, more);
     let work = work.expect("gh's lists are cut to their most, and their names to NAME_BYTES_MAX, none empty");
     Ok(Listed::Work(work))
 }
@@ -396,22 +432,40 @@ fn named(number: NonZeroU32, what: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn issues_off(dir: &str, asked: Instant, unlisted: String) -> Result<(), String> {
+    let left = PATIENCE.saturating_sub(asked.elapsed());
+    if left.is_zero() {
+        return Err(unlisted);
+    }
+    let said = answered_by_gh(dir, "repo view", &REPOSITORY, left).ok();
+    let read = said.and_then(|said| serde_json::from_slice::<Repository>(&said).ok());
+    match read {
+        Some(Repository { has_issues_enabled: false }) => Ok(()),
+        Some(Repository { has_issues_enabled: true }) | None => Err(unlisted),
+    }
+}
+
 fn gh<T: DeserializeOwned>(dir: &str, asked: &[&str], fields: &str) -> Result<(Vec<T>, bool), String> {
     let said = asked.join(" ");
     let limit = (LISTED_MAX + 1).to_string();
-    let mut listing = Command::new("gh");
-    listing.args(asked).args(["--limit", &limit, "--json", fields]).current_dir(dir);
-    git::local(&mut listing);
-    let ran = program::run(&mut listing, PATIENCE).map_err(|error| match error.kind() {
-        io::ErrorKind::NotFound => "gh is not on the PATH".to_owned(),
-        _ => format!("gh {said} could not be run: {error}"),
-    })?;
-    let answer = ran.answer().map_err(|why| format!("gh {said}: {why}"))?;
+    let listing = [asked, &["--limit", limit.as_str(), "--json", fields]].concat();
+    let answer = answered_by_gh(dir, &said, &listing, PATIENCE)?;
     let mut listed: Vec<T> = serde_json::from_slice(&answer)
         .map_err(|why| format!("gh {said} said what does not read: {why}"))?;
     let more = listed.len() > LISTED_MAX;
     listed.truncate(LISTED_MAX);
     Ok((listed, more))
+}
+
+fn answered_by_gh(dir: &str, said: &str, args: &[&str], within: Duration) -> Result<Vec<u8>, String> {
+    let mut gh = Command::new("gh");
+    gh.args(args).current_dir(dir);
+    git::local(&mut gh);
+    let ran = program::run(&mut gh, within).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => "gh is not on the PATH".to_owned(),
+        _ => format!("gh {said} could not be run: {error}"),
+    })?;
+    ran.answer().map_err(|why| format!("gh {said}: {why}"))
 }
 
 fn cut(mut text: String, most: usize) -> String {
@@ -438,28 +492,37 @@ mod tests {
             author: author.map(str::to_owned),
         };
         let labelled = Issue { labels: vec!["enhancement".to_owned()], ..issue(507, "Home") };
-        let work = Work::new(vec![labelled, issue(498, "Menu")], vec![pull(524, None), pull(526, Some("o"))], More::default());
+        let open = Issues::Open(vec![labelled, issue(498, "Menu")]);
+        let work = Work::new(open, vec![pull(524, None), pull(526, Some("o"))], More::default());
         let work = Listed::Work(work.unwrap());
         assert_eq!(Listed::of(work.answer()), Ok(work));
-        let many: Vec<Issue> = (1..=50).map(|at| issue(at, "many")).collect();
+        let many = Issues::Open((1..=50).map(|at| issue(at, "many")).collect());
         let more = More { issues: true, pulls: false };
         let full = Listed::Work(Work::new(many, vec![], more).unwrap());
         assert_eq!(Listed::of(full.answer()), Ok(full));
+        let off = Listed::Work(Work::new(Issues::Off, vec![pull(524, None)], More::default()).unwrap());
+        assert_eq!(Listed::of(off.answer()), Ok(off), "a repository with its issues off lists its pull requests");
         assert_eq!(Listed::of(Listed::Unhosted.answer()), Ok(Listed::Unhosted));
         let unsaid = Listed::of(ListWorkResponse { listed: None });
         assert_eq!(unsaid, Err("listed: neither work nor unhosted".to_owned()));
+        let said = SaidWork { issues: None, pulls: vec![], more_pulls: false };
+        assert_eq!(Work::of(said), Err("issues: neither open nor off".to_owned()));
     }
 
     #[test]
     fn work_holds_no_number_0_and_no_more_than_it_lists() {
-        let mut said = Work::new(vec![issue(1, "one")], vec![], More::default()).unwrap().answer();
-        said.issues[0].number = 0;
+        let open = Issues::Open(vec![issue(1, "one")]);
+        let mut said = Work::new(open, vec![], More::default()).unwrap().answer();
+        let Some(SaidIssues::Open(listed)) = &mut said.issues else {
+            panic!("open issues go over the wire open: {said:?}");
+        };
+        listed.issues[0].number = 0;
         assert_eq!(Work::of(said), Err("an issue or pull request of number 0".to_owned()));
-        let many = |most: u32| (1..=most).map(|at| issue(at, "many")).collect::<Vec<_>>();
+        let many = |most: u32| Issues::Open((1..=most).map(|at| issue(at, "many")).collect());
         assert_eq!(Work::new(many(51), vec![], More::default()), Err("at most 50 issues".to_owned()));
         let long = issue(7, &"é".repeat(TITLE_BYTES_MAX));
         let refused = Err("#7 has a title longer than 1024 bytes".to_owned());
-        assert_eq!(Work::new(vec![long], vec![], More::default()), refused);
+        assert_eq!(Work::new(Issues::Open(vec![long]), vec![], More::default()), refused);
         let more = More { issues: false, pulls: true };
         let refused = Err("0 pull requests are listed of more, where 50 would be".to_owned());
         assert_eq!(Work::new(many(50), vec![], more), refused, "more is said only past a full list");
@@ -467,6 +530,8 @@ mod tests {
         let refused = Err("49 issues are listed of more, where 50 would be".to_owned());
         assert_eq!(Work::new(many(49), vec![], more), refused);
         assert_eq!(Work::new(many(50), vec![], more).map(|work| work.more()), Ok(more));
+        let refused = Err("0 issues are listed of more, where 50 would be".to_owned());
+        assert_eq!(Work::new(Issues::Off, vec![], more), refused, "issues that are off have none more");
     }
 
     #[test]
@@ -486,14 +551,14 @@ mod tests {
         ];
         let work = |issues, pulls| Work::new(issues, pulls, More::default());
         for (pull, why) in refused {
-            assert_eq!(work(vec![], vec![pull]), Err(why.to_owned()));
+            assert_eq!(work(Issues::Off, vec![pull]), Err(why.to_owned()));
         }
-        let labelled = |label: &str| Issue { labels: vec![label.to_owned()], ..issue(4, "t") };
-        assert_eq!(work(vec![labelled("")], vec![]), Err("#4: a label is empty".to_owned()));
+        let labelled = |label: &str| Issues::Open(vec![Issue { labels: vec![label.to_owned()], ..issue(4, "t") }]);
+        assert_eq!(work(labelled(""), vec![]), Err("#4: a label is empty".to_owned()));
         let refused = Err("#4: a label is longer than 256 bytes".to_owned());
-        assert_eq!(work(vec![labelled(&long)], vec![]), refused);
+        assert_eq!(work(labelled(&long), vec![]), refused);
         let most = "b".repeat(NAME_BYTES_MAX);
-        assert!(work(vec![labelled(&most)], vec![pull(&most, Some(&most))]).is_ok());
+        assert!(work(labelled(&most), vec![pull(&most, Some(&most))]).is_ok());
     }
 
     fn dir(path: &str) -> Dir {
@@ -506,7 +571,8 @@ mod tests {
         assert_eq!(slots.seen(&luneta, now), Seen::Unlisted);
         slots.run(&luneta, now).unwrap();
         assert_eq!(slots.seen(&luneta, now), Seen::Running);
-        let work = Ok(Listed::Work(Work::new(vec![issue(1, "one")], vec![], More::default()).unwrap()));
+        let work = Work::new(Issues::Open(vec![issue(1, "one")]), vec![], More::default());
+        let work = Ok(Listed::Work(work.unwrap()));
         slots.ran(&luneta, Some((now, work.clone())));
         assert_eq!(slots.seen(&luneta, now + FRESH.saturating_sub(Duration::from_millis(1))), Seen::Fresh(&work));
         assert_eq!(slots.seen(&luneta, now + FRESH), Seen::Unlisted);

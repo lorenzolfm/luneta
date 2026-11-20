@@ -1271,7 +1271,7 @@ impl App {
                 match ask.key(key) {
                     Keyed::Nothing => {},
                     Keyed::Send => self.converse(),
-                    Keyed::Close => self.give(Focus::on(self.focus.side)),
+                    Keyed::Close | Keyed::Interrupt => self.give(Focus::on(self.focus.side)),
                 }
                 return;
             },

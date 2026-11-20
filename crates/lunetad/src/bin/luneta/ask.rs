@@ -30,6 +30,7 @@ pub enum Keyed {
     Nothing,
     Send,
     Close,
+    Interrupt,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -135,7 +136,7 @@ impl Ask {
         let control = key.modifiers == KeyModifiers::CONTROL;
         match key.code {
             KeyCode::Esc if bare => return Keyed::Close,
-            KeyCode::Char('c') if control => return Keyed::Close,
+            KeyCode::Char('c') if control => return Keyed::Interrupt,
             _ if self.turn.is_some() => return Keyed::Nothing,
             KeyCode::Enter if bare && !self.typed.trim().is_empty() => return Keyed::Send,
             KeyCode::Backspace if bare => {
@@ -246,6 +247,7 @@ impl Ask {
         assert!(number > self.number, "a stopped talk is numbered past its turn's");
         if self.turn.take().is_some() {
             self.talk.push(Said::Wrong(STOPPED.to_owned()));
+            self.turned = None;
         }
         self.number = number;
     }
@@ -522,7 +524,7 @@ mod tests {
         assert!(ask.turn.is_none());
         assert_eq!(ask.key(&key(KeyCode::Esc)), Keyed::Close);
         let interrupt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(ask.key(&interrupt), Keyed::Close);
+        assert_eq!(ask.key(&interrupt), Keyed::Interrupt);
     }
 
     #[test]
@@ -593,10 +595,10 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_turn_ends_and_its_talk_goes_on_under_a_new_number() {
+    fn a_stopped_turn_ends_its_talk_goes_on_under_a_new_number_and_it_is_no_turn_before() {
         let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
         ask.talk.push(Said::You("tackle these".to_owned()));
-        ask.turn = Some(at_a_turn());
+        (ask.turn, ask.turned) = (Some(at_a_turn()), Some(7));
         let session = SessionId::parse("7c22").unwrap();
         ask.heard(Heard::Step(Step::Session(session.clone())));
         ask.stop(2);
@@ -604,6 +606,7 @@ mod tests {
         assert_eq!((ask.number(), ask.session.clone()), (2, Some(session)), "the next turn resumes it");
         let stopped = [Said::You("tackle these".to_owned()), Said::Wrong(STOPPED.to_owned())];
         assert_eq!(ask.talk, stopped);
+        assert_eq!(ask.turned, None, "the next turn has none before it, so no plan the user never read is agreed to");
         ask.stop(3);
         assert_eq!((ask.number(), ask.talk.len()), (3, 2), "a stop with no turn says nothing");
     }

@@ -815,10 +815,17 @@ message ListWorkResponse {
   }
 
   message Work {
-    repeated Issue issues = 1;
-    repeated Pull pulls = 2;
-    bool more_issues = 3;
+    oneof issues {
+      OpenIssues open = 1;
+      google.protobuf.Empty off = 2;
+    }
+    repeated Pull pulls = 3;
     bool more_pulls = 4;
+  }
+
+  message OpenIssues {
+    repeated Issue issues = 1;
+    bool more = 2;
   }
 
   message Issue {
