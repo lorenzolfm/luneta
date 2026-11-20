@@ -1190,6 +1190,8 @@ impl Picker {
                 self.act(action, run)
             },
             Key::Pasted { target, work, pull } => {
+                let parsed = Work::parse(&self.term, target.cwd().cloned());
+                assert_eq!(parsed.as_ref(), Some(work), "pasted rows are rebuilt with the term");
                 let (target, work, pull) = (Target::clone(target), work.clone(), *pull);
                 Picked::Pull { target, work, pull, origin: self.palette.origin }
             },

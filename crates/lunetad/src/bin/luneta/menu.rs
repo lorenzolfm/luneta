@@ -234,23 +234,23 @@ impl Pull {
         }
     }
 
-    fn pressed(key: &KeyEvent, asks: Asks) -> Option<Pull> {
+    fn pressed(key: &KeyEvent, work: &Work) -> Option<Pull> {
         let KeyCode::Char(c) = key.code else {
             return None;
         };
         if !bare(key) {
             return None;
         }
-        Pull::ALL.into_iter().find(|pull| pull.key(asks) == c)
+        let mut offered = Pull::offered(work).into_iter();
+        offered.find(|(_, action)| pasted_key(*action) == c).map(|(pull, _)| pull)
     }
+}
 
-    fn key(self, asks: Asks) -> char {
-        let action = self.action(asks);
-        let Key::Pasted(key) = action.key() else {
-            unreachable!("{action:?} answers a pasted link, and so is keyed as one");
-        };
-        key
-    }
+fn pasted_key(action: Action) -> char {
+    let Key::Pasted(key) = action.key() else {
+        unreachable!("{action:?} answers a pasted link, and so is keyed as one");
+    };
+    key
 }
 
 enum Entry {
@@ -1338,7 +1338,7 @@ impl Menu {
         Menu { number, target, stage: Stage::Pull { work, agent, step } }
     }
 
-    pub fn chose(number: u64, target: Target, work: Work, agent: Harness, pull: Pull) -> Did {
+    pub fn start_pull(number: u64, target: Target, work: Work, agent: Harness, pull: Pull) -> Did {
         let wants = Wants::Pull(work.clone(), pull.wanted(Asks::of(&work)));
         let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Pulling(pull)) };
         Did::Stays(Menu { number, target, stage }, wants)
@@ -1611,9 +1611,8 @@ impl Menu {
                 stays(Stage::Pull { work, agent, step }, Wants::Keep(agent))
             },
             Stage::Pull { work, agent, step: step @ Step::Choosing { .. } } => {
-                let asks = Asks::of(&work);
-                match Pull::pressed(key, asks) {
-                    Some(pull) => Menu::chose(number, target.clone(), work, agent, pull),
+                match Pull::pressed(key, &work) {
+                    Some(pull) => Menu::start_pull(number, target.clone(), work, agent, pull),
                     None => stays(Stage::Pull { work, agent, step }, Wants::Nothing),
                 }
             },
@@ -1956,11 +1955,9 @@ impl Menu {
             Stage::Pull { work, agent, step } => {
                 let body = match step {
                     Step::Choosing { wrong } => {
-                        let asks = Asks::of(work);
-                        let entry = |pull: Pull| {
-                            Entry::Act { key: pull.key(asks), action: pull.action(asks) }
-                        };
-                        let entries = Pull::ALL.map(entry);
+                        let entry =
+                            |(_, action)| Entry::Act { key: pasted_key(action), action };
+                        let entries = Pull::offered(work).map(entry);
                         spots = entry_spots(&entries, width).map(Choice::Key);
                         let mut body: Vec<_> =
                             entries.iter().map(|entry| entry_line(entry, inner)).collect();

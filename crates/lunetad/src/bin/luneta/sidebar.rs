@@ -3600,7 +3600,7 @@ impl Sidebar {
         let Some(work) = Work::parse(text, from) else {
             return;
         };
-        if self.on_its_way(&work) {
+        if self.notice_on_its_way(&work) {
             return;
         }
         let Some(target) = target else {
@@ -3627,19 +3627,19 @@ impl Sidebar {
         pull: Pull,
         origin: Origin,
     ) -> Asked {
-        if self.on_its_way(&work) {
+        if self.notice_on_its_way(&work) {
             return Asked::Nothing;
         }
         self.end_mode();
         self.menus += 1;
-        let did = Menu::chose(self.menus, target, work, self.agent.harness(), pull);
+        let did = Menu::start_pull(self.menus, target, work, self.agent.harness(), pull);
         if origin == Origin::Views {
             self.let_go();
         }
         self.menu_did(Placed::of(origin), did)
     }
 
-    fn on_its_way(&mut self, work: &Work) -> bool {
+    fn notice_on_its_way(&mut self, work: &Work) -> bool {
         let making = self.open().into_iter().chain(self.working.values()).filter_map(Menu::making);
         let on_its_way = making.into_iter().any(|making| making == work);
         self.notice = on_its_way.then(|| format!("{} is on its way", work.tab()));
