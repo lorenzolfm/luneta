@@ -2461,7 +2461,7 @@ impl Sidebar {
             }
             let machine_folded = finder.is_none() && self.folds.contains(Fold::Machine(&machine));
             let machine_at = rows.len();
-            let mut below_machine = Vec::new();
+            let mut machine_rows = Vec::new();
             let (mut machine_tally, mut machine_here) = (Tally::default(), false);
             let agents = heard.as_ref().map_or_default(Seen::seated);
             let statuses: HashMap<&str, &lunetad::api::GitStatus> = heard
@@ -2535,8 +2535,8 @@ impl Sidebar {
                     .as_ref()
                     .and_then(|finder| finder.session(listed.name.as_str()))
                     .unzip();
-                let project_at = machine_at + 1 + below_machine.len();
-                let mut below = Vec::new();
+                let project_at = machine_at + 1 + machine_rows.len();
+                let mut project_rows = Vec::new();
                 let mut lead: Option<(usize, Fit)> = None;
                 let mut found_at = |at: usize, fit: Fit, weigh: &mut dyn FnMut(usize, Fit)| {
                     weigh(at, fit);
@@ -2618,9 +2618,9 @@ impl Sidebar {
                         } else {
                             Under::Empty
                         };
-                        let worktree_at = project_at + 1 + below.len();
+                        let worktree_at = project_at + 1 + project_rows.len();
                         let here = on && here_worktree.as_ref() == Some(&worktree.place);
-                        below.push(Row::Worktree {
+                        project_rows.push(Row::Worktree {
                             machine: machine.clone(),
                             place: worktree.place.clone(),
                             named: Named::of(worktree.name.clone(), checkout),
@@ -2639,27 +2639,27 @@ impl Sidebar {
                         let count = shown.len();
                         for (at, (row, found)) in shown.into_iter().enumerate() {
                             if let Some(found) = found {
-                                found_at(project_at + 1 + below.len(), found, &mut weigh);
+                                found_at(project_at + 1 + project_rows.len(), found, &mut weigh);
                             }
                             let bracket = Bracket::of(at, count).map(|sits| (sits, colour));
-                            below.push(row(bracket));
+                            project_rows.push(row(bracket));
                         }
                     }
                 }
-                if finder.is_some() && named.is_none() && below.is_empty() {
+                if finder.is_some() && named.is_none() && project_rows.is_empty() {
                     continue;
                 }
                 if let Some(named) = named {
                     weigh(lead.map_or(project_at, |(at, _)| at), named);
                 }
-                let under = if !below.is_empty() {
-                    Under::Rows
-                } else if folded {
-                    Under::Folded
+                let under = if project_rows.is_empty() {
+                    if folded { Under::Folded } else { Under::Empty }
                 } else {
-                    Under::Empty
+                    Under::Rows
                 };
-                below_machine.push(Row::Project {
+                let rows_above = machine_at + 1 + machine_rows.len();
+                assert_eq!(rows_above, project_at, "a project's rows count from its own row");
+                machine_rows.push(Row::Project {
                     machine: machine.clone(),
                     project: known.project.clone(),
                     hits: name_hits.unwrap_or_default(),
@@ -2670,9 +2670,9 @@ impl Sidebar {
                     dot: tally.dots > 0,
                     busy: tally.busy > 0,
                 });
-                below_machine.append(&mut below);
+                machine_rows.append(&mut project_rows);
             }
-            if finder.is_some() && below_machine.is_empty() {
+            if finder.is_some() && machine_rows.is_empty() {
                 continue;
             }
             let heads = Heads::Projects {
@@ -2684,7 +2684,7 @@ impl Sidebar {
             };
             assert_eq!(rows.len(), machine_at, "a machine's rows count from its own row");
             rows.push(Row::Machine { machine, name, away, heads });
-            rows.append(&mut below_machine);
+            rows.append(&mut machine_rows);
         }
         if finder.is_none() {
             assert!(!rows.is_empty(), "this machine always has a row");
