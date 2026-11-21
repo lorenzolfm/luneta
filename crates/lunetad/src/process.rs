@@ -116,10 +116,10 @@ mod tests {
         }
     }
 
-    fn heard_within(pid: u32, limit: Duration) -> bool {
+    fn hears_it_ended(pid: u32, what: &str) {
         let (ended, heard) = mpsc::channel();
         thread::spawn(move || ended.send(super::ends(pid)));
-        heard.recv_timeout(limit).map(|said| said.unwrap()).is_ok()
+        luneta_waits::heard(what, &heard).unwrap();
     }
 
     #[test]
@@ -128,17 +128,17 @@ mod tests {
         let pid = child.id();
         let (ended, heard) = mpsc::channel();
         thread::spawn(move || ended.send(super::ends(pid)));
-        assert!(heard.recv_timeout(Duration::from_millis(100)).is_err(), "it still runs");
+        luneta_waits::never("its end is heard while it runs", || heard.try_recv().ok());
         assert!(super::start(pid).is_some());
 
         child.kill().unwrap();
-        heard.recv_timeout(Duration::from_secs(5)).expect("it was killed").unwrap();
+        luneta_waits::heard("it was killed", &heard).unwrap();
         assert_eq!(super::start(pid), None);
-        assert!(heard_within(pid, Duration::from_secs(5)), "ended, and not waited for");
+        hears_it_ended(pid, "ended, and not waited for");
 
         child.wait().unwrap();
         assert_eq!(super::start(pid), None);
-        assert!(heard_within(pid, Duration::from_secs(5)), "ended, and waited for");
+        hears_it_ended(pid, "ended, and waited for");
     }
 
     #[test]

@@ -509,7 +509,7 @@ fn failed(stderr: &[u8], status: ExitStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use serde_json::json;
 
@@ -799,9 +799,12 @@ mod tests {
     fn a_turn_given_up_kills_claude() {
         let mut sh = Command::new("sh");
         sh.args(["-c", "sleep 10"]);
-        let started = Instant::now();
-        let ended = talk(sh, "", &|| started.elapsed() < Duration::from_millis(50), &|_| {});
-        assert_eq!(ended, None);
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let looks = Cell::new(0_u32);
+        let wanted = || {
+            looks.set(looks.get() + 1);
+            looks.get() < 3
+        };
+        assert_eq!(talk(sh, "", &wanted, &|_| {}), None);
+        assert_eq!(looks.get(), 3, "it is given up at the first look that does not want it");
     }
 }

@@ -886,6 +886,7 @@ mod tests {
     use std::io::Write as _;
     use std::time::Duration;
 
+    use luneta_waits::PATIENCE;
     use tonic::transport::Channel;
 
     use super::*;
@@ -1066,24 +1067,24 @@ mod tests {
         let bridges = Arc::new(Bridges::default());
         let destination: Destination = "nixos".parse().unwrap();
         let mut watch = Bridged::new(Arc::clone(&bridges), destination.clone(), 1);
-        let woke = |watch: &mut Bridged, within: Duration| {
-            let waits = tokio::time::timeout(within, watch.waits(Duration::from_secs(60)));
-            runtime.block_on(waits).is_ok()
+        let woke = |watch: &mut Bridged| {
+            let waits = watch.waits(PATIENCE.saturating_mul(2));
+            runtime.block_on(luneta_waits::awaited("the watch wakes", waits));
         };
 
         assert!(runtime.block_on(bridges.to(&destination)).is_none());
         assert!(runtime.block_on(bridges.to(&destination)).is_none());
-        assert!(woke(&mut watch, Duration::from_secs(10)));
-        assert!(!woke(&mut watch, Duration::from_millis(100)));
+        woke(&mut watch);
+        assert!(watch.woken.is_empty(), "two questions wake it once");
 
         assert!(runtime.block_on(bridges.to(&destination)).is_none());
         watch.awake();
-        assert!(!woke(&mut watch, Duration::from_millis(100)));
+        assert!(watch.woken.is_empty(), "a watch awake takes the wake it was given");
 
         let daemon = unreached_daemon();
         watch.agree(&answered(), Some(&daemon));
         assert!(runtime.block_on(bridges.to(&destination)).is_some());
-        assert!(!woke(&mut watch, Duration::from_millis(100)));
+        assert!(watch.woken.is_empty(), "a question for a machine reached wakes no watch");
     }
 
     #[test]

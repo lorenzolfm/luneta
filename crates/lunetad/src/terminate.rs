@@ -137,7 +137,8 @@ mod tests {
     use std::ffi::OsString;
     use std::io::{BufRead as _, BufReader};
     use std::process::{Child, Command, Stdio};
-    use std::time::Instant;
+
+    use luneta_waits::Began;
 
     use super::*;
 
@@ -154,10 +155,10 @@ mod tests {
         let mut held = String::new();
         BufReader::new(holds.stdout.take().unwrap()).read_line(&mut held).unwrap();
         assert_eq!(held, "held\n");
-        let started = Instant::now();
+        let started = Began::now();
         let (ends_id, holds_id) = (id_of(&ends), id_of(&holds));
         assert_eq!(end(&[ends_id.clone(), holds_id]), []);
-        assert!(started.elapsed() >= GRACE, "the one that holds out has its grace");
+        started.lasted().at_least(GRACE, "the one that holds out has its grace");
         assert!(ends.wait().unwrap().code().is_none());
         assert!(holds.wait().unwrap().code().is_none());
         assert_eq!(end(&[ends_id]), [], "one that has ended is left alone");
