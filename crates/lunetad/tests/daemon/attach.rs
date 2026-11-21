@@ -386,6 +386,25 @@ fn an_edge_answered_after_the_keys_went_and_came_back_leaves_them_with_the_view(
 }
 
 #[test]
+fn an_edge_answered_after_a_click_on_another_view_leaves_the_keys_with_the_view() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    window.send(SPLIT);
+    let split = eventually("two frames are drawn beside each other", || seam(&window));
+    window.send(LEFT);
+    eventually("the cursor is in the left view", || (window.cursor().1 < split).then_some(()));
+    let right = (5, split + 5);
+    let click = [mouse(0, right, 'M'), mouse(0, right, 'm')].concat();
+    window.send(&format!("{LEFT}{click}{TYPED}"));
+    eventually("the shell has the keys", || window.shows(PRINTED).then_some(()));
+    luneta_waits::never("the edge of a step asked before the click gives the sidebar the keys", || {
+        (!window.cursor_shown()).then_some(())
+    });
+}
+
+#[test]
 fn ctrl_h_on_a_project_s_home_gives_the_sidebar_the_keys() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");

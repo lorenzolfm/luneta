@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU64};
 use std::path::Path;
 use std::process;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -126,7 +126,7 @@ pub enum Asked {
     Open { beside: Beside, opens: Opens },
     Welcome,
     Close(ViewId),
-    Focus { to: Focus, step: u64 },
+    Focus(Focus),
     Resize { sides: Sides, growth: layout::Growth },
     Move(Step),
     Fullscreen,
@@ -143,12 +143,13 @@ pub enum Beside {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Done {
     Quiet,
-    Edged { direction: Direction, step: u64 },
+    Edged { direction: Direction, step: NonZeroU64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
-    Step(Step),
+    Toward { direction: Direction, step: NonZeroU64 },
+    Order(Order),
     View(ViewId),
 }
 
@@ -185,16 +186,17 @@ impl Asked {
             Event::Close(view) => Asked::Close(id("close", view).map(ViewId::new)?),
             Event::Focus(show_request::Focus { to, step }) => {
                 use show_request::focus::To;
-                let to = match to.ok_or("focus: it says no terminal to go to")? {
+                Asked::Focus(match to.ok_or("focus: it says no terminal to go to")? {
                     To::Direction(direction) => {
-                        Focus::Step(Step::Direction(direction_of(direction)?))
+                        let direction = direction_of(direction)?;
+                        let step = NonZeroU64::new(step).ok_or("focus: a step numbered 0")?;
+                        Focus::Toward { direction, step }
                     },
-                    To::Order(order) => Focus::Step(Step::Order(order_of(order)?)),
+                    To::Order(order) => Focus::Order(order_of(order)?),
                     To::View(view) => {
                         Focus::View(id("focus", view).map(ViewId::new)?)
                     },
-                };
-                Asked::Focus { to, step }
+                })
             },
             Event::Resize(show_request::Resize { sides, growth }) => {
                 use show_request::resize;
@@ -486,6 +488,7 @@ impl Layouts {
                     Ok(Done::Edged { direction, step }) => {
                         let worktree = self.clients[&client].worktree.get();
                         let direction = direction_said(direction).into();
+                        let step = step.get();
                         let edged = show_response::Edged { worktree, direction, step };
                         show_response::Event::Edged(edged)
                     },
@@ -939,13 +942,13 @@ impl Layouts {
                 }
                 self.close(view).map_err(Failed::said)?;
             },
-            Asked::Focus { to: Focus::View(view), step: _ } => {
+            Asked::Focus(Focus::View(view)) => {
                 if !self.layout(worktree)?.holds(view) {
                     return Err(format!("the layout holds no view {view}"));
                 }
                 self.focus(client, view)?;
             },
-            Asked::Focus { to: Focus::Step(Step::Direction(direction)), step } => {
+            Asked::Focus(Focus::Toward { direction, step }) => {
                 let tree = self.layout(worktree)?.tree();
                 let beside = tree.zip(focus).and_then(|(tree, from)| {
                     tree.neighbour(from, direction, size)
@@ -955,9 +958,9 @@ impl Layouts {
                 };
                 self.focus(client, to)?;
             },
-            Asked::Focus { to: Focus::Step(order @ Step::Order(_)), step: _ } => {
+            Asked::Focus(Focus::Order(order)) => {
                 let from = focused()?;
-                let to = self.stepped(worktree, from, order, size)?;
+                let to = self.stepped(worktree, from, Step::Order(order), size)?;
                 self.focus(client, to)?;
             },
             Asked::Resize { sides, growth } => {
@@ -2193,11 +2196,11 @@ mod tests {
         use show_request::{focus, open, resize, Event};
         let terminal = Event::Focus(show_request::Focus { to: Some(focus::To::View(3)), step: 0 });
         let three = ViewId::of(3).unwrap();
-        let asked = Asked::Focus { to: Focus::View(three), step: 0 };
-        assert_eq!(Asked::of_api(terminal), Ok(asked));
-        let left = Some(focus::To::Direction(show_request::Direction::Left.into()));
-        let stepped = Event::Focus(show_request::Focus { to: left, step: 7 });
-        let asked = Asked::Focus { to: Focus::Step(Step::Direction(Direction::Left)), step: 7 };
+        assert_eq!(Asked::of_api(terminal), Ok(Asked::Focus(Focus::View(three))));
+        let towards_left = || Some(focus::To::Direction(show_request::Direction::Left.into()));
+        let stepped = Event::Focus(show_request::Focus { to: towards_left(), step: 7 });
+        let step = NonZeroU64::new(7).unwrap();
+        let asked = Asked::Focus(Focus::Toward { direction: Direction::Left, step });
         assert_eq!(Asked::of_api(stepped), Ok(asked), "a step keeps its number");
         let right = show_request::Towards::Right.into();
         let shell = || Some(Opens::Shell.to_api());
@@ -2229,6 +2232,7 @@ mod tests {
         let refused = [
             Event::Go(0),
             Event::Focus(show_request::Focus { to: None, step: 0 }),
+            Event::Focus(show_request::Focus { to: towards_left(), step: 0 }),
             Event::Resize(show_request::Resize { sides: None, growth: grow }),
             Event::Resize(show_request::Resize { sides: Some(one_side(0)), growth: grow }),
             Event::Resize(show_request::Resize { sides: every, growth: 0 }),

@@ -65,10 +65,16 @@ enum Moused {
     Sent(TerminalKey, api::Mouse),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Across {
+    Before,
+    After,
+}
+
 pub enum Heeded {
     Quiet,
     Followed,
-    Edged { direction: Direction, step: NonZeroU64 },
+    Edged(Across),
     Sent(WorktreeId),
     Note(String),
     Emptied,
@@ -258,8 +264,15 @@ impl Layout {
         Some((inner, key, self.screens.get(&key)?))
     }
 
-    fn edged(&self, worktree: WorktreeId, direction: Direction) -> Option<Direction> {
-        (worktree == self.worktree).then_some(direction)
+    fn edged(&self, worktree: WorktreeId, direction: Direction) -> Option<Across> {
+        if worktree != self.worktree {
+            return None;
+        }
+        match direction {
+            Direction::Left => Some(Across::Before),
+            Direction::Right => Some(Across::After),
+            Direction::Up | Direction::Down => None,
+        }
     }
 
     fn named_tabs(&self) -> impl Iterator<Item = (WorktreeId, &str)> {
@@ -491,6 +504,8 @@ pub struct Viewed {
     watchers: u64,
     watched_at: Option<Instant>,
     opened: BTreeSet<WorktreeId>,
+    steps: u64,
+    awaited: Option<NonZeroU64>,
     events: Sender<Event>,
 }
 
@@ -521,6 +536,8 @@ impl Viewed {
             watchers: 0,
             watched_at: None,
             opened: BTreeSet::new(),
+            steps: 0,
+            awaited: None,
             events: events.clone(),
         };
         viewed.shown();
@@ -595,9 +612,10 @@ impl Viewed {
                 }
             },
             Heard::Edged { worktree, direction, step } => {
+                let awaited = self.awaited.take_if(|awaited| *awaited == step).is_some();
                 match self.layout.edged(worktree, direction) {
-                    Some(direction) => Heeded::Edged { direction, step },
-                    None => Heeded::Quiet,
+                    Some(across) if awaited => Heeded::Edged(across),
+                    Some(_) | None => Heeded::Quiet,
                 }
             },
             Heard::Sent(worktree) => Heeded::Sent(worktree),
@@ -708,10 +726,24 @@ impl Viewed {
         }
     }
 
-    pub fn ask(&self, asked: Asked) {
+    pub fn ask(&mut self, asked: Asked) {
+        if matches!(asked, Asked::Focus(_) | Asked::Go(_)) {
+            self.awaited = None;
+        }
         if let Some(show) = &self.show {
             show.ask(asked);
         }
+    }
+
+    pub fn step(&mut self, direction: Direction) {
+        self.steps += 1;
+        let step = NonZeroU64::new(self.steps).expect("steps count up from 1");
+        self.ask(Asked::Step { direction, step });
+        self.awaited = Some(step);
+    }
+
+    pub fn forget_step(&mut self) {
+        self.awaited = None;
     }
 
     pub fn go(&mut self, on: &Machine, worktree: WorktreeId) {
@@ -983,10 +1015,10 @@ mod tests {
     #[test]
     fn an_edge_is_heeded_only_from_the_worktree_the_view_is_on() {
         let mut layout = split_layout();
-        assert_eq!(layout.edged(worktree(1), Direction::Right), Some(Direction::Right));
+        assert_eq!(layout.edged(worktree(1), Direction::Right), Some(Across::After));
         layout.go(worktree(2));
         assert_eq!(layout.edged(worktree(1), Direction::Right), None, "an edge of the one left");
-        assert_eq!(layout.edged(worktree(2), Direction::Left), Some(Direction::Left));
+        assert_eq!(layout.edged(worktree(2), Direction::Left), Some(Across::Before));
     }
 
     #[test]

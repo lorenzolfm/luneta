@@ -3,7 +3,7 @@ use std::env;
 use std::io::{self, Write as _};
 use std::iter;
 use std::mem;
-use std::num::{NonZeroU16, NonZeroU64};
+use std::num::NonZeroU16;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -77,7 +77,7 @@ use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::projected::{self, Projected};
-use crate::viewed::{self, Heeded, Viewed};
+use crate::viewed::{self, Across, Heeded, Viewed};
 use crate::worktrees::{self, Arrival, Landing};
 use crate::width::Width;
 
@@ -437,8 +437,6 @@ struct App {
     colours: Colours,
     briefs: u64,
     asks: u64,
-    steps: u64,
-    step_awaited: Option<NonZeroU64>,
     issues: u64,
     unfiled: issue::Kept,
     pickers: u64,
@@ -724,8 +722,6 @@ fn run_in(
         colours,
         briefs: 0,
         asks: 0,
-        steps: 0,
-        step_awaited: None,
         issues: 0,
         unfiled: issue::Kept::default(),
         pickers: 0,
@@ -1459,8 +1455,8 @@ impl App {
         }
     }
 
-    fn ask_right(&self, asked: lunetad::Asked) {
-        if let Some(right) = self.viewed() {
+    fn ask_right(&mut self, asked: lunetad::Asked) {
+        if let Some(right) = self.viewed_mut() {
             right.ask(asked);
         }
     }
@@ -1784,9 +1780,6 @@ impl App {
     fn session_mouse(&mut self, mouse: MouseEvent) {
         let at = self.session_cell(mouse);
         let width = self.areas.1.width;
-        if matches!(mouse.kind, MouseEventKind::Down(_)) {
-            self.step_awaited = None;
-        }
         let Some(right) = self.viewed_mut() else {
             return;
         };
@@ -2350,10 +2343,9 @@ impl App {
 
     fn step_asked(&mut self, direction: Direction) {
         self.leave();
-        self.steps += 1;
-        let step = NonZeroU64::new(self.steps).expect("steps count up from 1");
-        self.step_awaited = Some(step);
-        self.ask_right(lunetad::Asked::Step { direction, step });
+        if let Some(right) = self.viewed_mut() {
+            right.step(direction);
+        }
     }
 
     fn step_to_sidebar(&mut self) {
@@ -2362,11 +2354,7 @@ impl App {
         assert!(held, "the sidebar holds the keys past the project's left edge");
     }
 
-    fn cross(&mut self, direction: Direction, step: NonZeroU64) {
-        if self.step_awaited != Some(step) {
-            return;
-        }
-        self.step_awaited = None;
+    fn cross(&mut self, across: Across) {
         if !matches!(self.holder(), Holder::Terminal) {
             return;
         }
@@ -2375,12 +2363,12 @@ impl App {
         };
         let on = right.machine().clone();
         let (before, after) = self.projected.tabs_beside(&on, right.worktree());
-        match (direction, before, after) {
-            (Direction::Left, Some(beside), _) | (Direction::Right, _, Some(beside)) => {
+        match (across, before, after) {
+            (Across::Before, Some(beside), _) | (Across::After, _, Some(beside)) => {
                 self.go_worktree(&on, beside, None);
             },
-            (Direction::Left, None, _) => self.step_to_sidebar(),
-            (Direction::Right | Direction::Up | Direction::Down, ..) => {},
+            (Across::Before, None, _) => self.step_to_sidebar(),
+            (Across::After, _, None) => {},
         }
     }
 
@@ -2435,7 +2423,6 @@ impl App {
         worktree: WorktreeId,
         terminal: Option<ViewId>,
     ) {
-        self.step_awaited = None;
         if let Some(right) = self.viewed_mut() {
             right.go(on, worktree);
         } else {
@@ -2528,7 +2515,7 @@ impl App {
                 let (tabs, titles) = self.projected.tabs(&on, worktree);
                 self.shown().tabs(tabs, titles);
             },
-            Heeded::Edged { direction, step } => self.cross(direction, step),
+            Heeded::Edged(across) => self.cross(across),
             Heeded::Sent(worktree) => {
                 let Some(right) = self.viewed() else {
                     return;
@@ -2689,7 +2676,9 @@ impl App {
             self.let_go();
             self.sidebar.let_go();
         }
-        self.step_awaited = None;
+        if let Some(right) = self.viewed_mut() {
+            right.forget_step();
+        }
         self.sidebar.focus(focus.keys());
         assert!(self.sidebar.floating().is_none(), "a focus change closes what floats");
         self.focus = focus;

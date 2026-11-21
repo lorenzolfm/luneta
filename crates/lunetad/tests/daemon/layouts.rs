@@ -397,7 +397,7 @@ fn focus_is_each_client_s_own_and_fullscreen_is_the_layout_s() {
     let mut other = Shown::new(&owned, worktree, 80, 24);
     other.until("the layout where the last client was", |laid| focused_of(laid) == Some(right));
     let towards_left = focus::To::Direction(show_request::Direction::Left.into());
-    other.ask(Event::Focus(show_request::Focus { to: Some(towards_left), step: 0 }));
+    other.ask(Event::Focus(show_request::Focus { to: Some(towards_left), step: 1 }));
     other.until("the other client on the left", |laid| focused_of(laid) == Some(left));
     assert_eq!(one.laid.as_ref().and_then(focused_of), Some(right));
 
@@ -638,7 +638,7 @@ fn a_terminal_one_client_filled_is_the_last_focus_of_both_when_lunetad_starts_ag
     let mut other = Shown::new(&owned, worktree, 80, 24);
     other.until("the layout where the last client was", |laid| focused_of(laid) == Some(right));
     let towards_left = focus::To::Direction(show_request::Direction::Left.into());
-    other.ask(Event::Focus(show_request::Focus { to: Some(towards_left), step: 0 }));
+    other.ask(Event::Focus(show_request::Focus { to: Some(towards_left), step: 1 }));
     other.until("the other client on the left", |laid| focused_of(laid) == Some(left));
     let file = || fs::read_to_string(kept(&owned.host)).unwrap();
     one.ask(Event::Fullscreen(()));
