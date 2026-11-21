@@ -47,10 +47,10 @@ fn unparsed(why: &str) -> Unread {
     reason = "sysctl writes into the buffer it is handed, and no further than the length it is told"
 )]
 fn procargs(pid: u32) -> Result<Vec<u8>, Unread> {
-    let Ok(pid) = libc::c_int::try_from(pid) else {
+    let Ok(native) = libc::c_int::try_from(pid) else {
         return Err(Unread::Failed(format!("pid {pid} does not fit a c_int")));
     };
-    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, native];
     let name_count = libc::c_uint::try_from(name.len()).expect("three names fit a c_uint");
     let mut size: libc::size_t = 0;
     let sized = unsafe {
@@ -58,7 +58,7 @@ fn procargs(pid: u32) -> Result<Vec<u8>, Unread> {
         libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
     };
     if sized == -1 {
-        return Err(unread(&io::Error::last_os_error()));
+        return Err(unread(pid, &io::Error::last_os_error()));
     }
     if size > EXEC_STRINGS_BYTES_MAX {
         let most = EXEC_STRINGS_BYTES_MAX;
@@ -71,15 +71,17 @@ fn procargs(pid: u32) -> Result<Vec<u8>, Unread> {
         libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
     };
     if read == -1 {
-        return Err(unread(&io::Error::last_os_error()));
+        return Err(unread(pid, &io::Error::last_os_error()));
     }
     assert!(size <= procargs.len(), "sysctl wrote {size} bytes into {}", procargs.len());
     procargs.truncate(size);
     Ok(procargs)
 }
 
-fn unread(error: &io::Error) -> Unread {
-    if matches!(Errno::from_io_error(error), Some(Errno::INVAL | Errno::SRCH)) {
+fn unread(pid: u32, error: &io::Error) -> Unread {
+    let errno = Errno::from_io_error(error);
+    let ended = errno == Some(Errno::INVAL) && living_start(pid).is_none();
+    if ended || errno == Some(Errno::SRCH) {
         Unread::Gone
     } else {
         Unread::Failed(error.to_string())
