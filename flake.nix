@@ -176,7 +176,7 @@
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ];
 
-            doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
+            doCheck = true;
           };
 
           daemonDeps = craneLib.buildDepsOnly daemon;
