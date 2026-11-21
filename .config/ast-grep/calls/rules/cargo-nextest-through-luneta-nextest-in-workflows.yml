@@ -1,0 +1,19 @@
+id: cargo-nextest-through-luneta-nextest-in-workflows
+language: yaml
+files:
+  - .github/workflows/**
+message: >-
+  Run the tests through luneta-nextest, on the devshell's PATH: it runs `cargo
+  nextest run` with luneta's packages and fails when the tests leave a
+  luneta-mux from target/ running, which a raw `cargo nextest run` lets pass.
+rule:
+  kind: block_mapping_pair
+  has:
+    field: key
+    regex: ^["']?run["']?$
+  any:
+    - regex: (^|[^\w-])(?i:cargo)[^\s;|&<>]*(?:[ \t]|\\\n)+(?:[^\s;|&<>]+(?:[ \t]|\\\n)+)*?nextest(?:[ \t]|\\\n)+(?:[^\s;|&<>]+(?:[ \t]|\\\n)+)*?(run|r)([\s;|&<>)"']|$)
+    - has:
+        field: value
+        regex: ^>
+      regex: (^|[^\w-])(?i:cargo)[^\s;|&<>]*\s+(?:[^\s;|&<>]+\s+)*?nextest\s+(?:[^\s;|&<>]+\s+)*?(run|r)([\s;|&<>)"']|$)

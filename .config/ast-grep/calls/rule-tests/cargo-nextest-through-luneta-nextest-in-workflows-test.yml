@@ -1,0 +1,13 @@
+id: cargo-nextest-through-luneta-nextest-in-workflows
+valid:
+  - "steps:\n  - run: luneta-nextest --profile ci\n"
+  - "steps:\n  - run: nix develop -c cargo check --locked -p lunetad\n"
+  - "steps:\n  - name: cargo nextest run\n    run: nix run .#dev -- test\n"
+  - "steps:\n  - run: |\n      nix develop -c cargo nextest list\n      nix run .#dev -- test\n"
+invalid:
+  - "steps:\n  - run: cargo nextest run\n"
+  - "steps:\n  - \"run\": $CARGO nextest run>tests.log\n"
+  - "steps:\n  - run: \"nix develop -c cargo nextest run --profile ci\"\n"
+  - "steps:\n  - run: |\n      cd crates\n      cargo nextest run -p lunetad\n"
+  - "steps:\n  - run: |\n      cargo nextest \\\n        run -p lunetad\n"
+  - "steps:\n  - run: >-\n      nix develop -c\n      cargo nextest\n      run --profile ci\n"
