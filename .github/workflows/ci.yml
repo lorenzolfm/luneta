@@ -162,6 +162,18 @@ jobs:
 
       - *tailscale
 
+      - name: Give macOS its own DNS back, and only the tailnet's names to MagicDNS
+        if: runner.os == 'macOS' && steps.tailscale.outcome == 'success'
+        run: |
+          sudo networksetup -setdnsservers Ethernet Empty
+          sudo networksetup -setsearchdomains Ethernet Empty
+          sudo mkdir -p /etc/resolver
+          echo 'nameserver 100.100.100.100' | sudo tee /etc/resolver/tail174781.ts.net
+          sudo dscacheutil -flushcache
+          sudo killall -HUP mDNSResponder
+          curl -sSf -o /dev/null https://api.github.com
+          curl -sSf -o /dev/null https://attic.tail174781.ts.net/main/nix-cache-info
+
       - name: nix-community/cache-nix-action v7
         if: runner.os == 'macOS'
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
