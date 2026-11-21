@@ -27,7 +27,8 @@ pub use file::{forget, holder, kept, take, Changed, Elsewhere, Failed, Forgotten
 pub use file::{Opened, Store, Unheld};
 pub use layout::{Size, FRAME_CELLS, LAYOUT_VIEWS_MAX};
 pub use spot::{clone_of, subfolders, CloneRoot, Spot, CLONE_WORKTREES_MAX, LOOK as SPOT_LOOK};
-pub use view::{quoted, Argv, Layout, Line, Opens, Placed, Runs, Session};
+pub use view::{quoted, Argv, Arranged, Layout, Line, Opens, Placed, Runs, Session};
+pub use view::{Focus, Shape};
 pub use view::{Terminal, TerminalViewId};
 pub use view::View;
 pub use view::{LINE_BYTES_MAX, SESSION_BYTES_MAX};
@@ -640,6 +641,7 @@ pub enum Change {
     Unopen { terminal: TerminalViewId },
     Move { terminal: TerminalViewId, to: MoveTo, size: Size, focused: bool },
     Swap { one: ViewId, other: ViewId },
+    Arrange { worktree: WorktreeId, arranged: Arranged },
     Ran(Vec<Ran>),
 }
 
@@ -825,7 +827,9 @@ impl Change {
             | Change::Close { .. }
             | Change::Unopen { .. }
             | Change::Move { .. } => true,
-            Change::Went { .. } | Change::Swap { .. } | Change::Ran(_) => false,
+            Change::Went { .. } | Change::Swap { .. } | Change::Arrange { .. } | Change::Ran(_) => {
+                false
+            },
         }
     }
 }
@@ -1207,14 +1211,11 @@ impl Projects {
                     return Err(format!("terminal {terminal} is in worktree {to} already"));
                 }
                 let (_, target) = changed.find(to).ok_or_else(|| unknown("worktree", to))?;
-                let placed = match target.layout.tree() {
-                    None => Placed::Alone,
-                    Some(tree) => {
-                        let room = tree.room_beside_largest(terminal.view(), size);
-                        let roomless = || format!("worktree {to} has no room for {terminal}");
-                        let (at, towards, _) = room.ok_or_else(roomless)?;
-                        Placed::Beside { at, towards }
-                    },
+                let placed = if target.layout.is_empty() {
+                    Placed::Alone
+                } else {
+                    let room = target.layout.room_for(terminal.view(), None, size);
+                    room.ok_or_else(|| format!("worktree {to} has no room for {terminal}"))?
                 };
                 let layout = changed.layout_of(terminal.view())?;
                 let moved = layout.terminal_mut(terminal).clone();
@@ -1235,6 +1236,10 @@ impl Projects {
                     return Err(format!("terminals {one} and {other} are in two layouts"));
                 }
                 layout.swapped(one, other)?;
+                None
+            },
+            Change::Arrange { worktree, arranged } => {
+                changed.worktree_mut(worktree)?.layout.arranged_as(arranged)?;
                 None
             },
             Change::Ran(ran) => {
@@ -2523,6 +2528,11 @@ mod tests {
         projects.find(worktree).unwrap().1.layout()
     }
 
+    fn arranged(projects: &mut Projects, worktree: WorktreeId, arranged: Arranged) {
+        (*projects, _) = change(projects, Change::Arrange { worktree, arranged }).unwrap();
+        assert_eq!(layout(projects, worktree).arranged(), Some(arranged));
+    }
+
     #[test]
     fn a_layout_opens_closes_and_fills_itself_with_one_of_its_terminals() {
         let mut projects = Projects::default();
@@ -2535,10 +2545,13 @@ mod tests {
         let two = opened(&mut projects, main, 101, right);
         assert_eq!(layout(&projects, main).tree().unwrap().views(), [one, two]);
         assert_eq!(projects.holding_terminal(two).map(|(it, _)| it.id()), Some(main));
+        let fill = |full| Relaid::Fill { worktree: main, full };
+        let tabs = projects.relaid(fill(Some(two))).unwrap_err();
+        assert!(tabs.contains("tabs shows each view whole"), "tabs fill no view: {tabs}");
+        arranged(&mut projects, main, Arranged::Panes);
 
         (projects, _) = change(&projects, Change::Swap { one, other: two }).unwrap();
         assert_eq!(layout(&projects, main).tree().unwrap().views(), [two, one]);
-        let fill = |full| Relaid::Fill { worktree: main, full };
         projects = projects.relaid(fill(Some(two))).unwrap();
         assert_eq!(layout(&projects, main).full(), Some(two));
         let swap = change(&projects, Change::Swap { one, other: two });
@@ -2565,6 +2578,7 @@ mod tests {
         let one = first(&projects, main);
         let right = Placed::Beside { at: one, towards: layout::Towards::Right };
         let two = opened(&mut projects, main, 101, right);
+        arranged(&mut projects, main, Arranged::Panes);
         let (sides, growth) = (layout::Sides::One(layout::Direction::Left), layout::Growth::Grow);
         let size = Size::of(80, 24).unwrap();
         let relaid = [
@@ -2697,6 +2711,8 @@ mod tests {
             (layout(projects, main).full(), last_focus(projects, main))
         };
         projects = projects.relaid(Relaid::Focus { view: one }).unwrap();
+        arranged(&mut projects, main, Arranged::Panes);
+        assert_eq!(last_focus(&projects, main), Some(one), "panes keep the tab focused last");
         projects = projects.relaid(fill(Some(three))).unwrap();
         assert_eq!(shown(&projects), (Some(three), Some(three)), "a view that fills is the focus");
         projects = projects.relaid(fill(None)).unwrap();
@@ -3103,10 +3119,21 @@ mod tests {
         assert!(change(&projects, open(main.get(), nowhere)).unwrap_err().contains("is taken"));
         let tiny = Size::of(5, 3).unwrap();
         let beside = Placed::Beside { at: one, towards: layout::Towards::Right };
-        let (terminal, placed) = (terminal(102), beside);
-        let view = View::Terminal(terminal);
-        let cramped = Change::Open { worktree: main, view, placed, size: tiny };
-        assert!(change(&projects, cramped).unwrap_err().contains("no room"));
+        let cramped = || {
+            let view = View::Terminal(terminal(102));
+            Change::Open { worktree: main, view, placed: beside, size: tiny }
+        };
+        let new = terminal_view(103).view();
+        let room = |projects: &Projects, size| layout(projects, main).room_for(new, None, size);
+        let towards = |towards| Some(Placed::Beside { at: one, towards });
+        assert!(room(&projects, tiny).is_some(), "a tab needs no room on the client");
+        assert_eq!(room(&projects, size), towards(layout::Towards::Right), "it splits as it looks");
+        let tall = Size::of(20, 60).unwrap();
+        assert_eq!(room(&projects, tall), towards(layout::Towards::Down), "on any client");
+        assert!(change(&projects, cramped()).is_ok(), "a tab needs no room beside another");
+        arranged(&mut projects, main, Arranged::Panes);
+        assert_eq!(room(&projects, tiny), None, "panes need room on the client");
+        assert!(change(&projects, cramped()).unwrap_err().contains("no room"));
         let drawn = projects.fresh(&mut || Ok(one.0));
         assert!(drawn.unwrap_err().contains("were all taken"), "a terminal's id is drawn once");
     }

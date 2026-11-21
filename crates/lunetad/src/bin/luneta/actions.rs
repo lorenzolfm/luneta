@@ -114,6 +114,8 @@ actions! {
     FixChecks,
     NewView,
     NewWelcome,
+    ShowTabs,
+    ShowPanes,
     NewWorktree,
     NewProject,
     NewMachine,
@@ -262,14 +264,20 @@ impl Action {
             },
             Action::NewView => {
                 let new = menu(&['n', 'v']);
-                spec("new view", &["pane", "split", "terminal", "shell"], new, VIEW)
+                spec("new view", &["pane", "split", "tab", "terminal", "shell"], new, VIEW)
             },
             Action::NewWelcome => {
                 let new = menu(&['n', 'h']);
                 spec("new welcome view", &["home", "start", "greeting"], new, VIEW)
             },
+            Action::ShowTabs => {
+                spec("Show as tabs", &["arrange", "layout", "views"], menu(&['t']), VIEW)
+            },
+            Action::ShowPanes => {
+                spec("Show as panes", &["arrange", "layout", "split"], menu(&['s']), VIEW)
+            },
             Action::NewWorktree => {
-                let keywords = &["branch", "tab", "task"];
+                let keywords = &["branch", "task"];
                 spec("new worktree…", keywords, menu(&['n', 'w']), IN_A_PROJECT)
             },
             Action::NewProject => {

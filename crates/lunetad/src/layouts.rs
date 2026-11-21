@@ -18,13 +18,13 @@ use crate::mux::own::server::{self, Is, Terminals, TerminalsListed, Word};
 use crate::mux::own::TerminalKey;
 use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
-use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
+use crate::projects::layout::{self, Direction, Order, Sides, Towards, SIDE_MAX};
 use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
 use crate::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
 use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
 use crate::projects::{Holds, Name, Spot, Worktree};
-use crate::projects::{WorktreeId, FRAME_CELLS, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
-use crate::projects::{self, quoted, Argv, Opens, Subfolder, WORKTREES_MAX};
+use crate::projects::{WorktreeId, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
+use crate::projects::{self, quoted, Argv, Arranged, Opens, Subfolder, WORKTREES_MAX};
 use crate::shells::Doing;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
@@ -128,6 +128,7 @@ pub enum Asked {
     Resize { sides: Sides, growth: layout::Growth },
     Move(Step),
     Fullscreen,
+    Arrange(Arranged),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +209,9 @@ impl Asked {
                 })
             },
             Event::Fullscreen(()) => Asked::Fullscreen,
+            Event::Arrange(said) => {
+                Asked::Arrange(Arranged::said(said).map_err(|it| format!("arrange: {it}"))?)
+            },
         })
     }
 }
@@ -946,10 +950,8 @@ impl Layouts {
                 self.focus(client, view)?;
             },
             Asked::Focus(Focus::Toward { direction, step }) => {
-                let tree = self.layout(worktree)?.tree();
-                let beside = tree.zip(focus).and_then(|(tree, from)| {
-                    tree.neighbour(from, direction, size)
-                });
+                let layout = self.layout(worktree)?;
+                let beside = focus.and_then(|from| layout.beside(from, direction, size));
                 let Some(to) = beside else {
                     return Ok(Done::Edged { direction, step });
                 };
@@ -964,15 +966,9 @@ impl Layouts {
                 let Some(view) = focus else {
                     return Ok(Done::Quiet);
                 };
-                let layout = self.layout(worktree)?;
-                let moves = layout.full().is_none()
-                    && layout.tree().is_some_and(|tree| {
-                        tree.clone().resize(view, sides, growth, size)
-                    });
-                if !moves {
-                    return Ok(Done::Quiet);
+                if self.layout(worktree)?.resizes(view, sides, growth, size) {
+                    self.relaid(Relaid::Resize { view, sides, growth, size })?;
                 }
-                self.relaid(Relaid::Resize { view, sides, growth, size })?;
             },
             Asked::Move(step) => {
                 let one = focused()?;
@@ -985,6 +981,15 @@ impl Layouts {
                     None => Some(focused()?),
                 };
                 self.relaid(Relaid::Fill { worktree, full })?;
+            },
+            Asked::Arrange(arranged) => {
+                let Some(shown) = self.layout(worktree)?.arranged() else {
+                    return Ok(Done::Quiet);
+                };
+                if shown == arranged {
+                    return Ok(Done::Quiet);
+                }
+                self.changed(Change::Arrange { worktree, arranged })?;
             },
         }
         Ok(Done::Quiet)
@@ -1008,9 +1013,10 @@ impl Layouts {
         step: Step,
         size: Size,
     ) -> Result<ViewId, String> {
-        let tree = self.layout(worktree)?.tree().ok_or("the layout holds no view")?;
+        let layout = self.layout(worktree)?;
+        let tree = layout.tree().ok_or("the layout holds no view")?;
         let to = match step {
-            Step::Direction(direction) => tree.neighbour(from, direction, size),
+            Step::Direction(direction) => layout.beside(from, direction, size),
             Step::Order(order) => tree.in_order(from, order),
         };
         to.ok_or_else(|| "no other terminal is there".to_owned())
@@ -1622,17 +1628,12 @@ impl Layouts {
         }
         for (&worktree, &Fit { size, outside }) in &fits {
             let (_, found) = projects.find(worktree).expect("a client's worktree is held");
-            let Some(tree) = found.layout().tree() else {
-                continue;
-            };
-            let whole = Rect::whole(tree.fitted(size)).inner();
-            for (view, rect) in tree.laid(size) {
+            let (_, sized) = found.layout().sized(size);
+            for (view, wanted) in sized {
                 let View::Terminal(terminal) = view else {
                     continue;
                 };
                 let terminal = terminal.id();
-                let full = found.layout().full() == Some(terminal.view());
-                let wanted = if full { whole } else { rect.inner() };
                 let Some(known) = known.get_mut(&terminal) else {
                     continue;
                 };
@@ -1704,18 +1705,9 @@ fn inside(client: &Client, layout: &Layout, known: &BTreeMap<TerminalViewId, Kno
 }
 
 fn placed(layout: &Layout, terminal: ViewId, size: Size) -> Option<Size> {
-    let tree = layout.tree()?;
-    let fitted = tree.fitted(size);
-    let inner = if layout.full() == Some(terminal) {
-        Rect::whole(fitted).inner()
-    } else {
-        let mut laid = tree.laid(size).into_iter();
-        laid.find(|(it, _)| layout::Leaf::id(*it) == terminal).map(|(_, rect)| rect.inner())?
-    };
-    let ((columns, rows), (columns_fitted, rows_fitted)) = (inner.get(), fitted.get());
-    assert!(columns + 2 * FRAME_CELLS <= columns_fitted, "a terminal fits its layout's width");
-    assert!(rows + 2 * FRAME_CELLS <= rows_fitted, "a terminal fits its layout's height");
-    Some(inner)
+    let (_, sized) = layout.sized(size);
+    let mut sized = sized.into_iter();
+    sized.find(|(view, _)| layout::Leaf::id(*view) == terminal).map(|(_, inner)| inner)
 }
 
 fn keeps(restored: Option<&Restored>, held: &Runs, is: &Is, read: &Runs) -> bool {
@@ -1810,6 +1802,19 @@ fn placement(
     assert!(!tree.holds(new), "view {new} is placed in a layout that holds it");
     let focused = || focus.ok_or("the layout holds no view to open beside");
     let roomless = |at: ViewId| format!("view {at} has no room beside it");
+    if layout.tabbed() {
+        let placed = match beside {
+            Beside::Towards(towards) => {
+                let at = focused()?;
+                let room = layout.room_towards(at, towards, new, size);
+                room.then_some(Placed::Beside { at, towards }).ok_or_else(|| roomless(at))?
+            },
+            Beside::Alone | Beside::Focused | Beside::Largest => {
+                layout.room_for(new, focus, size).ok_or("no view has room for another")?
+            },
+        };
+        return Ok((placed, layout::lone(size)));
+    }
     match beside {
         Beside::Alone => unreachable!("a view opened alone is opened only in an empty layout"),
         Beside::Towards(towards) => {
@@ -1858,37 +1863,33 @@ fn laid(
     if let Some(focus) = focus {
         assert!(layout.holds(focus), "a client focuses view {focus} of the layout it shows");
     }
-    let (fitted, views) = match layout.tree() {
-        None => (size, Vec::new()),
-        Some(tree) => {
-            let views = tree.laid(size).into_iter().map(|(view, rect)| {
-                use show_response::view::Found;
-                let id = layout::Leaf::id(view);
-                let found = match view {
-                    View::Welcome(_) => Found::Welcome(()),
-                    View::Terminal(terminal) => match known.get(&terminal.id()) {
-                        Some(known) => Found::Key(api::TerminalKey {
-                            id: known.key.id.get(),
-                            made_at: Some(known.key.made.into()),
-                        }),
-                        None if looked => Found::Lost(()),
-                        None => Found::Looking(()),
-                    },
-                };
-                show_response::View {
-                    id: id.get(),
-                    rect: Some(show_response::Rect {
-                        column: rect.column.into(),
-                        row: rect.row.into(),
-                        columns: rect.columns.into(),
-                        rows: rect.rows.into(),
-                    }),
-                    found: Some(found),
-                }
-            });
-            (tree.fitted(size), views.collect::<Vec<_>>())
-        },
-    };
+    let (fitted, laid_out) = layout.rects(size);
+    let views = laid_out.into_iter().map(|(view, rect)| {
+        use show_response::view::Found;
+        let id = layout::Leaf::id(view);
+        let found = match view {
+            View::Welcome(_) => Found::Welcome(()),
+            View::Terminal(terminal) => match known.get(&terminal.id()) {
+                Some(known) => Found::Key(api::TerminalKey {
+                    id: known.key.id.get(),
+                    made_at: Some(known.key.made.into()),
+                }),
+                None if looked => Found::Lost(()),
+                None => Found::Looking(()),
+            },
+        };
+        show_response::View {
+            id: id.get(),
+            rect: Some(show_response::Rect {
+                column: rect.column.into(),
+                row: rect.row.into(),
+                columns: rect.columns.into(),
+                rows: rect.rows.into(),
+            }),
+            found: Some(found),
+        }
+    });
+    let views: Vec<show_response::View> = views.collect();
     assert_eq!(views.len(), layout.len(), "a layout lays out each of its terminals");
     let (columns, rows) = fitted.get();
     let laid = show_response::Laid {
@@ -1896,6 +1897,9 @@ fn laid(
         size: Some(show_request::Size { columns: columns.into(), rows: rows.into() }),
         views,
         shown: match (layout.full(), focus) {
+            (None, Some(focus)) if layout.tabbed() => {
+                Some(show_response::laid::Shown::Tabbed(focus.get()))
+            },
             (Some(full), _) => {
                 assert_eq!(focus, Some(full), "a client of a full layout focuses its terminal");
                 Some(show_response::laid::Shown::Full(full.get()))

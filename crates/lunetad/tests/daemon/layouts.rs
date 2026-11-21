@@ -12,7 +12,7 @@ use lunetad::api::change_projects_request::{
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::projects::Held;
 use lunetad::api::{terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Worktree};
-use lunetad::api::{frames_request, On, FramesRequest};
+use lunetad::api::{frames_request, Arrangement, On, FramesRequest};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
 use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
@@ -127,6 +127,25 @@ impl<'a> Shown<'a> {
         new
     }
 
+    fn arrange(&mut self, arrangement: Arrangement) -> Laid {
+        self.ask(Event::Arrange(arrangement.into()));
+        let shows = |laid: &Laid| match (laid.shown, arrangement) {
+            (Some(show_response::laid::Shown::Tabbed(_)), Arrangement::Tabs)
+            | (
+                Some(show_response::laid::Shown::Tiled(_) | show_response::laid::Shown::Full(_)),
+                Arrangement::Panes,
+            ) => true,
+            (_, _) => false,
+        };
+        self.until("the layout arranged as asked", shows)
+    }
+
+    fn open_panes(&mut self) -> u64 {
+        let first = self.open();
+        self.arrange(Arrangement::Panes);
+        first
+    }
+
     fn terminals(&self) -> Vec<u64> {
         let laid = self.laid.as_ref().expect("a layout was heard");
         laid.views.iter().map(|view| view.id).collect()
@@ -231,14 +250,16 @@ impl<'a> Shown<'a> {
 
 fn focused_of(laid: &Laid) -> Option<u64> {
     match laid.shown? {
-        show_response::laid::Shown::Tiled(it) | show_response::laid::Shown::Full(it) => Some(it),
+        show_response::laid::Shown::Tiled(it)
+        | show_response::laid::Shown::Full(it)
+        | show_response::laid::Shown::Tabbed(it) => Some(it),
     }
 }
 
 fn full_of(laid: &Laid) -> Option<u64> {
     match laid.shown? {
         show_response::laid::Shown::Full(it) => Some(it),
-        show_response::laid::Shown::Tiled(_) => None,
+        show_response::laid::Shown::Tiled(_) | show_response::laid::Shown::Tabbed(_) => None,
     }
 }
 
@@ -320,7 +341,7 @@ fn a_layout_opens_terminals_the_mux_holds_tagged_and_sized_to_their_place() {
     let laid = (empty.worktree, empty.views.len(), focused_of(&empty));
     assert_eq!(laid, (worktree, 0, None));
 
-    let first = shown.open();
+    let first = shown.open_panes();
     let laid = shown.laid.clone().unwrap();
     assert_eq!(laid.views[0].rect, Some(rect(0, 0, 80, 24)));
     let key = key(&laid.views[0]).expect("an open terminal has its key in the mux");
@@ -337,6 +358,98 @@ fn a_layout_opens_terminals_the_mux_holds_tagged_and_sized_to_their_place() {
         (sized(&owned, first) == Some((38, 22)) && sized(&owned, second) == Some((38, 22)))
             .then_some(())
     });
+}
+
+#[test]
+fn views_open_as_tabs_that_each_fill_the_layout_and_a_step_goes_to_the_tab_beside() {
+    use show_request::Direction::{Left, Right, Up};
+    let owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    let first = shown.open();
+    let last = shown.open();
+    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(first)), step: 0 }));
+    shown.until("the first tab focused", |laid| focused_of(laid) == Some(first));
+    let middle = shown.open();
+    let laid = shown.laid.clone().unwrap();
+    assert_eq!(laid.shown, Some(show_response::laid::Shown::Tabbed(middle)));
+    assert_eq!(shown.terminals(), [first, middle, last], "a tab opens after the focused one");
+    assert!(laid.views.iter().all(|view| view.rect == Some(rect(0, 0, 80, 24))), "{laid:?}");
+    eventually("each tab's terminal takes the whole layout", || {
+        [first, middle, last].iter().all(|it| sized(&owned, *it) == Some((78, 22))).then_some(())
+    });
+
+    let step = |direction: show_request::Direction, step| {
+        let to = Some(focus::To::Direction(direction.into()));
+        Event::Focus(show_request::Focus { to, step })
+    };
+    let edged = |direction: show_request::Direction, step| show_response::Edged {
+        worktree,
+        direction: direction.into(),
+        step,
+    };
+    shown.ask(step(Right, 1));
+    shown.until("the last tab focused", |laid| focused_of(laid) == Some(last));
+    shown.ask(step(Right, 2));
+    assert_eq!(shown.until_edged(), edged(Right, 2), "the last tab is the edge on the right");
+    shown.ask(step(Up, 3));
+    assert_eq!(shown.until_edged(), edged(Up, 3), "tabs have nothing above or below");
+    shown.ask(step(Left, 4));
+    shown.until("the middle tab focused", |laid| focused_of(laid) == Some(middle));
+    shown.ask(step(Left, 5));
+    shown.until("the first tab focused", |laid| focused_of(laid) == Some(first));
+    shown.ask(step(Left, 6));
+    assert_eq!(shown.until_edged(), edged(Left, 6), "the first tab is the edge on the left");
+
+    let grow = show_request::Growth::Grow.into();
+    let every = Some(resize::Sides::Every(()));
+    shown.ask(Event::Resize(show_request::Resize { sides: every, growth: grow }));
+    shown.ask(Event::Fullscreen(()));
+    assert!(shown.until_refused().contains("whole already"), "tabs fill no view");
+    assert!(shown.refused.is_empty(), "a resize of tabs is quiet: {:?}", shown.refused);
+    assert!(shown.edged.is_empty(), "{:?}", shown.edged);
+}
+
+#[test]
+fn a_worktree_shown_as_panes_tiles_its_views_keeps_that_and_goes_back_to_tabs() {
+    let mut owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut one = Shown::new(&owned, worktree, 80, 24);
+    let left = one.open();
+    let right = one.open();
+    let towards_right = open::Beside::Towards(show_request::Towards::Right.into());
+    let far = one.open_beside(towards_right, &WAITS);
+    let mut other = Shown::new(&owned, worktree, 80, 24);
+    other.until("the other client's layout", |laid| laid.views.len() == 3);
+    let tiled = one.arrange(Arrangement::Panes);
+    let rects: Vec<_> = tiled.views.iter().map(|view| (view.id, view.rect)).collect();
+    let (half, quarter, last) = (rect(0, 0, 40, 24), rect(40, 0, 20, 24), rect(60, 0, 20, 24));
+    let asked = [(left, Some(half)), (right, Some(quarter)), (far, Some(last))];
+    assert_eq!(rects, asked, "a tab opened towards the right splits so as panes");
+    let tiled = |laid: &Laid| matches!(laid.shown, Some(show_response::laid::Shown::Tiled(_)));
+    other.until("the other client sees panes too", tiled);
+    eventually("each pane's terminal takes its share", || {
+        let shares = [(left, (38, 22)), (right, (18, 22)), (far, (18, 22))];
+        shares.iter().all(|(it, share)| sized(&owned, *it) == Some(*share)).then_some(())
+    });
+    let arranged = |owned: &Owned| watched_worktree(owned, worktree).unwrap().arranged;
+    assert_eq!(arranged(&owned), Some(Arrangement::Panes.into()), "watch says it shows panes");
+    drop((one, other));
+    let file = |owned: &Owned| fs::read_to_string(kept(&owned.host)).unwrap();
+    let panes = r#""panes": {"#;
+    eventually("panes are kept within a sweep", || file(&owned).contains(panes).then_some(()));
+
+    owned.stop_daemon();
+    owned.start_daemon();
+    let mut again = Shown::new(&owned, worktree, 80, 24);
+    let laid = again.until("the layout found again", |laid| !laid.views.is_empty());
+    assert_eq!(laid.shown, Some(show_response::laid::Shown::Tiled(far)), "panes come back");
+    again.arrange(Arrangement::Tabs);
+    eventually("tabs are kept within a sweep", || (!file(&owned).contains("panes")).then_some(()));
+    assert_eq!(arranged(&owned), Some(Arrangement::Tabs.into()), "watch says it shows tabs");
+    let unsaid = Arrangement::Unspecified.into();
+    again.ask(Event::Arrange(unsaid));
+    assert!(again.until_refused().contains("neither tabs nor panes"));
 }
 
 #[test]
@@ -366,7 +479,7 @@ fn a_client_that_runs_in_a_terminal_of_the_layout_it_shows_sizes_none_of_it() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut outer = Shown::new(&owned, worktree, 80, 24);
-    let terminal = outer.open();
+    let terminal = outer.open_panes();
     let runs_in = key(&outer.laid.clone().unwrap().views[0]);
     let mut inner = Shown::running_in(&owned, worktree, (50, 16), runs_in);
     inner.until("the outer client's size", |laid| laid.size == Some(size(80, 24)));
@@ -392,7 +505,7 @@ fn focus_is_each_client_s_own_and_fullscreen_is_the_layout_s() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut one = Shown::new(&owned, worktree, 80, 24);
-    let left = one.open();
+    let left = one.open_panes();
     let right = one.open();
     let mut other = Shown::new(&owned, worktree, 80, 24);
     other.until("the layout where the last client was", |laid| focused_of(laid) == Some(right));
@@ -496,7 +609,7 @@ fn a_closed_terminal_leaves_the_mux_and_its_layout_to_the_terminal_beside_it() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut shown = Shown::new(&owned, worktree, 80, 24);
-    let first = shown.open();
+    let first = shown.open_panes();
     let second = shown.open();
     let third = shown.open();
     shown.ask(Event::Close(third));
@@ -581,7 +694,7 @@ fn a_layout_comes_back_with_its_terminals_when_lunetad_starts_again() {
     let mut owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut shown = Shown::new(&owned, worktree, 80, 24);
-    shown.open();
+    shown.open_panes();
     shown.open();
     shown.ask(Event::Fullscreen(()));
     let before = shown.until("the layout full", |laid| full_of(laid).is_some());
@@ -591,7 +704,7 @@ fn a_layout_comes_back_with_its_terminals_when_lunetad_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 10,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 11,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();
@@ -616,7 +729,7 @@ fn a_worktree_s_last_focus_comes_back_when_lunetad_starts_again() {
     shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(middle)), step: 0 }));
     shown.until("the middle terminal focused", |laid| focused_of(laid) == Some(middle));
     drop(shown);
-    let kept_focus = format!(r#""last_focus": "{middle:016x}""#);
+    let kept_focus = format!(r#""last": "{middle:016x}""#);
     eventually("the focus is kept within a sweep", || {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&kept_focus).then_some(())
     });
@@ -633,7 +746,7 @@ fn a_terminal_one_client_filled_is_the_last_focus_of_both_when_lunetad_starts_ag
     let mut owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut one = Shown::new(&owned, worktree, 80, 24);
-    let left = one.open();
+    let left = one.open_panes();
     let right = one.open();
     let mut other = Shown::new(&owned, worktree, 80, 24);
     other.until("the layout where the last client was", |laid| focused_of(laid) == Some(right));
@@ -653,7 +766,7 @@ fn a_terminal_one_client_filled_is_the_last_focus_of_both_when_lunetad_starts_ag
         (!file().contains(r#""full""#)).then_some(())
     });
     let file = file();
-    let kept_focus = format!(r#""last_focus": "{right:016x}""#);
+    let kept_focus = format!(r#""last": "{right:016x}""#);
     assert!(file.contains(&kept_focus), "the terminal filled is kept as the last focus: {file}");
     drop((one, other));
 
@@ -690,7 +803,7 @@ fn an_open_beside_the_focused_terminal_splits_it_on_its_longer_side() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut shown = Shown::new(&owned, worktree, 80, 24);
-    let first = shown.open();
+    let first = shown.open_panes();
     let second = shown.open();
     shown.open();
     let to = Some(show_request::focus::To::View(first));
@@ -726,7 +839,7 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut shown = Shown::new(&owned, worktree, 80, 24);
-    let left = shown.open();
+    let left = shown.open_panes();
     let right = shown.open();
     let towards_left: i32 = show_request::Direction::Left.into();
     let sides = Some(resize::Sides::Direction(towards_left));
@@ -764,7 +877,7 @@ fn a_resize_on_every_side_moves_every_border_of_the_focused_terminal() {
         Event::Resize(show_request::Resize { sides: every, growth: growth.into() })
     };
     shown.ask(around(grow));
-    shown.open();
+    shown.open_panes();
     shown.ask(around(grow));
     shown.open();
     assert!(shown.refused.is_empty(), "a resize that moves nothing is quiet: {:?}", shown.refused);

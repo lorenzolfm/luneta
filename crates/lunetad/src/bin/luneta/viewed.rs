@@ -12,9 +12,9 @@ use lunetad::mux::own::api::{self, typed};
 use lunetad::mux::own::frames::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Opens, Size, ViewId, WorktreeId};
+use lunetad::projects::{Arranged, Opens, Size, ViewId, WorktreeId};
 use lunetad::{
-    Asked, Beside, Direction, Found, Heard, Laid, View, Rect as Placed, Show, Where,
+    Asked, Beside, Direction, Found, Heard, Laid, View, Rect as Placed, Show, Shows, Where,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -22,8 +22,8 @@ use ratatui::style::Style;
 
 use crate::attached::{
     below_bar, border, draw_screen, draw_tab_spans, key_said, link, mouse_said, on_views,
-    screen_rect, selects, span_under, spot_in, tab_spans, text, within, Pointer, Screen,
-    Selection, Spot, TAB_BAR_ROWS,
+    screen_rect, selects, span_under, spot_in, tab_columns_max, tab_spans, tab_spans_capped,
+    tab_style, text, within, Pointer, Screen, Selection, Spot, TabSpan, TAB_BAR_ROWS,
 };
 use crate::copied::Excerpt;
 use crate::gruvbox;
@@ -39,6 +39,10 @@ const LOST: &str = "lost: luneta-mux no longer holds it";
 const LOOKING: &str = "looking for it in luneta-mux";
 
 const HERE: &str = "luneta runs here";
+
+const UNTITLED: &str = "terminal";
+
+const WELCOME_TAB: &str = "welcome";
 
 const WELCOME: [&str; 4] =
     ["Welcome", "", "This view runs no terminal.", "d d  close it   Ctrl hjkl  another view"];
@@ -436,6 +440,41 @@ impl Layout {
         self.tabs.iter().map(|tab| (tab.worktree, tab.name.as_str()))
     }
 
+    fn view_tabs(&self, outer: Rect) -> Vec<TabSpan<ViewId>> {
+        let Some(laid) = self.laid().filter(|laid| laid.shows() == Some(Shows::Tabs)) else {
+            return Vec::new();
+        };
+        let width = outer.width.saturating_sub(2);
+        if width == 0 {
+            return Vec::new();
+        }
+        let focused = laid.focused().expect("a layout shown as tabs focuses one").id;
+        let named = laid.in_order().map(|view| {
+            let title = self.titles.get(&view.id).map(String::as_str).filter(|it| !it.is_empty());
+            let fallback = if view.found == Found::Welcome { WELCOME_TAB } else { UNTITLED };
+            (view.id, title.unwrap_or(fallback))
+        });
+        let named: Vec<(ViewId, &str)> = named.collect();
+        let from_each = (0..named.len()).map(|hidden| {
+            let shown = &named[hidden..];
+            tab_spans_capped(shown.iter().copied(), width, tab_columns_max(shown, width))
+        });
+        let mut drawn = from_each;
+        let drawn = drawn.find(|spans| spans.iter().any(|span| span.id == focused));
+        drawn.expect("the focused tab is drawn on a border of a column or more")
+    }
+
+    fn tab_under(&self, at: Position) -> Option<ViewId> {
+        let (_, placed) = self.laid()?.focused_at()?;
+        let outer = view_rect(Rect::default(), placed);
+        if at.y == outer.y {
+            let column = at.x.checked_sub(outer.x)?.checked_sub(1)?;
+            span_under(&self.view_tabs(outer), column)
+        } else {
+            None
+        }
+    }
+
     fn moused(&mut self, mouse: MouseEvent, at: Spot, width: u16) -> Moused {
         let down = matches!(mouse.kind, MouseEventKind::Down(_));
         if self.pointer == Pointer::Sending {
@@ -452,11 +491,12 @@ impl Layout {
                 Some(_) | None => Moused::Nothing,
             };
         };
-        let under = self
-            .drawn()
-            .into_iter()
-            .find(|(_, placed)| view_rect(Rect::default(), *placed).contains(spot))
-            .map(|(view, _)| view.id);
+        let under = self.tab_under(spot).or_else(|| {
+            let drawn = self.drawn().into_iter();
+            let mut under =
+                drawn.filter(|(_, placed)| view_rect(Rect::default(), *placed).contains(spot));
+            under.next().map(|(view, _)| view.id)
+        });
         if down
             && let Some(under) = under
             && Some(under) != self.focused()
@@ -578,8 +618,11 @@ impl Layout {
             let mine = Some(view.id) == focused;
             let outer = view_rect(views, placed);
             let colour = if mine { gruvbox::GREEN } else { gruvbox::GREY };
-            let title = self.titles.get(&view.id).map_or("", String::as_str);
+            let tabs = self.view_tabs(outer);
+            let titled = self.titles.get(&view.id).map_or("", String::as_str);
+            let title = if tabs.is_empty() { titled } else { "" };
             border(buffer, views, outer, title, Style::new().fg(colour));
+            draw_view_tabs(buffer, views, outer, &tabs, view.id);
             let seen = screen_rect(outer).intersection(views);
             if seen.is_empty() {
                 continue;
@@ -624,6 +667,28 @@ impl Layout {
             frames::CursorShape::BlockHollow => CursorShape::HollowBlock,
         };
         (shape, cursor.blinking)
+    }
+}
+
+fn draw_view_tabs(
+    buffer: &mut Buffer,
+    views: Rect,
+    outer: Rect,
+    tabs: &[TabSpan<ViewId>],
+    focused: ViewId,
+) {
+    let start = outer.x.checked_add(1).expect("a view's border is a terminal column");
+    for span in tabs {
+        let x = start + span.column;
+        if !views.contains(Position::new(x, outer.y)) {
+            continue;
+        }
+        let style = tab_style(span.id == focused);
+        let lit = Rect::new(x, outer.y, span.columns, 1).intersection(views);
+        let width = usize::from(lit.width);
+        buffer.set_stringn(x, outer.y, " ".repeat(width), width, style);
+        let room = usize::from(lit.width.saturating_sub(2));
+        buffer.set_stringn(x + 1, outer.y, &span.name, room, style);
     }
 }
 
@@ -927,6 +992,10 @@ impl Viewed {
         self.ask(Asked::Welcome);
     }
 
+    pub fn arrange(&mut self, arranged: Arranged) {
+        self.ask(Asked::Arrange(arranged));
+    }
+
     pub fn open_beside_focused(&mut self, opens: Opens) {
         self.opened.insert(self.layout.worktree);
         self.ask(Asked::Open { beside: Beside::Focused, opens });
@@ -1205,6 +1274,65 @@ mod tests {
         here.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
         assert_eq!(row(&buffer, 2, 1, 9), "lost: lu");
         assert_eq!(row(&buffer, 2, 11, 19), "luneta r");
+    }
+
+    #[test]
+    fn tabs_draw_the_focused_view_whole_with_each_view_named_on_its_border() {
+        use show_response::laid::Shown as Said;
+        let mut layout = split_layout();
+        let tab = |id, key| view(id, (0, 0, 20, 4), key);
+        let tabs = |focused| {
+            Laid::heard(show_response::Laid {
+                worktree: 1,
+                size: Some(show_request::Size { columns: 20, rows: 4 }),
+                views: vec![tab(11, Some(1)), tab(12, Some(2)), tab(13, None)],
+                shown: Some(Said::Tabbed(focused)),
+            })
+            .unwrap()
+        };
+        layout.laid_out(tabs(12));
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
+        assert_eq!(row(&buffer, 1, 0, 20), "╭ p1 ─ p2 ─ termin ╮");
+        assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
+        assert_eq!((buffer[(7, 1)].fg, buffer[(7, 1)].bg), (gruvbox::BG0, gruvbox::GREEN));
+        assert_eq!(buffer[(2, 1)].bg, gruvbox::BG2, "a tab not focused is dim");
+        let down = mouse(MouseEventKind::Down(MouseButton::Left));
+        assert_eq!(layout.moused(down, spot(1, 2), 20), Moused::Focus(terminal(11)));
+        assert_eq!(layout.moused(down, spot(1, 12), 20), Moused::Focus(terminal(13)));
+        let on_the_focused = layout.moused(down, spot(1, 7), 20);
+        assert_eq!(on_the_focused, Moused::Nothing, "the focused tab is there");
+        assert!(!matches!(layout.moused(down, spot(2, 3), 20), Moused::Focus(_)));
+    }
+
+    #[test]
+    fn tabs_share_the_border_and_the_focused_one_is_always_drawn() {
+        use show_response::laid::Shown as Said;
+        let mut layout = split_layout();
+        let long = |title: &str| title.to_owned();
+        layout.titles =
+            [(terminal(11), long("a very long title")), (terminal(12), long("another long one"))]
+                .into();
+        let tab = |id, key| view(id, (0, 0, 20, 4), key);
+        let tabs = Laid::heard(show_response::Laid {
+            worktree: 1,
+            size: Some(show_request::Size { columns: 20, rows: 4 }),
+            views: vec![tab(11, Some(1)), tab(12, Some(2)), tab(13, None)],
+            shown: Some(Said::Tabbed(13)),
+        });
+        layout.laid_out(tabs.unwrap());
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
+        assert_eq!(row(&buffer, 1, 0, 20), "╭ a v ─ ano ─ ter ─╮");
+        let drawn = |columns| {
+            let spans = layout.view_tabs(Rect::new(0, 0, columns, 4));
+            spans.iter().map(|span| (span.id, span.column, span.columns)).collect::<Vec<_>>()
+        };
+        let (one, two, three) = (terminal(11), terminal(12), terminal(13));
+        assert_eq!(drawn(7), [(one, 0, 1), (two, 2, 1), (three, 4, 1)], "a column each");
+        assert_eq!(drawn(6), [(two, 0, 1), (three, 2, 1)], "the tabs before it go first");
+        assert_eq!(drawn(3), [(three, 0, 1)], "the focused tab alone");
+        assert!(drawn(2).is_empty(), "a border with no room draws no tab");
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::path::Path;
 
 use luneta_waits::{eventually, Span, QUIET};
 use lunetad::api::terminal::Found;
+use lunetad::api::Arrangement;
 use serde_json::json;
 
 use crate::host::{script, LUNETA};
@@ -48,6 +49,22 @@ const WELCOMES: &str = "d d  close it";
 const CLOSE: &str = "\x1b[97;3udd";
 
 const WELCOME: &str = "\x1b[97;3unh";
+
+const PANES: &str = "\x1b[97;3us";
+
+const TABS: &str = "\x1b[97;3ut";
+
+fn as_panes(owned: &Owned, window: &mut Window, folder: &Path) {
+    window.send(PANES);
+    let panes = Some(Arrangement::Panes.into());
+    eventually("the worktree is shown as panes", || {
+        (shown(owned, folder)?.arranged == panes).then_some(())
+    });
+}
+
+fn frames(window: &Window) -> Option<usize> {
+    window.screen().iter().map(|line| line.matches('╭').count()).max()
+}
 
 fn seam(window: &Window) -> Option<usize> {
     window.screen().iter().find_map(|line| {
@@ -113,6 +130,7 @@ fn the_menu_opens_a_view_beside_the_one_luneta_shows_and_closes_it() {
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("a second terminal opens in the layout", || {
         let terminals = shown(&owned, &dir.path)?.terminals;
@@ -140,13 +158,43 @@ fn the_menu_opens_a_view_beside_the_one_luneta_shows_and_closes_it() {
 }
 
 #[test]
+fn views_open_as_tabs_ctrl_h_and_ctrl_l_step_through_them_and_the_menu_shows_panes_and_back() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    window.send(SPLIT);
+    eventually("a second terminal opens as a tab of the first", || {
+        let terminals = shown(&owned, &dir.path)?.terminals;
+        let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
+        (found.count() == 2 && frames(&window) == Some(1)).then_some(())
+    });
+    assert!(seam(&window).is_none(), "one tab fills the view: {:?}", window.screen());
+    window.send(TYPED);
+    eventually("the tab opened has the keys", || window.shows(PRINTED).then_some(()));
+    window.send(LEFT);
+    eventually("Ctrl h shows the tab before", || (!window.shows(PRINTED)).then_some(()));
+    window.send(RIGHT);
+    eventually("Ctrl l shows the tab after", || window.shows(PRINTED).then_some(()));
+    as_panes(&owned, &mut window, &dir.path);
+    eventually("panes are drawn beside each other", || seam(&window));
+    window.send(TABS);
+    eventually("tabs again, one filling the view", || {
+        let tabbed = shown(&owned, &dir.path)?.arranged == Some(Arrangement::Tabs.into());
+        let tabs = tabbed && seam(&window).is_none();
+        (tabs && window.shows(PRINTED)).then_some(())
+    });
+}
+
+#[test]
 fn the_menu_opens_a_welcome_view_beside_the_terminal_and_d_d_in_it_closes_it() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
-    let frames = |window: &Window| window.screen().iter().map(|it| it.matches('╭').count()).max();
+    as_panes(&owned, &mut window, &dir.path);
     window.send(WELCOME);
     eventually("a welcome view is drawn beside the terminal", || {
         (frames(&window) == Some(2) && window.shows("runs no terminal")).then_some(())
@@ -234,6 +282,7 @@ fn a_view_opened_from_the_sidebar_or_its_menu_takes_the_keys() {
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    as_panes(&owned, &mut window, &dir.path);
     let mut before = tops(&window);
     for (keys, count) in [(format!("{SIDEBAR}nv"), 2), (format!("{SIDEBAR}{MENU}nv"), 3)] {
         window.send(&keys);
@@ -322,6 +371,7 @@ fn ctrl_h_and_ctrl_l_move_between_views_and_alt_equals_and_minus_resize_the_focu
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
     let side = |window: &Window| if window.cursor().1 >= split { "right" } else { "left" };
@@ -391,6 +441,8 @@ fn an_edge_answered_after_a_click_on_another_view_leaves_the_keys_with_the_view(
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
     window.send(LEFT);
@@ -423,6 +475,8 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     let first = eventually("luneta shows work", || shown(&owned, &dir.path)).id;
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
     let side = |window: &Window| if window.cursor().1 >= split { "right" } else { "left" };

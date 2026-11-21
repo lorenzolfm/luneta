@@ -13,7 +13,8 @@ use crate::api::{self, show_request, show_response};
 use crate::folder::Folder;
 use crate::mux::TerminalKey;
 use crate::remote::Destination;
-use crate::projects::{Opens, Size, ViewId, WorktreeId, FRAME_CELLS, LAYOUT_VIEWS_MAX};
+use crate::projects::{Arranged, Opens, Size, ViewId, WorktreeId};
+use crate::projects::{FRAME_CELLS, LAYOUT_VIEWS_MAX};
 use crate::streams::{self, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
@@ -64,11 +65,19 @@ impl View {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shows {
+    Tiled,
+    Full,
+    Tabs,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Showing {
+    before: Vec<View>,
     focused: View,
-    others: Vec<View>,
-    full: bool,
+    after: Vec<View>,
+    shows: Shows,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,7 +104,15 @@ impl Laid {
     }
 
     pub fn views(&self) -> impl Iterator<Item = &View> {
-        self.shown.iter().flat_map(|shown| iter::once(&shown.focused).chain(&shown.others))
+        self.shown.iter().flat_map(|shown| {
+            iter::once(&shown.focused).chain(&shown.before).chain(&shown.after)
+        })
+    }
+
+    pub fn in_order(&self) -> impl Iterator<Item = &View> {
+        self.shown.iter().flat_map(|shown| {
+            shown.before.iter().chain(iter::once(&shown.focused)).chain(&shown.after)
+        })
     }
 
     #[must_use]
@@ -104,24 +121,25 @@ impl Laid {
     }
 
     #[must_use]
-    pub fn full(&self) -> bool {
-        self.shown.as_ref().is_some_and(|shown| shown.full)
+    pub fn shows(&self) -> Option<Shows> {
+        self.shown.as_ref().map(|shown| shown.shows)
     }
 
     #[must_use]
     pub fn focused_at(&self) -> Option<(&View, Rect)> {
         let shown = self.shown.as_ref()?;
-        let rect = if shown.full { self.whole() } else { shown.focused.rect };
+        let rect = match shown.shows {
+            Shows::Full | Shows::Tabs => self.whole(),
+            Shows::Tiled => shown.focused.rect,
+        };
         Some((&shown.focused, rect))
     }
 
     #[must_use]
     pub fn drawn(&self) -> Vec<(&View, Rect)> {
-        match &self.shown {
-            Some(Showing { full: true, .. }) => self.focused_at().into_iter().collect(),
-            Some(Showing { full: false, .. }) | None => {
-                self.views().map(|view| (view, view.rect)).collect()
-            },
+        match self.shows() {
+            Some(Shows::Full | Shows::Tabs) => self.focused_at().into_iter().collect(),
+            Some(Shows::Tiled) | None => self.views().map(|view| (view, view.rect)).collect(),
         }
     }
 
@@ -143,22 +161,25 @@ impl Laid {
             let count = laid.views.len();
             return Err(format!("a layout of {count} views, over {LAYOUT_VIEWS_MAX}"));
         }
-        let mut others =
+        let mut before =
             laid.views.into_iter().map(heard_view).collect::<Result<Vec<View>, String>>()?;
-        tiles(&others, size)?;
-        let (focused, full) = match laid.shown {
-            None if others.is_empty() => return Ok(Laid { worktree, size, shown: None }),
+        let (focused, shows) = match laid.shown {
+            None if before.is_empty() => return Ok(Laid { worktree, size, shown: None }),
             None => return Err("a layout of terminals focuses none".to_owned()),
-            Some(Said::Tiled(focused)) => (focused, false),
-            Some(Said::Full(_)) if others.len() == 1 => {
+            Some(Said::Tiled(focused)) => (focused, Shows::Tiled),
+            Some(Said::Full(_)) if before.len() == 1 => {
                 return Err("a layout of one terminal fills itself with it".to_owned());
             },
-            Some(Said::Full(full)) => (full, true),
+            Some(Said::Full(full)) => (full, Shows::Full),
+            Some(Said::Tabbed(focused)) => (focused, Shows::Tabs),
         };
-        let at = others.iter().position(|view| view.id.get() == focused);
+        tiles(&before, size, shows)?;
+        let at = before.iter().position(|view| view.id.get() == focused);
         let unheld = || format!("a layout focuses terminal {focused:016x}, which it lays out not");
-        let focused = others.remove(at.ok_or_else(unheld)?);
-        Ok(Laid { worktree, size, shown: Some(Showing { focused, others, full }) })
+        let at = at.ok_or_else(unheld)?;
+        let after = before.split_off(at + 1);
+        let focused = before.pop().expect("the focused view is the last before those after it");
+        Ok(Laid { worktree, size, shown: Some(Showing { before, focused, after, shows }) })
     }
 }
 
@@ -184,11 +205,15 @@ fn heard_view(view: show_response::View) -> Result<View, String> {
     Ok(View { id, rect, found })
 }
 
-fn tiles(views: &[View], size: Size) -> Result<(), String> {
+fn tiles(views: &[View], size: Size, shows: Shows) -> Result<(), String> {
     let (columns, rows) = size.get();
+    let tabbed = shows == Shows::Tabs;
     for (at, one) in views.iter().enumerate() {
         if right(one.rect) > u32::from(columns) || bottom(one.rect) > u32::from(rows) {
             return Err(format!("view {} is placed off its layout", one.id));
+        }
+        if tabbed && one.rect != Rect::whole(size) {
+            return Err(format!("view {} is a tab that fills not its layout", one.id));
         }
         for other in &views[at + 1..] {
             if one.id == other.id {
@@ -200,10 +225,13 @@ fn tiles(views: &[View], size: Size) -> Result<(), String> {
                 let (one, other, id) = (one.id, other.id, key.id);
                 return Err(format!("terminals {one} and {other} share luneta-mux's terminal {id}"));
             }
-            if overlaps(one.rect, other.rect) {
+            if !tabbed && overlaps(one.rect, other.rect) {
                 return Err(format!("view {} is laid over {}", other.id, one.id));
             }
         }
+    }
+    if tabbed {
+        return Ok(());
     }
     let covered: u64 = views.iter().map(|view| cells(view.rect)).sum();
     let whole = u64::from(columns) * u64::from(rows);
@@ -242,6 +270,7 @@ pub enum Asked {
     Step { direction: Direction, step: NonZeroU64 },
     Resize(Growth),
     Fullscreen,
+    Arrange(Arranged),
 }
 
 impl Asked {
@@ -279,6 +308,7 @@ impl Asked {
                 Event::Resize(show_request::Resize { sides, growth: growth.into() })
             },
             Asked::Fullscreen => Event::Fullscreen(()),
+            Asked::Arrange(arranged) => Event::Arrange(arranged.to_api().into()),
         };
         api::ShowRequest { event: Some(event) }
     }
@@ -506,13 +536,34 @@ mod tests {
         assert_eq!(read.keys().len(), 1);
         let drawn: Vec<(u64, u16)> =
             read.drawn().iter().map(|(view, rect)| (view.id.get(), rect.columns)).collect();
-        assert_eq!((read.full(), drawn), (false, vec![(2, 40), (1, 40)]));
+        assert_eq!((read.shows(), drawn), (Some(Shows::Tiled), vec![(2, 40), (1, 40)]));
         let full = Laid::heard(laid(halves(), Some(full(1)))).unwrap();
         let drawn: Vec<(u64, u16)> =
             full.drawn().iter().map(|(view, rect)| (view.id.get(), rect.columns)).collect();
-        assert_eq!((full.full(), drawn), (true, vec![(1, 80)]));
+        assert_eq!((full.shows(), drawn), (Some(Shows::Full), vec![(1, 80)]));
         let empty = Laid::heard(laid(Vec::new(), None)).unwrap();
         assert!(empty.is_empty() && empty.focused().is_none() && empty.drawn().is_empty());
+    }
+
+    #[test]
+    fn tabs_each_fill_the_layout_keep_their_order_and_draw_the_focused_one_alone() {
+        let tab = |terminal, key| placed(terminal, (0, 0, 80, 24), key);
+        let tabs = vec![tab(1, Some(3)), tab(2, None), tab(5, Some(4))];
+        let read = Laid::heard(laid(tabs.clone(), Some(Said::Tabbed(2)))).unwrap();
+        let order: Vec<u64> = read.in_order().map(|view| view.id.get()).collect();
+        assert_eq!(order, [1, 2, 5], "tabs keep the layout's order");
+        let drawn: Vec<(u64, u16)> =
+            read.drawn().iter().map(|(view, rect)| (view.id.get(), rect.columns)).collect();
+        assert_eq!((read.shows(), drawn), (Some(Shows::Tabs), vec![(2, 80)]));
+        let lone = Laid::heard(laid(vec![tab(1, Some(3))], Some(Said::Tabbed(1)))).unwrap();
+        assert_eq!(lone.in_order().count(), 1, "one view is one tab");
+        let unfilled = Laid::heard(laid(halves(), Some(Said::Tabbed(1)))).unwrap_err();
+        assert!(unfilled.contains("fills not its layout"), "{unfilled}");
+        let twice = vec![tab(1, Some(3)), tab(2, Some(3))];
+        let shared = Laid::heard(laid(twice, Some(Said::Tabbed(1)))).unwrap_err();
+        assert!(shared.contains("share luneta-mux's terminal"), "{shared}");
+        let astray = Laid::heard(laid(tabs, Some(Said::Tabbed(9)))).unwrap_err();
+        assert!(astray.contains("lays out not"), "{astray}");
     }
 
     #[test]

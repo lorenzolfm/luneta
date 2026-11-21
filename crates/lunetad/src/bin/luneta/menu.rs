@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::said::Said;
 use lunetad::links::Branch;
-use lunetad::projects::{self, Argv, Opens, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, Argv, Arranged, Opens, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::rebases::{self, Came, Rebased, Unrebased};
 use lunetad::{Destination, Directory, SessionName};
@@ -633,6 +633,7 @@ impl Chain {
             | Offer::FixChecks(_)
             | Offer::NewView(_)
             | Offer::NewWelcome(_)
+            | Offer::Arrange(..)
             | Offer::CloseView(_)
             | Offer::CloseWorktree(_)
             | Offer::CloseProject(_)
@@ -798,6 +799,7 @@ enum Offer<'t> {
     FixChecks(&'t ViewRow),
     NewView(&'t ViewRow),
     NewWelcome(&'t ViewRow),
+    Arrange(&'t ViewRow, Arranged),
     NewWorktree(ProjectId),
     NewProject,
     NewMachine,
@@ -833,6 +835,7 @@ pub struct ViewRow {
     pub repository: Option<String>,
     pub pull_request: Option<PullRequest>,
     pub ran: Ran,
+    pub arranged: Option<Arranged>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -930,6 +933,12 @@ impl Target {
             (Action::FixChecks, Target::View(_, row)) => Offer::FixChecks(row),
             (Action::NewView, Target::View(_, row)) => Offer::NewView(row),
             (Action::NewWelcome, Target::View(_, row)) => Offer::NewWelcome(row),
+            (Action::ShowTabs, Target::View(_, row)) if row.arranged == Some(Arranged::Panes) => {
+                Offer::Arrange(row, Arranged::Tabs)
+            },
+            (Action::ShowPanes, Target::View(_, row)) if row.arranged == Some(Arranged::Tabs) => {
+                Offer::Arrange(row, Arranged::Panes)
+            },
             (Action::NewWorktree, _) => Offer::NewWorktree(self.project()?.id()),
             (Action::NewProject, _) => Offer::NewProject,
             (Action::NewMachine, _) => Offer::NewMachine,
@@ -1254,6 +1263,7 @@ pub enum Done {
     Forget(Destination),
     Worktree(Machine, ProjectId, Branch),
     Welcome { on: Machine, session: Listed, view: ViewKey },
+    Arrange { on: Machine, session: Listed, view: ViewKey, arranged: Arranged },
     OpenIn { on: Machine, worktree: WorktreeId, command: Argv },
     Said(String),
     Project { on: Machine, folder: String, name: Option<projects::Name> },
@@ -1524,6 +1534,10 @@ impl Menu {
                 let on = target.machine().clone();
                 Did::Closed(Done::Welcome { on, session: row.session.clone(), view: row.view })
             },
+            Offer::Arrange(row, arranged) => {
+                let (on, session, view) = (target.machine().clone(), row.session.clone(), row.view);
+                Did::Closed(Done::Arrange { on, session, view, arranged })
+            },
             Offer::NewWorktree(project) => {
                 let chain = chained.expect("a new worktree is typed in a chain");
                 stays(Stage::Typing { keys, chain }, Wants::Cloned(project))
@@ -1743,6 +1757,7 @@ impl Menu {
                     repository: None,
                     pull_request: None,
                     ran: Ran::Unhooked,
+                    arranged: None,
                 };
                 let target = Target::View(on, row);
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Opening) };
@@ -2790,6 +2805,7 @@ mod tests {
             repository: Some("/w/luneta".to_owned()),
             pull_request: None,
             ran: Ran::Unhooked,
+            arranged: Some(Arranged::Tabs),
         }
     }
 
@@ -2959,7 +2975,7 @@ mod tests {
     fn the_first_group_has_luneta_s_keys_and_backspace_goes_back_to_it() {
         let (menu, _) = stays(opened(own_view(), None));
         assert_eq!(
-            text(&menu.lines(31, 12, 0).0),
+            text(&menu.lines(31, 13, 0).0),
             [
                 "─ luneta ──────── luneta/main ─",
                 " /  Search skills",
@@ -2967,6 +2983,7 @@ mod tests {
                 " i  File issue",
                 " c  Skills ▸",
                 " n  New ▸",
+                " s  Show as panes",
                 " r  Rename the view…",
                 " d  Close ▸",
                 " g  Git ▸",
@@ -2993,7 +3010,7 @@ mod tests {
     #[test]
     fn the_legend_lists_the_sidebar_s_commands_then_the_menu_s_groups_for_the_row() {
         assert_eq!(
-            text(&legend(Some(&own_view()), 31, 15).0),
+            text(&legend(Some(&own_view()), 31, 16).0),
             [
                 "─ luneta ──────────────────────",
                 " /  Search",
@@ -3006,6 +3023,7 @@ mod tests {
                 " i  File issue",
                 " c  Skills ▸",
                 " n  New ▸",
+                " s  Show as panes",
                 " r  Rename the view…",
                 " d  Close ▸",
                 " b  Brief ▸",
@@ -3053,6 +3071,23 @@ mod tests {
     }
 
     #[test]
+    fn a_view_s_row_offers_only_the_arrangement_its_worktree_is_not_shown_as() {
+        let on = |arranged| Target::View(Machine::Local, ViewRow { arranged, ..row() });
+        let arrange = |arranged| {
+            let (session, view) = (listed(), ViewKey::terminal(4));
+            Done::Arrange { on: Machine::Local, session, view, arranged }
+        };
+        let (tabs, panes) = (Some(Arranged::Tabs), Some(Arranged::Panes));
+        assert_eq!(closed(opened(on(tabs), Some('s'))), arrange(Arranged::Panes));
+        assert_eq!(closed(opened(on(panes), Some('t'))), arrange(Arranged::Tabs));
+        let unoffered = |arranged, key| Menu::open(1, on(arranged), Some(key), PICKED).is_none();
+        assert!(unoffered(tabs, 't'), "nothing that changes nothing");
+        assert!(unoffered(panes, 's'), "nothing that changes nothing");
+        assert!(unoffered(None, 't'), "neither, unknown how it is shown");
+        assert!(unoffered(None, 's'), "neither, unknown how it is shown");
+    }
+
+    #[test]
     fn each_action_of_the_menu_is_offered_on_some_row() {
         let vps = Machine::Remote("me@vps".parse().unwrap());
         let rows = [
@@ -3061,6 +3096,7 @@ mod tests {
             worktree_on(Machine::Local),
             project_on(Machine::Local),
             Target::Machine(vps),
+            Target::View(Machine::Local, ViewRow { arranged: Some(Arranged::Panes), ..row() }),
         ];
         for (action, _) in Action::menu() {
             assert!(rows.iter().any(|row| row.offer(action).is_some()), "{action:?}");
@@ -3631,7 +3667,7 @@ mod tests {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let root = |target: Target| {
             let (menu, _) = stays(opened(target, None));
-            text(&menu.lines(40, 12, 0).0)[1..].to_vec()
+            text(&menu.lines(40, 13, 0).0)[1..].to_vec()
         };
         let view = Target::View(vps(), own_row());
         assert_eq!(root(view.clone()), [
@@ -3640,6 +3676,7 @@ mod tests {
             " i  File issue",
             " c  Skills ▸",
             " n  New ▸",
+            " s  Show as panes",
             " r  Rename the view…",
             " d  Close ▸",
             " g  Git ▸",
@@ -4275,7 +4312,7 @@ mod tests {
     fn the_menu_floats_at_the_bottom_right_of_the_view_s_side() {
         let menu = Menu::new(1, view_row(), PICKED);
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
-        assert_eq!(floated(drawing(&menu), 50, 13), [
+        assert_eq!(floated(drawing(&menu), 50, 14), [
             "z".repeat(50),
             format!("{}┌─ luneta ─ luneta/main ─┐", "z".repeat(24)),
             boxed(" /  Search skills"),
@@ -4283,6 +4320,7 @@ mod tests {
             boxed(" i  File issue"),
             boxed(" c  Skills ▸"),
             boxed(" n  New ▸"),
+            boxed(" s  Show as panes"),
             boxed(" d  Close ▸"),
             boxed(" g  Git ▸"),
             boxed(" b  Brief ▸"),
