@@ -188,7 +188,7 @@ pub fn watch(file: &Path, events: Sender<Event>) -> notify::Result<RecommendedWa
 
 #[cfg(test)]
 mod tests {
-    use lunetad::projects::LINE_BYTES_MAX;
+    use lunetad::projects::{Line, LINE_BYTES_MAX};
 
     use super::*;
 
@@ -252,7 +252,12 @@ mod tests {
 
     #[test]
     fn an_agent_is_refused_words_that_no_command_line_holds() {
-        let refused = Err(format!("a command line is longer than {LINE_BYTES_MAX} bytes"));
+        let refused = Err(Line::parse(&"x".repeat(LINE_BYTES_MAX + 1)).unwrap_err());
+        let fits = "x".repeat(LINE_BYTES_MAX - "pi ".len());
+        let argv = on_words(Harness::Pi, fits.clone(), &[]);
+        let argv = argv.expect("pi and the words fill a command line");
+        assert_eq!(argv.words(), ["pi".to_owned(), fits.clone()]);
+        assert_eq!(on_words(Harness::Pi, format!("{fits}x"), &[]), refused);
         assert_eq!(on_words(Harness::Pi, "x".repeat(LINE_BYTES_MAX), &[]), refused);
         assert_eq!(on_skill(Harness::Pi, "tdd", Some(&"x".repeat(LINE_BYTES_MAX))), refused);
     }

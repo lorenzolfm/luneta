@@ -1152,7 +1152,7 @@ pub enum Asked {
     Browse(Link),
     Leave,
     Close { on: Machine, act: Act, ticket: u64 },
-    Open { asking: Held, on: Machine, project: ProjectId, beside: ViewKey, command: Opens },
+    Open { asking: Held, on: Machine, project: ProjectId, beside: ViewKey, opens: Opens },
     NewWorktree { on: Machine, project: ProjectId, branch: Branch },
     Welcome { asking: Held, on: Machine, session: Listed, view: ViewKey },
     OpenIn { asking: Held, on: Machine, worktree: WorktreeId, command: Argv },
@@ -3732,9 +3732,9 @@ impl Sidebar {
             },
         };
         let (number, on) = (menu.number(), menu.target().machine().clone());
-        if let Wants::Open { session, view, command } = wants {
+        if let Wants::Open { session, view, opens } = wants {
             let asking = taken.held();
-            return Asked::Open { asking, on, project: session.project(), beside: view, command };
+            return Asked::Open { asking, on, project: session.project(), beside: view, opens };
         }
         match taken {
             Taken::Open(placed) => self.put(menu, placed),
@@ -8899,9 +8899,9 @@ mod tests {
         let tigerstyle = || Choice::Skill(name("tigerstyle"));
         assert_eq!(sidebar.chose(2, tigerstyle(), moment(160_000)), Asked::Nothing);
         let command = ["claude", "/tigerstyle"].map(str::to_owned).to_vec();
-        let command = Opens::Command(Argv::parse(command).unwrap());
+        let opens = Opens::Command(Argv::parse(command).unwrap());
         let (project, beside) = (listed("older", 10).project(), view_key(10, 1));
-        let open = Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, command };
+        let open = Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, opens };
         assert_eq!(sidebar.chose(1, tigerstyle(), moment(160_000)), open);
     }
 
@@ -8918,10 +8918,10 @@ mod tests {
         step_onto_its_first_view(&mut sidebar);
         let started = |session: &str, beside, harness, spelled| {
             let command = [harness, spelled].map(str::to_owned).to_vec();
-            let command = Opens::Command(Argv::parse(command).unwrap());
+            let opens = Opens::Command(Argv::parse(command).unwrap());
             let id = if session == "older" { 10 } else { 20 };
             let (project, beside) = (listed(session, id).project(), view_key(id, beside));
-            Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, command }
+            Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, opens }
         };
         type_in(&mut sidebar, "c");
         let pi = started("older", 1, "pi", "/skill:tigerstyle");
@@ -9424,8 +9424,8 @@ mod tests {
         let (lines, _) = seen_at(&mut sidebar, true, 32, 13, moment(160_000) + PAUSE);
         assert_eq!(lines[6], "─ New ─────────── luneta/main ─", "{lines:?}");
         let (project, beside) = (listed("s", 10).project(), view_key(10, 1));
-        let command = Opens::Shell;
-        let view = Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, command };
+        let opens = Opens::Shell;
+        let view = Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, opens };
         assert_eq!(sidebar.key(&char('v'), moment(160_000)), view);
     }
 
@@ -9451,9 +9451,9 @@ mod tests {
         let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
                       nothing.";
         let command = vec!["claude".to_owned(), prompt.to_owned()];
-        let command = Opens::Command(Argv::parse(command).unwrap());
+        let opens = Opens::Command(Argv::parse(command).unwrap());
         let (project, beside) = (listed("s", 10).project(), view_key(10, 1));
-        let open = Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, command };
+        let open = Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, opens };
         assert_eq!(sidebar.printed(1, nothing()), open);
         assert!(sidebar.open().is_none());
 
@@ -9617,9 +9617,9 @@ mod tests {
         float_a_menu(&mut sidebar);
         type_in(&mut sidebar, "c");
         let command = ["claude", "/thermo-nuclear-review"];
-        let command = Opens::Command(Argv::parse(command.map(str::to_owned).to_vec()).unwrap());
+        let opens = Opens::Command(Argv::parse(command.map(str::to_owned).to_vec()).unwrap());
         let (project, beside) = (own_listed("older", 1).project(), view_key(1, 1));
-        let view = Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, command };
+        let view = Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, opens };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), view);
         sidebar.focus(Keys::Terminal);
         assert!(sidebar.open().is_none());
@@ -11098,8 +11098,8 @@ mod tests {
         let menu = sidebar.open().expect("the menu");
         assert_eq!(menu.target(), &Target::View(on.clone(), row.clone()));
         let (project, beside) = (listed("main", 20).project(), view_key(20, 1));
-        let command = Opens::Shell;
-        let asked = Asked::Open { asking: Held::Open, on: on.clone(), project, beside, command };
+        let opens = Opens::Shell;
+        let asked = Asked::Open { asking: Held::Open, on: on.clone(), project, beside, opens };
         assert_eq!(sidebar.key(&char('v'), moment(160_000)), asked);
         assert!(sidebar.open().is_none());
 

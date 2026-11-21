@@ -1875,8 +1875,8 @@ impl App {
                 self.leave();
             },
             Asked::Close { on, act, ticket } => self.project_act(on, act, ticket),
-            Asked::Open { asking, on, project, beside, command } => {
-                self.project_open(asking, &on, project, beside, command);
+            Asked::Open { asking, on, project, beside, opens } => {
+                self.project_open(asking, &on, project, beside, opens);
             },
             Asked::Welcome { asking, on, session, view } => {
                 self.welcome(asking, &on, &session, view);
@@ -2070,7 +2070,7 @@ impl App {
         on: &Machine,
         project: ProjectId,
         beside: ViewKey,
-        command: Opens,
+        opens: Opens,
     ) {
         let Some(project) = self.projected.project(on, project) else {
             return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());
@@ -2079,7 +2079,7 @@ impl App {
             return self.sidebar.notify(format!("menu: lunetad lists no view {beside}"));
         };
         self.go_worktree(on, worktree, Some(terminal));
-        self.shown().open_beside_focused(command);
+        self.shown().open_beside_focused(opens);
         self.give_opened(Opener::of(asking));
     }
 
