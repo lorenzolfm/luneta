@@ -1197,7 +1197,7 @@ pub enum Asked {
     Welcome { asking: Held, on: Machine, session: Listed, view: ViewKey },
     Arrange { asking: Held, on: Machine, session: Listed, view: ViewKey, arranged: Arranged },
     OpenIn { asking: Held, on: Machine, worktree: WorktreeId, command: Argv },
-    AddProject { on: Machine, folder: String, name: Option<projects::Name> },
+    AddProject { on: Machine, folder: String, name: Option<projects::ProjectName> },
     Rename { on: Machine, rename: Rename },
     Make {
         menu: u64,

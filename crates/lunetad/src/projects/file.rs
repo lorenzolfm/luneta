@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Closing, Dir, Holds, Id, Line, Name, Project, Projects};
-use super::{Made, ProjectId, Refused, Relaid, Runs, Session, Spot, Terminal};
+use super::{Made, ProjectId, ProjectName, Refused, Relaid, Runs, Session, Spot, Terminal};
 use super::{TerminalViewId, Used, View, ViewId};
 use super::{Arranged, Focus, Layout, Shape, Subfolder, Worktree, WorktreeId};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
@@ -879,14 +879,14 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
 
 struct Unrooted {
     id: ProjectId,
-    name: Name,
+    name: ProjectName,
     dir: Dir,
     worktrees: Vec<(Below, Worktree)>,
 }
 
 struct Gathered {
     id: ProjectId,
-    name: Name,
+    name: ProjectName,
     dir: Dir,
     holds: Gathering,
 }
@@ -971,7 +971,7 @@ fn root_project(
     project: Unrooted,
     root: &mut impl FnMut(&Dir) -> Result<Option<Spot>, String>,
 ) -> Result<Gathered, String> {
-    let named = |at: &Dir| match Name::parse(at.last()) {
+    let named = |at: &Dir| match ProjectName::of_folder(at) {
         Ok(after) if project.name.as_str() == project.dir.last() => after,
         Ok(_) | Err(_) => project.name.clone(),
     };
@@ -1092,7 +1092,8 @@ fn join(held: &mut Worktree, other: Worktree) -> Result<(), String> {
 
 impl<L: KeptLaid> KeptProject<KeptFolderWorktree<L>, KeptCloneWorktree<L>> {
     fn read(self) -> Result<Project, String> {
-        let (id, name, dir) = (self.id.parse()?, Name::parse(&self.name)?, Dir::parse(&self.dir)?);
+        let (id, name) = (self.id.parse()?, ProjectName::parse(&self.name)?);
+        let dir = Dir::parse(&self.dir)?;
         let holds = match self.holds {
             KeptHolds::Folder(own) => Holds::Folder(own.read()?),
             KeptHolds::Clone(rows) => {
@@ -1229,7 +1230,8 @@ impl KeptCloneWorktree<KeptLayout> {
 
 impl UnrootedProject {
     fn read(self) -> Result<Unrooted, String> {
-        let (id, name, dir) = (self.id.parse()?, Name::parse(&self.name)?, Dir::parse(&self.dir)?);
+        let (id, name) = (self.id.parse()?, ProjectName::parse(&self.name)?);
+        let dir = Dir::parse(&self.dir)?;
         let worktrees = self.worktrees.into_iter().map(UnrootedWorktree::read);
         Ok(Unrooted { id, name, dir, worktrees: worktrees.collect::<Result<_, _>>()? })
     }
@@ -1561,7 +1563,7 @@ mod tests {
         let (core, commands) = channel();
         let mut store = store_at(Ok(file.clone()), core.clone());
         assert_eq!(store.unkept(), None);
-        let vault = Some(Name::parse("bitwarden backup").unwrap());
+        let vault = Some(ProjectName::parse("bitwarden backup").unwrap());
         store.change(Change::AddProject { spot: alone("/home/me/Vault"), name: vault }).unwrap();
         let luneta = Change::AddProject { spot: clone_of("/w/luneta", &["main"]), name: None };
         let made = store.change(luneta);
@@ -2249,7 +2251,7 @@ mod tests {
             panic!("a project inside another is kept");
         };
         assert!(why.contains("/a/b is inside /a"), "{why}");
-        let (project, to) = (ProjectId::new(Id::of(9).unwrap()), Name::parse("x").unwrap());
+        let (project, to) = (ProjectId::new(Id::of(9).unwrap()), ProjectName::parse("x").unwrap());
         let Err(Failed::Refused(why)) = store.change(Change::RenameProject { project, to }) else {
             panic!("a rename of no project is kept");
         };
@@ -2454,7 +2456,8 @@ mod tests {
         assert_eq!(full(&read()), Some(two));
 
         store.relaid(Relaid::Fill { worktree, full: None }).unwrap();
-        store.change(Change::RenameProject { project, to: Name::parse("b").unwrap() }).unwrap();
+        let to = ProjectName::parse("b").unwrap();
+        store.change(Change::RenameProject { project, to }).unwrap();
         let kept = *store.projects().unwrap() == read();
         assert!(kept, "a change kept at once takes the rest along");
         store.flush().unwrap();

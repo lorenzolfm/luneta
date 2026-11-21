@@ -461,20 +461,11 @@ pub enum Renames {
     Project(ProjectId),
 }
 
-impl Renames {
-    fn parse(self) -> fn(&str) -> Result<projects::Name, String> {
-        match self {
-            Renames::Terminal(_) | Renames::Worktree(_) => projects::Name::parse,
-            Renames::Project(_) => projects::Name::of_project,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rename {
     Terminal(ViewId, Option<projects::Name>),
     Worktree(WorktreeId, Option<projects::Name>),
-    Project(ProjectId, projects::Name),
+    Project(ProjectId, projects::ProjectName),
 }
 
 impl Rename {
@@ -526,10 +517,6 @@ impl Typing {
     }
 
     fn typed(self, typed: &str, on: &Machine) -> Entered {
-        let named = |parse: fn(&str) -> Result<projects::Name, String>| {
-            let named = Some(typed.trim()).filter(|name| !name.is_empty());
-            named.map(parse).transpose()
-        };
         let renamed = |rename: Rename| Entered::Done(Done::Rename(on.clone(), rename));
         match self {
             Typing::Machine => match typed.parse::<Destination>() {
@@ -540,7 +527,7 @@ impl Typing {
                 Ok(folder) => Entered::Folder(folder),
                 Err(why) => Entered::Wrong(why),
             },
-            Typing::Name(folder) => match named(projects::Name::of_project) {
+            Typing::Name(folder) => match named(typed, projects::ProjectName::parse) {
                 Ok(name) => Entered::Done(Done::Project { on: on.clone(), folder, name }),
                 Err(why) => Entered::Wrong(why),
             },
@@ -548,23 +535,27 @@ impl Typing {
                 Ok(branch) => Entered::Done(Done::Worktree(on.clone(), project, branch)),
                 Err(why) => Entered::Wrong(why),
             },
-            Typing::Rename(asked) => match (asked, named(asked.parse())) {
-                (_, Err(why)) => Entered::Wrong(why),
-                (Renames::Terminal(terminal), Ok(name)) => {
-                    renamed(Rename::Terminal(terminal, name))
-                },
-                (Renames::Worktree(worktree), Ok(name)) => {
-                    renamed(Rename::Worktree(worktree, name))
-                },
-                (Renames::Project(project), Ok(Some(name))) => {
-                    renamed(Rename::Project(project, name))
-                },
-                (Renames::Project(_), Ok(None)) => {
-                    Entered::Wrong("a project keeps a name: type one".to_owned())
-                },
+            Typing::Rename(asked) => {
+                let rename = match asked {
+                    Renames::Terminal(terminal) => named(typed, projects::Name::parse)
+                        .map(|name| Some(Rename::Terminal(terminal, name))),
+                    Renames::Worktree(worktree) => named(typed, projects::Name::parse)
+                        .map(|name| Some(Rename::Worktree(worktree, name))),
+                    Renames::Project(project) => named(typed, projects::ProjectName::parse)
+                        .map(|name| name.map(|name| Rename::Project(project, name))),
+                };
+                match rename {
+                    Err(why) => Entered::Wrong(why),
+                    Ok(Some(rename)) => renamed(rename),
+                    Ok(None) => Entered::Wrong("a project keeps a name: type one".to_owned()),
+                }
             },
         }
     }
+}
+
+fn named<N>(typed: &str, parse: fn(&str) -> Result<N, String>) -> Result<Option<N>, String> {
+    Some(typed.trim()).filter(|name| !name.is_empty()).map(parse).transpose()
 }
 
 fn folder_typed(typed: &str) -> Result<String, String> {
@@ -1266,7 +1257,7 @@ pub enum Done {
     Arrange { on: Machine, session: Listed, view: ViewKey, arranged: Arranged },
     OpenIn { on: Machine, worktree: WorktreeId, command: Argv },
     Said(String),
-    Project { on: Machine, folder: String, name: Option<projects::Name> },
+    Project { on: Machine, folder: String, name: Option<projects::ProjectName> },
     Rename(Machine, Rename),
     Quit,
 }
@@ -3568,7 +3559,8 @@ mod tests {
         };
         assert!(wrong.contains("names no project"), "{wrong}");
         let named = closed(typed(cleared(menu), "Notes").key(&enter));
-        let (folder, name) = ("~/notes".to_owned(), Some(projects::Name::parse("Notes").unwrap()));
+        let name = Some(projects::ProjectName::parse("Notes").unwrap());
+        let folder = "~/notes".to_owned();
         assert_eq!(named, Done::Project { on: Machine::Local, folder, name });
         let (menu, _) = stays(typed(cleared(asked(remote_header())), "/srv/notes").key(&enter));
         let folder = "/srv/notes".to_owned();
@@ -3594,7 +3586,8 @@ mod tests {
         let done = closed(renamed(worktree_on(vps()), "logs"));
         assert_eq!(done, Done::Rename(vps(), Rename::Worktree(worktree(), to())));
         let done = closed(renamed(session_row(), "logs"));
-        let project = Rename::Project(project().id(), logs());
+        let logs = projects::ProjectName::parse("logs").unwrap();
+        let project = Rename::Project(project().id(), logs);
         assert_eq!(done, Done::Rename(Machine::Local, project));
         let (menu, _) = stays(renamed(session_row(), " "));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[..3], [

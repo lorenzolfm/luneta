@@ -17,6 +17,7 @@ use lunetad::api::{Version, WatchRequest};
 use lunetad::changes::{Unadded, Unchanged};
 use lunetad::mux::own::TerminalKey;
 use lunetad::projects::{self, Argv, Holders, Name, Opened, Opens, ProjectId, Size, ViewId};
+use lunetad::projects::ProjectName;
 use lunetad::projects::WorktreeId;
 use lunetad::links::{self, Branch, Unready};
 use lunetad::work::{self, Listed};
@@ -520,9 +521,9 @@ fn changed_there(machine: &Machine, change: Change) -> Result<(), Unchanged> {
 pub fn renamed_project(
     machine: &Machine,
     project: ProjectId,
-    to: &Name,
+    to: &ProjectName,
 ) -> Result<(), Unchanged> {
-    let (project, to) = (project.get(), spelled(to));
+    let (project, to) = (project.get(), to.as_str().to_owned());
     changed_there(machine, Change::RenameProject(RenameProject { project, to }))
 }
 
@@ -554,9 +555,9 @@ pub enum Landing {
 pub fn project_made(
     machine: &Machine,
     folder: &str,
-    name: Option<&Name>,
+    name: Option<&ProjectName>,
 ) -> Result<ProjectId, String> {
-    let (dir, name) = (folder.to_owned(), name.map(spelled));
+    let (dir, name) = (folder.to_owned(), name.map(|name| name.as_str().to_owned()));
     let made = made_there(machine, Change::AddProject(AddProject { dir, name }));
     let project = made.and_then(project_of).map_err(|unchanged| said_unmade(unchanged, "project"))?;
     let start = Start { folder: folder.to_owned(), name: None };
