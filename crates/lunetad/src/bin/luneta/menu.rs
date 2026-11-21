@@ -1248,7 +1248,7 @@ pub enum Wants {
     Pull(Work, Wanted),
     Printed { session: Listed, view: ViewKey, ended: Ended },
     Checks { page: PullPage },
-    Make { cwd: Directory, name: String, opens: Opens },
+    Make { cwd: Directory, name: String, agent: Option<Argv> },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1735,16 +1735,15 @@ impl Menu {
                 Some(agents::on_words(agent, words, &[real.as_str()]))
             },
         };
-        let opens = match argv {
-            None => Opens::Shell,
-            Some(Ok(argv)) => Opens::Command(argv),
-            Some(Err(why)) => return unstarted(&work, &why),
+        let argv = match argv.transpose() {
+            Ok(argv) => argv,
+            Err(why) => return unstarted(&work, &why),
         };
-        match (at, opens) {
-            (At::There((session, view)), Opens::Shell) => {
+        match (at, argv) {
+            (At::There((session, view)), None) => {
                 Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })))
             },
-            (At::There((session, view)), opens @ Opens::Command(_)) => {
+            (At::There((session, view)), Some(argv)) => {
                 let row = ViewRow {
                     session: session.clone(),
                     view,
@@ -1757,11 +1756,11 @@ impl Menu {
                 };
                 let target = Target::View(on, row);
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Opening) };
-                let wants = Wants::Open { session, view, opens };
+                let wants = Wants::Open { session, view, opens: Opens::Command(argv) };
                 Did::Stays(Menu { number, target, stage }, wants)
             },
-            (At::Unopened, opens) => {
-                let wants = Wants::Make { cwd: folder, name: work.tab(), opens };
+            (At::Unopened, argv) => {
+                let wants = Wants::Make { cwd: folder, name: work.tab(), agent: argv };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Unopened) };
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
@@ -4430,8 +4429,12 @@ mod tests {
         Found { on: Machine::Local, ready }
     }
 
-    fn agent(argv: Vec<String>) -> Opens {
-        Opens::Command(Argv::parse(argv).expect("an agent's argv"))
+    fn argv(words: Vec<String>) -> Argv {
+        Argv::parse(words).expect("an agent's argv")
+    }
+
+    fn agent(words: Vec<String>) -> Opens {
+        Opens::Command(argv(words))
     }
 
     #[test]
@@ -4484,10 +4487,10 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        for (key, opens) in [('w', Opens::Shell), ('r', agent(review.clone()))] {
+        for (key, agent) in [('w', None), ('r', Some(argv(review.clone())))] {
             let (menu, wants) = stays(pulling(key).pulled(ready(At::Unopened)));
             let (cwd, name) = (directory(&folder), "#2736".to_owned());
-            assert_eq!(wants, Wants::Make { cwd, name, opens });
+            assert_eq!(wants, Wants::Make { cwd, name, agent });
             assert_eq!(menu.target(), &Target::Machine(Machine::Local), "no view is in it");
             assert!(menu.opens_pulled());
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
@@ -4526,9 +4529,9 @@ mod tests {
             "pi",
             "/skill:thermo-nuclear-review https://github.com/cashubtc/cdk/pull/2736",
         ];
-        let opens = agent(review.map(str::to_owned).to_vec());
+        let agent = Some(argv(review.map(str::to_owned).to_vec()));
         let (cwd, name) = (directory(&folder), "#2736".to_owned());
-        assert_eq!(wants, Wants::Make { cwd, name, opens });
+        assert_eq!(wants, Wants::Make { cwd, name, agent });
     }
 
     #[test]
@@ -4560,9 +4563,9 @@ mod tests {
         };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
         let tackle = ["claude", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
-        let opens = agent(tackle.map(str::to_owned).to_vec());
+        let agent = Some(argv(tackle.map(str::to_owned).to_vec()));
         let (cwd, name) = (directory(&folder), "#2736".to_owned());
-        assert_eq!(wants, Wants::Make { cwd, name, opens });
+        assert_eq!(wants, Wants::Make { cwd, name, agent });
     }
 
     #[test]
@@ -4644,17 +4647,17 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        let made = |opens| {
+        let made = |agent| {
             let (cwd, name) = (directory(folder), "sync-rework".to_owned());
-            Wants::Make { cwd, name, opens }
+            Wants::Make { cwd, name, agent }
         };
-        assert_eq!(wants, made(agent(command)));
+        assert_eq!(wants, made(Some(argv(command))));
 
         let pressed = |key: char| {
             stays(Menu::pull(1, view_row(), file(), CLAUDE).key(&char(key))).0
         };
         let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
-        assert_eq!(wants, made(Opens::Shell));
+        assert_eq!(wants, made(None));
 
         assert_eq!(
             closed(pressed('w').pulled(Err("no such file".to_owned()))),

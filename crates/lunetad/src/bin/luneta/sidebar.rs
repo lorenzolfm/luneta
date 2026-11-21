@@ -1163,7 +1163,7 @@ pub enum Asked {
         on: Machine,
         cwd: Directory,
         name: String,
-        opens: Opens,
+        agent: Option<Argv>,
     },
     Pull {
         menu: u64,
@@ -3789,7 +3789,7 @@ impl Sidebar {
                 Asked::Printed { menu: number, on, session, view, ended }
             },
             Wants::Checks { page } => Asked::Checks { menu: number, on, page },
-            Wants::Make { cwd, name, opens } => Asked::Make { menu: number, on, cwd, name, opens },
+            Wants::Make { cwd, name, agent } => Asked::Make { menu: number, on, cwd, name, agent },
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
             Wants::Rebase { dir, branch } => Asked::Rebase { menu: number, on, dir, branch },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
@@ -9087,7 +9087,7 @@ mod tests {
             on: Machine::Local,
             cwd: directory("/w/n/feat"),
             name: "#5".to_owned(),
-            opens: Opens::Shell,
+            agent: None,
         };
         assert_eq!(sidebar.pulled(1, Ok(Found { on: Machine::Local, ready })), asked);
         assert_eq!(sidebar.made_for(1), Some(Held::Open));

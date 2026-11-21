@@ -1908,7 +1908,7 @@ impl App {
             Asked::Rename { on, rename } => {
                 self.rename(on, rename);
             },
-            Asked::Make { menu, on, cwd, name, opens } => {
+            Asked::Make { menu, on, cwd, name, agent } => {
                 let busy = |busy: &str| format!("menu: {}", worktrees::unopened(&cwd, &name, busy));
                 if self.refuse_naming(Some(menu), busy) {
                     return;
@@ -1917,7 +1917,7 @@ impl App {
                 self.naming_on(move || {
                     let said = |unchanged| worktrees::said_unopened(unchanged, &cwd, &name);
                     let made = unmade_caught(PULL_PANICKED, said, || {
-                        let pulled = worktrees::pulled(&lunetad, &on, &cwd, &name, &opens)?;
+                        let pulled = worktrees::pulled(&lunetad, &on, &cwd, &name, agent.as_ref())?;
                         Ok(Pulled { on, pulled })
                     });
                     Made::Pulled { menu, made }

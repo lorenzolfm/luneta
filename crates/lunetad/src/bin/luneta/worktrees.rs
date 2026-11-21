@@ -16,7 +16,7 @@ use lunetad::api::{self, ChangeProjectsRequest, ListWorkRequest, MakeWorktreeReq
 use lunetad::api::{Version, WatchRequest};
 use lunetad::changes::{Unadded, Unchanged};
 use lunetad::mux::own::TerminalKey;
-use lunetad::projects::{self, Holders, Name, Opened, Opens, ProjectId, Size, ViewId};
+use lunetad::projects::{self, Argv, Holders, Name, Opened, Opens, ProjectId, Size, ViewId};
 use lunetad::projects::WorktreeId;
 use lunetad::links::{self, Branch, Unready};
 use lunetad::work::{self, Listed};
@@ -457,12 +457,12 @@ pub fn pulled(
     machine: &Machine,
     cwd: &Directory,
     name: &str,
-    opens: &Opens,
+    agent: Option<&Argv>,
 ) -> Result<Pulled, String> {
     let change = Change::Pull(Pull {
         folder: cwd.to_string(),
         name: name.to_owned(),
-        opens: Some(opens.to_api()),
+        agent: agent.map(Argv::to_api),
     });
     let pulled = change_answered(path, on(machine), change, Unchanged::of).and_then(pulled_of);
     match pulled {

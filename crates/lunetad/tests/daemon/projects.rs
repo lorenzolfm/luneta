@@ -111,9 +111,12 @@ pub fn project(host: &Host, dir: &Path, name: Option<&str>) -> u64 {
 
 pub const FIRST: [&str; 2] = ["sleep", "600"];
 
+pub fn argv(words: &[&str]) -> Argv {
+    Argv::parse(words.iter().map(|word| (*word).to_owned()).collect()).unwrap()
+}
+
 pub fn command(words: &[&str]) -> Opens {
-    let words = words.iter().map(|word| (*word).to_owned()).collect();
-    Opens::Command(Argv::parse(words).unwrap())
+    Opens::Command(argv(words))
 }
 
 pub fn running(words: &[&str]) -> api::Opens {
@@ -477,14 +480,14 @@ fn a_pull_that_finds_its_worktree_runs_its_command_there_or_says_why_it_does_not
     cloned_as_wt(&scratch, &scratch.join("up"), &clone);
     let luneta = project(host, &clone, None);
     let main = worktree(host, luneta, &clone.join("main"));
-    let pull = |opens: api::Opens| {
-        let opens = Some(opens);
-        Change::Pull(Pull { folder: text(&clone.join("main")), name: "main".to_owned(), opens })
+    let pull = |agent: Option<&[&str]>| {
+        let agent = agent.map(|words| argv(words).to_api());
+        Change::Pull(Pull { folder: text(&clone.join("main")), name: "main".to_owned(), agent })
     };
-    let shell = answered_on(host, None, pull(Opens::Shell.to_api())).unwrap();
-    assert_eq!((shell.made, shell.opened), (Some(Made::Found(main)), None), "a shell opens none");
+    let found = answered_on(host, None, pull(None)).unwrap();
+    assert_eq!((found.made, found.opened), (Some(Made::Found(main)), None), "no agent opens none");
     let review = ["sleep", "601"];
-    let ran = answered_on(host, None, pull(running(&review))).unwrap();
+    let ran = answered_on(host, None, pull(Some(&review))).unwrap();
     assert_eq!(ran.made, Some(Made::Found(main)));
     let Some(Opened::View(view)) = ran.opened else { panic!("the command opens a view: {ran:?}") };
     let want = [(None, FIRST.join(" ")), (Some(view), review.join(" "))];
@@ -501,7 +504,7 @@ fn a_pull_that_finds_its_worktree_runs_its_command_there_or_says_why_it_does_not
     eventually("the pull's command runs in the view it names, beside the first", opened);
 
     let stalled = owned.stall_mux();
-    let unrun = answered_on(host, None, pull(running(&["sleep", "602"]))).unwrap();
+    let unrun = answered_on(host, None, pull(Some(&["sleep", "602"]))).unwrap();
     drop(stalled);
     assert_eq!(unrun.made, Some(Made::Found(main)), "a command that does not start finds it still");
     let Some(Opened::Unopened(said)) = unrun.opened else { panic!("it says why: {unrun:?}") };
@@ -658,7 +661,7 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     let pull = Pull {
         folder: text(&link.join("luneta/pr-7")),
         name: "pr-7".to_owned(),
-        opens: Some(running(&FIRST)),
+        agent: Some(argv(&FIRST).to_api()),
     };
     let Some(Made::Worktree(pr) | Made::Found(pr)) = asked(Change::Pull(pull)) else {
         panic!("a pull goes to the worktree, made by it or by the sweep");
@@ -669,7 +672,7 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     let into_unheld_clone = Pull {
         folder: text(&link.join("cdk/fix")),
         name: "fix".to_owned(),
-        opens: Some(running(&FIRST)),
+        agent: Some(argv(&FIRST).to_api()),
     };
     let Some(Made::Worktree(fix) | Made::Found(fix)) = asked(Change::Pull(into_unheld_clone)) else {
         panic!("a pull into a clone of no project goes to the worktree in one made for it");

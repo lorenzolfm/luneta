@@ -619,8 +619,8 @@ pub struct Projects {
 pub enum Change {
     AddProject { spot: Spot, name: Option<Name> },
     AddWorktree { project: ProjectId, spot: Spot, name: Option<Name>, opens: Opens },
-    Start { spot: Spot, name: Option<Name>, opens: Opens },
-    Pull { spot: Spot, name: Name, opens: Opens },
+    Start { spot: Spot, name: Option<Name> },
+    Pull { spot: Spot, name: Name, agent: Option<Argv> },
     Join { spot: Spot, opens: Opens },
     Listed { root: Dir, subfolders: BTreeSet<Subfolder>, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, subfolders: BTreeSet<Subfolder> },
@@ -721,12 +721,11 @@ impl Ask {
             Asked::Start(asked::Start { folder, name: named }) => Change::Start {
                 spot: spot(&folder).map_err(field("folder"))?,
                 name: named.as_deref().map(Name::of_project).transpose().map_err(field("name"))?,
-                opens: Opens::Shell,
             },
-            Asked::Pull(asked::Pull { folder, name, opens }) => Change::Pull {
+            Asked::Pull(asked::Pull { folder, name, agent }) => Change::Pull {
                 spot: spot(&folder).map_err(field("folder"))?,
                 name: Name::parse(&name).map_err(field("name"))?,
-                opens: Opens::of_api(opens).map_err(field("opens"))?,
+                agent: agent.map(Argv::of_api).transpose().map_err(field("agent"))?,
             },
             Asked::Join(asked::Join { folder, opens }) => Change::Join {
                 spot: spot(&folder).map_err(field("folder"))?,
@@ -797,12 +796,11 @@ impl Ask {
 
 impl Change {
     #[must_use]
-    pub fn opens(&self) -> Option<&Opens> {
+    pub fn opens(&self) -> Option<Opens> {
         match self {
-            Change::AddWorktree { opens, .. }
-            | Change::Start { opens, .. }
-            | Change::Pull { opens, .. }
-            | Change::Join { opens, .. } => Some(opens),
+            Change::AddWorktree { opens, .. } | Change::Join { opens, .. } => Some(opens.clone()),
+            Change::Start { .. } => Some(Opens::Shell),
+            Change::Pull { agent, .. } => Some(Opens::first(agent.clone())),
             _ => None,
         }
     }
@@ -1064,7 +1062,7 @@ impl Projects {
                 let made = made.ok_or_else(|| held.unplaced(&spot))?;
                 Some(self.landed(&mut changed, made, &opens, &mut draw)?)
             },
-            Change::Start { spot, name, opens } => {
+            Change::Start { spot, name } => {
                 let (project, within) = match self.inside(&spot) {
                     Some(found) => found,
                     None => changed.made_inside(&spot, name, &mut draw)?,
@@ -1073,10 +1071,10 @@ impl Projects {
                 let last = || changed.project_of(project).and_then(Project::last_used);
                 match made.or_else(last) {
                     None => Some(Made::Project(project)),
-                    Some(made) => Some(self.landed(&mut changed, made, &opens, &mut draw)?),
+                    Some(made) => Some(self.landed(&mut changed, made, &Opens::Shell, &mut draw)?),
                 }
             },
-            Change::Pull { spot, name, opens } => {
+            Change::Pull { spot, name, agent } => {
                 let (project, within) = match self.inside(&spot) {
                     Some(found) => found,
                     None => changed.made_inside(&spot, None, &mut draw)?,
@@ -1090,7 +1088,7 @@ impl Projects {
                     let plain = plain.expect("a clone's worktree is at the folder pulled");
                     return Err(held_by_folder(&place, &plain));
                 }
-                Some(self.landed(&mut changed, made, &opens, &mut draw)?)
+                Some(self.landed(&mut changed, made, &Opens::first(agent), &mut draw)?)
             },
             Change::Join { spot, opens } => {
                 if let Some((own, plain)) = self.swallower(&spot) {
@@ -1821,7 +1819,7 @@ mod tests {
     }
 
     fn starting(spot: Spot) -> Change {
-        Change::Start { spot, name: None, opens: Opens::Shell }
+        Change::Start { spot, name: None }
     }
 
     fn joining(spot: Spot) -> Change {
@@ -2141,7 +2139,7 @@ mod tests {
 
         let subfolders = BTreeSet::from([tree("fix"), tree("main")]);
         let spot = Spot::in_clone(dir("/w/elo"), Some(tree("main")), subfolders);
-        let named = Change::Start { spot, name: Some(name("elo-app")), opens: Opens::Shell };
+        let named = Change::Start { spot, name: Some(name("elo-app")) };
         let Made::Worktree(elo_main) = add(&mut projects, named) else {
             panic!("a start in a worktree of no project makes its project and goes there");
         };
@@ -2196,7 +2194,7 @@ mod tests {
         let pull = |root: &str| Change::Pull {
             spot: spot_at(root, "pr-7"),
             name: name("pr-7"),
-            opens: Opens::Shell,
+            agent: None,
         };
         let Made::Worktree(held) = add(&mut projects, pull("/w/luneta")) else {
             panic!("a pull makes a worktree");
@@ -2244,7 +2242,7 @@ mod tests {
         let pull = Change::Pull {
             spot: spot_at("/n/cdk", "fix"),
             name: name("fix"),
-            opens: Opens::Command(Argv::parse(vec!["claude".to_owned()]).unwrap()),
+            agent: Some(Argv::parse(vec!["claude".to_owned()]).unwrap()),
         };
         let said = change(&projects, pull).unwrap_err();
         let one = "n is a folder, and its own is its one worktree";
