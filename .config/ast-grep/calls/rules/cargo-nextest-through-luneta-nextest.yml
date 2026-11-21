@@ -1,0 +1,17 @@
+id: cargo-nextest-through-luneta-nextest
+language: nix
+ignores:
+  - nix/nextest.nix
+message: >-
+  Run the tests through luneta-nextest (nix/nextest.nix): it runs `cargo
+  nextest run` with luneta's packages and fails when the tests leave a
+  luneta-mux from target/ running, which a raw `cargo nextest run`, or
+  crane's cargoNextest, lets pass.
+rule:
+  any:
+    - kind: identifier
+      regex: ^cargoNextest$
+    - regex: (^|[^\w-])(?i:cargo)[^\s;|&<>]*(?:[ \t]|\\\n)+(?:[^\s;|&<>]+(?:[ \t]|\\\n)+)*?nextest(?:[ \t]|\\\n)+(?:[^\s;|&<>]+(?:[ \t]|\\\n)+)*?(run|r)([\s;|&<>)"'}]|$)
+      any:
+        - kind: string_expression
+        - kind: indented_string_expression

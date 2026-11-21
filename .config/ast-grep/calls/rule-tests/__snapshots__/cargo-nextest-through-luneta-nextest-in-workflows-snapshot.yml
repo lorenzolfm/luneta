@@ -1,0 +1,99 @@
+id: cargo-nextest-through-luneta-nextest-in-workflows
+snapshots:
+  ? |
+    steps:
+      - "run": $CARGO nextest run>tests.log
+  : labels:
+    - source: '"run": $CARGO nextest run>tests.log'
+      style: primary
+      start: 11
+      end: 46
+    - source: '"run"'
+      style: secondary
+      start: 11
+      end: 16
+  ? |
+    steps:
+      - run: "nix develop -c cargo nextest run --profile ci"
+  : labels:
+    - source: 'run: "nix develop -c cargo nextest run --profile ci"'
+      style: primary
+      start: 11
+      end: 63
+    - source: run
+      style: secondary
+      start: 11
+      end: 14
+  ? |
+    steps:
+      - run: >-
+          nix develop -c
+          cargo nextest
+          run --profile ci
+  : labels:
+    - source: |
+        run: >-
+              nix develop -c
+              cargo nextest
+              run --profile ci
+      style: primary
+      start: 11
+      end: 83
+    - source: |
+        >-
+              nix develop -c
+              cargo nextest
+              run --profile ci
+      style: secondary
+      start: 16
+      end: 83
+    - source: run
+      style: secondary
+      start: 11
+      end: 14
+  ? |
+    steps:
+      - run: cargo nextest run
+  : labels:
+    - source: 'run: cargo nextest run'
+      style: primary
+      start: 11
+      end: 33
+    - source: run
+      style: secondary
+      start: 11
+      end: 14
+  ? |
+    steps:
+      - run: |
+          cargo nextest \
+            run -p lunetad
+  : labels:
+    - source: |
+        run: |
+              cargo nextest \
+                run -p lunetad
+      style: primary
+      start: 11
+      end: 63
+    - source: run
+      style: secondary
+      start: 11
+      end: 14
+  ? |
+    steps:
+      - run: |
+          cd crates
+          cargo nextest run -p lunetad
+  : labels:
+    - source: |
+        run: |
+              cd crates
+              cargo nextest run -p lunetad
+      style: primary
+      start: 11
+      end: 69
+    - source: run
+      style: secondary
+      start: 11
+      end: 14
