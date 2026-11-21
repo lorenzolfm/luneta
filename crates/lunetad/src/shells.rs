@@ -1,5 +1,6 @@
 use std::env;
 use std::ffi::OsString;
+use std::fmt;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -7,7 +8,7 @@ use luneta_protocol::mux::v1 as mux;
 use luneta_protocol::said::Said;
 use luneta_protocol::shell::{Ending, Front};
 
-use crate::api;
+use crate::{api, log};
 
 const SHELL_VAR: &str = "SHELL";
 
@@ -51,18 +52,18 @@ impl Doing {
         let doing = match shell.doing.as_ref().ok_or("no doing")? {
             Told::Ready(()) => Doing::Ready,
             Told::Going(going) => Doing::Going {
-                command: said(going.command.as_ref())?,
+                command: command_of(going.command.as_ref())?,
                 since: time(going.since, "since")?,
                 front: Front::of_api(going.front()).ok_or(NEWER_FRONT)?,
             },
             Told::Ended(ended) => Doing::Ended {
-                command: said(ended.command.as_ref())?,
+                command: command_of(ended.command.as_ref())?,
                 at: time(ended.at, "at")?,
                 ending: ended.ending.as_ref().map(Ending::of_api),
                 took: took(ended.took)?,
             },
             Told::Stopped(stopped) => Doing::Stopped {
-                command: said(stopped.command.as_ref())?,
+                command: command_of(stopped.command.as_ref())?,
                 at: time(stopped.at, "at")?,
             },
         };
@@ -74,18 +75,18 @@ impl Doing {
         let doing = match is {
             Is::Ready(mux::ran::Ready {}) => Doing::Ready,
             Is::Going(going) => Doing::Going {
-                command: said(going.command.as_ref())?,
+                command: command_of(going.command.as_ref())?,
                 since: time(going.since, "since")?,
                 front: Front::of_mux(going.front()).ok_or(NEWER_FRONT)?,
             },
             Is::Ended(ended) => Doing::Ended {
-                command: said(ended.command.as_ref())?,
+                command: command_of(ended.command.as_ref())?,
                 at: time(ended.at, "at")?,
                 ending: ended.ending.as_ref().map(Ending::of_mux),
                 took: took(ended.took)?,
             },
             Is::Stopped(stopped) => Doing::Stopped {
-                command: said(stopped.command.as_ref())?,
+                command: command_of(stopped.command.as_ref())?,
                 at: time(stopped.at, "at")?,
             },
         };
@@ -95,7 +96,7 @@ impl Doing {
 
 const NEWER_FRONT: &str = "what its command does, in a word of a newer build's";
 
-fn said(command: Option<&String>) -> Result<Option<Said>, String> {
+fn command_of(command: Option<&String>) -> Result<Option<Said>, String> {
     match command {
         None => Ok(None),
         Some(command) => Said::new(command.clone()).map(Some).ok_or("an empty command line".into()),
@@ -115,14 +116,44 @@ fn took(took: Option<prost_types::Duration>) -> Result<Duration, String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shell(String);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unopened {
+    Unread,
+    Unnamed,
+    RefusesLogins,
+    NoFile,
+}
+
+impl fmt::Display for Unopened {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Unopened::Unread => "is not UTF-8",
+            Unopened::Unnamed => "names no file",
+            Unopened::RefusesLogins => "refuses logins",
+            Unopened::NoFile => "is no file",
+        })
+    }
+}
+
 const LOGIN_REFUSERS: [&str; 2] = ["nologin", "false"];
 
 impl Shell {
-    pub(crate) fn of(path: OsString) -> Option<Shell> {
-        let path = path.into_string().ok()?;
-        let named = Path::new(&path).file_name()?.to_str()?;
-        let opens = !LOGIN_REFUSERS.contains(&named) && Path::new(&path).is_file();
-        opens.then_some(Shell(path))
+    pub(crate) fn of(path: OsString) -> Result<Shell, Unopened> {
+        let path = path.into_string().map_err(|_| Unopened::Unread)?;
+        let named = Path::new(&path).file_name().ok_or(Unopened::Unnamed)?;
+        let named = named.to_str().expect("a file name in a UTF-8 path is UTF-8");
+        if LOGIN_REFUSERS.contains(&named) {
+            return Err(Unopened::RefusesLogins);
+        }
+        if Path::new(&path).is_file() {
+            Ok(Shell(path))
+        } else {
+            Err(Unopened::NoFile)
+        }
+    }
+
+    fn none() -> Shell {
+        Shell(NO_SHELL.to_owned())
     }
 
     #[must_use]
@@ -137,14 +168,41 @@ impl Shell {
     }
 }
 
-#[must_use]
-pub fn your_shell() -> Shell {
-    shell(login_shell(), env::var_os(SHELL_VAR))
+struct Named {
+    login: Option<OsString>,
+    variable: Option<OsString>,
 }
 
-fn shell(login: Option<OsString>, named: Option<OsString>) -> Shell {
-    let opening = |shell: Option<OsString>| shell.and_then(Shell::of);
-    opening(login).or_else(|| opening(named)).unwrap_or_else(|| Shell(NO_SHELL.to_owned()))
+struct Chosen {
+    shell: Shell,
+    passed: Vec<String>,
+}
+
+#[must_use]
+pub fn your_shell() -> Shell {
+    let chosen = shell(Named { login: login_shell(), variable: env::var_os(SHELL_VAR) });
+    for passed in &chosen.passed {
+        log::say(&format!("{passed}, so terminals open {}", chosen.shell.as_str()));
+    }
+    chosen.shell
+}
+
+fn shell(named: Named) -> Chosen {
+    let sources = [("the user database's shell", named.login), ("$SHELL", named.variable)];
+    let sources_count = sources.len();
+    let mut passed = Vec::with_capacity(sources_count);
+    for (source, path) in sources {
+        let Some(path) = path.filter(|path| !path.is_empty()) else {
+            continue;
+        };
+        let shown = path.to_string_lossy().into_owned();
+        match Shell::of(path) {
+            Ok(shell) => return Chosen { shell, passed },
+            Err(why) => passed.push(format!("{source} {shown} {why}")),
+        }
+    }
+    assert!(passed.len() <= sources_count);
+    Chosen { shell: Shell::none(), passed }
 }
 
 fn login_shell() -> Option<OsString> {
@@ -165,8 +223,16 @@ mod tests {
         path.into_os_string()
     }
 
-    fn chosen(login: Option<&OsString>, named: Option<&OsString>) -> String {
-        shell(login.cloned(), named.cloned()).as_str().to_owned()
+    fn named(login: Option<&OsString>, variable: Option<&OsString>) -> Named {
+        Named { login: login.cloned(), variable: variable.cloned() }
+    }
+
+    fn chosen(login: Option<&OsString>, variable: Option<&OsString>) -> String {
+        shell(named(login, variable)).shell.as_str().to_owned()
+    }
+
+    fn passed(login: Option<&OsString>, variable: Option<&OsString>) -> Vec<String> {
+        shell(named(login, variable)).passed
     }
 
     fn text(path: &OsString) -> &str {
@@ -183,7 +249,24 @@ mod tests {
         assert_eq!(chosen(Some(&empty), Some(&bash)), text(&bash));
         assert_eq!(chosen(None, Some(&empty)), "/bin/sh");
         assert_eq!(chosen(None, None), "/bin/sh");
-        assert_eq!(shell(Some(fish), None).name(), "fish");
+        assert_eq!(shell(named(Some(&fish), None)).shell.name(), "fish");
+        assert_eq!(shell(named(None, None)).shell.name(), "sh");
+    }
+
+    #[test]
+    fn a_shell_passed_over_says_why() {
+        let folder = tempfile::tempdir().unwrap();
+        let bash = made(folder.path(), "bash");
+        let nologin = made(folder.path(), "sbin/nologin");
+        let gone = folder.path().join("fish").into_os_string();
+        let refuses = format!("the user database's shell {} refuses logins", text(&nologin));
+        assert_eq!(passed(Some(&nologin), Some(&bash)), [refuses]);
+        let no_file = format!("the user database's shell {} is no file", text(&gone));
+        let variable = format!("$SHELL {} refuses logins", text(&nologin));
+        assert_eq!(passed(Some(&gone), Some(&nologin)), [no_file, variable]);
+        assert_eq!(passed(Some(&bash), Some(&gone)), Vec::<String>::new());
+        assert_eq!(passed(Some(&OsString::new()), None), Vec::<String>::new());
+        assert_eq!(passed(None, None), Vec::<String>::new());
     }
 
     #[test]
@@ -196,6 +279,8 @@ mod tests {
         assert_eq!(chosen(Some(&folder), Some(&bash)), text(&bash));
         assert_eq!(chosen(Some(&bash), Some(&gone)), text(&bash));
         assert_eq!(chosen(None, Some(&gone)), "/bin/sh");
+        assert_eq!(Shell::of(gone), Err(Unopened::NoFile));
+        assert_eq!(Shell::of("/".into()), Err(Unopened::Unnamed));
     }
 
     #[test]
@@ -225,6 +310,7 @@ mod tests {
         fs::write(&unread, "").unwrap();
         assert_eq!(chosen(Some(&unread), Some(&bash)), text(&bash));
         assert_eq!(chosen(None, Some(&unread)), "/bin/sh");
+        assert_eq!(Shell::of(unread), Err(Unopened::Unread));
     }
 
     fn at(seconds: u64) -> SystemTime {
