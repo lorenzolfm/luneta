@@ -11,7 +11,7 @@ use lunetad::mux::own::api::{self, typed};
 use lunetad::mux::own::frames::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Size, ViewId, WorktreeId};
+use lunetad::projects::{Opens, Size, ViewId, WorktreeId};
 use lunetad::{
     Asked, Beside, Direction, Found, Heard, Laid, View, Rect as Placed, Show, Where,
 };
@@ -599,7 +599,7 @@ impl Viewed {
                 let mut emptied = false;
                 if self.layout.laid_out(laid) {
                     if self.opened.insert(self.layout.worktree) {
-                        self.ask(Asked::Open { beside: Beside::Alone, argv: Vec::new() });
+                        self.ask(Asked::Open { beside: Beside::Alone, opens: Opens::Shell });
                     } else {
                         emptied = true;
                     }
@@ -768,9 +768,9 @@ impl Viewed {
         self.ask(Asked::Welcome);
     }
 
-    pub fn open_beside_focused(&mut self, argv: Vec<String>) {
+    pub fn open_beside_focused(&mut self, opens: Opens) {
         self.opened.insert(self.layout.worktree);
-        self.ask(Asked::Open { beside: Beside::Focused, argv });
+        self.ask(Asked::Open { beside: Beside::Focused, opens });
     }
 
     pub fn tabs(&mut self, tabs: Vec<Tab>, titles: BTreeMap<ViewId, String>) {

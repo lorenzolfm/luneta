@@ -588,9 +588,9 @@ impl Landed {
     }
 }
 
-pub fn worked_in(path: &Path, folder: &Path, argv: Vec<String>) -> Result<Landed, String> {
+pub fn worked_in(path: &Path, folder: &Path, opens: &Opens) -> Result<Landed, String> {
     let folder = folder.to_str().ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
-    joined(path, folder, argv).map_err(|unchanged| match unchanged {
+    joined(path, folder, opens).map_err(|unchanged| match unchanged {
         Unchanged::Refused(why) => why,
         Unchanged::InDoubt(why) => format!("{why}, so lunetad may keep {folder} as a worktree"),
     })
@@ -600,14 +600,13 @@ pub fn joined_as(
     path: &Path,
     folder: &Directory,
     tab: &str,
-    argv: Vec<String>,
+    opens: &Opens,
 ) -> Result<Landed, String> {
-    joined(path, folder.as_str(), argv).map_err(|unchanged| said_unopened(unchanged, folder, tab))
+    joined(path, folder.as_str(), opens).map_err(|unchanged| said_unopened(unchanged, folder, tab))
 }
 
-fn joined(path: &Path, folder: &str, argv: Vec<String>) -> Result<Landed, Unchanged> {
-    let opens = Some(projects::shell_if_empty(argv));
-    let change = Change::Join(Join { folder: folder.to_owned(), opens });
+fn joined(path: &Path, folder: &str, opens: &Opens) -> Result<Landed, Unchanged> {
+    let change = Change::Join(Join { folder: folder.to_owned(), opens: Some(opens.to_api()) });
     changed_on(path, None, change).and_then(landed)
 }
 
@@ -654,7 +653,7 @@ enum Asking {
 pub fn opened(
     path: &Path,
     worktree: WorktreeId,
-    argv: Vec<String>,
+    opens: Opens,
     opening: Opening,
 ) -> Result<(), String> {
     let folder = lunetad::folder::open(path).map_err(|refusal| refusal.to_string())?;
@@ -670,7 +669,7 @@ pub fn opened(
         Opening::IfEmpty => Beside::Alone,
         Opening::Beside => Beside::Focused,
     };
-    let mut asking = Asking::Unsent(Asked::Open { beside, argv });
+    let mut asking = Asking::Unsent(Asked::Open { beside, opens });
     let until = Instant::now() + OPENING;
     loop {
         let left = until.saturating_duration_since(Instant::now());

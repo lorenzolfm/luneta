@@ -1092,7 +1092,8 @@ fn typed_path(path: &[char]) -> String {
 
 fn started(keys: &Keys, row: &ViewRow, skill: &str) -> Result<Wants, String> {
     let Beside { session, view, .. } = row.beside()?;
-    let command = agents::on_skill(keys.agent.harness(), skill, None);
+    let argv = agents::on_skill(keys.agent.harness(), skill, None);
+    let command = Opens::Command(argv.map_err(|why| format!("menu: {skill}: {why}"))?);
     Ok(Wants::Open { session, view, command })
 }
 
@@ -1239,7 +1240,7 @@ pub enum Wants {
     Prunes { dir: Directory },
     Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
     Rebase { dir: Directory, branch: String },
-    Open { session: Listed, view: ViewKey, command: Vec<String> },
+    Open { session: Listed, view: ViewKey, command: Opens },
     Pull(Work, Wanted),
     Printed { session: Listed, view: ViewKey, ended: Ended },
     Checks { page: PullPage },
@@ -1259,7 +1260,7 @@ pub enum Done {
     Forget(Destination),
     Worktree(Machine, ProjectId, Branch),
     Welcome { on: Machine, session: Listed, view: ViewKey },
-    OpenIn { on: Machine, worktree: WorktreeId, command: Vec<String> },
+    OpenIn { on: Machine, worktree: WorktreeId, command: Argv },
     Said(String),
     Project { on: Machine, folder: String, name: Option<projects::Name> },
     Rename(Machine, Rename),
@@ -1519,7 +1520,7 @@ impl Menu {
             },
             Offer::NewView(row) => match row.beside() {
                 Ok(Beside { session, view, .. }) => {
-                    let command = Vec::new();
+                    let command = Opens::Shell;
                     let stage = Stage::Opening { keys };
                     stays(stage, Wants::Open { session, view, command })
                 },
@@ -1732,17 +1733,14 @@ impl Menu {
         };
         let opens = match argv {
             None => Opens::Shell,
-            Some(argv) => match Argv::parse(argv) {
-                Ok(argv) => Opens::Command(argv),
-                Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
-            },
+            Some(Ok(argv)) => Opens::Command(argv),
+            Some(Err(why)) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
         };
         match (at, opens) {
             (At::There((session, view)), Opens::Shell) => {
                 Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })))
             },
-            (At::There((session, view)), Opens::Command(argv)) => {
-                let command = argv.words().to_vec();
+            (At::There((session, view)), command @ Opens::Command(_)) => {
                 let row = ViewRow {
                     session: session.clone(),
                     view,
@@ -1805,7 +1803,12 @@ impl Menu {
         }
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
-        let command = agents::on_words(keys.agent.harness(), prompt, &files);
+        let command = match agents::on_words(keys.agent.harness(), prompt, &files) {
+            Ok(argv) => Opens::Command(argv),
+            Err(why) => {
+                return Did::Closed(Done::Wrong(format!("menu: what view {view} printed: {why}")));
+            },
+        };
         let stage = Stage::Opening { keys };
         let wants = Wants::Open { session, view, command };
         Did::Stays(Menu { number, target, stage }, wants)
@@ -1834,7 +1837,13 @@ impl Menu {
             )));
         }
         let prompt = checks::prompt(&page, &failing);
-        let command = agents::on_words(keys.agent.harness(), prompt, &checks::files(&failing));
+        let files = checks::files(&failing);
+        let command = match agents::on_words(keys.agent.harness(), prompt, &files) {
+            Ok(argv) => Opens::Command(argv),
+            Err(why) => {
+                return Did::Closed(Done::Wrong(format!("menu: the checks of #{number}: {why}")));
+            },
+        };
         let stage = Stage::Opening { keys };
         let wants = Wants::Open { session, view, command };
         Did::Stays(Menu { number: menu, target, stage }, wants)
@@ -1863,10 +1872,14 @@ impl Menu {
             return Did::Closed(Done::Said(format!("menu: {}", rebase::said(&rebased))));
         };
         let prompt = rebases::prompt(&rebased.branch, &rebased.onto, stopped);
-        let command = agents::on_words(keys.agent.harness(), prompt, &[]);
+        let command = match agents::on_words(keys.agent.harness(), prompt, &[]) {
+            Ok(argv) => argv,
+            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {branch}: {why}"))),
+        };
         match resolves {
             Resolves::Beside(Beside { session, view, .. }) => {
                 let stage = Stage::Opening { keys };
+                let command = Opens::Command(command);
                 let wants = Wants::Open { session, view, command };
                 Did::Stays(Menu { number, target, stage }, wants)
             },
@@ -2842,7 +2855,7 @@ mod tests {
     }
 
     fn beside_row(command: Vec<String>) -> Wants {
-        Wants::Open { session: listed(), view: ViewKey::terminal(4), command }
+        Wants::Open { session: listed(), view: ViewKey::terminal(4), command: agent(command) }
     }
 
     fn opened(target: Target, key: Option<char>) -> Did {
@@ -2903,7 +2916,7 @@ mod tests {
             ]
         );
         let (menu, wants) = stays(menu.key(&char('v')));
-        let command = Vec::new();
+        let command = Opens::Shell;
         let (session, view) = (project().listed().clone(), ViewKey::terminal(4));
         assert_eq!(wants, Wants::Open { session, view, command });
         let (menu, wants) = stays(menu.key(&char('v')));
@@ -2984,7 +2997,7 @@ mod tests {
     #[test]
     fn an_own_session_s_view_opens_its_agents_beside_it() {
         let (_, wants) = stays(stays(opened(own_view(), Some('c'))).0.key(&char('t')));
-        let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec();
+        let command = agent(["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec());
         let (session, view) = (project().listed().clone(), ViewKey::terminal(4));
         assert_eq!(wants, Wants::Open { session, view, command });
     }
@@ -3319,6 +3332,7 @@ mod tests {
 
         let worktree_row = worktree_on(Machine::Local);
         let done = closed(rebasing(worktree_row).rebased(Ok(rebased(on_conflicts()))));
+        let command = Argv::parse(command).unwrap();
         assert_eq!(done, Done::OpenIn { on: Machine::Local, worktree: worktree(), command });
     }
 
@@ -3661,7 +3675,7 @@ mod tests {
             " <ESC> - Close",
         ]);
         let (_, wants) = stays(stays(opened(view.clone(), Some('c'))).0.key(&char('t')));
-        let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec();
+        let command = agent(["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec());
         let (session, at) = (project().listed().clone(), ViewKey::terminal(4));
         assert_eq!(wants, Wants::Open { session, view: at, command });
         let (menu, _) = stays(opened(view.clone(), Some('n')));
@@ -4058,7 +4072,7 @@ mod tests {
             " /tigerstyle  tigerstyle it".to_owned(),
         ]);
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
-        let command = agents::on_skill(CLAUDE, "tigerstyle", None);
+        let command = agents::on_skill(CLAUDE, "tigerstyle", None).unwrap().words().to_vec();
         assert_eq!(wants, beside_row(command));
     }
 
@@ -4080,7 +4094,7 @@ mod tests {
         assert_eq!(text(&menu.lines(31, 6, 0).0)[2], " /tdd  tdd it");
         assert_eq!(text(&menu.lines(31, 6, 0).0)[4], " \u{f03ff} pi  <TAB> another agent");
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
-        let command = agents::on_skill(Harness::Pi, "tdd", None);
+        let command = agents::on_skill(Harness::Pi, "tdd", None).unwrap().words().to_vec();
         assert_eq!(wants, beside_row(command));
     }
 
@@ -4101,7 +4115,7 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         let (menu, wants) = stays(menu.pick(&skill("code-review")));
-        let command = agents::on_skill(CLAUDE, "code-review", None);
+        let command = agents::on_skill(CLAUDE, "code-review", None).unwrap().words().to_vec();
         assert_eq!(wants, beside_row(command));
         assert_eq!(menu.lines(31, 6, 0).1.at(Position::new(4, 3)), None);
         let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
@@ -4484,7 +4498,7 @@ mod tests {
         assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(Machine::Local, place));
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         assert!(!menu.opens_pulled(), "a view beside another opens at once, with no pull");
-        let command = review;
+        let command = agent(review);
         let view = ViewKey::terminal(9);
         assert_eq!(wants, Wants::Open { session: other.clone(), view, command });
         let Target::View(_, row) = menu.target() else { panic!("not a view's row") };

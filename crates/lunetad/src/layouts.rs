@@ -1973,7 +1973,6 @@ mod tests {
 
     use super::*;
     use crate::agent::{Harness, Status};
-    use crate::projects::shell_if_empty;
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
 
@@ -2229,6 +2228,10 @@ mod tests {
         let towards = Event::Resize(show_request::Resize { sides: left, growth: grow });
         let (sides, growth) = (Sides::One(Direction::Left), layout::Growth::Grow);
         assert_eq!(Asked::of_api(towards), Ok(Asked::Resize { sides, growth }));
+        let command = |words| {
+            let runs = api::opens::Runs::Command(api::Argv { words });
+            Some(api::Opens { runs: Some(runs) })
+        };
         let refused = [
             Event::Go(0),
             Event::Focus(show_request::Focus { to: None, step: 0 }),
@@ -2242,11 +2245,11 @@ mod tests {
             Event::Open(show_request::Open { beside: largest(), opens: None }),
             Event::Open(show_request::Open {
                 beside: largest(),
-                opens: Some(shell_if_empty(vec![String::new()])),
+                opens: command(vec![String::new()]),
             }),
             Event::Open(show_request::Open {
                 beside: largest(),
-                opens: Some(shell_if_empty(vec!["x".to_owned(); ARGV_MAX + 1])),
+                opens: command(vec!["x".to_owned(); ARGV_MAX + 1]),
             }),
             Event::Hello(show_request::Hello { worktree: 1, ..Default::default() }),
         ];
