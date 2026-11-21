@@ -32,7 +32,7 @@ let
       };
     };
   };
-  config = pkgs.writeText "comments.yml" (
+  configFolder = pkgs.writeTextDir "sgconfig.yml" (
     builtins.toJSON {
       ruleDirs = [
         "${comments}/rules"
@@ -70,6 +70,7 @@ let
       ];
     }
   );
+  config = "${configFolder}/sgconfig.yml";
 in
 pkgs.writeShellApplication {
   name = "luneta-comments";
