@@ -730,7 +730,7 @@ message ChangeProjectsRequest {
   message Pull {
     string folder = 1;
     string name = 2;
-    Opens opens = 3;
+    Argv agent = 3;
   }
 
   message RenameProject {

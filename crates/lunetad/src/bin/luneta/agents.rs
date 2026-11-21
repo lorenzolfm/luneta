@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use lunetad::api;
+use lunetad::projects::Argv;
 pub use lunetad::Harness;
 
 use notify::RecommendedWatcher;
@@ -65,16 +66,16 @@ pub fn of(agent: &api::Agent) -> Option<Harness> {
     }
 }
 
-pub fn on_skill(harness: Harness, skill: &str, given: Option<&str>) -> Vec<String> {
+pub fn on_skill(harness: Harness, skill: &str, given: Option<&str>) -> Result<Argv, String> {
     let spelled = spelled(harness, skill);
     let prompt = match given {
         Some(given) => format!("{spelled} {given}"),
         None => spelled,
     };
-    vec![name(harness).to_owned(), prompt]
+    Argv::parse(vec![name(harness).to_owned(), prompt])
 }
 
-pub fn on_words(harness: Harness, words: String, files: &[&str]) -> Vec<String> {
+pub fn on_words(harness: Harness, words: String, files: &[&str]) -> Result<Argv, String> {
     let mut command = vec![name(harness).to_owned()];
     if harness == Harness::ClaudeCode {
         let rules: Vec<String> = files.iter().filter_map(|file| read_rule(file)).collect();
@@ -85,7 +86,7 @@ pub fn on_words(harness: Harness, words: String, files: &[&str]) -> Vec<String> 
         }
     }
     command.push(words);
-    command
+    Argv::parse(command)
 }
 
 fn read_rule(file: &str) -> Option<String> {
@@ -187,24 +188,26 @@ pub fn watch(file: &Path, events: Sender<Event>) -> notify::Result<RecommendedWa
 
 #[cfg(test)]
 mod tests {
+    use lunetad::projects::{Line, LINE_BYTES_MAX};
+
     use super::*;
 
     #[test]
     fn a_skill_starts_an_unnamed_agent_in_its_harness_s_spelling() {
         assert_eq!(
-            on_skill(Harness::ClaudeCode, "tigerstyle", None),
+            on_skill(Harness::ClaudeCode, "tigerstyle", None).unwrap().words(),
             ["claude", "/tigerstyle"]
         );
         assert_eq!(
-            on_skill(Harness::ClaudeCode, "code-review", Some("since main")),
+            on_skill(Harness::ClaudeCode, "code-review", Some("since main")).unwrap().words(),
             ["claude", "/code-review since main"]
         );
         assert_eq!(
-            on_skill(Harness::Pi, "tigerstyle", None),
+            on_skill(Harness::Pi, "tigerstyle", None).unwrap().words(),
             ["pi", "/skill:tigerstyle"]
         );
         assert_eq!(
-            on_skill(Harness::Pi, "code-review", Some("since main")),
+            on_skill(Harness::Pi, "code-review", Some("since main")).unwrap().words(),
             ["pi", "/skill:code-review since main"]
         );
     }
@@ -222,12 +225,12 @@ mod tests {
             let prompt = format!("Tackle {file}");
             let command = ["claude", "--allowedTools", rule, "--", prompt.as_str()];
             assert_eq!(
-                on_words(Harness::ClaudeCode, prompt.clone(), &[file]),
+                on_words(Harness::ClaudeCode, prompt.clone(), &[file]).unwrap().words(),
                 command.map(str::to_owned).to_vec(),
                 "{file}"
             );
             assert_eq!(
-                on_words(Harness::Pi, prompt.clone(), &[file]),
+                on_words(Harness::Pi, prompt.clone(), &[file]).unwrap().words(),
                 ["pi".to_owned(), prompt],
                 "{file}"
             );
@@ -240,11 +243,23 @@ mod tests {
         ] {
             let prompt = format!("Tackle {file}");
             assert_eq!(
-                on_words(Harness::ClaudeCode, prompt.clone(), &[file]),
+                on_words(Harness::ClaudeCode, prompt.clone(), &[file]).unwrap().words(),
                 ["claude".to_owned(), prompt],
                 "{file:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_agent_is_refused_words_that_no_command_line_holds() {
+        let refused = Err(Line::parse(&"x".repeat(LINE_BYTES_MAX + 1)).unwrap_err());
+        let fits = "x".repeat(LINE_BYTES_MAX - "pi ".len());
+        let argv = on_words(Harness::Pi, fits.clone(), &[]);
+        let argv = argv.expect("pi and the words fill a command line");
+        assert_eq!(argv.words(), ["pi".to_owned(), fits.clone()]);
+        assert_eq!(on_words(Harness::Pi, format!("{fits}x"), &[]), refused);
+        assert_eq!(on_words(Harness::Pi, "x".repeat(LINE_BYTES_MAX), &[]), refused);
+        assert_eq!(on_skill(Harness::Pi, "tdd", Some(&"x".repeat(LINE_BYTES_MAX))), refused);
     }
 
     #[test]

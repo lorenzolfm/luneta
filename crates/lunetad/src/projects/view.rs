@@ -121,13 +121,16 @@ pub enum Opens {
 }
 
 impl Opens {
+    #[must_use]
+    pub fn first(agent: Option<Argv>) -> Opens {
+        agent.map_or(Opens::Shell, Opens::Command)
+    }
+
     pub fn of_api(opens: Option<api::Opens>) -> Result<Opens, String> {
         match opens.and_then(|opens| opens.runs) {
             None => Err("it says nothing to open".to_owned()),
             Some(api::opens::Runs::Shell(())) => Ok(Opens::Shell),
-            Some(api::opens::Runs::Command(api::Argv { words })) => {
-                Argv::parse(words).map(Opens::Command)
-            },
+            Some(api::opens::Runs::Command(argv)) => Argv::of_api(argv).map(Opens::Command),
         }
     }
 
@@ -135,9 +138,7 @@ impl Opens {
     pub fn to_api(&self) -> api::Opens {
         let runs = match self {
             Opens::Shell => api::opens::Runs::Shell(()),
-            Opens::Command(argv) => {
-                api::opens::Runs::Command(api::Argv { words: argv.words.clone() })
-            },
+            Opens::Command(argv) => api::opens::Runs::Command(argv.to_api()),
         };
         api::Opens { runs: Some(runs) }
     }
@@ -170,6 +171,15 @@ impl Argv {
         Ok(Argv { words, line })
     }
 
+    pub fn of_api(argv: api::Argv) -> Result<Argv, String> {
+        Argv::parse(argv.words)
+    }
+
+    #[must_use]
+    pub fn to_api(&self) -> api::Argv {
+        api::Argv { words: self.words.clone() }
+    }
+
     #[must_use]
     pub fn words(&self) -> &[String] {
         &self.words
@@ -184,16 +194,6 @@ impl Argv {
     pub fn args(&self) -> &[String] {
         &self.words[1..]
     }
-}
-
-#[must_use]
-pub fn shell_if_empty(words: Vec<String>) -> api::Opens {
-    let runs = if words.is_empty() {
-        api::opens::Runs::Shell(())
-    } else {
-        api::opens::Runs::Command(api::Argv { words })
-    };
-    api::Opens { runs: Some(runs) }
 }
 
 #[must_use]

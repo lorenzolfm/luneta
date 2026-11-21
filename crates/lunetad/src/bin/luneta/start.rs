@@ -7,7 +7,7 @@ use std::time::Duration;
 use lunetad::links::{self, Branch, Kind, Link, Of, Pasted, Unready, Work, Worked};
 use lunetad::mux::own::terminal_here;
 use lunetad::program;
-use lunetad::projects::{Dir, WorktreeId};
+use lunetad::projects::{Dir, Opens, WorktreeId};
 use lunetad::Directory;
 
 use crate::agents::{self, Kept};
@@ -170,7 +170,7 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
             let made = links::made_landing(repo, &Of::Branch(branch.clone()), &holders)?;
             let folder = worktrees::real(&made)?;
             let at = Directory::parse(utf8(&folder)?.to_owned())?;
-            let landed = worktrees::joined_as(path, &at, branch.as_str(), Vec::new())?;
+            let landed = worktrees::joined_as(path, &at, branch.as_str(), &Opens::Shell)?;
             Ok(Started::Worktree { worktree: landed.worktree(), folder, left: Left::Done })
         },
         What::Issue(number) => linked(path, &cwd, &numbered(number, &cwd)?),
@@ -192,11 +192,13 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let agent = match (link.kind(), &off) {
         (Kind::Issue, None) => {
             let harness = Kept::shared().0.harness();
-            agents::on_words(harness, format!("{TACKLE} {}", link.url()), &[])
+            let agent = agents::on_words(harness, format!("{TACKLE} {}", link.url()), &[]);
+            let unstarted = |why| format!("no agent starts on {}: {why}", link.tab());
+            Opens::Command(agent.map_err(unstarted)?)
         },
-        (Kind::Issue, Some(_)) | (Kind::Pull, _) => Vec::new(),
+        (Kind::Issue, Some(_)) | (Kind::Pull, _) => Opens::Shell,
     };
-    let landed = worktrees::joined_as(path, &ready.folder, &link.tab(), agent.clone())?;
+    let landed = worktrees::joined_as(path, &ready.folder, &link.tab(), &agent)?;
     let worktree = landed.worktree();
     let left = match (link.kind(), landed, off) {
         (Kind::Pull, _, _)

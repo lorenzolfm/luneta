@@ -24,7 +24,7 @@ use crate::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, R
 use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
 use crate::projects::{Holds, Name, Spot, Worktree};
 use crate::projects::{WorktreeId, FRAME_CELLS, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
-use crate::projects::{self, quoted, Opens, Subfolder, WORKTREES_MAX};
+use crate::projects::{self, quoted, Argv, Opens, Subfolder, WORKTREES_MAX};
 use crate::shells::Doing;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
@@ -35,8 +35,6 @@ pub const CLIENTS_MAX: usize = 64;
 pub const ANSWERS_MAX: usize = 64;
 
 const COMMANDS_MAX: usize = 64;
-
-const ARGV_MAX: usize = LINE_BYTES_MAX / 2;
 
 const TAG: &str = "luneta terminal ";
 
@@ -174,11 +172,6 @@ impl Asked {
                     Said::Alone(()) => Beside::Alone,
                     Said::Towards(towards) => Beside::Towards(towards_of(towards)?),
                 };
-                if let Some(api::Opens { runs: Some(api::opens::Runs::Command(argv)) }) = &opens
-                    && argv.words.len() > ARGV_MAX
-                {
-                    return Err(format!("open: a command line is at most {ARGV_MAX} words"));
-                }
                 let opens = Opens::of_api(opens).map_err(|why| format!("open: {why}"))?;
                 Asked::Open { beside, opens }
             },
@@ -621,30 +614,34 @@ impl Layouts {
         &mut self,
         change: Change,
     ) -> Result<(Option<Made>, Option<projects::Opened>), Failed> {
-        let Some(opens) = change.opens().cloned() else {
+        let Some(opens) = change.opens() else {
             return self.store.change(change).map(|made| (made, None));
         };
-        let opens_found = matches!(change, Change::Pull { opens: Opens::Command(_), .. });
+        let found_agent = match &change {
+            Change::Pull { agent, .. } => agent.clone(),
+            _ => None,
+        };
         let held: BTreeSet<ProjectId> = self.store.projects().map_or_default(|projects| {
             projects.all().iter().map(Project::id).collect()
         });
         let made = self.store.change(change)?;
-        let opened = match (made, opens_found) {
+        let opened = match (made, found_agent) {
             (Some(Made::Worktree(worktree)), _) => {
                 self.first_made(worktree, &opens, &held).map_err(Failed::Unopened)?;
                 None
             },
-            (Some(Made::Found(worktree)), true) => {
-                let opened = self.found_opened(worktree, &opens);
+            (Some(Made::Found(worktree)), Some(agent)) => {
+                let opened = self.found_opened(worktree, agent);
                 Some(opened.map_or_else(projects::Opened::Unopened, projects::Opened::View))
             },
-            (Some(Made::Found(_)), false)
+            (Some(Made::Found(_)), None)
             | (Some(Made::Project(_) | Made::Taken(_) | Made::Untaken) | None, _) => None,
         };
         Ok((made, opened))
     }
 
-    fn found_opened(&mut self, worktree: WorktreeId, opens: &Opens) -> Result<ViewId, String> {
+    fn found_opened(&mut self, worktree: WorktreeId, agent: Argv) -> Result<ViewId, String> {
+        let opens = Opens::Command(agent);
         let terminal = self.store.fresh_terminal().map_err(Failed::said)?;
         let projects = self.kept()?;
         let (project, found) = projects.find(worktree).expect("a worktree just found is held");
@@ -657,7 +654,7 @@ impl Layouts {
         let made = Terminal::new(terminal, folder, opens.runs());
         self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
         let unopened = |why| format!("no terminal opens in worktree {worktree}: {why}");
-        self.spawned(terminal, &cwd, opens, inner).map_err(unopened)?;
+        self.spawned(terminal, &cwd, &opens, inner).map_err(unopened)?;
         let last_focus = self.layout(worktree).map(Layout::last_focus);
         assert_eq!(last_focus, Ok(Some(view)), "terminal {terminal} opens focused in its worktree");
         Ok(view)
@@ -1973,7 +1970,6 @@ mod tests {
 
     use super::*;
     use crate::agent::{Harness, Status};
-    use crate::projects::shell_if_empty;
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
 
@@ -2229,6 +2225,10 @@ mod tests {
         let towards = Event::Resize(show_request::Resize { sides: left, growth: grow });
         let (sides, growth) = (Sides::One(Direction::Left), layout::Growth::Grow);
         assert_eq!(Asked::of_api(towards), Ok(Asked::Resize { sides, growth }));
+        let command = |words| {
+            let runs = api::opens::Runs::Command(api::Argv { words });
+            Some(api::Opens { runs: Some(runs) })
+        };
         let refused = [
             Event::Go(0),
             Event::Focus(show_request::Focus { to: None, step: 0 }),
@@ -2242,11 +2242,11 @@ mod tests {
             Event::Open(show_request::Open { beside: largest(), opens: None }),
             Event::Open(show_request::Open {
                 beside: largest(),
-                opens: Some(shell_if_empty(vec![String::new()])),
+                opens: command(vec![String::new()]),
             }),
             Event::Open(show_request::Open {
                 beside: largest(),
-                opens: Some(shell_if_empty(vec!["x".to_owned(); ARGV_MAX + 1])),
+                opens: command(vec!["x".to_owned(); LINE_BYTES_MAX / 2 + 1]),
             }),
             Event::Hello(show_request::Hello { worktree: 1, ..Default::default() }),
         ];

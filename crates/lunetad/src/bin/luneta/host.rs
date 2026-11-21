@@ -27,7 +27,7 @@ use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, Opens, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::asks::Marked;
 use lunetad::rebases::{Rebased, Unrebased};
@@ -1875,15 +1875,15 @@ impl App {
                 self.leave();
             },
             Asked::Close { on, act, ticket } => self.project_act(on, act, ticket),
-            Asked::Open { asking, on, project, beside, command } => {
-                self.project_open(asking, &on, project, beside, command);
+            Asked::Open { asking, on, project, beside, opens } => {
+                self.project_open(asking, &on, project, beside, opens);
             },
             Asked::Welcome { asking, on, session, view } => {
                 self.welcome(asking, &on, &session, view);
             },
             Asked::OpenIn { asking, on, worktree, command } => {
                 self.go_worktree(&on, worktree, None);
-                self.shown().open_beside_focused(command);
+                self.shown().open_beside_focused(Opens::Command(command));
                 self.give_opened(Opener::of(asking));
             },
             Asked::NewWorktree { on, project, branch } => {
@@ -1908,7 +1908,7 @@ impl App {
             Asked::Rename { on, rename } => {
                 self.rename(on, rename);
             },
-            Asked::Make { menu, on, cwd, name, opens } => {
+            Asked::Make { menu, on, cwd, name, agent } => {
                 let busy = |busy: &str| format!("menu: {}", worktrees::unopened(&cwd, &name, busy));
                 if self.refuse_naming(Some(menu), busy) {
                     return;
@@ -1917,7 +1917,7 @@ impl App {
                 self.naming_on(move || {
                     let said = |unchanged| worktrees::said_unopened(unchanged, &cwd, &name);
                     let made = unmade_caught(PULL_PANICKED, said, || {
-                        let pulled = worktrees::pulled(&lunetad, &on, &cwd, &name, &opens)?;
+                        let pulled = worktrees::pulled(&lunetad, &on, &cwd, &name, agent.as_ref())?;
                         Ok(Pulled { on, pulled })
                     });
                     Made::Pulled { menu, made }
@@ -2070,7 +2070,7 @@ impl App {
         on: &Machine,
         project: ProjectId,
         beside: ViewKey,
-        command: Vec<String>,
+        opens: Opens,
     ) {
         let Some(project) = self.projected.project(on, project) else {
             return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());
@@ -2079,7 +2079,7 @@ impl App {
             return self.sidebar.notify(format!("menu: lunetad lists no view {beside}"));
         };
         self.go_worktree(on, worktree, Some(terminal));
-        self.shown().open_beside_focused(command);
+        self.shown().open_beside_focused(opens);
         self.give_opened(Opener::of(asking));
     }
 

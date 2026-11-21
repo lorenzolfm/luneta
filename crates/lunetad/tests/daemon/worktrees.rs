@@ -11,7 +11,7 @@ use lunetad::{Asked, Beside, Heard, Where};
 
 use crate::host::{folder_in, script, Host, LUNETA};
 use crate::own::Owned;
-use crate::projects::{project, worktree};
+use crate::projects::{command, project, worktree};
 use crate::worktree::{cloned_as_wt, git};
 
 fn started(host: &Host, from: &Path, what: &str, env: &[(&str, String)]) -> Output {
@@ -103,8 +103,7 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
     let size = Size::of(80, 24).unwrap();
     let at = Where::Here { runs_in: None };
     let show = lunetad::show(folder, at, here, size, false, move |it| drop(heard.send(it)));
-    let argv = ["sleep", "600"].map(str::to_owned).to_vec();
-    show.ask(Asked::Open { beside: Beside::Alone, argv });
+    show.ask(Asked::Open { beside: Beside::Alone, opens: command(&["sleep", "600"]) });
     let laid = eventually("the layout lays out the terminal", || match hearing.try_recv() {
         Ok(Heard::Laid(laid)) if !laid.is_empty() => Some(laid),
         Ok(_) | Err(_) => None,
