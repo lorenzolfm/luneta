@@ -3852,7 +3852,7 @@ mod tests {
             ("search skills", "Search skills", "Alt a /"),
             ("quit", "Quit luneta", "Alt a q"),
             ("pick a worktree", "Pick a worktree", "Super j"),
-            ("view left", "View left, or the worktree before", "Ctrl h"),
+            ("view left", "View left, the worktree before, or the sidebar", "Ctrl h"),
         ];
         for (query, name, spelled) in views {
             assert_eq!(key(Origin::Views, query), (name.to_owned(), spelled.to_owned()));

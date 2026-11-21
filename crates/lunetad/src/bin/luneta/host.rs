@@ -2322,8 +2322,16 @@ impl App {
     }
 
     fn step(&mut self, direction: Direction) {
-        self.leave();
-        self.ask_right(lunetad::Asked::Step(direction));
+        let on_sidebar = self.focus.side == Side::Sidebar;
+        match direction {
+            Direction::Left if on_sidebar => {},
+            Direction::Right if on_sidebar => self.leave(),
+            Direction::Left if self.home().is_some() => self.give(Focus::on(Side::Sidebar)),
+            Direction::Left | Direction::Right | Direction::Up | Direction::Down => {
+                self.leave();
+                self.ask_right(lunetad::Asked::Step(direction));
+            },
+        }
     }
 
     fn cross(&mut self, direction: Direction) {
@@ -2332,13 +2340,14 @@ impl App {
         };
         let on = right.machine().clone();
         let (before, after) = self.projected.tabs_beside(&on, right.worktree());
-        let beside = match direction {
-            Direction::Left => before,
-            Direction::Right => after,
-            Direction::Up | Direction::Down => None,
-        };
-        if let Some(beside) = beside {
-            self.go_worktree(&on, beside, None);
+        match (direction, before, after) {
+            (Direction::Left, Some(beside), _) | (Direction::Right, _, Some(beside)) => {
+                self.go_worktree(&on, beside, None);
+            },
+            (Direction::Left, None, _) if matches!(self.holder(), Holder::Terminal) => {
+                self.give(Focus::on(Side::Sidebar));
+            },
+            (Direction::Left | Direction::Right | Direction::Up | Direction::Down, ..) => {},
         }
     }
 
