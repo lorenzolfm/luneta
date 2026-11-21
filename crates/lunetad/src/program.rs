@@ -309,15 +309,13 @@ pub(crate) mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use luneta_waits::{Began, PATIENCE, eventually};
+    use luneta_waits::{Began, Lasted, OUTLASTING, eventually};
     use rustix::process::{self, Pid, Signal};
 
     use super::{
         Ran, SAID_MAX, alone, run, run_alone, run_reading, run_tail, run_up_to, run_while,
         run_while_reading, saying,
     };
-
-    pub(crate) const OUTLASTING: Duration = PATIENCE.saturating_mul(2);
 
     const _: () = assert!(OUTLASTING.subsec_nanos() == 0, "sleep is told whole seconds");
 
@@ -436,7 +434,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_program_is_heard_from_as_it_ends() {
-        let mut behind: Vec<Duration> = (0..61)
+        let mut behind: Vec<Lasted> = (0..61)
             .map(|_| {
                 let asked = Began::now();
                 let said = run(&mut Command::new("true"), Duration::from_secs(10)).unwrap();
@@ -449,7 +447,7 @@ pub(crate) mod tests {
             .collect();
         behind.sort();
         let least = behind[behind.len() / 5];
-        assert!(least < Duration::from_millis(1), "{least:?} behind, of {behind:?}");
+        assert!(least.is_under(Duration::from_millis(1)), "{least:?} behind, of {behind:?}");
     }
 
     #[test]

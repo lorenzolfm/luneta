@@ -102,6 +102,16 @@ snapshots:
       style: secondary
       start: 34
       end: 74
+  '#[cfg(test)] mod tests { fn f() { while busy() { assert!(Instant::now() < deadline, "a"); } } }':
+    labels:
+    - source: (Instant::now() < deadline, "a")
+      style: primary
+      start: 56
+      end: 88
+    - source: while busy() { assert!(Instant::now() < deadline, "a"); }
+      style: secondary
+      start: 34
+      end: 91
   '#[cfg(test)] mod tests { mod inner { fn f() { thread::sleep(d); } } }':
     labels:
     - source: sleep

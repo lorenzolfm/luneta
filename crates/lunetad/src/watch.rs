@@ -204,7 +204,7 @@ impl Troubles {
 mod tests {
     use std::process::Command;
 
-    use luneta_waits::{PATIENCE, eventually, never};
+    use luneta_waits::{OUTLASTING, eventually, never};
 
     use super::*;
 
@@ -244,8 +244,7 @@ mod tests {
             found.send(count).is_ok()
         };
         let any = |_: &Path| true;
-        let sweep = PATIENCE.saturating_mul(2);
-        watch("test", dir.path().to_owned(), RecursiveMode::NonRecursive, any, sweep, read, tell)
+        watch("test", dir.path().to_owned(), RecursiveMode::NonRecursive, any, OUTLASTING, read, tell)
             .unwrap();
         assert_eq!(luneta_waits::heard("the first read", &heard), 0);
         assert_eq!(luneta_waits::heard("the read before the sweep", &heard), 1);

@@ -29,4 +29,5 @@ invalid:
   - "#[cfg(all(unix, test))] mod tests { fn f() { thread::sleep(d); } }"
   - "#[cfg(test)] mod tests { fn f() { while Instant::now() < deadline { g(); } } }"
   - "#[cfg(test)] mod tests { fn f() { loop { if deadline <= std::time::Instant::now() { break; } } } }"
+  - "#[cfg(test)] mod tests { fn f() { while busy() { assert!(Instant::now() < deadline, \"a\"); } } }"
   - "#[cfg(test)] mod tests { fn f() { loop { let left = deadline.saturating_duration_since(Instant::now()); } } }"

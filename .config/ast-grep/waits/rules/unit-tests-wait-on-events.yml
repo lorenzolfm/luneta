@@ -18,6 +18,8 @@ rule:
             - any:
                 - kind: binary_expression
                   regex: Instant::now\(\)\s*[<>]|[<>]=?\s*(\w+::)*Instant::now\(\)
+                - kind: token_tree
+                  regex: Instant::now\(\)\s*[<>]|[<>]=?\s*(\w+::)*Instant::now\(\)
                 - kind: field_identifier
                   regex: ^(duration_since|saturating_duration_since|checked_duration_since)$
             - inside:

@@ -68,11 +68,12 @@ impl Group {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
     use std::io::{Read as _, Write as _};
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
 
-    use luneta_waits::{PATIENCE, Span, eventually, seen_within};
+    use luneta_waits::{eventually, eventually_showing};
 
     use super::*;
 
@@ -98,7 +99,7 @@ mod tests {
             .spawn()
             .expect("sh starts");
         let pid = child.id();
-        let argv = sh_ran(pid, |argv| format!("{argv:?}"));
+        let argv = sh_ran(pid, |argv| argv);
         assert_eq!(argv, ["sh", "-c", "read line", "", "b c"]);
         assert!(children(std::process::id()).contains(&pid));
         let read = process(pid).expect("the child reads");
@@ -149,7 +150,7 @@ mod tests {
             .stdin(Stdio::piped())
             .spawn()
             .expect("sh starts");
-        let argv = sh_ran(child.id(), |argv| format!("{:?}", argv.map(|args| args.len())));
+        let argv = sh_ran(child.id(), |argv| argv.map(|args| args.len()));
         assert_eq!(argv[..4], ["sh", "-c", "read line", ""]);
         assert_eq!(argv[4], long[..ARGV_BYTES_MAX - 18]);
         assert_eq!(argv.len(), 5);
@@ -167,9 +168,10 @@ mod tests {
         assert_eq!(children(pid), Vec::<u32>::new());
     }
 
-    fn sh_ran(pid: u32, said: impl Fn(Option<Vec<String>>) -> String) -> Vec<String> {
-        let ran = || argv(pid).filter(|argv| argv.first().is_some_and(|first| first == "sh"));
-        let seen = seen_within(const { Span::of(PATIENCE) }, ran);
-        seen.unwrap_or_else(|| panic!("sh never ran in {PATIENCE:?}: {}", said(argv(pid))))
+    fn sh_ran<E: Debug>(pid: u32, shown: impl Fn(Option<Vec<String>>) -> E) -> Vec<String> {
+        eventually_showing("sh runs", || match argv(pid) {
+            Some(argv) if argv.first().is_some_and(|first| first == "sh") => Ok(argv),
+            other => Err(shown(other)),
+        })
     }
 }

@@ -563,12 +563,10 @@ mod tests {
     }
 
     fn next_within(patience: Patience, heard: &Receiver<Event>) -> (u64, Peered) {
-        loop {
-            let event = patience.heard("the luneta holding the lock hears it", heard);
-            if let Event::Peers(Heard::Peer(number, peered)) = event {
-                return (number, peered);
-            }
-        }
+        patience.heard_first("the luneta holding the lock hears it", heard, |event| match event {
+            Event::Peers(Heard::Peer(number, peered)) => Some((number, peered)),
+            _ => None,
+        })
     }
 
     fn a_click(event: Event) -> Option<Key> {
@@ -579,12 +577,7 @@ mod tests {
     }
 
     fn clicked(heard: &Receiver<Event>) -> Key {
-        let patience = Patience::begun();
-        loop {
-            if let Some(key) = a_click(patience.heard("a click", heard)) {
-                return key;
-            }
-        }
+        Patience::begun().heard_first("a click", heard, a_click)
     }
 
     #[test]
@@ -668,21 +661,15 @@ mod tests {
         let (clicks, _clicked) = mpsc::channel();
         let reaching = Reaching::to(socket, false, clicks);
         reaching.stopped();
-        let patience = Patience::begun();
-        loop {
-            if let Event::StopAloud = patience.heard("the key that stops", &heard) {
-                return;
-            }
-        }
+        let stops = |event| matches!(event, Event::StopAloud).then_some(());
+        let () = Patience::begun().heard_first("the key that stops", &heard, stops);
     }
 
     fn note(heard: &Receiver<Event>) -> String {
-        let patience = Patience::begun();
-        loop {
-            if let Event::Notice(note) = patience.heard("it says why", heard) {
-                return note;
-            }
-        }
+        Patience::begun().heard_first("it says why", heard, |event| match event {
+            Event::Notice(note) => Some(note),
+            _ => None,
+        })
     }
 
     #[test]
@@ -719,13 +706,10 @@ mod tests {
     }
 
     fn read_aloud(heard: &Receiver<Event>) -> (u64, String) {
-        let patience = Patience::begun();
-        loop {
-            let event = patience.heard("what to read aloud", heard);
-            if let Event::ReadAloud { from, selected } = event {
-                return (from, selected);
-            }
-        }
+        Patience::begun().heard_first("what to read aloud", heard, |event| match event {
+            Event::ReadAloud { from, selected } => Some((from, selected)),
+            _ => None,
+        })
     }
 
     #[test]

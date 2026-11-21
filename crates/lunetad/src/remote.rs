@@ -886,7 +886,7 @@ mod tests {
     use std::io::Write as _;
     use std::time::Duration;
 
-    use luneta_waits::PATIENCE;
+    use luneta_waits::OUTLASTING;
     use tonic::transport::Channel;
 
     use super::*;
@@ -1068,7 +1068,7 @@ mod tests {
         let destination: Destination = "nixos".parse().unwrap();
         let mut watch = Bridged::new(Arc::clone(&bridges), destination.clone(), 1);
         let wakes = |watch: &mut Bridged| {
-            let waits = watch.waits(PATIENCE.saturating_mul(2));
+            let waits = watch.waits(OUTLASTING);
             runtime.block_on(luneta_waits::awaited("the watch wakes", waits));
         };
 

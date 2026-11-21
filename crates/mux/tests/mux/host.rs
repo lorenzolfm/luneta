@@ -68,14 +68,12 @@ impl Server {
                 let _ = said.send(line);
             }
         });
-        let patience = Patience::begun();
-        loop {
-            let line = patience.awaited("luneta-mux says it listens", heard.recv()).await;
+        let listens = |line: Option<String>| {
             let line = line.expect("luneta-mux says it listens before its stderr closes");
-            if line.starts_with("luneta-mux: listening on ") {
-                break;
-            }
-        }
+            line.starts_with("luneta-mux: listening on ").then_some(())
+        };
+        let what = "luneta-mux says it listens";
+        Patience::begun().awaited_first(what, async || heard.recv().await, listens).await;
         Server { child, runtime }
     }
 
@@ -168,18 +166,18 @@ pub async fn watched_until(
 
 pub async fn watched_end(watch: &mut Streaming<api::Watched>) -> api::watched::ended::Why {
     let patience = Patience::begun();
-    loop {
-        let next = patience.awaited("the watch says why it ended", watch.message()).await;
+    let ends = |next: Result<Option<api::Watched>, tonic::Status>| {
         let watched = next.unwrap().expect("the watch says why before it ends");
         match watched.is.expect("the watch says something") {
-            api::watched::Is::Listing(_) => {},
-            api::watched::Is::Ended(ended) => {
-                let after = patience.awaited("the watch ends", watch.message()).await;
-                assert!(after.unwrap().is_none(), "the watch ends once it says why");
-                return ended.why.expect("the watch says why it ended");
-            },
+            api::watched::Is::Listing(_) => None,
+            api::watched::Is::Ended(ended) => Some(ended),
         }
-    }
+    };
+    let what = "the watch says why it ended";
+    let ended = patience.awaited_first(what, async || watch.message().await, ends).await;
+    let after = patience.awaited("the watch ends", watch.message()).await;
+    assert!(after.unwrap().is_none(), "the watch ends once it says why");
+    ended.why.expect("the watch says why it ended")
 }
 
 pub async fn listed(mux: &mut MuxClient<Channel>) -> api::Listing {
