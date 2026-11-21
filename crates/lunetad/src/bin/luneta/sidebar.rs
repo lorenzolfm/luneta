@@ -10,14 +10,12 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::{SkimMatcherV2, SkimScoreConfig};
 use luneta_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
 use luneta_protocol::github::{PullRequest, State, Verdict};
-use luneta_protocol::said::Said;
-use luneta_protocol::shell::Ending;
+use luneta_protocol::shell::{Ending, Front};
 use luneta_protocol::unread;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
-use lunetad::api::shell::Doing;
-use lunetad::api::{self, Agent, Front, Harness, Host, View, Saying, Shell, Status, UnreadFile};
+use lunetad::api::{self, Agent, Harness, Host, View, Saying, Shell, Status, UnreadFile};
 use lunetad::changes::Unchanged;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links::{self, Branch};
@@ -27,6 +25,7 @@ use lunetad::projects::{Arranged, ProjectName, WorktreeId, CLONE_WORKTREES_MAX};
 use lunetad::prunes;
 use lunetad::rebases::{Rebased, Unrebased};
 use lunetad::seats::{self, seated, Unread};
+use lunetad::shells::Doing;
 use lunetad::transcripts::SessionId;
 use lunetad::{log, Destination, Directory, SessionName};
 use ratatui::buffer::Buffer;
@@ -436,33 +435,34 @@ impl Marked {
         Marked { mark: Mark::of(agent), since }
     }
 
-    fn of_shell(shell: &Shell, now: SystemTime) -> Option<(Self, Option<&str>)> {
-        let (mark, since, command) = match shell.doing.as_ref()? {
-            Doing::Going(going) => {
-                let since = told(going.since)?;
+    fn of_shell(doing: &Doing, now: SystemTime) -> Option<(Self, Option<String>)> {
+        let (mark, since, command) = match doing {
+            Doing::Going { command, since, front } => {
+                let since = told(*since)?;
                 if now < since.checked_add(LONG)? {
                     return None;
                 }
-                let mark = match Front::try_from(going.front) {
-                    Ok(Front::Working) => Mark::Busy,
-                    Ok(Front::Asking) => Mark::Waiting,
-                    Ok(Front::Interactive | Front::Unspecified) | Err(_) => return None,
+                let mark = match front {
+                    Front::Working => Mark::Busy,
+                    Front::Asking => Mark::Waiting,
+                    Front::Interactive => return None,
                 };
-                (mark, since, going.command.as_deref())
+                (mark, since, command)
             },
-            Doing::Ended(ended) => {
-                if Duration::try_from(ended.took?).ok()? < LONG {
+            Doing::Ended { command, at, ending, took } => {
+                if *took < LONG {
                     return None;
                 }
-                let mark = match ended.ending.as_ref().map(Ending::of_api) {
+                let mark = match ending {
                     Some(Ending::Exited(0)) => Mark::Passed,
                     Some(Ending::Exited(_)) => Mark::Failed,
                     Some(Ending::Resumed) | None => Mark::Ran,
                 };
-                (mark, told(ended.at)?, ended.command.as_deref())
+                (mark, told(*at)?, command)
             },
-            Doing::Stopped(_) | Doing::Ready(()) => return None,
+            Doing::Stopped { .. } | Doing::Ready => return None,
         };
+        let command = command.as_ref().map(|command| command.as_str().to_owned());
         Some((Marked { mark, since: Some(since) }, command))
     }
 
@@ -483,7 +483,7 @@ struct Tally {
 }
 
 impl Tally {
-    fn of(by_view: &[Shows<'_>]) -> Tally {
+    fn of(by_view: &[Shows]) -> Tally {
         let marks = || by_view.iter().filter_map(|shows| Some(&shows.marked.as_ref()?.mark));
         Tally {
             waiting: marks().filter(|mark| **mark == Mark::Waiting).count(),
@@ -503,13 +503,13 @@ impl Tally {
     }
 }
 
-struct Shows<'a> {
+struct Shows {
     marked: Option<Marked>,
-    ran: Option<&'a str>,
+    ran: Option<String>,
     unread: bool,
 }
 
-impl Shows<'_> {
+impl Shows {
     fn dotted(&self) -> bool {
         dotted(self.unread, self.marked.as_ref())
     }
@@ -523,41 +523,29 @@ fn dot() -> Span<'static> {
     Span::styled(NEW, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
 }
 
-fn told(at: Option<impl TryInto<SystemTime>>) -> Option<SystemTime> {
-    at?.try_into().ok()?.checked_add(Duration::from_millis(999))
+fn told(at: SystemTime) -> Option<SystemTime> {
+    at.checked_add(Duration::from_millis(999))
 }
 
 fn ran(shell: &Shell) -> Ran {
-    let ran = match shell.doing.as_ref() {
-        Some(Doing::Going(going)) => said(going.command.as_ref(), Ran::Going),
-        Some(Doing::Stopped(stopped)) => said(stopped.command.as_ref(), Ran::Stopped),
-        Some(Doing::Ended(ended)) => ended_last(ended),
-        Some(Doing::Ready(())) => Some(Ran::Ready),
-        None => None,
+    let Ok(doing) = Doing::of_api(shell) else {
+        return Ran::Unknown;
     };
-    ran.unwrap_or(Ran::Unknown)
-}
-
-fn said(command: Option<&String>, ran: impl FnOnce(Option<Said>) -> Ran) -> Option<Ran> {
-    match command {
-        None => Some(ran(None)),
-        Some(command) => Some(ran(Some(Said::new(command.clone())?))),
+    match doing {
+        Doing::Going { command, .. } => Ran::Going(command),
+        Doing::Stopped { command, .. } => Ran::Stopped(command),
+        Doing::Ended { command: Some(command), at, ending, .. } => {
+            Ran::Ended(menu::Ended { command, ending, at })
+        },
+        Doing::Ended { command: None, .. } => Ran::EndedUnsaid,
+        Doing::Ready => Ran::Ready,
     }
 }
 
-fn ended_last(ended: &lunetad::api::shell::Ended) -> Option<Ran> {
-    let at = SystemTime::try_from(ended.at?).ok()?;
-    let ending = ended.ending.as_ref().map(Ending::of_api);
-    said(ended.command.as_ref(), |command| match command {
-        Some(command) => Ran::Ended(menu::Ended { command, ending, at }),
-        None => Ran::EndedUnsaid,
-    })
-}
-
-fn long_at(shell: &Shell) -> Option<SystemTime> {
-    match shell.doing.as_ref()? {
-        Doing::Going(going) => told(going.since)?.checked_add(LONG),
-        Doing::Ended(_) | Doing::Stopped(_) | Doing::Ready(()) => None,
+fn long_at(doing: &Doing) -> Option<SystemTime> {
+    match doing {
+        Doing::Going { since, .. } => told(*since)?.checked_add(LONG),
+        Doing::Ended { .. } | Doing::Stopped { .. } | Doing::Ready => None,
     }
 }
 
@@ -2511,14 +2499,15 @@ impl Sidebar {
                             by_view.push(Shows { marked: Some(agent), ran: None, unread });
                             continue;
                         }
-                        let Some(shell) = &view.shell else {
+                        let doing = view.shell.as_ref().map(Doing::of_api);
+                        let Some(Ok(doing)) = doing else {
                             by_view.push(Shows { marked: None, ran: None, unread });
                             continue;
                         };
-                        if let Some(long) = long_at(shell).filter(|long| *long > now) {
+                        if let Some(long) = long_at(&doing).filter(|long| *long > now) {
                             due = Some(due.map_or(long, |due| due.min(long)));
                         }
-                        let mut shell = Marked::of_shell(shell, now);
+                        let mut shell = Marked::of_shell(&doing, now);
                         let ended = shell.as_ref().and_then(|(shell, _)| shell.ended());
                         if let Some(ended) = ended {
                             finished.insert(key, ended);
@@ -2578,7 +2567,7 @@ impl Sidebar {
                                 .and_then(|agent| icons::agent(agent.runs_in()))
                                 .or_else(|| command.and_then(icons::program));
                             let label = match ran {
-                                Some(ran) => ran.to_owned(),
+                                Some(ran) => ran,
                                 None => label(agent(view), view),
                             };
                             let dir = view_dir(agent(view), view);
@@ -5715,9 +5704,10 @@ mod tests {
     use std::hash::{DefaultHasher, Hash as _, Hasher as _};
     use std::sync::LazyLock;
 
-    use lunetad::api::shell::{ended, Ended, Going, Stopped};
-    use lunetad::api::{self, NameSource, View, UnreadFile, Version};
+    use lunetad::api::shell::{ended, Doing, Ended, Going, Stopped};
+    use lunetad::api::{self, Front, NameSource, View, UnreadFile, Version};
     use luneta_protocol::github::PullPage;
+    use luneta_protocol::said::Said;
     use prost_types::Timestamp;
     use ratatui::buffer::Cell;
 

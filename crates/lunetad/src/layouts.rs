@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
 use std::io;
 use std::num::{NonZeroU16, NonZeroU64};
 use std::path::Path;
@@ -25,7 +24,7 @@ use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View
 use crate::projects::{Holds, ProjectName, Spot, Worktree};
 use crate::projects::{WorktreeId, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
 use crate::projects::{self, quoted, Argv, Arranged, Opens, Subfolder, WORKTREES_MAX};
-use crate::shells::Doing;
+use crate::shells::{Doing, Shell};
 use crate::shows::direction_said;
 use crate::watch::Troubles;
 use crate::{shells, Directory};
@@ -320,7 +319,7 @@ struct Layouts {
     restore_attempts: Attempts,
     told: Option<BTreeMap<ViewId, Located>>,
     troubles: Troubles,
-    shell: OsString,
+    shell: Shell,
 }
 
 struct Client {
@@ -1911,7 +1910,7 @@ fn laid(
     api::ShowResponse { event: Some(show_response::Event::Laid(laid)) }
 }
 
-fn runs_of(listed: &server::Terminal, agents: &[Agent], before: &Runs, shell: &OsString) -> Runs {
+fn runs_of(listed: &server::Terminal, agents: &[Agent], before: &Runs, shell: &Shell) -> Runs {
     let Is::Running { root, front, word, .. } = &listed.is else {
         return before.clone();
     };
@@ -1943,7 +1942,7 @@ fn runs_line(line: &str) -> Runs {
     Line::parse(&kept).map_or(Runs::Shell, Runs::Command)
 }
 
-fn is_shell(argv: &[String], shell: &OsString) -> bool {
+fn is_shell(argv: &[String], shell: &Shell) -> bool {
     let Some((first, rest)) = argv.split_first() else {
         return false;
     };
@@ -1951,7 +1950,7 @@ fn is_shell(argv: &[String], shell: &OsString) -> bool {
     let Some(named) = name(Path::new(first.trim_start_matches('-'))) else {
         return false;
     };
-    let yours = name(Path::new(shell)).is_some_and(|yours| yours == named);
+    let yours = shell.name() == named;
     if !yours && !SHELLS.contains(&named.as_str()) {
         return false;
     }
@@ -2027,7 +2026,10 @@ mod tests {
 
     #[test]
     fn a_terminal_runs_its_agent_its_command_or_its_shell() {
-        let shell = OsString::from("/bin/fish");
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("xonsh");
+        fs::write(&path, "").unwrap();
+        let shell = Shell::of(path.into_os_string()).unwrap();
         let before = command("htop");
         let of = |listed: &server::Terminal, agents: &[Agent]| {
             runs_of(listed, agents, &before, &shell)
@@ -2042,6 +2044,7 @@ mod tests {
         assert_eq!(of(&vim, &[]), command("vim notes"));
         assert_eq!(of(&running(Some((10, &["-bash"])), None), &[]), Runs::Shell);
         assert_eq!(of(&running(Some((10, &["/nix/store/x/fish"])), None), &[]), Runs::Shell);
+        assert_eq!(of(&running(Some((10, &["-xonsh"])), None), &[]), Runs::Shell);
         let kanban = running(Some((10, &["luneta", "kanban"])), None);
         assert_eq!(of(&kanban, &[]), command("luneta kanban"));
         assert_eq!(of(&running(None, None), &[]), before);

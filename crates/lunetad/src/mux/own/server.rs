@@ -8,12 +8,10 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use std::{env, fs};
 
 use hyper_util::rt::TokioIo;
-use luneta_protocol::said::Said;
-use luneta_protocol::shell::Ending;
 use rustix::process::{Pid, Signal};
 use tokio::net::UnixStream;
 use tokio::runtime::{self, Runtime};
@@ -28,7 +26,7 @@ use crate::changes::Unchanged;
 use crate::client::Within;
 use crate::mux::{Failure, Runs};
 use crate::projects::{Line, Size, VIEWS_MAX};
-use crate::shells::{Doing, Front};
+use crate::shells::Doing;
 use crate::{folder, log, release, Directory};
 
 pub const SOCKET: &str = "mux.sock";
@@ -324,62 +322,16 @@ fn mine(stream: UnixStream) -> io::Result<(UnixStream, Option<Pid>)> {
     Ok((stream, peer.pid().and_then(Pid::from_raw)))
 }
 
-fn opens(cwd: &Directory, runs: Runs<'_>) -> Result<api::Opens, Failure> {
+fn opens(cwd: &Directory, runs: Runs<'_>) -> api::Opens {
     let program = |argv: Vec<String>| api::opens::Runs::Program(api::Program { argv });
     let (runs, ends) = match runs {
-        Runs::Shell(shell) => {
-            assert!(!shell.is_empty());
-            let unread = || Failure::Own(format!("the shell {} is not UTF-8", shell.display()));
-            (program(vec![shell.to_str().ok_or_else(unread)?.to_owned()]), api::Ends::Closes)
-        },
+        Runs::Shell(shell) => (program(vec![shell.as_str().to_owned()]), api::Ends::Closes),
         Runs::Command { program: first, args } => {
             let argv = std::iter::once(first.to_owned()).chain(args.iter().cloned()).collect();
             (program(argv), api::Ends::Holds)
         },
     };
-    Ok(api::Opens { cwd: cwd.as_str().to_owned(), runs: Some(runs), ends: ends.into() })
-}
-
-fn doing(is: &api::ran::Is) -> Result<Doing, String> {
-    use api::ran::{ended, Is};
-    let time = |at: Option<prost_types::Timestamp>, what: &str| {
-        let at = at.ok_or_else(|| format!("no {what}"))?;
-        SystemTime::try_from(at).map_err(|why| format!("its {what}: {why}"))
-    };
-    let said = |command: &Option<String>| match command {
-        None => Ok(None),
-        Some(command) => Said::new(command.clone()).map(Some).ok_or("an empty command line"),
-    };
-    let doing = match is {
-        Is::Ready(_) => Doing::Ready,
-        Is::Going(going) => {
-            let front = match going.front() {
-                api::Front::Working => Front::Working,
-                api::Front::Asking => Front::Asking,
-                api::Front::Interactive => Front::Interactive,
-                api::Front::Unspecified => {
-                    return Err("what its command does, in a word of a newer build's".into());
-                },
-            };
-            let since = time(going.since, "since")?;
-            Doing::Going { command: said(&going.command)?, since, front }
-        },
-        Is::Ended(ended) => {
-            let at = time(ended.at, "at")?;
-            let ending = ended.ending.as_ref().map(|ending| match ending {
-                ended::Ending::Status(status) => Ending::Exited(*status),
-                ended::Ending::Resumed(_) => Ending::Resumed,
-            });
-            let took = ended.took.ok_or("no took")?;
-            let took = Duration::try_from(took).map_err(|why| format!("its took: {why}"))?;
-            Doing::Ended { command: said(&ended.command)?, at, ending, took }
-        },
-        Is::Stopped(stopped) => {
-            let at = time(stopped.at, "at")?;
-            Doing::Stopped { command: said(&stopped.command)?, at }
-        },
-    };
-    Ok(doing)
+    api::Opens { cwd: cwd.as_str().to_owned(), runs: Some(runs), ends: ends.into() }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -520,7 +472,7 @@ fn terminal_of(terminal: api::Terminal) -> Result<(Terminal, Option<String>), St
             let front = runs.foreground;
             let front = front.map(|front| Foreground { pid: front.pid, argv: front.argv });
             let said = runs.ran.and_then(|ran| ran.is);
-            let doing = match said.as_ref().map(doing).transpose() {
+            let doing = match said.as_ref().map(Doing::of_mux).transpose() {
                 Ok(doing) => doing,
                 Err(why) => {
                     unsaid = Some(why);
@@ -548,7 +500,7 @@ impl Terminals {
         tag: Vec<u8>,
         size: Size,
     ) -> Result<TerminalKey, Failure> {
-        let opens = opens(cwd, runs)?;
+        let opens = opens(cwd, runs);
         let (columns, rows) = size.get();
         let size = Some(api::Size { columns: columns.into(), rows: rows.into() });
         let request = api::NewTerminalRequest { opens: Some(opens), tag, size };
@@ -818,6 +770,10 @@ fn program() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
+    use luneta_protocol::shell::Front;
+
     use super::*;
 
     #[test]
