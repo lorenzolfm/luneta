@@ -391,13 +391,52 @@ impl Lone {
 struct Row {
     key: Key,
     name: String,
+    lead: usize,
     hits: Vec<usize>,
     rules: Rules,
 }
 
 impl Row {
     fn plain(key: Key, name: String) -> Row {
-        Row { key, name, hits: Vec::new(), rules: Rules::default() }
+        Row { key, name, lead: 0, hits: Vec::new(), rules: Rules::default() }
+    }
+
+    fn named(key: Key, named: Named, hits: Vec<usize>) -> Row {
+        let Named { text: name, lead } = named;
+        Row { key, name, lead, hits, rules: Rules::default() }
+    }
+
+    fn own(&self) -> &str {
+        &self.name[self.lead..]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Named {
+    text: String,
+    lead: usize,
+}
+
+impl Named {
+    fn whole(text: String) -> Named {
+        Named { text, lead: 0 }
+    }
+
+    fn placed(project: &str, own: &str) -> Named {
+        let lead = format!("{project} › ");
+        Named { lead: lead.len(), text: lead + own }
+    }
+}
+
+struct Search<'a> {
+    finder: Finder<'a>,
+    term: String,
+}
+
+impl<'a> Search<'a> {
+    fn of(typed: &'a str) -> Option<Search<'a>> {
+        let term = typed.to_lowercase();
+        (!typed.is_empty()).then(|| Search { finder: Finder::new(typed), term })
     }
 }
 
@@ -545,7 +584,7 @@ type Looked = (Machine, Listed, Option<ViewKey>);
 
 type Located = (Machine, Directory);
 
-type Found<'a> = (Option<Used>, String, Option<&'a str>, String, Key);
+type Found<'a> = (Option<Used>, Named, Option<&'a str>, String, Key);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Preview {
@@ -1197,24 +1236,24 @@ impl Picker {
         }
     }
 
-    fn action_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
+    fn action_rows(&self, search: Option<&Search<'_>>) -> Vec<Row> {
         if let Some(pasted) = self.pasted_rows() {
             return pasted;
         }
         let fitting = Action::ALL.into_iter().filter_map(|it| Some((it, self.run(it)?)));
-        let worktrees = self.listed_worktrees(finder);
+        let worktrees = self.listed_worktrees(search.map(|it| &it.finder));
         let worktrees = worktrees.into_iter().filter(|row| !matches!(row.key, Key::Machine { .. }));
-        let Some(finder) = finder else {
+        let Some(search) = search else {
             let row = |(action, run)| Row::plain(Key::Action(action, run), titled(action));
             let rows = fitting.map(row);
             return rows.chain(worktrees).collect();
         };
-        let term = self.term.to_lowercase();
         let mut found: Vec<(Tier, Fit, Row)> =
-            fitting.filter_map(|(action, run)| found_action(finder, &term, action, run)).collect();
+            fitting.filter_map(|(action, run)| found_action(search, action, run)).collect();
         found.sort_by_key(|(tier, fit, _)| (*tier, Reverse(*fit)));
         let actions = found.into_iter().map(|(tier, _, row)| (tier, Kind::Action, row));
-        let places = worktrees.map(|row| (tier_of(&term, &row.name), Kind::Place, row));
+        let place = |row: Row| (tier_of(search, &row.name, Some(row.own())), Kind::Place, row);
+        let places = worktrees.map(place);
         let mut ranked: Vec<(Tier, Kind, Row)> = actions.chain(places).collect();
         ranked.sort_by_key(|(tier, kind, _)| (*tier, *kind));
         let mut rows: Vec<Row> = ranked.into_iter().map(|(.., row)| row).collect();
@@ -1378,19 +1417,20 @@ impl Picker {
     }
 
     fn rebuild(&mut self, snap: bool) {
-        let finder = (!self.term.is_empty()).then(|| Finder::new(&self.term));
+        let search = Search::of(&self.term);
+        let finder = search.as_ref().map(|it| &it.finder);
         let ruled = !self.listing.remotes.is_empty();
         let mut agents = Vec::new();
         for (on, runs) in self.each() {
             let rule = ruled.then(|| self.machine_name(&on));
-            grouped(&mut agents, self.agent_rows(finder.as_ref(), &on, runs), rule);
+            grouped(&mut agents, self.agent_rows(finder, &on, runs), rule);
         }
-        let mut worktrees = self.worktree_rows(finder.as_ref());
+        let mut worktrees = self.worktree_rows(finder);
         if worktrees.is_empty() && self.scope.is_none() {
             worktrees = self.typed_rows();
         }
         let (dirs, aimed) = self.dir_rows();
-        let actions = self.action_rows(finder.as_ref());
+        let actions = self.action_rows(search.as_ref());
         let worktree_start = match worktrees.first().map(|row| &row.key) {
             Some(Key::Worktree { on, place }) if self.is_shown(on, place) => {
                 usize::from(self.term.is_empty())
@@ -1440,10 +1480,10 @@ impl Picker {
                     let (on, row) = (on.clone(), housed.project.clone());
                     let key = Key::Project { on, project: row, lone };
                     let dir = sidebar::short_cwd(housed.dir.as_str());
-                    found.push((None, project.to_owned(), None, dir, key));
+                    found.push((None, Named::whole(project.to_owned()), None, dir, key));
                 }
                 for worktree in &housed.worktrees {
-                    let name = format!("{project} › {}", worktree.name);
+                    let name = Named::placed(project, &worktree.name);
                     let folder = sidebar::short_cwd(worktree.folder.as_str());
                     let key = Key::Worktree { on: on.clone(), place: worktree.place.clone() };
                     found.push((worktree.used, name, worktree.branch.as_deref(), folder, key));
@@ -1474,12 +1514,12 @@ impl Picker {
     fn agent_rows(&self, finder: Option<&Finder<'_>>, on: &Machine, runs: &Runs) -> Vec<Row> {
         let yours = self.here_view(on);
         let agents = runs.agents.iter().filter(|seated| Some(&seated.place) != yours);
-        let agents: Vec<(String, Vec<Option<&str>>, Key)> = agents
+        let agents: Vec<(Named, Vec<Option<&str>>, Key)> = agents
             .map(|seated| {
                 let session = seated.place.session.name().as_str();
                 let also = vec![Some(session), Some(seated.dir.as_str())];
                 let key = Key::Agent { on: on.clone(), place: seated.place.clone() };
-                (agent_name(&runs.agents, seated), also, key)
+                (Named::whole(agent_name(&runs.agents, seated)), also, key)
             })
             .collect();
         matched(finder, agents.into_iter())
@@ -2087,7 +2127,8 @@ impl Picker {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Tier {
     Exact,
-    Prefix,
+    Leads,
+    Word,
     Fuzzy,
 }
 
@@ -2103,36 +2144,35 @@ fn titled(action: Action) -> String {
     chars.next().map_or_default(|first| first.to_uppercase().chain(chars).collect())
 }
 
-fn tier(finder: &Finder<'_>, term: &str, text: &str) -> Option<(Tier, Fit, Vec<usize>)> {
-    let (fit, hits) = finder.find(text, &[])?;
-    Some((tier_of(term, text), fit, hits))
+fn tier(search: &Search<'_>, text: &str, own: Option<&str>) -> Option<(Tier, Fit, Vec<usize>)> {
+    let (fit, hits) = search.finder.find(text, &[])?;
+    Some((tier_of(search, text, own), fit, hits))
 }
 
-fn tier_of(term: &str, text: &str) -> Tier {
+fn tier_of(search: &Search<'_>, text: &str, own: Option<&str>) -> Tier {
+    let term = search.term.as_str();
     let lower = text.to_lowercase();
+    let own = own.map(str::to_lowercase);
     let words = lower.match_indices([' ', '/', '-']).map(|(at, _)| at + 1);
     let starts = std::iter::once(0).chain(words).any(|at| lower[at..].starts_with(term));
-    if lower == term || lower.rsplit(" › ").next() == Some(term) {
+    if lower == term || own.as_deref() == Some(term) {
         Tier::Exact
+    } else if own.is_some_and(|own| own.starts_with(term)) {
+        Tier::Leads
     } else if starts {
-        Tier::Prefix
+        Tier::Word
     } else {
         Tier::Fuzzy
     }
 }
 
-fn found_action(
-    finder: &Finder<'_>,
-    term: &str,
-    action: Action,
-    run: Run,
-) -> Option<(Tier, Fit, Row)> {
+fn found_action(search: &Search<'_>, action: Action, run: Run) -> Option<(Tier, Fit, Row)> {
     let Spec { keywords, .. } = action.spec();
     let title = titled(action);
     let key = Key::Action(action, run);
-    let row = |name, hits| Row { key: key.clone(), name, hits, rules: Rules::default() };
-    let named = tier(finder, term, &title);
-    let keyword = keywords.iter().filter_map(|it| Some((tier(finder, term, it)?, *it)));
+    let row = |name, hits| Row { key: key.clone(), name, lead: 0, hits, rules: Rules::default() };
+    let named = tier(search, &title, Some(title.trim_start_matches('/')));
+    let keyword = keywords.iter().filter_map(|it| Some((tier(search, it, None)?, *it)));
     let keyword = keyword.min_by_key(|((tier, fit, _), _)| (*tier, Reverse(*fit)));
     match (named, keyword) {
         (Some((by_name, fit, hits)), Some(((by_keyword, ..), _))) if by_name <= by_keyword => {
@@ -2179,7 +2219,7 @@ fn unopened_of<'a>(on: &'a Machine, housed: &'a Housed) -> impl Iterator<Item = 
 
 fn unopened_found<'a>(on: &Machine, housed: &Housed, unopened: &projects::Dir) -> Found<'a> {
     let project = housed.project.listed().name().as_str();
-    let name = format!("{project} › {}", unopened.last());
+    let name = Named::placed(project, unopened.last());
     let folder = sidebar::short_cwd(unopened.as_str());
     let (row, at) = (housed.project.clone(), unopened.into());
     let key = Key::Unopened { on: on.clone(), project: row, folder: at };
@@ -2188,7 +2228,7 @@ fn unopened_found<'a>(on: &Machine, housed: &Housed, unopened: &projects::Dir) -
 
 fn candidates_of<'a>(
     found: &'a [Found<'a>],
-) -> impl Iterator<Item = (String, Vec<Option<&'a str>>, Key)> {
+) -> impl Iterator<Item = (Named, Vec<Option<&'a str>>, Key)> {
     found.iter().map(|(_, name, branch, folder, key)| {
         (name.clone(), vec![*branch, Some(folder.as_str())], key.clone())
     })
@@ -2196,16 +2236,16 @@ fn candidates_of<'a>(
 
 fn matched<'a>(
     finder: Option<&Finder<'_>>,
-    candidates: impl Iterator<Item = (String, Vec<Option<&'a str>>, Key)>,
+    candidates: impl Iterator<Item = (Named, Vec<Option<&'a str>>, Key)>,
 ) -> Vec<Row> {
     let Some(finder) = finder else {
-        let row = |(name, _, key)| Row { key, name, hits: Vec::new(), rules: Rules::default() };
+        let row = |(named, _, key)| Row::named(key, named, Vec::new());
         return candidates.map(row).collect();
     };
     let mut found: Vec<(Fit, Row)> = Vec::new();
-    for (name, also, key) in candidates {
-        if let Some((fit, hits)) = finder.find(&name, &also) {
-            found.push((fit, Row { key, name, hits, rules: Rules::default() }));
+    for (named, also, key) in candidates {
+        if let Some((fit, hits)) = finder.find(&named.text, &also) {
+            found.push((fit, Row::named(key, named, hits)));
         }
     }
     found.sort_by_key(|(fit, _)| Reverse(*fit));
@@ -2232,7 +2272,8 @@ fn dir_rows<'a>(
         if let Some((score, hits)) = hit {
             let exact = name == term || dir.name.as_str() == term;
             let key = Key::Dir { on: on.clone(), path: dir.path.clone(), session };
-            found.push((exact, score, at, Row { key, name, hits, rules: Rules::default() }));
+            let row = Row { key, name, lead: 0, hits, rules: Rules::default() };
+            found.push((exact, score, at, row));
         }
     }
     found.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
@@ -3895,6 +3936,34 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert_eq!(lit, "kill", "the keyword that matched is lit");
+    }
+
+    #[test]
+    fn a_letter_lights_the_action_whose_title_it_starts_over_a_keyword_or_a_later_word() {
+        for origin in [Origin::Views, Origin::Sidebar] {
+            for query in ["c", "cl"] {
+                let mut picker = palette(origin);
+                typed(&mut picker, query);
+                assert_eq!(keyed_action(&picker).0, "Close the view", "{origin:?} {query:?}");
+                let closes = Picked::Menu { target: fix_view(), origin, action: Action::CloseView };
+                assert_eq!(press(&mut picker, KeyCode::Enter), closes, "{origin:?} {query:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_worktree_whose_name_the_query_starts_ranks_over_an_action_with_a_later_word_it_starts() {
+        for name in ["launch", "launch › retry"] {
+            let mut listing = works();
+            let launch = worktree(place("site", 4, 1), name, Some(10), &[5]);
+            listing.shelves[0].projects.push(housed("site", 4, vec![launch]));
+            let mut picker = palette_on(listing, at_fix(Origin::Views));
+            typed(&mut picker, "la");
+            let (shown, _) = shown_actions(&picker);
+            let shown: Vec<String> = shown.iter().map(|line| named(line)).collect();
+            assert_eq!(shown[0], format!("site › {name}"), "{shown:?}");
+            assert!(shown.contains(&"Fix the last command".to_owned()), "{shown:?}");
+        }
     }
 
     #[test]
