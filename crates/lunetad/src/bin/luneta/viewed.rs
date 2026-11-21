@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::{NonZeroU16, NonZeroU64};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::vte::ansi::CursorShape;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use lunetad::folder;
+use lunetad::log;
 use lunetad::mux::own::api::{self, typed};
 use lunetad::mux::own::frames::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
@@ -43,6 +44,10 @@ const WELCOME: [&str; 4] =
     ["Welcome", "", "This view runs no terminal.", "d d  close it   Ctrl hjkl  another view"];
 
 const CLOSE: char = 'd';
+
+const HELD_MAX: usize = 256;
+
+const _: () = assert!(HELD_MAX < viewer::SAID_MAX);
 
 #[must_use]
 pub fn layout_size(columns: NonZeroU16, rows: NonZeroU16) -> Size {
@@ -91,6 +96,14 @@ struct Layout {
     tabs: Vec<Tab>,
     titles: BTreeMap<ViewId, String>,
     closing: Closing,
+    held: VecDeque<typed::Event>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Typing {
+    Into(TerminalKey),
+    Later,
+    Never,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +124,7 @@ impl Layout {
             tabs: Vec::new(),
             titles: BTreeMap::new(),
             closing: Closing::Unarmed,
+            held: VecDeque::new(),
         }
     }
 
@@ -160,9 +174,31 @@ impl Layout {
         (Some(key) != self.runs_in).then_some(key)
     }
 
+    fn typing(&self) -> Typing {
+        let Some(focused) = self.laid().and_then(Laid::focused) else {
+            return Typing::Later;
+        };
+        match focused.found {
+            Found::Key(key) if Some(key) == self.runs_in => Typing::Never,
+            Found::Key(key) => Typing::Into(key),
+            Found::Looking => Typing::Later,
+            Found::Lost | Found::Welcome => Typing::Never,
+        }
+    }
+
+    fn hold(&mut self, event: typed::Event) {
+        if self.held.len() < HELD_MAX {
+            self.held.push_back(event);
+        } else {
+            let dropped = format!("luneta holds {HELD_MAX} events for a terminal yet to come");
+            log::say(&format!("{dropped}: input dropped"));
+        }
+    }
+
     fn go(&mut self, worktree: WorktreeId) {
         self.worktree = worktree;
         self.laid = None;
+        self.held.clear();
         self.screens.clear();
         self.pointer = Pointer::Free;
     }
@@ -605,6 +641,7 @@ impl Viewed {
                     }
                 }
                 self.watch();
+                self.type_held();
                 match (emptied, followed) {
                     (true, _) => Heeded::Emptied,
                     (false, true) => Heeded::Followed,
@@ -723,6 +760,7 @@ impl Viewed {
         }
         if self.watcher.is_none() {
             self.watch();
+            self.type_held();
         }
     }
 
@@ -795,9 +833,22 @@ impl Viewed {
         }
     }
 
-    fn type_focused(&self, event: typed::Event) {
-        if let Some(key) = self.layout.focused_key() {
-            self.type_in(key, event);
+    fn type_focused(&mut self, event: typed::Event) {
+        self.layout.hold(event);
+        self.type_held();
+    }
+
+    fn type_held(&mut self) {
+        let key = match self.layout.typing() {
+            Typing::Into(key) => key,
+            Typing::Later => return,
+            Typing::Never => return self.layout.held.clear(),
+        };
+        let Some(watcher) = self.watcher.as_ref().filter(|it| it.showing.contains(&key)) else {
+            return;
+        };
+        for event in self.layout.held.drain(..) {
+            watcher.viewer.typed(key, event);
         }
     }
 
@@ -822,7 +873,7 @@ impl Viewed {
         self.type_focused(typed::Event::Paste(api::Paste { text: text.to_owned() }));
     }
 
-    pub fn focus(&self, focused: bool) {
+    pub fn focus(&mut self, focused: bool) {
         self.type_focused(typed::Event::Focus(api::Focus { focused }));
     }
 
