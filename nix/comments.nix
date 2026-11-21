@@ -4,6 +4,7 @@ let
   comments = ../.config/ast-grep/comments;
   waits = ../.config/ast-grep/waits;
   calls = ../.config/ast-grep/calls;
+  nextestRules = import ./nextest-rules.nix { inherit pkgs; };
   grammar = language: "${pkgs.tree-sitter-grammars."tree-sitter-${language}"}/parser";
   extensions = {
     fish = [ "fish" ];
@@ -32,12 +33,13 @@ let
       };
     };
   };
-  config = pkgs.writeText "comments.yml" (
+  configFolder = pkgs.writeTextDir "sgconfig.yml" (
     builtins.toJSON {
       ruleDirs = [
         "${comments}/rules"
         "${waits}/rules"
         "${calls}/rules"
+        "${nextestRules}"
       ];
       testConfigs = [
         { testDir = "${comments}/rule-tests"; }
@@ -70,6 +72,8 @@ let
       ];
     }
   );
+  config = "${configFolder}/sgconfig.yml";
+  configDir = dirOf config;
 in
 pkgs.writeShellApplication {
   name = "luneta-comments";
@@ -80,6 +84,12 @@ pkgs.writeShellApplication {
     pkgs.gnugrep
   ];
   text = ''
+    case "$PWD/" in
+      ${configDir}/*)
+        echo "luneta-comments: the ast-grep config's folder ${configDir} holds $PWD, so its rules' files: and ignores: globs would see paths under that folder, not paths from $PWD" >&2
+        exit 1
+        ;;
+    esac
     status=0
     found=()
     while IFS= read -r -d "" path; do
