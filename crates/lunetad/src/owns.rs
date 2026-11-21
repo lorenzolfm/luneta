@@ -67,7 +67,7 @@ pub fn follow(
                 },
                 Ok(Followed::Emptied { since }) => Some(layouts::Command::Emptied { since }),
                 Ok(Followed::Lost(why)) => {
-                    troubles.say(format!("terminals are not followed: {why}"));
+                    troubles.say(format!("terminals are not followed, as luneta-mux ended: {why}"));
                     troubles.done();
                     Some(layouts::Command::Crashed)
                 },

@@ -277,10 +277,10 @@ impl Model {
         match self {
             Model::Holds(holding) => Ok(holding),
             Model::Ended(Ending::Emptied) => {
-                Err(Status::unavailable("luneta-mux is ending, as nothing is left in it"))
+                Err(Status::unavailable("it is ending, as nothing is left in it"))
             },
             Model::Ended(Ending::Unreached(unreached)) => {
-                Err(Status::unavailable(format!("luneta-mux is ending: {unreached}")))
+                Err(Status::unavailable(format!("it is ending: {unreached}")))
             },
         }
     }
@@ -498,7 +498,7 @@ fn refuse_if_full(count: usize, max: usize, what: &str) -> Result<(), Status> {
     if count < max {
         return Ok(());
     }
-    Err(Status::resource_exhausted(format!("luneta-mux holds {max} {what} at most")))
+    Err(Status::resource_exhausted(format!("it holds {max} {what} at most")))
 }
 
 #[cfg(test)]
