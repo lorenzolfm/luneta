@@ -105,17 +105,26 @@ struct Layout {
 struct Aim {
     worktree: WorktreeId,
     view: Option<ViewId>,
+    key: Option<TerminalKey>,
 }
 
 impl Aim {
     fn reaches(self, now: Aim) -> bool {
-        self.worktree == now.worktree && self.view.is_none_or(|view| Some(view) == now.view)
+        let view = self.view.is_none_or(|view| Some(view) == now.view);
+        let key = self.key.is_none_or(|key| Some(key) == now.key);
+        self.worktree == now.worktree && view && key
     }
 }
 
 struct Unsent {
     aim: Aim,
-    kept: Option<Kept>,
+    held: Held,
+}
+
+enum Held {
+    Nothing,
+    Kept(Kept),
+    Dropping,
 }
 
 struct Kept {
@@ -126,32 +135,43 @@ struct Kept {
 
 impl Unsent {
     fn new(aim: Aim) -> Unsent {
-        Unsent { aim, kept: None }
+        Unsent { aim, held: Held::Nothing }
     }
 
     fn aim_at(&mut self, aim: Aim, now: Instant) {
         let moved = !self.aim.reaches(aim);
         self.aim = aim;
-        let stale = |kept: &mut Kept| UNSENT_FOR < now.saturating_duration_since(kept.since);
-        let Some(kept) = self.kept.take_if(|kept| moved || stale(kept)) else {
+        if moved {
+            if let Held::Kept(kept) = std::mem::replace(&mut self.held, Held::Nothing) {
+                let count = kept.events.len();
+                let dropped = format!("luneta drops {count} events kept for a terminal yet to come");
+                log::say(&format!("{dropped}: typed for a terminal no longer focused"));
+            }
+            return;
+        }
+        let Held::Kept(kept) = &self.held else {
             return;
         };
+        if now.saturating_duration_since(kept.since) <= UNSENT_FOR {
+            return;
+        }
         let count = kept.events.len();
-        let why = if moved {
-            "for a view no longer focused".to_owned()
-        } else {
-            format!("over {UNSENT_FOR:?} ago")
-        };
+        self.held = Held::Dropping;
         let dropped = format!("luneta drops {count} events kept for a terminal yet to come");
-        log::say(&format!("{dropped}: typed {why}"));
+        let after = "and what is typed after them till a terminal takes it";
+        log::say(&format!("{dropped}: typed over {UNSENT_FOR:?} ago, {after}"));
     }
 
     fn keep(&mut self, aim: Aim, event: typed::Event, now: Instant) {
         self.aim_at(aim, now);
-        let Some(kept) = &mut self.kept else {
-            let events = VecDeque::from([event]);
-            self.kept = Some(Kept { since: now, events, dropped: false });
-            return;
+        let kept = match &mut self.held {
+            Held::Nothing => {
+                let events = VecDeque::from([event]);
+                self.held = Held::Kept(Kept { since: now, events, dropped: false });
+                return;
+            },
+            Held::Kept(kept) => kept,
+            Held::Dropping => return,
         };
         if kept.events.len() < UNSENT_MAX {
             kept.events.push_back(event);
@@ -166,11 +186,14 @@ impl Unsent {
     }
 
     fn clear(&mut self) {
-        self.kept = None;
+        self.held = Held::Nothing;
     }
 
     fn take(&mut self) -> VecDeque<typed::Event> {
-        self.kept.take().map_or_default(|kept| kept.events)
+        match std::mem::replace(&mut self.held, Held::Nothing) {
+            Held::Kept(kept) => kept.events,
+            Held::Nothing | Held::Dropping => VecDeque::new(),
+        }
     }
 }
 
@@ -199,7 +222,7 @@ impl Layout {
             tabs: Vec::new(),
             titles: BTreeMap::new(),
             closing: Closing::Unarmed,
-            unsent: Unsent::new(Aim { worktree, view: None }),
+            unsent: Unsent::new(Aim { worktree, view: None, key: None }),
         }
     }
 
@@ -264,7 +287,9 @@ impl Layout {
     }
 
     fn aim(&self) -> Aim {
-        Aim { worktree: self.worktree, view: self.focused() }
+        let focused = self.laid().and_then(Laid::focused);
+        let (view, key) = (focused.map(|view| view.id), focused.and_then(View::key));
+        Aim { worktree: self.worktree, view, key }
     }
 
     fn keep_unsent(&mut self, event: typed::Event, now: Instant) {
@@ -1419,7 +1444,18 @@ mod tests {
         layout.keep_unsent(pasted("a"), now);
         assert!(!layout.laid_out(laid_on(1, terminal())));
         assert_eq!(sent(&mut layout, now), None, "luneta types not into itself");
-        assert!(layout.unsent.kept.is_none());
+        assert!(matches!(layout.unsent.held, Held::Nothing));
+    }
+
+    #[test]
+    fn events_kept_for_a_terminal_never_reach_the_one_put_in_its_view_in_its_place() {
+        let now = Instant::now();
+        let mut layout = Layout::new(worktree(1), None);
+        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
+        layout.keep_unsent(pasted("a"), now);
+        assert_eq!(layout.take_unsent(None::<()>, now), None, "its viewer is lost");
+        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(2)))));
+        assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())), "remade");
     }
 
     #[test]
@@ -1472,21 +1508,25 @@ mod tests {
         assert_eq!(sent(&mut layout, too_late), Some((key(1), VecDeque::new())));
         layout.keep_unsent(pasted("a"), now);
         layout.keep_unsent(pasted("b"), too_late);
-        assert_eq!(sent(&mut layout, too_late), Some((key(1), VecDeque::from([pasted("b")]))));
+        layout.keep_unsent(pasted("c"), too_late);
+        assert_eq!(sent(&mut layout, too_late), Some((key(1), VecDeque::new())), "no tail");
+        layout.keep_unsent(pasted("d"), too_late);
+        let taken = Some((key(1), VecDeque::from([pasted("d")])));
+        assert_eq!(sent(&mut layout, too_late), taken, "a terminal took input, so on it goes");
     }
 
     #[test]
     fn events_past_the_most_kept_are_dropped_and_those_kept_stay_in_order() {
         let now = Instant::now();
-        let aim = Aim { worktree: worktree(1), view: None };
+        let aim = Aim { worktree: worktree(1), view: None, key: None };
         let mut unsent = Unsent::new(aim);
         for index in 0..=UNSENT_MAX {
             unsent.keep(aim, pasted(&index.to_string()), now);
         }
-        assert!(unsent.kept.as_ref().is_some_and(|kept| kept.dropped));
+        assert!(matches!(&unsent.held, Held::Kept(kept) if kept.dropped));
         let kept: Vec<typed::Event> = unsent.take().into();
         let first = (0..UNSENT_MAX).map(|index| pasted(&index.to_string()));
         assert_eq!(kept, first.collect::<Vec<typed::Event>>());
-        assert!(unsent.kept.is_none(), "a batch sent starts the count over");
+        assert!(matches!(unsent.held, Held::Nothing), "a batch sent starts the count over");
     }
 }
