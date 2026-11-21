@@ -1,10 +1,20 @@
 id: tests-ask-lunetad-with-patience
 valid:
-  - "async fn f() { let daemon = lunetad::connect(&folder, PATIENCE).await; }"
-  - "async fn f() { let daemon = lunetad::connect(&folder, luneta_waits::PATIENCE).await; }"
+  - "async fn f() { let daemon = lunetad::connect(&folder, PATIENT).await; }"
+  - "async fn f() { let daemon = lunetad::connect(&folder, crate::host::PATIENT).await; }"
   - "async fn f() { let stream = tokio::net::UnixStream::connect(socket).await; }"
+  - "async fn f() { let daemon = lunetad::through(bridge(&host), PATIENT_ROUND_TRIP).await; }"
+  - "async fn f() { let daemon = lunetad::through(command, crate::host::PATIENT_ROUND_TRIP).await; }"
 invalid:
   - "async fn f() { let daemon = lunetad::connect(&folder, lunetad::ANSWER).await; }"
+  - "async fn f() { let daemon = lunetad::connect(&folder, Answer::of(QUIET)).await; }"
   - "async fn f() { let daemon = lunetad::connect(&folder, QUIET).await; }"
   - "async fn f() { let daemon = lunetad::connect(&folder, PATIENCE / 2).await; }"
+  - "async fn f() { let daemon = lunetad::connect(&folder, PATIENCE).await; }"
+  - "async fn f() { let daemon = lunetad::connect(&folder, PATIENT_ROUND_TRIP).await; }"
   - "fn f() { let deadline = lunetad::ANSWER; }"
+  - "async fn f() { let daemon = lunetad::through(stalls, RoundTrip::of(QUIET)).await; }"
+  - "async fn f() { let daemon = lunetad::through(bridge(&host), RoundTrip::of(PATIENCE)).await; }"
+  - "async fn f() { let daemon = lunetad::through(bridge(&host), RoundTrip::of(PATIENCE / 2)).await; }"
+  - "async fn f() { let daemon = lunetad::through(bridge(&host), round_trip).await; }"
+  - "fn ends_it_past_its_round_trip() { runtime().block_on(async { lunetad::through(stalls, RoundTrip::of(QUIET)).await }); }"

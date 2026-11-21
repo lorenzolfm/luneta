@@ -769,7 +769,7 @@ async fn matched(
     folder: &Path,
 ) -> Result<client::Daemon, Failed> {
     let (ssh, last) = ssh(destination, said, folder);
-    let mut daemon = match client::through(ssh).await {
+    let mut daemon = match client::through(ssh, client::ROUND_TRIP).await {
         Ok(daemon) => daemon,
         Err(error) => {
             let mut failed = unreached(&error);
@@ -893,7 +893,7 @@ mod tests {
 
     fn unreached_daemon() -> client::Daemon {
         let channel = Channel::from_static("http://[::1]:1").connect_lazy();
-        DaemonClient::new(client::Within::new(channel, client::ANSWER, client::unanswered))
+        DaemonClient::new(client::Within::new(channel, client::ANSWER.waits(), client::unanswered))
     }
 
     fn answered() -> Seen {

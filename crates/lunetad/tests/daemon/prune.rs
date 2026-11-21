@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use luneta_waits::{eventually, PATIENCE};
+use luneta_waits::eventually;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::{On, PrunesRequest};
@@ -12,7 +12,7 @@ use lunetad::Directory;
 use serde_json::json;
 use tonic::Code;
 
-use crate::host::{Daemon, Host, LUNETA, LUNETAD, answered, folder_in, start, start_as};
+use crate::host::{Daemon, Host, LUNETA, LUNETAD, answered, folder_in, start, start_as, PATIENT};
 use crate::projects::{project, worktree};
 use crate::remote::{FakeSsh, hosts, reached};
 use crate::worktree::{cloned_as_wt, git};
@@ -545,7 +545,7 @@ fn a_plan_does_not_need_the_directory_it_runs_in() {
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon: DaemonClient<_> = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon: DaemonClient<_> = lunetad::connect(&folder, PATIENT).await.unwrap();
         let main = Directory::parse(main).unwrap();
         let asked = prunes::asked(None, &main);
         let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
@@ -573,7 +573,7 @@ fn the_daemon_deletes_only_what_it_would_plan_itself() {
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon: DaemonClient<_> = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon: DaemonClient<_> = lunetad::connect(&folder, PATIENT).await.unwrap();
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
         let deleting = |name: &str, head: &str, remote: Option<&str>| Deleting {
             folder: repository.at(name).display().to_string(),
@@ -662,7 +662,7 @@ fn what_was_agreed_goes_in_whatever_order_it_is_told() {
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon: DaemonClient<_> = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon: DaemonClient<_> = lunetad::connect(&folder, PATIENT).await.unwrap();
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
         let asked = prunes::asked(None, &main);
         let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
@@ -750,7 +750,7 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon: DaemonClient<_> = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon: DaemonClient<_> = lunetad::connect(&folder, PATIENT).await.unwrap();
         let on = || Some(On { destination: "far".to_owned() });
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
         let asked = prunes::asked(on(), &main);

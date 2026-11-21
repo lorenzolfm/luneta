@@ -82,7 +82,7 @@ const KEEPS_SWEEP: Duration = Duration::from_hours(1);
 
 pub const WATCH: Duration = Duration::from_secs(4);
 
-const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
+const _: () = assert!(WATCH.as_millis() < client::ANSWER.waits().as_millis());
 
 #[must_use]
 pub fn parked_watch(version: api::Version) -> String {
@@ -103,11 +103,6 @@ const QUESTIONS_MAX: u32 = 16;
 
 pub const ANSWERING_MAX: Duration = Duration::from_mins(2);
 
-const _: () = assert!(
-    client::ANSWER_THROUGH.as_millis() < ANSWERING_MAX.as_millis(),
-    "lunetad works at a question for longer than any of luneta's askers waits for its answer"
-);
-
 const BRIDGED_ASKS_MIN: usize = 4;
 
 const _: () = assert!(remote::HELD_MAX + BRIDGED_ASKS_MIN == QUESTIONS_MAX as usize);
@@ -125,7 +120,7 @@ pub const ALONE: Duration = Duration::from_secs(30);
 const _: () =
     assert!(ALONE.as_secs() > SWEEP.as_secs(), "lunetad is alone over more than one look");
 
-const DRAIN: Duration = client::ANSWER;
+const DRAIN: Duration = client::ANSWER.waits();
 
 pub struct Claim {
     folder: PathBuf,

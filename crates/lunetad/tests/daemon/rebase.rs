@@ -2,14 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use luneta_waits::{eventually, PATIENCE};
+use luneta_waits::eventually;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::On;
 use lunetad::rebases::{self, Came, Rebased};
 use lunetad::Directory;
 
-use crate::host::{Host, LUNETA, answered, folder_in, script, start};
+use crate::host::{Host, LUNETA, answered, folder_in, script, start, PATIENT};
 use crate::own::Owned;
 use crate::projects::project;
 use crate::remote::{FakeSsh, hosts, reached};
@@ -170,7 +170,7 @@ fn a_far_worktree_is_rebased_on_its_own_machine() {
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon: DaemonClient<_> = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon: DaemonClient<_> = lunetad::connect(&folder, PATIENT).await.unwrap();
         let on = || Some(On { destination: "far".to_owned() });
         let dir = Directory::parse(repository.fix.display().to_string()).unwrap();
         let mut rebase = async |came: Came| {

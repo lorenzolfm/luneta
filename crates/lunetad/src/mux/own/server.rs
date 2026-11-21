@@ -45,7 +45,7 @@ const WAITS_PER_ANSWER_MAX: u128 = 2;
 
 const _: () = assert!(
     WAITS_PER_ANSWER_MAX * (CONNECT.as_millis() + ANSWER.as_millis())
-        < crate::client::ANSWER.as_millis()
+        < crate::client::ANSWER.waits().as_millis()
 );
 
 const MAKING: Duration = Duration::from_secs(10);

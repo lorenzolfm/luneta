@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use luneta_waits::{eventually, Span, PATIENCE};
+use luneta_waits::{eventually, Span};
 use lunetad::api::change_projects_request::{
     AddProject, AddWorktree, Change, CloseWorktree, Pull, ReorderProjects, ReorderWorktrees, Start,
 };
@@ -22,7 +22,7 @@ use lunetad::changes::Unchanged;
 use lunetad::SWEEP;
 use tonic::{Code, Status};
 
-use crate::host::{folder_in, start, Host};
+use crate::host::{folder_in, start, Host, PATIENT};
 use crate::remote::{hosts, reached, FakeSsh};
 use crate::worktree::{cloned_as_wt, git, worktree_added};
 
@@ -46,7 +46,7 @@ fn answered_on(host: &Host, on: Option<&str>, change: Change) -> Result<Answered
     let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENT).await.unwrap();
         let on = on.map(|destination| On { destination: destination.to_owned() });
         let asked = ChangeProjectsRequest { on, change: Some(change) };
         Ok(daemon.change_projects(asked).await?.into_inner())
@@ -62,7 +62,7 @@ fn branched_on(
     let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENT).await.unwrap();
         let on = on.map(|on| On { destination: on.to_owned() });
         let asked = MakeWorktreeRequest { on, project, branch: branch.to_owned() };
         let mut answer = daemon.make_worktree(asked).await?.into_inner();
@@ -76,7 +76,7 @@ fn work_on(host: &Host, on: Option<&str>, project: u64) -> Result<ListWorkRespon
     let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENT).await.unwrap();
         let on = on.map(|on| On { destination: on.to_owned() });
         let mut answer = daemon.list_work(ListWorkRequest { on, project }).await?.into_inner();
         let listed = answer.message().await?.expect("lunetad answers once");

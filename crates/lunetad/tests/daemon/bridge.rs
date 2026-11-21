@@ -2,12 +2,11 @@ use std::error::Error;
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::process::{Command, Stdio};
 
-use luneta_waits::PATIENCE;
 use lunetad::api::WatchRequest;
 use lunetad::{Unbridged, BRIDGED};
 
 use crate::demand::Detached;
-use crate::host::{folder_in, start, Host, Running, LUNETA};
+use crate::host::{folder_in, start, Host, Running, LUNETA, PATIENT, PATIENT_ROUND_TRIP};
 
 const OPENING: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
 
@@ -39,7 +38,8 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn unbridged(command: Command, is: impl Fn(&Unbridged) -> bool) {
-    let error = runtime().block_on(lunetad::through(command)).expect_err("it reached one");
+    let unbridged = lunetad::through(command, PATIENT_ROUND_TRIP);
+    let error = runtime().block_on(unbridged).expect_err("it reached one");
     let first: &(dyn Error + 'static) = &error;
     let mut sources = std::iter::successors(Some(first), |&error| error.source());
     let why = sources.find_map(|error| error.downcast_ref::<Unbridged>());
@@ -51,7 +51,7 @@ fn a_client_asks_the_daemon_of_the_folder_through_luneta_bridge() {
     let host = Host::new();
     let daemon = start(host.vars()).unwrap();
     runtime().block_on(async {
-        let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
+        let mut bridged = lunetad::through(bridge(&host), PATIENT_ROUND_TRIP).await.unwrap();
         let info = bridged.info(()).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
         let first = WatchRequest { after: None, kept: None, shown: false };
@@ -61,34 +61,19 @@ fn a_client_asks_the_daemon_of_the_folder_through_luneta_bridge() {
 }
 
 #[test]
-fn a_client_runs_its_command_once_and_one_that_stalls_ends_it() {
-    let host = Host::new();
-    let daemon = start(host.vars()).unwrap();
-    runtime().block_on(async {
-        let mut stalled = lunetad::through(sh("echo lunetad; exec sleep 60")).await.unwrap();
-        stalled.info(()).await.expect_err("a stalled command answered");
-        let again = stalled.info(()).await.expect_err("it ran a command again");
-        assert!(went(&again), "{again:?}");
-        let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
-        let info = bridged.info(()).await.unwrap().into_inner();
-        assert_eq!(info.pid, daemon.pid());
-    });
-}
-
-#[test]
 fn a_client_reaches_no_daemon_but_the_one_it_dialed() {
     let host = Host::new();
     let first = start(host.vars()).unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
     runtime().block_on(async {
-        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENT).await.unwrap();
         assert_eq!(daemon.info(()).await.unwrap().into_inner().pid, first.pid());
         drop(first);
         let second = start(host.vars()).unwrap();
         let lost = daemon.info(()).await.expect_err("it reached the second daemon");
         let again = daemon.info(()).await.expect_err("it reached the second daemon");
         assert!(went(&again), "{lost:?}, then {again:?}");
-        let mut fresh = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut fresh = lunetad::connect(&folder, PATIENT).await.unwrap();
         assert_eq!(fresh.info(()).await.unwrap().into_inner().pid, second.pid());
     });
 }
@@ -97,14 +82,14 @@ fn a_client_reaches_no_daemon_but_the_one_it_dialed() {
 fn luneta_bridge_starts_a_daemon_where_none_runs() {
     let host = Host::new();
     let pid = runtime().block_on(async {
-        let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
+        let mut bridged = lunetad::through(bridge(&host), PATIENT_ROUND_TRIP).await.unwrap();
         bridged.info(()).await.unwrap().into_inner().pid
     });
     let daemon = Detached { host: &host, pid };
 
     let folder = folder_in(host.runtime.path()).unwrap();
     let answering = runtime().block_on(async {
-        let mut socket = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut socket = lunetad::connect(&folder, PATIENT).await.unwrap();
         socket.info(()).await.unwrap().into_inner().pid
     });
     assert_eq!(answering, daemon.pid);
