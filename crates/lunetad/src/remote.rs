@@ -1067,14 +1067,14 @@ mod tests {
         let bridges = Arc::new(Bridges::default());
         let destination: Destination = "nixos".parse().unwrap();
         let mut watch = Bridged::new(Arc::clone(&bridges), destination.clone(), 1);
-        let woke = |watch: &mut Bridged| {
+        let wakes = |watch: &mut Bridged| {
             let waits = watch.waits(PATIENCE.saturating_mul(2));
             runtime.block_on(luneta_waits::awaited("the watch wakes", waits));
         };
 
         assert!(runtime.block_on(bridges.to(&destination)).is_none());
         assert!(runtime.block_on(bridges.to(&destination)).is_none());
-        woke(&mut watch);
+        wakes(&mut watch);
         assert!(watch.woken.is_empty(), "two questions wake it once");
 
         assert!(runtime.block_on(bridges.to(&destination)).is_none());

@@ -511,6 +511,7 @@ fn failed(stderr: &[u8], status: ExitStatus) -> String {
 mod tests {
     use std::cell::{Cell, RefCell};
 
+    use luneta_waits::PATIENCE;
     use serde_json::json;
 
     use super::*;
@@ -798,13 +799,18 @@ mod tests {
     #[test]
     fn a_turn_given_up_kills_claude() {
         let mut sh = Command::new("sh");
-        sh.args(["-c", "sleep 10"]);
-        let looks = Cell::new(0_u32);
-        let wanted = || {
-            looks.set(looks.get() + 1);
-            looks.get() < 3
-        };
-        assert_eq!(talk(sh, "", &wanted, &|_| {}), None);
-        assert_eq!(looks.get(), 3, "it is given up at the first look that does not want it");
+        sh.args(["-c", &format!("exec sleep {}", PATIENCE.saturating_mul(10).as_secs())]);
+        let (ended, heard) = mpsc::channel();
+        thread::spawn(move || {
+            let looks = Cell::new(0_u32);
+            let wanted = || {
+                looks.set(looks.get() + 1);
+                looks.get() < 3
+            };
+            ended.send((talk(sh, "", &wanted, &|_| {}), looks.get())).unwrap();
+        });
+        let (ended, looks) = luneta_waits::heard("claude, which ends only if killed, ends", &heard);
+        assert_eq!(ended, None);
+        assert_eq!(looks, 3, "it is given up at the first look that does not want it");
     }
 }

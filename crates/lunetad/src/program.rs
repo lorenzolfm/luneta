@@ -305,9 +305,11 @@ mod tests {
     use std::fs::{self, File, TryLockError};
     use std::os::unix::process::ExitStatusExt;
     use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::Duration;
 
-    use luneta_waits::{Began, eventually};
+    use luneta_waits::{Began, PATIENCE, eventually};
     use rustix::process::{self, Pid, Signal};
 
     use super::{
@@ -437,14 +439,21 @@ mod tests {
 
     #[test]
     fn a_program_no_longer_wanted_is_killed() {
-        let looks = Cell::new(0_u32);
-        let wanted = || {
-            looks.set(looks.get() + 1);
-            looks.get() < 3
-        };
-        let ran = run_while(Command::new("sleep").arg("10"), Duration::from_secs(10), wanted);
-        assert!(ran.unwrap().is_none());
-        assert_eq!(looks.get(), 3, "it is killed at the first look that does not want it");
+        let longer = PATIENCE.saturating_mul(10);
+        let (ended, heard) = mpsc::channel();
+        thread::spawn(move || {
+            let looks = Cell::new(0_u32);
+            let wanted = || {
+                looks.set(looks.get() + 1);
+                looks.get() < 3
+            };
+            let mut sleeps = Command::new("sleep");
+            let ran = run_while(sleeps.arg(longer.as_secs().to_string()), longer, wanted);
+            ended.send((ran.unwrap().is_none(), looks.get())).unwrap();
+        });
+        let (unwanted, looks) = luneta_waits::heard("a program that ends only if killed ends", &heard);
+        assert!(unwanted);
+        assert_eq!(looks, 3, "it is killed at the first look that does not want it");
     }
 
     #[test]

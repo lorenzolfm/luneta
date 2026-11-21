@@ -669,7 +669,11 @@ mod tests {
         let reaching = Reaching::to(socket, false, clicks);
         reaching.stopped();
         let patience = Patience::begun();
-        while !matches!(patience.heard("the key that stops", &heard), Event::StopAloud) {}
+        loop {
+            if let Event::StopAloud = patience.heard("the key that stops", &heard) {
+                return;
+            }
+        }
     }
 
     fn note(heard: &Receiver<Event>) -> String {

@@ -205,7 +205,7 @@ pub fn watch(dirs: &[&Path], events: Sender<Event>) -> notify::Result<Recommende
 mod tests {
     use std::sync::mpsc;
 
-    use luneta_waits::{QUIET, Span, never, seen_within};
+    use luneta_waits::{QUIET, Span, eventually, never, seen_within};
 
     use super::*;
 
@@ -317,7 +317,8 @@ mod tests {
         let mut here = within(scratch.path());
         let (events, heard) = mpsc::channel();
         let _watcher = watch(&here.dirs(), events).unwrap();
-        while seen_within(const { Span::of(QUIET) }, || heard.try_recv().ok()).is_some() {}
+        let quiet = || seen_within(const { Span::of(QUIET) }, || heard.try_recv().ok()).is_none();
+        eventually("the watch goes quiet", || quiet().then_some(()));
         here.reload();
         never("a reload here is heard as a change", || heard.try_recv().ok().map(drop));
 
