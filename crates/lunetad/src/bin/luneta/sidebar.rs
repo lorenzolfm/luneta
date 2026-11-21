@@ -438,7 +438,7 @@ impl Marked {
     fn of_shell(doing: &Doing, now: SystemTime) -> Option<(Self, Option<String>)> {
         let (mark, since, command) = match doing {
             Doing::Going { command, since, front } => {
-                let since = told(*since)?;
+                let since = end_of_second(*since)?;
                 if now < since.checked_add(LONG)? {
                     return None;
                 }
@@ -458,7 +458,7 @@ impl Marked {
                     Some(Ending::Exited(_)) => Mark::Failed,
                     Some(Ending::Resumed) | None => Mark::Ran,
                 };
-                (mark, told(*at)?, command)
+                (mark, end_of_second(*at)?, command)
             },
             Doing::Stopped { .. } | Doing::Ready => return None,
         };
@@ -523,7 +523,7 @@ fn dot() -> Span<'static> {
     Span::styled(NEW, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
 }
 
-fn told(at: SystemTime) -> Option<SystemTime> {
+fn end_of_second(at: SystemTime) -> Option<SystemTime> {
     at.checked_add(Duration::from_millis(999))
 }
 
@@ -544,7 +544,7 @@ fn ran(shell: &Shell) -> Ran {
 
 fn long_at(doing: &Doing) -> Option<SystemTime> {
     match doing {
-        Doing::Going { since, .. } => told(*since)?.checked_add(LONG),
+        Doing::Going { since, .. } => end_of_second(*since)?.checked_add(LONG),
         Doing::Ended { .. } | Doing::Stopped { .. } | Doing::Ready => None,
     }
 }
