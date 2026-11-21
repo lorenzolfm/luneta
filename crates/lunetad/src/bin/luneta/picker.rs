@@ -2226,7 +2226,7 @@ fn plain(key: &KeyEvent) -> bool {
 fn agent_name(agents: &[Seated], seated: &Seated) -> String {
     let alike = agents.iter().filter(|other| other.label == seated.label);
     let sessions: HashSet<&SessionName> =
-        alike.clone().map(|other| other.place.session.name()).collect();
+        alike.clone().map(|other| other.place.session.name().session()).collect();
     let (session, view) = (seated.place.session.name(), seated.place.view);
     match (alike.count(), sessions.len()) {
         (0 | 1, _) => seated.label.clone(),

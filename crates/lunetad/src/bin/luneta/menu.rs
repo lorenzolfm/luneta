@@ -1041,18 +1041,19 @@ impl Target {
                 Briefed::Machine(machine.clone())
             },
             (Target::View(machine, row), brief::Scope::Highlighted) => {
-                Briefed::Agent(machine.clone(), row.session.name().clone(), row.view.terminal_id())
+                let session = row.session.name().session().clone();
+                Briefed::Agent(machine.clone(), session, row.view.terminal_id())
             },
             (
                 Target::Worktree(machine, WorktreeRow { place, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
-            ) => Briefed::Session(machine.clone(), place.project.listed().name().clone()),
+            ) => Briefed::Session(machine.clone(), place.project.listed().name().session().clone()),
             (
                 Target::Project(machine, ProjectTarget { project, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
-            ) => Briefed::Session(machine.clone(), project.listed().name().clone()),
+            ) => Briefed::Session(machine.clone(), project.listed().name().session().clone()),
             (Target::View(machine, ViewRow { session, .. }), brief::Scope::Session) => {
-                Briefed::Session(machine.clone(), session.name().clone())
+                Briefed::Session(machine.clone(), session.name().session().clone())
             },
         }
     }
@@ -3474,7 +3475,7 @@ mod tests {
                 " <BS> - Back, <ESC> - Close",
             ]
         );
-        let luneta = || listed().name().clone();
+        let luneta = || listed().name().session().clone();
         for (row, key, briefed) in [
             (view_row(), 'z', Briefed::Every),
             (view_row(), 's', Briefed::Session(Machine::Local, luneta())),
@@ -3709,7 +3710,7 @@ mod tests {
         let done = closed(menu.planned(Ok(worktree_plan(Vec::new()))));
         assert_eq!(done, Done::Act(vps(), worktree_act()));
 
-        let name = || project().listed().name().clone();
+        let name = || project().listed().name().session().clone();
         for (row, highlighted) in [
             (view, Briefed::Agent(vps(), name(), 4)),
             (project_on(vps()), Briefed::Session(vps(), name())),
@@ -4251,7 +4252,7 @@ mod tests {
     fn d_d_on_a_project_closes_it_with_its_worktrees_always_asking_first() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let act = Act::Project {
-            session: project().listed().name().clone(),
+            session: project().listed().name().session().clone(),
             project: project().id(),
             worktrees: vec![worktree()],
             seen: worktree_seen(),

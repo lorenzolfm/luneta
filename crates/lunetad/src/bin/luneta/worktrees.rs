@@ -342,7 +342,8 @@ fn chosen(
     folder: &str,
 ) -> Option<Result<Arrival, Tried>> {
     if let Some(name) = name {
-        let named: Vec<&Project> = projects.iter().filter(|project| project.name == name).collect();
+        let named = projects.iter().filter(|project| project.name.as_str() == name);
+        let named: Vec<&Project> = named.collect();
         match named[..] {
             [] => {},
             [one] => return Some(Ok(Arrival::Home(one.id))),
@@ -364,7 +365,7 @@ fn chosen(
 }
 
 fn branched_in(path: &Path, holding: &Project, name: &str) -> Result<Landing, Tried> {
-    assert_ne!(holding.name, name, "a name a project has goes to that project");
+    assert_ne!(holding.name.as_str(), name, "a name a project has goes to that project");
     match holding.holds {
         Holds::Clone(_) => {},
         Holds::Folder(_) => {

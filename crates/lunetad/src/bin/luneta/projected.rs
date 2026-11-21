@@ -4,7 +4,8 @@ use lunetad::api::projects::Held;
 use lunetad::api::{self, remote, terminal, Host};
 use lunetad::log;
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Dir, ProjectId, Used, ViewId, WorktreeId, VIEWS_MAX, WORKTREES_MAX};
+use lunetad::projects::{Dir, ProjectId, ProjectName, Used, ViewId, WorktreeId};
+use lunetad::projects::{VIEWS_MAX, WORKTREES_MAX};
 use lunetad::Destination;
 
 use crate::host::NOT_YET;
@@ -32,7 +33,7 @@ pub enum Holds {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
     pub id: ProjectId,
-    pub name: String,
+    pub name: ProjectName,
     pub dir: Dir,
     pub holds: Holds,
 }
@@ -270,7 +271,8 @@ fn project(project: &api::Project) -> Result<Project, String> {
         None => return Err(format!("project {named} says not what it holds")),
     };
     let dir = Dir::parse(&project.dir).map_err(|why| format!("project {named}'s folder: {why}"))?;
-    Ok(Project { id, name: project.name.clone(), dir, holds })
+    let name = ProjectName::parse(&project.name)?;
+    Ok(Project { id, name, dir, holds })
 }
 
 #[cfg(test)]

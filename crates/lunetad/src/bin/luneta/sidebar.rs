@@ -23,7 +23,7 @@ use lunetad::issues::{Filed, Unfiled};
 use lunetad::links::{self, Branch};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Argv, Dir, Holders, Opens, Plain, ProjectId, Used, ViewId};
-use lunetad::projects::{Arranged, WorktreeId, CLONE_WORKTREES_MAX};
+use lunetad::projects::{Arranged, ProjectName, WorktreeId, CLONE_WORKTREES_MAX};
 use lunetad::prunes;
 use lunetad::rebases::{Rebased, Unrebased};
 use lunetad::seats::{self, seated, Unread};
@@ -137,7 +137,7 @@ const PALETTE_NO_ROW: &str = "palette: the sidebar highlights no row yet";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Listed {
-    name: SessionName,
+    name: ProjectName,
     kept: ledger::Session,
 }
 
@@ -155,7 +155,7 @@ impl ProjectRow {
     }
 
     fn of_api(project: &api::Project) -> Option<Self> {
-        let name = SessionName::listed(&project.name).ok()?;
+        let name = ProjectName::parse(&project.name).ok()?;
         let id = ProjectId::of(project.id)?;
         Some(ProjectRow { listed: Listed { name, kept: ledger::Session::Project(id) }, id })
     }
@@ -184,7 +184,7 @@ impl Listed {
         }
     }
 
-    pub fn name(&self) -> &SessionName {
+    pub fn name(&self) -> &ProjectName {
         &self.name
     }
 
@@ -195,7 +195,7 @@ impl Listed {
     #[cfg(test)]
     pub fn new_project(name: &str, id: u64) -> Self {
         let kept = ledger::Session::Project(lunetad::projects::ProjectId::of(id).unwrap());
-        Listed { name: SessionName::parse(name).unwrap(), kept }
+        Listed { name: ProjectName::parse(name).unwrap(), kept }
     }
 }
 
@@ -2178,7 +2178,7 @@ impl Sidebar {
         };
         Some(HereAgent {
             on: self.on().clone(),
-            session: place.session.name().clone(),
+            session: place.session.name().session().clone(),
             view: place.view.terminal_id(),
             dir,
             harness,
@@ -3998,7 +3998,7 @@ impl Sidebar {
         for it in seen.projects {
             match &it.unopened {
                 Unopened::Folder => {
-                    let name = it.listed().name().to_string();
+                    let name = it.listed().name().clone();
                     holders.plain.push(Plain { dir: it.dir.clone(), name });
                 },
                 Unopened::Unlisted(_) | Unopened::Listed(_) => holders.clones.push(it.dir.clone()),
@@ -4041,7 +4041,7 @@ impl Sidebar {
         let known = known.ok_or_else(unlisted)?;
         let worktrees = known.worktrees.iter().map(|worktree| worktree.place.worktree).collect();
         let seen = known.worktrees.iter().flat_map(|worktree| worktree.terminals.iter().copied());
-        let session = listed.name().clone();
+        let session = listed.name().session().clone();
         Ok(Act::Project { session, project, worktrees, seen: seen.collect() })
     }
 
@@ -4101,7 +4101,7 @@ impl Sidebar {
                 seen.git_statuses.iter().map(|status| (status.dir.as_str(), status)).collect();
             for known in seen.projects {
                 let listed = known.listed();
-                every.push((machine.clone(), listed.name.clone()));
+                every.push((machine.clone(), listed.name.session().clone()));
                 for view in known.views() {
                     let Some(agent) = keyed(view).and_then(|key| agents.get(&key)) else {
                         continue;
@@ -4112,7 +4112,7 @@ impl Sidebar {
                     });
                     notes.push(Note {
                         on: machine.clone(),
-                        session: listed.name.clone(),
+                        session: listed.name.session().clone(),
                         view: view.id,
                         name: label(Some(agent), view),
                         status: status_word(agent),
@@ -6632,7 +6632,7 @@ mod tests {
         let mut unsocketed = session("z", 30, vec![]);
         unsocketed.id = 0;
         let misnamed = session("a/b", 40, vec![]);
-        let long = session(&"w".repeat(66), 50, vec![]);
+        let long = session(&"w".repeat(projects::NAME_CHARS_MAX), 50, vec![]);
         let sessions = vec![unstarted, session("y", 20, vec![]), unsocketed, misnamed, long];
         sidebar.hear(host(sessions, Vec::new()));
         let lines = screen(&mut sidebar, false, 60, 9);

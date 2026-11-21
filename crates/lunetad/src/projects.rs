@@ -171,14 +171,14 @@ impl Name {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProjectName(Name);
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ProjectName(SessionName);
 
 impl ProjectName {
     pub fn parse(text: &str) -> Result<ProjectName, String> {
-        let name = Name::parse(text)?;
-        SessionName::listed(text).map_err(|why| format!("{text:?} names no project: {why}"))?;
-        Ok(ProjectName(name))
+        Name::parse(text)?;
+        let listed = SessionName::listed(text);
+        listed.map(ProjectName).map_err(|why| format!("{text:?} names no project: {why}"))
     }
 
     pub fn of_folder(dir: &Dir) -> Result<ProjectName, String> {
@@ -188,6 +188,17 @@ impl ProjectName {
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+
+    #[must_use]
+    pub fn session(&self) -> &SessionName {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProjectName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -520,9 +531,7 @@ impl Project {
     #[must_use]
     pub fn plain(&self) -> Option<Plain> {
         match self.holds {
-            Holds::Folder(_) => {
-                Some(Plain { dir: self.dir.clone(), name: self.name.as_str().to_owned() })
-            },
+            Holds::Folder(_) => Some(Plain { dir: self.dir.clone(), name: self.name.clone() }),
             Holds::Clone(_) => None,
         }
     }
@@ -535,7 +544,7 @@ impl Project {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plain {
     pub dir: Dir,
-    pub name: String,
+    pub name: ProjectName,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -554,7 +563,8 @@ impl Holders {
             };
             match &project.holds {
                 Some(api::project::Holds::Folder(_)) => {
-                    holders.plain.push(Plain { dir: dir()?, name: project.name.clone() });
+                    let name = ProjectName::parse(&project.name)?;
+                    holders.plain.push(Plain { dir: dir()?, name });
                 },
                 Some(api::project::Holds::Clone(_)) => holders.clones.push(dir()?),
                 None => return Err(format!("lunetad says not what project {} holds", project.name)),
@@ -2243,7 +2253,7 @@ mod tests {
         let clone = api::project::Holds::Clone(api::project::Clone::default());
         let luneta = api::Project { holds: Some(clone), ..folder("luneta", "/w/luneta") };
         let holders = Holders::of_api(&[folder("notes", "/n"), luneta.clone()]).unwrap();
-        let plain = vec![Plain { dir: dir("/n"), name: "notes".to_owned() }];
+        let plain = vec![Plain { dir: dir("/n"), name: project_name("notes") }];
         assert_eq!(holders, Holders { plain, clones: vec![dir("/w/luneta")] });
         let unsaid = api::Project { holds: None, ..luneta.clone() };
         let said = Holders::of_api(&[folder("notes", "/n"), unsaid]);
