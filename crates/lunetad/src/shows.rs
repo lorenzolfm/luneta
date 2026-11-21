@@ -13,7 +13,7 @@ use crate::api::{self, show_request, show_response};
 use crate::folder::Folder;
 use crate::mux::TerminalKey;
 use crate::remote::Destination;
-use crate::projects::{shell_if_empty, Size, ViewId, WorktreeId, FRAME_CELLS, LAYOUT_VIEWS_MAX};
+use crate::projects::{Opens, Size, ViewId, WorktreeId, FRAME_CELLS, LAYOUT_VIEWS_MAX};
 use crate::streams::{self, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
@@ -235,7 +235,7 @@ pub enum Beside {
 pub enum Asked {
     Size(Size),
     Go(WorktreeId),
-    Open { beside: Beside, argv: Vec<String> },
+    Open { beside: Beside, opens: Opens },
     Welcome,
     Close(ViewId),
     Focus(ViewId),
@@ -250,15 +250,15 @@ impl Asked {
         let event = match self {
             Asked::Size(size) => Event::Size(size_said(size)),
             Asked::Go(worktree) => Event::Go(worktree.get()),
-            Asked::Open { beside, argv } => {
+            Asked::Open { beside, opens } => {
                 use show_request::open::Beside as Said;
                 let beside = match beside {
                     Beside::Alone => Said::Alone(()),
                     Beside::Largest => Said::Largest(()),
                     Beside::Focused => Said::Focused(()),
                 };
-                let opens = Some(shell_if_empty(argv));
-                Event::Open(show_request::Open { beside: Some(beside), opens })
+                let (beside, opens) = (Some(beside), Some(opens.to_api()));
+                Event::Open(show_request::Open { beside, opens })
             },
             Asked::Welcome => Event::Welcome(()),
             Asked::Close(view) => Event::Close(view.get()),

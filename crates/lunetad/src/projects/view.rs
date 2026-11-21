@@ -187,16 +187,6 @@ impl Argv {
 }
 
 #[must_use]
-pub fn shell_if_empty(words: Vec<String>) -> api::Opens {
-    let runs = if words.is_empty() {
-        api::opens::Runs::Shell(())
-    } else {
-        api::opens::Runs::Command(api::Argv { words })
-    };
-    api::Opens { runs: Some(runs) }
-}
-
-#[must_use]
 pub fn quoted(argv: &[String]) -> String {
     let plain = |word: &str| {
         let safe = |byte: u8| byte.is_ascii_alphanumeric() || b"-_./=:,+@%".contains(&byte);

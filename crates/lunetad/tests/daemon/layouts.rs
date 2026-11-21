@@ -16,7 +16,7 @@ use lunetad::api::{frames_request, On, FramesRequest};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
 use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
-use lunetad::projects::{shell_if_empty, Size, WorktreeId};
+use lunetad::projects::{Opens, Size, WorktreeId};
 use lunetad::folder::Folder;
 use lunetad::Daemon;
 use lunetad::release;
@@ -28,7 +28,7 @@ use tonic::{Code, Status, Streaming};
 use crate::agents::file_of_pid;
 use crate::host::{folder_in, script, start, Host};
 use crate::own::{self, Owned};
-use crate::projects::{self, asked, kept, project, worktree};
+use crate::projects::{self, asked, command, kept, project, running, worktree};
 use crate::remote::{hosts, reached, skills_on, FakeSsh};
 use crate::starts::{directory, makes_shells, mouse, projects_of, Window};
 use crate::worktree::{cloned_as_wt, git, worktree_added};
@@ -118,7 +118,7 @@ impl<'a> Shown<'a> {
 
     fn open_beside(&mut self, beside: open::Beside, words: &[&str]) -> u64 {
         let before = self.terminals();
-        let opens = Some(shell_if_empty(words.iter().map(|word| (*word).to_owned()).collect()));
+        let opens = Some(running(words));
         self.ask(Event::Open(show_request::Open { beside: Some(beside), opens }));
         let laid = self.until("a terminal more", |laid| laid.views.len() == before.len() + 1);
         let new = laid.views.iter().find(|view| !before.contains(&view.id));
@@ -671,7 +671,7 @@ fn two_layouts_that_each_open_a_terminal_alone_in_one_empty_worktree_open_one() 
     let mut one = Shown::new(&owned, worktree, 80, 24);
     let mut other = Shown::new(&owned, worktree, 80, 24);
     let alone = || {
-        let opens = Some(shell_if_empty(WAITS.iter().map(|word| (*word).to_owned()).collect()));
+        let opens = Some(running(&WAITS));
         Event::Open(show_request::Open { beside: Some(open::Beside::Alone(())), opens })
     };
     one.ask(alone());
@@ -711,7 +711,7 @@ fn an_open_the_layout_refuses_makes_no_terminal_in_the_mux() {
     let mut shown = Shown::new(&owned, worktree, 1000, 1000);
     let opened: Vec<u64> = (0..64).map(|_| shown.open()).collect();
     let largest = open::Beside::Largest(());
-    let opens = Some(shell_if_empty(WAITS.iter().map(|word| (*word).to_owned()).collect()));
+    let opens = Some(running(&WAITS));
     shown.ask(Event::Open(show_request::Open { beside: Some(largest), opens }));
     assert!(shown.until_refused().contains("no view has room"));
     let listing = owned.listing();
@@ -824,7 +824,7 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     let gone = || watched_worktree(&owned, closing).is_none().then_some(());
     eventually("a worktree closed goes", gone);
     let largest = Some(open::Beside::Largest(()));
-    let opens = Some(shell_if_empty(Vec::new()));
+    let opens = Some(Opens::Shell.to_api());
     shown.ask(Event::Open(show_request::Open { beside: largest, opens }));
     assert!(shown.until_refused().contains("is gone"), "a client left behind opens nothing");
     shown.ask(Event::Go(other));
@@ -1756,7 +1756,7 @@ fn seen_and_typed_into(
         Heard::Left(gone) => panic!("worktree {gone} is gone"),
     };
     assert!(laid().is_empty());
-    show.ask(Asked::Open { beside: Beside::Largest, argv: vec!["sh".to_owned()] });
+    show.ask(Asked::Open { beside: Beside::Largest, opens: command(&["sh"]) });
     let opened = laid();
     let view = *opened.views().next().expect("the layout lays out the terminal opened");
     let key = view.key().expect("lunetad says the key of a terminal it opened");
@@ -1821,8 +1821,7 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     };
     assert!(laid().is_empty());
     let ticking = ["sh", "-c", "while :; do date +%N; sleep 0.005; done"];
-    let argv = ticking.iter().map(|word| (*word).to_owned()).collect();
-    show.ask(Asked::Open { beside: Beside::Largest, argv });
+    show.ask(Asked::Open { beside: Beside::Largest, opens: command(&ticking) });
     let opened = laid();
 
     let (seen, seeing) = std::sync::mpsc::channel();

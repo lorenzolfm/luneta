@@ -27,7 +27,7 @@ use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, Opens, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::asks::Marked;
 use lunetad::rebases::{Rebased, Unrebased};
@@ -1883,7 +1883,7 @@ impl App {
             },
             Asked::OpenIn { asking, on, worktree, command } => {
                 self.go_worktree(&on, worktree, None);
-                self.shown().open_beside_focused(command);
+                self.shown().open_beside_focused(Opens::Command(command));
                 self.give_opened(Opener::of(asking));
             },
             Asked::NewWorktree { on, project, branch } => {
@@ -2070,7 +2070,7 @@ impl App {
         on: &Machine,
         project: ProjectId,
         beside: ViewKey,
-        command: Vec<String>,
+        command: Opens,
     ) {
         let Some(project) = self.projected.project(on, project) else {
             return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());

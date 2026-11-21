@@ -27,7 +27,7 @@ pub use file::{forget, holder, kept, take, Changed, Elsewhere, Failed, Forgotten
 pub use file::{Opened, Store, Unheld};
 pub use layout::{Size, FRAME_CELLS, LAYOUT_VIEWS_MAX};
 pub use spot::{clone_of, subfolders, CloneRoot, Spot, CLONE_WORKTREES_MAX, LOOK as SPOT_LOOK};
-pub use view::{quoted, shell_if_empty, Argv, Layout, Line, Opens, Placed, Runs, Session};
+pub use view::{quoted, Argv, Layout, Line, Opens, Placed, Runs, Session};
 pub use view::{Terminal, TerminalViewId};
 pub use view::View;
 pub use view::{LINE_BYTES_MAX, SESSION_BYTES_MAX};
@@ -2965,12 +2965,9 @@ mod tests {
     #[test]
     fn an_opens_reads_back_what_it_says_and_a_command_names_its_program() {
         let argv = ["cargo", "test", "it's"].map(str::to_owned).to_vec();
-        let command = Opens::Command(Argv::parse(argv.clone()).unwrap());
+        let command = Opens::Command(Argv::parse(argv).unwrap());
         assert_eq!(Opens::of_api(Some(command.to_api())), Ok(command));
         assert_eq!(Opens::of_api(Some(Opens::Shell.to_api())), Ok(Opens::Shell));
-        let said = Opens::of_api(Some(shell_if_empty(argv.clone())));
-        assert_eq!(said, Ok(Opens::Command(Argv::parse(argv).unwrap())));
-        assert_eq!(Opens::of_api(Some(shell_if_empty(Vec::new()))), Ok(Opens::Shell));
         let nothing = "it says nothing to open".to_owned();
         assert_eq!(Opens::of_api(None), Err(nothing.clone()));
         assert_eq!(Opens::of_api(Some(api::Opens { runs: None })), Err(nothing));

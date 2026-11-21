@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 
+use lunetad::projects::Opens;
 use lunetad::rebases::{self, Came, Rebased, Stopped, Unrebased};
 use lunetad::Directory;
 
@@ -37,16 +38,16 @@ pub fn run(dir: Option<&Path>, path: &Path) -> ExitCode {
     eprintln!("luneta: {}", said(&rebased));
     let words = rebases::prompt(&rebased.branch, &rebased.onto, stopped);
     let agent = agents::on_words(Kept::shared().0.harness(), words, &[]);
-    match handed(path, &dir, agent) {
+    match agent.and_then(|agent| handed(path, &dir, Opens::Command(agent))) {
         Ok(()) => eprintln!("luneta: an agent resolves it, in a view of the worktree"),
         Err(why) => eprintln!("luneta: no agent started, and the rebase waits for you: {why}"),
     }
     ExitCode::from(UNFINISHED)
 }
 
-fn handed(path: &Path, dir: &Directory, agent: Vec<String>) -> Result<(), String> {
+fn handed(path: &Path, dir: &Directory, agent: Opens) -> Result<(), String> {
     let folder = worktrees::real(Path::new(dir.as_str()))?;
-    match worktrees::worked_in(path, &folder, agent.clone())? {
+    match worktrees::worked_in(path, &folder, &agent)? {
         Landed::Made(_) => Ok(()),
         Landed::Found(worktree) => worktrees::opened(path, worktree, agent, Opening::Beside),
     }
