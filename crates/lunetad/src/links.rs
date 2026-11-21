@@ -20,7 +20,7 @@ use crate::api::{On, PasteRequest, PasteResponse};
 use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common};
 use crate::program::{self, Ran};
-use crate::projects::{self, CloneRoot, Dir, Holders, Name, SPOT_LOOK};
+use crate::projects::{self, CloneRoot, Dir, Holders, ProjectName, SPOT_LOOK};
 use crate::{zoxide, Destination, Directory};
 
 pub(crate) mod sync;
@@ -807,7 +807,7 @@ fn lands(root: &Dir, holders: &Holders) -> Result<(), String> {
     if holders.clones.contains(root) {
         return Ok(());
     }
-    match Name::of_folder(root) {
+    match ProjectName::of_folder(root) {
         Ok(_) => Ok(()),
         Err(why) => Err(format!(
             "nothing made: no project holds {}, and one made for it cannot be named: {why}",

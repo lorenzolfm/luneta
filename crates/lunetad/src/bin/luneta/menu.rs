@@ -461,20 +461,11 @@ pub enum Renames {
     Project(ProjectId),
 }
 
-impl Renames {
-    fn parse(self) -> fn(&str) -> Result<projects::Name, String> {
-        match self {
-            Renames::Terminal(_) | Renames::Worktree(_) => projects::Name::parse,
-            Renames::Project(_) => projects::Name::of_project,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rename {
     Terminal(ViewId, Option<projects::Name>),
     Worktree(WorktreeId, Option<projects::Name>),
-    Project(ProjectId, projects::Name),
+    Project(ProjectId, projects::ProjectName),
 }
 
 impl Rename {
@@ -526,10 +517,6 @@ impl Typing {
     }
 
     fn typed(self, typed: &str, on: &Machine) -> Entered {
-        let named = |parse: fn(&str) -> Result<projects::Name, String>| {
-            let named = Some(typed.trim()).filter(|name| !name.is_empty());
-            named.map(parse).transpose()
-        };
         let renamed = |rename: Rename| Entered::Done(Done::Rename(on.clone(), rename));
         match self {
             Typing::Machine => match typed.parse::<Destination>() {
@@ -540,7 +527,7 @@ impl Typing {
                 Ok(folder) => Entered::Folder(folder),
                 Err(why) => Entered::Wrong(why),
             },
-            Typing::Name(folder) => match named(projects::Name::of_project) {
+            Typing::Name(folder) => match named(typed, projects::ProjectName::parse) {
                 Ok(name) => Entered::Done(Done::Project { on: on.clone(), folder, name }),
                 Err(why) => Entered::Wrong(why),
             },
@@ -548,23 +535,30 @@ impl Typing {
                 Ok(branch) => Entered::Done(Done::Worktree(on.clone(), project, branch)),
                 Err(why) => Entered::Wrong(why),
             },
-            Typing::Rename(asked) => match (asked, named(asked.parse())) {
-                (_, Err(why)) => Entered::Wrong(why),
-                (Renames::Terminal(terminal), Ok(name)) => {
-                    renamed(Rename::Terminal(terminal, name))
-                },
-                (Renames::Worktree(worktree), Ok(name)) => {
-                    renamed(Rename::Worktree(worktree, name))
-                },
-                (Renames::Project(project), Ok(Some(name))) => {
-                    renamed(Rename::Project(project, name))
-                },
-                (Renames::Project(_), Ok(None)) => {
-                    Entered::Wrong("a project keeps a name: type one".to_owned())
-                },
+            Typing::Rename(asked) => {
+                let rename = match asked {
+                    Renames::Terminal(terminal) => named(typed, projects::Name::parse)
+                        .map(|name| Rename::Terminal(terminal, name)),
+                    Renames::Worktree(worktree) => named(typed, projects::Name::parse)
+                        .map(|name| Rename::Worktree(worktree, name)),
+                    Renames::Project(project) => {
+                        let kept = || "a project keeps a name: type one".to_owned();
+                        named(typed, projects::ProjectName::parse)
+                            .and_then(|name| name.ok_or_else(kept))
+                            .map(|name| Rename::Project(project, name))
+                    },
+                };
+                match rename {
+                    Ok(rename) => renamed(rename),
+                    Err(why) => Entered::Wrong(why),
+                }
             },
         }
     }
+}
+
+fn named<N>(typed: &str, parse: fn(&str) -> Result<N, String>) -> Result<Option<N>, String> {
+    Some(typed.trim()).filter(|name| !name.is_empty()).map(parse).transpose()
 }
 
 fn folder_typed(typed: &str) -> Result<String, String> {
@@ -1047,18 +1041,19 @@ impl Target {
                 Briefed::Machine(machine.clone())
             },
             (Target::View(machine, row), brief::Scope::Highlighted) => {
-                Briefed::Agent(machine.clone(), row.session.name().clone(), row.view.terminal_id())
+                let session = row.session.name().session().clone();
+                Briefed::Agent(machine.clone(), session, row.view.terminal_id())
             },
             (
                 Target::Worktree(machine, WorktreeRow { place, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
-            ) => Briefed::Session(machine.clone(), place.project.listed().name().clone()),
+            ) => Briefed::Session(machine.clone(), place.project.listed().name().session().clone()),
             (
                 Target::Project(machine, ProjectTarget { project, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
-            ) => Briefed::Session(machine.clone(), project.listed().name().clone()),
+            ) => Briefed::Session(machine.clone(), project.listed().name().session().clone()),
             (Target::View(machine, ViewRow { session, .. }), brief::Scope::Session) => {
-                Briefed::Session(machine.clone(), session.name().clone())
+                Briefed::Session(machine.clone(), session.name().session().clone())
             },
         }
     }
@@ -1266,7 +1261,7 @@ pub enum Done {
     Arrange { on: Machine, session: Listed, view: ViewKey, arranged: Arranged },
     OpenIn { on: Machine, worktree: WorktreeId, command: Argv },
     Said(String),
-    Project { on: Machine, folder: String, name: Option<projects::Name> },
+    Project { on: Machine, folder: String, name: Option<projects::ProjectName> },
     Rename(Machine, Rename),
     Quit,
 }
@@ -3480,7 +3475,7 @@ mod tests {
                 " <BS> - Back, <ESC> - Close",
             ]
         );
-        let luneta = || listed().name().clone();
+        let luneta = || listed().name().session().clone();
         for (row, key, briefed) in [
             (view_row(), 'z', Briefed::Every),
             (view_row(), 's', Briefed::Session(Machine::Local, luneta())),
@@ -3568,7 +3563,8 @@ mod tests {
         };
         assert!(wrong.contains("names no project"), "{wrong}");
         let named = closed(typed(cleared(menu), "Notes").key(&enter));
-        let (folder, name) = ("~/notes".to_owned(), Some(projects::Name::parse("Notes").unwrap()));
+        let name = Some(projects::ProjectName::parse("Notes").unwrap());
+        let folder = "~/notes".to_owned();
         assert_eq!(named, Done::Project { on: Machine::Local, folder, name });
         let (menu, _) = stays(typed(cleared(asked(remote_header())), "/srv/notes").key(&enter));
         let folder = "/srv/notes".to_owned();
@@ -3594,7 +3590,8 @@ mod tests {
         let done = closed(renamed(worktree_on(vps()), "logs"));
         assert_eq!(done, Done::Rename(vps(), Rename::Worktree(worktree(), to())));
         let done = closed(renamed(session_row(), "logs"));
-        let project = Rename::Project(project().id(), logs());
+        let logs = projects::ProjectName::parse("logs").unwrap();
+        let project = Rename::Project(project().id(), logs);
         assert_eq!(done, Done::Rename(Machine::Local, project));
         let (menu, _) = stays(renamed(session_row(), " "));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[..3], [
@@ -3713,7 +3710,7 @@ mod tests {
         let done = closed(menu.planned(Ok(worktree_plan(Vec::new()))));
         assert_eq!(done, Done::Act(vps(), worktree_act()));
 
-        let name = || project().listed().name().clone();
+        let name = || project().listed().name().session().clone();
         for (row, highlighted) in [
             (view, Briefed::Agent(vps(), name(), 4)),
             (project_on(vps()), Briefed::Session(vps(), name())),
@@ -4255,7 +4252,7 @@ mod tests {
     fn d_d_on_a_project_closes_it_with_its_worktrees_always_asking_first() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let act = Act::Project {
-            session: project().listed().name().clone(),
+            session: project().listed().name().session().clone(),
             project: project().id(),
             worktrees: vec![worktree()],
             seen: worktree_seen(),

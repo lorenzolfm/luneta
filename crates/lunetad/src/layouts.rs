@@ -22,7 +22,7 @@ use crate::projects::layout::{self, Direction, Order, Sides, Towards, SIDE_MAX};
 use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
 use crate::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
 use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
-use crate::projects::{Holds, Name, Spot, Worktree};
+use crate::projects::{Holds, ProjectName, Spot, Worktree};
 use crate::projects::{WorktreeId, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
 use crate::projects::{self, quoted, Argv, Arranged, Opens, Subfolder, WORKTREES_MAX};
 use crate::shells::Doing;
@@ -99,7 +99,7 @@ pub enum Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Root {
     Clone(Dir),
-    Folder { dir: Dir, name: Name },
+    Folder { dir: Dir, name: ProjectName },
 }
 
 impl Root {

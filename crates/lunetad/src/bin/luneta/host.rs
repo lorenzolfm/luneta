@@ -1526,7 +1526,7 @@ impl App {
         let home = self.homes.shown_mut(shown);
         match self.projected.project(&shown.on, shown.project) {
             Some(project) => {
-                home.named(&project.name, &project.dir);
+                home.named(project.name.as_str(), &project.dir);
                 Some(Homed::Named)
             },
             None if gone(&self.projected, home) => Some(Homed::Gone { on: shown.on.clone() }),

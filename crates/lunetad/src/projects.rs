@@ -165,19 +165,40 @@ impl Name {
         Ok(Name(text.to_owned()))
     }
 
-    pub fn of_folder(dir: &Dir) -> Result<Name, String> {
-        Name::parse(dir.last())
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ProjectName(SessionName);
+
+impl ProjectName {
+    pub fn parse(text: &str) -> Result<ProjectName, String> {
+        Name::parse(text)?;
+        let listed = SessionName::listed(text);
+        listed.map(ProjectName).map_err(|why| format!("{text:?} names no project: {why}"))
     }
 
-    pub fn of_project(text: &str) -> Result<Name, String> {
-        let name = Name::parse(text)?;
-        SessionName::listed(text).map_err(|why| format!("{text:?} names no project: {why}"))?;
-        Ok(name)
+    pub fn of_folder(dir: &Dir) -> Result<ProjectName, String> {
+        ProjectName::parse(dir.last())
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    #[must_use]
+    pub fn session(&self) -> &SessionName {
         &self.0
+    }
+}
+
+impl fmt::Display for ProjectName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -410,7 +431,7 @@ enum Within {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
     id: ProjectId,
-    name: Name,
+    name: ProjectName,
     dir: Dir,
     holds: Holds,
 }
@@ -422,7 +443,7 @@ impl Project {
     }
 
     #[must_use]
-    pub fn name(&self) -> &Name {
+    pub fn name(&self) -> &ProjectName {
         &self.name
     }
 
@@ -510,7 +531,7 @@ impl Project {
     #[must_use]
     pub fn plain(&self) -> Option<Plain> {
         match self.holds {
-            Holds::Folder(_) => Some(Plain { dir: self.dir.clone(), name: self.name.0.clone() }),
+            Holds::Folder(_) => Some(Plain { dir: self.dir.clone(), name: self.name.clone() }),
             Holds::Clone(_) => None,
         }
     }
@@ -523,7 +544,7 @@ impl Project {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plain {
     pub dir: Dir,
-    pub name: String,
+    pub name: ProjectName,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -542,7 +563,8 @@ impl Holders {
             };
             match &project.holds {
                 Some(api::project::Holds::Folder(_)) => {
-                    holders.plain.push(Plain { dir: dir()?, name: project.name.clone() });
+                    let name = ProjectName::parse(&project.name)?;
+                    holders.plain.push(Plain { dir: dir()?, name });
                 },
                 Some(api::project::Holds::Clone(_)) => holders.clones.push(dir()?),
                 None => return Err(format!("lunetad says not what project {} holds", project.name)),
@@ -618,14 +640,14 @@ pub struct Projects {
 
 #[derive(Debug)]
 pub enum Change {
-    AddProject { spot: Spot, name: Option<Name> },
+    AddProject { spot: Spot, name: Option<ProjectName> },
     AddWorktree { project: ProjectId, spot: Spot, name: Option<Name>, opens: Opens },
-    Start { spot: Spot, name: Option<Name> },
+    Start { spot: Spot, name: Option<ProjectName> },
     Pull { spot: Spot, name: Name, agent: Option<Argv> },
     Join { spot: Spot, opens: Opens },
     Listed { root: Dir, subfolders: BTreeSet<Subfolder>, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, subfolders: BTreeSet<Subfolder> },
-    RenameProject { project: ProjectId, to: Name },
+    RenameProject { project: ProjectId, to: ProjectName },
     RenameWorktree { worktree: WorktreeId, to: Option<Name> },
     ReorderProjects { seen: Vec<ProjectId>, projects: Vec<ProjectId> },
     ReorderWorktrees {
@@ -710,7 +732,7 @@ impl Ask {
         let change = match change {
             Asked::AddProject(asked::AddProject { dir, name: named }) => Change::AddProject {
                 spot: spot(&dir).map_err(field("dir"))?,
-                name: named.as_deref().map(Name::of_project).transpose().map_err(field("name"))?,
+                name: named.as_deref().map(ProjectName::parse).transpose().map_err(field("name"))?,
             },
             Asked::AddWorktree(asked::AddWorktree { project, folder, name: named, opens }) => {
                 Change::AddWorktree {
@@ -722,7 +744,7 @@ impl Ask {
             },
             Asked::Start(asked::Start { folder, name: named }) => Change::Start {
                 spot: spot(&folder).map_err(field("folder"))?,
-                name: named.as_deref().map(Name::of_project).transpose().map_err(field("name"))?,
+                name: named.as_deref().map(ProjectName::parse).transpose().map_err(field("name"))?,
             },
             Asked::Pull(asked::Pull { folder, name, agent }) => Change::Pull {
                 spot: spot(&folder).map_err(field("folder"))?,
@@ -735,7 +757,7 @@ impl Ask {
             },
             Asked::RenameProject(asked::RenameProject { project, to }) => Change::RenameProject {
                 project: id("project", project).map(ProjectId)?,
-                to: Name::of_project(&to).map_err(field("to"))?,
+                to: ProjectName::parse(&to).map_err(field("to"))?,
             },
             Asked::RenameWorktree(asked::RenameWorktree { worktree, to }) => {
                 Change::RenameWorktree {
@@ -1303,13 +1325,13 @@ impl Projects {
     fn with_project(
         &mut self,
         spot: &Spot,
-        name: Option<Name>,
+        name: Option<ProjectName>,
         draw: &mut impl FnMut() -> io::Result<Id>,
     ) -> Result<ProjectId, String> {
         let dir = spot.dir().clone();
         let name = match name {
             Some(name) => name,
-            None => Name::of_folder(&dir).map_err(|why| format!("name it: {why}"))?,
+            None => ProjectName::of_folder(&dir).map_err(|why| format!("name it: {why}"))?,
         };
         if self.projects.len() >= PROJECTS_MAX {
             return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
@@ -1326,7 +1348,7 @@ impl Projects {
     fn made_inside(
         &mut self,
         spot: &Spot,
-        name: Option<Name>,
+        name: Option<ProjectName>,
         draw: &mut impl FnMut() -> io::Result<Id>,
     ) -> Result<(ProjectId, Within), String> {
         let made = self.with_project(spot, name, draw)?;
@@ -1440,7 +1462,7 @@ impl Projects {
         match &mut held.holds {
             Holds::Clone(rows) => Ok(rows),
             Holds::Folder(_) => {
-                let (name, dir) = (&held.name.0, &held.dir.0);
+                let (name, dir) = (held.name.as_str(), &held.dir.0);
                 Err(format!("project {name} in {dir} is a folder, which holds no worktree"))
             },
         }
@@ -1639,7 +1661,7 @@ fn shaped(project: &Project) -> Result<(), String> {
             return Err(format!("worktree {id} in {} holds no view, as no clone's may", folder.0));
         }
         if !subfolders.insert(subfolder) {
-            let (folder, name) = (project.dir.at(subfolder), &project.name.0);
+            let (folder, name) = (project.dir.at(subfolder), project.name.as_str());
             return Err(format!("{} holds two of project {name}'s worktrees", folder.0));
         }
     }
@@ -1664,7 +1686,7 @@ impl fmt::Display for Refused {
 }
 
 fn nested(dir: &Dir, other: &Project) -> String {
-    let (other_dir, name) = (&other.dir.0, &other.name.0);
+    let (other_dir, name) = (&other.dir.0, other.name.as_str());
     if *dir == other.dir {
         return format!("{} is project {name}'s folder already", dir.0);
     }
@@ -1838,6 +1860,10 @@ mod tests {
         Name::parse(text).unwrap()
     }
 
+    fn project_name(text: &str) -> ProjectName {
+        ProjectName::parse(text).unwrap()
+    }
+
     fn counting() -> impl FnMut() -> io::Result<Id> {
         let mut next = 0;
         move || {
@@ -1940,11 +1966,11 @@ mod tests {
 
     #[test]
     fn a_project_s_name_is_one_a_session_may_have() {
-        assert_eq!(Name::of_project("bitwarden backup"), Name::parse("bitwarden backup"));
-        assert!(Name::of_project("a\nb").is_err());
+        assert_eq!(ProjectName::parse("bitwarden backup").unwrap().as_str(), "bitwarden backup");
+        assert!(ProjectName::parse("a\nb").is_err());
         for listed_by_none in ["api/v2", ".", ".."] {
             assert!(Name::parse(listed_by_none).is_ok(), "{listed_by_none:?}");
-            let refused = Name::of_project(listed_by_none).unwrap_err();
+            let refused = ProjectName::parse(listed_by_none).unwrap_err();
             assert!(refused.contains("names no project"), "{refused}");
         }
     }
@@ -2020,7 +2046,7 @@ mod tests {
         let mut projects = Projects::default();
         let vault = project(&mut projects, "/home/me/Documents/Vault");
         assert_eq!(projects.all()[0].name().as_str(), "Vault");
-        let to = Name::parse("bitwarden backup").unwrap();
+        let to = project_name("bitwarden backup");
         (projects, _) = change(&projects, Change::RenameProject { project: vault, to }).unwrap();
         assert_eq!(projects.all()[0].name().as_str(), "bitwarden backup");
         assert_eq!(projects.all()[0].dir().as_str(), "/home/me/Documents/Vault");
@@ -2143,13 +2169,13 @@ mod tests {
 
         let subfolders = BTreeSet::from([tree("fix"), tree("main")]);
         let spot = Spot::in_clone(dir("/w/elo"), Some(tree("main")), subfolders);
-        let named = Change::Start { spot, name: Some(name("elo-app")) };
+        let named = Change::Start { spot, name: Some(project_name("elo-app")) };
         let Made::Worktree(elo_main) = add(&mut projects, named) else {
             panic!("a start in a worktree of no project makes its project and goes there");
         };
         let (held, there) = projects.find(elo_main).unwrap();
         let held_as = (held.name(), held.dir(), held.folder(there.id()));
-        assert_eq!(held_as, (&name("elo-app"), &dir("/w/elo"), Some(dir("/w/elo/main"))));
+        assert_eq!(held_as, (&project_name("elo-app"), &dir("/w/elo"), Some(dir("/w/elo/main"))));
         assert_eq!(held.worktrees().count(), 1, "the one started in, and no other of git's");
 
         let vault = starting(folder("/w/vault"));
@@ -2184,7 +2210,7 @@ mod tests {
             panic!("a join in a clone of no project makes its project and its worktree");
         };
         let (held, _) = projects.find(elo).unwrap();
-        assert_eq!((held.name(), held.dir()), (&name("elo"), &dir("/w/elo")));
+        assert_eq!((held.name(), held.dir()), (&project_name("elo"), &dir("/w/elo")));
         let root = joining(clone_of("/w/luneta", &["main", "feat"]));
         assert!(change(&projects, root).unwrap_err().contains("is in no worktree of /w/luneta"));
         let around = refused(&projects, join("/w", "fix"));
@@ -2210,7 +2236,8 @@ mod tests {
             panic!("a pull makes a worktree");
         };
         let (project, worktree) = projects.find(made).unwrap();
-        assert_eq!((project.name(), project.dir()), (&name("elo"), &dir("/w/elo")), "its clone's");
+        let (name, folder) = (project_name("elo"), dir("/w/elo"));
+        assert_eq!((project.name(), project.dir()), (&name, &folder), "its clone's");
         assert_eq!(project.folder(worktree.id()), Some(dir("/w/elo/pr-7")));
         assert!(matches!(refused(&projects, pull("/w")), Err(Refused::Nests(_))));
     }
@@ -2226,7 +2253,7 @@ mod tests {
         let clone = api::project::Holds::Clone(api::project::Clone::default());
         let luneta = api::Project { holds: Some(clone), ..folder("luneta", "/w/luneta") };
         let holders = Holders::of_api(&[folder("notes", "/n"), luneta.clone()]).unwrap();
-        let plain = vec![Plain { dir: dir("/n"), name: "notes".to_owned() }];
+        let plain = vec![Plain { dir: dir("/n"), name: project_name("notes") }];
         assert_eq!(holders, Holders { plain, clones: vec![dir("/w/luneta")] });
         let unsaid = api::Project { holds: None, ..luneta.clone() };
         let said = Holders::of_api(&[folder("notes", "/n"), unsaid]);

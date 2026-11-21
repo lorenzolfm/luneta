@@ -17,6 +17,7 @@ use lunetad::api::{Version, WatchRequest};
 use lunetad::changes::{Unadded, Unchanged};
 use lunetad::mux::own::TerminalKey;
 use lunetad::projects::{self, Argv, Holders, Name, Opened, Opens, ProjectId, Size, ViewId};
+use lunetad::projects::ProjectName;
 use lunetad::projects::WorktreeId;
 use lunetad::links::{self, Branch, Unready};
 use lunetad::work::{self, Listed};
@@ -341,7 +342,8 @@ fn chosen(
     folder: &str,
 ) -> Option<Result<Arrival, Tried>> {
     if let Some(name) = name {
-        let named: Vec<&Project> = projects.iter().filter(|project| project.name == name).collect();
+        let named = projects.iter().filter(|project| project.name.as_str() == name);
+        let named: Vec<&Project> = named.collect();
         match named[..] {
             [] => {},
             [one] => return Some(Ok(Arrival::Home(one.id))),
@@ -363,7 +365,7 @@ fn chosen(
 }
 
 fn branched_in(path: &Path, holding: &Project, name: &str) -> Result<Landing, Tried> {
-    assert_ne!(holding.name, name, "a name a project has goes to that project");
+    assert_ne!(holding.name.as_str(), name, "a name a project has goes to that project");
     match holding.holds {
         Holds::Clone(_) => {},
         Holds::Folder(_) => {
@@ -520,9 +522,9 @@ fn changed_there(machine: &Machine, change: Change) -> Result<(), Unchanged> {
 pub fn renamed_project(
     machine: &Machine,
     project: ProjectId,
-    to: &Name,
+    to: &ProjectName,
 ) -> Result<(), Unchanged> {
-    let (project, to) = (project.get(), spelled(to));
+    let (project, to) = (project.get(), to.as_str().to_owned());
     changed_there(machine, Change::RenameProject(RenameProject { project, to }))
 }
 
@@ -531,7 +533,7 @@ pub fn renamed_worktree(
     worktree: WorktreeId,
     to: Option<&Name>,
 ) -> Result<(), Unchanged> {
-    let (worktree, to) = (worktree.get(), to.map(spelled));
+    let (worktree, to) = (worktree.get(), to.map(|to| to.as_str().to_owned()));
     let renames = lunetad::api::change_projects_request::RenameWorktree { worktree, to };
     changed_there(machine, Change::RenameWorktree(renames))
 }
@@ -541,7 +543,7 @@ pub fn renamed_terminal(
     terminal: ViewId,
     to: Option<&Name>,
 ) -> Result<(), Unchanged> {
-    let (terminal, to) = (terminal.get(), to.map(spelled));
+    let (terminal, to) = (terminal.get(), to.map(|to| to.as_str().to_owned()));
     changed_there(machine, Change::RenameTerminal(RenameTerminal { terminal, to }))
 }
 
@@ -554,9 +556,9 @@ pub enum Landing {
 pub fn project_made(
     machine: &Machine,
     folder: &str,
-    name: Option<&Name>,
+    name: Option<&ProjectName>,
 ) -> Result<ProjectId, String> {
-    let (dir, name) = (folder.to_owned(), name.map(spelled));
+    let (dir, name) = (folder.to_owned(), name.map(|name| name.as_str().to_owned()));
     let made = made_there(machine, Change::AddProject(AddProject { dir, name }));
     let project = made.and_then(project_of).map_err(|unchanged| said_unmade(unchanged, "project"))?;
     let start = Start { folder: folder.to_owned(), name: None };
@@ -568,10 +570,6 @@ pub fn project_made(
         format!("{folder} is project {project}: {}", said_unmade(unchanged, "worktree"))
     };
     started.map_err(unstarted)
-}
-
-fn spelled(name: &Name) -> String {
-    name.as_str().to_owned()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

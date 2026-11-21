@@ -2226,7 +2226,7 @@ fn plain(key: &KeyEvent) -> bool {
 fn agent_name(agents: &[Seated], seated: &Seated) -> String {
     let alike = agents.iter().filter(|other| other.label == seated.label);
     let sessions: HashSet<&SessionName> =
-        alike.clone().map(|other| other.place.session.name()).collect();
+        alike.clone().map(|other| other.place.session.name().session()).collect();
     let (session, view) = (seated.place.session.name(), seated.place.view);
     match (alike.count(), sessions.len()) {
         (0 | 1, _) => seated.label.clone(),
@@ -2475,7 +2475,7 @@ impl Layout {
 mod tests {
     use std::time::UNIX_EPOCH;
 
-    use lunetad::projects::{Name, WorktreeId};
+    use lunetad::projects::{Name, ProjectName, WorktreeId};
     use ratatui::layout::Position;
 
     use super::*;
@@ -3289,7 +3289,8 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
         assert!(said(&picker).contains("a project keeps a name"), "{}", said(&picker));
         typed(&mut picker, "jots");
-        let jots = menu::Rename::Project(project("notes", 2).id(), Name::parse("jots").unwrap());
+        let jots = ProjectName::parse("jots").unwrap();
+        let jots = menu::Rename::Project(project("notes", 2).id(), jots);
         assert_eq!(press(&mut picker, KeyCode::Enter), renamed(Machine::Local, jots));
     }
 
