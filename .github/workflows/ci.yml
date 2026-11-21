@@ -171,7 +171,7 @@ jobs:
           echo 'nameserver 100.100.100.100' | sudo tee /etc/resolver/tail174781.ts.net
           sudo dscacheutil -flushcache
           sudo killall -HUP mDNSResponder
-          curl -sSf -o /dev/null https://api.github.com
+          curl -sSf -o /dev/null https://cache.nixos.org/nix-cache-info
           curl -sSf -o /dev/null https://attic.tail174781.ts.net/main/nix-cache-info
 
       - name: nix-community/cache-nix-action v7
