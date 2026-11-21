@@ -15,6 +15,11 @@ pub const SIDE_MAX: u16 = 1000;
 
 pub const SHARES: u32 = 1_000_000;
 
+pub const SIZE_MAX: Size = {
+    let side = NonZeroU16::new(SIDE_MAX).expect("SIDE_MAX is not 0");
+    Size { columns: side, rows: side }
+};
+
 const STEP_PERCENT: u32 = 5;
 
 pub const NODES_MAX: usize = 2 * LAYOUT_VIEWS_MAX - 1;
@@ -296,7 +301,12 @@ pub enum Removed<L> {
 
 #[must_use]
 pub fn lone(size: Size) -> Size {
-    Rect::whole(Least::VIEW.raised(size)).inner()
+    Rect::whole(lone_whole(size)).inner()
+}
+
+#[must_use]
+pub fn lone_whole(size: Size) -> Size {
+    Least::VIEW.raised(size)
 }
 
 impl<L: Leaf> Tree<L> {

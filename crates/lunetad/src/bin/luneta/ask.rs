@@ -379,6 +379,7 @@ mod tests {
             repository: None,
             pull_request: None,
             ran: Ran::Unhooked,
+            arranged: None,
         };
         Target::View(machine, row)
     }

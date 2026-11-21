@@ -23,7 +23,7 @@ use lunetad::issues::{Filed, Unfiled};
 use lunetad::links::{self, Branch};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Argv, Dir, Holders, Opens, Plain, ProjectId, Used, ViewId};
-use lunetad::projects::{WorktreeId, CLONE_WORKTREES_MAX};
+use lunetad::projects::{Arranged, WorktreeId, CLONE_WORKTREES_MAX};
 use lunetad::prunes;
 use lunetad::rebases::{Rebased, Unrebased};
 use lunetad::seats::{self, seated, Unread};
@@ -842,6 +842,7 @@ struct KnownWorktree {
     used: Option<Used>,
     views: Vec<(ViewId, View)>,
     terminals: Vec<ViewId>,
+    arranged: Option<Arranged>,
 }
 
 impl Known {
@@ -869,7 +870,9 @@ impl Known {
             let folder = Dir::parse(&worktree.folder);
             let folder = folder.expect("lunetad says a worktree's folder as a folder it keeps");
             let name = worktree.name.clone();
-            Some(KnownWorktree { place, name, folder, seen, used, views, terminals })
+            let arranged = worktree.arranged.map(Arranged::said).transpose();
+            let arranged = arranged.expect("lunetad says a worktree's arrangement luneta knows");
+            Some(KnownWorktree { place, name, folder, seen, used, views, terminals, arranged })
         });
         let worktrees: Vec<KnownWorktree> = worktrees.collect();
         let order = rows.iter().filter_map(|it| WorktreeId::of(it.id)).collect();
@@ -944,6 +947,17 @@ fn closed_by(act: &Act, on: &Machine, spot: &Spot) -> bool {
 
 fn keyed(view: &View) -> Option<TerminalKey> {
     TerminalKey::of(view.key.as_ref()?).ok()
+}
+
+fn arranged_holding(
+    shelves: &[Shelf],
+    on: &Machine,
+    listed: &Listed,
+    view: ViewId,
+) -> Option<Arranged> {
+    let known = shelf(shelves, on).iter().find(|it| it.listed() == listed)?;
+    let holding = known.worktrees.iter().find(|it| it.terminals.contains(&view))?;
+    holding.arranged
 }
 
 fn view_id_of(shelves: &[Shelf], on: &Machine, listed: &Listed, view: ViewKey) -> Option<ViewId> {
@@ -1181,6 +1195,7 @@ pub enum Asked {
     Open { asking: Held, on: Machine, project: ProjectId, beside: ViewKey, opens: Opens },
     NewWorktree { on: Machine, project: ProjectId, branch: Branch },
     Welcome { asking: Held, on: Machine, session: Listed, view: ViewKey },
+    Arrange { asking: Held, on: Machine, session: Listed, view: ViewKey, arranged: Arranged },
     OpenIn { asking: Held, on: Machine, worktree: WorktreeId, command: Argv },
     AddProject { on: Machine, folder: String, name: Option<projects::Name> },
     Rename { on: Machine, rename: Rename },
@@ -1235,6 +1250,7 @@ impl Asked {
             | Asked::Open { .. }
             | Asked::NewWorktree { .. }
             | Asked::Welcome { .. }
+            | Asked::Arrange { .. }
             | Asked::OpenIn { .. }
             | Asked::AddProject { .. }
             | Asked::Rename { .. }
@@ -3440,7 +3456,19 @@ impl Sidebar {
         let pull_request = pull_request.and_then(PullRequest::of_api);
         let ran = self.ran_in(machine, &session, view.terminal_id());
         let terminal = view_id_of(&self.shelves, machine, &session, view);
-        let row = ViewRow { session, view, terminal, cwd, branch, repository, pull_request, ran };
+        let arranged =
+            terminal.and_then(|it| arranged_holding(&self.shelves, machine, &session, it));
+        let row = ViewRow {
+            session,
+            view,
+            terminal,
+            cwd,
+            branch,
+            repository,
+            pull_request,
+            ran,
+            arranged,
+        };
         Some(Target::View(machine.clone(), row))
     }
 
@@ -3764,6 +3792,9 @@ impl Sidebar {
                     },
                     Done::Welcome { on, session, view } => {
                         Asked::Welcome { asking: taken.held(), on, session, view }
+                    },
+                    Done::Arrange { on, session, view, arranged } => {
+                        Asked::Arrange { asking: taken.held(), on, session, view, arranged }
                     },
                     Done::OpenIn { on, worktree, command } => {
                         Asked::OpenIn { asking: taken.held(), on, worktree, command }
@@ -5927,6 +5958,7 @@ mod tests {
                         folder: kept_folder(view.cwd.as_deref()),
                         seen: Some(api::worktree::Seen::Unread(())),
                         terminals: vec![terminal],
+                        arranged: Some(api::Arrangement::Tabs.into()),
                         ..api::Worktree::default()
                     }),
                 }
@@ -6129,6 +6161,7 @@ mod tests {
             folder: folder.to_owned(),
             seen: Some(api::worktree::Seen::Unread(())),
             terminals: views.iter().map(terminal).collect(),
+            arranged: (!views.is_empty()).then_some(api::Arrangement::Tabs.into()),
             ..api::Worktree::default()
         }
     }
@@ -8624,9 +8657,9 @@ mod tests {
         step_onto_its_first_view(&mut sidebar);
         sidebar.key(&char('?'), moment(160_000));
         let clicked = clicks(&mut sidebar, 0);
-        assert!(clicked[..7].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
+        assert!(clicked[..6].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
         let legend: Vec<(&str, Option<Hit>)> =
-            clicked[7..].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
+            clicked[6..].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         let rule = format!("─ luneta {}", "─".repeat(22));
         assert_eq!(legend, [
             (rule.as_str(), None),
@@ -8639,6 +8672,7 @@ mod tests {
             (" a  Ask", Some(on_legend('a'))),
             (" c  Skills ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
+            (" s  Show as panes", Some(on_legend('s'))),
             (" r  Rename the view…", Some(on_legend('r'))),
             (" d  Close ▸", Some(on_legend('d'))),
             (" b  Brief ▸", Some(on_legend('b'))),
@@ -9712,6 +9746,7 @@ mod tests {
             repository: None,
             pull_request: None,
             ran: Ran::Unhooked,
+            arranged: Some(Arranged::Tabs),
         })));
 
         type_in(&mut sidebar, "n");
@@ -11234,8 +11269,18 @@ mod tests {
         let (branch, repository, ran) = (None, None, Ran::Unhooked);
         let view = view_key(20, 1);
         let terminal = ViewId::of(1);
-        let row =
-            ViewRow { session, view, terminal, cwd, branch, repository, pull_request: None, ran };
+        let (pull_request, arranged) = (None, Some(Arranged::Tabs));
+        let row = ViewRow {
+            session,
+            view,
+            terminal,
+            cwd,
+            branch,
+            repository,
+            pull_request,
+            ran,
+            arranged,
+        };
         let menu = sidebar.open().expect("the menu");
         assert_eq!(menu.target(), &Target::View(on.clone(), row.clone()));
         let (project, beside) = (listed("main", 20).project(), view_key(20, 1));

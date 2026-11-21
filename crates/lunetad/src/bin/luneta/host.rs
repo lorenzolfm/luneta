@@ -27,7 +27,7 @@ use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, Opens, ProjectId, ViewId, WorktreeId};
+use lunetad::projects::{self, Arranged, Opens, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::asks::Marked;
 use lunetad::rebases::{Rebased, Unrebased};
@@ -1884,6 +1884,9 @@ impl App {
             Asked::Welcome { asking, on, session, view } => {
                 self.welcome(asking, &on, &session, view);
             },
+            Asked::Arrange { asking, on, session, view, arranged } => {
+                self.arrange(asking, &on, &session, view, arranged);
+            },
             Asked::OpenIn { asking, on, worktree, command } => {
                 self.go_worktree(&on, worktree, None);
                 self.shown().open_beside_focused(Opens::Command(command));
@@ -2064,6 +2067,24 @@ impl App {
         };
         self.go_worktree(on, worktree, Some(terminal));
         self.shown().welcome();
+        self.give_opened(Opener::of(asking));
+    }
+
+    fn arrange(
+        &mut self,
+        asking: sidebar::Held,
+        on: &Machine,
+        session: &Listed,
+        view: ViewKey,
+        arranged: Arranged,
+    ) {
+        let project = self.projected.project(on, session.project());
+        let held = project.and_then(|project| project.view_of(view.key()));
+        let Some((worktree, terminal)) = held else {
+            return self.sidebar.notify(format!("menu: lunetad lists no view {view}"));
+        };
+        self.go_worktree(on, worktree, Some(terminal));
+        self.shown().arrange(arranged);
         self.give_opened(Opener::of(asking));
     }
 

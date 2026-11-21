@@ -434,6 +434,7 @@ impl Known {
                 folder: folder.as_str().to_owned(),
                 terminals: self.built_terminals(worktree),
                 used_at: worktree.used().map(|used| used.time().into()),
+                arranged: worktree.layout().arranged().map(|it| it.to_api().into()),
             }
         };
         let holds = |project: &Project| match project.holds() {

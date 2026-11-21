@@ -123,11 +123,19 @@ pub(crate) fn tab_spans<'a, T: Copy>(
     tabs: impl IntoIterator<Item = (T, &'a str)>,
     width: u16,
 ) -> Vec<TabSpan<T>> {
+    tab_spans_capped(tabs, width, u16::MAX)
+}
+
+pub(crate) fn tab_spans_capped<'a, T: Copy>(
+    tabs: impl IntoIterator<Item = (T, &'a str)>,
+    width: u16,
+    columns_max: u16,
+) -> Vec<TabSpan<T>> {
     let mut spans = Vec::new();
     let mut column: u16 = 0;
     for (id, name) in tabs {
         let name = printable(name);
-        let wanted = u16::try_from(name.width()).unwrap_or(u16::MAX).saturating_add(2);
+        let wanted = tab_columns(&name).min(columns_max);
         let columns = wanted.min(width.saturating_sub(column));
         if columns == 0 {
             break;
@@ -145,6 +153,41 @@ pub(crate) fn tab_spans<'a, T: Copy>(
     spans
 }
 
+pub(crate) fn tab_columns_max<T>(tabs: &[(T, &str)], width: u16) -> u16 {
+    let count = u16::try_from(tabs.len()).expect("a bar's tabs are counted in u16");
+    let Some(gaps) = count.checked_sub(1) else {
+        return u16::MAX;
+    };
+    let wanted = tabs.iter().map(|(_, name)| tab_columns(&printable(name)));
+    let mut wanted: Vec<u16> = wanted.collect();
+    wanted.sort_unstable();
+    let mut room = width.saturating_sub(gaps);
+    let mut left = count;
+    for columns in wanted {
+        let share = room / left;
+        if columns <= share {
+            room -= columns;
+            left -= 1;
+        } else {
+            return share.max(1);
+        }
+    }
+    assert_eq!(left, 0, "every tab took the columns it wants");
+    u16::MAX
+}
+
+fn tab_columns(name: &str) -> u16 {
+    u16::try_from(name.width()).unwrap_or(u16::MAX).saturating_add(2)
+}
+
+pub(crate) fn tab_style(current: bool) -> Style {
+    if current {
+        Style::new().fg(gruvbox::BG0).bg(gruvbox::GREEN).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(gruvbox::FG1).bg(gruvbox::BG2)
+    }
+}
+
 pub(crate) fn draw_tab_spans<T: Copy + PartialEq>(
     buffer: &mut Buffer,
     bar: Rect,
@@ -156,11 +199,7 @@ pub(crate) fn draw_tab_spans<T: Copy + PartialEq>(
     }
     buffer.set_style(bar, Style::new().bg(gruvbox::BG1));
     for span in spans {
-        let style = if span.id == current {
-            Style::new().fg(gruvbox::BG0).bg(gruvbox::GREEN).add_modifier(Modifier::BOLD)
-        } else {
-            Style::new().fg(gruvbox::FG1).bg(gruvbox::BG2)
-        };
+        let style = tab_style(span.id == current);
         let x = bar.x + span.column;
         buffer.set_style(Rect::new(x, bar.y, span.columns, 1), style);
         let room = usize::from(span.columns.saturating_sub(2));

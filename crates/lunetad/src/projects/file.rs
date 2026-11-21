@@ -9,13 +9,14 @@ use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Duration;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Closing, Dir, Holds, Id, Line, Name, Project, Projects};
-use super::{Made, ProjectId, Refused, Relaid, Runs, Session, Spot, Terminal, TerminalViewId};
-use super::{Used, View, ViewId};
-use super::{Layout, Subfolder, Worktree, WorktreeId};
+use super::{Made, ProjectId, Refused, Relaid, Runs, Session, Spot, Terminal};
+use super::{TerminalViewId, Used, View, ViewId};
+use super::{Arranged, Focus, Layout, Shape, Subfolder, Worktree, WorktreeId};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{SPOT_LOOK, VIEWS_MAX, WORKTREES_MAX};
 use crate::agent::Harness;
@@ -36,7 +37,7 @@ const SAID_TRIES: u32 = 20;
 
 const SAID_PAUSE: Duration = Duration::from_millis(10);
 
-const VERSION: u32 = 10;
+const VERSION: u32 = 11;
 
 const WITHOUT_LAYOUTS: u32 = 1;
 
@@ -84,54 +85,83 @@ struct Versioned {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Kept {
+struct Kept<P> {
     version: u32,
-    projects: Vec<KeptProject>,
+    projects: Vec<P>,
 }
+
+type Laid = KeptProject<KeptFolderWorktree<KeptLayout>, KeptCloneWorktree<KeptLayout>>;
+
+type LaidBefore =
+    KeptProject<KeptFolderWorktree<KeptOlderLayout>, KeptCloneWorktree<KeptOlderLayout>>;
+
+type Viewed = KeptProject<ViewedFolderWorktree, ViewedCloneWorktree>;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct KeptProject {
+struct KeptProject<F, C> {
     id: String,
     name: String,
     dir: String,
-    holds: KeptHolds,
+    holds: KeptHolds<F, C>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum KeptHolds {
-    Folder(KeptFolderWorktree),
-    Clone(Vec<KeptCloneWorktree>),
+enum KeptHolds<F, C> {
+    Folder(F),
+    Clone(Vec<C>),
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeptFolderWorktree {
+#[serde(deny_unknown_fields, bound(deserialize = "L: Deserialize<'de>"))]
+struct KeptFolderWorktree<L> {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    layout: Option<KeptLayout>,
-    #[serde(default, skip_serializing)]
-    view: Option<KeptLayout>,
+    layout: Option<L>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     used_millis: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeptCloneWorktree {
+#[serde(deny_unknown_fields, bound(deserialize = "L: Deserialize<'de>"))]
+struct KeptCloneWorktree<L> {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(rename = "worktree")]
     subfolder: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    layout: Option<KeptLayout>,
-    #[serde(default, skip_serializing)]
-    view: Option<KeptLayout>,
+    layout: Option<L>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    used_millis: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewedFolderWorktree {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    view: Option<KeptOlderLayout>,
+    #[serde(default)]
+    used_millis: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewedCloneWorktree {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(rename = "worktree")]
+    subfolder: String,
+    #[serde(default)]
+    view: Option<KeptOlderLayout>,
+    #[serde(default)]
     used_millis: Option<u64>,
 }
 
@@ -161,23 +191,58 @@ struct UnrootedWorktree {
     #[serde(default)]
     below: String,
     #[serde(default)]
-    view: Option<KeptLayout>,
+    view: Option<KeptOlderLayout>,
     #[serde(default)]
     used_millis: Option<u64>,
 }
 
 struct Counted<'a> {
-    layout: Option<&'a KeptLayout>,
-    view: Option<&'a KeptLayout>,
+    tree: Option<&'a [KeptNode]>,
+    last_focus: bool,
     used_millis: Option<u64>,
+}
+
+trait KeptLaid: Sized {
+    fn tree(&self) -> &[KeptNode];
+
+    fn focuses_last(&self) -> bool;
+
+    fn read(self) -> Result<Layout, String>;
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeptLayout {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shown: KeptShown,
+    tree: Vec<KeptNode>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+enum KeptShown {
+    Tabs {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last: Option<String>,
+    },
+    Panes {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        focus: Option<KeptFocus>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum KeptFocus {
+    Last(String),
+    Full(String),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptOlderLayout {
+    #[serde(default)]
     full: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     last_focus: Option<String>,
     tree: Vec<KeptNode>,
 }
@@ -716,15 +781,14 @@ fn parse(
         return Err(format!("it is of version {version}, and {read}"));
     }
     if version > UNROOTED {
-        let kept: Kept = serde_json::from_str(text).map_err(|error| error.to_string())?;
-        assert_eq!(kept.version, version, "a file says one version");
-        let counted = || kept.projects.iter().flat_map(KeptProject::counted);
-        bounded(version, kept.projects.len(), counted)?;
-        let mut kept = kept.projects;
-        let unopened = if version <= ROWS_UNOPENED { unopened_forgotten(&mut kept) } else { 0 };
-        let projects = kept.into_iter().map(KeptProject::read);
-        let projects = projects.collect::<Result<_, String>>()?;
-        return Ok(Read { projects: Projects::checked(projects)?, migrated: unopened > 0 });
+        return match version {
+            VERSION => read_laid(version, parsed::<Laid>(text, version)?),
+            LAID_AS_VIEW => {
+                let viewed = parsed::<Viewed>(text, version)?;
+                read_laid(version, viewed.into_iter().map(Viewed::laid).collect())
+            },
+            _ => read_laid(version, parsed::<LaidBefore>(text, version)?),
+        };
     }
     let kept: KeptUnrooted = serde_json::from_str(text).map_err(|error| error.to_string())?;
     assert_eq!(kept.version, version, "a file says one version");
@@ -736,14 +800,33 @@ fn parse(
     Ok(Read { projects: Projects::checked(projects)?, migrated: true })
 }
 
-fn unopened_forgotten(projects: &mut [KeptProject]) -> usize {
+fn parsed<P: DeserializeOwned>(text: &str, version: u32) -> Result<Vec<P>, String> {
+    let kept: Kept<P> = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    assert_eq!(kept.version, version, "a file says one version");
+    Ok(kept.projects)
+}
+
+fn read_laid<L: KeptLaid>(
+    version: u32,
+    mut kept: Vec<KeptProject<KeptFolderWorktree<L>, KeptCloneWorktree<L>>>,
+) -> Result<Read, String> {
+    bounded(version, kept.len(), || kept.iter().flat_map(KeptProject::counted))?;
+    let unopened = if version <= ROWS_UNOPENED { unopened_forgotten(&mut kept) } else { 0 };
+    let projects = kept.into_iter().map(KeptProject::read);
+    let projects = projects.collect::<Result<_, String>>()?;
+    Ok(Read { projects: Projects::checked(projects)?, migrated: unopened > 0 })
+}
+
+fn unopened_forgotten<L>(
+    projects: &mut [KeptProject<KeptFolderWorktree<L>, KeptCloneWorktree<L>>],
+) -> usize {
     let mut forgotten = 0;
     for project in projects {
         let KeptHolds::Clone(rows) = &mut project.holds else {
             continue;
         };
         let before = rows.len();
-        rows.retain(|it| it.layout.is_some() || it.view.is_some());
+        rows.retain(|it| it.layout.is_some());
         forgotten += before - rows.len();
     }
     forgotten
@@ -754,8 +837,8 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     projects: usize,
     worktrees: impl Fn() -> I,
 ) -> Result<(), String> {
-    let laid = || worktrees().filter_map(|it| it.layout.or(it.view));
-    let nodes = || laid().flat_map(|layout| &layout.tree);
+    let laid = || worktrees().filter_map(|it| it.tree);
+    let nodes = || laid().flatten();
     if projects > PROJECTS_MAX {
         return Err(format!("it holds over {PROJECTS_MAX} projects"));
     }
@@ -765,19 +848,13 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     if nodes().filter(|node| !matches!(node, KeptNode::Split(_))).count() > VIEWS_MAX {
         return Err(format!("it holds over {VIEWS_MAX} views"));
     }
-    if version <= LAID_AS_VIEW && worktrees().any(|it| it.layout.is_some()) {
-        return Err(format!("it is of version {version}, which keeps layouts as \"view\""));
-    }
-    if version > LAID_AS_VIEW && worktrees().any(|it| it.view.is_some()) {
-        return Err(format!("it is of version {version}, which keeps layouts as \"layout\""));
-    }
     if version == WITHOUT_LAYOUTS && laid().next().is_some() {
         return Err(format!("it is of version {WITHOUT_LAYOUTS}, which holds no layouts"));
     }
     let unrun = |node: &KeptNode| {
         matches!(node, KeptNode::Terminal(KeptTerminal { runs: KeptRuns::Unrun(_), .. }))
     };
-    if version <= WITHOUT_LAST_FOCUS && laid().any(|it| it.last_focus.is_some()) {
+    if version <= WITHOUT_LAST_FOCUS && worktrees().any(|it| it.last_focus) {
         return Err(format!("it is of version {version}, which keeps no last focus"));
     }
     if version <= WITHOUT_WELCOMES && nodes().any(|it| matches!(it, KeptNode::Welcome(_))) {
@@ -1013,7 +1090,7 @@ fn join(held: &mut Worktree, other: Worktree) -> Result<(), String> {
     Ok(())
 }
 
-impl KeptProject {
+impl<L: KeptLaid> KeptProject<KeptFolderWorktree<L>, KeptCloneWorktree<L>> {
     fn read(self) -> Result<Project, String> {
         let (id, name, dir) = (self.id.parse()?, Name::parse(&self.name)?, Dir::parse(&self.dir)?);
         let holds = match self.holds {
@@ -1026,7 +1103,17 @@ impl KeptProject {
         Ok(Project { id, name, dir, holds })
     }
 
-    fn of(project: &Project) -> KeptProject {
+    fn counted(&self) -> impl Iterator<Item = Counted<'_>> {
+        let (own, rows): (_, &[KeptCloneWorktree<L>]) = match &self.holds {
+            KeptHolds::Folder(own) => (Some(own.counted()), &[]),
+            KeptHolds::Clone(rows) => (None, rows),
+        };
+        own.into_iter().chain(rows.iter().map(KeptCloneWorktree::counted))
+    }
+}
+
+impl Laid {
+    fn of(project: &Project) -> Laid {
         let holds = match &project.holds {
             Holds::Folder(own) => KeptHolds::Folder(KeptFolderWorktree::of(own)),
             Holds::Clone(rows) => {
@@ -1036,25 +1123,44 @@ impl KeptProject {
         };
         KeptProject {
             id: project.id.to_string(),
-            name: project.name.0.clone(),
+            name: project.name.as_str().to_owned(),
             dir: project.dir.0.clone(),
             holds,
         }
     }
+}
 
-    fn counted(&self) -> impl Iterator<Item = Counted<'_>> {
-        let (own, rows): (_, &[KeptCloneWorktree]) = match &self.holds {
-            KeptHolds::Folder(own) => (Some(own.counted()), &[]),
-            KeptHolds::Clone(rows) => (None, rows),
+impl Viewed {
+    fn laid(self) -> LaidBefore {
+        let KeptProject { id, name, dir, holds } = self;
+        let holds = match holds {
+            KeptHolds::Folder(own) => KeptHolds::Folder(own.laid()),
+            KeptHolds::Clone(rows) => {
+                KeptHolds::Clone(rows.into_iter().map(ViewedCloneWorktree::laid).collect())
+            },
         };
-        own.into_iter().chain(rows.iter().map(KeptCloneWorktree::counted))
+        KeptProject { id, name, dir, holds }
     }
 }
 
-fn read_worktree(
+impl ViewedFolderWorktree {
+    fn laid(self) -> KeptFolderWorktree<KeptOlderLayout> {
+        let ViewedFolderWorktree { id, name, view, used_millis } = self;
+        KeptFolderWorktree { id, name, layout: view, used_millis }
+    }
+}
+
+impl ViewedCloneWorktree {
+    fn laid(self) -> KeptCloneWorktree<KeptOlderLayout> {
+        let ViewedCloneWorktree { id, name, subfolder, view, used_millis } = self;
+        KeptCloneWorktree { id, name, subfolder, layout: view, used_millis }
+    }
+}
+
+fn read_worktree<L: KeptLaid>(
     id: &str,
     name: Option<&str>,
-    layout: Option<KeptLayout>,
+    layout: Option<L>,
     used_millis: Option<u64>,
 ) -> Result<Worktree, String> {
     let id: WorktreeId = id.parse()?;
@@ -1074,46 +1180,50 @@ fn read_worktree(
     })
 }
 
-impl KeptFolderWorktree {
+fn counted<L: KeptLaid>(layout: Option<&L>, used_millis: Option<u64>) -> Counted<'_> {
+    let tree = layout.map(KeptLaid::tree);
+    Counted { tree, last_focus: layout.is_some_and(KeptLaid::focuses_last), used_millis }
+}
+
+impl<L: KeptLaid> KeptFolderWorktree<L> {
     fn read(self) -> Result<Worktree, String> {
-        let layout = self.layout.or(self.view);
-        read_worktree(&self.id, self.name.as_deref(), layout, self.used_millis)
+        read_worktree(&self.id, self.name.as_deref(), self.layout, self.used_millis)
     }
 
-    fn of(worktree: &Worktree) -> KeptFolderWorktree {
+    fn counted(&self) -> Counted<'_> {
+        counted(self.layout.as_ref(), self.used_millis)
+    }
+}
+
+impl KeptFolderWorktree<KeptLayout> {
+    fn of(worktree: &Worktree) -> KeptFolderWorktree<KeptLayout> {
         KeptFolderWorktree {
             id: worktree.id.to_string(),
             name: worktree.renamed.as_ref().map(|name| name.0.clone()),
             layout: KeptLayout::of(&worktree.layout),
-            view: None,
             used_millis: worktree.used.map(Used::millis),
         }
     }
-
-    fn counted(&self) -> Counted<'_> {
-        let (layout, view) = (self.layout.as_ref(), self.view.as_ref());
-        Counted { layout, view, used_millis: self.used_millis }
-    }
 }
 
-impl KeptCloneWorktree {
+impl<L: KeptLaid> KeptCloneWorktree<L> {
     fn read(self) -> Result<(Subfolder, Worktree), String> {
-        let layout = self.layout.or(self.view);
-        let worktree = read_worktree(&self.id, self.name.as_deref(), layout, self.used_millis)?;
+        let (name, used_millis) = (self.name.as_deref(), self.used_millis);
+        let worktree = read_worktree(&self.id, name, self.layout, used_millis)?;
         let at = |why: String| format!("worktree {}: {why}", worktree.id);
         Ok((Subfolder::parse(&self.subfolder).map_err(at)?, worktree))
     }
 
-    fn of(subfolder: &Subfolder, worktree: &Worktree) -> KeptCloneWorktree {
-        let KeptFolderWorktree { id, name, layout, view, used_millis } =
-            KeptFolderWorktree::of(worktree);
-        let subfolder = subfolder.as_str().to_owned();
-        KeptCloneWorktree { id, name, subfolder, layout, view, used_millis }
-    }
-
     fn counted(&self) -> Counted<'_> {
-        let (layout, view) = (self.layout.as_ref(), self.view.as_ref());
-        Counted { layout, view, used_millis: self.used_millis }
+        counted(self.layout.as_ref(), self.used_millis)
+    }
+}
+
+impl KeptCloneWorktree<KeptLayout> {
+    fn of(subfolder: &Subfolder, worktree: &Worktree) -> KeptCloneWorktree<KeptLayout> {
+        let KeptFolderWorktree { id, name, layout, used_millis } = KeptFolderWorktree::of(worktree);
+        let subfolder = subfolder.as_str().to_owned();
+        KeptCloneWorktree { id, name, subfolder, layout, used_millis }
     }
 }
 
@@ -1132,28 +1242,43 @@ impl UnrootedWorktree {
     }
 
     fn counted(&self) -> Counted<'_> {
-        Counted { layout: None, view: self.view.as_ref(), used_millis: self.used_millis }
+        counted(self.view.as_ref(), self.used_millis)
+    }
+}
+
+fn read_tree(tree: Vec<KeptNode>) -> Result<Vec<Preordered<View>>, String> {
+    let tree = tree.into_iter().map(|node| match node {
+        KeptNode::Split(KeptSplit { towards, share }) => {
+            Ok(Preordered::Split { towards: towards.read(), share })
+        },
+        KeptNode::Terminal(terminal) => {
+            terminal.read().map(|terminal| Preordered::View(View::Terminal(terminal)))
+        },
+        KeptNode::Welcome(KeptWelcome { id }) => {
+            id.parse().map(|id| Preordered::View(View::Welcome(id)))
+        },
+    });
+    tree.collect()
+}
+
+impl KeptLaid for KeptLayout {
+    fn tree(&self) -> &[KeptNode] {
+        &self.tree
+    }
+
+    fn focuses_last(&self) -> bool {
+        match &self.shown {
+            KeptShown::Tabs { last } => last.is_some(),
+            KeptShown::Panes { focus } => matches!(focus, Some(KeptFocus::Last(_))),
+        }
+    }
+
+    fn read(self) -> Result<Layout, String> {
+        Layout::read(read_tree(self.tree)?, self.shown.read()?)
     }
 }
 
 impl KeptLayout {
-    fn read(self) -> Result<Layout, String> {
-        let full = self.full.as_deref().map(str::parse).transpose()?;
-        let last_focus = self.last_focus.as_deref().map(str::parse).transpose()?;
-        let tree = self.tree.into_iter().map(|node| match node {
-            KeptNode::Split(KeptSplit { towards, share }) => {
-                Ok(Preordered::Split { towards: towards.read(), share })
-            },
-            KeptNode::Terminal(terminal) => {
-                terminal.read().map(|terminal| Preordered::View(View::Terminal(terminal)))
-            },
-            KeptNode::Welcome(KeptWelcome { id }) => {
-                id.parse().map(|id| Preordered::View(View::Welcome(id)))
-            },
-        });
-        Layout::read(tree.collect::<Result<_, String>>()?, full, last_focus)
-    }
-
     fn of(layout: &Layout) -> Option<KeptLayout> {
         let tree = layout.tree()?.preorder().into_iter().map(|node| match node {
             Preordered::Split { towards, share } => {
@@ -1166,11 +1291,67 @@ impl KeptLayout {
                 KeptNode::Welcome(KeptWelcome { id: id.to_string() })
             },
         });
-        let (full, last_focus) = match layout.full() {
-            Some(full) => (Some(full.to_string()), None),
-            None => (None, layout.last_focus().map(|focus| focus.to_string())),
+        let shown = KeptShown::of(layout.shape()?);
+        Some(KeptLayout { shown, tree: tree.collect() })
+    }
+}
+
+impl KeptShown {
+    fn read(self) -> Result<Shape, String> {
+        let view = |id: String| id.parse::<ViewId>();
+        Ok(match self {
+            KeptShown::Tabs { last } => Shape::Tabs { last: last.map(view).transpose()? },
+            KeptShown::Panes { focus: None } => Shape::Panes { focus: None },
+            KeptShown::Panes { focus: Some(KeptFocus::Last(last)) } => {
+                Shape::Panes { focus: Some(Focus::Last(view(last)?)) }
+            },
+            KeptShown::Panes { focus: Some(KeptFocus::Full(full)) } => {
+                Shape::Panes { focus: Some(Focus::Full(view(full)?)) }
+            },
+        })
+    }
+
+    fn of(shape: Shape) -> KeptShown {
+        let id = |view: ViewId| view.to_string();
+        match shape {
+            Shape::Tabs { last } => KeptShown::Tabs { last: last.map(id) },
+            Shape::Panes { focus: None } => KeptShown::Panes { focus: None },
+            Shape::Panes { focus: Some(Focus::Last(last)) } => {
+                KeptShown::Panes { focus: Some(KeptFocus::Last(id(last))) }
+            },
+            Shape::Panes { focus: Some(Focus::Full(full)) } => {
+                KeptShown::Panes { focus: Some(KeptFocus::Full(id(full))) }
+            },
+        }
+    }
+}
+
+impl KeptLaid for KeptOlderLayout {
+    fn tree(&self) -> &[KeptNode] {
+        &self.tree
+    }
+
+    fn focuses_last(&self) -> bool {
+        self.last_focus.is_some()
+    }
+
+    fn read(self) -> Result<Layout, String> {
+        let full: Option<ViewId> = self.full.as_deref().map(str::parse).transpose()?;
+        let last_focus: Option<ViewId> = self.last_focus.as_deref().map(str::parse).transpose()?;
+        let tree = read_tree(self.tree)?;
+        let full = match (full, last_focus) {
+            (None, last) => return Layout::read(tree, Shape::Tabs { last }),
+            (Some(full), None) => full,
+            (Some(full), Some(last_focus)) => {
+                let one = format!("the layout is filled by view {full}");
+                return Err(format!("{one}, and so is focused on no other view {last_focus}"));
+            },
         };
-        Some(KeptLayout { full, last_focus, tree: tree.collect() })
+        let mut layout = Layout::read(tree, Shape::Panes { focus: Some(Focus::Full(full)) })?;
+        layout.arranged_as(Arranged::Tabs)?;
+        let shape = Some(Shape::Tabs { last: Some(full) });
+        assert_eq!(layout.shape(), shape, "an older file's full view is the tab focused");
+        Ok(layout)
     }
 }
 
@@ -1244,7 +1425,7 @@ impl KeptHarness {
 }
 
 fn written(projects: &Projects) -> String {
-    let projects = projects.projects.iter().map(KeptProject::of).collect();
+    let projects = projects.projects.iter().map(Laid::of).collect();
     let kept = Kept { version: VERSION, projects };
     let mut text = serde_json::to_string_pretty(&kept).expect("strings and numbers serialize");
     text.push('\n');
@@ -1455,7 +1636,7 @@ mod tests {
         let change = Change::AddProject { spot: alone("/home/me/Vault"), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
         let want = r#"{
-  "version": 10,
+  "version": 11,
   "projects": [
     {
       "id": "0000000000000001",
@@ -1467,6 +1648,9 @@ mod tests {
             "id": "0000000000000002",
             "worktree": "top",
             "layout": {
+              "shown": {
+                "tabs": {}
+              },
               "tree": [
                 {
                   "terminal": {
@@ -1483,6 +1667,9 @@ mod tests {
             "name": "release",
             "worktree": "main",
             "layout": {
+              "shown": {
+                "tabs": {}
+              },
               "tree": [
                 {
                   "terminal": {
@@ -1512,13 +1699,19 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        for before in [7, 8, 9] {
-            let before = want.replace(r#""version": 10"#, &format!(r#""version": {before}"#));
+        let tabbed = "\n              \"shown\": {\n                \"tabs\": {}\n              },";
+        let older = want.replace(tabbed, "");
+        assert!(parse(&older).unwrap_err().contains("missing field `shown`"));
+        for before in [7, 8, 9, 10] {
+            let before = older.replace(r#""version": 11"#, &format!(r#""version": {before}"#));
             assert_eq!(parse(&before), Ok(projects.clone()));
         }
-        let viewed = want.replace(r#""version": 10"#, r#""version": 6"#);
+        let shown_before = want.replace(r#""version": 11"#, r#""version": 10"#);
+        assert!(parse(&shown_before).unwrap_err().contains("unknown field `shown`"));
+        let viewed = older.replace(r#""version": 11"#, r#""version": 6"#);
         assert_eq!(parse(&viewed.replace(r#""layout": {"#, r#""view": {"#)), Ok(projects.clone()));
-        let before = want.replace(r#""version": 10"#, r#""version": 5"#);
+        assert!(parse(&viewed).unwrap_err().contains("unknown field `layout`"));
+        let before = want.replace(r#""version": 11"#, r#""version": 5"#);
         assert!(parse(&before).unwrap_err().contains("unknown field `holds`"));
 
         let unopened = r#""clone": [
@@ -1526,16 +1719,16 @@ mod tests {
             "id": "0000000000000008",
             "worktree": "old"
           },"#;
-        let with_unopened = want.replace(r#""clone": ["#, unopened);
+        let with_unopened = older.replace(r#""clone": ["#, unopened);
         let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone())));
         for before in [7, 8] {
             let version = format!(r#""version": {before}"#);
-            let before = with_unopened.replace(r#""version": 10"#, &version);
+            let before = with_unopened.replace(r#""version": 11"#, &version);
             let read = rooted_as(&before, alone).unwrap();
             assert_eq!(read.projects, projects, "a worktree an old file kept with no view goes");
             assert!(read.migrated, "and the file is written again at once");
         }
-        let refused = parse(&with_unopened).unwrap_err();
+        let refused = parse(&want.replace(r#""clone": ["#, unopened)).unwrap_err();
         assert!(refused.contains("holds no view, as no clone's may"), "{refused}");
     }
 
@@ -1572,9 +1765,11 @@ mod tests {
             (projects, _) = projects.changed(open, &mut draw).unwrap();
         }
         projects = projects.relaid(Relaid::Focus { view: shell }).unwrap();
+        let panes = Change::Arrange { worktree, arranged: Arranged::Panes };
+        (projects, _) = projects.changed(panes, &mut draw).unwrap();
         projects = projects.relaid(Relaid::Fill { worktree, full: Some(vim) }).unwrap();
         let want = r#"{
-  "version": 10,
+  "version": 11,
   "projects": [
     {
       "id": "0000000000000001",
@@ -1586,7 +1781,13 @@ mod tests {
             "id": "0000000000000002",
             "worktree": "top",
             "layout": {
-              "full": "0000000000000005",
+              "shown": {
+                "panes": {
+                  "focus": {
+                    "full": "0000000000000005"
+                  }
+                }
+              },
               "tree": [
                 {
                   "split": {
@@ -1641,36 +1842,59 @@ mod tests {
         assert_eq!(parse(want), Ok(projects.clone()));
         let (_, top) = projects.find(worktree).unwrap();
         assert_eq!(top.layout().last_focus(), Some(vim), "a full view is the last focus");
-        for before in [7, 8, 9] {
-            let before = want.replace(r#""version": 10"#, &format!(r#""version": {before}"#));
-            assert_eq!(parse(&before), Ok(projects.clone()), "and is read so from older files");
-        }
+        let tabs = Change::Arrange { worktree, arranged: Arranged::Tabs };
+        let as_tabs = projects.relaid(Relaid::Fill { worktree, full: None }).unwrap();
+        let (as_tabs, _) = as_tabs.changed(tabs, &mut draw).unwrap();
+        let (_, top) = as_tabs.find(worktree).unwrap();
+        assert_eq!(top.layout().last_focus(), Some(vim), "the view filled is the tab focused");
         let vim_full = r#""full": "0000000000000005""#;
-        let shell_focused = r#""last_focus": "0000000000000003""#;
+        let shown = [
+            r#""shown": {"#,
+            r#"                "panes": {"#,
+            r#"                  "focus": {"#,
+            r#"                    "full": "0000000000000005""#,
+            "                  }",
+            "                }",
+            "              },",
+        ]
+        .join("\n");
+        let older = want.replace(&shown, &format!("{vim_full},"));
+        for before in [7, 8, 9, 10] {
+            let version = format!(r#""version": {before}"#);
+            let older = older.replace(r#""version": 11"#, &version);
+            assert_eq!(parse(&older), Ok(as_tabs.clone()), "an older file shows tabs");
+            let refused = parse(&want.replace(r#""version": 11"#, &version)).unwrap_err();
+            assert!(refused.contains("unknown field `shown`"), "an older file shows no panes");
+        }
+        assert!(parse(&older).unwrap_err().contains("unknown field `full`"));
+        let shell_last = r#""last": "0000000000000003""#;
         let tiled = projects.relaid(Relaid::Focus { view: shell }).unwrap();
-        let on_shell = want.replace(vim_full, shell_focused);
+        let on_shell = want.replace(vim_full, shell_last);
         assert_eq!(written(&tiled), on_shell, "a focus on another view tiles the layout");
         assert_eq!(parse(&on_shell), Ok(tiled));
-        let astray = r#""last_focus": "0000000000000009""#;
+        let astray = r#""last": "0000000000000009""#;
         let refused = parse(&want.replace(vim_full, astray)).unwrap_err();
         assert!(refused.contains("holds no view 0000000000000009 to focus"), "{refused}");
-        let both = want.replace(vim_full, &format!("{vim_full},\n              {shell_focused}"));
-        let refused = parse(&both).unwrap_err();
+        let both = format!("{vim_full},\n                    {shell_last}");
+        let both = want.replace(vim_full, &both);
+        assert!(parse(&both).is_err(), "a focus is one view, full or last");
+        let older_focus = r#""last_focus": "0000000000000003""#;
+        let older_both = format!("{vim_full},\n              {older_focus}");
+        let older_both = older.replace(vim_full, &older_both);
+        let older_both = older_both.replace(r#""version": 11"#, r#""version": 10"#);
+        let refused = parse(&older_both).unwrap_err();
         assert!(refused.contains("and so is focused on no other view"), "{refused}");
+        let older_on_shell = older.replace(vim_full, older_focus);
         for before in [7, 8, 9] {
             let version = format!(r#""version": {before}"#);
             let refused = format!("it is of version {before}, which keeps no last focus");
-            assert_eq!(parse(&on_shell.replace(r#""version": 10"#, &version)), Err(refused));
+            assert_eq!(parse(&older_on_shell.replace(r#""version": 11"#, &version)), Err(refused));
         }
-        let viewed = want.replace(r#""version": 10"#, r#""version": 6"#);
-        let viewed = viewed.replace(r#""layout": {"#, r#""view": {"#);
-        assert_eq!(parse(&viewed), Ok(projects));
-        let unviewed = want.replace(r#""version": 10"#, r#""version": 6"#);
-        let refused = "it is of version 6, which keeps layouts as \"view\"";
-        assert_eq!(parse(&unviewed), Err(refused.to_owned()));
+        let viewed = older.replace(r#""version": 11"#, r#""version": 6"#);
+        assert_eq!(parse(&viewed.replace(r#""layout": {"#, r#""view": {"#)), Ok(as_tabs));
+        assert!(parse(&viewed).unwrap_err().contains("unknown field `layout`"));
         let relaid = want.replace(r#""layout": {"#, r#""view": {"#);
-        let refused = "it is of version 10, which keeps layouts as \"layout\"";
-        assert_eq!(parse(&relaid), Err(refused.to_owned()));
+        assert!(parse(&relaid).unwrap_err().contains("unknown field `view`"));
         let before = r#"{"version": 1, "projects": [{"id": "0000000000000001", "name": "luneta",
             "dir": "/w/luneta", "workstreams": [{"id": "0000000000000002", "below": "top",
             "view": {"tree": [{"terminal": {"id": "0000000000000004", "folder": "/w/luneta/top",
@@ -1875,8 +2099,8 @@ mod tests {
         let refused = [
             ("{", "EOF"),
             (
-                r#"{"version": 11, "projects": []}"#,
-                "version 11, and this lunetad reads only 1 to 10",
+                r#"{"version": 12, "projects": []}"#,
+                "version 12, and this lunetad reads only 1 to 11",
             ),
             (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),
@@ -2217,6 +2441,9 @@ mod tests {
         store.change(opened(two, beside)).unwrap();
         let read = || parse(&fs::read_to_string(&file).unwrap()).unwrap();
         let full = |projects: &Projects| projects.find(worktree).unwrap().1.layout().full();
+        store.change(Change::Arrange { worktree, arranged: Arranged::Panes }).unwrap();
+        let tabbed = |projects: &Projects| projects.find(worktree).unwrap().1.layout().tabbed();
+        assert!(tabbed(&read()), "an arrangement too waits for the flush");
 
         store.relaid(Relaid::Fill { worktree, full: Some(two) }).unwrap();
         assert_eq!(full(store.projects().unwrap()), Some(two));
@@ -2259,7 +2486,10 @@ mod tests {
         store.change(opened(one, Placed::Alone)).unwrap();
         store.change(opened(two, Placed::Beside { at: one, towards: Towards::Right })).unwrap();
         let listing = || core::ask(&core, Command::Host).expect("the core answers").version;
+        let tabbed = (listing(), store.revision());
+        store.change(Change::Arrange { worktree, arranged: Arranged::Panes }).unwrap();
         let before = (listing(), store.revision());
+        assert_ne!(before, tabbed, "watchers hear of panes, as a listing says it");
 
         let (sides, growth) = (Sides::One(Direction::Left), Growth::Grow);
         let relaid = [

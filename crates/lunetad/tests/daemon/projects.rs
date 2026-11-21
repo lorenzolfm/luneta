@@ -211,6 +211,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_lunetad_starts_again() 
                         seen: Some(Seen::Stage(Stage::Working.into())),
                         terminals: Vec::new(),
                         used_at: None,
+                        arranged: Some(api::Arrangement::Tabs.into()),
                     }],
                     listing: Some(Listing::Unopened(project::Unopened { subfolders: Vec::new() })),
                 })),
@@ -228,6 +229,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_lunetad_starts_again() 
                     seen: Some(Seen::Stage(Stage::NoBranch.into())),
                     terminals: Vec::new(),
                     used_at: None,
+                    arranged: None,
                 })),
             },
         ],
@@ -425,7 +427,7 @@ fn an_old_file_forgets_the_worktrees_it_kept_with_no_view_and_is_written_again()
     let rows: Vec<u64> = projects[0].worktrees().unwrap().iter().map(|it| it.id).collect();
     assert_eq!(rows, [3], "the worktree kept with no view goes, and the one with a view stays");
     let written = fs::read_to_string(&file).unwrap();
-    assert!(written.starts_with("{\n  \"version\": 10,"), "written at once: {written}");
+    assert!(written.starts_with("{\n  \"version\": 11,"), "written at once: {written}");
     assert!(!written.contains("\"old\""), "{written}");
 }
 
@@ -517,11 +519,11 @@ fn a_projects_file_lunetad_cannot_read_is_left_as_it_is_and_no_change_is_kept() 
     let host = Host::new();
     let file = kept(&host);
     fs::create_dir_all(file.parent().unwrap()).unwrap();
-    let newer = "{\"version\": 11, \"projects\": [], \"views\": []}\n";
+    let newer = "{\"version\": 12, \"projects\": [], \"views\": []}\n";
     fs::write(&file, newer).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let mut daemon = start(host.vars()).unwrap();
-    let unread = "of version 11, and this lunetad reads only 1 to 10";
+    let unread = "of version 12, and this lunetad reads only 1 to 11";
     daemon.says("lunetad says it cannot read the file", |line| line.contains(unread));
 
     let add = AddProject { dir: text(scratch.path()), name: None };
