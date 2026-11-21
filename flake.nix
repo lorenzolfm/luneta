@@ -173,8 +173,8 @@
               pkgs.git
               pkgs.nodejs
               pkgs.openssh
-              pkgs.procps
-            ];
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ];
 
             doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
           };

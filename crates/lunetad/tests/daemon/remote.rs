@@ -224,8 +224,13 @@ fn project_named(host: &Host, name: &str) {
     project(host, &dir, None);
 }
 
+#[cfg(target_os = "linux")]
+const PS: &str = "ps";
+#[cfg(target_os = "macos")]
+const PS: &str = "/bin/ps";
+
 fn ended(pid: u32) -> bool {
-    let stat = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+    let stat = Command::new(PS).args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
     let stat = String::from_utf8(stat.stdout).unwrap();
     stat.trim().is_empty() || stat.trim().starts_with('Z')
 }
