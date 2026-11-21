@@ -2088,15 +2088,15 @@ impl Picker {
 enum Tier {
     Exact,
     Leads,
-    Prefix,
+    Word,
     Fuzzy,
 }
 
 impl Tier {
     fn of_keyword(self) -> Tier {
         match self {
-            Tier::Leads => Tier::Prefix,
-            Tier::Exact | Tier::Prefix | Tier::Fuzzy => self,
+            Tier::Leads => Tier::Word,
+            Tier::Exact | Tier::Word | Tier::Fuzzy => self,
         }
     }
 }
@@ -2119,8 +2119,11 @@ fn tier(finder: &Finder<'_>, term: &str, text: &str) -> Option<(Tier, Fit, Vec<u
 }
 
 fn tier_of(term: &str, text: &str) -> Tier {
+    assert!(!term.is_empty(), "an empty term starts every text");
+    assert_eq!(term, term.to_lowercase(), "the term is matched against lowercased text");
     let lower = text.to_lowercase();
-    let name = lower.rsplit(" › ").next().unwrap_or(&lower);
+    let name = lower.rsplit(" › ").next();
+    let name = name.expect("rsplit yields the whole text when it finds no separator");
     let words = lower.match_indices([' ', '/', '-']).map(|(at, _)| at + 1);
     let starts = std::iter::once(0).chain(words).any(|at| lower[at..].starts_with(term));
     if lower == term || name == term {
@@ -2128,7 +2131,7 @@ fn tier_of(term: &str, text: &str) -> Tier {
     } else if name.trim_start_matches('/').starts_with(term) {
         Tier::Leads
     } else if starts {
-        Tier::Prefix
+        Tier::Word
     } else {
         Tier::Fuzzy
     }
@@ -2554,7 +2557,6 @@ mod tests {
             ..Listing::default()
         }
     }
-
 
     fn at_host() -> Palette {
         let target = Rc::new(Target::Machine(Machine::Local));
@@ -3925,6 +3927,19 @@ mod tests {
                 assert_eq!(press(&mut picker, KeyCode::Enter), closes, "{origin:?} {query:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_worktree_whose_name_the_query_starts_ranks_over_an_action_with_a_later_word_it_starts() {
+        let mut listing = works();
+        let launch = worktree(place("site", 4, 1), "launch", Some(10), &[5]);
+        listing.shelves[0].projects.push(housed("site", 4, vec![launch]));
+        let mut picker = palette_on(listing, at_fix(Origin::Views));
+        typed(&mut picker, "la");
+        let (shown, _) = shown_actions(&picker);
+        let shown: Vec<String> = shown.iter().map(|line| named(line)).collect();
+        assert_eq!(shown[0], "site › launch", "{shown:?}");
+        assert!(shown.contains(&"Fix the last command".to_owned()), "{shown:?}");
     }
 
     #[test]
