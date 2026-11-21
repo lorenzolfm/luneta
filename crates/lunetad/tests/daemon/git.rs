@@ -11,12 +11,18 @@ use lunetad::api::checkout::Head;
 use lunetad::api::git_status::{NoCheckout, Stands};
 use lunetad::api::projects::Held;
 use lunetad::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream, Version};
+use lunetad::checks::PullPage;
 use lunetad::{parked_watch, SETTLE, WATCH};
 use prost::Message as _;
 use serde_json::json;
 
 use crate::host::{start, Daemon, Host, LUNETA};
 use crate::projects::{asked, project};
+
+fn number(pull_request: &api::PullRequest) -> u32 {
+    let page = PullPage::parse(&pull_request.url).expect("lunetad says a pull request's page");
+    page.number().get()
+}
 
 impl Host {
     fn watch(&self, after: Option<Version>) -> (api::Host, Lasted) {
@@ -723,7 +729,7 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     }
     let found = || -> BTreeMap<String, (u32, PullRequestState, String)> {
         let pull_requests = host.host().pull_requests.into_iter();
-        pull_requests.map(|it| (it.dir.clone(), (it.number, it.state(), it.url))).collect()
+        pull_requests.map(|it| (it.dir.clone(), (number(&it), it.state(), it.url))).collect()
     };
 
     let open = (7, PullRequestState::Open, page(7));
@@ -783,7 +789,7 @@ fn a_branch_gh_hangs_on_holds_up_no_other() {
     });
     eventually("main's pull request shows as gh hangs on stuck", || {
         let pull_requests = host.host().pull_requests;
-        pull_requests.iter().any(|it| it.dir == other && it.number == 7).then_some(())
+        pull_requests.iter().any(|it| it.dir == other && number(it) == 7).then_some(())
     });
     host.gh.answer("stuck");
 }
@@ -888,7 +894,7 @@ fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
+        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
     };
     let asked_of = |branch: &str| host.gh.asked().iter().any(|it| it == branch).then_some(());
 
@@ -964,7 +970,7 @@ fn a_closed_pull_request_in_a_fork_gives_way_to_its_parent_s() {
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
+        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
     };
 
     eventually("the parent's open one is main's", || (found() == Some(2)).then_some(()));
@@ -1002,7 +1008,7 @@ fn a_fork_s_default_branch_shows_no_merged_pull_request_of_its_parent() {
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
+        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
     };
 
     eventually("another branch's merged one shows", || (found() == Some(1)).then_some(()));
@@ -1032,7 +1038,7 @@ fn a_fork_s_default_branch_keeps_what_the_fork_says_over_its_parent_s_closed_one
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
+        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
     };
 
     eventually("the fork's closed one stands", || (found() == Some(1)).then_some(()));
@@ -1086,7 +1092,7 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
+        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
     };
     let asked_of = |branch: &str| host.gh.asked().iter().any(|it| it == branch).then_some(());
     let in_parent = |branch: &str| format!("{PARENT} {branch}");
@@ -1140,7 +1146,7 @@ fn a_fork_s_parent_is_looked_up_again_as_its_remotes_change() {
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
+        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
     };
 
     eventually("the first parent's pull request is main's", || (found() == Some(1)).then_some(()));
@@ -1206,7 +1212,7 @@ fn what_goes_wrong_in_a_fork_s_parent_names_it_and_leaves_what_the_fork_said() {
     eventually("the fork's closed one shows", || {
         let host = host.host();
         let found = host.pull_requests.into_iter().find(|it| it.dir == cwd);
-        (found.map(|it| it.number) == Some(1)).then_some(())
+        (found.map(|it| number(&it)) == Some(1)).then_some(())
     });
 }
 
@@ -1234,7 +1240,7 @@ fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| (it.number, it.url))
+        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| (number(&it), it.url))
     };
 
     let main_in_parent = format!("{PARENT} main");
@@ -1284,7 +1290,7 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
             },
             _ => None,
         };
-        let number = host.pull_requests.iter().find(|it| it.dir == cwd).map(|it| it.number);
+        let number = host.pull_requests.iter().find(|it| it.dir == cwd).map(number);
         (branch, number)
     };
 

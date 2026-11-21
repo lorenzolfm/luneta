@@ -6,6 +6,7 @@ use std::thread;
 use std::time::SystemTime;
 
 use luneta_protocol::git::{GitStatus, Head};
+use luneta_protocol::github::PullRequest;
 use luneta_protocol::said::Said;
 use tokio::sync::oneshot;
 
@@ -348,6 +349,12 @@ impl Known {
         }
     }
 
+    fn pull_request(&self, dir: &str) -> Option<&PullRequest> {
+        let found = self.pull_requests.get(dir)?;
+        let on_its_branch = self.branch(dir) == Some(found.branch.as_str());
+        on_its_branch.then_some(&found.pull_request)
+    }
+
     fn branches(&self) -> BTreeMap<String, String> {
         let branch = |dir: &String| Some((dir.clone(), self.branch(dir)?.to_owned()));
         self.statuses.keys().filter_map(branch).collect()
@@ -391,9 +398,8 @@ impl Known {
         let (unread, unread_files) = self.unread();
         let pull_requests = self
             .pull_requests
-            .iter()
-            .filter(|(dir, found)| self.branch(dir) == Some(&found.branch))
-            .map(|(dir, found)| found.pull_request.to_api(dir))
+            .keys()
+            .filter_map(|dir| Some(self.pull_request(dir)?.to_api(dir)))
             .collect();
         let remotes = self.remotes.iter().map(Remote::to_api).collect();
         api::Host {
@@ -520,10 +526,8 @@ impl Known {
         if !self.statuses.contains_key(folder.as_str()) {
             return Seen::Unread;
         }
-        let branch = self.branch(folder.as_str());
-        let found = self.pull_requests.get(folder.as_str());
-        let found = found.filter(|found| branch == Some(found.branch.as_str()));
-        Seen::Read(Stage::of(branch, found.map(|found| &found.pull_request)))
+        let dir = folder.as_str();
+        Seen::Read(Stage::of(self.branch(dir), self.pull_request(dir)))
     }
 
     fn version(&self) -> api::Version {

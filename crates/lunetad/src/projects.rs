@@ -1803,10 +1803,9 @@ fn gone(folder: &Dir) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
     use std::os::unix::fs::PermissionsExt as _;
 
-    use luneta_protocol::github::Checks;
+    use luneta_protocol::github::{Checks, PullPage};
 
     use super::*;
 
@@ -3114,8 +3113,8 @@ mod tests {
 
     fn pull_request(state: State, failed: u32) -> PullRequest {
         let checks = Some(Checks { pending: 0, failed, passed: 1 });
-        let number = NonZeroU32::new(1).unwrap();
-        PullRequest { number, state, url: None, checks, stale: false }
+        let page = PullPage::parse("https://github.com/o/r/pull/1").unwrap();
+        PullRequest { page, state, checks, stale: false }
     }
 
     #[test]

@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
-use std::num::NonZeroU32;
 use std::panic::{self, AssertUnwindSafe};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
@@ -9,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use luneta_protocol::github::{PullRequest, State, Verdict};
+use luneta_protocol::github::{PullPage, PullRequest, State, Verdict};
 use serde::Deserialize;
 
 use crate::checks;
@@ -33,14 +32,13 @@ pub struct Found {
 }
 
 const VIEWED: &str = concat!(
-    "number,state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner,",
+    "state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner,",
     "statusCheckRollup",
 );
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Viewed {
-    number: NonZeroU32,
     state: Stands,
     is_draft: bool,
     url: String,
@@ -107,8 +105,8 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
         (Stands::Merged, _) => State::Merged,
         (Stands::Closed, _) => State::Closed,
     };
-    let host = host_of(&viewed.url).ok_or_else(|| format!("{} is no page", viewed.url))?;
-    let host = host.to_owned();
+    let page = PullPage::parse(&viewed.url)?;
+    let host = page.host().to_owned();
     let owner = viewed.head_repository_owner.map(|owner| owner.login);
     let name = viewed.head_repository.map(|repository| repository.name);
     let head_repository = match (owner, name) {
@@ -119,9 +117,8 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
     };
     Ok(Pulled {
         pull_request: PullRequest {
-            number: viewed.number,
+            page,
             state,
-            url: Some(viewed.url),
             checks: checks::rolled_up(viewed.status_check_rollup),
             stale: false,
         },
@@ -274,7 +271,7 @@ fn view(dir: &str, (repository, branch): &Branch, forks: &Forks) -> Result<Answe
 
 fn standing(was: Option<PullRequest>, own: Option<PullRequest>) -> Option<PullRequest> {
     match (was, own) {
-        (Some(was), Some(own)) if was.url == own.url => Some(own),
+        (Some(was), Some(own)) if was.page == own.page => Some(own),
         (was, own) => was.or(own),
     }
 }
@@ -309,7 +306,7 @@ impl Asker {
     ) -> Result<Option<u32>, String> {
         let found = in_parent(dir, repository, branch, &self.forks)?;
         let open = |found: &Pulled| matches!(found.pull_request.state, State::Open | State::Draft);
-        Ok(found.filter(open).map(|found| found.pull_request.number.get()))
+        Ok(found.filter(open).map(|found| found.pull_request.number().get()))
     }
 }
 
@@ -497,7 +494,7 @@ fn checks_changed(
     at: Instant,
 ) -> Option<String> {
     let (said, was, now) = (was.at, was.found.as_ref()?, now?);
-    if (was.number, &was.url) != (now.number, &now.url) {
+    if was.page != now.page {
         return None;
     }
     let verdict = |pull_request: &PullRequest| pull_request.checks.and_then(|it| it.verdict());
@@ -511,7 +508,7 @@ fn checks_changed(
         Some(Verdict::Passing) => "passing",
         None => "no checks",
     };
-    let named = now.url.clone().unwrap_or_else(|| format!("#{}", now.number));
+    let named = now.page.url();
     let said = at.duration_since(said).as_secs();
     let failed = match failed {
         0 => String::new(),
@@ -633,10 +630,9 @@ fn tell(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
     use std::time::{Duration, Instant};
 
-    use luneta_protocol::github::{Checks, PullRequest, State};
+    use luneta_protocol::github::{Checks, PullPage, PullRequest, State};
 
     use super::{
         answered, checks_changed, fork_of, parse, standing, Answer, Asked, Pulled, RepositoryName,
@@ -644,13 +640,8 @@ mod tests {
     };
 
     fn pull(repository: &str, number: u32, state: State, checks: Option<Checks>) -> PullRequest {
-        PullRequest {
-            number: NonZeroU32::new(number).unwrap(),
-            state,
-            url: Some(format!("https://github.com/{repository}/pull/{number}")),
-            checks,
-            stale: false,
-        }
+        let page = PullPage::parse(&format!("https://github.com/{repository}/pull/{number}"));
+        PullRequest { page: page.unwrap(), state, checks, stale: false }
     }
 
     fn pulled(pull_request: PullRequest) -> Pulled {
@@ -806,7 +797,7 @@ mod tests {
     fn a_pull_request_says_whose_head_it_is() {
         let viewed = |author: &str, repository: &str, owner: &str| {
             let said = format!(
-                r#"{{"isDraft":false,"number":1,"state":"MERGED","headRefName":"fix",
+                r#"{{"isDraft":false,"state":"MERGED","headRefName":"fix",
                 "headRefOid":"abc","author":{author},"headRepository":{repository},
                 "headRepositoryOwner":{owner},"url":"https://git.example.com/up/repo/pull/1"}}"#
             );
@@ -833,36 +824,34 @@ mod tests {
     fn a_pull_request_reads_as_gh_writes_it() {
         let read = |said: &str| parse(said.as_bytes()).map(|pulled| pulled.pull_request);
         let state = |said: &str| read(said).map(|pull_request| pull_request.state);
-        let number = NonZeroU32::new(126).unwrap();
         let url = "https://github.com/owner/repo/pull/126";
         let head = r#""headRefName":"fold","headRefOid":"abc""#;
-        let open = format!(r#""isDraft":false,"number":126,"state":"OPEN",{head}"#);
+        let open = format!(r#""isDraft":false,"state":"OPEN",{head}"#);
         assert_eq!(
             read(&format!(r#"{{{open},"url":"{url}"}}"#)),
             Ok(PullRequest {
-                number,
+                page: PullPage::parse(url).unwrap(),
                 state: State::Open,
-                url: Some(url.to_owned()),
                 checks: Some(Checks::default()),
                 stale: false,
             })
         );
         let page = format!(r#"{head},"url":"https://github.com/owner/repo/pull/1""#);
         let viewed = |fields: &str| format!("{{{fields},{page}}}");
-        let draft = viewed(r#""isDraft":true,"number":1,"state":"OPEN""#);
+        let draft = viewed(r#""isDraft":true,"state":"OPEN""#);
         assert_eq!(state(&draft), Ok(State::Draft));
-        let merged = viewed(r#""isDraft":true,"number":1,"state":"MERGED""#);
+        let merged = viewed(r#""isDraft":true,"state":"MERGED""#);
         assert_eq!(state(&merged), Ok(State::Merged));
-        let closed = viewed(r#""isDraft":true,"number":1,"state":"CLOSED""#);
+        let closed = viewed(r#""isDraft":true,"state":"CLOSED""#);
         assert_eq!(state(&closed), Ok(State::Closed));
         let unread = [
-            viewed(r#""isDraft":false,"number":1,"state":"QUEUED""#),
-            viewed(r#""number":1,"state":"OPEN""#),
-            viewed(r#""isDraft":false,"number":-1,"state":"OPEN""#),
-            viewed(r#""isDraft":false,"number":0,"state":"OPEN""#),
-            format!(r#"{{"isDraft":false,"number":1,"state":"OPEN",{head}}}"#),
-            format!(r#"{{"isDraft":false,"number":1,"state":"OPEN",{head},"url":"nowhere"}}"#),
-            r#"{"isDraft":false,"number":1,"state":"OPEN","url":"https://x/1"}"#.to_owned(),
+            viewed(r#""isDraft":false,"state":"QUEUED""#),
+            viewed(r#""state":"OPEN""#),
+            format!(r#"{{"isDraft":false,"state":"OPEN",{head}}}"#),
+            format!(r#"{{"isDraft":false,"state":"OPEN",{head},"url":"nowhere"}}"#),
+            format!(r#"{{{open},"url":"https://github.com/owner/repo/issues/1"}}"#),
+            format!(r#"{{{open},"url":"https://github.com/owner/repo/pull/0"}}"#),
+            r#"{"isDraft":false,"state":"OPEN","url":"https://x/1"}"#.to_owned(),
             String::new(),
         ];
         for said in unread {

