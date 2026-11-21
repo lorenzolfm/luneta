@@ -377,11 +377,10 @@ message Upstream {
 
 message PullRequest {
   string dir = 1;
-  uint32 number = 2;
-  PullRequestState state = 3;
-  string url = 4;
-  Checks checks = 5;
-  bool stale = 6;
+  PullRequestState state = 2;
+  string url = 3;
+  Checks checks = 4;
+  bool stale = 5;
 }
 
 message Checks {

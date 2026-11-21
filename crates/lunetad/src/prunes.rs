@@ -537,7 +537,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
     };
     let mut goes = Vec::new();
     for ((on, pulled, target), others) in going.into_iter().zip(others) {
-        let (folder, number) = (on.listed.path.clone(), pulled.pull_request.number.get());
+        let (folder, number) = (on.listed.path.clone(), pulled.pull_request.number().get());
         let merged_into = match others {
             Ok(Others::Leave) => None,
             Ok(Others::MergedInto(merged)) => Some(merged),
@@ -608,7 +608,7 @@ fn sorted_out<'a>(
     let mut defaults: HashMap<String, Result<Option<String>, String>> = HashMap::new();
     let mut going = Vec::new();
     for (on, pulled) in merged {
-        let (folder, number) = (on.listed.path.clone(), pulled.pull_request.number.get());
+        let (folder, number) = (on.listed.path.clone(), pulled.pull_request.number().get());
         let why = match stays(on.listed, all, &pulled.head, occupied, here) {
             Ok(why) => why,
             Err(why) => {
@@ -925,9 +925,8 @@ pub fn told(on: Option<On>, dir: &Directory, agreed: &BTreeSet<Deleting>) -> Pru
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
 
-    use luneta_protocol::github::PullRequest;
+    use luneta_protocol::github::{PullPage, PullRequest};
 
     use crate::github::RepositoryName;
 
@@ -1081,12 +1080,11 @@ mod tests {
     }
 
     fn pulled(author: Option<&str>, head: &str) -> Pulled {
-        let number = NonZeroU32::new(1).unwrap();
+        let page = PullPage::parse("https://github.com/o/n/pull/1").unwrap();
         Pulled {
             pull_request: PullRequest {
-                number,
+                page,
                 state: State::Merged,
-                url: None,
                 checks: None,
                 stale: false,
             },

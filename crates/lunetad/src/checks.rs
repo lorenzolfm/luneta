@@ -1,8 +1,9 @@
-use std::num::NonZeroU32;
 use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, SystemTime};
+
+pub use luneta_protocol::github::PullPage;
 
 use luneta_protocol::github::Checks;
 use serde::Deserialize;
@@ -144,43 +145,6 @@ fn job_of(link: &str) -> Option<Job> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PullPage {
-    url: String,
-    repository: String,
-    number: NonZeroU32,
-}
-
-impl PullPage {
-    pub fn parse(url: &str) -> Result<PullPage, String> {
-        let path = url.strip_prefix("https://").ok_or_else(|| format!("{url} is no https page"))?;
-        let parts: Vec<&str> = path.split('/').collect();
-        let named = |part: &&str| !part.is_empty() && !part.contains(['?', '#']);
-        let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
-        let pull = match parts.as_slice() {
-            [host, owner, name, "pull", pull]
-                if [host, owner, name].into_iter().all(named) && digits(pull) =>
-            {
-                pull.parse().ok().map(|number| (format!("{host}/{owner}/{name}"), number))
-            },
-            _ => None,
-        };
-        let (repository, number) =
-            pull.ok_or_else(|| format!("{url} is no page of a pull request"))?;
-        Ok(PullPage { url: url.to_owned(), repository, number })
-    }
-
-    #[must_use]
-    pub fn url(&self) -> &str {
-        &self.url
-    }
-
-    #[must_use]
-    pub fn number(&self) -> NonZeroU32 {
-        self.number
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Log {
     Kept(Kept),
     Unkept(String),
@@ -240,13 +204,13 @@ pub fn kept_failing(page: &PullPage) -> Result<Failing, String> {
     }
     let checks = checks_of(viewed.status_check_rollup)
         .ok_or_else(|| format!("gh pr view {url} said checks that do not read"))?;
-    let host = page.repository.split('/').next().unwrap_or_default();
+    let host = page.host();
     let head = match (viewed.head_repository_owner, viewed.head_repository) {
         (Some(Owner { login }), Some(Named { name })) => Some(format!("{host}/{login}/{name}")),
         _ => None,
     };
     let repositories: Vec<&str> =
-        [page.repository.as_str()].into_iter().chain(head.as_deref()).collect();
+        [page.repository()].into_iter().chain(head.as_deref()).collect();
     let runtime = folder::find().map_err(|unfound| format!("{unfound}, to keep it in"))?;
     Ok(keep(&runtime, viewed.head_ref_oid, &checks, &repositories, fetch, SystemTime::now()))
 }
@@ -447,27 +411,6 @@ mod tests {
             "https://ci.example.com/1",
         ] {
             assert_eq!(job_of(page), None, "{page}");
-        }
-    }
-
-    #[test]
-    fn only_a_pull_request_s_page_is_asked_of() {
-        let url = "https://github.com/owner/repo/pull/328";
-        let page = PullPage::parse(url).unwrap();
-        assert_eq!((page.url(), page.number().get()), (url, 328));
-        assert_eq!(page.repository, "github.com/owner/repo");
-        for url in [
-            "http://github.com/owner/repo/pull/328",
-            "https://github.com/owner/repo/issues/328",
-            "https://github.com/owner/repo/pull/328/files",
-            "https://github.com/owner/repo/pull/",
-            "https://github.com/owner/repo/pull/x",
-            "https://github.com/owner/repo/pull/0",
-            "https://github.com/owner/repo?/pull/1",
-            "--repo",
-            "",
-        ] {
-            assert!(PullPage::parse(url).is_err(), "{url}");
         }
     }
 
