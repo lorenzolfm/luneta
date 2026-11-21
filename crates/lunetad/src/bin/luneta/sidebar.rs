@@ -2156,7 +2156,7 @@ impl Sidebar {
         let mut listing = Listing { away, this, ..Listing::default() };
         if let Some(host) = &self.host {
             for (machine, seen) in machines(host, &self.shelves).each() {
-                listing.shelves.push(self.shelved(&machine, seen.as_ref(), here.as_ref()));
+                listing.shelves.push(self.shelved(&machine, seen.as_ref()));
                 let Ok(seen) = seen else {
                     continue;
                 };
@@ -2176,13 +2176,8 @@ impl Sidebar {
         &self,
         machine: &Machine,
         seen: Result<&Seen<'_>, &Away>,
-        here: Option<&Here>,
     ) -> Shelved {
-        let here = here.filter(|here| here.on() == machine);
-        let placed = here.and_then(Here::view);
-        let here_key = placed.and_then(|place| news_key(&self.shelves, machine, place));
         let heard = seen.ok();
-        let seated = heard.map_or_default(|seen| seen.seated());
         let statuses: HashMap<&str, &lunetad::api::GitStatus> = heard
             .iter()
             .flat_map(|seen| seen.git_statuses)
@@ -2194,13 +2189,6 @@ impl Sidebar {
             let mut worktrees = Vec::with_capacity(known.worktrees.len());
             for worktree in &known.worktrees {
                 let views = worktree.views.iter();
-                let agents = views.clone().filter_map(|(id, view)| {
-                    Some((listed.key(*id), *seated.get(&keyed(view)?)?))
-                });
-                let waiting = agents.filter(|(key, agent)| {
-                    let (marked, _) = agent_marked(&self.news, agent, *key, here_key == Some(*key));
-                    marked.mark == Mark::Waiting
-                });
                 let branch = statuses.get(worktree.folder.as_str()).and_then(|status| {
                     Some(checkout(&GitStatus::of_api(status)?, None)?.branch)
                 });
@@ -2212,10 +2200,8 @@ impl Sidebar {
                     name: worktree.name.clone(),
                     folder: worktree.folder.clone(),
                     branch,
-                    seen: worktree.seen,
                     used: worktree.used,
                     terminals: terminals.collect(),
-                    waiting: waiting.count(),
                 });
             }
             let (project, dir) = (known.project.clone(), known.dir.clone());
