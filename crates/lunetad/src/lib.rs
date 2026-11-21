@@ -50,7 +50,7 @@ pub use agent::Harness;
 pub use claude::{folder as claude_folder, one_answer, TORN};
 pub use client::{connect, listening, stream, through, unanswered, Daemon, Unbridged};
 pub use client::{ANSWER, BRIDGED, REACH};
-pub use daemon::{parked_watch, serve, Claim, ALONE, SWEEP, WATCH};
+pub use daemon::{parked_watch, serve, Claim, ALONE, ANSWERING_MAX, SWEEP, WATCH};
 pub use keeps::KEPT;
 pub use directory::Directory;
 pub use folder::Refusal;

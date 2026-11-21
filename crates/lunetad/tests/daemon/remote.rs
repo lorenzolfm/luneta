@@ -36,6 +36,8 @@ use crate::worktree::{cloned_as_wt, git};
 
 const SLOW: Duration = QUIET.saturating_mul(6);
 
+const GIVES_UP: Duration = QUIET.saturating_mul(3);
+
 pub struct FakeSsh {
     to: PathBuf,
 }
@@ -2075,14 +2077,18 @@ fn a_machine_whose_answer_stalls_may_have_made_the_worktree() {
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let _stalled = ssh.stalls_answers("far");
+    let stalled = ssh.stalls_answers("far");
     let said = runtime.block_on(async {
         let daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
         let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
         let pasted = Pasted::new(Work::Link(issue), Vec::new());
-        pasted.ready_on(daemon, &"far".parse().unwrap(), lunetad::REACH).await
+        pasted.ready_on(daemon, &"far".parse().unwrap(), GIVES_UP).await
     });
-    assert!(matches!(said, Err(Unready::InDoubt(_))), "{said:?}");
+    drop(stalled);
+    let Err(Unready::InDoubt(why)) = said else {
+        panic!("{said:?} is not in doubt");
+    };
+    assert_eq!(why, format!("far: lunetad did not answer in {}s", GIVES_UP.as_secs()));
     let made = clone.join("issue-7").join(".git");
     eventually("the worktree on far", || made.is_file().then_some(()));
 }

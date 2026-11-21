@@ -19,6 +19,11 @@ pub const LUNETA: &str = env!("CARGO_BIN_EXE_luneta");
 
 pub const SOCKET: &str = "luneta/lunetad.sock";
 
+const _: () = assert!(
+    PATIENCE.as_millis() < lunetad::ANSWERING_MAX.as_millis(),
+    "lunetad works at a test's question for as long as the test waits for its answer"
+);
+
 #[derive(Clone, Copy, Default)]
 pub struct Vars<'a> {
     pub runtime: Option<&'a Path>,

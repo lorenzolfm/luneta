@@ -101,6 +101,13 @@ async fn says_parked(told: Option<oneshot::Receiver<api::Version>>) {
 
 const QUESTIONS_MAX: u32 = 16;
 
+pub const ANSWERING_MAX: Duration = Duration::from_mins(2);
+
+const _: () = assert!(
+    client::ANSWER_THROUGH.as_millis() < ANSWERING_MAX.as_millis(),
+    "lunetad works at a question for longer than any of luneta's askers waits for its answer"
+);
+
 const BRIDGED_ASKS_MIN: usize = 4;
 
 const _: () = assert!(remote::HELD_MAX + BRIDGED_ASKS_MIN == QUESTIONS_MAX as usize);
@@ -224,7 +231,7 @@ pub async fn serve(
             .max_concurrent_streams(QUESTIONS_MAX)
             .initial_stream_window_size(IN_FLIGHT)
             .layer(layer_fn(|routes| {
-                client::Within::new(routes, client::ANSWER, client::unanswered)
+                client::Within::new(routes, ANSWERING_MAX, client::unanswered)
             }))
             .add_service(DaemonServer::new(host))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
