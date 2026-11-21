@@ -1,0 +1,16 @@
+id: procargs-through-process
+language: rust
+files:
+  - crates/**
+ignores:
+  - crates/lunetad/src/process/macos.rs
+  - crates/mux/src/process/macos.rs
+message: >-
+  Read a process's KERN_PROCARGS2 through lunetad::process::mine or
+  process::environ, or luneta-mux's process::argv: they bound it by
+  luneta_protocol::process::EXEC_STRINGS_BYTES_MAX and parse it with
+  laid_in_procargs, which reads argc arguments, empty ones too, before it
+  looks at the environment.
+rule:
+  kind: identifier
+  regex: ^KERN_PROCARGS2$

@@ -1,0 +1,26 @@
+id: git-symbolic-ref-through-git
+snapshots:
+  'const SCRIPT: &str = r#"b=$(git symbolic-ref -q HEAD)"#;':
+    labels:
+    - source: r#"b=$(git symbolic-ref -q HEAD)"#
+      style: primary
+      start: 21
+      end: 55
+  fn f() { git.arg("symbolic-ref"); }:
+    labels:
+    - source: '"symbolic-ref"'
+      style: primary
+      start: 17
+      end: 31
+  fn f() { git.args(["symbolic-ref", "--quiet", "HEAD"]); }:
+    labels:
+    - source: '"symbolic-ref"'
+      style: primary
+      start: 19
+      end: 33
+  fn f() { sh("git symbolic-ref -q HEAD"); }:
+    labels:
+    - source: '"git symbolic-ref -q HEAD"'
+      style: primary
+      start: 12
+      end: 38

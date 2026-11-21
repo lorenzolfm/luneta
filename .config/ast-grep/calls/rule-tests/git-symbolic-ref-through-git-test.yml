@@ -1,0 +1,9 @@
+id: git-symbolic-ref-through-git
+valid:
+  - "fn f(dir: &str) -> Option<String> { git::branch(dir) }"
+  - "fn f() { git.args([\"rev-parse\", \"--short\", \"HEAD\"]); }"
+invalid:
+  - "fn f() { git.args([\"symbolic-ref\", \"--quiet\", \"HEAD\"]); }"
+  - "fn f() { git.arg(\"symbolic-ref\"); }"
+  - "fn f() { sh(\"git symbolic-ref -q HEAD\"); }"
+  - "const SCRIPT: &str = r#\"b=$(git symbolic-ref -q HEAD)\"#;"

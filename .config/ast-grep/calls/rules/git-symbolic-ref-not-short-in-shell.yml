@@ -1,0 +1,18 @@
+id: git-symbolic-ref-not-short-in-shell
+language: bash
+message: >-
+  `git symbolic-ref --short` says heads/x on a branch x beside a tag x: read
+  the whole ref with `git symbolic-ref --quiet HEAD` and strip refs/heads/,
+  as `${branch#refs/heads/}` does.
+rule:
+  kind: command
+  all:
+    - has:
+        field: name
+        regex: ^git$
+    - has:
+        kind: word
+        regex: ^symbolic-ref$
+    - has:
+        kind: word
+        regex: ^--short$

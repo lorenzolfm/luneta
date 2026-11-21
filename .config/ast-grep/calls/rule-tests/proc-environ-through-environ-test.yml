@@ -1,0 +1,10 @@
+id: proc-environ-through-environ
+valid:
+  - "fn f(pid: u32) { process::environ(pid); }"
+  - "fn f() { let it = found.environ; }"
+  - "fn f() { say(\"its environment does not read\"); }"
+invalid:
+  - "fn f(pid: u32) { fs::read(format!(\"/proc/{pid}/environ\")); }"
+  - "fn f(pid: u32) { fs::read(proc(pid, \"environ\")); }"
+  - "fn f() { fs::read(\"/proc/self/environ\"); }"
+  - "const SCRIPT: &str = r#\"tr '\\0' '\\n' < /proc/$pid/environ\"#;"

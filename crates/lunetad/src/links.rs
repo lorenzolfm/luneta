@@ -758,7 +758,7 @@ fn ready(
             kind_holds(link)?;
             let dir = &worked[at].dir;
             synced(dir.as_str(), link, wanted, None)?;
-            let (folder, branch) = (dir.clone(), branch(dir.as_str()));
+            let (folder, branch) = (dir.clone(), branch_of(dir.as_str())?);
             let work = Readied::Link(link.clone());
             return Ok(Ready { at: At::There(at), folder, branch, moved_off: false, work });
         },
@@ -897,7 +897,12 @@ fn made_worktree(
 ) -> Result<Ready<usize>, Unready> {
     let folder = worktree(dir, of)?;
     let at = opened_in(&folder, worked);
-    Ok(Ready { at, branch: branch(folder.as_str()), moved_off: false, folder, work })
+    let branch = branch_of(folder.as_str())?;
+    Ok(Ready { at, branch, moved_off: false, folder, work })
+}
+
+fn branch_of(dir: &str) -> Result<Option<String>, Unready> {
+    git::branch_within(dir, ANSWER).map_err(|why| Unready::InDoubt(format!("no branch read {why}")))
 }
 
 fn opened_in(folder: &Directory, worked: &[Worked]) -> At<usize> {
@@ -1079,12 +1084,6 @@ fn layout(dir: &str) -> Layout {
         Ok(CloneRoot::Unparsed(why)) => Layout::WtRefused(why),
         Err(_) => Layout::Unsaid,
     }
-}
-
-fn branch(dir: &str) -> Option<String> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "symbolic-ref", "--quiet", "HEAD"]));
-    Some(said(&mut git)?.strip_prefix("refs/heads/")?.to_owned())
 }
 
 fn said(git: &mut Command) -> Option<String> {

@@ -1,0 +1,18 @@
+id: proc-environ-through-environ
+language: rust
+files:
+  - crates/**
+ignores:
+  - crates/lunetad/src/process/linux.rs
+message: >-
+  Read a process's environment through lunetad::process::environ or
+  process::mine: they bound /proc/<pid>/environ by
+  luneta_protocol::process::EXEC_STRINGS_BYTES_MAX, split it with
+  luneta_protocol::process::entries, and tell a process that ended from one
+  that did not read.
+rule:
+  any:
+    - kind: string_literal
+      regex: (^"|/)environ"$
+    - kind: raw_string_literal
+      regex: /proc/\S*/environ

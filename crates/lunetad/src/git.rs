@@ -175,13 +175,55 @@ pub fn holder(common: &str) -> Option<String> {
     holder.to_str().map(str::to_owned)
 }
 
-pub fn branch(dir: &str) -> Option<String> {
+pub fn branch(dir: &str) -> Result<Option<String>, String> {
+    branch_within(dir, LIMIT)
+}
+
+pub fn branch_within(dir: &str, limit: Duration) -> Result<Option<String>, String> {
     let mut git = Command::new("git");
-    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]))
-        .args(["symbolic-ref", "--quiet", "HEAD"]);
-    let said = program::run(&mut git, LIMIT).ok()?.answer().ok()?;
-    let head = String::from_utf8(said).ok()?;
-    Some(head.strip_suffix('\n')?.strip_prefix("refs/heads/")?.to_owned())
+    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]));
+    pointed(git, Symbolic::Head, limit).map_err(|why| format!("in {dir}: {why}"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Symbolic<'a> {
+    Head,
+    RemoteHead(&'a str),
+}
+
+impl Symbolic<'_> {
+    fn name(self) -> String {
+        match self {
+            Symbolic::Head => "HEAD".to_owned(),
+            Symbolic::RemoteHead(remote) => format!("refs/remotes/{remote}/HEAD"),
+        }
+    }
+
+    fn folder(self) -> String {
+        match self {
+            Symbolic::Head => "refs/heads/".to_owned(),
+            Symbolic::RemoteHead(remote) => format!("refs/remotes/{remote}/"),
+        }
+    }
+}
+
+pub fn pointed(
+    mut git: Command,
+    symbolic: Symbolic<'_>,
+    limit: Duration,
+) -> Result<Option<String>, String> {
+    let name = symbolic.name();
+    git.args(["symbolic-ref", "--quiet", &name]);
+    let asked = format!("git symbolic-ref {name}");
+    let ran = program::run(&mut git, limit)
+        .map_err(|error| format!("{asked} could not be run: {error}"))?;
+    let said = match ran {
+        Ran::Ended { status, .. } if status.code() == Some(1) => return Ok(None),
+        ran => ran.answer().map_err(|why| format!("{asked}: {why}"))?,
+    };
+    let said = one_line(said).ok_or_else(|| format!("{asked} said no one line"))?;
+    let pointed = said.strip_prefix(&symbolic.folder()).filter(|pointed| !pointed.is_empty());
+    Ok(pointed.map(str::to_owned))
 }
 
 pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
@@ -887,7 +929,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{Changed, Common, DefaultBranch, changed, stamp};
+    use super::{Changed, Common, DefaultBranch, Symbolic, branch, changed, pointed, stamp};
 
     fn git(dir: &Path, args: &[&str]) -> bool {
         let mut git = std::process::Command::new("git");
@@ -918,6 +960,44 @@ mod tests {
         for unnamed in ["refs/remotes/origin/", "refs/heads/", "refs/remotes/originals/main"] {
             assert_eq!(DefaultBranch::of(unnamed), None, "{unnamed}");
         }
+    }
+
+    #[test]
+    fn a_branch_reads_as_its_whole_name_beside_a_tag_of_that_name_and_unborn() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| git(dir.path(), args);
+        let at = dir.path().to_str().unwrap();
+        let named = |name: &str| Ok(Some(name.to_owned()));
+        assert!(git(&["init", "-q", "-b", "x"]));
+        assert_eq!(branch(at), named("x"));
+        assert!(git(&["commit", "-q", "--allow-empty", "-m", "x"]));
+        assert!(git(&["tag", "x"]));
+        assert_eq!(branch(at), named("x"));
+        assert!(git(&["switch", "-q", "-c", "team/x"]));
+        assert_eq!(branch(at), named("team/x"));
+        assert!(git(&["switch", "-q", "--detach"]));
+        assert_eq!(branch(at), Ok(None));
+    }
+
+    #[test]
+    fn a_git_that_fails_says_why_where_a_ref_pointed_nowhere_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().to_str().unwrap();
+        let gone = dir.path().join("gone");
+        let unmade = branch(gone.to_str().unwrap()).expect_err("no repository is there");
+        assert!(unmade.contains("git symbolic-ref HEAD"), "{unmade}");
+        assert!(git(dir.path(), &["init", "-q", "-b", "x"]));
+        let remote = || {
+            let mut git = std::process::Command::new("git");
+            super::local(git.args(["-C", at]));
+            pointed(git, Symbolic::RemoteHead("origin"), Duration::from_secs(60))
+        };
+        assert_eq!(remote(), Ok(None), "an origin never heard of");
+        assert!(git(dir.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/x"]));
+        assert_eq!(remote(), Ok(None), "it points outside the folder");
+        let main = "refs/remotes/origin/main";
+        assert!(git(dir.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", main]));
+        assert_eq!(remote(), Ok(Some("main".to_owned())), "it points at origin's main");
     }
 
     #[test]

@@ -10,7 +10,9 @@ use sysinfo::{
     Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind,
 };
 
-use super::{Found, Id, Start, Unended};
+use luneta_protocol::process::{laid_in_procargs, EXEC_STRINGS_BYTES_MAX};
+
+use super::{Found, Id, Mine, Start, Unended, Unread, Unreadable};
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
     let mut system = System::new();
@@ -31,13 +33,24 @@ pub fn started(pid: u32) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_secs(secs.checked_add(1)?))
 }
 
+pub fn environ(pid: u32) -> Result<Vec<OsString>, Unread> {
+    let procargs = procargs(pid)?;
+    laid_in_procargs(&procargs).and_then(|laid| laid.environ()).map_err(unparsed)
+}
+
+fn unparsed(why: &str) -> Unread {
+    Unread::Failed(why.to_owned())
+}
+
 #[expect(
     unsafe_code,
     reason = "sysctl writes into the buffer it is handed, and no further than the length it is told"
 )]
-pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
-    let pid = libc::c_int::try_from(pid).map_err(|_| io::Error::from(Errno::INVAL))?;
-    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+fn procargs(pid: u32) -> Result<Vec<u8>, Unread> {
+    let Ok(native) = libc::c_int::try_from(pid) else {
+        return Err(Unread::Failed(format!("pid {pid} does not fit a c_int")));
+    };
+    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, native];
     let name_count = libc::c_uint::try_from(name.len()).expect("three names fit a c_uint");
     let mut size: libc::size_t = 0;
     let sized = unsafe {
@@ -45,7 +58,12 @@ pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
         libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
     };
     if sized == -1 {
-        return Err(io::Error::last_os_error());
+        return Err(unread(pid, &io::Error::last_os_error()));
+    }
+    if size > EXEC_STRINGS_BYTES_MAX {
+        let most = EXEC_STRINGS_BYTES_MAX;
+        let why = format!("KERN_PROCARGS2 of {size} bytes runs past the {most} exec lays out");
+        return Err(Unread::Failed(why));
     }
     let mut procargs = vec![0_u8; size];
     let read = unsafe {
@@ -53,24 +71,30 @@ pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
         libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
     };
     if read == -1 {
-        return Err(io::Error::last_os_error());
+        return Err(unread(pid, &io::Error::last_os_error()));
     }
     assert!(size <= procargs.len(), "sysctl wrote {size} bytes into {}", procargs.len());
     procargs.truncate(size);
-    let unparsed = |why| io::Error::new(io::ErrorKind::InvalidData, why);
-    super::environ_in_procargs(&procargs).map_err(unparsed)
+    Ok(procargs)
+}
+
+fn unread(pid: u32, error: &io::Error) -> Unread {
+    let errno = Errno::from_io_error(error);
+    let ended = errno == Some(Errno::INVAL) && living_start(pid).is_none();
+    if ended || errno == Some(Errno::SRCH) {
+        Unread::Gone
+    } else {
+        Unread::Failed(error.to_string())
+    }
 }
 
 #[must_use]
-pub fn mine(names: &[&str]) -> Vec<Found> {
+pub fn mine(names: &[&str]) -> Mine {
     let mut system = System::new();
-    let refresh = ProcessRefreshKind::nothing()
-        .with_user(UpdateKind::Always)
-        .with_cmd(UpdateKind::Always)
-        .with_environ(UpdateKind::Always);
+    let refresh = ProcessRefreshKind::nothing().with_user(UpdateKind::Always);
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
     let uid = rustix::process::getuid().as_raw();
-    let mut found = Vec::new();
+    let mut seen = Mine::default();
     for (pid, process) in system.processes() {
         let Some(name) = process.name().to_str().filter(|name| names.contains(name)) else {
             continue;
@@ -83,12 +107,23 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
         let Some(start) = start.and_then(Start::spelled) else {
             continue;
         };
-        let argv = process.cmd().iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
-        let environ = process.environ().to_vec();
         let id = Id { pid: pid.as_u32(), start };
-        found.push(Found { id, name: name.to_owned(), argv, environ });
+        let read = procargs(pid.as_u32()).and_then(|procargs| {
+            let laid = laid_in_procargs(&procargs).map_err(unparsed)?;
+            let environ = laid.environ().map_err(unparsed)?;
+            Ok((laid.argv, environ))
+        });
+        let (argv, environ) = match read {
+            Ok(read) => read,
+            Err(Unread::Gone) => continue,
+            Err(Unread::Failed(why)) => {
+                seen.unreadable.push(Unreadable { id, name: name.to_owned(), why });
+                continue;
+            },
+        };
+        seen.found.push(Found { id, name: name.to_owned(), argv, environ });
     }
-    found
+    seen
 }
 
 fn living_start(pid: u32) -> Option<Start> {

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher as _};
 use std::io::{self, Write as _};
@@ -13,7 +14,7 @@ use clap::CommandFactory as _;
 use lunetad::asks::Turn;
 use lunetad::program::{self, Ran};
 use lunetad::projects::{self, Forgotten, Projects};
-use lunetad::terminate::{self, Folders, Id, Running, Unended};
+use lunetad::terminate::{self, Folders, Id, Running, Unended, Unreadable};
 use lunetad::{Destination, HostsLine, HostsParsed};
 use signal_hook::consts::SIGHUP;
 
@@ -184,8 +185,28 @@ impl Here {
             Ok(kept) => format!("forgets {}", kept_said(*kept)),
             Err(why) => format!("forgets its projects file, which does not read: {why}"),
         };
-        format!("{runs}; {kept}")
+        format!("{runs}; {kept}{}", unreadable_said(&self.running.unreadable, Tense::Plan))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tense {
+    Plan,
+    Done,
+}
+
+fn unreadable_said(unreadable: &[Unreadable], tense: Tense) -> String {
+    if unreadable.is_empty() {
+        return String::new();
+    }
+    let (leaves, read) = match tense {
+        Tense::Plan => ("leaves", "do not read"),
+        Tense::Done => ("left", "did not read"),
+    };
+    let each = |it: &Unreadable| {
+        format!("{} (pid {}), whose arguments {read}: {}", it.name, it.id.pid, it.why)
+    };
+    format!("; {leaves} {}", listed(&unreadable.iter().map(each).collect::<Vec<_>>()))
 }
 
 fn uncounted_said(why: &str) -> String {
@@ -220,11 +241,12 @@ enum Role {
     Command,
 }
 
-fn role(argv: &[String]) -> Role {
+fn role(argv: &[OsString]) -> Role {
     let Some(first) = argv.get(1) else {
         return Role::Front;
     };
-    if first.starts_with('-') || crate::Cli::command().find_subcommand(first).is_some() {
+    let named = |first: &str| crate::Cli::command().find_subcommand(first).is_some();
+    if first.as_encoded_bytes().starts_with(b"-") || first.to_str().is_some_and(named) {
         Role::Command
     } else {
         Role::Front
@@ -562,6 +584,7 @@ struct Ended {
     ending: Ending,
     agents: Counted,
     forgot: Forgotten,
+    unread: Vec<Unreadable>,
 }
 
 impl Ending {
@@ -612,7 +635,7 @@ impl Ending {
             ));
         }
         let forgot = forgot.map_err(|why| format!("ended luneta, and forgot no project: {why}"))?;
-        Ok(Ended { ending: self, agents, forgot })
+        Ok(Ended { ending: self, agents, forgot, unread: running.unreadable })
     }
 }
 
@@ -647,7 +670,7 @@ impl Ended {
                 format!("forgot its projects file, which did not read: {why}")
             },
         };
-        format!("{runs}; {forgot}")
+        format!("{runs}; {forgot}{}", unreadable_said(&self.unread, Tense::Done))
     }
 }
 
@@ -681,7 +704,7 @@ mod tests {
     use super::*;
 
     fn luneta(pid: u32, after: &[&str]) -> Luneta {
-        let argv = std::iter::once("luneta").chain(after.iter().copied()).map(str::to_owned);
+        let argv = std::iter::once("luneta").chain(after.iter().copied()).map(OsString::from);
         Luneta { id: id(pid), argv: argv.collect() }
     }
 
@@ -696,6 +719,7 @@ mod tests {
             lunetads: vec![id(4)],
             muxes: vec![id(5)],
             served: vec![PathBuf::from("/run/user/1000/luneta")],
+            unreadable: Vec::new(),
         };
         let agents = Counted::Agents(Agents { count: 3, busy: 1 });
         let projects = Ok(Kept { projects: 4, worktrees: 9 });
@@ -729,6 +753,22 @@ mod tests {
         let projects = Ok(Kept { projects: 0, worktrees: 0 });
         let here = Here { running, agents: Counted::Unasked, projects };
         assert_eq!(here.says(), "ends 1 luneta; keeps no project to forget");
+
+        let unreadable = |pid: u32, name: &str| Unreadable {
+            id: id(pid),
+            name: name.to_owned(),
+            why: "KERN_PROCARGS2 holds a negative argc".to_owned(),
+        };
+        let unreadable = vec![unreadable(2, "lunetad"), unreadable(3, "luneta-mux")];
+        let running = Running { lunetas: vec![luneta(1, &[])], unreadable, ..Running::default() };
+        let projects = Ok(Kept { projects: 0, worktrees: 0 });
+        let here = Here { running, agents: Counted::Unasked, projects };
+        assert_eq!(
+            here.says(),
+            "ends 1 luneta; keeps no project to forget; leaves lunetad (pid 2), whose arguments do \
+             not read: KERN_PROCARGS2 holds a negative argc and luneta-mux (pid 3), whose \
+             arguments do not read: KERN_PROCARGS2 holds a negative argc"
+        );
     }
 
     #[test]
@@ -782,7 +822,8 @@ mod tests {
         ending.lunetads.insert(id(3));
         ending.muxes.insert(id(4));
         let agents = Counted::Agents(Agents { count: 2, busy: 0 });
-        let ended = Ended { ending, agents, forgot: Forgotten::Read(Projects::default()) };
+        let forgot = Forgotten::Read(Projects::default());
+        let ended = Ended { ending, agents, forgot, unread: Vec::new() };
         assert_eq!(
             ended.says(),
             "ended 1 luneta, 1 luneta command, lunetad and luneta-mux, and 2 agents with them; \
@@ -795,11 +836,29 @@ mod tests {
         let mut ending = Ending::default();
         ending.muxes.insert(id(4));
         let forgot = Forgotten::Read(Projects::default());
-        let ended = Ended { ending, agents: Counted::Unasked, forgot };
+        let ended = Ended { ending, agents: Counted::Unasked, forgot, unread: Vec::new() };
         assert_eq!(
             ended.says(),
             "ended luneta-mux, and the agents in its terminals with them, which no lunetad ran to \
              count; kept no project to forget"
+        );
+    }
+
+    #[test]
+    fn what_ended_says_the_processes_it_left_as_their_arguments_did_not_read() {
+        let mut ending = Ending::default();
+        ending.lunetas.insert(id(1), Role::Front);
+        let forgot = Forgotten::Read(Projects::default());
+        let unread = vec![Unreadable {
+            id: id(2),
+            name: "lunetad".to_owned(),
+            why: "Permission denied (os error 13)".to_owned(),
+        }];
+        let ended = Ended { ending, agents: Counted::Unasked, forgot, unread };
+        assert_eq!(
+            ended.says(),
+            "ended 1 luneta; kept no project to forget; left lunetad (pid 2), whose arguments did \
+             not read: Permission denied (os error 13)"
         );
     }
 }

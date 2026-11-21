@@ -1,0 +1,15 @@
+id: ps-wchan-through-mux-process
+language: rust
+files:
+  - crates/**
+ignores:
+  - crates/mux/src/process/linux.rs
+message: >-
+  Read a process's wait channel through luneta-mux's process::process, as
+  Process::sleeps from /proc/<pid>/wchan: ps cuts `-o wchan` to 6 characters
+  (wait_woken reads wait_w) unless it is the last column.
+rule:
+  regex: wchan
+  any:
+    - kind: string_literal
+    - kind: raw_string_literal

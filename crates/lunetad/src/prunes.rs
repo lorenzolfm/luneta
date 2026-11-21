@@ -397,16 +397,12 @@ fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, Strin
     Ok(Some(RemoteBranch { remote: remote.to_owned(), branch: there.to_owned() }))
 }
 
-fn default_heard(common: &str, remote: &str) -> Option<String> {
-    let mut git = on_repository(common);
-    git.args(["symbolic-ref", "--quiet", &format!("refs/remotes/{remote}/HEAD")]);
-    let said = says(git, GIT_SAYS, "symbolic-ref").ok()?;
-    let said = String::from_utf8_lossy(&said);
-    said.trim_end().strip_prefix(&format!("refs/remotes/{remote}/")).map(str::to_owned)
+fn default_heard(common: &str, remote: &str) -> Result<Option<String>, String> {
+    git::pointed(on_repository(common), git::Symbolic::RemoteHead(remote), GIT_SAYS)
 }
 
 fn remote_default(common: &str, remote: &str) -> Result<Option<String>, String> {
-    if let Some(default) = default_heard(common, remote) {
+    if let Some(default) = default_heard(common, remote)? {
         return Ok(Some(default));
     }
     let mut git = on_repository(common);

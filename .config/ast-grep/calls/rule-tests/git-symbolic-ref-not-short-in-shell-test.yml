@@ -1,0 +1,9 @@
+id: git-symbolic-ref-not-short-in-shell
+valid:
+  - "branch=\"$(git symbolic-ref -q HEAD)\" || branch=\"\""
+  - "git rev-parse --short HEAD"
+  - "git symbolic-ref --quiet HEAD && git log --short"
+invalid:
+  - "branch=$(git symbolic-ref --short HEAD)"
+  - "git symbolic-ref -q --short HEAD"
+  - "git -C \"$dir\" symbolic-ref --short HEAD"

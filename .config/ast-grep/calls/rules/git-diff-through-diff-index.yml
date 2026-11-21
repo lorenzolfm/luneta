@@ -1,0 +1,18 @@
+id: git-diff-through-diff-index
+language: rust
+files:
+  - crates/*/src/**
+message: >-
+  Count a work tree's changes through lunetad::git::changed: porcelain `git
+  diff` takes index.lock and rewrites the index, even with
+  --no-optional-locks, where `git diff-index` writes nothing. diff-index reads
+  no diff.* settings, so pass -M yourself, and set GIT_NO_LAZY_FETCH=1 so a
+  partial clone fails rather than fetches.
+rule:
+  any:
+    - kind: string_literal
+      regex: ^"diff"$
+    - regex: \bgit\b.*\sdiff(\s|"|$)
+      any:
+        - kind: string_literal
+        - kind: raw_string_literal

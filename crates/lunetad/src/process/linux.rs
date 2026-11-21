@@ -1,6 +1,6 @@
 use std::ffi::OsString;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read as _};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt as _;
@@ -12,7 +12,9 @@ use rustix::io::{retry_on_intr, Errno};
 use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
 use rustix::time::{clock_gettime, ClockId};
 
-use super::{Found, Id, Start, Unended};
+use luneta_protocol::process::{arguments, entries, EXEC_STRINGS_BYTES_MAX};
+
+use super::{Found, Id, Mine, Start, Unended, Unread, Unreadable};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -21,6 +23,22 @@ fn proc(pid: u32, leaf: &str) -> PathBuf {
 #[must_use]
 pub fn start(pid: u32) -> Option<Start> {
     start_in(&fs::read_to_string(proc(pid, "stat")).ok()?).and_then(Start::spelled)
+}
+
+const PF_EXITING: u64 = 0x4;
+
+fn exiting(pid: u32) -> bool {
+    fs::read_to_string(proc(pid, "stat")).map_or(true, |stat| exiting_in(&stat))
+}
+
+fn exiting_in(stat: &str) -> bool {
+    let Some(close) = stat.rfind(')') else {
+        return false;
+    };
+    let mut fields = stat[close + 1..].split_whitespace();
+    let ended = fields.next().is_some_and(|state| matches!(state, "Z" | "X"));
+    let flags = fields.nth(5).and_then(|flags| flags.parse::<u64>().ok());
+    ended || flags.is_some_and(|flags| flags & PF_EXITING != 0)
 }
 
 fn start_in(stat: &str) -> Option<String> {
@@ -59,22 +77,39 @@ pub fn started(pid: u32) -> Option<SystemTime> {
     now.checked_sub(Duration::new(secs, nanos).saturating_sub(after_boot))
 }
 
-pub fn environ(pid: u32) -> io::Result<Vec<OsString>> {
-    Ok(nul_split(&fs::read(proc(pid, "environ"))?))
+pub fn environ(pid: u32) -> Result<Vec<OsString>, Unread> {
+    Ok(entries(&exec_strings(pid, "environ")?))
 }
 
-fn nul_split(raw: &[u8]) -> Vec<OsString> {
-    let entries = raw.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
-    entries.map(|entry| OsString::from_vec(entry.to_vec())).collect()
+fn exec_strings(pid: u32, leaf: &str) -> Result<Vec<u8>, Unread> {
+    let most = u64::try_from(EXEC_STRINGS_BYTES_MAX).expect("6 MiB fit a u64");
+    let mut read = Vec::new();
+    let file = File::open(proc(pid, leaf)).map_err(|error| unread(pid, &error))?;
+    file.take(most + 1).read_to_end(&mut read).map_err(|error| unread(pid, &error))?;
+    if read.len() > EXEC_STRINGS_BYTES_MAX {
+        let most = EXEC_STRINGS_BYTES_MAX;
+        let why = format!("/proc/{pid}/{leaf} runs past the {most} bytes exec lays out");
+        return Err(Unread::Failed(why));
+    }
+    Ok(read)
+}
+
+fn unread(pid: u32, error: &io::Error) -> Unread {
+    let unfound = error.kind() == io::ErrorKind::NotFound;
+    if unfound || Errno::from_io_error(error) == Some(Errno::SRCH) || exiting(pid) {
+        Unread::Gone
+    } else {
+        Unread::Failed(error.to_string())
+    }
 }
 
 #[must_use]
-pub fn mine(names: &[&str]) -> Vec<Found> {
+pub fn mine(names: &[&str]) -> Mine {
     let Ok(listed) = fs::read_dir("/proc") else {
-        return Vec::new();
+        return Mine::default();
     };
     let uid = rustix::process::getuid().as_raw();
-    let mut found = Vec::new();
+    let mut seen = Mine::default();
     for entry in listed.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
             continue;
@@ -92,18 +127,23 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
         let Some(start) = start(pid) else {
             continue;
         };
-        let Ok(environ) = environ(pid) else {
-            continue;
-        };
-        let Ok(cmdline) = fs::read(proc(pid, "cmdline")) else {
-            continue;
-        };
-        let argv = nul_split(&cmdline).into_iter().map(|arg| arg.to_string_lossy().into_owned());
-        let argv = argv.collect();
         let id = Id { pid, start };
-        found.push(Found { id, name: name.to_owned(), argv, environ });
+        let read = environ(pid).and_then(|environ| Ok((environ, exec_strings(pid, "cmdline")?)));
+        let (environ, cmdline) = match read {
+            Ok(read) => read,
+            Err(Unread::Gone) => continue,
+            Err(Unread::Failed(why)) => {
+                seen.unreadable.push(Unreadable { id, name: name.to_owned(), why });
+                continue;
+            },
+        };
+        let Some(argv) = arguments(&cmdline) else {
+            continue;
+        };
+        let argv = argv.into_iter().map(|arg| OsString::from_vec(arg.to_vec())).collect();
+        seen.found.push(Found { id, name: name.to_owned(), argv, environ });
     }
-    found
+    seen
 }
 
 #[must_use]
@@ -191,11 +231,40 @@ impl Domain {
 
 #[cfg(test)]
 mod tests {
-    use super::start_in;
+    use std::io;
+
+    use rustix::io::Errno;
+
+    use super::{exiting_in, start_in, unread, Unread};
 
     fn stat(state: &str, threads: u32) -> String {
         let before = "1 7 7 0 -1 4194304 0 0 0 0 0 0 0 0 20 0";
         format!("7 (a) b) {state} {before} {threads} 0 6630522 16 2 18446744073709551615")
+    }
+
+    #[test]
+    fn a_process_that_ended_reads_as_gone_and_one_that_did_not_read_as_failed() {
+        let read = super::exec_strings(u32::MAX, "cmdline").map(|_| ());
+        assert_eq!(read, Err(Unread::Gone), "no process has the last pid");
+        let me = std::process::id();
+        let ended = unread(me, &io::Error::from(Errno::SRCH));
+        assert_eq!(ended, Unread::Gone, "one that ended as it was read");
+        let refused = unread(me, &io::Error::from(Errno::ACCESS));
+        assert_eq!(refused, Unread::Failed(io::Error::from(Errno::ACCESS).to_string()));
+        let ending = unread(u32::MAX, &io::Error::from(Errno::ACCESS));
+        assert_eq!(ending, Unread::Gone, "an ending process refuses its environment");
+    }
+
+    #[test]
+    fn a_process_is_exiting_from_its_flags_or_as_a_zombie() {
+        let flagged = |state: &str, flags: u64| {
+            format!("7 (a) b) {state} 1 7 7 0 -1 {flags} 0 0 0 0 0 0 0 0 20 0 1 0 6630522")
+        };
+        assert!(!exiting_in(&flagged("S", 0x40_0000)), "PF_RANDOMIZE alone");
+        assert!(exiting_in(&flagged("D", 0x40_0004)), "PF_EXITING");
+        assert!(exiting_in(&flagged("Z", 0)));
+        assert!(exiting_in(&flagged("X", 0)));
+        assert!(!exiting_in("7 (a"), "no state to read");
     }
 
     #[test]

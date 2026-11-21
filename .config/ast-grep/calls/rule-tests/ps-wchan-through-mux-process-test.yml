@@ -1,0 +1,9 @@
+id: ps-wchan-through-mux-process
+valid:
+  - "fn f(pid: u32) { process::process(pid).map(|it| it.sleeps); }"
+  - "fn f(pid: &str) { Command::new(\"ps\").args([\"-o\", \"stat=\", \"-p\", pid]); }"
+invalid:
+  - "fn f(pid: &str) { Command::new(\"ps\").args([\"-o\", \"wchan=,pid=\", \"-p\", pid]); }"
+  - "fn f(pid: u32) { fs::read_to_string(format!(\"/proc/{pid}/wchan\")); }"
+  - "fn f() { sh(\"ps -o tty,stat,wchan,comm\"); }"
+  - "const SCRIPT: &str = r#\"ps -o tty,stat,wchan,comm\"#;"

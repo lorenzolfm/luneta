@@ -1,0 +1,26 @@
+id: proc-environ-through-environ
+snapshots:
+  'const SCRIPT: &str = r#"tr ''\0'' ''\n'' < /proc/$pid/environ"#;':
+    labels:
+    - source: r#"tr '\0' '\n' < /proc/$pid/environ"#
+      style: primary
+      start: 21
+      end: 59
+  fn f() { fs::read("/proc/self/environ"); }:
+    labels:
+    - source: '"/proc/self/environ"'
+      style: primary
+      start: 18
+      end: 38
+  'fn f(pid: u32) { fs::read(format!("/proc/{pid}/environ")); }':
+    labels:
+    - source: '"/proc/{pid}/environ"'
+      style: primary
+      start: 34
+      end: 55
+  'fn f(pid: u32) { fs::read(proc(pid, "environ")); }':
+    labels:
+    - source: '"environ"'
+      style: primary
+      start: 36
+      end: 45

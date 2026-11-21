@@ -1,0 +1,26 @@
+id: proc-cmdline-through-argv
+snapshots:
+  'const SCRIPT: &str = r#"cat /proc/$pid/cmdline"#;':
+    labels:
+    - source: r#"cat /proc/$pid/cmdline"#
+      style: primary
+      start: 21
+      end: 48
+  fn f() { fs::read("/proc/self/cmdline"); }:
+    labels:
+    - source: '"/proc/self/cmdline"'
+      style: primary
+      start: 18
+      end: 38
+  'fn f(pid: u32) { fs::read(format!("/proc/{pid}/cmdline")); }':
+    labels:
+    - source: '"/proc/{pid}/cmdline"'
+      style: primary
+      start: 34
+      end: 55
+  'fn f(pid: u32) { fs::read(proc(pid, "cmdline")); }':
+    labels:
+    - source: '"cmdline"'
+      style: primary
+      start: 36
+      end: 45

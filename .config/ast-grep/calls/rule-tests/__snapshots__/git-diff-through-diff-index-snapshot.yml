@@ -1,0 +1,38 @@
+id: git-diff-through-diff-index
+snapshots:
+  'const SCRIPT: &str = r#"git diff HEAD"#;':
+    labels:
+    - source: r#"git diff HEAD"#
+      style: primary
+      start: 21
+      end: 39
+  fn f() { git(&["diff", "--numstat", &fork]); }:
+    labels:
+    - source: '"diff"'
+      style: primary
+      start: 15
+      end: 21
+  fn f() { git.arg("diff"); }:
+    labels:
+    - source: '"diff"'
+      style: primary
+      start: 17
+      end: 23
+  fn f() { sh("git --no-pager diff"); }:
+    labels:
+    - source: '"git --no-pager diff"'
+      style: primary
+      start: 12
+      end: 33
+  fn f() { sh("git -C dir diff --numstat"); }:
+    labels:
+    - source: '"git -C dir diff --numstat"'
+      style: primary
+      start: 12
+      end: 39
+  fn f() { sh("git diff --stat HEAD"); }:
+    labels:
+    - source: '"git diff --stat HEAD"'
+      style: primary
+      start: 12
+      end: 34

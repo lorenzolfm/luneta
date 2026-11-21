@@ -41,7 +41,10 @@ pub fn terminal_of(id: &process::Id) -> Result<Option<TerminalKey>, String> {
     if process::start(id.pid).as_ref() == Some(&id.start) {
         match environ {
             Ok(environ) => own::terminal_in(&environ),
-            Err(error) => Err(format!("its environment does not read: {error}")),
+            Err(process::Unread::Gone) => Ok(None),
+            Err(process::Unread::Failed(why)) => {
+                Err(format!("its environment does not read: {why}"))
+            },
         }
     } else {
         Ok(None)

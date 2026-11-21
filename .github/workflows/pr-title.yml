@@ -1,0 +1,24 @@
+name: pr-title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  title:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: The title is at most 70 characters
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          export LC_ALL=C.UTF-8
+          length=${#TITLE}
+          if (( length > 70 )); then
+            echo "::error::The title is $length characters, over the 70 before GitHub's \" (#N)\"; aim for 60: say only what changes, and give the reason in the body"
+            exit 1
+          fi
+          echo "The title is $length characters"

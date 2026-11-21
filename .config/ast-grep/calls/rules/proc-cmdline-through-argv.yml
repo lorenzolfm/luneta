@@ -1,0 +1,19 @@
+id: proc-cmdline-through-argv
+language: rust
+files:
+  - crates/**
+ignores:
+  - crates/mux/src/process/linux.rs
+  - crates/lunetad/src/process/linux.rs
+message: >-
+  Read a process's arguments through luneta-mux's process::argv or
+  lunetad::process::mine: /proc/<pid>/cmdline reads empty until the kernel
+  lays out argv, which can be after Command::spawn returns, and both split it
+  with luneta_protocol::process::arguments, which keeps empty arguments. A
+  test waits for its child to say it runs before it reads.
+rule:
+  any:
+    - kind: string_literal
+      regex: (^"|/)cmdline"$
+    - kind: raw_string_literal
+      regex: /proc/\S*/cmdline
