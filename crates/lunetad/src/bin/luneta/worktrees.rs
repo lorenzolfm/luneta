@@ -532,7 +532,7 @@ pub fn renamed_worktree(
     worktree: WorktreeId,
     to: Option<&Name>,
 ) -> Result<(), Unchanged> {
-    let (worktree, to) = (worktree.get(), to.map(spelled));
+    let (worktree, to) = (worktree.get(), to.map(|to| to.as_str().to_owned()));
     let renames = lunetad::api::change_projects_request::RenameWorktree { worktree, to };
     changed_there(machine, Change::RenameWorktree(renames))
 }
@@ -542,7 +542,7 @@ pub fn renamed_terminal(
     terminal: ViewId,
     to: Option<&Name>,
 ) -> Result<(), Unchanged> {
-    let (terminal, to) = (terminal.get(), to.map(spelled));
+    let (terminal, to) = (terminal.get(), to.map(|to| to.as_str().to_owned()));
     changed_there(machine, Change::RenameTerminal(RenameTerminal { terminal, to }))
 }
 
@@ -569,10 +569,6 @@ pub fn project_made(
         format!("{folder} is project {project}: {}", said_unmade(unchanged, "worktree"))
     };
     started.map_err(unstarted)
-}
-
-fn spelled(name: &Name) -> String {
-    name.as_str().to_owned()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

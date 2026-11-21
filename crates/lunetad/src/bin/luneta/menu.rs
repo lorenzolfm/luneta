@@ -538,16 +538,19 @@ impl Typing {
             Typing::Rename(asked) => {
                 let rename = match asked {
                     Renames::Terminal(terminal) => named(typed, projects::Name::parse)
-                        .map(|name| Some(Rename::Terminal(terminal, name))),
+                        .map(|name| Rename::Terminal(terminal, name)),
                     Renames::Worktree(worktree) => named(typed, projects::Name::parse)
-                        .map(|name| Some(Rename::Worktree(worktree, name))),
-                    Renames::Project(project) => named(typed, projects::ProjectName::parse)
-                        .map(|name| name.map(|name| Rename::Project(project, name))),
+                        .map(|name| Rename::Worktree(worktree, name)),
+                    Renames::Project(project) => {
+                        let kept = || "a project keeps a name: type one".to_owned();
+                        named(typed, projects::ProjectName::parse)
+                            .and_then(|name| name.ok_or_else(kept))
+                            .map(|name| Rename::Project(project, name))
+                    },
                 };
                 match rename {
+                    Ok(rename) => renamed(rename),
                     Err(why) => Entered::Wrong(why),
-                    Ok(Some(rename)) => renamed(rename),
-                    Ok(None) => Entered::Wrong("a project keeps a name: type one".to_owned()),
                 }
             },
         }

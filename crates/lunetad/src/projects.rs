@@ -165,10 +165,6 @@ impl Name {
         Ok(Name(text.to_owned()))
     }
 
-    pub fn of_folder(dir: &Dir) -> Result<Name, String> {
-        Name::parse(dir.last())
-    }
-
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0

@@ -971,9 +971,12 @@ fn root_project(
     project: Unrooted,
     root: &mut impl FnMut(&Dir) -> Result<Option<Spot>, String>,
 ) -> Result<Gathered, String> {
-    let named = |at: &Dir| match ProjectName::of_folder(at) {
-        Ok(after) if project.name.as_str() == project.dir.last() => after,
-        Ok(_) | Err(_) => project.name.clone(),
+    let named = |at: &Dir| {
+        if project.name.as_str() == project.dir.last() {
+            ProjectName::of_folder(at).unwrap_or_else(|_| project.name.clone())
+        } else {
+            project.name.clone()
+        }
     };
     let unread = |why: String| {
         let (name, dir) = (project.name.as_str(), project.dir.as_str());
@@ -2106,6 +2109,16 @@ mod tests {
             ),
             (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),
+            (
+                r#"{"version": 1, "projects": [
+                {"id": "0000000000000001", "name": "a/b", "dir": "/a"}]}"#,
+                "\"a/b\" names no project: name cannot contain '/'",
+            ),
+            (
+                r#"{"version": 10, "projects": [{"id": "0000000000000001", "name": "..",
+                "dir": "/a", "holds": {"clone": []}}]}"#,
+                "\"..\" names no project: name cannot be '.' or '..'",
+            ),
             (
                 r#"{"version": 1, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a"},
                 {"id": "0000000000000002", "name": "b", "dir": "/a/b"}]}"#,
