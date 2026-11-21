@@ -30,6 +30,36 @@ snapshots:
       style: secondary
       start: 28
       end: 44
+  async fn f() { let daemon = lunetad::through(bridge(&host), PATIENCE / 2).await; }:
+    labels:
+    - source: lunetad::through(bridge(&host), PATIENCE / 2)
+      style: primary
+      start: 28
+      end: 73
+    - source: lunetad::through
+      style: secondary
+      start: 28
+      end: 44
+  async fn f() { let daemon = lunetad::through(stalls, QUIET).await; }:
+    labels:
+    - source: lunetad::through(stalls, QUIET)
+      style: primary
+      start: 28
+      end: 59
+    - source: lunetad::through
+      style: secondary
+      start: 28
+      end: 44
+  fn ends_it() { runtime().block_on(async { lunetad::through(bridge(&host), QUIET).await }); }:
+    labels:
+    - source: lunetad::through(bridge(&host), QUIET)
+      style: primary
+      start: 42
+      end: 80
+    - source: lunetad::through
+      style: secondary
+      start: 42
+      end: 58
   fn f() { let deadline = lunetad::ANSWER; }:
     labels:
     - source: lunetad::ANSWER

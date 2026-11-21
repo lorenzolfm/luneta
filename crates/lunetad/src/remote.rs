@@ -769,7 +769,7 @@ async fn matched(
     folder: &Path,
 ) -> Result<client::Daemon, Failed> {
     let (ssh, last) = ssh(destination, said, folder);
-    let mut daemon = match client::through(ssh).await {
+    let mut daemon = match client::through(ssh, client::ROUND_TRIP).await {
         Ok(daemon) => daemon,
         Err(error) => {
             let mut failed = unreached(&error);

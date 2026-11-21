@@ -26,13 +26,17 @@ pub const BRIDGED: &[u8] = b"lunetad\n";
 
 pub const REACH: Duration = Duration::from_secs(10);
 
-const ROUND_TRIP: Duration = Duration::from_secs(5);
+pub(crate) const ROUND_TRIP: Duration = Duration::from_secs(5);
 
-pub(crate) const ANSWER_THROUGH: Duration = ANSWER.saturating_add(ROUND_TRIP);
+pub(crate) const ANSWER_THROUGH: Duration = answer_through(ROUND_TRIP);
 
 const QUIET: Duration = Duration::from_secs(3);
 
-const _: () = assert!(QUIET.as_millis() + ROUND_TRIP.as_millis() < ANSWER_THROUGH.as_millis());
+const _: () = assert!(QUIET.as_millis() < ANSWER.as_millis());
+
+const fn answer_through(round_trip: Duration) -> Duration {
+    ANSWER.saturating_add(round_trip)
+}
 
 const SAID_MAX: u64 = 4096;
 
@@ -97,11 +101,14 @@ pub async fn connect(folder: &Folder, answer: Duration) -> Result<Daemon, Error>
     Ok(DaemonClient::new(Within::new(channel, answer, unanswered)))
 }
 
-pub async fn through(command: std::process::Command) -> Result<Daemon, Error> {
+pub async fn through(
+    command: std::process::Command,
+    round_trip: Duration,
+) -> Result<Daemon, Error> {
     let mut command = Some(command);
     let channel = Endpoint::from_static("http://lunetad")
         .http2_keep_alive_interval(QUIET)
-        .keep_alive_timeout(ROUND_TRIP)
+        .keep_alive_timeout(round_trip)
         .keep_alive_while_idle(true)
         .connect_with_connector(service_fn(move |_: Uri| {
             let command = command.take();
@@ -111,7 +118,7 @@ pub async fn through(command: std::process::Command) -> Result<Daemon, Error> {
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, ANSWER_THROUGH, unanswered)))
+    Ok(DaemonClient::new(Within::new(channel, answer_through(round_trip), unanswered)))
 }
 
 fn went() -> io::Error {
