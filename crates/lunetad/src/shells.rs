@@ -68,15 +68,18 @@ pub fn your_shell() -> OsString {
     shell(login_shell(), env::var_os(SHELL_VAR))
 }
 
-const REFUSING: [&str; 2] = ["nologin", "false"];
+const LOGIN_REFUSERS: [&str; 2] = ["nologin", "false"];
 
 fn shell(login: Option<OsString>, named: Option<OsString>) -> OsString {
-    let some = |shell: &OsString| !shell.is_empty();
-    let opens = |shell: &OsString| {
-        let name = Path::new(shell).file_name().and_then(|name| name.to_str());
-        some(shell) && !name.is_some_and(|name| REFUSING.contains(&name))
-    };
-    login.filter(opens).or_else(|| named.filter(some)).unwrap_or_else(|| NO_SHELL.into())
+    login.filter(opens).or_else(|| named.filter(opens)).unwrap_or_else(|| NO_SHELL.into())
+}
+
+fn opens(shell: &OsString) -> bool {
+    if shell.is_empty() {
+        return false;
+    }
+    let name = Path::new(shell).file_name().and_then(|name| name.to_str());
+    name.is_none_or(|name| !LOGIN_REFUSERS.contains(&name))
 }
 
 fn login_shell() -> Option<OsString> {
@@ -106,6 +109,8 @@ mod tests {
             assert_eq!(shell(Some(refusing.into()), bash()), "/bin/bash", "{refusing}");
             assert_eq!(shell(Some(refusing.into()), None), "/bin/sh", "{refusing}");
         }
+        assert_eq!(shell(None, Some("/usr/sbin/nologin".into())), "/bin/sh");
+        assert_eq!(shell(Some("/sbin/nologin".into()), Some("/sbin/nologin".into())), "/bin/sh");
         assert_eq!(shell(Some("/opt/nologin-not/fish".into()), bash()), "/opt/nologin-not/fish");
     }
 }

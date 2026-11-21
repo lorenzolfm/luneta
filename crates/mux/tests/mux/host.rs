@@ -84,9 +84,11 @@ impl Server {
         use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
         let mut system = System::new();
         let pid = Pid::from_u32(self.child.id());
-        let memory = ProcessRefreshKind::nothing().with_memory();
-        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, memory);
-        system.process(pid).unwrap().memory() / 1024
+        let resident = ProcessRefreshKind::nothing().with_memory();
+        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, resident);
+        let bytes = system.process(pid).expect("the mux server runs").memory();
+        assert_eq!(bytes % 1024, 0, "resident memory is whole pages");
+        bytes / 1024
     }
 
     pub fn socket(&self) -> PathBuf {

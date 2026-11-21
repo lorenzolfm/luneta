@@ -236,8 +236,8 @@ fn ended(pid: u32) -> bool {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
     let mut system = System::new();
     let pid = Pid::from_u32(pid);
-    let status = ProcessRefreshKind::nothing();
-    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, status);
+    let basics = ProcessRefreshKind::nothing();
+    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, basics);
     system.process(pid).is_none_or(|process| process.status() == ProcessStatus::Zombie)
 }
 
@@ -364,6 +364,7 @@ fn a_machine_that_leaves_the_hosts_file_is_watched_no_more() {
     reached(&here, "far", |_| true);
     let bridges = ssh.bridges("far");
     assert_eq!(bridges.len(), 1);
+    assert!(!ended(bridges[0]), "the bridge to far runs");
 
     hosts(&here, "");
     eventually("far leaves", || here.host().remotes.is_empty().then_some(()));
