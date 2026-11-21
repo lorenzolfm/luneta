@@ -2,7 +2,7 @@ use std::error::Error;
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::process::{Command, Stdio};
 
-use luneta_waits::PATIENCE;
+use luneta_waits::{PATIENCE, QUIET};
 use lunetad::api::WatchRequest;
 use lunetad::{Unbridged, BRIDGED};
 
@@ -39,7 +39,8 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn unbridged(command: Command, is: impl Fn(&Unbridged) -> bool) {
-    let error = runtime().block_on(lunetad::through(command)).expect_err("it reached one");
+    let unbridged = lunetad::through(command, PATIENCE);
+    let error = runtime().block_on(unbridged).expect_err("it reached one");
     let first: &(dyn Error + 'static) = &error;
     let mut sources = std::iter::successors(Some(first), |&error| error.source());
     let why = sources.find_map(|error| error.downcast_ref::<Unbridged>());
@@ -51,7 +52,7 @@ fn a_client_asks_the_daemon_of_the_folder_through_luneta_bridge() {
     let host = Host::new();
     let daemon = start(host.vars()).unwrap();
     runtime().block_on(async {
-        let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
+        let mut bridged = lunetad::through(bridge(&host), PATIENCE).await.unwrap();
         let info = bridged.info(()).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
         let first = WatchRequest { after: None, kept: None, shown: false };
@@ -61,15 +62,16 @@ fn a_client_asks_the_daemon_of_the_folder_through_luneta_bridge() {
 }
 
 #[test]
-fn a_client_runs_its_command_once_and_one_that_stalls_ends_it() {
+fn a_client_runs_its_command_once_and_one_that_stalls_ends_it_past_its_round_trip() {
     let host = Host::new();
     let daemon = start(host.vars()).unwrap();
     runtime().block_on(async {
-        let mut stalled = lunetad::through(sh("echo lunetad; exec sleep 60")).await.unwrap();
+        let stalls = sh("echo lunetad; exec sleep 60");
+        let mut stalled = lunetad::through(stalls, QUIET).await.unwrap();
         stalled.info(()).await.expect_err("a stalled command answered");
         let again = stalled.info(()).await.expect_err("it ran a command again");
         assert!(went(&again), "{again:?}");
-        let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
+        let mut bridged = lunetad::through(bridge(&host), PATIENCE).await.unwrap();
         let info = bridged.info(()).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
     });
@@ -97,7 +99,7 @@ fn a_client_reaches_no_daemon_but_the_one_it_dialed() {
 fn luneta_bridge_starts_a_daemon_where_none_runs() {
     let host = Host::new();
     let pid = runtime().block_on(async {
-        let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
+        let mut bridged = lunetad::through(bridge(&host), PATIENCE).await.unwrap();
         bridged.info(()).await.unwrap().into_inner().pid
     });
     let daemon = Detached { host: &host, pid };
