@@ -3781,7 +3781,7 @@ mod tests {
     fn asked(ask: Ask, projected: &Projected) -> Heard {
         let (events, heard) = std::sync::mpsc::channel();
         super::ask(1, ask, projected, &events);
-        match heard.recv_timeout(Duration::from_secs(10)).expect("the picker hears its ask") {
+        match luneta_waits::heard("the picker's ask", &heard) {
             Event::Picker { number: 1, heard } => heard,
             _ => panic!("the picker hears another event"),
         }

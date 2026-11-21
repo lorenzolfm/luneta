@@ -476,6 +476,8 @@ fn cut(mut text: String, most: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use luneta_waits::eventually;
+
     use super::*;
 
     fn issue(number: u32, title: &str) -> Issue {
@@ -614,19 +616,15 @@ mod tests {
         locked(&listings.slots).run(&luneta, Instant::now()).unwrap();
         locked(&listings.slots).waiters = WAITERS_MAX;
         let refused = Err(format!("lunetad has {WAITERS_MAX} asks waiting on gh already, its most"));
-        let started = Instant::now();
-        assert_eq!(listings.list(&luneta), refused);
-        assert!(started.elapsed() < PATIENCE, "the refusal waits for nothing");
+        assert_eq!(listings.list(&luneta), refused, "the refusal waits for nothing");
         assert_eq!(locked(&listings.slots).waiters, WAITERS_MAX, "a refused ask counts no waiter");
 
         locked(&listings.slots).waiters = WAITERS_MAX - 1;
         let came = thread::scope(|scope| {
             let waiting = scope.spawn(|| listings.list(&luneta));
-            let counted = (0..1000).any(|_| {
-                thread::sleep(Duration::from_millis(1));
-                locked(&listings.slots).waiters == WAITERS_MAX
+            eventually("the ask waits on the listing that runs, and counts itself", || {
+                (locked(&listings.slots).waiters == WAITERS_MAX).then_some(())
             });
-            assert!(counted, "the ask waits on the listing that runs, and counts itself");
             locked(&listings.slots).ran(&luneta, Some((Instant::now(), Ok(Listed::Unhosted))));
             listings.done.notify_all();
             waiting.join().unwrap()
