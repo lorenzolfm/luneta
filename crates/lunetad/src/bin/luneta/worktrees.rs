@@ -34,11 +34,11 @@ const ASKING: Duration = Duration::from_secs(15);
 
 const WORK_PATIENCE: Duration = work::ANSWERED_MAX.saturating_add(ASKING);
 
-fn said_unmade(unchanged: Unchanged, what: &str) -> String {
+pub fn said_unmade(unchanged: Unchanged, what: &str) -> String {
     unchanged.said(&format!("no {what} made"), &format!("the {what} may be made"))
 }
 
-fn said_unopened(unchanged: Unchanged, folder: &Directory, tab: &str) -> String {
+pub fn said_unopened(unchanged: Unchanged, folder: &Directory, tab: &str) -> String {
     match unchanged {
         Unchanged::Refused(why) => unopened(folder, tab, &why),
         Unchanged::InDoubt(why) => format!("{why}, so {folder}, {tab}'s worktree, may be opened"),

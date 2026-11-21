@@ -115,7 +115,11 @@ impl Opener {
 
 const NAMING: &str = "luneta names a session already: try again once it has made it";
 
-const NAMING_PANICKED: &str = "luneta could not name the session: naming it panicked";
+const MAKE_PANICKED: &str = "luneta could not ask lunetad for the worktree: asking panicked";
+
+const ADD_PANICKED: &str = "luneta could not ask lunetad for the project: asking panicked";
+
+const PULL_PANICKED: &str = "luneta could not ask lunetad for the pull: asking panicked";
 
 const RENAME_PANICKED: &str = "luneta could not ask lunetad for the rename: asking panicked";
 
@@ -767,6 +771,15 @@ fn layout_size(area: Rect) -> lunetad::projects::Size {
 
 fn caught<T>(panicked: &str, asked: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     panic::catch_unwind(AssertUnwindSafe(asked)).unwrap_or_else(|_| Err(panicked.to_owned()))
+}
+
+fn unmade_caught<T>(
+    panicked: &str,
+    said: impl FnOnce(Unchanged) -> String,
+    asked: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let in_doubt = || said(Unchanged::InDoubt(panicked.to_owned()));
+    panic::catch_unwind(AssertUnwindSafe(asked)).unwrap_or_else(|_| Err(in_doubt()))
 }
 
 fn doubted<T>(
@@ -1885,7 +1898,9 @@ impl App {
                 }
                 self.naming_on(move || {
                     let made = || worktrees::project_made(&on, &folder, name.as_ref());
-                    let made = caught(NAMING_PANICKED, made).map_err(|why| format!("menu: {why}"));
+                    let said = |unchanged| worktrees::said_unmade(unchanged, "project");
+                    let made = unmade_caught(ADD_PANICKED, said, made);
+                    let made = made.map_err(|why| format!("menu: {why}"));
                     Made::Project { on, made }
                 });
                 self.leave();
@@ -1900,7 +1915,8 @@ impl App {
                 }
                 let lunetad = self.lunetad.clone();
                 self.naming_on(move || {
-                    let made = caught(NAMING_PANICKED, || {
+                    let said = |unchanged| worktrees::said_unopened(unchanged, &cwd, &name);
+                    let made = unmade_caught(PULL_PANICKED, said, || {
                         let pulled = worktrees::pulled(&lunetad, &on, &cwd, &name, &opens)?;
                         Ok(Pulled { on, pulled })
                     });
@@ -2498,7 +2514,8 @@ impl App {
         }
         let lunetad = self.lunetad.clone();
         self.naming_on(move || {
-            let made = caught(NAMING_PANICKED, || made(&lunetad, &on));
+            let said = |unchanged| worktrees::said_unmade(unchanged, "worktree");
+            let made = unmade_caught(MAKE_PANICKED, said, || made(&lunetad, &on));
             Made::Worktree { on, made }
         });
     }
@@ -2879,6 +2896,27 @@ mod tests {
         let refused = doubted(RENAME_PANICKED, || Err::<(), _>(Unchanged::Refused("taken".to_owned())));
         assert_eq!(unrenamed(&view, refused.unwrap_err()), "menu: not renamed: taken");
         assert_eq!(doubted(RENAME_PANICKED, || Ok(7)), Ok(7));
+    }
+
+    #[test]
+    fn a_make_that_panics_says_it_may_be_made_and_never_that_naming_failed() {
+        let panics = || -> Result<(), String> { panic!("dropped") };
+        let worktree = |unchanged| worktrees::said_unmade(unchanged, "worktree");
+        let said = unmade_caught(MAKE_PANICKED, worktree, panics).unwrap_err();
+        let maybe = "luneta could not ask lunetad for the worktree: asking panicked, so the worktree may be made";
+        assert_eq!(said, maybe);
+        let project = |unchanged| worktrees::said_unmade(unchanged, "project");
+        let said = unmade_caught(ADD_PANICKED, project, panics).unwrap_err();
+        let maybe = "luneta could not ask lunetad for the project: asking panicked, so the project may be made";
+        assert_eq!(said, maybe);
+        let folder = lunetad::Directory::parse("/w/cdk/issue-5".to_owned()).unwrap();
+        let pull = |unchanged| worktrees::said_unopened(unchanged, &folder, "#5");
+        let said = unmade_caught(PULL_PANICKED, pull, panics).unwrap_err();
+        let maybe = "luneta could not ask lunetad for the pull: asking panicked, so /w/cdk/issue-5, #5's worktree, may be opened";
+        assert_eq!(said, maybe);
+        let refused = || Err::<(), _>("no worktree made: taken".to_owned());
+        assert_eq!(unmade_caught(MAKE_PANICKED, worktree, refused), refused());
+        assert_eq!(unmade_caught(MAKE_PANICKED, worktree, || Ok(7)), Ok(7));
     }
 
     #[test]
