@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use luneta_protocol::git::{GitStatus, Head};
 use luneta_protocol::github::PullRequest;
 use luneta_protocol::said::Said;
+use luneta_protocol::shell::Doing;
 use tokio::sync::oneshot;
 
 use crate::agent::{Agent, Unread};
@@ -21,7 +22,6 @@ use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage
 use crate::projects::{ViewId, Worktree, WorktreeId, CLONE_WORKTREES_MAX};
 use crate::remote::{Destination, Line, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
-use crate::shells::Doing;
 use crate::transcripts::SessionId;
 use crate::mux::TerminalKey;
 

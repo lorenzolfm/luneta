@@ -10,7 +10,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::{SkimMatcherV2, SkimScoreConfig};
 use luneta_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
 use luneta_protocol::github::{PullRequest, State, Verdict};
-use luneta_protocol::shell::{Ending, Front};
+use luneta_protocol::shell::{Doing, Ending, Front};
 use luneta_protocol::unread;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::remote::unreached::Stopped;
@@ -25,7 +25,6 @@ use lunetad::projects::{Arranged, ProjectName, WorktreeId, CLONE_WORKTREES_MAX};
 use lunetad::prunes;
 use lunetad::rebases::{Rebased, Unrebased};
 use lunetad::seats::{self, seated, Unread};
-use lunetad::shells::Doing;
 use lunetad::transcripts::SessionId;
 use lunetad::{log, Destination, Directory, SessionName};
 use ratatui::buffer::Buffer;
@@ -527,15 +526,17 @@ fn end_of_second(at: SystemTime) -> Option<SystemTime> {
     at.checked_add(Duration::from_millis(999))
 }
 
-fn ran(shell: &Shell) -> Ran {
-    let Ok(doing) = Doing::of_api(shell) else {
-        return Ran::Unknown;
+fn ran(told: &Told) -> Ran {
+    let doing = match told {
+        Told::Unhooked => return Ran::Unhooked,
+        Told::Unread => return Ran::Unknown,
+        Told::Doing(doing) => doing,
     };
     match doing {
-        Doing::Going { command, .. } => Ran::Going(command),
-        Doing::Stopped { command, .. } => Ran::Stopped(command),
+        Doing::Going { command, .. } => Ran::Going(command.clone()),
+        Doing::Stopped { command, .. } => Ran::Stopped(command.clone()),
         Doing::Ended { command: Some(command), at, ending, .. } => {
-            Ran::Ended(menu::Ended { command, ending, at })
+            Ran::Ended(menu::Ended { command: command.clone(), ending: *ending, at: *at })
         },
         Doing::Ended { command: None, .. } => Ran::EndedUnsaid,
         Doing::Ready => Ran::Ready,
@@ -828,9 +829,33 @@ struct KnownWorktree {
     folder: Dir,
     seen: projects::Seen,
     used: Option<Used>,
-    views: Vec<(ViewId, View)>,
+    views: Vec<KnownView>,
     terminals: Vec<ViewId>,
     arranged: Option<Arranged>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KnownView {
+    id: ViewId,
+    view: View,
+    told: Told,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Told {
+    Unhooked,
+    Unread,
+    Doing(Doing),
+}
+
+impl Told {
+    fn of(shell: Option<&Shell>) -> Told {
+        match shell.map(Doing::of_api) {
+            None => Told::Unhooked,
+            Some(Err(_)) => Told::Unread,
+            Some(Ok(doing)) => Told::Doing(doing),
+        }
+    }
 }
 
 impl Known {
@@ -847,7 +872,8 @@ impl Known {
             let terminals: Vec<ViewId> = terminals.collect();
             let found = worktree.terminals.iter().zip(&terminals);
             let views = found.filter_map(|(it, id)| {
-                Some((*id, view_of(it, worktree, tab)?))
+                let told = Told::of(it.shell.as_ref());
+                Some(KnownView { id: *id, view: view_of(it, worktree, tab)?, told })
             });
             let views = views.collect();
             let seen = worktree.seen.and_then(projects::Seen::of_api);
@@ -905,16 +931,16 @@ impl Known {
         self.worktrees.iter().flat_map(|worktree| worktree.terminals.iter().copied())
     }
 
-    fn kept_views(&self) -> impl Iterator<Item = &(ViewId, View)> {
+    fn kept_views(&self) -> impl Iterator<Item = &KnownView> {
         self.worktrees.iter().flat_map(|worktree| &worktree.views)
     }
 
     fn views(&self) -> impl Iterator<Item = &View> {
-        self.kept_views().map(|(_, view)| view)
+        self.kept_views().map(|kept| &kept.view)
     }
 
-    fn view(&self, id: u32) -> Option<&View> {
-        self.views().find(|view| view.id == id)
+    fn kept(&self, id: u32) -> Option<&KnownView> {
+        self.kept_views().find(|kept| kept.view.id == id)
     }
 }
 
@@ -952,7 +978,7 @@ fn view_id_of(shelves: &[Shelf], on: &Machine, listed: &Listed, view: ViewKey) -
     let ViewKey::Terminal(key) = view;
     let known = shelf(shelves, on).iter().find(|it| it.listed() == listed)?;
     let mut kept = known.kept_views();
-    kept.find(|(_, view)| keyed(view) == Some(key)).map(|(id, _)| *id)
+    kept.find(|kept| keyed(&kept.view) == Some(key)).map(|kept| kept.id)
 }
 
 fn news_key(shelves: &[Shelf], on: &Machine, place: &ViewPlace) -> Option<Key> {
@@ -971,7 +997,7 @@ fn view_of(terminal: &api::Terminal, worktree: &api::Worktree, tab: u32) -> Opti
         cwd: Some(terminal.folder.clone()).filter(|folder| !folder.is_empty()),
         command: terminal.command.clone(),
         titled: terminal.titled.clone(),
-        shell: terminal.shell.clone(),
+        shell: None,
         tab_id: tab.checked_add(1),
         held: terminal.held,
         key: Some(*key),
@@ -2222,8 +2248,8 @@ impl Sidebar {
                 let branch = statuses.get(worktree.folder.as_str()).and_then(|status| {
                     Some(checkout(&GitStatus::of_api(status)?, None)?.branch)
                 });
-                let terminals = views.filter_map(|(_, view)| {
-                    ViewPlace::of(listed.clone(), view).map(|place| place.view)
+                let terminals = views.filter_map(|kept| {
+                    ViewPlace::of(listed.clone(), &kept.view).map(|place| place.view)
                 });
                 worktrees.push(Worktree {
                     place: worktree.place.clone(),
@@ -2285,7 +2311,7 @@ impl Sidebar {
         let mut runs = Runs::default();
         for known in seen.projects.iter().rev() {
             let listed = known.listed();
-            for (id, view) in known.kept_views() {
+            for KnownView { id, view, .. } in known.kept_views() {
                 let Some(agent) = keyed(view).and_then(|key| seated.get(&key)) else {
                     continue;
                 };
@@ -2480,7 +2506,7 @@ impl Sidebar {
                 let mut worktrees = Vec::with_capacity(known.worktrees.len());
                 for worktree in &known.worktrees {
                     let mut by_view: Vec<Shows> = Vec::with_capacity(worktree.views.len());
-                    for (id, view) in &worktree.views {
+                    for KnownView { id, view, told } in &worktree.views {
                         counts.views += 1;
                         let key = listed.key(*id);
                         let here = on && here_key == Some(key);
@@ -2499,15 +2525,14 @@ impl Sidebar {
                             by_view.push(Shows { marked: Some(agent), ran: None, unread });
                             continue;
                         }
-                        let doing = view.shell.as_ref().map(Doing::of_api);
-                        let Some(Ok(doing)) = doing else {
+                        let Told::Doing(doing) = told else {
                             by_view.push(Shows { marked: None, ran: None, unread });
                             continue;
                         };
-                        if let Some(long) = long_at(&doing).filter(|long| *long > now) {
+                        if let Some(long) = long_at(doing).filter(|long| *long > now) {
                             due = Some(due.map_or(long, |due| due.min(long)));
                         }
-                        let mut shell = Marked::of_shell(&doing, now);
+                        let mut shell = Marked::of_shell(doing, now);
                         let ended = shell.as_ref().and_then(|(shell, _)| shell.ended());
                         if let Some(ended) = ended {
                             finished.insert(key, ended);
@@ -2561,7 +2586,8 @@ impl Sidebar {
                         let listing =
                             if worktree_folded { &[][..] } else { worktree.views.as_slice() };
                         let listing = listing.iter().zip(by_view);
-                        for ((view_id, view), Shows { marked, ran, unread }) in listing {
+                        for (known, Shows { marked, ran, unread }) in listing {
+                            let (view_id, view) = (&known.id, &known.view);
                             let command = view.command.as_deref();
                             let program = agent(view)
                                 .and_then(|agent| icons::agent(agent.runs_in()))
@@ -3484,8 +3510,8 @@ impl Sidebar {
     }
 
     fn ran_in(&self, machine: &Machine, session: &Listed, view: u32) -> Ran {
-        let shell = self.view_of(machine, session, view).and_then(|shown| shown.shell.as_ref());
-        shell.map_or(Ran::Unhooked, ran)
+        let kept = self.kept_of(machine, session, view);
+        kept.map_or(Ran::Unhooked, |kept| ran(&kept.told))
     }
 
     fn reran(&mut self) {
@@ -3758,8 +3784,12 @@ impl Sidebar {
     }
 
     fn view_of(&self, machine: &Machine, listed: &Listed, id: u32) -> Option<&View> {
+        Some(&self.kept_of(machine, listed, id)?.view)
+    }
+
+    fn kept_of(&self, machine: &Machine, listed: &Listed, id: u32) -> Option<&KnownView> {
         let mut known = shelf(&self.shelves, machine).iter();
-        known.find(|known| known.listed() == listed)?.view(id)
+        known.find(|known| known.listed() == listed)?.kept(id)
     }
 
     fn menu_did(&mut self, placed: Placed, did: Did) -> Asked {
@@ -4040,7 +4070,7 @@ impl Sidebar {
         let Some(found) = held.next() else {
             return Err(format!("worktree {worktree} is no longer listed"));
         };
-        let views = found.views.iter().filter_map(|(_, view)| keyed(view)).collect();
+        let views = found.views.iter().filter_map(|it| keyed(&it.view)).collect();
         Ok(Act::Worktree { worktree, views, seen: found.terminals.clone() })
     }
 
@@ -6119,7 +6149,7 @@ mod tests {
         let (project, terminal) = (session.project(), view.key());
         let known = sidebar.known_of(project).expect("luneta sits in a project it knows");
         let mut worktrees = known.worktrees.iter();
-        let home = worktrees.find(|it| it.views.iter().any(|(_, it)| keyed(it) == Some(terminal)));
+        let home = worktrees.find(|it| it.views.iter().any(|it| keyed(&it.view) == Some(terminal)));
         let worktree = home.expect("a worktree holds the view luneta sits on").place.worktree;
         let at = Sitting::Worktree { worktree, terminal: Some(terminal) };
         sidebar.sit(Seat { on: Machine::Local, project, at });
@@ -7161,7 +7191,7 @@ mod tests {
 
     #[test]
     fn what_a_shell_said_it_ran_is_read_as_it_comes() {
-        let said = |doing| ran(&Shell { doing: Some(doing) });
+        let said = |doing| ran(&Told::of(Some(&Shell { doing: Some(doing) })));
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
         let command = Said::new("make".to_owned()).unwrap();
         let make = Ran::Ended(menu::Ended { command, ending: Some(Ending::Exited(2)), at });
@@ -7179,7 +7209,8 @@ mod tests {
         let unsaid = Ended { command: None, ..untimed };
         assert_eq!(said(Doing::Ended(unsaid.clone())), Ran::EndedUnsaid);
         assert_eq!(said(Doing::Ended(Ended { at: None, ..unsaid })), Ran::Unknown);
-        assert_eq!(ran(&Shell { doing: None }), Ran::Unknown);
+        assert_eq!(ran(&Told::of(Some(&Shell { doing: None }))), Ran::Unknown);
+        assert_eq!(ran(&Told::of(None)), Ran::Unhooked);
         assert_eq!(said(Doing::Ready(())), Ran::Ready);
     }
 

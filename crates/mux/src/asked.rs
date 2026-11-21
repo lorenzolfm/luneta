@@ -66,14 +66,9 @@ impl Size {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Opens {
     pub cwd: String,
-    pub runs: Runs,
+    pub program: String,
+    pub args: Vec<String>,
     pub ends: Ends,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Runs {
-    Shell,
-    Program { program: String, args: Vec<String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,23 +86,18 @@ impl Opens {
         if !Path::new(&opens.cwd).is_absolute() {
             return Err(refused(&format!("{field}.cwd"), "is not an absolute path"));
         }
-        let runs = match present(&format!("{field}.runs"), opens.runs)? {
-            api::opens::Runs::Shell(api::Shell {}) => Runs::Shell,
-            api::opens::Runs::Program(api::Program { mut argv }) => {
-                let argv_field = format!("{field}.program.argv");
-                if argv.is_empty() {
-                    return Err(refused(&argv_field, "is empty"));
-                }
-                if argv[0].is_empty() {
-                    return Err(refused(&argv_field, "names no program"));
-                }
-                if argv.iter().any(|arg| arg.contains('\0')) {
-                    return Err(refused(&argv_field, "has a NUL"));
-                }
-                let program = argv.remove(0);
-                Runs::Program { program, args: argv }
-            },
+        let api::Program { argv } = present(&format!("{field}.program"), opens.program)?;
+        let argv_field = format!("{field}.program.argv");
+        let Some((program, args)) = argv.split_first() else {
+            return Err(refused(&argv_field, "is empty"));
         };
+        if program.is_empty() {
+            return Err(refused(&argv_field, "names no program"));
+        }
+        if argv.iter().any(|arg| arg.contains('\0')) {
+            return Err(refused(&argv_field, "has a NUL"));
+        }
+        let (program, args) = (program.clone(), args.to_vec());
         let ends = match api::Ends::try_from(opens.ends) {
             Ok(api::Ends::Closes) => Ends::Closes,
             Ok(api::Ends::Holds) => Ends::Holds,
@@ -115,7 +105,7 @@ impl Opens {
                 return Err(refused(&format!("{field}.ends"), "is not one of CLOSES or HOLDS"));
             },
         };
-        Ok(Opens { cwd: opens.cwd, runs, ends })
+        Ok(Opens { cwd: opens.cwd, program, args, ends })
     }
 }
 
@@ -512,18 +502,20 @@ mod tests {
 
     #[test]
     fn opens_needs_an_absolute_cwd_a_program_and_an_end() {
-        let opens = |cwd: &str, runs, ends: api::Ends| {
-            Opens::parse("opens", Some(api::Opens { cwd: cwd.to_owned(), runs, ends: ends.into() }))
+        let opens = |cwd: &str, program, ends: api::Ends| {
+            let ends = ends.into();
+            Opens::parse("opens", Some(api::Opens { cwd: cwd.to_owned(), program, ends }))
         };
-        let shell = Some(api::opens::Runs::Shell(api::Shell {}));
         let program = |argv: &[&str]| {
             let argv = argv.iter().map(|arg| (*arg).to_owned()).collect();
-            Some(api::opens::Runs::Program(api::Program { argv }))
+            Some(api::Program { argv })
         };
-        assert_eq!(opens("/", shell.clone(), api::Ends::Holds).unwrap().runs, Runs::Shell);
+        let shell = program(&["/bin/sh"]);
+        let opened = opens("/", program(&["ls", "-l"]), api::Ends::Holds).unwrap();
+        assert_eq!((opened.program.as_str(), opened.args), ("ls", vec!["-l".to_owned()]));
         let refused = [
             (opens("tmp", shell.clone(), api::Ends::Holds), "opens.cwd is not an absolute path"),
-            (opens("/", None, api::Ends::Holds), "opens.runs is missing"),
+            (opens("/", None, api::Ends::Holds), "opens.program is missing"),
             (opens("/", program(&[]), api::Ends::Holds), "opens.program.argv is empty"),
             (opens("/", program(&[""]), api::Ends::Holds), "opens.program.argv names no program"),
             (opens("/", program(&["ls", "a\0"]), api::Ends::Holds), "opens.program.argv has a NUL"),

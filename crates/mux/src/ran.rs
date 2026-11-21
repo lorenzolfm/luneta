@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
-use luneta_protocol::shell::{Ending, Front};
+use luneta_protocol::shell::{Doing, Ending, Front};
 
 use crate::api;
 use crate::marks::Mark;
@@ -150,26 +150,18 @@ impl Shell {
 
     #[must_use]
     pub fn said(&self) -> Option<api::Ran> {
-        use api::ran::{Ended, Going, Is, Ready, Stopped};
-        let is = match self.ran.as_ref()? {
-            Ran::Ready => Is::Ready(Ready {}),
-            Ran::Going(going) => Is::Going(Going {
-                command: command_line(going.command.as_ref()),
-                since: Some(going.since.into()),
-                front: going.front.to_mux().into(),
-            }),
-            Ran::Ended { command, at, ending, took } => Is::Ended(Ended {
-                command: command_line(command.as_ref()),
-                at: Some((*at).into()),
-                ending: ending.map(Ending::to_mux),
-                took: Some((*took).try_into().expect("a command ran for under 2^63 seconds")),
-            }),
-            Ran::Stopped { command, at } => {
-                let command = command_line(command.as_ref());
-                Is::Stopped(Stopped { command, at: Some((*at).into()) })
+        let doing = match self.ran.as_ref()? {
+            Ran::Ready => Doing::Ready,
+            Ran::Going(going) => {
+                let (command, since, front) = (going.command.clone(), going.since, going.front);
+                Doing::Going { command, since, front }
             },
+            Ran::Ended { command, at, ending, took } => {
+                Doing::Ended { command: command.clone(), at: *at, ending: *ending, took: *took }
+            },
+            Ran::Stopped { command, at } => Doing::Stopped { command: command.clone(), at: *at },
         };
-        Some(api::Ran { is: Some(is) })
+        Some(doing.to_mux())
     }
 }
 
@@ -178,10 +170,6 @@ impl Going {
         let took = now.instant.saturating_duration_since(self.started);
         Ran::Ended { command: self.command, at: now.at, ending, took }
     }
-}
-
-fn command_line(command: Option<&Said>) -> Option<String> {
-    command.map(|command| command.as_str().to_owned())
 }
 
 fn execs(line: &str) -> bool {

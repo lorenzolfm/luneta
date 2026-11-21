@@ -13,7 +13,7 @@ use rustix::process::{Resource, Rlimit};
 use rustix::pty::OpenptFlags;
 use rustix::termios::{self, InputModes, LocalModes, OptionalActions, Winsize};
 
-use crate::asked::{Opens, Runs, Size};
+use crate::asked::{Opens, Size};
 use crate::process::Group;
 
 pub const TERMINAL_VAR: &str = "LUNETA_MUX_TERMINAL";
@@ -99,16 +99,8 @@ impl Pty {
     }
 
     pub fn spawned(&self, opens: &Opens, vars: &[(&str, String)]) -> io::Result<Child> {
-        let mut command = match &opens.runs {
-            Runs::Shell => {
-                Command::new(std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()))
-            },
-            Runs::Program { program, args } => {
-                let mut command = Command::new(program);
-                command.args(args);
-                command
-            },
-        };
+        let mut command = Command::new(&opens.program);
+        command.args(&opens.args);
         command.current_dir(&opens.cwd);
         command.stdin(self.far.try_clone()?).stdout(self.far.try_clone()?);
         command.stderr(self.far.try_clone()?);

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs};
 
 use hyper_util::rt::TokioIo;
+use luneta_protocol::shell::Doing;
 use rustix::process::{Pid, Signal};
 use tokio::net::UnixStream;
 use tokio::runtime::{self, Runtime};
@@ -26,7 +27,6 @@ use crate::changes::Unchanged;
 use crate::client::Within;
 use crate::mux::{Failure, Runs};
 use crate::projects::{Line, Size, VIEWS_MAX};
-use crate::shells::Doing;
 use crate::{folder, log, release, Directory};
 
 pub const SOCKET: &str = "mux.sock";
@@ -323,15 +323,15 @@ fn mine(stream: UnixStream) -> io::Result<(UnixStream, Option<Pid>)> {
 }
 
 fn opens(cwd: &Directory, runs: Runs<'_>) -> api::Opens {
-    let program = |argv: Vec<String>| api::opens::Runs::Program(api::Program { argv });
-    let (runs, ends) = match runs {
-        Runs::Shell(shell) => (program(vec![shell.as_str().to_owned()]), api::Ends::Closes),
-        Runs::Command { program: first, args } => {
-            let argv = std::iter::once(first.to_owned()).chain(args.iter().cloned()).collect();
-            (program(argv), api::Ends::Holds)
+    let (argv, ends) = match runs {
+        Runs::Shell(shell) => (vec![shell.as_str().to_owned()], api::Ends::Closes),
+        Runs::Command { program, args } => {
+            let argv = std::iter::once(program.to_owned()).chain(args.iter().cloned()).collect();
+            (argv, api::Ends::Holds)
         },
     };
-    api::Opens { cwd: cwd.as_str().to_owned(), runs: Some(runs), ends: ends.into() }
+    let program = Some(api::Program { argv });
+    api::Opens { cwd: cwd.as_str().to_owned(), program, ends: ends.into() }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -423,19 +423,13 @@ pub struct Terminal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Is {
     Ended,
-    Running { root: u32, front: Option<Foreground>, word: Option<Word>, doing: Option<Doing> },
+    Running { root: u32, front: Option<Foreground>, doing: Option<Doing> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Foreground {
     pub pid: u32,
     pub argv: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Word {
-    Prompts,
-    Going(Option<String>),
 }
 
 fn terminals(listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>, Vec<String>) {
@@ -460,7 +454,6 @@ fn terminals(listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>, Vec<Str
 }
 
 fn terminal_of(terminal: api::Terminal) -> Result<(Terminal, Option<String>), String> {
-    use api::ran::Is as Said;
     let key = TerminalKey::read(terminal.key)?;
     let size = terminal.size.map(|size| Size::of(size.columns, size.rows));
     let size = size.transpose().map_err(|why| format!("terminal {}'s size: {why}", key.id))?;
@@ -471,19 +464,14 @@ fn terminal_of(terminal: api::Terminal) -> Result<(Terminal, Option<String>), St
         Some(api::terminal::Program::Runs(runs)) => {
             let front = runs.foreground;
             let front = front.map(|front| Foreground { pid: front.pid, argv: front.argv });
-            let said = runs.ran.and_then(|ran| ran.is);
-            let doing = match said.as_ref().map(Doing::of_mux).transpose() {
+            let doing = match runs.ran.as_ref().map(Doing::of_mux).transpose() {
                 Ok(doing) => doing,
                 Err(why) => {
                     unsaid = Some(why);
                     None
                 },
             };
-            let word = said.map(|is| match is {
-                Said::Ready(_) | Said::Ended(_) | Said::Stopped(_) => Word::Prompts,
-                Said::Going(going) => Word::Going(going.command),
-            });
-            Is::Running { root: runs.pid, front, word, doing }
+            Is::Running { root: runs.pid, front, doing }
         },
     };
     let (tag, cwd, title) = (terminal.tag, terminal.cwd, terminal.title);
@@ -798,26 +786,28 @@ mod tests {
         let since = Some(prost_types::Timestamp { seconds: 90, nanos: 0 });
         let working = api::Front::Working.into();
         let unsaid = Going { command: None, since, front: working };
+        let said = |is| Some(api::Ran { is: Some(is) });
         let shells = [
-            Some(Said::Ready(Ready {})),
+            said(Said::Ready(Ready {})),
             None,
-            Some(Said::Going(Going { front: api::Front::Unspecified.into(), ..unsaid.clone() })),
-            Some(Said::Going(Going { command: Some(String::new()), ..unsaid.clone() })),
-            Some(Said::Stopped(Stopped { command: Some("vim".to_owned()), at: None })),
-            Some(Said::Going(unsaid)),
+            said(Said::Going(Going { front: api::Front::Unspecified.into(), ..unsaid.clone() })),
+            said(Said::Going(Going { command: Some(String::new()), ..unsaid.clone() })),
+            said(Said::Stopped(Stopped { command: Some("vim".to_owned()), at: None })),
+            Some(api::Ran { is: None }),
+            said(Said::Going(unsaid)),
         ];
         let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
-        let listed = (1..).zip(shells).map(|(id, is)| api::Terminal {
+        let listed = (1..).zip(shells).map(|(id, ran)| api::Terminal {
             key: Some(api::TerminalKey { id, made_at }),
             program: Some(api::terminal::Program::Runs(api::Running {
                 pid: 70,
                 foreground: None,
-                ran: is.map(|is| api::Ran { is: Some(is) }),
+                ran,
             })),
             ..api::Terminal::default()
         });
         let (terminals, unread, unsaid) = super::terminals(listed.collect());
-        assert_eq!((terminals.len(), unread.len(), unsaid.len()), (6, 0, 3), "{unsaid:?}");
+        assert_eq!((terminals.len(), unread.len(), unsaid.len()), (7, 0, 4), "{unsaid:?}");
         let doings: Vec<(u32, Option<&Doing>)> = terminals
             .iter()
             .map(|terminal| match &terminal.is {
@@ -830,9 +820,9 @@ mod tests {
             since: SystemTime::UNIX_EPOCH + Duration::from_secs(90),
             front: Front::Working,
         };
-        let unread = [(3, None), (4, None), (5, None)];
+        let unread = [(3, None), (4, None), (5, None), (6, None)];
         let read = [(1, Some(&Doing::Ready)), (2, None)];
-        assert_eq!(doings, [&read[..], &unread[..], &[(6, Some(&going))]].concat());
+        assert_eq!(doings, [&read[..], &unread[..], &[(7, Some(&going))]].concat());
     }
 
     #[test]

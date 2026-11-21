@@ -45,7 +45,6 @@ impl Server {
         let runtime = tempfile::tempdir().unwrap();
         command
             .arg(runtime.path().join("luneta"))
-            .env("SHELL", "/bin/sh")
             .env("ZELLIJ", "0")
             .env("ZELLIJ_SESSION_NAME", "theirs")
             .env("ZELLIJ_PANE_ID", "7")
@@ -122,7 +121,7 @@ impl Drop for Server {
 pub fn shell() -> api::Opens {
     api::Opens {
         cwd: "/".to_owned(),
-        runs: Some(api::opens::Runs::Shell(api::Shell {})),
+        program: Some(api::Program { argv: vec!["/bin/sh".to_owned()] }),
         ends: api::Ends::Closes.into(),
     }
 }
@@ -131,7 +130,7 @@ pub fn script(script: &str, ends: api::Ends) -> api::Opens {
     let argv = ["/bin/sh", "-c", script].map(str::to_owned).to_vec();
     api::Opens {
         cwd: "/".to_owned(),
-        runs: Some(api::opens::Runs::Program(api::Program { argv })),
+        program: Some(api::Program { argv }),
         ends: ends.into(),
     }
 }

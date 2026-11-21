@@ -7,13 +7,14 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use luneta_protocol::shell::Doing;
 use tokio::sync::{mpsc as answers, oneshot};
 use tonic::Status;
 
 use crate::agent::Agent;
 use crate::api::{self, show_request, show_response};
 use crate::core::{self, Command as Core, Located, Shown};
-use crate::mux::own::server::{self, Is, Terminals, TerminalsListed, Word};
+use crate::mux::own::server::{self, Is, Terminals, TerminalsListed};
 use crate::mux::own::TerminalKey;
 use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
@@ -24,7 +25,7 @@ use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View
 use crate::projects::{Holds, ProjectName, Spot, Worktree};
 use crate::projects::{WorktreeId, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
 use crate::projects::{self, quoted, Argv, Arranged, Opens, Subfolder, WORKTREES_MAX};
-use crate::shells::{Doing, Shell};
+use crate::shells::Shell;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
 use crate::{shells, Directory};
@@ -1728,7 +1729,7 @@ fn pasted(is: Option<&Is>, due: Instant, by: Instant, now: Instant) -> Paste {
     if runs_in_front(is) {
         return if now >= by { Paste::Never } else { Paste::Later };
     }
-    let prompts = matches!(is, Is::Running { word: Some(Word::Prompts), .. });
+    let prompts = matches!(is, Is::Running { doing: Some(Doing::Ready), .. });
     if prompts || now >= due { Paste::Now } else { Paste::Later }
 }
 
@@ -1747,9 +1748,8 @@ fn ran(is: &Is) -> bool {
 
 fn runs_in_front(is: &Is) -> bool {
     match is {
-        Is::Running { root, front, word, doing } => {
-            matches!(word, Some(Word::Going(_)))
-                || matches!(doing, Some(Doing::Going { .. }))
+        Is::Running { root, front, doing } => {
+            matches!(doing, Some(Doing::Going { .. }))
                 || front.as_ref().is_some_and(|it| it.pid != *root)
         },
         Is::Ended => false,
@@ -1911,7 +1911,7 @@ fn laid(
 }
 
 fn runs_of(listed: &server::Terminal, agents: &[Agent], before: &Runs, shell: &Shell) -> Runs {
-    let Is::Running { root, front, word, .. } = &listed.is else {
+    let Is::Running { root, front, doing } = &listed.is else {
         return before.clone();
     };
     if let Some(front) = front
@@ -1920,13 +1920,13 @@ fn runs_of(listed: &server::Terminal, agents: &[Agent], before: &Runs, shell: &S
     {
         return Runs::Agent { harness: agent.harness, session };
     }
-    match (word, front) {
-        (Some(Word::Prompts), _) => Runs::Shell,
-        (Some(Word::Going(Some(command))), _) => runs_line(command),
+    match (doing, front) {
+        (Some(Doing::Ready | Doing::Ended { .. } | Doing::Stopped { .. }), _) => Runs::Shell,
+        (Some(Doing::Going { command: Some(command), .. }), _) => runs_line(command.as_str()),
         (_, Some(front)) if front.pid != *root => runs_line(&quoted(&front.argv)),
         (_, Some(front)) if is_shell(&front.argv, shell) => Runs::Shell,
         (_, Some(front)) => runs_line(&quoted(&front.argv)),
-        (Some(Word::Going(None)) | None, None) => before.clone(),
+        (Some(Doing::Going { command: None, .. }) | None, None) => before.clone(),
     }
 }
 
@@ -1967,9 +1967,11 @@ fn is_shell_option(word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::time::SystemTime;
 
     use luneta_protocol::said::Said;
+    use luneta_protocol::shell::Front;
 
     use super::*;
     use crate::agent::{Harness, Status};
@@ -1982,12 +1984,17 @@ mod tests {
         server::Terminal { key, tag, size: None, cwd, title, is }
     }
 
-    fn running(front: Option<(u32, &[&str])>, word: Option<Word>) -> server::Terminal {
+    fn running(front: Option<(u32, &[&str])>, doing: Option<Doing>) -> server::Terminal {
         let front = front.map(|(pid, argv)| Foreground {
             pid,
             argv: argv.iter().map(|word| (*word).to_owned()).collect(),
         });
-        listed(Is::Running { root: 10, front, word, doing: None })
+        listed(Is::Running { root: 10, front, doing })
+    }
+
+    fn going(command: Option<&str>) -> Doing {
+        let command = command.and_then(|command| Said::new(command.to_owned()));
+        Doing::Going { command, since: SystemTime::UNIX_EPOCH, front: Front::Working }
     }
 
     fn agent(pid: u32) -> Agent {
@@ -2009,11 +2016,6 @@ mod tests {
         Runs::Command(Line::parse(line).unwrap())
     }
 
-    fn doing(word: Word, doing: Doing) -> server::Terminal {
-        let front = Some(Foreground { pid: 10, argv: vec!["fish".to_owned()] });
-        listed(Is::Running { root: 10, front, word: Some(word), doing: Some(doing) })
-    }
-
     fn ended_ls() -> Doing {
         let command = Said::new("ls".to_owned());
         let at = SystemTime::UNIX_EPOCH;
@@ -2029,17 +2031,18 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("xonsh");
         fs::write(&path, "").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         let shell = Shell::of(path.into_os_string()).unwrap();
         let before = command("htop");
         let of = |listed: &server::Terminal, agents: &[Agent]| {
             runs_of(listed, agents, &before, &shell)
         };
-        let claude = running(Some((20, &["claude"])), Some(Word::Going(Some("claude".into()))));
+        let claude = running(Some((20, &["claude"])), Some(going(Some("claude"))));
         let session = Session::parse("7c22-ab").unwrap();
         let agent_runs = Runs::Agent { harness: Harness::ClaudeCode, session };
         assert_eq!(of(&claude, &[agent(20)]), agent_runs);
         assert_eq!(of(&claude, &[agent(21)]), command("claude"));
-        assert_eq!(of(&running(Some((10, &["fish"])), Some(Word::Prompts)), &[]), Runs::Shell);
+        assert_eq!(of(&running(Some((10, &["fish"])), Some(Doing::Ready)), &[]), Runs::Shell);
         let vim = running(Some((20, &["vim", "notes"])), None);
         assert_eq!(of(&vim, &[]), command("vim notes"));
         assert_eq!(of(&running(Some((10, &["-bash"])), None), &[]), Runs::Shell);
@@ -2048,7 +2051,7 @@ mod tests {
         let kanban = running(Some((10, &["luneta", "kanban"])), None);
         assert_eq!(of(&kanban, &[]), command("luneta kanban"));
         assert_eq!(of(&running(None, None), &[]), before);
-        assert_eq!(of(&running(None, Some(Word::Going(None))), &[]), before);
+        assert_eq!(of(&running(None, Some(going(None))), &[]), before);
         assert_eq!(of(&listed(Is::Ended), &[agent(20)]), before);
         let long = "é".repeat(LINE_BYTES_MAX);
         let too_long = running(Some((20, &[long.as_str()])), None);
@@ -2071,12 +2074,12 @@ mod tests {
         let unrun = Runs::Unrun(line.clone());
         let now = Instant::now();
         let typing = Restored::Typing { line, due: now, by: now };
-        let prompts = running(Some((10, &["fish"])), Some(Word::Prompts));
+        let prompts = running(Some((10, &["fish"])), Some(Doing::Ready));
         let started = running(Some((10, &["fish"])), None);
-        let going = running(Some((10, &["fish"])), Some(Word::Going(Some("ls".into()))));
+        let going = running(Some((10, &["fish"])), Some(going(Some("ls"))));
         let vim = running(Some((20, &["vim"])), None);
         let ended = listed(Is::Ended);
-        let ran_ls = doing(Word::Prompts, ended_ls());
+        let ran_ls = running(Some((10, &["fish"])), Some(ended_ls()));
         for is in [&prompts, &started, &going, &vim, &ended, &ran_ls] {
             assert!(!keeps(None, &shell, &is.is, &shell), "{is:?}");
             assert!(!keeps(None, &command("make test"), &is.is, &shell), "{is:?}");
@@ -2141,11 +2144,11 @@ mod tests {
         let start = Instant::now();
         let (due, by) = (start + TYPING_WAIT, start + TYPING_WAIT_MAX);
         let (early, late, too_late) = (start, due, by);
-        let prompts = running(Some((10, &["fish"])), Some(Word::Prompts));
+        let prompts = running(Some((10, &["fish"])), Some(Doing::Ready));
         let quiet = running(Some((10, &["bash"])), None);
         let vim = running(Some((20, &["vim"])), None);
-        let going = running(Some((10, &["fish"])), Some(Word::Going(Some("vim".into()))));
-        let ran_ls = doing(Word::Prompts, ended_ls());
+        let going = running(Some((10, &["fish"])), Some(going(Some("vim"))));
+        let ran_ls = running(Some((10, &["fish"])), Some(ended_ls()));
         let ended = listed(Is::Ended);
         let at = |is: Option<&server::Terminal>, now| pasted(is.map(|it| &it.is), due, by, now);
         assert_eq!(at(Some(&prompts), early), Paste::Now, "a prompt is waited for");

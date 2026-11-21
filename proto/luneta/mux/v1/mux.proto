@@ -61,14 +61,9 @@ message InfoResponse {
 
 message Opens {
   string cwd = 1;
-  oneof runs {
-    Shell shell = 2;
-    Program program = 3;
-  }
-  Ends ends = 4;
+  Program program = 2;
+  Ends ends = 3;
 }
-
-message Shell {}
 
 message Program {
   repeated string argv = 1;
