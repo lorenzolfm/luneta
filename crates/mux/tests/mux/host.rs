@@ -19,11 +19,6 @@ use tower::service_fn;
 
 pub const LUNETA_MUX: &str = env!("CARGO_BIN_EXE_luneta-mux");
 
-#[cfg(target_os = "linux")]
-const PS: &str = "ps";
-#[cfg(target_os = "macos")]
-const PS: &str = "/bin/ps";
-
 pub fn run<F: Future<Output = ()>>(test: F) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(test);
@@ -77,10 +72,21 @@ impl Server {
         Server { child, runtime }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn resident_kib(&self) -> u64 {
         let pid = self.child.id().to_string();
-        let listed = Command::new(PS).args(["-o", "rss=", "-p", &pid]).output().unwrap();
+        let listed = Command::new("ps").args(["-o", "rss=", "-p", &pid]).output().unwrap();
         String::from_utf8(listed.stdout).unwrap().trim().parse().unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn resident_kib(&self) -> u64 {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        let mut system = System::new();
+        let pid = Pid::from_u32(self.child.id());
+        let memory = ProcessRefreshKind::nothing().with_memory();
+        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, memory);
+        system.process(pid).unwrap().memory() / 1024
     }
 
     pub fn socket(&self) -> PathBuf {

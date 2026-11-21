@@ -1398,6 +1398,7 @@ dependencies = [
  "prost",
  "prost-types",
  "rustix",
+ "sysinfo",
  "tempfile",
  "tokio",
  "tokio-stream",

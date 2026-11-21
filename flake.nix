@@ -173,10 +173,8 @@
               pkgs.git
               pkgs.nodejs
               pkgs.openssh
-            ]
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ];
-
-            doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
+              pkgs.procps
+            ];
           };
 
           daemonDeps = craneLib.buildDepsOnly daemon;
@@ -191,6 +189,7 @@
 
                 NEXTEST_SHOW_PROGRESS = "counter";
                 checkPhaseCargoCommand = ''
+                  export PATH="${localToolchain}/bin:$PATH"
                   ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
                     --test-threads "$NIX_BUILD_CORES"
                   cargoWithProfile test --doc --locked ${testRun}

@@ -1,5 +1,6 @@
 use std::env;
 use std::ffi::OsString;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use luneta_protocol::said::Said;
@@ -67,9 +68,15 @@ pub fn your_shell() -> OsString {
     shell(login_shell(), env::var_os(SHELL_VAR))
 }
 
+const REFUSING: [&str; 2] = ["nologin", "false"];
+
 fn shell(login: Option<OsString>, named: Option<OsString>) -> OsString {
     let some = |shell: &OsString| !shell.is_empty();
-    login.filter(some).or_else(|| named.filter(some)).unwrap_or_else(|| NO_SHELL.into())
+    let opens = |shell: &OsString| {
+        let name = Path::new(shell).file_name().and_then(|name| name.to_str());
+        some(shell) && !name.is_some_and(|name| REFUSING.contains(&name))
+    };
+    login.filter(opens).or_else(|| named.filter(some)).unwrap_or_else(|| NO_SHELL.into())
 }
 
 fn login_shell() -> Option<OsString> {
@@ -90,5 +97,15 @@ mod tests {
         assert_eq!(shell(Some(OsString::new()), bash()), "/bin/bash");
         assert_eq!(shell(None, Some(OsString::new())), "/bin/sh");
         assert_eq!(shell(None, None), "/bin/sh");
+    }
+
+    #[test]
+    fn a_login_shell_that_refuses_logins_is_no_shell() {
+        let bash = || Some("/bin/bash".into());
+        for refusing in ["/sbin/nologin", "/usr/sbin/nologin", "/usr/bin/false", "/bin/false"] {
+            assert_eq!(shell(Some(refusing.into()), bash()), "/bin/bash", "{refusing}");
+            assert_eq!(shell(Some(refusing.into()), None), "/bin/sh", "{refusing}");
+        }
+        assert_eq!(shell(Some("/opt/nologin-not/fish".into()), bash()), "/opt/nologin-not/fish");
     }
 }
