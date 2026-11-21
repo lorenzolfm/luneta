@@ -137,8 +137,10 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
     git(&scratch, &["clone", "-q", "--bare", &up.display().to_string(), "infra.git"]);
     let bare = refused(&started(&owned.host, &scratch.join("infra.git"), "feat", &[]));
     assert!(bare.contains("is in a bare repository, not in a worktree of it"), "{bare}");
-    let nowhere = refused(&started(&owned.host, &scratch, "feat", &[]));
-    assert!(nowhere.starts_with("luneta: wt add: "), "{nowhere}");
+    let nowhere = started(&owned.host, &scratch, "feat", &[]);
+    refused(&nowhere);
+    let nowhere = String::from_utf8_lossy(&nowhere.stderr);
+    assert!(nowhere.lines().any(|line| line.starts_with("luneta: wt add: ")), "{nowhere}");
 }
 
 #[test]

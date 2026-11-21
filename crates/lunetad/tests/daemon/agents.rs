@@ -122,7 +122,7 @@ pub fn hidden() -> Hidden {
 
 #[cfg(target_os = "macos")]
 pub fn hidden() -> Hidden {
-    let listed = Command::new("/bin/ps").args(["-axo", "pid=,uid="]).output().unwrap();
+    let listed = Command::new("ps").args(["-axo", "pid=,uid="]).output().unwrap();
     let listed = String::from_utf8(listed.stdout).unwrap();
     let root_s = listed.lines().filter_map(|line| {
         let mut fields = line.split_whitespace();
@@ -141,7 +141,7 @@ fn started(pid: u32) -> String {
 
 #[cfg(target_os = "macos")]
 fn started(pid: u32) -> String {
-    let output = Command::new("/bin/ps")
+    let output = Command::new("ps")
         .env("LC_ALL", "C")
         .env("TZ", "UTC")
         .args(["-o", "lstart=", "-p"])
