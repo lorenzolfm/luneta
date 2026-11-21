@@ -78,6 +78,11 @@ impl Lasted {
     pub fn is_under(self, span: Duration) -> bool {
         self.0 < span
     }
+
+    #[must_use]
+    pub fn beyond(self, other: Lasted) -> Duration {
+        self.0.saturating_sub(other.0)
+    }
 }
 
 impl Debug for Lasted {

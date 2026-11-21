@@ -204,7 +204,8 @@ pub fn watch(dirs: &[&Path], events: Sender<Event>) -> notify::Result<Recommende
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
-    use std::time::Duration;
+
+    use luneta_waits::{QUIET, Span, never, seen_within};
 
     use super::*;
 
@@ -316,16 +317,17 @@ mod tests {
         let mut here = within(scratch.path());
         let (events, heard) = mpsc::channel();
         let _watcher = watch(&here.dirs(), events).unwrap();
-        while heard.recv_timeout(Duration::from_millis(200)).is_ok() {}
+        while seen_within(const { Span::of(QUIET) }, || heard.try_recv().ok()).is_some() {}
         here.reload();
-        assert!(heard.recv_timeout(Duration::from_millis(200)).is_err());
+        never("a reload here is heard as a change", || heard.try_recv().ok().map(drop));
 
         within(scratch.path()).set(project(1), true);
-        assert!(matches!(heard.recv_timeout(Duration::from_secs(5)), Ok(Event::Folds)));
+        assert!(matches!(luneta_waits::heard("a fold made elsewhere", &heard), Event::Folds));
         assert!(here.reload() && here.contains(project(1)));
         let vps = Machine::Remote("vps".parse().unwrap());
         within(scratch.path()).set(Fold::Worktree(&vps, WorktreeId::of(2).unwrap()), true);
-        assert!(matches!(heard.recv_timeout(Duration::from_secs(5)), Ok(Event::Folds)));
+        let far = luneta_waits::heard("a fold made on another machine", &heard);
+        assert!(matches!(far, Event::Folds));
         let two = WorktreeId::of(2).unwrap();
         assert!(here.reload() && here.contains(Fold::Worktree(&vps, two)));
     }

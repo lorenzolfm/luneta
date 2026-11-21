@@ -210,7 +210,7 @@ mod tests {
         let (events, heard) = std::sync::mpsc::channel();
         let no_use = || Err("this machine has no speakers".to_owned());
         let _asking = fetch(&[PIN], &events, Event::VoiceFetched, no_use);
-        let Ok(Event::VoiceFetched(fetched)) = heard.recv_timeout(Duration::from_secs(10)) else {
+        let Event::VoiceFetched(fetched) = luneta_waits::heard("how the fetch went", &heard) else {
             panic!("it says how the fetch went");
         };
         let why = "this machine has no speakers".to_owned();

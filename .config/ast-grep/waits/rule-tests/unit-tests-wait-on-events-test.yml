@@ -1,0 +1,22 @@
+id: unit-tests-wait-on-events
+valid:
+  - "fn f() { thread::sleep(PAUSE); }"
+  - "#[cfg(test)] fn f() {} mod later { fn g() { thread::sleep(d); } }"
+  - "#[cfg(not(test))] mod tests { fn f() { thread::sleep(d); } }"
+  - "#[cfg(test)] mod tests { fn f() { luneta_waits::eventually(\"a\", || Some(())); } }"
+  - "#[cfg(test)] mod tests { fn f() { g(Duration::from_secs(1), Instant::now()); } }"
+  - "#[cfg(test)] mod tests { fn f() { let began = Began::now(); began.lasted().at_least(GRACE, \"a\"); } }"
+  - "#[cfg(test)] mod tests { fn f() { let sleeps = Command::new(\"sleep\"); } }"
+invalid:
+  - "#[cfg(test)] mod tests { fn f() { thread::sleep(d); } }"
+  - "#[cfg(test)] mod tests { fn f() { std::thread::sleep(d); } }"
+  - "#[cfg(test)] mod tests { async fn f() { tokio::time::sleep(d).await; } }"
+  - "#[cfg(test)] mod tests { async fn f() { tokio::time::timeout(d, g()).await; } }"
+  - "#[cfg(test)] mod tests { use std::thread::sleep; }"
+  - "#[cfg(test)] mod tests { fn f() { heard.recv_timeout(d); } }"
+  - "#[cfg(test)] mod tests { fn f() { let _ = Receiver::recv_timeout(&heard, d); } }"
+  - "#[cfg(test)] mod tests { fn f() { std::thread::park_timeout(d); } }"
+  - "#[cfg(test)] mod tests { fn f() { done.wait_timeout(held, d); } }"
+  - "#[cfg(test)] mod tests { fn f() { assert!(began.elapsed() < QUIET); } }"
+  - "#[cfg(test)] mod tests { mod inner { fn f() { thread::sleep(d); } } }"
+  - "#[cfg(test)] #[expect(clippy::unwrap_used)] mod tests { fn f() { thread::sleep(d); } }"
