@@ -318,13 +318,15 @@ mod tests {
         let (events, heard) = mpsc::channel();
         let _watcher = watch(&here.dirs(), events).unwrap();
         let quiet = || seen_within(const { Span::of(QUIET) }, || heard.try_recv().ok()).is_none();
-        eventually("the watch goes quiet", || quiet().then_some(()));
+        let settles = || eventually("the watch goes quiet", || quiet().then_some(()));
+        settles();
         here.reload();
         never("a reload here is heard as a change", || heard.try_recv().ok().map(drop));
 
         within(scratch.path()).set(project(1), true);
         assert!(matches!(luneta_waits::heard("a fold made elsewhere", &heard), Event::Folds));
         assert!(here.reload() && here.contains(project(1)));
+        settles();
         let vps = Machine::Remote("vps".parse().unwrap());
         within(scratch.path()).set(Fold::Worktree(&vps, WorktreeId::of(2).unwrap()), true);
         let far = luneta_waits::heard("a fold made on another machine", &heard);

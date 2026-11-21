@@ -1,170 +1,116 @@
 id: unit-tests-wait-on-events
 snapshots:
-  "#[cfg(test)] #[expect(clippy::unwrap_used)] mod tests { fn f() { thread::sleep(d); } }":
-    labels:
-    - source: sleep
-      style: primary
-      start: 73
-      end: 78
-    - source: "#[cfg(test)]"
-      style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { fn f() { thread::sleep(d); } }
-      style: secondary
-      start: 44
-      end: 86
-  "#[cfg(test)] mod tests { async fn f() { tokio::time::sleep(d).await; } }":
+  '#[cfg(all(test, unix))] mod tests { fn f() { thread::sleep(d); } }':
     labels:
     - source: sleep
       style: primary
       start: 53
       end: 58
-    - source: "#[cfg(test)]"
-      style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { async fn f() { tokio::time::sleep(d).await; } }
-      style: secondary
-      start: 13
-      end: 72
-  "#[cfg(test)] mod tests { async fn f() { tokio::time::timeout(d, g()).await; } }":
+  '#[cfg(all(unix, test))] mod tests { fn f() { thread::sleep(d); } }':
+    labels:
+    - source: sleep
+      style: primary
+      start: 53
+      end: 58
+  '#[cfg(test)] #[expect(clippy::unwrap_used)] mod tests { fn f() { thread::sleep(d); } }':
+    labels:
+    - source: sleep
+      style: primary
+      start: 73
+      end: 78
+  '#[cfg(test)] mod tests { async fn f() { tokio::time::sleep(d).await; } }':
+    labels:
+    - source: sleep
+      style: primary
+      start: 53
+      end: 58
+  '#[cfg(test)] mod tests { async fn f() { tokio::time::timeout(d, g()).await; } }':
     labels:
     - source: timeout
       style: primary
       start: 53
       end: 60
-    - source: "#[cfg(test)]"
-      style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { async fn f() { tokio::time::timeout(d, g()).await; } }
-      style: secondary
-      start: 13
-      end: 79
-  "#[cfg(test)] mod tests { fn f() { assert!(began.elapsed() < QUIET); } }":
+  '#[cfg(test)] mod tests { fn f() { assert!(began.elapsed() < QUIET); } }':
     labels:
     - source: elapsed
       style: primary
       start: 48
       end: 55
-    - source: "#[cfg(test)]"
-      style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { fn f() { assert!(began.elapsed() < QUIET); } }
-      style: secondary
-      start: 13
-      end: 71
-  "#[cfg(test)] mod tests { fn f() { done.wait_timeout(held, d); } }":
+  '#[cfg(test)] mod tests { fn f() { done.wait_timeout(held, d); } }':
     labels:
     - source: wait_timeout
       style: primary
       start: 39
       end: 51
-    - source: "#[cfg(test)]"
-      style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { fn f() { done.wait_timeout(held, d); } }
-      style: secondary
-      start: 13
-      end: 65
-  "#[cfg(test)] mod tests { fn f() { heard.recv_timeout(d); } }":
+  '#[cfg(test)] mod tests { fn f() { heard.recv_timeout(d); } }':
     labels:
     - source: recv_timeout
       style: primary
       start: 40
       end: 52
-    - source: "#[cfg(test)]"
-      style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { fn f() { heard.recv_timeout(d); } }
-      style: secondary
-      start: 13
-      end: 60
-  "#[cfg(test)] mod tests { fn f() { let _ = Receiver::recv_timeout(&heard, d); } }":
+  '#[cfg(test)] mod tests { fn f() { let _ = Receiver::recv_timeout(&heard, d); } }':
     labels:
     - source: recv_timeout
       style: primary
       start: 52
       end: 64
-    - source: "#[cfg(test)]"
+  '#[cfg(test)] mod tests { fn f() { loop { if deadline <= std::time::Instant::now() { break; } } } }':
+    labels:
+    - source: deadline <= std::time::Instant::now()
+      style: primary
+      start: 44
+      end: 81
+    - source: loop { if deadline <= std::time::Instant::now() { break; } }
       style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { fn f() { let _ = Receiver::recv_timeout(&heard, d); } }
+      start: 34
+      end: 94
+  '#[cfg(test)] mod tests { fn f() { loop { let left = deadline.saturating_duration_since(Instant::now()); } } }':
+    labels:
+    - source: saturating_duration_since
+      style: primary
+      start: 61
+      end: 86
+    - source: loop { let left = deadline.saturating_duration_since(Instant::now()); }
       style: secondary
-      start: 13
-      end: 80
-  "#[cfg(test)] mod tests { fn f() { std::thread::park_timeout(d); } }":
+      start: 34
+      end: 105
+  '#[cfg(test)] mod tests { fn f() { std::thread::park_timeout(d); } }':
     labels:
     - source: park_timeout
       style: primary
       start: 47
       end: 59
-    - source: "#[cfg(test)]"
-      style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { fn f() { std::thread::park_timeout(d); } }
-      style: secondary
-      start: 13
-      end: 67
-  "#[cfg(test)] mod tests { fn f() { std::thread::sleep(d); } }":
+  '#[cfg(test)] mod tests { fn f() { std::thread::sleep(d); } }':
     labels:
     - source: sleep
       style: primary
       start: 47
       end: 52
-    - source: "#[cfg(test)]"
-      style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { fn f() { std::thread::sleep(d); } }
-      style: secondary
-      start: 13
-      end: 60
-  "#[cfg(test)] mod tests { fn f() { thread::sleep(d); } }":
+  '#[cfg(test)] mod tests { fn f() { thread::sleep(d); } }':
     labels:
     - source: sleep
       style: primary
       start: 42
       end: 47
-    - source: "#[cfg(test)]"
+  '#[cfg(test)] mod tests { fn f() { while Instant::now() < deadline { g(); } } }':
+    labels:
+    - source: Instant::now() < deadline
+      style: primary
+      start: 40
+      end: 65
+    - source: while Instant::now() < deadline { g(); }
       style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { fn f() { thread::sleep(d); } }
-      style: secondary
-      start: 13
-      end: 55
-  "#[cfg(test)] mod tests { mod inner { fn f() { thread::sleep(d); } } }":
+      start: 34
+      end: 74
+  '#[cfg(test)] mod tests { mod inner { fn f() { thread::sleep(d); } } }':
     labels:
     - source: sleep
       style: primary
       start: 54
       end: 59
-    - source: "#[cfg(test)]"
-      style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { mod inner { fn f() { thread::sleep(d); } } }
-      style: secondary
-      start: 13
-      end: 69
-  "#[cfg(test)] mod tests { use std::thread::sleep; }":
+  '#[cfg(test)] mod tests { use std::thread::sleep; }':
     labels:
     - source: sleep
       style: primary
       start: 42
       end: 47
-    - source: "#[cfg(test)]"
-      style: secondary
-      start: 0
-      end: 12
-    - source: mod tests { use std::thread::sleep; }
-      style: secondary
-      start: 13
-      end: 50

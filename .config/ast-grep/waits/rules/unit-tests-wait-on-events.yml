@@ -14,12 +14,16 @@ rule:
           regex: ^(sleep|sleep_ms|sleep_until|timeout|timeout_at|interval|interval_at|park_timeout|park_timeout_ms|recv_timeout|recv_deadline|wait_timeout|wait_timeout_ms|wait_timeout_while|elapsed)$
         - kind: field_identifier
           regex: ^(recv_timeout|recv_deadline|wait_timeout|wait_timeout_ms|wait_timeout_while|park_timeout|elapsed)$
-    - inside:
-        stopBy: end
-        kind: mod_item
-        follows:
-          stopBy:
-            not:
-              kind: attribute_item
-          kind: attribute_item
-          regex: ^#\[cfg\(test\)\]$
+        - all:
+            - any:
+                - kind: binary_expression
+                  regex: Instant::now\(\)\s*[<>]|[<>]=?\s*(\w+::)*Instant::now\(\)
+                - kind: field_identifier
+                  regex: ^(duration_since|saturating_duration_since|checked_duration_since)$
+            - inside:
+                stopBy: end
+                any:
+                  - kind: loop_expression
+                  - kind: while_expression
+                  - kind: for_expression
+    - matches: in-a-test-module

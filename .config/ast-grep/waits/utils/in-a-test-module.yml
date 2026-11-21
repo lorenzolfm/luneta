@@ -1,0 +1,12 @@
+id: in-a-test-module
+language: rust
+rule:
+  inside:
+    stopBy: end
+    kind: mod_item
+    follows:
+      stopBy:
+        not:
+          kind: attribute_item
+      kind: attribute_item
+      regex: ^#\[cfg\((test|all\((.+, *)?test(, *.+)?\))\)\]$

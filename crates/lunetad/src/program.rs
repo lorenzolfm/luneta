@@ -300,7 +300,7 @@ fn in_thread<T: Send + 'static>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::Cell;
     use std::fs::{self, File, TryLockError};
     use std::os::unix::process::ExitStatusExt;
@@ -316,6 +316,37 @@ mod tests {
         Ran, SAID_MAX, alone, run, run_alone, run_reading, run_tail, run_up_to, run_while,
         run_while_reading, saying,
     };
+
+    pub(crate) const OUTLASTING: Duration = PATIENCE.saturating_mul(2);
+
+    const _: () = assert!(OUTLASTING.subsec_nanos() == 0, "sleep is told whole seconds");
+
+    const UNWANTED_AT: u32 = 3;
+
+    pub(crate) fn outlasting_patience() -> Command {
+        let mut sleeps = Command::new("sleep");
+        sleeps.arg(OUTLASTING.as_secs().to_string());
+        sleeps
+    }
+
+    pub(crate) fn given_up<T: Send + 'static>(
+        what: &str,
+        run: impl FnOnce(&dyn Fn() -> bool) -> T + Send + 'static,
+    ) -> T {
+        let (ended, heard) = mpsc::channel();
+        thread::spawn(move || {
+            let looks = Cell::new(0_u32);
+            let wanted = || {
+                looks.set(looks.get() + 1);
+                looks.get() < UNWANTED_AT
+            };
+            let ran = run(&wanted);
+            ended.send((ran, looks.get())).unwrap();
+        });
+        let (ran, looks) = luneta_waits::heard(what, &heard);
+        assert_eq!(looks, UNWANTED_AT, "{what}: given up at the first look that does not want it");
+        ran
+    }
 
     #[test]
     fn a_program_hears_what_it_is_told_and_need_not_listen() {
@@ -439,21 +470,10 @@ mod tests {
 
     #[test]
     fn a_program_no_longer_wanted_is_killed() {
-        let longer = PATIENCE.saturating_mul(10);
-        let (ended, heard) = mpsc::channel();
-        thread::spawn(move || {
-            let looks = Cell::new(0_u32);
-            let wanted = || {
-                looks.set(looks.get() + 1);
-                looks.get() < 3
-            };
-            let mut sleeps = Command::new("sleep");
-            let ran = run_while(sleeps.arg(longer.as_secs().to_string()), longer, wanted);
-            ended.send((ran.unwrap().is_none(), looks.get())).unwrap();
+        let ran = given_up("a program that ends only if killed ends", |wanted| {
+            run_while(&mut outlasting_patience(), OUTLASTING, wanted)
         });
-        let (unwanted, looks) = luneta_waits::heard("a program that ends only if killed ends", &heard);
-        assert!(unwanted);
-        assert_eq!(looks, 3, "it is killed at the first look that does not want it");
+        assert!(ran.unwrap().is_none());
     }
 
     #[test]

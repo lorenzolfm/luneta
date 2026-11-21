@@ -1,0 +1,18 @@
+id: unit-waits-spans-are-constant
+language: rust
+files:
+  - crates/*/src/**
+message: >-
+  A unit test's window or gap is made in a const, so a span past its bound
+  fails the build, not the test that reaches it: write const { Span::of(...) }.
+rule:
+  all:
+    - kind: call_expression
+      regex: ^(luneta_waits::)?(Span|Gap)::of\(
+      not:
+        inside:
+          stopBy: end
+          any:
+            - kind: const_block
+            - kind: const_item
+    - matches: in-a-test-module
