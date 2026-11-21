@@ -4,6 +4,8 @@ valid:
   - "steps:\n  - run: nix develop -c cargo check --locked -p lunetad\n"
   - "steps:\n  - name: cargo nextest run\n    run: nix run .#dev -- test\n"
   - "steps:\n  - run: |\n      nix develop -c cargo nextest list\n      nix run .#dev -- test\n"
+  - "steps:\n  - run: >-\n      nix develop -c cargo nextest list\n\n      nix run .#dev -- test\n"
+  - "steps:\n  - run: \"nix develop -c cargo nextest list\\nnix run .#dev -- test\"\n"
 invalid:
   - "steps:\n  - run: cargo nextest run\n"
   - "steps:\n  - \"run\": $CARGO nextest run>tests.log\n"
@@ -11,3 +13,4 @@ invalid:
   - "steps:\n  - run: |\n      cd crates\n      cargo nextest run -p lunetad\n"
   - "steps:\n  - run: |\n      cargo nextest \\\n        run -p lunetad\n"
   - "steps:\n  - run: >-\n      nix develop -c\n      cargo nextest\n      run --profile ci\n"
+  - "steps:\n  - run: nix develop -c cargo\n      nextest run --profile ci\n"

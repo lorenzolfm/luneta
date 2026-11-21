@@ -76,6 +76,15 @@ snapshots:
       style: primary
       start: 6
       end: 51
+  ? |-
+    { a = ''
+      echo ${if x then "cargo nextest run" else ""}
+    ''; }
+  : labels:
+    - source: '"cargo nextest run"'
+      style: primary
+      start: 28
+      end: 47
   '{ checkPhaseCargoCommand = "cargo nextest run --locked"; }':
     labels:
     - source: '"cargo nextest run --locked"'

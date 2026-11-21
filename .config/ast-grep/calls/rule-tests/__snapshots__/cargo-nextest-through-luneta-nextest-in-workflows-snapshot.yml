@@ -39,14 +39,6 @@ snapshots:
       style: primary
       start: 11
       end: 83
-    - source: |
-        >-
-              nix develop -c
-              cargo nextest
-              run --profile ci
-      style: secondary
-      start: 16
-      end: 83
     - source: run
       style: secondary
       start: 11
@@ -65,6 +57,21 @@ snapshots:
       end: 14
   ? |
     steps:
+      - run: nix develop -c cargo
+          nextest run --profile ci
+  : labels:
+    - source: |-
+        run: nix develop -c cargo
+              nextest run --profile ci
+      style: primary
+      start: 11
+      end: 67
+    - source: run
+      style: secondary
+      start: 11
+      end: 14
+  ? |
+    steps:
       - run: |
           cargo nextest \
             run -p lunetad
@@ -75,6 +82,13 @@ snapshots:
                 run -p lunetad
       style: primary
       start: 11
+      end: 63
+    - source: |
+        |
+              cargo nextest \
+                run -p lunetad
+      style: secondary
+      start: 16
       end: 63
     - source: run
       style: secondary
@@ -92,6 +106,13 @@ snapshots:
               cargo nextest run -p lunetad
       style: primary
       start: 11
+      end: 69
+    - source: |
+        |
+              cd crates
+              cargo nextest run -p lunetad
+      style: secondary
+      start: 16
       end: 69
     - source: run
       style: secondary
