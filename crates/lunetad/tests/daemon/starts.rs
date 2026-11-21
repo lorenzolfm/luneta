@@ -576,6 +576,20 @@ fn q_in_the_sidebar_quits_luneta_and_its_terminal_runs_on_for_the_next_one() {
 }
 
 #[test]
+fn keys_typed_before_luneta_draws_reach_the_shell_of_its_worktree() {
+    if !makes_shells() {
+        return;
+    }
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::opening(&owned.host, &dir, &[]);
+    window.send("printf 'be%s\\n' fore-42\r");
+    eventually("the terminal runs what was typed", || window.shows("before-42").then_some(()));
+    let shown = shown(&owned, &dir.path).expect("luneta shows work");
+    assert_eq!(shown.terminals.len(), 1, "{:?}", projects_of(&owned));
+}
+
+#[test]
 fn a_daemon_that_goes_away_is_started_again_in_moments() {
     let mut owned = Owned::new();
     let dir = work_in(&owned, "work");

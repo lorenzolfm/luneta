@@ -24,7 +24,7 @@ pub const SHOWN_MAX: usize = 1024;
 
 pub const FRAMES_MAX: usize = 64;
 
-const SAID_MAX: usize = 1024;
+pub const SAID_MAX: usize = 1024;
 
 const _: () = assert!(LAYOUT_VIEWS_MAX <= SHOWN_MAX);
 
