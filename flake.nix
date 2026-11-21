@@ -191,6 +191,7 @@
 
                 NEXTEST_SHOW_PROGRESS = "counter";
                 checkPhaseCargoCommand = ''
+                  ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "export PATH=${localToolchain}/bin:$PATH"}
                   ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
                     --test-threads "$NIX_BUILD_CORES"
                   cargoWithProfile test --doc --locked ${testRun}
