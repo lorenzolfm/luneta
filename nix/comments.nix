@@ -41,6 +41,7 @@ let
         "${calls}/rules"
         "${nextestRules}"
       ];
+      utilDirs = [ "${waits}/utils" ];
       testConfigs = [
         { testDir = "${comments}/rule-tests"; }
         { testDir = "${waits}/rule-tests"; }

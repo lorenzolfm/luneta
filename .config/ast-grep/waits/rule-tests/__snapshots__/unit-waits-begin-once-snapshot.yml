@@ -1,0 +1,42 @@
+id: unit-waits-begin-once
+snapshots:
+  '#[cfg(all(test, unix))] mod tests { fn f() { loop { let line = heard("a", &rx); } } }':
+    labels:
+    - source: heard("a", &rx)
+      style: primary
+      start: 63
+      end: 78
+    - source: loop { let line = heard("a", &rx); }
+      style: secondary
+      start: 45
+      end: 81
+  '#[cfg(test)] mod tests { async fn f() { for x in xs { awaited("a", g(x)).await; } } }':
+    labels:
+    - source: awaited("a", g(x))
+      style: primary
+      start: 54
+      end: 72
+    - source: for x in xs { awaited("a", g(x)).await; }
+      style: secondary
+      start: 40
+      end: 81
+  '#[cfg(test)] mod tests { fn f() { loop { let p = Patience::begun(); } } }':
+    labels:
+    - source: Patience::begun()
+      style: primary
+      start: 49
+      end: 66
+    - source: loop { let p = Patience::begun(); }
+      style: secondary
+      start: 34
+      end: 69
+  '#[cfg(test)] mod tests { fn f() { while waiting { let line = luneta_waits::heard("a", &rx); } } }':
+    labels:
+    - source: luneta_waits::heard("a", &rx)
+      style: primary
+      start: 61
+      end: 90
+    - source: while waiting { let line = luneta_waits::heard("a", &rx); }
+      style: secondary
+      start: 34
+      end: 93

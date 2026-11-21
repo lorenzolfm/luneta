@@ -514,6 +514,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::program::tests::{given_up, outlasting_patience};
 
     fn turn() -> Turn {
         Turn { key: 255, before: Some(10) }
@@ -797,11 +798,9 @@ mod tests {
 
     #[test]
     fn a_turn_given_up_kills_claude() {
-        let mut sh = Command::new("sh");
-        sh.args(["-c", "sleep 10"]);
-        let started = Instant::now();
-        let ended = talk(sh, "", &|| started.elapsed() < Duration::from_millis(50), &|_| {});
+        let ended = given_up("claude, which ends only if killed, ends", |wanted| {
+            talk(outlasting_patience(), "", wanted, &|_| {})
+        });
         assert_eq!(ended, None);
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     }
 }

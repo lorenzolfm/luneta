@@ -11,11 +11,15 @@ pub const PATIENCE: Duration = Duration::from_mins(1);
 
 pub const QUIET: Duration = Duration::from_secs(1);
 
+pub const OUTLASTING: Duration = PATIENCE.saturating_mul(2);
+
 const LOOK: Duration = Duration::from_millis(20);
 
 const _: () = assert!(LOOK.as_millis() < QUIET.as_millis(), "a quiet window is looked at more than once");
 
 const _: () = assert!(QUIET.as_millis() < PATIENCE.as_millis(), "a quiet window is shorter than any wait for an event");
+
+const _: () = assert!(PATIENCE.as_nanos() < OUTLASTING.as_nanos(), "it outlasts any wait for an event");
 
 const QUIETLY: Span = Span::of(QUIET);
 
@@ -26,8 +30,8 @@ impl Span {
     #[must_use]
     pub const fn of(span: Duration) -> Span {
         assert!(!span.is_zero(), "a window of no time sees nothing");
-        let past = span.as_nanos() > PATIENCE.as_nanos();
-        assert!(!past, "a window longer than any wait for an event waits on the clock");
+        let past = span.as_nanos() >= PATIENCE.as_nanos();
+        assert!(!past, "a window as long as a wait for an event waits on the clock");
         Span(span)
     }
 }
@@ -60,7 +64,7 @@ impl Began {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Lasted(Duration);
 
 impl Lasted {
@@ -77,6 +81,11 @@ impl Lasted {
     #[must_use]
     pub fn is_under(self, span: Duration) -> bool {
         self.0 < span
+    }
+
+    #[must_use]
+    pub fn beyond(self, other: Lasted) -> Lasted {
+        Lasted(self.0.saturating_sub(other.0))
     }
 }
 
@@ -108,6 +117,20 @@ impl Patience {
         }
     }
 
+    #[must_use]
+    pub fn heard_first<T, U>(
+        self,
+        what: impl Display,
+        from: &Receiver<T>,
+        mut pick: impl FnMut(T) -> Option<U>,
+    ) -> U {
+        loop {
+            if let Some(picked) = pick(self.heard(&what, from)) {
+                return picked;
+            }
+        }
+    }
+
     pub async fn awaited<F: IntoFuture>(self, what: impl Display, asked: F) -> F::Output {
         let deadline = tokio::time::Instant::from_std(self.deadline);
         match tokio::time::timeout_at(deadline, asked).await {
@@ -115,17 +138,38 @@ impl Patience {
             Err(elapsed) => panic!("not answered in {PATIENCE:?}, {elapsed}: {what}"),
         }
     }
+
+    pub async fn awaited_first<T, U>(
+        self,
+        what: impl Display,
+        mut ask: impl AsyncFnMut() -> T,
+        mut pick: impl FnMut(T) -> Option<U>,
+    ) -> U {
+        loop {
+            if let Some(picked) = pick(self.awaited(&what, ask()).await) {
+                return picked;
+            }
+        }
+    }
 }
 
 pub fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
+    polled(|| check().ok_or(()), |()| panic!("never came to be in {PATIENCE:?}: {what}"))
+}
+
+pub fn eventually_showing<T, E: Debug>(what: &str, check: impl FnMut() -> Result<T, E>) -> T {
+    polled(check, |last| panic!("never came to be in {PATIENCE:?}: {what}, last {last:?}"))
+}
+
+fn polled<T, E>(mut check: impl FnMut() -> Result<T, E>, ran_out: impl FnOnce(E) -> T) -> T {
     blocks_no_runtime();
     let deadline = Instant::now() + PATIENCE;
     loop {
-        if let Some(found) = check() {
-            return found;
+        match check() {
+            Ok(found) => return found,
+            Err(last) if Instant::now() >= deadline => return ran_out(last),
+            Err(_) => thread::sleep(LOOK),
         }
-        assert!(Instant::now() < deadline, "never came to be in {PATIENCE:?}: {what}");
-        thread::sleep(LOOK);
     }
 }
 

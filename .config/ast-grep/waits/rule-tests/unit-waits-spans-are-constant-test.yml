@@ -1,0 +1,8 @@
+id: unit-waits-spans-are-constant
+valid:
+  - "fn f() { let span = Span::of(d); }"
+  - "#[cfg(test)] mod tests { fn f() { apart(const { Gap::of(HELD_PAUSE) }); } }"
+  - "#[cfg(test)] mod tests { const QUIETLY: Span = Span::of(QUIET); }"
+invalid:
+  - "#[cfg(test)] mod tests { fn f() { apart(Gap::of(HELD_PAUSE)); } }"
+  - "#[cfg(test)] mod tests { fn f() { seen_within(luneta_waits::Span::of(QUIET), || None::<()>); } }"

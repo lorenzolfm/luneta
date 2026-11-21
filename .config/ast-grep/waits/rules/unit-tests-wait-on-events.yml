@@ -1,0 +1,31 @@
+id: unit-tests-wait-on-events
+language: rust
+files:
+  - crates/*/src/**
+message: >-
+  A unit test waits on an event, never on the clock: wait through
+  luneta_waits, whose one patience no loaded machine runs out of, and time a
+  span with luneta_waits::Began. A Duration or an Instant it hands the code
+  under test is no wait, and may stay.
+rule:
+  all:
+    - any:
+        - kind: identifier
+          regex: ^(sleep|sleep_ms|sleep_until|timeout|timeout_at|interval|interval_at|park_timeout|park_timeout_ms|recv_timeout|recv_deadline|wait_timeout|wait_timeout_ms|wait_timeout_while|elapsed)$
+        - kind: field_identifier
+          regex: ^(recv_timeout|recv_deadline|wait_timeout|wait_timeout_ms|wait_timeout_while|park_timeout|elapsed)$
+        - all:
+            - any:
+                - kind: binary_expression
+                  regex: Instant::now\(\)\s*[<>]|[<>]=?\s*(\w+::)*Instant::now\(\)
+                - kind: token_tree
+                  regex: Instant::now\(\)\s*[<>]|[<>]=?\s*(\w+::)*Instant::now\(\)
+                - kind: field_identifier
+                  regex: ^(duration_since|saturating_duration_since|checked_duration_since)$
+            - inside:
+                stopBy: end
+                any:
+                  - kind: loop_expression
+                  - kind: while_expression
+                  - kind: for_expression
+    - matches: in-a-test-module

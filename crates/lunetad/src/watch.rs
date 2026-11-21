@@ -204,11 +204,9 @@ impl Troubles {
 mod tests {
     use std::process::Command;
 
+    use luneta_waits::{OUTLASTING, eventually, never};
+
     use super::*;
-
-    const QUIET: Duration = Duration::from_millis(100);
-
-    const HEARD: Duration = Duration::from_secs(5);
 
     #[test]
     fn a_process_wakes_the_reader_as_it_ends_and_no_more() {
@@ -218,20 +216,18 @@ mod tests {
         let pid = child.id();
         ends.hear(&[pid]);
         ends.hear(&[pid]);
-        assert!(heard.recv_timeout(QUIET).is_err(), "it still runs");
+        never("an end is heard while it runs", || heard.try_recv().ok());
 
         child.kill().unwrap();
         child.wait().unwrap();
-        heard.recv_timeout(HEARD).expect("it ended");
-        while !ends.hearing[&pid].is_finished() {
-            thread::sleep(Duration::from_millis(1));
-        }
+        let () = luneta_waits::heard("it ended", &heard);
+        eventually("its hearing ends", || ends.hearing[&pid].is_finished().then_some(()));
         ends.hear(&[pid]);
-        assert!(heard.recv_timeout(QUIET).is_err(), "it ended once");
+        never("one end is heard twice", || heard.try_recv().ok());
 
         ends.hear(&[]);
         ends.hear(&[pid]);
-        heard.recv_timeout(HEARD).expect("no process by that pid has ended");
+        let () = luneta_waits::heard("no process by that pid has ended", &heard);
     }
 
     #[test]
@@ -248,10 +244,9 @@ mod tests {
             found.send(count).is_ok()
         };
         let any = |_: &Path| true;
-        let sweep = Duration::from_mins(1);
-        watch("test", dir.path().to_owned(), RecursiveMode::NonRecursive, any, sweep, read, tell)
+        watch("test", dir.path().to_owned(), RecursiveMode::NonRecursive, any, OUTLASTING, read, tell)
             .unwrap();
-        assert_eq!(heard.recv_timeout(QUIET), Ok(0));
-        assert_eq!(heard.recv_timeout(HEARD), Ok(1), "read on the sweep alone");
+        assert_eq!(luneta_waits::heard("the first read", &heard), 0);
+        assert_eq!(luneta_waits::heard("the read before the sweep", &heard), 1);
     }
 }

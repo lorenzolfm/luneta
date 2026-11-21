@@ -1,0 +1,18 @@
+id: unit-waits-begin-once
+language: rust
+files:
+  - crates/*/src/**
+message: >-
+  A unit test's wait begins its patience once, before the loop that hears it:
+  one begun for each message lets a chatty process hold the test forever.
+rule:
+  all:
+    - kind: call_expression
+      regex: ^(luneta_waits::)?(Patience::begun|heard|awaited)\(
+      inside:
+        stopBy: end
+        any:
+          - kind: loop_expression
+          - kind: while_expression
+          - kind: for_expression
+    - matches: in-a-test-module

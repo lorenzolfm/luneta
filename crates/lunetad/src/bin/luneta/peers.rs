@@ -491,7 +491,8 @@ fn talk(
 mod tests {
     use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt as _;
-    use std::time::Instant;
+
+    use luneta_waits::{Patience, never};
 
     use super::*;
 
@@ -558,24 +559,25 @@ mod tests {
     }
 
     fn next(heard: &Receiver<Event>) -> (u64, Peered) {
-        let until = Instant::now() + Duration::from_secs(5);
-        loop {
-            let left = until.saturating_duration_since(Instant::now());
-            let event = heard.recv_timeout(left).expect("the luneta holding the lock hears it");
-            if let Event::Peers(Heard::Peer(number, peered)) = event {
-                return (number, peered);
-            }
+        next_within(Patience::begun(), heard)
+    }
+
+    fn next_within(patience: Patience, heard: &Receiver<Event>) -> (u64, Peered) {
+        patience.heard_first("the luneta holding the lock hears it", heard, |event| match event {
+            Event::Peers(Heard::Peer(number, peered)) => Some((number, peered)),
+            _ => None,
+        })
+    }
+
+    fn a_click(event: Event) -> Option<Key> {
+        match event {
+            Event::Clicked(key) => Some(key),
+            _ => None,
         }
     }
 
-    fn clicked(heard: &Receiver<Event>, within: Duration) -> Option<Key> {
-        let until = Instant::now() + within;
-        loop {
-            let left = until.saturating_duration_since(Instant::now());
-            if let Event::Clicked(key) = heard.recv_timeout(left).ok()? {
-                return Some(key);
-            }
-        }
+    fn clicked(heard: &Receiver<Event>) -> Key {
+        Patience::begun().heard_first("a click", heard, a_click)
     }
 
     #[test]
@@ -593,13 +595,10 @@ mod tests {
             panic!("the other came first");
         };
         peers.heard(number, Peered::Came(stream));
-        while peers.looks().is_empty() || peers.last.is_none() {
-            let (number, peered) = next(&heard);
-            peers.heard(number, peered);
-        }
+        hear_until(&heard, &mut peers, |peers| !peers.looks().is_empty() && peers.last.is_some());
         assert_eq!(peers.looks(), [key(41)]);
         assert!(peers.hand(&far(7)));
-        assert_eq!(clicked(&heard_clicks, Duration::from_secs(5)), Some(far(7)));
+        assert_eq!(clicked(&heard_clicks), far(7));
 
         peers.here();
         assert!(!peers.hand(&key(41)), "this luneta's window had the focus last");
@@ -616,7 +615,7 @@ mod tests {
         peers.heard(number, peered);
         assert!(!peers.focused(), "its window let the focus go");
         assert!(peers.hand(&key(41)), "its window had the focus last");
-        assert_eq!(clicked(&heard_clicks, Duration::from_secs(5)), Some(key(41)));
+        assert_eq!(clicked(&heard_clicks), key(41));
         reaching.focus(true);
         let (number, peered) = next(&heard);
         peers.heard(number, peered);
@@ -646,8 +645,9 @@ mod tests {
     }
 
     fn hear_until(heard: &Receiver<Event>, peers: &mut Peers, done: impl Fn(&Peers) -> bool) {
+        let patience = Patience::begun();
         while !done(peers) {
-            let (number, peered) = next(heard);
+            let (number, peered) = next_within(patience, heard);
             peers.heard(number, peered);
         }
     }
@@ -661,22 +661,15 @@ mod tests {
         let (clicks, _clicked) = mpsc::channel();
         let reaching = Reaching::to(socket, false, clicks);
         reaching.stopped();
-        loop {
-            let event = heard.recv_timeout(Duration::from_secs(5)).expect("it hears");
-            if matches!(event, Event::StopAloud) {
-                break;
-            }
-        }
+        let stops = |event| matches!(event, Event::StopAloud).then_some(());
+        let () = Patience::begun().heard_first("the key that stops", &heard, stops);
     }
 
     fn note(heard: &Receiver<Event>) -> String {
-        let until = Instant::now() + Duration::from_secs(5);
-        loop {
-            let left = until.saturating_duration_since(Instant::now());
-            if let Event::Notice(note) = heard.recv_timeout(left).expect("it says why") {
-                return note;
-            }
-        }
+        Patience::begun().heard_first("it says why", heard, |event| match event {
+            Event::Notice(note) => Some(note),
+            _ => None,
+        })
     }
 
     #[test]
@@ -701,8 +694,9 @@ mod tests {
     }
 
     fn came(heard: &Receiver<Event>, peers: &mut Peers) -> u64 {
+        let patience = Patience::begun();
         loop {
-            let (number, peered) = next(heard);
+            let (number, peered) = next_within(patience, heard);
             let came = matches!(peered, Peered::Came(_));
             peers.heard(number, peered);
             if came {
@@ -712,14 +706,10 @@ mod tests {
     }
 
     fn read_aloud(heard: &Receiver<Event>) -> (u64, String) {
-        let until = Instant::now() + Duration::from_secs(5);
-        loop {
-            let left = until.saturating_duration_since(Instant::now());
-            let event = heard.recv_timeout(left).expect("the luneta holding the lock hears it");
-            if let Event::ReadAloud { from, selected } = event {
-                return (from, selected);
-            }
-        }
+        Patience::begun().heard_first("what to read aloud", heard, |event| match event {
+            Event::ReadAloud { from, selected } => Some((from, selected)),
+            _ => None,
+        })
     }
 
     #[test]
@@ -740,8 +730,7 @@ mod tests {
         assert_eq!(read_aloud(&heard), (asker_number, String::new()));
         peers.nothing_to_read(asker_number);
         assert_eq!(note(&asker_heard), NothingToRead.to_string());
-        let told = other_heard.recv_timeout(Duration::from_millis(300));
-        assert!(told.is_err(), "the other luneta is told nothing");
+        never("the other luneta is told something", || other_heard.try_recv().ok().map(drop));
     }
 
     fn relay(at: &Path, holder: PathBuf, stopped: Receiver<()>) {
@@ -793,17 +782,16 @@ mod tests {
     }
 
     fn socket_after_waiting(path: &Path, change: impl FnOnce()) -> Result<PathBuf, String> {
-        let until = Duration::from_secs(5);
         let another = File::create(checked(path).expect("a folder").join(LOCK)).expect("a lock");
         another.try_lock().expect("another holds it");
         let (events, heard) = mpsc::channel();
         let taking = path.to_owned();
         thread::spawn(move || take(&taking, &events));
-        let waits = heard.recv_timeout(until).expect("it finds the lock held");
+        let waits = luneta_waits::heard("it finds the lock held", &heard);
         assert!(matches!(waits, Event::Peers(Heard::Peering(_))));
         change();
         drop(another);
-        match heard.recv_timeout(until).expect("it comes to hold the lock") {
+        match luneta_waits::heard("it comes to hold the lock", &heard) {
             Event::Peers(Heard::Holding(_, socket)) => socket,
             _ => panic!("it holds the lock"),
         }
@@ -874,7 +862,7 @@ mod tests {
         assert!(tell(&socket, "luneta-x").is_err());
         UnixStream::connect(&socket).unwrap().write_all(b"clicked other-41\n").unwrap();
         tell(&socket, &group(&far(41))).expect("it is told");
-        assert_eq!(clicked(&heard, Duration::from_secs(5)), Some(far(41)));
-        assert_eq!(clicked(&heard, Duration::from_millis(300)), None);
+        assert_eq!(clicked(&heard), far(41));
+        never("a second click is heard", || heard.try_recv().ok().and_then(a_click));
     }
 }

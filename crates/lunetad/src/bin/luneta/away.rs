@@ -333,6 +333,7 @@ mod tests {
     use std::cell::RefCell;
     use std::pin::Pin;
 
+    use luneta_waits::Began;
     use lunetad::api::ask_response;
 
     use super::*;
@@ -369,11 +370,11 @@ mod tests {
         let why = "nixos: Not logged in".to_owned();
         assert_eq!(not_well, (vec![said.clone()], Some(Err(why))));
 
-        let started = Instant::now();
+        let started = Began::now();
         let late = heard_of(stuck(vec![Ok(said.clone().answer())]), true);
         let why = "nixos: the turn had not ended after 10 minutes".to_owned();
         assert_eq!(late, (vec![said.clone()], Some(Err(why))));
-        assert!(started.elapsed() >= DEADLINE, "{:?}", started.elapsed());
+        started.lasted().at_least(DEADLINE, "a turn there is waited for to its deadline");
 
         let unnamed = AskResponse { step: Some(ask_response::Step::Session("../x".to_owned())) };
         let none = heard_of(stuck(vec![Ok(unnamed), Ok(said.answer())]), true);

@@ -1460,6 +1460,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::mpsc::{self, Receiver};
 
+    use luneta_waits::{Gap, apart};
+
     use super::super::{Opens, Placed, ProjectId, USED_MILLIS_MAX};
     use super::*;
 
@@ -2386,7 +2388,7 @@ mod tests {
         assert!(older.to_string().ends_with("one too old to say where it listens"), "{older}");
 
         let released = thread::spawn(move || {
-            thread::sleep(HELD_PAUSE * 4);
+            apart(const { Gap::of(HELD_PAUSE.saturating_mul(4)) });
             drop(first);
         });
         let third = take_at(Ok(file), Path::new("/tmp/b"));
@@ -2402,7 +2404,7 @@ mod tests {
         fs::write(&path, "").unwrap();
         let lock = File::open(&path).unwrap();
         let writing = thread::spawn(move || {
-            thread::sleep(SAID_PAUSE);
+            apart(const { Gap::of(SAID_PAUSE) });
             fs::write(path, LISTENS_IN).unwrap();
         });
         assert_eq!(said_by(&lock), Some(PathBuf::from(LISTENS_IN)));

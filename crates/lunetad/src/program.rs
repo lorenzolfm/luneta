@@ -300,19 +300,51 @@ fn in_thread<T: Send + 'static>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::cell::Cell;
     use std::fs::{self, File, TryLockError};
     use std::os::unix::process::ExitStatusExt;
     use std::process::{Command, Stdio};
+    use std::sync::mpsc;
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
+    use luneta_waits::{Began, Lasted, OUTLASTING, eventually};
     use rustix::process::{self, Pid, Signal};
 
     use super::{
         Ran, SAID_MAX, alone, run, run_alone, run_reading, run_tail, run_up_to, run_while,
         run_while_reading, saying,
     };
+
+    const _: () = assert!(OUTLASTING.subsec_nanos() == 0, "sleep is told whole seconds");
+
+    const UNWANTED_AT: u32 = 3;
+
+    pub(crate) fn outlasting_patience() -> Command {
+        let mut sleeps = Command::new("sleep");
+        sleeps.arg(OUTLASTING.as_secs().to_string());
+        sleeps
+    }
+
+    pub(crate) fn given_up<T: Send + 'static>(
+        what: &str,
+        run: impl FnOnce(&dyn Fn() -> bool) -> T + Send + 'static,
+    ) -> T {
+        let (ended, heard) = mpsc::channel();
+        thread::spawn(move || {
+            let looks = Cell::new(0_u32);
+            let wanted = || {
+                looks.set(looks.get() + 1);
+                looks.get() < UNWANTED_AT
+            };
+            let ran = run(&wanted);
+            ended.send((ran, looks.get())).unwrap();
+        });
+        let (ran, looks) = luneta_waits::heard(what, &heard);
+        assert_eq!(looks, UNWANTED_AT, "{what}: given up at the first look that does not want it");
+        ran
+    }
 
     #[test]
     fn a_program_hears_what_it_is_told_and_need_not_listen() {
@@ -353,11 +385,7 @@ mod tests {
         drop(sh);
         let other = File::open(&path).unwrap();
         assert!(matches!(other.try_lock(), Err(TryLockError::WouldBlock)));
-        let free = Instant::now() + Duration::from_secs(5);
-        while other.try_lock().is_err() {
-            assert!(Instant::now() < free, "the lock outlived the program");
-            thread::sleep(Duration::from_millis(20));
-        }
+        eventually("the lock frees as the program ends", || other.try_lock().ok());
     }
 
     #[test]
@@ -406,65 +434,58 @@ mod tests {
 
     #[test]
     fn a_program_is_heard_from_as_it_ends() {
-        let mut behind: Vec<Duration> = (0..61)
+        let mut behind: Vec<Lasted> = (0..61)
             .map(|_| {
-                let asked = Instant::now();
+                let asked = Began::now();
                 let said = run(&mut Command::new("true"), Duration::from_secs(10)).unwrap();
-                let ran = asked.elapsed();
+                let ran = asked.lasted();
                 assert_eq!(said.answer(), Ok(Vec::new()));
-                let asked = Instant::now();
+                let asked = Began::now();
                 assert!(Command::new("true").output().unwrap().status.success());
-                ran.saturating_sub(asked.elapsed())
+                ran.beyond(asked.lasted())
             })
             .collect();
         behind.sort();
         let least = behind[behind.len() / 5];
-        assert!(least < Duration::from_millis(1), "{least:?} behind, of {behind:?}");
+        assert!(least.is_under(Duration::from_millis(1)), "{least:?} behind, of {behind:?}");
     }
 
     #[test]
     fn a_program_a_signal_kills_is_heard_from_as_it_ends() {
-        let asked = Instant::now();
         let mut dies = Command::new("sh");
         dies.args(["-c", "kill -KILL $$"]);
         let Ran::Ended { status, .. } = run(&mut dies, Duration::from_secs(10)).unwrap() else {
             panic!("it was not heard to end");
         };
         assert_eq!(status.signal(), Some(Signal::KILL.as_raw()));
-        assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 
     #[test]
     fn a_program_that_does_not_end_in_time_is_stuck() {
-        let asked = Instant::now();
         let ran = run(Command::new("sleep").arg("10"), Duration::from_millis(200)).unwrap();
         assert!(matches!(ran, Ran::Stuck));
-        assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 
     #[test]
     fn a_program_no_longer_wanted_is_killed() {
-        let asked = Instant::now();
-        let wanted = || asked.elapsed() < Duration::from_millis(200);
-        let ran = run_while(Command::new("sleep").arg("10"), Duration::from_secs(10), wanted);
+        let ran = given_up("a program that ends only if killed ends", |wanted| {
+            run_while(&mut outlasting_patience(), OUTLASTING, wanted)
+        });
         assert!(ran.unwrap().is_none());
-        assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 
     #[test]
     fn a_program_that_stopped_is_stuck() {
-        let asked = Instant::now();
         let mut stops = Command::new("sh");
         stops.args(["-c", "kill -STOP $$"]);
         let ran = run(&mut stops, Duration::from_millis(200)).unwrap();
         assert!(matches!(ran, Ran::Stuck));
-        assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 
     #[test]
     fn a_program_run_alone_has_a_session_of_its_own() {
-        let mut sleep = Command::new("sleep");
-        let mut child = alone(sleep.arg("10")).spawn().expect("sleep runs");
+        let mut sleeps = Command::new("sleep");
+        let mut child = alone(sleeps.arg("10")).spawn().expect("sleep runs");
         let pid = Pid::from_child(&child);
         let session = process::getsid(Some(pid));
         child.kill().expect("sleep is killed");
@@ -483,11 +504,8 @@ mod tests {
             assert!(matches!(ran, Ran::Stuck), "{script}");
             let pid = fs::read_to_string(&started).expect("sh says what it started");
             let pid = Pid::from_raw(pid.trim().parse().expect("a pid")).expect("a pid");
-            let gone = Instant::now() + Duration::from_secs(5);
-            while process::test_kill_process(pid).is_ok() {
-                assert!(Instant::now() < gone, "what `{script}` started runs on");
-                thread::sleep(Duration::from_millis(10));
-            }
+            let ends = format!("what `{script}` started ends");
+            eventually(&ends, || process::test_kill_process(pid).err());
         }
     }
 

@@ -68,10 +68,12 @@ impl Group {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
     use std::io::{Read as _, Write as _};
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+
+    use luneta_waits::{eventually, eventually_showing};
 
     use super::*;
 
@@ -97,14 +99,7 @@ mod tests {
             .spawn()
             .expect("sh starts");
         let pid = child.id();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let started =
-            || argv(pid).is_some_and(|argv| argv.first().is_some_and(|first| first == "sh"));
-        while !started() {
-            assert!(Instant::now() < deadline, "sh never ran: {:?}", argv(pid));
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let argv = argv(pid).expect("the child's arguments read");
+        let argv = sh_ran(pid, |argv| argv);
         assert_eq!(argv, ["sh", "-c", "read line", "", "b c"]);
         assert!(children(std::process::id()).contains(&pid));
         let read = process(pid).expect("the child reads");
@@ -112,10 +107,7 @@ mod tests {
         assert!(["sh", "bash"].contains(&read.name.as_str()), "{read:?}");
         let raw = rustix::process::Pid::from_raw(pid.cast_signed()).expect("a pid is not 0");
         rustix::process::kill_process(raw, rustix::process::Signal::STOP).expect("it stops");
-        while !process(pid).is_some_and(|read| read.stopped) {
-            assert!(Instant::now() < deadline, "it never read as stopped");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        eventually("it reads as stopped", || process(pid).filter(|read| read.stopped));
         rustix::process::kill_process(raw, rustix::process::Signal::CONT).expect("it goes on");
         child.stdin.take().expect("its stdin").write_all(b"\n").expect("it reads a line");
         child.wait().expect("it ends");
@@ -158,15 +150,7 @@ mod tests {
             .stdin(Stdio::piped())
             .spawn()
             .expect("sh starts");
-        let pid = child.id();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let started =
-            || argv(pid).is_some_and(|argv| argv.first().is_some_and(|first| first == "sh"));
-        while !started() {
-            assert!(Instant::now() < deadline, "sh never ran: {:?}", argv(pid).map(|args| args.len()));
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let argv = argv(pid).expect("the child's arguments read");
+        let argv = sh_ran(child.id(), |argv| argv.map(|args| args.len()));
         assert_eq!(argv[..4], ["sh", "-c", "read line", ""]);
         assert_eq!(argv[4], long[..ARGV_BYTES_MAX - 18]);
         assert_eq!(argv.len(), 5);
@@ -182,5 +166,12 @@ mod tests {
         assert_eq!(process(pid), None);
         assert_eq!(argv(pid), None);
         assert_eq!(children(pid), Vec::<u32>::new());
+    }
+
+    fn sh_ran<E: Debug>(pid: u32, shown: impl Fn(Option<Vec<String>>) -> E) -> Vec<String> {
+        eventually_showing("sh runs", || match argv(pid) {
+            Some(argv) if argv.first().is_some_and(|first| first == "sh") => Ok(argv),
+            other => Err(shown(other)),
+        })
     }
 }
