@@ -28,6 +28,14 @@ impl Ending {
     }
 
     #[must_use]
+    pub fn to_mux(self) -> mux::ran::ended::Ending {
+        match self {
+            Ending::Exited(status) => mux::ran::ended::Ending::Status(status),
+            Ending::Resumed => mux::ran::ended::Ending::Resumed(mux::ran::Resumed {}),
+        }
+    }
+
+    #[must_use]
     pub fn of_mux(ending: &mux::ran::ended::Ending) -> Self {
         match ending {
             mux::ran::ended::Ending::Status(status) => Ending::Exited(*status),
@@ -64,12 +72,44 @@ impl Front {
     }
 
     #[must_use]
+    pub fn to_mux(self) -> mux::Front {
+        match self {
+            Front::Working => mux::Front::Working,
+            Front::Asking => mux::Front::Asking,
+            Front::Interactive => mux::Front::Interactive,
+        }
+    }
+
+    #[must_use]
     pub fn of_mux(front: mux::Front) -> Option<Self> {
         match front {
             mux::Front::Working => Some(Front::Working),
             mux::Front::Asking => Some(Front::Asking),
             mux::Front::Interactive => Some(Front::Interactive),
             mux::Front::Unspecified => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_front_told_is_read_back_as_it_was() {
+        for front in [Front::Working, Front::Asking, Front::Interactive] {
+            assert_eq!(Front::of_api(front.to_api()), Some(front));
+            assert_eq!(Front::of_mux(front.to_mux()), Some(front));
+        }
+        assert_eq!(Front::of_api(v1::Front::Unspecified), None);
+        assert_eq!(Front::of_mux(mux::Front::Unspecified), None);
+    }
+
+    #[test]
+    fn an_ending_told_is_read_back_as_it_was() {
+        for ending in [Ending::Exited(0), Ending::Exited(-1), Ending::Exited(255), Ending::Resumed] {
+            assert_eq!(Ending::of_api(&ending.to_api()), ending);
+            assert_eq!(Ending::of_mux(&ending.to_mux()), ending);
         }
     }
 }

@@ -4,7 +4,6 @@ use rustix::fs::{Mode, OFlags};
 
 use luneta_protocol::shell::Front;
 
-use crate::api;
 use crate::process::{self, Group, Process};
 use crate::pty::{self, Modes, Pty};
 
@@ -18,15 +17,6 @@ const TAKING_OVER: [&str; 22] = [
 const RELAYS: [&str; 2] = ["sudo", "script"];
 
 const PROCESSES_MAX: usize = 512;
-
-#[must_use]
-pub fn said(front: Front) -> api::Front {
-    match front {
-        Front::Working => api::Front::Working,
-        Front::Asking => api::Front::Asking,
-        Front::Interactive => api::Front::Interactive,
-    }
-}
 
 #[must_use]
 pub fn of_terminal(pty: &Pty, program: u32, group: Group) -> Front {

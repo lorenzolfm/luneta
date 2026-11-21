@@ -4,7 +4,6 @@ use luneta_protocol::said::Said;
 use luneta_protocol::shell::{Ending, Front};
 
 use crate::api;
-use crate::front;
 use crate::marks::Mark;
 use crate::process::Group;
 
@@ -151,25 +150,23 @@ impl Shell {
 
     #[must_use]
     pub fn said(&self) -> Option<api::Ran> {
-        use api::ran::{Ended, Going, Is, Ready, Resumed, Stopped};
+        use api::ran::{Ended, Going, Is, Ready, Stopped};
         let is = match self.ran.as_ref()? {
             Ran::Ready => Is::Ready(Ready {}),
             Ran::Going(going) => Is::Going(Going {
-                command: told(going.command.as_ref()),
+                command: command_line(going.command.as_ref()),
                 since: Some(going.since.into()),
-                front: front::said(going.front).into(),
+                front: going.front.to_mux().into(),
             }),
             Ran::Ended { command, at, ending, took } => Is::Ended(Ended {
-                command: told(command.as_ref()),
+                command: command_line(command.as_ref()),
                 at: Some((*at).into()),
-                ending: ending.map(|ending| match ending {
-                    Ending::Exited(status) => api::ran::ended::Ending::Status(status),
-                    Ending::Resumed => api::ran::ended::Ending::Resumed(Resumed {}),
-                }),
+                ending: ending.map(Ending::to_mux),
                 took: Some((*took).try_into().expect("a command ran for under 2^63 seconds")),
             }),
             Ran::Stopped { command, at } => {
-                Is::Stopped(Stopped { command: told(command.as_ref()), at: Some((*at).into()) })
+                let command = command_line(command.as_ref());
+                Is::Stopped(Stopped { command, at: Some((*at).into()) })
             },
         };
         Some(api::Ran { is: Some(is) })
@@ -183,7 +180,7 @@ impl Going {
     }
 }
 
-fn told(command: Option<&Said>) -> Option<String> {
+fn command_line(command: Option<&Said>) -> Option<String> {
     command.map(|command| command.as_str().to_owned())
 }
 
