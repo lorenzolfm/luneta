@@ -89,7 +89,7 @@ each action by name. When they ask you for one, tell them which:
   the view they are on. "Search skills" finds any other skill.
 - A link pasted in luneta's sidebar offers `w` for its worktree, and `t` to
   tackle an issue or `r` for /thermo-nuclear-review on a pull request. A pull
-  request's link goes straight to its worktree when the sidebar has a row of
+  request's link goes straight to its worktree when the sidebar has one row of
   it. Pasted in the palette, a link lists the same choices.
 
 ## Start a worktree
@@ -152,8 +152,8 @@ Report each issue and the folder `start` printed for it.
 with no agent. Then tell the user to start the skill from luneta's menu on a view
 of that worktree. For /thermo-nuclear-review, the PR's link pasted in luneta's
 palette and its /thermo-nuclear-review row does both, on the pull request's
-head. So does the link pasted in the sidebar and `r`, while the sidebar has no
-row of the PR's worktree.
+head. So does the link pasted in the sidebar and `r`, unless the sidebar has
+one row of the PR's worktree.
 
 ## Merged worktrees
 
