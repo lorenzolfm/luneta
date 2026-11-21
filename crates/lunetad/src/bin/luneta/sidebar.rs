@@ -3566,12 +3566,12 @@ impl Sidebar {
         self.menu_did(Placed::of(origin), Did::Closed(done))
     }
 
-    pub fn paste(&mut self, text: &str) {
+    pub fn paste(&mut self, text: &str) -> Asked {
         if let Mode::AfloatNote(_) = self.mode {
-            return;
+            return Asked::Nothing;
         }
         if self.open_mut().is_some_and(|menu| menu.paste(text)) {
-            return;
+            return Asked::Nothing;
         }
         let target = match self.open() {
             Some(menu) => Some(menu.target().clone()),
@@ -3579,18 +3579,33 @@ impl Sidebar {
         };
         let from = target.as_ref().and_then(Target::cwd).cloned();
         let Some(work) = Work::parse(text, from) else {
-            return;
+            return Asked::Nothing;
         };
         if self.notice_on_its_way(&work) {
-            return;
+            return Asked::Nothing;
+        }
+        let present = match &work {
+            Work::Link(link) if link.kind() == Kind::Pull => {
+                self.pulled_worktree(link, target.as_ref().map(Target::machine))
+            },
+            Work::Link(_) | Work::File(_) => None,
+        };
+        let afloat = matches!(self.mode, Mode::Afloat { .. });
+        if let Some((on, place)) = present {
+            if afloat {
+                self.close_menu();
+            } else {
+                self.end_mode();
+            }
+            return self.go_to(on, Place::Worktree(place));
         }
         let Some(target) = target else {
             if self.lit_spot().is_none() {
                 self.say(format!("menu: no row is highlighted for {work} to open the menu on"));
             }
-            return;
+            return Asked::Nothing;
         };
-        let placed = if let Mode::Afloat { .. } = self.mode {
+        let placed = if afloat {
             self.close_menu();
             Placed::Afloat
         } else {
@@ -3599,6 +3614,30 @@ impl Sidebar {
         };
         self.menus += 1;
         self.put(Menu::pull(self.menus, target, work, self.agent.harness()), placed);
+        Asked::Nothing
+    }
+
+    fn pulled_worktree(
+        &self,
+        link: &Link,
+        first: Option<&Machine>,
+    ) -> Option<(Machine, WorktreePlace)> {
+        let host = self.host.as_ref()?;
+        let seen = machines(host, &self.shelves).each();
+        let mut seen: Vec<(Machine, Seen<'_>)> =
+            seen.filter_map(|(machine, seen)| Some((machine, seen.ok()?))).collect();
+        seen.sort_by_key(|(machine, _)| Some(machine) != first);
+        seen.into_iter().find_map(|(machine, seen)| {
+            let pulls = pull_requests(seen.pull_requests);
+            let checked_out = |worktree: &&KnownWorktree| {
+                let pull = pulls.get(worktree.folder.as_str());
+                let pull = pull.and_then(|it| Link::parse(it.url.as_deref()?));
+                pull.is_some_and(|it| it.is(link))
+            };
+            let mut worktrees = seen.projects.iter().flat_map(|known| &known.worktrees);
+            let worktree = worktrees.find(checked_out)?;
+            Some((machine, worktree.place.clone()))
+        })
     }
 
     pub fn pull_in_menu(
@@ -9036,17 +9075,44 @@ mod tests {
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(act, 1));
     }
 
+    fn pull_in(sidebar: &mut Sidebar, dir: &str, number: u32) {
+        let Some(host) = &mut sidebar.host else {
+            panic!("the sidebar has heard of no host");
+        };
+        let url = format!("https://github.com/lorenzolfm/luneta/pull/{number}");
+        let pull = Some((number, State::Open, Some(url.as_str())));
+        checked_out(&mut Vec::new(), &mut host.pull_requests, dir, "feat", pull);
+    }
+
+    #[test]
+    fn a_pull_request_s_link_pasted_goes_to_its_worktree_when_one_is_present() {
+        let mut sidebar = own_two_sessions();
+        sit(&mut sidebar, &own_view_of("older", 1, 1));
+        pull_in(&mut sidebar, "/w/b", 5);
+        sidebar.focus(Keys::Sidebar);
+        let young = WorktreePlace { project: project_row("young", 2), worktree: tab_of(2, 0) };
+        let there = Asked::Go { on: Machine::Local, place: Place::Worktree(young) };
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5\n"), there);
+        assert!(sidebar.open().is_none());
+
+        sidebar.key(&char('m'), moment(160_000));
+        assert!(sidebar.open().is_some());
+        assert_eq!(sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5"), there);
+        assert!(sidebar.open().is_none());
+
+        let elsewhere = ["luneta/issues/5", "luneta/pull/6"];
+        for elsewhere in elsewhere.map(|it| format!("https://github.com/lorenzolfm/{it}")) {
+            assert_eq!(sidebar.paste(&elsewhere), Asked::Nothing, "{elsewhere}");
+            assert!(sidebar.open().is_some(), "{elsewhere}");
+            sidebar.drop_menu(sidebar.menus);
+        }
+    }
+
     #[test]
     fn a_pull_request_s_link_pasted_opens_the_menu_for_it() {
         let mut sidebar = own_two_sessions();
         sit(&mut sidebar, &own_view_of("older", 1, 1));
-        if let Some(host) = &mut sidebar.host {
-            let number = NonZeroU32::new(5).unwrap();
-            let url = Some("https://github.com/lorenzolfm/luneta/pull/5".to_owned());
-            let state = State::Open;
-            let pull_request = PullRequest { number, state, url, checks: None, stale: false };
-            host.pull_requests.push(pull_request.to_api("/w/b"));
-        }
+        pull_in(&mut sidebar, "/w/b", 7);
         sidebar.focus(Keys::Sidebar);
         sidebar.paste("ls -la");
         assert!(sidebar.open().is_none());
@@ -9060,6 +9126,7 @@ mod tests {
             " <ESC> - Close",
         ]);
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
+        let on_b = Link::parse("https://github.com/lorenzolfm/luneta/pull/7").unwrap();
         let worked = |session, view, dir: &str, pull, here| Worked {
             session,
             view,
@@ -9068,7 +9135,7 @@ mod tests {
         let worked = vec![
             worked(own_listed("older", 1), view_key(1, 1), "/w/luneta/main", None, true),
             worked(own_listed("older", 1), view_key(1, 2), "/w/c", None, true),
-            worked(own_listed("young", 2), view_key(2, 1), "/w/b", Some(link.clone()), false),
+            worked(own_listed("young", 2), view_key(2, 1), "/w/b", Some(on_b), false),
         ];
         let work = Work::Link(link.clone());
         let wanted = Wanted::AsItIs;
@@ -11067,6 +11134,40 @@ mod tests {
         assert!(sidebar.working.is_empty());
         let note = "menu: nothing deleted: the menu closed before you said yes; d m asks again";
         assert_eq!(sidebar.notice.as_deref(), Some(note));
+    }
+
+    #[test]
+    fn a_pasted_pull_request_goes_to_its_worktree_on_the_row_s_machine_first_then_on_any() {
+        let link = "https://github.com/lorenzolfm/luneta/pull/5";
+        let pulled = |dir: &str| {
+            let mut pull_requests = Vec::new();
+            let url = Some((5, State::Open, Some(link)));
+            checked_out(&mut Vec::new(), &mut pull_requests, dir, "feat", url);
+            pull_requests
+        };
+        let mut host = machines();
+        let views = vec![view(1, 0, "/w/b", "claude")];
+        let mut nixos_host = up(vec![session("main", 20, views)], Vec::new());
+        if let Reached::Host(far) = &mut nixos_host {
+            far.pull_requests = pulled("/w/b");
+        }
+        host.remotes[0] = remote("nixos", nixos_host);
+        let (here, there) = (project_row("main", 10), project_row("main", 20));
+        let here = Place::Worktree(WorktreePlace { project: here, worktree: tab_of(10, 0) });
+        let there = Place::Worktree(WorktreePlace { project: there, worktree: tab_of(20, 0) });
+        let mut sidebar = fresh();
+        sidebar.hear(host.clone());
+        sidebar.focus(Keys::Sidebar);
+        sidebar.light(Spot::Local(view_of("main", 10, 1)));
+        let far = Asked::Go { on: Machine::Remote(nixos()), place: there.clone() };
+        assert_eq!(sidebar.paste(link), far);
+
+        host.pull_requests = pulled("/w/a");
+        sidebar.hear(host);
+        sidebar.light(Spot::Local(view_of("main", 10, 1)));
+        assert_eq!(sidebar.paste(link), Asked::Go { on: Machine::Local, place: here });
+        sidebar.light(Spot::Remote(nixos(), view_of("main", 20, 1)));
+        assert_eq!(sidebar.paste(link), far);
     }
 
     #[test]
