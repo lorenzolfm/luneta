@@ -30,36 +30,46 @@ snapshots:
       style: secondary
       start: 28
       end: 44
-  async fn f() { let daemon = lunetad::through(bridge(&host), PATIENCE / 2).await; }:
+  async fn f() { let daemon = lunetad::through(bridge(&host), RoundTrip::of(PATIENCE / 2)).await; }:
     labels:
-    - source: lunetad::through(bridge(&host), PATIENCE / 2)
+    - source: lunetad::through(bridge(&host), RoundTrip::of(PATIENCE / 2))
       style: primary
       start: 28
-      end: 73
+      end: 88
     - source: lunetad::through
       style: secondary
       start: 28
       end: 44
-  async fn f() { let daemon = lunetad::through(stalls, QUIET).await; }:
+  async fn f() { let daemon = lunetad::through(bridge(&host), round_trip).await; }:
     labels:
-    - source: lunetad::through(stalls, QUIET)
+    - source: lunetad::through(bridge(&host), round_trip)
       style: primary
       start: 28
-      end: 59
+      end: 71
     - source: lunetad::through
       style: secondary
       start: 28
       end: 44
-  fn ends_it() { runtime().block_on(async { lunetad::through(bridge(&host), QUIET).await }); }:
+  async fn f() { let daemon = lunetad::through(stalls, RoundTrip::of(QUIET)).await; }:
     labels:
-    - source: lunetad::through(bridge(&host), QUIET)
+    - source: lunetad::through(stalls, RoundTrip::of(QUIET))
       style: primary
-      start: 42
-      end: 80
+      start: 28
+      end: 74
     - source: lunetad::through
       style: secondary
-      start: 42
-      end: 58
+      start: 28
+      end: 44
+  fn ends_it_past_its_round_trip() { runtime().block_on(async { lunetad::through(stalls, RoundTrip::of(QUIET)).await }); }:
+    labels:
+    - source: lunetad::through(stalls, RoundTrip::of(QUIET))
+      style: primary
+      start: 62
+      end: 108
+    - source: lunetad::through
+      style: secondary
+      start: 62
+      end: 78
   fn f() { let deadline = lunetad::ANSWER; }:
     labels:
     - source: lunetad::ANSWER

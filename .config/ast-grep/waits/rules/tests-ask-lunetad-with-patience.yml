@@ -4,9 +4,9 @@ files:
   - crates/*/tests/**
 message: >-
   A test's call to lunetad waits for its answer as long as a wait for an
-  event: connect, or go through a bridge, with luneta_waits::PATIENCE, since
-  lunetad's own deadline runs out on a loaded machine. Only a test named for
-  the round trip it tests goes through a bridge with a shorter one.
+  event: connect with luneta_waits::PATIENCE, or go through a bridge with
+  RoundTrip::of(PATIENCE), since lunetad's own deadline runs out on a loaded
+  machine.
 rule:
   any:
     - kind: call_expression
@@ -18,20 +18,12 @@ rule:
           field: arguments
           regex: ^\(.*,\s*(luneta_waits::)?PATIENCE\s*\)$
     - kind: call_expression
-      all:
-        - has:
-            field: function
-            regex: ^lunetad::through$
-        - not:
-            has:
-              field: arguments
-              regex: ^\(.*,\s*(luneta_waits::)?PATIENCE\s*\)$
-        - not:
-            inside:
-              kind: function_item
-              stopBy: end
-              has:
-                field: name
-                regex: round_trip
+      has:
+        field: function
+        regex: ^lunetad::through$
+      not:
+        has:
+          field: arguments
+          regex: ^\(.*,\s*(lunetad::)?RoundTrip::of\(\s*(luneta_waits::)?PATIENCE\s*\)\s*\)$
     - kind: scoped_identifier
       regex: ^lunetad::ANSWER$

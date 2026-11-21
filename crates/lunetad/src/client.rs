@@ -16,6 +16,7 @@ use tonic::Status;
 use tower::{service_fn, BoxError, Service};
 
 use crate::api::daemon_client::DaemonClient;
+use crate::daemon::ANSWERING_MAX;
 use crate::folder::Folder;
 
 const CONNECT: Duration = Duration::from_secs(1);
@@ -26,16 +27,30 @@ pub const BRIDGED: &[u8] = b"lunetad\n";
 
 pub const REACH: Duration = Duration::from_secs(10);
 
-pub(crate) const ROUND_TRIP: Duration = Duration::from_secs(5);
-
-pub(crate) const ANSWER_THROUGH: Duration = answer_through(ROUND_TRIP);
+pub(crate) const ROUND_TRIP: RoundTrip = RoundTrip::of(Duration::from_secs(5));
 
 const QUIET: Duration = Duration::from_secs(3);
 
 const _: () = assert!(QUIET.as_millis() < ANSWER.as_millis());
 
-const fn answer_through(round_trip: Duration) -> Duration {
-    ANSWER.saturating_add(round_trip)
+#[derive(Clone, Copy, Debug)]
+pub struct RoundTrip(Duration);
+
+impl RoundTrip {
+    #[must_use]
+    pub const fn of(round_trip: Duration) -> RoundTrip {
+        assert!(!round_trip.is_zero(), "a keepalive waits some time for its pong");
+        let within = RoundTrip(round_trip);
+        assert!(
+            within.answer().as_millis() < ANSWERING_MAX.as_millis(),
+            "lunetad works at a question for longer than any of luneta's askers waits for its answer"
+        );
+        within
+    }
+
+    const fn answer(self) -> Duration {
+        ANSWER.checked_add(self.0).expect("an answer through a bridge waits a finite time")
+    }
 }
 
 const SAID_MAX: u64 = 4096;
@@ -103,12 +118,12 @@ pub async fn connect(folder: &Folder, answer: Duration) -> Result<Daemon, Error>
 
 pub async fn through(
     command: std::process::Command,
-    round_trip: Duration,
+    round_trip: RoundTrip,
 ) -> Result<Daemon, Error> {
     let mut command = Some(command);
     let channel = Endpoint::from_static("http://lunetad")
         .http2_keep_alive_interval(QUIET)
-        .keep_alive_timeout(round_trip)
+        .keep_alive_timeout(round_trip.0)
         .keep_alive_while_idle(true)
         .connect_with_connector(service_fn(move |_: Uri| {
             let command = command.take();
@@ -118,7 +133,7 @@ pub async fn through(
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, answer_through(round_trip), unanswered)))
+    Ok(DaemonClient::new(Within::new(channel, round_trip.answer(), unanswered)))
 }
 
 fn went() -> io::Error {
@@ -235,15 +250,19 @@ fn mine(stream: UnixStream) -> io::Result<UnixStream> {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     use std::future::pending;
+    use std::io::ErrorKind;
+    use std::process::Command;
     use std::time::Duration;
 
+    use luneta_waits::Began;
     use tonic::body::Body;
     use tonic::codegen::http::{Request, Response};
     use tonic::Code;
     use tower::{service_fn, BoxError};
 
-    use super::{unanswered, Within};
+    use super::{through, unanswered, RoundTrip, Unbridged, Within};
     use crate::api::daemon_client::DaemonClient;
 
     #[test]
@@ -254,6 +273,34 @@ mod tests {
         let late = runtime.block_on(daemon.info(())).unwrap_err();
         let said = (late.code(), late.message());
         assert_eq!(said, (Code::DeadlineExceeded, "lunetad did not answer in 1s"));
+    }
+
+    #[test]
+    fn a_command_that_stalls_ends_its_call_on_the_keepalive_past_its_round_trip_and_runs_once() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut stalls = Command::new("sh");
+        stalls.args(["-c", "echo lunetad; exec sleep 60"]);
+        let round_trip = Duration::from_secs(1);
+        runtime.block_on(async {
+            let mut stalled = through(stalls, RoundTrip::of(round_trip)).await.unwrap();
+            let began = Began::now();
+            let ended = stalled.info(()).await.expect_err("a stalled command answered");
+            began.lasted().at_least(round_trip, "a stalled call");
+            assert_eq!(ended.code(), Code::Unavailable, "{ended:?}");
+            let keepalive = sources(&ended).any(|error| error.to_string() == "keep-alive timed out");
+            assert!(keepalive, "{ended:?}");
+            let again = stalled.info(()).await.expect_err("it ran a command again");
+            let went = sources(&again).filter_map(|error| error.downcast_ref::<Unbridged>()).any(|why| {
+                matches!(why, Unbridged::Io(error) if error.kind() == ErrorKind::NotConnected)
+            });
+            assert!(went, "{again:?}");
+        });
+    }
+
+    fn sources<'a>(
+        error: &'a (dyn Error + 'static),
+    ) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
+        std::iter::successors(Some(error), |&error| error.source())
     }
 
     #[test]
