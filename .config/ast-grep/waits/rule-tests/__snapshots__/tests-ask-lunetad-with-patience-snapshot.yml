@@ -1,11 +1,41 @@
 id: tests-ask-lunetad-with-patience
 snapshots:
+  async fn f() { let daemon = lunetad::connect(&folder, Answer::of(QUIET)).await; }:
+    labels:
+    - source: lunetad::connect(&folder, Answer::of(QUIET))
+      style: primary
+      start: 28
+      end: 72
+    - source: lunetad::connect
+      style: secondary
+      start: 28
+      end: 44
   async fn f() { let daemon = lunetad::connect(&folder, PATIENCE / 2).await; }:
     labels:
     - source: lunetad::connect(&folder, PATIENCE / 2)
       style: primary
       start: 28
       end: 67
+    - source: lunetad::connect
+      style: secondary
+      start: 28
+      end: 44
+  async fn f() { let daemon = lunetad::connect(&folder, PATIENCE).await; }:
+    labels:
+    - source: lunetad::connect(&folder, PATIENCE)
+      style: primary
+      start: 28
+      end: 63
+    - source: lunetad::connect
+      style: secondary
+      start: 28
+      end: 44
+  async fn f() { let daemon = lunetad::connect(&folder, PATIENT_ROUND_TRIP).await; }:
+    labels:
+    - source: lunetad::connect(&folder, PATIENT_ROUND_TRIP)
+      style: primary
+      start: 28
+      end: 73
     - source: lunetad::connect
       style: secondary
       start: 28
@@ -36,6 +66,16 @@ snapshots:
       style: primary
       start: 28
       end: 88
+    - source: lunetad::through
+      style: secondary
+      start: 28
+      end: 44
+  async fn f() { let daemon = lunetad::through(bridge(&host), RoundTrip::of(PATIENCE)).await; }:
+    labels:
+    - source: lunetad::through(bridge(&host), RoundTrip::of(PATIENCE))
+      style: primary
+      start: 28
+      end: 84
     - source: lunetad::through
       style: secondary
       start: 28

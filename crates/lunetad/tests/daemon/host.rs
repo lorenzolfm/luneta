@@ -11,6 +11,7 @@ use std::thread;
 use luneta_waits::{Patience, Span, PATIENCE};
 use lunetad::api::{self, WatchRequest};
 use lunetad::folder::{self, Folder};
+use lunetad::{Answer, RoundTrip};
 use tempfile::TempDir;
 
 pub const LUNETAD: &str = env!("CARGO_BIN_EXE_lunetad");
@@ -19,10 +20,9 @@ pub const LUNETA: &str = env!("CARGO_BIN_EXE_luneta");
 
 pub const SOCKET: &str = "luneta/lunetad.sock";
 
-const _: () = assert!(
-    PATIENCE.as_millis() < lunetad::ANSWERING_MAX.as_millis(),
-    "lunetad works at a test's question for as long as the test waits for its answer"
-);
+pub const PATIENT: Answer = Answer::of(PATIENCE);
+
+pub const PATIENT_ROUND_TRIP: RoundTrip = RoundTrip::of(PATIENCE);
 
 #[derive(Clone, Copy, Default)]
 pub struct Vars<'a> {
@@ -525,7 +525,7 @@ impl Host {
         let folder = folder_in(self.runtime.path()).expect("no daemon has made its folder");
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
+            let mut daemon = lunetad::connect(&folder, PATIENT).await.unwrap();
             let asked = WatchRequest { after: None, kept: None, shown: false };
             daemon.watch(asked).await.unwrap().into_inner()
         })

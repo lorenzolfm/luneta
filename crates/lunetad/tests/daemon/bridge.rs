@@ -2,18 +2,15 @@ use std::error::Error;
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::process::{Command, Stdio};
 
-use luneta_waits::PATIENCE;
 use lunetad::api::WatchRequest;
-use lunetad::{RoundTrip, Unbridged, BRIDGED};
+use lunetad::{Unbridged, BRIDGED};
 
 use crate::demand::Detached;
-use crate::host::{folder_in, start, Host, Running, LUNETA};
+use crate::host::{folder_in, start, Host, Running, LUNETA, PATIENT, PATIENT_ROUND_TRIP};
 
 const OPENING: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
 
 const SETTINGS: u8 = 0x4;
-
-const _: RoundTrip = RoundTrip::of(PATIENCE);
 
 fn bridge(host: &Host) -> Command {
     let mut command = host.vars().command(LUNETA);
@@ -41,7 +38,7 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn unbridged(command: Command, is: impl Fn(&Unbridged) -> bool) {
-    let unbridged = lunetad::through(command, RoundTrip::of(PATIENCE));
+    let unbridged = lunetad::through(command, PATIENT_ROUND_TRIP);
     let error = runtime().block_on(unbridged).expect_err("it reached one");
     let first: &(dyn Error + 'static) = &error;
     let mut sources = std::iter::successors(Some(first), |&error| error.source());
@@ -54,7 +51,7 @@ fn a_client_asks_the_daemon_of_the_folder_through_luneta_bridge() {
     let host = Host::new();
     let daemon = start(host.vars()).unwrap();
     runtime().block_on(async {
-        let mut bridged = lunetad::through(bridge(&host), RoundTrip::of(PATIENCE)).await.unwrap();
+        let mut bridged = lunetad::through(bridge(&host), PATIENT_ROUND_TRIP).await.unwrap();
         let info = bridged.info(()).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
         let first = WatchRequest { after: None, kept: None, shown: false };
@@ -69,14 +66,14 @@ fn a_client_reaches_no_daemon_but_the_one_it_dialed() {
     let first = start(host.vars()).unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
     runtime().block_on(async {
-        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENT).await.unwrap();
         assert_eq!(daemon.info(()).await.unwrap().into_inner().pid, first.pid());
         drop(first);
         let second = start(host.vars()).unwrap();
         let lost = daemon.info(()).await.expect_err("it reached the second daemon");
         let again = daemon.info(()).await.expect_err("it reached the second daemon");
         assert!(went(&again), "{lost:?}, then {again:?}");
-        let mut fresh = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut fresh = lunetad::connect(&folder, PATIENT).await.unwrap();
         assert_eq!(fresh.info(()).await.unwrap().into_inner().pid, second.pid());
     });
 }
@@ -85,14 +82,14 @@ fn a_client_reaches_no_daemon_but_the_one_it_dialed() {
 fn luneta_bridge_starts_a_daemon_where_none_runs() {
     let host = Host::new();
     let pid = runtime().block_on(async {
-        let mut bridged = lunetad::through(bridge(&host), RoundTrip::of(PATIENCE)).await.unwrap();
+        let mut bridged = lunetad::through(bridge(&host), PATIENT_ROUND_TRIP).await.unwrap();
         bridged.info(()).await.unwrap().into_inner().pid
     });
     let daemon = Detached { host: &host, pid };
 
     let folder = folder_in(host.runtime.path()).unwrap();
     let answering = runtime().block_on(async {
-        let mut socket = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut socket = lunetad::connect(&folder, PATIENT).await.unwrap();
         socket.info(()).await.unwrap().into_inner().pid
     });
     assert_eq!(answering, daemon.pid);

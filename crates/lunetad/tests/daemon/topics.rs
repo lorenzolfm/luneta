@@ -2,13 +2,13 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use luneta_waits::{eventually, Span, PATIENCE};
+use luneta_waits::{eventually, Span};
 use lunetad::api::{self, remote::Reached, WatchRequest};
 use lunetad::SWEEP;
 use serde_json::json;
 
 use crate::agents::{file_for, process};
-use crate::host::{folder_in, script, start, Host, Running};
+use crate::host::{folder_in, script, start, Host, Running, PATIENT};
 use crate::remote::{hosts, FakeSsh};
 
 const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
@@ -61,7 +61,7 @@ fn seen(host: &Host) -> api::Host {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
     runtime.block_on(async {
-        let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
+        let mut daemon = lunetad::connect(&folder, PATIENT).await.unwrap();
         let asked = WatchRequest { after: None, kept: None, shown: true };
         daemon.watch(asked).await.unwrap().into_inner()
     })

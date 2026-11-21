@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use luneta_waits::{eventually, Began, Gap, Span, PATIENCE};
+use luneta_waits::{eventually, Began, Gap, Span};
 use lunetad::api::agent::{Status as Reported, WaitingFor as Waits};
 use lunetad::api::{self, Agent, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor};
 use lunetad::mux::{OwnMade, TerminalKey};
@@ -19,7 +19,7 @@ use lunetad::{SETTLE, SWEEP, TORN};
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::host::{start, Running, Vars, LUNETA};
+use crate::host::{start, Running, Vars, LUNETA, PATIENT};
 
 pub struct Host {
     runtime: TempDir,
@@ -72,7 +72,7 @@ impl Host {
             crate::host::folder_in(self.runtime.path()).expect("no daemon has made its folder");
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            let mut daemon = lunetad::connect(&folder, PATIENCE).await.unwrap();
+            let mut daemon = lunetad::connect(&folder, PATIENT).await.unwrap();
             daemon.list_agents(()).await.unwrap().into_inner()
         })
     }

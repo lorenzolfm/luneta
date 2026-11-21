@@ -21,7 +21,7 @@ use crate::folder::Folder;
 
 const CONNECT: Duration = Duration::from_secs(1);
 
-pub const ANSWER: Duration = Duration::from_secs(5);
+pub const ANSWER: Answer = Answer::of(Duration::from_secs(5));
 
 pub const BRIDGED: &[u8] = b"lunetad\n";
 
@@ -31,25 +31,41 @@ pub(crate) const ROUND_TRIP: RoundTrip = RoundTrip::of(Duration::from_secs(5));
 
 const QUIET: Duration = Duration::from_secs(3);
 
-const _: () = assert!(QUIET.as_millis() < ANSWER.as_millis());
+const _: () = assert!(QUIET.as_millis() < ANSWER.waits().as_millis());
 
 #[derive(Clone, Copy, Debug)]
-pub struct RoundTrip(Duration);
+pub struct Answer(Duration);
+
+impl Answer {
+    #[must_use]
+    pub const fn of(answer: Duration) -> Answer {
+        assert!(!answer.is_zero(), "a call waits some time for its answer");
+        assert!(
+            answer.as_millis() < ANSWERING_MAX.as_millis(),
+            "lunetad works at a question for longer than any of luneta's askers waits for its answer"
+        );
+        Answer(answer)
+    }
+
+    #[must_use]
+    pub const fn waits(self) -> Duration {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RoundTrip {
+    pong: Duration,
+    answer: Answer,
+}
 
 impl RoundTrip {
     #[must_use]
     pub const fn of(round_trip: Duration) -> RoundTrip {
         assert!(!round_trip.is_zero(), "a keepalive waits some time for its pong");
-        let within = RoundTrip(round_trip);
-        assert!(
-            within.answer().as_millis() < ANSWERING_MAX.as_millis(),
-            "lunetad works at a question for longer than any of luneta's askers waits for its answer"
-        );
-        within
-    }
-
-    const fn answer(self) -> Duration {
-        ANSWER.checked_add(self.0).expect("an answer through a bridge waits a finite time")
+        let answer = ANSWER.0.checked_add(round_trip);
+        let answer = answer.expect("an answer through a bridge waits a finite time");
+        RoundTrip { pong: round_trip, answer: Answer::of(answer) }
     }
 }
 
@@ -101,7 +117,7 @@ pub fn unanswered(within: Duration) -> String {
     format!("lunetad did not answer in {}s", within.as_secs_f64())
 }
 
-pub async fn connect(folder: &Folder, answer: Duration) -> Result<Daemon, Error> {
+pub async fn connect(folder: &Folder, answer: Answer) -> Result<Daemon, Error> {
     let mut socket = Some(folder.socket());
     let channel = Endpoint::from_static("http://lunetad")
         .connect_timeout(CONNECT)
@@ -113,7 +129,7 @@ pub async fn connect(folder: &Folder, answer: Duration) -> Result<Daemon, Error>
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, answer, unanswered)))
+    Ok(DaemonClient::new(Within::new(channel, answer.0, unanswered)))
 }
 
 pub async fn through(
@@ -123,7 +139,7 @@ pub async fn through(
     let mut command = Some(command);
     let channel = Endpoint::from_static("http://lunetad")
         .http2_keep_alive_interval(QUIET)
-        .keep_alive_timeout(round_trip.0)
+        .keep_alive_timeout(round_trip.pong)
         .keep_alive_while_idle(true)
         .connect_with_connector(service_fn(move |_: Uri| {
             let command = command.take();
@@ -133,7 +149,7 @@ pub async fn through(
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, round_trip.answer(), unanswered)))
+    Ok(DaemonClient::new(Within::new(channel, round_trip.answer.0, unanswered)))
 }
 
 fn went() -> io::Error {
@@ -277,15 +293,15 @@ mod tests {
 
     #[test]
     fn a_command_that_stalls_ends_its_call_on_the_keepalive_past_its_round_trip_and_runs_once() {
+        const STALLS: RoundTrip = RoundTrip::of(Duration::from_secs(1));
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let mut stalls = Command::new("sh");
         stalls.args(["-c", "echo lunetad; exec sleep 60"]);
-        let round_trip = Duration::from_secs(1);
         runtime.block_on(async {
-            let mut stalled = through(stalls, RoundTrip::of(round_trip)).await.unwrap();
+            let mut stalled = through(stalls, STALLS).await.unwrap();
             let began = Began::now();
             let ended = stalled.info(()).await.expect_err("a stalled command answered");
-            began.lasted().at_least(round_trip, "a stalled call");
+            began.lasted().at_least(STALLS.pong, "a stalled call");
             assert_eq!(ended.code(), Code::Unavailable, "{ended:?}");
             let keepalive = sources(&ended).any(|error| error.to_string() == "keep-alive timed out");
             assert!(keepalive, "{ended:?}");

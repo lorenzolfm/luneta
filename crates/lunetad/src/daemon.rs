@@ -82,7 +82,7 @@ const KEEPS_SWEEP: Duration = Duration::from_hours(1);
 
 pub const WATCH: Duration = Duration::from_secs(4);
 
-const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
+const _: () = assert!(WATCH.as_millis() < client::ANSWER.waits().as_millis());
 
 #[must_use]
 pub fn parked_watch(version: api::Version) -> String {
@@ -120,7 +120,7 @@ pub const ALONE: Duration = Duration::from_secs(30);
 const _: () =
     assert!(ALONE.as_secs() > SWEEP.as_secs(), "lunetad is alone over more than one look");
 
-const DRAIN: Duration = client::ANSWER;
+const DRAIN: Duration = client::ANSWER.waits();
 
 pub struct Claim {
     folder: PathBuf,
