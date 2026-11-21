@@ -1260,7 +1260,10 @@ impl App {
                 Some(Over::Picker(picker)) => picker.paste(&text),
                 Some(Over::Brief(_) | Over::Dictation(..)) => {},
                 None => match self.holder() {
-                    Holder::Sidebar(_) => self.sidebar.paste(&text),
+                    Holder::Sidebar(_) => {
+                        let asked = self.sidebar.paste(&text);
+                        self.follow(asked);
+                    },
                     Holder::Terminal => self.paste(&text),
                     Holder::Box(_) => unreachable!("a box takes the paste"),
                 },
