@@ -77,7 +77,7 @@ use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::projected::{self, Projected};
-use crate::viewed::{self, Heeded, Viewed};
+use crate::viewed::{self, Across, Heeded, Viewed};
 use crate::worktrees::{self, Arrival, Landing};
 use crate::width::Width;
 
@@ -1455,8 +1455,8 @@ impl App {
         }
     }
 
-    fn ask_right(&self, asked: lunetad::Asked) {
-        if let Some(right) = self.viewed() {
+    fn ask_right(&mut self, asked: lunetad::Asked) {
+        if let Some(right) = self.viewed_mut() {
             right.ask(asked);
         }
     }
@@ -2322,23 +2322,53 @@ impl App {
     }
 
     fn step(&mut self, direction: Direction) {
-        self.leave();
-        self.ask_right(lunetad::Asked::Step(direction));
+        assert!(self.focus.over.is_none(), "a box takes the key before a step");
+        match (self.focus.side, direction) {
+            (Side::Sidebar, Direction::Left) => {},
+            (Side::Sidebar, Direction::Right) => self.leave(),
+            (Side::Session | Side::Collapsed, Direction::Left) => {
+                if self.home().is_some() {
+                    self.step_to_sidebar();
+                } else {
+                    self.step_asked(direction);
+                }
+            },
+            (Side::Sidebar, Direction::Up | Direction::Down)
+            | (
+                Side::Session | Side::Collapsed,
+                Direction::Right | Direction::Up | Direction::Down,
+            ) => self.step_asked(direction),
+        }
     }
 
-    fn cross(&mut self, direction: Direction) {
+    fn step_asked(&mut self, direction: Direction) {
+        self.leave();
+        if let Some(right) = self.viewed_mut() {
+            right.step(direction);
+        }
+    }
+
+    fn step_to_sidebar(&mut self) {
+        self.give(Focus::on(Side::Sidebar));
+        let held = matches!(self.holder(), Holder::Sidebar(_));
+        assert!(held, "the sidebar holds the keys past the project's left edge");
+    }
+
+    fn cross(&mut self, across: Across) {
+        if !matches!(self.holder(), Holder::Terminal) {
+            return;
+        }
         let Some(right) = self.viewed() else {
             return;
         };
         let on = right.machine().clone();
         let (before, after) = self.projected.tabs_beside(&on, right.worktree());
-        let beside = match direction {
-            Direction::Left => before,
-            Direction::Right => after,
-            Direction::Up | Direction::Down => None,
-        };
-        if let Some(beside) = beside {
-            self.go_worktree(&on, beside, None);
+        match (across, before, after) {
+            (Across::Before, Some(beside), _) | (Across::After, _, Some(beside)) => {
+                self.go_worktree(&on, beside, None);
+            },
+            (Across::Before, None, _) => self.step_to_sidebar(),
+            (Across::After, _, None) => {},
         }
     }
 
@@ -2485,7 +2515,7 @@ impl App {
                 let (tabs, titles) = self.projected.tabs(&on, worktree);
                 self.shown().tabs(tabs, titles);
             },
-            Heeded::Edged(direction) => self.cross(direction),
+            Heeded::Edged(across) => self.cross(across),
             Heeded::Sent(worktree) => {
                 let Some(right) = self.viewed() else {
                     return;
@@ -2645,6 +2675,9 @@ impl App {
         if focus.side == Side::Collapsed || focus.over.is_some() {
             self.let_go();
             self.sidebar.let_go();
+        }
+        if let Some(right) = self.viewed_mut() {
+            right.forget_step();
         }
         self.sidebar.focus(focus.keys());
         assert!(self.sidebar.floating().is_none(), "a focus change closes what floats");

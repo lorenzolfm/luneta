@@ -10,7 +10,7 @@ use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use base64::Engine as _;
 use luneta_waits::{eventually, Began};
@@ -176,6 +176,10 @@ impl Window {
     pub fn cursor(&self) -> (usize, usize) {
         let point = self.term().grid().cursor.point;
         (usize::try_from(point.line.0).unwrap(), point.column.0)
+    }
+
+    pub fn cursor_shown(&self) -> bool {
+        self.term().mode().contains(TermMode::SHOW_CURSOR)
     }
 
     pub fn screen(&self) -> Vec<String> {

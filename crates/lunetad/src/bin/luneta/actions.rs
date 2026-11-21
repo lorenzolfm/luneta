@@ -365,7 +365,8 @@ impl Action {
             },
             Action::Swap => anywhere("Sidebar or views", &["focus", "switch"], SWAP),
             Action::ViewLeft => {
-                anywhere("View left, or the worktree before", &["focus", "move"], LEFT)
+                let name = "View left, the worktree before, or the sidebar";
+                anywhere(name, &["focus", "move"], LEFT)
             },
             Action::ViewDown => anywhere("View below", &["focus", "move"], DOWN),
             Action::ViewUp => anywhere("View above", &["focus", "move"], UP),
