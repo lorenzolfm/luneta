@@ -2087,8 +2087,18 @@ impl Picker {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Tier {
     Exact,
+    Leads,
     Prefix,
     Fuzzy,
+}
+
+impl Tier {
+    fn of_keyword(self) -> Tier {
+        match self {
+            Tier::Leads => Tier::Prefix,
+            Tier::Exact | Tier::Prefix | Tier::Fuzzy => self,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2110,10 +2120,13 @@ fn tier(finder: &Finder<'_>, term: &str, text: &str) -> Option<(Tier, Fit, Vec<u
 
 fn tier_of(term: &str, text: &str) -> Tier {
     let lower = text.to_lowercase();
+    let name = lower.rsplit(" › ").next().unwrap_or(&lower);
     let words = lower.match_indices([' ', '/', '-']).map(|(at, _)| at + 1);
     let starts = std::iter::once(0).chain(words).any(|at| lower[at..].starts_with(term));
-    if lower == term || lower.rsplit(" › ").next() == Some(term) {
+    if lower == term || name == term {
         Tier::Exact
+    } else if name.trim_start_matches('/').starts_with(term) {
+        Tier::Leads
     } else if starts {
         Tier::Prefix
     } else {
@@ -2132,7 +2145,10 @@ fn found_action(
     let key = Key::Action(action, run);
     let row = |name, hits| Row { key: key.clone(), name, hits, rules: Rules::default() };
     let named = tier(finder, term, &title);
-    let keyword = keywords.iter().filter_map(|it| Some((tier(finder, term, it)?, *it)));
+    let keyword = keywords.iter().filter_map(|it| {
+        let (tier, fit, hits) = tier(finder, term, it)?;
+        Some(((tier.of_keyword(), fit, hits), *it))
+    });
     let keyword = keyword.min_by_key(|((tier, fit, _), _)| (*tier, Reverse(*fit)));
     match (named, keyword) {
         (Some((by_name, fit, hits)), Some(((by_keyword, ..), _))) if by_name <= by_keyword => {
@@ -2538,6 +2554,7 @@ mod tests {
             ..Listing::default()
         }
     }
+
 
     fn at_host() -> Palette {
         let target = Rc::new(Target::Machine(Machine::Local));
@@ -3895,6 +3912,19 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert_eq!(lit, "kill", "the keyword that matched is lit");
+    }
+
+    #[test]
+    fn a_letter_lights_the_action_whose_title_it_starts_over_a_keyword_or_a_later_word() {
+        for origin in [Origin::Views, Origin::Sidebar] {
+            for query in ["c", "cl"] {
+                let mut picker = palette(origin);
+                typed(&mut picker, query);
+                assert_eq!(keyed_action(&picker).0, "Close the view", "{origin:?} {query:?}");
+                let closes = Picked::Menu { target: fix_view(), origin, action: Action::CloseView };
+                assert_eq!(press(&mut picker, KeyCode::Enter), closes, "{origin:?} {query:?}");
+            }
+        }
     }
 
     #[test]
