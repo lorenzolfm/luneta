@@ -372,6 +372,20 @@ fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_worktree_beside_or_ctrl_h_to_the_side
 }
 
 #[test]
+fn an_edge_answered_after_the_keys_went_and_came_back_leaves_them_with_the_view() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the view has the keys", || window.cursor_shown().then_some(()));
+    window.send(&format!("{LEFT}{SIDEBAR}{SIDEBAR}{TYPED}"));
+    eventually("the shell has the keys", || window.shows(PRINTED).then_some(()));
+    luneta_waits::never("the edge of a step asked before Ctrl a gives the sidebar the keys", || {
+        (!window.cursor_shown()).then_some(())
+    });
+}
+
+#[test]
 fn ctrl_h_on_a_project_s_home_gives_the_sidebar_the_keys() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");

@@ -3,7 +3,7 @@ use std::env;
 use std::io::{self, Write as _};
 use std::iter;
 use std::mem;
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU64};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -437,6 +437,8 @@ struct App {
     colours: Colours,
     briefs: u64,
     asks: u64,
+    steps: u64,
+    step_awaited: Option<NonZeroU64>,
     issues: u64,
     unfiled: issue::Kept,
     pickers: u64,
@@ -722,6 +724,8 @@ fn run_in(
         colours,
         briefs: 0,
         asks: 0,
+        steps: 0,
+        step_awaited: None,
         issues: 0,
         unfiled: issue::Kept::default(),
         pickers: 0,
@@ -1780,6 +1784,9 @@ impl App {
     fn session_mouse(&mut self, mouse: MouseEvent) {
         let at = self.session_cell(mouse);
         let width = self.areas.1.width;
+        if matches!(mouse.kind, MouseEventKind::Down(_)) {
+            self.step_awaited = None;
+        }
         let Some(right) = self.viewed_mut() else {
             return;
         };
@@ -2322,19 +2329,47 @@ impl App {
     }
 
     fn step(&mut self, direction: Direction) {
-        let on_sidebar = self.focus.side == Side::Sidebar;
-        match direction {
-            Direction::Left if on_sidebar => {},
-            Direction::Right if on_sidebar => self.leave(),
-            Direction::Left if self.home().is_some() => self.give(Focus::on(Side::Sidebar)),
-            Direction::Left | Direction::Right | Direction::Up | Direction::Down => {
-                self.leave();
-                self.ask_right(lunetad::Asked::Step(direction));
+        assert!(self.focus.over.is_none(), "a box takes the key before a step");
+        match (self.focus.side, direction) {
+            (Side::Sidebar, Direction::Left) => {},
+            (Side::Sidebar, Direction::Right) => self.leave(),
+            (Side::Session | Side::Collapsed, Direction::Left) => {
+                if self.home().is_some() {
+                    self.step_to_sidebar();
+                } else {
+                    self.step_asked(direction);
+                }
             },
+            (Side::Sidebar, Direction::Up | Direction::Down)
+            | (
+                Side::Session | Side::Collapsed,
+                Direction::Right | Direction::Up | Direction::Down,
+            ) => self.step_asked(direction),
         }
     }
 
-    fn cross(&mut self, direction: Direction) {
+    fn step_asked(&mut self, direction: Direction) {
+        self.leave();
+        self.steps += 1;
+        let step = NonZeroU64::new(self.steps).expect("steps count up from 1");
+        self.step_awaited = Some(step);
+        self.ask_right(lunetad::Asked::Step { direction, step });
+    }
+
+    fn step_to_sidebar(&mut self) {
+        self.give(Focus::on(Side::Sidebar));
+        let held = matches!(self.holder(), Holder::Sidebar(_));
+        assert!(held, "the sidebar holds the keys past the project's left edge");
+    }
+
+    fn cross(&mut self, direction: Direction, step: NonZeroU64) {
+        if self.step_awaited != Some(step) {
+            return;
+        }
+        self.step_awaited = None;
+        if !matches!(self.holder(), Holder::Terminal) {
+            return;
+        }
         let Some(right) = self.viewed() else {
             return;
         };
@@ -2344,10 +2379,8 @@ impl App {
             (Direction::Left, Some(beside), _) | (Direction::Right, _, Some(beside)) => {
                 self.go_worktree(&on, beside, None);
             },
-            (Direction::Left, None, _) if matches!(self.holder(), Holder::Terminal) => {
-                self.give(Focus::on(Side::Sidebar));
-            },
-            (Direction::Left | Direction::Right | Direction::Up | Direction::Down, ..) => {},
+            (Direction::Left, None, _) => self.step_to_sidebar(),
+            (Direction::Right | Direction::Up | Direction::Down, ..) => {},
         }
     }
 
@@ -2402,6 +2435,7 @@ impl App {
         worktree: WorktreeId,
         terminal: Option<ViewId>,
     ) {
+        self.step_awaited = None;
         if let Some(right) = self.viewed_mut() {
             right.go(on, worktree);
         } else {
@@ -2494,7 +2528,7 @@ impl App {
                 let (tabs, titles) = self.projected.tabs(&on, worktree);
                 self.shown().tabs(tabs, titles);
             },
-            Heeded::Edged(direction) => self.cross(direction),
+            Heeded::Edged { direction, step } => self.cross(direction, step),
             Heeded::Sent(worktree) => {
                 let Some(right) = self.viewed() else {
                     return;
@@ -2655,6 +2689,7 @@ impl App {
             self.let_go();
             self.sidebar.let_go();
         }
+        self.step_awaited = None;
         self.sidebar.focus(focus.keys());
         assert!(self.sidebar.floating().is_none(), "a focus change closes what floats");
         self.focus = focus;

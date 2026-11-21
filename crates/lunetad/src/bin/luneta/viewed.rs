@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU64};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -68,7 +68,7 @@ enum Moused {
 pub enum Heeded {
     Quiet,
     Followed,
-    Edged(Direction),
+    Edged { direction: Direction, step: NonZeroU64 },
     Sent(WorktreeId),
     Note(String),
     Emptied,
@@ -594,8 +594,11 @@ impl Viewed {
                     (false, false) => Heeded::Quiet,
                 }
             },
-            Heard::Edged { worktree, direction } => {
-                self.layout.edged(worktree, direction).map_or(Heeded::Quiet, Heeded::Edged)
+            Heard::Edged { worktree, direction, step } => {
+                match self.layout.edged(worktree, direction) {
+                    Some(direction) => Heeded::Edged { direction, step },
+                    None => Heeded::Quiet,
+                }
             },
             Heard::Sent(worktree) => Heeded::Sent(worktree),
             Heard::Left(worktree) => {

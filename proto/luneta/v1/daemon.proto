@@ -895,6 +895,7 @@ message ShowRequest {
       Order order = 2;
       fixed64 view = 3;
     }
+    fixed64 step = 4;
   }
 
   message Resize {
@@ -963,6 +964,7 @@ message ShowResponse {
   message Edged {
     fixed64 worktree = 1;
     ShowRequest.Direction direction = 2;
+    fixed64 step = 3;
   }
 
   message Laid {

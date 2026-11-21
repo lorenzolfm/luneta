@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::iter;
+use std::num::NonZeroU64;
 use std::pin::pin;
 
 use tokio::runtime;
@@ -215,7 +216,7 @@ fn tiles(views: &[View], size: Size) -> Result<(), String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
     Laid(Laid),
-    Edged { worktree: WorktreeId, direction: Direction },
+    Edged { worktree: WorktreeId, direction: Direction, step: NonZeroU64 },
     Sent(WorktreeId),
     Left(WorktreeId),
     Refused(String),
@@ -238,7 +239,7 @@ pub enum Asked {
     Welcome,
     Close(ViewId),
     Focus(ViewId),
-    Step(Direction),
+    Step { direction: Direction, step: NonZeroU64 },
     Resize(Growth),
     Fullscreen,
 }
@@ -263,11 +264,11 @@ impl Asked {
             Asked::Close(view) => Event::Close(view.get()),
             Asked::Focus(view) => {
                 let to = show_request::focus::To::View(view.get());
-                Event::Focus(show_request::Focus { to: Some(to) })
+                Event::Focus(show_request::Focus { to: Some(to), step: 0 })
             },
-            Asked::Step(direction) => {
+            Asked::Step { direction, step } => {
                 let to = show_request::focus::To::Direction(direction_said(direction).into());
-                Event::Focus(show_request::Focus { to: Some(to) })
+                Event::Focus(show_request::Focus { to: Some(to), step: step.get() })
             },
             Asked::Resize(growth) => {
                 let sides = Some(show_request::resize::Sides::Every(()));
@@ -287,7 +288,8 @@ fn edged_heard(edged: &show_response::Edged) -> Result<Heard, String> {
     let worktree = WorktreeId::of(edged.worktree).ok_or("an edge of worktree 0")?;
     let direction = crate::layouts::direction_of(edged.direction);
     let direction = direction.map_err(|why| format!("an edge: {why}"))?;
-    Ok(Heard::Edged { worktree, direction })
+    let step = NonZeroU64::new(edged.step).ok_or("an edge of step 0")?;
+    Ok(Heard::Edged { worktree, direction, step })
 }
 
 pub(crate) fn direction_said(direction: Direction) -> show_request::Direction {
@@ -515,14 +517,16 @@ mod tests {
 
     #[test]
     fn an_edge_reads_with_its_worktree_and_a_direction_it_knows() {
-        let edged = |worktree, direction| show_response::Edged { worktree, direction };
+        let edged =
+            |worktree, direction, step| show_response::Edged { worktree, direction, step };
         let left = show_request::Direction::Left.into();
-        let heard = edged_heard(&edged(2, left));
-        let worktree = WorktreeId::of(2).unwrap();
-        assert_eq!(heard, Ok(Heard::Edged { worktree, direction: Direction::Left }));
-        assert!(edged_heard(&edged(0, left)).is_err(), "worktree 0");
-        assert!(edged_heard(&edged(2, 0)).is_err(), "no direction");
-        assert!(edged_heard(&edged(2, 9)).is_err(), "an unknown direction");
+        let heard = edged_heard(&edged(2, left, 5));
+        let (worktree, step) = (WorktreeId::of(2).unwrap(), NonZeroU64::new(5).unwrap());
+        assert_eq!(heard, Ok(Heard::Edged { worktree, direction: Direction::Left, step }));
+        assert!(edged_heard(&edged(0, left, 5)).is_err(), "worktree 0");
+        assert!(edged_heard(&edged(2, 0, 5)).is_err(), "no direction");
+        assert!(edged_heard(&edged(2, 9, 5)).is_err(), "an unknown direction");
+        assert!(edged_heard(&edged(2, left, 0)).is_err(), "step 0");
     }
 
     #[test]

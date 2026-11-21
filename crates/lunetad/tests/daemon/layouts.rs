@@ -397,7 +397,7 @@ fn focus_is_each_client_s_own_and_fullscreen_is_the_layout_s() {
     let mut other = Shown::new(&owned, worktree, 80, 24);
     other.until("the layout where the last client was", |laid| focused_of(laid) == Some(right));
     let towards_left = focus::To::Direction(show_request::Direction::Left.into());
-    other.ask(Event::Focus(show_request::Focus { to: Some(towards_left) }));
+    other.ask(Event::Focus(show_request::Focus { to: Some(towards_left), step: 0 }));
     other.until("the other client on the left", |laid| focused_of(laid) == Some(left));
     assert_eq!(one.laid.as_ref().and_then(focused_of), Some(right));
 
@@ -410,7 +410,7 @@ fn focus_is_each_client_s_own_and_fullscreen_is_the_layout_s() {
             .then_some(())
     });
 
-    other.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(left)) }));
+    other.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(left)), step: 0 }));
     let tiled = |on| move |laid: &Laid| full_of(laid).is_none() && focused_of(laid) == Some(on);
     other.until("the layout tiled again", tiled(left));
     one.until("the layout tiled again", tiled(right));
@@ -424,26 +424,27 @@ fn a_step_with_no_terminal_that_way_says_the_edge_of_the_worktree_it_is_on() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut shown = Shown::new(&owned, worktree, 80, 24);
-    let step = |direction: show_request::Direction| {
+    let step = |direction: show_request::Direction, step| {
         let to = Some(focus::To::Direction(direction.into()));
-        Event::Focus(show_request::Focus { to })
+        Event::Focus(show_request::Focus { to, step })
     };
-    let edged = |direction: show_request::Direction| show_response::Edged {
+    let edged = |direction: show_request::Direction, step| show_response::Edged {
         worktree,
         direction: direction.into(),
+        step,
     };
-    shown.ask(step(Left));
-    assert_eq!(shown.until_edged(), edged(Left), "an empty layout is at every edge");
+    shown.ask(step(Left, 1));
+    assert_eq!(shown.until_edged(), edged(Left, 1), "an empty layout is at every edge");
     let left = shown.open();
     shown.open();
-    shown.ask(step(Right));
-    assert_eq!(shown.until_edged(), edged(Right));
-    shown.ask(step(Up));
-    assert_eq!(shown.until_edged(), edged(Up));
-    shown.ask(step(Left));
+    shown.ask(step(Right, 2));
+    assert_eq!(shown.until_edged(), edged(Right, 2), "an edge says which step met it");
+    shown.ask(step(Up, 3));
+    assert_eq!(shown.until_edged(), edged(Up, 3));
+    shown.ask(step(Left, 4));
     shown.until("the left terminal focused", |laid| focused_of(laid) == Some(left));
-    shown.ask(step(Left));
-    assert_eq!(shown.until_edged(), edged(Left));
+    shown.ask(step(Left, 5));
+    assert_eq!(shown.until_edged(), edged(Left, 5));
     assert!(shown.refused.is_empty(), "an edge is no refusal: {:?}", shown.refused);
 }
 
@@ -455,7 +456,7 @@ fn a_bring_sends_the_clients_on_the_terminal_it_is_asked_from_to_the_worktree() 
     let left = on.open();
     let right = on.open();
     let mut off = Shown::new(&owned, here, 80, 24);
-    let focus = |to| Event::Focus(show_request::Focus { to: Some(focus::To::View(to)) });
+    let focus = |to| Event::Focus(show_request::Focus { to: Some(focus::To::View(to)), step: 0 });
     off.ask(focus(left));
     off.until("the other client on the left", |laid| focused_of(laid) == Some(left));
     let from = on.key_of(right);
@@ -549,7 +550,7 @@ fn a_welcome_view_opens_beside_the_focus_and_closes_as_a_terminal_does() {
     assert!(laid.views.iter().any(|view| view.id == terminal), "{stayed}");
     assert!(tagged(&owned.listing(), terminal).is_some(), "{stayed}");
     let again = laid.views.iter().find(|view| welcomes(view)).expect("a welcome").id;
-    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(terminal)) }));
+    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(terminal)), step: 0 }));
     shown.until("the terminal focused", |it| focused_of(it) == Some(terminal));
     shown.ask(Event::Close(terminal));
     let laid = shown.until("the terminal gone", |laid| laid.views.len() == 1);
@@ -612,7 +613,7 @@ fn a_worktree_s_last_focus_comes_back_when_lunetad_starts_again() {
     shown.open();
     let middle = shown.open();
     shown.open();
-    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(middle)) }));
+    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(middle)), step: 0 }));
     shown.until("the middle terminal focused", |laid| focused_of(laid) == Some(middle));
     drop(shown);
     let kept_focus = format!(r#""last_focus": "{middle:016x}""#);
@@ -637,7 +638,7 @@ fn a_terminal_one_client_filled_is_the_last_focus_of_both_when_lunetad_starts_ag
     let mut other = Shown::new(&owned, worktree, 80, 24);
     other.until("the layout where the last client was", |laid| focused_of(laid) == Some(right));
     let towards_left = focus::To::Direction(show_request::Direction::Left.into());
-    other.ask(Event::Focus(show_request::Focus { to: Some(towards_left) }));
+    other.ask(Event::Focus(show_request::Focus { to: Some(towards_left), step: 0 }));
     other.until("the other client on the left", |laid| focused_of(laid) == Some(left));
     let file = || fs::read_to_string(kept(&owned.host)).unwrap();
     one.ask(Event::Fullscreen(()));
@@ -693,7 +694,7 @@ fn an_open_beside_the_focused_terminal_splits_it_on_its_longer_side() {
     let second = shown.open();
     shown.open();
     let to = Some(show_request::focus::To::View(first));
-    shown.ask(Event::Focus(show_request::Focus { to }));
+    shown.ask(Event::Focus(show_request::Focus { to, step: 0 }));
     shown.until("the first terminal focused", |laid| focused_of(laid) == Some(first));
     let new = shown.open_beside(open::Beside::Focused(()), &WAITS);
     let laid = shown.laid.clone().unwrap();
@@ -1116,7 +1117,7 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
             owned.dumped(restored).contains("sleep 60").then_some(())
         });
     }
-    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(closes)) }));
+    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(closes)), step: 0 }));
     shown.until("the terminal to close focused", |laid| focused_of(laid) == Some(closes));
     shown.ask(Event::Close(closes));
     let terminals = |laid: &Laid| laid.views.iter().map(|view| view.id).collect::<Vec<_>>();
