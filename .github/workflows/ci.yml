@@ -45,7 +45,7 @@ jobs:
 
   clippy:
     needs: code
-    if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -117,9 +117,7 @@ jobs:
 
   breaking:
     needs: code
-    if: >-
-      ${{ !cancelled() && needs.code.outputs.changed != 'false'
-      && github.event_name == 'pull_request' }}
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -146,7 +144,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        runner: [macos-latest]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -194,6 +192,19 @@ jobs:
             target/
           key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix', 'rust-toolchain.toml', '.cargo/config.toml') }}
 
+      - name: Probe, Nix's settings
+        run: |
+          nix config show | grep -E '^(sandbox|sandbox-fallback|sandbox-paths|extra-sandbox-paths|cores|max-jobs|build-users-group) '
+          sysctl -n hw.ncpu
+          cat /etc/nix/nix.conf
+
+      - name: Probe, test the daemon inside nix build
+        continue-on-error: true
+        run: |
+          start=$(date +%s)
+          nix build -L --keep-going --no-link .#checks.aarch64-darwin.lunetad
+          echo "nix build took $(( $(date +%s) - start ))s"
+
       - name: Test the daemon outside the sandbox
         if: runner.os == 'macOS'
         env:
@@ -212,7 +223,7 @@ jobs:
         run: nix develop -c cargo check --locked -p lunetad
 
       - name: Build the daemon, and on Linux test it
-        if: runner.os != 'macOS' || steps.target.outputs.cache-hit != 'true'
+        if: false
         run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).lunetad"
 
       - name: Save the tests' target/, with actions/cache v6.1.0

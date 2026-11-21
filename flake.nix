@@ -173,10 +173,10 @@
               pkgs.git
               pkgs.nodejs
               pkgs.openssh
-            ]
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.procps ];
+              pkgs.procps
+            ];
 
-            doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
+            doCheck = true;
           };
 
           daemonDeps = craneLib.buildDepsOnly daemon;
