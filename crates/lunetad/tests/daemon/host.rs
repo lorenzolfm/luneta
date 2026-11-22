@@ -220,7 +220,7 @@ if [ "$1 $2 $3" = "pr list --base" ]; then
     echo '[]'
     exit 0
 fi
-if [ "$*" != "pr view --json state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner,statusCheckRollup" ]; then
+if [ "$*" != "pr view --json state,isDraft,url,baseRefName,headRefName,headRefOid,author,headRepository,headRepositoryOwner,statusCheckRollup" ]; then
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
 fi
@@ -445,6 +445,7 @@ exec cat "$said"
 fn with_head(branch: &str, said: &serde_json::Value) -> serde_json::Value {
     let mut said = said.clone();
     let fields = said.as_object_mut().unwrap();
+    fields.entry("baseRefName").or_insert("main".into());
     fields.entry("headRefName").or_insert(branch.into());
     fields.entry("headRefOid").or_insert("0".repeat(40).into());
     said

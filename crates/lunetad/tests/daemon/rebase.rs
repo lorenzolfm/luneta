@@ -8,6 +8,7 @@ use lunetad::api::projects::Held;
 use lunetad::api::On;
 use lunetad::rebases::{self, Came, Rebased};
 use lunetad::Directory;
+use serde_json::json;
 
 use crate::host::{Host, LUNETA, answered, folder_in, script, start, PATIENT};
 use crate::own::Owned;
@@ -45,6 +46,26 @@ fn tracking(clone: &Path) {
     for (key, value) in [("user.name", "t"), ("user.email", "t@t"), ("core.hooksPath", "/dev/null")] {
         git(&bare, &["config", key, value]);
     }
+}
+
+fn forked_on_github(clone: &Path, up: &Path) {
+    let bare = clone.join(".bare");
+    let (fork, parent) = ("git@github.com:me/n.git", "git@github.com:o/n.git");
+    git(&bare, &["config", "remote.origin.url", fork]);
+    git(&bare, &["remote", "add", "upstream", parent]);
+    for github in [fork, parent] {
+        git(&bare, &["config", "--add", &format!("url.{}.insteadOf", up.display()), github]);
+    }
+}
+
+fn pull(state: &str, url: &str, base: &str) -> serde_json::Value {
+    json!({ "number": 7, "state": state, "isDraft": false, "url": url, "baseRefName": base })
+}
+
+fn tip(dir: &Path) -> String {
+    let mut git = std::process::Command::new("git");
+    lunetad::local_git(&mut git).arg("-C").arg(dir).args(["rev-parse", "HEAD"]);
+    String::from_utf8(git.output().unwrap().stdout).unwrap()
 }
 
 fn commit(dir: &Path, file: &str, text: &str) {
@@ -119,6 +140,63 @@ fn luneta_rebase_moves_a_branch_onto_upstream_and_hands_its_conflicts_to_an_agen
     assert_eq!(again.status.code(), Some(UNFINISHED), "{}", stderr(&again));
     eventually("a second agent starts", || fs::read_to_string(&asked).ok());
     assert_eq!(terminals_in(host, fix), 2, "beside the first");
+}
+
+#[test]
+fn luneta_rebase_moves_a_stacked_branch_onto_its_open_pull_request_s_base() {
+    let owned = Owned::new();
+    let host = &owned.host;
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let repository = Repository::new(&scratch);
+    let (up, fix) = (&repository.up, &repository.fix);
+    forked_on_github(&scratch.join("n"), up);
+    git(up, &["switch", "-q", "-c", "base"]);
+    commit(up, "beneath", "b\n");
+    git(fix, &["pull", "-q", "--ff-only", "origin", "base"]);
+    commit(fix, "own", "o\n");
+    git(fix, &["push", "-q", "-u", "origin", "fix"]);
+    commit(up, "beneath", "moved on\n");
+    git(up, &["switch", "-q", "main"]);
+    commit(up, "theirs", "t\n");
+
+    let mut draft = pull("OPEN", "https://github.com/O/N/pull/7", "base");
+    draft["isDraft"] = json!(true);
+    host.gh.open("fix", &draft);
+    let stacked = rebased(host, fix);
+    assert!(stacked.status.success(), "{}", stderr(&stacked));
+    let said = String::from_utf8_lossy(&stacked.stdout);
+    assert_eq!(said, "fix is rebased onto upstream/base, one commit on top\n");
+    assert_eq!(fs::read_to_string(fix.join("beneath")).unwrap(), "moved on\n", "as fetched now");
+    assert!(!fix.join("theirs").exists(), "and not onto main");
+
+    let refused = |why: &str| {
+        let before = tip(fix);
+        let refused = rebased(host, fix);
+        assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+        assert!(stderr(&refused).ends_with(why), "{}", stderr(&refused));
+        assert_eq!(tip(fix), before, "a refusal rebases nothing");
+    };
+    host.gh.open("fix", &pull("OPEN", "https://github.com/elsewhere/n/pull/7", "base"));
+    refused(&format!("which no remote of {} fetches: add one that does\n", fix.display()));
+    host.gh.open("fix", &pull("OPEN", "https://github.com/o/n/pull/7", "base:refs/heads/main"));
+    refused("no branch\n");
+    host.gh.fail("fix");
+    refused("HTTP 401: Requires authentication (https://api.github.com/graphql)\n");
+    host.gh.mend("fix");
+
+    host.gh.open("fix", &pull("MERGED", "https://github.com/o/n/pull/7", "base"));
+    let merged = rebased(host, fix);
+    assert!(merged.status.success(), "{}", stderr(&merged));
+    let said = String::from_utf8_lossy(&merged.stdout);
+    assert_eq!(said, "fix is rebased onto origin/main, 3 commits on top\n");
+    assert!(fix.join("theirs").exists(), "a merged pull request's branch goes onto main");
+
+    git(fix, &["branch", "-q", "--unset-upstream"]);
+    host.gh.open("fix", &pull("OPEN", "https://github.com/o/n/pull/7", "base"));
+    let unpushed = rebased(host, fix);
+    let said = String::from_utf8_lossy(&unpushed.stdout);
+    assert_eq!(said, "fix is on origin/main already\n", "{}", stderr(&unpushed));
 }
 
 #[test]

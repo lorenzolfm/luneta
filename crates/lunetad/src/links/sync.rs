@@ -4,9 +4,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{
-    ASKING, GITHUB, Link, MAKING, Remotes, failure, luneta, remote, remotes_in, said, ssh_host,
-};
+use super::{ASKING, GITHUB, Link, MAKING, failure, luneta, remote, remotes, said, ssh_host};
 use crate::git;
 use crate::program::{self, Ran};
 
@@ -47,11 +45,7 @@ pub(super) fn to_head(dir: &str, link: &Link, remote: Option<&str>) -> Result<()
 }
 
 fn remote_of(dir: &str, link: &Link) -> Result<Option<String>, String> {
-    match remotes_in(dir) {
-        Remotes::Listed(listed) => Ok(remote(&listed, link, ssh_host)),
-        Remotes::Unlisted => Ok(None),
-        Remotes::Unsaid(why) => Err(format!("git did not say the remotes of {dir}: {why}")),
-    }
+    Ok(remotes(dir)?.and_then(|listed| remote(&listed, link, ssh_host)))
 }
 
 fn viewed(link: &Link) -> Result<Viewed, String> {
