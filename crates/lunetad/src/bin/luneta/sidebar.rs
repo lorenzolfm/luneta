@@ -6,8 +6,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::{SkimMatcherV2, SkimScoreConfig};
 use luneta_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
 use luneta_protocol::github::{PullRequest, State, Verdict};
 use luneta_protocol::shell::{Doing, Ending, Front};
@@ -43,6 +41,7 @@ use crate::checks;
 use crate::close::{self, Act, Plan, Scope, Untold};
 use crate::copied::{Copied, Excerpt};
 use crate::folds::{Fold, Folds};
+use crate::fuzzy::{Fuzzy, Score, Typos};
 use crate::gruvbox;
 use crate::icons;
 use crate::issue::Repository;
@@ -1702,6 +1701,12 @@ enum Search {
     Typed { term: String, seek: bool },
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Rebuilt {
+    Done,
+    Unfound,
+}
+
 #[derive(Clone, Copy)]
 enum Highlight {
     Lit(Option<usize>),
@@ -2425,6 +2430,13 @@ impl Sidebar {
     }
 
     fn rebuild(&mut self) {
+        if self.rebuild_with(Typos::None) == Rebuilt::Unfound {
+            let rebuilt = self.rebuild_with(Typos::Forgiven);
+            assert!(rebuilt == Rebuilt::Done, "a search forgiving typos rebuilds even unfound");
+        }
+    }
+
+    fn rebuild_with(&mut self, typos: Typos) -> Rebuilt {
         let seat_listed = self.seated_in().and_then(|project| self.listed_of(project));
         if let Some(listed) = seat_listed {
             self.seat_name = Some(listed.name.to_string());
@@ -2432,7 +2444,7 @@ impl Sidebar {
         let here_view = self.here_place().ok();
         let here_worktree = self.here_worktree();
         let Some(host) = &self.host else {
-            return;
+            return Rebuilt::Done;
         };
         let (seated, sits_on) = (self.seated_in(), self.on().clone());
         let here_key =
@@ -2442,19 +2454,17 @@ impl Sidebar {
         let listed = machines(host, &self.shelves);
         let unlisted_machines = listed.left_out;
         let unlisted = self.shelves.iter().map(|shelf| shelf.unlisted).sum();
-        let (term, seek) = match &mut self.mode {
-            Mode::Search(Search::Typed { term, seek }) => {
-                (Some(term.as_str()), std::mem::take(seek))
-            },
+        let term = match &self.mode {
+            Mode::Search(Search::Typed { term, .. }) => Some(term.as_str()),
             Mode::Idle
             | Mode::Pending(_)
             | Mode::Search(Search::Empty)
             | Mode::Reorder(_)
             | Mode::Menu { .. }
             | Mode::Afloat { .. }
-            | Mode::AfloatNote(_) => (None, false),
+            | Mode::AfloatNote(_) => None,
         };
-        let finder = term.map(Finder::new);
+        let finder = term.map(|term| Finder::new(term, typos));
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
         let mut counts = Counts::default();
         let mut rows = Vec::new();
@@ -2703,7 +2713,19 @@ impl Sidebar {
         }
         if finder.is_none() {
             assert!(!rows.is_empty(), "this machine always has a row");
+        } else if best.is_none() && typos == Typos::None {
+            return Rebuilt::Unfound;
         }
+        let seek = match &mut self.mode {
+            Mode::Search(Search::Typed { seek, .. }) => std::mem::take(seek),
+            Mode::Idle
+            | Mode::Pending(_)
+            | Mode::Search(Search::Empty)
+            | Mode::Reorder(_)
+            | Mode::Menu { .. }
+            | Mode::Afloat { .. }
+            | Mode::AfloatNote(_) => false,
+        };
         self.rows = rows;
         self.homes = homes;
         self.counts = counts;
@@ -2733,6 +2755,7 @@ impl Sidebar {
         self.due = due;
         let best = best.map(|(at, _)| self.row_of(&at).expect("a search's best match has a row"));
         self.settle(best, seek);
+        Rebuilt::Done
     }
 
     fn row_for(&self, spot: &Spot) -> Option<Spot> {
@@ -5016,19 +5039,17 @@ pub fn short_cwd(path: &str) -> String {
     }
 }
 
-pub type Fit = (bool, i64);
+pub type Fit = (bool, Score);
 
 pub struct Finder<'a> {
-    matcher: SkimMatcherV2,
-    anywhere: SkimMatcherV2,
+    fuzzy: Fuzzy,
+    anywhere: Fuzzy,
     term: &'a str,
 }
 
 impl<'a> Finder<'a> {
-    pub fn new(term: &'a str) -> Self {
-        let anywhere = SkimScoreConfig { bonus_first_char_multiplier: 1, ..Default::default() };
-        let anywhere = SkimMatcherV2::default().score_config(anywhere);
-        Finder { matcher: SkimMatcherV2::default(), anywhere, term }
+    pub fn new(term: &'a str, typos: Typos) -> Self {
+        Finder { fuzzy: Fuzzy::new(term, typos), anywhere: Fuzzy::anywhere(term, typos), term }
     }
 
     fn session(&self, name: &str) -> Option<(Fit, Vec<usize>)> {
@@ -5058,16 +5079,14 @@ impl<'a> Finder<'a> {
 
     pub fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
         let exact = shown == self.term;
-        let best = |matcher: &SkimMatcherV2| {
-            also.iter().flatten().filter_map(|text| matcher.fuzzy_match(text, self.term)).max()
-        };
-        let other = best(&self.matcher);
-        let Some((score, hits)) = self.matcher.fuzzy_indices(shown, self.term) else {
+        let best = |fuzzy: &Fuzzy| also.iter().flatten().filter_map(|text| fuzzy.score(text)).max();
+        let other = best(&self.fuzzy);
+        let Some((score, hits)) = self.fuzzy.hits(shown) else {
             return Some(((exact, other?), Vec::new()));
         };
-        let fits = |score: i64, other: Option<i64>| other.is_none_or(|other| score >= other);
+        let fits = |score: Score, other: Option<Score>| other.is_none_or(|other| score >= other);
         let lit = fits(score, other)
-            || self.anywhere.fuzzy_match(shown, self.term).is_some_and(|anywhere| {
+            || self.anywhere.score(shown).is_some_and(|anywhere| {
                 fits(anywhere, best(&self.anywhere))
             });
         let fit = (exact, other.map_or(score, |other| score.max(other)));
@@ -8070,6 +8089,7 @@ mod tests {
         };
         assert_eq!(found("notes"), [" ▾ s", "  ▾ notes", "     \u{e6ae} nvim a"]);
         assert_eq!(found("luneta"), [" ▾ s", "  ▾ Tab #2", "     \u{e6ae} nvim b"]);
+        assert_eq!(found("lnueta"), found("luneta"));
         let branched = [" ▾ s", "  ▾ Tab #3", "       feature/sidebar", "     \u{e6ae} nvim c"];
         assert_eq!(found("sidebar"), branched);
         let seated = found("fold/review");

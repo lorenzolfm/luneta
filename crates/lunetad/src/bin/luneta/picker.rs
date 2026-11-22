@@ -12,8 +12,6 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Modifier, Style};
@@ -30,6 +28,7 @@ use crate::actions::{self, Action, Pasted, Spec};
 use crate::alerts::Doing;
 use crate::away::{self, Away};
 use crate::close::{self, Act, Plan};
+use crate::fuzzy::{Fuzzy, Score, Typos};
 use crate::gruvbox;
 use crate::host::Event;
 use crate::screen;
@@ -433,9 +432,9 @@ struct Search<'a> {
 }
 
 impl<'a> Search<'a> {
-    fn of(typed: &'a str) -> Option<Search<'a>> {
+    fn of(typed: &'a str, typos: Typos) -> Option<Search<'a>> {
         let term = typed.to_lowercase();
-        (!typed.is_empty()).then(|| Search { finder: Finder::new(typed), term })
+        (!typed.is_empty()).then(|| Search { finder: Finder::new(typed, typos), term })
     }
 }
 
@@ -1276,11 +1275,7 @@ impl Picker {
         let places = worktrees.map(place);
         let mut ranked: Vec<(Tier, Kind, Row)> = actions.chain(places).collect();
         ranked.sort_by_key(|(tier, kind, _)| (*tier, *kind));
-        let mut rows: Vec<Row> = ranked.into_iter().map(|(.., row)| row).collect();
-        if rows.is_empty() {
-            rows = self.typed_rows();
-        }
-        rows
+        ranked.into_iter().map(|(.., row)| row).collect()
     }
 
     fn pasted_rows(&self) -> Option<Vec<Row>> {
@@ -1440,20 +1435,30 @@ impl Picker {
     }
 
     fn rebuild(&mut self, snap: bool) {
-        let search = Search::of(&self.term);
-        let finder = search.as_ref().map(|it| &it.finder);
         let ruled = !self.listing.remotes.is_empty();
-        let mut agents = Vec::new();
-        for (on, runs) in self.each() {
-            let rule = ruled.then(|| self.machine_name(&on));
-            grouped(&mut agents, self.agent_rows(finder, &on, runs), rule);
-        }
-        let mut worktrees = self.worktree_rows(finder);
+        let agents = Typos::found(|typos| {
+            let search = Search::of(&self.term, typos);
+            let mut agents = Vec::new();
+            for (on, runs) in self.each() {
+                let rule = ruled.then(|| self.machine_name(&on));
+                let found = self.agent_rows(search.as_ref().map(|it| &it.finder), &on, runs);
+                grouped(&mut agents, found, rule);
+            }
+            agents
+        });
+        let mut worktrees = Typos::found(|typos| {
+            let search = Search::of(&self.term, typos);
+            self.worktree_rows(search.as_ref().map(|it| &it.finder))
+        });
         if worktrees.is_empty() && self.scope.is_none() {
             worktrees = self.typed_rows();
         }
         let (dirs, aimed) = self.dir_rows();
-        let actions = self.action_rows(search.as_ref());
+        let mut actions =
+            Typos::found(|typos| self.action_rows(Search::of(&self.term, typos).as_ref()));
+        if actions.is_empty() && !self.term.is_empty() {
+            actions = self.typed_rows();
+        }
         let worktree_start = match worktrees.first().map(|row| &row.key) {
             Some(Key::Worktree { on, place }) if self.is_shown(on, place) => {
                 usize::from(self.term.is_empty())
@@ -1556,25 +1561,31 @@ impl Picker {
     }
 
     fn dir_rows(&self) -> (Vec<Row>, Option<usize>) {
-        let matcher = SkimMatcherV2::default();
         let taken = self.taken(&Machine::Local);
         let machines = self.machines();
         let ruled = machines.len() > 1;
-        let (mut rows, mut aimed) = (Vec::new(), None);
-        for on in machines {
-            let Some(Visited::Listed(visited)) = self.visited.get(&on) else {
-                continue;
-            };
-            let named = visited.iter().map(|dir| {
-                let session = match &on {
-                    Machine::Local => dir.name.free(&taken),
-                    Machine::Remote(_) => dir.name.clone(),
+        let found = Typos::found(|typos| {
+            let fuzzy = Fuzzy::new(&self.term, typos);
+            let found = machines.iter().filter_map(|on| {
+                let Some(Visited::Listed(visited)) = self.visited.get(on) else {
+                    return None;
                 };
-                (dir, session)
+                let named = visited.iter().map(|dir| {
+                    let session = match on {
+                        Machine::Local => dir.name.free(&taken),
+                        Machine::Remote(_) => dir.name.clone(),
+                    };
+                    (dir, session)
+                });
+                let found = dir_rows(&fuzzy, &self.term, on, named);
+                (!found.is_empty()).then_some((on, found))
             });
-            let found = dir_rows(&matcher, &self.term, &on, named);
-            let first = grouped(&mut rows, found, ruled.then(|| self.machine_name(&on)));
-            if self.aim == on {
+            found.collect()
+        });
+        let (mut rows, mut aimed) = (Vec::new(), None);
+        for (on, found) in found {
+            let first = grouped(&mut rows, found, ruled.then(|| self.machine_name(on)));
+            if self.aim == *on {
                 aimed = first;
             }
         }
@@ -2281,19 +2292,19 @@ fn matched<'a>(
 }
 
 fn dir_rows<'a>(
-    matcher: &SkimMatcherV2,
+    fuzzy: &Fuzzy,
     term: &str,
     on: &Machine,
     dirs: impl Iterator<Item = (&'a Dir, SessionName)>,
 ) -> Vec<Row> {
-    let mut found: Vec<(bool, i64, usize, Row)> = Vec::new();
+    let mut found: Vec<(bool, Score, usize, Row)> = Vec::new();
     for (at, (dir, session)) in dirs.enumerate() {
         let name = session.to_string();
         let hit = if term.is_empty() {
             Some((0, Vec::new()))
         } else {
-            matcher.fuzzy_indices(dir.path.as_str(), term).or_else(|| {
-                let score = matcher.fuzzy_match(&name, term)?;
+            fuzzy.hits(dir.path.as_str()).or_else(|| {
+                let score = fuzzy.score(&name)?;
                 Some((score, Vec::new()))
             })
         };
@@ -3713,6 +3724,11 @@ mod tests {
             cells.iter().filter(|cell| cell.fg == ACCENT).map(|cell| cell.symbol()).collect();
         assert!(row.trim_end().ends_with("…u/Projects/misc/far/away/down/luneta/main"), "{row}");
         assert_eq!(lit, "luneta/m");
+        for _ in 0.."luneta/m".len() {
+            press(&mut picker, KeyCode::Backspace);
+        }
+        typed(&mut picker, "lnueta");
+        assert_eq!(names(&picker), ["luneta-main", "luneta"], "a typo is forgiven where none fits");
     }
 
     #[test]

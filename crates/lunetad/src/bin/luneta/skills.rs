@@ -1,13 +1,12 @@
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::SkimMatcherV2;
 pub use lunetad::skills::{Name, Runs, Skill};
 use lunetad::Directory;
 
 use crate::agents::Harness;
 use crate::away::{self, Away};
+use crate::fuzzy::{Fuzzy, Score, Typos};
 use crate::host::Event;
 use crate::machines::Machine;
 
@@ -29,7 +28,7 @@ pub fn find(
     });
 }
 
-type Fit = (bool, bool, i64);
+type Fit = (bool, bool, Score);
 
 struct Found {
     at: usize,
@@ -136,23 +135,25 @@ impl Search {
         let Skills::Found(skills) = &self.skills else {
             return;
         };
-        let matcher = SkimMatcherV2::default();
         let term = self.term.as_str();
-        let mut found: Vec<(Fit, Found)> = skills
-            .iter()
-            .enumerate()
-            .filter_map(|(at, skill)| {
-                if term.is_empty() {
-                    return Some(((false, false, 0), Found { at, hits: Vec::new() }));
-                }
-                let name = skill.name.as_str();
-                if let Some((score, hits)) = matcher.fuzzy_indices(name, term) {
-                    return Some(((name == term, true, score), Found { at, hits }));
-                }
-                let score = matcher.fuzzy_match(&skill.description, term)?;
-                Some(((false, false, score), Found { at, hits: Vec::new() }))
-            })
-            .collect();
+        let mut found: Vec<(Fit, Found)> = Typos::found(|typos| {
+            let fuzzy = Fuzzy::new(term, typos);
+            skills
+                .iter()
+                .enumerate()
+                .filter_map(|(at, skill)| {
+                    if term.is_empty() {
+                        return Some(((false, false, 0), Found { at, hits: Vec::new() }));
+                    }
+                    let name = skill.name.as_str();
+                    if let Some((score, hits)) = fuzzy.hits(name) {
+                        return Some(((name == term, true, score), Found { at, hits }));
+                    }
+                    let score = fuzzy.score(&skill.description)?;
+                    Some(((false, false, score), Found { at, hits: Vec::new() }))
+                })
+                .collect()
+        });
         found.sort_by(|(a, one), (b, other)| b.cmp(a).then(one.at.cmp(&other.at)));
         self.found = found.into_iter().map(|(_, found)| found).collect();
         self.selected = 0;
@@ -202,6 +203,9 @@ mod tests {
         assert!(search.pop());
         assert!(!search.pop());
         assert_eq!(names(&search), ["code-review", "prototype", "re", "tigerstyle"]);
+        "tigrestyle".chars().for_each(|c| search.push(c));
+        assert_eq!(names(&search), ["tigerstyle"]);
+        "tigrestyle".chars().for_each(|_| assert!(search.pop()));
 
         assert!(!search.fill(Ok(Vec::new())));
         assert_eq!(search.count(), 4);

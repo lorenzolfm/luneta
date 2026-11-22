@@ -20,7 +20,7 @@ base64 = "0.22.1"
 clap = { version = "4.6.6", features = ["derive"] }
 cpal = "0.18.2"
 crossterm = "0.29.0"
-fuzzy-matcher = { version = "0.3.7", default-features = false }
+frizbee = { version = "0.13.0", default-features = false }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 luneta-protocol = { path = "../protocol" }
 notify = "8.2.0"
