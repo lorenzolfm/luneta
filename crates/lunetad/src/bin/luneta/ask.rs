@@ -353,7 +353,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::menu::{ViewRow, Ran};
+    use crate::menu::{Folder, ViewRow, Ran};
     use crate::sidebar::{Listed, ViewKey, ProjectRow};
 
     fn listed() -> Listed {
@@ -374,10 +374,10 @@ mod tests {
             session: listed(),
             view: ViewKey::terminal(4),
             terminal: None,
-            cwd: Cwd::of(Some("/w/luneta/main".to_owned())),
-            branch: Some("feat/ask".to_owned()),
-            repository: None,
-            pull_request: None,
+            cwd: Cwd::of(Some("/w/luneta/main".to_owned()), |dir| {
+                let branch = Some("feat/ask".to_owned());
+                Folder { dir, branch, repository: None, pull_request: None }
+            }),
             ran: Ran::Unhooked,
             arranged: None,
         };
@@ -390,7 +390,8 @@ mod tests {
 
     fn unread_on(machine: Machine) -> Target {
         let Target::View(on, row) = view_row_on(machine) else { unreachable!("a view's row") };
-        Target::View(on, ViewRow { cwd: Cwd::of(Some("w".to_owned())), ..row })
+        let cwd = Cwd::of(Some("w".to_owned()), |dir| unreachable!("{dir} is no absolute path"));
+        Target::View(on, ViewRow { cwd, ..row })
     }
 
     fn key(code: KeyCode) -> KeyEvent {
