@@ -52,8 +52,11 @@ jobs:
       id-token: write
 
     steps:
-      - name: actions/checkout v7
+      - &checkout-head
+        name: actions/checkout v7, at the PR's head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - &install-nix
         name: cachix/install-nix-action v31
@@ -141,7 +144,7 @@ jobs:
           git update-ref refs/remotes/origin/main HEAD^
           nix run .#dev.commands.lint -- --breaking
 
-  macos-tested:
+  tested:
     needs: code
     if: >-
       ${{ !cancelled() && needs.code.outputs.changed != 'false'
@@ -151,36 +154,42 @@ jobs:
       contents: read
       id-token: write
     outputs:
-      held: ${{ steps.tested.outputs.held }}
+      untested: ${{ steps.tested.outputs.untested }}
 
     steps:
-      - name: actions/checkout v7
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - *checkout-head
 
       - *install-nix
 
       - *tailscale
 
-      - name: Whether attic holds this tree's tested lunetad for macOS
+      - name: The runners whose tested lunetad attic doesn't hold
         id: tested
         if: steps.tailscale.outcome == 'success'
         run: |
-          check="$(nix eval --raw .#checks.aarch64-darwin.lunetad.outPath)"
-          held=false
-          if nix store verify --no-contents --store https://attic.tail174781.ts.net/main "$check"; then
-            held=true
-          fi
-          echo "held=$held" | tee -a "$GITHUB_OUTPUT"
+          checks="$(nix eval --json .#checks --apply 'builtins.mapAttrs (_: checks: checks.lunetad.outPath)')"
+          untested=()
+          for pair in x86_64-linux=ubuntu-latest aarch64-linux=ubuntu-24.04-arm aarch64-darwin=macos-latest; do
+            system="${pair%%=*}"
+            check="$(jq -er --arg system "$system" '.[$system]' <<<"$checks")"
+            if nix store verify --no-contents --store https://attic.tail174781.ts.net/main "$check"; then
+              echo "attic holds $system's tested $check"
+            else
+              untested+=("${pair#*=}")
+            fi
+          done
+          echo "untested=$(jq -cn '$ARGS.positional' --args "${untested[@]}")" | tee -a "$GITHUB_OUTPUT"
 
   daemon:
-    needs: [code, macos-tested]
-    if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
+    needs: [code, tested]
+    if: >-
+      ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      && needs.tested.outputs.untested != '[]' }}
     strategy:
       fail-fast: false
       matrix:
         runner: >-
-          ${{ fromJSON(needs.macos-tested.outputs.held == 'true'
-          && '["ubuntu-latest", "ubuntu-24.04-arm"]'
+          ${{ fromJSON(needs.tested.outputs.untested
           || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]') }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -189,8 +198,7 @@ jobs:
       id-token: write
 
     steps:
-      - name: actions/checkout v7
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - *checkout-head
 
       - *install-nix
 
