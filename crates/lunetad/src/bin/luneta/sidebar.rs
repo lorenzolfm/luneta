@@ -52,7 +52,8 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::{self, Machine};
 use crate::menu::{
-    self, AllKeys, Briefed, Choice, Cwd, Did, Done, Hint, Label, Menu, Origin, Pull, ViewRow,
+    self, AllKeys, Briefed, Choice, Cwd, Did, Done, Folder, Hint, Label, Menu, Origin, Pull,
+    ViewRow,
     ProjectTarget, Ran, Rename, Target, Top, Wants, WorktreeRow,
 };
 use crate::news::News;
@@ -3440,35 +3441,22 @@ impl Sidebar {
         let seen = self.seen(machine);
         let shown = self.view_of(machine, &session, view.terminal_id());
         let agents = seen.as_ref().map(Seen::seated);
-        let cwd = Cwd::of(shown.zip(agents.as_ref()).and_then(|(shown, agents)| {
+        let said = shown.zip(agents.as_ref()).and_then(|(shown, agents)| {
             let agent = keyed(shown).and_then(|key| agents.get(&key).copied());
             view_dir(agent, shown).map(str::to_owned)
-        }));
-        let dir = cwd.at().map(Directory::as_str);
-        let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
-        let status = dir.and_then(|dir| statuses.into_iter().find(|status| status.dir == dir));
-        let status = status.and_then(GitStatus::of_api);
-        let checkout = status.as_ref().and_then(|status| checkout(status, None));
-        let branch = checkout.map(|checkout| checkout.branch);
-        let repository = status.as_ref().and_then(repository_of);
-        let pulls = seen.iter().flat_map(|seen| seen.pull_requests);
-        let pull_request = dir.and_then(|dir| pulls.into_iter().find(|pull| pull.dir == dir));
-        let pull_request = pull_request.and_then(PullRequest::of_api);
+        });
+        let cwd = Cwd::of(said, |dir| {
+            let (branch, repository) = git_in(seen.as_ref(), &dir);
+            let pulls = seen.iter().flat_map(|seen| seen.pull_requests);
+            let pull_request = pulls.into_iter().find(|pull| pull.dir == dir.as_str());
+            let pull_request = pull_request.and_then(PullRequest::of_api);
+            Folder { dir, branch, repository, pull_request }
+        });
         let ran = self.ran_in(machine, &session, view.terminal_id());
         let terminal = view_id_of(&self.shelves, machine, &session, view);
         let arranged =
             terminal.and_then(|it| arranged_holding(&self.shelves, machine, &session, it));
-        let row = ViewRow {
-            session,
-            view,
-            terminal,
-            cwd,
-            branch,
-            repository,
-            pull_request,
-            ran,
-            arranged,
-        };
+        let row = ViewRow { session, view, terminal, cwd, ran, arranged };
         Some(Target::View(machine.clone(), row))
     }
 
@@ -3484,12 +3472,7 @@ impl Sidebar {
         let known = known.find(|it| it.project.id() == place.project.id())?;
         let worktree = known.worktrees.iter().find(|worktree| worktree.place == place)?;
         let (name, folder) = (worktree.name.clone(), Directory::from(&worktree.folder));
-        let seen = self.seen(machine);
-        let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
-        let status = statuses.into_iter().find(|status| status.dir == folder.as_str());
-        let status = status.and_then(GitStatus::of_api);
-        let branch = status.as_ref().and_then(|status| checkout(status, None)).map(|it| it.branch);
-        let repository = status.as_ref().and_then(repository_of);
+        let (branch, repository) = git_in(self.seen(machine).as_ref(), &folder);
         let row = WorktreeRow { place, name, folder, branch, repository };
         Some(Target::Worktree(machine.clone(), row))
     }
@@ -5099,6 +5082,16 @@ fn log_unasked(plan: &prunes::Plan) {
     for unasked in &plan.unasked {
         log::say(&format!("{}: {}", unasked.folder, unasked.why));
     }
+}
+
+fn git_in(seen: Option<&Seen<'_>>, dir: &Directory) -> (Option<String>, Option<String>) {
+    let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
+    let status = statuses.into_iter().find(|status| status.dir == dir.as_str());
+    let Some(status) = status.and_then(GitStatus::of_api) else {
+        return (None, None);
+    };
+    let branch = checkout(&status, None).map(|checkout| checkout.branch);
+    (branch, repository_of(&status))
 }
 
 fn repository_of(status: &GitStatus) -> Option<String> {
@@ -9445,7 +9438,7 @@ mod tests {
             assert!(sidebar.open().is_none(), "{text:?}");
         }
         let Some(Target::View(on, row)) = sidebar.target() else { panic!("not a view's row") };
-        let from = row.cwd.at().cloned();
+        let from = row.cwd.at().map(|folder| folder.dir.clone());
         assert_eq!(sidebar.paste("  docs/plans/sync-rework.md\n"), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 39, 17);
         assert_eq!(lines[12..], [
@@ -9741,10 +9734,12 @@ mod tests {
             session: Listed::new_project("older", 1),
             view: view_key(1, 1),
             terminal: ViewId::of(1),
-            cwd: Cwd::At(directory("/w/luneta/main")),
-            branch: Some("feat/menu".to_owned()),
-            repository: None,
-            pull_request: None,
+            cwd: Cwd::At(Folder {
+                dir: directory("/w/luneta/main"),
+                branch: Some("feat/menu".to_owned()),
+                repository: None,
+                pull_request: None,
+            }),
             ran: Ran::Unhooked,
             arranged: Some(Arranged::Tabs),
         })));
@@ -11265,22 +11260,11 @@ mod tests {
         assert_eq!(sidebar.key(&enter, moment(160_000)), there);
         type_in(&mut sidebar, "mn");
         let on = Machine::Remote(nixos());
-        let (session, cwd) = (listed("main", 20), Cwd::At(directory("/w/b")));
-        let (branch, repository, ran) = (None, None, Ran::Unhooked);
-        let view = view_key(20, 1);
-        let terminal = ViewId::of(1);
-        let (pull_request, arranged) = (None, Some(Arranged::Tabs));
-        let row = ViewRow {
-            session,
-            view,
-            terminal,
-            cwd,
-            branch,
-            repository,
-            pull_request,
-            ran,
-            arranged,
-        };
+        let dir = directory("/w/b");
+        let cwd = Cwd::At(Folder { dir, branch: None, repository: None, pull_request: None });
+        let (session, view, terminal) = (listed("main", 20), view_key(20, 1), ViewId::of(1));
+        let (ran, arranged) = (Ran::Unhooked, Some(Arranged::Tabs));
+        let row = ViewRow { session, view, terminal, cwd, ran, arranged };
         let menu = sidebar.open().expect("the menu");
         assert_eq!(menu.target(), &Target::View(on.clone(), row.clone()));
         let (project, beside) = (listed("main", 20).project(), view_key(20, 1));

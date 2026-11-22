@@ -2480,7 +2480,7 @@ mod tests {
 
     use super::*;
     use crate::close::Doing;
-    use crate::menu::{Cwd, Ran, ViewRow, WorktreeRow};
+    use crate::menu::{Cwd, Folder, Ran, ViewRow, WorktreeRow};
     use lunetad::projects::ViewId;
     use crate::spots::Hit;
 
@@ -2631,10 +2631,12 @@ mod tests {
             session: fix().project.listed().clone(),
             view: ViewKey::terminal(3),
             terminal: ViewId::of(3),
-            cwd: Cwd::At(directory("/home/you/fix")),
-            branch: None,
-            repository: None,
-            pull_request: None,
+            cwd: Cwd::At(Folder {
+                dir: directory("/home/you/fix"),
+                branch: None,
+                repository: None,
+                pull_request: None,
+            }),
             ran: Ran::Unhooked,
             arranged: None,
         };
