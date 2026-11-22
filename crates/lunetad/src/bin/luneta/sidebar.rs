@@ -13,13 +13,13 @@ use luneta_protocol::unread;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
-use lunetad::api::{self, Agent, Harness, Host, Saying, Shell, Status, Titled, UnreadFile};
+use lunetad::api::{self, Agent, Harness, Host, Saying, Status, Titled, UnreadFile};
 use lunetad::changes::Unchanged;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links::{self, Branch};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Argv, Dir, Holders, Opens, Plain, ProjectId, Used, ViewId};
-use lunetad::projects::{Arranged, ProjectName, WorktreeId, CLONE_WORKTREES_MAX};
+use lunetad::projects::{Arranged, ProjectName, WorktreeId};
 use lunetad::prunes;
 use lunetad::rebases::{Rebased, Unrebased};
 use lunetad::seats::{self, seated, Unread};
@@ -56,6 +56,7 @@ use crate::menu::{
 use crate::news::News;
 use crate::picker::{Aim, Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
 use crate::printed::Printed;
+use crate::projected::{self, Told};
 use crate::prune;
 use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
@@ -150,12 +151,6 @@ impl ProjectRow {
     pub fn of(listed: Listed) -> Self {
         let id = listed.project();
         ProjectRow { listed, id }
-    }
-
-    fn of_api(project: &api::Project) -> Option<Self> {
-        let name = ProjectName::parse(&project.name).ok()?;
-        let id = ProjectId::of(project.id)?;
-        Some(ProjectRow { listed: Listed { name, kept: ledger::Session::Project(id) }, id })
     }
 
     #[must_use]
@@ -804,7 +799,6 @@ struct Known {
     project: ProjectRow,
     dir: Dir,
     worktrees: Vec<KnownWorktree>,
-    order: Vec<WorktreeId>,
     unopened: Unopened,
 }
 
@@ -836,19 +830,17 @@ enum KnownTerminal {
 }
 
 impl KnownTerminal {
-    fn of(terminal: &api::Terminal) -> Self {
-        let id = ViewId::of(terminal.id).expect("lunetad says a terminal's id, and no id is 0");
-        let Some(api::terminal::Found::Key(key)) = &terminal.found else {
-            return KnownTerminal::Unfound(id);
+    fn of(terminal: &projected::Terminal) -> Self {
+        let Some(key) = terminal.key else {
+            return KnownTerminal::Unfound(terminal.id);
         };
-        let key = TerminalKey::of(key).expect("lunetad says a found terminal's key as the mux's");
         KnownTerminal::Found(KnownView {
-            id,
+            id: terminal.id,
             key,
-            cwd: Some(terminal.folder.clone()).filter(|folder| !folder.is_empty()),
+            cwd: terminal.cwd.clone(),
             command: terminal.command.clone(),
             titled: terminal.titled.clone(),
-            told: Told::of(terminal.shell.as_ref()),
+            told: terminal.told.clone(),
         })
     }
 
@@ -868,23 +860,6 @@ impl KnownTerminal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Told {
-    Unhooked,
-    Unread,
-    Doing(Doing),
-}
-
-impl Told {
-    fn of(shell: Option<&Shell>) -> Told {
-        match shell.map(Doing::of_api) {
-            None => Told::Unhooked,
-            Some(Err(_)) => Told::Unread,
-            Some(Ok(doing)) => Told::Doing(doing),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct KnownView {
     id: ViewId,
     key: TerminalKey,
@@ -895,63 +870,37 @@ struct KnownView {
 }
 
 impl Known {
-    fn of(said: &api::Project) -> Option<Known> {
-        let project = ProjectRow::of_api(said)?;
-        let holds = said.holds.as_ref()?;
-        let rows = holds.worktrees();
-        let worktrees = rows.iter().filter_map(|worktree| {
-            let id = WorktreeId::of(worktree.id)?;
-            let place = WorktreePlace { project: project.clone(), worktree: id };
-            let terminals = worktree.terminals.iter().map(KnownTerminal::of).collect();
-            let seen = worktree.seen.and_then(projects::Seen::of_api);
-            let seen = seen.expect("lunetad says a worktree's stage luneta knows");
-            let used = worktree.used_at.map(|at| {
-                Used::of_api(at).expect("lunetad says a worktree's last use as one it keeps")
-            });
-            let folder = Dir::parse(&worktree.folder);
-            let folder = folder.expect("lunetad says a worktree's folder as a folder it keeps");
-            let name = worktree.name.clone();
-            let arranged = worktree.arranged.map(Arranged::said).transpose();
-            let arranged = arranged.expect("lunetad says a worktree's arrangement luneta knows");
-            Some(KnownWorktree { place, name, folder, seen, used, terminals, arranged })
+    fn of(said: &projected::Project) -> Known {
+        let listed = Listed { name: said.name.clone(), kept: ledger::Session::Project(said.id) };
+        let project = ProjectRow::of(listed);
+        let worktrees = said.worktrees().iter().map(|worktree| KnownWorktree {
+            place: WorktreePlace { project: project.clone(), worktree: worktree.id },
+            name: worktree.name.clone(),
+            folder: worktree.folder.clone(),
+            seen: worktree.seen,
+            used: worktree.used,
+            terminals: worktree.terminals.iter().map(KnownTerminal::of).collect(),
+            arranged: worktree.arranged,
         });
-        let worktrees: Vec<KnownWorktree> = worktrees.collect();
-        let order = rows.iter().filter_map(|it| WorktreeId::of(it.id)).collect();
-        let dir = Dir::parse(&said.dir).expect("lunetad says a project's folder as one it keeps");
-        let unopened = Known::unopened_of(holds, &dir, &worktrees);
-        Some(Known { project, dir, worktrees, order, unopened })
-    }
-
-    fn unopened_of(
-        holds: &api::project::Holds,
-        dir: &Dir,
-        worktrees: &[KnownWorktree],
-    ) -> Unopened {
-        use api::project::clone::Listing as Said;
-        let clone = match holds {
-            api::project::Holds::Clone(clone) => clone,
-            api::project::Holds::Folder(_) => return Unopened::Folder,
+        let worktrees = worktrees.collect();
+        let unopened = match &said.holds {
+            projected::Holds::Folder(_) => Unopened::Folder,
+            projected::Holds::Clone { unopened: projected::Unopened::Listed(folders), .. } => {
+                Unopened::Listed(folders.clone())
+            },
+            projected::Holds::Clone { unopened: projected::Unopened::Unlisted(why), .. } => {
+                Unopened::Unlisted(why.clone())
+            },
         };
-        let listed = match &clone.listing {
-            Some(Said::Unopened(listed)) => &listed.subfolders,
-            Some(Said::Unlisted(why)) => return Unopened::Unlisted(why.clone()),
-            None => return Unopened::Unlisted("lunetad says nothing of them".to_owned()),
-        };
-        let max = CLONE_WORKTREES_MAX;
-        assert!(listed.len() <= max, "a clone lists at most {max} worktrees");
-        let open: BTreeSet<&Dir> = worktrees.iter().map(|it| &it.folder).collect();
-        let unopened = listed.iter().map(|it| {
-            let subfolder = projects::Subfolder::parse(it);
-            let subfolder = subfolder.expect("lunetad says a worktree not open as a subfolder");
-            let folder = dir.at(&subfolder);
-            assert!(!open.contains(&folder), "{it} is said not open, so no open worktree is there");
-            folder
-        });
-        Unopened::Listed(unopened.collect())
+        Known { project, dir: said.dir.clone(), worktrees, unopened }
     }
 
     fn listed(&self) -> &Listed {
         self.project.listed()
+    }
+
+    fn order(&self) -> Vec<WorktreeId> {
+        self.worktrees.iter().map(|worktree| worktree.place.worktree).collect()
     }
 
     fn terminals(&self) -> impl Iterator<Item = ViewId> {
@@ -1003,27 +952,63 @@ fn news_key(shelves: &[Shelf], on: &Machine, place: &ViewPlace) -> Option<Key> {
     Some(place.session.key(view_id_of(shelves, on, &place.session, place.view)?))
 }
 
-
 #[derive(Debug, Default)]
 struct Shelf {
     machine: Machine,
-    projects: Vec<Known>,
-    unlisted: usize,
-    order: Vec<ProjectId>,
     version: Option<api::Version>,
-    kept: bool,
+    shelving: Shelving,
+}
+
+#[derive(Debug, Default)]
+enum Shelving {
+    #[default]
+    Unkept,
+    Kept(Vec<Known>),
+    Refused(String),
 }
 
 impl Shelf {
+    fn kept(&self) -> Option<&[Known]> {
+        match &self.shelving {
+            Shelving::Kept(projects) => Some(projects),
+            Shelving::Unkept | Shelving::Refused(_) => None,
+        }
+    }
+
+    fn projects(&self) -> &[Known] {
+        self.kept().unwrap_or_default()
+    }
+
+    fn projects_mut(&mut self) -> &mut [Known] {
+        match &mut self.shelving {
+            Shelving::Kept(projects) => projects,
+            Shelving::Unkept | Shelving::Refused(_) => &mut [],
+        }
+    }
+
+    fn refused(&self) -> Option<String> {
+        let Shelving::Refused(why) = &self.shelving else {
+            return None;
+        };
+        Some(match &self.machine {
+            Machine::Local => format!("lunetad's projects: {why}"),
+            Machine::Remote(destination) => format!("{destination}'s projects: {why}"),
+        })
+    }
+
     fn known(&self, project: ProjectId) -> Option<&Known> {
-        self.projects.iter().find(|known| known.project.id() == project)
+        self.projects().iter().find(|known| known.project.id() == project)
+    }
+
+    fn order(&self) -> Vec<ProjectId> {
+        self.projects().iter().map(|known| known.project.id()).collect()
     }
 
     fn orders(&self, order: &Order) -> bool {
         match order {
-            Order::Projects(order) => permutes(&self.order, order),
+            Order::Projects(order) => permutes(&self.order(), order),
             Order::Worktrees { project, worktrees } => {
-                self.known(*project).is_some_and(|known| permutes(&known.order, worktrees))
+                self.known(*project).is_some_and(|known| permutes(&known.order(), worktrees))
             },
         }
     }
@@ -1032,14 +1017,12 @@ impl Shelf {
         assert!(self.orders(order), "an order reorders what is kept");
         match order {
             Order::Projects(order) => {
-                order.clone_into(&mut self.order);
-                self.projects.sort_by_key(|known| position(order, known.project.id()));
+                self.projects_mut().sort_by_key(|known| position(order, known.project.id()));
             },
             Order::Worktrees { project, worktrees } => {
-                let mut known = self.projects.iter_mut();
+                let mut known = self.projects_mut().iter_mut();
                 let known = known.find(|known| known.project.id() == *project);
                 let known = known.expect("the project reordered is shelved");
-                worktrees.clone_into(&mut known.order);
                 let at = |worktree: &KnownWorktree| position(worktrees, worktree.place.worktree);
                 known.worktrees.sort_by_key(at);
             },
@@ -1060,14 +1043,17 @@ fn permutes<I: Ord + Copy>(kept: &[I], order: &[I]) -> bool {
 }
 
 fn shelved(machine: Machine, projects: Option<&api::Projects>) -> Shelf {
-    let (kept, version, held) = match projects.and_then(|projects| projects.held.as_ref()) {
-        Some(api::projects::Held::Kept(kept)) => (kept.projects.as_slice(), kept.version, true),
-        Some(api::projects::Held::Unkept(_)) | None => (&[][..], None, false),
+    let Some(api::projects::Held::Kept(kept)) = projects.and_then(|it| it.held.as_ref()) else {
+        return Shelf { machine, ..Shelf::default() };
     };
-    let projects: Vec<Known> = kept.iter().filter_map(Known::of).collect();
-    let unlisted = kept.len() - projects.len();
-    let order = kept.iter().filter_map(|project| ProjectId::of(project.id)).collect();
-    Shelf { machine, projects, unlisted, order, version, kept: held }
+    let shelving = match projected::listed(&kept.projects) {
+        Ok(listed) => {
+            assert_eq!(listed.len(), kept.projects.len(), "a listing read is read whole");
+            Shelving::Kept(listed.iter().map(Known::of).collect())
+        },
+        Err(why) => Shelving::Refused(why),
+    };
+    Shelf { machine, version: kept.version, shelving }
 }
 
 fn wanted<I: PartialEq + Copy>(all: &[I], listed: &[I]) -> Vec<I> {
@@ -1096,7 +1082,7 @@ fn shelves(host: &Host) -> Vec<Shelf> {
 
 fn shelf<'a>(shelves: &'a [Shelf], machine: &Machine) -> &'a [Known] {
     let found = shelves.iter().find(|shelf| shelf.machine == *machine);
-    found.map_or(&[], |shelf| shelf.projects.as_slice())
+    found.map_or(&[], Shelf::projects)
 }
 
 struct Seen<'a> {
@@ -1389,7 +1375,7 @@ pub struct Sidebar {
     finished: HashMap<Key, SystemTime>,
     rows: Vec<Row>,
     counts: Counts,
-    unlisted: usize,
+    refused: Vec<String>,
     unlisted_machines: usize,
     keys: Keys,
     here_row: Option<Spot>,
@@ -1739,13 +1725,16 @@ impl Sidebar {
 
     pub fn heard(&mut self, host: Host) {
         self.shelve(&host);
-        for shelf in self.shelves.iter().filter(|shelf| shelf.kept && shelf.unlisted == 0) {
+        for shelf in &self.shelves {
+            let Some(projects) = shelf.kept() else {
+                continue;
+            };
             let machine = &shelf.machine;
-            if shelf.projects.is_empty() && self.folds.contains(Fold::Machine(machine)) {
+            if projects.is_empty() && self.folds.contains(Fold::Machine(machine)) {
                 self.folds.set(Fold::Machine(machine), false);
             }
             let mut live = Vec::new();
-            for known in &shelf.projects {
+            for known in projects {
                 live.push(Fold::Project(machine, known.project.id()));
                 let worktrees = known.worktrees.iter();
                 live.extend(worktrees.map(|it| Fold::Worktree(machine, it.place.worktree)));
@@ -1853,9 +1842,7 @@ impl Sidebar {
                 live.unreached(&machine);
                 continue;
             };
-            let whole = self.shelves.iter().any(|it| {
-                it.machine == machine && it.kept && it.unlisted == 0
-            });
+            let whole = self.shelves.iter().any(|it| it.machine == machine && it.kept().is_some());
             let listed = seen.projects.iter().map(|known| (known.listed().kept, known.terminals()));
             live.lists(&machine, listed, whole);
         }
@@ -2453,7 +2440,7 @@ impl Sidebar {
         let mut due: Option<SystemTime> = None;
         let listed = machines(host, &self.shelves);
         let unlisted_machines = listed.left_out;
-        let unlisted = self.shelves.iter().map(|shelf| shelf.unlisted).sum();
+        let refused = self.shelves.iter().filter_map(Shelf::refused).collect();
         let term = match &self.mode {
             Mode::Search(Search::Typed { term, .. }) => Some(term.as_str()),
             Mode::Idle
@@ -2729,7 +2716,7 @@ impl Sidebar {
         self.rows = rows;
         self.homes = homes;
         self.counts = counts;
-        self.unlisted = unlisted;
+        self.refused = refused;
         self.unlisted_machines = unlisted_machines;
         self.here_key = here_key;
         self.finished = finished;
@@ -3308,13 +3295,13 @@ impl Sidebar {
         let (on, order) = match spans {
             Spans::Projects(machine, spans) => {
                 let kept = self.shelves.iter().find(|it| it.machine == *machine);
-                let seen = kept.map_or(&[][..], |it| it.order.as_slice());
+                let seen = kept.map_or_else(Vec::new, Shelf::order);
                 let listed: Vec<ProjectId> = spans.iter().map(|(id, _)| *id).collect();
-                let wanted = wanted(seen, &listed);
+                let wanted = wanted(&seen, &listed);
                 if wanted == seen {
                     return Asked::Nothing;
                 }
-                (machine.clone(), Reorder::Projects { seen: seen.to_vec(), wanted })
+                (machine.clone(), Reorder::Projects { seen, wanted })
             },
             Spans::Worktrees(machine, project, spans) => {
                 let mut known = shelf(&self.shelves, machine).iter();
@@ -3324,11 +3311,12 @@ impl Sidebar {
                     return Asked::Nothing;
                 };
                 let listed: Vec<WorktreeId> = spans.iter().map(|(id, _)| *id).collect();
-                let wanted = wanted(&known.order, &listed);
-                if wanted == known.order {
+                let seen = known.order();
+                let wanted = wanted(&seen, &listed);
+                if wanted == seen {
                     return Asked::Nothing;
                 }
-                let (project, seen) = (project.id(), known.order.clone());
+                let project = project.id();
                 (machine.clone(), Reorder::Worktrees { project, seen, wanted })
             },
         };
@@ -4740,13 +4728,8 @@ impl Sidebar {
         if let Some(away) = &self.away {
             notes.say(&format!("lunetad: {away}"), width, error);
         }
-        if self.unlisted > 0 {
-            let count = self.unlisted;
-            let projects = if count == 1 { "project" } else { "projects" };
-            let unlisted = format!(
-                "lunetad: {count} {projects} with an id of 0 or a name luneta refuses, not listed"
-            );
-            notes.say(&unlisted, width, error);
+        for refused in &self.refused {
+            notes.say(refused, width, error);
         }
         if self.unlisted_machines > 0 {
             let count = self.unlisted_machines;
@@ -5725,7 +5708,7 @@ mod tests {
     use std::sync::LazyLock;
 
     use lunetad::api::shell::{ended, Doing, Ended, Going, Stopped};
-    use lunetad::api::{self, Front, NameSource, UnreadFile, Version};
+    use lunetad::api::{self, Front, NameSource, Shell, UnreadFile, Version};
     use luneta_protocol::github::PullPage;
     use luneta_protocol::said::Said;
     use prost_types::Timestamp;
@@ -6653,22 +6636,53 @@ mod tests {
         assert_eq!(edge(&collapsed(&mut sidebar, 10, moment(160_000))), vec![dim; 10]);
     }
 
+    fn kept_mut(projects: Option<&mut api::Projects>) -> &mut Vec<api::Project> {
+        let held = projects.and_then(|projects| projects.held.as_mut());
+        let Some(api::projects::Held::Kept(kept)) = held else {
+            panic!("kept projects");
+        };
+        &mut kept.projects
+    }
+
+    fn rows_mut(project: &mut api::Project) -> &mut Vec<api::Worktree> {
+        let Some(api::project::Holds::Clone(clone)) = &mut project.holds else {
+            panic!("a clone");
+        };
+        &mut clone.worktrees
+    }
+
     #[test]
-    fn a_project_of_id_0_or_a_refused_name_is_left_out_and_said() {
-        let mut sidebar = fresh();
-        let unstarted = session("x", 0, vec![]);
-        let mut unsocketed = session("z", 30, vec![]);
-        unsocketed.id = 0;
-        let misnamed = session("a/b", 40, vec![]);
-        let long = session(&"w".repeat(projects::NAME_CHARS_MAX), 50, vec![]);
-        let sessions = vec![unstarted, session("y", 20, vec![]), unsocketed, misnamed, long];
-        sidebar.hear(host(sessions, Vec::new()));
-        let lines = screen(&mut sidebar, false, 60, 9);
-        assert_eq!(lines[1], format!("─ 2 projects {}", "─".repeat(46)));
-        assert_eq!(lines[4], format!(" ▾ y {}", "─".repeat(53)));
-        assert!(lines[5].starts_with(" ▾ wwww"), "{:?}", lines[5]);
-        assert_eq!(lines[7], " lunetad: 3 projects with an id of 0 or a name luneta refu");
-        assert_eq!(lines[8], " ses, not listed");
+    fn a_listing_with_an_id_of_0_shows_none_of_its_projects_and_says_why() {
+        type Zero = fn(&mut api::Project);
+        let zeroed: [(Zero, &str); 3] = [
+            (|project| project.id = 0, "project y has id 0"),
+            (|project| rows_mut(project)[0].id = 0, "worktree Tab #1 of project y has id 0"),
+            (
+                |project| rows_mut(project)[0].terminals[0].id = 0,
+                "a terminal of worktree Tab #1 has id 0",
+            ),
+        ];
+        let listing = || {
+            let x = session("x", 10, vec![view(1, 0, "/w/a", "fish")]);
+            vec![x, session("y", 20, vec![view(1, 0, "/w/b", "fish")])]
+        };
+        for (zero, why) in zeroed {
+            let mut sidebar = fresh();
+            let mut here = host(listing(), Vec::new());
+            zero(&mut kept_mut(here.projects.as_mut())[1]);
+            let mut nixos = up(listing(), Vec::new());
+            let Reached::Host(far) = &mut nixos else {
+                panic!("nixos is up");
+            };
+            zero(&mut kept_mut(far.projects.as_mut())[1]);
+            here.remotes = vec![remote("nixos", nixos)];
+            sidebar.hear(here);
+            let lines = screen(&mut sidebar, false, 80, 9);
+            let rows = [" ▸ \u{f108} mac · no projects", " ▸ \u{f108} nixos · no projects"];
+            assert_eq!(lines[3..5], rows);
+            assert_eq!(lines[7], format!(" lunetad's projects: {why}"));
+            assert_eq!(lines[8], format!(" nixos's projects: {why}"));
+        }
     }
 
     #[test]

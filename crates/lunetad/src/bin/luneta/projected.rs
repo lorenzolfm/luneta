@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use luneta_protocol::shell::Doing;
+
 use lunetad::api::projects::Held;
 use lunetad::api::{self, remote, terminal, Host};
 use lunetad::log;
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Dir, ProjectId, ProjectName, Used, ViewId, WorktreeId};
-use lunetad::projects::{VIEWS_MAX, WORKTREES_MAX};
+use lunetad::projects::{Arranged, Dir, ProjectId, ProjectName, Seen, Subfolder, Used, ViewId};
+use lunetad::projects::{WorktreeId, CLONE_WORKTREES_MAX, VIEWS_MAX, WORKTREES_MAX};
 use lunetad::Destination;
 
 use crate::host::NOT_YET;
@@ -17,17 +19,51 @@ use crate::viewed::{Tab, WorktreeTabs};
 pub struct Worktree {
     pub id: WorktreeId,
     pub name: String,
-    pub folder: String,
+    pub folder: Dir,
     pub tab: u32,
-    pub terminals: Vec<(ViewId, Option<TerminalKey>)>,
-    pub titles: BTreeMap<ViewId, String>,
+    pub terminals: Vec<Terminal>,
     pub used: Option<Used>,
+    pub seen: Seen,
+    pub arranged: Option<Arranged>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Terminal {
+    pub id: ViewId,
+    pub key: Option<TerminalKey>,
+    pub cwd: Option<String>,
+    pub command: Option<String>,
+    pub titled: Option<api::Titled>,
+    pub told: Told,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Told {
+    Unhooked,
+    Unread,
+    Doing(Doing),
+}
+
+impl Told {
+    pub fn of(shell: Option<&api::Shell>) -> Told {
+        match shell.map(Doing::of_api) {
+            None => Told::Unhooked,
+            Some(Err(_)) => Told::Unread,
+            Some(Ok(doing)) => Told::Doing(doing),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Holds {
     Folder(Worktree),
-    Clone(Vec<Worktree>),
+    Clone { worktrees: Vec<Worktree>, unopened: Unopened },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unopened {
+    Listed(Vec<Dir>),
+    Unlisted(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,12 +94,26 @@ pub struct Projected {
     far: BTreeMap<Destination, Holding>,
 }
 
+impl Terminal {
+    fn title(&self) -> Option<String> {
+        let topic = self.titled.as_ref().and_then(|titled| titled.topic.clone());
+        topic.or_else(|| self.command.clone())
+    }
+}
+
+impl Worktree {
+    fn titles(&self) -> BTreeMap<ViewId, String> {
+        let titled = self.terminals.iter();
+        titled.filter_map(|it| Some((it.id, it.title()?))).collect()
+    }
+}
+
 impl Project {
     #[must_use]
     pub fn worktrees(&self) -> &[Worktree] {
         match &self.holds {
             Holds::Folder(own) => std::slice::from_ref(own),
-            Holds::Clone(rows) => rows,
+            Holds::Clone { worktrees, .. } => worktrees,
         }
     }
 
@@ -74,20 +124,19 @@ impl Project {
     #[must_use]
     pub fn terminal_key(&self, view: ViewId) -> Option<TerminalKey> {
         let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
-        let (_, key) = held.find(|(id, _)| *id == view)?;
-        *key
+        held.find(|it| it.id == view)?.key
     }
 
     fn first_keyed(&self) -> Option<TerminalKey> {
         let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
-        held.find_map(|(_, key)| *key)
+        held.find_map(|it| it.key)
     }
 
     #[must_use]
     pub fn view_of(&self, terminal: TerminalKey) -> Option<(WorktreeId, ViewId)> {
         self.worktrees().iter().find_map(|worktree| {
-            let (view, _) = worktree.terminals.iter().find(|(_, key)| *key == Some(terminal))?;
-            Some((worktree.id, *view))
+            let held = worktree.terminals.iter().find(|it| it.key == Some(terminal))?;
+            Some((worktree.id, held.id))
         })
     }
 }
@@ -197,7 +246,7 @@ impl Projected {
         let tab = |it: &Worktree| Tab { worktree: it.id, name: it.name.clone() };
         let tabs: Vec<Tab> = project.worktrees().iter().map(tab).collect();
         assert!(tabs.iter().any(|tab| tab.worktree == worktree), "the tabs hold the worktree held");
-        (Some(WorktreeTabs { project: project.id, tabs }), shown.titles.clone())
+        (Some(WorktreeTabs { project: project.id, tabs }), shown.titles())
     }
 }
 
@@ -213,7 +262,7 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
         return Err(format!("they hold {views} views, over the {VIEWS_MAX} kept"));
     }
     let mut keyed = BTreeSet::new();
-    for key in worktrees.iter().flat_map(|it| &it.terminals).filter_map(|(_, key)| *key) {
+    for key in worktrees.iter().flat_map(|it| &it.terminals).filter_map(|it| it.key) {
         if !keyed.insert(key) {
             return Err(format!("two views hold terminal {}", key.id));
         }
@@ -236,43 +285,81 @@ fn found_key(terminal: &api::Terminal) -> Result<Option<TerminalKey>, String> {
     }
 }
 
-fn title_of(terminal: &api::Terminal) -> Option<String> {
-    let topic = terminal.titled.as_ref().and_then(|titled| titled.topic.clone());
-    topic.or_else(|| terminal.command.clone())
+fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, String> {
+    let named = &worktree.name;
+    let id = WorktreeId::of(worktree.id);
+    let id = id.ok_or_else(|| format!("worktree {named} of project {of} has id 0"))?;
+    let mut terminals = Vec::with_capacity(worktree.terminals.len());
+    for terminal in &worktree.terminals {
+        let held = ViewId::of(terminal.id);
+        let id = held.ok_or_else(|| format!("a terminal of worktree {named} has id 0"))?;
+        let key = found_key(terminal).map_err(|why| format!("terminal {id}: {why}"))?;
+        terminals.push(Terminal {
+            id,
+            key,
+            cwd: Some(terminal.folder.clone()).filter(|folder| !folder.is_empty()),
+            command: terminal.command.clone(),
+            titled: terminal.titled.clone(),
+            told: Told::of(terminal.shell.as_ref()),
+        });
+    }
+    assert_eq!(terminals.len(), worktree.terminals.len(), "every terminal said is read");
+    let folder = Dir::parse(&worktree.folder);
+    let folder = folder.map_err(|why| format!("worktree {named}'s folder: {why}"))?;
+    let used = worktree.used_at.map(Used::of_api).transpose();
+    let used = used.map_err(|why| format!("worktree {named}'s last use: {why}"))?;
+    let seen = worktree.seen.and_then(Seen::of_api);
+    let seen = seen.ok_or_else(|| format!("worktree {named} says no stage luneta knows"))?;
+    let arranged = worktree.arranged.map(Arranged::said).transpose();
+    let arranged = arranged.map_err(|why| format!("worktree {named}'s arrangement: {why}"))?;
+    let name = named.clone();
+    Ok(Worktree { id, name, folder, tab, terminals, used, seen, arranged })
+}
+
+fn unopened(
+    clone: &api::project::Clone,
+    dir: &Dir,
+    open: &[Worktree],
+) -> Result<Unopened, String> {
+    use api::project::clone::Listing;
+    let listed = match &clone.listing {
+        Some(Listing::Unopened(listed)) => &listed.subfolders,
+        Some(Listing::Unlisted(why)) => return Ok(Unopened::Unlisted(why.clone())),
+        None => return Ok(Unopened::Unlisted("lunetad says nothing of them".to_owned())),
+    };
+    let (count, max) = (listed.len(), CLONE_WORKTREES_MAX);
+    if count > max {
+        return Err(format!("it lists {count} worktrees not open, over the {max} a clone holds"));
+    }
+    let open: BTreeSet<&Dir> = open.iter().map(|it| &it.folder).collect();
+    let mut unopened = Vec::new();
+    for said in listed {
+        let subfolder = Subfolder::parse(said).map_err(|why| format!("{said}: {why}"))?;
+        let folder = dir.at(&subfolder);
+        if open.contains(&folder) {
+            return Err(format!("{said} is said not open, and a worktree is open there"));
+        }
+        unopened.push(folder);
+    }
+    assert_eq!(unopened.len(), count, "each subfolder said is a folder not open");
+    Ok(Unopened::Listed(unopened))
 }
 
 fn project(project: &api::Project) -> Result<Project, String> {
     let named = &project.name;
     let id = ProjectId::of(project.id).ok_or_else(|| format!("project {named} has id 0"))?;
-    let worktree = |(worktree, tab): (&api::Worktree, u32)| -> Result<Worktree, String> {
-        let (named, of) = (&worktree.name, &project.name);
-        let id = WorktreeId::of(worktree.id);
-        let id = id.ok_or_else(|| format!("worktree {named} of project {of} has id 0"))?;
-        let mut terminals = Vec::new();
-        let mut titles = BTreeMap::new();
-        for terminal in &worktree.terminals {
-            let held = ViewId::of(terminal.id);
-            let held = held.ok_or_else(|| format!("a terminal of worktree {named} has id 0"))?;
-            let key = found_key(terminal).map_err(|why| format!("terminal {held}: {why}"))?;
-            terminals.push((held, key));
-            if let Some(title) = title_of(terminal) {
-                titles.insert(held, title);
-            }
-        }
-        let (name, folder) = (worktree.name.clone(), worktree.folder.clone());
-        let used = worktree.used_at.map(Used::of_api).transpose();
-        let used = used.map_err(|why| format!("worktree {named}'s last use: {why}"))?;
-        Ok(Worktree { id, name, folder, tab, terminals, titles, used })
-    };
+    let dir = Dir::parse(&project.dir).map_err(|why| format!("project {named}'s folder: {why}"))?;
     let holds = match project.holds.as_ref() {
-        Some(api::project::Holds::Folder(own)) => Holds::Folder(worktree((own, 0))?),
+        Some(api::project::Holds::Folder(own)) => Holds::Folder(worktree(own, 0, named)?),
         Some(api::project::Holds::Clone(clone)) => {
-            let rows = clone.worktrees.iter().zip(0..).map(worktree);
-            Holds::Clone(rows.collect::<Result<_, String>>()?)
+            let rows = clone.worktrees.iter().zip(0..).map(|(it, tab)| worktree(it, tab, named));
+            let worktrees = rows.collect::<Result<Vec<_>, String>>()?;
+            let unopened = unopened(clone, &dir, &worktrees);
+            let unopened = unopened.map_err(|why| format!("project {named}'s clone: {why}"))?;
+            Holds::Clone { worktrees, unopened }
         },
         None => return Err(format!("project {named} says not what it holds")),
     };
-    let dir = Dir::parse(&project.dir).map_err(|why| format!("project {named}'s folder: {why}"))?;
     let name = ProjectName::parse(&project.name)?;
     Ok(Project { id, name, dir, holds })
 }
@@ -307,22 +394,27 @@ mod tests {
         }
     }
 
+    fn row(id: u64, name: &str) -> api::Worktree {
+        api::Worktree {
+            id,
+            name: name.to_owned(),
+            folder: format!("/w/{name}"),
+            seen: Some(api::worktree::Seen::Unread(())),
+            ..api::Worktree::default()
+        }
+    }
+
     fn host() -> Host {
         let first = api::Worktree {
-            id: 11,
-            name: "main".to_owned(),
-            folder: "/w/a".to_owned(),
             terminals: vec![
                 terminal(21, terminal::Found::Key(key(4)), Some("Fixing")),
                 terminal(22, terminal::Found::Lost(()), None),
             ],
-            ..api::Worktree::default()
+            ..row(11, "main")
         };
         let second = api::Worktree {
-            id: 12,
-            name: "docs".to_owned(),
             terminals: vec![terminal(23, terminal::Found::Key(key(5)), None)],
-            ..api::Worktree::default()
+            ..row(12, "docs")
         };
         let worktrees = vec![first, second];
         let project = api::Project {
@@ -483,8 +575,8 @@ mod tests {
     fn a_machine_that_lists_more_worktrees_than_lunetad_keeps_is_refused_its_projects() {
         let listing = |count: usize| {
             let mut host = host();
-            let row = |id| api::Worktree { id: u64::try_from(id).unwrap(), ..Default::default() };
-            *rows(kept(&mut host)) = (1..=count).map(row).collect();
+            let each = |id: usize| row(u64::try_from(id).unwrap(), &format!("t{id}"));
+            *rows(kept(&mut host)) = (1..=count).map(each).collect();
             host.projects
         };
         let most = Host { projects: listing(WORKTREES_MAX), ..Host::default() };
@@ -581,5 +673,64 @@ mod tests {
         kept(&mut folder).holds = None;
         let refused = Projected::adapted(&folder).unwrap_err();
         assert_eq!(refused, "project bitwarden backup says not what it holds");
+    }
+
+    #[test]
+    fn a_worktree_said_with_no_stage_folder_or_arrangement_luneta_reads_is_refused() {
+        type Broke = fn(&mut api::Worktree);
+        let unknown = "worktree docs says no stage luneta knows";
+        let broken: [(Broke, &str); 4] = [
+            (|it| it.seen = None, unknown),
+            (|it| it.seen = Some(api::worktree::Seen::Stage(99)), unknown),
+            (
+                |it| it.folder = "w/docs".to_owned(),
+                "worktree docs's folder: \"w/docs\" is no absolute path",
+            ),
+            (
+                |it| it.arranged = Some(99),
+                "worktree docs's arrangement: it says neither tabs nor panes",
+            ),
+        ];
+        for (broke, why) in broken {
+            let mut host = host();
+            broke(&mut rows(kept(&mut host))[1]);
+            assert_eq!(Projected::adapted(&host), Err(why.to_owned()));
+        }
+    }
+
+    #[test]
+    fn a_clone_lists_the_worktrees_not_open_under_its_folder_or_is_refused() {
+        use api::project::clone::Listing;
+        let listing = |subfolders: Vec<String>| {
+            let mut host = host();
+            let Some(api::project::Holds::Clone(clone)) = &mut kept(&mut host).holds else {
+                panic!("the project is a clone");
+            };
+            clone.listing = Some(Listing::Unopened(api::project::Unopened { subfolders }));
+            Projected::adapted(&host).map(|it| it.projects(&Machine::Local)[0].holds.clone())
+        };
+        let unopened = |holds: Holds| {
+            let Holds::Clone { unopened, .. } = holds else {
+                panic!("a clone: {holds:?}");
+            };
+            unopened
+        };
+        let spike = listing(vec!["spike".to_owned()]).map(unopened);
+        assert_eq!(spike, Ok(Unopened::Listed(vec![Dir::parse("/w/spike").unwrap()])));
+        let unsaid = Projected::adapted(&host()).unwrap();
+        let unsaid = unopened(unsaid.projects(&Machine::Local)[0].holds.clone());
+        assert_eq!(unsaid, Unopened::Unlisted("lunetad says nothing of them".to_owned()));
+        let clone = "project bitwarden backup's clone";
+        let open = format!("{clone}: docs is said not open, and a worktree is open there");
+        assert_eq!(listing(vec!["docs".to_owned()]), Err(open));
+        let root = format!("{clone}: : a worktree is below its clone's root, and never the root");
+        assert_eq!(listing(vec![String::new()]), Err(root));
+        let max = CLONE_WORKTREES_MAX;
+        let many = |count: usize| (0..count).map(|it| format!("s{it}")).collect();
+        assert!(listing(many(max)).is_ok(), "a clone lists {max} not open");
+        let over = max + 1;
+        let over = format!("it lists {over} worktrees not open, over the {max} a clone holds");
+        let over = format!("{clone}: {over}");
+        assert_eq!(listing(many(max + 1)), Err(over));
     }
 }
