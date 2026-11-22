@@ -4,6 +4,7 @@ pub mod release;
 pub mod process;
 pub mod said;
 pub mod shell;
+pub mod socket;
 pub mod unread;
 
 #[allow(

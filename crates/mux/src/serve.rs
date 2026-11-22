@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use luneta_protocol::release;
+use luneta_protocol::socket::{Bound, Found};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::{oneshot, watch};
@@ -15,7 +16,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::{self, mux_server};
 use crate::asked::{self, Dumped, Opens, Size, Tag, TerminalKey, ViewerHeard};
-use crate::folder::{Bound, Claim, Found};
+use crate::folder::Claim;
 use crate::id::ClientId;
 use crate::mux::{Listed, Mux};
 use crate::terminal::{CLIENT_MESSAGES, ToTerminal, UNREAD_BYTES_MAX, ViewerOut};

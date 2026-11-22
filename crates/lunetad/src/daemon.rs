@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
+use luneta_protocol::socket::{self, Bound, Found};
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
 use tokio::runtime::Handle;
@@ -161,6 +162,12 @@ impl Claim {
     pub fn socket(&self) -> &Path {
         &self.socket
     }
+
+    fn bind(&self) -> io::Result<(UnixListener, Bound)> {
+        let (listener, bound) = socket::bind(&self.socket)?;
+        listener.set_nonblocking(true)?;
+        Ok((UnixListener::from_std(listener)?, bound))
+    }
 }
 
 pub async fn serve(
@@ -168,7 +175,7 @@ pub async fn serve(
     projects: Result<Lock, String>,
     unkept: Option<String>,
 ) -> io::Result<()> {
-    let listener = UnixListener::bind(&claim.socket)?;
+    let (listener, bound) = claim.bind()?;
     let started = SystemTime::now();
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
@@ -187,7 +194,7 @@ pub async fn serve(
     let watchers = Arc::new(Watchers::default());
     let owns = Arc::new(AtomicBool::new(false));
     follow(&core, &claim.folder, claude_folder.clone())?;
-    tokio::spawn(stand(watchers.clone(), owns.clone(), end));
+    tokio::spawn(stand(watchers.clone(), owns.clone(), bound.clone(), end));
     owns::follow(layouts.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
@@ -208,16 +215,13 @@ pub async fn serve(
     }
     let listings = Arc::new(work::Listings::default());
     let host = Host { started, claude_folder, core, watchers, bridges, layouts, listings };
-    let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     let ended = async move {
         if ending.await.is_err() {
             log::say("lunetad no longer follows what keeps it, and so it ends");
         }
-        match fs::remove_file(&socket) {
-            Ok(()) => {},
-            Err(error) if error.kind() == ErrorKind::NotFound => {},
-            Err(error) => log::say(&format!("{}: {error}", socket.display())),
+        if let Err(error) = bound.unbind() {
+            log::say(&format!("{}: {error}", bound.socket().display()));
         }
         let _ = begun.send(());
     };
@@ -305,11 +309,32 @@ fn follow(
     watch::watch_ending("pi", dir, mode, any, SWEEP, read, pids, tell)
 }
 
-async fn stand(watchers: Arc<Watchers>, owns: Arc<AtomicBool>, end: oneshot::Sender<()>) {
+async fn stand(
+    watchers: Arc<Watchers>,
+    owns: Arc<AtomicBool>,
+    bound: Bound,
+    end: oneshot::Sender<()>,
+) {
     let mut sweeps = tokio::time::interval(SWEEP);
     let mut alone = Alone::default();
+    let mut unlooked_said = false;
     loop {
         sweeps.tick().await;
+        match bound.found() {
+            Ok(Found::Ours) => unlooked_said = false,
+            Ok(Found::Lost(unreached)) => {
+                log::say(&format!("{unreached}, and so lunetad ends"));
+                let _ = end.send(());
+                return;
+            },
+            Err(error) => {
+                if !unlooked_said {
+                    let socket = bound.socket().display();
+                    log::say(&format!("{socket} is not looked at, so lunetad runs on: {error}"));
+                }
+                unlooked_said = true;
+            },
+        }
         let (clients, daemons) = (watchers.clients.looked(), watchers.daemons.looked());
         let (window, far_window) = (watchers.windows.looked(), watchers.far_windows.looked());
         let terminals = owns.load(Ordering::Relaxed);
