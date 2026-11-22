@@ -20,6 +20,7 @@ mod desktop;
 mod dictation;
 mod due;
 mod folds;
+mod fuzzy;
 mod gruvbox;
 mod home;
 mod host;
