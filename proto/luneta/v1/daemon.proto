@@ -273,19 +273,6 @@ message Remote {
   }
 }
 
-message View {
-  uint32 id = 1;
-  uint32 tab = 2;
-  string tab_name = 3;
-  optional string cwd = 4;
-  optional string command = 5;
-  Titled titled = 6;
-  Shell shell = 7;
-  optional uint32 tab_id = 8;
-  bool held = 9;
-  TerminalKey key = 10;
-}
-
 message Titled {
   optional string topic = 1;
 }
