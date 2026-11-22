@@ -1731,8 +1731,8 @@ impl Menu {
                 Ok(found) => found,
                 Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
             };
-        let off = work.off_branch(branch.as_deref()).filter(|_| moved_off);
-        if let (Pull::Agent, Some(off)) = (pull, off) {
+        if let (Pull::Agent, true) = (pull, moved_off) {
+            let off = work.off_branch(branch.as_deref());
             let wrong = Some(format!("{folder} is {off}, so no agent starts there; w opens it"));
             let stage = Stage::Pull { work, agent, step: Step::Choosing { wrong } };
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
@@ -1790,7 +1790,7 @@ impl Menu {
         let Ready { moved_off: true, branch, .. } = &found.as_ref().ok()?.ready else {
             return None;
         };
-        Some(format!("{}'s worktree is {}", work.tab(), work.off_branch(branch.as_deref())?))
+        Some(format!("{}'s worktree is {}", work.tab(), work.off_branch(branch.as_deref())))
     }
 
     pub fn reran(&mut self, ran: Ran) {
@@ -4640,6 +4640,42 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('w')));
         assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
         assert!(menu.pulling());
+    }
+
+    #[test]
+    fn r_on_a_pull_request_s_worktree_that_moved_off_stays_open_saying_why_and_w_notes_it() {
+        let ready = Ready {
+            at: At::Unopened,
+            folder: directory("/w/cdk/feat"),
+            branch: Some("stacked".to_owned()),
+            moved_off: true,
+            work: Readied::Link(pull_request()),
+        };
+        let (menu, wants) = stays(pulling('r').pulled(Ok(here(ready.clone()))));
+        assert_eq!(wants, Wants::Nothing);
+        assert_eq!(
+            text(&menu.lines(31, 11, 0).0),
+            [
+                "─ #2736 ──────── cashubtc/cdk ─",
+                " w  worktree",
+                " r  /thermo-nuclear-review",
+                " \u{ec82} claude  <TAB> another agent",
+                " /w/cdk/feat is on stacked,",
+                " not the pull request's head",
+                " branch, so no agent starts",
+                " there; w opens it",
+                " <ESC> - Close",
+            ]
+        );
+
+        let (menu, wants) = stays(menu.key(&char('w')));
+        assert_eq!(wants, Wants::Pull(link(), Wanted::AsItIs));
+        let found = Ok(here(ready));
+        let note = "#2736's worktree is on stacked, not the pull request's head branch";
+        assert_eq!(menu.off_branch(&found).as_deref(), Some(note));
+        let (_, wants) = stays(menu.pulled(found));
+        let (cwd, name) = (directory("/w/cdk/feat"), "#2736".to_owned());
+        assert_eq!(wants, Wants::Make { cwd, name, agent: None });
     }
 
     #[test]

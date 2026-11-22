@@ -43,7 +43,7 @@ unicode-segmentation = "1.13.3"
 unicode-width = { version = "0.2.2", default-features = false }
 uzers = { version = "0.12.2", default-features = false }
 xn = "=0.2.13"
-wt = { git = "https://github.com/lorenzolfm/wt", rev = "a6fee7e0024b5a8f245c3777bbc27543913b22ac" }
+wt = { git = "https://github.com/lorenzolfm/wt", rev = "b73f7d36d8f6f6c9301da9568de82ec8bd917cce" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.189"

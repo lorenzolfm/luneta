@@ -120,7 +120,8 @@ luneta start https://github.com/o/app/pull/7   # a pull request, checked out in 
   another agent on it: `start` already has. Started again while its worktree
   has views, it starts no second agent; with none, the agent starts in it. If
   the worktree is on another branch than the issue's, no agent starts there. A
-  pull request gets no agent.
+  pull request gets no agent; where its worktree is on another branch than its
+  head's, as up a stack of pull requests, stderr names the branch.
 - It exits 4 when the worktree started but its agent did not, or taking the
   user there failed: the folder is printed all the same, and stderr says what
   failed. Tell the user. Starting it again is safe.

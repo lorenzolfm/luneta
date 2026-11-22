@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 use tonic::{Code, Status};
-use wt::cmd::add::{self, Fetch};
+use wt::cmd::add::{self, Fetch, Plan};
 use wt::cmd::follow::Upstream;
 use wt::repo::Repo;
 
@@ -301,10 +301,12 @@ impl Work {
     }
 
     #[must_use]
-    pub fn off_branch(&self, checked_out: Option<&str>) -> Option<String> {
-        let own = self.branch()?;
+    pub fn off_branch(&self, checked_out: Option<&str>) -> String {
         let on = checked_out.map_or("on no branch".to_owned(), |branch| format!("on {branch}"));
-        Some(format!("{on}, not {own}"))
+        match self.branch() {
+            Some(own) => format!("{on}, not {own}"),
+            None => format!("{on}, not the pull request's head branch"),
+        }
     }
 }
 
@@ -797,7 +799,17 @@ fn ready(
         })?;
         base(&repository, remote, &branch)?;
     }
-    let ready = made_worktree(&repository, &link.wt(), worked, work)?;
+    let folder = match link.kind() {
+        Kind::Pull if reads_moved_off => match worktree_or_moved_off(&repository, &link.wt())? {
+            Taken::OnBranch(folder) => folder,
+            Taken::MovedOff(folder) => {
+                let on = branch_of(folder.as_str())?;
+                return Ok(MovedOff { folder, on }.ready(worked, work));
+            },
+        },
+        Kind::Pull | Kind::Issue => worktree(&repository, &link.wt())?,
+    };
+    let ready = opened_worktree(folder, worked, work)?;
     synced(ready.folder.as_str(), link, wanted, remote)?;
     Ok(ready)
 }
@@ -858,7 +870,8 @@ fn ready_file(
         return Ok(moved.ready(worked, work));
     }
     base(&repository, ORIGIN, &branch)?;
-    made_worktree(&repository, &Of::Branch(Branch(branch)), worked, work)
+    let folder = worktree(&repository, &Of::Branch(Branch(branch)))?;
+    opened_worktree(folder, worked, work)
 }
 
 struct MovedOff {
@@ -875,18 +888,21 @@ impl MovedOff {
 }
 
 fn moved_off(dir: &str, root: &Dir, own: &str) -> Result<Option<MovedOff>, String> {
-    let there = wt_makes(root, own);
+    sits_there(dir, &wt_makes(root, own), own)
+}
+
+fn sits_there(dir: &str, there: &str, own: &str) -> Result<Option<MovedOff>, String> {
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "worktree", "list", "--porcelain"]));
     let ran = program::run(&mut git, ANSWER)
         .map_err(|error| format!("git worktree list could not be run: {error}"))?;
     let listed = ran.answer().map_err(|why| format!("git worktree list: {why}"))?;
     let listed = String::from_utf8_lossy(&listed);
-    let Some(entry) = sits_off(&listed, &there, own) else {
+    let Some(entry) = sits_off(&listed, there, own) else {
         return Ok(None);
     };
     let on = entry.lines().find_map(|line| line.strip_prefix("branch refs/heads/"));
-    Ok(directory(&there).map(|folder| MovedOff { folder, on: on.map(str::to_owned) }))
+    Ok(directory(there).map(|folder| MovedOff { folder, on: on.map(str::to_owned) }))
 }
 
 fn wt_makes(root: &Dir, branch: &str) -> String {
@@ -905,13 +921,11 @@ fn sits_off<'a>(listed: &'a str, there: &str, own: &str) -> Option<&'a str> {
         .filter(|entry| !entry.lines().any(|line| line.starts_with("prunable")))
 }
 
-fn made_worktree(
-    dir: &str,
-    of: &Of,
+fn opened_worktree(
+    folder: Directory,
     worked: &[Worked],
     work: Readied,
 ) -> Result<Ready<usize>, Unready> {
-    let folder = worktree(dir, of)?;
     let at = opened_in(&folder, worked);
     let branch = branch_of(folder.as_str())?;
     Ok(Ready { at, branch, moved_off: false, folder, work })
@@ -1142,15 +1156,37 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
 
-pub fn worktree(dir: &str, of: &Of) -> Result<Directory, Unready> {
-    let mut luneta = Command::new(luneta()?);
-    git::local(luneta.args(["worktree", "--repo", dir, "--", &of.to_string()]));
-    let ran = program::run_alone(&mut luneta, MAKING)
-        .map_err(|error| format!("luneta worktree could not be run: {error}"))?;
-    worktree_said(ran)
+pub const MOVED_OFF: &str = "moved off: ";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Taken<P> {
+    OnBranch(P),
+    MovedOff(P),
 }
 
-fn worktree_said(ran: Ran) -> Result<Directory, Unready> {
+pub fn worktree(dir: &str, of: &Of) -> Result<Directory, Unready> {
+    match worktree_said(ran_worktree(dir, of, &[])?)? {
+        Taken::OnBranch(folder) => Ok(folder),
+        Taken::MovedOff(folder) => Err(Unready::InDoubt(format!(
+            "luneta worktree said {folder} moved off the branch, which lunetad did not ask of it"
+        ))),
+    }
+}
+
+fn worktree_or_moved_off(dir: &str, of: &Of) -> Result<Taken<Directory>, Unready> {
+    worktree_said(ran_worktree(dir, of, &["--moved-off"])?)
+}
+
+fn ran_worktree(dir: &str, of: &Of, flags: &[&str]) -> Result<Ran, Unready> {
+    let mut luneta = Command::new(luneta()?);
+    git::local(luneta.args(["worktree", "--repo", dir]).args(flags));
+    luneta.args(["--", &of.to_string()]);
+    let ran = program::run_alone(&mut luneta, MAKING)
+        .map_err(|error| format!("luneta worktree could not be run: {error}"))?;
+    Ok(ran)
+}
+
+fn worktree_said(ran: Ran) -> Result<Taken<Directory>, Unready> {
     match ran {
         Ran::Ended { status, stdout, .. } if status.success() => {
             let printed = String::from_utf8_lossy(&stdout);
@@ -1158,7 +1194,11 @@ fn worktree_said(ran: Ran) -> Result<Directory, Unready> {
             let Some(said) = said else {
                 return Err(Unready::InDoubt("luneta worktree said no worktree".to_owned()));
             };
-            directory(said).ok_or_else(|| {
+            let taken = match said.strip_prefix(MOVED_OFF) {
+                Some(path) => directory(path).map(Taken::MovedOff),
+                None => directory(said).map(Taken::OnBranch),
+            };
+            taken.ok_or_else(|| {
                 Unready::InDoubt(format!("luneta worktree said {said}, which is no directory"))
             })
         },
@@ -1187,24 +1227,45 @@ pub(crate) fn luneta() -> Result<PathBuf, String> {
 }
 
 pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
-    made_if(repo, of, |_| Ok(()))
+    let (found, plan) = planned(repo, of, |_| Ok(()))?;
+    made_of(&found, &plan)
 }
 
 pub fn made_landing(repo: &str, of: &Of, holders: &Holders) -> Result<PathBuf, String> {
-    made_if(repo, of, |root| lands(root, holders))
+    let (found, plan) = planned(repo, of, |root| lands(root, holders))?;
+    made_of(&found, &plan)
 }
 
-fn made_if(
+pub fn made_or_moved_off(repo: &str, of: &Of) -> Result<Taken<PathBuf>, String> {
+    let (found, plan) = planned(repo, of, |_| Ok(()))?;
+    let there = plan.dest().to_str().ok_or_else(|| {
+        format!("wt would make the worktree in {}, which is no UTF-8 path", plan.dest().display())
+    })?;
+    match sits_there(repo, there, plan.branch())? {
+        Some(MovedOff { folder, .. }) => Ok(Taken::MovedOff(PathBuf::from(folder.as_str()))),
+        None => made_of(&found, &plan).map(Taken::OnBranch),
+    }
+}
+
+fn planned(
     repo: &str,
     of: &Of,
     lands: impl FnOnce(&Dir) -> Result<(), String>,
-) -> Result<PathBuf, String> {
+) -> Result<(Repo, Plan), String> {
     git_reads(repo)?;
-    let wt_add = |error| format!("wt add: {error:#}");
     let found = Repo::discover(Some(Path::new(repo))).map_err(wt_add)?;
     lands(&wt_made(repo)?)?;
-    let made = add::run(&found, &of.to_string(), None, Fetch::Lazy).map_err(wt_add)?;
+    let plan = add::plan(&found, &of.to_string(), None, Fetch::Lazy).map_err(wt_add)?;
+    Ok((found, plan))
+}
+
+fn made_of(found: &Repo, plan: &Plan) -> Result<PathBuf, String> {
+    let made = add::make(found, plan).map_err(wt_add)?;
     Ok(made.path().to_owned())
+}
+
+fn wt_add(error: impl fmt::Display) -> String {
+    format!("wt add: {error:#}")
 }
 
 pub fn followed(dir: &str) -> Result<(), String> {
@@ -2162,12 +2223,13 @@ mod tests {
         let file = Work::File(File::parse("/w/sync-rework.md", None).unwrap());
         let of = |work: &Work, on| work.off_branch(on);
         let note = "on dev-docs, not issue-2736";
-        assert_eq!(of(&Work::Link(issue()), Some("dev-docs")).as_deref(), Some(note));
+        assert_eq!(of(&Work::Link(issue()), Some("dev-docs")), note);
         let note = "on no branch, not issue-2736";
-        assert_eq!(of(&Work::Link(issue()), None).as_deref(), Some(note));
+        assert_eq!(of(&Work::Link(issue()), None), note);
         let note = "on feat, not md-sync-rework";
-        assert_eq!(of(&file, Some("feat")).as_deref(), Some(note));
-        assert_eq!(of(&Work::Link(link()), Some("feat")), None);
+        assert_eq!(of(&file, Some("feat")), note);
+        let note = "on feat, not the pull request's head branch";
+        assert_eq!(of(&Work::Link(link()), Some("feat")), note);
     }
 
     #[test]

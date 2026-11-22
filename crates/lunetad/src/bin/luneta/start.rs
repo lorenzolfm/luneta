@@ -187,8 +187,7 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let holders = worktrees::holders(path)?;
     let ready = Pasted::new(Work::Link(link.clone()), worked).ready(&holders).map_err(said)?;
     let folder = PathBuf::from(ready.folder.as_str());
-    let off = Work::Link(link.clone()).off_branch(ready.branch.as_deref());
-    let off = off.filter(|_| ready.moved_off);
+    let off = ready.moved_off.then(|| Work::Link(link.clone()).off_branch(ready.branch.as_deref()));
     let agent = match (link.kind(), &off) {
         (Kind::Issue, None) => {
             let harness = Kept::shared().0.harness();
@@ -201,9 +200,12 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let landed = worktrees::joined_as(path, &ready.folder, &link.tab(), &agent)?;
     let worktree = landed.worktree();
     let left = match (link.kind(), landed, off) {
-        (Kind::Pull, _, _)
-        | (Kind::Issue, Landed::Found(_), Some(_))
+        (Kind::Pull, _, None)
+        | (Kind::Pull | Kind::Issue, Landed::Found(_), Some(_))
         | (Kind::Issue, Landed::Made(_), None) => Left::Done,
+        (Kind::Pull, Landed::Made(_), Some(off)) => {
+            Left::Noted(format!("{} is {off}", folder.display()))
+        },
         (Kind::Issue, Landed::Made(_), Some(off)) => {
             Left::Noted(format!("{} is {off}, so no agent starts there", folder.display()))
         },

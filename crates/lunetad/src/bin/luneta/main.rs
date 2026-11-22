@@ -104,6 +104,13 @@ enum Command {
         #[arg(long, value_name = "DIR", help = "A directory of the repository")]
         repo: String,
         #[arg(
+            long,
+            help = "When no worktree has the branch, and a worktree of the repository on another \
+                    branch, or on none, is where wt would make one, make none and print that \
+                    worktree after `moved off: `"
+        )]
+        moved_off: bool,
+        #[arg(
             value_parser = pull::Of::parse,
             value_name = "BRANCH",
             help = "The branch, or the link of a pull request on GitHub, with or without its \
@@ -152,7 +159,7 @@ fn main() -> ExitCode {
         return host::run(cli.name.as_deref(), folder);
     };
     let command = match command {
-        Command::Worktree { repo, of } => return pull::make(&repo, &of),
+        Command::Worktree { repo, moved_off, of } => return pull::make(&repo, &of, moved_off),
         Command::Follow { dir } => return pull::follow(&dir),
         Command::FetchUpstream { dir, branch } => return pull::fetch_upstream(&dir, &branch),
         Command::Clicked { socket, group } => {
