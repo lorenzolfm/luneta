@@ -155,7 +155,7 @@ impl Here {
     pub fn session(&self) -> &str {
         match self {
             Here::Session { session, .. } => session,
-            Here::View { place, .. } => place.session.name().as_str(),
+            Here::View { place, .. } => place.listed().name().as_str(),
         }
     }
 
@@ -767,7 +767,7 @@ impl Picker {
     }
 
     fn focus(&self, on: &Machine, worktree: &Worktree) -> Option<ViewKey> {
-        let here = self.here_view(on).map(|place| place.view);
+        let here = self.here_view(on).map(ViewPlace::view);
         let focused = here.filter(|view| worktree.terminals.contains(view));
         focused.or_else(|| worktree.terminals.first().copied())
     }
@@ -1298,15 +1298,15 @@ impl Picker {
         };
         let named = match target {
             Target::View(on, row) => {
-                let project = row.session.name();
-                let housed = self.housed(on, &ProjectRow::of(row.session.clone()));
+                let (project, view) = (row.place.listed().name(), row.place.view());
+                let housed = self.housed(on, &row.place.worktree().project);
                 let mut worktrees = housed.iter().flat_map(|housed| &housed.worktrees);
-                match worktrees.find(|worktree| worktree.terminals.contains(&row.view)) {
+                match worktrees.find(|worktree| worktree.place == *row.place.worktree()) {
                     Some(worktree) => {
                         let named = in_project(project, worktree.named.name());
-                        format!("{named} · view {}", row.view)
+                        format!("{named} · view {view}")
                     },
-                    None => format!("{project} · view {}", row.view),
+                    None => format!("{project} · view {view}"),
                 }
             },
             Target::Worktree(_, row) => {
@@ -1367,7 +1367,7 @@ impl Picker {
                 Picked::Nothing
             },
             Key::Agent { on, place } => {
-                self.plan(on, place.session, close::Scope::View(place.view), None)
+                self.plan(on, place.listed().clone(), close::Scope::View(place.view()), None)
             },
             Key::Unopened { .. } => {
                 self.error = Some("a worktree not open has no views to close".to_owned());
@@ -1551,7 +1551,7 @@ impl Picker {
         let agents = runs.agents.iter().filter(|seated| Some(&seated.place) != yours);
         let agents: Vec<(Named, Vec<Option<&str>>, Key)> = agents
             .map(|seated| {
-                let session = seated.place.session.name().as_str();
+                let session = seated.place.listed().name().as_str();
                 let also = vec![Some(session), Some(seated.dir.as_str())];
                 let key = Key::Agent { on: on.clone(), place: seated.place.clone() };
                 (Named::whole(agent_name(&runs.agents, seated)), also, key)
@@ -1608,7 +1608,7 @@ impl Picker {
                 focus.map(|focus| Preview::Screen(looked(focus)))
             },
             Some(Key::Agent { on, place }) => {
-                Some(Preview::Screen((on.clone(), place.session.clone(), Some(place.view))))
+                Some(Preview::Screen((on.clone(), place.listed().clone(), Some(place.view()))))
             },
             Some(Key::Dir { on, path, .. }) => Some(Preview::Dir((on.clone(), path.clone()))),
             Some(Key::Unopened { on, folder, .. }) => {
@@ -2012,7 +2012,7 @@ impl Picker {
                         Span::styled(seated.dir.clone(), grey),
                     ]);
                 }
-                let looked = (on.clone(), place.session.clone(), Some(place.view));
+                let looked = (on.clone(), place.listed().clone(), Some(place.view()));
                 (row.name.clone(), String::new(), Line::from(caption), looked)
             },
         };
@@ -2237,8 +2237,8 @@ fn plain(key: &KeyEvent) -> bool {
 fn agent_name(agents: &[Seated], seated: &Seated) -> String {
     let alike = agents.iter().filter(|other| other.label == seated.label);
     let sessions: HashSet<&SessionName> =
-        alike.clone().map(|other| other.place.session.name().session()).collect();
-    let (session, view) = (seated.place.session.name(), seated.place.view);
+        alike.clone().map(|other| other.place.listed().name().session()).collect();
+    let (session, view) = (seated.place.listed().name(), seated.place.view());
     match (alike.count(), sessions.len()) {
         (0 | 1, _) => seated.label.clone(),
         (_, 1) => format!("{}:{view}", seated.label),
@@ -2507,7 +2507,7 @@ mod tests {
 
     fn seated(name: &str, started: u64, view: u32, label: &str, mark: Mark) -> Seated {
         Seated {
-            place: ViewPlace { session: listed(name, started), view: ViewKey::terminal(view) },
+            place: ViewPlace::new(place(name, started, 1), ViewKey::terminal(view)),
             label: label.to_owned(),
             mark,
             status: "idle".to_owned(),
@@ -2604,7 +2604,7 @@ mod tests {
             housed("notes", 2, Vec::new()),
             housed("web", 3, vec![worktree(api(), "api", Some(40), &[4])]),
         ];
-        let at = ViewPlace { session: fix().project.listed().clone(), view: ViewKey::terminal(3) };
+        let at = ViewPlace::new(fix(), ViewKey::terminal(3));
         Listing {
             here: Some(Here::View { on: Machine::Local, place: at }),
             shown: Some((Machine::Local, fix())),
@@ -2639,8 +2639,7 @@ mod tests {
 
     fn fix_view() -> Target {
         let row = ViewRow {
-            session: fix().project.listed().clone(),
-            view: ViewKey::terminal(3),
+            place: ViewPlace::new(fix(), ViewKey::terminal(3)),
             terminal: ViewId::of(3),
             cwd: Cwd::At(Folder {
                 dir: directory("/home/you/fix"),
@@ -3598,7 +3597,7 @@ mod tests {
 
     #[test]
     fn agents_named_alike_are_told_apart_and_yours_is_pinned_over_them() {
-        let place = ViewPlace { session: listed("work", 20), view: ViewKey::terminal(9) };
+        let place = ViewPlace::new(self::place("work", 20, 1), ViewKey::terminal(9));
         let listing = Listing {
             here: Some(Here::View { on: Machine::Local, place }),
             local: agents(vec![
@@ -3881,7 +3880,7 @@ mod tests {
 
     #[test]
     fn luneta_s_agent_on_another_machine_is_pinned_over_that_machine_s_rows() {
-        let at = |view| ViewPlace { session: listed("api", 40), view };
+        let at = |view| ViewPlace::new(place("api", 40, 1), view);
         let there = agents(vec![
             seated("api", 40, 9, "mine", Mark::Busy),
             seated("api", 40, 2, "fix", Mark::Idle),

@@ -275,7 +275,7 @@ impl Alerts {
                     let focused = self.focused;
                     acts.extend(followed.does(&key, doing, now, &mut self.numbered, focused));
                 } else {
-                    let placed = before.as_ref().is_some_and(|was| was.contains(&place.session));
+                    let placed = before.as_ref().is_some_and(|was| was.contains(place.listed()));
                     let state = State::new(doing, now, !placed);
                     self.followed.insert(key.clone(), Followed { state, place, label, transcript });
                 }
@@ -284,7 +284,7 @@ impl Alerts {
             self.followed.retain(|key, followed| {
                 let ended = key.on == on
                     && !running.contains(key)
-                    && !unlisted.contains(&followed.place.session);
+                    && !unlisted.contains(followed.place.listed());
                 if ended && followed.state.is_up() {
                     acts.push(Act::Close(key.clone()));
                 }
@@ -558,14 +558,14 @@ mod tests {
     use lunetad::Destination;
 
     use super::*;
-    use crate::sidebar::{Mark, ViewKey};
+    use crate::sidebar::Mark;
 
     fn work() -> Listed {
         Listed::new_project("work", 10)
     }
 
     fn place(view: u32) -> ViewPlace {
-        ViewPlace { session: work(), view: ViewKey::terminal(view) }
+        ViewPlace::new_in("work", 10, 1, view)
     }
 
     fn seated(pid: u32, doing: Doing) -> Seated {

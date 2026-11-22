@@ -11,16 +11,15 @@ use crate::away::{self, Away};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
-use crate::sidebar::{Listed, ViewKey};
+use crate::sidebar::ViewPlace;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worked {
-    pub session: Listed,
-    pub view: ViewKey,
+    pub place: ViewPlace,
     pub works: links::Worked,
 }
 
-pub type Ready = links::Ready<(Listed, ViewKey)>;
+pub type Ready = links::Ready<ViewPlace>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
@@ -72,8 +71,8 @@ fn first_found(
     mut ask: impl FnMut(&Machine, &Pasted) -> Result<links::Ready<usize>, Unready>,
 ) -> Result<Found, String> {
     let mut found_on = |on: Machine, worked: Vec<Worked>| {
-        let apart = |Worked { session, view, works }| ((session, view), works);
-        let (views, worked): (Vec<(Listed, ViewKey)>, Vec<links::Worked>) =
+        let apart = |Worked { place, works }| (place, works);
+        let (views, worked): (Vec<ViewPlace>, Vec<links::Worked>) =
             worked.into_iter().map(apart).unzip();
         let ready = ask(&on, &Pasted::new(work.clone(), worked).wanting(wanted))?;
         match ready.placed(&views) {
@@ -205,8 +204,7 @@ mod tests {
 
     fn view(id: u32, dir: &str) -> Worked {
         let works = links::Worked { dir: directory(dir), pull: None, here: false };
-        let session = Listed::new_project("main", 1);
-        Worked { session, view: ViewKey::terminal(id), works }
+        Worked { place: ViewPlace::new_in("main", 1, 1, id), works }
     }
 
     fn there(at: usize) -> links::Ready<usize> {
@@ -246,7 +244,7 @@ mod tests {
         let (found, asked) = asking(&link(), others, |_| Ok(there(0)));
         let Found { on, ready } = found.unwrap();
         assert_eq!((on, asked), (Machine::Local, vec![Machine::Local]));
-        assert_eq!(ready.at, At::There((view(1, "/m").session, ViewKey::terminal(1))));
+        assert_eq!(ready.at, At::There(view(1, "/m").place));
     }
 
     #[test]
@@ -261,7 +259,7 @@ mod tests {
         });
         let Found { on, ready } = found.unwrap();
         assert_eq!(on, Machine::Remote(vps()));
-        assert_eq!(ready.at, At::There((view(9, "/w").session, ViewKey::terminal(9))));
+        assert_eq!(ready.at, At::There(view(9, "/w").place));
         let order = vec![Machine::Local, Machine::Remote(far()), Machine::Remote(vps())];
         assert_eq!(asked, order);
     }

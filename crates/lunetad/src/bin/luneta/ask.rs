@@ -328,7 +328,9 @@ fn highlighted(target: &Target) -> String {
         Target::Worktree(_, row) => {
             format!("worktree {} of project {}", row.name, row.place.project.listed().name())
         },
-        Target::View(_, ViewRow { session, view, .. }) => format!("view {}:{view}", session.name()),
+        Target::View(_, ViewRow { place, .. }) => {
+            format!("view {}:{}", place.listed().name(), place.view())
+        },
         Target::Machine(_) => "the header of this machine".to_owned(),
     };
     let cwd = target.cwd().map_or_default(|cwd| format!(", in {cwd}"));
@@ -346,11 +348,7 @@ mod tests {
 
     use super::*;
     use crate::menu::{Cwd, Folder, ViewRow, Ran};
-    use crate::sidebar::{Listed, ViewKey, ProjectRow};
-
-    fn listed() -> Listed {
-        Listed::new_project("luneta", 3)
-    }
+    use crate::sidebar::{Listed, ProjectRow, ViewPlace};
 
     fn project_on(on: Machine) -> Target {
         let project = ProjectRow::of(Listed::new_project("luneta", 3));
@@ -363,8 +361,7 @@ mod tests {
 
     fn view_row_on(machine: Machine) -> Target {
         let row = ViewRow {
-            session: listed(),
-            view: ViewKey::terminal(4),
+            place: ViewPlace::new_in("luneta", 3, 1, 4),
             terminal: None,
             cwd: Cwd::of(Some(Directory::parse("/w/luneta/main".to_owned()).unwrap()), |dir| {
                 let branch = Some("feat/ask".to_owned());

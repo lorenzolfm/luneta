@@ -582,6 +582,7 @@ pub struct Chain {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[expect(clippy::large_enum_variant, reason = "it lasts a key; a box would allocate on each")]
 pub enum Chained {
     Typing(Chain),
     Back,
@@ -821,8 +822,7 @@ pub struct WorktreeRow {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewRow {
-    pub session: Listed,
-    pub view: ViewKey,
+    pub place: ViewPlace,
     pub terminal: Option<ViewId>,
     pub cwd: Cwd,
     pub ran: Ran,
@@ -897,7 +897,7 @@ impl Target {
             Target::Project(_, target) => Some(Place::Session(target.project.listed().clone())),
             Target::Worktree(_, row) => Some(Place::Worktree(row.place.clone())),
             Target::View(_, row) => {
-                Some(Place::View(ViewPlace::new(row.session.clone(), row.view)))
+                Some(Place::View(row.place.clone()))
             },
             Target::Machine(_) => None,
         }
@@ -984,7 +984,7 @@ impl Target {
         match self {
             Target::Project(_, target) => Some(target.project.clone()),
             Target::Worktree(_, row) => Some(row.place.project.clone()),
-            Target::View(_, row) => Some(ProjectRow::of(row.session.clone())),
+            Target::View(_, row) => Some(row.place.worktree().project.clone()),
             Target::Machine(_) => None,
         }
     }
@@ -1054,8 +1054,8 @@ impl Target {
                 Briefed::Machine(machine.clone())
             },
             (Target::View(machine, row), brief::Scope::Highlighted) => {
-                let session = row.session.name().session().clone();
-                Briefed::Agent(machine.clone(), session, row.view)
+                let session = row.place.listed().name().session().clone();
+                Briefed::Agent(machine.clone(), session, row.place.view())
             },
             (
                 Target::Worktree(machine, WorktreeRow { place, .. }),
@@ -1065,8 +1065,8 @@ impl Target {
                 Target::Project(machine, ProjectTarget { project, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
             ) => Briefed::Session(machine.clone(), project.listed().name().session().clone()),
-            (Target::View(machine, ViewRow { session, .. }), brief::Scope::Session) => {
-                Briefed::Session(machine.clone(), session.name().session().clone())
+            (Target::View(machine, ViewRow { place, .. }), brief::Scope::Session) => {
+                Briefed::Session(machine.clone(), place.listed().name().session().clone())
             },
         }
     }
@@ -1170,7 +1170,7 @@ impl Rebases<'_> {
 
 impl ViewRow {
     fn folder(&self) -> Result<&Folder, String> {
-        let view = self.view;
+        let view = self.place.view();
         match &self.cwd {
             Cwd::At(folder) => Ok(folder),
             Cwd::Unsaid => Err(format!(
@@ -1181,11 +1181,11 @@ impl ViewRow {
 
     fn beside(&self) -> Result<Beside, String> {
         let cwd = self.folder()?.dir.clone();
-        Ok(Beside { session: self.session.clone(), view: self.view, cwd })
+        Ok(Beside { session: self.place.listed().clone(), view: self.place.view(), cwd })
     }
 
     fn pulled(&self) -> Result<(Beside, PullPage), String> {
-        let (beside, view) = (self.beside()?, self.view);
+        let (beside, view) = (self.beside()?, self.place.view());
         let pull_request = self.cwd.at().and_then(|folder| folder.pull_request.as_ref());
         let Some(PullRequest { page, state, .. }) = pull_request else {
             return Err(format!("menu: gh has found no pull request of view {view}'s branch"));
@@ -1540,10 +1540,12 @@ impl Menu {
             },
             Offer::NewWelcome(row) => {
                 let on = target.machine().clone();
-                Did::Closed(Done::Welcome { on, session: row.session.clone(), view: row.view })
+                let (session, view) = (row.place.listed().clone(), row.place.view());
+                Did::Closed(Done::Welcome { on, session, view })
             },
             Offer::Arrange(row, arranged) => {
-                let (on, session, view) = (target.machine().clone(), row.session.clone(), row.view);
+                let on = target.machine().clone();
+                let (session, view) = (row.place.listed().clone(), row.place.view());
                 Did::Closed(Done::Arrange { on, session, view, arranged })
             },
             Offer::NewWorktree(project) => {
@@ -1555,7 +1557,7 @@ impl Menu {
                 stays(Stage::Typing { keys, chain }, Wants::Nothing)
             },
             Offer::CloseView(row) => {
-                closing(keys, &row.session, Scope::View(row.view))
+                closing(keys, row.place.listed(), Scope::View(row.place.view()))
             },
             Offer::CloseWorktree(row) => {
                 let scope = Scope::Worktree(row.place.worktree);
@@ -1750,14 +1752,12 @@ impl Menu {
             Err(why) => return unstarted(&work, &why),
         };
         match (at, argv) {
-            (At::There((session, view)), None) => {
-                Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })))
-            },
-            (At::There((session, view)), Some(argv)) => {
+            (At::There(place), None) => Did::Closed(Done::Go(on, Place::View(place))),
+            (At::There(place), Some(argv)) => {
+                let (session, view) = (place.listed().clone(), place.view());
                 let folder = Folder { dir: folder, branch, repository: None, pull_request: None };
                 let row = ViewRow {
-                    session: session.clone(),
-                    view,
+                    place,
                     terminal: None,
                     cwd: Cwd::At(folder),
                     ran: Ran::Unhooked,
@@ -2810,8 +2810,7 @@ mod tests {
 
     fn row_in(folder: Folder) -> ViewRow {
         ViewRow {
-            session: listed(),
-            view: ViewKey::terminal(4),
+            place: ViewPlace::new_in("luneta", 1, 1, 4),
             terminal: None,
             cwd: Cwd::At(folder),
             ran: Ran::Unhooked,
@@ -2836,8 +2835,8 @@ mod tests {
     }
 
     fn own_row() -> ViewRow {
-        let session = project().listed().clone();
-        ViewRow { session, view: ViewKey::terminal(4), terminal: Some(terminal()), ..row() }
+        let place = ViewPlace::new_in("luneta", 3, 1, 4);
+        ViewRow { place, terminal: Some(terminal()), ..row() }
     }
 
     fn own_view() -> Target {
@@ -4520,8 +4519,8 @@ mod tests {
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
-        let there = || At::There((other.clone(), ViewKey::terminal(9)));
-        let place = Place::View(ViewPlace { session: other.clone(), view: ViewKey::terminal(9) });
+        let there = || At::There(ViewPlace::new_in("cdk", 2, 1, 9));
+        let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
         assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(Machine::Local, place));
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         assert!(!menu.opens_pulled(), "a view beside another opens at once, with no pull");
@@ -4529,7 +4528,7 @@ mod tests {
         let view = ViewKey::terminal(9);
         assert_eq!(wants, Wants::Open { session: other.clone(), view, opens });
         let Target::View(_, row) = menu.target() else { panic!("not a view's row") };
-        assert_eq!((&row.session, row.view), (&other, ViewKey::terminal(9)));
+        assert_eq!(row.place, ViewPlace::new_in("cdk", 2, 1, 9));
     }
 
     #[test]
@@ -4738,7 +4737,6 @@ mod tests {
     #[test]
     fn the_keys_for_a_link_pasted_on_another_machine_s_row_open_there() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
-        let other = Listed::new_project("cdk", 2);
         let ready = |at| {
             let work = Readied::Link(pull_request());
             let folder = directory("/w/cdk/feat-x");
@@ -4746,8 +4744,8 @@ mod tests {
             Ok(Found { on: vps(), ready })
         };
         let row = || Target::View(vps(), row());
-        let place = Place::View(ViewPlace { session: other.clone(), view: ViewKey::terminal(9) });
-        let there = ready(At::There((other.clone(), ViewKey::terminal(9))));
+        let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
+        let there = ready(At::There(ViewPlace::new_in("cdk", 2, 1, 9)));
         assert_eq!(closed(pulling_on(row(), 'w').pulled(there)), Done::Go(vps(), place));
         for asked in [row(), Target::Machine(vps())] {
             let (menu, wants) = stays(pulling_on(asked, 'w').pulled(ready(At::Unopened)));
@@ -4759,7 +4757,6 @@ mod tests {
     #[test]
     fn what_a_key_found_on_another_machine_opens_there_from_any_row() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
-        let other = Listed::new_project("cdk", 2);
         let found = |at| {
             let work = Readied::Link(pull_request());
             let folder = directory("/w/cdk/feat-x");
@@ -4768,15 +4765,14 @@ mod tests {
         };
         let rows = [session_row(), view_row(), Target::Machine(Machine::Local)];
         for row in rows {
-            let at = At::There((other.clone(), ViewKey::terminal(9)));
+            let at = At::There(ViewPlace::new_in("cdk", 2, 1, 9));
             let (menu, wants) = stays(pulling_on(row.clone(), 'r').pulled(found(at)));
             assert!(matches!(&wants, Wants::Open { view, .. } if *view == ViewKey::terminal(9)));
             let Target::View(machine, opening) = menu.target() else { panic!("not a view's row") };
-            assert_eq!((machine, opening.view), (&vps(), ViewKey::terminal(9)));
+            assert_eq!((machine, opening.place.view()), (&vps(), ViewKey::terminal(9)));
 
-            let view = ViewKey::terminal(9);
-            let place = Place::View(ViewPlace { session: other.clone(), view });
-            let at = At::There((other.clone(), ViewKey::terminal(9)));
+            let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
+            let at = At::There(ViewPlace::new_in("cdk", 2, 1, 9));
             let goes = pulling_on(row.clone(), 'w').pulled(found(at));
             assert_eq!(closed(goes), Done::Go(vps(), place));
 
