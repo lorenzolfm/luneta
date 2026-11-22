@@ -70,7 +70,7 @@ use crate::picker::{self, List, Palette, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found};
 use crate::sidebar::{
-    self, AgentDir, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat,
+    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat,
     Sidebar, Sitting, ViewKey, ViewPlace,
 };
 use crate::skills::{self, Skill, Skills};
@@ -2243,12 +2243,8 @@ impl App {
         let Where::Session(Some(agent)) = under else {
             return Skills::Found(Vec::new());
         };
-        let dir = match &agent.dir {
-            AgentDir::At(dir) => dir,
-            AgentDir::Unread { why } => return Skills::Failed(why.clone()),
-        };
         let said = move |skills| Event::Nameable { number, skills };
-        skills::find(&agent.on, dir, agent.harness, &self.events, said);
+        skills::find(&agent.on, &agent.dir, agent.harness, &self.events, said);
         Skills::Finding
     }
 

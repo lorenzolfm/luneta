@@ -18,7 +18,7 @@ use crate::due::Due;
 use crate::gruvbox;
 use crate::host::Event;
 use crate::machines::Machine;
-use crate::menu::{self, Cwd, Hint, ViewRow, ProjectTarget, Target};
+use crate::menu::{self, Hint, ViewRow, ProjectTarget, Target};
 use crate::sidebar::{self, ACCENT};
 
 const TITLE: &str = "Ask";
@@ -51,7 +51,6 @@ enum Said {
 enum Works {
     Here(PathBuf),
     There { on: Destination, cwd: Option<Directory> },
-    Unread { why: String },
 }
 
 #[derive(Debug)]
@@ -69,9 +68,6 @@ pub struct Ask {
 impl Ask {
     pub fn new(number: u64, target: &Target, dir: &Path) -> Self {
         let works = match (target, target.machine()) {
-            (Target::View(_, ViewRow { view, cwd: Cwd::Unread { why }, .. }), _) => {
-                Works::Unread { why: format!("where view {view} works, {why}") }
-            },
             (_, Machine::Local) => {
                 let cwd = target.cwd().map(|cwd| PathBuf::from(cwd.as_str()));
                 Works::Here(cwd.unwrap_or_else(|| dir.to_owned()))
@@ -175,18 +171,15 @@ impl Ask {
             return;
         }
         let turn = Turn::after(self.turned);
-        let placed = match &self.works {
-            Works::Here(cwd) => Ok((None, Some(cwd.clone()))),
+        let (on, cwd) = match &self.works {
+            Works::Here(cwd) => (None, Some(cwd.clone())),
             Works::There { on, cwd } => {
-                Ok((Some(on.clone()), cwd.as_ref().map(|cwd| PathBuf::from(cwd.as_str()))))
+                (Some(on.clone()), cwd.as_ref().map(|cwd| PathBuf::from(cwd.as_str())))
             },
-            Works::Unread { why } => Err(why.clone()),
         };
         let (resumed, highlighted) = (self.session.clone(), self.highlighted.clone());
-        let asked = placed.and_then(|(on, cwd)| {
-            let asked = Asked::new(cwd, &words, resumed, highlighted, turn)?;
-            Ok((on, asked.marking(marked)))
-        });
+        let asked = Asked::new(cwd, &words, resumed, highlighted, turn);
+        let asked = asked.map(|asked| (on, asked.marking(marked)));
         self.talk.push(Said::You(words));
         let (on, asked) = match asked {
             Ok(asked) => asked,
@@ -281,7 +274,6 @@ impl Ask {
                 format!("{} on {on}", sidebar::short_cwd(cwd.as_str()))
             },
             Works::There { on, cwd: None } => format!("~ on {on}"),
-            Works::Unread { .. } => String::new(),
         };
         brief::boxed(buffer, over, TITLE, &right, &lines);
     }
@@ -353,7 +345,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::menu::{Folder, ViewRow, Ran};
+    use crate::menu::{Cwd, Folder, ViewRow, Ran};
     use crate::sidebar::{Listed, ViewKey, ProjectRow};
 
     fn listed() -> Listed {
@@ -374,7 +366,7 @@ mod tests {
             session: listed(),
             view: ViewKey::terminal(4),
             terminal: None,
-            cwd: Cwd::of(Some("/w/luneta/main".to_owned()), |dir| {
+            cwd: Cwd::of(Some(Directory::parse("/w/luneta/main".to_owned()).unwrap()), |dir| {
                 let branch = Some("feat/ask".to_owned());
                 Folder { dir, branch, repository: None, pull_request: None }
             }),
@@ -386,12 +378,6 @@ mod tests {
 
     fn view_row() -> Target {
         view_row_on(Machine::Local)
-    }
-
-    fn unread_on(machine: Machine) -> Target {
-        let Target::View(on, row) = view_row_on(machine) else { unreachable!("a view's row") };
-        let cwd = Cwd::of(Some("w".to_owned()), |dir| unreachable!("{dir} is no absolute path"));
-        Target::View(on, ViewRow { cwd, ..row })
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -584,13 +570,6 @@ mod tests {
         let row = "is the header of this machine: \"this\"";
         assert!(header.highlighted.contains(row), "{}", header.highlighted);
 
-        let why = "where view 4 works, \"w\" is no absolute path".to_owned();
-        for on in [Machine::Local, nixos()] {
-            let unread = Ask::new(6, &unread_on(on), Path::new("/w"));
-            assert_eq!(unread.works, Works::Unread { why: why.clone() });
-            assert_eq!(top(&unread), "┌─ Ask ────────────────────────────────┐");
-        }
-
         let home = |on: &Machine| Ask::homed(7, on, &Dir::parse("/w/luneta").unwrap(), "luneta").works;
         assert_eq!(home(&Machine::Local), Works::Here(PathBuf::from("/w/luneta")));
         assert_eq!(home(&nixos()), there(Some("/w/luneta")));
@@ -615,11 +594,11 @@ mod tests {
 
     #[test]
     fn a_turn_that_is_none_says_why() {
-        let mut ask = Ask::new(1, &unread_on(Machine::Local), Path::new("/w"));
+        let mut ask = Ask::new(1, &project_on(Machine::Local), Path::new("w"));
         typed(&mut ask, "close it");
         let (events, _heard) = mpsc::channel();
         ask.send(Marked::default(), &events);
-        let wrong = "ask: where view 4 works, \"w\" is no absolute path".to_owned();
+        let wrong = "ask: cwd: w is no absolute path".to_owned();
         assert_eq!(ask.talk, [Said::You("close it".to_owned()), Said::Wrong(wrong)]);
         assert!(!ask.turning());
         assert_eq!(ask.turned, None);

@@ -833,7 +833,6 @@ pub struct ViewRow {
 pub enum Cwd {
     Unsaid,
     At(Folder),
-    Unread { why: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -846,23 +845,20 @@ pub struct Folder {
 
 impl Cwd {
     #[must_use]
-    pub fn of(said: Option<String>, found: impl FnOnce(Directory) -> Folder) -> Cwd {
-        match said.map(Directory::parse) {
-            None => Cwd::Unsaid,
-            Some(Ok(dir)) => {
-                let folder = found(dir.clone());
-                assert_eq!(folder.dir, dir, "a view's folder is the one its cwd says");
-                Cwd::At(folder)
-            },
-            Some(Err(why)) => Cwd::Unread { why },
-        }
+    pub fn of(said: Option<Directory>, found: impl FnOnce(Directory) -> Folder) -> Cwd {
+        let Some(dir) = said else {
+            return Cwd::Unsaid;
+        };
+        let folder = found(dir.clone());
+        assert_eq!(folder.dir, dir, "a view's folder is the one its cwd says");
+        Cwd::At(folder)
     }
 
     #[must_use]
     pub fn at(&self) -> Option<&Folder> {
         match self {
             Cwd::At(folder) => Some(folder),
-            Cwd::Unsaid | Cwd::Unread { .. } => None,
+            Cwd::Unsaid => None,
         }
     }
 }
@@ -1180,7 +1176,6 @@ impl ViewRow {
             Cwd::Unsaid => Err(format!(
                 "menu: luneta does not know yet where view {view} works; try again in a moment"
             )),
-            Cwd::Unread { why } => Err(format!("menu: where view {view} works, {why}")),
         }
     }
 
@@ -4067,12 +4062,6 @@ mod tests {
         let (menu, _) = stays(opened(unsaid, None));
         let done = closed(menu.key(&char('/')));
         assert!(matches!(done, Done::Wrong(why) if why.contains("where view 4 works")));
-        let cwd = Cwd::of(Some("w".to_owned()), |dir| unreachable!("{dir} is no absolute path"));
-        let relative = ViewRow { cwd, ..own_row() };
-        let relative = Target::View(Machine::Local, relative);
-        let (menu, _) = stays(opened(relative, Some('n')));
-        let why = "menu: where view 4 works, \"w\" is no absolute path".to_owned();
-        assert_eq!(closed(menu.key(&char('v'))), Done::Wrong(why));
     }
 
     fn skills(names: &[&str]) -> Vec<Skill> {
