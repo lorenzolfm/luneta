@@ -14,4 +14,3 @@ failure-output = "immediate-final"
 
 [profile.ci.junit]
 path = "junit.xml"
-
