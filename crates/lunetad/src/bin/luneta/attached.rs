@@ -180,9 +180,9 @@ fn tab_columns(name: &str) -> u16 {
     u16::try_from(name.width()).unwrap_or(u16::MAX).saturating_add(2)
 }
 
-pub(crate) fn tab_style(current: bool) -> Style {
+pub(crate) fn tab_style(current: bool, colour: Color) -> Style {
     if current {
-        Style::new().fg(gruvbox::BG0).bg(gruvbox::GREEN).add_modifier(Modifier::BOLD)
+        Style::new().fg(gruvbox::BG0).bg(colour).add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(gruvbox::FG1).bg(gruvbox::BG2)
     }
@@ -193,13 +193,14 @@ pub(crate) fn draw_tab_spans<T: Copy + PartialEq>(
     bar: Rect,
     spans: &[TabSpan<T>],
     current: T,
+    colour: Color,
 ) {
     if bar.is_empty() {
         return;
     }
     buffer.set_style(bar, Style::new().bg(gruvbox::BG1));
     for span in spans {
-        let style = tab_style(span.id == current);
+        let style = tab_style(span.id == current, colour);
         let x = bar.x + span.column;
         buffer.set_style(Rect::new(x, bar.y, span.columns, 1), style);
         let room = usize::from(span.columns.saturating_sub(2));
