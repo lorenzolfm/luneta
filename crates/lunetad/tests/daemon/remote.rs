@@ -2319,6 +2319,88 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
     });
 }
 
+#[test]
+fn a_worktree_where_a_pull_request_s_would_go_is_taken_off_its_head_branch() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.bin()).reaches("far", far.vars());
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&far, &scratch);
+    let (up, bare, main, feat) =
+        (scratch.join("up"), clone.join(".bare"), clone.join("main"), clone.join("feat"));
+    git(&bare, &["worktree", "add", "-q", "-b", "stacked", "../feat", "main"]);
+    let was = git_said(&feat, &["rev-parse", "HEAD"]);
+    let top = git_said(&up, &["commit-tree", "-p", "feat", "-m", "top", "feat^{tree}"]);
+    git(&up, &["update-ref", "refs/heads/stack/top", &top]);
+    git(&up, &["update-ref", "refs/pull/8/head", &top]);
+    git(&bare, &["worktree", "add", "-q", "-b", "lower", "../stack-top", "main"]);
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder, PATIENT).await.unwrap();
+        let pull = Link::parse("https://github.com/o/n/pull/7").unwrap();
+        let views = vec![view_in(&main)];
+        let w = Pasted::new(Work::Link(pull.clone()), views.clone());
+        let folder = absolute(&feat.display().to_string());
+        let (at, work) = (At::Unopened, Readied::Link(pull.clone()));
+        let branch = Some("stacked".to_owned());
+        let answer = Ready { at, folder: folder.clone(), branch, moved_off: true, work };
+        assert_eq!(pasted_on(&mut daemon, "far", &w).await.unwrap(), answer);
+        assert_eq!(rev_parse_verify(&main, "refs/heads/feat"), None, "no branch is made");
+
+        let in_it = Pasted::new(Work::Link(pull.clone()), vec![view_in(&main), view_in(&feat)]);
+        assert_eq!(pasted_on(&mut daemon, "far", &in_it).await.unwrap().at, At::There(1));
+
+        pushed(&far, &up, "feat", "second");
+        let r = reviewing_pull_7(views.clone());
+        assert_eq!(pasted_on(&mut daemon, "far", &r).await.unwrap(), answer);
+        assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), was, "r moves no branch");
+        assert_eq!(far.gh.viewed(), [] as [String; 0], "r syncs nothing");
+
+        let eight = Link::parse("https://github.com/o/n/pull/8").unwrap();
+        let slashed = Pasted::new(Work::Link(eight), views.clone());
+        let lower = pasted_on(&mut daemon, "far", &slashed).await.unwrap();
+        let stack_top = clone.join("stack-top").display().to_string();
+        assert_eq!((lower.folder, lower.branch), (absolute(&stack_top), Some("lower".to_owned())));
+        assert!(lower.moved_off);
+
+        git(&feat, &["switch", "-q", "--detach"]);
+        let detached = pasted_on(&mut daemon, "far", &w).await.unwrap();
+        assert_eq!((detached.folder, detached.branch), (folder.clone(), None));
+        assert!(detached.moved_off);
+
+        let on = Some(On { destination: "far".to_owned() });
+        let older = PasteRequest { reads_moved_off: false, ..w.asked(on) };
+        let mut answer = daemon.paste(older).await.unwrap().into_inner();
+        let refused = answer.message().await.unwrap_err();
+        assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+        assert!(refused.message().ends_with("feat is already present"), "{refused:?}");
+        let mut luneta = far.vars().command(LUNETA);
+        lunetad::local_git(&mut luneta);
+        let made = luneta.args(["worktree", "--repo"]).arg(&main).arg(pull.url()).output();
+        let made = made.unwrap();
+        let stderr = String::from_utf8_lossy(&made.stderr);
+        assert!(!made.status.success(), "{stderr}");
+        assert!(stderr.trim_end().ends_with("feat is already present"), "{stderr}");
+
+        git(&feat, &["switch", "-q", "--track", "-c", "feat", "origin/feat"]);
+        let on_it = pasted_on(&mut daemon, "far", &w).await.unwrap();
+        assert_eq!((on_it.folder, on_it.branch), (folder, Some("feat".to_owned())));
+        assert!(!on_it.moved_off);
+
+        git(&bare, &["worktree", "remove", "--force", "../feat"]);
+        fs::create_dir(&feat).unwrap();
+        let why = refused_there(&mut daemon, &w).await;
+        assert!(why.ends_with("feat is already present"), "{why}");
+    });
+}
+
 async fn refused_there(daemon: &mut Daemon, pasted: &Pasted) -> String {
     let refused = pasted_on(daemon, "far", pasted).await.unwrap_err();
     assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");

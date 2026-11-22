@@ -2,7 +2,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use lunetad::links::{self, Pasted, Unready};
+use lunetad::links::{self, Pasted, Taken, Unready};
 use lunetad::projects::Holders;
 pub use lunetad::links::{At, Kind, Link, Of, Readied, Wanted, Work};
 use lunetad::log;
@@ -134,10 +134,19 @@ fn naming(machine: &Machine, why: String) -> String {
 
 const UNASKED: &str = "lunetad says the key goes to a view luneta did not ask of";
 
-pub fn make(repo: &str, of: &Of) -> ExitCode {
-    match links::made(repo, of) {
-        Ok(folder) => {
+pub fn make(repo: &str, of: &Of, moved_off: bool) -> ExitCode {
+    let made = if moved_off {
+        links::made_or_moved_off(repo, of)
+    } else {
+        links::made(repo, of).map(Taken::OnBranch)
+    };
+    match made {
+        Ok(Taken::OnBranch(folder)) => {
             println!("{}", folder.display());
+            ExitCode::SUCCESS
+        },
+        Ok(Taken::MovedOff(folder)) => {
+            println!("{}{}", links::MOVED_OFF, folder.display());
             ExitCode::SUCCESS
         },
         Err(why) => {
