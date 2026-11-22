@@ -6,6 +6,8 @@ pub type Score = u16;
 
 const TYPED_PER_TYPO: usize = 4;
 
+const TERM_BYTES_MAX: usize = 256;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Typos {
     None,
@@ -18,17 +20,22 @@ impl Typos {
         if found.is_empty() { find(Typos::Forgiven) } else { found }
     }
 
-    fn of(self, term: &str) -> Score {
+    fn allowed(self, term: &str) -> u16 {
+        assert!(term.len() <= TERM_BYTES_MAX, "a longer term is matched by no one");
         match self {
             Typos::None => 0,
             Typos::Forgiven => {
-                Score::try_from(term.chars().count() / TYPED_PER_TYPO).unwrap_or(Score::MAX)
+                let typos = term.chars().count().div_euclid(TYPED_PER_TYPO);
+                u16::try_from(typos).expect("a bounded term's typos fit a u16")
             },
         }
     }
 }
 
-pub struct Fuzzy(RefCell<Matcher>);
+pub enum Fuzzy {
+    Matching(Box<RefCell<Matcher>>),
+    TooLong,
+}
 
 impl Fuzzy {
     pub fn new(term: &str, typos: Typos) -> Self {
@@ -43,18 +50,28 @@ impl Fuzzy {
     }
 
     fn scored(term: &str, typos: Typos, scoring: Scoring) -> Self {
-        let config = Config::default().max_typos(Some(typos.of(term))).scoring(scoring);
-        Fuzzy(RefCell::new(Matcher::new(term, &config)))
+        if term.len() > TERM_BYTES_MAX {
+            return Fuzzy::TooLong;
+        }
+        let config = Config::default().max_typos(Some(typos.allowed(term))).scoring(scoring);
+        Fuzzy::Matching(Box::new(RefCell::new(Matcher::new(term, &config))))
     }
 
     pub fn score(&self, text: &str) -> Option<Score> {
-        Some(self.0.borrow_mut().match_one(text, 0)?.score)
+        match self {
+            Fuzzy::Matching(matcher) => Some(matcher.borrow_mut().match_one(text, 0)?.score),
+            Fuzzy::TooLong => None,
+        }
     }
 
     pub fn hits(&self, text: &str) -> Option<(Score, Vec<usize>)> {
-        let found = self.0.borrow_mut().match_one_indices(text, 0)?;
+        let found = match self {
+            Fuzzy::Matching(matcher) => matcher.borrow_mut().match_one_indices(text, 0)?,
+            Fuzzy::TooLong => return None,
+        };
         let byte = |at: &u32| usize::try_from(*at).expect("a text's byte is a usize");
         let lit: Vec<usize> = found.indices.iter().map(byte).collect();
+        assert!(lit.iter().all(|byte| *byte < text.len()), "frizbee lights the text's own bytes");
         let hit = |(at, c): &(usize, char)| {
             let bytes = *at..at + c.len_utf8();
             lit.iter().any(|byte| bytes.contains(byte))
@@ -87,6 +104,14 @@ mod tests {
         assert_eq!(find("luneta-m"), ["luneta-main"]);
         assert_eq!(find("lnueta"), ["luneta", "luneta-main"]);
         assert_eq!(find("zzz"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_term_past_its_bound_finds_nothing() {
+        let long = "a".repeat(TERM_BYTES_MAX + 1);
+        assert!(Fuzzy::new(&long, Typos::Forgiven).hits(&long).is_none());
+        let longest = "a".repeat(TERM_BYTES_MAX);
+        assert!(Fuzzy::new(&longest, Typos::Forgiven).hits(&longest).is_some());
     }
 
     #[test]
