@@ -184,15 +184,20 @@ Never run it unless the user asked.
 
 When the user asks to rebase a branch onto main, or to bring it up to date,
 run `luneta rebase`, with the worktree's directory for one other than the one
-you run in. It fetches the default branch of the repository's `upstream`,
-`github` or `origin` remote (else its own `main` or `master`), and rebases the
-worktree's branch onto it. It pushes nothing: push only when the user asks.
+you run in. A branch with an open pull request goes onto that pull request's
+base, fetched from the remote of the pull request's repository, so a stacked
+branch stays on the branch beneath it. Any other branch goes onto the default
+branch of the repository's `upstream`, `github` or `origin` remote (else its own
+`main` or `master`), fetched first. It pushes nothing: push only when the user
+asks.
 
 - It exits 0 once the branch is on top of it, and prints a line of where it
   is now.
 - It exits 1 and rebases nothing when the worktree has changes not committed,
   is on no branch, or is already in the middle of a rebase, a merge or a
-  cherry-pick. Tell the user why: don't commit or stash for them.
+  cherry-pick. It does too when gh can't say whether the branch has a pull
+  request open, or no remote fetches the pull request's repository. Tell the
+  user why: don't commit or stash for them.
 - It exits 4 when the rebase stopped on conflicts. The rebase is left stopped,
   and an agent is started on it in a new view of the worktree, in the harness
   the user picked last. Don't resolve the conflicts yourself, and don't run

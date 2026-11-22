@@ -1088,6 +1088,7 @@ mod tests {
                 checks: None,
                 stale: false,
             },
+            base_name: "main".to_owned(),
             head_name: "origin-branch".to_owned(),
             head: head.to_owned(),
             author: author.map(str::to_owned),

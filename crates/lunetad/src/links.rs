@@ -499,12 +499,36 @@ fn remote(
     link: &Link,
     mut ssh_host: impl FnMut(&str) -> Option<String>,
 ) -> Option<String> {
+    first_remote(listed, |url| link.of(url, &mut ssh_host))
+}
+
+fn first_remote(listed: &str, mut is_of: impl FnMut(&str) -> bool) -> Option<String> {
     let of = |line: &str| {
         let (key, url) = line.split_once(' ')?;
         let name = key.strip_prefix("remote.")?.strip_suffix(".url")?;
-        link.of(url.trim(), &mut ssh_host).then(|| name.to_owned())
+        is_of(url.trim()).then(|| name.to_owned())
     };
     listed.lines().filter_map(of).min_by_key(|name| Remote::of(name))
+}
+
+pub(crate) fn has_github_remote(dir: &str) -> Result<bool, String> {
+    let on = |url: &str| github_repository_of(url, ssh_host).is_some();
+    Ok(remotes(dir)?.is_some_and(|listed| first_remote(&listed, on).is_some()))
+}
+
+pub(crate) fn remote_of_repository(
+    dir: &str,
+    repository: (&str, &str, &str),
+) -> Result<Option<String>, String> {
+    Ok(remotes(dir)?.and_then(|listed| first_remote(&listed, |url| remote_is_of(url, repository))))
+}
+
+fn remotes(dir: &str) -> Result<Option<String>, String> {
+    match remotes_in(dir) {
+        Remotes::Listed(listed) => Ok(Some(listed)),
+        Remotes::Unlisted => Ok(None),
+        Remotes::Unsaid(why) => Err(format!("git did not say the remotes of {dir}: {why}")),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

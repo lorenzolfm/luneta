@@ -32,8 +32,8 @@ pub struct Found {
 }
 
 const VIEWED: &str = concat!(
-    "state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner,",
-    "statusCheckRollup",
+    "state,isDraft,url,baseRefName,headRefName,headRefOid,author,headRepository,",
+    "headRepositoryOwner,statusCheckRollup",
 );
 
 #[derive(Deserialize)]
@@ -42,6 +42,7 @@ struct Viewed {
     state: Stands,
     is_draft: bool,
     url: String,
+    base_ref_name: String,
     head_ref_name: String,
     head_ref_oid: String,
     author: Option<Owner>,
@@ -67,6 +68,7 @@ enum Stands {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pulled {
     pub pull_request: PullRequest,
+    pub base_name: String,
     pub head_name: String,
     pub head: String,
     pub author: Option<String>,
@@ -122,6 +124,7 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
             checks: checks::rolled_up(viewed.status_check_rollup),
             stale: false,
         },
+        base_name: viewed.base_ref_name,
         head_name: viewed.head_ref_name,
         head: viewed.head_ref_oid,
         author: viewed.author.map(|author| author.login).filter(|login| !login.is_empty()),
@@ -647,6 +650,7 @@ mod tests {
     fn pulled(pull_request: PullRequest) -> Pulled {
         Pulled {
             pull_request,
+            base_name: "main".to_owned(),
             head_name: "fix".to_owned(),
             head: "abc".to_owned(),
             author: None,
@@ -797,7 +801,7 @@ mod tests {
     fn a_pull_request_says_whose_head_it_is() {
         let viewed = |author: &str, repository: &str, owner: &str| {
             let said = format!(
-                r#"{{"isDraft":false,"state":"MERGED","headRefName":"fix",
+                r#"{{"isDraft":false,"state":"MERGED","baseRefName":"main","headRefName":"fix",
                 "headRefOid":"abc","author":{author},"headRepository":{repository},
                 "headRepositoryOwner":{owner},"url":"https://git.example.com/up/repo/pull/1"}}"#
             );
@@ -825,7 +829,7 @@ mod tests {
         let read = |said: &str| parse(said.as_bytes()).map(|pulled| pulled.pull_request);
         let state = |said: &str| read(said).map(|pull_request| pull_request.state);
         let url = "https://github.com/owner/repo/pull/126";
-        let head = r#""headRefName":"fold","headRefOid":"abc""#;
+        let head = r#""baseRefName":"main","headRefName":"fold","headRefOid":"abc""#;
         let open = format!(r#""isDraft":false,"state":"OPEN",{head}"#);
         assert_eq!(
             read(&format!(r#"{{{open},"url":"{url}"}}"#)),
