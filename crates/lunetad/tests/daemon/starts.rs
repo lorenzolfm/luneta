@@ -173,13 +173,11 @@ impl Window {
         screen
     }
 
-    pub fn cursor(&self) -> (usize, usize) {
-        let point = self.term().grid().cursor.point;
-        (usize::try_from(point.line.0).unwrap(), point.column.0)
-    }
-
-    pub fn cursor_shown(&self) -> bool {
-        self.term().mode().contains(TermMode::SHOW_CURSOR)
+    pub fn cursor(&self) -> Option<(usize, usize)> {
+        let term = self.term();
+        let point = term.grid().cursor.point;
+        let shown = term.mode().contains(TermMode::SHOW_CURSOR);
+        shown.then(|| (usize::try_from(point.line.0).unwrap(), point.column.0))
     }
 
     pub fn screen(&self) -> Vec<String> {

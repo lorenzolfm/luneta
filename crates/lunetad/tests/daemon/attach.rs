@@ -73,6 +73,16 @@ fn seam(window: &Window) -> Option<usize> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    Left,
+    Right,
+}
+
+fn side(window: &Window, split: usize) -> Option<Side> {
+    window.cursor().map(|(_, column)| if column >= split { Side::Right } else { Side::Left })
+}
+
 fn tops(window: &Window) -> Vec<(usize, usize)> {
     let screen = window.screen();
     let edge = screen.first().and_then(|line| line.chars().position(|it| it == '│'));
@@ -374,18 +384,17 @@ fn ctrl_h_and_ctrl_l_move_between_views_and_alt_equals_and_minus_resize_the_focu
     as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
-    let side = |window: &Window| if window.cursor().1 >= split { "right" } else { "left" };
-    for (key, to) in [(LEFT, "left"), (RIGHT, "right"), (LEFT, "left")] {
+    for (key, to) in [(LEFT, Side::Left), (RIGHT, Side::Right), (LEFT, Side::Left)] {
         window.send(key);
-        eventually(&format!("the cursor is in the {to} view"), || {
-            (side(&window) == to).then_some(())
+        eventually(&format!("the cursor is in the {to:?} view"), || {
+            (side(&window, split) == Some(to)).then_some(())
         });
     }
     window.send(GROW);
     let grown = eventually("the left view grows", || seam(&window).filter(|at| *at > split));
     window.send(SHRINK);
     eventually("the left view shrinks", || seam(&window).filter(|at| *at < grown));
-    assert_eq!(side(&window), "left", "{:?}", window.screen());
+    assert_eq!(side(&window, split), Some(Side::Left), "{:?}", window.screen());
 }
 
 #[test]
@@ -399,18 +408,18 @@ fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_worktree_beside_or_ctrl_h_to_the_side
     worktree_added(dir.path.parent().unwrap(), "docs");
     let second = worktree(&owned.host, project, &docs);
     eventually("the tab bar lists docs", || window.shows("docs").then_some(()));
-    eventually("the view has the keys", || window.cursor_shown().then_some(()));
+    eventually("the view has the keys", || window.cursor().is_some().then_some(()));
     let used = |id: u64| used(&owned, id);
     window.send(LEFT);
     eventually("Ctrl h past the first worktree gives the sidebar the keys", || {
-        (!window.cursor_shown()).then_some(())
+        window.cursor().is_none().then_some(())
     });
     assert!(used(second).is_none(), "Ctrl h goes to no worktree past the project's first");
     window.send("?");
     eventually("? in the sidebar shows its legend", || window.shows(LEGEND).then_some(()));
     window.send(RIGHT);
     eventually("Ctrl l in the sidebar gives the view the keys", || {
-        window.cursor_shown().then_some(())
+        window.cursor().is_some().then_some(())
     });
     window.send(TYPED);
     eventually("the shell has the keys", || window.shows(PRINTED).then_some(()));
@@ -427,11 +436,11 @@ fn an_edge_answered_after_the_keys_went_and_came_back_leaves_them_with_the_view(
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
-    eventually("the view has the keys", || window.cursor_shown().then_some(()));
+    eventually("the view has the keys", || window.cursor().is_some().then_some(()));
     window.send(&format!("{LEFT}{SIDEBAR}{SIDEBAR}{TYPED}"));
     eventually("the shell has the keys", || window.shows(PRINTED).then_some(()));
     luneta_waits::never("the edge of a step asked before Ctrl a gives the sidebar the keys", || {
-        (!window.cursor_shown()).then_some(())
+        window.cursor().is_none().then_some(())
     });
 }
 
@@ -446,13 +455,15 @@ fn an_edge_answered_after_a_click_on_another_view_leaves_the_keys_with_the_view(
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
     window.send(LEFT);
-    eventually("the cursor is in the left view", || (window.cursor().1 < split).then_some(()));
+    eventually("the cursor is in the left view", || {
+        (side(&window, split) == Some(Side::Left)).then_some(())
+    });
     let right = (5, split + 5);
     let click = [mouse(0, right, 'M'), mouse(0, right, 'm')].concat();
     window.send(&format!("{LEFT}{click}{TYPED}"));
     eventually("the shell has the keys", || window.shows(PRINTED).then_some(()));
     luneta_waits::never("the edge of a step asked before the click gives the sidebar the keys", || {
-        (!window.cursor_shown()).then_some(())
+        window.cursor().is_none().then_some(())
     });
 }
 
@@ -479,8 +490,9 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
     as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
-    let side = |window: &Window| if window.cursor().1 >= split { "right" } else { "left" };
-    eventually("the view opened has the keys", || (side(&window) == "right").then_some(()));
+    eventually("the view opened has the keys", || {
+        (side(&window, split) == Some(Side::Right)).then_some(())
+    });
     let project = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().id;
     let root = dir.path.parent().unwrap();
     worktree_added(root, "docs");
@@ -490,21 +502,25 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
     window.send(RIGHT);
     eventually("Ctrl l goes to docs", || (used(second) > used(first)).then_some(()));
     let main = sidebar_row(&window, "▾ main");
-    let back_on = |window: &Window, to: &str| {
+    let back_on = |window: &Window, to: Side| {
         let back = used(first) > used(second) && seam(window) == Some(split);
-        (back && side(window) == to).then_some(())
+        (back && side(window, split) == Some(to)).then_some(())
     };
     click(&mut window, main);
-    eventually("a click on main's row goes back to the view it left", || back_on(&window, "right"));
+    eventually("a click on main's row goes back to the view it left", || {
+        back_on(&window, Side::Right)
+    });
     let left = sidebar_row(&window, "╭");
     assert!(left > main, "main's first view sits below its row: {:?}", window.screen());
     click(&mut window, left);
-    eventually("a click on a view's row focuses it", || (side(&window) == "left").then_some(()));
+    eventually("a click on a view's row focuses it", || {
+        (side(&window, split) == Some(Side::Left)).then_some(())
+    });
     let docs = sidebar_row(&window, "▾ docs");
     click(&mut window, docs);
     eventually("a click on docs's row goes there", || (used(second) > used(first)).then_some(()));
     click(&mut window, main);
-    eventually("main's row goes to the view focused last", || back_on(&window, "left"));
+    eventually("main's row goes to the view focused last", || back_on(&window, Side::Left));
 }
 
 #[test]
