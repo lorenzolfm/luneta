@@ -5501,7 +5501,7 @@ impl Colour {
         [Colour::Blue, Colour::Yellow, Colour::Purple, Colour::Aqua, Colour::Orange, Colour::Green];
 }
 
-fn colour_of(project: ProjectId) -> Color {
+pub(crate) fn colour_of(project: ProjectId) -> Color {
     let count = u64::try_from(Colour::ALL.len()).expect("six colours");
     let at = usize::try_from(project.get() % count).expect("an index below six");
     hue(Colour::ALL[at])

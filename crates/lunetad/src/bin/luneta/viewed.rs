@@ -12,7 +12,7 @@ use lunetad::mux::own::api::{self, typed};
 use lunetad::mux::own::frames::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Arranged, Opens, Size, ViewId, WorktreeId};
+use lunetad::projects::{Arranged, Opens, ProjectId, Size, ViewId, WorktreeId};
 use lunetad::{
     Asked, Beside, Direction, Found, Heard, Laid, View, Rect as Placed, Show, Shows, Where,
 };
@@ -29,6 +29,7 @@ use crate::copied::Excerpt;
 use crate::gruvbox;
 use crate::host::Event;
 use crate::machines::Machine;
+use crate::sidebar::colour_of;
 
 const AGAIN: Duration = Duration::from_secs(1);
 
@@ -68,6 +69,12 @@ pub struct Tab {
     pub name: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeTabs {
+    pub project: ProjectId,
+    pub tabs: Vec<Tab>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Moused {
     Nothing,
@@ -99,7 +106,7 @@ struct Layout {
     laid: Option<Laid>,
     screens: BTreeMap<TerminalKey, Screen>,
     pointer: Pointer,
-    tabs: Vec<Tab>,
+    worktree_tabs: Option<WorktreeTabs>,
     titles: BTreeMap<ViewId, String>,
     closing: Closing,
     unsent: Unsent,
@@ -223,7 +230,7 @@ impl Layout {
             laid: None,
             screens: BTreeMap::new(),
             pointer: Pointer::Free,
-            tabs: Vec::new(),
+            worktree_tabs: None,
             titles: BTreeMap::new(),
             closing: Closing::Unarmed,
             unsent: Unsent::new(Aim { worktree, view: None, key: None }),
@@ -437,7 +444,8 @@ impl Layout {
     }
 
     fn named_tabs(&self) -> impl Iterator<Item = (WorktreeId, &str)> {
-        self.tabs.iter().map(|tab| (tab.worktree, tab.name.as_str()))
+        let tabs = self.worktree_tabs.iter().flat_map(|it| &it.tabs);
+        tabs.map(|tab| (tab.worktree, tab.name.as_str()))
     }
 
     fn view_tabs(&self, outer: Rect) -> Vec<TabSpan<ViewId>> {
@@ -609,7 +617,9 @@ impl Layout {
         }
         let bar = Rect { height: area.height.min(TAB_BAR_ROWS), ..area };
         let views = Rect { y: area.y + bar.height, height: area.height - bar.height, ..area };
-        draw_tab_spans(buffer, bar, &tab_spans(self.named_tabs(), bar.width), self.worktree);
+        let spans = tab_spans(self.named_tabs(), bar.width);
+        let colour = self.worktree_tabs.as_ref().map_or(gruvbox::GREEN, |it| colour_of(it.project));
+        draw_tab_spans(buffer, bar, &spans, self.worktree, colour);
         let focused = self.focused();
         let selection = self.pointer.selection();
         let pointed = hover.and_then(|at| self.pointed(at));
@@ -683,7 +693,7 @@ fn draw_view_tabs(
         if !views.contains(Position::new(x, outer.y)) {
             continue;
         }
-        let style = tab_style(span.id == focused);
+        let style = tab_style(span.id == focused, gruvbox::GREEN);
         let lit = Rect::new(x, outer.y, span.columns, 1).intersection(views);
         let width = usize::from(lit.width);
         buffer.set_stringn(x, outer.y, " ".repeat(width), width, style);
@@ -1001,8 +1011,8 @@ impl Viewed {
         self.ask(Asked::Open { beside: Beside::Focused, opens });
     }
 
-    pub fn tabs(&mut self, tabs: Vec<Tab>, titles: BTreeMap<ViewId, String>) {
-        self.layout.tabs = tabs;
+    pub fn tabs(&mut self, worktree_tabs: Option<WorktreeTabs>, titles: BTreeMap<ViewId, String>) {
+        self.layout.worktree_tabs = worktree_tabs;
         self.layout.titles = titles;
     }
 
@@ -1195,10 +1205,13 @@ mod tests {
 
     fn split_layout() -> Layout {
         let mut layout = Layout::new(worktree(1), None);
-        layout.tabs = vec![
+        let tabs = vec![
             Tab { worktree: worktree(1), name: "one".to_owned() },
             Tab { worktree: worktree(2), name: "two".to_owned() },
         ];
+        let project = ProjectId::of(2).unwrap();
+        assert_eq!(colour_of(project), gruvbox::PURPLE);
+        layout.worktree_tabs = Some(WorktreeTabs { project, tabs });
         layout.titles = [(terminal(11), "p1".to_owned()), (terminal(12), "p2".to_owned())].into();
         assert!(!layout.laid_out(laid(halves(), 11, false)));
         let cursor =
@@ -1226,7 +1239,7 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
         let cursor = layout.draw(&mut buffer, Rect::new(2, 0, 22, 6), None);
         assert_eq!(row(&buffer, 0, 2, 14), " one   two  ");
-        assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (gruvbox::BG0, gruvbox::GREEN));
+        assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (gruvbox::BG0, gruvbox::PURPLE));
         assert_eq!(row(&buffer, 1, 2, 22), "╭ p1 ────╮╭ p2 ────╮");
         assert_eq!(row(&buffer, 2, 2, 12), "│abcdefgh│");
         assert_eq!(row(&buffer, 3, 12, 22), "│yz012345│");

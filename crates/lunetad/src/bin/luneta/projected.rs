@@ -11,7 +11,7 @@ use lunetad::Destination;
 use crate::host::NOT_YET;
 use crate::machines::{self, Machine};
 use crate::sidebar::{Listed, ViewKey};
-use crate::viewed::Tab;
+use crate::viewed::{Tab, WorktreeTabs};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worktree {
@@ -190,12 +190,14 @@ impl Projected {
         &self,
         on: &Machine,
         worktree: WorktreeId,
-    ) -> (Vec<Tab>, BTreeMap<ViewId, String>) {
+    ) -> (Option<WorktreeTabs>, BTreeMap<ViewId, String>) {
         let Some((project, shown)) = self.holding(on, worktree) else {
-            return (Vec::new(), BTreeMap::new());
+            return (None, BTreeMap::new());
         };
         let tab = |it: &Worktree| Tab { worktree: it.id, name: it.name.clone() };
-        (project.worktrees().iter().map(tab).collect(), shown.titles.clone())
+        let tabs: Vec<Tab> = project.worktrees().iter().map(tab).collect();
+        assert!(tabs.iter().any(|tab| tab.worktree == worktree), "the tabs hold the worktree held");
+        (Some(WorktreeTabs { project: project.id, tabs }), shown.titles.clone())
     }
 }
 
@@ -375,9 +377,11 @@ mod tests {
         assert_eq!(project.terminal_key(terminal), Some(keyed(4)));
         assert_eq!(project.terminal_key(ViewId::of(22).unwrap()), None, "a lost one is no view");
         assert_eq!(projected.project(&Machine::Local, ProjectId::of(8).unwrap()), None);
-        let (tabs, titles) = projected.tabs(&Machine::Local, worktree(11));
-        let names: Vec<&str> = tabs.iter().map(|tab| tab.name.as_str()).collect();
+        let (bar, titles) = projected.tabs(&Machine::Local, worktree(11));
+        let bar = bar.unwrap();
+        let names: Vec<&str> = bar.tabs.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["main", "docs"]);
+        assert_eq!(bar.project, seven(), "the tabs are the project's");
         assert_eq!(titles.get(&terminal).map(String::as_str), Some("Fixing"));
         let lost = ViewId::of(22).unwrap();
         assert_eq!(titles.get(&lost).map(String::as_str), Some("sleep 600"));
