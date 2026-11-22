@@ -84,6 +84,13 @@ pub struct RepositoryName {
 
 impl RepositoryName {
     #[must_use]
+    pub fn of_page(page: &PullPage) -> RepositoryName {
+        let mut parts = page.repository().split('/').map(str::to_owned);
+        let mut part = || parts.next().expect("a pull request's page is of host/owner/name");
+        RepositoryName { host: part(), owner: part(), name: part() }
+    }
+
+    #[must_use]
     pub fn is_at(&self, url: &str) -> bool {
         links::remote_is_of(url, (&self.host, &self.owner, &self.name))
     }

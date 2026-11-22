@@ -184,9 +184,9 @@ Never run it unless the user asked.
 
 When the user asks to rebase a branch onto main, or to bring it up to date,
 run `luneta rebase`, with the worktree's directory for one other than the one
-you run in. A branch with an open pull request goes onto that pull request's
-base, fetched from the remote of the pull request's repository, so a stacked
-branch stays on the branch beneath it. Any other branch goes onto the default
+you run in. A pushed branch with an open pull request goes onto that pull
+request's base, fetched from the remote of the pull request's repository, so a
+stacked branch stays on the branch beneath it. Any other branch goes onto the default
 branch of the repository's `upstream`, `github` or `origin` remote (else its own
 `main` or `master`), fetched first. It pushes nothing: push only when the user
 asks.

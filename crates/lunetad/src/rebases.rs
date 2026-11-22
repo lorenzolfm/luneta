@@ -11,7 +11,7 @@ use crate::api::rebase_response::{self, Came as Said};
 use crate::api::{On, RebaseRequest, RebaseResponse};
 use crate::directory::Directory;
 use crate::git::{self, Common, DefaultBranch};
-use crate::github::{self, Pulled};
+use crate::github::{self, Pulled, RepositoryName};
 use crate::links::{self, sync};
 use crate::program::{self, Ran};
 
@@ -96,8 +96,10 @@ struct Ready {
 
 enum Onto {
     Default(DefaultBranch),
-    Base { remote: String, branch: String },
+    Base { remote: String, branch: NamedBranch },
 }
+
+struct NamedBranch(String);
 
 pub fn rebase(dir: &Directory, expected: Option<&str>) -> Result<Rebased, Unrebased> {
     let until = Instant::now() + RUNNING_MAX;
@@ -138,7 +140,7 @@ fn ready(dir: &Directory, expected: Option<&str>, until: Instant) -> Result<Read
         return Err(format!("{top} has changes not committed: commit or stash them first"));
     }
     let onto = onto(&top, &branch, until)?;
-    if let Some((remote, branch)) = onto.fetched() {
+    if let Some((remote, branch)) = onto.to_fetch() {
         sync::fetch(&top, remote, branch, left(until, FETCHING)?)?;
     }
     let before = tip(&top, &branch, until)?;
@@ -146,8 +148,11 @@ fn ready(dir: &Directory, expected: Option<&str>, until: Instant) -> Result<Read
 }
 
 fn onto(top: &str, branch: &str, until: Instant) -> Result<Onto, String> {
-    if let Some(pulled) = pulled(top, branch, until)? {
-        return based(top, branch, &pulled, until);
+    let listed = links::remotes(top)?.unwrap_or_default();
+    if links::any_on_github(&listed)
+        && let Some(pulled) = pulled(top, branch, until)?
+    {
+        return based(top, branch, &listed, &pulled, until);
     }
     let default = git::default_branch(top, left(until, GIT_SAYS)?)
         .map_err(|why| format!("{top} has no default branch to rebase onto: {why}"))?;
@@ -155,7 +160,7 @@ fn onto(top: &str, branch: &str, until: Instant) -> Result<Onto, String> {
 }
 
 fn pulled(top: &str, branch: &str, until: Instant) -> Result<Option<Pulled>, String> {
-    if !links::has_github_remote(top)? {
+    if git::named_head(top, branch)?.is_none() {
         return Ok(None);
     }
     let repository = match git::common_within(top, left(until, GIT_SAYS)?) {
@@ -169,31 +174,35 @@ fn pulled(top: &str, branch: &str, until: Instant) -> Result<Option<Pulled>, Str
     Ok(pulled.filter(open))
 }
 
-fn based(top: &str, branch: &str, pulled: &Pulled, until: Instant) -> Result<Onto, String> {
-    let (page, base) = (pulled.pull_request.page.url(), &pulled.base_name);
-    if !named_branch(top, base, until)? {
-        return Err(format!("{page}, the pull request of {branch}, is onto {base:?}, no branch"));
-    }
-    let repository = pulled.pull_request.page.repository();
-    let [host, owner, name] = repository.split('/').collect::<Vec<_>>()[..] else {
-        return Err(format!("{page}, the pull request of {branch}, is of no repository"));
+fn based(
+    top: &str,
+    branch: &str,
+    listed: &str,
+    pulled: &Pulled,
+    until: Instant,
+) -> Result<Onto, String> {
+    let page = &pulled.pull_request.page;
+    let pull_request = format!("{}, the pull request of {branch},", page.url());
+    let Some(base) = named_branch(top, &pulled.base_name, until)? else {
+        return Err(format!("{pull_request} is onto {:?}, no branch", pulled.base_name));
     };
-    let Some(remote) = links::remote_of_repository(top, (host, owner, name))? else {
+    let repository = RepositoryName::of_page(page);
+    let Some(remote) = links::first_remote(listed, |url| repository.is_at(url)) else {
         return Err(format!(
-            "{page}, the pull request of {branch}, is onto {base} of {repository}, which no \
-             remote of {top} fetches"
+            "{pull_request} is onto {base} of {repository}, which no remote of {top} fetches: \
+             add one that does"
         ));
     };
-    Ok(Onto::Base { remote, branch: base.clone() })
+    Ok(Onto::Base { remote, branch: base })
 }
 
-fn named_branch(top: &str, name: &str, until: Instant) -> Result<bool, String> {
+fn named_branch(top: &str, name: &str, until: Instant) -> Result<Option<NamedBranch>, String> {
     let mut git = Command::new("git");
     git::local(git.args(["-C", top, "check-ref-format", &format!("refs/heads/{name}")]));
     let ran = program::run(&mut git, left(until, GIT_SAYS)?)
         .map_err(|error| format!("git check-ref-format could not be run: {error}"))?;
     match ran {
-        Ran::Ended { status, .. } => Ok(status.success()),
+        Ran::Ended { status, .. } => Ok(status.success().then(|| NamedBranch(name.to_owned()))),
         Ran::Stuck => Err("git check-ref-format did not end in time".to_owned()),
     }
 }
@@ -382,10 +391,10 @@ impl Unrebased {
 }
 
 impl Onto {
-    fn fetched(&self) -> Option<(&str, &str)> {
+    fn to_fetch(&self) -> Option<(&str, &str)> {
         match self {
             Onto::Default(DefaultBranch::Remote { remote, branch }) => Some((remote, branch)),
-            Onto::Base { remote, branch } => Some((remote, branch)),
+            Onto::Base { remote, branch } => Some((remote, &branch.0)),
             Onto::Default(DefaultBranch::Local { .. }) => None,
         }
     }
@@ -404,6 +413,12 @@ impl fmt::Display for Onto {
             Onto::Default(default) => default.fmt(f),
             Onto::Base { remote, branch } => write!(f, "{remote}/{branch}"),
         }
+    }
+}
+
+impl fmt::Display for NamedBranch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
