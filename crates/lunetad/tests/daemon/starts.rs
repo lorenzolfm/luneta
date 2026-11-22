@@ -229,7 +229,7 @@ fn log_of(host: &Host) -> String {
 const FOLDERS: &str = "\x1b[100;5u";
 
 pub fn makes_shells() -> bool {
-    Path::new(&shells::your_shell()).is_file()
+    Path::new(shells::your_shell().as_str()).is_file()
 }
 
 pub fn projects_of(owned: &Owned) -> Vec<api::Project> {

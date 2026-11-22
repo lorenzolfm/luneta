@@ -20,7 +20,7 @@ use tonic::Status;
 use crate::api;
 use crate::asked::{Colours, Dumped, Input, Size, TerminalKey};
 use crate::frame::{self, Flags};
-use crate::front::Front;
+use crate::front;
 use crate::id::{ClientId, TerminalId};
 use crate::marks::Mark;
 use crate::mux::Mux;
@@ -427,7 +427,7 @@ impl Thread {
         if self.shell.going()
             && let Some(group) = group
         {
-            self.shell.saw(group, self.pid, Front::of_terminal(pty, self.pid, group));
+            self.shell.saw(group, self.pid, front::of_terminal(pty, self.pid, group));
         }
         self.looks.looked(now, self.shell.going());
         self.tell(foreground);

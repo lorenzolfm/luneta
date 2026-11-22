@@ -63,13 +63,14 @@ jobs:
             experimental-features = nix-command flakes
             connect-timeout = 5
             fallback = true
-            ${{ runner.os == 'Linux' && !github.event.pull_request.head.repo.fork && 'extra-substituters = https://attic.tail174781.ts.net/main' || '' }}
-            ${{ runner.os == 'Linux' && !github.event.pull_request.head.repo.fork && 'extra-trusted-public-keys = main:4Zt9CH+9bGa5vSsFCdxOmqGjhItSREekmxJaB9wmgYY=' || '' }}
+            ${{ runner.os == 'macOS' && 'keep-outputs = true' || '' }}
+            ${{ !github.event.pull_request.head.repo.fork && 'extra-substituters = https://attic.tail174781.ts.net/main' || '' }}
+            ${{ !github.event.pull_request.head.repo.fork && 'extra-trusted-public-keys = main:4Zt9CH+9bGa5vSsFCdxOmqGjhItSREekmxJaB9wmgYY=' || '' }}
 
       - &tailscale
         name: tailscale/github-action v4.4.0, to reach the attic cache
         id: tailscale
-        if: runner.os == 'Linux' && !github.event.pull_request.head.repo.fork
+        if: ${{ !github.event.pull_request.head.repo.fork }}
         continue-on-error: true
         uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c
         with:
@@ -161,6 +162,25 @@ jobs:
 
       - *tailscale
 
+      - name: Give macOS its own DNS back, and only the tailnet's names to MagicDNS
+        if: runner.os == 'macOS' && steps.tailscale.outcome != 'skipped'
+        env:
+          TAILSCALE: ${{ steps.tailscale.outcome }}
+        run: |
+          sudo networksetup -setdnsservers Ethernet Empty
+          sudo networksetup -setsearchdomains Ethernet Empty
+          if [[ $TAILSCALE == success ]]; then
+            sudo mkdir -p /etc/resolver
+            echo 'nameserver 100.100.100.100' | sudo tee /etc/resolver/tail174781.ts.net
+          fi
+          sudo dscacheutil -flushcache
+          sudo killall -HUP mDNSResponder
+          curl -sSf --max-time 10 -o /dev/null https://cache.nixos.org/nix-cache-info
+          attic=https://attic.tail174781.ts.net/main/nix-cache-info
+          if [[ $TAILSCALE == success ]] && ! curl -sSf --max-time 10 -o /dev/null "$attic"; then
+            echo "::warning::attic did not answer, so this job goes on without it"
+          fi
+
       - name: nix-community/cache-nix-action v7
         if: runner.os == 'macOS'
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
@@ -182,46 +202,7 @@ jobs:
           | jq -er '.inputs | .. | objects | .path | strings'
           | xargs -r nix build --out-link "$RUNNER_TEMP/inputs"
 
-      - name: Restore the tests' target/, with actions/cache v6.1.0
-        id: target
-        if: runner.os == 'macOS'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: &target-paths |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'flake.nix', 'rust-toolchain.toml', '.cargo/config.toml') }}
-
-      - name: Test the daemon outside the sandbox
-        if: runner.os == 'macOS'
-        env:
-          CARGO_INCREMENTAL: 0
-          NEXTEST_DOUBLE_SPAWN: 0
-        run: |
-          nix develop --profile devshell -c sh -ec '
-            luneta-nextest --profile ci
-            cargo test --doc --locked $LUNETA_TEST_RUN
-          '
-
-      - name: Check the daemon without the tests' features
-        if: runner.os == 'macOS'
-        env:
-          CARGO_INCREMENTAL: 0
-        run: nix develop -c cargo check --locked -p lunetad
-
-      - name: Build the daemon, and on Linux test it
-        if: runner.os != 'macOS' || steps.target.outputs.cache-hit != 'true'
+      - name: Build and test the daemon
         run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).lunetad"
-
-      - name: Save the tests' target/, with actions/cache v6.1.0
-        if: >-
-          runner.os == 'macOS' && github.ref == 'refs/heads/main'
-          && steps.target.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: *target-paths
-          key: ${{ steps.target.outputs.cache-primary-key }}
 
       - *attic-push

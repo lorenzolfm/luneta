@@ -19,11 +19,6 @@ use tower::service_fn;
 
 pub const LUNETA_MUX: &str = env!("CARGO_BIN_EXE_luneta-mux");
 
-#[cfg(target_os = "linux")]
-const PS: &str = "ps";
-#[cfg(target_os = "macos")]
-const PS: &str = "/bin/ps";
-
 pub fn run<F: Future<Output = ()>>(test: F) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(test);
@@ -50,7 +45,6 @@ impl Server {
         let runtime = tempfile::tempdir().unwrap();
         command
             .arg(runtime.path().join("luneta"))
-            .env("SHELL", "/bin/sh")
             .env("ZELLIJ", "0")
             .env("ZELLIJ_SESSION_NAME", "theirs")
             .env("ZELLIJ_PANE_ID", "7")
@@ -77,10 +71,23 @@ impl Server {
         Server { child, runtime }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn resident_kib(&self) -> u64 {
         let pid = self.child.id().to_string();
-        let listed = Command::new(PS).args(["-o", "rss=", "-p", &pid]).output().unwrap();
+        let listed = Command::new("ps").args(["-o", "rss=", "-p", &pid]).output().unwrap();
         String::from_utf8(listed.stdout).unwrap().trim().parse().unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn resident_kib(&self) -> u64 {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        let mut system = System::new();
+        let pid = Pid::from_u32(self.child.id());
+        let resident = ProcessRefreshKind::nothing().with_memory();
+        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, resident);
+        let bytes = system.process(pid).expect("the mux server runs").memory();
+        assert_eq!(bytes % 1024, 0, "resident memory is whole pages");
+        bytes / 1024
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -114,7 +121,7 @@ impl Drop for Server {
 pub fn shell() -> api::Opens {
     api::Opens {
         cwd: "/".to_owned(),
-        runs: Some(api::opens::Runs::Shell(api::Shell {})),
+        program: Some(api::Program { argv: vec!["/bin/sh".to_owned()] }),
         ends: api::Ends::Closes.into(),
     }
 }
@@ -123,7 +130,7 @@ pub fn script(script: &str, ends: api::Ends) -> api::Opens {
     let argv = ["/bin/sh", "-c", script].map(str::to_owned).to_vec();
     api::Opens {
         cwd: "/".to_owned(),
-        runs: Some(api::opens::Runs::Program(api::Program { argv })),
+        program: Some(api::Program { argv }),
         ends: ends.into(),
     }
 }

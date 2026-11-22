@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use rustix::fs::{Mode, OFlags};
 
-use crate::api;
+use luneta_protocol::shell::Front;
+
 use crate::process::{self, Group, Process};
 use crate::pty::{self, Modes, Pty};
 
@@ -17,80 +18,62 @@ const RELAYS: [&str; 2] = ["sudo", "script"];
 
 const PROCESSES_MAX: usize = 512;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Front {
-    Working,
-    Asking,
-    Interactive,
+#[must_use]
+pub fn of_terminal(pty: &Pty, program: u32, group: Group) -> Front {
+    let modes = pty.modes().ok();
+    let processes = tree(program);
+    let front = in_front(&processes, group);
+    let said = of(modes, &front, group.leader() == program);
+    if said != Front::Interactive {
+        return said;
+    }
+    let Ok(ours) = pty.device() else {
+        return said;
+    };
+    let relays = front.iter().filter(|process| RELAYS.contains(&process.name.as_str()));
+    let children = relays.flat_map(|relay| {
+        processes.iter().filter(move |child| child.parent == relay.pid)
+    });
+    let inner = children.filter_map(|child| Some((child, child.terminal?)));
+    match inner.into_iter().find(|(_, terminal)| terminal.device != ours) {
+        Some((child, terminal)) => {
+            let Some(inner) = terminal.front else {
+                return behind(modes_at(terminal.device), &[]);
+            };
+            let below = tree(child.pid);
+            behind(modes_at(terminal.device), &in_front(&below, inner))
+        },
+        None => said,
+    }
 }
 
-impl Front {
-    #[must_use]
-    pub fn said(self) -> api::Front {
-        match self {
-            Front::Working => api::Front::Working,
-            Front::Asking => api::Front::Asking,
-            Front::Interactive => api::Front::Interactive,
-        }
+fn of(modes: Option<Modes>, front: &[&Process], shell: bool) -> Front {
+    match by_modes(modes, front) {
+        Front::Interactive if shell => Front::Asking,
+        front => front,
     }
+}
 
-    #[must_use]
-    pub fn of_terminal(pty: &Pty, program: u32, group: Group) -> Front {
-        let modes = pty.modes().ok();
-        let processes = tree(program);
-        let front = in_front(&processes, group);
-        let said = Front::of(modes, &front, group.leader() == program);
-        if said != Front::Interactive {
-            return said;
-        }
-        let Ok(ours) = pty.device() else {
-            return said;
-        };
-        let relays = front.iter().filter(|process| RELAYS.contains(&process.name.as_str()));
-        let children = relays.flat_map(|relay| {
-            processes.iter().filter(move |child| child.parent == relay.pid)
-        });
-        let inner = children.filter_map(|child| Some((child, child.terminal?)));
-        match inner.into_iter().find(|(_, terminal)| terminal.device != ours) {
-            Some((child, terminal)) => {
-                let Some(inner) = terminal.front else {
-                    return Front::behind(modes_at(terminal.device), &[]);
-                };
-                let below = tree(child.pid);
-                Front::behind(modes_at(terminal.device), &in_front(&below, inner))
-            },
-            None => said,
-        }
+fn by_modes(modes: Option<Modes>, front: &[&Process]) -> Front {
+    let Modes { lines, echo } = modes.unwrap_or(Modes { lines: true, echo: true });
+    let reading = || front.iter().any(|process| READING.contains(&process.sleeps.as_str()));
+    if !lines {
+        Front::Interactive
+    } else if !echo || reading() {
+        Front::Asking
+    } else {
+        Front::Working
     }
+}
 
-    fn of(modes: Option<Modes>, front: &[&Process], shell: bool) -> Self {
-        match Front::by_modes(modes, front) {
-            Front::Interactive if shell => Front::Asking,
-            front => front,
-        }
+fn behind(modes: Option<Modes>, front: &[&Process]) -> Front {
+    if modes.is_some() {
+        return by_modes(modes, front);
     }
-
-    fn by_modes(modes: Option<Modes>, front: &[&Process]) -> Self {
-        let Modes { lines, echo } = modes.unwrap_or(Modes { lines: true, echo: true });
-        let reading = || front.iter().any(|process| READING.contains(&process.sleeps.as_str()));
-        if !lines {
-            Front::Interactive
-        } else if !echo || reading() {
-            Front::Asking
-        } else {
-            Front::Working
-        }
-    }
-
-    fn behind(modes: Option<Modes>, front: &[&Process]) -> Self {
-        if modes.is_some() {
-            return Front::by_modes(modes, front);
-        }
-        if front.iter().any(|process| TAKING_OVER.contains(&process.name.as_str())) {
-            Front::Interactive
-        } else {
-            Front::Working
-        }
+    if front.iter().any(|process| TAKING_OVER.contains(&process.name.as_str())) {
+        Front::Interactive
+    } else {
+        Front::Working
     }
 }
 
@@ -167,28 +150,28 @@ mod tests {
         let sleeping = process(2, "sleep", "hrtimer_nanosleep");
         let reading = process(3, "python3", "n_tty_read");
         let socket = process(4, "curl", "wait_woken");
-        assert_eq!(Front::of(KEYS, &[&sleeping], false), Front::Interactive);
-        assert_eq!(Front::of(HIDDEN, &[&sleeping], false), Front::Asking);
-        assert_eq!(Front::of(LINES, &[&sleeping], false), Front::Working);
-        assert_eq!(Front::of(LINES, &[&sleeping, &reading], false), Front::Asking);
-        assert_eq!(Front::of(LINES, &[&socket], false), Front::Asking);
-        assert_eq!(Front::of(None, &[&sleeping], false), Front::Working);
+        assert_eq!(of(KEYS, &[&sleeping], false), Front::Interactive);
+        assert_eq!(of(HIDDEN, &[&sleeping], false), Front::Asking);
+        assert_eq!(of(LINES, &[&sleeping], false), Front::Working);
+        assert_eq!(of(LINES, &[&sleeping, &reading], false), Front::Asking);
+        assert_eq!(of(LINES, &[&socket], false), Front::Asking);
+        assert_eq!(of(None, &[&sleeping], false), Front::Working);
     }
 
     #[test]
     fn the_shell_in_front_a_key_at_a_time_asks() {
         let fish = process(2, "fish", "");
-        assert_eq!(Front::of(KEYS, &[&fish], true), Front::Asking);
-        assert_eq!(Front::of(LINES, &[&fish], true), Front::Working);
+        assert_eq!(of(KEYS, &[&fish], true), Front::Asking);
+        assert_eq!(of(LINES, &[&fish], true), Front::Working);
     }
 
     #[test]
     fn behind_a_relay_a_root_terminal_goes_by_the_program_s_name() {
         let vim = process(2, "vim", "");
         let make = process(3, "make", "");
-        assert_eq!(Front::behind(None, &[&vim]), Front::Interactive);
-        assert_eq!(Front::behind(None, &[&make]), Front::Working);
-        assert_eq!(Front::behind(HIDDEN, &[&make]), Front::Asking);
-        assert_eq!(Front::behind(KEYS, &[&make]), Front::Interactive);
+        assert_eq!(behind(None, &[&vim]), Front::Interactive);
+        assert_eq!(behind(None, &[&make]), Front::Working);
+        assert_eq!(behind(HIDDEN, &[&make]), Front::Asking);
+        assert_eq!(behind(KEYS, &[&make]), Front::Interactive);
     }
 }

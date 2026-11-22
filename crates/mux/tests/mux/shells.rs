@@ -35,7 +35,7 @@ fn bash(script: &str) -> api::Opens {
     let argv = ["bash", "-c", script].map(str::to_owned).to_vec();
     api::Opens {
         cwd: "/".to_owned(),
-        runs: Some(api::opens::Runs::Program(api::Program { argv })),
+        program: Some(api::Program { argv }),
         ends: api::Ends::Holds.into(),
     }
 }

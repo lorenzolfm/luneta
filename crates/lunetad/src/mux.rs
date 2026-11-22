@@ -1,8 +1,8 @@
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 
-use crate::process;
+use crate::{process, shells};
 
 pub mod own;
 
@@ -32,7 +32,7 @@ impl From<Failure> for String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Runs<'a> {
-    Shell(&'a OsStr),
+    Shell(&'a shells::Shell),
     Command { program: &'a str, args: &'a [String] },
 }
 
