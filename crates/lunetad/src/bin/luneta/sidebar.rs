@@ -13,7 +13,7 @@ use luneta_protocol::unread;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
-use lunetad::api::{self, Agent, Harness, Host, Saying, Status, Titled, UnreadFile};
+use lunetad::api::{self, Agent, Harness, Host, Saying, Status, UnreadFile};
 use lunetad::changes::Unchanged;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links::{self, Branch};
@@ -296,14 +296,8 @@ pub struct HereAgent {
     pub on: Machine,
     pub session: SessionName,
     pub view: ViewKey,
-    pub dir: AgentDir,
+    pub dir: Directory,
     pub harness: agents::Harness,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AgentDir {
-    At(Directory),
-    Unread { why: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -839,7 +833,7 @@ impl KnownTerminal {
             key,
             cwd: terminal.cwd.clone(),
             command: terminal.command.clone(),
-            titled: terminal.titled.clone(),
+            topic: terminal.titled.as_ref().and_then(|titled| titled.topic.clone()),
             told: terminal.told.clone(),
         })
     }
@@ -863,9 +857,9 @@ impl KnownTerminal {
 struct KnownView {
     id: ViewId,
     key: TerminalKey,
-    cwd: Option<String>,
+    cwd: Dir,
     command: Option<String>,
-    titled: Option<Titled>,
+    topic: Option<String>,
     told: Told,
 }
 
@@ -2177,13 +2171,7 @@ impl Sidebar {
         let agent = seated.get(&place.view.key())?;
         let view = self.view_of(self.on(), &place.session, place.view)?;
         let harness = agents::of(agent).filter(|_| agent.at_a_prompt())?;
-        let dir = match Directory::parse(agent_dir(agent, view).to_owned()) {
-            Ok(dir) => AgentDir::At(dir),
-            Err(why) => {
-                let why = format!("skills: where view {} works, {why}", place.view);
-                AgentDir::Unread { why }
-            },
-        };
+        let dir = Directory::from(&view.cwd);
         Some(HereAgent {
             on: self.on().clone(),
             session: place.session.name().session().clone(),
@@ -2314,7 +2302,7 @@ impl Sidebar {
                     mark: marked.mark,
                     status: status_word(agent),
                     since: marked.since,
-                    dir: short_cwd(agent_dir(agent, view)),
+                    dir: short_cwd(view.cwd.as_str()),
                     pid: agent.pid,
                     transcript: transcript(agent).named(),
                     doing: alerts::Doing::of(agent),
@@ -2583,7 +2571,7 @@ impl Sidebar {
                                 Some(ran) => ran,
                                 None => label(agent(view), view),
                             };
-                            let dir = view_dir(agent(view), view);
+                            let dir = view.cwd.as_str();
                             let (found, hits) = finder
                                 .as_ref()
                                 .and_then(|finder| finder.view(&label, None, &worktree.name, dir))
@@ -3452,11 +3440,7 @@ impl Sidebar {
         };
         let seen = self.seen(machine);
         let shown = self.view_of(machine, &session, view);
-        let agents = seen.as_ref().map(Seen::seated);
-        let said = shown.zip(agents.as_ref()).and_then(|(shown, agents)| {
-            view_dir(agents.get(&shown.key).copied(), shown).map(str::to_owned)
-        });
-        let cwd = Cwd::of(said, |dir| {
+        let cwd = Cwd::of(shown.map(|shown| Directory::from(&shown.cwd)), |dir| {
             let (branch, repository) = git_in(seen.as_ref(), &dir);
             let pulls = seen.iter().flat_map(|seen| seen.pull_requests);
             let pull_request = pulls.into_iter().find(|pull| pull.dir == dir.as_str());
@@ -3963,15 +3947,10 @@ impl Sidebar {
                 },
             };
         };
-        let agents = seen.seated();
         let pulls = pull_requests(seen.pull_requests);
         let mut worked = Vec::new();
         for (listed, view) in seen.views() {
-            let agent = agents.get(&view.key).copied();
-            let dir = view_dir(agent, view).and_then(|dir| Directory::parse(dir.to_owned()).ok());
-            let Some(dir) = dir else {
-                continue;
-            };
+            let dir = Directory::from(&view.cwd);
             let pull = pull_request_link(&pulls, dir.as_str());
             let here = Self::seats_here(self.seated_on(on), listed);
             let ViewPlace { session, view } = ViewPlace::of(listed.clone(), view);
@@ -4097,7 +4076,7 @@ impl Sidebar {
                     let Some(agent) = agents.get(&view.key) else {
                         continue;
                     };
-                    let cwd = agent_dir(agent, view);
+                    let cwd = view.cwd.as_str();
                     let branch = statuses.get(cwd).and_then(|status| {
                         checkout(&GitStatus::of_api(status)?, None).map(|checkout| checkout.branch)
                     });
@@ -4958,20 +4937,11 @@ fn transcript(agent: &Agent) -> Transcript {
     }
 }
 
-fn agent_dir<'a>(agent: &'a Agent, view: &'a KnownView) -> &'a str {
-    view.cwd.as_deref().unwrap_or(&agent.cwd)
-}
-
-fn view_dir<'a>(agent: Option<&'a Agent>, view: &'a KnownView) -> Option<&'a str> {
-    view.cwd.as_deref().or(agent.map(|agent| agent.cwd.as_str()))
-}
-
 fn label(agent: Option<&Agent>, view: &KnownView) -> String {
     if let Some(agent) = agent {
-        let titled = view.titled.as_ref().and_then(|titled| titled.topic.as_deref());
-        let topic = agent.topic.as_deref().or(titled);
+        let topic = agent.topic.as_deref().or(view.topic.as_deref());
         let name = given_name(agent).or(topic);
-        return name.map_or_else(|| short_cwd(agent_dir(agent, view)), str::to_owned);
+        return name.map_or_else(|| short_cwd(view.cwd.as_str()), str::to_owned);
     }
     let mut words = view.command.iter().flat_map(|command| command.split_whitespace());
     let program = words.next().map(|program| {
@@ -4982,7 +4952,7 @@ fn label(agent: Option<&Agent>, view: &KnownView) -> String {
         Some(program) if !icons::SHELLS.contains(&program) => {
             [program].into_iter().chain(words).collect::<Vec<_>>().join(" ")
         },
-        _ => view.cwd.as_deref().map_or_else(|| format!("view {}", view.key.id), short_cwd),
+        _ => short_cwd(view.cwd.as_str()),
     }
 }
 
@@ -5053,11 +5023,11 @@ impl<'a> Finder<'a> {
         &self,
         label: &str,
         branch: Option<&str>,
-        tab_name: &str,
-        cwd: Option<&str>,
+        worktree: &str,
+        cwd: &str,
     ) -> Option<(Fit, Vec<usize>)> {
-        let cwd = cwd.map(short_cwd);
-        self.find(label, &[branch, Some(tab_name), cwd.as_deref()])
+        let cwd = short_cwd(cwd);
+        self.find(label, &[branch, Some(worktree), Some(cwd.as_str())])
     }
 
     pub fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
@@ -5728,9 +5698,9 @@ mod tests {
         id: u32,
         tab: u32,
         tab_name: String,
-        cwd: Option<String>,
+        cwd: String,
         command: Option<String>,
-        titled: Option<Titled>,
+        titled: Option<api::Titled>,
         shell: Option<Shell>,
         held: bool,
     }
@@ -5740,7 +5710,7 @@ mod tests {
             id,
             tab,
             tab_name: format!("Tab #{}", tab + 1),
-            cwd: Some(cwd.to_owned()),
+            cwd: cwd.to_owned(),
             command: Some(command.to_owned()),
             titled: None,
             shell: None,
@@ -5769,9 +5739,9 @@ mod tests {
         KnownView {
             id: ViewId::of(u64::from(view.id)).unwrap(),
             key: TerminalKey::of(&key_in(1, view.id)).unwrap(),
-            cwd: view.cwd.clone(),
+            cwd: Dir::parse(&view.cwd).unwrap(),
             command: view.command.clone(),
-            titled: view.titled.clone(),
+            topic: view.titled.as_ref().and_then(|titled| titled.topic.clone()),
             told: Told::of(view.shell.as_ref()),
         }
     }
@@ -5953,7 +5923,7 @@ mod tests {
                 let terminal = api::Terminal {
                     id: u64::from(view.id),
                     found: Some(api::terminal::Found::Key(key_in(session.id, view.id))),
-                    folder: view.cwd.clone().unwrap_or_default(),
+                    folder: view.cwd.clone(),
                     command: view.command.clone(),
                     titled: view.titled.clone(),
                     shell: view.shell.clone(),
@@ -5966,7 +5936,7 @@ mod tests {
                     None => worktrees.push(api::Worktree {
                         id,
                         name: view.tab_name.clone(),
-                        folder: kept_folder(view.cwd.as_deref()),
+                        folder: view.cwd.clone(),
                         seen: Some(api::worktree::Seen::Unread(())),
                         terminals: vec![terminal],
                         arranged: Some(api::Arrangement::Tabs.into()),
@@ -6175,11 +6145,6 @@ mod tests {
             arranged: (!views.is_empty()).then_some(api::Arrangement::Tabs.into()),
             ..api::Worktree::default()
         }
-    }
-
-    fn kept_folder(cwd: Option<&str>) -> String {
-        let kept = cwd.filter(|cwd| Dir::parse(cwd).is_ok());
-        kept.unwrap_or("/w").to_owned()
     }
 
     fn clone_of(worktrees: Vec<api::Worktree>) -> api::project::Clone {
@@ -7026,8 +6991,6 @@ mod tests {
         assert_eq!(named("/bin/zsh -l"), "luneta/main");
         assert_eq!(named("cargo test"), "cargo test");
         assert_eq!(named("/nix/store/a1p5-neovim/bin/nvim --clean"), "nvim --clean");
-        let unsaid = View { cwd: None, command: None, ..view(3, 0, "", "") };
-        assert_eq!(label(None, &known(&unsaid)), "view 3");
     }
 
     #[test]
@@ -7044,8 +7007,6 @@ mod tests {
         assert_eq!(label(Some(&unnamed), &topic), "Fix the fold");
         assert_eq!(label(Some(&unnamed), &titled(None)), "w/x");
         assert_eq!(label(Some(&unnamed), &known(&untitled)), "w/x");
-        let unsaid = View { cwd: None, ..untitled };
-        assert_eq!(label(Some(&unnamed), &known(&unsaid)), "luneta/main");
         let mut derived = agent("s", 1, Status::Idle, Some("luneta-main"));
         let source = Some(NameSource::Derived.into());
         derived.name = derived.name.map(|name| api::Name { source, ..name });
@@ -7301,14 +7262,13 @@ mod tests {
     #[test]
     fn the_picker_gets_an_agents_directory_as_its_last_two_parts() {
         let mut sidebar = fresh();
-        let unsaid = View { cwd: None, ..view(2, 0, "", "claude") };
         sidebar.hear(host(
-            vec![session("s", 10, vec![view(1, 0, "/home/me/src/luneta/pr-12", "claude"), unsaid])],
-            vec![agent("s", 1, Status::Idle, None), agent("s", 2, Status::Idle, None)],
+            vec![session("s", 10, vec![view(1, 0, "/home/me/src/luneta/pr-12", "claude")])],
+            vec![agent("s", 1, Status::Idle, None)],
         ));
         let agents = sidebar.listing().local.agents;
         let dirs: Vec<&str> = agents.iter().map(|seated| seated.dir.as_str()).collect();
-        assert_eq!(dirs, ["luneta/pr-12", "luneta/main"]);
+        assert_eq!(dirs, ["luneta/pr-12"]);
     }
 
     #[test]
@@ -8081,14 +8041,12 @@ mod tests {
         notes.tab_name = "notes".to_owned();
         let deep = view(2, 1, "/home/lorenzo/Projects/misc/luneta", "nvim b");
         let branched = view(3, 2, "/w/c", "nvim c");
-        let unsaid = View {
-            cwd: None,
+        let titled = View {
             titled: Some(api::Titled { topic: Some("Rename the rows".to_owned()) }),
-            ..view(4, 3, "", "claude")
+            ..view(4, 3, "/w/fold/review", "claude")
         };
-        let elsewhere = "/w/fold/review".to_owned();
-        let seated = Agent { cwd: elsewhere, ..agent("s", 4, Status::Idle, None) };
-        let views = vec![notes, deep, branched, unsaid];
+        let seated = agent("s", 4, Status::Idle, None);
+        let views = vec![notes, deep, branched, titled];
         let mut host = host(vec![session("s", 10, views)], vec![seated]);
         let name = Said::new("feature/sidebar".to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None, changed: None };
@@ -9574,29 +9532,11 @@ mod tests {
     }
 
     #[test]
-    fn a_row_by_no_absolute_path_is_no_directory_for_a_file_s_path() {
-        let mut sidebar = fresh();
-        let unsaid = View { cwd: None, ..view(1, 0, "", "claude") };
-        let elsewhere = Agent { cwd: "w/luneta".to_owned(), ..agent("s", 1, Status::Idle, None) };
-        sidebar.hear(host(vec![session("s", 10, vec![unsaid])], vec![elsewhere]));
-        sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "j");
-        let Some(Target::View(_, row)) = sidebar.target() else { panic!("not a view's row") };
-        assert!(matches!(row.cwd, Cwd::Unread { .. }), "{:?}", row.cwd);
-        assert_eq!(sidebar.paste("docs/plan.md"), Asked::Nothing);
-        let Asked::Pull { work, worked, .. } = sidebar.key(&char('w'), moment(160_000)) else {
-            panic!("no job for the key");
-        };
-        assert_eq!(Some(work), Work::parse("docs/plan.md", None));
-        assert!(worked.is_empty(), "an agent by no absolute path works nowhere to go: {worked:?}");
-    }
-
-    #[test]
     fn the_menu_on_an_agent_is_for_where_its_row_says_it_works() {
         let mut sidebar = fresh();
-        let unsaid = View { cwd: None, ..view(1, 0, "", "claude") };
+        let claude = view(1, 0, "/w/luneta/main", "claude");
         let agents = vec![agent("s", 1, Status::Idle, None)];
-        sidebar.hear(host(vec![session("s", 10, vec![unsaid])], agents));
+        sidebar.hear(host(vec![session("s", 10, vec![claude])], agents));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "j");
         assert_eq!(lit_place(&sidebar), Some(view_of("s", 10, 1)));
@@ -9817,7 +9757,6 @@ mod tests {
                 view(2, 0, "/w/b", "fish"),
                 view(3, 0, "/w/c", "fish"),
                 view(4, 0, "/w/d", "pi"),
-                view(5, 0, "w", "claude"),
             ];
             let printing = agent("s", 3, Status::Busy, None);
             let printing = Agent { entrypoint: Some("sdk-cli".to_owned()), ..printing };
@@ -9826,8 +9765,7 @@ mod tests {
                 entrypoint: Some("tui".to_owned()),
                 ..agent("s", 4, Status::Idle, None)
             };
-            let relative = agent("s", 5, Status::Idle, None);
-            let agents = vec![agent("s", 1, Status::Idle, None), printing, pi, relative];
+            let agents = vec![agent("s", 1, Status::Idle, None), printing, pi];
             let agents = agents.into_iter().map(|agent| {
                 let view = agent.terminal.as_ref().expect("an agent of a view of a project's").id;
                 in_own(agent, 1, view)
@@ -9838,29 +9776,28 @@ mod tests {
             sidebar.here_agent()
         };
         let session = SessionName::listed("s").expect("a name");
-        let (dir, harness) = (AgentDir::At(directory("/w/a")), agents::Harness::ClaudeCode);
+        let (dir, harness) = (directory("/w/a"), agents::Harness::ClaudeCode);
         let here = HereAgent { on: Machine::Local, session, view: view_key(1, 1), dir, harness };
         assert_eq!(on_view(1), Some(here));
         assert_eq!(on_view(2), None);
         assert_eq!(on_view(3), None);
         let session = SessionName::listed("s").expect("a name");
-        let (dir, harness) = (AgentDir::At(directory("/w/d")), agents::Harness::Pi);
+        let (dir, harness) = (directory("/w/d"), agents::Harness::Pi);
         let here = HereAgent { on: Machine::Local, session, view: view_key(1, 4), dir, harness };
         assert_eq!(on_view(4), Some(here));
-        let session = SessionName::listed("s").expect("a name");
-        let why = "skills: where view 5 works, \"w\" is no absolute path".to_owned();
-        let (dir, harness) = (AgentDir::Unread { why }, agents::Harness::ClaudeCode);
-        let here = HereAgent { on: Machine::Local, session, view: view_key(1, 5), dir, harness };
-        assert_eq!(on_view(5), Some(here));
     }
 
     #[test]
     fn the_menu_over_the_session_says_over_it_what_went_wrong() {
         let mut sidebar = fresh();
-        let unknown = View { cwd: None, ..view(1, 0, "/w/b", "fish") };
-        sidebar.hear(host(vec![own_session("only", 1, vec![unknown])], Vec::new()));
-        sit(&mut sidebar, &own_view_of("only", 1, 1));
-        let wrong = "menu: luneta does not know yet where view 1 works; try again in a moment";
+        let own = worktree_of(31, "notes", "/w/notes", &[1]);
+        let mut notes = a_project(8, "notes", Vec::new());
+        notes.dir = "/w/notes".to_owned();
+        notes.holds = Some(api::project::Holds::Folder(own));
+        sidebar.heard(Host { projects: Some(kept(vec![notes])), ..host(Vec::new(), Vec::new()) });
+        let view = ViewPlace::new(listed("notes", 8), ViewKey::terminal(1));
+        sit(&mut sidebar, &Place::View(view));
+        let wrong = "menu: notes is a folder, and its own is its one worktree";
 
         let floated = |sidebar: &Sidebar| match sidebar.floating() {
             Some(Floating::Note(note)) => Some(note.to_owned()),
@@ -9868,18 +9805,18 @@ mod tests {
         };
 
         float_a_menu(&mut sidebar);
-        type_in(&mut sidebar, "nv");
+        type_in(&mut sidebar, "nw");
         assert_eq!((floated(&sidebar).as_deref(), sidebar.notice.as_deref()), (Some(wrong), None));
         sidebar.close_note();
         assert!(sidebar.floating().is_none());
 
         float_a_menu(&mut sidebar);
-        type_in(&mut sidebar, "nv");
+        type_in(&mut sidebar, "nw");
         sidebar.focus(Keys::Terminal);
         assert_eq!((floated(&sidebar).as_deref(), sidebar.notice.as_deref()), (None, Some(wrong)));
 
         sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "nv");
+        type_in(&mut sidebar, "nw");
         assert_eq!((floated(&sidebar).as_deref(), sidebar.notice.as_deref()), (None, Some(wrong)));
         float_a_menu(&mut sidebar);
         assert!(sidebar.notice.is_none());
@@ -10921,12 +10858,12 @@ mod tests {
 
     #[test]
     fn a_sweep_has_no_control_character_of_what_a_cut_took() {
-        let cwd = "/w/a-directory-too-long-for-the-sidebar\necho hidden\x1b[201~\tend";
+        let command = "make a-target-too-long-for-the-sidebar\x07echo\x1b[201~end";
         let mut sidebar = fresh();
-        sidebar.hear(host(vec![session("s", 10, vec![view(1, 1, cwd, "fish")])], Vec::new()));
+        sidebar.hear(host(vec![session("s", 10, vec![view(1, 1, "/w/a", command)])], Vec::new()));
         let area = Rect::new(0, 0, 24, 14);
         framed(&mut sidebar, area);
-        let whole = "w/a-directory-too-long-for-the-sidebarecho hidden[201~end";
+        let whole = "make a-target-too-long-for-the-sidebarecho[201~end";
         assert_eq!(swept(&mut sidebar, area, (7, 6), (22, 6)), copied(whole));
     }
 

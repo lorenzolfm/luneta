@@ -31,7 +31,7 @@ pub struct Worktree {
 pub struct Terminal {
     pub id: ViewId,
     pub key: Option<TerminalKey>,
-    pub cwd: Option<String>,
+    pub cwd: Dir,
     pub command: Option<String>,
     pub titled: Option<api::Titled>,
     pub told: Told,
@@ -294,10 +294,12 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
         let held = ViewId::of(terminal.id);
         let id = held.ok_or_else(|| format!("a terminal of worktree {named} has id 0"))?;
         let key = found_key(terminal).map_err(|why| format!("terminal {id}: {why}"))?;
+        let cwd = Dir::parse(&terminal.folder);
+        let cwd = cwd.map_err(|why| format!("terminal {id}'s folder: {why}"))?;
         terminals.push(Terminal {
             id,
             key,
-            cwd: Some(terminal.folder.clone()).filter(|folder| !folder.is_empty()),
+            cwd,
             command: terminal.command.clone(),
             titled: terminal.titled.clone(),
             told: Told::of(terminal.shell.as_ref()),
@@ -695,6 +697,22 @@ mod tests {
             let mut host = host();
             broke(&mut rows(kept(&mut host))[1]);
             assert_eq!(Projected::adapted(&host), Err(why.to_owned()));
+        }
+    }
+
+    #[test]
+    fn a_terminal_whose_folder_is_no_folder_lunetad_keeps_is_refused() {
+        let unnamed = "a path holds a part that is no name: empty, `.` or `..`";
+        let unkept = [
+            ("", "\"\" is no absolute path".to_owned()),
+            ("w/a", "\"w/a\" is no absolute path".to_owned()),
+            ("/w/../a", format!("\"/w/../a\": {unnamed}")),
+        ];
+        for (folder, why) in unkept {
+            let mut host = host();
+            rows(kept(&mut host))[0].terminals[1].folder = folder.to_owned();
+            let refused = format!("terminal 0000000000000016's folder: {why}");
+            assert_eq!(Projected::adapted(&host), Err(refused), "{folder:?}");
         }
     }
 
