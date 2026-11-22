@@ -150,8 +150,12 @@ mod tests {
     fn a_process_ends_at_its_term_and_one_that_holds_out_at_its_kill() {
         let mut ends = Command::new("sleep").arg("60").spawn().unwrap();
         let script = "trap '' TERM; echo held; while :; do sleep 0.05; done";
-        let mut holds = Command::new("sh");
-        let mut holds = holds.args(["-c", script]).stdout(Stdio::piped()).spawn().unwrap();
+        let mut holds = Command::new("sh")
+            .args(["-c", script])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
         let mut held = String::new();
         BufReader::new(holds.stdout.take().unwrap()).read_line(&mut held).unwrap();
         assert_eq!(held, "held\n");
