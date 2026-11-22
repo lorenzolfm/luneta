@@ -141,13 +141,47 @@ jobs:
           git update-ref refs/remotes/origin/main HEAD^
           nix run .#dev.commands.lint -- --breaking
 
-  daemon:
+  macos-tested:
     needs: code
+    if: >-
+      ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      && !github.event.pull_request.head.repo.fork }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      held: ${{ steps.tested.outputs.held }}
+
+    steps:
+      - name: actions/checkout v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - *install-nix
+
+      - *tailscale
+
+      - name: Whether attic holds this tree's tested lunetad for macOS
+        id: tested
+        if: steps.tailscale.outcome == 'success'
+        run: |
+          check="$(nix eval --raw .#checks.aarch64-darwin.lunetad.outPath)"
+          held=false
+          if nix store verify --no-contents --store https://attic.tail174781.ts.net/main "$check"; then
+            held=true
+          fi
+          echo "held=$held" | tee -a "$GITHUB_OUTPUT"
+
+  daemon:
+    needs: [code, macos-tested]
     if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        runner: >-
+          ${{ fromJSON(needs.macos-tested.outputs.held == 'true'
+          && '["ubuntu-latest", "ubuntu-24.04-arm"]'
+          || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]') }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
