@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 publish = false
-description = "What luneta's daemon and its clients both read: the protocol, git's status, and the arguments and environment a process was started with"
+description = "What luneta's daemon and its clients both read: the protocol, git's status, the arguments and environment a process was started with, and whether a socket is still the one its server bound"
 
 [dependencies]
 prost = "0.14.4"

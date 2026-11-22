@@ -1,5 +1,6 @@
 use std::fs::{self, Permissions};
 use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
 use crate::host::{info, start, Host, Vars, LUNETA, SOCKET};
@@ -39,6 +40,37 @@ fn one_daemon_holds_the_folder_until_it_dies() {
     let next = start(vars).unwrap();
     let said = info(vars);
     assert!(said.contains(&format!("(pid {})", next.pid())), "{said}");
+}
+
+#[test]
+fn a_daemon_whose_folder_goes_ends_and_the_next_one_takes_its_projects() {
+    let host = Host::new();
+    let mut first = start(host.vars()).unwrap();
+    fs::remove_dir_all(host.folder()).unwrap();
+
+    let ended = first.ended("a daemon whose folder goes ends");
+    assert!(ended.success(), "{ended}");
+    let socket = host.runtime.path().join(SOCKET);
+    let why = format!("{} is gone, so nothing reaches it again", socket.display());
+    first.says("the daemon says why it ends", |line| line.contains(&why));
+    let next = start(host.vars()).unwrap();
+    let said = info(host.vars());
+    assert!(said.contains(&format!("(pid {})", next.pid())), "{said}");
+}
+
+#[test]
+fn a_daemon_whose_socket_another_takes_ends_and_leaves_that_socket_be() {
+    let host = Host::new();
+    let mut daemon = start(host.vars()).unwrap();
+    let socket = host.runtime.path().join(SOCKET);
+    let taking = socket.with_file_name("taking.sock");
+    let theirs = UnixListener::bind(&taking).unwrap();
+    fs::rename(&taking, &socket).unwrap();
+
+    let ended = daemon.ended("a daemon whose socket another takes ends");
+    assert!(ended.success(), "{ended}");
+    UnixStream::connect(&socket).expect("the socket that took the daemon's place stays");
+    drop(theirs);
 }
 
 #[test]

@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use luneta_protocol::socket::Unreached;
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
 use crate::api;
 use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
-use crate::folder::Unreached;
 use crate::id::{ClientId, TerminalId};
 use crate::panics::Shared;
 use crate::terminal::{self, Exit, Handle, Viewer, ViewerOut, Wanted};
