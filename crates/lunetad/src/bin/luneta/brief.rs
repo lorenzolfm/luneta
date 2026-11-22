@@ -23,7 +23,7 @@ use crate::gruvbox;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
-use crate::sidebar;
+use crate::sidebar::{self, ViewKey};
 
 const MODEL: &str = "haiku";
 
@@ -70,7 +70,7 @@ pub enum Over {
     },
     Machine(Machine, Vec<SessionName>),
     Session(Machine, SessionName),
-    Agent(Machine, SessionName, u32),
+    Agent(Machine, SessionName, ViewKey),
 }
 
 impl Over {
@@ -152,7 +152,7 @@ fn machine_named(on: &Machine) -> String {
 pub struct Note {
     pub on: Machine,
     pub session: SessionName,
-    pub view: u32,
+    pub view: ViewKey,
     pub name: String,
     pub status: String,
     pub since: Option<SystemTime>,
@@ -618,7 +618,7 @@ mod tests {
         Note {
             on: Machine::Local,
             session: named(session),
-            view,
+            view: ViewKey::terminal(view),
             name: name.to_owned(),
             status: "idle".to_owned(),
             since: Some(SystemTime::UNIX_EPOCH),
@@ -771,7 +771,7 @@ Its transcript is unknown: Claude Code names none for it.
         let note = |(n, id): (usize, &String)| Note {
             on: Machine::Local,
             session: named("a"),
-            view: n as u32,
+            view: ViewKey::terminal(n as u32 + 1),
             name: format!("agent {n}"),
             status: "busy".to_owned(),
             since: None,
@@ -805,7 +805,7 @@ Its transcript is unknown: Claude Code names none for it.
         let note = |session: &str, view: usize, name: String| Note {
             on: Machine::Local,
             session: named(session),
-            view: view as u32,
+            view: ViewKey::terminal(view as u32 + 1),
             name,
             status: "busy".to_owned(),
             since: None,
@@ -916,7 +916,7 @@ Its transcript was not read: me@vps: lunetad did not answer in 6s
         for (over, title) in [
             (Over::Machine(nixos(), vec![a()]), Ok("Brief of every session on nixos")),
             (Over::Session(nixos(), a()), Ok("Brief of a on nixos")),
-            (Over::Agent(nixos(), a(), 1), Ok("Brief of fold, in a on nixos")),
+            (Over::Agent(nixos(), a(), ViewKey::terminal(1)), Ok("Brief of fold, in a on nixos")),
             (Over::Machine(Machine::Local, vec![a()]), Ok("Brief of every session on this machine")),
             (Over::Session(vps(), a()), Err("brief: no agents in a on me@vps")),
             (Over::Machine(Machine::Remote(pi()), Vec::new()), Err("brief: no agents on pi")),
@@ -934,7 +934,7 @@ Its transcript was not read: me@vps: lunetad did not answer in 6s
         let of = |view: u32, name: &str, transcript: Transcript| Note {
             on: Machine::Local,
             session: named("a"),
-            view,
+            view: ViewKey::terminal(view),
             name: name.to_owned(),
             status: "idle".to_owned(),
             since: None,

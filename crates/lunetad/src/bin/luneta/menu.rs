@@ -1059,7 +1059,7 @@ impl Target {
             },
             (Target::View(machine, row), brief::Scope::Highlighted) => {
                 let session = row.session.name().session().clone();
-                Briefed::Agent(machine.clone(), session, row.view.terminal_id())
+                Briefed::Agent(machine.clone(), session, row.view)
             },
             (
                 Target::Worktree(machine, WorktreeRow { place, .. }),
@@ -1289,7 +1289,7 @@ pub enum Briefed {
     Every,
     Machine(Machine),
     Session(Machine, SessionName),
-    Agent(Machine, SessionName, u32),
+    Agent(Machine, SessionName, ViewKey),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3504,7 +3504,7 @@ mod tests {
         for (row, key, briefed) in [
             (view_row(), 'z', Briefed::Every),
             (view_row(), 's', Briefed::Session(Machine::Local, luneta())),
-            (view_row(), 'h', Briefed::Agent(Machine::Local, luneta(), 4)),
+            (view_row(), 'h', Briefed::Agent(Machine::Local, luneta(), ViewKey::terminal(4))),
             (session_row(), 'h', Briefed::Session(Machine::Local, luneta())),
         ] {
             let (menu, _) = stays(opened(row, Some('b')));
@@ -3737,7 +3737,7 @@ mod tests {
 
         let name = || project().listed().name().session().clone();
         for (row, highlighted) in [
-            (view, Briefed::Agent(vps(), name(), 4)),
+            (view, Briefed::Agent(vps(), name(), ViewKey::terminal(4))),
             (project_on(vps()), Briefed::Session(vps(), name())),
         ] {
             for (key, briefed) in [
