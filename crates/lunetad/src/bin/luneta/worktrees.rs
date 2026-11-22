@@ -367,7 +367,7 @@ fn chosen(
 fn branched_in(path: &Path, holding: &Project, name: &str) -> Result<Landing, Tried> {
     assert_ne!(holding.name.as_str(), name, "a name a project has goes to that project");
     match holding.holds {
-        Holds::Clone(_) => {},
+        Holds::Clone { .. } => {},
         Holds::Folder(_) => {
             let one = projects::folder_has_one_worktree(&holding.name);
             return Err(Tried::Failed(format!("{name} names no project, and {one}")));
@@ -617,7 +617,7 @@ pub fn folder_of(path: &Path, worktree: WorktreeId) -> Result<PathBuf, String> {
     let mut worktrees = projects.iter().flat_map(Project::worktrees);
     let found = worktrees.find(|it| it.id == worktree);
     let found = found.ok_or_else(|| format!("lunetad keeps no worktree {worktree}"))?;
-    Ok(PathBuf::from(&found.folder))
+    Ok(PathBuf::from(found.folder.as_str()))
 }
 
 pub enum Went {
