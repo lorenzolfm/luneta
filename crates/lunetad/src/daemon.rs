@@ -323,7 +323,7 @@ async fn stand(
         match bound.found() {
             Ok(Found::Ours) => unlooked_said = false,
             Ok(Found::Lost(unreached)) => {
-                log::say(&format!("{unreached}, and so lunetad ends"));
+                log::say(&format!("{unreached}: lunetad ends"));
                 let _ = end.send(());
                 return;
             },
