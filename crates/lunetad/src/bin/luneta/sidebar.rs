@@ -206,8 +206,9 @@ impl Place {
 
     pub fn listed(&self) -> &Listed {
         match self {
-            Place::Session(session) | Place::View(ViewPlace { session, .. }) => session,
-            Place::Worktree(WorktreePlace { project, .. }) => project.listed(),
+            Place::Session(session) => session,
+            Place::Worktree(place) => place.project.listed(),
+            Place::View(place) => place.listed(),
         }
     }
 }
@@ -220,17 +221,40 @@ pub struct WorktreePlace {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ViewPlace {
-    pub session: Listed,
-    pub view: ViewKey,
+    worktree: WorktreePlace,
+    view: ViewKey,
 }
 
 impl ViewPlace {
-    pub fn new(session: Listed, view: ViewKey) -> Self {
-        ViewPlace { session, view }
+    fn of(worktree: &WorktreePlace, view: &KnownView) -> Self {
+        ViewPlace { worktree: worktree.clone(), view: ViewKey::Terminal(view.key) }
     }
 
-    fn of(session: Listed, view: &KnownView) -> Self {
-        ViewPlace::new(session, ViewKey::Terminal(view.key))
+    #[must_use]
+    pub fn worktree(&self) -> &WorktreePlace {
+        &self.worktree
+    }
+
+    #[must_use]
+    pub fn view(&self) -> ViewKey {
+        self.view
+    }
+
+    #[must_use]
+    pub fn listed(&self) -> &Listed {
+        self.worktree.project.listed()
+    }
+
+    #[cfg(test)]
+    pub fn new(worktree: WorktreePlace, view: ViewKey) -> Self {
+        ViewPlace { worktree, view }
+    }
+
+    #[cfg(test)]
+    pub fn new_in(name: &str, project: u64, worktree: u64, view: u32) -> Self {
+        let worktree = WorktreeId::of(worktree).unwrap();
+        let worktree = WorktreePlace { project: ProjectRow::new(name, project), worktree };
+        ViewPlace::new(worktree, ViewKey::terminal(view))
     }
 }
 
@@ -327,6 +351,25 @@ impl Spot {
         match self {
             Spot::Machine(_) => None,
             Spot::Local(place) | Spot::Remote(_, place) => Some(place),
+        }
+    }
+
+    fn worktree(&self) -> Option<Spot> {
+        match self.place()? {
+            Place::Session(_) => None,
+            Place::Worktree(_) => Some(self.clone()),
+            Place::View(place) => {
+                Some(Spot::on(&self.machine(), Place::Worktree(place.worktree.clone())))
+            },
+        }
+    }
+
+    fn folding(&self) -> Folding {
+        match self.place() {
+            None => Folding::Machine,
+            Some(Place::Session(session)) => Folding::Project(session.project()),
+            Some(Place::Worktree(place)) => Folding::Worktree(place.worktree),
+            Some(Place::View(place)) => Folding::Worktree(place.worktree.worktree),
         }
     }
 
@@ -559,8 +602,7 @@ enum Row {
     },
     View {
         machine: Machine,
-        session: Listed,
-        view: ViewKey,
+        place: ViewPlace,
         view_id: ViewId,
         here: bool,
         unread: bool,
@@ -724,9 +766,7 @@ impl Row {
             Row::Worktree { machine, place, .. } => {
                 Spot::on(machine, Place::Worktree(place.clone()))
             },
-            Row::View { machine, session, view, .. } => {
-                Spot::on(machine, Place::View(ViewPlace { session: session.clone(), view: *view }))
-            },
+            Row::View { machine, place, .. } => Spot::on(machine, Place::View(place.clone())),
         }
     }
 
@@ -905,6 +945,11 @@ impl Known {
         self.worktrees.iter().flat_map(KnownWorktree::views)
     }
 
+    fn placed_views(&self) -> impl Iterator<Item = (&WorktreePlace, &KnownView)> {
+        let each = self.worktrees.iter();
+        each.flat_map(|worktree| worktree.views().map(move |view| (&worktree.place, view)))
+    }
+
     fn view(&self, key: TerminalKey) -> Option<&KnownView> {
         self.views().find(|view| view.key == key)
     }
@@ -943,7 +988,8 @@ fn view_id_of(shelves: &[Shelf], on: &Machine, listed: &Listed, view: ViewKey) -
 }
 
 fn news_key(shelves: &[Shelf], on: &Machine, place: &ViewPlace) -> Option<Key> {
-    Some(place.session.key(view_id_of(shelves, on, &place.session, place.view)?))
+    let listed = place.listed();
+    Some(listed.key(view_id_of(shelves, on, listed, place.view)?))
 }
 
 #[derive(Debug, Default)]
@@ -1103,9 +1149,8 @@ impl Seen<'_> {
         known.flat_map(Known::views).map(|view| view.key).collect()
     }
 
-    fn views(&self) -> impl Iterator<Item = (&Listed, &KnownView)> {
-        let each = self.projects.iter();
-        each.flat_map(|known| known.views().map(move |view| (known.listed(), view)))
+    fn views(&self) -> impl Iterator<Item = (&WorktreePlace, &KnownView)> {
+        self.projects.iter().flat_map(Known::placed_views)
     }
 }
 
@@ -1376,7 +1421,6 @@ pub struct Sidebar {
     lit: Option<Lit>,
     mode: Mode,
     moving: Moving,
-    homes: HashMap<Spot, Spot>,
     revealed: Option<Spot>,
     top: usize,
     page: Page,
@@ -2097,13 +2141,9 @@ impl Sidebar {
     }
 
     fn unfold_home(&mut self, project: ProjectId, terminal: TerminalKey) {
-        let Some(place) = self.view_place(project, terminal) else {
-            return;
-        };
-        let on = self.on().clone();
-        let spot = Spot::on(&on, Place::View(place));
-        if let Some(Place::Worktree(home)) = self.homes.get(&spot).and_then(Spot::place) {
-            self.folds.set(Fold::Worktree(&on, home.worktree), false);
+        if let Some(place) = self.view_place(project, terminal) {
+            let on = self.on().clone();
+            self.folds.set(Fold::Worktree(&on, place.worktree.worktree), false);
         }
     }
 
@@ -2129,8 +2169,9 @@ impl Sidebar {
     }
 
     fn view_place(&self, project: ProjectId, terminal: TerminalKey) -> Option<ViewPlace> {
-        let known = self.known_of(project)?;
-        Some(ViewPlace::of(known.listed().clone(), known.view(terminal)?))
+        let mut placed = self.known_of(project)?.placed_views();
+        let (worktree, view) = placed.find(|(_, view)| view.key == terminal)?;
+        Some(ViewPlace::of(worktree, view))
     }
 
     fn here_worktree(&self) -> Option<WorktreePlace> {
@@ -2169,13 +2210,13 @@ impl Sidebar {
         let seen = self.seen(self.on())?;
         let seated = seen.seated();
         let agent = seated.get(&place.view.key())?;
-        let view = self.view_of(self.on(), &place.session, place.view)?;
+        let view = self.view_of(self.on(), place.listed(), place.view())?;
         let harness = agents::of(agent).filter(|_| agent.at_a_prompt())?;
         let dir = Directory::from(&view.cwd);
         Some(HereAgent {
             on: self.on().clone(),
-            session: place.session.name().session().clone(),
-            view: place.view,
+            session: place.listed().name().session().clone(),
+            view: place.view(),
             dir,
             harness,
         })
@@ -2289,11 +2330,11 @@ impl Sidebar {
         let mut runs = Runs::default();
         for known in seen.projects.iter().rev() {
             let listed = known.listed();
-            for view in known.views() {
+            for (worktree, view) in known.placed_views() {
                 let Some(agent) = seated.get(&view.key) else {
                     continue;
                 };
-                let place = ViewPlace::of(listed.clone(), view);
+                let place = ViewPlace::of(worktree, view);
                 let key = listed.key(view.id);
                 let (marked, _) = agent_marked(&self.news, agent, key, here_key == Some(key));
                 runs.agents.push(Seated {
@@ -2310,7 +2351,7 @@ impl Sidebar {
             }
         }
         let here = here.map(Here::session);
-        runs.agents.sort_by_key(|seated| here != Some(seated.place.session.name().as_str()));
+        runs.agents.sort_by_key(|seated| here != Some(seated.place.listed().name().as_str()));
         runs
     }
 
@@ -2443,7 +2484,6 @@ impl Sidebar {
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
         let mut counts = Counts::default();
         let mut rows = Vec::new();
-        let mut homes = HashMap::new();
         let mut best: Option<(Spot, Fit)> = None;
         let mut weigh = |at: Spot, fit: Fit| {
             if best.as_ref().is_none_or(|(_, top)| fit > *top) {
@@ -2492,9 +2532,6 @@ impl Sidebar {
                         let key = listed.key(view.id);
                         let here = on && here_key == Some(key);
                         let unread = self.news.is_unread(key);
-                        let place = Place::View(ViewPlace::of(listed.clone(), view));
-                        let home = Place::Worktree(worktree.place.clone());
-                        homes.insert(Spot::on(&machine, place), Spot::on(&machine, home));
                         if let Some(agent) = agent(view) {
                             let (agent, done) = agent_marked(&self.news, agent, key, here);
                             if let Some(done) = done {
@@ -2583,18 +2620,16 @@ impl Sidebar {
                             {
                                 continue;
                             }
-                            let place = ViewPlace::of(listed.clone(), view);
+                            let place = ViewPlace::of(&worktree.place, view);
                             let here = on && here_view.as_ref() == Some(&place);
                             let icon = program.and_then(icons::of);
                             let found = found.map(|fit| {
                                 (Spot::on(&machine, Place::View(place.clone())), fit)
                             });
-                            let (machine, session) = (machine.clone(), place.session);
-                            let (view, view_id) = (place.view, view.id);
+                            let (machine, view_id) = (machine.clone(), view.id);
                             let row = move |bracket| Row::View {
                                 machine,
-                                session,
-                                view,
+                                place,
                                 view_id,
                                 here,
                                 unread,
@@ -2701,8 +2736,10 @@ impl Sidebar {
             | Mode::Afloat { .. }
             | Mode::AfloatNote(_) => false,
         };
+        if let Some(kin) = self.kin_of_gone(&rows) {
+            self.lit = Some(Lit::On(kin));
+        }
         self.rows = rows;
-        self.homes = homes;
         self.counts = counts;
         self.refused = refused;
         self.unlisted_machines = unlisted_machines;
@@ -2733,36 +2770,36 @@ impl Sidebar {
         Rebuilt::Done
     }
 
+    fn kin_of_gone(&self, rows: &[Row]) -> Option<Spot> {
+        let Some(Lit::On(spot)) = &self.lit else {
+            return None;
+        };
+        let Some(Place::View(gone)) = spot.place() else {
+            return None;
+        };
+        let listed = |spot: &Spot| rows.iter().any(|row| row.spot() == *spot);
+        if listed(spot) {
+            return None;
+        }
+        let at = self.row_of(spot)?;
+        let machine = spot.machine();
+        let kin = |row: &&Row| {
+            matches!(row, Row::View { machine: of, place, .. }
+                if *of == machine && place.worktree == gone.worktree)
+        };
+        let (above, below) = (self.rows[..at].iter().rev(), self.rows[at + 1..].iter());
+        below.chain(above).filter(kin).map(Row::spot).find(listed)
+    }
+
     fn row_for(&self, spot: &Spot) -> Option<Spot> {
         let rows = [
             Some(spot.clone()),
-            self.worktree_of(spot),
+            spot.worktree(),
             project_of(spot),
             Some(Spot::Machine(spot.machine())),
         ];
         let listed = |spot: &Spot| self.rows.iter().any(|row| row.spot() == *spot);
         rows.into_iter().flatten().find(listed)
-    }
-
-    fn worktree_of(&self, spot: &Spot) -> Option<Spot> {
-        match spot.place()? {
-            Place::Session(_) => None,
-            Place::Worktree(_) => Some(spot.clone()),
-            Place::View(_) => self.homes.get(spot).cloned(),
-        }
-    }
-
-
-    fn folding(&self, spot: &Spot) -> Option<Folding> {
-        match spot.place() {
-            None => Some(Folding::Machine),
-            Some(Place::Session(session)) => Some(Folding::Project(session.project())),
-            Some(Place::Worktree(place)) => Some(Folding::Worktree(place.worktree)),
-            Some(Place::View(_)) => match self.homes.get(spot)?.place()? {
-                Place::Worktree(place) => Some(Folding::Worktree(place.worktree)),
-                Place::Session(_) | Place::View(_) => None,
-            },
-        }
     }
 
     fn folded(&self, machine: &Machine, folding: Folding) -> bool {
@@ -2794,7 +2831,7 @@ impl Sidebar {
         if !matches!(row, Row::View { .. }) {
             return None;
         }
-        let home = self.row_of(self.homes.get(&row.spot())?)?;
+        let home = self.row_of(&row.spot().worktree()?)?;
         assert!(home < at, "a worktree's row sits above its views");
         Some(home)
     }
@@ -2877,9 +2914,7 @@ impl Sidebar {
         let Some(spot) = self.lit_spot().cloned() else {
             return;
         };
-        let Some(folding) = self.folding(&spot) else {
-            return;
-        };
+        let folding = spot.folding();
         let folded = self.folded(&spot.machine(), folding);
         self.set_fold(&spot, folding, !folded);
     }
@@ -2888,9 +2923,7 @@ impl Sidebar {
         let Some(spot) = self.lit_spot().cloned() else {
             return;
         };
-        let Some(folding) = self.folding(&spot) else {
-            return;
-        };
+        let folding = spot.folding();
         let lifted = match self.row_of(&spot).map(|at| &self.rows[at]) {
             Some(Row::Worktree { under, .. }) if folded && *under != Under::Rows => {
                 spot.place().map(|place| Folding::Project(place.listed().project()))
@@ -2916,7 +2949,7 @@ impl Sidebar {
             Folding::Machine => (Fold::Machine(&machine), Some(header)),
             Folding::Project(project) => (Fold::Project(&machine, project), project_of(spot)),
             Folding::Worktree(worktree) => {
-                (Fold::Worktree(&machine, worktree), self.worktree_of(spot))
+                (Fold::Worktree(&machine, worktree), spot.worktree())
             },
         };
         if !self.folds.set(fold, folded) {
@@ -3095,7 +3128,7 @@ impl Sidebar {
         let row = self.lit_spot().and_then(|spot| self.row_of(spot));
         let checked_out = |row: &Row| match row {
             Row::Worktree { named, .. } => named.checkout().cloned(),
-            Row::View { .. } => self.row_of(&self.worktree_of(&row.spot())?).and_then(|at| {
+            Row::View { .. } => self.row_of(&row.spot().worktree()?).and_then(|at| {
                 let Row::Worktree { named, .. } = &self.rows[at] else {
                     return None;
                 };
@@ -3188,7 +3221,7 @@ impl Sidebar {
         let Some(spot) = self.lit_spot().cloned() else {
             return;
         };
-        let Some(movable) = Movable::of(self.worktree_of(&spot).unwrap_or(spot)) else {
+        let Some(movable) = Movable::of(spot.worktree().unwrap_or(spot)) else {
             return;
         };
         self.light(movable.spot());
@@ -3416,7 +3449,7 @@ impl Sidebar {
             return None;
         };
         let seen = self.seen(machine)?;
-        let shown = self.view_of(machine, &row.session, row.view)?;
+        let shown = self.view_of(machine, row.place.listed(), row.place.view())?;
         seen.seated().get(&shown.key).and_then(|agent| agents::of(agent))
     }
 
@@ -3433,13 +3466,14 @@ impl Sidebar {
     }
 
     fn target_at(&self, machine: &Machine, place: Place) -> Option<Target> {
-        let (session, view) = match place {
+        let place = match place {
             Place::Session(session) => return self.project_target(machine, &session),
             Place::Worktree(place) => return self.worktree_target(machine, place),
-            Place::View(ViewPlace { session, view }) => (session, view),
+            Place::View(place) => place,
         };
+        let (session, view) = (place.listed(), place.view);
         let seen = self.seen(machine);
-        let shown = self.view_of(machine, &session, view);
+        let shown = self.view_of(machine, session, view);
         let cwd = Cwd::of(shown.map(|shown| Directory::from(&shown.cwd)), |dir| {
             let (branch, repository) = git_in(seen.as_ref(), &dir);
             let pulls = seen.iter().flat_map(|seen| seen.pull_requests);
@@ -3447,11 +3481,11 @@ impl Sidebar {
             let pull_request = pull_request.and_then(PullRequest::of_api);
             Folder { dir, branch, repository, pull_request }
         });
-        let ran = self.ran_in(machine, &session, view);
-        let terminal = view_id_of(&self.shelves, machine, &session, view);
+        let ran = self.ran_in(machine, session, view);
+        let terminal = view_id_of(&self.shelves, machine, session, view);
         let arranged =
-            terminal.and_then(|it| arranged_holding(&self.shelves, machine, &session, it));
-        let row = ViewRow { session, view, terminal, cwd, ran, arranged };
+            terminal.and_then(|it| arranged_holding(&self.shelves, machine, session, it));
+        let row = ViewRow { place: place.clone(), terminal, cwd, ran, arranged };
         Some(Target::View(machine.clone(), row))
     }
 
@@ -3480,7 +3514,7 @@ impl Sidebar {
         let Some(Target::View(machine, row)) = self.open().map(Menu::target) else {
             return;
         };
-        let ran = self.ran_in(machine, &row.session, row.view);
+        let ran = self.ran_in(machine, row.place.listed(), row.place.view());
         if let Some(menu) = self.open_mut() {
             menu.reran(ran);
         }
@@ -3949,13 +3983,13 @@ impl Sidebar {
         };
         let pulls = pull_requests(seen.pull_requests);
         let mut worked = Vec::new();
-        for (listed, view) in seen.views() {
+        for (worktree, view) in seen.views() {
             let dir = Directory::from(&view.cwd);
             let pull = pull_request_link(&pulls, dir.as_str());
-            let here = Self::seats_here(self.seated_on(on), listed);
-            let ViewPlace { session, view } = ViewPlace::of(listed.clone(), view);
+            let here = Self::seats_here(self.seated_on(on), worktree.project.listed());
+            let place = ViewPlace::of(worktree, view);
             let it = links::Worked { dir, pull, here };
-            worked.push(Worked { session, view, works: it });
+            worked.push(Worked { place, works: it });
         }
         Ok(worked)
     }
@@ -4172,12 +4206,12 @@ impl Sidebar {
         let Some(spot) = self.lit_spot() else {
             return;
         };
-        let Some(Row::View { session, view_id, unread, marked, .. }) =
+        let Some(Row::View { place, view_id, unread, marked, .. }) =
             self.rows.iter().find(|row| row.spot() == *spot)
         else {
             return;
         };
-        let key = session.key(*view_id);
+        let key = place.listed().key(*view_id);
         if dotted(*unread, marked.as_ref()) {
             self.news.read(key, self.finished.get(&key).copied(), now);
         } else {
@@ -5779,7 +5813,16 @@ mod tests {
     }
 
     fn view_of(name: &str, started: u64, view: u32) -> Place {
-        Place::View(ViewPlace { session: listed(name, started), view: view_key(started, view) })
+        Place::View(view_place(name, started, 0, view))
+    }
+
+    fn tab_view_of(name: &str, started: u64, tab: u32, view: u32) -> Place {
+        Place::View(view_place(name, started, tab, view))
+    }
+
+    fn view_place(name: &str, project: u64, tab: u32, view: u32) -> ViewPlace {
+        let worktree = WorktreePlace { project: project_row(name, project), worktree: tab_of(project, tab) };
+        ViewPlace::new(worktree, view_key(project, view))
     }
 
     fn own_listed(name: &str, id: u64) -> Listed {
@@ -5787,8 +5830,7 @@ mod tests {
     }
 
     fn own_view_of(name: &str, id: u64, view: u32) -> Place {
-        let session = Listed::new_project(name, id);
-        Place::View(ViewPlace { session, view: view_key(id, view) })
+        view_of(name, id, view)
     }
 
     fn session_name(name: &str) -> SessionName {
@@ -6104,15 +6146,11 @@ mod tests {
     }
 
     fn sit(sidebar: &mut Sidebar, place: &Place) {
-        let Place::View(ViewPlace { session, view }) = place else {
+        let Place::View(ViewPlace { worktree, view }) = place else {
             panic!("luneta sits on a view: {place:?}");
         };
-        let (project, terminal) = (session.project(), view.key());
-        let known = sidebar.known_of(project).expect("luneta sits in a project it knows");
-        let mut worktrees = known.worktrees.iter();
-        let home = worktrees.find(|it| it.views().any(|it| it.key == terminal));
-        let worktree = home.expect("a worktree holds the view luneta sits on").place.worktree;
-        let at = Sitting::Worktree { worktree, terminal: Some(terminal) };
+        let (project, terminal) = (worktree.project.id(), view.key());
+        let at = Sitting::Worktree { worktree: worktree.worktree, terminal: Some(terminal) };
         sidebar.sit(Seat { on: Machine::Local, project, at });
     }
 
@@ -6250,7 +6288,8 @@ mod tests {
             Some(Lit::On(_)) | None => None,
         };
         let past = "the highlight lands past the worktree's views";
-        let next = ViewPlace { session: listed("luneta", 7), view: ViewKey::terminal(3) };
+        let main = WorktreePlace { project: project_row("luneta", 7), worktree: WorktreeId::of(32).unwrap() };
+        let next = ViewPlace::new(main, ViewKey::terminal(3));
         assert_eq!(landing, Some(Spot::Local(Place::View(next))), "{past}");
     }
 
@@ -6672,7 +6711,7 @@ mod tests {
             stands: Some(api::git_status::Stands::Checkout(checkout)),
         }];
         sidebar.hear(host);
-        sit(&mut sidebar, &own_view_of("older", 2, 2));
+        sit(&mut sidebar, &tab_view_of("older", 2, 1, 2));
 
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         let (lines, lit) = seen(&mut sidebar, false, 32, 13);
@@ -6696,7 +6735,7 @@ mod tests {
         let mut sidebar = two_sessions();
         let older = Some(Place::Session(listed("older", 10)));
         let fold = Some(view_of("older", 10, 1));
-        let nvim = Some(view_of("older", 10, 2));
+        let nvim = Some(tab_view_of("older", 10, 1, 2));
         let newer = Some(Place::Session(listed("newer", 20)));
         let shell = Some(view_of("newer", 20, 1));
         assert_eq!(lit_place(&sidebar), older);
@@ -6715,7 +6754,7 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         let newer = Some(Place::Session(listed("newer", 20)));
-        sidebar.light(Spot::Local(view_of("older", 10, 2)));
+        sidebar.light(Spot::Local(tab_view_of("older", 10, 1, 2)));
         type_in(&mut sidebar, "j");
         let (lines, lit) = seen(&mut sidebar, true, 32, 24);
         let lit: Vec<&str> = lit.iter().map(|y| lines[usize::from(*y)].as_str()).collect();
@@ -6837,7 +6876,7 @@ mod tests {
     #[test]
     fn luneta_shown_another_worktree_of_its_project_is_on_no_view_until_it_focuses_one() {
         let mut sidebar = own_two_sessions();
-        let older = |view| ViewPlace { session: own_listed("older", 1), view: view_key(1, view) };
+        let older = |view| view_place("older", 1, u32::from(view == 2), view);
         sit(&mut sidebar, &Place::View(older(1)));
         assert_eq!(sidebar.here_place(), Ok(older(1)));
         let at = Sitting::Worktree { worktree: tab_of(1, 1), terminal: None };
@@ -6882,12 +6921,36 @@ mod tests {
     fn a_gone_view_leaves_the_highlight_in_its_session() {
         let mut sidebar = two_sessions();
         sidebar.step(2);
-        assert_eq!(lit_place(&sidebar), Some(view_of("older", 10, 2)));
+        assert_eq!(lit_place(&sidebar), Some(tab_view_of("older", 10, 1, 2)));
         sidebar.hear(host(
             vec![session("older", 10, vec![view(1, 0, "/w/luneta/main", "claude")])],
             Vec::new(),
         ));
         assert_eq!(lit_place(&sidebar), Some(Place::Session(listed("older", 10))));
+    }
+
+    #[test]
+    fn a_view_gone_by_itself_leaves_the_highlight_on_the_next_view_of_its_worktree() {
+        let mut sidebar = fresh();
+        let hear = |sidebar: &mut Sidebar, fix: &[u32]| {
+            let fix = worktree_of(31, "fix", "/w/fix", fix);
+            let main = worktree_of(32, "main", "/w/main", &[4]);
+            let projects = vec![a_project(7, "luneta", vec![fix, main])];
+            sidebar.heard(Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) });
+        };
+        let worktree = WorktreeId::of(31).unwrap();
+        let fix = WorktreePlace { project: project_row("luneta", 7), worktree };
+        let view = |id| Some(Place::View(ViewPlace::new(fix.clone(), ViewKey::terminal(id))));
+        hear(&mut sidebar, &[1, 2, 3]);
+        sidebar.light(Spot::Local(view(2).unwrap()));
+        hear(&mut sidebar, &[1, 3]);
+        assert_eq!(lit_place(&sidebar), view(3), "the view below it in its worktree");
+        hear(&mut sidebar, &[1]);
+        let above = "the last of its worktree's views leaves it on the one above, not below it";
+        assert_eq!(lit_place(&sidebar), view(1), "{above}");
+        hear(&mut sidebar, &[]);
+        let home = "the last view of all leaves it on its worktree's row";
+        assert_eq!(lit_place(&sidebar), Some(Place::Worktree(fix.clone())), "{home}");
     }
 
     #[test]
@@ -6932,7 +6995,7 @@ mod tests {
         let mut sidebar = two_sessions();
         let area = Rect::new(0, 0, 32, 11);
         screen(&mut sidebar, false, area.width, area.height);
-        let view = view_of("older", 10, 2);
+        let view = tab_view_of("older", 10, 1, 2);
         assert_eq!(click(&mut sidebar, 10, 8, area), go_here(view));
         let older = Place::Session(listed("older", 10));
         assert_eq!(click(&mut sidebar, 10, 4, area), go_here(older.clone()));
@@ -7312,7 +7375,7 @@ mod tests {
         assert!(lines(&mut sidebar, moment(160_000))[5].ends_with(" •"));
         sidebar.key(&KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), moment(160_000));
 
-        let s = |view| own_view_of("s", 1, view);
+        let s = |view| tab_view_of("s", 1, if view == 3 { 3 } else { 0 }, view);
         sit(&mut sidebar, &s(2));
         assert_eq!(lines(&mut sidebar, moment(160_000))[7], "▌╰   \u{e795} luneta/main");
         sit(&mut sidebar, &s(1));
@@ -7517,7 +7580,8 @@ mod tests {
         let made = Timestamp { seconds: 99, nanos: 0 };
         sidebar.hear(restored(s(), made, |id| id % 3 + 1));
         let fish = TerminalKey::of(&api::TerminalKey { id: 1, made_at: Some(made) }).unwrap();
-        let fish = ViewPlace::new(own_listed("s", 1), ViewKey::Terminal(fish));
+        let s = WorktreePlace { project: project_row("s", 1), worktree: tab_of(1, 0) };
+        let fish = ViewPlace::new(s, ViewKey::Terminal(fish));
         sit(&mut sidebar, &Place::View(fish));
         assert_eq!(rows(&mut sidebar)[6..], marked);
     }
@@ -7846,8 +7910,11 @@ mod tests {
         let on = drawn.at(Position::new(columns(8, "#246")[0], 8));
         assert_eq!(on, Some(Hit::Number(link())));
         let project = project_row("luneta", 7);
-        let view = |id| ViewPlace::new(listed("luneta", 7), ViewKey::terminal(id));
-        let view = |id| go_here(Place::View(view(id)));
+        let view = |id| {
+            let worktree = WorktreeId::of(30 + u64::from(id)).unwrap();
+            let worktree = WorktreePlace { project: project.clone(), worktree };
+            go_here(Place::View(ViewPlace::new(worktree, ViewKey::terminal(id))))
+        };
         let worktree = |id| {
             let worktree = WorktreeId::of(id).unwrap();
             go_here(Place::Worktree(WorktreePlace { project: project.clone(), worktree }))
@@ -8017,9 +8084,9 @@ mod tests {
             "  ▾ Tab #3",
             "       less logs",
         ];
-        let bipa = view_of("bipa", 10, 3);
+        let bipa = tab_view_of("bipa", 10, 2, 3);
         let notes = Place::Session(listed("notes", 20));
-        let zed = view_of("zed", 30, 2);
+        let zed = tab_view_of("zed", 30, 1, 2);
         for (typed, rows, best) in [
             ("pix", &PIX[..], bipa),
             ("note", &[" ▾ notes", "  ▾ Tab #1", "     \u{e795} me/Documents"][..], notes),
@@ -8084,7 +8151,7 @@ mod tests {
                 sidebar.focus(Keys::Terminal);
                 Asked::Nothing
             };
-            let pix = view_of("bipa", 10, 3);
+            let pix = tab_view_of("bipa", 10, 2, 3);
             let went = if close == Some(KeyCode::Enter) { go_here(pix) } else { Asked::Nothing };
             assert_eq!(asked, went, "{close:?}");
             assert_eq!(rows_shown(&mut sidebar)[..2], [" ▸ bipa", " ▾ notes"], "{close:?}");
@@ -8099,7 +8166,7 @@ mod tests {
         type_in(&mut sidebar, "jhh");
         assert_eq!(rows_shown(&mut sidebar)[..2], [" ▸ bipa", " ▾ notes"]);
         type_in(&mut sidebar, "/pix");
-        let pix = own_view_of("bipa", 1, 3);
+        let pix = tab_view_of("bipa", 1, 2, 3);
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(pix.clone()));
         sit(&mut sidebar, &pix);
@@ -8322,7 +8389,7 @@ mod tests {
     #[test]
     fn y_p_asks_for_the_highlighted_row_s_link_and_the_legend_comes_back() {
         let mut sidebar = pulls();
-        sidebar.light(Spot::Local(view_of("s", 10, 1)));
+        sidebar.light(Spot::Local(tab_view_of("s", 10, 1, 1)));
         let now = moment(160_000);
         assert_eq!(sidebar.key(&char('y'), now), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now + PAUSE);
@@ -8364,7 +8431,7 @@ mod tests {
     #[test]
     fn y_waits_for_one_key_and_esc_only_drops_it() {
         let mut sidebar = pulls();
-        let one = Spot::Local(view_of("s", 10, 1));
+        let one = Spot::Local(tab_view_of("s", 10, 1, 1));
         sidebar.light(one.clone());
         let now = moment(160_000);
         let esc = KeyEvent::from(KeyCode::Esc);
@@ -8375,7 +8442,7 @@ mod tests {
 
         sidebar.key(&char('y'), now);
         sidebar.key(&char('j'), now);
-        assert_eq!(lit_place(&sidebar), Some(view_of("s", 10, 2)));
+        assert_eq!(lit_place(&sidebar), Some(tab_view_of("s", 10, 2, 2)));
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
 
         sidebar.light(one);
@@ -8392,7 +8459,7 @@ mod tests {
     #[test]
     fn a_click_on_y_then_on_p_copies() {
         let mut sidebar = pulls();
-        sidebar.light(Spot::Local(view_of("s", 10, 1)));
+        sidebar.light(Spot::Local(tab_view_of("s", 10, 1, 1)));
         let now = moment(160_000);
         sidebar.key(&char('?'), now);
         assert_eq!(sidebar.keys_clicked(Keyed::Legend, &char('y'), now), Asked::Nothing);
@@ -8407,9 +8474,9 @@ mod tests {
         let none = "no pull request on this row";
         let old = "#7: lunetad says no link of it on github.com";
         let rows = [
-            (Spot::Local(view_of("s", 10, 2)), old),
-            (Spot::Local(view_of("s", 10, 3)), none),
-            (Spot::Local(view_of("s", 10, 4)), none),
+            (Spot::Local(tab_view_of("s", 10, 2, 2)), old),
+            (Spot::Local(tab_view_of("s", 10, 3, 3)), none),
+            (Spot::Local(tab_view_of("s", 10, 4, 4)), none),
             (Spot::Local(Place::Session(listed("s", 10))), none),
             (Spot::Machine(Machine::Local), none),
         ];
@@ -8435,7 +8502,7 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Spot::Local(view_of("s", 10, 1)));
+        sidebar.light(Spot::Local(tab_view_of("s", 10, 1, 1)));
         sidebar
     }
 
@@ -8477,7 +8544,7 @@ mod tests {
     #[test]
     fn o_p_and_y_p_take_another_machine_s_link_too() {
         let mut sidebar = pulls();
-        sidebar.light(Spot::Local(view_of("s", 10, 1)));
+        sidebar.light(Spot::Local(tab_view_of("s", 10, 1, 1)));
         let now = moment(160_000);
         assert_eq!(open_pull(&mut sidebar, now), Asked::Browse(link()));
         assert_eq!(sidebar.copied, None, "what opens shows");
@@ -8493,7 +8560,7 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
-        let place = ViewPlace { session: listed("main", 20), view: view_key(20, 1) };
+        let place = view_place("main", 20, 0, 1);
         let place = Place::View(place);
         sidebar.light(Spot::Remote(nixos(), place));
         assert_eq!(open_pull(&mut sidebar, now), Asked::Browse(far_link.clone()));
@@ -8507,7 +8574,7 @@ mod tests {
         let grouped = Action::row().filter(|(_, path)| path.len() == 2);
         for (action, path) in grouped {
             let mut sidebar = pulls();
-            sidebar.light(Spot::Local(view_of("s", 10, 1)));
+            sidebar.light(Spot::Local(tab_view_of("s", 10, 1, 1)));
             assert_eq!(sidebar.key(&char(path[0]), now), Asked::Nothing, "{path:?} opens a group");
             let asked = sidebar.key(&char(path[1]), now);
             let said = asked != Asked::Nothing || sidebar.notice.is_some();
@@ -8518,7 +8585,7 @@ mod tests {
     #[test]
     fn o_w_asks_for_the_worktrees_not_open_of_the_row_s_project_on_its_machine() {
         let mut sidebar = pulls();
-        sidebar.light(Spot::Local(view_of("s", 10, 1)));
+        sidebar.light(Spot::Local(tab_view_of("s", 10, 1, 1)));
         let now = moment(160_000);
         let opening = |sidebar: &mut Sidebar| {
             assert_eq!(sidebar.key(&char('o'), now), Asked::Nothing, "o opens a group");
@@ -8532,7 +8599,7 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         sidebar.focus(Keys::Sidebar);
-        let place = ViewPlace { session: listed("main", 20), view: view_key(20, 1) };
+        let place = view_place("main", 20, 0, 1);
         sidebar.light(Spot::Remote(nixos(), Place::View(place)));
         assert_eq!(opening(&mut sidebar), (Machine::Remote(nixos()), "main".to_owned()));
     }
@@ -8625,7 +8692,7 @@ mod tests {
         assert_eq!(sidebar.notice, None);
 
         sidebar.focus(Keys::Sidebar);
-        sidebar.light(Spot::Local(view_of("s", 10, 1)));
+        sidebar.light(Spot::Local(tab_view_of("s", 10, 1, 1)));
         sidebar.key(&char('y'), now);
         sidebar.number_clicked(link());
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
@@ -9097,8 +9164,7 @@ mod tests {
         assert_eq!(sidebar.here_place(), Err(NO_HERE_VIEW));
         sidebar.sit(seat_in(1, Some(1)));
         let twin = Listed::new_project("twin", 1);
-        let here = ViewPlace { session: twin.clone(), view: view_key(1, 1) };
-        assert_eq!(sidebar.here_place(), Ok(here));
+        assert_eq!(sidebar.here_place(), Ok(view_place("twin", 1, 0, 1)));
         sidebar.focus(Keys::Sidebar);
         sidebar.light(Spot::Local(Place::Session(twin)));
         type_in(&mut sidebar, "d");
@@ -9116,8 +9182,8 @@ mod tests {
         sidebar.sit(seat_in(1, Some(1)));
         sidebar.unseat();
         assert_eq!(sidebar.seated_in(), None);
-        let (twin, view) = (Listed::new_project("twin", 1), view_key(1, 1));
-        sidebar.light(Spot::Local(Place::View(ViewPlace { session: twin.clone(), view })));
+        let view = view_key(1, 1);
+        sidebar.light(Spot::Local(view_of("twin", 1, 1)));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
         let act = Act::View(view);
@@ -9148,7 +9214,7 @@ mod tests {
         let worked = sidebar.worked(&Machine::Local).unwrap();
         let carries = |it: &&Worked| it.works.pull.as_ref().is_some_and(|it| it.is(&link));
         let worked = worked.iter().filter(carries);
-        let sessions: Vec<&Listed> = worked.map(|it| &it.session).collect();
+        let sessions: Vec<&Listed> = worked.map(|it| it.place.listed()).collect();
         assert_eq!(sessions, [&own_listed("young", 2)]);
 
         sidebar.key(&char('m'), moment(160_000));
@@ -9197,15 +9263,14 @@ mod tests {
         ]);
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
         let on_b = Link::parse("https://github.com/lorenzolfm/luneta/pull/7").unwrap();
-        let worked = |session, view, dir: &str, pull, here| Worked {
-            session,
-            view,
+        let worked = |place, dir: &str, pull, here| Worked {
+            place,
             works: links::Worked { dir: directory(dir), pull, here },
         };
         let worked = vec![
-            worked(own_listed("older", 1), view_key(1, 1), "/w/luneta/main", None, true),
-            worked(own_listed("older", 1), view_key(1, 2), "/w/c", None, true),
-            worked(own_listed("young", 2), view_key(2, 1), "/w/b", Some(on_b), false),
+            worked(view_place("older", 1, 0, 1), "/w/luneta/main", None, true),
+            worked(view_place("older", 1, 1, 2), "/w/c", None, true),
+            worked(view_place("young", 2, 0, 1), "/w/b", Some(on_b), false),
         ];
         let work = Work::Link(link.clone());
         let wanted = Wanted::AsItIs;
@@ -9284,7 +9349,7 @@ mod tests {
         sidebar.focus(Keys::Terminal);
         let there = || {
             let work = Readied::Link(link());
-            let at = At::There((own_listed("older", 1), view_key(1, 4)));
+            let at = At::There(view_place("older", 1, 0, 4));
             Ready {
                 at,
                 folder: directory("/w/luneta/feat"),
@@ -9717,8 +9782,7 @@ mod tests {
         assert_eq!(standing(&mut sidebar), lent);
         let target = floating_menu(&sidebar).map(Menu::target).cloned();
         assert_eq!(target, Some(Target::View(Machine::Local, ViewRow {
-            session: Listed::new_project("older", 1),
-            view: view_key(1, 1),
+            place: view_place("older", 1, 0, 1),
             terminal: ViewId::of(1),
             cwd: Cwd::At(Folder {
                 dir: directory("/w/luneta/main"),
@@ -9795,8 +9859,8 @@ mod tests {
         notes.dir = "/w/notes".to_owned();
         notes.holds = Some(api::project::Holds::Folder(own));
         sidebar.heard(Host { projects: Some(kept(vec![notes])), ..host(Vec::new(), Vec::new()) });
-        let view = ViewPlace::new(listed("notes", 8), ViewKey::terminal(1));
-        sit(&mut sidebar, &Place::View(view));
+        let own = WorktreePlace { project: project_row("notes", 8), worktree: WorktreeId::of(31).unwrap() };
+        sit(&mut sidebar, &Place::View(ViewPlace::new(own, ViewKey::terminal(1))));
         let wrong = "menu: notes is a folder, and its own is its one worktree";
 
         let floated = |sidebar: &Sidebar| match sidebar.floating() {
@@ -9835,7 +9899,7 @@ mod tests {
         let Target::View(_, row) = target.as_ref() else {
             panic!("the palette aims at the view shown: {target:?}");
         };
-        assert_eq!(row.view, view_key(10, 1));
+        assert_eq!(row.place, view_place("older", 10, 0, 1));
         let Aim::At { target: welcome, .. } = sidebar.aimed_worktree() else {
             panic!("over a welcome view, the palette aims at its worktree");
         };
@@ -10223,7 +10287,7 @@ mod tests {
         assert!(sidebar.open().is_none());
         sidebar.hear(with_nvim());
         let waits = "a listing heard before the close lands leaves the highlight on the view";
-        assert_eq!(lit_place(&sidebar), Some(view_of("older", 10, 2)), "{waits}");
+        assert_eq!(lit_place(&sidebar), Some(tab_view_of("older", 10, 1, 2)), "{waits}");
         sidebar.hear(without_nvim());
         assert_eq!(lit_place(&sidebar), Some(past_nvim()));
         type_in(&mut sidebar, "d");
@@ -10250,7 +10314,7 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         sidebar.step(2);
-        assert_eq!(lit_place(&sidebar), Some(view_of("older", 10, 2)));
+        assert_eq!(lit_place(&sidebar), Some(tab_view_of("older", 10, 1, 2)));
         sidebar
     }
 
@@ -10286,7 +10350,7 @@ mod tests {
         close_nvim(&mut sidebar);
         type_in(&mut sidebar, "hl");
         let back = "h folds its worktree and l unfolds it, back onto the view";
-        assert_eq!(lit_place(&sidebar), Some(view_of("older", 10, 2)), "{back}");
+        assert_eq!(lit_place(&sidebar), Some(tab_view_of("older", 10, 1, 2)), "{back}");
         sidebar.hear(without_nvim());
         assert_eq!(lit_place(&sidebar), where_nvim_going_by_itself_leaves_it());
     }
@@ -10295,7 +10359,7 @@ mod tests {
         let refused = Unchanged::Refused("lunetad refused".to_owned());
         sidebar.unclosed(&Machine::Local, &closes_nvim(), ticket, refused);
         assert_eq!(sidebar.notice.as_deref(), Some("menu: not closed: lunetad refused"));
-        assert_eq!(lit_place(sidebar), Some(view_of("older", 10, 2)));
+        assert_eq!(lit_place(sidebar), Some(tab_view_of("older", 10, 1, 2)));
     }
 
     fn nvim_closed_twice_with_the_others_refused() -> (Sidebar, u64) {
@@ -10328,7 +10392,7 @@ mod tests {
     }
 
     fn last_with(views: &[u32]) -> Host {
-        let shells = views.iter().map(|id| view(*id, 0, "/w/luneta/main", "fish")).collect();
+        let shells = views.iter().map(|id| view(*id, *id - 1, "/w/luneta/main", "fish")).collect();
         let first = own_session("first", 1, vec![view(1, 0, "/w/luneta/main", "fish")]);
         host(vec![first, own_session("last", 2, shells)], Vec::new())
     }
@@ -10338,7 +10402,7 @@ mod tests {
         sidebar.hear(last_with(&[1, 2]));
         sidebar.focus(Keys::Sidebar);
         sidebar.step(9);
-        assert_eq!(lit_place(&sidebar), Some(own_view_of("last", 2, 2)));
+        assert_eq!(lit_place(&sidebar), Some(tab_view_of("last", 2, 1, 2)));
         sidebar
     }
 
@@ -10407,7 +10471,7 @@ mod tests {
     #[test]
     fn the_highlight_seeks_the_best_match_only_as_the_search_changes() {
         let mut sidebar = searched();
-        let view = |view| Some(view_of("bipa", 10, view));
+        let view = |view| Some(tab_view_of("bipa", 10, view - 1, view));
         type_in(&mut sidebar, "/pi");
         assert_eq!(lit_place(&sidebar), view(3));
         sidebar.key(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), moment(160_000));
@@ -11104,7 +11168,7 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
-        let place = ViewPlace { session: listed("main", 20), view: view_key(20, 1) };
+        let place = view_place("main", 20, 0, 1);
         let spot = Spot::Remote(nixos(), Place::View(place));
         sidebar.light(spot.clone());
         let now = moment(160_000);
@@ -11150,7 +11214,7 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
-        let place = ViewPlace { session: listed("main", 20), view: view_key(20, 1) };
+        let place = view_place("main", 20, 0, 1);
         let place = Place::View(place);
         sidebar.light(Spot::Remote(nixos(), place));
         let now = moment(160_000);
@@ -11264,9 +11328,9 @@ mod tests {
         let on = Machine::Remote(nixos());
         let dir = directory("/w/b");
         let cwd = Cwd::At(Folder { dir, branch: None, repository: None, pull_request: None });
-        let (session, view, terminal) = (listed("main", 20), view_key(20, 1), ViewId::of(1));
+        let (place, terminal) = (view_place("main", 20, 0, 1), ViewId::of(1));
         let (ran, arranged) = (Ran::Unhooked, Some(Arranged::Tabs));
-        let row = ViewRow { session, view, terminal, cwd, ran, arranged };
+        let row = ViewRow { place, terminal, cwd, ran, arranged };
         let menu = sidebar.open().expect("the menu");
         assert_eq!(menu.target(), &Target::View(on.clone(), row.clone()));
         let (project, beside) = (listed("main", 20).project(), view_key(20, 1));
@@ -11303,11 +11367,9 @@ mod tests {
         let on = Machine::Remote(nixos());
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
         let worked = links::Worked { dir: directory("/w/b"), pull: None, here: false };
-        let view = view_key(20, 3);
-        let worked = vec![Worked { session: listed("work", 20), view, works: worked }];
+        let worked = vec![Worked { place: view_place("work", 20, 0, 3), works: worked }];
         let local = links::Worked { dir: directory("/w/a"), pull: None, here: false };
-        let view = view_key(10, 1);
-        let local = vec![Worked { session: listed("main", 10), view, works: local }];
+        let local = vec![Worked { place: view_place("main", 10, 0, 1), works: local }];
         let unreached = |name: &str| {
             let machine = Machine::Remote(name.parse().unwrap());
             (machine, Err(format!("lunetad does not reach {name} now")))
@@ -11352,7 +11414,7 @@ mod tests {
         assert_eq!(on, Machine::Local);
         assert_eq!(wanted, Wanted::AtHead);
         let works = links::Worked { dir: directory("/w/b"), pull: None, here: false };
-        let work = Worked { session: own_listed("work", 1), view: view_key(1, 3), works };
+        let work = Worked { place: view_place("work", 1, 0, 3), works };
         let unreached = |name: &str| Err(format!("lunetad does not reach {name} now"));
         let pi = Machine::Remote("pi".parse().unwrap());
         assert_eq!(others, [
@@ -11531,8 +11593,8 @@ mod tests {
         notes.dir = "/w/notes".to_owned();
         notes.holds = Some(api::project::Holds::Folder(own));
         sidebar.heard(Host { projects: Some(kept(vec![notes])), ..host(Vec::new(), Vec::new()) });
-        let view = ViewPlace::new(listed("notes", 8), ViewKey::terminal(1));
-        sit(&mut sidebar, &Place::View(view));
+        let own = WorktreePlace { project: project_row("notes", 8), worktree: WorktreeId::of(31).unwrap() };
+        sit(&mut sidebar, &Place::View(ViewPlace::new(own, ViewKey::terminal(1))));
         float_a_menu(&mut sidebar);
         type_in(&mut sidebar, "n");
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Nothing);

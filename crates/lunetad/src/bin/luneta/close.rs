@@ -125,9 +125,9 @@ impl Act {
 
     pub fn closes(&self, place: &Place) -> bool {
         match (self, place) {
-            (Act::View(view), Place::View(at)) => at.view == *view,
+            (Act::View(view), Place::View(at)) => at.view() == *view,
             (Act::Worktree { worktree, .. }, Place::Worktree(at)) => at.worktree == *worktree,
-            (Act::Worktree { views, .. }, Place::View(at)) => views.contains(&at.view.key()),
+            (Act::Worktree { views, .. }, Place::View(at)) => views.contains(&at.view().key()),
             (Act::Project { project, .. }, _) => place.listed().project() == *project,
             (Act::View(_), Place::Session(_) | Place::Worktree(_))
             | (Act::Worktree { .. }, Place::Session(_)) => false,

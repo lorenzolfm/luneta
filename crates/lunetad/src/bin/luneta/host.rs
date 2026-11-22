@@ -71,7 +71,7 @@ use crate::printed::{self, Printed};
 use crate::pull::{self, Found};
 use crate::sidebar::{
     self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat,
-    Sidebar, Sitting, ViewKey, ViewPlace,
+    Sidebar, Sitting, ViewKey,
 };
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
@@ -2427,8 +2427,9 @@ impl App {
                     self.go_worktree(machine, place.worktree, None);
                 }
             },
-            Place::View(ViewPlace { view: ViewKey::Terminal(terminal_key), .. }) => {
-                let (worktree, terminal) = project.view_of(*terminal_key).ok_or_else(|| {
+            Place::View(place) => {
+                let terminal_key = place.view().key();
+                let (worktree, terminal) = project.view_of(terminal_key).ok_or_else(|| {
                     format!("lunetad lists no view {} in {session}", terminal_key.id)
                 })?;
                 self.go_worktree(machine, worktree, Some(terminal));
