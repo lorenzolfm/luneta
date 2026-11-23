@@ -593,6 +593,7 @@ impl Ending {
         end_or(&running.lune_ids(), terminate::LUNE)?;
         self.lunes.extend(running.lunes.into_iter().map(|it| (it.id, role(&it.argv))));
         let luneds = terminate::running(folders).luneds;
+        probe_ids("luneds", &luneds);
         end_or(&luneds, terminate::LUNED)?;
         self.luneds.extend(luneds);
         Ok(())
@@ -860,5 +861,16 @@ mod tests {
             "ended 1 lune; kept no project to forget; left luned (pid 2), whose arguments did \
              not read: Permission denied (os error 13)"
         );
+    }
+}
+
+fn probe_ids(what: &str, ids: &[Id]) {
+    let _ = writeln!(io::stderr(), "PROBE {what}: {ids:?}");
+    for id in ids {
+        let ps = Command::new("ps")
+            .args(["-o", "pid=,ppid=,stat=,lstart=,comm=", "-p", &id.pid.to_string()])
+            .output();
+        let said = ps.map(|ps| String::from_utf8_lossy(&ps.stdout).into_owned());
+        let _ = writeln!(io::stderr(), "PROBE ps {}: {said:?}", id.pid);
     }
 }

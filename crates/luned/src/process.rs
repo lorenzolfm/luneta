@@ -185,6 +185,45 @@ mod tests {
         assert!(found.environ.iter().any(|it| it.as_encoded_bytes().starts_with(b"PATH=")));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[expect(unsafe_code, reason = "probe")]
+    fn probe_a_forked_child_before_its_exec() {
+        use std::os::unix::process::CommandExt as _;
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        let me = std::process::id();
+        let mut system = System::new();
+        let all = ProcessesToUpdate::All;
+        system.refresh_processes_specifics(all, true, ProcessRefreshKind::everything());
+        let name = system.process(sysinfo::Pid::from_u32(me)).unwrap().name();
+        let name = name.to_str().unwrap().to_owned();
+        eprintln!("PROBE my name {name:?}, pid {me}");
+        let spawned = thread::spawn(|| {
+            let mut command = Command::new("true");
+            unsafe {
+                command.pre_exec(|| {
+                    thread::sleep(Duration::from_secs(3));
+                    Ok(())
+                });
+            }
+            command.spawn().unwrap().wait().unwrap()
+        });
+        thread::sleep(Duration::from_secs(1));
+        let mine = super::mine(&[name.as_str()]);
+        let mut system = System::new();
+        system.refresh_processes_specifics(all, true, ProcessRefreshKind::everything());
+        let own = mine.found.iter().find(|it| it.id.pid == me).cloned();
+        for found in &mine.found {
+            let parent = system.process(sysinfo::Pid::from_u32(found.id.pid)).and_then(|it| it.parent());
+            let same = own.as_ref().map(|own| (own.argv == found.argv, own.environ == found.environ));
+            eprintln!("PROBE found {:?} parent {parent:?} same argv/environ as me {same:?}", found.id);
+        }
+        eprintln!("PROBE unreadable {:?}", mine.unreadable);
+        spawned.join().unwrap();
+        let children = mine.found.iter().filter(|it| it.id.pid != me).count();
+        assert_eq!(children, 0, "PROBE: the forked child reads as me");
+    }
+
     #[test]
     fn no_end_is_heard_of_a_pid_no_process_can_have() {
         assert!(super::ends(0).is_err());

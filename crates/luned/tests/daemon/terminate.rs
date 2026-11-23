@@ -210,7 +210,8 @@ fn lune_terminate_forgets_again_what_a_luned_started_meanwhile_kept() {
     let ended = terminate(host.vars(), Some(&plan_in(&planned)));
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
     let says = "ended 2 luneds and lune-mux; forgot 1 project and 1 worktree";
-    assert_eq!(ended.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
+    let got = ended.lines.iter().map(|line| here(line)).collect::<Vec<_>>();
+    assert_eq!(got, [says], "PROBE stderr:\n{}", ended.stderr);
     daemon.ended("luned ends");
     writer.ended("lune-mux ends");
     assert!(fs::read_to_string(&log).unwrap().contains("listening on"), "no luned started");

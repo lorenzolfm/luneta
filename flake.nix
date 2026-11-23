@@ -190,9 +190,24 @@
                 NEXTEST_SHOW_PROGRESS = "counter";
                 checkPhaseCargoCommand = ''
                   export PATH="${localToolchain}/bin:$PATH"
-                  ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
-                    --test-threads "$NIX_BUILD_CORES"
-                  cargoWithProfile test --doc --locked ${testRun}
+                  cargo nextest run --cargo-profile "$CARGO_PROFILE" --locked -p luned --profile ci \
+                    -E 'test(probe_a_forked_child_before_its_exec)' --no-capture || true
+                  probe() {
+                    fails=0
+                    for _ in $(seq 75); do
+                      if ! cargo nextest run --cargo-profile "$CARGO_PROFILE" --locked -p luned \
+                        --profile ci --no-capture \
+                        -E 'test(=terminate::lune_terminate_forgets_again_what_a_luned_started_meanwhile_kept)' \
+                        >"probe-$1.log" 2>&1; then
+                        fails=$((fails + 1))
+                        grep -E 'PROBE|left:|right:' "probe-$1.log" || true
+                      fi
+                    done
+                    echo "PROBE loop $1 failed $fails of 75"
+                  }
+                  probe 1 & probe 2 & probe 3 & probe 4 &
+                  wait
+                  exit 1
                 '';
 
                 meta = {
