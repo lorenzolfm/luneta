@@ -14,7 +14,8 @@ use luned::api::{
     self, AskRequest, AskResponse, FileIssueRequest, FileIssueResponse, IssueRepositoriesRequest,
     IssueRepositoriesResponse, InfoResponse, KeepChecksRequest, KeepChecksResponse,
     KeepImageRequest, KeepImageResponse, ListAgentsResponse, ListContentsRequest,
-    ListContentsResponse, ListDirsRequest, ListDirsResponse, ListSkillsRequest, ListSkillsResponse,
+    ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest,
+    ListSkillsResponse,
     PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
     RebaseRequest, RebaseResponse,
     TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
@@ -608,11 +609,11 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in finds no skills"))
     }
 
-    async fn list_dirs(
+    async fn list_repositories(
         &self,
-        _: Request<ListDirsRequest>,
-    ) -> Result<Response<ListDirsResponse>, Status> {
-        Err(Status::unimplemented("a stand-in knows no directory"))
+        _: Request<ListRepositoriesRequest>,
+    ) -> Result<Response<ListRepositoriesResponse>, Status> {
+        Err(Status::unimplemented("a stand-in knows no repository"))
     }
 
     async fn list_contents(

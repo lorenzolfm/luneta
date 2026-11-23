@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use luned::api::keep_checks_response::{self, failed};
 use luned::api::{
     AskResponse, IssueRepositoriesRequest, KeepChecksRequest, ListContentsRequest,
-    ListDirsRequest, ListDirsResponse, ListSkillsRequest, On, PrintedFile,
+    ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, On, PrintedFile,
 };
 use luned::asks::{self, Asked, Step};
 use luned::checks::{self, Failed, Failing, Log, PullPage};
@@ -16,9 +16,9 @@ use luned::links::{Pasted, Ready, Unready};
 use luned::printed::Kept;
 use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
+use luned::repositories::Repository;
 use luned::skills::{Name, Runs, Skill};
 use luned::transcripts::{Reading, SessionId};
-use luned::zoxide::Dir;
 use luned::{log, Daemon, Destination, Directory, SessionName};
 use tokio::runtime::Runtime;
 use tokio::time::error::Elapsed;
@@ -55,17 +55,18 @@ impl Away {
         Ok(Away { runtime, daemon, on: destination.clone(), patience })
     }
 
-    pub fn dirs(&mut self) -> Result<Vec<Dir>, String> {
-        let request = ListDirsRequest { on: Some(self.on()) };
-        let listed = self.ask(|mut daemon| async move { daemon.list_dirs(request).await })?;
-        let sent = listed.dirs.len();
-        let dirs = dirs_of(listed);
-        let left_out = sent - dirs.len();
+    pub fn repositories(&mut self) -> Result<Vec<Repository>, String> {
+        let request = ListRepositoriesRequest { on: Some(self.on()) };
+        let listed =
+            self.ask(|mut daemon| async move { daemon.list_repositories(request).await })?;
+        let sent = listed.repositories.len();
+        let repositories = repositories_of(listed);
+        let left_out = sent - repositories.len();
         if left_out > 0 {
             let on = &self.on;
-            log::say(&format!("{on}: left out {left_out} directories no session is made in"));
+            log::say(&format!("{on}: left out {left_out} repositories no project is named for"));
         }
-        Ok(dirs)
+        Ok(repositories)
     }
 
     pub fn contents(&mut self, dir: &Directory) -> Result<String, String> {
@@ -320,12 +321,12 @@ async fn heard(
     }
 }
 
-fn dirs_of(answer: ListDirsResponse) -> Vec<Dir> {
-    let dir = |dir: luned::api::list_dirs_response::Dir| {
-        let name = SessionName::parse(&dir.name).ok()?;
-        Some(Dir { path: Directory::parse(dir.path).ok()?, name })
+fn repositories_of(answer: ListRepositoriesResponse) -> Vec<Repository> {
+    let repository = |said: luned::api::list_repositories_response::Repository| {
+        let name = SessionName::parse(&said.name).ok()?;
+        Some(Repository { path: Directory::parse(said.path).ok()?, name })
     };
-    answer.dirs.into_iter().filter_map(dir).collect()
+    answer.repositories.into_iter().filter_map(repository).collect()
 }
 
 #[cfg(test)]
@@ -385,13 +386,13 @@ mod tests {
     }
 
     #[test]
-    fn another_machine_s_directories_are_those_a_session_can_be_made_in() {
-        let dir = |path: &str, name: &str| luned::api::list_dirs_response::Dir {
+    fn another_machine_s_repositories_are_those_a_project_can_be_named_for() {
+        let dir = |path: &str, name: &str| luned::api::list_repositories_response::Repository {
             path: path.to_owned(),
             name: name.to_owned(),
         };
-        let answer = ListDirsResponse {
-            dirs: vec![
+        let answer = ListRepositoriesResponse {
+            repositories: vec![
                 dir("/home/me/api", "api-2"),
                 dir("home/me/relative", "relative"),
                 dir("/home/me/odd", "../odd"),
@@ -399,11 +400,11 @@ mod tests {
                 dir("/home/me/blog", "blog"),
             ],
         };
-        let made = |path: &str, name: &str| Dir {
+        let made = |path: &str, name: &str| Repository {
             path: Directory::parse(path.to_owned()).unwrap(),
             name: SessionName::parse(name).unwrap(),
         };
-        let dirs = [made("/home/me/api", "api-2"), made("/home/me/blog", "blog")];
-        assert_eq!(dirs_of(answer), dirs);
+        let repositories = [made("/home/me/api", "api-2"), made("/home/me/blog", "blog")];
+        assert_eq!(repositories_of(answer), repositories);
     }
 }

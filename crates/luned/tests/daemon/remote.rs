@@ -16,8 +16,8 @@ use luned::api::list_skills_response::Skill;
 use luned::api::projects::Held;
 use luned::api::{
     self, AskRequest, FileIssueRequest, IssueRepositoriesRequest, IssueRepository,
-    KeepChecksRequest, KeepImageRequest, ListContentsRequest, ListDirsRequest, ListSkillsRequest,
-    On, PasteRequest, PrintedFile as File, TranscriptEndsRequest, WatchRequest,
+    KeepChecksRequest, KeepImageRequest, ListContentsRequest, ListRepositoriesRequest,
+    ListSkillsRequest, On, PasteRequest, PrintedFile as File, TranscriptEndsRequest, WatchRequest,
 };
 use luned::asks::{Asked, Step, Turn};
 use luned::images::{self, Png};
@@ -1117,14 +1117,20 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
 }
 
 #[test]
-fn another_machine_s_directories_are_listed_there() {
+fn another_machine_s_repositories_are_listed_there() {
     let here = Host::new();
     let far = Host::new();
     FakeSsh::new(here.bin()).reaches("far", far.vars());
     let dir = tempfile::tempdir().unwrap();
     let (work, notes) = (dir.path().join("work"), dir.path().join("notes"));
-    fs::create_dir(&work).unwrap();
+    fs::create_dir_all(work.join(".bare")).unwrap();
+    fs::create_dir_all(work.join("main")).unwrap();
     fs::create_dir(&notes).unwrap();
+    let owned = far.home.path().join("lune").join("app");
+    fs::create_dir_all(owned.join(".bare")).unwrap();
+    fs::create_dir_all(far.home.path().join("lune").join("plain")).unwrap();
+    let owned = owned.display().to_string();
+    let main = work.join("main").display().to_string();
     let (work, notes) = (work.display().to_string(), notes.display().to_string());
     let lists = |dirs: &[&str]| {
         dirs.iter().fold(String::new(), |mut script, dir| {
@@ -1132,7 +1138,7 @@ fn another_machine_s_directories_are_listed_there() {
             script
         })
     };
-    script(&far.bin().join("zoxide"), &lists(&[&work, &notes]));
+    script(&far.bin().join("zoxide"), &lists(&[&main, &notes, &work]));
     script(&here.bin().join("zoxide"), &lists(&["/here/only"]));
     script(&far.bin().join("eza"), "echo \"far: $*\"\n");
     script(&here.bin().join("eza"), "echo \"here: $*\"\n");
@@ -1146,12 +1152,13 @@ fn another_machine_s_directories_are_listed_there() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-        let listed = daemon.list_dirs(ListDirsRequest { on: on("far") }).await.unwrap();
+        let listed = ListRepositoriesRequest { on: on("far") };
+        let listed = daemon.list_repositories(listed).await.unwrap().into_inner().repositories;
         let named: Vec<(String, String)> =
-            listed.into_inner().dirs.into_iter().map(|dir| (dir.path, dir.name)).collect();
-        let dirs = [(work.clone(), "work".to_owned()), (notes.clone(), "notes".to_owned())];
-        assert_eq!(named, dirs);
-        let nowhere = daemon.list_dirs(ListDirsRequest { on: on("nowhere") }).await.unwrap_err();
+            listed.into_iter().map(|it| (it.path, it.name)).collect();
+        assert_eq!(named, [(owned, "app".to_owned()), (work, "work".to_owned())]);
+        let nowhere = ListRepositoriesRequest { on: on("nowhere") };
+        let nowhere = daemon.list_repositories(nowhere).await.unwrap_err();
         assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
 
         let contents = |dir: &str| ListContentsRequest { on: on("far"), dir: dir.to_owned() };

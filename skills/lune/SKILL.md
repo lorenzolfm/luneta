@@ -81,6 +81,10 @@ a worktree's row or a project, and only `start` takes the user anywhere.
 The user does those in lune, whose menu (`Alt a`) and palette (`Super k`) list
 each action by name. When they ask you for one, tell them which:
 
+- "Open a project" (`Super o`) lists their projects, used last first, then
+  the clones `wt clone` made that are no project yet, and takes a folder's
+  path typed in it. Enter goes to a project, or makes one of the clone or the
+  folder.
 - "new view" opens a shell beside the view they are on.
 - "close the view", "close the worktree" and "close the project" end the
   shells and agents in their views.

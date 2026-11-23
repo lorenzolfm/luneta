@@ -442,10 +442,10 @@ fn started(
 pub fn made_at(
     path: &Path,
     machine: &Machine,
-    cwd: &Directory,
+    folder: &str,
     name: Option<&str>,
 ) -> Result<Landing, String> {
-    let (folder, name) = (cwd.to_string(), name.map(str::to_owned));
+    let (folder, name) = (folder.to_owned(), name.map(str::to_owned));
     let start = Change::Start(Start { folder, name });
     let made = changed_on(path, on(machine), start).and_then(|made| match made {
         Some(Made::Project(_)) => project_of(made).map(Landing::Unopened),
@@ -551,25 +551,6 @@ pub fn renamed_terminal(
 pub enum Landing {
     Worktree(Landed),
     Unopened(ProjectId),
-}
-
-pub fn project_made(
-    machine: &Machine,
-    folder: &str,
-    name: Option<&ProjectName>,
-) -> Result<ProjectId, String> {
-    let (dir, name) = (folder.to_owned(), name.map(|name| name.as_str().to_owned()));
-    let made = made_there(machine, Change::AddProject(AddProject { dir, name }));
-    let project = made.and_then(project_of).map_err(|unchanged| said_unmade(unchanged, "project"))?;
-    let start = Start { folder: folder.to_owned(), name: None };
-    let started = made_there(machine, Change::Start(start)).and_then(|made| match made {
-        Some(Made::Project(root)) if root == project.get() => Ok(project),
-        made => landed(made).map(|_| project),
-    });
-    let unstarted = |unchanged: Unchanged| {
-        format!("{folder} is project {project}: {}", said_unmade(unchanged, "worktree"))
-    };
-    started.map_err(unstarted)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

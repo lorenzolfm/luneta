@@ -145,7 +145,12 @@ impl Spot {
 
 #[must_use]
 pub fn holds_bare(folder: &Dir) -> bool {
-    Path::new(folder.as_str()).join(BARE).is_dir()
+    bare_in(Path::new(folder.as_str()))
+}
+
+#[must_use]
+pub fn bare_in(folder: &Path) -> bool {
+    folder.join(BARE).is_dir()
 }
 
 pub fn subfolders(root: &Dir, look: Duration) -> Result<BTreeSet<Subfolder>, String> {

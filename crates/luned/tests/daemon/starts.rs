@@ -224,7 +224,7 @@ fn log_of(host: &Host) -> String {
     fs::read_to_string(host.home.path().join(".local/state/lune/lune.log")).unwrap()
 }
 
-const FOLDERS: &str = "\x1b[100;5u";
+const PROJECTS: &str = "\x1b[111;9u";
 
 pub fn makes_shells() -> bool {
     Path::new(shells::your_shell().as_str()).is_file()
@@ -331,7 +331,7 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"Started b
 }
 
 #[test]
-fn a_clone_s_root_picked_from_the_folders_shows_its_home() {
+fn a_clone_s_root_picked_from_the_projects_shows_its_home() {
     let owned = Owned::new();
     let dir = cloned("project", &["one", "two"]);
     let root = real(&dir.path);
@@ -339,9 +339,9 @@ fn a_clone_s_root_picked_from_the_folders_shows_its_home() {
     let mut window = Window::open(&owned.host, &directory("elsewhere"), &[]);
     let none = || window.shows("no projects").then_some(());
     eventually("lune's sidebar says it has no project", none);
-    window.send(FOLDERS);
+    window.send(PROJECTS);
     let tmp = dir.path.parent().unwrap().file_name().unwrap().to_str().unwrap().to_owned();
-    eventually("the folders list the clone's root", || window.shows(&tmp).then_some(()));
+    eventually("the projects list the clone's root", || window.shows(&tmp).then_some(()));
     window.send("\r");
     eventually("lune shows the project's home", || {
         window.shows("no remote on GitHub, so nothing is listed here").then_some(())

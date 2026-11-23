@@ -20,7 +20,7 @@ use crate::{layouts, SessionName};
 
 mod file;
 pub(crate) mod layout;
-mod spot;
+pub(crate) mod spot;
 mod view;
 
 pub use file::{forget, holder, kept, take, Changed, Elsewhere, Failed, Forgotten, Lock, Revision};

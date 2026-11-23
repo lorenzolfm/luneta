@@ -31,17 +31,17 @@ use crate::api::make_worktree_response::Landed;
 use crate::api::daemon_server::{Daemon, DaemonServer};
 use crate::api::keep_image_request::{Image, Part};
 use crate::api::keep_checks_response::{self, Failed as FailedCheck};
-use crate::api::list_dirs_response::Dir;
+use crate::api::list_repositories_response::Repository;
 use crate::api::list_skills_response::Skill;
 use crate::api::{
     self, AskRequest, AskResponse, ChangeProjectsRequest, ChangeProjectsResponse,
     FileIssueRequest, FileIssueResponse, InfoResponse, IssueRepositoriesRequest,
     IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest,
     KeepImageResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
-    ListDirsRequest, ListDirsResponse, ListSkillsRequest, ListSkillsResponse, ListWorkRequest,
-    ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest, PasteResponse,
-    PrintedFile, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, RebaseRequest,
-    RebaseResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
+    ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, ListSkillsResponse,
+    ListWorkRequest, ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest,
+    PasteResponse, PrintedFile, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
+    RebaseRequest, RebaseResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
     TranscriptEndsResponse, FramesRequest,
 };
 use crate::asks::{Asked, Step};
@@ -66,7 +66,7 @@ use crate::agent::Agent;
 use crate::checks::{Failing, Log};
 use crate::{
     changes, checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed,
-    projects, release, remote, skills, topics, watch, work, zoxide, Harness,
+    projects, release, remote, repositories, skills, topics, watch, work, Harness,
 };
 
 pub const SWEEP: Duration = Duration::from_secs(2);
@@ -527,19 +527,23 @@ impl Daemon for Host {
         Ok(Response::new(Box::pin(answer)))
     }
 
-    async fn list_dirs(
+    async fn list_repositories(
         &self,
-        request: Request<ListDirsRequest>,
-    ) -> Result<Response<ListDirsResponse>, Status> {
-        let ListDirsRequest { on } = request.into_inner();
+        request: Request<ListRepositoriesRequest>,
+    ) -> Result<Response<ListRepositoriesResponse>, Status> {
+        let ListRepositoriesRequest { on } = request.into_inner();
         if let Some(mut daemon) = self.bridged(on).await? {
-            return daemon.list_dirs(ListDirsRequest { on: None }).await;
+            return daemon.list_repositories(ListRepositoriesRequest { on: None }).await;
         }
-        let visited = task::spawn_blocking(zoxide::visited).await;
-        let visited = visited.map_err(|error| unfinished(&error))?;
-        let visited = visited.map_err(Status::failed_precondition)?;
-        let dir = |zoxide::Dir { path, name }| Dir { path: path.into(), name: name.to_string() };
-        Ok(Response::new(ListDirsResponse { dirs: visited.into_iter().map(dir).collect() }))
+        let found = task::spawn_blocking(repositories::found).await;
+        let found = found.map_err(|error| unfinished(&error))?;
+        let found = found.map_err(Status::failed_precondition)?;
+        let repository = |repositories::Repository { path, name }| Repository {
+            path: path.into(),
+            name: name.to_string(),
+        };
+        let repositories = found.into_iter().map(repository).collect();
+        Ok(Response::new(ListRepositoriesResponse { repositories }))
     }
 
     async fn list_contents(
