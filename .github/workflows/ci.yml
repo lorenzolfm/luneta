@@ -52,8 +52,11 @@ jobs:
       id-token: write
 
     steps:
-      - name: actions/checkout v7
+      - &checkout-head
+        name: actions/checkout v7, at the PR's head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - &install-nix
         name: cachix/install-nix-action v31
@@ -141,13 +144,53 @@ jobs:
           git update-ref refs/remotes/origin/main HEAD^
           nix run .#dev.commands.lint -- --breaking
 
-  daemon:
+  tested:
     needs: code
-    if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
+    if: >-
+      ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      && !github.event.pull_request.head.repo.fork }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      untested: ${{ steps.tested.outputs.untested }}
+
+    steps:
+      - *checkout-head
+
+      - *install-nix
+
+      - *tailscale
+
+      - name: The runners whose tested lunetad attic doesn't hold
+        id: tested
+        if: steps.tailscale.outcome == 'success'
+        run: |
+          checks="$(nix eval --json .#checks --apply 'builtins.mapAttrs (_: checks: checks.lunetad.outPath)')"
+          untested=()
+          for pair in x86_64-linux=ubuntu-latest aarch64-linux=ubuntu-24.04-arm aarch64-darwin=macos-latest; do
+            system="${pair%%=*}"
+            check="$(jq -er --arg system "$system" '.[$system]' <<<"$checks")"
+            if nix store verify --no-contents --store https://attic.tail174781.ts.net/main "$check"; then
+              echo "attic holds $system's tested $check"
+            else
+              untested+=("${pair#*=}")
+            fi
+          done
+          echo "untested=$(jq -cn '$ARGS.positional' --args "${untested[@]}")" | tee -a "$GITHUB_OUTPUT"
+
+  daemon:
+    needs: [code, tested]
+    if: >-
+      ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      && needs.tested.outputs.untested != '[]' }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        runner: >-
+          ${{ fromJSON(needs.tested.outputs.untested
+          || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]') }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -155,8 +198,7 @@ jobs:
       id-token: write
 
     steps:
-      - name: actions/checkout v7
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - *checkout-head
 
       - *install-nix
 
