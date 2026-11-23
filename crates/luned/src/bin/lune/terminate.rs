@@ -204,7 +204,7 @@ fn unreadable_said(unreadable: &[Unreadable], tense: Tense) -> String {
         Tense::Done => ("left", "did not read"),
     };
     let each = |it: &Unreadable| {
-        format!("{} (pid {}), whose arguments {read}: {}", it.name, it.id.pid, it.why)
+        format!("{} (pid {}), whose arguments {read}: {}", it.program.name(), it.id.pid, it.why)
     };
     format!("; {leaves} {}", listed(&unreadable.iter().map(each).collect::<Vec<_>>()))
 }
@@ -699,7 +699,7 @@ fn left_said(name: &str, id: &Id, why: Unended) -> String {
 
 #[cfg(test)]
 mod tests {
-    use luned::terminate::{Lune, Start};
+    use luned::terminate::{Lune, Program, Start};
 
     use super::*;
 
@@ -754,12 +754,12 @@ mod tests {
         let here = Here { running, agents: Counted::Unasked, projects };
         assert_eq!(here.says(), "ends 1 lune; keeps no project to forget");
 
-        let unreadable = |pid: u32, name: &str| Unreadable {
+        let unreadable = |pid: u32, program: Program| Unreadable {
             id: id(pid),
-            name: name.to_owned(),
+            program,
             why: "KERN_PROCARGS2 holds a negative argc".to_owned(),
         };
-        let unreadable = vec![unreadable(2, "luned"), unreadable(3, "lune-mux")];
+        let unreadable = vec![unreadable(2, Program::Luned), unreadable(3, Program::Mux)];
         let running = Running { lunes: vec![lune(1, &[])], unreadable, ..Running::default() };
         let projects = Ok(Kept { projects: 0, worktrees: 0 });
         let here = Here { running, agents: Counted::Unasked, projects };
@@ -851,7 +851,7 @@ mod tests {
         let forgot = Forgotten::Read(Projects::default());
         let unread = vec![Unreadable {
             id: id(2),
-            name: "luned".to_owned(),
+            program: Program::Luned,
             why: "Permission denied (os error 13)".to_owned(),
         }];
         let ended = Ended { ending, agents: Counted::Unasked, forgot, unread };

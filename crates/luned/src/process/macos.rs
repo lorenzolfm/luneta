@@ -12,7 +12,7 @@ use sysinfo::{
 
 use lune_protocol::process::{laid_in_procargs, EXEC_STRINGS_BYTES_MAX};
 
-use super::{Found, Id, Mine, Start, Unended, Unread, Unreadable};
+use super::{program_named, Found, Id, Mine, Start, Unended, Unread, Unreadable};
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
     let mut system = System::new();
@@ -89,14 +89,15 @@ fn unread(pid: u32, error: &io::Error) -> Unread {
 }
 
 #[must_use]
-pub fn mine(names: &[&str]) -> Mine {
+pub(super) fn listed<P: Copy>(programs: &[(P, &str)]) -> Mine<P> {
     let mut system = System::new();
     let refresh = ProcessRefreshKind::nothing().with_user(UpdateKind::Always);
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
     let uid = rustix::process::getuid().as_raw();
     let mut seen = Mine::default();
     for (pid, process) in system.processes() {
-        let Some(name) = process.name().to_str().filter(|name| names.contains(name)) else {
+        let Some(program) = process.name().to_str().and_then(|name| program_named(programs, name))
+        else {
             continue;
         };
         let mine = process.user_id().is_some_and(|it| **it == uid);
@@ -105,6 +106,9 @@ pub fn mine(names: &[&str]) -> Mine {
         }
         let start = i64::try_from(process.start_time()).ok().map(lstart);
         let Some(start) = start.and_then(Start::spelled) else {
+            continue;
+        };
+        let Some(false) = forked(pid.as_u32()) else {
             continue;
         };
         let id = Id { pid: pid.as_u32(), start };
@@ -117,13 +121,33 @@ pub fn mine(names: &[&str]) -> Mine {
             Ok(read) => read,
             Err(Unread::Gone) => continue,
             Err(Unread::Failed(why)) => {
-                seen.unreadable.push(Unreadable { id, name: name.to_owned(), why });
+                seen.unreadable.push(Unreadable { id, program, why });
                 continue;
             },
         };
-        seen.found.push(Found { id, name: name.to_owned(), argv, environ });
+        seen.found.push(Found { id, program, argv, environ });
     }
     seen
+}
+
+const PROC_FLAG_EXEC: u32 = 0x4000;
+
+#[expect(
+    unsafe_code,
+    reason = "proc_pidinfo writes at most the size it is given into a proc_bsdinfo of that size"
+)]
+fn forked(pid: u32) -> Option<bool> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let size = libc::c_int::try_from(size_of::<libc::proc_bsdinfo>()).expect("it fits a c_int");
+    let mut bsd: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let into = (&raw mut bsd).cast();
+    let read = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, into, size) };
+    (read == size).then_some(bsd.pbi_flags & PROC_FLAG_EXEC == 0)
+}
+
+pub(super) fn named(pid: u32) -> Option<String> {
+    let name = |process: &Process| process.name().to_str().map(str::to_owned);
+    with(pid, ProcessRefreshKind::nothing(), name)?
 }
 
 fn living_start(pid: u32) -> Option<Start> {

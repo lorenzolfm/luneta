@@ -5,6 +5,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
+use std::str::SplitWhitespace;
 use std::time::{Duration, Instant, SystemTime};
 
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
@@ -14,7 +15,7 @@ use rustix::time::{clock_gettime, ClockId};
 
 use lune_protocol::process::{arguments, entries, EXEC_STRINGS_BYTES_MAX};
 
-use super::{Found, Id, Mine, Start, Unended, Unread, Unreadable};
+use super::{program_named, Found, Id, Mine, Start, Unended, Unread, Unreadable};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -31,19 +32,29 @@ fn exiting(pid: u32) -> bool {
     fs::read_to_string(proc(pid, "stat")).map_or(true, |stat| exiting_in(&stat))
 }
 
+fn after_name(stat: &str) -> Option<SplitWhitespace<'_>> {
+    let close = stat.rfind(')')?;
+    Some(stat[close + 1..].split_whitespace())
+}
+
 fn exiting_in(stat: &str) -> bool {
-    let Some(close) = stat.rfind(')') else {
+    let Some(mut fields) = after_name(stat) else {
         return false;
     };
-    let mut fields = stat[close + 1..].split_whitespace();
     let ended = fields.next().is_some_and(|state| matches!(state, "Z" | "X"));
     let flags = fields.nth(5).and_then(|flags| flags.parse::<u64>().ok());
     ended || flags.is_some_and(|flags| flags & PF_EXITING != 0)
 }
 
+const PF_FORKNOEXEC: u64 = 0x40;
+
+fn forked_in(stat: &str) -> Option<bool> {
+    let flags = after_name(stat)?.nth(6)?.parse::<u64>().ok()?;
+    Some(flags & PF_FORKNOEXEC != 0)
+}
+
 fn start_in(stat: &str) -> Option<String> {
-    let close = stat.rfind(')')?;
-    let mut fields = stat[close + 1..].split_whitespace();
+    let mut fields = after_name(stat)?;
     let state = fields.next()?;
     let threads = fields.nth(16)?;
     if state == "Z" && threads == "1" {
@@ -103,8 +114,13 @@ fn unread(pid: u32, error: &io::Error) -> Unread {
     }
 }
 
+pub(super) fn named(pid: u32) -> Option<String> {
+    let name = fs::read_to_string(proc(pid, "comm")).ok()?;
+    Some(name.trim_end_matches('\n').to_owned())
+}
+
 #[must_use]
-pub fn mine(names: &[&str]) -> Mine {
+pub(super) fn listed<P: Copy>(programs: &[(P, &str)]) -> Mine<P> {
     let Ok(listed) = fs::read_dir("/proc") else {
         return Mine::default();
     };
@@ -117,14 +133,16 @@ pub fn mine(names: &[&str]) -> Mine {
         if !entry.metadata().is_ok_and(|it| it.uid() == uid) {
             continue;
         }
-        let Ok(name) = fs::read_to_string(proc(pid, "comm")) else {
+        let Some(program) = named(pid).and_then(|name| program_named(programs, &name)) else {
             continue;
         };
-        let name = name.trim_end_matches('\n');
-        if !names.contains(&name) {
+        let Ok(stat_line) = fs::read_to_string(proc(pid, "stat")) else {
             continue;
-        }
-        let Some(start) = start(pid) else {
+        };
+        let Some(false) = forked_in(&stat_line) else {
+            continue;
+        };
+        let Some(start) = start_in(&stat_line).and_then(Start::spelled) else {
             continue;
         };
         let id = Id { pid, start };
@@ -133,7 +151,7 @@ pub fn mine(names: &[&str]) -> Mine {
             Ok(read) => read,
             Err(Unread::Gone) => continue,
             Err(Unread::Failed(why)) => {
-                seen.unreadable.push(Unreadable { id, name: name.to_owned(), why });
+                seen.unreadable.push(Unreadable { id, program, why });
                 continue;
             },
         };
@@ -141,7 +159,7 @@ pub fn mine(names: &[&str]) -> Mine {
             continue;
         };
         let argv = argv.into_iter().map(|arg| OsString::from_vec(arg.to_vec())).collect();
-        seen.found.push(Found { id, name: name.to_owned(), argv, environ });
+        seen.found.push(Found { id, program, argv, environ });
     }
     seen
 }
@@ -235,7 +253,7 @@ mod tests {
 
     use rustix::io::Errno;
 
-    use super::{exiting_in, start_in, unread, Unread};
+    use super::{exiting_in, forked_in, start_in, unread, Unread};
 
     fn stat(state: &str, threads: u32) -> String {
         let before = "1 7 7 0 -1 4194304 0 0 0 0 0 0 0 0 20 0";
@@ -273,5 +291,14 @@ mod tests {
         assert_eq!(start_in(&stat("S", 1)), start);
         assert_eq!(start_in(&stat("Z", 2)), start);
         assert_eq!(start_in(&stat("Z", 1)), None);
+    }
+
+    #[test]
+    fn a_process_is_forked_until_it_execs_by_its_flags() {
+        let flagged = |flags: u64| format!("7 (a) b) S 1 7 7 0 -1 {flags} 0 0 0 0 0 0 0 0 20 0");
+        assert_eq!(forked_in(&flagged(0x40_0040)), Some(true), "PF_FORKNOEXEC");
+        assert_eq!(forked_in(&flagged(0x40_0000)), Some(false), "PF_RANDOMIZE alone");
+        assert_eq!(forked_in(&stat("S", 1)), Some(false), "past a name holding ') '");
+        assert_eq!(forked_in("7 (a) b) S 1 7 7 0 -1"), None, "no flags to read");
     }
 }

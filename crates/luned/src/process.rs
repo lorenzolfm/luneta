@@ -18,7 +18,7 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("luned reads processes on Linux and macOS, and on nothing else yet");
 
-pub use os::{environ, mine, signalled, start, started, Domain};
+pub use os::{environ, signalled, start, started, Domain};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id {
@@ -42,9 +42,9 @@ impl Start {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Found {
+pub struct Found<P> {
     pub id: Id,
-    pub name: String,
+    pub program: P,
     pub argv: Vec<OsString>,
     pub environ: Vec<OsString>,
 }
@@ -56,16 +56,22 @@ pub enum Unread {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Unreadable {
+pub struct Unreadable<P> {
     pub id: Id,
-    pub name: String,
+    pub program: P,
     pub why: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Mine {
-    pub found: Vec<Found>,
-    pub unreadable: Vec<Unreadable>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mine<P> {
+    pub found: Vec<Found<P>>,
+    pub unreadable: Vec<Unreadable<P>>,
+}
+
+impl<P> Default for Mine<P> {
+    fn default() -> Mine<P> {
+        Mine { found: Vec::new(), unreadable: Vec::new() }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +79,24 @@ pub enum Unended {
     Outlived,
     Unsignalled(Errno),
     Unwatched(Errno),
+}
+
+pub const NAME_BYTES_MAX: usize = 15;
+
+#[must_use]
+pub fn mine<P: Copy + Eq>(programs: &[(P, &str)]) -> Mine<P> {
+    let Mine { mut found, unreadable } = os::listed(programs);
+    found.retain(|it| {
+        let named = os::named(it.id.pid);
+        programs.iter().any(|&(program, name)| {
+            program == it.program && named.as_deref() == Some(name)
+        })
+    });
+    Mine { found, unreadable }
+}
+
+fn program_named<P: Copy>(programs: &[(P, &str)], name: &str) -> Option<P> {
+    programs.iter().find(|&&(_, named)| named == name).map(|&(program, _)| program)
 }
 
 pub fn var(name: &str) -> Result<Option<String>, String> {
@@ -94,9 +118,9 @@ pub fn ends(pid: u32) -> io::Result<()> {
 mod tests {
     use std::env;
     use std::ffi::OsString;
-    use std::io::Read as _;
+    use std::io::{self, Read as _, Write as _};
     use std::os::unix::process::CommandExt as _;
-    use std::process::{Command, Stdio};
+    use std::process::{self, Command, Stdio};
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, SystemTime};
@@ -171,7 +195,7 @@ mod tests {
         given.env_clear().env("PATH", &path).env("LUNE_GIVEN", "a b=c");
         let mut child = given.spawn().unwrap();
         child.stdout.as_mut().unwrap().read_exact(&mut [0; 1]).expect("it says it runs");
-        let mine = super::mine(&["sh", "bash"]);
+        let mine = super::mine(&[("sh", "sh"), ("bash", "bash")]);
         let pid = child.id();
         child.kill().unwrap();
         child.wait().unwrap();
@@ -183,6 +207,42 @@ mod tests {
         let given = OsString::from("LUNE_GIVEN=a b=c");
         assert!(found.environ.contains(&given), "{found:?}");
         assert!(found.environ.iter().any(|it| it.as_encoded_bytes().starts_with(b"PATH=")));
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "the closure runs in the child between its fork and its exec, and only writes \
+                  and reads a pipe, which a signal handler may do"
+    )]
+    #[test]
+    fn a_process_forked_and_not_yet_given_its_own_program_is_not_found_as_its_parent() {
+        const NAMED_ON_LINUX_AS: &str = "lune-forks";
+        let me = process::id();
+        let own = super::os::named(me).expect("this test's process has a name");
+        let (mut forked_heard, mut forked_said) = io::pipe().unwrap();
+        let (mut go_heard, mut go_said) = io::pipe().unwrap();
+        let mut held = Command::new("true");
+        unsafe {
+            held.pre_exec(move || {
+                forked_said.write_all(&process::id().to_ne_bytes())?;
+                go_heard.read_exact(&mut [0; 1])
+            });
+        }
+        let forks = thread::Builder::new().name(NAMED_ON_LINUX_AS.to_owned());
+        let spawned = forks.spawn(move || held.spawn().unwrap().wait().unwrap()).unwrap();
+        let mut forked = [0; 4];
+        forked_heard.read_exact(&mut forked).expect("the child says its pid once forked");
+        let forked = u32::from_ne_bytes(forked);
+        let names = [own.as_str(), NAMED_ON_LINUX_AS];
+        let held_as = super::os::named(forked);
+        let mine = super::mine(&names.map(|name| (name, name)));
+        go_said.write_all(&[1]).unwrap();
+        assert!(spawned.join().unwrap().success());
+        let held_as = held_as.expect("the held child has a name");
+        assert!(names.contains(&held_as.as_str()), "{held_as} is a name asked for");
+        let pids: Vec<u32> = mine.found.iter().map(|it| it.id.pid).collect();
+        assert!(pids.contains(&me), "{pids:?} lists this test's process");
+        assert!(!pids.contains(&forked), "{pids:?} lists the held child {forked}");
     }
 
     #[test]
