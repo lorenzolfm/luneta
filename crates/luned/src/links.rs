@@ -980,7 +980,7 @@ fn clone(
             format!("no session works in {repository}, and lune cannot look for a clone: {why}")
         })?
         .into_iter()
-        .map(|dir| dir.path.into())
+        .map(String::from)
         .collect();
     Ok(cloned(&dirs, repository_of).map(|(at, root)| (dirs[at].clone(), root)))
 }

@@ -4,7 +4,8 @@ use std::thread;
 
 use lune_waits::{eventually, Span};
 use luned::api::change_projects_request::{
-    AddProject, AddWorktree, Change, CloseWorktree, Pull, ReorderProjects, ReorderWorktrees, Start,
+    AddProject, AddWorktree, Change, CloseWorktree, Pull, RenameProject, ReorderProjects,
+    ReorderWorktrees, Start,
 };
 use luned::api::change_projects_response::{Made, Opened};
 use luned::api::project::clone::Listing;
@@ -535,6 +536,80 @@ fn a_projects_file_luned_cannot_read_is_left_as_it_is_and_no_change_is_kept() {
     };
     assert_eq!(unkept, refused.message());
     assert_eq!(fs::read_to_string(&file).unwrap(), newer);
+}
+
+#[test]
+fn no_two_projects_take_one_name() {
+    let host = Host::new();
+    let _daemon = start(host.vars()).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let folders = ["one/notes", "two/notes", "three/notes", "twin"].map(|it| scratch.join(it));
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let add = |folder: &Path, name: Option<&str>| {
+        let add = AddProject { dir: text(folder), name: name.map(str::to_owned) };
+        changed(&host, Change::AddProject(add))
+    };
+    let first = add(&folders[0], None).unwrap();
+    let freed = add(&folders[1], None).unwrap();
+    let taken = add(&folders[2], Some("notes")).unwrap_err();
+    assert_eq!(taken.code(), Code::InvalidArgument);
+    assert_eq!(taken.message(), "a project is named notes already");
+    let twin = add(&folders[3], None).unwrap();
+    let rename = RenameProject { project: twin, to: "notes-2".to_owned() };
+    let renamed = asked(&host, Change::RenameProject(rename)).unwrap_err();
+    assert_eq!(renamed.message(), "a project is named notes-2 already");
+    let Held::Kept(kept) = held(&host) else {
+        panic!("luned keeps the projects");
+    };
+    let names: Vec<(u64, &str)> =
+        kept.projects.iter().map(|project| (project.id, project.name.as_str())).collect();
+    assert_eq!(names, [(first, "notes"), (freed, "notes-2"), (twin, "twin")]);
+}
+
+#[test]
+fn no_project_holds_the_folder_lune_keeps_clones_in() {
+    let host = Host::new();
+    let _daemon = start(host.vars()).unwrap();
+    let home = fs::canonicalize(host.home.path()).unwrap();
+    let owned = home.join("lune");
+    let inside = owned.join("notes");
+    fs::create_dir_all(&inside).unwrap();
+    for held in [&home, &owned] {
+        let add = AddProject { dir: text(held), name: None };
+        let refused = changed(&host, Change::AddProject(add)).unwrap_err();
+        assert_eq!(refused.code(), Code::InvalidArgument);
+        let holds = format!("holds {}, where lune keeps clones", owned.display());
+        assert!(refused.message().contains(&holds), "{}", refused.message());
+    }
+    let add = AddProject { dir: text(&inside), name: None };
+    changed(&host, Change::AddProject(add)).unwrap();
+}
+
+#[test]
+fn no_project_holds_where_the_folder_for_clones_leads() {
+    let host = Host::new();
+    let _daemon = start(host.vars()).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let clones = fs::canonicalize(elsewhere.path()).unwrap().join("clones");
+    let inside = clones.join("app");
+    fs::create_dir_all(&inside).unwrap();
+    std::os::unix::fs::symlink(&clones, host.home.path().join("lune")).unwrap();
+    for held in [&clones, &fs::canonicalize(elsewhere.path()).unwrap()] {
+        let add = AddProject { dir: text(held), name: None };
+        let refused = changed(&host, Change::AddProject(add)).unwrap_err();
+        let holds = format!("holds {}, where lune keeps clones", clones.display());
+        assert!(refused.message().contains(&holds), "{}", refused.message());
+    }
+    let home = fs::canonicalize(host.home.path()).unwrap();
+    let add = AddProject { dir: text(&home), name: None };
+    let refused = changed(&host, Change::AddProject(add)).unwrap_err();
+    let named = format!("holds {}, where lune keeps clones", home.join("lune").display());
+    assert!(refused.message().contains(&named), "the folder as named: {}", refused.message());
+    let add = AddProject { dir: text(&inside), name: None };
+    changed(&host, Change::AddProject(add)).unwrap();
 }
 
 fn order(host: &Host) -> Vec<u64> {

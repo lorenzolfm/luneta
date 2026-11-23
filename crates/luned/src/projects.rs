@@ -20,7 +20,7 @@ use crate::{layouts, SessionName};
 
 mod file;
 pub(crate) mod layout;
-mod spot;
+pub(crate) mod spot;
 mod view;
 
 pub use file::{forget, holder, kept, take, Changed, Elsewhere, Failed, Forgotten, Lock, Revision};
@@ -186,6 +186,13 @@ impl ProjectName {
     }
 
     #[must_use]
+    pub fn free(&self, taken: &[&str]) -> ProjectName {
+        let free = self.0.free(taken);
+        let parsed = ProjectName::parse(free.as_str());
+        parsed.expect("a project's name, cut short and given a -n, still names a project")
+    }
+
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -341,7 +348,8 @@ impl Dir {
         Dir::parse(text)
     }
 
-    fn nests(&self, other: &Dir) -> bool {
+    #[must_use]
+    pub fn nests(&self, other: &Dir) -> bool {
         self.below(other).is_some() || other.below(self).is_some()
     }
 }
@@ -962,7 +970,11 @@ impl Projects {
         }
         let Projects { projects } = projects;
         let mut ids = BTreeSet::new();
+        let mut names = BTreeSet::new();
         for (at, project) in projects.iter().enumerate() {
+            if !names.insert(project.name.as_str()) {
+                return Err(format!("two projects are named {}", project.name));
+            }
             let worktrees = project.worktrees().map(|worktree| worktree.id.0);
             let terminals = project.worktrees().flat_map(|worktree| {
                 worktree.layout.views().map(|view| layout::Leaf::id(view).0)
@@ -1022,6 +1034,12 @@ impl Projects {
             && let Some(other) = self.projects.iter().find(|other| other.dir.nests(dir))
         {
             return Err(Refused::Nests(nested(dir, other)));
+        }
+        if let Some(dir) = self.added_at(&change)
+            && let Some(owned) =
+                crate::repositories::owned_folders().into_iter().find(|it| dir.below(it).is_some())
+        {
+            return Err(Refused::Said(holds_owned(dir, &owned)));
         }
         if let Some(why) = self.stale(&change) {
             return Err(Refused::Stale(why));
@@ -1144,6 +1162,9 @@ impl Projects {
                 None
             },
             Change::RenameProject { project, to } => {
+                if self.projects.iter().any(|other| other.id != project && other.name == to) {
+                    return Err(named_already(&to));
+                }
                 changed.project(project)?.name = to;
                 None
             },
@@ -1329,9 +1350,14 @@ impl Projects {
         draw: &mut impl FnMut() -> io::Result<Id>,
     ) -> Result<ProjectId, String> {
         let dir = spot.dir().clone();
+        let taken: Vec<&str> = self.projects.iter().map(|project| project.name.as_str()).collect();
         let name = match name {
+            Some(name) if taken.contains(&name.as_str()) => return Err(named_already(&name)),
             Some(name) => name,
-            None => ProjectName::of_folder(&dir).map_err(|why| format!("name it: {why}"))?,
+            None => {
+                let named = ProjectName::of_folder(&dir).map_err(|why| format!("name it: {why}"))?;
+                named.free(&taken)
+            },
         };
         if self.projects.len() >= PROJECTS_MAX {
             return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
@@ -1683,6 +1709,14 @@ impl fmt::Display for Refused {
             },
         }
     }
+}
+
+fn named_already(name: &ProjectName) -> String {
+    format!("a project is named {name} already")
+}
+
+fn holds_owned(dir: &Dir, owned: &Dir) -> String {
+    format!("{} holds {}, where lune keeps clones, and so is no project's", dir.0, owned.0)
 }
 
 fn nested(dir: &Dir, other: &Project) -> String {
@@ -3070,6 +3104,26 @@ mod tests {
         rows[0].1.layout = Layout::default();
         let empty = Projects::checked(all).unwrap_err();
         assert!(empty.contains("holds no view, as no clone's may"), "{empty}");
+    }
+
+    #[test]
+    fn no_two_projects_kept_share_a_name() {
+        let mut projects = Projects::default();
+        project(&mut projects, "/w/one/notes");
+        let other = project(&mut projects, "/w/two/notes");
+        let names: Vec<&str> = projects.all().iter().map(|it| it.name.as_str()).collect();
+        assert_eq!(names, ["notes", "notes-2"]);
+        let mut all = projects.all().to_vec();
+        all.iter_mut().find(|it| it.id == other).unwrap().name = project_name("notes");
+        assert_eq!(Projects::checked(all).unwrap_err(), "two projects are named notes");
+    }
+
+    #[test]
+    fn a_name_freed_for_a_project_still_names_a_project() {
+        let long = "n".repeat(NAME_CHARS_MAX);
+        let freed = project_name(&long).free(&[long.as_str()]);
+        assert_eq!(freed.as_str(), format!("{}-2", "n".repeat(58)));
+        assert_eq!(project_name("-dash").free(&["-dash", "-dash-2"]).as_str(), "-dash-3");
     }
 
     #[test]

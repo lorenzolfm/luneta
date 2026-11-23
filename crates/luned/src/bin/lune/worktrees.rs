@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
@@ -20,6 +21,7 @@ use luned::projects::{self, Argv, Holders, Name, Opened, Opens, ProjectId, Size,
 use luned::projects::ProjectName;
 use luned::projects::WorktreeId;
 use luned::links::{self, Branch, Unready};
+use luned::repositories::OWNED_FOLDER;
 use luned::work::{self, Listed};
 use luned::{Asked, Beside, Daemon, Heard};
 use tonic::{Code, Status};
@@ -34,6 +36,49 @@ use crate::sidebar::Reorder;
 const ASKING: Duration = Duration::from_secs(15);
 
 const WORK_PATIENCE: Duration = work::ANSWERED_MAX.saturating_add(ASKING);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Folder {
+    Home(projects::Below),
+    At(projects::Dir),
+}
+
+impl Folder {
+    #[must_use]
+    pub fn typed(typed: &str) -> Option<Folder> {
+        let folder = typed.trim();
+        if let Some(below) = projects::Dir::below_home(folder) {
+            let below = projects::Below::parse(below.trim_matches('/')).ok()?;
+            let held = below.is_own() || below.as_str() == OWNED_FOLDER;
+            return (!held).then_some(Folder::Home(below));
+        }
+        let at = folder.strip_suffix('/').filter(|it| !it.is_empty()).unwrap_or(folder);
+        projects::Dir::parse(at).ok().map(Folder::At)
+    }
+
+    #[must_use]
+    pub fn holds_one_of(&self, folders: &[projects::Dir]) -> bool {
+        match self {
+            Folder::Home(_) => false,
+            Folder::At(at) => folders.iter().any(|folder| at.below(folder).is_some()),
+        }
+    }
+}
+
+impl fmt::Display for Folder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Folder::Home(below) => write!(f, "~/{}", below.as_str()),
+            Folder::At(at) => f.write_str(at.as_str()),
+        }
+    }
+}
+
+impl From<&projects::Dir> for Folder {
+    fn from(path: &projects::Dir) -> Folder {
+        Folder::At(path.clone())
+    }
+}
 
 pub fn said_unmade(unchanged: Unchanged, what: &str) -> String {
     unchanged.said(&format!("no {what} made"), &format!("the {what} may be made"))
@@ -341,20 +386,10 @@ fn chosen(
     cwd: &Path,
     folder: &str,
 ) -> Option<Result<Arrival, Tried>> {
-    if let Some(name) = name {
-        let named = projects.iter().filter(|project| project.name.as_str() == name);
-        let named: Vec<&Project> = named.collect();
-        match named[..] {
-            [] => {},
-            [one] => return Some(Ok(Arrival::Home(one.id))),
-            [..] => {
-                let dirs: Vec<&str> = named.iter().map(|project| project.dir.as_str()).collect();
-                let dirs = dirs.join(", ");
-                return Some(Err(Tried::Failed(format!(
-                    "projects in {dirs} are all named {name}: start lune in the one you mean"
-                ))));
-            },
-        }
+    if let Some(name) = name
+        && let Some(named) = projects.iter().find(|project| project.name.as_str() == name)
+    {
+        return Some(Ok(Arrival::Home(named.id)));
     }
     let holding = projects.iter().find(|project| holds(project.dir.as_str(), cwd))?;
     let landed = match name {
@@ -439,14 +474,8 @@ fn started(
     chosen.unwrap_or(Err(Tried::Failed(unfound))).map(Some)
 }
 
-pub fn made_at(
-    path: &Path,
-    machine: &Machine,
-    cwd: &Directory,
-    name: Option<&str>,
-) -> Result<Landing, String> {
-    let (folder, name) = (cwd.to_string(), name.map(str::to_owned));
-    let start = Change::Start(Start { folder, name });
+pub fn made_at(path: &Path, machine: &Machine, folder: &Folder) -> Result<Landing, String> {
+    let start = Change::Start(Start { folder: folder.to_string(), name: None });
     let made = changed_on(path, on(machine), start).and_then(|made| match made {
         Some(Made::Project(_)) => project_of(made).map(Landing::Unopened),
         made => landed(made).map(Landing::Worktree),
@@ -551,25 +580,6 @@ pub fn renamed_terminal(
 pub enum Landing {
     Worktree(Landed),
     Unopened(ProjectId),
-}
-
-pub fn project_made(
-    machine: &Machine,
-    folder: &str,
-    name: Option<&ProjectName>,
-) -> Result<ProjectId, String> {
-    let (dir, name) = (folder.to_owned(), name.map(|name| name.as_str().to_owned()));
-    let made = made_there(machine, Change::AddProject(AddProject { dir, name }));
-    let project = made.and_then(project_of).map_err(|unchanged| said_unmade(unchanged, "project"))?;
-    let start = Start { folder: folder.to_owned(), name: None };
-    let started = made_there(machine, Change::Start(start)).and_then(|made| match made {
-        Some(Made::Project(root)) if root == project.get() => Ok(project),
-        made => landed(made).map(|_| project),
-    });
-    let unstarted = |unchanged: Unchanged| {
-        format!("{folder} is project {project}: {}", said_unmade(unchanged, "worktree"))
-    };
-    started.map_err(unstarted)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

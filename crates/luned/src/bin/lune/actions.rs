@@ -29,7 +29,7 @@ pub const SHRINK: Chord = (KeyCode::Char('-'), KeyModifiers::ALT);
 
 pub const AGENTS: Chord = (KeyCode::Char('b'), KeyModifiers::CONTROL);
 
-pub const DIRS: Chord = (KeyCode::Char('d'), KeyModifiers::CONTROL);
+pub const PROJECTS: Chord = (KeyCode::Char('o'), KeyModifiers::SUPER);
 
 pub const REVIEW: &str = "thermo-nuclear-review";
 
@@ -117,7 +117,6 @@ actions! {
     ShowTabs,
     ShowPanes,
     NewWorktree,
-    NewProject,
     NewMachine,
     RenameView,
     RenameWorktree,
@@ -153,7 +152,7 @@ actions! {
     Palette,
     Worktrees,
     Agents,
-    Dirs,
+    Projects,
     Dictate,
     ReadAloud,
     StopAloud,
@@ -280,9 +279,6 @@ impl Action {
                 let keywords = &["branch", "task"];
                 spec("new worktree…", keywords, menu(&['n', 'w']), IN_A_PROJECT)
             },
-            Action::NewProject => {
-                spec("new project…", &["folder", "directory", "add"], menu(&['n', 'p']), EVERY)
-            },
             Action::NewMachine => {
                 spec("new machine…", &["ssh", "host", "remote"], menu(&['n', 'm']), EVERY)
             },
@@ -392,7 +388,10 @@ impl Action {
                 anywhere("Pick a worktree", &["finder", "switch"], WORKTREES)
             },
             Action::Agents => anywhere("Pick an agent", &["finder", "claude"], AGENTS),
-            Action::Dirs => anywhere("Pick a directory", &["finder", "folder"], DIRS),
+            Action::Projects => {
+                let keywords = &["finder", "folder", "directory", "repository", "new", "add"];
+                anywhere("Open a project", keywords, PROJECTS)
+            },
             Action::Dictate => anywhere("Hold to dictate", &["voice", "speech"], dictation::KEY),
             Action::ReadAloud => anywhere("Read aloud, pause", &["speak", "voice"], aloud::KEY),
             Action::StopAloud => anywhere("Stop reading", &["speak", "voice"], aloud::STOPS),

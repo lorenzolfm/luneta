@@ -152,8 +152,8 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
     match What::read(what, &cwd, home.as_deref(), Path::is_dir)? {
         What::Folder(dir) => {
             let folder = worktrees::real(&dir)?;
-            let at = Directory::parse(utf8(&folder)?.to_owned())?;
-            Ok(match worktrees::made_at(path, &Machine::Local, &at, None)? {
+            let at = Dir::parse(utf8(&folder)?)?;
+            Ok(match worktrees::made_at(path, &Machine::Local, &(&at).into())? {
                 Landing::Worktree(landed) => {
                     let worktree = landed.worktree();
                     let there = worktrees::folder_of(path, worktree);

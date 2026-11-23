@@ -81,6 +81,10 @@ a worktree's row or a project, and only `start` takes the user anywhere.
 The user does those in lune, whose menu (`Alt a`) and palette (`Super k`) list
 each action by name. When they ask you for one, tell them which:
 
+- "Open a project" (`Super o`) lists their projects, used last first, then
+  the clones `wt clone` made that are no project yet, and takes a folder's
+  path typed in it. Enter goes to a project, or makes one of the clone or the
+  folder.
 - "new view" opens a shell beside the view they are on.
 - "close the view", "close the worktree" and "close the project" end the
   shells and agents in their views.
@@ -130,8 +134,10 @@ lune start https://github.com/o/app/pull/7   # a pull request, checked out in a 
 
 A worktree goes in the project lune keeps for its folder: the project of its
 clone's root, or the project of the folder itself. Where lune has none, luned
-makes one there, named after that folder: the clone's root, or the folder. The
-worktree gets a row in that project, and a view, which runs the issue's agent
+makes one there, named after that folder: the clone's root, or the folder. A
+name another project has gets a `-2`, as no two projects share one. luned
+makes none at `~/lune`, where lune keeps clones, or in a folder holding it.
+The worktree gets a row in that project, and a view, which runs the issue's agent
 where `start` starts one, and a shell otherwise.
 
 Run in a terminal of lune-mux, `start` takes each lune whose focus is on
