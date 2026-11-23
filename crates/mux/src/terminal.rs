@@ -185,7 +185,7 @@ impl Wake {
         match (&*self.0).write(&[0]) {
             Ok(written) => assert_eq!(written, 1),
             Err(error) if error.kind() == ErrorKind::WouldBlock => {},
-            Err(error) => eprintln!("luneta-mux: a terminal's wake failed: {error}"),
+            Err(error) => eprintln!("lune-mux: a terminal's wake failed: {error}"),
         }
     }
 }
@@ -221,7 +221,7 @@ pub fn start(
         let screen = match Screen::new(size, SCROLLBACK_BYTES) {
             Ok(screen) => screen,
             Err(error) => {
-                eprintln!("luneta-mux: terminal {terminal}'s screen could not be made: {error}");
+                eprintln!("lune-mux: terminal {terminal}'s screen could not be made: {error}");
                 drop(pty);
                 mux.lost(terminal);
                 return;
@@ -256,7 +256,7 @@ pub fn start(
             Err(Panicked) => Some("it panicked".to_owned()),
         };
         if let Some(failed) = failed {
-            eprintln!("luneta-mux: terminal {terminal} failed: {failed}");
+            eprintln!("lune-mux: terminal {terminal} failed: {failed}");
             thread.program = Program::Gone;
             thread.mux.lost(terminal);
         }
@@ -272,7 +272,7 @@ fn waits(terminal: TerminalId, child: &mut Child, exited: &SyncSender<Exit>, wak
             }
         },
         Err(error) => {
-            eprintln!("luneta-mux: terminal {terminal}'s program could not be waited for: {error}");
+            eprintln!("lune-mux: terminal {terminal}'s program could not be waited for: {error}");
         },
     }
 }
@@ -625,7 +625,7 @@ impl Thread {
             unread.extend_from_slice(bytes);
         } else {
             eprintln!(
-                "luneta-mux: terminal {} has {} unread bytes: input dropped",
+                "lune-mux: terminal {} has {} unread bytes: input dropped",
                 self.key.id,
                 unread.len()
             );

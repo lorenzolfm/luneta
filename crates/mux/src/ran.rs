@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant, SystemTime};
 
-use luneta_protocol::said::Said;
-use luneta_protocol::shell::{Doing, Ending, Front};
+use lune_protocol::said::Said;
+use lune_protocol::shell::{Doing, Ending, Front};
 
 use crate::api;
 use crate::marks::Mark;

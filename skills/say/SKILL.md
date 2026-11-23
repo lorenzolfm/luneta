@@ -1,7 +1,7 @@
 ---
 name: say
-description: Speak aloud while you work with `luneta say`, heard on the machine the user sits at. Use when the user asks you to keep them updated out loud, talk them through it or narrate, or to turn voice on or off, as when they step away from the screen.
-allowed-tools: Bash(luneta say:*)
+description: Speak aloud while you work with `lune say`, heard on the machine the user sits at. Use when the user asks you to keep them updated out loud, talk them through it or narrate, or to turn voice on or off, as when they step away from the screen.
+allowed-tools: Bash(lune say:*)
 ---
 
 # Say it out loud
@@ -9,14 +9,14 @@ allowed-tools: Bash(luneta say:*)
 The user can look away and still follow where the work is going: short updates as things change, and a complete handoff at the end. Voice is a companion to the work, and text stays the record.
 
 ```sh
-luneta say "I found why the test fails. The fixture is stale, so I'm regenerating it."
-luneta say --now "Stop reading that, this matters more."   # goes first, cutting off what plays
-luneta say --stop                                          # stops, and lets go of what waits
+lune say "I found why the test fails. The fixture is stale, so I'm regenerating it."
+lune say --now "Stop reading that, this matters more."   # goes first, cutting off what plays
+lune say --stop                                          # stops, and lets go of what waits
 ```
 
-`luneta say` queues one utterance and returns once lunetad has it, in milliseconds: run it in the foreground, as a call of its own, and go straight on with the work. Utterances play in order, on the machine the user sits at, whichever machine you run on. The user may have other agents talking too, so use `--now` only when the user asks for it or something urgent needs them.
+`lune say` queues one utterance and returns once luned has it, in milliseconds: run it in the foreground, as a call of its own, and go straight on with the work. Utterances play in order, on the machine the user sits at, whichever machine you run on. The user may have other agents talking too, so use `--now` only when the user asks for it or something urgent needs them.
 
-Where `luneta say` fails, the work goes on without voice, and the next text you write says why, once. A denied call has a fix to name there: `Bash(luneta say:*)` in `permissions.allow` of their Claude Code settings, as a skill's own permission lasts one turn.
+Where `lune say` fails, the work goes on without voice, and the next text you write says why, once. A denied call has a fix to name there: `Bash(lune say:*)` in `permissions.allow` of their Claude Code settings, as a skill's own permission lasts one turn.
 
 ## Voice is a sticky mode
 

@@ -1,7 +1,7 @@
 id: tests-wait-on-events
 valid:
   - "fn f(span: Duration) {}"
-  - "fn f() { luneta_waits::eventually(\"a\", || Some(())); }"
+  - "fn f() { lune_waits::eventually(\"a\", || Some(())); }"
   - "fn f() { let began = Began::now(); began.lasted().at_least(ALONE, \"a\"); }"
   - "fn f() { g(QUIET.saturating_mul(2)); }"
   - "use std::time::Duration;"

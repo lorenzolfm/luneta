@@ -3,10 +3,10 @@ use std::sync::LazyLock;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const BUILT: Option<u64> = match option_env!("LUNETA_BUILT") {
+pub const BUILT: Option<u64> = match option_env!("LUNE_BUILT") {
     Some(seconds) => match u64::from_str_radix(seconds, 10) {
         Ok(seconds) => Some(seconds),
-        Err(_) => panic!("LUNETA_BUILT is no number of seconds"),
+        Err(_) => panic!("LUNE_BUILT is no number of seconds"),
     },
     None => None,
 };
@@ -185,8 +185,8 @@ mod tests {
             claude_folder: Some(b"/home/you/.claude".to_vec()),
             built: Some(1_793_301_121),
         };
-        assert_eq!(info.encode_to_vec(), said(None), "an older luneta reads this lunetad's");
+        assert_eq!(info.encode_to_vec(), said(None), "an older lune reads this luned's");
         let older = InfoResponse::decode(said(Some(b"/tmp/zellij-1000")).as_slice());
-        assert_eq!(older.unwrap(), info, "and this luneta reads an older lunetad's");
+        assert_eq!(older.unwrap(), info, "and this lune reads an older luned's");
     }
 }

@@ -1,11 +1,11 @@
 id: waits-spans-are-constant
 snapshots:
-  fn f() { apart(luneta_waits::Gap::of(SETTLE)); }:
+  fn f() { apart(lune_waits::Gap::of(SETTLE)); }:
     labels:
-    - source: luneta_waits::Gap::of(SETTLE)
+    - source: lune_waits::Gap::of(SETTLE)
       style: primary
       start: 15
-      end: 44
+      end: 42
   fn f() { through(Span::of(span), "a", g); }:
     labels:
     - source: Span::of(span)

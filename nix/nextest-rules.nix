@@ -8,7 +8,7 @@ let
     ''(^|[^\w-])(?i:cargo)(?:${word})?${gap}(?:${word}${gap})*?nextest${gap}(?:${word}${gap})*?(run|r)([\s${stops})"'}\\]|$)'';
   joined = ''(?:[ \t]|\\\n)+'';
   folded = ''(?:[ \t]+(?:\n[ \t]*)?|\n[ \t]*)'';
-  wrapper = "luneta-nextest (nix/nextest.nix): it runs nextest on luneta's packages and fails when the tests leave a luneta-mux from target/ running";
+  wrapper = "lune-nextest (nix/nextest.nix): it runs nextest on lune's packages and fails when the tests leave a lune-mux from target/ running";
   inString = {
     any = [
       { kind = "string_expression"; }
@@ -22,7 +22,7 @@ let
   };
   rules = [
     {
-      id = "cargo-nextest-through-luneta-nextest";
+      id = "cargo-nextest-through-lune-nextest";
       language = "nix";
       ignores = [ "nix/nextest.nix" ];
       message = "Run the tests through ${wrapper}, which a raw nextest run, or crane's cargoNextest, lets pass.";
@@ -42,10 +42,10 @@ let
       ];
     }
     {
-      id = "cargo-nextest-through-luneta-nextest-in-workflows";
+      id = "cargo-nextest-through-lune-nextest-in-workflows";
       language = "yaml";
       files = [ ".github/workflows/**" ];
-      message = "Run the tests through ${wrapper}, which a raw nextest run lets pass. luneta-nextest is on the devshell's PATH.";
+      message = "Run the tests through ${wrapper}, which a raw nextest run lets pass. lune-nextest is on the devshell's PATH.";
       rule = {
         kind = "block_mapping_pair";
         has = {

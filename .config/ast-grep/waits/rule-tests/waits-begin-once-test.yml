@@ -1,11 +1,11 @@
 id: waits-begin-once
 valid:
   - "fn f() { let patience = Patience::begun(); loop { patience.heard(\"a\", &rx); } }"
-  - "fn f() { let line = luneta_waits::heard(\"a\", &rx); }"
+  - "fn f() { let line = lune_waits::heard(\"a\", &rx); }"
   - "async fn f() { let answer = awaited(\"a\", g()).await; }"
   - "fn f() { for x in xs { eventually(\"a\", || Some(x)); } }"
 invalid:
   - "fn f() { loop { let p = Patience::begun(); } }"
-  - "fn f() { while waiting { let line = luneta_waits::heard(\"a\", &rx); } }"
+  - "fn f() { while waiting { let line = lune_waits::heard(\"a\", &rx); } }"
   - "async fn f() { for x in xs { awaited(\"a\", g(x)).await; } }"
   - "fn f() { loop { if done { break; } let line = heard(\"a\", &rx); } }"

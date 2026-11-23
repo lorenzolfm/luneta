@@ -8,11 +8,11 @@
     pkgs.procps
   ];
   text = ''
-    programs=(luneta-mux lunetad luneta)
+    programs=(lune-mux luned lune)
     home="''${CARGO_HOME:-$HOME/.cargo}"
     bin="$home/bin"
-    builds="$home/luneta-dev"
-    report="$home/luneta-dev.log"
+    builds="$home/lune-dev"
+    report="$home/lune-dev.log"
     left=()
 
     usage() {
@@ -32,8 +32,8 @@
       ran=0
       said="$("$1" info 2>&1)" || ran=$?
       if [ "$ran" -eq 0 ]; then
-        [[ $said =~ ^lunetad\ ([^ ]+)\ \(pid\ ([1-9][0-9]*)\) ]] || {
-          echo "dev ${name}: luneta info says '$said', which names no lunetad and pid" >&2
+        [[ $said =~ ^luned\ ([^ ]+)\ \(pid\ ([1-9][0-9]*)\) ]] || {
+          echo "dev ${name}: lune info says '$said', which names no luned and pid" >&2
           exit 1
         }
         build="''${BASH_REMATCH[1]}"
@@ -94,10 +94,10 @@
       stop "''${ending[@]}"
     }
 
-    luneta_folder() {
+    lune_folder() {
       local root
       if [[ ''${XDG_RUNTIME_DIR-} == /* ]]; then
-        echo "''${XDG_RUNTIME_DIR%/}/luneta"
+        echo "''${XDG_RUNTIME_DIR%/}/lune"
       elif [ "$(uname)" = Darwin ]; then
         root="$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)"
         root="''${root%/}"
@@ -105,34 +105,34 @@
           echo "dev ${name}: DARWIN_USER_TEMP_DIR names '$root', no absolute folder" >&2
           return 1
         }
-        echo "$root/luneta"
+        echo "$root/lune"
       else
-        echo "/tmp/luneta-$(id -u)"
+        echo "/tmp/lune-$(id -u)"
       fi
     }
 
     holders() {
-      lsof -w -t -a -c lunetad -- "$1/lunetad.lock" || true
+      lsof -w -t -a -c luned -- "$1/luned.lock" || true
     }
 
     end_holder() {
       local folder holding
-      folder="$(luneta_folder)"
+      folder="$(lune_folder)"
       mapfile -t holding < <(holders "$folder")
       wait "$!"
       if [ "''${#holding[@]}" -eq 0 ]; then
-        echo "dev ${name}: luneta info: ''${said#luneta: }" >&2
+        echo "dev ${name}: lune info: ''${said#lune: }" >&2
         exit 1
       fi
-      echo "dev ${name}: luneta info: ''${said#luneta: }, but lunetad (pid ''${holding[*]}) holds $folder: ending it, $1" >&2
+      echo "dev ${name}: lune info: ''${said#lune: }, but luned (pid ''${holding[*]}) holds $folder: ending it, $1" >&2
       end_daemon "''${holding[@]}"
     }
 
     muxes() {
       local folder
-      folder="$(luneta_folder)"
+      folder="$(lune_folder)"
       ps -ww -u "$(id -u)" -o pid= -o args= |
-        awk -v folder="$folder" '$2 ~ /(^|\/)luneta-mux$/ && NF == 3 && $3 == folder { print $1 }'
+        awk -v folder="$folder" '$2 ~ /(^|\/)lune-mux$/ && NF == 3 && $3 == folder { print $1 }'
     }
 
     descends() {
@@ -152,7 +152,7 @@
       mapfile -t running < <(muxes)
       wait "$!"
       descends "''${running[@]}" || return 0
-      echo "dev ${name}: --mux ends this terminal with luneta-mux (pid ''${running[*]}), so all dev ${name} says from here goes to $report too" >&2
+      echo "dev ${name}: --mux ends this terminal with lune-mux (pid ''${running[*]}), so all dev ${name} says from here goes to $report too" >&2
       mkdir -p "$home"
       : >"$report"
       trap "" HUP
@@ -164,12 +164,12 @@
       mapfile -t running < <(muxes)
       wait "$!"
       if [ "''${#running[@]}" -eq 0 ]; then
-        echo "dev ${name}: no luneta-mux runs" >&2
+        echo "dev ${name}: no lune-mux runs" >&2
         return 0
       fi
       mapfile -t ending < <(identified "''${running[@]}")
       wait "$!"
-      echo "dev ${name}: ending luneta-mux (pid ''${running[*]}) and what runs in its terminals; the next lunetad starts the one beside it and restores them" >&2
+      echo "dev ${name}: ending lune-mux (pid ''${running[*]}) and what runs in its terminals; the next luned starts the one beside it and restores them" >&2
       stop "''${ending[@]}"
     }
 

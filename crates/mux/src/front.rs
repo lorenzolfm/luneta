@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rustix::fs::{Mode, OFlags};
 
-use luneta_protocol::shell::Front;
+use lune_protocol::shell::Front;
 
 use crate::process::{self, Group, Process};
 use crate::pty::{self, Modes, Pty};

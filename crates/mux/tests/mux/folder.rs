@@ -2,11 +2,11 @@ use std::fs;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
 
-use luneta_mux::api;
+use lune_mux::api;
 use rustix::process::{Pid, test_kill_process};
 
 use crate::host::{
-    LUNETA_MUX, Server, listed, new_terminal, run, script, shell, size, watched_end,
+    LUNE_MUX, Server, listed, new_terminal, run, script, shell, size, watched_end,
 };
 
 fn programs(listing: &api::Listing) -> Vec<Pid> {
@@ -21,7 +21,7 @@ fn programs(listing: &api::Listing) -> Vec<Pid> {
 
 async fn ended(pid: Pid) {
     let what = format!("program {pid:?} ends");
-    luneta_waits::eventually_async(&what, async || test_kill_process(pid).is_err().then_some(()))
+    lune_waits::eventually_async(&what, async || test_kill_process(pid).is_err().then_some(()))
         .await;
 }
 
@@ -30,10 +30,10 @@ fn it_listens_only_in_the_one_absolute_folder_it_is_given() {
     let refused: [(&[&str], &str); 3] = [
         (&[], "give it the one folder to listen in"),
         (&["/tmp/a", "/tmp/b"], "give it the one folder to listen in"),
-        (&["luneta"], "luneta is no folder to listen in, as it is not absolute"),
+        (&["lune"], "lune is no folder to listen in, as it is not absolute"),
     ];
     for (arguments, why) in refused {
-        let output = Command::new(LUNETA_MUX).args(arguments).output().unwrap();
+        let output = Command::new(LUNE_MUX).args(arguments).output().unwrap();
         assert!(!output.status.success(), "{arguments:?}");
         let said = String::from_utf8_lossy(&output.stderr);
         assert!(said.contains(why), "{arguments:?}: {said}");

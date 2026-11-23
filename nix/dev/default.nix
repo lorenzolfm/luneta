@@ -66,7 +66,7 @@ let
 in
 pkgs.writeShellApplication {
   name = "dev";
-  meta.description = "luneta build recipes on the flake-pinned toolchain";
+  meta.description = "lune build recipes on the flake-pinned toolchain";
   passthru.commands = {
     lint = command (import ./commands/lint.nix args);
     clippy-cross = command (import ./commands/clippy.nix args).cross;
@@ -88,7 +88,7 @@ pkgs.writeShellApplication {
 
     usage() {
       paint "$1"
-      printf '%s%s%s\n\n' "$bold" 'dev — luneta build recipes (pinned nix tooling)' "$reset"
+      printf '%s%s%s\n\n' "$bold" 'dev — lune build recipes (pinned nix tooling)' "$reset"
       ${helpLines}
     }
 
@@ -99,8 +99,8 @@ pkgs.writeShellApplication {
 
     enter_checkout() {
       root="$(${lib.getExe pkgs.git} rev-parse --show-toplevel 2>/dev/null)" || root=""
-      if [ ! -f "$root/crates/lunetad/Cargo.toml" ]; then
-        error "run this inside the luneta checkout"
+      if [ ! -f "$root/crates/luned/Cargo.toml" ]; then
+        error "run this inside the lune checkout"
         exit 2
       fi
       export DEV_HERE="$PWD"

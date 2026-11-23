@@ -1,0 +1,997 @@
+syntax = "proto3";
+
+package lune.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "lune/mux/v1/mux.proto";
+
+service Daemon {
+  rpc Info(google.protobuf.Empty) returns (InfoResponse);
+  rpc ListAgents(google.protobuf.Empty) returns (ListAgentsResponse);
+  rpc Watch(WatchRequest) returns (Host);
+  rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
+  rpc KeepChecks(KeepChecksRequest) returns (stream KeepChecksResponse);
+  rpc ListDirs(ListDirsRequest) returns (ListDirsResponse);
+  rpc ListContents(ListContentsRequest) returns (ListContentsResponse);
+  rpc TranscriptEnds(TranscriptEndsRequest) returns (TranscriptEndsResponse);
+  rpc Ask(AskRequest) returns (stream AskResponse);
+  rpc Paste(PasteRequest) returns (stream PasteResponse);
+  rpc KeepImage(stream KeepImageRequest) returns (stream KeepImageResponse);
+  rpc Say(SayRequest) returns (google.protobuf.Empty);
+  rpc Prunes(PrunesRequest) returns (stream PrunesResponse);
+  rpc Prune(PruneRequest) returns (stream PruneResponse);
+  rpc Rebase(RebaseRequest) returns (stream RebaseResponse);
+  rpc FileIssue(FileIssueRequest) returns (stream FileIssueResponse);
+  rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
+  rpc ChangeProjects(ChangeProjectsRequest) returns (ChangeProjectsResponse);
+  rpc MakeWorktree(MakeWorktreeRequest) returns (stream MakeWorktreeResponse);
+  rpc ListWork(ListWorkRequest) returns (stream ListWorkResponse);
+  rpc Show(stream ShowRequest) returns (stream ShowResponse);
+  rpc Frames(stream FramesRequest) returns (stream lune.mux.v1.ToViewer);
+}
+
+message On {
+  string destination = 1;
+}
+
+message ListSkillsRequest {
+  On on = 1;
+  string dir = 2;
+  optional Harness harness = 3;
+}
+
+message ListSkillsResponse {
+  repeated Skill skills = 1;
+
+  message Skill {
+    string name = 1;
+    string description = 2;
+    bool only_you = 3;
+  }
+}
+
+message PrintedFile {
+  string path = 1;
+  uint64 lines = 2;
+  uint64 left_out = 3;
+}
+
+message KeepChecksRequest {
+  On on = 1;
+  string url = 2;
+}
+
+message KeepChecksResponse {
+  string head = 1;
+  repeated Failed failed = 2;
+  uint32 pending = 3;
+  uint32 passed = 4;
+
+  message Failed {
+    string name = 1;
+    string link = 2;
+    oneof log {
+      PrintedFile kept = 3;
+      string unkept = 4;
+    }
+  }
+}
+
+message ListDirsRequest {
+  On on = 1;
+}
+
+message ListDirsResponse {
+  repeated Dir dirs = 1;
+
+  message Dir {
+    string path = 1;
+    string name = 2;
+  }
+}
+
+message ListContentsRequest {
+  On on = 1;
+  string dir = 2;
+}
+
+message ListContentsResponse {
+  string listed = 1;
+}
+
+message TranscriptEndsRequest {
+  On on = 1;
+  repeated string ids = 2;
+  uint32 share = 3;
+}
+
+message TranscriptEndsResponse {
+  map<string, string> ends = 1;
+}
+
+message AskRequest {
+  On on = 1;
+  optional string cwd = 2;
+  string words = 3;
+  optional string resumed = 4;
+  string highlighted = 5;
+  fixed64 turn = 6;
+  optional fixed64 before = 7;
+  repeated uint32 marked_issues = 8;
+  repeated uint32 marked_pulls = 9;
+}
+
+message AskResponse {
+  oneof step {
+    string session = 1;
+    Ran ran = 2;
+    string denied = 3;
+    string said = 4;
+  }
+
+  message Ran {
+    string id = 1;
+    string command = 2;
+  }
+}
+
+message KeepImageRequest {
+  oneof part {
+    Image image = 1;
+    bytes bytes = 2;
+  }
+
+  message Image {
+    On on = 1;
+    uint64 size = 2;
+  }
+}
+
+message KeepImageResponse {
+  string path = 1;
+}
+
+message PasteRequest {
+  On on = 1;
+  oneof work {
+    string link = 2;
+    File file = 3;
+  }
+  repeated Worked worked = 4;
+  bool at_head = 5;
+  bool reads_moved_off = 6;
+
+  message File {
+    string path = 1;
+    optional string from = 2;
+  }
+
+  message Worked {
+    string dir = 1;
+    optional string pull = 2;
+    bool here = 3;
+  }
+}
+
+message PasteResponse {
+  oneof at {
+    uint32 there = 1;
+    google.protobuf.Empty unopened = 2;
+  }
+  string folder = 3;
+  optional string branch = 4;
+  optional string file = 5;
+  bool at_head = 6;
+  bool moved_off = 7;
+}
+
+message WatchRequest {
+  Version after = 1;
+  optional bool kept = 2;
+  bool shown = 3;
+}
+
+message Version {
+  uint32 pid = 1;
+  uint64 seq = 2;
+}
+
+message Host {
+  Version version = 1;
+  repeated GitStatus git_statuses = 2;
+  repeated Agent agents = 3;
+  uint32 unread = 4;
+  repeated PullRequest pull_requests = 5;
+  repeated UnreadFile unread_files = 6;
+  repeated Remote remotes = 7;
+  optional uint32 unread_hosts = 8;
+  repeated Saying sayings = 9;
+  Projects projects = 10;
+}
+
+message Say {
+  oneof does {
+    Utterance in_turn = 1;
+    Utterance now = 2;
+    google.protobuf.Empty stop = 3;
+  }
+}
+
+message Utterance {
+  string text = 1;
+}
+
+message SayRequest {
+  Say say = 1;
+}
+
+message Saying {
+  uint32 pid = 1;
+  uint64 number = 2;
+  Say say = 3;
+}
+
+message Remote {
+  string destination = 1;
+  oneof reached {
+    google.protobuf.Empty reaching = 2;
+    Host host = 3;
+    Unreached unreached = 4;
+    google.protobuf.Empty here = 5;
+  }
+
+  message Host {
+    repeated GitStatus git_statuses = 1;
+    repeated Agent agents = 2;
+    uint32 unread = 3;
+    repeated PullRequest pull_requests = 4;
+    repeated UnreadFile unread_files = 5;
+    repeated Saying sayings = 6;
+    Projects projects = 7;
+  }
+
+  message Unreached {
+    google.protobuf.Timestamp since = 1;
+    string why = 2;
+    oneof stopped {
+      google.protobuf.Empty unstarted = 3;
+      Ended ended = 4;
+      google.protobuf.Empty said = 5;
+      google.protobuf.Empty silent = 6;
+      google.protobuf.Empty lost = 7;
+      google.protobuf.Empty unwatched = 8;
+      google.protobuf.Empty unmatched = 10;
+    }
+    Projects projects = 9;
+    optional string ssh_said = 11;
+
+    message Ended {
+      optional int32 code = 1;
+    }
+  }
+}
+
+message Titled {
+  optional string topic = 1;
+}
+
+message Shell {
+  oneof doing {
+    Going going = 1;
+    Ended ended = 2;
+    Stopped stopped = 3;
+    google.protobuf.Empty ready = 4;
+  }
+
+  message Going {
+    optional string command = 1;
+    google.protobuf.Timestamp since = 2;
+    Front front = 3;
+  }
+
+  message Ended {
+    optional string command = 1;
+    google.protobuf.Timestamp at = 2;
+    oneof ending {
+      int32 status = 3;
+      google.protobuf.Empty resumed = 4;
+    }
+    google.protobuf.Duration took = 5;
+  }
+
+  message Stopped {
+    optional string command = 1;
+    google.protobuf.Timestamp at = 2;
+  }
+}
+
+enum Front {
+  FRONT_UNSPECIFIED = 0;
+  FRONT_WORKING = 1;
+  FRONT_ASKING = 2;
+  FRONT_INTERACTIVE = 3;
+}
+
+message GitStatus {
+  string dir = 1;
+  oneof stands {
+    google.protobuf.Empty outside = 2;
+    Checkout checkout = 3;
+    NoCheckout no_checkout = 4;
+  }
+
+  message NoCheckout {
+    string repository = 1;
+  }
+}
+
+message Checkout {
+  oneof head {
+    google.protobuf.Empty detached = 1;
+    Branch branch = 2;
+  }
+  Changes changes = 3;
+  uint32 stashes = 4;
+  optional string repository = 5;
+}
+
+message Branch {
+  string name = 1;
+  Upstream upstream = 2;
+  Changed changed = 3;
+}
+
+message Changed {
+  uint32 added = 1;
+  uint32 deleted = 2;
+}
+
+message Changes {
+  uint32 conflicted = 1;
+  uint32 deleted = 2;
+  uint32 renamed = 3;
+  uint32 modified = 4;
+  uint32 staged = 5;
+  uint32 untracked = 6;
+}
+
+message Upstream {
+  uint32 ahead = 1;
+  uint32 behind = 2;
+}
+
+message PullRequest {
+  string dir = 1;
+  PullRequestState state = 2;
+  string url = 3;
+  Checks checks = 4;
+  bool stale = 5;
+}
+
+message Checks {
+  uint32 pending = 1;
+  uint32 failed = 2;
+  uint32 passed = 3;
+}
+
+enum PullRequestState {
+  PULL_REQUEST_STATE_UNSPECIFIED = 0;
+  PULL_REQUEST_STATE_OPEN = 1;
+  PULL_REQUEST_STATE_DRAFT = 2;
+  PULL_REQUEST_STATE_MERGED = 3;
+  PULL_REQUEST_STATE_CLOSED = 4;
+}
+
+message InfoResponse {
+  string version = 1;
+  uint32 pid = 2;
+  google.protobuf.Timestamp started_at = 3;
+  optional bytes claude_folder = 5;
+  optional uint64 built = 6;
+}
+
+message ListAgentsResponse {
+  repeated Agent agents = 1;
+  uint32 unread = 2;
+  repeated UnreadFile unread_files = 3;
+}
+
+message UnreadFile {
+  uint32 pid = 1;
+  TerminalKey terminal = 2;
+}
+
+message Agent {
+  uint32 pid = 1;
+  string session_id = 2;
+  string cwd = 3;
+  oneof status {
+    Status known_status = 4;
+    string other_status = 5;
+  }
+  google.protobuf.Timestamp status_since = 6;
+  google.protobuf.Timestamp started_at = 7;
+  Name name = 8;
+  optional string entrypoint = 9;
+  TerminalKey terminal = 10;
+  oneof waiting_for {
+    WaitingFor known_waiting_for = 11;
+    string other_waiting_for = 12;
+  }
+  optional Harness harness = 13;
+  optional string topic = 14;
+}
+
+enum Harness {
+  HARNESS_UNSPECIFIED = 0;
+  HARNESS_CLAUDE_CODE = 1;
+  HARNESS_PI = 2;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_BUSY = 1;
+  STATUS_IDLE = 2;
+  STATUS_WAITING = 3;
+  STATUS_SHELL = 4;
+}
+
+enum WaitingFor {
+  WAITING_FOR_UNSPECIFIED = 0;
+  WAITING_FOR_PERMISSION_PROMPT = 1;
+  WAITING_FOR_INPUT_NEEDED = 2;
+  WAITING_FOR_DIALOG_OPEN = 3;
+}
+
+message Name {
+  string text = 1;
+  optional NameSource source = 2;
+}
+
+enum NameSource {
+  NAME_SOURCE_UNSPECIFIED = 0;
+  NAME_SOURCE_USER = 1;
+  NAME_SOURCE_PEER = 2;
+  NAME_SOURCE_DERIVED = 3;
+  NAME_SOURCE_COLLISION = 4;
+  NAME_SOURCE_AUTO = 5;
+  NAME_SOURCE_HOOK = 6;
+  NAME_SOURCE_OTHER = 7;
+}
+
+message PrunesRequest {
+  On on = 1;
+  string dir = 2;
+}
+
+message PrunesResponse {
+  string repository = 1;
+  repeated Goes goes = 2;
+  repeated Kept kept = 3;
+  repeated Unasked unasked = 4;
+
+  message Goes {
+    string folder = 1;
+    string branch = 2;
+    string head = 3;
+    uint32 number = 4;
+    oneof pushed {
+      RemoteBranch remote = 5;
+      string stays = 6;
+    }
+    optional uint64 bytes = 7;
+  }
+
+  message RemoteBranch {
+    string remote = 1;
+    string branch = 2;
+  }
+
+  message Kept {
+    string folder = 1;
+    uint32 number = 2;
+    string why = 3;
+  }
+
+  message Unasked {
+    string folder = 1;
+    string why = 2;
+  }
+}
+
+message PruneRequest {
+  On on = 1;
+  string dir = 2;
+  repeated Deleting agreed = 3;
+
+  message Deleting {
+    string folder = 1;
+    string branch = 2;
+    string head = 3;
+    uint32 number = 4;
+    PrunesResponse.RemoteBranch remote = 5;
+  }
+}
+
+message PruneResponse {
+  oneof answer {
+    PrunesResponse changed = 1;
+    Outcomes deleted = 2;
+  }
+
+  message Outcomes {
+    repeated Outcome outcomes = 1;
+  }
+
+  message Outcome {
+    string folder = 1;
+    oneof came {
+      google.protobuf.Empty gone = 2;
+      string went_but = 3;
+      string stays = 4;
+    }
+  }
+}
+
+message RebaseRequest {
+  On on = 1;
+  string dir = 2;
+  optional string branch = 3;
+}
+
+message RebaseResponse {
+  string branch = 1;
+  string onto = 2;
+  oneof came {
+    google.protobuf.Empty already = 3;
+    Clean clean = 4;
+    Stopped stopped = 5;
+  }
+
+  message Clean {
+    uint32 ahead = 1;
+  }
+
+  message Stopped {
+    optional string at = 1;
+    repeated string conflicted = 2;
+    uint32 conflicted_count = 3;
+  }
+}
+
+message FileIssueRequest {
+  On on = 1;
+  string dir = 2;
+  string words = 3;
+  string repository = 4;
+}
+
+message FileIssueResponse {
+  string url = 1;
+  string title = 2;
+}
+
+message IssueRepositoriesRequest {
+  On on = 1;
+  string dir = 2;
+}
+
+message IssueRepositoriesResponse {
+  repeated IssueRepository repositories = 1;
+}
+
+message IssueRepository {
+  string remote = 1;
+  string repository = 2;
+}
+
+message Projects {
+  oneof held {
+    Kept kept = 1;
+    string unkept = 2;
+  }
+
+  message Kept {
+    repeated Project projects = 1;
+    Version version = 2;
+  }
+}
+
+message Project {
+  fixed64 id = 1;
+  string name = 2;
+  string dir = 3;
+  bool missing = 4;
+  oneof holds {
+    Worktree folder = 5;
+    Clone clone = 6;
+  }
+
+  message Clone {
+    repeated Worktree worktrees = 1;
+    oneof listing {
+      string unlisted = 2;
+      Unopened unopened = 3;
+    }
+  }
+
+  message Unopened {
+    repeated string subfolders = 1;
+  }
+}
+
+message Worktree {
+  fixed64 id = 1;
+  string name = 2;
+  bool renamed = 3;
+  string folder = 4;
+  oneof seen {
+    google.protobuf.Empty missing = 5;
+    Stage stage = 6;
+    google.protobuf.Empty unread = 7;
+  }
+  repeated Terminal terminals = 8;
+  google.protobuf.Timestamp used_at = 9;
+  optional Arrangement arranged = 10;
+}
+
+message Terminal {
+  fixed64 id = 1;
+  oneof found {
+    TerminalKey key = 2;
+    google.protobuf.Empty lost = 3;
+    google.protobuf.Empty looking = 4;
+  }
+  string folder = 5;
+  optional string command = 6;
+  Titled titled = 7;
+  Shell shell = 8;
+  bool held = 9;
+  optional string name = 10;
+}
+
+enum Stage {
+  STAGE_UNSPECIFIED = 0;
+  STAGE_NO_BRANCH = 1;
+  STAGE_WORKING = 2;
+  STAGE_PULL_REQUEST_OPEN = 3;
+  STAGE_CHECKS_FAILING = 4;
+  STAGE_MERGED = 5;
+}
+
+enum Arrangement {
+  ARRANGEMENT_UNSPECIFIED = 0;
+  ARRANGEMENT_TABS = 1;
+  ARRANGEMENT_PANES = 2;
+}
+
+message Opens {
+  oneof runs {
+    google.protobuf.Empty shell = 1;
+    Argv command = 2;
+  }
+}
+
+message Argv {
+  repeated string words = 1;
+}
+
+message ChangeProjectsRequest {
+  On on = 1;
+  oneof change {
+    AddProject add_project = 2;
+    AddWorktree add_worktree = 3;
+    Start start = 4;
+    Join join = 5;
+    Pull pull = 6;
+    RenameProject rename_project = 7;
+    RenameWorktree rename_worktree = 8;
+    RenameTerminal rename_terminal = 9;
+    ReorderProjects reorder_projects = 10;
+    ReorderWorktrees reorder_worktrees = 11;
+    ForgetProject forget_project = 12;
+    CloseProject close_project = 13;
+    CloseWorktree close_worktree = 14;
+    Bring bring = 15;
+    CloseView close_view = 16;
+  }
+
+  message AddProject {
+    string dir = 1;
+    optional string name = 2;
+  }
+
+  message AddWorktree {
+    fixed64 project = 1;
+    string folder = 2;
+    optional string name = 3;
+    Opens opens = 4;
+  }
+
+  message Start {
+    string folder = 1;
+    optional string name = 2;
+  }
+
+  message Join {
+    string folder = 1;
+    Opens opens = 2;
+  }
+
+  message Pull {
+    string folder = 1;
+    string name = 2;
+    Argv agent = 3;
+  }
+
+  message RenameProject {
+    fixed64 project = 1;
+    string to = 2;
+  }
+
+  message RenameWorktree {
+    fixed64 worktree = 1;
+    optional string to = 2;
+  }
+
+  message RenameTerminal {
+    fixed64 terminal = 1;
+    optional string to = 2;
+  }
+
+  message ReorderProjects {
+    repeated fixed64 projects = 1;
+    repeated fixed64 seen = 2;
+  }
+
+  message ReorderWorktrees {
+    fixed64 project = 1;
+    repeated fixed64 worktrees = 2;
+    repeated fixed64 seen = 3;
+  }
+
+  message ForgetProject {
+    fixed64 project = 1;
+  }
+
+  message CloseProject {
+    fixed64 project = 1;
+    repeated fixed64 worktrees = 2;
+    repeated fixed64 seen = 3;
+  }
+
+  message CloseWorktree {
+    fixed64 worktree = 1;
+    repeated fixed64 seen = 2;
+  }
+
+  message Bring {
+    fixed64 worktree = 1;
+    TerminalKey from = 2;
+  }
+
+  message CloseView {
+    TerminalKey terminal = 1;
+  }
+}
+
+message ChangeProjectsResponse {
+  oneof made {
+    fixed64 project = 1;
+    fixed64 worktree = 2;
+    fixed64 found = 3;
+    fixed64 taken = 4;
+    google.protobuf.Empty untaken = 6;
+  }
+  Version kept = 5;
+  oneof opened {
+    fixed64 view = 7;
+    string unopened = 8;
+  }
+}
+
+message MakeWorktreeRequest {
+  On on = 1;
+  fixed64 project = 2;
+  string branch = 3;
+}
+
+message MakeWorktreeResponse {
+  oneof landed {
+    fixed64 made = 1;
+    fixed64 found = 2;
+  }
+}
+
+message ListWorkRequest {
+  On on = 1;
+  fixed64 project = 2;
+}
+
+message ListWorkResponse {
+  oneof listed {
+    Work work = 1;
+    google.protobuf.Empty unhosted = 2;
+  }
+
+  message Work {
+    oneof issues {
+      OpenIssues open = 1;
+      google.protobuf.Empty off = 2;
+    }
+    repeated Pull pulls = 3;
+    bool more_pulls = 4;
+  }
+
+  message OpenIssues {
+    repeated Issue issues = 1;
+    bool more = 2;
+  }
+
+  message Issue {
+    uint32 number = 1;
+    string title = 2;
+    repeated string labels = 3;
+  }
+
+  message Pull {
+    uint32 number = 1;
+    string title = 2;
+    bool draft = 3;
+    string branch = 4;
+    optional string author = 5;
+  }
+}
+
+message ShowRequest {
+  oneof event {
+    Hello hello = 1;
+    Size size = 2;
+    fixed64 go = 3;
+    Open open = 4;
+    fixed64 close = 5;
+    Focus focus = 6;
+    Resize resize = 7;
+    Move move = 8;
+    google.protobuf.Empty fullscreen = 9;
+    google.protobuf.Empty welcome = 10;
+    Arrangement arrange = 11;
+  }
+
+  message Hello {
+    fixed64 worktree = 1;
+    Size size = 2;
+    TerminalKey runs_in = 3;
+    bool again = 4;
+    On on = 5;
+  }
+
+  message Size {
+    uint32 columns = 1;
+    uint32 rows = 2;
+  }
+
+  message Open {
+    oneof beside {
+      google.protobuf.Empty largest = 1;
+      Towards towards = 2;
+      google.protobuf.Empty focused = 3;
+      google.protobuf.Empty alone = 4;
+    }
+    Opens opens = 5;
+  }
+
+  message Focus {
+    oneof to {
+      Direction direction = 1;
+      Order order = 2;
+      fixed64 view = 3;
+    }
+    fixed64 step = 4;
+  }
+
+  message Resize {
+    oneof sides {
+      Direction direction = 1;
+      google.protobuf.Empty every = 2;
+    }
+    Growth growth = 3;
+  }
+
+  message Move {
+    oneof to {
+      Direction direction = 1;
+      Order order = 2;
+    }
+  }
+
+  enum Towards {
+    TOWARDS_UNSPECIFIED = 0;
+    TOWARDS_RIGHT = 1;
+    TOWARDS_DOWN = 2;
+  }
+
+  enum Direction {
+    DIRECTION_UNSPECIFIED = 0;
+    DIRECTION_LEFT = 1;
+    DIRECTION_RIGHT = 2;
+    DIRECTION_UP = 3;
+    DIRECTION_DOWN = 4;
+  }
+
+  enum Order {
+    ORDER_UNSPECIFIED = 0;
+    ORDER_NEXT = 1;
+    ORDER_PREVIOUS = 2;
+  }
+
+  enum Growth {
+    GROWTH_UNSPECIFIED = 0;
+    GROWTH_GROW = 1;
+    GROWTH_SHRINK = 2;
+  }
+}
+
+message FramesRequest {
+  oneof event {
+    Hello hello = 1;
+    lune.mux.v1.FromViewer said = 2;
+  }
+
+  message Hello {
+    On on = 1;
+    lune.mux.v1.Greeting greeting = 2;
+  }
+}
+
+message ShowResponse {
+  oneof event {
+    Laid laid = 1;
+    string refused = 2;
+    Edged edged = 3;
+    fixed64 sent = 4;
+    fixed64 left = 5;
+  }
+
+  message Edged {
+    fixed64 worktree = 1;
+    ShowRequest.Direction direction = 2;
+    fixed64 step = 3;
+  }
+
+  message Laid {
+    fixed64 worktree = 1;
+    ShowRequest.Size size = 2;
+    repeated View views = 3;
+    oneof shown {
+      fixed64 tiled = 4;
+      fixed64 full = 5;
+      fixed64 tabbed = 6;
+    }
+  }
+
+  message View {
+    fixed64 id = 1;
+    Rect rect = 2;
+    oneof found {
+      TerminalKey key = 3;
+      google.protobuf.Empty lost = 4;
+      google.protobuf.Empty looking = 5;
+      google.protobuf.Empty welcome = 6;
+    }
+  }
+
+  message Rect {
+    uint32 column = 1;
+    uint32 row = 2;
+    uint32 columns = 3;
+    uint32 rows = 4;
+  }
+}
+
+message TerminalKey {
+  uint32 id = 1;
+  google.protobuf.Timestamp made_at = 2;
+}

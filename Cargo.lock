@@ -1382,15 +1382,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "luneta-mux"
+name = "lune-mux"
 version = "0.3.0"
 dependencies = [
  "hyper-util",
  "libc",
  "libghostty-vt",
  "libghostty-vt-sys",
- "luneta-protocol",
- "luneta-waits",
+ "lune-protocol",
+ "lune-waits",
  "percent-encoding",
  "prost",
  "prost-types",
@@ -1406,7 +1406,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "luneta-protocol"
+name = "lune-protocol"
 version = "0.3.0"
 dependencies = [
  "prost",
@@ -1415,14 +1415,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "luneta-waits"
+name = "lune-waits"
 version = "0.3.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
-name = "lunetad"
+name = "luned"
 version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
@@ -1434,8 +1434,8 @@ dependencies = [
  "frizbee",
  "hyper-util",
  "libc",
- "luneta-protocol",
- "luneta-waits",
+ "lune-protocol",
+ "lune-waits",
  "notify",
  "prost",
  "prost-types",

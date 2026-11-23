@@ -2,10 +2,10 @@ id: unit-waits-begin-once
 valid:
   - "fn f() { loop { let line = heard(&rx); } }"
   - "#[cfg(test)] mod tests { fn f() { let patience = Patience::begun(); loop { patience.heard(\"a\", &rx); } } }"
-  - "#[cfg(test)] mod tests { fn f() { let line = luneta_waits::heard(\"a\", &rx); } }"
+  - "#[cfg(test)] mod tests { fn f() { let line = lune_waits::heard(\"a\", &rx); } }"
   - "#[cfg(test)] mod tests { fn f() { for x in xs { eventually(\"a\", || Some(x)); } } }"
 invalid:
   - "#[cfg(test)] mod tests { fn f() { loop { let p = Patience::begun(); } } }"
-  - "#[cfg(test)] mod tests { fn f() { while waiting { let line = luneta_waits::heard(\"a\", &rx); } } }"
+  - "#[cfg(test)] mod tests { fn f() { while waiting { let line = lune_waits::heard(\"a\", &rx); } } }"
   - "#[cfg(test)] mod tests { async fn f() { for x in xs { awaited(\"a\", g(x)).await; } } }"
   - "#[cfg(all(test, unix))] mod tests { fn f() { loop { let line = heard(\"a\", &rx); } } }"

@@ -1,0 +1,461 @@
+syntax = "proto3";
+
+package lune.mux.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+service Mux {
+  rpc Dump(DumpRequest) returns (DumpResponse);
+  rpc List(ListRequest) returns (Listing);
+  rpc Watch(WatchRequest) returns (stream Watched);
+  rpc NewTerminal(NewTerminalRequest) returns (NewTerminalResponse);
+  rpc CloseTerminal(CloseTerminalRequest) returns (CloseTerminalResponse);
+  rpc SizeTerminal(SizeTerminalRequest) returns (SizeTerminalResponse);
+  rpc TagTerminal(TagTerminalRequest) returns (TagTerminalResponse);
+  rpc Show(stream FromViewer) returns (stream ToViewer);
+  rpc Info(InfoRequest) returns (InfoResponse);
+}
+
+message TerminalKey {
+  uint32 id = 1;
+  google.protobuf.Timestamp made_at = 2;
+}
+
+message NewTerminalRequest {
+  Opens opens = 1;
+  bytes tag = 2;
+  Size size = 3;
+}
+
+message NewTerminalResponse {
+  TerminalKey terminal = 1;
+}
+
+message CloseTerminalRequest {
+  TerminalKey terminal = 1;
+}
+
+message CloseTerminalResponse {}
+
+message SizeTerminalRequest {
+  TerminalKey terminal = 1;
+  Size size = 2;
+}
+
+message SizeTerminalResponse {}
+
+message TagTerminalRequest {
+  TerminalKey terminal = 1;
+  bytes tag = 2;
+}
+
+message TagTerminalResponse {}
+
+message InfoRequest {}
+
+message InfoResponse {
+  string version = 1;
+  optional uint64 built = 2;
+}
+
+message Opens {
+  string cwd = 1;
+  Program program = 2;
+  Ends ends = 3;
+}
+
+message Program {
+  repeated string argv = 1;
+}
+
+enum Ends {
+  ENDS_UNSPECIFIED = 0;
+  ENDS_CLOSES = 1;
+  ENDS_HOLDS = 2;
+}
+
+message DumpRequest {
+  Dumped dumped = 1;
+  TerminalKey terminal = 2;
+}
+
+enum Dumped {
+  DUMPED_UNSPECIFIED = 0;
+  DUMPED_SCREEN = 1;
+  DUMPED_TEXT = 2;
+}
+
+message DumpResponse {
+  string text = 1;
+}
+
+message ListRequest {}
+
+message WatchRequest {}
+
+message Listing {
+  repeated Terminal terminals = 1;
+}
+
+message Watched {
+  oneof is {
+    Listing listing = 1;
+    Ended ended = 2;
+  }
+
+  message Ended {
+    oneof why {
+      Emptied emptied = 1;
+      Unreached unreached = 2;
+    }
+  }
+
+  message Emptied {}
+
+  message Unreached {
+    string why = 1;
+  }
+}
+
+message Terminal {
+  TerminalKey key = 1;
+  bytes tag = 2;
+  Size size = 3;
+  string title = 4;
+  string cwd = 5;
+  oneof program {
+    Running runs = 6;
+    Exit ended = 7;
+  }
+}
+
+message Running {
+  uint32 pid = 1;
+  Foreground foreground = 2;
+  Ran ran = 3;
+}
+
+message Foreground {
+  uint32 pid = 1;
+  repeated string argv = 2;
+}
+
+message Ran {
+  oneof is {
+    Ready ready = 1;
+    Going going = 2;
+    Ended ended = 3;
+    Stopped stopped = 4;
+  }
+
+  message Ready {}
+
+  message Going {
+    optional string command = 1;
+    google.protobuf.Timestamp since = 2;
+    Front front = 3;
+  }
+
+  message Ended {
+    optional string command = 1;
+    google.protobuf.Timestamp at = 2;
+    oneof ending {
+      int32 status = 3;
+      Resumed resumed = 4;
+    }
+    google.protobuf.Duration took = 5;
+  }
+
+  message Resumed {}
+
+  message Stopped {
+    optional string command = 1;
+    google.protobuf.Timestamp at = 2;
+  }
+}
+
+enum Front {
+  FRONT_UNSPECIFIED = 0;
+  FRONT_WORKING = 1;
+  FRONT_ASKING = 2;
+  FRONT_INTERACTIVE = 3;
+}
+
+message Exit {
+  oneof how {
+    int32 code = 1;
+    int32 signal = 2;
+  }
+}
+
+message Size {
+  uint32 columns = 1;
+  uint32 rows = 2;
+}
+
+message Colours {
+  Rgb foreground = 1;
+  Rgb background = 2;
+}
+
+message Rgb {
+  uint32 red = 1;
+  uint32 green = 2;
+  uint32 blue = 3;
+}
+
+message Key {
+  Press press = 1;
+  Modifiers modifiers = 2;
+  oneof key {
+    Named named = 3;
+    uint32 character = 4;
+  }
+  string text = 5;
+}
+
+enum Press {
+  PRESS_UNSPECIFIED = 0;
+  PRESS_DOWN = 1;
+  PRESS_REPEAT = 2;
+  PRESS_UP = 3;
+}
+
+message Modifiers {
+  bool shift = 1;
+  bool alt = 2;
+  bool ctrl = 3;
+  bool super_key = 4;
+}
+
+enum Named {
+  NAMED_UNSPECIFIED = 0;
+  NAMED_ENTER = 1;
+  NAMED_TAB = 2;
+  NAMED_BACKSPACE = 3;
+  NAMED_ESCAPE = 4;
+  NAMED_INSERT = 5;
+  NAMED_DELETE = 6;
+  NAMED_HOME = 7;
+  NAMED_END = 8;
+  NAMED_PAGE_UP = 9;
+  NAMED_PAGE_DOWN = 10;
+  NAMED_UP = 11;
+  NAMED_DOWN = 12;
+  NAMED_LEFT = 13;
+  NAMED_RIGHT = 14;
+  NAMED_F1 = 15;
+  NAMED_F2 = 16;
+  NAMED_F3 = 17;
+  NAMED_F4 = 18;
+  NAMED_F5 = 19;
+  NAMED_F6 = 20;
+  NAMED_F7 = 21;
+  NAMED_F8 = 22;
+  NAMED_F9 = 23;
+  NAMED_F10 = 24;
+  NAMED_F11 = 25;
+  NAMED_F12 = 26;
+  NAMED_CAPS_LOCK = 27;
+  NAMED_NUM_LOCK = 28;
+  NAMED_SCROLL_LOCK = 29;
+  NAMED_PRINT_SCREEN = 30;
+  NAMED_PAUSE = 31;
+  NAMED_MENU = 32;
+  NAMED_SHIFT_LEFT = 33;
+  NAMED_SHIFT_RIGHT = 34;
+  NAMED_CTRL_LEFT = 35;
+  NAMED_CTRL_RIGHT = 36;
+  NAMED_ALT_LEFT = 37;
+  NAMED_ALT_RIGHT = 38;
+  NAMED_SUPER_LEFT = 39;
+  NAMED_SUPER_RIGHT = 40;
+}
+
+message Mouse {
+  Modifiers modifiers = 1;
+  uint32 column = 2;
+  uint32 row = 3;
+  oneof does {
+    Button press = 4;
+    Button release = 5;
+    Motion motion = 6;
+    Wheel wheel = 7;
+  }
+}
+
+enum Button {
+  BUTTON_UNSPECIFIED = 0;
+  BUTTON_LEFT = 1;
+  BUTTON_MIDDLE = 2;
+  BUTTON_RIGHT = 3;
+}
+
+message Motion {
+  optional Button held = 1;
+}
+
+enum Wheel {
+  WHEEL_UNSPECIFIED = 0;
+  WHEEL_UP = 1;
+  WHEEL_DOWN = 2;
+  WHEEL_LEFT = 3;
+  WHEEL_RIGHT = 4;
+}
+
+message Paste {
+  string text = 1;
+}
+
+message Focus {
+  bool focused = 1;
+}
+
+message Scroll {
+  sint32 back = 1;
+}
+
+message FromViewer {
+  oneof event {
+    Greeting hello = 1;
+    Showing showing = 2;
+    Typed typed = 3;
+  }
+}
+
+message Greeting {
+  Colours colours = 1;
+  TerminalKey runs_in = 2;
+}
+
+message Showing {
+  repeated TerminalKey terminals = 1;
+}
+
+message Typed {
+  TerminalKey terminal = 1;
+  oneof event {
+    Key key = 2;
+    Mouse mouse = 3;
+    Paste paste = 4;
+    Focus focus = 5;
+    Scroll scroll = 6;
+  }
+}
+
+message ToViewer {
+  oneof event {
+    Frame frame = 1;
+    Refused refused = 2;
+  }
+}
+
+message Refused {
+  string reason = 1;
+}
+
+message Frame {
+  TerminalKey terminal = 1;
+  Size size = 2;
+  oneof rows {
+    Whole whole = 3;
+    Changed changed = 4;
+  }
+  Cursor cursor = 5;
+  bool clusters = 6;
+  bool mouse_tracking = 7;
+  uint32 scrolled_back = 8;
+  uint32 scrollback = 9;
+}
+
+message Whole {
+  repeated Line lines = 1;
+}
+
+message Changed {
+  repeated Row rows = 1;
+}
+
+message Row {
+  uint32 index = 1;
+  Line line = 2;
+}
+
+message Line {
+  repeated Glyph glyphs = 1;
+  Ending ending = 2;
+}
+
+enum Ending {
+  ENDING_UNSPECIFIED = 0;
+  ENDING_HERE = 1;
+  ENDING_WRAPS = 2;
+  ENDING_WRAPS_WIDE = 3;
+}
+
+message Glyph {
+  oneof shows {
+    Blank blank = 1;
+    Narrow narrow = 2;
+    Wide wide = 3;
+  }
+  Style style = 4;
+}
+
+message Blank {}
+
+message Narrow {
+  string grapheme = 1;
+}
+
+message Wide {
+  string grapheme = 1;
+}
+
+message Style {
+  Colour foreground = 1;
+  Colour background = 2;
+  Colour underline_colour = 3;
+  bool bold = 4;
+  bool italic = 5;
+  bool faint = 6;
+  bool blink = 7;
+  bool inverse = 8;
+  bool invisible = 9;
+  bool strikethrough = 10;
+  bool overline = 11;
+  Underline underline = 12;
+}
+
+message Colour {
+  oneof is {
+    uint32 palette = 1;
+    Rgb rgb = 2;
+  }
+}
+
+enum Underline {
+  UNDERLINE_UNSPECIFIED = 0;
+  UNDERLINE_NONE = 1;
+  UNDERLINE_SINGLE = 2;
+  UNDERLINE_DOUBLE = 3;
+  UNDERLINE_CURLY = 4;
+  UNDERLINE_DOTTED = 5;
+  UNDERLINE_DASHED = 6;
+}
+
+message Cursor {
+  uint32 row = 1;
+  uint32 column = 2;
+  CursorShape shape = 3;
+  bool blinking = 4;
+}
+
+enum CursorShape {
+  CURSOR_SHAPE_UNSPECIFIED = 0;
+  CURSOR_SHAPE_BLOCK = 1;
+  CURSOR_SHAPE_BAR = 2;
+  CURSOR_SHAPE_UNDERLINE = 3;
+  CURSOR_SHAPE_BLOCK_HOLLOW = 4;
+}

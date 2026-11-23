@@ -1,6 +1,6 @@
-const PROTO: &str = "../../proto/luneta/v1/daemon.proto";
+const PROTO: &str = "../../proto/lune/v1/daemon.proto";
 
-const MUX: &str = "../../proto/luneta/mux/v1/mux.proto";
+const MUX: &str = "../../proto/lune/mux/v1/mux.proto";
 
 fn main() -> std::io::Result<()> {
     println!("cargo:rerun-if-changed={PROTO}");

@@ -2,7 +2,7 @@ use std::ffi::{c_int, c_void};
 use std::mem::{MaybeUninit, size_of};
 use std::ptr;
 
-use luneta_protocol::process::{EXEC_STRINGS_BYTES_MAX, laid_in_procargs};
+use lune_protocol::process::{EXEC_STRINGS_BYTES_MAX, laid_in_procargs};
 
 use super::{CHILDREN_MAX, Group, Process, Terminal};
 

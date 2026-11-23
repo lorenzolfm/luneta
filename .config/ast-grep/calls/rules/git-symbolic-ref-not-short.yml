@@ -4,7 +4,7 @@ files:
   - crates/**
 message: >-
   `git symbolic-ref --short` says heads/x on a branch x beside a tag x: read
-  the whole ref and strip its folder, as lunetad::git::pointed does.
+  the whole ref and strip its folder, as luned::git::pointed does.
 rule:
   any:
     - regex: symbolic-ref.*--short|--short.*symbolic-ref

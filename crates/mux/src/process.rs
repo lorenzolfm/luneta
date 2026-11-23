@@ -73,7 +73,7 @@ mod tests {
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
 
-    use luneta_waits::{eventually, eventually_showing};
+    use lune_waits::{eventually, eventually_showing};
 
     use super::*;
 

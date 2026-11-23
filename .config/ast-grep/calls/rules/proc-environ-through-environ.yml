@@ -3,12 +3,12 @@ language: rust
 files:
   - crates/**
 ignores:
-  - crates/lunetad/src/process/linux.rs
+  - crates/luned/src/process/linux.rs
 message: >-
-  Read a process's environment through lunetad::process::environ or
+  Read a process's environment through luned::process::environ or
   process::mine: they bound /proc/<pid>/environ by
-  luneta_protocol::process::EXEC_STRINGS_BYTES_MAX, split it with
-  luneta_protocol::process::entries, and tell a process that ended from one
+  lune_protocol::process::EXEC_STRINGS_BYTES_MAX, split it with
+  lune_protocol::process::entries, and tell a process that ended from one
   that did not read.
 rule:
   any:

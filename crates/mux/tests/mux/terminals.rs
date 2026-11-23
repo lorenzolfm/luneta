@@ -1,5 +1,5 @@
-use luneta_mux::api;
-use luneta_waits::Patience;
+use lune_mux::api;
+use lune_waits::Patience;
 use tonic::Code;
 
 use crate::host::{
@@ -187,8 +187,8 @@ fn a_terminal_s_program_sees_the_terminal_s_ids_and_not_zellij_s() {
     run(async {
         let server = Server::start().await;
         let mut mux = server.client().await;
-        let says = "echo \"$LUNETA_MUX_TERMINAL ${ZELLIJ_SESSION_NAME-none}\"; \
-            echo \"$LUNETA_MUX_TERMINAL_MADE\"; read x";
+        let says = "echo \"$LUNE_MUX_TERMINAL ${ZELLIJ_SESSION_NAME-none}\"; \
+            echo \"$LUNE_MUX_TERMINAL_MADE\"; read x";
         let key = new_terminal(&mut mux, script(says, api::Ends::Holds), b"t", size(40, 4)).await;
         let mut viewer = Viewer::new(&mut mux).await;
         viewer.show(&[key]).await;
