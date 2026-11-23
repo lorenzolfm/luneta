@@ -1,13 +1,13 @@
 [package]
-name = "luneta-mux"
+name = "lune-mux"
 version.workspace = true
 edition = "2024"
 license.workspace = true
 publish = false
-description = "luneta's own multiplexer: a server that holds the pseudoterminals of its sessions and reads each terminal's program as Ghostty does"
+description = "lune's own multiplexer: a server that holds the pseudoterminals of its sessions and reads each terminal's program as Ghostty does"
 
 [dependencies]
-luneta-protocol = { path = "../protocol" }
+lune-protocol = { path = "../protocol" }
 percent-encoding = "2.3.2"
 prost = "0.14.4"
 prost-types = "0.14.4"
@@ -37,7 +37,7 @@ sysinfo = { version = "0.36.1", default-features = false, features = ["system"] 
 
 [dev-dependencies]
 hyper-util = { version = "0.1.21", features = ["tokio"] }
-luneta-waits = { path = "../waits" }
+lune-waits = { path = "../waits" }
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
 

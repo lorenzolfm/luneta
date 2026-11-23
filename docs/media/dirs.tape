@@ -9,7 +9,7 @@ Set Padding 20
 Set Framerate 24
 
 Hide
-Type "luneta luneta" Enter
+Type "lune lune" Enter
 Sleep 3s
 Show
 

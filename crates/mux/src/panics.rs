@@ -27,7 +27,7 @@ pub fn abort_on_panic() {
         match CONTAINMENT.get() {
             Containment::Contained => {},
             Containment::Unset | Containment::Uncontained => {
-                eprintln!("luneta-mux: a thread panicked, so it aborts");
+                eprintln!("lune-mux: a thread panicked, so it aborts");
                 process::abort();
             },
         }
@@ -115,7 +115,7 @@ mod tests {
     use super::{abort_on_panic, contained, uncontained};
     use crate::mux;
 
-    const PANICS: &str = "LUNETA_MUX_TEST_PANICS";
+    const PANICS: &str = "LUNE_MUX_TEST_PANICS";
 
     #[derive(Clone, Copy)]
     enum Way {

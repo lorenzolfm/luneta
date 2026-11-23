@@ -6,7 +6,7 @@ in
 {
   inherit name;
   usage = "[--mux]";
-  help = "take dev install's build out of ~/.cargo/bin and end the lunetad that runs; --mux luneta-mux too, saying it all in ~/.cargo/luneta-dev.log too when that ends this terminal";
+  help = "take dev install's build out of ~/.cargo/bin and end the luned that runs; --mux lune-mux too, saying it all in ~/.cargo/lune-dev.log too when that ends this terminal";
   inherit (installed) tools;
   inheritPath = true;
   text = ''
@@ -30,18 +30,18 @@ in
     done
     echo "dev uninstall: took ''${removed[*]:-nothing} out of $bin" >&2
 
-    luneta="$builds/current/luneta"
-    if [ -f "$luneta" ]; then
-      rm -f "$builds/current/lunetad" "$builds/current/luneta-mux"
-      info "$luneta"
+    lune="$builds/current/lune"
+    if [ -f "$lune" ]; then
+      rm -f "$builds/current/luned" "$builds/current/lune-mux"
+      info "$lune"
       case "$ran" in
         0)
-          echo "dev uninstall: ending lunetad $build (pid $pid), so the next luneta starts its own" >&2
+          echo "dev uninstall: ending luned $build (pid $pid), so the next lune starts its own" >&2
           end_daemon "$pid"
           ;;
         5) ;;
         *)
-          end_holder "so the next luneta starts its own"
+          end_holder "so the next lune starts its own"
           ;;
       esac
     fi
@@ -50,7 +50,7 @@ in
     if [ -n "$mux" ]; then
       end_mux
     fi
-    luneta="$(PATH="$DEV_PATH" type -P luneta || true)"
-    echo "dev uninstall: your PATH finds ''${luneta:-no luneta}" >&2
+    lune="$(PATH="$DEV_PATH" type -P lune || true)"
+    echo "dev uninstall: your PATH finds ''${lune:-no lune}" >&2
   '';
 }

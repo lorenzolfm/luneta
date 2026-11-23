@@ -3,7 +3,7 @@ language: rust
 files:
   - crates/*/src/**
 message: >-
-  Count a work tree's changes through lunetad::git::changed: porcelain `git
+  Count a work tree's changes through luned::git::changed: porcelain `git
   diff` takes index.lock and rewrites the index, even with
   --no-optional-locks, where `git diff-index` writes nothing. diff-index reads
   no diff.* settings, so pass -M yourself, and set GIT_NO_LAZY_FETCH=1 so a

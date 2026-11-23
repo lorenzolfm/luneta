@@ -1,6 +1,6 @@
-use luneta_mux::api;
-use luneta_mux::api::mux_client::MuxClient;
-use luneta_mux::api::ran::Is;
+use lune_mux::api;
+use lune_mux::api::mux_client::MuxClient;
+use lune_mux::api::ran::Is;
 use tonic::transport::Channel;
 
 use crate::host::{Server, Viewer, new_terminal, run, script, size, watched_until};

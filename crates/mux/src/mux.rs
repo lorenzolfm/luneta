@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use luneta_protocol::socket::Unreached;
+use lune_protocol::socket::Unreached;
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
 

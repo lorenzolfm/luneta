@@ -3,9 +3,9 @@ language: rust
 files:
   - crates/*/src/**
 ignores:
-  - crates/lunetad/src/git.rs
+  - crates/luned/src/git.rs
 message: >-
-  Read a symbolic ref through lunetad::git::pointed, or a worktree's branch
+  Read a symbolic ref through luned::git::pointed, or a worktree's branch
   through git::branch: they strip the ref's folder from its whole name, where
   `symbolic-ref --short` would say heads/x on a branch x beside a tag x.
 rule:

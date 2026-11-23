@@ -30,13 +30,13 @@ snapshots:
       style: secondary
       start: 9
       end: 44
-  fn f() { while waiting { let line = luneta_waits::heard("a", &rx); } }:
+  fn f() { while waiting { let line = lune_waits::heard("a", &rx); } }:
     labels:
-    - source: luneta_waits::heard("a", &rx)
+    - source: lune_waits::heard("a", &rx)
       style: primary
       start: 36
-      end: 65
-    - source: while waiting { let line = luneta_waits::heard("a", &rx); }
+      end: 63
+    - source: while waiting { let line = lune_waits::heard("a", &rx); }
       style: secondary
       start: 9
-      end: 68
+      end: 66

@@ -1,0 +1,99 @@
+id: cargo-nextest-through-lune-nextest
+snapshots:
+  ? |-
+    { a = ''
+      "$CARGO" nextest run>tests.log
+    ''; }
+  : labels:
+    - source: |-
+        ''
+          "$CARGO" nextest run>tests.log
+        ''
+      style: primary
+      start: 6
+      end: 44
+  ? |-
+    { a = ''
+      ${jq} -r . <x
+      cargo nextest \
+        run --profile ci
+    ''; }
+  : labels:
+    - source: |-
+        ''
+          ${jq} -r . <x
+          cargo nextest \
+            run --profile ci
+        ''
+      style: primary
+      start: 6
+      end: 66
+  ? |-
+    { a = ''
+      ${lib.getExe pkgs.cargo-nextest} nextest run
+    ''; }
+  : labels:
+    - source: |-
+        ''
+          ${lib.getExe pkgs.cargo-nextest} nextest run
+        ''
+      style: primary
+      start: 6
+      end: 58
+  ? |-
+    { a = ''
+      ${pkgs.cargo}/bin/cargo nextest r
+    ''; }
+  : labels:
+    - source: |-
+        ''
+          ${pkgs.cargo}/bin/cargo nextest r
+        ''
+      style: primary
+      start: 6
+      end: 47
+  ? |-
+    { a = ''
+      cargo +nightly --locked nextest --color never run -p x
+    ''; }
+  : labels:
+    - source: |-
+        ''
+          cargo +nightly --locked nextest --color never run -p x
+        ''
+      style: primary
+      start: 6
+      end: 68
+  ? |-
+    { a = ''
+      cargo nextest run --locked ${testRun}
+    ''; }
+  : labels:
+    - source: |-
+        ''
+          cargo nextest run --locked ${testRun}
+        ''
+      style: primary
+      start: 6
+      end: 51
+  ? |-
+    { a = ''
+      echo ${if x then "cargo nextest run" else ""}
+    ''; }
+  : labels:
+    - source: '"cargo nextest run"'
+      style: primary
+      start: 28
+      end: 47
+  '{ checkPhaseCargoCommand = "cargo nextest run --locked"; }':
+    labels:
+    - source: '"cargo nextest run --locked"'
+      style: primary
+      start: 27
+      end: 55
+  '{ checks.tests = craneLib.cargoNextest daemon; }':
+    labels:
+    - source: cargoNextest
+      style: primary
+      start: 26
+      end: 38

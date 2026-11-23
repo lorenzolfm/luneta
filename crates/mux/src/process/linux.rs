@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io::Read as _;
 
-use luneta_protocol::process::arguments;
+use lune_protocol::process::arguments;
 
 use super::{ARGV_BYTES_MAX, CHILDREN_MAX, Group, Process, Terminal};
 

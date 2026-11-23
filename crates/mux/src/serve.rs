@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use luneta_protocol::release;
-use luneta_protocol::socket::{Bound, Found};
+use lune_protocol::release;
+use lune_protocol::socket::{Bound, Found};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::{oneshot, watch};
@@ -169,14 +169,14 @@ async fn listen_to_viewer(
             let reason = refusal.message().to_owned();
             let refused = api::to_viewer::Event::Refused(api::Refused { reason });
             if out.send(Ok(api::ToViewer { event: Some(refused) })).await.is_err() {
-                eprintln!("luneta-mux: viewer {client} went before it heard it was refused");
+                eprintln!("lune-mux: viewer {client} went before it heard it was refused");
             }
         }
     };
     if let Some(refusal) = ending
         && let Err(TrySendError::Full(_)) = out.try_send(Err(refusal))
     {
-        eprintln!("luneta-mux: viewer {client} had no room for its ending refusal");
+        eprintln!("lune-mux: viewer {client} had no room for its ending refusal");
     }
     mux.unview(client);
 }
@@ -228,7 +228,7 @@ async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
             Err(error) => {
                 if !error_said {
                     let socket = bound.socket().display();
-                    eprintln!("luneta-mux: {socket} is not looked at, so it runs on: {error}");
+                    eprintln!("lune-mux: {socket} is not looked at, so it runs on: {error}");
                 }
                 error_said = true;
                 continue;
@@ -240,7 +240,7 @@ async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
                 1 => "it closed its 1 terminal".to_owned(),
                 closed => format!("it closed its {closed} terminals"),
             };
-            eprintln!("luneta-mux: {unreached}: {closed} and ends");
+            eprintln!("lune-mux: {unreached}: {closed} and ends");
         }
         assert!(matches!(*watched.borrow(), Listed::Ended(_)), "the listing ends with the server");
         return;
@@ -249,14 +249,14 @@ async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
 
 pub async fn serve(claim: Claim) -> io::Result<()> {
     if let Err(error) = pty::raise_files_limit() {
-        eprintln!("luneta-mux: the limit of open files stays as it was: {error}");
+        eprintln!("lune-mux: the limit of open files stays as it was: {error}");
     }
     let (listener, bound) = claim.bind()?;
     listener.set_nonblocking(true)?;
     let listener = UnixListener::from_std(listener)?;
     let mux = Mux::new();
     let mut watched = mux.watched();
-    eprintln!("luneta-mux: listening on {}", bound.socket().display());
+    eprintln!("lune-mux: listening on {}", bound.socket().display());
     let (begun, mut beginning) = watch::channel(false);
     let unused = Arc::clone(&mux);
     tokio::spawn(async move {
@@ -271,7 +271,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
             }
         }
         if let Err(error) = bound.unbind() {
-            eprintln!("luneta-mux: {}: {error}", bound.socket().display());
+            eprintln!("lune-mux: {}: {error}", bound.socket().display());
         }
         let _ = begun.send(true);
     };
@@ -290,7 +290,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
         Ok(Ok(served)) => served.map_err(io::Error::other),
         Ok(Err(error)) => Err(io::Error::other(error)),
         Err(_) => {
-            eprintln!("luneta-mux: clients still connected after {}s are left", DRAIN.as_secs());
+            eprintln!("lune-mux: clients still connected after {}s are left", DRAIN.as_secs());
             Ok(())
         },
     }

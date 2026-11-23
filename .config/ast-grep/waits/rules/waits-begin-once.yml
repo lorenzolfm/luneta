@@ -7,7 +7,7 @@ message: >-
   for each message lets a chatty process hold the test forever.
 rule:
   kind: call_expression
-  regex: ^(luneta_waits::)?(Patience::begun|heard|awaited)\(
+  regex: ^(lune_waits::)?(Patience::begun|heard|awaited)\(
   inside:
     stopBy: end
     any:

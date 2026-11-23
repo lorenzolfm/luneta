@@ -35,7 +35,7 @@ jobs:
             base="$BEFORE"
           fi
           files="$(git diff --no-renames --name-only "$base" HEAD)"
-          docs="$(grep -xE '.*\.md' <<<"$files" | grep -vxF skills/luneta/SKILL.md || true)"
+          docs="$(grep -xE '.*\.md' <<<"$files" | grep -vxF skills/lune/SKILL.md || true)"
           changed=true
           if [[ -n $files && $docs == "$files" ]]; then
             changed=false
@@ -163,11 +163,11 @@ jobs:
 
       - *tailscale
 
-      - name: The runners whose tested lunetad attic doesn't hold
+      - name: The runners whose tested luned attic doesn't hold
         id: tested
         if: steps.tailscale.outcome == 'success'
         run: |
-          checks="$(nix eval --json .#checks --apply 'builtins.mapAttrs (_: checks: checks.lunetad.outPath)')"
+          checks="$(nix eval --json .#checks --apply 'builtins.mapAttrs (_: checks: checks.luned.outPath)')"
           untested=()
           for pair in x86_64-linux=ubuntu-latest aarch64-linux=ubuntu-24.04-arm aarch64-darwin=macos-latest; do
             system="${pair%%=*}"
@@ -227,7 +227,7 @@ jobs:
         if: runner.os == 'macOS'
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml', 'deny.toml', '.github/workflows/ci.yml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/lune/SKILL.md', 'clippy.toml', '.config/nextest.toml', 'deny.toml', '.github/workflows/ci.yml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
@@ -245,6 +245,6 @@ jobs:
           | xargs -r nix build --out-link "$RUNNER_TEMP/inputs"
 
       - name: Build and test the daemon
-        run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).lunetad"
+        run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).luned"
 
       - *attic-push

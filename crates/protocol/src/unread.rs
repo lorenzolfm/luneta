@@ -8,7 +8,7 @@ pub struct Unread(pub NonZeroU32);
 
 impl fmt::Display for Unread {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "lunetad cannot read {} of Claude Code's session files", self.0)
+        write!(f, "luned cannot read {} of Claude Code's session files", self.0)
     }
 }
 
@@ -65,13 +65,13 @@ mod tests {
     #[test]
     fn it_says_how_many_files_it_cannot_read_and_place() {
         let one = NonZeroU32::new(1).unwrap();
-        let said = "lunetad cannot read 1 of Claude Code's session files";
+        let said = "luned cannot read 1 of Claude Code's session files";
         assert_eq!(Unread(one).to_string(), said);
         assert_eq!(unplaced(1, 1).to_string(), format!("{said}, nor tell where its agent runs"));
-        let two = "lunetad cannot read 2 of Claude Code's session files, nor tell where";
+        let two = "luned cannot read 2 of Claude Code's session files, nor tell where";
         assert_eq!(unplaced(2, 2).to_string(), format!("{two} their agents run"));
         assert_eq!(unplaced(2, 1).to_string(), format!("{two} 1 of their agents runs"));
-        let three = "lunetad cannot read 3 of Claude Code's session files, nor tell where";
+        let three = "luned cannot read 3 of Claude Code's session files, nor tell where";
         assert_eq!(unplaced(3, 2).to_string(), format!("{three} 2 of their agents run"));
     }
 }

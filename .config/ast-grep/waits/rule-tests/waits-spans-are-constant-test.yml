@@ -5,4 +5,4 @@ valid:
   - "fn f() { apart(const { Gap::of(SETTLE) }); }"
 invalid:
   - "fn f() { through(Span::of(span), \"a\", g); }"
-  - "fn f() { apart(luneta_waits::Gap::of(SETTLE)); }"
+  - "fn f() { apart(lune_waits::Gap::of(SETTLE)); }"

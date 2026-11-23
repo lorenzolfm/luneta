@@ -77,7 +77,7 @@ let
   configDir = dirOf config;
 in
 pkgs.writeShellApplication {
-  name = "luneta-comments";
+  name = "lune-comments";
   runtimeInputs = [
     pkgs.ast-grep
     pkgs.coreutils
@@ -87,7 +87,7 @@ pkgs.writeShellApplication {
   text = ''
     case "$PWD/" in
       ${configDir}/*)
-        echo "luneta-comments: the ast-grep config's folder ${configDir} holds $PWD, so its rules' files: and ignores: globs would see paths under that folder, not paths from $PWD" >&2
+        echo "lune-comments: the ast-grep config's folder ${configDir} holds $PWD, so its rules' files: and ignores: globs would see paths under that folder, not paths from $PWD" >&2
         exit 1
         ;;
     esac
@@ -103,7 +103,7 @@ pkgs.writeShellApplication {
       esac
     done
     if (( ''${#found[@]} == 0 )); then
-      echo "luneta-comments: no file to scan was listed on stdin" >&2
+      echo "lune-comments: no file to scan was listed on stdin" >&2
       exit 1
     fi
     ast-grep test --config ${config} || status=1
@@ -123,18 +123,18 @@ pkgs.writeShellApplication {
     for path in "''${found[@]}"; do
       case $path in
         *.sh | *.bash)
-          echo "luneta-comments: $path is a shell script file; it lives inline in a nix file, as writeShellApplication's text, so nix is the only way to run it" >&2
+          echo "lune-comments: $path is a shell script file; it lives inline in a nix file, as writeShellApplication's text, so nix is the only way to run it" >&2
           status=1
           continue
           ;;
       esac
       if [[ -z ''${ruled[$path]-} ]]; then
-        echo "luneta-comments: no rule says what a comment is in $path" >&2
+        echo "lune-comments: no rule says what a comment is in $path" >&2
         status=1
       fi
     done
     if grep -lF -- ${lib.escapeShellArg suppression} "''${found[@]}" >&2; then
-      echo "luneta-comments: the files above turn a rule off with ${suppression}" >&2
+      echo "lune-comments: the files above turn a rule off with ${suppression}" >&2
       status=1
     elif (( $? != 1 )); then
       status=1

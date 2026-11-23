@@ -3,9 +3,9 @@ language: rust
 files:
   - crates/*/tests/**
 message: >-
-  A test waits on an event, never on the clock: wait through luneta_waits,
+  A test waits on an event, never on the clock: wait through lune_waits,
   whose one patience no loaded machine runs out of, and time a span with
-  luneta_waits::Began.
+  lune_waits::Began.
 rule:
   any:
     - kind: scoped_identifier

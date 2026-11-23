@@ -7,8 +7,8 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 
 use hyper_util::rt::TokioIo;
-use luneta_mux::api::{self, mux_client::MuxClient};
-use luneta_waits::Patience;
+use lune_mux::api::{self, mux_client::MuxClient};
+use lune_waits::Patience;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -17,7 +17,7 @@ use tonic::Streaming;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
-pub const LUNETA_MUX: &str = env!("CARGO_BIN_EXE_luneta-mux");
+pub const LUNE_MUX: &str = env!("CARGO_BIN_EXE_lune-mux");
 
 pub fn run<F: Future<Output = ()>>(test: F) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -31,12 +31,12 @@ pub struct Server {
 
 impl Server {
     pub async fn start() -> Server {
-        Server::started(Command::new(LUNETA_MUX)).await
+        Server::started(Command::new(LUNE_MUX)).await
     }
 
     pub async fn start_with_files(files: u32) -> Server {
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "ulimit -Sn \"$1\" && exec \"$0\" \"$2\"", LUNETA_MUX]);
+        command.args(["-c", "ulimit -Sn \"$1\" && exec \"$0\" \"$2\"", LUNE_MUX]);
         command.arg(files.to_string());
         Server::started(command).await
     }
@@ -44,12 +44,12 @@ impl Server {
     async fn started(mut command: Command) -> Server {
         let runtime = tempfile::tempdir().unwrap();
         command
-            .arg(runtime.path().join("luneta"))
+            .arg(runtime.path().join("lune"))
             .env("ZELLIJ", "0")
             .env("ZELLIJ_SESSION_NAME", "theirs")
             .env("ZELLIJ_PANE_ID", "7")
-            .env_remove("LUNETA_MUX_TERMINAL")
-            .env_remove("LUNETA_MUX_TERMINAL_MADE")
+            .env_remove("LUNE_MUX_TERMINAL")
+            .env_remove("LUNE_MUX_TERMINAL_MADE")
             .stdin(Stdio::null())
             .stderr(Stdio::piped());
         let mut child = command.spawn().unwrap();
@@ -63,10 +63,10 @@ impl Server {
             }
         });
         let listens = |line: Option<String>| {
-            let line = line.expect("luneta-mux says it listens before its stderr closes");
-            line.starts_with("luneta-mux: listening on ").then_some(())
+            let line = line.expect("lune-mux says it listens before its stderr closes");
+            line.starts_with("lune-mux: listening on ").then_some(())
         };
-        let what = "luneta-mux says it listens";
+        let what = "lune-mux says it listens";
         Patience::begun().awaited_first(what, async || heard.recv().await, listens).await;
         Server { child, runtime }
     }
@@ -91,12 +91,12 @@ impl Server {
     }
 
     pub fn socket(&self) -> PathBuf {
-        self.runtime.path().join("luneta/mux.sock")
+        self.runtime.path().join("lune/mux.sock")
     }
 
     pub async fn client(&self) -> MuxClient<Channel> {
         let socket = self.socket();
-        let channel = Endpoint::from_static("http://luneta-mux")
+        let channel = Endpoint::from_static("http://lune-mux")
             .connect_with_connector(service_fn(move |_: Uri| {
                 let socket = socket.clone();
                 async move { UnixStream::connect(socket).await.map(TokioIo::new) }
@@ -107,7 +107,7 @@ impl Server {
     }
 
     pub async fn ended(&mut self) -> ExitStatus {
-        luneta_waits::ended_async("luneta-mux ends", &mut self.child).await
+        lune_waits::ended_async("lune-mux ends", &mut self.child).await
     }
 }
 

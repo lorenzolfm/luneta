@@ -25,7 +25,7 @@ pub use input::{Click, Wheel};
 use crate::asked::Size;
 use crate::marks::{Mark, Marks};
 
-const NAME: &str = concat!("luneta-mux ", env!("CARGO_PKG_VERSION"));
+const NAME: &str = concat!("lune-mux ", env!("CARGO_PKG_VERSION"));
 
 const ATTRIBUTES: DeviceAttributes = DeviceAttributes {
     primary: PrimaryDeviceAttributes::new(

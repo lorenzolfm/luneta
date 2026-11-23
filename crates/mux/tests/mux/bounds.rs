@@ -1,5 +1,5 @@
-use luneta_mux::api;
-use luneta_waits::{Span, QUIET};
+use lune_mux::api;
+use lune_waits::{Span, QUIET};
 
 use crate::host::{Server, Viewer, new_terminal, run, script, size, watched_until};
 
@@ -13,7 +13,7 @@ fn answers_a_program_never_reads_are_held_to_a_bound() {
         new_terminal(&mut mux, script(asks, api::Ends::Holds), b"asks", size(80, 24)).await;
         let before = server.resident_kib();
         let quiet = const { Span::of(QUIET.saturating_mul(4)) };
-        luneta_waits::through_async(quiet, "the server grows by 64 MiB or more, in KiB", || {
+        lune_waits::through_async(quiet, "the server grows by 64 MiB or more, in KiB", || {
             Some(server.resident_kib().saturating_sub(before)).filter(|grown| *grown >= 64 * 1024)
         })
         .await;

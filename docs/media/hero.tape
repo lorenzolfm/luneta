@@ -11,7 +11,7 @@ Set Framerate 24
 Hide
 Type "zellij -s dotfiles --detached" Enter
 Type "zellij -s despesas --detached" Enter
-Type "luneta luneta" Enter
+Type "lune lune" Enter
 Sleep 3s
 Show
 

@@ -1,5 +1,5 @@
 {
-  description = "luneta — zellij beside a sidebar of its sessions and agents, and its daemon";
+  description = "lune — zellij beside a sidebar of its sessions and agents, and its daemon";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -63,7 +63,7 @@
             ./.cargo/config.toml
             ./crates
             ./proto
-            ./skills/luneta/SKILL.md
+            ./skills/lune/SKILL.md
             ./Cargo.toml
             ./Cargo.lock
           ];
@@ -153,16 +153,16 @@
             export LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libiconv ]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
           '';
 
-          testRun = "-p lunetad -p luneta-protocol -p luneta-mux";
+          testRun = "-p luned -p lune-protocol -p lune-mux";
 
           nextest = import ./nix/nextest.nix { inherit pkgs testRun; };
 
           daemon = {
-            pname = "lunetad";
+            pname = "luned";
             inherit version src;
             strictDeps = true;
 
-            cargoExtraArgs = "--locked -p lunetad -p luneta-mux";
+            cargoExtraArgs = "--locked -p luned -p lune-mux";
 
             nativeBuildInputs = [ pkgs.protobuf ] ++ speechBuild;
             buildInputs = speechLibs ++ [ libghosttyVt.dev ];
@@ -179,7 +179,7 @@
 
           daemonDeps = craneLib.buildDepsOnly daemon;
 
-          lunetadWith =
+          lunedWith =
             built:
             craneLib.buildPackage (
               daemon
@@ -196,22 +196,22 @@
                 '';
 
                 meta = {
-                  description = "The luneta daemon, its CLI, and luneta's own multiplexer";
-                  homepage = "https://github.com/lorenzolfm/luneta";
+                  description = "The lune daemon, its CLI, and lune's own multiplexer";
+                  homepage = "https://github.com/lorenzolfm/lune";
                   license = pkgs.lib.licenses.mit;
-                  mainProgram = "lunetad";
+                  mainProgram = "luned";
                   platforms = systems;
                 };
               }
               // built
             );
 
-          lunetad = lunetadWith (
+          luned = lunedWith (
             {
               doCheck = false;
             }
             // pkgs.lib.optionalAttrs (self ? rev) {
-              LUNETA_BUILT = toString self.lastModified;
+              LUNE_BUILT = toString self.lastModified;
             }
           );
 
@@ -261,25 +261,25 @@
 
           nixLint =
             tool: args:
-            pkgs.runCommand "luneta-${tool.pname}" { } ''
+            pkgs.runCommand "lune-${tool.pname}" { } ''
               cd ${nixFiles}
               ${pkgs.lib.getExe tool} ${args}
               touch "$out"
             '';
         in
         {
-          inherit dev lunetad;
+          inherit dev luned;
 
           checks = {
             inherit clippy deny;
-            lunetad = lunetadWith { LUNETA_BUILT = "1"; };
+            luned = lunedWith { LUNE_BUILT = "1"; };
             statix = nixLint pkgs.statix "check .";
             deadnix = nixLint pkgs.deadnix "--hidden --fail .";
             comments =
               let
                 comments = import ./nix/comments.nix { inherit pkgs; };
               in
-              pkgs.runCommand "luneta-comments" { } ''
+              pkgs.runCommand "lune-comments" { } ''
                 cd ${./.}
                 find . -type f -print0 | ${pkgs.lib.getExe comments}
                 touch "$out"
@@ -295,10 +295,10 @@
             ];
             buildInputs = speechLibs ++ [ libghosttyVt.dev ];
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
-            LUNETA_TEST_RUN = testRun;
+            LUNE_TEST_RUN = testRun;
 
             shellHook = ''
-              echo "luneta — rust $(rustc --version | cut -d' ' -f2); run 'dev help' for the command set"
+              echo "lune — rust $(rustc --version | cut -d' ' -f2); run 'dev help' for the command set"
             '';
           };
         };
@@ -309,8 +309,8 @@
       devShells = nixpkgs.lib.mapAttrs (_: built: { default = built.shell; }) bySystem;
 
       packages = nixpkgs.lib.mapAttrs (_: built: {
-        inherit (built) dev lunetad;
-        default = built.lunetad;
+        inherit (built) dev luned;
+        default = built.luned;
       }) bySystem;
 
       checks = nixpkgs.lib.mapAttrs (_: built: built.checks) bySystem;

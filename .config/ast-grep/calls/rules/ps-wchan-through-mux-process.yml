@@ -5,7 +5,7 @@ files:
 ignores:
   - crates/mux/src/process/linux.rs
 message: >-
-  Read a process's wait channel through luneta-mux's process::process, as
+  Read a process's wait channel through lune-mux's process::process, as
   Process::sleeps from /proc/<pid>/wchan: ps cuts `-o wchan` to 6 characters
   (wait_woken reads wait_w) unless it is the last column.
 rule:

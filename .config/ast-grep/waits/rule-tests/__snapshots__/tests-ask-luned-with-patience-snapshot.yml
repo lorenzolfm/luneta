@@ -1,0 +1,118 @@
+id: tests-ask-luned-with-patience
+snapshots:
+  async fn f() { let daemon = luned::connect(&folder, Answer::of(QUIET)).await; }:
+    labels:
+    - source: luned::connect(&folder, Answer::of(QUIET))
+      style: primary
+      start: 28
+      end: 70
+    - source: luned::connect
+      style: secondary
+      start: 28
+      end: 42
+  async fn f() { let daemon = luned::connect(&folder, PATIENCE / 2).await; }:
+    labels:
+    - source: luned::connect(&folder, PATIENCE / 2)
+      style: primary
+      start: 28
+      end: 65
+    - source: luned::connect
+      style: secondary
+      start: 28
+      end: 42
+  async fn f() { let daemon = luned::connect(&folder, PATIENCE).await; }:
+    labels:
+    - source: luned::connect(&folder, PATIENCE)
+      style: primary
+      start: 28
+      end: 61
+    - source: luned::connect
+      style: secondary
+      start: 28
+      end: 42
+  async fn f() { let daemon = luned::connect(&folder, PATIENT_ROUND_TRIP).await; }:
+    labels:
+    - source: luned::connect(&folder, PATIENT_ROUND_TRIP)
+      style: primary
+      start: 28
+      end: 71
+    - source: luned::connect
+      style: secondary
+      start: 28
+      end: 42
+  async fn f() { let daemon = luned::connect(&folder, QUIET).await; }:
+    labels:
+    - source: luned::connect(&folder, QUIET)
+      style: primary
+      start: 28
+      end: 58
+    - source: luned::connect
+      style: secondary
+      start: 28
+      end: 42
+  async fn f() { let daemon = luned::connect(&folder, luned::ANSWER).await; }:
+    labels:
+    - source: luned::connect(&folder, luned::ANSWER)
+      style: primary
+      start: 28
+      end: 66
+    - source: luned::connect
+      style: secondary
+      start: 28
+      end: 42
+  async fn f() { let daemon = luned::through(bridge(&host), RoundTrip::of(PATIENCE / 2)).await; }:
+    labels:
+    - source: luned::through(bridge(&host), RoundTrip::of(PATIENCE / 2))
+      style: primary
+      start: 28
+      end: 86
+    - source: luned::through
+      style: secondary
+      start: 28
+      end: 42
+  async fn f() { let daemon = luned::through(bridge(&host), RoundTrip::of(PATIENCE)).await; }:
+    labels:
+    - source: luned::through(bridge(&host), RoundTrip::of(PATIENCE))
+      style: primary
+      start: 28
+      end: 82
+    - source: luned::through
+      style: secondary
+      start: 28
+      end: 42
+  async fn f() { let daemon = luned::through(bridge(&host), round_trip).await; }:
+    labels:
+    - source: luned::through(bridge(&host), round_trip)
+      style: primary
+      start: 28
+      end: 69
+    - source: luned::through
+      style: secondary
+      start: 28
+      end: 42
+  async fn f() { let daemon = luned::through(stalls, RoundTrip::of(QUIET)).await; }:
+    labels:
+    - source: luned::through(stalls, RoundTrip::of(QUIET))
+      style: primary
+      start: 28
+      end: 72
+    - source: luned::through
+      style: secondary
+      start: 28
+      end: 42
+  fn ends_it_past_its_round_trip() { runtime().block_on(async { luned::through(stalls, RoundTrip::of(QUIET)).await }); }:
+    labels:
+    - source: luned::through(stalls, RoundTrip::of(QUIET))
+      style: primary
+      start: 62
+      end: 106
+    - source: luned::through
+      style: secondary
+      start: 62
+      end: 76
+  fn f() { let deadline = luned::ANSWER; }:
+    labels:
+    - source: luned::ANSWER
+      style: primary
+      start: 24
+      end: 37

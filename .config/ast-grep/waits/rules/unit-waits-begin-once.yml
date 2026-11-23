@@ -8,7 +8,7 @@ message: >-
 rule:
   all:
     - kind: call_expression
-      regex: ^(luneta_waits::)?(Patience::begun|heard|awaited)\(
+      regex: ^(lune_waits::)?(Patience::begun|heard|awaited)\(
       inside:
         stopBy: end
         any:

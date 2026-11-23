@@ -6,9 +6,9 @@ snapshots:
       style: primary
       start: 40
       end: 59
-  '#[cfg(test)] mod tests { fn f() { seen_within(luneta_waits::Span::of(QUIET), || None::<()>); } }':
+  '#[cfg(test)] mod tests { fn f() { seen_within(lune_waits::Span::of(QUIET), || None::<()>); } }':
     labels:
-    - source: luneta_waits::Span::of(QUIET)
+    - source: lune_waits::Span::of(QUIET)
       style: primary
       start: 46
-      end: 75
+      end: 73

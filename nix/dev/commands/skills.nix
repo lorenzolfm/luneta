@@ -19,7 +19,7 @@
   text = ''
     ${compileEnv}
     dir="$(cd "''${1:-$DEV_HERE}" && pwd -P)"
-    LUNETA_SKILLS_DIR="$dir" cargo test --locked -p lunetad --lib \
+    LUNE_SKILLS_DIR="$dir" cargo test --locked -p luned --lib \
       skills::tests::the_finder_finds_what_claude_code_runs -- --ignored --exact
   '';
 }

@@ -16,9 +16,9 @@ use rustix::termios::{self, InputModes, LocalModes, OptionalActions, Winsize};
 use crate::asked::{Opens, Size};
 use crate::process::Group;
 
-pub const TERMINAL_VAR: &str = "LUNETA_MUX_TERMINAL";
+pub const TERMINAL_VAR: &str = "LUNE_MUX_TERMINAL";
 
-pub const TERMINAL_MADE_VAR: &str = "LUNETA_MUX_TERMINAL_MADE";
+pub const TERMINAL_MADE_VAR: &str = "LUNE_MUX_TERMINAL_MADE";
 
 const OWN_VARS: [&str; 2] = [TERMINAL_VAR, TERMINAL_MADE_VAR];
 

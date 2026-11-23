@@ -1,0 +1,29 @@
+id: tests-ask-luned-with-patience
+language: rust
+files:
+  - crates/*/tests/**
+message: >-
+  A test's call to luned waits for its answer as long as a wait for an
+  event: connect with the tests' PATIENT, or go through a bridge with their
+  PATIENT_ROUND_TRIP, since luned's own deadline runs out on a loaded
+  machine.
+rule:
+  any:
+    - kind: call_expression
+      has:
+        field: function
+        regex: ^luned::connect$
+      not:
+        has:
+          field: arguments
+          regex: ^\(.*,\s*(crate::host::)?PATIENT\s*\)$
+    - kind: call_expression
+      has:
+        field: function
+        regex: ^luned::through$
+      not:
+        has:
+          field: arguments
+          regex: ^\(.*,\s*(crate::host::)?PATIENT_ROUND_TRIP\s*\)$
+    - kind: scoped_identifier
+      regex: ^luned::ANSWER$

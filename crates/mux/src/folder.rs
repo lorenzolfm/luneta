@@ -5,7 +5,7 @@ use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as 
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 
-use luneta_protocol::socket::{self, Bound};
+use lune_protocol::socket::{self, Bound};
 
 pub const SOCKET: &str = "mux.sock";
 
@@ -29,7 +29,7 @@ impl fmt::Display for Refusal {
             },
             Refusal::Open(folder) => write!(f, "{} is open to other users", folder.display()),
             Refusal::Running(folder) => {
-                write!(f, "another luneta-mux already runs in {}", folder.display())
+                write!(f, "another lune-mux already runs in {}", folder.display())
             },
             Refusal::Io(path, error) => write!(f, "{}: {error}", path.display()),
         }

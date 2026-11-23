@@ -35,7 +35,7 @@ in
         statix check . || status=1
         git ls-files -z --cached --others --exclude-standard '*.nix' |
           xargs -0 deadnix --fail || status=1
-        git ls-files -z --cached --others --exclude-standard | luneta-comments || status=1
+        git ls-files -z --cached --others --exclude-standard | lune-comments || status=1
         breaking || status=1
         exit "$status"
         ;;

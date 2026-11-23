@@ -5,7 +5,7 @@ valid:
   - "#[cfg(not(test))] mod tests { fn f() { thread::sleep(d); } }"
   - "#[cfg(all(unix, not(test)))] mod m { fn f() { thread::sleep(d); } }"
   - "#[cfg(any(target_os = \"macos\", test))] mod notifier { fn f() { thread::sleep(d); } }"
-  - "#[cfg(test)] mod tests { fn f() { luneta_waits::eventually(\"a\", || Some(())); } }"
+  - "#[cfg(test)] mod tests { fn f() { lune_waits::eventually(\"a\", || Some(())); } }"
   - "#[cfg(test)] mod tests { fn f() { g(Duration::from_secs(1), Instant::now()); } }"
   - "#[cfg(test)] mod tests { fn f() { for _ in 0..3 { tick(Instant::now()); } } }"
   - "#[cfg(test)] mod tests { fn f() { assert!(due > Instant::now()); } }"

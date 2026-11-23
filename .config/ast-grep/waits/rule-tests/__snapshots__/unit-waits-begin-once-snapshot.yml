@@ -30,13 +30,13 @@ snapshots:
       style: secondary
       start: 34
       end: 69
-  '#[cfg(test)] mod tests { fn f() { while waiting { let line = luneta_waits::heard("a", &rx); } } }':
+  '#[cfg(test)] mod tests { fn f() { while waiting { let line = lune_waits::heard("a", &rx); } } }':
     labels:
-    - source: luneta_waits::heard("a", &rx)
+    - source: lune_waits::heard("a", &rx)
       style: primary
       start: 61
-      end: 90
-    - source: while waiting { let line = luneta_waits::heard("a", &rx); }
+      end: 88
+    - source: while waiting { let line = lune_waits::heard("a", &rx); }
       style: secondary
       start: 34
-      end: 93
+      end: 91

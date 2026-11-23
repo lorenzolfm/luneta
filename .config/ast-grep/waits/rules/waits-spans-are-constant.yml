@@ -7,7 +7,7 @@ message: >-
   build, not the test that reaches it: write const { Span::of(...) }.
 rule:
   kind: call_expression
-  regex: ^(luneta_waits::)?(Span|Gap)::of\(
+  regex: ^(lune_waits::)?(Span|Gap)::of\(
   not:
     inside:
       stopBy: end
