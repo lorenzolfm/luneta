@@ -10682,7 +10682,7 @@ mod tests {
         dragged(&mut sidebar, area, (7, 6), (9, 6));
         let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 13, 6), area);
         assert_eq!(up, copied("a-p-i-x"));
-        assert_eq!(swept(&mut sidebar, area, (2, 0), (8, 0)), copied("lune ──"));
+        assert_eq!(swept(&mut sidebar, area, (2, 0), (6, 0)), copied("lune"));
         assert_eq!(sidebar.lit_spot().cloned(), here);
 
         dragged(&mut sidebar, area, (9, 6), (11, 6));

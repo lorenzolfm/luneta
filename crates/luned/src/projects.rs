@@ -3021,11 +3021,11 @@ mod tests {
     #[test]
     fn a_worktree_is_made_with_its_first_terminal_running_what_was_asked() {
         let mut projects = Projects::default();
-        let cloned = clone(&mut projects, "/w/lune", &[]);
+        let clone_id = clone(&mut projects, "/w/lune", &[]);
         let argv = ["cargo", "test", "it's"].map(str::to_owned).to_vec();
         let opens = Opens::Command(Argv::parse(argv).unwrap());
         let spot = spot_at("/w/lune", "fix");
-        let fixing = Change::AddWorktree { project: cloned, spot, name: None, opens };
+        let fixing = Change::AddWorktree { project: clone_id, spot, name: None, opens };
         let Made::Worktree(fix) = add(&mut projects, fixing) else {
             panic!("a worktree with no row is made");
         };
@@ -3033,7 +3033,7 @@ mod tests {
         assert_eq!(first.folder(), &dir("/w/lune/fix"), "it starts in the worktree's folder");
         let line = Line::parse("cargo test 'it'\\''s'").unwrap();
         assert_eq!(first.runs(), &Runs::Command(line));
-        let (same, found) = change(&projects, add_in(cloned, spot_at("/w/lune", "fix"))).unwrap();
+        let (same, found) = change(&projects, add_in(clone_id, spot_at("/w/lune", "fix"))).unwrap();
         assert_eq!((same == projects, found), (true, Some(Made::Found(fix))), "opens no other");
         assert!(Argv::parse(vec!["\u{7}".to_owned()]).unwrap_err().contains("control character"));
 
