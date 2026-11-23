@@ -509,8 +509,10 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
     eventually("a click on main's row goes back to the view it left", || {
         back_on(&window, Side::Right)
     });
-    let left = sidebar_row(&window, "╭");
-    assert!(left > main, "main's first view sits below its row: {:?}", window.screen());
+    let left = main + 1;
+    let screen = window.screen();
+    let below: String = screen[left].chars().take_while(|it| *it != '│').collect();
+    assert!(below.contains(" work/main"), "main's first view sits below its row: {screen:?}");
     click(&mut window, left);
     eventually("a click on a view's row focuses it", || {
         (side(&window, split) == Some(Side::Left)).then_some(())

@@ -99,9 +99,7 @@ const UNSEEN_PROJECTS: &str =
     "luned has not said yet what projects this machine keeps, so nothing is made: paste it again";
 const COMPUTER: &str = "\u{f108}";
 const EDGE: &str = "│";
-const BRACKET_TOP: &str = "╭";
-const BRACKET_SIDE: &str = "│";
-const BRACKET_FOOT: &str = "╰";
+const INDENT: &str = " ";
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub const SPIN: Duration = Duration::from_millis(100);
 pub const SCROLL: Duration = Duration::from_millis(60);
@@ -500,7 +498,7 @@ struct Tally {
 }
 
 impl Tally {
-    fn of(by_view: &[Shows]) -> Tally {
+    fn of(by_view: &[Shows<'_>]) -> Tally {
         let marks = || by_view.iter().filter_map(|shows| Some(&shows.marked.as_ref()?.mark));
         Tally {
             waiting: marks().filter(|mark| **mark == Mark::Waiting).count(),
@@ -520,13 +518,14 @@ impl Tally {
     }
 }
 
-struct Shows {
+struct Shows<'a> {
+    view: &'a KnownView,
     marked: Option<Marked>,
     ran: Option<String>,
     unread: bool,
 }
 
-impl Shows {
+impl Shows<'_> {
     fn dotted(&self) -> bool {
         dotted(self.unread, self.marked.as_ref())
     }
@@ -610,7 +609,6 @@ enum Row {
         icon: Option<&'static str>,
         label: String,
         hits: Vec<usize>,
-        bracket: Option<(Bracket, Color)>,
     },
 }
 
@@ -618,24 +616,6 @@ enum Row {
 enum Heads {
     Nothing,
     Projects { folded: bool, here: bool, waiting: usize, dot: bool, busy: bool },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Bracket {
-    First,
-    Inner,
-    Last,
-}
-
-impl Bracket {
-    fn of(at: usize, count: usize) -> Option<Bracket> {
-        match at {
-            _ if count < 2 => None,
-            0 => Some(Bracket::First),
-            _ if at + 1 == count => Some(Bracket::Last),
-            _ => Some(Bracket::Inner),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2535,11 +2515,11 @@ impl Sidebar {
                             if let Some(done) = done {
                                 finished.insert(key, done);
                             }
-                            by_view.push(Shows { marked: Some(agent), ran: None, unread });
+                            by_view.push(Shows { view, marked: Some(agent), ran: None, unread });
                             continue;
                         }
                         let Told::Doing(doing) = &view.told else {
-                            by_view.push(Shows { marked: None, ran: None, unread });
+                            by_view.push(Shows { view, marked: None, ran: None, unread });
                             continue;
                         };
                         if let Some(long) = long_at(doing).filter(|long| *long > now) {
@@ -2554,7 +2534,7 @@ impl Sidebar {
                             }
                         }
                         let (marked, ran) = shell.unzip();
-                        by_view.push(Shows { marked, ran: ran.flatten(), unread });
+                        by_view.push(Shows { view, marked, ran: ran.flatten(), unread });
                     }
                     let tally = Tally::of(&by_view);
                     counts.waiting += tally.waiting;
@@ -2596,8 +2576,8 @@ impl Sidebar {
                             .and_then(|finder| finder.worktree(&worktree.name, branch, dir))
                             .unzip();
                         let mut shown = Vec::with_capacity(worktree.terminals.len());
-                        let listing = worktree.views().filter(|_| !worktree_folded).zip(by_view);
-                        for (view, Shows { marked, ran, unread }) in listing {
+                        let listing = by_view.into_iter().filter(|_| !worktree_folded);
+                        for Shows { view, marked, ran, unread } in listing {
                             let command = view.command.as_deref();
                             let program = agent(view)
                                 .and_then(|agent| icons::agent(agent.runs_in()))
@@ -2625,7 +2605,7 @@ impl Sidebar {
                                 (Spot::on(&machine, Place::View(place.clone())), fit)
                             });
                             let (machine, view_id) = (machine.clone(), view.id);
-                            let row = move |bracket| Row::View {
+                            let row = Row::View {
                                 machine,
                                 place,
                                 view_id,
@@ -2635,7 +2615,6 @@ impl Sidebar {
                                 icon,
                                 label,
                                 hits: hits.unwrap_or_default(),
-                                bracket,
                             };
                             shown.push((row, found));
                         }
@@ -2671,13 +2650,11 @@ impl Sidebar {
                             let at = Spot::on(&machine, Place::Worktree(worktree.place.clone()));
                             found_at(at, found, &mut weigh);
                         }
-                        let count = shown.len();
-                        for (at, (row, found)) in shown.into_iter().enumerate() {
+                        for (row, found) in shown {
                             if let Some((at, found)) = found {
                                 found_at(at, found, &mut weigh);
                             }
-                            let bracket = Bracket::of(at, count).map(|sits| (sits, colour));
-                            project_rows.push(row(bracket));
+                            project_rows.push(row);
                         }
                     }
                 }
@@ -5367,7 +5344,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             }
             RowLines { lines, number, cuts }
         },
-        Row::View { here, unread, marked, icon, label, hits, bracket, .. } => {
+        Row::View { here, unread, marked, icon, label, hits, .. } => {
             let mark = marked.as_ref().map(|marked| &marked.mark);
             let since = marked.as_ref().and_then(|marked| marked.since);
             let age = since.map_or_default(|since| age(since, now));
@@ -5377,7 +5354,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 Some(_) => Style::new(),
                 None => dim,
             };
-            let mut spans = vec![margin(*here), gutter(*bracket)];
+            let mut spans = vec![margin(*here), Span::raw(INDENT)];
             let dotted = dotted(*unread, marked.as_ref());
             spans.push(if dotted { dot() } else { Span::raw(" ") });
             match mark {
@@ -5498,18 +5475,6 @@ fn margin(here: bool) -> Span<'static> {
     } else {
         Span::raw(" ")
     }
-}
-
-fn gutter(bracket: Option<(Bracket, Color)>) -> Span<'static> {
-    let Some((sits, colour)) = bracket else {
-        return Span::raw(" ");
-    };
-    let glyph = match sits {
-        Bracket::First => BRACKET_TOP,
-        Bracket::Last => BRACKET_FOOT,
-        Bracket::Inner => BRACKET_SIDE,
-    };
-    Span::styled(glyph, Style::new().fg(colour))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6246,7 +6211,7 @@ mod tests {
         sidebar.heard(Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) });
         let area = Rect::new(0, 0, 32, 12);
         let lines = screen(&mut sidebar, false, area.width, area.height);
-        let fix = ["  ▾ fix", " ╭   \u{e795} w/fix", " ╰   \u{e795} w/fix"];
+        let fix = ["  ▾ fix", "     \u{e795} w/fix", "     \u{e795} w/fix"];
         assert_eq!(lines[5..10], [&fix[..], &["  ▾ main", "     \u{e795} w/main"]].concat());
         let project = project_row("lune", 7);
         let worktree = |id| {
@@ -6388,57 +6353,8 @@ mod tests {
     }
 
     #[test]
-    fn a_bracket_joins_the_views_of_a_worktree() {
-        let views = vec![
-            view(1, 0, "/w/a", "less a"),
-            view(2, 1, "/w/b", "less b"),
-            view(3, 1, "/w/c", "less c"),
-            view(4, 2, "/w/c", "less d"),
-            view(5, 2, "/w/b", "less e"),
-        ];
-        let mut host = host(vec![session("s", 10, views)], Vec::new());
-        let name = Said::new("main".to_owned()).expect("a branch's name");
-        let head = Head::Branch { name, upstream: None, changed: None };
-        let changes = Changes::default();
-        let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
-        host.git_statuses.push(status.to_api("/w/b"));
-        let mut sidebar = fresh();
-        sidebar.hear(host);
-
-        assert_eq!(
-            rows_shown(&mut sidebar),
-            [
-                " ▾ s",
-                "  ▾ Tab #1",
-                "       less a",
-                "  ▾ Tab #2",
-                "       main",
-                " ╭     less b",
-                " ╰     less c",
-                "  ▾ Tab #3",
-                " ╭     less d",
-                " ╰     less e",
-            ]
-        );
-        type_in(&mut sidebar, "/c");
-        assert_eq!(
-            rows_shown(&mut sidebar),
-            [
-                " ▾ s",
-                "  ▾ Tab #2",
-                "       main",
-                "       less c",
-                "  ▾ Tab #3",
-                " ╭     less d",
-                " ╰     less e",
-            ]
-        );
-    }
-
-    #[test]
-    fn a_project_s_colour_comes_from_its_id_and_marks_its_views() {
+    fn a_project_s_colour_comes_from_its_id() {
         let chip = |buffer: &Buffer, y: u16| buffer[(3, y)].bg;
-        let bracket = |buffer: &Buffer, y: u16| buffer[(1, y)].fg;
         let listing = |named: &[(&str, i64)]| {
             let shared = || vec![view(1, 0, "/w/a", "less"), view(2, 0, "/w/a", "less")];
             let sessions = named.iter().map(|(name, at)| session(name, *at, shared()));
@@ -6450,8 +6366,6 @@ mod tests {
         let (y, p, a) = (gruvbox::YELLOW, gruvbox::PURPLE, gruvbox::AQUA);
         assert_eq!([chip(&buffer, 4), chip(&buffer, 8), chip(&buffer, 12)], [y, p, a]);
         assert_eq!(buffer[(3, 4)].fg, gruvbox::BG0);
-        assert_eq!([bracket(&buffer, 6), bracket(&buffer, 7)], [y, y]);
-        assert_eq!([bracket(&buffer, 14), bracket(&buffer, 15)], [a, a]);
 
         let mut there = fresh();
         there.hear(listing(&[("e", 4), ("c", 9)]));
@@ -7288,15 +7202,15 @@ mod tests {
                 " ▾ \u{f108} mac ══════════════════ ●1",
                 " ▾ s ────────────────────── ●1",
                 "  ▾ Tab #1                  ●1",
-                " ╭ ⠋ \u{e795} cargo build --rele… 59s",
-                " │ ● \u{e795} sudo -k true        59s",
-                " │   \u{e6ae} nvim notes",
-                " │•✓ \u{e795} cargo test          29s",
-                " │•✗ \u{e795} cargo clippy        29s",
-                " │•$ \u{e795} cargo run           29s",
-                " │   \u{e795} lune/main",
-                " │   \u{e795} lune/main",
-                " ╰   \u{e795} lune/main",
+                "   ⠋ \u{e795} cargo build --rele… 59s",
+                "   ● \u{e795} sudo -k true        59s",
+                "     \u{e6ae} nvim notes",
+                "  •✓ \u{e795} cargo test          29s",
+                "  •✗ \u{e795} cargo clippy        29s",
+                "  •$ \u{e795} cargo run           29s",
+                "     \u{e795} lune/main",
+                "     \u{e795} lune/main",
+                "     \u{e795} lune/main",
             ]
         );
         assert!(sidebar.turning());
@@ -7359,8 +7273,8 @@ mod tests {
                 " ▾ \u{f108} mac ═════════════════════",
                 " ▾ s ─────────────────────────",
                 "  ▾ Tab #1",
-                " ╭•✓ \u{ec82} fold                 1m",
-                " ╰•✓ \u{e795} cargo test          29s",
+                "  •✓ \u{ec82} fold                 1m",
+                "  •✓ \u{e795} cargo test          29s",
                 "  ▾ Tab #4",
                 "     \u{e795} w/a",
             ]
@@ -7374,7 +7288,7 @@ mod tests {
 
         let s = |view| tab_view_of("s", 1, if view == 3 { 3 } else { 0 }, view);
         sit(&mut sidebar, &s(2));
-        assert_eq!(lines(&mut sidebar, moment(160_000))[7], "▌╰   \u{e795} lune/main");
+        assert_eq!(lines(&mut sidebar, moment(160_000))[7], "▌    \u{e795} lune/main");
         sit(&mut sidebar, &s(1));
         lines(&mut sidebar, moment(160_500));
         lines(&mut sidebar, moment(161_500));
@@ -7388,8 +7302,8 @@ mod tests {
                 " ▾ \u{f108} mac ═════════════════════",
                 " ▾ s ─────────────────────────",
                 "  ▾ Tab #1",
-                " ╭ ✓ \u{ec82} fold                 1m",
-                " ╰•✓ \u{e795} cargo test          31s",
+                "   ✓ \u{ec82} fold                 1m",
+                "  •✓ \u{e795} cargo test          31s",
             ]
         );
         assert!(dimmed(&mut sidebar, 3, 6, moment(162_000)));
@@ -7401,7 +7315,7 @@ mod tests {
         sit(&mut sidebar, &s(3));
         let seen = lines(&mut sidebar, moment(164_500));
         assert_eq!(seen[1], format!("─ 1 project {}", "─".repeat(19)));
-        assert_eq!(seen[7], " ╰   \u{e795} lune/main");
+        assert_eq!(seen[7], "     \u{e795} lune/main");
     }
 
     #[test]
@@ -7564,11 +7478,11 @@ mod tests {
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let rows = |sidebar: &mut Sidebar| seen_at(sidebar, true, 32, 9, moment(160_000)).0;
         let marked = [
-            " ╭   \u{e795} lune/main",
-            " │•  \u{e6ae} nvim src/main.rs",
-            "▌╰   \u{e795} w/a",
+            "     \u{e795} lune/main",
+            "  •  \u{e6ae} nvim src/main.rs",
+            "▌    \u{e795} w/a",
         ];
-        assert_eq!(rows(&mut sidebar)[6], " ╭•✓ \u{e795} cargo test          29s");
+        assert_eq!(rows(&mut sidebar)[6], "  •✓ \u{e795} cargo test          29s");
         for asked in ['k', 'u', 'k', 'u'] {
             sidebar.key(&key(asked), moment(160_000));
         }
