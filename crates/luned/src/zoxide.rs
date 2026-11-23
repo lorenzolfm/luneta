@@ -1,19 +1,12 @@
 use std::io;
-use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::{names, program, Directory, SessionName};
+use crate::{program, Directory};
 
 const ANSWER: Duration = Duration::from_secs(2);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Dir {
-    pub path: Directory,
-    pub name: SessionName,
-}
-
-pub fn visited() -> Result<Vec<Dir>, String> {
+pub fn visited() -> Result<Vec<Directory>, String> {
     let mut zoxide = Command::new("zoxide");
     zoxide.args(["query", "--list"]);
     let ran = program::run(&mut zoxide, ANSWER).map_err(|error| unrun(&error))?;
@@ -21,12 +14,8 @@ pub fn visited() -> Result<Vec<Dir>, String> {
     Ok(dirs_in(&listed))
 }
 
-fn dirs_in(listed: &[u8]) -> Vec<Dir> {
-    let dir = |line: &[u8]| {
-        let path = Directory::parse(std::str::from_utf8(line).ok()?.to_owned()).ok()?;
-        let name = names::session_for(Path::new(path.as_str()))?;
-        Some(Dir { path, name })
-    };
+fn dirs_in(listed: &[u8]) -> Vec<Directory> {
+    let dir = |line: &[u8]| Directory::parse(std::str::from_utf8(line).ok()?.to_owned()).ok();
     listed.split(|byte| *byte == b'\n').filter_map(dir).collect()
 }
 
@@ -42,13 +31,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_line_that_names_no_directory_a_session_can_be_made_in_is_left_out() {
-        let dir = |path: &str, name: &str| Dir {
-            path: Directory::parse(path.to_owned()).unwrap(),
-            name: SessionName::parse(name).unwrap(),
-        };
-        let listed = b"/home/you/lune\n/\n\nlune\n/home/you/caf\xe9\n/home/you/notes/\n";
-        let dirs = [dir("/home/you/lune", "lune"), dir("/home/you/notes/", "notes")];
+    fn a_line_that_names_no_absolute_utf_8_path_is_left_out() {
+        let dir = |path: &str| Directory::parse(path.to_owned()).unwrap();
+        let listed = b"/home/you/lune\n/\n\nlune\n/home/you/caf\xe9\n/home/you/-dash/\n";
+        let dirs = [dir("/home/you/lune"), dir("/"), dir("/home/you/-dash/")];
         assert_eq!(dirs_in(listed), dirs);
     }
 }

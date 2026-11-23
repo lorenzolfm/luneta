@@ -117,7 +117,6 @@ pub(crate) const MENU_MOVES: [(Label, &str); 3] = [
 pub const TITLE: &str = "lune";
 const SEARCH_TITLE: &str = "Skills";
 const SSH_TITLE: &str = "ssh";
-const PROJECT_TITLE: &str = "New project";
 const WORKTREE_TITLE: &str = "New worktree";
 const RENAME_TITLE: &str = "Rename";
 
@@ -433,11 +432,6 @@ fn searched(search: &mut Search, key: &KeyEvent) -> (Pressed, bool) {
 const SSH_HINT: &str = "what you type ssh to it: a Tailscale name, a Host of your ssh config, or \
                         me@vps";
 
-const FOLDER_HINT: &str =
-    "the folder it holds, on the row's machine: an absolute path, or one in ~";
-
-const PROJECT_NAME_HINT: &str = "its name; with none, it is named for its folder";
-
 const UNRENAME_HINT: &str = "its new name; with none, it goes back to the name lune gives it";
 
 const RENAME_HINT: &str = "its new name";
@@ -448,8 +442,6 @@ const BRANCH_HINT: &str = "its branch: one git has is checked out, and any other
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Typing {
     Machine,
-    Folder,
-    Name(String),
     Branch(ProjectId),
     Rename(Renames),
 }
@@ -482,7 +474,6 @@ impl Rename {
 #[expect(clippy::large_enum_variant, reason = "one is made on each Enter, and goes at once")]
 enum Entered {
     Done(Done),
-    Folder(String),
     Wrong(String),
 }
 
@@ -490,7 +481,6 @@ impl Typing {
     fn title(&self) -> &'static str {
         match self {
             Typing::Machine => SSH_TITLE,
-            Typing::Folder | Typing::Name(_) => PROJECT_TITLE,
             Typing::Branch(_) => WORKTREE_TITLE,
             Typing::Rename(_) => RENAME_TITLE,
         }
@@ -499,8 +489,6 @@ impl Typing {
     fn hint(&self) -> &'static str {
         match self {
             Typing::Machine => SSH_HINT,
-            Typing::Folder => FOLDER_HINT,
-            Typing::Name(_) => PROJECT_NAME_HINT,
             Typing::Branch(_) => BRANCH_HINT,
             Typing::Rename(Renames::Terminal(_) | Renames::Worktree(_)) => UNRENAME_HINT,
             Typing::Rename(Renames::Project(_)) => RENAME_HINT,
@@ -510,8 +498,7 @@ impl Typing {
     fn enter(&self) -> &'static str {
         match self {
             Typing::Machine => "Add",
-            Typing::Folder => "Next",
-            Typing::Name(_) | Typing::Branch(_) => "Make",
+            Typing::Branch(_) => "Make",
             Typing::Rename(_) => "Rename",
         }
     }
@@ -522,14 +509,6 @@ impl Typing {
             Typing::Machine => match typed.parse::<Destination>() {
                 Ok(destination) => Entered::Done(Done::Ssh(destination)),
                 Err(why) => Entered::Wrong(format!("not a destination: {why}")),
-            },
-            Typing::Folder => match folder_typed(typed) {
-                Ok(folder) => Entered::Folder(folder),
-                Err(why) => Entered::Wrong(why),
-            },
-            Typing::Name(folder) => match named(typed, projects::ProjectName::parse) {
-                Ok(name) => Entered::Done(Done::Project { on: on.clone(), folder, name }),
-                Err(why) => Entered::Wrong(why),
             },
             Typing::Branch(project) => match Branch::parse(typed) {
                 Ok(branch) => Entered::Done(Done::Worktree(on.clone(), project, branch)),
@@ -561,19 +540,6 @@ fn named<N>(typed: &str, parse: fn(&str) -> Result<N, String>) -> Result<Option<
     Some(typed.trim()).filter(|name| !name.is_empty()).map(parse).transpose()
 }
 
-fn folder_typed(typed: &str) -> Result<String, String> {
-    let folder = typed.trim();
-    if projects::Dir::below_home(folder).is_some() || folder.starts_with('/') {
-        return Ok(folder.to_owned());
-    }
-    Err(format!("not a folder: {folder:?} is no absolute path, nor one in ~"))
-}
-
-fn own_folder() -> String {
-    let here = std::env::current_dir().ok();
-    here.and_then(|here| here.to_str().map(str::to_owned)).unwrap_or_else(|| "~".to_owned())
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chain {
     typing: Typing,
@@ -603,7 +569,7 @@ impl Chain {
 
     #[must_use]
     pub fn of(target: &Target, action: Action) -> Option<Chain> {
-        Chain::offered(target, &target.offer(action)?)
+        Chain::offered(&target.offer(action)?)
     }
 
     #[must_use]
@@ -616,10 +582,9 @@ impl Chain {
         Chain::new(Typing::Rename(renames), String::new())
     }
 
-    fn offered(target: &Target, offer: &Offer<'_>) -> Option<Chain> {
+    fn offered(offer: &Offer<'_>) -> Option<Chain> {
         let typing = match offer {
             Offer::NewWorktree(project) => return Some(Chain::branch(*project)),
-            Offer::NewProject => return Some(Chain::new(Typing::Folder, target.folder_hint())),
             Offer::NewMachine => Typing::Machine,
             Offer::Rename(renames) => return Some(Chain::rename(*renames)),
             Offer::SearchSkills(_)
@@ -647,21 +612,13 @@ impl Chain {
     pub fn key(mut self, key: &KeyEvent, on: &Machine) -> Chained {
         match type_key(key, &mut self.typed) {
             Typed::Close => Chained::Close,
-            Typed::Back => match self.typing {
-                Typing::Name(folder) => Chained::Typing(Chain::new(Typing::Folder, folder)),
-                Typing::Machine | Typing::Folder | Typing::Branch(_) | Typing::Rename(_) => {
-                    Chained::Back
-                },
-            },
+            Typed::Back => Chained::Back,
             Typed::Typing => {
                 self.wrong = None;
                 Chained::Typing(self)
             },
             Typed::Enter => match self.typing.clone().typed(&self.typed, on) {
                 Entered::Done(done) => Chained::Done(done),
-                Entered::Folder(folder) => {
-                    Chained::Typing(Chain::new(Typing::Name(folder), String::new()))
-                },
                 Entered::Wrong(why) => {
                     self.wrong = Some(why);
                     Chained::Typing(self)
@@ -695,16 +652,6 @@ impl Chain {
         match &self.wrong {
             Some(wrong) => Says::Wrong(wrong),
             None => Says::Hint(self.typing.hint()),
-        }
-    }
-
-    #[must_use]
-    pub fn right(&self) -> String {
-        match &self.typing {
-            Typing::Name(folder) => sidebar::short_cwd(folder),
-            Typing::Machine | Typing::Folder | Typing::Branch(_) | Typing::Rename(_) => {
-                String::new()
-            },
         }
     }
 }
@@ -796,7 +743,6 @@ enum Offer<'t> {
     NewWelcome(&'t ViewRow),
     Arrange(&'t ViewRow, Arranged),
     NewWorktree(ProjectId),
-    NewProject,
     NewMachine,
     Rename(Renames),
     CloseView(&'t ViewRow),
@@ -939,7 +885,6 @@ impl Target {
                 Offer::Arrange(row, Arranged::Panes)
             },
             (Action::NewWorktree, _) => Offer::NewWorktree(self.project()?.id()),
-            (Action::NewProject, _) => Offer::NewProject,
             (Action::NewMachine, _) => Offer::NewMachine,
             (Action::RenameView, Target::View(_, ViewRow { terminal: Some(terminal), .. })) => {
                 Offer::Rename(Renames::Terminal(*terminal))
@@ -1022,21 +967,6 @@ impl Target {
 
     fn merged_in(&self) -> Option<Directory> {
         self.in_repository().map(|(dir, _)| dir.clone())
-    }
-
-    fn folder_hint(&self) -> String {
-        let held = match self {
-            Target::View(..) | Target::Worktree(..) => self.cwd().map(Directory::as_str),
-            Target::Project(_, project) => Some(project.dir.as_str()),
-            Target::Machine(_) => None,
-        };
-        held.map_or_else(
-            || match self.machine() {
-                Machine::Local => own_folder(),
-                Machine::Remote(_) => "~".to_owned(),
-            },
-            str::to_owned,
-        )
     }
 
     pub fn branch(&self) -> Option<&str> {
@@ -1274,7 +1204,6 @@ pub enum Done {
     Arrange { on: Machine, session: Listed, view: ViewKey, arranged: Arranged },
     OpenIn { on: Machine, worktree: WorktreeId, command: Argv },
     Said(String),
-    Project { on: Machine, folder: String, name: Option<projects::ProjectName> },
     Rename(Machine, Rename),
     Quit,
 }
@@ -1494,7 +1423,7 @@ impl Menu {
         let stays = |stage: Stage, wants: Wants| {
             Did::Stays(Menu { number, target: target.clone(), stage }, wants)
         };
-        let chained = Chain::offered(target, &offer);
+        let chained = Chain::offered(&offer);
         let closing = |keys: Keys, session: &Listed, scope: Scope| {
             let session = session.clone();
             let wants = Wants::Plan { session: session.clone(), scope };
@@ -1552,8 +1481,8 @@ impl Menu {
                 let chain = chained.expect("a new worktree is typed in a chain");
                 stays(Stage::Typing { keys, chain }, Wants::Cloned(project))
             },
-            Offer::NewProject | Offer::NewMachine | Offer::Rename(_) => {
-                let chain = chained.expect("a project, a machine and a name are typed in a chain");
+            Offer::NewMachine | Offer::Rename(_) => {
+                let chain = chained.expect("a machine and a name are typed in a chain");
                 stays(Stage::Typing { keys, chain }, Wants::Nothing)
             },
             Offer::CloseView(row) => {
@@ -2107,7 +2036,7 @@ impl Menu {
                 ])];
                 body.extend(chain_says(chain, width));
                 let keys = [(Hint::Enter, chain.enter()), (Hint::Esc, "Back")];
-                (chain.title().to_owned(), chain.right(), body, keyed(width, &keys))
+                (chain.title().to_owned(), String::new(), body, keyed(width, &keys))
             },
         };
         Shown { title, right, body, spots, footer, keys }
@@ -2927,7 +2856,6 @@ mod tests {
                 " v  new view",
                 " h  new welcome view",
                 " w  new worktree…",
-                " p  new project…",
                 " m  new machine…",
                 " <BS> - Back, <ESC> - Close",
             ]
@@ -3531,67 +3459,6 @@ mod tests {
     }
 
     #[test]
-    fn n_p_makes_a_project_of_the_row_s_folder_or_one_typed() {
-        let typed = |menu: Menu, text: &str| {
-            text.chars().fold(menu, |menu, c| stays(menu.key(&char(c))).0)
-        };
-        let shown = |menu: &Menu| match &menu.stage {
-            Stage::Typing { chain, .. } => chain.typed.clone(),
-            _ => panic!("no box to type in"),
-        };
-        let cleared = |menu: Menu| {
-            let back = KeyEvent::from(KeyCode::Backspace);
-            (0..shown(&menu).chars().count()).fold(menu, |menu, _| stays(menu.key(&back)).0)
-        };
-        let enter = KeyEvent::from(KeyCode::Enter);
-        let asked = |target: Target| stays(stays(opened(target, Some('n'))).0.key(&char('p'))).0;
-        for (target, folder) in [
-            (view_row(), "/w/lune/main".to_owned()),
-            (worktree_on(Machine::Local), "/w/lune/main".to_owned()),
-            (session_row(), "/w/lune".to_owned()),
-            (local_header(), own_folder()),
-            (remote_header(), "~".to_owned()),
-        ] {
-            let on = target.machine().clone();
-            let menu = asked(target.clone());
-            assert_eq!(shown(&menu), folder, "{target:?}");
-            let named = closed(stays(menu.key(&enter)).0.key(&enter));
-            assert_eq!(named, Done::Project { on, folder, name: None }, "{target:?}");
-        }
-        let menu = asked(view_row());
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[..3], [
-            "─ New project ─────────────────",
-            " /w/lune/main_",
-            " the folder it holds, on the",
-        ]);
-        let (menu, _) = stays(typed(cleared(menu), "w/notes").key(&enter));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[2], " not a folder: \"w/notes\" is no");
-        let (menu, _) = stays(typed(cleared(menu), "~/notes").key(&enter));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[..3], [
-            "─ New project ─────── ~/notes ─",
-            " _",
-            " its name; with none, it is",
-        ]);
-        let (back, _) = stays(menu.key(&KeyEvent::from(KeyCode::Esc)));
-        let folder = ["─ New project ─────────────────", " ~/notes_"];
-        assert_eq!(text(&back.lines(31, 9, 0).0)[..2], folder, "Esc goes back to the folder typed");
-        let (menu, _) = stays(back.key(&enter));
-        let (menu, _) = stays(typed(menu, "api/v2").key(&enter));
-        let Stage::Typing { chain: Chain { wrong: Some(wrong), .. }, .. } = &menu.stage else {
-            panic!("a project's name the sidebar cannot list keeps its box open, saying why");
-        };
-        assert!(wrong.contains("names no project"), "{wrong}");
-        let named = closed(typed(cleared(menu), "Notes").key(&enter));
-        let name = Some(projects::ProjectName::parse("Notes").unwrap());
-        let folder = "~/notes".to_owned();
-        assert_eq!(named, Done::Project { on: Machine::Local, folder, name });
-        let (menu, _) = stays(typed(cleared(asked(remote_header())), "/srv/notes").key(&enter));
-        let folder = "/srv/notes".to_owned();
-        let on = Machine::Remote("me@vps".parse().unwrap());
-        assert_eq!(closed(menu.key(&enter)), Done::Project { on, folder, name: None });
-    }
-
-    #[test]
     fn r_renames_the_row_s_terminal_worktree_or_project() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let enter = KeyEvent::from(KeyCode::Enter);
@@ -3705,11 +3572,10 @@ mod tests {
         let (session, at) = (project().listed().clone(), ViewKey::terminal(4));
         assert_eq!(wants, Wants::Open { session, view: at, opens });
         let (menu, _) = stays(opened(view.clone(), Some('n')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..6], [
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..5], [
             " v  new view",
             " h  new welcome view",
             " w  new worktree…",
-            " p  new project…",
             " m  new machine…",
         ]);
         let (menu, _) = stays(opened(view.clone(), Some('d')));
@@ -3997,7 +3863,6 @@ mod tests {
         ]);
         assert_eq!(at(session_row(), Some('n')), [
             " w  new worktree…",
-            " p  new project…",
             " m  new machine…",
             " <BS> - Back, <ESC> - Close",
         ]);
@@ -4031,7 +3896,6 @@ mod tests {
             " <ESC> - Close",
         ]);
         assert_eq!(at(local_header(), Some('n')), [
-            " p  new project…",
             " m  new machine…",
             " <BS> - Back, <ESC> - Close",
         ]);

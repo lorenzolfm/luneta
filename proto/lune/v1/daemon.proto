@@ -13,7 +13,7 @@ service Daemon {
   rpc Watch(WatchRequest) returns (Host);
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
   rpc KeepChecks(KeepChecksRequest) returns (stream KeepChecksResponse);
-  rpc ListDirs(ListDirsRequest) returns (ListDirsResponse);
+  rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
   rpc ListContents(ListContentsRequest) returns (ListContentsResponse);
   rpc TranscriptEnds(TranscriptEndsRequest) returns (TranscriptEndsResponse);
   rpc Ask(AskRequest) returns (stream AskResponse);
@@ -79,16 +79,17 @@ message KeepChecksResponse {
   }
 }
 
-message ListDirsRequest {
+message ListRepositoriesRequest {
   On on = 1;
 }
 
-message ListDirsResponse {
-  repeated Dir dirs = 1;
+message ListRepositoriesResponse {
+  repeated Repository repositories = 1;
+  repeated string unread = 2;
+  repeated string owned = 3;
 
-  message Dir {
+  message Repository {
     string path = 1;
-    string name = 2;
   }
 }
 

@@ -35,6 +35,8 @@ const MENU: &str = "\x1b[97;3u";
 
 const PALETTE: &str = "\x1b[107;9u";
 
+const PROJECTS: &str = "\x1b[111;9u";
+
 const ESC: &str = "\x1b[27u";
 
 const MENU_SHOWS: &str = "n  New ▸";
@@ -327,7 +329,6 @@ fn a_worktree_opened_or_made_while_lune_shows_none_takes_the_keys() {
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
-    let root = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().dir;
     let other = directory("other");
     let typed_in = |window: &mut Window, folder: &Path, typed: u32| {
         eventually(&format!("a shell opens in {}", folder.display()), || {
@@ -350,11 +351,10 @@ fn a_worktree_opened_or_made_while_lune_shows_none_takes_the_keys() {
     window.send("\r");
     typed_in(&mut window, &dir.path, 1);
     unshow(&mut window);
-    let erased = "\x7f".repeat(root.chars().count());
-    window.send(&format!("np{erased}{}\r\r", other.path.display()));
-    eventually("the new project's home shows", || window.shows(UNHOSTED).then_some(()));
-    window.send("own-2");
-    eventually("its prompt takes the keys", || window.shows("› own-2_").then_some(()));
+    window.send(&format!("{PROJECTS}{}", other.path.display()));
+    eventually("the typed folder is listed", || window.shows(" new project ").then_some(()));
+    window.send("\r");
+    typed_in(&mut window, &other.path, 2);
 }
 
 #[test]
@@ -365,12 +365,11 @@ fn a_menu_opened_while_a_project_is_made_keeps_the_keys() {
     eventually("lune shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
     let other = directory("other");
-    let erased = "\x7f".repeat(dir.path.display().to_string().chars().count());
-    window.send(&format!("{SIDEBAR}np{erased}{}\r\r{SIDEBAR}n", other.path.display()));
-    let named = format!(" other  {}", other.path.parent().unwrap().file_name().unwrap().display());
-    eventually("lune shows the new project's home", || {
-        (window.shows(&named) && window.shows(UNHOSTED)).then_some(())
-    });
+    window.send(&format!("{PROJECTS}{}", other.path.display()));
+    eventually("the typed folder is listed", || window.shows(" new project ").then_some(()));
+    window.send(&format!("\r{SIDEBAR}n"));
+    eventually("lune shows the new project's worktree", || shown(&owned, &other.path));
+    eventually("the sidebar lists it", || window.shows(" other ").then_some(()));
     eventually("the menu opened meanwhile stays open", || window.shows("─ New ─").then_some(()));
 }
 

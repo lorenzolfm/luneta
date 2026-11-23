@@ -82,7 +82,6 @@ use crate::worktrees::{self, Arrival, Landing};
 use crate::width::Width;
 
 pub enum Made {
-    Project { on: Machine, made: Result<ProjectId, String> },
     Worktree { on: Machine, made: Result<Landing, String> },
     Pulled { menu: u64, made: Result<Pulled, String> },
 }
@@ -116,8 +115,6 @@ impl Opener {
 const NAMING: &str = "lune names a session already: try again once it has made it";
 
 const MAKE_PANICKED: &str = "lune could not ask luned for the worktree: asking panicked";
-
-const ADD_PANICKED: &str = "lune could not ask luned for the project: asking panicked";
 
 const PULL_PANICKED: &str = "lune could not ask luned for the pull: asking panicked";
 
@@ -1393,7 +1390,7 @@ impl App {
         if let Some(list) = List::opened_by(chord) {
             self.pickers += 1;
             let aim = match (list, self.focus.side) {
-                (List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
+                (List::Projects, Side::Sidebar) => self.sidebar.on_header(),
                 _ => None,
             };
             let aim = aim.unwrap_or_default();
@@ -1898,19 +1895,6 @@ impl App {
                 });
                 self.leave();
             },
-            Asked::AddProject { on, folder, name } => {
-                if self.refuse_naming(None, |busy| format!("menu: {busy}")) {
-                    return;
-                }
-                self.naming_on(move || {
-                    let made = || worktrees::project_made(&on, &folder, name.as_ref());
-                    let said = |unchanged| worktrees::said_unmade(unchanged, "project");
-                    let made = unmade_caught(ADD_PANICKED, said, made);
-                    let made = made.map_err(|why| format!("menu: {why}"));
-                    Made::Project { on, made }
-                });
-                self.leave();
-            },
             Asked::Rename { on, rename } => {
                 self.rename(on, rename);
             },
@@ -2130,10 +2114,8 @@ impl App {
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Make { on, session, cwd } => {
-                self.make_worktree(on, move |luned, on| {
-                    worktrees::made_at(luned, on, &cwd, Some(session.as_str()))
-                });
+            Picked::Make { on, folder } => {
+                self.make_worktree(on, move |luned, on| worktrees::made_at(luned, on, &folder));
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Plan { on, session, scope } => {
@@ -2597,12 +2579,11 @@ impl App {
                 self.go_worktree(&on, made.worktree(), None);
                 self.give_opened(Opener::LetGo);
             },
-            Made::Project { on, made: Ok(project) }
-            | Made::Worktree { on, made: Ok(Landing::Unopened(project)) } => {
+            Made::Worktree { on, made: Ok(Landing::Unopened(project)) } => {
                 self.go_home(&on, project);
                 self.give_opened(Opener::LetGo);
             },
-            Made::Project { made: Err(why), .. } | Made::Worktree { made: Err(why), .. } => {
+            Made::Worktree { made: Err(why), .. } => {
                 self.sidebar.notify(why);
             },
             Made::Pulled { menu, made } => self.pulled_made(menu, made),
@@ -2958,10 +2939,6 @@ mod tests {
         let worktree = |unchanged| worktrees::said_unmade(unchanged, "worktree");
         let said = unmade_caught(MAKE_PANICKED, worktree, panics).unwrap_err();
         let maybe = "lune could not ask luned for the worktree: asking panicked, so the worktree may be made";
-        assert_eq!(said, maybe);
-        let project = |unchanged| worktrees::said_unmade(unchanged, "project");
-        let said = unmade_caught(ADD_PANICKED, project, panics).unwrap_err();
-        let maybe = "lune could not ask luned for the project: asking panicked, so the project may be made";
         assert_eq!(said, maybe);
         let folder = luned::Directory::parse("/w/cdk/issue-5".to_owned()).unwrap();
         let pull = |unchanged| worktrees::said_unopened(unchanged, &folder, "#5");

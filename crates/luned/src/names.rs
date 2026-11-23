@@ -1,7 +1,5 @@
 use std::borrow::Borrow;
 use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 pub const NAME_BYTES_MAX: usize = 60;
 
@@ -73,83 +71,9 @@ impl fmt::Display for SessionName {
     }
 }
 
-#[must_use]
-pub fn session_for(dir: &Path) -> Option<SessionName> {
-    let path = dir.to_str()?;
-    common_dir(dir)
-        .and_then(|common| worktree_name(path, common.to_str()?))
-        .or_else(|| SessionName::parse(path.split('/').rfind(|part| !part.is_empty())?).ok())
-}
-
-fn common_dir(dir: &Path) -> Option<PathBuf> {
-    let dot_git = fs::read_to_string(dir.join(".git")).ok()?;
-    let own = dir.join(dot_git.lines().next()?.strip_prefix("gitdir: ")?);
-    let common = fs::read_to_string(own.join("commondir")).ok()?;
-    fs::canonicalize(own.join(common.lines().next()?)).ok()
-}
-
-fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
-    let base = path.split('/').rfind(|part| !part.is_empty())?;
-    let mut parts = common.split('/').filter(|part| !part.is_empty());
-    let mut repository = parts.next_back()?;
-    if repository.starts_with('.') {
-        repository = parts.next_back()?;
-    }
-    let repository =
-        repository.strip_suffix(".git").filter(|bare| !bare.is_empty()).unwrap_or(repository);
-    if base.strip_prefix(repository).is_some_and(|rest| !rest.starts_with(char::is_alphanumeric)) {
-        return None;
-    }
-    SessionName::parse(&format!("{repository}-{base}")).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_name_is_the_directory_itself() {
-        let named = |dir: &str| session_for(Path::new(dir)).map(|name| name.as_str().to_owned());
-        assert_eq!(named("/nowhere/at/all/lune"), Some("lune".to_owned()));
-        assert_eq!(named("/nowhere/at/all/lune/"), Some("lune".to_owned()));
-        assert_eq!(named("/"), None);
-    }
-
-    #[test]
-    fn a_worktree_is_named_for_its_repository_too() {
-        let named = |path: &str, common: &str| {
-            worktree_name(path, common).map(|name| name.as_str().to_owned())
-        };
-        assert_eq!(named("/w/lune/main", "/w/lune/.bare"), Some("lune-main".to_owned()));
-        assert_eq!(named("/w/trees/main", "/w/lune/.git"), Some("lune-main".to_owned()));
-        assert_eq!(named("/w/infra.git/master", "/w/infra.git"), Some("infra-master".to_owned()));
-        assert_eq!(named("/w/app-hotfix", "/w/app/.git"), None);
-        assert_eq!(named("/w/application", "/w/app/.git"), Some("app-application".to_owned()));
-        let long = "x".repeat(NAME_BYTES_MAX);
-        assert_eq!(named(&format!("/w/{long}"), "/w/repo/.git"), None);
-    }
-
-    #[test]
-    fn a_linked_worktree_is_found_by_its_git_files() {
-        let Ok(scratch) = tempfile::tempdir() else {
-            panic!("no scratch directory");
-        };
-        let root = scratch.path();
-        let common = root.join("lune").join(".bare");
-        let own = common.join("worktrees").join("main");
-        let tree = root.join("lune").join("main");
-        for dir in [&own, &tree] {
-            assert!(fs::create_dir_all(dir).is_ok());
-        }
-        let wrote = [
-            fs::write(tree.join(".git"), format!("gitdir: {}\n", own.display())),
-            fs::write(own.join("commondir"), "../..\n"),
-        ];
-        assert!(wrote.iter().all(Result::is_ok));
-        assert_eq!(session_for(&tree).as_ref().map(SessionName::as_str), Some("lune-main"));
-        let repository = root.join("lune");
-        assert_eq!(session_for(&repository).as_ref().map(SessionName::as_str), Some("lune"));
-    }
 
     #[test]
     fn a_postfix_makes_room_for_itself_between_characters() {
