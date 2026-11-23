@@ -354,7 +354,7 @@ pub enum Key {
     Agent { on: Machine, place: ViewPlace },
     Housed { on: Machine, dir: projects::Dir, goes: Goes },
     Repository { on: Machine, repository: Repository, name: ProjectName },
-    Folder { on: Machine, folder: Folder, name: Option<ProjectName> },
+    Folder { on: Machine, folder: Folder },
     New { on: Machine, project: ProjectRow, branch: Branch },
     Action(Action, Run),
     Pasted { target: Rc<Target>, work: Work, pull: Pull },
@@ -760,6 +760,13 @@ impl Picker {
     fn found_on(&self, on: &Machine) -> &[Repository] {
         match self.lookups.get(on) {
             Some(Lookup::Listed(found)) => &found.repositories,
+            Some(Lookup::Asking(_) | Lookup::Failed(_)) | None => &[],
+        }
+    }
+
+    fn owned_on(&self, on: &Machine) -> &[projects::Dir] {
+        match self.lookups.get(on) {
+            Some(Lookup::Listed(found)) => &found.owned,
             Some(Lookup::Asking(_) | Lookup::Failed(_)) | None => &[],
         }
     }
@@ -1628,10 +1635,10 @@ impl Picker {
                     (Key::Repository { on, repository: repository.clone(), name }, shown, path)
                 });
                 let mut rows = place_rows(&fuzzy, &self.term, kept.chain(unkept));
-                if let Some(folder) = &typed {
-                    let name = folder.named().map(|name| name.free(&taken));
-                    let key = Key::Folder { on: on.clone(), folder: folder.clone(), name };
-                    rows.push(Row::plain(key, folder.as_str().to_owned()));
+                let owned = self.owned_on(on);
+                if let Some(folder) = typed.as_ref().filter(|it| !it.holds_one_of(owned)) {
+                    let key = Key::Folder { on: on.clone(), folder: folder.clone() };
+                    rows.push(Row::plain(key, folder.to_string()));
                 }
                 (!rows.is_empty()).then_some((on, rows))
             });
@@ -2031,15 +2038,14 @@ impl Picker {
                 self.draw_contents(buffer, area, &row.name, on, path);
                 return;
             },
-            Key::Folder { on, folder, name } => {
+            Key::Folder { on, folder } => {
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
                 caption.push(Span::styled("new project", grey));
-                let named = name.as_ref().map_or_else(String::new, |name| format!(", {name}"));
                 let words = format!(
-                    "Enter makes the project of {}{named}, and goes to it. In a folder of a \
-                     project already, it goes to that project",
-                    folder.as_str(),
+                    "Enter makes the project of {folder}, named for it or for the repository it \
+                     is in, and goes to it. In a folder of a project already, it goes to that \
+                     project",
                 );
                 framed(buffer, area, &row.name, "", said(caption, &words));
                 return;
@@ -2208,10 +2214,7 @@ impl Picker {
                 })),
                 Key::Agent { on, .. } => Ok(there("Go to agent", on)),
                 Key::Repository { on, name, .. } => Ok(there(&format!("Make \"{name}\""), on)),
-                Key::Folder { on, name: Some(name), .. } => {
-                    Ok(there(&format!("Make \"{name}\""), on))
-                },
-                Key::Folder { on, name: None, .. } => Ok(there("Make the project", on)),
+                Key::Folder { on, .. } => Ok(there("Make the project", on)),
                 Key::New { project, branch, .. } => {
                     let project = project.listed().name();
                     Ok(format!("New worktree \"{branch}\" in {project}"))
@@ -2669,15 +2672,18 @@ mod tests {
         Repository::at(projects::Dir::parse(path).unwrap()).unwrap()
     }
 
+    fn found_in(owned: &str, repositories: Vec<Repository>) -> repositories::Found {
+        let owned = vec![projects::Dir::parse(owned).unwrap()];
+        repositories::Found { repositories, owned, unread: Vec::new() }
+    }
+
     fn heard_here(found: Result<Vec<Repository>, String>) -> Heard {
-        let unread = Vec::new();
-        let found = found.map(|repositories| repositories::Found { repositories, unread });
+        let found = found.map(|repositories| found_in("/home/you/lune", repositories));
         Heard::Repositories { on: Machine::Local, ask: 1, found }
     }
 
     fn heard_there(ask: u64, found: Result<Vec<Repository>, String>) -> Heard {
-        let unread = Vec::new();
-        let found = found.map(|repositories| repositories::Found { repositories, unread });
+        let found = found.map(|repositories| found_in("/home/me/lune", repositories));
         Heard::Repositories { on: nixos(), ask, found }
     }
 
@@ -3819,7 +3825,7 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), home);
         down_to(&mut picker, "notes-2");
         assert!(said(&picker).contains(r#"<ENTER> Make "notes-2""#), "{}", said(&picker));
-        let folder = crate::worktrees::Folder::from(&directory("/srv/notes"));
+        let folder = crate::worktrees::Folder::from(&projects::Dir::parse("/srv/notes").unwrap());
         let made = Picked::Make { on: Machine::Local, folder };
         assert_eq!(press(&mut picker, KeyCode::Enter), made);
         picker.asks();
@@ -3831,6 +3837,7 @@ mod tests {
     fn a_typed_folder_makes_the_project_of_it_on_each_machine() {
         let mut picker = Picker::open(1, List::Projects, two_machines(), Machine::Local, at_host());
         picker.heard(heard_here(Ok(vec![repository("/home/you/lune")])));
+        picker.heard(heard_there(2, Ok(Vec::new())));
         typed(&mut picker, "code/app");
         assert_eq!(list(&picker).0, ["no match for \"code/app\""], "no path, no folder to make");
         retyped(&mut picker, "~/code/app");
@@ -3838,24 +3845,24 @@ mod tests {
         let (lines, _) = list(&picker);
         let words: Vec<&str> = lines[1].split_whitespace().collect();
         assert_eq!(words, ["+", "~/code/app", "new", "project"]);
-        assert!(said(&picker).contains("Enter makes the project of ~/code/app, app"));
+        assert!(said(&picker).contains("Enter makes the project of ~/code/app, named for it"));
+        assert!(said(&picker).contains("<ENTER> Make the project"), "{}", said(&picker));
         let folder = crate::worktrees::Folder::typed("~/code/app").unwrap();
         let made = |on| Picked::Make { on, folder: folder.clone() };
         assert_eq!(press(&mut picker, KeyCode::Enter), made(Machine::Local));
         press(&mut picker, KeyCode::Down);
         assert_eq!(press(&mut picker, KeyCode::Enter), made(nixos()));
-        retyped(&mut picker, "/home/you/lune");
-        assert_eq!(grouped(&picker), ["── desk", "lune", "+", "── nixos", "+"]);
-        for held in ["~", "~/", "~/lune", "~/lune/", "/", "//"] {
+        retyped(&mut picker, "/home/you/lune/");
+        let held_here = ["── nixos", "+"];
+        assert_eq!(grouped(&picker), held_here, "each machine's own clone folder");
+        for held in ["~", "~/", "~/lune", "~/lune/", "/", "//", "/home", "~/code/..", "~/./code"] {
             retyped(&mut picker, held);
             let rows = grouped(&picker);
             assert!(!rows.contains(&"+".to_owned()), "no project holds ~/lune: {held} {rows:?}");
         }
-        retyped(&mut picker, "~/code/..");
-        assert!(said(&picker).contains("<ENTER> Make the project"), "{}", said(&picker));
-        let typed = crate::worktrees::Folder::typed("~/code/..").unwrap();
-        let made = Picked::Make { on: Machine::Local, folder: typed };
-        assert_eq!(press(&mut picker, KeyCode::Enter), made);
+        retyped(&mut picker, "/home/you/lune/app");
+        let both = ["── desk", "+", "── nixos", "+"];
+        assert_eq!(grouped(&picker), both, "a folder in it holds no clone folder");
     }
 
     #[test]
@@ -3946,7 +3953,7 @@ mod tests {
         press(&mut picker, KeyCode::Down);
         assert_eq!(lit(&picker), "api");
         assert!(said(&picker).contains(r#"<ENTER> Make "api" on nixos"#), "{}", said(&picker));
-        let folder = crate::worktrees::Folder::from(&directory(api));
+        let folder = crate::worktrees::Folder::from(&projects::Dir::parse(api).unwrap());
         let made = Picked::Make { on: nixos(), folder };
         assert_eq!(press(&mut picker, KeyCode::Enter), made);
         picker.ticked(picker.due().unwrap());
@@ -4044,7 +4051,7 @@ mod tests {
         let said = "zoxide is not on the PATH, so only the clones in ~/lune are listed";
         let repositories = vec![repository("/home/you/lune/app")];
         let unread = vec![said.to_owned()];
-        let found = Ok(repositories::Found { repositories, unread });
+        let found = Ok(repositories::Found { repositories, owned: Vec::new(), unread });
         picker.heard(Heard::Repositories { on: Machine::Local, ask: 1, found });
         let (lines, _) = list(&picker);
         assert_eq!(lines[..2].join(" "), said);

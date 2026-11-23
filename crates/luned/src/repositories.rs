@@ -11,6 +11,8 @@ pub const OWNED_FOLDER: &str = "lune";
 
 pub const REPOSITORIES_MAX: usize = 512;
 
+pub const OWNED_FOLDERS_MAX: usize = 2;
+
 const OWNED_ENTRIES_MAX: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,14 +41,24 @@ impl Repository {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Found {
     pub repositories: Vec<Repository>,
+    pub owned: Vec<Dir>,
     pub unread: Vec<String>,
 }
 
 #[must_use]
-pub fn owned_folder() -> Option<Dir> {
-    let home = fs::canonicalize(env::var_os("HOME")?).ok()?;
-    let home = home.to_str()?.trim_end_matches('/');
-    Dir::parse(&format!("{home}/{OWNED_FOLDER}")).ok()
+pub fn owned_folders() -> Vec<Dir> {
+    let home = env::var_os("HOME").and_then(|home| fs::canonicalize(home).ok());
+    let home = home.as_deref().and_then(Path::to_str).map(|home| home.trim_end_matches('/'));
+    let Some(named) = home.and_then(|home| Dir::parse(&format!("{home}/{OWNED_FOLDER}")).ok())
+    else {
+        return Vec::new();
+    };
+    let led = fs::canonicalize(named.as_str()).ok();
+    let led = led.as_deref().and_then(Path::to_str).and_then(|led| Dir::parse(led).ok());
+    let led = led.filter(|led| *led != named);
+    let owned: Vec<Dir> = std::iter::once(named).chain(led).collect();
+    assert!(owned.len() <= OWNED_FOLDERS_MAX, "the folder as named, and where it leads");
+    owned
 }
 
 pub fn found() -> Found {
@@ -80,7 +92,7 @@ pub fn found() -> Found {
         unread.push(format!("listed the first {REPOSITORIES_MAX} clones, and no more"));
     }
     assert!(repositories.len() <= REPOSITORIES_MAX, "roots stops at REPOSITORIES_MAX");
-    Found { repositories, unread }
+    Found { repositories, owned: owned_folders(), unread }
 }
 
 struct Owned {
@@ -136,6 +148,7 @@ fn roots(folders: impl IntoIterator<Item = Directory>, bare: fn(&Path) -> bool) 
         let Some(root) = root_of(Path::new(folder.as_str()), bare, &mut rooted) else {
             continue;
         };
+        let root = fs::canonicalize(&root).unwrap_or(root);
         let path = root.to_str().map(|it| Dir::parse(it.trim_end_matches('/')));
         let Some(Ok(repository)) = path.map(|path| path.and_then(Repository::at)) else {
             unnamed += 1;
@@ -219,6 +232,20 @@ mod tests {
         assert_eq!(repositories, listed);
         assert_eq!(repositories[3].name().as_str(), "-dash", "a project may start with -");
         assert_eq!((unnamed, cut), (1, false), "a name ending in a space names no project");
+    }
+
+    #[test]
+    fn a_clone_reached_through_a_link_is_listed_where_it_is() {
+        let scratch = tempfile::tempdir().unwrap();
+        let real = fs::canonicalize(scratch.path()).unwrap().join("real");
+        fs::create_dir_all(real.join("app").join(".bare")).unwrap();
+        fs::create_dir_all(real.join("app").join("main")).unwrap();
+        let link = scratch.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let through = [link.join("app").join("main"), real.join("app")];
+        let through = through.map(|it| directory(it.to_str().unwrap()));
+        let Roots { repositories, .. } = roots(through, spot::bare_in);
+        assert_eq!(repositories, [repository(real.join("app").to_str().unwrap())]);
     }
 
     #[test]

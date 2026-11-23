@@ -536,12 +536,13 @@ impl Daemon for Host {
             return daemon.list_repositories(ListRepositoriesRequest { on: None }).await;
         }
         let found = task::spawn_blocking(repositories::found).await;
-        let repositories::Found { repositories, unread } =
+        let repositories::Found { repositories, owned, unread } =
             found.map_err(|error| unfinished(&error))?;
         let repository =
             |it: repositories::Repository| Repository { path: it.path().as_str().to_owned() };
         let repositories = repositories.into_iter().map(repository).collect();
-        Ok(Response::new(ListRepositoriesResponse { repositories, unread }))
+        let owned = owned.iter().map(|it| it.as_str().to_owned()).collect();
+        Ok(Response::new(ListRepositoriesResponse { repositories, unread, owned }))
     }
 
     async fn list_contents(

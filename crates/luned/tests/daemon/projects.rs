@@ -588,6 +588,30 @@ fn no_project_holds_the_folder_lune_keeps_clones_in() {
     changed(&host, Change::AddProject(add)).unwrap();
 }
 
+#[test]
+fn no_project_holds_where_the_folder_for_clones_leads() {
+    let host = Host::new();
+    let _daemon = start(host.vars()).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let clones = fs::canonicalize(elsewhere.path()).unwrap().join("clones");
+    let inside = clones.join("app");
+    fs::create_dir_all(&inside).unwrap();
+    std::os::unix::fs::symlink(&clones, host.home.path().join("lune")).unwrap();
+    for held in [&clones, &fs::canonicalize(elsewhere.path()).unwrap()] {
+        let add = AddProject { dir: text(held), name: None };
+        let refused = changed(&host, Change::AddProject(add)).unwrap_err();
+        let holds = format!("holds {}, where lune keeps clones", clones.display());
+        assert!(refused.message().contains(&holds), "{}", refused.message());
+    }
+    let home = fs::canonicalize(host.home.path()).unwrap();
+    let add = AddProject { dir: text(&home), name: None };
+    let refused = changed(&host, Change::AddProject(add)).unwrap_err();
+    let named = format!("holds {}, where lune keeps clones", home.join("lune").display());
+    assert!(refused.message().contains(&named), "the folder as named: {}", refused.message());
+    let add = AddProject { dir: text(&inside), name: None };
+    changed(&host, Change::AddProject(add)).unwrap();
+}
+
 fn order(host: &Host) -> Vec<u64> {
     let Held::Kept(Kept { projects, .. }) = held(host) else {
         panic!("the projects are kept");

@@ -1129,9 +1129,10 @@ fn another_machine_s_repositories_are_listed_there() {
     let owned = far.home.path().join("lune").join("app");
     fs::create_dir_all(owned.join(".bare")).unwrap();
     fs::create_dir_all(far.home.path().join("lune").join("plain")).unwrap();
-    let owned = owned.display().to_string();
+    let real = |path: &Path| fs::canonicalize(path).unwrap().display().to_string();
+    let (clones, owned) = (real(&far.home.path().join("lune")), real(&owned));
     let main = work.join("main").display().to_string();
-    let (work, notes) = (work.display().to_string(), notes.display().to_string());
+    let (work, notes) = (real(&work), notes.display().to_string());
     let lists = |dirs: &[&str]| {
         dirs.iter().fold(String::new(), |mut script, dir| {
             writeln!(script, "echo '{dir}'").unwrap();
@@ -1153,8 +1154,9 @@ fn another_machine_s_repositories_are_listed_there() {
     runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
         let listed = ListRepositoriesRequest { on: on("far") };
-        let listed = daemon.list_repositories(listed).await.unwrap().into_inner().repositories;
-        let paths: Vec<String> = listed.into_iter().map(|it| it.path).collect();
+        let listed = daemon.list_repositories(listed).await.unwrap().into_inner();
+        assert_eq!(listed.owned, [clones], "far's own folder for clones");
+        let paths: Vec<String> = listed.repositories.into_iter().map(|it| it.path).collect();
         assert_eq!(paths, [owned, work]);
         let nowhere = ListRepositoriesRequest { on: on("nowhere") };
         let nowhere = daemon.list_repositories(nowhere).await.unwrap_err();

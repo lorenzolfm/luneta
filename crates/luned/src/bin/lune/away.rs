@@ -17,7 +17,7 @@ use luned::printed::Kept;
 use luned::projects;
 use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
-use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
+use luned::repositories::{Found, Repository, OWNED_FOLDERS_MAX, REPOSITORIES_MAX};
 use luned::skills::{Name, Runs, Skill};
 use luned::transcripts::{Reading, SessionId};
 use luned::{Daemon, Destination, Directory};
@@ -60,10 +60,10 @@ impl Away {
         let request = ListRepositoriesRequest { on: Some(self.on()) };
         let listed =
             self.ask(|mut daemon| async move { daemon.list_repositories(request).await })?;
-        let Found { repositories, unread } = repositories_of(listed);
+        let Found { repositories, owned, unread } = repositories_of(listed);
         let on = &self.on;
         let unread = unread.into_iter().map(|note| format!("{on}: {note}")).collect();
-        Ok(Found { repositories, unread })
+        Ok(Found { repositories, owned, unread })
     }
 
     pub fn contents(&mut self, dir: &Directory) -> Result<String, String> {
@@ -321,7 +321,7 @@ async fn heard(
 const UNREAD_MAX: usize = 8;
 
 fn repositories_of(answer: ListRepositoriesResponse) -> Found {
-    let ListRepositoriesResponse { repositories: said, unread: mut unread_there } = answer;
+    let ListRepositoriesResponse { repositories: said, unread: mut unread_there, owned } = answer;
     let sent = said.len();
     let repository = |said: luned::api::list_repositories_response::Repository| {
         projects::Dir::parse(&said.path).and_then(Repository::at).ok()
@@ -336,11 +336,19 @@ fn repositories_of(answer: ListRepositoriesResponse) -> Found {
         unread.push(format!("listed the first {REPOSITORIES_MAX} of {} clones", read.len()));
     }
     let repositories: Vec<Repository> = read.into_iter().take(REPOSITORIES_MAX).collect();
+    let owned_sent = owned.len();
+    let owned = owned.iter().filter_map(|it| projects::Dir::parse(it).ok());
+    let owned: Vec<projects::Dir> = owned.take(OWNED_FOLDERS_MAX).collect();
+    let owned_left_out = owned_sent - owned.len();
+    if owned_left_out > 0 {
+        unread.push(format!("left out {owned_left_out} of the folders lune keeps clones in"));
+    }
     unread_there.truncate(UNREAD_MAX);
     unread.extend(unread_there);
     assert!(repositories.len() <= REPOSITORIES_MAX, "another machine's clones stop at the most");
-    assert!(unread.len() <= UNREAD_MAX + 2, "another machine's notes stop at the most");
-    Found { repositories, unread }
+    assert!(owned.len() <= OWNED_FOLDERS_MAX, "another machine's clone folders stop at the most");
+    assert!(unread.len() <= UNREAD_MAX + 3, "another machine's notes stop at the most");
+    Found { repositories, owned, unread }
 }
 
 #[cfg(test)]
@@ -415,23 +423,28 @@ mod tests {
                 dir("/home/me/-dash"),
             ],
             unread: vec!["zoxide is not on the PATH".to_owned()],
+            owned: vec!["/home/me/lune".to_owned(), "lune".to_owned(), "/srv/lune".to_owned()],
         };
         let made = |path: &str| Repository::at(projects::Dir::parse(path).unwrap()).unwrap();
         let repositories = vec![made("/home/me/api"), made("/home/me/-dash")];
         assert_eq!(repositories[1].name().as_str(), "-dash");
+        let owned = ["/home/me/lune", "/srv/lune"].map(|it| projects::Dir::parse(it).unwrap());
         let unread = vec![
             "left out 4 clones no project can be named for".to_owned(),
+            "left out 1 of the folders lune keeps clones in".to_owned(),
             "zoxide is not on the PATH".to_owned(),
         ];
-        assert_eq!(repositories_of(answer), Found { repositories, unread });
+        assert_eq!(repositories_of(answer), Found { repositories, owned: owned.to_vec(), unread });
 
         let many = (0..=REPOSITORIES_MAX).map(|at| dir(&format!("/w/c{at}")));
         let notes = (0..=UNREAD_MAX).map(|at| format!("note {at}"));
         let (repositories, unread) = (many.collect(), notes.collect());
-        let answer = ListRepositoriesResponse { repositories, unread };
-        let Found { repositories, unread } = repositories_of(answer);
+        let owned = (0..=OWNED_FOLDERS_MAX).map(|at| format!("/w/lune{at}")).collect();
+        let answer = ListRepositoriesResponse { repositories, unread, owned };
+        let Found { repositories, owned, unread } = repositories_of(answer);
+        assert_eq!(owned.len(), OWNED_FOLDERS_MAX);
         assert_eq!(repositories.len(), REPOSITORIES_MAX);
-        assert_eq!(unread.len(), 1 + UNREAD_MAX, "the cut is said, and the notes stop");
+        assert_eq!(unread.len(), 2 + UNREAD_MAX, "the cuts are said, and the notes stop");
         let cut = format!("listed the first {REPOSITORIES_MAX} of {} clones", REPOSITORIES_MAX + 1);
         assert_eq!(unread[0], cut);
     }

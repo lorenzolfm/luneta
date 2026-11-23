@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
@@ -37,40 +38,45 @@ const ASKING: Duration = Duration::from_secs(15);
 const WORK_PATIENCE: Duration = work::ANSWERED_MAX.saturating_add(ASKING);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Folder(String);
+pub enum Folder {
+    Home(projects::Below),
+    At(projects::Dir),
+}
 
 impl Folder {
     #[must_use]
     pub fn typed(typed: &str) -> Option<Folder> {
         let folder = typed.trim();
-        let held = match projects::Dir::below_home(folder).map(|below| below.trim_matches('/')) {
-            Some(below) => !below.is_empty() && below != OWNED_FOLDER,
-            None => folder.starts_with('/') && !folder.trim_start_matches('/').is_empty(),
-        };
-        held.then(|| Folder(folder.to_owned()))
+        if let Some(below) = projects::Dir::below_home(folder) {
+            let below = projects::Below::parse(below.trim_matches('/')).ok()?;
+            let held = below.is_own() || below.as_str() == OWNED_FOLDER;
+            return (!held).then_some(Folder::Home(below));
+        }
+        let at = folder.strip_suffix('/').filter(|it| !it.is_empty()).unwrap_or(folder);
+        projects::Dir::parse(at).ok().map(Folder::At)
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    #[must_use]
-    pub fn named(&self) -> Option<ProjectName> {
-        let last = self.0.rsplit('/').find(|part| !part.is_empty()).filter(|part| *part != "~")?;
-        ProjectName::parse(last).ok()
+    pub fn holds_one_of(&self, folders: &[projects::Dir]) -> bool {
+        match self {
+            Folder::Home(_) => false,
+            Folder::At(at) => folders.iter().any(|folder| at.below(folder).is_some()),
+        }
     }
 }
 
-impl From<&Directory> for Folder {
-    fn from(path: &Directory) -> Folder {
-        Folder(path.to_string())
+impl fmt::Display for Folder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Folder::Home(below) => write!(f, "~/{}", below.as_str()),
+            Folder::At(at) => f.write_str(at.as_str()),
+        }
     }
 }
 
 impl From<&projects::Dir> for Folder {
     fn from(path: &projects::Dir) -> Folder {
-        Folder(path.as_str().to_owned())
+        Folder::At(path.clone())
     }
 }
 
@@ -469,7 +475,7 @@ fn started(
 }
 
 pub fn made_at(path: &Path, machine: &Machine, folder: &Folder) -> Result<Landing, String> {
-    let start = Change::Start(Start { folder: folder.as_str().to_owned(), name: None });
+    let start = Change::Start(Start { folder: folder.to_string(), name: None });
     let made = changed_on(path, on(machine), start).and_then(|made| match made {
         Some(Made::Project(_)) => project_of(made).map(Landing::Unopened),
         made => landed(made).map(Landing::Worktree),

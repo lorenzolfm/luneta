@@ -1036,8 +1036,8 @@ impl Projects {
             return Err(Refused::Nests(nested(dir, other)));
         }
         if let Some(dir) = self.added_at(&change)
-            && let Some(owned) = crate::repositories::owned_folder()
-            && dir.below(&owned).is_some()
+            && let Some(owned) =
+                crate::repositories::owned_folders().into_iter().find(|it| dir.below(it).is_some())
         {
             return Err(Refused::Said(holds_owned(dir, &owned)));
         }
