@@ -121,9 +121,15 @@ pub fn mine(names: &[&str]) -> Mine {
                 continue;
             },
         };
-        seen.found.push(Found { id, name: name.to_owned(), argv, environ });
+        let parent = process.parent().map(sysinfo::Pid::as_u32);
+        seen.found.push(Found { id, parent, name: name.to_owned(), argv, environ });
     }
     seen
+}
+
+pub(super) fn named(pid: u32) -> Option<String> {
+    let name = |process: &Process| process.name().to_str().map(str::to_owned);
+    with(pid, ProcessRefreshKind::nothing(), name)?
 }
 
 fn living_start(pid: u32) -> Option<Start> {

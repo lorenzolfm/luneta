@@ -5,6 +5,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
+use std::str::SplitWhitespace;
 use std::time::{Duration, Instant, SystemTime};
 
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
@@ -31,19 +32,31 @@ fn exiting(pid: u32) -> bool {
     fs::read_to_string(proc(pid, "stat")).map_or(true, |stat| exiting_in(&stat))
 }
 
+fn after_name(stat: &str) -> Option<SplitWhitespace<'_>> {
+    let close = stat.rfind(')')?;
+    Some(stat[close + 1..].split_whitespace())
+}
+
 fn exiting_in(stat: &str) -> bool {
-    let Some(close) = stat.rfind(')') else {
+    let Some(mut fields) = after_name(stat) else {
         return false;
     };
-    let mut fields = stat[close + 1..].split_whitespace();
     let ended = fields.next().is_some_and(|state| matches!(state, "Z" | "X"));
     let flags = fields.nth(5).and_then(|flags| flags.parse::<u64>().ok());
     ended || flags.is_some_and(|flags| flags & PF_EXITING != 0)
 }
 
+fn parent(pid: u32) -> Option<u32> {
+    parent_in(&fs::read_to_string(proc(pid, "stat")).ok()?)
+}
+
+fn parent_in(stat: &str) -> Option<u32> {
+    let parent = after_name(stat)?.nth(1)?.parse::<u32>().ok()?;
+    (parent != 0).then_some(parent)
+}
+
 fn start_in(stat: &str) -> Option<String> {
-    let close = stat.rfind(')')?;
-    let mut fields = stat[close + 1..].split_whitespace();
+    let mut fields = after_name(stat)?;
     let state = fields.next()?;
     let threads = fields.nth(16)?;
     if state == "Z" && threads == "1" {
@@ -103,6 +116,11 @@ fn unread(pid: u32, error: &io::Error) -> Unread {
     }
 }
 
+pub(super) fn named(pid: u32) -> Option<String> {
+    let name = fs::read_to_string(proc(pid, "comm")).ok()?;
+    Some(name.trim_end_matches('\n').to_owned())
+}
+
 #[must_use]
 pub fn mine(names: &[&str]) -> Mine {
     let Ok(listed) = fs::read_dir("/proc") else {
@@ -117,23 +135,20 @@ pub fn mine(names: &[&str]) -> Mine {
         if !entry.metadata().is_ok_and(|it| it.uid() == uid) {
             continue;
         }
-        let Ok(name) = fs::read_to_string(proc(pid, "comm")) else {
+        let Some(name) = named(pid).filter(|name| names.contains(&name.as_str())) else {
             continue;
         };
-        let name = name.trim_end_matches('\n');
-        if !names.contains(&name) {
-            continue;
-        }
         let Some(start) = start(pid) else {
             continue;
         };
         let id = Id { pid, start };
+        let parent = parent(pid);
         let read = environ(pid).and_then(|environ| Ok((environ, exec_strings(pid, "cmdline")?)));
         let (environ, cmdline) = match read {
             Ok(read) => read,
             Err(Unread::Gone) => continue,
             Err(Unread::Failed(why)) => {
-                seen.unreadable.push(Unreadable { id, name: name.to_owned(), why });
+                seen.unreadable.push(Unreadable { id, name, why });
                 continue;
             },
         };
@@ -141,7 +156,7 @@ pub fn mine(names: &[&str]) -> Mine {
             continue;
         };
         let argv = argv.into_iter().map(|arg| OsString::from_vec(arg.to_vec())).collect();
-        seen.found.push(Found { id, name: name.to_owned(), argv, environ });
+        seen.found.push(Found { id, parent, name, argv, environ });
     }
     seen
 }

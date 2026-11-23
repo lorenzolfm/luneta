@@ -190,7 +190,7 @@ mod tests {
         let id = Id { pid, start: Start::spelled("1".to_owned()).unwrap() };
         let argv = [name].iter().chain(arguments).map(OsString::from).collect();
         let environ = environ.iter().map(OsString::from).collect();
-        process::Found { id, name: name.to_owned(), argv, environ }
+        process::Found { id, parent: None, name: name.to_owned(), argv, environ }
     }
 
     #[test]

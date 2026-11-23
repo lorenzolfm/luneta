@@ -18,7 +18,7 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("luned reads processes on Linux and macOS, and on nothing else yet");
 
-pub use os::{environ, mine, signalled, start, started, Domain};
+pub use os::{environ, signalled, start, started, Domain};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id {
@@ -44,9 +44,18 @@ impl Start {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub id: Id,
+    pub parent: Option<u32>,
     pub name: String,
     pub argv: Vec<OsString>,
     pub environ: Vec<OsString>,
+}
+
+impl Found {
+    fn forked_from(&self, parent: &Found) -> bool {
+        self.parent == Some(parent.id.pid)
+            && self.argv == parent.argv
+            && self.environ == parent.environ
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +84,22 @@ pub enum Unended {
     Unwatched(Errno),
 }
 
+#[must_use]
+pub fn mine(names: &[&str]) -> Mine {
+    let Mine { mut found, unreadable } = os::mine(names);
+    found.retain(|it| os::named(it.id.pid).as_ref() == Some(&it.name));
+    Mine { found: unforked(found), unreadable }
+}
+
+fn unforked(found: Vec<Found>) -> Vec<Found> {
+    let forked: Vec<Id> = found
+        .iter()
+        .filter(|it| found.iter().any(|parent| it.forked_from(parent)))
+        .map(|it| it.id.clone())
+        .collect();
+    found.into_iter().filter(|it| !forked.contains(&it.id)).collect()
+}
+
 pub fn var(name: &str) -> Result<Option<String>, String> {
     match env::var(name) {
         Ok(value) => Ok(Some(value)),
@@ -94,9 +119,9 @@ pub fn ends(pid: u32) -> io::Result<()> {
 mod tests {
     use std::env;
     use std::ffi::OsString;
-    use std::io::Read as _;
+    use std::io::{self, Read as _, Write as _};
     use std::os::unix::process::CommandExt as _;
-    use std::process::{Command, Stdio};
+    use std::process::{self, Command, Stdio};
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, SystemTime};
@@ -183,6 +208,57 @@ mod tests {
         let given = OsString::from("LUNE_GIVEN=a b=c");
         assert!(found.environ.contains(&given), "{found:?}");
         assert!(found.environ.iter().any(|it| it.as_encoded_bytes().starts_with(b"PATH=")));
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "the closure runs in the child between its fork and its exec, and only writes \
+                  and reads a pipe, which a signal handler may do"
+    )]
+    #[test]
+    fn a_process_forked_and_not_yet_given_its_own_program_is_not_found_as_its_parent() {
+        const NAMED_ON_LINUX_AS: &str = "lune-forks";
+        let me = process::id();
+        let own = super::os::named(me).expect("this test's process has a name");
+        let (mut forked_heard, mut forked_said) = io::pipe().unwrap();
+        let (mut go_heard, mut go_said) = io::pipe().unwrap();
+        let mut held = Command::new("true");
+        unsafe {
+            held.pre_exec(move || {
+                forked_said.write_all(&[1])?;
+                go_heard.read_exact(&mut [0; 1])
+            });
+        }
+        let forks = thread::Builder::new().name(NAMED_ON_LINUX_AS.to_owned());
+        let spawned = forks.spawn(move || held.spawn().unwrap().wait().unwrap()).unwrap();
+        forked_heard.read_exact(&mut [0; 1]).expect("the child says it was forked");
+        let mine = super::mine(&[own.as_str(), NAMED_ON_LINUX_AS]);
+        go_said.write_all(&[1]).unwrap();
+        assert!(spawned.join().unwrap().success());
+        let pids: Vec<u32> = mine.found.iter().map(|it| it.id.pid).collect();
+        assert!(pids.contains(&me), "{pids:?} lists this test's process");
+        let children = mine.found.iter().filter(|it| it.parent == Some(me));
+        let children: Vec<u32> = children.map(|it| it.id.pid).collect();
+        assert_eq!(children, Vec::<u32>::new());
+    }
+
+    #[test]
+    fn only_a_copy_of_a_listed_parent_is_left_out_and_a_child_of_its_own_program_is_kept() {
+        let found = |pid: u32, parent: Option<u32>, argv: &[&str]| super::Found {
+            id: super::Id { pid, start: super::Start::spelled("1".to_owned()).unwrap() },
+            parent,
+            name: "luned".to_owned(),
+            argv: argv.iter().map(OsString::from).collect(),
+            environ: vec![OsString::from("XDG_RUNTIME_DIR=/run/user/1000")],
+        };
+        let listed = vec![
+            found(1, None, &["luned"]),
+            found(2, Some(1), &["luned"]),
+            found(3, Some(1), &["luned", "--detached"]),
+            found(4, Some(9), &["luned"]),
+        ];
+        let kept: Vec<u32> = super::unforked(listed).into_iter().map(|it| it.id.pid).collect();
+        assert_eq!(kept, [1, 3, 4]);
     }
 
     #[test]
