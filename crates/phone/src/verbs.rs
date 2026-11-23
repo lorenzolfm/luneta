@@ -136,6 +136,12 @@ pub struct Marked {
     pub pulls: Vec<u32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Order {
+    pub seen: Vec<u64>,
+    pub wanted: Vec<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Step {
     Session { id: String },

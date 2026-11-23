@@ -932,7 +932,7 @@ impl Daemon for Host {
         }
         let opens = match opens {
             None => Opens::Shell,
-            Some(opens) => Opens::of_api(Some(opens))
+            opens @ Some(_) => Opens::of_api(opens)
                 .map_err(|why| Status::invalid_argument(format!("opens: {why}")))?,
         };
         let layouts = self.layouts.clone();

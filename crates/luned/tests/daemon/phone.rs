@@ -2,8 +2,8 @@ use std::fs;
 use std::sync::{mpsc, Arc, Mutex};
 
 use lune_phone::{
-    Came, Core, Held, Landed, Marked, Model, Observer, Plan, Pruned, Rebase, Step, Unanswered,
-    View, Worktree,
+    Came, Core, Held, Landed, Marked, Model, Observer, Order, Plan, Pruned, Rebase, Step,
+    Unanswered, View, Worktree,
 };
 use lune_waits::{eventually, Patience, PATIENCE};
 
@@ -127,9 +127,10 @@ fn the_phone_hears_this_machine_s_projects_and_renames_and_reorders_them() {
     let taken = refused(phone.block_on(phone.core.rename_project(None, b, "gamma".to_owned())));
     assert!(taken.contains("gamma"), "{taken}");
 
-    phone.block_on(phone.core.reorder_projects(None, vec![a, b], vec![b, a])).unwrap();
+    let reorder = Order { seen: vec![a, b], wanted: vec![b, a] };
+    phone.block_on(phone.core.reorder_projects(None, reorder)).unwrap();
     phone.sees("the projects reordered", |model| names(model) == ["beta", "gamma"]);
-    let stale = phone.core.reorder_projects(None, vec![a, b], vec![a, b]);
+    let stale = phone.core.reorder_projects(None, Order { seen: vec![a, b], wanted: vec![a, b] });
     let stale = refused(phone.block_on(stale));
     assert!(stale.contains("changed since"), "{stale}");
 
@@ -160,7 +161,8 @@ fn the_phone_renames_and_reorders_a_clone_s_worktrees_and_closes_a_view_and_a_wo
         let renamed = worktree_of(model, main).is_some_and(|it| it.renamed && it.name == "desk");
         renamed && started_view(model, main).is_some_and(|it| it.name.as_deref() == Some("server"))
     });
-    let reorder = phone.core.reorder_worktrees(None, made, vec![main, two], vec![two, main]);
+    let reorder = Order { seen: vec![main, two], wanted: vec![two, main] };
+    let reorder = phone.core.reorder_worktrees(None, made, reorder);
     phone.block_on(reorder).unwrap();
     phone.sees("the worktrees reordered", |model| order(model) == [two, main]);
 

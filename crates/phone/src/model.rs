@@ -157,8 +157,9 @@ impl Model {
                 },
             }
         }
-        let mut inbox = Vec::new();
-        let machines = seats
+        let agents_count: usize = seats.iter().map(|(seat, _)| seat.agents.len()).sum();
+        let mut inbox = Vec::with_capacity(agents_count);
+        let machines: Vec<Machine> = seats
             .into_iter()
             .map(|(seat, reached)| {
                 let held = held_of(&seat);
@@ -166,11 +167,19 @@ impl Model {
                 Machine { on: seat.on.map(str::to_owned), reached, held }
             })
             .collect();
-        inbox.sort_by_key(|agent| match agent.status {
-            Status::Waiting { .. } => (false, agent.since),
-            _ => (true, None),
-        });
+        inbox.sort_by_key(inbox_place);
+        assert_eq!(inbox.len(), agents_count);
+        assert_eq!(machines[0].reached, Reached::Here);
+        assert!(machines[0].on.is_none());
+        assert!(machines[1..].iter().all(|machine| machine.on.is_some()));
         Model { machines, inbox }
+    }
+}
+
+fn inbox_place(agent: &Agent) -> (bool, bool, Option<SystemTime>) {
+    match agent.status {
+        Status::Waiting { .. } => (false, agent.since.is_none(), agent.since),
+        Status::Busy | Status::Idle | Status::Shell | Status::Other { .. } => (true, false, None),
     }
 }
 
@@ -372,12 +381,13 @@ mod tests {
                 agent(2, api::Status::Waiting, 30, None),
                 agent(3, api::Status::Idle, 5, None),
                 agent(4, api::Status::Waiting, 20, None),
+                api::Agent { status_since: None, ..agent(5, api::Status::Waiting, 0, None) },
             ],
             ..api::Host::default()
         };
         let model = Model::of(&host);
         let names: Vec<&str> = model.inbox.iter().map(|agent| agent.name.as_str()).collect();
-        assert_eq!(names, ["agent-4", "agent-2", "agent-1", "agent-3"]);
+        assert_eq!(names, ["agent-4", "agent-2", "agent-5", "agent-1", "agent-3"]);
         assert_eq!(model.inbox[0].status, Status::Waiting { why: Why::Permission });
     }
 
