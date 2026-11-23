@@ -130,8 +130,12 @@ impl Owned {
     }
 
     pub fn new_terminal(&self, tag: &[u8]) -> mux_api::TerminalKey {
+        self.new_terminal_running(tag, WAITS.map(str::to_owned).to_vec())
+    }
+
+    pub fn new_terminal_running(&self, tag: &[u8], argv: Vec<String>) -> mux_api::TerminalKey {
         let socket = self.socket();
-        let program = Some(mux_api::Program { argv: WAITS.map(str::to_owned).to_vec() });
+        let program = Some(mux_api::Program { argv });
         let ends = mux_api::Ends::Holds.into();
         let opens = Some(mux_api::Opens { cwd: self.home(), program, ends });
         let size = Some(mux_api::Size { columns: 80, rows: 24 });

@@ -7,10 +7,10 @@ use std::time::Duration;
 use luned::links::{self, Branch, Kind, Link, Of, Pasted, Unready, Work, Worked};
 use luned::mux::own::terminal_here;
 use luned::program;
-use luned::projects::{Dir, Opens, WorktreeId};
+use luned::projects::{Argv, Dir, Opens, WorktreeId};
 use luned::Directory;
 
-use crate::agents::{self, Kept};
+use crate::agents::Kept;
 use crate::machines::Machine;
 use crate::worktrees::{self, Landed, Landing, Opening, Went};
 
@@ -191,7 +191,7 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let agent = match (link.kind(), &off) {
         (Kind::Issue, None) => {
             let harness = Kept::shared().0.harness();
-            let agent = agents::on_words(harness, format!("{TACKLE} {}", link.url()), &[]);
+            let agent = Argv::on_words(harness, format!("{TACKLE} {}", link.url()), &[]);
             let unstarted = |why| format!("no agent starts on {}: {why}", link.tab());
             Opens::Command(agent.map_err(unstarted)?)
         },

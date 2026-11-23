@@ -15,10 +15,11 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::{self, mux_server};
-use crate::asked::{self, Dumped, Opens, Size, Tag, TerminalKey, ViewerHeard};
+use crate::asked::{self, Dumped, Opens, Press, Size, Tag, TerminalKey, ViewerHeard};
 use crate::folder::Claim;
 use crate::id::ClientId;
 use crate::mux::{Listed, Mux};
+use crate::screen::Looked;
 use crate::terminal::{CLIENT_MESSAGES, ToTerminal, UNREAD_BYTES_MAX, ViewerOut};
 use crate::pty;
 
@@ -51,9 +52,26 @@ impl mux_server::Mux for Service {
         let handle = self.mux.terminal(key)?;
         let (answer, answered) = oneshot::channel();
         handle.send(ToTerminal::Dump(dumped, answer)).await;
-        let gone = || Status::not_found(format!("terminal {} ended", key.id));
-        let text = answered.await.map_err(|_| gone())??;
+        let text = answered.await.map_err(|_| ended(key))??;
         Ok(Response::new(api::DumpResponse { text }))
+    }
+
+    async fn look(&self, request: Request<api::LookRequest>) -> Answer<api::Looked> {
+        let key = TerminalKey::parse("terminal", request.into_inner().terminal)?;
+        let handle = self.mux.terminal(key)?;
+        let (answer, answered) = oneshot::channel();
+        handle.send(ToTerminal::Look(answer)).await;
+        let Looked { text, shown } = answered.await.map_err(|_| ended(key))??;
+        Ok(Response::new(api::Looked { text, shown }))
+    }
+
+    async fn press(&self, request: Request<api::PressRequest>) -> Answer<api::PressResponse> {
+        let Press { terminal, shown, inputs } = Press::parse(request.into_inner())?;
+        let handle = self.mux.terminal(terminal)?;
+        let (answer, answered) = oneshot::channel();
+        handle.send(ToTerminal::Press(shown, inputs, answer)).await;
+        answered.await.map_err(|_| ended(terminal))??;
+        Ok(Response::new(api::PressResponse {}))
     }
 
     async fn list(&self, _: Request<api::ListRequest>) -> Answer<api::Listing> {
@@ -137,6 +155,10 @@ impl mux_server::Mux for Service {
         Ok(Response::new(api::InfoResponse { version, built }))
     }
 
+}
+
+fn ended(key: TerminalKey) -> Status {
+    Status::not_found(format!("terminal {} ended", key.id))
 }
 
 async fn listen_to_viewer(

@@ -30,6 +30,8 @@ service Daemon {
   rpc ListWork(ListWorkRequest) returns (stream ListWorkResponse);
   rpc Show(stream ShowRequest) returns (stream ShowResponse);
   rpc Frames(stream FramesRequest) returns (stream lune.mux.v1.ToViewer);
+  rpc Waiting(WaitingRequest) returns (WaitingResponse);
+  rpc Answer(AnswerRequest) returns (google.protobuf.Empty);
 }
 
 message On {
@@ -672,7 +674,13 @@ message Opens {
   oneof runs {
     google.protobuf.Empty shell = 1;
     Argv command = 2;
+    Prompted agent = 3;
   }
+}
+
+message Prompted {
+  Harness harness = 1;
+  string words = 2;
 }
 
 message Argv {
@@ -995,4 +1003,41 @@ message ShowResponse {
 message TerminalKey {
   uint32 id = 1;
   google.protobuf.Timestamp made_at = 2;
+}
+
+message WaitingRequest {
+  On on = 1;
+  TerminalKey terminal = 2;
+}
+
+message WaitingResponse {
+  string screen = 1;
+  uint64 shown = 2;
+  oneof asks {
+    google.protobuf.Empty words = 3;
+    Menu menu = 4;
+    string unread = 5;
+  }
+  optional string said = 6;
+
+  message Menu {
+    repeated string choices = 1;
+    uint32 chosen = 2;
+  }
+}
+
+message AnswerRequest {
+  On on = 1;
+  TerminalKey terminal = 2;
+  optional uint64 shown = 6;
+  oneof answer {
+    string text = 3;
+    Choice choice = 4;
+    google.protobuf.Empty escape = 5;
+  }
+
+  message Choice {
+    uint32 index = 1;
+    string label = 2;
+  }
 }

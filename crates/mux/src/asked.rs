@@ -18,6 +18,8 @@ pub const TAG_BYTES_MAX: usize = 256;
 
 pub const SHOWN_MAX: usize = 1024;
 
+pub const PRESSED_MAX: usize = 64;
+
 pub(crate) fn refused(field: &str, why: impl fmt::Display) -> Status {
     Status::invalid_argument(format!("{field} {why}"))
 }
@@ -124,6 +126,36 @@ impl Dumped {
                 Err(refused(field, "is not one of SCREEN or TEXT"))
             },
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Press {
+    pub terminal: TerminalKey,
+    pub shown: u64,
+    pub inputs: Vec<Input>,
+}
+
+impl Press {
+    pub fn parse(request: api::PressRequest) -> Result<Press, Status> {
+        let api::PressRequest { terminal, shown, pressed } = request;
+        let terminal = TerminalKey::parse("terminal", terminal)?;
+        let shown = present("shown", shown)?;
+        if pressed.is_empty() {
+            return Err(refused("pressed", "is empty"));
+        }
+        if pressed.len() > PRESSED_MAX {
+            return Err(refused("pressed", format_args!("are over {PRESSED_MAX}")));
+        }
+        let inputs = pressed.into_iter().map(|api::Pressed { event }| {
+            Ok(match present("pressed.event", event)? {
+                api::pressed::Event::Key(key) => key_heard(key)?,
+                api::pressed::Event::Paste(api::Paste { text }) => Input::Paste(text),
+            })
+        });
+        let inputs = inputs.collect::<Result<Vec<Input>, Status>>()?;
+        assert!((1..=PRESSED_MAX).contains(&inputs.len()), "{} inputs", inputs.len());
+        Ok(Press { terminal, shown, inputs })
     }
 }
 

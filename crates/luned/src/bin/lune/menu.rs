@@ -1674,11 +1674,11 @@ impl Menu {
             (Pull::Worktree, _) => None,
             (Pull::Agent, Readied::Link(link)) => Some(match Asks::of_link(link) {
                 Asks::Review => agents::on_skill(agent, REVIEW, Some(&link.url())),
-                Asks::Tackle => agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[]),
+                Asks::Tackle => Argv::on_words(agent, format!("{TACKLE} {}", link.url()), &[]),
             }),
             (Pull::Agent, Readied::File { real }) => {
                 let words = format!("{TACKLE} {real}");
-                Some(agents::on_words(agent, words, &[real.as_str()]))
+                Some(Argv::on_words(agent, words, &[real.as_str()]))
             },
         };
         let argv = match argv.transpose() {
@@ -1749,7 +1749,7 @@ impl Menu {
         }
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
-        let opens = match agents::on_words(keys.agent.harness(), prompt, &files) {
+        let opens = match Argv::on_words(keys.agent.harness(), prompt, &files) {
             Ok(argv) => Opens::Command(argv),
             Err(why) => return unstarted(format!("what view {view} printed"), &why),
         };
@@ -1782,7 +1782,7 @@ impl Menu {
         }
         let prompt = checks::prompt(&page, &failing);
         let files = checks::files(&failing);
-        let opens = match agents::on_words(keys.agent.harness(), prompt, &files) {
+        let opens = match Argv::on_words(keys.agent.harness(), prompt, &files) {
             Ok(argv) => Opens::Command(argv),
             Err(why) => return unstarted(format!("the checks of #{number}"), &why),
         };
@@ -1814,7 +1814,7 @@ impl Menu {
             return Did::Closed(Done::Said(format!("menu: {}", rebase::said(&rebased))));
         };
         let prompt = rebases::prompt(&rebased.branch, &rebased.onto, stopped);
-        let command = match agents::on_words(keys.agent.harness(), prompt, &[]) {
+        let command = match Argv::on_words(keys.agent.harness(), prompt, &[]) {
             Ok(argv) => argv,
             Err(why) => return unstarted(&branch, &why),
         };
@@ -3166,7 +3166,7 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('e')));
         let kept = Kept { file: "/run/lune/printed/1.txt".to_owned(), lines: 3, left_out: 0 };
         let (_, wants) = stays(menu.printed(Ok(Printed::After(kept))));
-        let command = vec!["pi".to_owned(), prompt.to_owned()];
+        let command = vec!["pi".to_owned(), "--".to_owned(), prompt.to_owned()];
         assert_eq!(wants, beside_row(command));
 
         let (menu, _) = stays(opened(ended_row(), Some('c')));
@@ -3174,7 +3174,7 @@ mod tests {
         let (_, wants) = stays(menu.printed(Ok(Printed::Nothing)));
         let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
                       nothing.";
-        let command = vec!["claude".to_owned(), prompt.to_owned()];
+        let command = vec!["claude".to_owned(), "--".to_owned(), prompt.to_owned()];
         assert_eq!(wants, beside_row(command));
 
         let (menu, _) = stays(opened(ended_row(), Some('c')));
@@ -3293,7 +3293,7 @@ mod tests {
             unreachable!("on_conflicts() is a stopped rebase");
         };
         let prompt = rebases::prompt("feat/menu", "origin/main", &stopped);
-        let command = vec!["claude".to_owned(), prompt];
+        let command = vec!["claude".to_owned(), "--".to_owned(), prompt];
 
         let (menu, wants) = stays(rebasing(view_row()).rebased(Ok(rebased(on_conflicts()))));
         assert_eq!(wants, beside_row(command.clone()));
@@ -4454,7 +4454,7 @@ mod tests {
             work: Readied::Link(link),
         };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
-        let tackle = ["claude", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
+        let tackle = ["claude", "--", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
         let agent = Some(argv(tackle.map(str::to_owned).to_vec()));
         let (cwd, name) = (directory(&folder), "#2736".to_owned());
         assert_eq!(wants, Wants::Make { cwd, name, agent });

@@ -28,7 +28,7 @@ use crate::panics::{self, Panicked};
 use crate::process::{self, Group};
 use crate::pty::Pty;
 use crate::ran::{Job, Now, Shell};
-use crate::screen::{Pushed, Screen, View, Wheel};
+use crate::screen::{Looked, Pushed, Screen, View, Wheel};
 
 const SCROLLBACK_BYTES: usize = 10_000_000;
 
@@ -141,6 +141,8 @@ enum Held {
 pub enum ToTerminal {
     Input(ClientId, Input),
     Dump(Dumped, oneshot::Sender<Result<String, Status>>),
+    Look(oneshot::Sender<Result<Looked, Status>>),
+    Press(u64, Vec<Input>, oneshot::Sender<Result<(), Status>>),
 }
 
 #[derive(Clone)]
@@ -543,7 +545,46 @@ impl Thread {
                 let failed = |error| Status::internal(format!("the dump failed: {error}"));
                 let _ = answer.send(text.map_err(failed));
             },
+            ToTerminal::Look(answer) => {
+                let failed = |error| Status::internal(format!("the look failed: {error}"));
+                let _ = answer.send(self.screen.looked().map_err(failed));
+            },
+            ToTerminal::Press(shown, inputs, answer) => {
+                let pressed = match self.want()? {
+                    Held::Still => self.press(shown, inputs),
+                    Held::LetGo => {
+                        Err(Status::not_found(format!("terminal {} ended", self.key.id)))
+                    },
+                };
+                let _ = answer.send(pressed);
+            },
         }
+        Ok(())
+    }
+
+    fn press(&mut self, shown: u64, inputs: Vec<Input>) -> Result<(), Status> {
+        assert!(!inputs.is_empty(), "something is pressed");
+        let failed = |error: Error| Status::internal(format!("the press failed: {error}"));
+        if self.screen.looked().map_err(failed)?.shown != shown {
+            return Err(Status::aborted("the screen changed since it was looked at"));
+        }
+        let mut bytes = Vec::new();
+        for input in inputs {
+            assert!(matches!(input, Input::Key { .. } | Input::Paste(_)), "{input:?} is pressed");
+            match self.does(input).map_err(failed)? {
+                Does::Write(written) => bytes.extend(written),
+                Does::Scroll(_) | Does::Nothing => {},
+            }
+        }
+        let Program::Runs { unread, .. } = &mut self.program else {
+            let ended = format!("terminal {}'s program ended", self.key.id);
+            return Err(Status::failed_precondition(ended));
+        };
+        if unread.len() + bytes.len() > UNREAD_BYTES_MAX {
+            let full = format!("terminal {} has {} unread bytes", self.key.id, unread.len());
+            return Err(Status::resource_exhausted(full));
+        }
+        unread.extend_from_slice(&bytes);
         Ok(())
     }
 

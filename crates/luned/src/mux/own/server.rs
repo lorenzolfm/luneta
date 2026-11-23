@@ -52,6 +52,15 @@ const STOPPING: Duration = Duration::from_secs(2);
 
 const LOOK: Duration = Duration::from_millis(10);
 
+pub const PRESSES_MAX: usize = crate::choices::CHOICES_MAX - 1;
+
+const _: () = assert!(
+    PRESSES_MAX + 1 == crate::choices::CHOICES_MAX,
+    "an answer presses at once at most the moves from a menu's first choice to its last"
+);
+
+const _: () = assert!(PRESSES_MAX >= 2, "a text answer's paste and Enter go at once");
+
 const AGAIN: Duration = Duration::from_millis(100);
 
 static MATCHED: AtomicI32 = AtomicI32::new(0);
@@ -238,21 +247,57 @@ pub(super) fn unreached_at(socket: &Path, error: &io::Error) -> String {
 }
 
 #[derive(Debug)]
-pub struct Reply(String);
+pub struct Reply {
+    code: Code,
+    said: String,
+}
 
 impl Reply {
     fn of(status: &Status) -> Reply {
-        match status.message() {
-            "" => Reply(status.code().description().to_owned()),
-            said => Reply(said.to_owned()),
-        }
+        let said = match status.message() {
+            "" => status.code().description().to_owned(),
+            said => said.to_owned(),
+        };
+        Reply { code: status.code(), said }
+    }
+
+    #[must_use]
+    pub fn code(&self) -> Code {
+        self.code
     }
 }
 
 impl fmt::Display for Reply {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.said)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shown(u64);
+
+impl Shown {
+    #[must_use]
+    pub fn of(shown: u64) -> Shown {
+        Shown(shown)
+    }
+
+    #[must_use]
+    pub fn said(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug)]
+pub struct Looked {
+    pub text: String,
+    pub shown: Shown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pressed {
+    Done,
+    Changed,
 }
 
 pub fn socket() -> Result<PathBuf, Failure> {
@@ -558,7 +603,7 @@ impl Terminals {
         if reasons.is_empty() {
             Ok(())
         } else {
-            Err(Failure::Called(Reply(reasons.join("; "))))
+            Err(Failure::Called(Reply { code: Code::Unknown, said: reasons.join("; ") }))
         }
     }
 
@@ -574,6 +619,34 @@ impl Terminals {
         let request = api::DumpRequest { dumped: dumped.into(), terminal: Some(key.said()) };
         let asked = reached()?.ask(|mut client| async move { client.dump(request).await });
         Ok(asked.map_err(|status| refused(&status))?.text)
+    }
+
+    pub fn looked(&self, key: TerminalKey) -> Result<Looked, Failure> {
+        let request = api::LookRequest { terminal: Some(key.said()) };
+        let asked = reached()?.ask(|mut client| async move { client.look(request).await });
+        let api::Looked { text, shown } = asked.map_err(|status| refused(&status))?;
+        Ok(Looked { text, shown: Shown(shown) })
+    }
+
+    pub fn pressed(
+        &self,
+        key: TerminalKey,
+        shown: Shown,
+        pressed: Vec<api::pressed::Event>,
+    ) -> Result<Pressed, Failure> {
+        assert!(!pressed.is_empty(), "something is pressed");
+        assert!(pressed.len() <= PRESSES_MAX, "no more presses than an answer takes");
+        let pressed = pressed.into_iter().map(|event| api::Pressed { event: Some(event) });
+        let request = api::PressRequest {
+            terminal: Some(key.said()),
+            shown: Some(shown.0),
+            pressed: pressed.collect(),
+        };
+        match reached()?.ask(|mut client| async move { client.press(request).await }) {
+            Ok(api::PressResponse {}) => Ok(Pressed::Done),
+            Err(status) if status.code() == Code::Aborted => Ok(Pressed::Changed),
+            Err(status) => Err(refused(&status)),
+        }
     }
 
     pub fn closed(&self, key: TerminalKey) -> Result<(), Failure> {

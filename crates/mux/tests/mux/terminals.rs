@@ -1,5 +1,5 @@
 use lune_mux::api;
-use lune_waits::Patience;
+use lune_waits::{Patience, eventually_async};
 use tonic::Code;
 
 use crate::host::{
@@ -217,6 +217,76 @@ fn a_terminal_dumps_its_text() {
         let untold = api::DumpRequest { dumped: api::Dumped::Text.into(), terminal: None };
         let refusal = mux.dump(untold).await.unwrap_err();
         assert_eq!(refusal.message(), "terminal is missing");
+    });
+}
+
+#[test]
+fn a_terminal_looks_at_only_the_text_it_shows() {
+    run(async {
+        let server = Server::start().await;
+        let mut mux = server.client().await;
+        let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
+        let key =
+            new_terminal(&mut mux, script("seq 1 20", api::Ends::Holds), b"t", size(20, 4)).await;
+        watched_until(&mut watch, "the program ended", |listing| {
+            terminal(listing, &key).is_some_and(|terminal| {
+                matches!(terminal.program, Some(api::terminal::Program::Ended(_)))
+            })
+        })
+        .await;
+        let looked = mux.look(api::LookRequest { terminal: Some(key) }).await.unwrap().into_inner();
+        let again = mux.look(api::LookRequest { terminal: Some(key) }).await.unwrap().into_inner();
+        let dumped = api::DumpRequest { dumped: api::Dumped::Text.into(), terminal: Some(key) };
+        let text = mux.dump(dumped).await.unwrap().into_inner().text;
+        let shown = looked.text.as_str();
+        assert!(shown.lines().count() <= 4, "{shown}");
+        assert!(shown.lines().any(|line| line == "20"), "{shown}");
+        assert!(!shown.lines().any(|line| line == "1"), "{shown}");
+        assert!(text.lines().any(|line| line == "1"), "{text}");
+        assert_eq!(looked, again, "a screen that did not change looks the same");
+    });
+}
+
+fn pressed(key: api::TerminalKey, shown: Option<u64>, text: &str) -> api::PressRequest {
+    let paste = api::pressed::Event::Paste(api::Paste { text: text.to_owned() });
+    let enter = api::pressed::Event::Key(api::Key {
+        press: api::Press::Down.into(),
+        modifiers: None,
+        key: Some(api::key::Key::Named(api::Named::Enter.into())),
+        text: String::new(),
+    });
+    let pressed = [paste, enter].map(|event| api::Pressed { event: Some(event) }).to_vec();
+    api::PressRequest { terminal: Some(key), shown, pressed }
+}
+
+#[test]
+fn a_press_lands_only_on_the_screen_it_was_looked_at() {
+    run(async {
+        let server = Server::start().await;
+        let mut mux = server.client().await;
+        let heard =
+            "stty raw -echo; echo ready; dd bs=1 count=3 2>/dev/null | od -An -tx1; sleep 60";
+        let key = new_terminal(&mut mux, script(heard, api::Ends::Holds), b"t", size(40, 4)).await;
+        let looked = eventually_async("the program is ready", async || {
+            let looked = mux.look(api::LookRequest { terminal: Some(key) }).await.unwrap();
+            let looked = looked.into_inner();
+            looked.text.contains("ready").then_some(looked)
+        })
+        .await;
+        let changed = Some(looked.shown.wrapping_add(1));
+        let refused = mux.press(pressed(key, changed, "no")).await.unwrap_err();
+        assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+        let unsaid = mux.press(pressed(key, None, "no")).await.unwrap_err();
+        assert_eq!(unsaid.message(), "shown is missing");
+        let empty = pressed(key, Some(looked.shown), "");
+        let empty = api::PressRequest { pressed: Vec::new(), ..empty };
+        assert_eq!(mux.press(empty).await.unwrap_err().message(), "pressed is empty");
+        mux.press(pressed(key, Some(looked.shown), "ab")).await.unwrap();
+        eventually_async("the program heard the press alone", async || {
+            let looked = mux.look(api::LookRequest { terminal: Some(key) }).await.unwrap();
+            looked.into_inner().text.contains("61 62 0d").then_some(())
+        })
+        .await;
     });
 }
 

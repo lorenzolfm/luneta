@@ -18,7 +18,8 @@ use luned::api::{
     ListSkillsResponse,
     PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
     RebaseRequest, RebaseResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse, Version, WatchRequest,
+    TranscriptEndsRequest, TranscriptEndsResponse, Version, WaitingRequest, WaitingResponse,
+    WatchRequest, AnswerRequest,
 };
 use luned::{folder, release, Claim, ALONE, SWEEP};
 use prost::Message as _;
@@ -628,6 +629,17 @@ impl Daemon for StandIn {
         _: Request<TranscriptEndsRequest>,
     ) -> Result<Response<TranscriptEndsResponse>, Status> {
         Err(Status::unimplemented("a stand-in reads no transcripts"))
+    }
+
+    async fn waiting(
+        &self,
+        _: Request<WaitingRequest>,
+    ) -> Result<Response<WaitingResponse>, Status> {
+        Err(Status::unimplemented("a stand-in shows no screen"))
+    }
+
+    async fn answer(&self, _: Request<AnswerRequest>) -> Result<Response<()>, Status> {
+        Err(Status::unimplemented("a stand-in answers no agent"))
     }
 
     type AskStream = tokio_stream::Empty<Result<AskResponse, Status>>;
