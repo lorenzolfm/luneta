@@ -32,7 +32,7 @@ use crate::machines::Machine;
 use crate::printed::{self, Printed};
 use crate::prune;
 use crate::rebase;
-use crate::pull::{At, Found, Kind, Readied, Ready, Wanted, Work};
+use crate::pull::{At, Found, Kind, Link, Readied, Ready, Wanted, Work};
 use crate::sidebar::{
     self, ACCENT, LIT, Listed, Mark, NAME, ViewKey, ViewPlace, Place, ProjectRow, TAG,
     WorktreePlace,
@@ -204,14 +204,21 @@ enum Asks {
 impl Asks {
     fn of(work: &Work) -> Asks {
         match work {
-            Work::Link(link) if link.kind() == Kind::Pull => Asks::Review,
-            Work::Link(_) | Work::File(_) => Asks::Tackle,
+            Work::Link(link) => Asks::of_link(link),
+            Work::File(_) => Asks::Tackle,
+        }
+    }
+
+    fn of_link(link: &Link) -> Asks {
+        match link.kind() {
+            Kind::Pull => Asks::Review,
+            Kind::Issue => Asks::Tackle,
         }
     }
 }
 
 impl Pull {
-    const ALL: [Pull; 2] = [Pull::Worktree, Pull::Agent];
+    const ALL: [Pull; 2] = [Pull::Agent, Pull::Worktree];
 
     pub fn offered(work: &Work) -> [(Pull, Pasted); 2] {
         let asks = Asks::of(work);
@@ -1665,12 +1672,10 @@ impl Menu {
         }
         let argv = match (pull, &readied) {
             (Pull::Worktree, _) => None,
-            (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
-                Some(agents::on_skill(agent, REVIEW, Some(&link.url())))
-            },
-            (Pull::Agent, Readied::Link(link)) => {
-                Some(Argv::on_words(agent, format!("{TACKLE} {}", link.url()), &[]))
-            },
+            (Pull::Agent, Readied::Link(link)) => Some(match Asks::of_link(link) {
+                Asks::Review => agents::on_skill(agent, REVIEW, Some(&link.url())),
+                Asks::Tackle => Argv::on_words(agent, format!("{TACKLE} {}", link.url()), &[]),
+            }),
             (Pull::Agent, Readied::File { real }) => {
                 let words = format!("{TACKLE} {real}");
                 Some(Argv::on_words(agent, words, &[real.as_str()]))
@@ -4331,8 +4336,8 @@ mod tests {
             text(&menu.lines(31, 9, 0).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
-                " w  worktree",
                 " r  /thermo-nuclear-review",
+                " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
             ]
@@ -4430,8 +4435,8 @@ mod tests {
             text(&menu.lines(31, 9, 0).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
-                " w  worktree",
                 " t  tackle",
+                " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
             ]
@@ -4472,8 +4477,8 @@ mod tests {
         assert!(!menu.turning());
         let refused = [
             "─ #2736 ──────── cashubtc/cdk ─",
-            " w  worktree",
             " t  tackle",
+            " w  worktree",
             " \u{ec82} claude  <TAB> another agent",
             " /w/cdk/issue-2736 is on",
             " dev-docs, not issue-2736, so",
@@ -4483,7 +4488,7 @@ mod tests {
         ];
         let (lines, spots) = menu.lines(31, 9, 0);
         assert_eq!(text(&lines), refused);
-        assert_eq!(spots.at(Position::new(4, 1)), Some(&pressed(KeyCode::Char('w'))));
+        assert_eq!(spots.at(Position::new(4, 2)), Some(&pressed(KeyCode::Char('w'))));
 
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
@@ -4509,8 +4514,8 @@ mod tests {
             text(&menu.lines(31, 11, 0).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
-                " w  worktree",
                 " r  /thermo-nuclear-review",
+                " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " /w/cdk/feat is on stacked,",
                 " not the pull request's head",
@@ -4541,8 +4546,8 @@ mod tests {
             text(&menu.lines(38, 9, 0).0),
             [
                 "─ sync-rework ─ plans/sync-rework.md ─",
-                " w  worktree",
                 " t  tackle",
+                " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
             ]
