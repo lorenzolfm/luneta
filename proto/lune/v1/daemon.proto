@@ -85,6 +85,7 @@ message ListRepositoriesRequest {
 
 message ListRepositoriesResponse {
   repeated Repository repositories = 1;
+  repeated string unread = 2;
 
   message Repository {
     string path = 1;

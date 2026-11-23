@@ -2117,7 +2117,7 @@ impl App {
             Picked::Make { on, folder, name } => {
                 let name = name.as_ref().map(SessionName::to_string);
                 self.make_worktree(on, move |luned, on| {
-                    worktrees::made_at(luned, on, &folder, name.as_deref())
+                    worktrees::made_at(luned, on, folder.as_str(), name.as_deref())
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },

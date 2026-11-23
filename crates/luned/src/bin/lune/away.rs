@@ -16,10 +16,10 @@ use luned::links::{Pasted, Ready, Unready};
 use luned::printed::Kept;
 use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
-use luned::repositories::Repository;
+use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
 use luned::skills::{Name, Runs, Skill};
 use luned::transcripts::{Reading, SessionId};
-use luned::{log, Daemon, Destination, Directory, SessionName};
+use luned::{Daemon, Destination, Directory, SessionName};
 use tokio::runtime::Runtime;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
@@ -55,18 +55,14 @@ impl Away {
         Ok(Away { runtime, daemon, on: destination.clone(), patience })
     }
 
-    pub fn repositories(&mut self) -> Result<Vec<Repository>, String> {
+    pub fn repositories(&mut self) -> Result<Found, String> {
         let request = ListRepositoriesRequest { on: Some(self.on()) };
         let listed =
             self.ask(|mut daemon| async move { daemon.list_repositories(request).await })?;
-        let sent = listed.repositories.len();
-        let repositories = repositories_of(listed);
-        let left_out = sent - repositories.len();
-        if left_out > 0 {
-            let on = &self.on;
-            log::say(&format!("{on}: left out {left_out} repositories no project is named for"));
-        }
-        Ok(repositories)
+        let Found { repositories, unread } = repositories_of(listed);
+        let on = &self.on;
+        let unread = unread.into_iter().map(|note| format!("{on}: {note}")).collect();
+        Ok(Found { repositories, unread })
     }
 
     pub fn contents(&mut self, dir: &Directory) -> Result<String, String> {
@@ -321,12 +317,30 @@ async fn heard(
     }
 }
 
-fn repositories_of(answer: ListRepositoriesResponse) -> Vec<Repository> {
+const UNREAD_MAX: usize = 8;
+
+fn repositories_of(answer: ListRepositoriesResponse) -> Found {
+    let ListRepositoriesResponse { repositories: said, unread: mut unread_there } = answer;
+    let sent = said.len();
     let repository = |said: luned::api::list_repositories_response::Repository| {
         let name = SessionName::parse(&said.name).ok()?;
         Some(Repository { path: Directory::parse(said.path).ok()?, name })
     };
-    answer.repositories.into_iter().filter_map(repository).collect()
+    let read: Vec<Repository> = said.into_iter().filter_map(repository).collect();
+    let mut unread = Vec::new();
+    let left_out = sent - read.len();
+    if left_out > 0 {
+        unread.push(format!("left out {left_out} clones no project can be named for"));
+    }
+    if read.len() > REPOSITORIES_MAX {
+        unread.push(format!("listed the first {REPOSITORIES_MAX} of {} clones", read.len()));
+    }
+    let repositories: Vec<Repository> = read.into_iter().take(REPOSITORIES_MAX).collect();
+    unread_there.truncate(UNREAD_MAX);
+    unread.extend(unread_there);
+    assert!(repositories.len() <= REPOSITORIES_MAX, "another machine's clones stop at the most");
+    assert!(unread.len() <= UNREAD_MAX + 2, "another machine's notes stop at the most");
+    Found { repositories, unread }
 }
 
 #[cfg(test)]
@@ -399,12 +413,27 @@ mod tests {
                 dir("/home/me/long", &"x".repeat(luned::SESSION_NAME_BYTES_MAX + 1)),
                 dir("/home/me/blog", "blog"),
             ],
+            unread: vec!["zoxide is not on the PATH".to_owned()],
         };
         let made = |path: &str, name: &str| Repository {
             path: Directory::parse(path.to_owned()).unwrap(),
             name: SessionName::parse(name).unwrap(),
         };
-        let repositories = [made("/home/me/api", "api-2"), made("/home/me/blog", "blog")];
-        assert_eq!(repositories_of(answer), repositories);
+        let repositories = vec![made("/home/me/api", "api-2"), made("/home/me/blog", "blog")];
+        let unread = vec![
+            "left out 3 clones no project can be named for".to_owned(),
+            "zoxide is not on the PATH".to_owned(),
+        ];
+        assert_eq!(repositories_of(answer), Found { repositories, unread });
+
+        let many = (0..=REPOSITORIES_MAX).map(|at| dir(&format!("/w/c{at}"), &format!("c{at}")));
+        let notes = (0..=UNREAD_MAX).map(|at| format!("note {at}"));
+        let (repositories, unread) = (many.collect(), notes.collect());
+        let answer = ListRepositoriesResponse { repositories, unread };
+        let Found { repositories, unread } = repositories_of(answer);
+        assert_eq!(repositories.len(), REPOSITORIES_MAX);
+        assert_eq!(unread.len(), 1 + UNREAD_MAX, "the cut is said, and the notes stop");
+        let cut = format!("listed the first {REPOSITORIES_MAX} of {} clones", REPOSITORIES_MAX + 1);
+        assert_eq!(unread[0], cut);
     }
 }
