@@ -33,6 +33,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::actions::{Action, Command, GIT, QUIT};
+use crate::attached::border;
 use crate::agents::{self, Kept};
 use crate::alerts::{self, Reach};
 use crate::aloud;
@@ -85,6 +86,8 @@ const COPIED_SHOWS: Duration = Duration::from_secs(3);
 pub const NARROWEST: u16 = 16;
 
 pub const COLLAPSED: u16 = 4;
+
+pub const COLLAPSED_FRAMED: u16 = COLLAPSED + 1;
 
 const HERE_MARK: &str = "▌";
 const NEW: &str = "•";
@@ -4653,6 +4656,11 @@ impl Sidebar {
         [self.title(width, frame), Line::default()]
     }
 
+    pub fn frame(&self, buffer: &mut Buffer, framed: Rect) {
+        let framing = self.framing();
+        border(buffer, framed, framed, "", framing, framing);
+    }
+
     fn framing(&self) -> Style {
         if self.has_keys() {
             Style::new().fg(ACCENT)
@@ -4888,6 +4896,14 @@ fn tallies(counts: Counts, frame: usize) -> [(usize, (String, Style)); 3] {
         (counts.busy, Mark::Busy.glyph(frame)),
         (counts.shell, Mark::Shell.glyph(frame)),
     ]
+}
+
+pub fn within(framed: Rect) -> Rect {
+    let x = framed.x.saturating_add(1).min(framed.right());
+    let y = framed.y.saturating_add(1).min(framed.bottom());
+    let width = framed.right() - x;
+    let height = framed.bottom().saturating_sub(1).max(y) - y;
+    Rect { x, y, width, height }
 }
 
 pub fn edge(area: Rect) -> Option<u16> {
@@ -6557,6 +6573,29 @@ mod tests {
         assert_eq!(edge(&lent), vec![dim.clone(); 10]);
         assert_eq!(edge(&drawn(&mut sidebar, false, COLUMNS, 10)), vec![dim.clone(); 10]);
         assert_eq!(edge(&collapsed(&mut sidebar, 10, moment(160_000))), vec![dim; 10]);
+    }
+
+    #[test]
+    fn the_sidebar_is_a_rounded_box_round_its_rows() {
+        let mut sidebar = two_sessions();
+        let framed = Rect::new(0, 0, COLUMNS, 10);
+        let rows = within(framed);
+        assert_eq!(rows, Rect::new(1, 1, COLUMNS - 1, 8));
+        assert_eq!(edge(rows), edge(framed));
+        let mut buffer = Buffer::empty(framed);
+        sidebar.focus(Keys::Sidebar);
+        sidebar.draw(&mut buffer, rows, moment(160_000));
+        sidebar.frame(&mut buffer, framed);
+        let (right, bottom) = (COLUMNS - 1, 9);
+        let at = |x, y| (buffer[(x, y)].symbol().to_owned(), buffer[(x, y)].fg);
+        let accent = |symbol: &str| (symbol.to_owned(), ACCENT);
+        assert_eq!(at(0, 0), accent("╭"));
+        assert_eq!(at(right, 0), accent("╮"));
+        assert_eq!(at(0, bottom), accent("╰"));
+        assert_eq!(at(right, bottom), accent("╯"));
+        assert!((1..right).all(|x| at(x, 0) == accent("─") && at(x, bottom) == accent("─")));
+        assert!((1..bottom).all(|y| at(0, y) == accent("│") && at(right, y) == accent("│")));
+        assert_eq!(within(Rect::new(3, 2, 1, 1)), Rect::new(4, 3, 0, 0));
     }
 
     fn kept_mut(projects: Option<&mut api::Projects>) -> &mut Vec<api::Project> {

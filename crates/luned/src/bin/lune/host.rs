@@ -1746,7 +1746,7 @@ impl App {
             self.held = Held::Edge { dragged: false };
             return;
         }
-        let asked = self.sidebar.mouse(mouse, sidebar);
+        let asked = self.sidebar.mouse(mouse, sidebar::within(sidebar));
         self.follow(asked);
     }
 
@@ -2740,7 +2740,7 @@ impl App {
         let now = SystemTime::now();
         terminal.draw(|frame| {
             let collapsed = self.focus.side == Side::Collapsed;
-            let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
+            let own = if collapsed { sidebar::COLLAPSED_FRAMED } else { self.width.columns() };
             let (sidebar, right) = areas(frame.area(), own);
             self.areas = (sidebar, right);
             let size = window(right);
@@ -2748,12 +2748,14 @@ impl App {
                 right.resize(size.columns, size.lines);
             }
             let buffer = frame.buffer_mut();
+            let rows = sidebar::within(sidebar);
             let beside = if collapsed {
-                self.sidebar.draw_collapsed(buffer, sidebar, now);
+                self.sidebar.draw_collapsed(buffer, rows, now);
                 Drawn::Nothing
             } else {
-                self.sidebar.draw(buffer, sidebar, now)
+                self.sidebar.draw(buffer, rows, now)
             };
+            self.sidebar.frame(buffer, sidebar);
             self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
             let covered = self.covered();
             let uncovered = |at: &Position| !covered && right.contains(*at);
