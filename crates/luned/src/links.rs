@@ -627,9 +627,12 @@ impl Pasted {
         Pasted { work, wanted: Wanted::AsItIs, worked, reads_moved_off: true }
     }
 
-    #[must_use]
-    pub fn wanting(self, wanted: Wanted) -> Self {
-        Pasted { wanted, ..self }
+    pub fn wanting(self, wanted: Wanted) -> Result<Self, String> {
+        let headed = matches!(&self.work, Work::Link(link) if link.kind() == Kind::Pull);
+        if wanted == Wanted::AtHead && !headed {
+            return Err("at_head: only a pull request has a head".to_owned());
+        }
+        Ok(Pasted { wanted, ..self })
     }
 
     pub fn of(request: PasteRequest) -> Result<(Option<On>, Pasted), String> {
@@ -651,9 +654,6 @@ impl Pasted {
             None => return Err("it says neither a link nor a file".to_owned()),
         };
         let wanted = if at_head { Wanted::AtHead } else { Wanted::AsItIs };
-        if at_head && !matches!(&work, Work::Link(link) if link.kind() == Kind::Pull) {
-            return Err("at_head: only a pull request has a head".to_owned());
-        }
         if worked.len() > WORKED_MAX {
             return Err(format!("worked: more than {WORKED_MAX} views"));
         }
@@ -666,7 +666,8 @@ impl Pasted {
             Ok(Worked { dir, pull, here })
         };
         let worked = worked.into_iter().map(view).collect::<Result<_, String>>()?;
-        Ok((on, Pasted { work, wanted, worked, reads_moved_off }))
+        let pasted = Pasted { work, wanted: Wanted::AsItIs, worked, reads_moved_off };
+        Ok((on, pasted.wanting(wanted)?))
     }
 
     #[must_use]
@@ -2143,7 +2144,7 @@ mod tests {
 
     #[test]
     fn an_answer_that_does_not_say_the_worktree_is_at_the_head_is_refused() {
-        let asked = Pasted::new(Work::Link(link()), Vec::new()).wanting(Wanted::AtHead);
+        let asked = Pasted::new(Work::Link(link()), Vec::new()).wanting(Wanted::AtHead).unwrap();
         let at = At::There(0);
         let (folder, branch, work) = (directory("/w/x"), None, Readied::Link(link()));
         let ready = Ready { at, folder, branch, moved_off: false, work };
@@ -2157,14 +2158,16 @@ mod tests {
 
     #[test]
     fn only_a_pull_request_s_link_can_be_asked_at_its_head() {
-        let at_head = |work: Work| Pasted::new(work, Vec::new()).wanting(Wanted::AtHead).asked(None);
-        let (on, pasted) = Pasted::of(at_head(Work::Link(link()))).unwrap();
+        let pasted = |work: Work| Pasted::new(work, Vec::new());
+        let at_head = |work: Work| PasteRequest { at_head: true, ..pasted(work).asked(None) };
+        let (on, asked) = Pasted::of(at_head(Work::Link(link()))).unwrap();
         assert_eq!(on, None);
-        assert_eq!(pasted.wanted, Wanted::AtHead);
+        assert_eq!(asked.wanted, Wanted::AtHead);
         let plan = File::parse("/w/plan.md", None).unwrap();
         for work in [Work::Link(issue()), Work::File(plan)] {
-            let why = Pasted::of(at_head(work)).unwrap_err();
-            assert_eq!(why, "at_head: only a pull request has a head");
+            let headless = "at_head: only a pull request has a head";
+            assert_eq!(pasted(work.clone()).wanting(Wanted::AtHead).unwrap_err(), headless);
+            assert_eq!(Pasted::of(at_head(work)).unwrap_err(), headless);
         }
     }
 

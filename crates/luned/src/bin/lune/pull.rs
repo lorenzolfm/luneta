@@ -74,7 +74,7 @@ fn first_found(
         let apart = |Worked { place, works }| (place, works);
         let (views, worked): (Vec<ViewPlace>, Vec<links::Worked>) =
             worked.into_iter().map(apart).unzip();
-        let ready = ask(&on, &Pasted::new(work.clone(), worked).wanting(wanted))?;
+        let ready = ask(&on, &Pasted::new(work.clone(), worked).wanting(wanted)?)?;
         match ready.placed(&views) {
             Ok(ready) => Ok(Found { on, ready }),
             Err(_) => Err(Unready::InDoubt(match &on {

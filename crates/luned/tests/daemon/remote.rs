@@ -1698,7 +1698,7 @@ fn pushed(host: &Host, up: &Path, parent: &str, name: &str) -> String {
 
 fn reviewing_pull_7(worked: Vec<links::Worked>) -> Pasted {
     let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
-    Pasted::new(Work::Link(link), worked).wanting(Wanted::AtHead)
+    Pasted::new(Work::Link(link), worked).wanting(Wanted::AtHead).unwrap()
 }
 
 fn pasted_here(host: &Host, pasted: &Pasted) -> Result<Ready<usize>, Status> {
