@@ -42,20 +42,11 @@ impl Start {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Found {
+pub struct Found<P> {
     pub id: Id,
-    pub parent: Option<u32>,
-    pub name: String,
+    pub program: P,
     pub argv: Vec<OsString>,
     pub environ: Vec<OsString>,
-}
-
-impl Found {
-    fn forked_from(&self, parent: &Found) -> bool {
-        self.parent == Some(parent.id.pid)
-            && self.argv == parent.argv
-            && self.environ == parent.environ
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,16 +56,22 @@ pub enum Unread {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Unreadable {
+pub struct Unreadable<P> {
     pub id: Id,
-    pub name: String,
+    pub program: P,
     pub why: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Mine {
-    pub found: Vec<Found>,
-    pub unreadable: Vec<Unreadable>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mine<P> {
+    pub found: Vec<Found<P>>,
+    pub unreadable: Vec<Unreadable<P>>,
+}
+
+impl<P> Default for Mine<P> {
+    fn default() -> Mine<P> {
+        Mine { found: Vec::new(), unreadable: Vec::new() }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,19 +84,19 @@ pub enum Unended {
 pub const NAME_BYTES_MAX: usize = 15;
 
 #[must_use]
-pub fn mine(names: &[&str]) -> Mine {
-    let Mine { mut found, unreadable } = os::listed(names);
-    found.retain(|it| os::named(it.id.pid).as_ref() == Some(&it.name));
-    for it in &found {
-        assert!(names.contains(&it.name.as_str()), "{} was not asked for", it.name);
-    }
-    Mine { found: unforked(found), unreadable }
+pub fn mine<P: Copy + Eq>(programs: &[(P, &str)]) -> Mine<P> {
+    let Mine { mut found, unreadable } = os::listed(programs);
+    found.retain(|it| {
+        let named = os::named(it.id.pid);
+        programs.iter().any(|&(program, name)| {
+            program == it.program && named.as_deref() == Some(name)
+        })
+    });
+    Mine { found, unreadable }
 }
 
-fn unforked(found: Vec<Found>) -> Vec<Found> {
-    let forked: Vec<bool> =
-        found.iter().map(|it| found.iter().any(|parent| it.forked_from(parent))).collect();
-    found.into_iter().zip(forked).filter(|(_, forked)| !forked).map(|(it, _)| it).collect()
+fn program_named<P: Copy>(programs: &[(P, &str)], name: &str) -> Option<P> {
+    programs.iter().find(|&&(_, named)| named == name).map(|&(program, _)| program)
 }
 
 pub fn var(name: &str) -> Result<Option<String>, String> {
@@ -198,7 +195,7 @@ mod tests {
         given.env_clear().env("PATH", &path).env("LUNE_GIVEN", "a b=c");
         let mut child = given.spawn().unwrap();
         child.stdout.as_mut().unwrap().read_exact(&mut [0; 1]).expect("it says it runs");
-        let mine = super::mine(&["sh", "bash"]);
+        let mine = super::mine(&[("sh", "sh"), ("bash", "bash")]);
         let pid = child.id();
         child.kill().unwrap();
         child.wait().unwrap();
@@ -227,43 +224,25 @@ mod tests {
         let mut held = Command::new("true");
         unsafe {
             held.pre_exec(move || {
-                forked_said.write_all(&[1])?;
+                forked_said.write_all(&process::id().to_ne_bytes())?;
                 go_heard.read_exact(&mut [0; 1])
             });
         }
         let forks = thread::Builder::new().name(NAMED_ON_LINUX_AS.to_owned());
         let spawned = forks.spawn(move || held.spawn().unwrap().wait().unwrap()).unwrap();
-        forked_heard.read_exact(&mut [0; 1]).expect("the child says it was forked");
-        let mine = super::mine(&[own.as_str(), NAMED_ON_LINUX_AS]);
+        let mut forked = [0; 4];
+        forked_heard.read_exact(&mut forked).expect("the child says its pid once forked");
+        let forked = u32::from_ne_bytes(forked);
+        let names = [own.as_str(), NAMED_ON_LINUX_AS];
+        let held_as = super::os::named(forked);
+        let mine = super::mine(&names.map(|name| (name, name)));
         go_said.write_all(&[1]).unwrap();
         assert!(spawned.join().unwrap().success());
+        let held_as = held_as.expect("the held child has a name");
+        assert!(names.contains(&held_as.as_str()), "{held_as} is a name asked for");
         let pids: Vec<u32> = mine.found.iter().map(|it| it.id.pid).collect();
         assert!(pids.contains(&me), "{pids:?} lists this test's process");
-        let children = mine.found.iter().filter(|it| it.parent == Some(me));
-        let children: Vec<u32> = children.map(|it| it.id.pid).collect();
-        assert_eq!(children, Vec::<u32>::new());
-    }
-
-    #[test]
-    fn only_a_copy_of_a_listed_parent_is_left_out_and_a_child_of_its_own_program_is_kept() {
-        let runtime = "XDG_RUNTIME_DIR=/run/user/1000";
-        let found = |pid: u32, parent: Option<u32>, argv: &[&str], environ: &str| super::Found {
-            id: super::Id { pid, start: super::Start::spelled("1".to_owned()).unwrap() },
-            parent,
-            name: "luned".to_owned(),
-            argv: argv.iter().map(OsString::from).collect(),
-            environ: vec![OsString::from(environ)],
-        };
-        let listed = vec![
-            found(1, None, &["luned"], runtime),
-            found(2, Some(1), &["luned"], runtime),
-            found(3, Some(1), &["luned", "--detached"], runtime),
-            found(4, Some(9), &["luned"], runtime),
-            found(5, Some(1), &["luned"], "XDG_RUNTIME_DIR=/run/user/1001"),
-            found(6, Some(2), &["luned"], runtime),
-        ];
-        let kept: Vec<u32> = super::unforked(listed).into_iter().map(|it| it.id.pid).collect();
-        assert_eq!(kept, [1, 3, 4, 5]);
+        assert!(!pids.contains(&forked), "{pids:?} lists the held child {forked}");
     }
 
     #[test]

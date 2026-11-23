@@ -15,7 +15,7 @@ use rustix::time::{clock_gettime, ClockId};
 
 use lune_protocol::process::{arguments, entries, EXEC_STRINGS_BYTES_MAX};
 
-use super::{Found, Id, Mine, Start, Unended, Unread, Unreadable};
+use super::{program_named, Found, Id, Mine, Start, Unended, Unread, Unreadable};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -46,9 +46,11 @@ fn exiting_in(stat: &str) -> bool {
     ended || flags.is_some_and(|flags| flags & PF_EXITING != 0)
 }
 
-fn parent_in(stat: &str) -> Option<u32> {
-    let parent = after_name(stat)?.nth(1)?.parse::<u32>().ok()?;
-    (parent != 0).then_some(parent)
+const PF_FORKNOEXEC: u64 = 0x40;
+
+fn forked_in(stat: &str) -> Option<bool> {
+    let flags = after_name(stat)?.nth(6)?.parse::<u64>().ok()?;
+    Some(flags & PF_FORKNOEXEC != 0)
 }
 
 fn start_in(stat: &str) -> Option<String> {
@@ -118,7 +120,7 @@ pub(super) fn named(pid: u32) -> Option<String> {
 }
 
 #[must_use]
-pub(super) fn listed(names: &[&str]) -> Mine {
+pub(super) fn listed<P: Copy>(programs: &[(P, &str)]) -> Mine<P> {
     let Ok(listed) = fs::read_dir("/proc") else {
         return Mine::default();
     };
@@ -131,23 +133,25 @@ pub(super) fn listed(names: &[&str]) -> Mine {
         if !entry.metadata().is_ok_and(|it| it.uid() == uid) {
             continue;
         }
-        let Some(name) = named(pid).filter(|name| names.contains(&name.as_str())) else {
+        let Some(program) = named(pid).and_then(|name| program_named(programs, &name)) else {
             continue;
         };
         let Ok(stat_line) = fs::read_to_string(proc(pid, "stat")) else {
+            continue;
+        };
+        let Some(false) = forked_in(&stat_line) else {
             continue;
         };
         let Some(start) = start_in(&stat_line).and_then(Start::spelled) else {
             continue;
         };
         let id = Id { pid, start };
-        let parent = parent_in(&stat_line);
         let read = environ(pid).and_then(|environ| Ok((environ, exec_strings(pid, "cmdline")?)));
         let (environ, cmdline) = match read {
             Ok(read) => read,
             Err(Unread::Gone) => continue,
             Err(Unread::Failed(why)) => {
-                seen.unreadable.push(Unreadable { id, name, why });
+                seen.unreadable.push(Unreadable { id, program, why });
                 continue;
             },
         };
@@ -155,8 +159,7 @@ pub(super) fn listed(names: &[&str]) -> Mine {
             continue;
         };
         let argv = argv.into_iter().map(|arg| OsString::from_vec(arg.to_vec())).collect();
-        assert_ne!(parent, Some(pid), "{pid} is its own parent");
-        seen.found.push(Found { id, parent, name, argv, environ });
+        seen.found.push(Found { id, program, argv, environ });
     }
     seen
 }
@@ -250,7 +253,7 @@ mod tests {
 
     use rustix::io::Errno;
 
-    use super::{exiting_in, parent_in, start_in, unread, Unread};
+    use super::{exiting_in, forked_in, start_in, unread, Unread};
 
     fn stat(state: &str, threads: u32) -> String {
         let before = "1 7 7 0 -1 4194304 0 0 0 0 0 0 0 0 20 0";
@@ -291,9 +294,11 @@ mod tests {
     }
 
     #[test]
-    fn a_process_has_the_parent_its_stat_names_and_none_for_pid_zero() {
-        assert_eq!(parent_in(&stat("S", 1)), Some(1), "past a name holding ') '");
-        assert_eq!(parent_in("7 (a) b) S 0 7 7"), None, "pid 0 is no process");
-        assert_eq!(parent_in("7 (a) b) S"), None, "no parent to read");
+    fn a_process_is_forked_until_it_execs_by_its_flags() {
+        let flagged = |flags: u64| format!("7 (a) b) S 1 7 7 0 -1 {flags} 0 0 0 0 0 0 0 0 20 0");
+        assert_eq!(forked_in(&flagged(0x40_0040)), Some(true), "PF_FORKNOEXEC");
+        assert_eq!(forked_in(&flagged(0x40_0000)), Some(false), "PF_RANDOMIZE alone");
+        assert_eq!(forked_in(&stat("S", 1)), Some(false), "past a name holding ') '");
+        assert_eq!(forked_in("7 (a) b) S 1 7 7 0 -1"), None, "no flags to read");
     }
 }
