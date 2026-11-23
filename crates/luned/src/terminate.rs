@@ -15,6 +15,10 @@ pub const LUNED: &str = "luned";
 
 pub const MUX: &str = "lune-mux";
 
+const _: () = assert!(LUNE.len() <= process::NAME_BYTES_MAX, "Linux keeps 15 bytes of a name");
+const _: () = assert!(LUNED.len() <= process::NAME_BYTES_MAX, "Linux keeps 15 bytes of a name");
+const _: () = assert!(MUX.len() <= process::NAME_BYTES_MAX, "Linux keeps 15 bytes of a name");
+
 pub const GRACE: Duration = Duration::from_secs(5);
 
 pub const KILL_WAIT: Duration = Duration::from_secs(2);

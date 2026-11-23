@@ -89,7 +89,7 @@ fn unread(pid: u32, error: &io::Error) -> Unread {
 }
 
 #[must_use]
-pub fn mine(names: &[&str]) -> Mine {
+pub(super) fn listed(names: &[&str]) -> Mine {
     let mut system = System::new();
     let refresh = ProcessRefreshKind::nothing().with_user(UpdateKind::Always);
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
@@ -122,6 +122,7 @@ pub fn mine(names: &[&str]) -> Mine {
             },
         };
         let parent = process.parent().map(sysinfo::Pid::as_u32);
+        assert_ne!(parent, Some(pid.as_u32()), "{pid} is its own parent");
         seen.found.push(Found { id, parent, name: name.to_owned(), argv, environ });
     }
     seen

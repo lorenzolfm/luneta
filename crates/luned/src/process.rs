@@ -84,20 +84,22 @@ pub enum Unended {
     Unwatched(Errno),
 }
 
+pub const NAME_BYTES_MAX: usize = 15;
+
 #[must_use]
 pub fn mine(names: &[&str]) -> Mine {
-    let Mine { mut found, unreadable } = os::mine(names);
+    let Mine { mut found, unreadable } = os::listed(names);
     found.retain(|it| os::named(it.id.pid).as_ref() == Some(&it.name));
+    for it in &found {
+        assert!(names.contains(&it.name.as_str()), "{} was not asked for", it.name);
+    }
     Mine { found: unforked(found), unreadable }
 }
 
 fn unforked(found: Vec<Found>) -> Vec<Found> {
-    let forked: Vec<Id> = found
-        .iter()
-        .filter(|it| found.iter().any(|parent| it.forked_from(parent)))
-        .map(|it| it.id.clone())
-        .collect();
-    found.into_iter().filter(|it| !forked.contains(&it.id)).collect()
+    let forked: Vec<bool> =
+        found.iter().map(|it| found.iter().any(|parent| it.forked_from(parent))).collect();
+    found.into_iter().zip(forked).filter(|(_, forked)| !forked).map(|(it, _)| it).collect()
 }
 
 pub fn var(name: &str) -> Result<Option<String>, String> {
@@ -244,21 +246,24 @@ mod tests {
 
     #[test]
     fn only_a_copy_of_a_listed_parent_is_left_out_and_a_child_of_its_own_program_is_kept() {
-        let found = |pid: u32, parent: Option<u32>, argv: &[&str]| super::Found {
+        let runtime = "XDG_RUNTIME_DIR=/run/user/1000";
+        let found = |pid: u32, parent: Option<u32>, argv: &[&str], environ: &str| super::Found {
             id: super::Id { pid, start: super::Start::spelled("1".to_owned()).unwrap() },
             parent,
             name: "luned".to_owned(),
             argv: argv.iter().map(OsString::from).collect(),
-            environ: vec![OsString::from("XDG_RUNTIME_DIR=/run/user/1000")],
+            environ: vec![OsString::from(environ)],
         };
         let listed = vec![
-            found(1, None, &["luned"]),
-            found(2, Some(1), &["luned"]),
-            found(3, Some(1), &["luned", "--detached"]),
-            found(4, Some(9), &["luned"]),
+            found(1, None, &["luned"], runtime),
+            found(2, Some(1), &["luned"], runtime),
+            found(3, Some(1), &["luned", "--detached"], runtime),
+            found(4, Some(9), &["luned"], runtime),
+            found(5, Some(1), &["luned"], "XDG_RUNTIME_DIR=/run/user/1001"),
+            found(6, Some(2), &["luned"], runtime),
         ];
         let kept: Vec<u32> = super::unforked(listed).into_iter().map(|it| it.id.pid).collect();
-        assert_eq!(kept, [1, 3, 4]);
+        assert_eq!(kept, [1, 3, 4, 5]);
     }
 
     #[test]
