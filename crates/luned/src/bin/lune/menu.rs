@@ -32,7 +32,7 @@ use crate::machines::Machine;
 use crate::printed::{self, Printed};
 use crate::prune;
 use crate::rebase;
-use crate::pull::{At, Found, Kind, Readied, Ready, Wanted, Work};
+use crate::pull::{At, Found, Kind, Link, Readied, Ready, Wanted, Work};
 use crate::sidebar::{
     self, ACCENT, LIT, Listed, Mark, NAME, ViewKey, ViewPlace, Place, ProjectRow, TAG,
     WorktreePlace,
@@ -204,8 +204,15 @@ enum Asks {
 impl Asks {
     fn of(work: &Work) -> Asks {
         match work {
-            Work::Link(link) if link.kind() == Kind::Pull => Asks::Review,
-            Work::Link(_) | Work::File(_) => Asks::Tackle,
+            Work::Link(link) => Asks::of_link(link),
+            Work::File(_) => Asks::Tackle,
+        }
+    }
+
+    fn of_link(link: &Link) -> Asks {
+        match link.kind() {
+            Kind::Pull => Asks::Review,
+            Kind::Issue => Asks::Tackle,
         }
     }
 }
@@ -1665,12 +1672,10 @@ impl Menu {
         }
         let argv = match (pull, &readied) {
             (Pull::Worktree, _) => None,
-            (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
-                Some(agents::on_skill(agent, REVIEW, Some(&link.url())))
-            },
-            (Pull::Agent, Readied::Link(link)) => {
-                Some(agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[]))
-            },
+            (Pull::Agent, Readied::Link(link)) => Some(match Asks::of_link(link) {
+                Asks::Review => agents::on_skill(agent, REVIEW, Some(&link.url())),
+                Asks::Tackle => agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[]),
+            }),
             (Pull::Agent, Readied::File { real }) => {
                 let words = format!("{TACKLE} {real}");
                 Some(agents::on_words(agent, words, &[real.as_str()]))
