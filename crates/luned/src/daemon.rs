@@ -176,13 +176,14 @@ pub async fn serve(
     unkept: Option<String>,
 ) -> io::Result<()> {
     let (listener, bound) = claim.bind()?;
-    let tailnet = match (&projects, tailnet::in_own_home()) {
-        (Ok(_), Ok(())) => true,
-        (Err(_), _) => false,
-        (Ok(_), Err(why)) => {
+    let tailnet = if projects.is_ok() {
+        let home = tailnet::in_own_home();
+        if let Err(why) = &home {
             log::say(&format!("{why}, so luned stays off the tailnet"));
-            false
-        },
+        }
+        home.is_ok()
+    } else {
+        false
     };
     let started = SystemTime::now();
     let (wake_git, git_woken) = mpsc::sync_channel(1);
@@ -235,8 +236,8 @@ pub async fn serve(
         let _ = closing.send(true);
         let _ = begun.send(());
     };
-    let router = |host| {
-        Server::builder()
+    let router = |server: Server, host| {
+        server
             .max_concurrent_streams(QUESTIONS_MAX)
             .initial_stream_window_size(IN_FLIGHT)
             .layer(layer_fn(|routes| {
@@ -244,24 +245,38 @@ pub async fn serve(
             }))
             .add_service(DaemonServer::from_arc(host))
     };
-    if tailnet {
+    let tailnet_served = if tailnet {
         let mut closed = closed;
         let closed = async move {
             let _ = closed.wait_for(|closed| *closed).await;
         };
         let incoming = tailnet::incoming(SWEEP);
-        let served = router(Arc::clone(&host)).serve_with_incoming_shutdown(incoming, closed);
-        tokio::spawn(async move {
+        let served = router(tailnet::server(), Arc::clone(&host))
+            .serve_with_incoming_shutdown(incoming, closed);
+        Some(tokio::spawn(async move {
             if let Err(error) = served.await {
                 log::say(&format!("the tailnet is no longer served: {error}"));
             }
-        });
-    }
+        }))
+    } else {
+        None
+    };
     let served = tokio::spawn(
-        router(host).serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
+        router(Server::builder(), host)
+            .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
     );
     let _ = beginning.await;
-    match timeout(DRAIN, served).await {
+    let drained = async move {
+        let tailnet_ended = match tailnet_served {
+            Some(tailnet_served) => tailnet_served.await,
+            None => Ok(()),
+        };
+        if let Err(error) = tailnet_ended {
+            log::say(&format!("the tailnet's server did not end: {error}"));
+        }
+        served.await
+    };
+    match timeout(DRAIN, drained).await {
         Ok(Ok(served)) => served.map_err(io::Error::other),
         Ok(Err(error)) => Err(io::Error::other(error)),
         Err(_) => {
