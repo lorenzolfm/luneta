@@ -66,7 +66,7 @@ use crate::agent::Agent;
 use crate::checks::{Failing, Log};
 use crate::{
     changes, checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed,
-    projects, release, remote, skills, topics, watch, work, zoxide, Harness,
+    projects, release, remote, skills, tailnet, topics, watch, work, zoxide, Harness,
 };
 
 pub const SWEEP: Duration = Duration::from_secs(2);
@@ -176,6 +176,14 @@ pub async fn serve(
     unkept: Option<String>,
 ) -> io::Result<()> {
     let (listener, bound) = claim.bind()?;
+    let tailnet = match (&projects, tailnet::in_own_home()) {
+        (Ok(_), Ok(())) => true,
+        (Err(_), _) => false,
+        (Ok(_), Err(why)) => {
+            log::say(&format!("{why}, so luned stays off the tailnet"));
+            false
+        },
+    };
     let started = SystemTime::now();
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
@@ -214,8 +222,9 @@ pub async fn serve(
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
     let listings = Arc::new(work::Listings::default());
-    let host = Host { started, claude_folder, core, watchers, bridges, layouts, listings };
+    let host = Arc::new(Host { started, claude_folder, core, watchers, bridges, layouts, listings });
     let (begun, beginning) = oneshot::channel();
+    let (closing, closed) = tokio::sync::watch::channel(false);
     let ended = async move {
         if ending.await.is_err() {
             log::say("luned no longer follows what keeps it, and so it ends");
@@ -223,17 +232,33 @@ pub async fn serve(
         if let Err(error) = bound.unbind() {
             log::say(&format!("{}: {error}", bound.socket().display()));
         }
+        let _ = closing.send(true);
         let _ = begun.send(());
     };
-    let served = tokio::spawn(
+    let router = |host| {
         Server::builder()
             .max_concurrent_streams(QUESTIONS_MAX)
             .initial_stream_window_size(IN_FLIGHT)
             .layer(layer_fn(|routes| {
                 client::Within::new(routes, ANSWERING_MAX, client::unanswered)
             }))
-            .add_service(DaemonServer::new(host))
-            .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
+            .add_service(DaemonServer::from_arc(host))
+    };
+    if tailnet {
+        let mut closed = closed;
+        let closed = async move {
+            let _ = closed.wait_for(|closed| *closed).await;
+        };
+        let incoming = tailnet::incoming(SWEEP);
+        let served = router(Arc::clone(&host)).serve_with_incoming_shutdown(incoming, closed);
+        tokio::spawn(async move {
+            if let Err(error) = served.await {
+                log::say(&format!("the tailnet is no longer served: {error}"));
+            }
+        });
+    }
+    let served = tokio::spawn(
+        router(host).serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
     );
     let _ = beginning.await;
     match timeout(DRAIN, served).await {
