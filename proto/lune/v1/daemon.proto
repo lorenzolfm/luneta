@@ -89,7 +89,6 @@ message ListRepositoriesResponse {
 
   message Repository {
     string path = 1;
-    string name = 2;
   }
 }
 

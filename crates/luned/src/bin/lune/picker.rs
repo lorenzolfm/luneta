@@ -1,7 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -20,7 +19,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use luned::links::{Branch, Work};
-use luned::projects::{self, ProjectId, Used};
+use luned::projects::{self, ProjectId, ProjectName, Used};
 use luned::repositories::{self, Repository};
 use luned::transcripts::SessionId;
 use luned::{eza, screens, Destination, Directory, SessionName};
@@ -40,6 +39,7 @@ use crate::sidebar::{
     ProjectRow, WorktreePlace,
 };
 use crate::spots::{Drawn, Spots};
+use crate::worktrees::Folder;
 use crate::projected::{self, Projected};
 
 const TITLE: &str = "lune";
@@ -268,7 +268,7 @@ pub enum Picked {
     Close,
     Go { on: Machine, place: Place },
     Add { on: Machine, project: ProjectRow, folder: Directory },
-    Make { on: Machine, folder: Folder, name: Option<SessionName> },
+    Make { on: Machine, folder: Folder },
     Plan { on: Machine, session: Listed, scope: close::Scope },
     Act { on: Machine, act: Act },
     Chord(actions::Chord),
@@ -352,12 +352,18 @@ pub enum Key {
     Unopened { on: Machine, project: ProjectRow, folder: Directory },
     Machine { on: Machine },
     Agent { on: Machine, place: ViewPlace },
-    Housed { on: Machine, project: ProjectRow, dir: Directory, last: Option<WorktreePlace> },
-    Repository { on: Machine, path: Directory, session: SessionName },
-    Folder { on: Machine, folder: Folder, name: Option<SessionName> },
+    Housed { on: Machine, dir: projects::Dir, goes: Goes },
+    Repository { on: Machine, repository: Repository, name: ProjectName },
+    Folder { on: Machine, folder: Folder, name: Option<ProjectName> },
     New { on: Machine, project: ProjectRow, branch: Branch },
     Action(Action, Run),
     Pasted { target: Rc<Target>, work: Work, pull: Pull },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Goes {
+    Home(ProjectRow),
+    Last(WorktreePlace),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -623,32 +629,6 @@ enum Lookup {
     Failed(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Folder(String);
-
-impl Folder {
-    fn typed(typed: &str) -> Option<Folder> {
-        let folder = typed.trim();
-        let placed = projects::Dir::below_home(folder).is_some() || folder.starts_with('/');
-        placed.then(|| Folder(folder.to_owned()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    fn named(&self) -> Option<SessionName> {
-        let last = self.0.rsplit('/').find(|part| !part.is_empty()).filter(|part| *part != "~")?;
-        SessionName::parse(last).ok()
-    }
-}
-
-impl From<&Directory> for Folder {
-    fn from(path: &Directory) -> Folder {
-        Folder(path.to_string())
-    }
-}
-
 #[derive(Debug)]
 pub struct Picker {
     number: u64,
@@ -771,6 +751,17 @@ impl Picker {
 
     fn shelved(&self, on: &Machine) -> Option<&Shelved> {
         self.listing.shelves.iter().find(|shelved| shelved.on == *on)
+    }
+
+    fn projects_on(&self, on: &Machine) -> &[Housed] {
+        self.shelved(on).map_or(&[][..], |shelved| &shelved.projects)
+    }
+
+    fn found_on(&self, on: &Machine) -> &[Repository] {
+        match self.lookups.get(on) {
+            Some(Lookup::Listed(found)) => &found.repositories,
+            Some(Lookup::Asking(_) | Lookup::Failed(_)) | None => &[],
+        }
     }
 
     fn housed(&self, on: &Machine, project: &ProjectRow) -> Option<&Housed> {
@@ -1205,24 +1196,21 @@ impl Picker {
             Key::Agent { on, place } => {
                 Picked::Go { on: on.clone(), place: Place::View(place.clone()) }
             },
-            Key::Housed { on, last: Some(place), .. } if self.is_shown(on, place) => Picked::Close,
-            Key::Housed { on, project, last, .. } => {
-                let place = match last {
-                    Some(place) => {
-                        assert_eq!(place.project.id(), project.id(), "a project's last is in it");
-                        Place::Worktree(place.clone())
-                    },
-                    None => Place::Session(project.listed().clone()),
+            Key::Housed { on, goes: Goes::Last(place), .. } if self.is_shown(on, place) => {
+                Picked::Close
+            },
+            Key::Housed { on, goes, .. } => {
+                let place = match goes {
+                    Goes::Last(place) => Place::Worktree(place.clone()),
+                    Goes::Home(project) => Place::Session(project.listed().clone()),
                 };
                 Picked::Go { on: on.clone(), place }
             },
-            Key::Repository { on, path, session } => {
-                let (on, folder, name) = (on.clone(), Folder::from(path), Some(session.clone()));
-                Picked::Make { on, folder, name }
+            Key::Repository { on, repository, .. } => {
+                Picked::Make { on: on.clone(), folder: Folder::from(repository.path()) }
             },
-            Key::Folder { on, folder, name } => {
-                let (on, folder, name) = (on.clone(), folder.clone(), name.clone());
-                Picked::Make { on, folder, name }
+            Key::Folder { on, folder, .. } => {
+                Picked::Make { on: on.clone(), folder: folder.clone() }
             },
             Key::New { on, project, branch } => {
                 let done = Done::Worktree(on.clone(), project.id(), branch.clone());
@@ -1612,41 +1600,36 @@ impl Picker {
     }
 
     fn project_rows(&self) -> (Vec<Row>, Option<usize>) {
-        let taken = self.taken(&Machine::Local);
-        let free = |on: &Machine, name: &SessionName| match on {
-            Machine::Local => name.free(&taken),
-            Machine::Remote(_) => name.clone(),
-        };
         let machines = self.machines();
         let ruled = machines.len() > 1;
         let typed = Folder::typed(&self.term);
         let per_machine = Typos::found(|typos| {
             let fuzzy = Fuzzy::new(&self.term, typos);
             let per_machine = machines.iter().filter_map(|on| {
-                let projects = self.shelved(on).map_or(&[][..], |shelved| &shelved.projects);
+                let taken = self.taken(on);
+                let projects = self.projects_on(on);
                 let mut kept: Vec<(&Housed, Option<(Used, &WorktreePlace)>)> =
                     projects.iter().map(|housed| (housed, last_used(housed))).collect();
                 kept.sort_by_key(|(_, last)| Reverse(last.map(|(used, _)| used)));
                 let kept = kept.into_iter().map(|(housed, last)| {
-                    let (project, dir) = (housed.project.clone(), Directory::from(&housed.dir));
-                    let last = last.map(|(_, place)| place.clone());
-                    let name = project.listed().name().to_string();
-                    (Key::Housed { on: on.clone(), project, dir: dir.clone(), last }, name, dir)
+                    let goes = match last {
+                        Some((_, place)) => Goes::Last(place.clone()),
+                        None => Goes::Home(housed.project.clone()),
+                    };
+                    let name = housed.project.listed().name().to_string();
+                    let dir = housed.dir.clone();
+                    (Key::Housed { on: on.clone(), dir: dir.clone(), goes }, name, dir)
                 });
-                let listed = match self.lookups.get(on) {
-                    Some(Lookup::Listed(found)) => &found.repositories[..],
-                    Some(Lookup::Asking(_) | Lookup::Failed(_)) | None => &[],
-                };
-                let unkept = listed.iter().filter(|it| no_project_holds(projects, &it.path));
-                let unkept = unkept.map(|Repository { path, name }| {
-                    let session = free(on, name);
-                    let name = session.to_string();
-                    let key = Key::Repository { on: on.clone(), path: path.clone(), session };
-                    (key, name, path.clone())
+                let unkept = self.found_on(on).iter().filter(|it| unhoused(projects, it.path()));
+                let unkept = unkept.map(|repository| {
+                    let name = repository.name().free(&taken);
+                    let shown = name.to_string();
+                    let (on, path) = (on.clone(), repository.path().clone());
+                    (Key::Repository { on, repository: repository.clone(), name }, shown, path)
                 });
                 let mut rows = place_rows(&fuzzy, &self.term, kept.chain(unkept));
                 if let Some(folder) = &typed {
-                    let name = folder.named().map(|name| free(on, &name));
+                    let name = folder.named().map(|name| name.free(&taken));
                     let key = Key::Folder { on: on.clone(), folder: folder.clone(), name };
                     rows.push(Row::plain(key, folder.as_str().to_owned()));
                 }
@@ -1685,8 +1668,9 @@ impl Picker {
             Some(Key::Agent { on, place }) => {
                 Some(Preview::Screen((on.clone(), place.listed().clone(), Some(place.view()))))
             },
-            Some(Key::Housed { on, dir: path, .. } | Key::Repository { on, path, .. }) => {
-                Some(Preview::Dir((on.clone(), path.clone())))
+            Some(Key::Housed { on, dir, .. }) => Some(Preview::Dir((on.clone(), dir.into()))),
+            Some(Key::Repository { on, repository, .. }) => {
+                Some(Preview::Dir((on.clone(), repository.path().into())))
             },
             Some(Key::Unopened { on, folder, .. }) => {
                 Some(Preview::Dir((on.clone(), folder.clone())))
@@ -1752,6 +1736,18 @@ impl Picker {
                         Some(Lookup::Listed(found)) => {
                             for why in &found.unread {
                                 notes.extend(menu::wrap(why, width, error));
+                            }
+                            let projects = self.projects_on(&on);
+                            let holding = found.repositories.iter();
+                            let holding = holding.filter(|it| holds_a_project(projects, it.path()));
+                            let holding = holding.count();
+                            if holding > 0 {
+                                let there = match &on {
+                                    Machine::Local => String::new(),
+                                    Machine::Remote(destination) => format!("{destination}: "),
+                                };
+                                let why = format!("left out {holding} clones a project lies in");
+                                notes.extend(menu::wrap(&format!("{there}{why}"), width, error));
                             }
                         },
                         Some(Lookup::Asking(_)) | None => {},
@@ -1899,8 +1895,9 @@ impl Picker {
                 let away = self.shelved(on).and_then(|shelved| shelved.away).is_some();
                 return place_line(row, dir.as_str(), if away { dim } else { bold }, width);
             },
-            Key::Repository { path, .. } => {
-                return place_line(row, path.as_str(), Style::new().fg(gruvbox::FG1), width);
+            Key::Repository { repository, .. } => {
+                let path = repository.path().as_str();
+                return place_line(row, path, Style::new().fg(gruvbox::FG1), width);
             },
             Key::Folder { .. } => {
                 let lead = Span::styled("+", Style::new().fg(gruvbox::GREEN));
@@ -2022,9 +2019,15 @@ impl Picker {
             lines
         };
         let (title, right, caption, looked) = match &row.key {
-            Key::Housed { on, dir: path, .. }
-            | Key::Repository { on, path, .. }
-            | Key::Unopened { on, folder: path, .. } => {
+            Key::Housed { on, dir, .. } => {
+                self.draw_contents(buffer, area, &row.name, on, &dir.into());
+                return;
+            },
+            Key::Repository { on, repository, .. } => {
+                self.draw_contents(buffer, area, &row.name, on, &repository.path().into());
+                return;
+            },
+            Key::Unopened { on, folder: path, .. } => {
                 self.draw_contents(buffer, area, &row.name, on, path);
                 return;
             },
@@ -2185,7 +2188,7 @@ impl Picker {
     fn prompt(&self, width: usize) -> Line<'static> {
         let action = match self.rows().selected() {
             Some(row) => match &row.key {
-                Key::Worktree { on, place } | Key::Housed { on, last: Some(place), .. }
+                Key::Worktree { on, place } | Key::Housed { on, goes: Goes::Last(place), .. }
                     if self.is_shown(on, place) =>
                 {
                     Ok("you are in it".to_owned())
@@ -2204,9 +2207,7 @@ impl Picker {
                     format!("{} keeps no project", self.machine_name(on))
                 })),
                 Key::Agent { on, .. } => Ok(there("Go to agent", on)),
-                Key::Repository { on, session, .. } => {
-                    Ok(there(&format!("Make \"{session}\""), on))
-                },
+                Key::Repository { on, name, .. } => Ok(there(&format!("Make \"{name}\""), on)),
                 Key::Folder { on, name: Some(name), .. } => {
                     Ok(there(&format!("Make \"{name}\""), on))
                 },
@@ -2408,16 +2409,15 @@ fn matched<'a>(
 
 fn last_used(housed: &Housed) -> Option<(Used, &WorktreePlace)> {
     let used = housed.worktrees.iter().filter_map(|it| Some((it.used?, &it.place)));
-    let last = used.max_by_key(|(used, _)| *used);
-    if let Some((_, place)) = last {
-        assert_eq!(place.project.id(), housed.project.id(), "a project's worktree is in it");
-    }
-    last
+    used.max_by_key(|(used, _)| *used)
 }
 
-fn no_project_holds(projects: &[Housed], path: &Directory) -> bool {
-    let holds = |housed: &Housed| Path::new(path.as_str()).starts_with(housed.dir.as_str());
-    !projects.iter().any(holds)
+fn unhoused(projects: &[Housed], root: &projects::Dir) -> bool {
+    !projects.iter().any(|housed| housed.dir.nests(root))
+}
+
+fn holds_a_project(projects: &[Housed], root: &projects::Dir) -> bool {
+    projects.iter().any(|housed| housed.dir != *root && root.below(&housed.dir).is_some())
 }
 
 struct Matched {
@@ -2430,7 +2430,7 @@ struct Matched {
 fn place_rows(
     fuzzy: &Fuzzy,
     term: &str,
-    places: impl Iterator<Item = (Key, String, Directory)>,
+    places: impl Iterator<Item = (Key, String, projects::Dir)>,
 ) -> Vec<Row> {
     let mut matched: Vec<Matched> = Vec::new();
     for (at, (key, name, path)) in places.enumerate() {
@@ -2444,7 +2444,7 @@ fn place_rows(
         };
         if let Some((score, hits)) = hit {
             assert!(hits.iter().all(|hit| *hit < path.as_str().len()), "a hit is in the path");
-            let exact = name == term || path.as_str().rsplit('/').next() == Some(term);
+            let exact = name == term || path.last() == term;
             let row = Row { key, name, lead: 0, hits, rules: Rules::default() };
             matched.push(Matched { exact, score, at, row });
         }
@@ -2665,8 +2665,8 @@ mod tests {
         Directory::parse(path.to_owned()).unwrap()
     }
 
-    fn repository(path: &str, name: &str) -> Repository {
-        Repository { path: directory(path), name: SessionName::parse(name).unwrap() }
+    fn repository(path: &str) -> Repository {
+        Repository::at(projects::Dir::parse(path).unwrap()).unwrap()
     }
 
     fn heard_here(found: Result<Vec<Repository>, String>) -> Heard {
@@ -3664,7 +3664,7 @@ mod tests {
         let path = || directory("/home/you/lune");
         let super_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::SUPER);
         picker.key(&super_o);
-        picker.heard(heard_here(Ok(vec![repository("/home/you/lune", "lune")])));
+        picker.heard(heard_here(Ok(vec![repository("/home/you/lune")])));
         picker.ticked(picker.due().unwrap());
         let list = || Ask::List { on: Machine::Local, path: path() };
         assert_eq!(picker.asks(), [list()]);
@@ -3801,9 +3801,9 @@ mod tests {
         let mut picker = Picker::open(1, List::Projects, works(), Machine::Local, at_host());
         assert_eq!(names(&picker), ["lune", "web", "notes"]);
         picker.heard(heard_here(Ok(vec![
-            repository("/home/you/lune", "lune"),
-            repository("/home/you/Work/bipa", "bipa"),
-            repository("/srv/notes", "notes"),
+            repository("/home/you/lune"),
+            repository("/home/you/Work/bipa"),
+            repository("/srv/notes"),
         ])));
         assert_eq!(names(&picker), ["lune", "web", "notes", "bipa", "notes-2"]);
         let (lines, _) = list(&picker);
@@ -3819,9 +3819,8 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), home);
         down_to(&mut picker, "notes-2");
         assert!(said(&picker).contains(r#"<ENTER> Make "notes-2""#), "{}", said(&picker));
-        let name = Some(SessionName::parse("notes-2").unwrap());
-        let folder = Folder("/srv/notes".to_owned());
-        let made = Picked::Make { on: Machine::Local, folder, name };
+        let folder = crate::worktrees::Folder::from(&directory("/srv/notes"));
+        let made = Picked::Make { on: Machine::Local, folder };
         assert_eq!(press(&mut picker, KeyCode::Enter), made);
         picker.asks();
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
@@ -3831,7 +3830,7 @@ mod tests {
     #[test]
     fn a_typed_folder_makes_the_project_of_it_on_each_machine() {
         let mut picker = Picker::open(1, List::Projects, two_machines(), Machine::Local, at_host());
-        picker.heard(heard_here(Ok(vec![repository("/home/you/lune", "lune")])));
+        picker.heard(heard_here(Ok(vec![repository("/home/you/lune")])));
         typed(&mut picker, "code/app");
         assert_eq!(list(&picker).0, ["no match for \"code/app\""], "no path, no folder to make");
         retyped(&mut picker, "~/code/app");
@@ -3840,17 +3839,22 @@ mod tests {
         let words: Vec<&str> = lines[1].split_whitespace().collect();
         assert_eq!(words, ["+", "~/code/app", "new", "project"]);
         assert!(said(&picker).contains("Enter makes the project of ~/code/app, app"));
-        let name = Some(SessionName::parse("app").unwrap());
-        let folder = Folder("~/code/app".to_owned());
-        let made = |on| Picked::Make { on, folder: folder.clone(), name: name.clone() };
+        let folder = crate::worktrees::Folder::typed("~/code/app").unwrap();
+        let made = |on| Picked::Make { on, folder: folder.clone() };
         assert_eq!(press(&mut picker, KeyCode::Enter), made(Machine::Local));
         press(&mut picker, KeyCode::Down);
         assert_eq!(press(&mut picker, KeyCode::Enter), made(nixos()));
         retyped(&mut picker, "/home/you/lune");
         assert_eq!(grouped(&picker), ["── desk", "lune", "+", "── nixos", "+"]);
-        retyped(&mut picker, "~");
+        for held in ["~", "~/", "~/lune", "~/lune/", "/", "//"] {
+            retyped(&mut picker, held);
+            let rows = grouped(&picker);
+            assert!(!rows.contains(&"+".to_owned()), "no project holds ~/lune: {held} {rows:?}");
+        }
+        retyped(&mut picker, "~/code/..");
         assert!(said(&picker).contains("<ENTER> Make the project"), "{}", said(&picker));
-        let made = Picked::Make { on: Machine::Local, folder: Folder("~".to_owned()), name: None };
+        let typed = crate::worktrees::Folder::typed("~/code/..").unwrap();
+        let made = Picked::Make { on: Machine::Local, folder: typed };
         assert_eq!(press(&mut picker, KeyCode::Enter), made);
     }
 
@@ -3863,8 +3867,8 @@ mod tests {
         };
         let mut picker = Picker::open(1, List::Projects, listing, Machine::Local, at_host());
         picker.heard(heard_here(Ok(vec![
-            repository("/srv/notes", "notes"),
-            repository("/srv/lune", "lune"),
+            repository("/srv/notes"),
+            repository("/srv/lune"),
         ])));
         assert_eq!(names(&picker), ["lune", "notes-2", "lune-2"]);
     }
@@ -3875,9 +3879,9 @@ mod tests {
         let none = Listing::default();
         let mut picker = Picker::open(1, List::Projects, none, Machine::Local, at_host());
         picker.heard(heard_here(Ok(vec![
-            repository(far, "lune-main"),
-            repository("/home/you/lune", "lune"),
-            repository("/srv/app", "app"),
+            repository(far),
+            repository("/home/you/lune"),
+            repository("/srv/app"),
         ])));
         typed(&mut picker, "lune");
         assert_eq!(names(&picker), ["lune", "lune-main"]);
@@ -3929,12 +3933,12 @@ mod tests {
         let sought = |on: Machine, ask: u64| Ask::Repositories { on, ask };
         assert_eq!(picker.asks(), [sought(Machine::Local, 1), sought(nixos(), 2)]);
         let api = "/home/me/Projects/api";
-        let there = vec![repository(api, "api"), repository("/home/me/blog", "blog-2")];
+        let there = vec![repository(api), repository("/home/me/blog")];
         picker.heard(heard_there(2, Ok(there)));
-        let lune = repository("/home/you/lune", "lune");
-        let here = vec![lune, repository("/home/you/blog", "blog")];
+        let lune = repository("/home/you/lune");
+        let here = vec![lune, repository("/home/you/blog")];
         picker.heard(heard_here(Ok(here)));
-        let rows = ["── desk", "lune", "blog", "── nixos", "api", "blog-2"];
+        let rows = ["── desk", "lune", "blog", "── nixos", "api", "blog"];
         assert_eq!(grouped(&picker), rows);
         assert_eq!(lit(&picker), "lune");
 
@@ -3942,8 +3946,8 @@ mod tests {
         press(&mut picker, KeyCode::Down);
         assert_eq!(lit(&picker), "api");
         assert!(said(&picker).contains(r#"<ENTER> Make "api" on nixos"#), "{}", said(&picker));
-        let name = Some(SessionName::parse("api").unwrap());
-        let made = Picked::Make { on: nixos(), folder: Folder(api.to_owned()), name };
+        let folder = crate::worktrees::Folder::from(&directory(api));
+        let made = Picked::Make { on: nixos(), folder };
         assert_eq!(press(&mut picker, KeyCode::Enter), made);
         picker.ticked(picker.due().unwrap());
         assert_eq!(picker.asks(), vec![Ask::List { on: nixos(), path: directory(api) }]);
@@ -3954,16 +3958,16 @@ mod tests {
         assert_eq!(shown[..4], ["nixos · /home/me/Projects/api", "", "src/", "Cargo.toml"]);
 
         typed(&mut picker, "blog");
-        assert_eq!(grouped(&picker), ["── desk", "blog", "── nixos", "blog-2"]);
+        assert_eq!(grouped(&picker), ["── desk", "blog", "── nixos", "blog"]);
         assert_eq!(lit(&picker), "blog");
     }
 
     #[test]
     fn super_o_on_a_machine_s_header_has_the_highlight_on_its_projects() {
-        let here = || heard_here(Ok(vec![repository("/home/you/notes", "notes")]));
+        let here = || heard_here(Ok(vec![repository("/home/you/notes")]));
         let there = || {
-            let api = repository("/home/me/api", "api");
-            let found = vec![api, repository("/home/me/blog", "blog")];
+            let api = repository("/home/me/api");
+            let found = vec![api, repository("/home/me/blog")];
             heard_there(2, Ok(found))
         };
         let mut picker = Picker::open(1, List::Projects, two_machines(), nixos(), at_host());
@@ -4001,7 +4005,7 @@ mod tests {
         picker.listed(two_machines());
         assert_eq!(picker.asks(), [] as [Ask; 0]);
         assert_eq!(list(&picker).0, ["looking for repositories…"]);
-        picker.heard(heard_here(Ok(vec![repository("/home/you/notes", "notes")])));
+        picker.heard(heard_here(Ok(vec![repository("/home/you/notes")])));
         let older = "nixos: its luned, or this one, is older than what lune asked of it";
         let failed = Err(older.to_owned());
         picker.heard(heard_there(2, failed));
@@ -4018,7 +4022,7 @@ mod tests {
         assert_eq!(sought(&mut picker), [Ask::Repositories { on: nixos(), ask: 4 }]);
         let lost = Err("nixos: luned does not reach nixos now".to_owned());
         picker.heard(heard_there(3, lost));
-        let there = Ok(vec![repository("/home/me/api", "api")]);
+        let there = Ok(vec![repository("/home/me/api")]);
         picker.heard(heard_there(4, there));
         assert_eq!(grouped(&picker), ["── desk", "notes", "── nixos", "api"]);
     }
@@ -4038,7 +4042,7 @@ mod tests {
         let none = Listing::default();
         let mut picker = Picker::open(1, List::Projects, none, Machine::Local, at_host());
         let said = "zoxide is not on the PATH, so only the clones in ~/lune are listed";
-        let repositories = vec![repository("/home/you/lune/app", "app")];
+        let repositories = vec![repository("/home/you/lune/app")];
         let unread = vec![said.to_owned()];
         let found = Ok(repositories::Found { repositories, unread });
         picker.heard(Heard::Repositories { on: Machine::Local, ask: 1, found });
@@ -4048,11 +4052,24 @@ mod tests {
     }
 
     #[test]
+    fn another_machine_s_clone_takes_a_name_free_there_and_one_holding_a_project_is_left_out() {
+        let shelves = vec![shelved(nixos(), vec![housed("api", 1, Vec::new())])];
+        let listing = Listing { shelves, ..two_machines() };
+        let mut picker = Picker::open(1, List::Projects, listing, Machine::Local, at_host());
+        picker.heard(heard_here(Ok(Vec::new())));
+        let there = vec![repository("/srv/api"), repository("/home/you")];
+        picker.heard(heard_there(2, Ok(there)));
+        assert_eq!(grouped(&picker)[1..], ["── nixos", "api", "api-2"]);
+        let (lines, _) = list(&picker);
+        assert_eq!(lines[0], "nixos: left out 1 clones a project lies in");
+    }
+
+    #[test]
     fn a_project_of_another_machine_takes_no_name_here() {
         let shelves = vec![shelved(nixos(), vec![housed("api", 1, Vec::new())])];
         let listing = Listing { shelves, ..two_machines() };
         let mut picker = Picker::open(1, List::Projects, listing, Machine::Local, at_host());
-        picker.heard(heard_here(Ok(vec![repository("/srv/api", "api")])));
+        picker.heard(heard_here(Ok(vec![repository("/srv/api")])));
         assert_eq!(grouped(&picker), ["── desk", "api", "── nixos", "api"]);
     }
 

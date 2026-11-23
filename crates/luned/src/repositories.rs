@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::projects::spot;
-use crate::{zoxide, Directory, SessionName};
+use crate::projects::{spot, Dir, ProjectName};
+use crate::{zoxide, Directory};
 
 pub const OWNED_FOLDER: &str = "lune";
 
@@ -15,14 +15,38 @@ const OWNED_ENTRIES_MAX: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Repository {
-    pub path: Directory,
-    pub name: SessionName,
+    path: Dir,
+    name: ProjectName,
+}
+
+impl Repository {
+    pub fn at(path: Dir) -> Result<Repository, String> {
+        let name = ProjectName::of_folder(&path)?;
+        Ok(Repository { path, name })
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Dir {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &ProjectName {
+        &self.name
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Found {
     pub repositories: Vec<Repository>,
     pub unread: Vec<String>,
+}
+
+#[must_use]
+pub fn owned_folder() -> Option<Dir> {
+    let home = fs::canonicalize(env::var_os("HOME")?).ok()?;
+    let home = home.to_str()?.trim_end_matches('/');
+    Dir::parse(&format!("{home}/{OWNED_FOLDER}")).ok()
 }
 
 pub fn found() -> Found {
@@ -41,13 +65,13 @@ pub fn found() -> Found {
         },
     };
     let visited = match zoxide::visited() {
-        Ok(visited) => visited.into_iter().map(|dir| dir.path).collect(),
+        Ok(visited) => visited,
         Err(why) => {
             unread.push(format!("{why}, so only the clones in ~/{OWNED_FOLDER} are listed"));
             Vec::new()
         },
     };
-    let folders = owned.into_iter().chain(visited);
+    let folders = owned.iter().map(Directory::from).chain(visited);
     let Roots { repositories, unnamed, cut } = roots(folders, spot::bare_in);
     if unnamed > 0 {
         unread.push(format!("left out {unnamed} clones whose folder names no project"));
@@ -60,7 +84,7 @@ pub fn found() -> Found {
 }
 
 struct Owned {
-    folders: Vec<Directory>,
+    folders: Vec<Dir>,
     left_out: usize,
 }
 
@@ -79,8 +103,8 @@ fn owned() -> Result<Owned, String> {
     let (mut folders, mut left_out) = (Vec::new(), 0);
     for entry in entries {
         let named = entry.ok().map(|entry| entry.path());
-        let named = named.as_deref().and_then(Path::to_str).map(str::to_owned);
-        let Some(path) = named.and_then(|path| Directory::parse(path).ok()) else {
+        let named = named.as_deref().and_then(Path::to_str);
+        let Some(path) = named.and_then(|path| Dir::parse(path).ok()) else {
             left_out += 1;
             continue;
         };
@@ -106,29 +130,24 @@ struct Roots {
 
 fn roots(folders: impl IntoIterator<Item = Directory>, bare: fn(&Path) -> bool) -> Roots {
     let mut rooted: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
-    let mut seen = HashSet::new();
+    let mut seen = BTreeSet::new();
     let (mut repositories, mut unnamed) = (Vec::new(), 0);
     for folder in folders {
         let Some(root) = root_of(Path::new(folder.as_str()), bare, &mut rooted) else {
             continue;
         };
-        let path = root.to_str().map(|it| it.trim_end_matches('/').to_owned());
-        let path = path.and_then(|it| Directory::parse(it).ok());
-        let named = root.file_name().and_then(|it| it.to_str());
-        let name = named.and_then(|it| SessionName::parse(it).ok());
-        let (Some(path), Some(name)) = (path, name) else {
+        let path = root.to_str().map(|it| Dir::parse(it.trim_end_matches('/')));
+        let Some(Ok(repository)) = path.map(|path| path.and_then(Repository::at)) else {
             unnamed += 1;
             continue;
         };
-        if !seen.insert(path.clone()) {
+        if !seen.insert(repository.path.clone()) {
             continue;
         }
         if repositories.len() == REPOSITORIES_MAX {
             return Roots { repositories, unnamed, cut: true };
         }
-        assert!(!path.as_str().ends_with('/'), "a root's path ends in its folder: {path}");
-        assert!(path.as_str().ends_with(&format!("/{name}")), "{path} is named {name}");
-        repositories.push(Repository { path, name });
+        repositories.push(repository);
     }
     assert_eq!(repositories.len(), seen.len(), "each root is listed once");
     Roots { repositories, unnamed, cut: false }
@@ -169,13 +188,13 @@ mod tests {
         Directory::parse(path.to_owned()).unwrap()
     }
 
-    fn repository(path: &str, name: &str) -> Repository {
-        Repository { path: directory(path), name: SessionName::parse(name).unwrap() }
+    fn repository(path: &str) -> Repository {
+        Repository::at(Dir::parse(path).unwrap()).unwrap()
     }
 
     fn bare(folder: &Path) -> bool {
         let roots = ["/home/you/lune/app", "/home/you/Work/api", "/srv/cdk", "/srv/-dash"];
-        roots.map(Path::new).contains(&folder)
+        roots.into_iter().chain(["/srv/odd "]).any(|root| Path::new(root) == folder)
     }
 
     #[test]
@@ -188,15 +207,18 @@ mod tests {
             "/srv/cdk/",
             "/home/you/Work/api/fix",
             "/srv/-dash/main",
+            "/srv/odd /main",
         ];
         let Roots { repositories, unnamed, cut } = roots(folders.map(directory), bare);
         let listed = [
-            repository("/home/you/lune/app", "app"),
-            repository("/home/you/Work/api", "api"),
-            repository("/srv/cdk", "cdk"),
+            repository("/home/you/lune/app"),
+            repository("/home/you/Work/api"),
+            repository("/srv/cdk"),
+            repository("/srv/-dash"),
         ];
         assert_eq!(repositories, listed);
-        assert_eq!((unnamed, cut), (1, false), "-dash names no project");
+        assert_eq!(repositories[3].name().as_str(), "-dash", "a project may start with -");
+        assert_eq!((unnamed, cut), (1, false), "a name ending in a space names no project");
     }
 
     #[test]

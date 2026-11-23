@@ -421,19 +421,6 @@ fn a_named_lune_shows_the_project_of_that_name_wherever_it_starts() {
 }
 
 #[test]
-fn a_named_lune_refuses_a_name_two_projects_share() {
-    let owned = Owned::new();
-    let (one, other) = (directory("one"), directory("other"));
-    project(&owned.host, Path::new(&real(&one.path)), Some("twin"));
-    project(&owned.host, Path::new(&real(&other.path)), Some("twin"));
-    let output = lune(owned.host.vars(), &one.path).arg("twin").output().unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let refusal = String::from_utf8(output.stderr).unwrap();
-    let dirs = format!("{}, {}", real(&one.path), real(&other.path));
-    assert!(refusal.contains(&format!("projects in {dirs} are all named twin")), "{refusal}");
-}
-
-#[test]
 fn a_named_lune_in_a_clone_shows_the_worktree_of_the_branch_no_project_is_named() {
     if !makes_shells() {
         return;

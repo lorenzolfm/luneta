@@ -32,7 +32,7 @@ use luned::prunes;
 use luned::asks::Marked;
 use luned::rebases::{Rebased, Unrebased};
 use luned::work;
-use luned::{Destination, Direction, Growth, SessionName};
+use luned::{Destination, Direction, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -2114,11 +2114,8 @@ impl App {
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Make { on, folder, name } => {
-                let name = name.as_ref().map(SessionName::to_string);
-                self.make_worktree(on, move |luned, on| {
-                    worktrees::made_at(luned, on, folder.as_str(), name.as_deref())
-                });
+            Picked::Make { on, folder } => {
+                self.make_worktree(on, move |luned, on| worktrees::made_at(luned, on, &folder));
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Plan { on, session, scope } => {

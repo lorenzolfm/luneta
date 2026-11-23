@@ -1154,9 +1154,8 @@ fn another_machine_s_repositories_are_listed_there() {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
         let listed = ListRepositoriesRequest { on: on("far") };
         let listed = daemon.list_repositories(listed).await.unwrap().into_inner().repositories;
-        let named: Vec<(String, String)> =
-            listed.into_iter().map(|it| (it.path, it.name)).collect();
-        assert_eq!(named, [(owned, "app".to_owned()), (work, "work".to_owned())]);
+        let paths: Vec<String> = listed.into_iter().map(|it| it.path).collect();
+        assert_eq!(paths, [owned, work]);
         let nowhere = ListRepositoriesRequest { on: on("nowhere") };
         let nowhere = daemon.list_repositories(nowhere).await.unwrap_err();
         assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");

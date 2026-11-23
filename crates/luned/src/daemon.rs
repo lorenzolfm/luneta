@@ -538,10 +538,8 @@ impl Daemon for Host {
         let found = task::spawn_blocking(repositories::found).await;
         let repositories::Found { repositories, unread } =
             found.map_err(|error| unfinished(&error))?;
-        let repository = |repositories::Repository { path, name }| Repository {
-            path: path.into(),
-            name: name.to_string(),
-        };
+        let repository =
+            |it: repositories::Repository| Repository { path: it.path().as_str().to_owned() };
         let repositories = repositories.into_iter().map(repository).collect();
         Ok(Response::new(ListRepositoriesResponse { repositories, unread }))
     }

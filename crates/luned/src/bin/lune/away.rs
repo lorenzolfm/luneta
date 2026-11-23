@@ -14,12 +14,13 @@ use luned::images::{self, Png};
 use luned::issues::{self, Filed, Filing, Remote, Unfiled};
 use luned::links::{Pasted, Ready, Unready};
 use luned::printed::Kept;
+use luned::projects;
 use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
 use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
 use luned::skills::{Name, Runs, Skill};
 use luned::transcripts::{Reading, SessionId};
-use luned::{Daemon, Destination, Directory, SessionName};
+use luned::{Daemon, Destination, Directory};
 use tokio::runtime::Runtime;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
@@ -323,8 +324,7 @@ fn repositories_of(answer: ListRepositoriesResponse) -> Found {
     let ListRepositoriesResponse { repositories: said, unread: mut unread_there } = answer;
     let sent = said.len();
     let repository = |said: luned::api::list_repositories_response::Repository| {
-        let name = SessionName::parse(&said.name).ok()?;
-        Some(Repository { path: Directory::parse(said.path).ok()?, name })
+        projects::Dir::parse(&said.path).and_then(Repository::at).ok()
     };
     let read: Vec<Repository> = said.into_iter().filter_map(repository).collect();
     let mut unread = Vec::new();
@@ -401,32 +401,31 @@ mod tests {
 
     #[test]
     fn another_machine_s_repositories_are_those_a_project_can_be_named_for() {
-        let dir = |path: &str, name: &str| luned::api::list_repositories_response::Repository {
+        let dir = |path: &str| luned::api::list_repositories_response::Repository {
             path: path.to_owned(),
-            name: name.to_owned(),
         };
+        let long = format!("/home/me/{}", "x".repeat(luned::projects::NAME_CHARS_MAX + 1));
         let answer = ListRepositoriesResponse {
             repositories: vec![
-                dir("/home/me/api", "api-2"),
-                dir("home/me/relative", "relative"),
-                dir("/home/me/odd", "../odd"),
-                dir("/home/me/long", &"x".repeat(luned::SESSION_NAME_BYTES_MAX + 1)),
-                dir("/home/me/blog", "blog"),
+                dir("/home/me/api"),
+                dir("home/me/relative"),
+                dir("/home/me/../odd"),
+                dir("/home/me/blog/"),
+                dir(&long),
+                dir("/home/me/-dash"),
             ],
             unread: vec!["zoxide is not on the PATH".to_owned()],
         };
-        let made = |path: &str, name: &str| Repository {
-            path: Directory::parse(path.to_owned()).unwrap(),
-            name: SessionName::parse(name).unwrap(),
-        };
-        let repositories = vec![made("/home/me/api", "api-2"), made("/home/me/blog", "blog")];
+        let made = |path: &str| Repository::at(projects::Dir::parse(path).unwrap()).unwrap();
+        let repositories = vec![made("/home/me/api"), made("/home/me/-dash")];
+        assert_eq!(repositories[1].name().as_str(), "-dash");
         let unread = vec![
-            "left out 3 clones no project can be named for".to_owned(),
+            "left out 4 clones no project can be named for".to_owned(),
             "zoxide is not on the PATH".to_owned(),
         ];
         assert_eq!(repositories_of(answer), Found { repositories, unread });
 
-        let many = (0..=REPOSITORIES_MAX).map(|at| dir(&format!("/w/c{at}"), &format!("c{at}")));
+        let many = (0..=REPOSITORIES_MAX).map(|at| dir(&format!("/w/c{at}")));
         let notes = (0..=UNREAD_MAX).map(|at| format!("note {at}"));
         let (repositories, unread) = (many.collect(), notes.collect());
         let answer = ListRepositoriesResponse { repositories, unread };

@@ -48,10 +48,10 @@ pub fn gone(pid: u32) -> bool {
 }
 
 fn kept_in_home(host: &Host) {
-    let home = fs::canonicalize(host.home.path()).unwrap();
-    let work = home.join("work");
+    let notes = fs::canonicalize(host.home.path()).unwrap().join("notes");
+    let work = notes.join("work");
     fs::create_dir_all(&work).unwrap();
-    worktree(host, project(host, &home, None), &work);
+    worktree(host, project(host, &notes, None), &work);
 }
 
 #[test]
@@ -143,8 +143,9 @@ fn lune_terminate_ends_lune_on_each_machine_ssh_reaches_and_skips_the_others() {
     ssh.runs_lune("far", far.vars());
     hosts(&here_host, "far\ngone\n");
     let mut far_daemon = start(far.vars()).unwrap();
-    let home = fs::canonicalize(far.home.path()).unwrap();
-    project(&far, &home, None);
+    let notes = fs::canonicalize(far.home.path()).unwrap().join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    project(&far, &notes, None);
 
     let planned = terminate(here_host.vars(), None);
     assert_eq!(planned.code, Some(3), "{}", planned.stderr);

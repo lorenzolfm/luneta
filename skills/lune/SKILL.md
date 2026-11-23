@@ -134,8 +134,10 @@ lune start https://github.com/o/app/pull/7   # a pull request, checked out in a 
 
 A worktree goes in the project lune keeps for its folder: the project of its
 clone's root, or the project of the folder itself. Where lune has none, luned
-makes one there, named after that folder: the clone's root, or the folder. The
-worktree gets a row in that project, and a view, which runs the issue's agent
+makes one there, named after that folder: the clone's root, or the folder. A
+name another project has gets a `-2`, as no two projects share one. luned
+makes none at `~/lune`, where lune keeps clones, or in a folder holding it.
+The worktree gets a row in that project, and a view, which runs the issue's agent
 where `start` starts one, and a shell otherwise.
 
 Run in a terminal of lune-mux, `start` takes each lune whose focus is on
