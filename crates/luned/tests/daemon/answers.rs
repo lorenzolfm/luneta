@@ -30,6 +30,17 @@ const MOVED: &str =
 
 const PROMPT: &str = r" What next?\r\n";
 
+const ON_NO: &str = r" Do you want to proceed?\r\n   1. Yes\r\n \342\235\257 2. No\r\n\r\n Esc to cancel\r\n";
+
+const ASKED_ANEW: &str =
+    r"\033[H\033[2J Run rm -rf ./work?\r\n \342\235\257 1. Yes\r\n   2. No\r\n\r\n Esc to cancel\r\n";
+
+const SENT: &str = concat!(
+    r"\342\235\257 fix the failing\r\n  socket test\r\n\r\n\342\227\217 Done.\r\n\r\n",
+    r"\342\224\200\342\224\200\342\224\200\342\224\200\r\n\342\235\257\302\240\r\n",
+    r"\342\224\200\342\224\200\342\224\200\342\224\200\r\n  Opus 5.5\r\n",
+);
+
 struct Shown<'a> {
     first: &'a str,
     presses: usize,
@@ -206,6 +217,31 @@ fn a_choice_the_cursor_does_not_reach_is_not_entered() {
     let unreached = r#"the cursor did not reach choice 2, "No", so Enter was not pressed"#;
     assert_eq!(refused.message(), unreached);
     assert_eq!(menu.pressed(), "1b 5b 42");
+}
+
+#[test]
+fn a_choice_is_not_entered_on_another_menu_that_asks_anew() {
+    let menu = Menu::new();
+    let shown = Shown { first: ON_NO, presses: 3, then: ASKED_ANEW, presses_then: 1 };
+    let terminal = menu.opened(&shown);
+    let waiting = menu.shown(&terminal, "Esc to cancel");
+    assert_eq!(waiting.asks, Some(menu_of(&["Yes", "No"], 1)));
+    let refused = menu.answer(&terminal, waiting.shown, choice(0, "Yes")).unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition);
+    let unreached = r#"the cursor did not reach choice 1, "Yes", so Enter was not pressed"#;
+    assert_eq!(refused.message(), unreached);
+    let anew = menu.waiting(&terminal).unwrap();
+    assert!(anew.screen.contains("Run rm -rf ./work?"), "{}", anew.screen);
+}
+
+#[test]
+fn a_prompt_sent_above_the_input_is_no_menu_and_words_answer_it() {
+    let menu = Menu::new();
+    let terminal = menu.opened(&Shown::still(SENT, 6));
+    let waiting = menu.shown(&terminal, "Opus 5.5");
+    assert_eq!(waiting.asks, Some(Asks::Words(())));
+    menu.answer(&terminal, waiting.shown, text("hello")).unwrap();
+    assert_eq!(menu.pressed(), "68 65 6c 6c 6f 0d");
 }
 
 #[test]

@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::{answer_request, waiting_response, WaitingResponse};
-use crate::choices::{Moves, Seen, CHOICES_MAX, SCREEN_LINES_MAX};
+use crate::choices::{Choices, Moves, Seen, CHOICES_MAX, SCREEN_LINES_MAX};
 use crate::log;
 use crate::mux::own::api::{self as mux, pressed, Named};
 use crate::mux::own::server::{Looked, Pressed, Shown, Terminals, PRESSES_MAX};
@@ -114,6 +114,7 @@ pub fn waiting(key: TerminalKey, runs: &Runs) -> Result<WaitingResponse, Failure
                     chosen: u32::try_from(menu.at()).expect("a menu's choices are few"),
                 }),
                 Seen::TooMany(count) => Asks::Unread(too_many(count)),
+                Seen::Alone(chosen) => Asks::Unread(alone(&chosen)),
             };
             (asks, transcript.as_deref().and_then(said_in))
         },
@@ -135,6 +136,9 @@ pub fn answer(key: TerminalKey, runs: &Runs, answer: Answer) -> Result<(), Unans
         (Asked::Text(_) | Asked::Choice { .. }, Seen::TooMany(count)) => {
             Err(Unanswered::Refused(too_many(count)))
         },
+        (Asked::Text(_) | Asked::Choice { .. }, Seen::Alone(chosen)) => {
+            Err(Unanswered::Refused(alone(&chosen)))
+        },
         (Asked::Text(_), Seen::Menu(menu)) => {
             let count = menu.labels().len();
             let why = format!("the screen shows {count} choices: answer with one of them");
@@ -155,7 +159,7 @@ pub fn answer(key: TerminalKey, runs: &Runs, answer: Answer) -> Result<(), Unans
             };
             assert!(!moves.is_empty() && moves.len() <= PRESSES_MAX, "{} moves", moves.len());
             press(key, shown, moves)?;
-            entered_at(key, index, &label)
+            entered_at(key, &menu, index)
         },
     }
 }
@@ -167,12 +171,13 @@ fn press(key: TerminalKey, shown: Shown, events: Vec<pressed::Event>) -> Result<
     }
 }
 
-fn entered_at(key: TerminalKey, index: usize, label: &str) -> Result<(), Unanswered> {
+fn entered_at(key: TerminalKey, asked: &Choices, index: usize) -> Result<(), Unanswered> {
+    let label = &asked.labels()[index];
     for _ in 0..MOVED_LOOKS_MAX {
         let Looked { text, shown } = Terminals.looked(key)?;
         let there = match Seen::of(&tail(&text, SCREEN_LINES_MAX)) {
-            Seen::Menu(menu) => menu.moves_to(index, label) == Ok(Moves::Stay),
-            Seen::Words | Seen::TooMany(_) => false,
+            Seen::Menu(menu) => menu.at() == index && menu.asks_as(asked),
+            Seen::Words | Seen::TooMany(_) | Seen::Alone(_) => false,
         };
         if there {
             match Terminals.pressed(key, shown, vec![named_key(Named::Enter)])? {
@@ -190,6 +195,10 @@ fn entered_at(key: TerminalKey, index: usize, label: &str) -> Result<(), Unanswe
 fn too_many(count: usize) -> String {
     assert!(count > CHOICES_MAX, "{count} choices are read");
     format!("the screen shows {count} choices, over the {CHOICES_MAX} luned reads")
+}
+
+fn alone(chosen: &str) -> String {
+    format!("the screen's cursor is on {chosen:?}, with no choices luned reads beside it")
 }
 
 fn tail(text: &str, lines_max: usize) -> String {

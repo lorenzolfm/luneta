@@ -8,10 +8,15 @@ const CURSOR: &str = "❯ ";
 
 const CURSOR_WIDTH: usize = 2;
 
+const INPUT: char = '❯';
+
+const RULE: char = '─';
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Choices {
     labels: Vec<String>,
     at: usize,
+    asked: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +31,13 @@ pub enum Seen {
     Words,
     Menu(Choices),
     TooMany(usize),
+    Alone(String),
+}
+
+enum Row<'l> {
+    Choice(&'l str),
+    Under,
+    Apart,
 }
 
 impl Seen {
@@ -34,29 +46,12 @@ impl Seen {
         let lines: Vec<&str> = screen.lines().collect();
         let tail = &lines[lines.len().saturating_sub(SCREEN_LINES_MAX)..];
         assert!(tail.len() <= SCREEN_LINES_MAX, "{} lines looked at", tail.len());
-        for (at, line) in tail.iter().enumerate().rev() {
-            let Some((indent, chosen)) = cursor_on(line) else {
-                continue;
-            };
-            let sibling = indent + CURSOR_WIDTH;
-            let above: Vec<&str> =
-                tail[..at].iter().rev().map_while(|line| at_indent(line, sibling)).collect();
-            let below: Vec<&str> =
-                tail[at + 1..].iter().map_while(|line| at_indent(line, sibling)).collect();
-            if above.is_empty() && below.is_empty() {
-                continue;
+        let live = past_input(tail);
+        assert!(live <= tail.len(), "the lines past the input are of the screen");
+        for (at, line) in tail.iter().enumerate().skip(live).rev() {
+            if let Some((indent, chosen)) = cursor_on(line) {
+                return menu_at(tail, at, indent, chosen);
             }
-            let shown = above.iter().rev().chain([&chosen]).chain(below.iter());
-            let labels: Vec<String> =
-                shown.enumerate().map(|(index, label)| unnumbered(index, label)).collect();
-            assert_eq!(labels.len(), above.len() + 1 + below.len());
-            if labels.len() > CHOICES_MAX {
-                return Seen::TooMany(labels.len());
-            }
-            let choices = Choices { labels, at: above.len() };
-            assert!(choices.labels.len() >= 2, "a menu offers a choice besides the cursor's");
-            assert!(choices.at < choices.labels.len(), "the cursor is on one of the choices");
-            return Seen::Menu(choices);
         }
         Seen::Words
     }
@@ -71,6 +66,13 @@ impl Choices {
     #[must_use]
     pub fn at(&self) -> usize {
         self.at
+    }
+
+    #[must_use]
+    pub fn asks_as(&self, other: &Choices) -> bool {
+        let lines = self.asked.len().min(other.asked.len());
+        let (mine, theirs) = (self.asked.len() - lines, other.asked.len() - lines);
+        self.labels == other.labels && self.asked[mine..] == other.asked[theirs..]
     }
 
     pub fn moves_to(&self, index: usize, label: &str) -> Result<Moves, String> {
@@ -95,16 +97,81 @@ impl Choices {
     }
 }
 
+fn menu_at(tail: &[&str], at: usize, indent: usize, chosen: &str) -> Seen {
+    assert!(at < tail.len(), "the cursor is on a line of the screen");
+    let sibling = indent + CURSOR_WIDTH;
+    let mut above = Vec::new();
+    let mut first = at;
+    for (on, line) in tail[..at].iter().enumerate().rev() {
+        match row(line, sibling) {
+            Row::Choice(label) => {
+                above.push(label);
+                first = on;
+            },
+            Row::Under => {},
+            Row::Apart => break,
+        }
+    }
+    let mut below = Vec::new();
+    for line in &tail[at + 1..] {
+        match row(line, sibling) {
+            Row::Choice(label) => below.push(label),
+            Row::Under => {},
+            Row::Apart => break,
+        }
+    }
+    if above.is_empty() && below.is_empty() {
+        return Seen::Alone(chosen.to_owned());
+    }
+    let shown = above.iter().rev().chain([&chosen]).chain(below.iter());
+    let labels: Vec<String> =
+        shown.enumerate().map(|(index, label)| unnumbered(index, label)).collect();
+    assert_eq!(labels.len(), above.len() + 1 + below.len());
+    if labels.len() > CHOICES_MAX {
+        return Seen::TooMany(labels.len());
+    }
+    let asked = tail[..first].iter().map(|line| (*line).to_owned()).collect();
+    let choices = Choices { labels, at: above.len(), asked };
+    assert!(choices.labels.len() >= 2, "a menu offers a choice besides the cursor's");
+    assert!(choices.at < choices.labels.len(), "the cursor is on one of the choices");
+    Seen::Menu(choices)
+}
+
+fn past_input(lines: &[&str]) -> usize {
+    let input = (1..lines.len()).rev().find(|&at| is_rule(lines[at - 1]) && is_input(lines[at]));
+    let Some(input) = input else {
+        return 0;
+    };
+    let closed = (input + 1..lines.len()).find(|&at| is_rule(lines[at]));
+    closed.map_or(input + 1, |rule| rule + 1)
+}
+
+fn is_rule(line: &str) -> bool {
+    let line = line.trim_end();
+    !line.is_empty() && line.chars().all(|c| c == RULE)
+}
+
+fn is_input(line: &str) -> bool {
+    line.strip_prefix(INPUT).is_some_and(|rest| !rest.starts_with(' '))
+}
+
 fn cursor_on(line: &str) -> Option<(usize, &str)> {
     let shown = line.trim_start_matches(' ');
     let chosen = shown.strip_prefix(CURSOR)?.trim();
     (!chosen.is_empty()).then_some((line.len() - shown.len(), chosen))
 }
 
-fn at_indent(line: &str, indent: usize) -> Option<&str> {
+fn row(line: &str, sibling: usize) -> Row<'_> {
     let shown = line.trim_start_matches(' ');
     let text = shown.trim_end();
-    (line.len() - shown.len() == indent && !text.is_empty()).then_some(text)
+    let indent = line.len() - shown.len();
+    if text.is_empty() || indent < sibling {
+        Row::Apart
+    } else if indent == sibling {
+        Row::Choice(text)
+    } else {
+        Row::Under
+    }
 }
 
 fn unnumbered(index: usize, label: &str) -> String {
@@ -203,10 +270,47 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_and_what_was_asked_are_no_choices() {
+    fn the_prompt_and_what_was_asked_above_it_are_no_choices() {
         assert_eq!(Seen::of(PROMPT), Seen::Words);
+        let sent = "\n❯ please look at the failing test in the daemon\n  crate and tell me why it \
+                    breaks when the socket\n  is gone\n\n● It is the socket path.\n";
+        let rule = "─".repeat(40);
+        let below = format!("{rule}\n  Opus 5.5  ░░░░░░░░░░  4%  ctx\n");
+        assert_eq!(Seen::of(&format!("{sent}\n{rule}\n❯\u{a0}\n{below}")), Seen::Words);
+        let draft = format!("{sent}\n{rule}\n❯\u{a0}and this\n  and that\n{below}");
+        assert_eq!(Seen::of(&draft), Seen::Words);
+    }
+
+    #[test]
+    fn a_cursor_with_no_choices_beside_it_and_no_input_below_is_alone() {
         let asked = "\n❯ Run exactly this bash command\n\n● Bash(touch ./probe-file)\n";
-        assert_eq!(Seen::of(asked), Seen::Words);
+        assert_eq!(Seen::of(asked), Seen::Alone("Run exactly this bash command".to_owned()));
+    }
+
+    #[test]
+    fn choices_read_past_the_lines_under_each_of_them() {
+        let asked = "\n Which login should the app use?\n\n ❯ 1. OAuth\n      Sign in with Google\n   \
+                     2. Password, kept by\n      the app itself\n      Email and password\n   3. \
+                     Type something.\n\n Enter to select · Esc to cancel\n";
+        let choices = menu(asked);
+        assert_eq!(labels(&choices), ["OAuth", "Password, kept by", "Type something."]);
+        assert_eq!(choices.at(), 0);
+    }
+
+    #[test]
+    fn a_menu_asks_as_another_only_with_its_words_and_choices() {
+        let on = |chosen: usize, asked: &str| {
+            let rows = ["Yes", "No"].iter().enumerate().map(|(index, label)| {
+                let cursor = if index == chosen { "❯ " } else { "  " };
+                format!(" {cursor}{}. {label}\n", index + 1)
+            });
+            menu(&format!("\n {asked}\n Do you want to proceed?\n{}", rows.collect::<String>()))
+        };
+        let shown = on(1, "touch ./probe-file");
+        assert!(on(0, "touch ./probe-file").asks_as(&shown), "the cursor moved alone");
+        assert!(!on(0, "rm -rf ./work").asks_as(&shown), "another command asks");
+        let fewer = menu(" Do you want to proceed?\n ❯ 1. Yes\n   2. Maybe\n");
+        assert!(!fewer.asks_as(&shown), "other choices are offered");
     }
 
     #[test]
