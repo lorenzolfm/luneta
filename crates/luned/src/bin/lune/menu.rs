@@ -211,7 +211,7 @@ impl Asks {
 }
 
 impl Pull {
-    const ALL: [Pull; 2] = [Pull::Worktree, Pull::Agent];
+    const ALL: [Pull; 2] = [Pull::Agent, Pull::Worktree];
 
     pub fn offered(work: &Work) -> [(Pull, Pasted); 2] {
         let asks = Asks::of(work);
@@ -4331,8 +4331,8 @@ mod tests {
             text(&menu.lines(31, 9, 0).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
-                " w  worktree",
                 " r  /thermo-nuclear-review",
+                " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
             ]
@@ -4430,8 +4430,8 @@ mod tests {
             text(&menu.lines(31, 9, 0).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
-                " w  worktree",
                 " t  tackle",
+                " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
             ]
@@ -4472,8 +4472,8 @@ mod tests {
         assert!(!menu.turning());
         let refused = [
             "─ #2736 ──────── cashubtc/cdk ─",
-            " w  worktree",
             " t  tackle",
+            " w  worktree",
             " \u{ec82} claude  <TAB> another agent",
             " /w/cdk/issue-2736 is on",
             " dev-docs, not issue-2736, so",
@@ -4483,7 +4483,7 @@ mod tests {
         ];
         let (lines, spots) = menu.lines(31, 9, 0);
         assert_eq!(text(&lines), refused);
-        assert_eq!(spots.at(Position::new(4, 1)), Some(&pressed(KeyCode::Char('w'))));
+        assert_eq!(spots.at(Position::new(4, 2)), Some(&pressed(KeyCode::Char('w'))));
 
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
@@ -4509,8 +4509,8 @@ mod tests {
             text(&menu.lines(31, 11, 0).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
-                " w  worktree",
                 " r  /thermo-nuclear-review",
+                " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " /w/cdk/feat is on stacked,",
                 " not the pull request's head",
@@ -4541,8 +4541,8 @@ mod tests {
             text(&menu.lines(38, 9, 0).0),
             [
                 "─ sync-rework ─ plans/sync-rework.md ─",
-                " w  worktree",
                 " t  tackle",
+                " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
             ]

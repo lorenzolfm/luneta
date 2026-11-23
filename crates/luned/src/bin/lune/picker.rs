@@ -4383,22 +4383,22 @@ mod tests {
         let issue = "https://github.com/lorenzolfm/lune/issues/648";
         let mut picker = palette(Origin::Views);
         picker.paste(&format!("{issue}\n"));
-        assert_eq!(every_action(&mut picker), ["Worktree #648", "Tackle #648"]);
+        assert_eq!(every_action(&mut picker), ["Tackle #648", "Worktree #648"]);
         assert_eq!(keyed_action(&picker).1, "lorenzolfm/lune");
         let work = Work::parse(issue, None).expect("an issue's link");
         let origin = Origin::Views;
-        let tackle = Picked::Pull { target: fix_view(), work, pull: Pull::Agent, origin };
-        assert_eq!(press(&mut picker, KeyCode::Enter), tackle);
+        let worktree = Picked::Pull { target: fix_view(), work, pull: Pull::Worktree, origin };
+        assert_eq!(press(&mut picker, KeyCode::Enter), worktree);
 
         let pr = "https://github.com/lorenzolfm/lune/pull/650";
         let mut picker = palette(Origin::Sidebar);
         typed(&mut picker, pr);
-        assert_eq!(every_action(&mut picker), ["Worktree #650", "/thermo-nuclear-review #650"]);
+        assert_eq!(every_action(&mut picker), ["/thermo-nuclear-review #650", "Worktree #650"]);
         press(&mut picker, KeyCode::Up);
         let work = Work::parse(pr, None).expect("a pull request's link");
         let origin = Origin::Sidebar;
-        let worktree = Picked::Pull { target: fix_view(), work, pull: Pull::Worktree, origin };
-        assert_eq!(press(&mut picker, KeyCode::Enter), worktree);
+        let review = Picked::Pull { target: fix_view(), work, pull: Pull::Agent, origin };
+        assert_eq!(press(&mut picker, KeyCode::Enter), review);
 
         let why = "palette: lune does not know yet which view its client is on";
         let unplaced = Palette { aim: Aim::Unplaced(why), origin: Origin::Views };

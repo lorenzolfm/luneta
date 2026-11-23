@@ -9164,8 +9164,8 @@ mod tests {
         let lines = screen(&mut sidebar, true, 32, 17);
         assert_eq!(lines[12..], [
             "─ #5 ──────── lorenzolfm/lune ─",
-            " w  worktree",
             " r  /thermo-nuclear-review",
+            " w  worktree",
             " \u{ec82} claude  <TAB> another agent",
             " <ESC> - Close",
         ]);
@@ -9420,8 +9420,8 @@ mod tests {
         let lines = screen(&mut sidebar, true, 39, 17);
         assert_eq!(lines[12..], [
             "─ sync-rework ─ plans/sync-rework.md ─",
-            " w  worktree",
             " t  tackle",
+            " w  worktree",
             " \u{ec82} claude  <TAB> another agent",
             " <ESC> - Close",
         ]);
