@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::env;
-use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
 use std::mem;
@@ -23,7 +22,7 @@ use tokio::time::timeout;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Server;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Code, Request, Response, Status, Streaming};
 use tower::layer::layer_fn;
 
 use crate::api::change_projects_request::{self, AddWorktree};
@@ -45,7 +44,7 @@ use crate::api::{
     RebaseRequest, RebaseResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
     TranscriptEndsResponse, FramesRequest, AnswerRequest, WaitingRequest, WaitingResponse,
 };
-use crate::answers::{self, Answer, Unanswered};
+use crate::answers::{self, Answer, Runs, Unanswered};
 use crate::mux::Failure;
 use crate::asks::{Asked, Step};
 use crate::core::{self, After, Command, Full, Parked, Wakes};
@@ -612,20 +611,21 @@ impl Daemon for Host {
             return daemon.waiting(WaitingRequest { on: None, terminal }).await;
         }
         let (key, asked) = terminal_named(terminal)?;
-        let transcript = self.transcript_in(&asked).await;
-        let waiting = task::spawn_blocking(move || answers::waiting(key, transcript.as_deref()));
+        let runs = self.runs_in(&asked).await;
+        let waiting = task::spawn_blocking(move || answers::waiting(key, &runs));
         let waiting = waiting.await.map_err(|error| unfinished(&error))?;
         waiting.map(Response::new).map_err(|failure| unanswered(&Unanswered::Unreached(failure)))
     }
 
     async fn answer(&self, request: Request<AnswerRequest>) -> Result<Response<()>, Status> {
-        let AnswerRequest { on, terminal, answer } = request.into_inner();
+        let AnswerRequest { on, terminal, shown, answer } = request.into_inner();
         if let Some(mut daemon) = self.bridged(on).await? {
-            return daemon.answer(AnswerRequest { on: None, terminal, answer }).await;
+            return daemon.answer(AnswerRequest { on: None, terminal, shown, answer }).await;
         }
-        let (key, _) = terminal_named(terminal)?;
-        let answer = Answer::of(answer).map_err(Status::invalid_argument)?;
-        let answered = task::spawn_blocking(move || answers::answer(key, answer));
+        let (key, asked) = terminal_named(terminal)?;
+        let answer = Answer::of(shown, answer).map_err(Status::invalid_argument)?;
+        let runs = self.runs_in(&asked).await;
+        let answered = task::spawn_blocking(move || answers::answer(key, &runs, answer));
         let answered = answered.await.map_err(|error| unfinished(&error))?;
         answered.map(Response::new).map_err(|refused| unanswered(&refused))
     }
@@ -1203,37 +1203,50 @@ fn terminal_named(
 fn unanswered(unanswered: &Unanswered) -> Status {
     let said = unanswered.to_string();
     match unanswered {
-        Unanswered::Refused(_) | Unanswered::Unreached(Failure::Called(_)) => {
-            Status::failed_precondition(said)
+        Unanswered::Changed => Status::aborted(said),
+        Unanswered::Refused(_) => Status::failed_precondition(said),
+        Unanswered::Unreached(Failure::Called(reply)) if reply.code() == Code::NotFound => {
+            Status::not_found(said)
         },
-        Unanswered::Unreached(Failure::Own(_)) => Status::unavailable(said),
+        Unanswered::Unreached(Failure::Called(_) | Failure::Own(_)) => Status::unavailable(said),
         Unanswered::Unreached(Failure::Unread(_)) => Status::internal(said),
     }
 }
 
 impl Host {
-    async fn transcript_in(&self, terminal: &api::TerminalKey) -> Option<PathBuf> {
-        let projects = self.claude_folder.as_ref()?.join("projects");
-        let unfound = |why: &dyn fmt::Display| {
-            log::say(&format!("terminal {}: no transcript is looked for: {why}", terminal.id));
-        };
+    async fn runs_in(&self, terminal: &api::TerminalKey) -> Runs {
+        let id = terminal.id;
         let ListAgentsResponse { agents, .. } = match self.ask(Command::List).await {
             Ok(listed) => listed,
             Err(status) => {
-                unfound(&status.message());
-                return None;
+                let why = status.message();
+                return Runs::Unread(format!("luned could not list terminal {id}'s agent: {why}"));
             },
         };
         let agent = agents.into_iter().find(|agent| agent.terminal.as_ref() == Some(terminal));
-        let claude = agent.filter(|agent| agent.runs_in() == api::Harness::ClaudeCode);
-        let id = claude.and_then(|agent| SessionId::parse(&agent.session_id))?;
-        match task::spawn_blocking(move || transcripts::find(&projects, &id)).await {
-            Ok(found) => found,
-            Err(error) => {
-                unfound(&error);
-                None
+        let Some(agent) = agent else {
+            return Runs::Unread(format!("terminal {id} runs no agent luned knows"));
+        };
+        match agent.runs_in() {
+            api::Harness::ClaudeCode => {},
+            api::Harness::Pi => {
+                let why = format!("terminal {id} runs Pi, whose menus luned does not read");
+                return Runs::Unread(why);
+            },
+            api::Harness::Unspecified => {
+                return Runs::Unread(format!("terminal {id} runs a harness luned does not know"));
             },
         }
+        let projects = self.claude_folder.as_ref().map(|folder| folder.join("projects"));
+        let Some((projects, session)) = projects.zip(SessionId::parse(&agent.session_id)) else {
+            return Runs::Claude { transcript: None };
+        };
+        let found = task::spawn_blocking(move || transcripts::find(&projects, &session)).await;
+        let transcript = found.unwrap_or_else(|error| {
+            log::say(&format!("terminal {id}: no transcript is looked for: {error}"));
+            None
+        });
+        Runs::Claude { transcript }
     }
 
     async fn bridged(&self, on: Option<api::On>) -> Result<Option<client::Daemon>, Status> {

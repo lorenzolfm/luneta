@@ -132,6 +132,9 @@ impl Opens {
             Some(api::opens::Runs::Command(argv)) => Argv::of_api(argv).map(Opens::Command),
             Some(api::opens::Runs::Agent(api::Prompted { harness, words })) => {
                 let harness = Harness::said(Some(harness))?;
+                if words.trim().is_empty() {
+                    return Err("an agent is asked for with no words".to_owned());
+                }
                 Argv::on_words(harness, words, &[]).map(Opens::Command)
             },
         }
@@ -181,9 +184,9 @@ impl Argv {
             if !rules.is_empty() {
                 command.push("--allowedTools".to_owned());
                 command.extend(rules);
-                command.push("--".to_owned());
             }
         }
+        command.push("--".to_owned());
         command.push(words);
         Argv::parse(command)
     }
@@ -771,7 +774,7 @@ mod tests {
             );
             assert_eq!(
                 Argv::on_words(Harness::Pi, prompt.clone(), &[file]).unwrap().words(),
-                ["pi".to_owned(), prompt],
+                ["pi".to_owned(), "--".to_owned(), prompt],
                 "{file}"
             );
         }
@@ -784,7 +787,7 @@ mod tests {
             let prompt = format!("Tackle {file}");
             assert_eq!(
                 Argv::on_words(Harness::ClaudeCode, prompt.clone(), &[file]).unwrap().words(),
-                ["claude".to_owned(), prompt],
+                ["claude".to_owned(), "--".to_owned(), prompt],
                 "{file:?}"
             );
         }
@@ -792,20 +795,31 @@ mod tests {
 
     #[test]
     fn an_agent_asked_for_by_its_words_opens_as_its_command_line() {
-        let asked = |harness: api::Harness| api::Opens {
+        let asked = |harness: api::Harness, words: &str| api::Opens {
             runs: Some(api::opens::Runs::Agent(api::Prompted {
                 harness: harness.into(),
-                words: "Tackle #444".to_owned(),
+                words: words.to_owned(),
             })),
         };
-        let opens = Opens::of_api(Some(asked(api::Harness::ClaudeCode))).unwrap();
+        let opens = Opens::of_api(Some(asked(api::Harness::ClaudeCode, "Tackle #444"))).unwrap();
         let Opens::Command(argv) = opens else { panic!("an agent opens as a command") };
-        assert_eq!(argv.words(), ["claude", "Tackle #444"]);
-        let opens = Opens::of_api(Some(asked(api::Harness::Pi))).unwrap();
+        assert_eq!(argv.words(), ["claude", "--", "Tackle #444"]);
+        let opens = Opens::of_api(Some(asked(api::Harness::Pi, "Tackle #444"))).unwrap();
         let Opens::Command(argv) = opens else { panic!("an agent opens as a command") };
-        assert_eq!(argv.words(), ["pi", "Tackle #444"]);
-        let unnamed = Opens::of_api(Some(asked(api::Harness::Unspecified)));
+        assert_eq!(argv.words(), ["pi", "--", "Tackle #444"]);
+        let unnamed = Opens::of_api(Some(asked(api::Harness::Unspecified, "Tackle #444")));
         assert_eq!(unnamed, Err("a harness this luned does not know".to_owned()));
+        let blank = Opens::of_api(Some(asked(api::Harness::ClaudeCode, " \n")));
+        assert_eq!(blank, Err("an agent is asked for with no words".to_owned()));
+    }
+
+    #[test]
+    fn an_agent_s_words_are_never_read_as_its_flags() {
+        let words = "--dangerously-skip-permissions".to_owned();
+        for harness in [Harness::ClaudeCode, Harness::Pi] {
+            let argv = Argv::on_words(harness, words.clone(), &[]).unwrap();
+            assert_eq!(argv.words(), [harness.program(), "--", words.as_str()]);
+        }
     }
 
 }

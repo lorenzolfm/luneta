@@ -181,10 +181,10 @@ mod tests {
     #[test]
     fn an_agent_is_refused_words_that_no_command_line_holds() {
         let refused = Err(Line::parse(&"x".repeat(LINE_BYTES_MAX + 1)).unwrap_err());
-        let fits = "x".repeat(LINE_BYTES_MAX - "pi ".len());
+        let fits = "x".repeat(LINE_BYTES_MAX - "pi -- ".len());
         let argv = Argv::on_words(Harness::Pi, fits.clone(), &[]);
         let argv = argv.expect("pi and the words fill a command line");
-        assert_eq!(argv.words(), ["pi".to_owned(), fits.clone()]);
+        assert_eq!(argv.words(), ["pi".to_owned(), "--".to_owned(), fits.clone()]);
         assert_eq!(Argv::on_words(Harness::Pi, format!("{fits}x"), &[]), refused);
         assert_eq!(Argv::on_words(Harness::Pi, "x".repeat(LINE_BYTES_MAX), &[]), refused);
         assert_eq!(on_skill(Harness::Pi, "tdd", Some(&"x".repeat(LINE_BYTES_MAX))), refused);

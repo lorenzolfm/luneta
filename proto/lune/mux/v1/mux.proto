@@ -7,6 +7,8 @@ import "google/protobuf/timestamp.proto";
 
 service Mux {
   rpc Dump(DumpRequest) returns (DumpResponse);
+  rpc Look(LookRequest) returns (Looked);
+  rpc Press(PressRequest) returns (PressResponse);
   rpc List(ListRequest) returns (Listing);
   rpc Watch(WatchRequest) returns (stream Watched);
   rpc NewTerminal(NewTerminalRequest) returns (NewTerminalResponse);
@@ -84,12 +86,35 @@ enum Dumped {
   DUMPED_UNSPECIFIED = 0;
   DUMPED_SCREEN = 1;
   DUMPED_TEXT = 2;
-  DUMPED_SHOWN = 3;
 }
 
 message DumpResponse {
   string text = 1;
 }
+
+message LookRequest {
+  TerminalKey terminal = 1;
+}
+
+message Looked {
+  string text = 1;
+  uint64 shown = 2;
+}
+
+message PressRequest {
+  TerminalKey terminal = 1;
+  optional uint64 shown = 2;
+  repeated Pressed pressed = 3;
+}
+
+message Pressed {
+  oneof event {
+    Key key = 1;
+    Paste paste = 2;
+  }
+}
+
+message PressResponse {}
 
 message ListRequest {}
 

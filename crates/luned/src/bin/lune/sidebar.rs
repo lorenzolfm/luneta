@@ -9543,7 +9543,7 @@ mod tests {
         assert_eq!(sidebar.printed(2, nothing()), Asked::Nothing);
         let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
                       nothing.";
-        let command = vec!["claude".to_owned(), prompt.to_owned()];
+        let command = vec!["claude".to_owned(), "--".to_owned(), prompt.to_owned()];
         let opens = Opens::Command(Argv::parse(command).unwrap());
         let (project, beside) = (listed("s", 10).project(), view_key(10, 1));
         let open = Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, opens };

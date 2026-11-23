@@ -247,21 +247,57 @@ pub(super) fn unreached_at(socket: &Path, error: &io::Error) -> String {
 }
 
 #[derive(Debug)]
-pub struct Reply(String);
+pub struct Reply {
+    code: Code,
+    said: String,
+}
 
 impl Reply {
     fn of(status: &Status) -> Reply {
-        match status.message() {
-            "" => Reply(status.code().description().to_owned()),
-            said => Reply(said.to_owned()),
-        }
+        let said = match status.message() {
+            "" => status.code().description().to_owned(),
+            said => said.to_owned(),
+        };
+        Reply { code: status.code(), said }
+    }
+
+    #[must_use]
+    pub fn code(&self) -> Code {
+        self.code
     }
 }
 
 impl fmt::Display for Reply {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.said)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shown(u64);
+
+impl Shown {
+    #[must_use]
+    pub fn of(shown: u64) -> Shown {
+        Shown(shown)
+    }
+
+    #[must_use]
+    pub fn said(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug)]
+pub struct Looked {
+    pub text: String,
+    pub shown: Shown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pressed {
+    Done,
+    Changed,
 }
 
 pub fn socket() -> Result<PathBuf, Failure> {
@@ -540,24 +576,35 @@ impl Terminals {
             words.push(said(Event::Typed(typed)));
         }
         assert_eq!(words.len(), pastes.len() + 2, "a hello, a showing and one word per paste");
-        show_typed(words, 2 * pastes.len())
-    }
-
-    pub fn pressed(&self, key: TerminalKey, events: Vec<api::typed::Event>) -> Result<(), Failure> {
-        use api::from_viewer::Event;
-        assert!(!events.is_empty(), "something is pressed");
-        assert!(events.len() <= PRESSES_MAX, "no more presses than an answer takes");
-        let word = |event| api::FromViewer { event: Some(event) };
-        let hello = api::Greeting { colours: Some(colours(None, None)), runs_in: None };
-        let showing = api::Showing { terminals: vec![key.said()] };
-        let mut words = vec![word(Event::Hello(hello)), word(Event::Showing(showing))];
-        let refusals_max = 2 * events.len();
-        for event in events {
-            let typed = api::Typed { terminal: Some(key.said()), event: Some(event) };
-            words.push(word(Event::Typed(typed)));
+        let refusals_max = 2 * pastes.len();
+        let server = reached()?;
+        let mut client = server.client.clone();
+        let reasons = server.runtime.block_on(async move {
+            let deadline = tokio::time::Instant::now() + ANSWER;
+            let shown = client.show(tokio_stream::iter(words)).await;
+            let mut heard = shown.map_err(|status| refused(&status))?.into_inner();
+            let drained = async move {
+                let mut reasons = Vec::new();
+                while let Some(word) = heard.message().await? {
+                    if let Some(api::to_viewer::Event::Refused(refusal)) = word.event {
+                        reasons.push(refusal.reason);
+                    }
+                    if reasons.len() >= refusals_max {
+                        break;
+                    }
+                }
+                Ok::<_, Status>(reasons)
+            };
+            let kept = || Failure::Own("lune-mux kept showing the pastes too long".to_owned());
+            let reasons = tokio::time::timeout_at(deadline, drained).await.map_err(|_| kept())?;
+            reasons.map_err(|status| refused(&status))
+        })?;
+        assert!(reasons.len() <= refusals_max, "the drain stops at its most refusals");
+        if reasons.is_empty() {
+            Ok(())
+        } else {
+            Err(Failure::Called(Reply { code: Code::Unknown, said: reasons.join("; ") }))
         }
-        assert_eq!(words.len(), refusals_max / 2 + 2, "a hello, a showing and each press");
-        show_typed(words, refusals_max)
     }
 
     pub fn sized(&self, key: TerminalKey, size: Size) -> Result<(), Failure> {
@@ -572,6 +619,34 @@ impl Terminals {
         let request = api::DumpRequest { dumped: dumped.into(), terminal: Some(key.said()) };
         let asked = reached()?.ask(|mut client| async move { client.dump(request).await });
         Ok(asked.map_err(|status| refused(&status))?.text)
+    }
+
+    pub fn looked(&self, key: TerminalKey) -> Result<Looked, Failure> {
+        let request = api::LookRequest { terminal: Some(key.said()) };
+        let asked = reached()?.ask(|mut client| async move { client.look(request).await });
+        let api::Looked { text, shown } = asked.map_err(|status| refused(&status))?;
+        Ok(Looked { text, shown: Shown(shown) })
+    }
+
+    pub fn pressed(
+        &self,
+        key: TerminalKey,
+        shown: Shown,
+        pressed: Vec<api::pressed::Event>,
+    ) -> Result<Pressed, Failure> {
+        assert!(!pressed.is_empty(), "something is pressed");
+        assert!(pressed.len() <= PRESSES_MAX, "no more presses than an answer takes");
+        let pressed = pressed.into_iter().map(|event| api::Pressed { event: Some(event) });
+        let request = api::PressRequest {
+            terminal: Some(key.said()),
+            shown: Some(shown.0),
+            pressed: pressed.collect(),
+        };
+        match reached()?.ask(|mut client| async move { client.press(request).await }) {
+            Ok(api::PressResponse {}) => Ok(Pressed::Done),
+            Err(status) if status.code() == Code::Aborted => Ok(Pressed::Changed),
+            Err(status) => Err(refused(&status)),
+        }
     }
 
     pub fn closed(&self, key: TerminalKey) -> Result<(), Failure> {
@@ -591,38 +666,6 @@ impl Terminals {
                 }
             },
         }
-    }
-}
-
-fn show_typed(words: Vec<api::FromViewer>, refusals_max: usize) -> Result<(), Failure> {
-    assert!(refusals_max > 0, "something typed may be refused");
-    let server = reached()?;
-    let mut client = server.client.clone();
-    let reasons = server.runtime.block_on(async move {
-        let deadline = tokio::time::Instant::now() + ANSWER;
-        let shown = client.show(tokio_stream::iter(words)).await;
-        let mut heard = shown.map_err(|status| refused(&status))?.into_inner();
-        let drained = async move {
-            let mut reasons = Vec::new();
-            while let Some(word) = heard.message().await? {
-                if let Some(api::to_viewer::Event::Refused(refusal)) = word.event {
-                    reasons.push(refusal.reason);
-                }
-                if reasons.len() >= refusals_max {
-                    break;
-                }
-            }
-            Ok::<_, Status>(reasons)
-        };
-        let kept = || Failure::Own("lune-mux kept showing what was typed too long".to_owned());
-        let reasons = tokio::time::timeout_at(deadline, drained).await.map_err(|_| kept())?;
-        reasons.map_err(|status| refused(&status))
-    })?;
-    assert!(reasons.len() <= refusals_max, "the drain stops at its most refusals");
-    if reasons.is_empty() {
-        Ok(())
-    } else {
-        Err(Failure::Called(Reply(reasons.join("; "))))
     }
 }
 

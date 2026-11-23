@@ -21,9 +21,16 @@ pub enum Moves {
     Stay,
 }
 
-impl Choices {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Seen {
+    Words,
+    Menu(Choices),
+    TooMany(usize),
+}
+
+impl Seen {
     #[must_use]
-    pub fn of(screen: &str) -> Option<Choices> {
+    pub fn of(screen: &str) -> Seen {
         let lines: Vec<&str> = screen.lines().collect();
         let tail = &lines[lines.len().saturating_sub(SCREEN_LINES_MAX)..];
         assert!(tail.len() <= SCREEN_LINES_MAX, "{} lines looked at", tail.len());
@@ -44,16 +51,18 @@ impl Choices {
                 shown.enumerate().map(|(index, label)| unnumbered(index, label)).collect();
             assert_eq!(labels.len(), above.len() + 1 + below.len());
             if labels.len() > CHOICES_MAX {
-                return None;
+                return Seen::TooMany(labels.len());
             }
             let choices = Choices { labels, at: above.len() };
             assert!(choices.labels.len() >= 2, "a menu offers a choice besides the cursor's");
             assert!(choices.at < choices.labels.len(), "the cursor is on one of the choices");
-            return Some(choices);
+            return Seen::Menu(choices);
         }
-        None
+        Seen::Words
     }
+}
 
+impl Choices {
     #[must_use]
     pub fn labels(&self) -> &[String] {
         &self.labels
@@ -170,9 +179,16 @@ mod tests {
         choices.labels().iter().map(String::as_str).collect()
     }
 
+    fn menu(screen: &str) -> Choices {
+        match Seen::of(screen) {
+            Seen::Menu(choices) => choices,
+            seen => panic!("{seen:?} is no menu"),
+        }
+    }
+
     #[test]
     fn a_permission_prompt_reads_as_its_numbered_choices() {
-        let choices = Choices::of(PERMISSION).unwrap();
+        let choices = menu(PERMISSION);
         let always = "Yes, and always allow access to /tmp/claude-1000/permprobe/work from this project";
         let auto = "Yes, and switch to auto mode · auto mode handles these prompts for you";
         assert_eq!(labels(&choices), ["Yes", always, auto, "No"]);
@@ -181,30 +197,40 @@ mod tests {
 
     #[test]
     fn an_unnumbered_dialog_reads_with_its_cursor_where_it_is() {
-        let choices = Choices::of(TRUST).unwrap();
+        let choices = menu(TRUST);
         assert_eq!(labels(&choices), ["No, exit", "Yes, I trust this folder"]);
         assert_eq!(choices.at(), 1);
     }
 
     #[test]
     fn the_prompt_and_what_was_asked_are_no_choices() {
-        assert_eq!(Choices::of(PROMPT), None);
+        assert_eq!(Seen::of(PROMPT), Seen::Words);
         let asked = "\n❯ Run exactly this bash command\n\n● Bash(touch ./probe-file)\n";
-        assert_eq!(Choices::of(asked), None);
+        assert_eq!(Seen::of(asked), Seen::Words);
+    }
+
+    #[test]
+    fn a_menu_of_more_choices_than_are_read_is_seen_as_one() {
+        let numbered = |count: usize| {
+            let rest = (2..=count).map(|number| format!("   {number}. Option {number}\n"));
+            format!(" Pick one\n ❯ 1. Option 1\n{}", rest.collect::<String>())
+        };
+        assert!(matches!(Seen::of(&numbered(CHOICES_MAX)), Seen::Menu(_)));
+        assert_eq!(Seen::of(&numbered(CHOICES_MAX + 1)), Seen::TooMany(CHOICES_MAX + 1));
     }
 
     #[test]
     fn a_choice_is_reached_by_moving_from_the_cursor() {
-        let choices = Choices::of(PERMISSION).unwrap();
+        let choices = menu(PERMISSION);
         assert_eq!(choices.moves_to(3, "No"), Ok(Moves::Down(3)));
         assert_eq!(choices.moves_to(0, "Yes"), Ok(Moves::Stay));
-        let trust = Choices::of(TRUST).unwrap();
+        let trust = menu(TRUST);
         assert_eq!(trust.moves_to(0, "No, exit"), Ok(Moves::Up(1)));
     }
 
     #[test]
     fn a_choice_that_changed_since_it_was_shown_is_refused() {
-        let choices = Choices::of(PERMISSION).unwrap();
+        let choices = menu(PERMISSION);
         assert_eq!(choices.moves_to(1, "No").unwrap_err(), r#"choice 2 is now "Yes, and always allow access to /tmp/claude-1000/permprobe/work from this project", not "No""#);
         assert_eq!(choices.moves_to(4, "No").unwrap_err(), "choice 5 is asked for, and the screen shows 4");
     }
@@ -212,7 +238,7 @@ mod tests {
     #[test]
     fn only_the_last_screen_is_looked_at() {
         let old = format!("{TRUST}{}", "\n".repeat(SCREEN_LINES_MAX));
-        assert_eq!(Choices::of(&old), None);
+        assert_eq!(Seen::of(&old), Seen::Words);
     }
 
     #[test]

@@ -129,7 +129,7 @@ fn lune_rebase_moves_a_branch_onto_upstream_and_hands_its_conflicts_to_an_agent(
     assert!(why.starts_with(conflicts), "{why}");
     assert!(why.ends_with("lune: an agent resolves it, in a view of the worktree\n"), "{why}");
     let agent = eventually("an agent starts on the conflicts", || fs::read_to_string(&asked).ok());
-    assert!(agent.starts_with("The rebase of fix onto origin/main stopped at "), "{agent}");
+    assert!(agent.starts_with("--\nThe rebase of fix onto origin/main stopped at "), "{agent}");
     assert!(agent.contains(" theirs, on conflicts in theirs. Resolve it: "), "{agent}");
     assert!(scratch.join("n/.bare/worktrees/fix/rebase-merge").is_dir(), "the rebase waits");
     assert_eq!(terminals_in(host, fix), 1, "the worktree opens with the agent alone");
@@ -294,7 +294,7 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
     commit(&up, "theirs", "yours\n");
     window.send(REBASE);
     let agent = eventually("an agent starts on the conflicts", || fs::read_to_string(&asked).ok());
-    assert!(agent.starts_with("The rebase of fix onto origin/main stopped at "), "{agent}");
+    assert!(agent.starts_with("--\nThe rebase of fix onto origin/main stopped at "), "{agent}");
     assert!(agent.contains(", on conflicts in theirs. Resolve it: "), "{agent}");
     let terminals = || shown(&owned, &dir.path).map_or(0, |it| it.terminals.len());
     eventually("the agent opens beside the view", || (terminals() == 2).then_some(()));

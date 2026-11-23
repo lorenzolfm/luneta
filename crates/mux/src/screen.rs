@@ -1,6 +1,8 @@
 mod answering;
 mod input;
 
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+
 use libghostty_vt::effect::{
     ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
     PrimaryDeviceAttributes, SecondaryDeviceAttributes, TertiaryDeviceAttributes,
@@ -341,15 +343,29 @@ impl Screen {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    pub fn dumped_shown(&self) -> Result<String, Error> {
+    pub fn looked(&self) -> Result<Looked, Error> {
         let terminal = self.answering.terminal();
         let mut formatter = shown_only(terminal)?;
         formatter.set_format(Format::Plain)?.set_unwrap(true)?.set_trim(true)?;
         let bytes = formatter.format_alloc(None)?;
-        let shown = String::from_utf8_lossy(&bytes).into_owned();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
         let rows = usize::from(terminal.rows()?);
-        assert!(shown.lines().count() <= rows, "{} lines of {rows} rows", shown.lines().count());
-        Ok(shown)
+        assert!(text.lines().count() <= rows, "{} lines of {rows} rows", text.lines().count());
+        Ok(Looked::of(text))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Looked {
+    pub text: String,
+    pub shown: u64,
+}
+
+impl Looked {
+    fn of(text: String) -> Looked {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        Looked { shown: hasher.finish(), text }
     }
 }
 

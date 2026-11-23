@@ -222,7 +222,7 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     assert_eq!(said(&started(host, &clone.join("main"), "#7", &[])), shown(&issue));
     assert!(issue.join(".git").is_file(), "the issue's worktree is made");
     let agent = eventually("an agent starts on the issue", || fs::read_to_string(&asked).ok());
-    assert_eq!(agent, "Tackle https://github.com/o/n/issues/7\n");
+    assert_eq!(agent, "--\nTackle https://github.com/o/n/issues/7\n");
     let opened = vec![issue.display().to_string()];
     let made = vec![("n".to_owned(), clone.display().to_string(), opened)];
     assert_eq!(folders(host), made, "only the issue's worktree opens");
@@ -241,7 +241,7 @@ fn an_issue_starts_in_a_worktree_named_after_it_with_an_agent_on_it() {
     fs::remove_file(&asked).unwrap();
     assert_eq!(said(&started(host, &clone.join("main"), "#9", &[])), shown(&nine));
     let agent = eventually("an agent starts in one not open", || fs::read_to_string(&asked).ok());
-    assert_eq!(agent, "Tackle https://github.com/o/n/issues/9\n");
+    assert_eq!(agent, "--\nTackle https://github.com/o/n/issues/9\n");
     let projects = projects(host);
     let mut held = projects.iter().flat_map(|it| it.worktrees().unwrap());
     let nine = nine.display().to_string();

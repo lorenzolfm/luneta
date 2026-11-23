@@ -1012,14 +1012,24 @@ message WaitingRequest {
 
 message WaitingResponse {
   string screen = 1;
-  repeated string choices = 2;
-  optional uint32 chosen = 3;
-  optional string said = 4;
+  uint64 shown = 2;
+  oneof asks {
+    google.protobuf.Empty words = 3;
+    Menu menu = 4;
+    string unread = 5;
+  }
+  optional string said = 6;
+
+  message Menu {
+    repeated string choices = 1;
+    uint32 chosen = 2;
+  }
 }
 
 message AnswerRequest {
   On on = 1;
   TerminalKey terminal = 2;
+  optional uint64 shown = 6;
   oneof answer {
     string text = 3;
     Choice choice = 4;

@@ -3,14 +3,17 @@ use std::path::Path;
 use std::process::Stdio;
 
 use lune_waits::{eventually, eventually_showing};
+use luned::api::waiting_response::{Asks, Menu as Choices};
 use luned::api::{self, answer_request, AnswerRequest, WaitingRequest, WaitingResponse};
 use luned::mux::own::api as mux_api;
 use tonic::Code;
 
+use crate::agents::file_of_pid;
 use crate::host::{Running, PATIENT};
 use crate::own::{built_server, Owned};
 
-const SCREEN: &str = r#"stty raw -echo
+const SCREEN: &str = r#"echo $$ > "$HOME/pid.draft" && mv "$HOME/pid.draft" "$HOME/pid"
+stty raw -echo
 printf "$1"
 dd bs=1 count="$2" 2>/dev/null > "$HOME/pressed.raw"
 printf "$3"
@@ -58,6 +61,28 @@ impl Menu {
     }
 
     fn opened(&self, shown: &Shown<'_>) -> api::TerminalKey {
+        let terminal = self.opened_alone(shown);
+        let home = Path::new(&self.owned.home()).to_owned();
+        let pid = || fs::read_to_string(home.join("pid")).ok();
+        let pid = eventually("the screen says its pid", pid);
+        let pid: u32 = pid.trim().parse().unwrap();
+        let sessions = home.join(".claude/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let file = file_of_pid("menu", pid, "idle").to_string();
+        fs::write(sessions.join(format!("{pid}.json")), file).unwrap();
+        let folder = luned::folder::open(&self.owned.host.folder()).unwrap().unwrap();
+        eventually("luned lists the agent in the terminal", || {
+            let folder = folder.clone();
+            let listed = self.owned.block_on(async move {
+                let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
+                daemon.list_agents(()).await.unwrap().into_inner().agents
+            });
+            listed.iter().any(|agent| agent.terminal == Some(terminal)).then_some(())
+        });
+        terminal
+    }
+
+    fn opened_alone(&self, shown: &Shown<'_>) -> api::TerminalKey {
         let script = Path::new(&self.owned.home()).join("screen.sh");
         fs::write(&script, SCREEN).unwrap();
         let (presses, presses_then) = (shown.presses.to_string(), shown.presses_then.to_string());
@@ -79,11 +104,12 @@ impl Menu {
     fn answer(
         &self,
         terminal: &api::TerminalKey,
+        shown: u64,
         answer: answer_request::Answer,
     ) -> Result<(), tonic::Status> {
         let folder = luned::folder::open(&self.owned.host.folder()).unwrap().unwrap();
-        let request =
-            AnswerRequest { on: None, terminal: Some(*terminal), answer: Some(answer) };
+        let (terminal, shown, answer) = (Some(*terminal), Some(shown), Some(answer));
+        let request = AnswerRequest { on: None, terminal, shown, answer };
         self.owned.block_on(async move {
             let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
             daemon.answer(request).await.map(drop)
@@ -113,24 +139,51 @@ fn text(text: &str) -> answer_request::Answer {
     answer_request::Answer::Text(text.to_owned())
 }
 
+fn menu_of(choices: &[&str], chosen: u32) -> Asks {
+    let choices = choices.iter().map(|&choice| choice.to_owned()).collect();
+    Asks::Menu(Choices { choices, chosen })
+}
+
 #[test]
 fn a_waiting_terminal_shows_its_screen_and_choices() {
     let menu = Menu::new();
     let terminal = menu.opened(&Shown::still(MENU, 2));
     let waiting = menu.shown(&terminal, "Esc to cancel");
-    assert_eq!(waiting.choices, ["Yes", "No"]);
-    assert_eq!(waiting.chosen, Some(0));
+    assert_eq!(waiting.asks, Some(menu_of(&["Yes", "No"], 0)));
     assert!(waiting.screen.contains("Do you want to proceed?"), "{}", waiting.screen);
     assert_eq!(waiting.said, None);
 }
 
 #[test]
-fn a_terminal_with_no_menu_shows_no_choices() {
+fn a_terminal_with_no_menu_asks_for_words() {
     let menu = Menu::new();
     let terminal = menu.opened(&Shown::still(PROMPT, 2));
     let waiting = menu.shown(&terminal, "What next?");
-    assert!(waiting.choices.is_empty(), "{:?}", waiting.choices);
-    assert_eq!(waiting.chosen, None);
+    assert_eq!(waiting.asks, Some(Asks::Words(())));
+}
+
+#[test]
+fn a_terminal_that_runs_no_agent_is_shown_and_not_answered() {
+    let menu = Menu::new();
+    let terminal = menu.opened_alone(&Shown::still(MENU, 1));
+    let waiting = menu.shown(&terminal, "Esc to cancel");
+    let unknown = format!("terminal {} runs no agent luned knows", terminal.id);
+    assert_eq!(waiting.asks, Some(Asks::Unread(unknown.clone())));
+    let refused = menu.answer(&terminal, waiting.shown, choice(0, "Yes")).unwrap_err();
+    assert_eq!((refused.code(), refused.message()), (Code::FailedPrecondition, unknown.as_str()));
+}
+
+#[test]
+fn an_answer_to_a_screen_that_changed_since_it_was_read_presses_nothing() {
+    let menu = Menu::new();
+    let terminal = menu.opened(&Shown::still(MENU, 1));
+    let waiting = menu.shown(&terminal, "Esc to cancel");
+    let escape = answer_request::Answer::Escape(());
+    let refused = menu.answer(&terminal, waiting.shown.wrapping_add(1), escape).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted);
+    assert_eq!(refused.message(), "the screen changed since it was read: read it again");
+    menu.answer(&terminal, waiting.shown, choice(0, "Yes")).unwrap();
+    assert_eq!(menu.pressed(), "0d");
 }
 
 #[test]
@@ -138,8 +191,8 @@ fn a_choice_moves_the_cursor_to_it_and_presses_enter_once_it_is_there() {
     let menu = Menu::new();
     let shown = Shown { first: MENU, presses: 3, then: MOVED, presses_then: 1 };
     let terminal = menu.opened(&shown);
-    menu.shown(&terminal, "Esc to cancel");
-    menu.answer(&terminal, choice(1, "No")).unwrap();
+    let waiting = menu.shown(&terminal, "Esc to cancel");
+    menu.answer(&terminal, waiting.shown, choice(1, "No")).unwrap();
     assert_eq!(menu.pressed(), "1b 5b 42 0d");
 }
 
@@ -147,8 +200,8 @@ fn a_choice_moves_the_cursor_to_it_and_presses_enter_once_it_is_there() {
 fn a_choice_the_cursor_does_not_reach_is_not_entered() {
     let menu = Menu::new();
     let terminal = menu.opened(&Shown::still(MENU, 3));
-    menu.shown(&terminal, "Esc to cancel");
-    let refused = menu.answer(&terminal, choice(1, "No")).unwrap_err();
+    let waiting = menu.shown(&terminal, "Esc to cancel");
+    let refused = menu.answer(&terminal, waiting.shown, choice(1, "No")).unwrap_err();
     assert_eq!(refused.code(), Code::FailedPrecondition);
     let unreached = r#"the cursor did not reach choice 2, "No", so Enter was not pressed"#;
     assert_eq!(refused.message(), unreached);
@@ -156,11 +209,11 @@ fn a_choice_the_cursor_does_not_reach_is_not_entered() {
 }
 
 #[test]
-fn a_choice_the_screen_no_longer_shows_is_refused() {
+fn a_choice_the_screen_does_not_show_is_refused() {
     let menu = Menu::new();
     let terminal = menu.opened(&Shown::still(MENU, 4));
-    menu.shown(&terminal, "Esc to cancel");
-    let refused = menu.answer(&terminal, choice(1, "Maybe")).unwrap_err();
+    let waiting = menu.shown(&terminal, "Esc to cancel");
+    let refused = menu.answer(&terminal, waiting.shown, choice(1, "Maybe")).unwrap_err();
     assert_eq!(refused.code(), Code::FailedPrecondition);
     assert_eq!(refused.message(), r#"choice 2 is now "No", not "Maybe""#);
 }
@@ -169,8 +222,8 @@ fn a_choice_the_screen_no_longer_shows_is_refused() {
 fn a_text_answer_is_typed_and_entered() {
     let menu = Menu::new();
     let terminal = menu.opened(&Shown::still(PROMPT, 6));
-    menu.shown(&terminal, "What next?");
-    menu.answer(&terminal, text("hello")).unwrap();
+    let waiting = menu.shown(&terminal, "What next?");
+    menu.answer(&terminal, waiting.shown, text("hello")).unwrap();
     assert_eq!(menu.pressed(), "68 65 6c 6c 6f 0d");
 }
 
@@ -178,17 +231,17 @@ fn a_text_answer_is_typed_and_entered() {
 fn a_text_answer_is_refused_while_the_screen_shows_choices() {
     let menu = Menu::new();
     let terminal = menu.opened(&Shown::still(MENU, 6));
-    menu.shown(&terminal, "Esc to cancel");
-    let refused = menu.answer(&terminal, text("hello")).unwrap_err();
+    let waiting = menu.shown(&terminal, "Esc to cancel");
+    let refused = menu.answer(&terminal, waiting.shown, text("hello")).unwrap_err();
     assert_eq!(refused.code(), Code::FailedPrecondition);
-    assert_eq!(refused.message(), "the screen shows 2 choices now: answer with one of them");
+    assert_eq!(refused.message(), "the screen shows 2 choices: answer with one of them");
 }
 
 #[test]
 fn escape_is_pressed_alone() {
     let menu = Menu::new();
     let terminal = menu.opened(&Shown::still(MENU, 1));
-    menu.shown(&terminal, "Esc to cancel");
-    menu.answer(&terminal, answer_request::Answer::Escape(())).unwrap();
+    let waiting = menu.shown(&terminal, "Esc to cancel");
+    menu.answer(&terminal, waiting.shown, answer_request::Answer::Escape(())).unwrap();
     assert_eq!(menu.pressed(), "1b");
 }
