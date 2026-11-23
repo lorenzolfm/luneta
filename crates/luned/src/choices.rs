@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-const LOOKED_LINES: usize = 60;
+pub const SCREEN_LINES_MAX: usize = 40;
 
 pub const CHOICES_MAX: usize = 16;
 
@@ -25,7 +25,8 @@ impl Choices {
     #[must_use]
     pub fn of(screen: &str) -> Option<Choices> {
         let lines: Vec<&str> = screen.lines().collect();
-        let tail = &lines[lines.len().saturating_sub(LOOKED_LINES)..];
+        let tail = &lines[lines.len().saturating_sub(SCREEN_LINES_MAX)..];
+        assert!(tail.len() <= SCREEN_LINES_MAX, "{} lines looked at", tail.len());
         for (at, line) in tail.iter().enumerate().rev() {
             let Some((indent, chosen)) = cursor_on(line) else {
                 continue;
@@ -38,13 +39,17 @@ impl Choices {
             if above.is_empty() && below.is_empty() {
                 continue;
             }
-            let said = above.iter().rev().chain([&chosen]).chain(below.iter());
+            let shown = above.iter().rev().chain([&chosen]).chain(below.iter());
             let labels: Vec<String> =
-                said.enumerate().map(|(index, label)| unnumbered(index, label)).collect();
+                shown.enumerate().map(|(index, label)| unnumbered(index, label)).collect();
+            assert_eq!(labels.len(), above.len() + 1 + below.len());
             if labels.len() > CHOICES_MAX {
                 return None;
             }
-            return Some(Choices { labels, at: above.len() });
+            let choices = Choices { labels, at: above.len() };
+            assert!(choices.labels.len() >= 2, "a menu offers a choice besides the cursor's");
+            assert!(choices.at < choices.labels.len(), "the cursor is on one of the choices");
+            return Some(choices);
         }
         None
     }
@@ -60,6 +65,8 @@ impl Choices {
     }
 
     pub fn moves_to(&self, index: usize, label: &str) -> Result<Moves, String> {
+        assert!(self.at < self.labels.len(), "the cursor is on one of the choices");
+        assert!(self.labels.len() <= CHOICES_MAX, "{} choices", self.labels.len());
         let Some(found) = self.labels.get(index) else {
             let shown = self.labels.len();
             return Err(format!("choice {} is asked for, and the screen shows {shown}", index + 1));
@@ -67,11 +74,15 @@ impl Choices {
         if found != label {
             return Err(format!("choice {} is now {found:?}, not {label:?}", index + 1));
         }
-        Ok(match index.cmp(&self.at) {
+        let moves = match index.cmp(&self.at) {
             Ordering::Less => Moves::Up(self.at - index),
             Ordering::Greater => Moves::Down(index - self.at),
             Ordering::Equal => Moves::Stay,
-        })
+        };
+        if let Moves::Up(steps) | Moves::Down(steps) = moves {
+            assert!(steps < self.labels.len(), "{steps} moves among {}", self.labels.len());
+        }
+        Ok(moves)
     }
 }
 
@@ -83,8 +94,8 @@ fn cursor_on(line: &str) -> Option<(usize, &str)> {
 
 fn at_indent(line: &str, indent: usize) -> Option<&str> {
     let shown = line.trim_start_matches(' ');
-    let said = shown.trim_end();
-    (line.len() - shown.len() == indent && !said.is_empty()).then_some(said)
+    let text = shown.trim_end();
+    (line.len() - shown.len() == indent && !text.is_empty()).then_some(text)
 }
 
 fn unnumbered(index: usize, label: &str) -> String {
@@ -200,7 +211,12 @@ mod tests {
 
     #[test]
     fn only_the_last_screen_is_looked_at() {
-        let old = format!("{TRUST}{}", "\n".repeat(LOOKED_LINES));
+        let old = format!("{TRUST}{}", "\n".repeat(SCREEN_LINES_MAX));
         assert_eq!(Choices::of(&old), None);
+    }
+
+    #[test]
+    fn the_cursor_is_as_wide_as_its_characters() {
+        assert_eq!(CURSOR.chars().count(), CURSOR_WIDTH);
     }
 }

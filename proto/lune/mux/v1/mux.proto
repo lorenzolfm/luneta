@@ -84,6 +84,7 @@ enum Dumped {
   DUMPED_UNSPECIFIED = 0;
   DUMPED_SCREEN = 1;
   DUMPED_TEXT = 2;
+  DUMPED_SHOWN = 3;
 }
 
 message DumpResponse {

@@ -221,6 +221,31 @@ fn a_terminal_dumps_its_text() {
 }
 
 #[test]
+fn a_terminal_dumps_only_the_text_it_shows() {
+    run(async {
+        let server = Server::start().await;
+        let mut mux = server.client().await;
+        let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
+        let key =
+            new_terminal(&mut mux, script("seq 1 20", api::Ends::Holds), b"t", size(20, 4)).await;
+        watched_until(&mut watch, "the program ended", |listing| {
+            terminal(listing, &key).is_some_and(|terminal| {
+                matches!(terminal.program, Some(api::terminal::Program::Ended(_)))
+            })
+        })
+        .await;
+        let dumped =
+            |dumped: api::Dumped| api::DumpRequest { dumped: dumped.into(), terminal: Some(key) };
+        let shown = mux.dump(dumped(api::Dumped::Shown)).await.unwrap().into_inner().text;
+        let text = mux.dump(dumped(api::Dumped::Text)).await.unwrap().into_inner().text;
+        assert!(shown.lines().count() <= 4, "{shown}");
+        assert!(shown.lines().any(|line| line == "20"), "{shown}");
+        assert!(!shown.lines().any(|line| line == "1"), "{shown}");
+        assert!(text.lines().any(|line| line == "1"), "{text}");
+    });
+}
+
+#[test]
 fn a_held_terminal_says_how_its_program_ended_and_a_closing_one_leaves() {
     run(async {
         let server = Server::start().await;

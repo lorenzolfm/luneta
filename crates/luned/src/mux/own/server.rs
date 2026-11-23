@@ -52,7 +52,14 @@ const STOPPING: Duration = Duration::from_secs(2);
 
 const LOOK: Duration = Duration::from_millis(10);
 
-pub const PRESSES_MAX: usize = crate::choices::CHOICES_MAX + 1;
+pub const PRESSES_MAX: usize = crate::choices::CHOICES_MAX - 1;
+
+const _: () = assert!(
+    PRESSES_MAX + 1 == crate::choices::CHOICES_MAX,
+    "an answer presses at once at most the moves from a menu's first choice to its last"
+);
+
+const _: () = assert!(PRESSES_MAX >= 2, "a text answer's paste and Enter go at once");
 
 const AGAIN: Duration = Duration::from_millis(100);
 
@@ -533,23 +540,24 @@ impl Terminals {
             words.push(said(Event::Typed(typed)));
         }
         assert_eq!(words.len(), pastes.len() + 2, "a hello, a showing and one word per paste");
-        told(words, 2 * pastes.len())
+        show_typed(words, 2 * pastes.len())
     }
 
     pub fn pressed(&self, key: TerminalKey, events: Vec<api::typed::Event>) -> Result<(), Failure> {
         use api::from_viewer::Event;
         assert!(!events.is_empty(), "something is pressed");
         assert!(events.len() <= PRESSES_MAX, "no more presses than an answer takes");
-        let said = |event| api::FromViewer { event: Some(event) };
+        let word = |event| api::FromViewer { event: Some(event) };
         let hello = api::Greeting { colours: Some(colours(None, None)), runs_in: None };
         let showing = api::Showing { terminals: vec![key.said()] };
-        let mut words = vec![said(Event::Hello(hello)), said(Event::Showing(showing))];
+        let mut words = vec![word(Event::Hello(hello)), word(Event::Showing(showing))];
         let refusals_max = 2 * events.len();
         for event in events {
             let typed = api::Typed { terminal: Some(key.said()), event: Some(event) };
-            words.push(said(Event::Typed(typed)));
+            words.push(word(Event::Typed(typed)));
         }
-        told(words, refusals_max)
+        assert_eq!(words.len(), refusals_max / 2 + 2, "a hello, a showing and each press");
+        show_typed(words, refusals_max)
     }
 
     pub fn sized(&self, key: TerminalKey, size: Size) -> Result<(), Failure> {
@@ -586,7 +594,8 @@ impl Terminals {
     }
 }
 
-fn told(words: Vec<api::FromViewer>, refusals_max: usize) -> Result<(), Failure> {
+fn show_typed(words: Vec<api::FromViewer>, refusals_max: usize) -> Result<(), Failure> {
+    assert!(refusals_max > 0, "something typed may be refused");
     let server = reached()?;
     let mut client = server.client.clone();
     let reasons = server.runtime.block_on(async move {

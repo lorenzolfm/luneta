@@ -328,18 +328,8 @@ impl Screen {
 
     pub fn dumped_screen(&self) -> Result<String, Error> {
         let terminal = self.answering.terminal();
-        let corner = |x, y| terminal.grid_ref(Point::Active(Coordinate { x, y }));
-        let last = (terminal.cols()? - 1, u32::from(terminal.rows()?) - 1);
-        let shown = Selection::new(corner(0, 0)?, corner(last.0, last.1)?, false);
-        let mut formatter = Formatter::new(terminal)?;
+        let mut formatter = shown_only(terminal)?;
         formatter.set_format(Format::Vt)?.set_trim(true)?.set_extras(Extras::NONE)?;
-        #[expect(
-            unsafe_code,
-            reason = "a formatter takes a range only as a selection, unchecked. Both corners are \
-                      of `terminal`'s active screen, taken from it just now, and the formatter \
-                      borrows it as they do"
-        )]
-        unsafe { formatter.set_selection(Some(&shown)) }?;
         let bytes = formatter.format_alloc(None)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
@@ -350,6 +340,34 @@ impl Screen {
         let bytes = formatter.format_alloc(None)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
+
+    pub fn dumped_shown(&self) -> Result<String, Error> {
+        let terminal = self.answering.terminal();
+        let mut formatter = shown_only(terminal)?;
+        formatter.set_format(Format::Plain)?.set_unwrap(true)?.set_trim(true)?;
+        let bytes = formatter.format_alloc(None)?;
+        let shown = String::from_utf8_lossy(&bytes).into_owned();
+        let rows = usize::from(terminal.rows()?);
+        assert!(shown.lines().count() <= rows, "{} lines of {rows} rows", shown.lines().count());
+        Ok(shown)
+    }
+}
+
+fn shown_only<'t, 'alloc, 'cb>(
+    terminal: &'t Terminal<'alloc, 'cb>,
+) -> Result<Formatter<'t, 'alloc, 'cb>, Error> {
+    let corner = |x, y| terminal.grid_ref(Point::Active(Coordinate { x, y }));
+    let last = (terminal.cols()? - 1, u32::from(terminal.rows()?) - 1);
+    let shown = Selection::new(corner(0, 0)?, corner(last.0, last.1)?, false);
+    let mut formatter = Formatter::new(terminal)?;
+    #[expect(
+        unsafe_code,
+        reason = "a formatter takes a range only as a selection, unchecked. Both corners are of \
+                  `terminal`'s active screen, taken from it just now, and the formatter borrows \
+                  it as they do. It copies the selection, so `shown` may end before it does"
+    )]
+    unsafe { formatter.set_selection(Some(&shown)) }?;
+    Ok(formatter)
 }
 
 struct ScrollbackEnd {

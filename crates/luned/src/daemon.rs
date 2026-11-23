@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::env;
+use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
 use std::mem;
@@ -44,7 +45,8 @@ use crate::api::{
     RebaseRequest, RebaseResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
     TranscriptEndsResponse, FramesRequest, AnswerRequest, WaitingRequest, WaitingResponse,
 };
-use crate::answers::{self, Answer};
+use crate::answers::{self, Answer, Unanswered};
+use crate::mux::Failure;
 use crate::asks::{Asked, Step};
 use crate::core::{self, After, Command, Full, Parked, Wakes};
 use crate::directory::Directory;
@@ -609,11 +611,11 @@ impl Daemon for Host {
         if let Some(mut daemon) = self.bridged(on).await? {
             return daemon.waiting(WaitingRequest { on: None, terminal }).await;
         }
-        let (key, said) = terminal_named(terminal)?;
-        let transcript = self.transcript_in(&said).await?;
+        let (key, asked) = terminal_named(terminal)?;
+        let transcript = self.transcript_in(&asked).await;
         let waiting = task::spawn_blocking(move || answers::waiting(key, transcript.as_deref()));
         let waiting = waiting.await.map_err(|error| unfinished(&error))?;
-        waiting.map(Response::new).map_err(Status::failed_precondition)
+        waiting.map(Response::new).map_err(|failure| unanswered(&Unanswered::Unreached(failure)))
     }
 
     async fn answer(&self, request: Request<AnswerRequest>) -> Result<Response<()>, Status> {
@@ -625,7 +627,7 @@ impl Daemon for Host {
         let answer = Answer::of(answer).map_err(Status::invalid_argument)?;
         let answered = task::spawn_blocking(move || answers::answer(key, answer));
         let answered = answered.await.map_err(|error| unfinished(&error))?;
-        answered.map(Response::new).map_err(Status::failed_precondition)
+        answered.map(Response::new).map_err(|refused| unanswered(&refused))
     }
 
     async fn transcript_ends(
@@ -1192,25 +1194,46 @@ fn unfinished(error: &task::JoinError) -> Status {
 fn terminal_named(
     terminal: Option<api::TerminalKey>,
 ) -> Result<(crate::mux::own::TerminalKey, api::TerminalKey), Status> {
-    let said = terminal.ok_or_else(|| Status::invalid_argument("it names no terminal"))?;
-    let key = crate::mux::own::TerminalKey::of(&said);
+    let asked = terminal.ok_or_else(|| Status::invalid_argument("it names no terminal"))?;
+    let key = crate::mux::own::TerminalKey::of(&asked);
     let key = key.map_err(|why| Status::invalid_argument(format!("terminal: {why}")))?;
-    Ok((key, said))
+    Ok((key, asked))
+}
+
+fn unanswered(unanswered: &Unanswered) -> Status {
+    let said = unanswered.to_string();
+    match unanswered {
+        Unanswered::Refused(_) | Unanswered::Unreached(Failure::Called(_)) => {
+            Status::failed_precondition(said)
+        },
+        Unanswered::Unreached(Failure::Own(_)) => Status::unavailable(said),
+        Unanswered::Unreached(Failure::Unread(_)) => Status::internal(said),
+    }
 }
 
 impl Host {
-    async fn transcript_in(&self, terminal: &api::TerminalKey) -> Result<Option<PathBuf>, Status> {
-        let Some(projects) = self.claude_folder.as_ref().map(|it| it.join("projects")) else {
-            return Ok(None);
+    async fn transcript_in(&self, terminal: &api::TerminalKey) -> Option<PathBuf> {
+        let projects = self.claude_folder.as_ref()?.join("projects");
+        let unfound = |why: &dyn fmt::Display| {
+            log::say(&format!("terminal {}: no transcript is looked for: {why}", terminal.id));
         };
-        let ListAgentsResponse { agents, .. } = self.ask(Command::List).await?;
+        let ListAgentsResponse { agents, .. } = match self.ask(Command::List).await {
+            Ok(listed) => listed,
+            Err(status) => {
+                unfound(&status.message());
+                return None;
+            },
+        };
         let agent = agents.into_iter().find(|agent| agent.terminal.as_ref() == Some(terminal));
         let claude = agent.filter(|agent| agent.runs_in() == api::Harness::ClaudeCode);
-        let Some(id) = claude.and_then(|agent| SessionId::parse(&agent.session_id)) else {
-            return Ok(None);
-        };
-        let found = task::spawn_blocking(move || transcripts::find(&projects, &id)).await;
-        found.map_err(|error| unfinished(&error))
+        let id = claude.and_then(|agent| SessionId::parse(&agent.session_id))?;
+        match task::spawn_blocking(move || transcripts::find(&projects, &id)).await {
+            Ok(found) => found,
+            Err(error) => {
+                unfound(&error);
+                None
+            },
+        }
     }
 
     async fn bridged(&self, on: Option<api::On>) -> Result<Option<client::Daemon>, Status> {

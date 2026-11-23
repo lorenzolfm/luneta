@@ -136,11 +136,12 @@ pub fn told(path: &Path, share: usize, steps: usize) -> io::Result<Digest> {
     Ok(digest(&end(path, share)?, steps))
 }
 
-pub fn last_said(path: &Path, chars: usize) -> io::Result<Option<String>> {
-    Ok(said_last(&end(path, TAILS_BYTES)?, chars))
+pub fn last_said(path: &Path, chars_max: usize) -> io::Result<Option<String>> {
+    Ok(last_said_in(&end(path, TAILS_BYTES)?, chars_max))
 }
 
-fn said_last(end: &str, chars: usize) -> Option<String> {
+fn last_said_in(end: &str, chars_max: usize) -> Option<String> {
+    assert!(chars_max > 0, "something of what was said is kept");
     for line in end.lines().rev() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -150,19 +151,24 @@ fn said_last(end: &str, chars: usize) -> Option<String> {
         }
         let blocks = record["message"]["content"].as_array().into_iter().flatten().rev();
         let texts = blocks.filter(|block| block["type"] == "text");
-        let mut said = texts.filter_map(|block| block["text"].as_str()).map(str::trim);
-        if let Some(said) = said.find(|said| !said.is_empty()) {
-            return Some(cut(said, chars));
+        let mut texts = texts.filter_map(|block| block["text"].as_str()).map(str::trim);
+        if let Some(said) = texts.find(|text| !text.is_empty()) {
+            return Some(cut(said, chars_max));
         }
     }
     None
 }
 
-fn cut(text: &str, chars: usize) -> String {
-    match text.char_indices().nth(chars) {
+fn cut(text: &str, chars_max: usize) -> String {
+    let kept = match text.char_indices().nth(chars_max) {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text.to_owned(),
+    };
+    assert!(kept.chars().count() <= chars_max + 1, "the cut keeps {chars_max} and an ellipsis");
+    if !text.is_empty() {
+        assert!(!kept.is_empty(), "a cut of some text keeps some");
     }
+    kept
 }
 
 fn too_many(count: usize) -> String {
@@ -518,9 +524,9 @@ mod tests {
         };
         let user = serde_json::json!({ "type": "user", "message": { "content": "go" } }).to_string();
         let end = [said("first", false), said("  last  ", false), said("a subagent", true), user].join("\n");
-        assert_eq!(said_last(&end, 100), Some("last".to_owned()));
-        assert_eq!(said_last(&end, 2), Some("la…".to_owned()));
-        assert_eq!(said_last("", 100), None);
+        assert_eq!(last_said_in(&end, 100), Some("last".to_owned()));
+        assert_eq!(last_said_in(&end, 2), Some("la…".to_owned()));
+        assert_eq!(last_said_in("", 100), None);
     }
 
 }

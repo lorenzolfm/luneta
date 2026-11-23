@@ -539,6 +539,7 @@ impl Thread {
                 let text = match dumped {
                     Dumped::Screen => self.screen.dumped_screen(),
                     Dumped::Text => self.screen.dumped_text(),
+                    Dumped::Shown => self.screen.dumped_shown(),
                 };
                 let failed = |error| Status::internal(format!("the dump failed: {error}"));
                 let _ = answer.send(text.map_err(failed));

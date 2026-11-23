@@ -1013,7 +1013,7 @@ message WaitingRequest {
 message WaitingResponse {
   string screen = 1;
   repeated string choices = 2;
-  uint32 chosen = 3;
+  optional uint32 chosen = 3;
   optional string said = 4;
 }
 

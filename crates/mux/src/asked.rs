@@ -113,6 +113,7 @@ impl Opens {
 pub enum Dumped {
     Screen,
     Text,
+    Shown,
 }
 
 impl Dumped {
@@ -120,8 +121,9 @@ impl Dumped {
         match api::Dumped::try_from(dumped) {
             Ok(api::Dumped::Screen) => Ok(Dumped::Screen),
             Ok(api::Dumped::Text) => Ok(Dumped::Text),
+            Ok(api::Dumped::Shown) => Ok(Dumped::Shown),
             Ok(api::Dumped::Unspecified) | Err(_) => {
-                Err(refused(field, "is not one of SCREEN or TEXT"))
+                Err(refused(field, "is not one of SCREEN, TEXT or SHOWN"))
             },
         }
     }
