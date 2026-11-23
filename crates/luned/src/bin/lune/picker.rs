@@ -4379,6 +4379,17 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_fresh_paste_starts_the_agent() {
+        let issue = "https://github.com/lorenzolfm/lune/issues/648";
+        let mut picker = palette(Origin::Views);
+        picker.paste(&format!("{issue}\n"));
+        let work = Work::parse(issue, None).expect("an issue's link");
+        let origin = Origin::Views;
+        let tackle = Picked::Pull { target: fix_view(), work, pull: Pull::Agent, origin };
+        assert_eq!(press(&mut picker, KeyCode::Enter), tackle);
+    }
+
+    #[test]
     fn a_pasted_link_lists_what_the_menu_offers_for_it_and_enter_pulls_it_on_the_target() {
         let issue = "https://github.com/lorenzolfm/lune/issues/648";
         let mut picker = palette(Origin::Views);

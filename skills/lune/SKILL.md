@@ -91,10 +91,11 @@ each action by name. When they ask you for one, tell them which:
 - "/thermo-nuclear-review", "/tigerstyle" and
   "/make-illegal-states-unrepresentable" start an agent on that skill beside
   the view they are on. "Search skills" finds any other skill.
-- A link pasted in lune's sidebar offers `w` for its worktree, and `t` to
-  tackle an issue or `r` for /thermo-nuclear-review on a pull request. A pull
+- A link pasted in lune's sidebar offers `t` to tackle an issue or `r` for
+  /thermo-nuclear-review on a pull request, and `w` for its worktree. A pull
   request's link goes straight to its worktree when the sidebar has one row of
-  it. Pasted in the palette, a link lists the same choices.
+  it. Pasted in the palette, a link lists the same choices, and Enter starts
+  the agent.
 
 ## Start a worktree
 
