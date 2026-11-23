@@ -18,20 +18,23 @@ use luned::{
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 
 use crate::attached::{
     below_bar, border, draw_screen, draw_tab_spans, key_said, link, mouse_said, on_views,
     screen_rect, selects, span_under, spot_in, tab_columns_max, tab_spans, tab_spans_capped,
-    tab_style, text, within, Pointer, Screen, Selection, Spot, TabSpan, TAB_BAR_ROWS,
+    text, within, Pointer, Screen, Selection, Spot, TabSpan, TAB_BAR_ROWS,
 };
 use crate::copied::Excerpt;
-use crate::gruvbox;
+use crate::palette;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::sidebar::colour_of;
 
 const AGAIN: Duration = Duration::from_secs(1);
+
+const VIEW_DOT: &str = "●";
 
 const SIDE_MAX: u16 = 1000;
 
@@ -618,7 +621,7 @@ impl Layout {
         let bar = Rect { height: area.height.min(TAB_BAR_ROWS), ..area };
         let views = Rect { y: area.y + bar.height, height: area.height - bar.height, ..area };
         let spans = tab_spans(self.named_tabs(), bar.width);
-        let colour = self.worktree_tabs.as_ref().map_or(gruvbox::GREEN, |it| colour_of(it.project));
+        let colour = self.worktree_tabs.as_ref().map_or(palette::GREEN, |it| colour_of(it.project));
         draw_tab_spans(buffer, bar, &spans, self.worktree, colour);
         let focused = self.focused();
         let selection = self.pointer.selection();
@@ -627,12 +630,17 @@ impl Layout {
         for (view, placed) in self.drawn() {
             let mine = Some(view.id) == focused;
             let outer = view_rect(views, placed);
-            let colour = if mine { gruvbox::GREEN } else { gruvbox::GREY };
+            let edge = if mine { palette::MUTE } else { palette::LIFTED };
+            let named = if mine {
+                Style::new().fg(palette::TEXT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(palette::MUTE)
+            };
             let tabs = self.view_tabs(outer);
             let titled = self.titles.get(&view.id).map_or("", String::as_str);
             let title = if tabs.is_empty() { titled } else { "" };
-            border(buffer, views, outer, title, Style::new().fg(colour));
-            draw_view_tabs(buffer, views, outer, &tabs, view.id);
+            border(buffer, views, outer, title, Style::new().fg(edge), named);
+            draw_view_tabs(buffer, views, outer, &tabs, view.id, colour);
             let seen = screen_rect(outer).intersection(views);
             if seen.is_empty() {
                 continue;
@@ -652,14 +660,14 @@ impl Layout {
                 Found::Lost => LOST,
                 Found::Looking => LOOKING,
                 Found::Welcome => {
-                    let style = Style::new().fg(if mine { gruvbox::GREEN } else { gruvbox::GREY });
+                    let style = Style::new().fg(if mine { colour } else { palette::MUTE });
                     for (line, y) in WELCOME.iter().zip(seen.top()..seen.bottom()) {
                         buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
                     }
                     continue;
                 },
             };
-            let style = Style::new().fg(gruvbox::GREY);
+            let style = Style::new().fg(palette::MUTE);
             buffer.set_stringn(seen.x, seen.y, said, usize::from(seen.width), style);
         }
         cursor
@@ -686,6 +694,7 @@ fn draw_view_tabs(
     outer: Rect,
     tabs: &[TabSpan<ViewId>],
     focused: ViewId,
+    colour: Color,
 ) {
     let start = outer.x.checked_add(1).expect("a view's border is a terminal column");
     for span in tabs {
@@ -693,12 +702,22 @@ fn draw_view_tabs(
         if !views.contains(Position::new(x, outer.y)) {
             continue;
         }
-        let style = tab_style(span.id == focused, gruvbox::GREEN);
         let lit = Rect::new(x, outer.y, span.columns, 1).intersection(views);
         let width = usize::from(lit.width);
-        buffer.set_stringn(x, outer.y, " ".repeat(width), width, style);
-        let room = usize::from(lit.width.saturating_sub(2));
-        buffer.set_stringn(x + 1, outer.y, &span.name, room, style);
+        if span.id == focused {
+            let named = Style::new().fg(palette::TEXT).add_modifier(Modifier::BOLD);
+            let dot = Line::from(vec![
+                Span::raw(" "),
+                Span::styled(VIEW_DOT, Style::new().fg(colour)),
+                Span::raw(" "),
+                Span::styled(span.name.as_str(), named),
+                Span::raw(" "),
+            ]);
+            buffer.set_line(x, outer.y, &dot, lit.width);
+        } else {
+            let said = format!("  {}  ", span.name);
+            buffer.set_stringn(x, outer.y, said, width, Style::new().fg(palette::MUTE));
+        }
     }
 }
 
@@ -1210,7 +1229,7 @@ mod tests {
             Tab { worktree: worktree(2), name: "two".to_owned() },
         ];
         let project = ProjectId::of(2).unwrap();
-        assert_eq!(colour_of(project), gruvbox::PURPLE);
+        assert_eq!(colour_of(project), palette::MAUVE);
         layout.worktree_tabs = Some(WorktreeTabs { project, tabs });
         layout.titles = [(terminal(11), "p1".to_owned()), (terminal(12), "p2".to_owned())].into();
         assert!(!layout.laid_out(laid(halves(), 11, false)));
@@ -1238,13 +1257,15 @@ mod tests {
         let layout = split_layout();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
         let cursor = layout.draw(&mut buffer, Rect::new(2, 0, 22, 6), None);
-        assert_eq!(row(&buffer, 0, 2, 14), " one   two  ");
-        assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (gruvbox::BG0, gruvbox::PURPLE));
+        assert_eq!(row(&buffer, 0, 2, 17), "\u{e0b6} one \u{e0b4}   two  ");
+        assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (palette::INK, palette::MAUVE));
+        assert_eq!((buffer[(2, 0)].fg, buffer[(2, 0)].bg), (palette::MAUVE, Color::Reset));
+        assert_eq!((buffer[(12, 0)].fg, buffer[(12, 0)].bg), (palette::MUTE, Color::Reset));
         assert_eq!(row(&buffer, 1, 2, 22), "╭ p1 ────╮╭ p2 ────╮");
         assert_eq!(row(&buffer, 2, 2, 12), "│abcdefgh│");
         assert_eq!(row(&buffer, 3, 12, 22), "│yz012345│");
         assert_eq!(row(&buffer, 4, 2, 22), "╰────────╯╰────────╯");
-        assert_eq!((buffer[(2, 1)].fg, buffer[(12, 1)].fg), (gruvbox::GREEN, gruvbox::GREY));
+        assert_eq!((buffer[(2, 1)].fg, buffer[(12, 1)].fg), (palette::MUTE, palette::LIFTED));
         assert_eq!(row(&buffer, 5, 2, 24), " ".repeat(22));
         assert_eq!(cursor, Some(Position::new(5, 3)));
         let mut small = Buffer::empty(Rect::new(0, 0, 14, 3));
@@ -1306,13 +1327,15 @@ mod tests {
         layout.laid_out(tabs(12));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
         layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
-        assert_eq!(row(&buffer, 1, 0, 20), "╭ p1 ─ p2 ─ termin ╮");
+        assert_eq!(row(&buffer, 1, 0, 20), "╭  p1 ─ ● p2─  ter─╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
-        assert_eq!((buffer[(7, 1)].fg, buffer[(7, 1)].bg), (gruvbox::BG0, gruvbox::GREEN));
-        assert_eq!(buffer[(2, 1)].bg, gruvbox::BG2, "a tab not focused is dim");
+        assert_eq!((buffer[(8, 1)].symbol(), buffer[(8, 1)].fg), (VIEW_DOT, palette::MAUVE));
+        assert_eq!(buffer[(10, 1)].fg, palette::TEXT);
+        assert!(buffer[(10, 1)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(3, 1)].fg, palette::MUTE, "a tab not focused is dim");
         let down = mouse(MouseEventKind::Down(MouseButton::Left));
         assert_eq!(layout.moused(down, spot(1, 2), 20), Moused::Focus(terminal(11)));
-        assert_eq!(layout.moused(down, spot(1, 12), 20), Moused::Focus(terminal(13)));
+        assert_eq!(layout.moused(down, spot(1, 14), 20), Moused::Focus(terminal(13)));
         let on_the_focused = layout.moused(down, spot(1, 7), 20);
         assert_eq!(on_the_focused, Moused::Nothing, "the focused tab is there");
         assert!(!matches!(layout.moused(down, spot(2, 3), 20), Moused::Focus(_)));
@@ -1336,7 +1359,7 @@ mod tests {
         layout.laid_out(tabs.unwrap());
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
         layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
-        assert_eq!(row(&buffer, 1, 0, 20), "╭ a v ─ ano ─ ter ─╮");
+        assert_eq!(row(&buffer, 1, 0, 20), "╭  a v─  ano─ ● te─╮");
         let drawn = |columns| {
             let spans = layout.view_tabs(Rect::new(0, 0, columns, 4));
             spans.iter().map(|span| (span.id, span.column, span.columns)).collect::<Vec<_>>()
@@ -1359,7 +1382,7 @@ mod tests {
             Moused::Nothing | Moused::Go(_) | Moused::Focus(_) => None,
         };
         assert_eq!(layout.moused(down, spot(2, 14), 22), Moused::Focus(terminal(12)));
-        assert_eq!(layout.moused(down, spot(0, 7), 22), Moused::Go(worktree(2)));
+        assert_eq!(layout.moused(down, spot(0, 9), 22), Moused::Go(worktree(2)));
         assert_eq!(layout.moused(down, spot(0, 1), 22), Moused::Nothing);
         assert_eq!(layout.moused(down, spot(1, 0), 22), Moused::Nothing);
         assert_eq!(at(layout.moused(down, spot(2, 3), 22)), Some((1, 0, 2)));

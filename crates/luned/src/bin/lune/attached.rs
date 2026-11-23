@@ -13,7 +13,7 @@ use ratatui::symbols::border;
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::copied::Excerpt;
-use crate::gruvbox;
+use crate::palette;
 
 pub(crate) struct Screen {
     pub(crate) size: Size,
@@ -82,6 +82,9 @@ impl Pointer {
 }
 
 pub(crate) const TAB_BAR_ROWS: u16 = 1;
+const TAB_PAD: u16 = 2;
+const PILL_LEFT: &str = "\u{e0b6}";
+const PILL_RIGHT: &str = "\u{e0b4}";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TabSpan<T> {
@@ -177,14 +180,30 @@ pub(crate) fn tab_columns_max<T>(tabs: &[(T, &str)], width: u16) -> u16 {
 }
 
 fn tab_columns(name: &str) -> u16 {
-    u16::try_from(name.width()).unwrap_or(u16::MAX).saturating_add(2)
+    u16::try_from(name.width()).unwrap_or(u16::MAX).saturating_add(2 * TAB_PAD)
 }
 
 pub(crate) fn tab_style(current: bool, colour: Color) -> Style {
     if current {
-        Style::new().fg(gruvbox::BG0).bg(colour).add_modifier(Modifier::BOLD)
+        Style::new().fg(palette::INK).bg(colour).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(gruvbox::FG1).bg(gruvbox::BG2)
+        Style::new().fg(palette::MUTE)
+    }
+}
+
+pub(crate) fn paint_tab(buffer: &mut Buffer, tab: Rect, name: &str, current: bool, colour: Color) {
+    if tab.is_empty() {
+        return;
+    }
+    let style = tab_style(current, colour);
+    let width = usize::from(tab.width);
+    buffer.set_stringn(tab.x, tab.y, " ".repeat(width), width, style);
+    let room = usize::from(tab.width.saturating_sub(2 * TAB_PAD));
+    buffer.set_stringn(tab.x + TAB_PAD.min(tab.width), tab.y, name, room, style);
+    if current && tab.width >= 3 {
+        let cap = Style::new().fg(colour).bg(Color::Reset);
+        buffer.set_string(tab.left(), tab.y, PILL_LEFT, cap);
+        buffer.set_string(tab.right() - 1, tab.y, PILL_RIGHT, cap);
     }
 }
 
@@ -198,17 +217,20 @@ pub(crate) fn draw_tab_spans<T: Copy + PartialEq>(
     if bar.is_empty() {
         return;
     }
-    buffer.set_style(bar, Style::new().bg(gruvbox::BG1));
     for span in spans {
-        let style = tab_style(span.id == current, colour);
-        let x = bar.x + span.column;
-        buffer.set_style(Rect::new(x, bar.y, span.columns, 1), style);
-        let room = usize::from(span.columns.saturating_sub(2));
-        buffer.set_stringn(x + 1, bar.y, &span.name, room, style);
+        let tab = Rect::new(bar.x + span.column, bar.y, span.columns, 1).intersection(bar);
+        paint_tab(buffer, tab, &span.name, span.id == current, colour);
     }
 }
 
-pub(crate) fn border(buffer: &mut Buffer, views: Rect, outer: Rect, title: &str, style: Style) {
+pub(crate) fn border(
+    buffer: &mut Buffer,
+    views: Rect,
+    outer: Rect,
+    title: &str,
+    style: Style,
+    named: Style,
+) {
     if outer.is_empty() {
         return;
     }
@@ -238,7 +260,7 @@ pub(crate) fn border(buffer: &mut Buffer, views: Rect, outer: Rect, title: &str,
     let title = printable(title);
     let (start, end) = (left + 1, right.min(views.right()));
     if !title.is_empty() && start < end && views.contains(Position::new(start, top)) {
-        buffer.set_stringn(start, top, format!(" {title} "), usize::from(end - start), style);
+        buffer.set_stringn(start, top, format!(" {title} "), usize::from(end - start), named);
     }
 }
 

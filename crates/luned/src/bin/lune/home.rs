@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::ask::{self, Ask};
-use crate::gruvbox;
+use crate::palette;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
@@ -328,7 +328,7 @@ impl Home {
         let head = match &self.named {
             Named::As { name, dir, .. } => Line::from(vec![
                 Span::raw(" "),
-                Span::styled(name.clone(), Style::new().fg(gruvbox::FG1).add_modifier(Modifier::BOLD)),
+                Span::styled(name.clone(), Style::new().fg(palette::TEXT).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("  {}", sidebar::short_cwd(dir.as_str())), dim),
             ]),
             Named::Not { .. } => Line::styled(" …", dim),
@@ -337,7 +337,7 @@ impl Home {
         let (lines, at) = self.list_lines(width);
         if let Listing::Came { shown: Shown::Listed { stale: Some(why), .. }, .. } = &self.listing {
             let why = format!(" not listed again: {why}");
-            head.push(Line::styled(sidebar::cut(&why, width), Style::new().fg(gruvbox::RED)));
+            head.push(Line::styled(sidebar::cut(&why, width), Style::new().fg(palette::RED)));
         }
         head.push(Line::default());
         let rows = usize::from(area.height);
@@ -362,7 +362,7 @@ impl Home {
             Shown::Unhosted => return (menu::wrap(&format!(" {UNHOSTED}"), width, dim), None),
             Shown::Unlisted(why) => {
                 let said = format!(" gh lists nothing here: {why}");
-                let red = Style::new().fg(gruvbox::RED);
+                let red = Style::new().fg(palette::RED);
                 return (menu::wrap(&said, width, red), None);
             },
             Shown::Listed { work, .. } => work,
@@ -486,14 +486,14 @@ fn row(
     } else {
         Span::styled(UNMARKED, dim)
     };
-    let number = Span::styled(format!(" {number:<number_width$}  "), Style::new().fg(gruvbox::YELLOW));
+    let number = Span::styled(format!(" {number:<number_width$}  "), Style::new().fg(palette::YELLOW));
     let lead = margin.width() + mark.width() + number.width();
     let room = width.saturating_sub(lead + 1);
     let side_room = if side.is_empty() { 0 } else { (side.width() + 2).min(room / 3) };
     let title_room = room.saturating_sub(side_room);
     let title = sidebar::cut(title, title_room);
     let gap = title_room.saturating_sub(title.width());
-    let title_style = if here { Style::new().fg(gruvbox::FG1).add_modifier(Modifier::BOLD) } else { Style::new().fg(gruvbox::FG1) };
+    let title_style = if here { Style::new().fg(palette::TEXT).add_modifier(Modifier::BOLD) } else { Style::new().fg(palette::TEXT) };
     let mut spans = vec![margin, mark, number, Span::styled(title, title_style)];
     if side_room > 2 {
         spans.push(Span::raw(" ".repeat(gap + 2)));
@@ -558,7 +558,7 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         home.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != " ") {
-            assert!(gruvbox::ALL.contains(&cell.fg) || cell.fg == ratatui::style::Color::Reset);
+            assert!(palette::ALL.contains(&cell.fg) || cell.fg == ratatui::style::Color::Reset);
         }
         (0..height)
             .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())

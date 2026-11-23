@@ -21,7 +21,7 @@ mod dictation;
 mod due;
 mod folds;
 mod fuzzy;
-mod gruvbox;
+mod palette;
 mod home;
 mod host;
 mod hush;
