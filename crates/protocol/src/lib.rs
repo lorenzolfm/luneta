@@ -7,6 +7,8 @@ pub mod shell;
 pub mod socket;
 pub mod unread;
 
+pub const TAILNET_PORT: u16 = 7473;
+
 #[allow(
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,

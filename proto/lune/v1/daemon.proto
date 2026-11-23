@@ -805,6 +805,7 @@ message MakeWorktreeRequest {
   On on = 1;
   fixed64 project = 2;
   string branch = 3;
+  Opens opens = 4;
 }
 
 message MakeWorktreeResponse {

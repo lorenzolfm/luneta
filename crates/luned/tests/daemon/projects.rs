@@ -65,7 +65,7 @@ fn branched_on(
     runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
         let on = on.map(|on| On { destination: on.to_owned() });
-        let asked = MakeWorktreeRequest { on, project, branch: branch.to_owned() };
+        let asked = MakeWorktreeRequest { on, project, branch: branch.to_owned(), opens: None };
         let mut answer = daemon.make_worktree(asked).await?.into_inner();
         let made = answer.message().await?.expect("luned answers once");
         assert!(answer.message().await?.is_none(), "and only once");

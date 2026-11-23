@@ -27,13 +27,13 @@ fn said_by(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(said.stdout).unwrap().trim().to_owned()
 }
 
-struct Repository {
-    clone: PathBuf,
-    up: PathBuf,
+pub struct Repository {
+    pub clone: PathBuf,
+    pub up: PathBuf,
 }
 
 impl Repository {
-    fn new(scratch: &Path) -> Self {
+    pub fn new(scratch: &Path) -> Self {
         let (up, clone) = (scratch.join("up"), scratch.join("n"));
         cloned_as_wt(scratch, &up, &clone);
         let bare = clone.join(".bare");
@@ -46,11 +46,11 @@ impl Repository {
         Repository { clone, up }
     }
 
-    fn at(&self, name: &str) -> PathBuf {
+    pub fn at(&self, name: &str) -> PathBuf {
         self.clone.join(name)
     }
 
-    fn pushed(&self, name: &str) -> String {
+    pub fn pushed(&self, name: &str) -> String {
         let (bare, at) = (self.clone.join(".bare"), self.at(name));
         git(&bare, &["worktree", "add", "-q", "-b", name, &at.display().to_string(), "main"]);
         git(&at, &["commit", "-q", "--allow-empty", "-m", name]);
@@ -70,7 +70,7 @@ impl Repository {
     }
 }
 
-fn merged(number: u32, head: &str, author: &str) -> serde_json::Value {
+pub fn merged(number: u32, head: &str, author: &str) -> serde_json::Value {
     json!({
         "number": number,
         "state": "MERGED",
@@ -83,7 +83,7 @@ fn merged(number: u32, head: &str, author: &str) -> serde_json::Value {
     })
 }
 
-fn serving(host: &Host, dir: &Path) -> (Daemon, u64) {
+pub fn serving(host: &Host, dir: &Path) -> (Daemon, u64) {
     serving_as(host, dir, host.vars().command(LUNED))
 }
 

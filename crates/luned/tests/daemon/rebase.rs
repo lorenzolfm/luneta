@@ -23,13 +23,13 @@ const REBASE: &str = "\x1b[97;3ugr";
 
 const SAYS_WHERE: &str = "printf '\\033]7;file://localhost%s\\007' \"$PWD\"\r";
 
-struct Repository {
-    up: PathBuf,
-    fix: PathBuf,
+pub struct Repository {
+    pub up: PathBuf,
+    pub fix: PathBuf,
 }
 
 impl Repository {
-    fn new(scratch: &Path) -> Repository {
+    pub fn new(scratch: &Path) -> Repository {
         let (up, clone) = (scratch.join("up"), scratch.join("n"));
         cloned_as_wt(scratch, &up, &clone);
         tracking(&clone);
@@ -68,7 +68,7 @@ fn tip(dir: &Path) -> String {
     String::from_utf8(git.output().unwrap().stdout).unwrap()
 }
 
-fn commit(dir: &Path, file: &str, text: &str) {
+pub fn commit(dir: &Path, file: &str, text: &str) {
     fs::write(dir.join(file), text).unwrap();
     git(dir, &["add", file]);
     git(dir, &["commit", "-q", "-m", file]);

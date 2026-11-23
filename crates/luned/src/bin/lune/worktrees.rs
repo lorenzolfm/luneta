@@ -250,7 +250,7 @@ pub fn branched(
     branch: &Branch,
 ) -> Result<Landed, String> {
     let (on, project, branch) = (on(machine), project.get(), branch.as_str().to_owned());
-    let request = MakeWorktreeRequest { on, project, branch };
+    let request = MakeWorktreeRequest { on, project, branch, opens: None };
     let asking = async |daemon: &mut Daemon| {
         let unready = |status: Status| unbranched(&status);
         let mut answer = daemon.make_worktree(request).await.map_err(unready)?.into_inner();

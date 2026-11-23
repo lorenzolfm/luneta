@@ -21,7 +21,7 @@ use tonic::transport::Server;
 
 use crate::log;
 
-pub const PORT: u16 = 7473;
+pub const PORT: u16 = lune_protocol::TAILNET_PORT;
 
 #[cfg(target_os = "macos")]
 const TAILSCALED: &str = "/var/run/tailscaled.socket";

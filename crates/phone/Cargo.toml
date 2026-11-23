@@ -1,0 +1,27 @@
+[package]
+name = "lune-phone"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+description = "The core of lune's iPhone app: a client of luned over the tailnet that keeps a model of the hosts it watches and asks luned's verbs, called from Swift through UniFFI"
+
+[lib]
+crate-type = ["lib", "staticlib"]
+
+[dependencies]
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+lune-protocol = { path = "../protocol" }
+prost = "0.14.4"
+prost-types = "0.14.4"
+tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "sync", "time"] }
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+tower = { version = "0.5.3", features = ["util"] }
+uniffi = { version = "0.32.2", default-features = false }
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+
+[lints]
+workspace = true

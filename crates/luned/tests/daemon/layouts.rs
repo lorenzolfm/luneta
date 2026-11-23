@@ -316,7 +316,7 @@ fn project_in_home(owned: &Owned) -> u64 {
     project(&owned.host, &work_folder(owned), None)
 }
 
-fn two_in_a_clone(owned: &Owned, name: &str) -> (u64, u64, u64) {
+pub fn two_in_a_clone(owned: &Owned, name: &str) -> (u64, u64, u64) {
     let home = fs::canonicalize(owned.host.home.path()).unwrap();
     let clone = home.join(name);
     cloned_as_wt(&home, &home.join(format!("{name}-up")), &clone);
