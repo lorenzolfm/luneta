@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod agents;
 #[cfg(test)]
+mod answers;
+#[cfg(test)]
 mod attach;
 #[cfg(test)]
 mod bridge;

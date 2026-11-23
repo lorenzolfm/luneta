@@ -22,7 +22,7 @@ use tokio::time::timeout;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Server;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Code, Request, Response, Status, Streaming};
 use tower::layer::layer_fn;
 
 use crate::api::change_projects_request::{self, AddWorktree};
@@ -42,8 +42,10 @@ use crate::api::{
     ListWorkRequest, ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest,
     PasteResponse, PrintedFile, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
     RebaseRequest, RebaseResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
-    TranscriptEndsResponse, FramesRequest,
+    TranscriptEndsResponse, FramesRequest, AnswerRequest, WaitingRequest, WaitingResponse,
 };
+use crate::answers::{self, Answer, Runs, Unanswered};
+use crate::mux::Failure;
 use crate::asks::{Asked, Step};
 use crate::core::{self, After, Command, Full, Parked, Wakes};
 use crate::directory::Directory;
@@ -61,7 +63,7 @@ use crate::links::{self, Branch, Of, Pasted, Unready};
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Bridging, Destination, Standing};
 use crate::printed::Kept as KeptFile;
-use crate::transcripts::Reading;
+use crate::transcripts::{self, Reading, SessionId};
 use crate::agent::Agent;
 use crate::checks::{Failing, Log};
 use crate::{
@@ -598,6 +600,34 @@ impl Daemon for Host {
         let listed = listed.map_err(|error| unfinished(&error))?;
         let listed = listed.map_err(Status::failed_precondition)?;
         Ok(Response::new(ListContentsResponse { listed }))
+    }
+
+    async fn waiting(
+        &self,
+        request: Request<WaitingRequest>,
+    ) -> Result<Response<WaitingResponse>, Status> {
+        let WaitingRequest { on, terminal } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on).await? {
+            return daemon.waiting(WaitingRequest { on: None, terminal }).await;
+        }
+        let (key, asked) = terminal_named(terminal)?;
+        let runs = self.runs_in(&asked).await;
+        let waiting = task::spawn_blocking(move || answers::waiting(key, &runs));
+        let waiting = waiting.await.map_err(|error| unfinished(&error))?;
+        waiting.map(Response::new).map_err(|failure| unanswered(&Unanswered::Unreached(failure)))
+    }
+
+    async fn answer(&self, request: Request<AnswerRequest>) -> Result<Response<()>, Status> {
+        let AnswerRequest { on, terminal, shown, answer } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on).await? {
+            return daemon.answer(AnswerRequest { on: None, terminal, shown, answer }).await;
+        }
+        let (key, asked) = terminal_named(terminal)?;
+        let answer = Answer::of(shown, answer).map_err(Status::invalid_argument)?;
+        let runs = self.runs_in(&asked).await;
+        let answered = task::spawn_blocking(move || answers::answer(key, &runs, answer));
+        let answered = answered.await.map_err(|error| unfinished(&error))?;
+        answered.map(Response::new).map_err(|refused| unanswered(&refused))
     }
 
     async fn transcript_ends(
@@ -1161,7 +1191,64 @@ fn unfinished(error: &task::JoinError) -> Status {
     Status::internal(format!("luned lost its answer: {error}"))
 }
 
+fn terminal_named(
+    terminal: Option<api::TerminalKey>,
+) -> Result<(crate::mux::own::TerminalKey, api::TerminalKey), Status> {
+    let asked = terminal.ok_or_else(|| Status::invalid_argument("it names no terminal"))?;
+    let key = crate::mux::own::TerminalKey::of(&asked);
+    let key = key.map_err(|why| Status::invalid_argument(format!("terminal: {why}")))?;
+    Ok((key, asked))
+}
+
+fn unanswered(unanswered: &Unanswered) -> Status {
+    let said = unanswered.to_string();
+    match unanswered {
+        Unanswered::Changed => Status::aborted(said),
+        Unanswered::Refused(_) => Status::failed_precondition(said),
+        Unanswered::Unreached(Failure::Called(reply)) if reply.code() == Code::NotFound => {
+            Status::not_found(said)
+        },
+        Unanswered::Unreached(Failure::Called(_) | Failure::Own(_)) => Status::unavailable(said),
+        Unanswered::Unreached(Failure::Unread(_)) => Status::internal(said),
+    }
+}
+
 impl Host {
+    async fn runs_in(&self, terminal: &api::TerminalKey) -> Runs {
+        let id = terminal.id;
+        let ListAgentsResponse { agents, .. } = match self.ask(Command::List).await {
+            Ok(listed) => listed,
+            Err(status) => {
+                let why = status.message();
+                return Runs::Unread(format!("luned could not list terminal {id}'s agent: {why}"));
+            },
+        };
+        let agent = agents.into_iter().find(|agent| agent.terminal.as_ref() == Some(terminal));
+        let Some(agent) = agent else {
+            return Runs::Unread(format!("terminal {id} runs no agent luned knows"));
+        };
+        match agent.runs_in() {
+            api::Harness::ClaudeCode => {},
+            api::Harness::Pi => {
+                let why = format!("terminal {id} runs Pi, whose menus luned does not read");
+                return Runs::Unread(why);
+            },
+            api::Harness::Unspecified => {
+                return Runs::Unread(format!("terminal {id} runs a harness luned does not know"));
+            },
+        }
+        let projects = self.claude_folder.as_ref().map(|folder| folder.join("projects"));
+        let Some((projects, session)) = projects.zip(SessionId::parse(&agent.session_id)) else {
+            return Runs::Claude { transcript: None };
+        };
+        let found = task::spawn_blocking(move || transcripts::find(&projects, &session)).await;
+        let transcript = found.unwrap_or_else(|error| {
+            log::say(&format!("terminal {id}: no transcript is looked for: {error}"));
+            None
+        });
+        Runs::Claude { transcript }
+    }
+
     async fn bridged(&self, on: Option<api::On>) -> Result<Option<client::Daemon>, Status> {
         Ok(self.bridge(on).await?.map(|(_, bridging)| bridging.daemon))
     }
