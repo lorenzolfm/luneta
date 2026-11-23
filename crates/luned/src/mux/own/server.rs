@@ -52,6 +52,8 @@ const STOPPING: Duration = Duration::from_secs(2);
 
 const LOOK: Duration = Duration::from_millis(10);
 
+pub const PRESSES_MAX: usize = crate::choices::CHOICES_MAX + 1;
+
 const AGAIN: Duration = Duration::from_millis(100);
 
 static MATCHED: AtomicI32 = AtomicI32::new(0);
@@ -531,35 +533,23 @@ impl Terminals {
             words.push(said(Event::Typed(typed)));
         }
         assert_eq!(words.len(), pastes.len() + 2, "a hello, a showing and one word per paste");
-        let refusals_max = 2 * pastes.len();
-        let server = reached()?;
-        let mut client = server.client.clone();
-        let reasons = server.runtime.block_on(async move {
-            let deadline = tokio::time::Instant::now() + ANSWER;
-            let shown = client.show(tokio_stream::iter(words)).await;
-            let mut heard = shown.map_err(|status| refused(&status))?.into_inner();
-            let drained = async move {
-                let mut reasons = Vec::new();
-                while let Some(word) = heard.message().await? {
-                    if let Some(api::to_viewer::Event::Refused(refusal)) = word.event {
-                        reasons.push(refusal.reason);
-                    }
-                    if reasons.len() >= refusals_max {
-                        break;
-                    }
-                }
-                Ok::<_, Status>(reasons)
-            };
-            let kept = || Failure::Own("lune-mux kept showing the pastes too long".to_owned());
-            let reasons = tokio::time::timeout_at(deadline, drained).await.map_err(|_| kept())?;
-            reasons.map_err(|status| refused(&status))
-        })?;
-        assert!(reasons.len() <= refusals_max, "the drain stops at its most refusals");
-        if reasons.is_empty() {
-            Ok(())
-        } else {
-            Err(Failure::Called(Reply(reasons.join("; "))))
+        told(words, 2 * pastes.len())
+    }
+
+    pub fn pressed(&self, key: TerminalKey, events: Vec<api::typed::Event>) -> Result<(), Failure> {
+        use api::from_viewer::Event;
+        assert!(!events.is_empty(), "something is pressed");
+        assert!(events.len() <= PRESSES_MAX, "no more presses than an answer takes");
+        let said = |event| api::FromViewer { event: Some(event) };
+        let hello = api::Greeting { colours: Some(colours(None, None)), runs_in: None };
+        let showing = api::Showing { terminals: vec![key.said()] };
+        let mut words = vec![said(Event::Hello(hello)), said(Event::Showing(showing))];
+        let refusals_max = 2 * events.len();
+        for event in events {
+            let typed = api::Typed { terminal: Some(key.said()), event: Some(event) };
+            words.push(said(Event::Typed(typed)));
         }
+        told(words, refusals_max)
     }
 
     pub fn sized(&self, key: TerminalKey, size: Size) -> Result<(), Failure> {
@@ -593,6 +583,37 @@ impl Terminals {
                 }
             },
         }
+    }
+}
+
+fn told(words: Vec<api::FromViewer>, refusals_max: usize) -> Result<(), Failure> {
+    let server = reached()?;
+    let mut client = server.client.clone();
+    let reasons = server.runtime.block_on(async move {
+        let deadline = tokio::time::Instant::now() + ANSWER;
+        let shown = client.show(tokio_stream::iter(words)).await;
+        let mut heard = shown.map_err(|status| refused(&status))?.into_inner();
+        let drained = async move {
+            let mut reasons = Vec::new();
+            while let Some(word) = heard.message().await? {
+                if let Some(api::to_viewer::Event::Refused(refusal)) = word.event {
+                    reasons.push(refusal.reason);
+                }
+                if reasons.len() >= refusals_max {
+                    break;
+                }
+            }
+            Ok::<_, Status>(reasons)
+        };
+        let kept = || Failure::Own("lune-mux kept showing what was typed too long".to_owned());
+        let reasons = tokio::time::timeout_at(deadline, drained).await.map_err(|_| kept())?;
+        reasons.map_err(|status| refused(&status))
+    })?;
+    assert!(reasons.len() <= refusals_max, "the drain stops at its most refusals");
+    if reasons.is_empty() {
+        Ok(())
+    } else {
+        Err(Failure::Called(Reply(reasons.join("; "))))
     }
 }
 

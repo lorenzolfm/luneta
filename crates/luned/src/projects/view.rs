@@ -130,6 +130,10 @@ impl Opens {
             None => Err("it says nothing to open".to_owned()),
             Some(api::opens::Runs::Shell(())) => Ok(Opens::Shell),
             Some(api::opens::Runs::Command(argv)) => Argv::of_api(argv).map(Opens::Command),
+            Some(api::opens::Runs::Agent(api::Prompted { harness, words })) => {
+                let harness = Harness::said(Some(harness))?;
+                Argv::on_words(harness, words, &[]).map(Opens::Command)
+            },
         }
     }
 
@@ -168,6 +172,20 @@ impl Argv {
         }
         let line = Line::parse(&quoted(&words))?;
         Ok(Argv { words, line })
+    }
+
+    pub fn on_words(harness: Harness, words: String, files: &[&str]) -> Result<Argv, String> {
+        let mut command = vec![harness.program().to_owned()];
+        if harness == Harness::ClaudeCode {
+            let rules: Vec<String> = files.iter().filter_map(|file| read_rule(file)).collect();
+            if !rules.is_empty() {
+                command.push("--allowedTools".to_owned());
+                command.extend(rules);
+                command.push("--".to_owned());
+            }
+        }
+        command.push(words);
+        Argv::parse(command)
     }
 
     pub fn of_api(argv: api::Argv) -> Result<Argv, String> {
@@ -702,6 +720,26 @@ impl Arranged {
     }
 }
 
+fn read_rule(file: &str) -> Option<String> {
+    let mut rule = String::from("Read(/");
+    let mut inside = true;
+    for c in file.chars() {
+        match c {
+            '?' => return None,
+            ' ' | ',' if !inside => return None,
+            c if c.is_control() => return None,
+            '(' => inside = true,
+            ')' => inside = false,
+            '*' | '[' | ']' => rule.push('\\'),
+            '\\' => rule.push_str(r"\\\"),
+            _ => {},
+        }
+        rule.push(c);
+    }
+    rule.push(')');
+    Some(rule)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,4 +751,61 @@ mod tests {
             assert!(Session::parse(refused).is_err(), "{refused:?}");
         }
     }
+
+    #[test]
+    fn an_agent_is_let_read_the_file_by_a_rule_that_names_it_alone() {
+        for (file, rule) in [
+            ("/w/plan.md", "Read(//w/plan.md)"),
+            ("/w/My Plan (v2).md", "Read(//w/My Plan (v2).md)"),
+            ("/w/a, b.md", "Read(//w/a, b.md)"),
+            ("/w/b{a,c}.md", "Read(//w/b{a,c}.md)"),
+            ("/w/[draft] a*.md", r"Read(//w/\[draft\] a\*.md)"),
+            (r"/w/back\slash.md", r"Read(//w/back\\\\slash.md)"),
+        ] {
+            let prompt = format!("Tackle {file}");
+            let command = ["claude", "--allowedTools", rule, "--", prompt.as_str()];
+            assert_eq!(
+                Argv::on_words(Harness::ClaudeCode, prompt.clone(), &[file]).unwrap().words(),
+                command.map(str::to_owned).to_vec(),
+                "{file}"
+            );
+            assert_eq!(
+                Argv::on_words(Harness::Pi, prompt.clone(), &[file]).unwrap().words(),
+                ["pi".to_owned(), prompt],
+                "{file}"
+            );
+        }
+        for file in [
+            "/w/what?.md",
+            "/w/Plan (v2) final.md",
+            "/w/Plan (v2), final.md",
+            "/w/two\nlines.md",
+        ] {
+            let prompt = format!("Tackle {file}");
+            assert_eq!(
+                Argv::on_words(Harness::ClaudeCode, prompt.clone(), &[file]).unwrap().words(),
+                ["claude".to_owned(), prompt],
+                "{file:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_asked_for_by_its_words_opens_as_its_command_line() {
+        let asked = |harness: api::Harness| api::Opens {
+            runs: Some(api::opens::Runs::Agent(api::Prompted {
+                harness: harness.into(),
+                words: "Tackle #444".to_owned(),
+            })),
+        };
+        let opens = Opens::of_api(Some(asked(api::Harness::ClaudeCode))).unwrap();
+        let Opens::Command(argv) = opens else { panic!("an agent opens as a command") };
+        assert_eq!(argv.words(), ["claude", "Tackle #444"]);
+        let opens = Opens::of_api(Some(asked(api::Harness::Pi))).unwrap();
+        let Opens::Command(argv) = opens else { panic!("an agent opens as a command") };
+        assert_eq!(argv.words(), ["pi", "Tackle #444"]);
+        let unnamed = Opens::of_api(Some(asked(api::Harness::Unspecified)));
+        assert_eq!(unnamed, Err("a harness this luned does not know".to_owned()));
+    }
+
 }

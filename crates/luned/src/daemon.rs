@@ -42,8 +42,9 @@ use crate::api::{
     ListWorkRequest, ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest,
     PasteResponse, PrintedFile, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
     RebaseRequest, RebaseResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
-    TranscriptEndsResponse, FramesRequest,
+    TranscriptEndsResponse, FramesRequest, AnswerRequest, WaitingRequest, WaitingResponse,
 };
+use crate::answers::{self, Answer};
 use crate::asks::{Asked, Step};
 use crate::core::{self, After, Command, Full, Parked, Wakes};
 use crate::directory::Directory;
@@ -61,7 +62,7 @@ use crate::links::{self, Branch, Of, Pasted, Unready};
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Bridging, Destination, Standing};
 use crate::printed::Kept as KeptFile;
-use crate::transcripts::Reading;
+use crate::transcripts::{self, Reading, SessionId};
 use crate::agent::Agent;
 use crate::checks::{Failing, Log};
 use crate::{
@@ -598,6 +599,33 @@ impl Daemon for Host {
         let listed = listed.map_err(|error| unfinished(&error))?;
         let listed = listed.map_err(Status::failed_precondition)?;
         Ok(Response::new(ListContentsResponse { listed }))
+    }
+
+    async fn waiting(
+        &self,
+        request: Request<WaitingRequest>,
+    ) -> Result<Response<WaitingResponse>, Status> {
+        let WaitingRequest { on, terminal } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on).await? {
+            return daemon.waiting(WaitingRequest { on: None, terminal }).await;
+        }
+        let (key, said) = terminal_named(terminal)?;
+        let transcript = self.transcript_in(&said).await?;
+        let waiting = task::spawn_blocking(move || answers::waiting(key, transcript.as_deref()));
+        let waiting = waiting.await.map_err(|error| unfinished(&error))?;
+        waiting.map(Response::new).map_err(Status::failed_precondition)
+    }
+
+    async fn answer(&self, request: Request<AnswerRequest>) -> Result<Response<()>, Status> {
+        let AnswerRequest { on, terminal, answer } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on).await? {
+            return daemon.answer(AnswerRequest { on: None, terminal, answer }).await;
+        }
+        let (key, _) = terminal_named(terminal)?;
+        let answer = Answer::of(answer).map_err(Status::invalid_argument)?;
+        let answered = task::spawn_blocking(move || answers::answer(key, answer));
+        let answered = answered.await.map_err(|error| unfinished(&error))?;
+        answered.map(Response::new).map_err(Status::failed_precondition)
     }
 
     async fn transcript_ends(
@@ -1161,7 +1189,30 @@ fn unfinished(error: &task::JoinError) -> Status {
     Status::internal(format!("luned lost its answer: {error}"))
 }
 
+fn terminal_named(
+    terminal: Option<api::TerminalKey>,
+) -> Result<(crate::mux::own::TerminalKey, api::TerminalKey), Status> {
+    let said = terminal.ok_or_else(|| Status::invalid_argument("it names no terminal"))?;
+    let key = crate::mux::own::TerminalKey::of(&said);
+    let key = key.map_err(|why| Status::invalid_argument(format!("terminal: {why}")))?;
+    Ok((key, said))
+}
+
 impl Host {
+    async fn transcript_in(&self, terminal: &api::TerminalKey) -> Result<Option<PathBuf>, Status> {
+        let Some(projects) = self.claude_folder.as_ref().map(|it| it.join("projects")) else {
+            return Ok(None);
+        };
+        let ListAgentsResponse { agents, .. } = self.ask(Command::List).await?;
+        let agent = agents.into_iter().find(|agent| agent.terminal.as_ref() == Some(terminal));
+        let claude = agent.filter(|agent| agent.runs_in() == api::Harness::ClaudeCode);
+        let Some(id) = claude.and_then(|agent| SessionId::parse(&agent.session_id)) else {
+            return Ok(None);
+        };
+        let found = task::spawn_blocking(move || transcripts::find(&projects, &id)).await;
+        found.map_err(|error| unfinished(&error))
+    }
+
     async fn bridged(&self, on: Option<api::On>) -> Result<Option<client::Daemon>, Status> {
         Ok(self.bridge(on).await?.map(|(_, bridging)| bridging.daemon))
     }

@@ -136,6 +136,35 @@ pub fn told(path: &Path, share: usize, steps: usize) -> io::Result<Digest> {
     Ok(digest(&end(path, share)?, steps))
 }
 
+pub fn last_said(path: &Path, chars: usize) -> io::Result<Option<String>> {
+    Ok(said_last(&end(path, TAILS_BYTES)?, chars))
+}
+
+fn said_last(end: &str, chars: usize) -> Option<String> {
+    for line in end.lines().rev() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["isSidechain"].as_bool() == Some(true) || record["type"] != "assistant" {
+            continue;
+        }
+        let blocks = record["message"]["content"].as_array().into_iter().flatten().rev();
+        let texts = blocks.filter(|block| block["type"] == "text");
+        let mut said = texts.filter_map(|block| block["text"].as_str()).map(str::trim);
+        if let Some(said) = said.find(|said| !said.is_empty()) {
+            return Some(cut(said, chars));
+        }
+    }
+    None
+}
+
+fn cut(text: &str, chars: usize) -> String {
+    match text.char_indices().nth(chars) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_owned(),
+    }
+}
+
 fn too_many(count: usize) -> String {
     format!("ids: {count} transcripts, of {IDS_MAX} at the most")
 }
@@ -480,4 +509,18 @@ mod tests {
         let many = Reading::shared(vec![(1, ids(0, IDS_MAX)), (2, ids(IDS_MAX, 1))]);
         assert_eq!(many, Err("ids: 33 transcripts, of 32 at the most".to_owned()));
     }
+
+    #[test]
+    fn the_last_thing_said_is_the_last_text_of_the_main_line() {
+        let said = |text: &str, sidechain: bool| {
+            let content = serde_json::json!([{ "type": "text", "text": text }, { "type": "tool_use", "name": "Bash", "input": {} }]);
+            serde_json::json!({ "type": "assistant", "isSidechain": sidechain, "message": { "content": content } }).to_string()
+        };
+        let user = serde_json::json!({ "type": "user", "message": { "content": "go" } }).to_string();
+        let end = [said("first", false), said("  last  ", false), said("a subagent", true), user].join("\n");
+        assert_eq!(said_last(&end, 100), Some("last".to_owned()));
+        assert_eq!(said_last(&end, 2), Some("la…".to_owned()));
+        assert_eq!(said_last("", 100), None);
+    }
+
 }

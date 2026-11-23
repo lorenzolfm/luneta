@@ -75,40 +75,6 @@ pub fn on_skill(harness: Harness, skill: &str, given: Option<&str>) -> Result<Ar
     Argv::parse(vec![name(harness).to_owned(), prompt])
 }
 
-pub fn on_words(harness: Harness, words: String, files: &[&str]) -> Result<Argv, String> {
-    let mut command = vec![name(harness).to_owned()];
-    if harness == Harness::ClaudeCode {
-        let rules: Vec<String> = files.iter().filter_map(|file| read_rule(file)).collect();
-        if !rules.is_empty() {
-            command.push("--allowedTools".to_owned());
-            command.extend(rules);
-            command.push("--".to_owned());
-        }
-    }
-    command.push(words);
-    Argv::parse(command)
-}
-
-fn read_rule(file: &str) -> Option<String> {
-    let mut rule = String::from("Read(/");
-    let mut inside = true;
-    for c in file.chars() {
-        match c {
-            '?' => return None,
-            ' ' | ',' if !inside => return None,
-            c if c.is_control() => return None,
-            '(' => inside = true,
-            ')' => inside = false,
-            '*' | '[' | ']' => rule.push('\\'),
-            '\\' => rule.push_str(r"\\\"),
-            _ => {},
-        }
-        rule.push(c);
-    }
-    rule.push(')');
-    Some(rule)
-}
-
 #[derive(Debug)]
 pub struct Kept {
     harness: Harness,
@@ -213,52 +179,14 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_is_let_read_the_file_by_a_rule_that_names_it_alone() {
-        for (file, rule) in [
-            ("/w/plan.md", "Read(//w/plan.md)"),
-            ("/w/My Plan (v2).md", "Read(//w/My Plan (v2).md)"),
-            ("/w/a, b.md", "Read(//w/a, b.md)"),
-            ("/w/b{a,c}.md", "Read(//w/b{a,c}.md)"),
-            ("/w/[draft] a*.md", r"Read(//w/\[draft\] a\*.md)"),
-            (r"/w/back\slash.md", r"Read(//w/back\\\\slash.md)"),
-        ] {
-            let prompt = format!("Tackle {file}");
-            let command = ["claude", "--allowedTools", rule, "--", prompt.as_str()];
-            assert_eq!(
-                on_words(Harness::ClaudeCode, prompt.clone(), &[file]).unwrap().words(),
-                command.map(str::to_owned).to_vec(),
-                "{file}"
-            );
-            assert_eq!(
-                on_words(Harness::Pi, prompt.clone(), &[file]).unwrap().words(),
-                ["pi".to_owned(), prompt],
-                "{file}"
-            );
-        }
-        for file in [
-            "/w/what?.md",
-            "/w/Plan (v2) final.md",
-            "/w/Plan (v2), final.md",
-            "/w/two\nlines.md",
-        ] {
-            let prompt = format!("Tackle {file}");
-            assert_eq!(
-                on_words(Harness::ClaudeCode, prompt.clone(), &[file]).unwrap().words(),
-                ["claude".to_owned(), prompt],
-                "{file:?}"
-            );
-        }
-    }
-
-    #[test]
     fn an_agent_is_refused_words_that_no_command_line_holds() {
         let refused = Err(Line::parse(&"x".repeat(LINE_BYTES_MAX + 1)).unwrap_err());
         let fits = "x".repeat(LINE_BYTES_MAX - "pi ".len());
-        let argv = on_words(Harness::Pi, fits.clone(), &[]);
+        let argv = Argv::on_words(Harness::Pi, fits.clone(), &[]);
         let argv = argv.expect("pi and the words fill a command line");
         assert_eq!(argv.words(), ["pi".to_owned(), fits.clone()]);
-        assert_eq!(on_words(Harness::Pi, format!("{fits}x"), &[]), refused);
-        assert_eq!(on_words(Harness::Pi, "x".repeat(LINE_BYTES_MAX), &[]), refused);
+        assert_eq!(Argv::on_words(Harness::Pi, format!("{fits}x"), &[]), refused);
+        assert_eq!(Argv::on_words(Harness::Pi, "x".repeat(LINE_BYTES_MAX), &[]), refused);
         assert_eq!(on_skill(Harness::Pi, "tdd", Some(&"x".repeat(LINE_BYTES_MAX))), refused);
     }
 

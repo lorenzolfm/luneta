@@ -1669,11 +1669,11 @@ impl Menu {
                 Some(agents::on_skill(agent, REVIEW, Some(&link.url())))
             },
             (Pull::Agent, Readied::Link(link)) => {
-                Some(agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[]))
+                Some(Argv::on_words(agent, format!("{TACKLE} {}", link.url()), &[]))
             },
             (Pull::Agent, Readied::File { real }) => {
                 let words = format!("{TACKLE} {real}");
-                Some(agents::on_words(agent, words, &[real.as_str()]))
+                Some(Argv::on_words(agent, words, &[real.as_str()]))
             },
         };
         let argv = match argv.transpose() {
@@ -1744,7 +1744,7 @@ impl Menu {
         }
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
-        let opens = match agents::on_words(keys.agent.harness(), prompt, &files) {
+        let opens = match Argv::on_words(keys.agent.harness(), prompt, &files) {
             Ok(argv) => Opens::Command(argv),
             Err(why) => return unstarted(format!("what view {view} printed"), &why),
         };
@@ -1777,7 +1777,7 @@ impl Menu {
         }
         let prompt = checks::prompt(&page, &failing);
         let files = checks::files(&failing);
-        let opens = match agents::on_words(keys.agent.harness(), prompt, &files) {
+        let opens = match Argv::on_words(keys.agent.harness(), prompt, &files) {
             Ok(argv) => Opens::Command(argv),
             Err(why) => return unstarted(format!("the checks of #{number}"), &why),
         };
@@ -1809,7 +1809,7 @@ impl Menu {
             return Did::Closed(Done::Said(format!("menu: {}", rebase::said(&rebased))));
         };
         let prompt = rebases::prompt(&rebased.branch, &rebased.onto, stopped);
-        let command = match agents::on_words(keys.agent.harness(), prompt, &[]) {
+        let command = match Argv::on_words(keys.agent.harness(), prompt, &[]) {
             Ok(argv) => argv,
             Err(why) => return unstarted(&branch, &why),
         };
