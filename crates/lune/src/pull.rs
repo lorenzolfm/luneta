@@ -1,8 +1,8 @@
 use std::sync::mpsc::Sender;
 use std::thread;
 
+use lune_domain::projects::Holders;
 use luned::links::{self, Pasted, Unready};
-use luned::projects::Holders;
 pub use luned::links::{At, Kind, Link, Readied, Wanted, Work};
 use luned::log;
 

@@ -3,10 +3,10 @@ use std::path::Path;
 use std::process::Output;
 use std::sync::mpsc;
 
+use lune_domain::projects::{Size, WorktreeId};
 use lune_waits::eventually;
 use luned::api::projects::Held;
 use luned::api::Project;
-use luned::projects::{Size, WorktreeId};
 use luned::{Asked, Beside, Heard, Where};
 
 use crate::host::{folder_in, script, Host, LUNE};
@@ -102,6 +102,7 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
     let (heard, hearing) = mpsc::channel();
     let size = Size::of(80, 24).unwrap();
     let at = Where::Here { runs_in: None };
+    luned::tasks::start().unwrap();
     let show = luned::show(folder, at, here, size, false, move |it| drop(heard.send(it)));
     show.ask(Asked::Open { beside: Beside::Alone, opens: command(&["sleep", "600"]) });
     let laid = eventually("the layout lays out the terminal", || match hearing.try_recv() {

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use lune_domain::projects::Opens;
 use tonic::{Request, Response, Status, Streaming};
 
 use super::Host;
@@ -15,7 +16,6 @@ use crate::api::{
     TranscriptEndsResponse, WaitingRequest, WaitingResponse,
 };
 use crate::mux::own::api::FromViewer;
-use crate::projects::Opens;
 
 pub(super) struct OverTailnet(pub(super) Arc<Host>);
 

@@ -4,6 +4,7 @@ use std::iter;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
+use lune_domain::projects::{Opens, Size, WorktreeId};
 use lune_waits::{eventually, Patience, Span, QUIET};
 use luned::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use luned::api::show_response::{self, view::Found, Laid, View};
@@ -17,7 +18,6 @@ use luned::api::{frames_request, Arrangement, On, FramesRequest};
 use luned::mux::own::api::{self as mux_api, typed, Listing};
 use luned::mux::own::frames::{Line, Rows, Shows};
 use luned::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
-use luned::projects::{Opens, Size, WorktreeId};
 use luned::folder::Folder;
 use luned::Daemon;
 use luned::release;
@@ -560,6 +560,30 @@ fn a_step_with_no_terminal_that_way_says_the_edge_of_the_worktree_it_is_on() {
     shown.ask(step(Left, 5));
     assert_eq!(shown.until_edged(), edged(Left, 5));
     assert!(shown.refused.is_empty(), "an edge is no refusal: {:?}", shown.refused);
+}
+
+#[test]
+fn a_client_is_answered_while_lune_mux_has_yet_to_size_another_client_s_terminal() {
+    let owned = Owned::new();
+    let (_, sizing, other) = two_in_a_clone(&owned, "clone");
+    let mut resized = Shown::new(&owned, sizing, 80, 24);
+    let [terminal] = resized.terminals()[..] else { panic!("a worktree is made with one terminal") };
+    eventually("the terminal fills its client", || {
+        (sized(&owned, terminal) == Some((78, 22))).then_some(())
+    });
+    let mut beside = Shown::new(&owned, other, 80, 24);
+    let stalled = owned.stall_mux();
+    resized.ask(Event::Size(size(60, 20)));
+    resized.until("the smaller size", |laid| laid.size == Some(size(60, 20)));
+    let left = Some(focus::To::Direction(show_request::Direction::Left.into()));
+    beside.ask(Event::Focus(show_request::Focus { to: left, step: 1 }));
+    assert_eq!(beside.until_edged().worktree, other, "the other client is answered");
+    let log = logged(&owned);
+    assert!(!log.contains("is not sized"), "luned waited on lune-mux first: {log}");
+    drop(stalled);
+    eventually("the terminal fits the smaller client once lune-mux answers", || {
+        (sized(&owned, terminal) == Some((58, 18))).then_some(())
+    });
 }
 
 #[test]
@@ -1662,6 +1686,7 @@ fn a_layout_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
     let at = Where::On(nowhere.clone());
+    luned::tasks::start().unwrap();
     let _show = luned::show(luned.clone(), at, worktree, size, false, told);
     match lune_waits::heard("luned answers a layout of nowhere", &hearing) {
         Heard::Lost(why) => assert_eq!(why, "luned does not reach nowhere now"),
@@ -1670,6 +1695,7 @@ fn a_layout_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
     let (seen, seeing) = std::sync::mpsc::channel();
     let greeting = Greeting { foreground: None, background: None };
     let reach = Reach::On { luned, destination: nowhere };
+    luned::tasks::start().unwrap();
     let _viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
     match lune_waits::heard("luned answers a viewer of nowhere", &seeing) {
         Seen::Lost(why) => assert_eq!(why, "luned does not reach nowhere now"),
@@ -1750,6 +1776,7 @@ fn the_shows_and_viewers_lune_drops_give_their_places_on_a_bridge_back() {
         let (heard, hearing) = std::sync::mpsc::channel();
         let told = move |it| drop(heard.send(it));
         let at = Where::On(destination.clone());
+        luned::tasks::start().unwrap();
         let show = luned::show(luned.clone(), at, shown_in, size, false, told);
         let laid = move || match lune_waits::heard("luned lays the show out", &hearing) {
             Heard::Laid(laid) => laid,
@@ -1772,6 +1799,7 @@ fn the_shows_and_viewers_lune_drops_give_their_places_on_a_bridge_back() {
     let viewer = || {
         let (seen, seeing) = std::sync::mpsc::channel();
         let reach = Reach::On { luned: luned.clone(), destination: destination.clone() };
+        luned::tasks::start().unwrap();
         let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
         viewer.show(keys.clone());
         match lune_waits::heard("the viewer sees sh", &seeing) {
@@ -1940,6 +1968,7 @@ fn seen_and_typed_into(
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
+    luned::tasks::start().unwrap();
     let show = luned::show(folder, at, worktree, size, false, told);
     let laid = || match lune_waits::heard("luned lays the layout out", &hearing) {
         Heard::Laid(laid) => laid,
@@ -1959,6 +1988,7 @@ fn seen_and_typed_into(
 
     let (seen, seeing) = std::sync::mpsc::channel();
     let greeting = Greeting { foreground: None, background: None };
+    luned::tasks::start().unwrap();
     let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let paste = |text: &str| typed::Event::Paste(mux_api::Paste { text: text.to_owned() });
@@ -2004,6 +2034,7 @@ fn a_viewer_reads_no_more_frames_than_lune_has_taken() {
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
+    luned::tasks::start().unwrap();
     let show = luned::show(folder, Where::Here { runs_in: None }, worktree, size, false, told);
     let laid = || match lune_waits::heard("luned lays the layout out", &hearing) {
         Heard::Laid(laid) => laid,
@@ -2022,6 +2053,7 @@ fn a_viewer_reads_no_more_frames_than_lune_has_taken() {
     let (seen, seeing) = std::sync::mpsc::channel();
     let greeting = Greeting { foreground: None, background: None };
     let reach = Reach::Mux { socket: owned.socket(), runs_in: None };
+    luned::tasks::start().unwrap();
     let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let frame = |patience: Patience, what: &str| match patience.heard(what, &seeing) {
@@ -2038,4 +2070,58 @@ fn a_viewer_reads_no_more_frames_than_lune_has_taken() {
     drop(held.pop());
     let _again = frame(Patience::begun(), "a frame comes once lune lets one go");
     lune_waits::never("more than one frame comes for the one let go", unheld);
+}
+
+#[test]
+fn a_viewer_is_seen_while_others_on_the_same_lune_mux_hold_their_frames() {
+    let owned = Owned::new();
+    let worktree = WorktreeId::of(worktree_in_home(&owned)).unwrap();
+    let folder = folder_in(owned.host.runtime.path()).unwrap();
+    let (heard, hearing) = std::sync::mpsc::channel();
+    let size = Size::of(200, 60).unwrap();
+    let told = move |it| drop(heard.send(it));
+    luned::tasks::start().unwrap();
+    let show = luned::show(folder, Where::Here { runs_in: None }, worktree, size, false, told);
+    let laid = || match lune_waits::heard("luned lays the layout out", &hearing) {
+        Heard::Laid(laid) => laid,
+        Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
+            panic!("the layout is not laid out: {why}")
+        },
+        Heard::Edged { direction, .. } => panic!("the layout is at its {direction:?} edge"),
+        Heard::Sent(to) => panic!("the layout is sent to worktree {to}"),
+        Heard::Left(gone) => panic!("worktree {gone} is gone"),
+    };
+    assert!(laid().is_empty());
+    let busy = ["sh", "-c", "while :; do head -c 30000 /dev/urandom | base64 -w 190; done"];
+    show.ask(Asked::Open { beside: Beside::Largest, opens: command(&busy) });
+    let opened = laid();
+
+    let greeting = Greeting { foreground: None, background: None };
+    let watching = || {
+        let (seen, seeing) = std::sync::mpsc::channel();
+        let reach = Reach::Mux { socket: owned.socket(), runs_in: None };
+        let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
+        viewer.show(opened.keys());
+        (viewer, seeing)
+    };
+    let frame = |patience: Patience, what: &str, seeing: &std::sync::mpsc::Receiver<Seen>| {
+        match patience.heard(what, seeing) {
+            Seen::Frame(framed) => framed,
+            Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
+        }
+    };
+    let mut holding = Vec::new();
+    let patience = Patience::begun();
+    for holder in 0..3 {
+        let (viewer, seeing) = watching();
+        let held: Vec<_> = (0..FRAMES_MAX)
+            .map(|told| frame(patience, &format!("holder {holder} hears frame {told}"), &seeing))
+            .collect();
+        holding.push((viewer, seeing, held));
+    }
+    let unheld = || holding.iter().find_map(|(_, seeing, _)| seeing.try_recv().ok());
+    lune_waits::never("a frame comes past those a holder still holds", unheld);
+
+    let (_fresh, seeing) = watching();
+    let _seen = frame(Patience::begun(), "a frame comes while others hold theirs", &seeing);
 }

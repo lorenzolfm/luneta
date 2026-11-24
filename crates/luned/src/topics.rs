@@ -350,12 +350,14 @@ mod tests {
     use std::num::NonZeroU32;
     use std::os::unix::fs::PermissionsExt as _;
 
+    use lune_domain::agent::Harness;
+    use lune_domain::mux::TerminalKey;
     use serde_json::json;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::agent::{Harness, Source};
-    use crate::mux::{OwnMade, TerminalKey};
+    use crate::agent::Source;
+    use crate::mux::OwnMade;
     use crate::Directory;
 
     const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";

@@ -3,8 +3,8 @@ use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::projects::Dir;
 use luned::asks::{self, Asked, Marked, Step, Turn};
-use luned::projects::Dir;
 use luned::transcripts::SessionId;
 use luned::{Destination, Directory};
 use ratatui::buffer::Buffer;

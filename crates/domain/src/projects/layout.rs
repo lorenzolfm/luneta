@@ -377,6 +377,7 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
+    #[expect(clippy::len_without_is_empty, reason = "a tree holds one view at least")]
     pub fn len(&self) -> usize {
         self.nodes.len().div_ceil(2)
     }

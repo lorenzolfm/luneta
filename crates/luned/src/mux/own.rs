@@ -1,9 +1,10 @@
 use std::ffi::OsString;
-use std::num::{NonZeroU32, ParseIntError};
+use std::num::ParseIntError;
 use std::process::Command;
 use std::str::FromStr;
 
-pub use lune_protocol::made::Made as OwnMade;
+pub use lune_domain::mux::OwnMade;
+use lune_domain::mux::TerminalKey;
 
 use crate::mux::value_in;
 
@@ -11,40 +12,6 @@ pub mod api;
 pub mod frames;
 pub mod server;
 pub mod viewer;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TerminalKey {
-    pub id: NonZeroU32,
-    pub made: OwnMade,
-}
-
-impl TerminalKey {
-    pub fn read(key: Option<api::TerminalKey>) -> Result<Self, String> {
-        let key = key.ok_or("a terminal with no key")?;
-        let id = NonZeroU32::new(key.id).ok_or("0 is no terminal's id")?;
-        let made = key.made_at.ok_or_else(|| format!("terminal {id} has no made_at"))?;
-        let made = OwnMade::read(made).map_err(|why| format!("terminal {id}'s made_at: {why}"))?;
-        Ok(TerminalKey { id, made })
-    }
-
-    pub fn of(key: &crate::api::TerminalKey) -> Result<Self, String> {
-        let id = NonZeroU32::new(key.id).ok_or("0 is no terminal's id")?;
-        let made = key.made_at.ok_or_else(|| format!("terminal {id} has no made_at"))?;
-        let made = OwnMade::read(made).map_err(|why| format!("terminal {id}'s made_at: {why}"))?;
-        Ok(TerminalKey { id, made })
-    }
-
-    #[must_use]
-    pub fn said(self) -> api::TerminalKey {
-        api::TerminalKey { id: self.id.get(), made_at: Some(self.made.into()) }
-    }
-}
-
-impl From<TerminalKey> for crate::api::TerminalKey {
-    fn from(key: TerminalKey) -> Self {
-        crate::api::TerminalKey { id: key.id.get(), made_at: Some(key.made.into()) }
-    }
-}
 
 const TERMINAL_VAR: &str = "LUNE_MUX_TERMINAL";
 
@@ -97,6 +64,7 @@ pub(crate) fn in_no_terminal(command: &mut Command) {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
     use std::os::unix::ffi::OsStringExt;
 
     use super::*;

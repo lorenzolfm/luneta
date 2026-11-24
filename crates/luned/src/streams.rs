@@ -1,5 +1,3 @@
-use std::{io, thread};
-
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt as _};
@@ -60,22 +58,6 @@ pub fn boxes<T>(said_max: usize) -> (Outbox<T>, Inbox<T>) {
     let (said, saying) = mpsc::channel(said_max);
     let (untaken, untaken_heard) = mpsc::channel(1);
     (Outbox { said, untaken }, Inbox { said: saying, untaken: untaken_heard })
-}
-
-pub fn on_thread<Told: Send + 'static>(
-    name: &str,
-    told: Told,
-    run: impl FnOnce(Told) + Send + 'static,
-) -> Result<(), (Told, io::Error)> {
-    let (handing, handed) = std::sync::mpsc::sync_channel::<Told>(1);
-    let running = move || run(handed.recv().expect("`on_thread` hands its thread `told` at once"));
-    match thread::Builder::new().name(name.to_owned()).spawn(running) {
-        Ok(_) => {
-            handing.send(told).expect("the thread waits on `told` before all else");
-            Ok(())
-        },
-        Err(error) => Err((told, error)),
-    }
 }
 
 #[cfg(test)]
