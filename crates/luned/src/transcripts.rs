@@ -26,6 +26,33 @@ const KINDS: [&str; 4] =
 
 const AGY_KINDS: [&str; 2] = [r#""type":"USER_INPUT""#, r#""type":"PLANNER_RESPONSE""#];
 
+const ALL_KINDS: [&str; 6] = [
+    r#""type":"ai-title""#,
+    r#""type":"last-prompt""#,
+    r#""type":"user""#,
+    r#""type":"assistant""#,
+    r#""type":"USER_INPUT""#,
+    r#""type":"PLANNER_RESPONSE""#,
+];
+
+const ON_WHAT_FIELDS: [&str; 13] = [
+    "description",
+    "command",
+    "file_path",
+    "pattern",
+    "url",
+    "query",
+    "prompt",
+    "toolSummary",
+    "CommandLine",
+    "Path",
+    "Description",
+    "Query",
+    "Url",
+];
+
+const _: () = assert!(ALL_KINDS.len() == KINDS.len() + AGY_KINDS.len());
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Folders {
     pub claude: Option<PathBuf>,
@@ -126,6 +153,8 @@ impl Reading {
 }
 
 fn agy_file(agy: &Path, id: &SessionId) -> Option<PathBuf> {
+    assert_ne!(id.as_str(), "");
+    assert!(!id.as_str().contains('/'));
     let path = agy.join("brain").join(id.as_str()).join(".system_generated/logs/transcript.jsonl");
     path.is_file().then_some(path)
 }
@@ -151,11 +180,11 @@ pub fn find(projects: &Path, id: &SessionId) -> Option<PathBuf> {
 }
 
 pub fn told(path: &Path, share: usize, steps: usize) -> io::Result<Digest> {
-    Ok(digest(&end(path, share, &KINDS)?, steps))
+    Ok(digest(&end(path, share, &ALL_KINDS)?, steps))
 }
 
 pub fn last_said(path: &Path, chars_max: usize) -> io::Result<Option<String>> {
-    Ok(last_said_in(&end(path, TAILS_BYTES, &KINDS)?, chars_max))
+    Ok(last_said_in(&end(path, TAILS_BYTES, &ALL_KINDS)?, chars_max))
 }
 
 fn last_said_in(end: &str, chars_max: usize) -> Option<String> {
@@ -288,7 +317,7 @@ pub fn digest(end: &str, steps: usize) -> Digest {
             },
             Some("USER_INPUT") if record["source"].as_str() != Some("SYSTEM") => {
                 if let Some(typed) = record["content"].as_str().and_then(agy_user_text) {
-                    asked = Some(Asked::typed(&typed));
+                    asked = Some(Asked::typed(typed));
                 }
             },
             Some("PLANNER_RESPONSE") => {
@@ -312,17 +341,23 @@ pub fn digest(end: &str, steps: usize) -> Digest {
             _ => {},
         }
     }
+    assert!(last.len() <= steps);
     Digest { title: title.map(|title| one_line(&title, TITLE_CHARS)), asked, steps: last.into() }
 }
 
-fn push_step(last: &mut VecDeque<String>, step: String, steps: usize) {
-    last.push_back(step);
-    if last.len() > steps {
+fn push_step(last: &mut VecDeque<String>, step: String, steps_max: usize) {
+    assert!(last.len() <= steps_max);
+    if steps_max == 0 {
+        return;
+    }
+    if last.len() == steps_max {
         last.pop_front();
     }
+    last.push_back(step);
+    assert!(last.len() <= steps_max);
 }
 
-fn agy_user_text(content: &str) -> Option<String> {
+fn agy_user_text(content: &str) -> Option<&str> {
     let text = if let Some((_, rest)) = content.split_once("<USER_REQUEST>") {
         rest.split_once("</USER_REQUEST>").map_or(rest, |(inner, _)| inner)
     } else if content.trim_start().starts_with("<SYSTEM_MESSAGE>") {
@@ -331,26 +366,32 @@ fn agy_user_text(content: &str) -> Option<String> {
         content
     };
     let text = text.trim();
-    (!text.is_empty()).then(|| text.to_owned())
+    if text.is_empty() {
+        return None;
+    }
+    assert_ne!(text, "");
+    Some(text)
 }
 
 #[must_use]
 pub fn agy_args(raw: &Value) -> Value {
     let Value::Object(map) = raw else {
-        return raw.clone();
+        return Value::Null;
     };
-    let decoded = map
-        .iter()
-        .map(|(key, value)| {
-            let value = match value {
-                Value::String(text) => {
-                    serde_json::from_str::<Value>(text).unwrap_or_else(|_| value.clone())
-                },
-                other => other.clone(),
-            };
-            (key.clone(), value)
-        })
-        .collect();
+    let mut decoded = serde_json::Map::new();
+    for key in ON_WHAT_FIELDS.into_iter().chain(["questions"]) {
+        let Some(value) = map.get(key) else {
+            continue;
+        };
+        let value = match value {
+            Value::String(text) => {
+                serde_json::from_str::<Value>(text).unwrap_or_else(|_| value.clone())
+            },
+            other => other.clone(),
+        };
+        decoded.insert(key.to_owned(), value);
+    }
+    assert!(decoded.len() <= ON_WHAT_FIELDS.len() + 1);
     Value::Object(decoded)
 }
 
@@ -450,22 +491,7 @@ fn step(block: &Value) -> Option<String> {
 
 #[must_use]
 pub fn on_what(input: &Value) -> Option<&str> {
-    const FIELDS: [&str; 13] = [
-        "description",
-        "command",
-        "file_path",
-        "pattern",
-        "url",
-        "query",
-        "prompt",
-        "toolSummary",
-        "CommandLine",
-        "Path",
-        "Description",
-        "Query",
-        "Url",
-    ];
-    FIELDS
+    ON_WHAT_FIELDS
         .iter()
         .find_map(|field| input[field].as_str())
         .or_else(|| input["questions"][0]["question"].as_str())
@@ -690,6 +716,42 @@ mod tests {
         let folders = Folders { claude: None, agy: Some(agy) };
         let ends = reading.ends(&folders);
         assert_eq!(ends.get(&id).map(String::as_str), Some(line.to_string().as_str()));
+    }
+
+    #[test]
+    fn told_and_last_said_read_antigravity_transcript_files_and_ignore_non_summary_args() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let user = json!({
+            "type": "USER_INPUT",
+            "source": "USER_EXPLICIT",
+            "content": "<USER_REQUEST>\naudit this\n</USER_REQUEST>"
+        });
+        let tool = json!({
+            "type": "PLANNER_RESPONSE",
+            "tool_calls": [{
+                "name": "write_file",
+                "args": {
+                    "Path": "\"/w/a.rs\"",
+                    "Content": "\"huge body that is not parsed\""
+                }
+            }]
+        });
+        let reply = json!({
+            "type": "PLANNER_RESPONSE",
+            "content": "Done auditing."
+        });
+        fs::write(&path, format!("{user}\n{tool}\n{reply}\n")).unwrap();
+
+        let summary = told(&path, 8192, 4).unwrap();
+        assert_eq!(summary.asked, Some(Asked::Whole("audit this".to_owned())));
+        assert_eq!(summary.steps, ["ran write_file: /w/a.rs", "said: Done auditing."]);
+        assert_eq!(last_said(&path, 100).unwrap(), Some("Done auditing.".to_owned()));
+        assert_eq!(digest(&format!("{reply}\n"), 0).steps, Vec::<String>::new());
+
+        let decoded = agy_args(&tool["tool_calls"][0]["args"]);
+        assert_eq!(decoded["Path"], json!("/w/a.rs"));
+        assert!(decoded.get("Content").is_none());
     }
 
 }

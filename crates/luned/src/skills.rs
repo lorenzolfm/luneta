@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::{program, Directory, Harness};
+use crate::{log, program, Directory, Harness};
 
 const FIND: &str = r#"dir=$(cd "$1" 2>/dev/null && pwd -P) || exit 0
 config=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
@@ -204,36 +204,90 @@ fn pi_found(cwd: &Path, home: Option<&Path>, agent: Option<&Path>) -> Vec<Skill>
 
 const AGY_ROOTS: [&str; 4] = [".agents", ".agent", "_agents", "_agent"];
 
+const AGY_PLUGINS_MAX: usize = 256;
+
+const AGY_SKILLS_PER_ROOT_MAX: usize = 512;
+
+const AGY_SKILL_FILES_MAX: usize = 2048;
+
+const _: () = assert!(AGY_PLUGINS_MAX > 0);
+const _: () = assert!(AGY_SKILLS_PER_ROOT_MAX > 0);
+const _: () = assert!(AGY_SKILLS_PER_ROOT_MAX <= AGY_SKILL_FILES_MAX);
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if seen.insert(path.clone()) {
+        paths.push(path);
+    }
+}
+
+fn sorted_dir_entries(dir: &Path, limit: usize) -> Vec<(String, PathBuf)> {
+    assert!(limit > 0);
+    let listed = match fs::read_dir(dir) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            log::say(&format!("skills in {}: {error}", dir.display()));
+            return Vec::new();
+        },
+    };
+    let mut entries = Vec::new();
+    for entry in listed {
+        match entry {
+            Ok(entry) => {
+                if let Ok(name) = entry.file_name().into_string() {
+                    entries.push((name, entry.path()));
+                }
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => {},
+            Err(error) => log::say(&format!("skills in {}: {error}", dir.display())),
+        }
+    }
+    entries.sort();
+    entries.truncate(limit);
+    assert!(entries.len() <= limit);
+    entries
+}
+
 fn agy_found(cwd: &Path, home: Option<&Path>) -> Vec<Skill> {
+    assert!(cwd.is_absolute());
     let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen_roots: HashSet<PathBuf> = HashSet::new();
+    let mut plugin_roots: Vec<PathBuf> = Vec::new();
+    let mut seen_plugins: HashSet<PathBuf> = HashSet::new();
     if let Some(home) = home {
-        roots.push(home.join(".gemini/antigravity-cli/skills"));
-        roots.push(home.join(".gemini/skills"));
+        push_unique_path(&mut roots, &mut seen_roots, home.join(".gemini/antigravity-cli/skills"));
+        push_unique_path(&mut roots, &mut seen_roots, home.join(".gemini/skills"));
     }
     let top = cwd.ancestors().find(|dir| dir.join(".git").exists());
-    let mut plugin_roots: Vec<PathBuf> = Vec::new();
     for dir in cwd.ancestors() {
         for name in AGY_ROOTS {
             let base = dir.join(name);
-            roots.push(base.join("skills"));
-            plugin_roots.push(base.join("plugins"));
+            push_unique_path(&mut roots, &mut seen_roots, base.join("skills"));
+            push_unique_path(&mut plugin_roots, &mut seen_plugins, base.join("plugins"));
         }
         if top.is_none() || Some(dir) == top {
             break;
         }
     }
     if let Some(home) = home {
-        roots.push(home.join(".gemini/config/skills"));
-        roots.push(home.join(".agents/skills"));
-        plugin_roots.push(home.join(".gemini/config/plugins"));
+        push_unique_path(&mut roots, &mut seen_roots, home.join(".gemini/config/skills"));
+        push_unique_path(&mut roots, &mut seen_roots, home.join(".agents/skills"));
+        push_unique_path(&mut plugin_roots, &mut seen_plugins, home.join(".gemini/config/plugins"));
     }
     for plugins in &plugin_roots {
-        agy_plugin_skills(plugins, &mut roots);
+        for skills in agy_plugin_skills(plugins) {
+            push_unique_path(&mut roots, &mut seen_roots, skills);
+        }
     }
     let mut files = Vec::new();
     for root in &roots {
-        agy_skill_files(root, &mut files);
+        let remaining = AGY_SKILL_FILES_MAX - files.len();
+        if remaining == 0 {
+            break;
+        }
+        files.extend(agy_skill_files(root, remaining.min(AGY_SKILLS_PER_ROOT_MAX)));
     }
+    assert!(files.len() <= AGY_SKILL_FILES_MAX);
     let found = files.into_iter().filter_map(|file| {
         let mut front = frontmatter(&file).map_or_else(Front::default, |text| Front::read(&text));
         let folder = file.parent()?.file_name()?.to_str()?;
@@ -243,15 +297,9 @@ fn agy_found(cwd: &Path, home: Option<&Path>) -> Vec<Skill> {
     listed(found.filter(|(_, front)| front.invocable))
 }
 
-fn agy_plugin_skills(plugins_dir: &Path, roots: &mut Vec<PathBuf>) {
-    let Ok(listed) = fs::read_dir(plugins_dir) else {
-        return;
-    };
-    let mut entries: Vec<(String, PathBuf)> = listed
-        .filter_map(Result::ok)
-        .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.path())))
-        .collect();
-    entries.sort();
+fn agy_plugin_skills(plugins_dir: &Path) -> Vec<PathBuf> {
+    let entries = sorted_dir_entries(plugins_dir, AGY_PLUGINS_MAX);
+    let mut roots = Vec::new();
     for (name, path) in entries {
         if name.starts_with('.') || !path.is_dir() {
             continue;
@@ -261,17 +309,14 @@ fn agy_plugin_skills(plugins_dir: &Path, roots: &mut Vec<PathBuf>) {
             roots.push(skills);
         }
     }
+    assert!(roots.len() <= AGY_PLUGINS_MAX);
+    roots
 }
 
-fn agy_skill_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(listed) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<(String, PathBuf)> = listed
-        .filter_map(Result::ok)
-        .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.path())))
-        .collect();
-    entries.sort();
+fn agy_skill_files(dir: &Path, limit: usize) -> Vec<PathBuf> {
+    assert!(limit > 0);
+    let entries = sorted_dir_entries(dir, limit);
+    let mut files = Vec::new();
     for (name, path) in entries {
         if name.starts_with('.') || name == "node_modules" || !path.is_dir() {
             continue;
@@ -281,6 +326,8 @@ fn agy_skill_files(dir: &Path, files: &mut Vec<PathBuf>) {
             files.push(skill);
         }
     }
+    assert!(files.len() <= limit);
+    files
 }
 
 fn skill_files(dir: &Path, root: &Path, kept: Kept, depth: usize, files: &mut Vec<PathBuf>) {
@@ -755,6 +802,15 @@ mod tests {
         put(root, "plain/parent/.agents/skills/above/SKILL.md", &front("Above."));
         put(root, "plain/parent/child/.agents/skills/here/SKILL.md", &front("Here."));
         assert_eq!(agy_found(&root.join("plain/parent/child"), None), [skill("here", "Here.")]);
+
+        put(root, "home/.git/HEAD", "");
+        assert_eq!(agy_found(&home, Some(&home)), [
+            skill("deep-review", "Plugin review."),
+            skill("global", "Global."),
+            skill("near", "CLI wins."),
+            skill("shared", "Shared."),
+            skill("user-agent", "Home agents."),
+        ]);
     }
 
     #[test]

@@ -494,8 +494,9 @@ impl Turn {
                 },
                 Some("user") => {
                     for block in blocks.filter(|block| block["type"] == "tool_result") {
-                        let answered = block["tool_use_id"].as_str();
-                        calls.retain(|call| Some(call.id.as_str()) != answered);
+                        if let Some(answered) = block["tool_use_id"].as_str() {
+                            calls.retain(|call| call.id.as_deref() != Some(answered));
+                        }
                     }
                 },
                 Some("USER_INPUT") => {
@@ -511,7 +512,7 @@ impl Turn {
                     for call in record["tool_calls"].as_array().into_iter().flatten() {
                         if let Some(name) = call["name"].as_str() {
                             let input = luned::transcripts::agy_args(&call["args"]);
-                            calls.push(Call { id: String::new(), name: name.to_owned(), input });
+                            calls.push(Call { id: None, name: name.to_owned(), input });
                         }
                     }
                 },
@@ -524,7 +525,7 @@ impl Turn {
 }
 
 struct Call {
-    id: String,
+    id: Option<String>,
     name: String,
     input: Value,
 }
@@ -532,7 +533,11 @@ struct Call {
 impl Call {
     fn of(block: &Value) -> Option<Call> {
         let (id, name) = (block["id"].as_str()?, block["name"].as_str()?);
-        Some(Call { id: id.to_owned(), name: name.to_owned(), input: block["input"].clone() })
+        Some(Call {
+            id: Some(id.to_owned()),
+            name: name.to_owned(),
+            input: block["input"].clone(),
+        })
     }
 }
 

@@ -13,7 +13,7 @@ use crate::mux::TerminalKey;
 use crate::watch::Troubles;
 use crate::Directory;
 
-const FILE_BYTES_MAX: u64 = 64 * 1024;
+pub const FILE_BYTES_MAX: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
