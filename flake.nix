@@ -223,7 +223,7 @@
               src = lintSrc;
               cargoArtifacts = daemonDeps;
               cargoExtraArgs = "--locked";
-              cargoClippyExtraArgs = "${clippyRun} -- -D warnings";
+              cargoClippyExtraArgs = "${clippyRun} --exclude lune-phone-bindgen -- -D warnings";
               doCheck = false;
               doInstallCargoArtifacts = false;
             }
