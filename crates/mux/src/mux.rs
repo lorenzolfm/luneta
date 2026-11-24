@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
+use lune_protocol::made::Made;
 use lune_protocol::socket::Unreached;
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
@@ -140,7 +141,10 @@ impl Mux {
             refuse_if_full(holding.terminals.len(), TERMINALS_MAX, "terminals")?;
             let id = TerminalId::next(&mut holding.last.terminal);
             assert!(holding.index_of(id).is_none(), "terminal {id} is new");
-            let key = TerminalKey { id, made: SystemTime::now() };
+            let made = Made::of(SystemTime::now()).ok_or_else(|| {
+                Status::failed_precondition("the clock says a time before 1970, or after 2554")
+            })?;
+            let key = TerminalKey { id, made };
             let terminal = spawned(self, key, tag, opens, size)?;
             holding.terminals.push(terminal);
             Ok(key)
@@ -449,13 +453,6 @@ impl Terminal {
     }
 }
 
-fn nanos(made: SystemTime) -> Result<u64, Status> {
-    let made = made.duration_since(UNIX_EPOCH).ok();
-    made.and_then(|since| u64::try_from(since.as_nanos()).ok()).ok_or_else(|| {
-        Status::failed_precondition("the clock says a time before 1970, or after 2554")
-    })
-}
-
 fn spawned(
     mux: &Arc<Mux>,
     key: TerminalKey,
@@ -465,7 +462,7 @@ fn spawned(
 ) -> Result<Terminal, Status> {
     let vars = [
         (pty::TERMINAL_VAR, key.id.to_string()),
-        (pty::TERMINAL_MADE_VAR, nanos(key.made)?.to_string()),
+        (pty::TERMINAL_MADE_VAR, key.made.nanos().to_string()),
     ];
     let failed =
         |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));

@@ -1,10 +1,6 @@
 import LunePhone
 
 extension Agent {
-    var seat: Seat? {
-        terminal.map { Seat(machine: on, terminal: $0) }
-    }
-
     var waits: Bool {
         if case .waiting = status { true } else { false }
     }
@@ -80,6 +76,21 @@ extension Seen {
 extension LuneView {
     var title: String {
         name ?? topic ?? command ?? "shell"
+    }
+
+    var key: TerminalKey? {
+        if case .key(let key) = found { key } else { nil }
+    }
+}
+
+extension Found {
+    var words: String? {
+        switch self {
+        case .key, .untold: nil
+        case .lost: "lost: lune-mux no longer holds it"
+        case .looking: "looking for it in lune-mux"
+        case .unread(let why): why
+        }
     }
 }
 

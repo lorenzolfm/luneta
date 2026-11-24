@@ -2,7 +2,7 @@ import LunePhone
 import SwiftUI
 
 struct AgentView: View {
-    let seat: Seat
+    let terminal: TerminalKey
     @Environment(Luned.self) private var luned
     @State private var waiting: Waiting?
     @State private var unread: String?
@@ -13,7 +13,7 @@ struct AgentView: View {
     @State private var asking: AskPlace?
 
     var body: some View {
-        let agent = luned.agent(at: seat)
+        let agent = luned.agent(at: terminal)
         List {
             if let agent {
                 Section {
@@ -65,12 +65,12 @@ struct AgentView: View {
         .navigationTitle(agent?.name ?? "Agent")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if let placed = agent?.placed,
-                let worktree = luned.worktree(placed.worktree, on: seat.machine)
+            if let agent, let placed = agent.placed,
+                let worktree = luned.worktree(placed.worktree, on: agent.on)
             {
                 Button("Ask here", systemImage: "bubble.left") {
                     asking = AskPlace(
-                        machine: seat.machine, cwd: worktree.folder, title: worktree.name)
+                        machine: agent.on, cwd: worktree.folder, title: worktree.name)
                 }
             }
         }
@@ -114,7 +114,7 @@ struct AgentView: View {
         let load = loads
         let read: Result<Waiting, Error>
         do {
-            read = .success(try await luned.waiting(at: seat))
+            read = .success(try await luned.waiting(at: terminal))
         } catch {
             read = .failure(error)
         }

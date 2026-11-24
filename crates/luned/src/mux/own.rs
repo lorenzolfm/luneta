@@ -2,7 +2,8 @@ use std::ffi::OsString;
 use std::num::{NonZeroU32, ParseIntError};
 use std::process::Command;
 use std::str::FromStr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub use lune_protocol::made::Made as OwnMade;
 
 use crate::mux::value_in;
 
@@ -10,42 +11,6 @@ pub mod api;
 pub mod frames;
 pub mod server;
 pub mod viewer;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OwnMade(u64);
-
-impl OwnMade {
-    #[must_use]
-    pub fn of(at: SystemTime) -> Option<Self> {
-        u64::try_from(at.duration_since(UNIX_EPOCH).ok()?.as_nanos()).ok().map(OwnMade)
-    }
-
-    #[must_use]
-    pub fn from_nanos(nanos: u64) -> Self {
-        OwnMade(nanos)
-    }
-
-    pub fn read(at: prost_types::Timestamp) -> Result<Self, String> {
-        let at = SystemTime::try_from(at).map_err(|why| why.to_string())?;
-        OwnMade::of(at).ok_or_else(|| "a time before 1970, or past 2554".to_owned())
-    }
-
-    #[must_use]
-    pub fn nanos(self) -> u64 {
-        self.0
-    }
-
-    #[must_use]
-    pub fn at(self) -> SystemTime {
-        UNIX_EPOCH + Duration::from_nanos(self.0)
-    }
-}
-
-impl From<OwnMade> for prost_types::Timestamp {
-    fn from(made: OwnMade) -> Self {
-        made.at().into()
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalKey {
