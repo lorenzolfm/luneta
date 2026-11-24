@@ -124,19 +124,25 @@ impl Pty {
         Ok(rustix::io::ioctl_fionread(&self.far)? >= full)
     }
 
-    pub fn raise(&self, key: SignalKey) -> Result<(), Unraised> {
-        let group = termios::tcgetpgrp(&self.near).map_err(|error| Unraised::Kept(error.into()))?;
-        let signal = key.signal.signal();
-        if key.flushes {
-            self.flush_input().map_err(Unraised::Kept)?;
-            let signalled = rustix::process::kill_process_group(group, signal);
-            return signalled.map_err(|error| Unraised::Flushed(error.into()));
-        }
-        let signalled = rustix::process::kill_process_group(group, signal);
-        signalled.map_err(|error| Unraised::Kept(error.into()))
+    pub fn raise(&self, key: SignalKey) -> Raise {
+        let unraised = |error: io::Error| Raise { queue: Queue::Kept, signalled: Err(error) };
+        let group = match termios::tcgetpgrp(&self.near) {
+            Ok(group) => group,
+            Err(error) => return unraised(error.into()),
+        };
+        let queue = if key.flushes {
+            if let Err(error) = self.flush() {
+                return unraised(error);
+            }
+            Queue::Flushed
+        } else {
+            Queue::Kept
+        };
+        let signalled = rustix::process::kill_process_group(group, key.signal.signal());
+        Raise { queue, signalled: signalled.map_err(io::Error::from) }
     }
 
-    fn flush_input(&self) -> io::Result<()> {
+    fn flush(&self) -> io::Result<()> {
         Ok(termios::tcflush(&self.far, QueueSelector::IFlush)?)
     }
 
@@ -176,13 +182,30 @@ impl Led {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignalKey {
     pub signal: KeySignal,
-    pub flushes: bool,
+    flushes: bool,
 }
 
+#[must_use]
 #[derive(Debug)]
-pub enum Unraised {
-    Kept(io::Error),
-    Flushed(io::Error),
+pub struct Raise {
+    pub queue: Queue,
+    pub signalled: io::Result<()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Queue {
+    Flushed,
+    Kept,
+}
+
+impl Queue {
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Queue::Flushed => "flushed",
+            Queue::Kept => "kept",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -347,8 +370,11 @@ mod tests {
         lune_waits::eventually("the kernel takes what waits", || {
             (rustix::io::ioctl_fionread(&pty.far).unwrap() == 6).then_some(())
         });
-        assert!(matches!(pty.raise(key(KeySignal::Interrupt, true)), Err(Unraised::Kept(_))));
-        assert!(matches!(pty.raise(key(KeySignal::Interrupt, false)), Err(Unraised::Kept(_))));
+        for flushes in [true, false] {
+            let raise = pty.raise(key(KeySignal::Interrupt, flushes));
+            assert_eq!(raise.queue, Queue::Kept);
+            assert!(raise.signalled.is_err());
+        }
         assert_eq!(rustix::io::ioctl_fionread(&pty.far).unwrap(), 6);
     }
 
@@ -367,7 +393,7 @@ mod tests {
         assert!(!pty.line_full().unwrap());
         typed_far(&pty, 1000);
         lune_waits::eventually("the kernel's line fills", || pty.line_full().unwrap().then_some(()));
-        pty.flush_input().unwrap();
+        pty.flush().unwrap();
         assert!(!pty.line_full().unwrap());
     }
 }
