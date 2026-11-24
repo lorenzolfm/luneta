@@ -57,7 +57,7 @@ use crate::projects::{Changed, Lock, Opened, Store};
 use crate::layouts::{self, Root, Unrooted};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
-use crate::prunes::{self, Occupied};
+use crate::prunes::{self, Lunes, Occupied};
 use crate::rebases;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
@@ -704,17 +704,17 @@ impl Daemon for Host {
         &self,
         request: Request<PrunesRequest>,
     ) -> Result<Response<Self::PrunesStream>, Status> {
-        let PrunesRequest { on, dir, here } = request.into_inner();
+        let PrunesRequest { on, dir } = request.into_inner();
         let dir = directory("dir", dir)?;
-        let here = here_on(on.as_ref(), here)?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            let answer = daemon.prunes(prunes::asked(None, &dir, None)).await?.into_inner();
+            let answer = daemon.prunes(prunes::asked(None, &dir)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
         let host = self.host().await?;
-        let occupied = Occupied::of(&host).map_err(Status::failed_precondition)?;
         let answer = late(move || {
-            let planned = prunes::plan(&dir, &occupied, here.as_ref());
+            let occupied = Lunes::running().and_then(|lunes| Occupied::of(&host, lunes));
+            let occupied = occupied.map_err(Status::failed_precondition)?;
+            let planned = prunes::plan(&dir, &occupied);
             let said = planned.map(|planned| PrunesResponse::from(planned.plan()));
             said.map_err(Status::failed_precondition)
         });
@@ -727,11 +727,10 @@ impl Daemon for Host {
         &self,
         request: Request<PruneRequest>,
     ) -> Result<Response<Self::PruneStream>, Status> {
-        let PruneRequest { on, dir, agreed, here } = request.into_inner();
+        let PruneRequest { on, dir, agreed } = request.into_inner();
         let dir = directory("dir", dir)?;
-        let here = here_on(on.as_ref(), here)?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            let told = PruneRequest { on: None, dir: dir.into(), agreed, here: None };
+            let told = PruneRequest { on: None, dir: dir.into(), agreed };
             let answer = daemon.prune(told).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
@@ -740,9 +739,9 @@ impl Daemon for Host {
         let answer = late(move || {
             let occupied = || {
                 let host = core::ask(&core, Command::Host).ok_or("luned's core did not say")?;
-                Occupied::of(&host)
+                Occupied::of(&host, Lunes::running()?)
             };
-            let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied, here.as_ref())
+            let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied)
                 .map_err(Status::failed_precondition)?;
             Ok(PruneResponse::from(&pruned))
         });
@@ -1152,18 +1151,6 @@ where
 
 fn directory(field: &str, dir: String) -> Result<Directory, Status> {
     Directory::parse(dir).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
-}
-
-fn here_on(on: Option<&api::On>, here: Option<String>) -> Result<Option<Directory>, Status> {
-    let Some(here) = here else {
-        return Ok(None);
-    };
-    if let Some(api::On { destination }) = on {
-        return Err(Status::invalid_argument(format!(
-            "here: {here} is a directory on the asking machine; it means nothing on {destination}"
-        )));
-    }
-    directory("here", here).map(Some)
 }
 
 fn asked_branch(branch: &str) -> Result<Branch, Status> {

@@ -74,7 +74,6 @@ pub fn told_by(on: Option<&Destination>, why: &str) -> String {
 pub fn said_by(on: Option<&Destination>, status: &Status) -> String {
     match (on, status.code()) {
         (Some(on), _) => on.said(status),
-        (None, Code::Unimplemented) => "luned is older than what lune asked of it".to_owned(),
         (None, code) if status.message().is_empty() => format!("luned: {code}"),
         (None, _) => status.message().to_owned(),
     }
@@ -970,8 +969,6 @@ mod tests {
         assert_eq!(said_by(None, &refused), "is in no repository");
         let blank = said_by(None, &Status::unavailable(""));
         assert_eq!(blank, format!("luned: {}", Code::Unavailable));
-        let older = said_by(None, &Status::unimplemented("Prunes"));
-        assert_eq!(older, "luned is older than what lune asked of it");
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::env;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc::Sender;
@@ -30,11 +29,7 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
         Ok(luned) => luned,
         Err(why) => return failed(&untold(&why)),
     };
-    let here = match here_of(&Machine::Local) {
-        Ok(here) => here,
-        Err(why) => return failed(&why),
-    };
-    let plan = match luned.prunes(&dir, here.as_ref()) {
+    let plan = match luned.prunes(&dir) {
         Ok(plan) => plan,
         Err(why) => return failed(&why),
     };
@@ -63,7 +58,7 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
             return ExitCode::from(PLANNED);
         },
     }
-    match luned.prune(&dir, &plan.deletes(), here.as_ref()) {
+    match luned.prune(&dir, &plan.deletes()) {
         Ok(Pruned::Went(outcomes)) => exit_of(&outcomes),
         Ok(Pruned::Changed(now)) => {
             for line in listed(&now) {
@@ -74,19 +69,6 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
         },
         Err(why) => failed(&why),
     }
-}
-
-fn here_of(on: &Machine) -> Result<Option<Directory>, String> {
-    let Machine::Local = on else {
-        return Ok(None);
-    };
-    let unplaced =
-        |why: &str| format!("lune cannot tell where it runs, so it deletes nothing: {why}");
-    let here = env::current_dir().map_err(|error| unplaced(&error.to_string()))?;
-    let shown = here.display().to_string();
-    let here = here.into_os_string().into_string();
-    let here = here.map_err(|_| unplaced(&format!("{shown} is not UTF-8, as lune needs")))?;
-    Directory::parse(here).map(Some).map_err(|why| unplaced(&why))
 }
 
 fn unagreed(yes: Option<Agreed>, agreed: Agreed) -> String {
@@ -181,8 +163,7 @@ pub fn plan(menu: u64, on: Machine, dir: Directory, events: &Sender<Event>) {
 }
 
 fn planned(on: &Machine, dir: &Directory) -> Result<Plan, String> {
-    let here = here_of(on)?;
-    Away::on(on, away::ANSWER)?.prunes(dir, here.as_ref())
+    Away::on(on, away::ANSWER)?.prunes(dir)
 }
 
 pub fn delete(
@@ -197,8 +178,7 @@ pub fn delete(
 }
 
 fn deleted(on: &Machine, dir: &Directory, agreed: &BTreeSet<Deleting>) -> Result<Pruned, String> {
-    let here = here_of(on)?;
-    Away::on(on, away::ANSWER)?.prune(dir, agreed, here.as_ref())
+    Away::on(on, away::ANSWER)?.prune(dir, agreed)
 }
 
 pub fn note(outcomes: &[Outcome]) -> Option<String> {

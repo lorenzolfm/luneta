@@ -174,8 +174,8 @@ impl Away {
         Filed::of(answer).map_err(|why| Unfiled::InDoubt(told_by(self.on.destination(), &why)))
     }
 
-    pub fn prunes(&mut self, dir: &Directory, here: Option<&Directory>) -> Result<Plan, String> {
-        let request = prunes::asked(self.asked_on(), dir, here);
+    pub fn prunes(&mut self, dir: &Directory) -> Result<Plan, String> {
+        let request = prunes::asked(self.asked_on(), dir);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_of(prunes::PLANNING, async move {
             timeout(patience, daemon.prunes(request)).await
@@ -187,9 +187,8 @@ impl Away {
         &mut self,
         dir: &Directory,
         agreed: &BTreeSet<Deleting>,
-        here: Option<&Directory>,
     ) -> Result<Pruned, String> {
-        let request = prunes::told(self.asked_on(), dir, agreed, here);
+        let request = prunes::told(self.asked_on(), dir, agreed);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_of(prunes::PLANNING + prunes::DELETING, async move {
             timeout(patience, daemon.prune(request)).await

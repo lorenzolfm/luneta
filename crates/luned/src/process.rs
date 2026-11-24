@@ -18,7 +18,7 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("luned reads processes on Linux and macOS, and on nothing else yet");
 
-pub use os::{environ, signalled, start, started, Domain};
+pub use os::{cwd, environ, signalled, start, started, Domain};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id {
