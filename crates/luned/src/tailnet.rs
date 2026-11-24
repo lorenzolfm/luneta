@@ -3,7 +3,7 @@ use std::fmt;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -19,6 +19,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::server::{Connected, TcpConnectInfo};
 use tonic::transport::Server;
 
+use crate::devices::{self, Allowed, DeviceId};
 use crate::log;
 
 pub const PORT: u16 = lune_protocol::TAILNET_PORT;
@@ -149,8 +150,18 @@ struct Whois {
 struct Peer {
     #[serde(rename = "User")]
     user: UserId,
+    #[serde(rename = "StableID")]
+    id: DeviceId,
+    #[serde(rename = "Name", default)]
+    name: String,
     #[serde(rename = "Tags", default)]
     tags: Vec<String>,
+}
+
+struct Device {
+    user: UserId,
+    id: DeviceId,
+    name: String,
 }
 
 pub struct Admitted {
@@ -159,9 +170,21 @@ pub struct Admitted {
     _connection: OwnedSemaphorePermit,
 }
 
+#[derive(Default)]
+struct Followed(Option<Result<Allowed, String>>);
+
+impl Followed {
+    fn changed(&mut self, now: Result<Allowed, String>) -> bool {
+        let changed = self.0.as_ref().is_some_and(|before| *before != now);
+        self.0 = Some(now);
+        changed
+    }
+}
+
 #[derive(Clone)]
 struct Admission {
     tailscaled: &'static Path,
+    devices_file: Arc<Path>,
     machine: Arc<Machine>,
     admitting: Arc<Semaphore>,
     connected: Arc<Semaphore>,
@@ -188,33 +211,43 @@ pub fn server() -> Server {
         .http2_keepalive_timeout(Some(PONGED_WITHIN))
 }
 
-pub fn incoming(sweep: Duration) -> ReceiverStream<io::Result<Admitted>> {
+pub fn incoming(sweep: Duration, devices_file: PathBuf) -> ReceiverStream<io::Result<Admitted>> {
     assert!(!sweep.is_zero(), "luned asks tailscaled again some time later, not at once");
+    assert!(devices_file.is_absolute(), "{} is absolute", devices_file.display());
     let (admitted, coming) = mpsc::channel(ADMITTED_MAX);
-    tokio::spawn(admit_all(Path::new(TAILSCALED), admitted, sweep));
+    tokio::spawn(admit_all(Path::new(TAILSCALED), devices_file.into(), admitted, sweep));
     ReceiverStream::new(coming)
 }
 
 async fn admit_all(
     tailscaled: &'static Path,
+    devices_file: Arc<Path>,
     admitted: mpsc::Sender<io::Result<Admitted>>,
     sweep: Duration,
 ) {
     let admitting = Arc::new(Semaphore::new(ADMITTING_MAX));
     let connected = Arc::new(Semaphore::new(CONNECTED_MAX));
     let mut listening = Listening::Not;
+    let mut followed = Followed::default();
     let mut said: Option<String> = None;
     loop {
+        let changed = followed.changed(allowed_in(&devices_file).await);
+        if changed && matches!(listening, Listening::On { .. }) {
+            let devices_file = devices_file.display();
+            log::say(&format!("{devices_file} changed, so each device is admitted again"));
+            listening.stop().await;
+        }
         let unlistened = match see_machine(tailscaled).await {
             Seen::Owned(machine) if listening.is_for(&machine) => None,
             Seen::Owned(machine) => {
                 listening.stop().await;
                 match listen(&machine).await {
                     Ok(listeners) => {
-                        say_listening(&machine);
+                        say_listening(&machine, &devices_file);
                         let (epoch, admitted_in) = watch::channel(());
                         let admission = Admission {
                             tailscaled,
+                            devices_file: Arc::clone(&devices_file),
                             machine: Arc::new(machine.clone()),
                             admitting: Arc::clone(&admitting),
                             connected: Arc::clone(&connected),
@@ -256,11 +289,11 @@ async fn admit_all(
     }
 }
 
-fn say_listening(machine: &Machine) {
+fn say_listening(machine: &Machine, devices_file: &Path) {
     let addresses = machine.addresses.iter().map(|address| SocketAddr::new(address.0, PORT));
     let addresses: Vec<String> = addresses.map(|address| address.to_string()).collect();
-    let user = machine.user;
-    log::say(&format!("listening on {} for the devices of {user}", addresses.join(" and ")));
+    let (addresses, user, file) = (addresses.join(" and "), machine.user, devices_file.display());
+    log::say(&format!("listening on {addresses} for the devices of {user} that {file} lets in"));
 }
 
 async fn see_machine(tailscaled: &Path) -> Seen {
@@ -311,7 +344,8 @@ async fn accept(listener: TcpListener, admission: Admission) {
         }
         let admission = admission.clone();
         tokio::spawn(async move {
-            match admits(admission.tailscaled, &admission.machine, peer).await {
+            let (tailscaled, devices_file) = (admission.tailscaled, &*admission.devices_file);
+            match admits(tailscaled, devices_file, &admission.machine, peer).await {
                 Ok(()) => {
                     let epoch = admission.epoch.clone();
                     let admitted = Admitted { stream, epoch, _connection: connection };
@@ -324,7 +358,18 @@ async fn accept(listener: TcpListener, admission: Admission) {
     }
 }
 
-async fn admits(tailscaled: &Path, machine: &Machine, peer: SocketAddr) -> Result<(), String> {
+async fn allowed_in(devices_file: &Path) -> Result<Allowed, String> {
+    let read = devices_file.to_owned();
+    let allowed = tokio::task::spawn_blocking(move || devices::allowed(&read)).await;
+    allowed.map_err(|error| format!("{} is not read: {error}", devices_file.display()))?
+}
+
+async fn admits(
+    tailscaled: &Path,
+    devices_file: &Path,
+    machine: &Machine,
+    peer: SocketAddr,
+) -> Result<(), String> {
     let Ok(address) = TailnetAddress::try_from(peer.ip()) else {
         return Err("it is not on the tailnet".to_owned());
     };
@@ -333,12 +378,18 @@ async fn admits(tailscaled: &Path, machine: &Machine, peer: SocketAddr) -> Resul
     }
     let user = machine.user;
     let path = format!("/localapi/v0/whois?addr={}", query_of(address, peer.port()));
-    let peer_user = user_of(&ask(tailscaled, &path).await?)?;
-    if peer_user == user {
-        Ok(())
-    } else {
-        Err(format!("it is {peer_user}'s, and luned answers only {user}"))
+    let device = device_of(&ask(tailscaled, &path).await?)?;
+    if device.user != user {
+        return Err(format!("it is {}'s, and luned answers only {user}", device.user));
     }
+    if allowed_in(devices_file).await?.lets_in(&device.id) {
+        return Ok(());
+    }
+    let Device { id, name, .. } = device;
+    let name = name.trim_end_matches('.').escape_debug().to_string();
+    let line = if name.is_empty() { id.to_string() } else { format!("{id} {name}") };
+    let devices_file = devices_file.display();
+    Err(format!("it is not in {devices_file}; the line \"{line}\" there lets it in"))
 }
 
 fn query_of(TailnetAddress(address): TailnetAddress, port: u16) -> String {
@@ -410,13 +461,14 @@ fn machine_of(body: &[u8]) -> Result<Machine, String> {
     Ok(Machine { user, addresses })
 }
 
-fn user_of(body: &[u8]) -> Result<UserId, String> {
+fn device_of(body: &[u8]) -> Result<Device, String> {
     let whois: Whois = serde_json::from_slice(body)
         .map_err(|error| format!("tailscaled's whois does not read: {error}"))?;
-    if !whois.node.tags.is_empty() {
-        return Err(format!("it is tagged {}, so no one user owns it", whois.node.tags.join(", ")));
+    let Peer { user, id, name, tags } = whois.node;
+    if !tags.is_empty() {
+        return Err(format!("it is tagged {}, so no one user owns it", tags.join(", ")));
     }
-    Ok(whois.node.user)
+    Ok(Device { user, id, name })
 }
 
 impl Admitted {
@@ -673,31 +725,65 @@ mod tests {
     }
 
     #[test]
-    fn only_this_machine_s_untagged_user_is_admitted() {
+    fn only_a_device_of_this_machine_s_user_that_the_file_lets_in_is_admitted() {
         const ANSWERS: &[(&str, &str)] = &[
-            ("/localapi/v0/whois?addr=100.101.2.4%3A51000", r#"{"Node":{"User":7,"Name":"phone"}}"#),
-            ("/localapi/v0/whois?addr=100.101.2.5%3A51000", r#"{"Node":{"User":8,"Name":"theirs"}}"#),
+            (
+                "/localapi/v0/whois?addr=100.101.2.4%3A51000",
+                r#"{"Node":{"User":7,"StableID":"nPhone4CNTRL","Name":"phone.tail1.ts.net."}}"#,
+            ),
+            (
+                "/localapi/v0/whois?addr=100.101.2.5%3A51000",
+                r#"{"Node":{"User":8,"StableID":"nTheirs5CNTRL","Name":"theirs.tail1.ts.net."}}"#,
+            ),
             (
                 "/localapi/v0/whois?addr=100.101.2.7%3A51000",
-                r#"{"Node":{"User":7,"Name":"server","Tags":["tag:ci"]}}"#,
+                r#"{"Node":{"User":7,"StableID":"nServer7CNTRL","Name":"server","Tags":["tag:ci"]}}"#,
             ),
+            (
+                "/localapi/v0/whois?addr=100.101.2.8%3A51000",
+                r#"{"Node":{"User":7,"StableID":"nPad8CNTRL","Name":"pad.tail1.ts.net.\nluned: spoofed"}}"#,
+            ),
+            ("/localapi/v0/whois?addr=100.101.2.9%3A51000", r#"{"Node":{"User":7,"Name":"unstable"}}"#),
         ];
         runtime().block_on(async {
             let folder = tempfile::tempdir().unwrap();
             let socket = tailscaled(folder.path(), ANSWERS);
-            let mine: SocketAddr = "100.101.2.4:51000".parse().unwrap();
-            let theirs: SocketAddr = "100.101.2.5:51000".parse().unwrap();
-            let unknown: SocketAddr = "100.101.2.6:51000".parse().unwrap();
-            let tagged: SocketAddr = "100.101.2.7:51000".parse().unwrap();
+            let file = folder.path().join(devices::FILE);
+            let at = |address: &str| address.parse::<SocketAddr>().unwrap();
             let machine = machine_of(STATUS.as_bytes()).unwrap();
-            assert_eq!(admits(&socket, &machine, mine).await, Ok(()));
-            let refused = admits(&socket, &machine, theirs).await.unwrap_err();
-            assert_eq!(refused, "it is user 8's, and luned answers only user 7");
-            let unknown = admits(&socket, &machine, unknown).await.unwrap_err();
-            assert!(unknown.starts_with("tailscaled answered HTTP/1.0 404"), "{unknown}");
-            let tagged = admits(&socket, &machine, tagged).await.unwrap_err();
+            let admits = |peer: &str| admits(&socket, &file, &machine, at(peer));
+            let unlisted = |line: &str| format!("it is not in {}; the line \"{line}\" there lets it in", file.display());
+            assert_eq!(admits("100.101.2.4:51000").await, Err(unlisted("nPhone4CNTRL phone.tail1.ts.net")));
+            std::fs::write(&file, "nPhone4CNTRL my phone\nnTheirs5CNTRL\nnServer7CNTRL\n").unwrap();
+            assert_eq!(admits("100.101.2.4:51000").await, Ok(()));
+            let theirs = admits("100.101.2.5:51000").await.unwrap_err();
+            assert_eq!(theirs, "it is user 8's, and luned answers only user 7");
+            let tagged = admits("100.101.2.7:51000").await.unwrap_err();
             assert_eq!(tagged, "it is tagged tag:ci, so no one user owns it");
+            let spoofed = admits("100.101.2.8:51000").await.unwrap_err();
+            assert_eq!(spoofed, unlisted(r"nPad8CNTRL pad.tail1.ts.net.\nluned: spoofed"));
+            let unstable = admits("100.101.2.9:51000").await.unwrap_err();
+            assert!(unstable.starts_with("tailscaled's whois does not read"), "{unstable}");
+            let unknown = admits("100.101.2.6:51000").await.unwrap_err();
+            assert!(unknown.starts_with("tailscaled answered HTTP/1.0 404"), "{unknown}");
+            std::fs::write(&file, "nPhone4CNTRL\nphone.tail1.ts.net\n").unwrap();
+            let unread = admits("100.101.2.4:51000").await.unwrap_err();
+            let why = "line 2: \"phone.tail1.ts.net\" is not a device's StableID";
+            assert_eq!(unread, format!("{}: {why}", file.display()));
         });
+    }
+
+    #[test]
+    fn a_change_to_the_devices_file_is_seen_once_and_its_first_read_is_none() {
+        let listed = |text: &str| devices::allowed_of(text);
+        let mut followed = Followed::default();
+        assert!(!followed.changed(listed("")));
+        assert!(!followed.changed(listed("")));
+        assert!(followed.changed(listed("nPhone4CNTRL")));
+        assert!(!followed.changed(listed("nPhone4CNTRL my phone")));
+        assert!(followed.changed(Err("it is not read".to_owned())));
+        assert!(!followed.changed(Err("it is not read".to_owned())));
+        assert!(followed.changed(listed("")));
     }
 
     #[test]
@@ -705,9 +791,10 @@ mod tests {
         runtime().block_on(async {
             let folder = tempfile::tempdir().unwrap();
             let missing = folder.path().join("tailscaled.sock");
+            let file = folder.path().join(devices::FILE);
             let lan: SocketAddr = "192.168.1.5:51000".parse().unwrap();
             let machine = machine_of(STATUS.as_bytes()).unwrap();
-            assert_eq!(admits(&missing, &machine, lan).await.unwrap_err(), "it is not on the tailnet");
+            assert_eq!(admits(&missing, &file, &machine, lan).await.unwrap_err(), "it is not on the tailnet");
         });
     }
 
@@ -716,11 +803,12 @@ mod tests {
         runtime().block_on(async {
             let folder = tempfile::tempdir().unwrap();
             let missing = folder.path().join("tailscaled.sock");
+            let file = folder.path().join(devices::FILE);
             let machine = machine_of(STATUS.as_bytes()).unwrap();
             let refusal = "it is this machine, where any of its users may connect";
             for own in ["100.101.2.3:51000", "[fd7a:115c:a1e0::1]:51000"] {
                 let own: SocketAddr = own.parse().unwrap();
-                assert_eq!(admits(&missing, &machine, own).await.unwrap_err(), refusal, "{own}");
+                assert_eq!(admits(&missing, &file, &machine, own).await.unwrap_err(), refusal, "{own}");
             }
         });
     }
