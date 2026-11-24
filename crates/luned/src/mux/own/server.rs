@@ -195,7 +195,9 @@ fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
         return Err(Failure::Own(unmatched.left_be()));
     }
     let pid = unmatched.pid.ok_or_else(|| unstopped("the kernel names no pid for it".to_owned()))?;
-    assert_ne!(pid, rustix::process::getpid(), "luned is never the lune-mux it stops");
+    if pid == rustix::process::getpid() {
+        return Err(unstopped("its socket leads back to luned itself".to_owned()));
+    }
     match rustix::process::kill_process(pid, Signal::TERM) {
         Ok(()) | Err(rustix::io::Errno::SRCH) => {},
         Err(error) => return Err(unstopped(error.to_string())),
@@ -836,6 +838,17 @@ mod tests {
     use lune_protocol::shell::Front;
 
     use super::*;
+
+    #[test]
+    fn luned_refuses_to_stop_a_lune_mux_whose_socket_leads_back_to_it() {
+        let runtime = runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let itself = Unmatched { pid: Some(rustix::process::getpid()), build: None };
+        let refused = stop(&runtime, &itself);
+        let Err(Failure::Own(why)) = refused else {
+            panic!("luned stops itself: {refused:?}");
+        };
+        assert!(why.ends_with("its socket leads back to luned itself"), "{why}");
+    }
 
     #[test]
     fn only_a_watch_that_says_it_emptied_is_heard_as_emptied() {
