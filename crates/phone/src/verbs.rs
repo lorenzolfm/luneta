@@ -2,6 +2,8 @@ use crate::api::{
     self, ask_response, list_work_response, make_worktree_response, prune_request,
     prune_response, prunes_response, rebase_response, waiting_response,
 };
+use lune_protocol::CONFLICTED_NAMED_MAX;
+
 use crate::unanswered::Unanswered;
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -55,16 +57,18 @@ impl Answer {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Landed {
-    Made { worktree: u64 },
+    Started { worktree: u64 },
     Found { worktree: u64 },
+    Shell { worktree: u64 },
 }
 
 impl Landed {
     pub(crate) fn of(said: Option<api::MakeWorktreeResponse>) -> Result<Landed, Unanswered> {
         let landed = said.and_then(|said| said.landed);
         match landed.ok_or_else(|| Unanswered::unread("it ended with no worktree"))? {
-            make_worktree_response::Landed::Made(worktree) => Ok(Landed::Made { worktree }),
+            make_worktree_response::Landed::Started(worktree) => Ok(Landed::Started { worktree }),
             make_worktree_response::Landed::Found(worktree) => Ok(Landed::Found { worktree }),
+            make_worktree_response::Landed::Made(worktree) => Ok(Landed::Shell { worktree }),
         }
     }
 }
@@ -295,7 +299,7 @@ pub struct Rebased {
 pub enum Rebase {
     Already,
     Clean { ahead: u32 },
-    Stopped { at: Option<String>, conflicted: Vec<String>, conflicted_count: u32 },
+    Stopped { at: Option<String>, named: Vec<String>, unnamed: u32 },
 }
 
 impl Rebased {
@@ -306,7 +310,17 @@ impl Rebased {
             rebase_response::Came::Clean(rebase_response::Clean { ahead }) => Rebase::Clean { ahead },
             rebase_response::Came::Stopped(stopped) => {
                 let rebase_response::Stopped { at, conflicted, conflicted_count } = stopped;
-                Rebase::Stopped { at, conflicted, conflicted_count }
+                let wanted = usize::try_from(conflicted_count).unwrap_or(usize::MAX);
+                let wanted = wanted.min(CONFLICTED_NAMED_MAX);
+                if conflicted.len() != wanted {
+                    let (named, count) = (conflicted.len(), conflicted_count);
+                    let why = format!("it names {named} files of the {count} in conflict, not {wanted}");
+                    return Err(Unanswered::unread(why));
+                }
+                let named = u32::try_from(conflicted.len());
+                let named = named.expect("at most CONFLICTED_NAMED_MAX files are named");
+                assert!(named <= conflicted_count);
+                Rebase::Stopped { at, named: conflicted, unnamed: conflicted_count - named }
             },
         };
         Ok(Rebased { branch: said.branch, onto: said.onto, came })
@@ -354,6 +368,35 @@ mod tests {
         assert_eq!(stays.deleting().remote, None);
         let local = Goes::of(said(None)).deleting();
         assert_eq!((local.folder.as_str(), local.number, local.remote), ("/w/lune/fix", 7, None));
+    }
+
+    #[test]
+    fn a_worktree_made_by_a_luned_too_old_to_read_what_it_opens_runs_a_shell() {
+        use make_worktree_response::Landed as Said;
+        let said = |landed| Some(api::MakeWorktreeResponse { landed: Some(landed) });
+        assert_eq!(Landed::of(said(Said::Made(4))), Ok(Landed::Shell { worktree: 4 }));
+        assert_eq!(Landed::of(said(Said::Started(4))), Ok(Landed::Started { worktree: 4 }));
+        assert_eq!(Landed::of(said(Said::Found(4))), Ok(Landed::Found { worktree: 4 }));
+    }
+
+    #[test]
+    fn a_rebase_stopped_names_its_conflicts_up_to_the_most_and_counts_the_rest() {
+        let stopped = |named: usize, count| {
+            let conflicted = (0..named).map(|file| format!("f{file}")).collect();
+            let stopped = rebase_response::Stopped { at: None, conflicted, conflicted_count: count };
+            let came = Some(rebase_response::Came::Stopped(stopped));
+            Rebased::of(Some(api::RebaseResponse { came, ..api::RebaseResponse::default() }))
+        };
+        let unnamed = |rebased: Result<Rebased, Unanswered>| match rebased.unwrap().came {
+            Rebase::Stopped { named, unnamed, .. } => (named.len(), unnamed),
+            came => panic!("the rebase stopped: {came:?}"),
+        };
+        assert_eq!(unnamed(stopped(3, 3)), (3, 0));
+        assert_eq!(unnamed(stopped(CONFLICTED_NAMED_MAX, 30)), (CONFLICTED_NAMED_MAX, 10));
+        for (named, count) in [(3, 2), (2, 3), (CONFLICTED_NAMED_MAX + 1, 30)] {
+            let unread = matches!(stopped(named, count), Err(Unanswered::InDoubt { .. }));
+            assert!(unread, "{named} of {count}");
+        }
     }
 
     #[test]

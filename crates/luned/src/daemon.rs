@@ -930,10 +930,12 @@ impl Daemon for Host {
             let answer = daemon.make_worktree(asked).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
+        let unopenable = |why: String| Status::invalid_argument(format!("opens: {why}"));
+        let agent = |opens: &api::Opens| matches!(opens.runs, Some(api::opens::Runs::Agent(_)));
+        let agent_asked = opens.as_ref().is_some_and(agent);
         let opens = match opens {
             None => Opens::Shell,
-            opens @ Some(_) => Opens::of_api(opens)
-                .map_err(|why| Status::invalid_argument(format!("opens: {why}")))?,
+            opens @ Some(_) => Opens::of_api(opens).map_err(unopenable)?,
         };
         let layouts = self.layouts.clone();
         let answer = late(move || {
@@ -955,6 +957,7 @@ impl Daemon for Host {
             let add = change_projects_request::Change::AddWorktree(add);
             let Changed { made, .. } = change_made(&layouts, add).map_err(unopened)?;
             let landed = match made {
+                Some(Made::Worktree(made)) if agent_asked => Landed::Started(made.get()),
                 Some(Made::Worktree(made)) => Landed::Made(made.get()),
                 Some(Made::Found(found)) => Landed::Found(found.get()),
                 made => unreachable!("an added worktree is made or found, not {made:?}"),

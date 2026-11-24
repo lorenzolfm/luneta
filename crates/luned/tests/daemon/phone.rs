@@ -1,9 +1,10 @@
 use std::fs;
+use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 
 use lune_phone::{
-    Came, Core, Held, Landed, Marked, Model, Observer, Order, Plan, Pruned, Rebase, Step,
-    Unanswered, View, Worktree,
+    Came, Core, Held, Landed, Marked, Model, Observer, Order, Plan, Pruned, Rebase, Refusals,
+    Step, Unanswered, View, Worktree,
 };
 use lune_waits::{eventually, Patience, PATIENCE};
 
@@ -82,14 +83,14 @@ impl Phone {
 }
 
 fn projects_here(model: &Model) -> &[lune_phone::Project] {
-    match &model.machines[0].held {
+    match &model.here {
         Held::Kept { projects } => projects,
         held => panic!("this machine keeps its projects: {held:?}"),
     }
 }
 
 fn worktree_of(model: &Model, worktree: u64) -> Option<&Worktree> {
-    projects_here(model).iter().flat_map(|it| &it.worktrees).find(|it| it.id == worktree)
+    projects_here(model).iter().flat_map(|it| it.holds.worktrees()).find(|it| it.id == worktree)
 }
 
 fn started_view(model: &Model, worktree: u64) -> Option<View> {
@@ -150,7 +151,7 @@ fn the_phone_renames_and_reorders_a_clone_s_worktrees_and_closes_a_view_and_a_wo
     });
     let order = |model: &Model| -> Vec<u64> {
         let project = projects_here(model).iter().find(|it| it.id == made);
-        project.map_or_default(|it| it.worktrees.iter().map(|it| it.id).collect())
+        project.map_or_default(|it| it.holds.worktrees().iter().map(|it| it.id).collect())
     };
     assert_eq!(order(&model), [main, two]);
     let (view, last) = (started_view(&model, main).unwrap(), started_view(&model, two).unwrap());
@@ -191,7 +192,7 @@ fn a_new_agent_starts_alone_in_its_branch_s_worktree_on_the_words_the_phone_gave
 
     let words = "Make the button blue\nand say so".to_owned();
     let landed = phone.core.new_agent(None, lune, "feat".to_owned(), words.clone());
-    let Landed::Made { worktree } = phone.block_on(landed).unwrap() else {
+    let Landed::Started { worktree } = phone.block_on(landed).unwrap() else {
         panic!("a branch with no worktree gets one made");
     };
     let told = eventually("claude starts in the worktree", || fs::read_to_string(&asked).ok());
@@ -233,10 +234,10 @@ fn the_phone_rebases_a_branch_onto_upstream_and_hears_why_not() {
     commit(&repository.fix, "theirs", "mine\n");
     commit(&repository.up, "theirs", "yours\n");
     let stopped = phone.block_on(phone.core.rebase(None, fix, Some("fix".to_owned()))).unwrap();
-    let Rebase::Stopped { conflicted, conflicted_count, .. } = stopped.came else {
+    let Rebase::Stopped { named, unnamed, .. } = stopped.came else {
         panic!("a conflict stops the rebase: {stopped:?}");
     };
-    assert_eq!((conflicted, conflicted_count), (vec!["theirs".to_owned()], 1));
+    assert_eq!((named, unnamed), (vec!["theirs".to_owned()], 0));
 }
 
 #[test]
@@ -321,7 +322,7 @@ fn the_phone_asks_in_turns_and_tackles_what_it_marked() {
     };
 
     let cwd = Some(dir.to_str().unwrap().to_owned());
-    let first = phone.core.ask(None, cwd, "which agents run".to_owned(), None, marked());
+    let first = phone.core.ask(None, cwd, "which agents run".to_owned(), None, marked()).unwrap();
     let session = Step::Session { id: "7c22".to_owned() };
     let ran = Step::Ran { id: "toolu_1".to_owned(), command: "lune agents".to_owned() };
     let said = Step::Said { text: "No agent runs.".to_owned() };
@@ -330,24 +331,75 @@ fn the_phone_asks_in_turns_and_tackles_what_it_marked() {
     assert_eq!((on(&told_first, "cwd"), on(&told_first, "before")), (dir.display().to_string(), "unset".to_owned()));
     assert_eq!(words, "which agents run");
 
-    let again = phone.core.ask(None, None, "yes".to_owned(), Some("7c22".to_owned()), marked());
+    let resumed = || Some("7c22".to_owned());
+    let again = phone.core.ask(None, None, "yes".to_owned(), resumed(), marked()).unwrap();
     assert_eq!(phone.steps(&again).unwrap(), [session.clone(), ran, said]);
     let (told_again, _) = told(&host);
     assert_eq!(on(&told_again, "resumed"), "7c22");
     assert_eq!(on(&told_again, "before"), on(&told_first, "turn"), "the turn before is the session's last");
     assert_ne!(on(&told_again, "turn"), on(&told_first, "turn"));
 
+    let unread = phone.core.ask(None, None, "and then".to_owned(), resumed(), marked()).unwrap();
+    let heard = phone.block_on(Patience::begun().awaited("the session", unread.next()));
+    assert_eq!(heard.unwrap(), Some(session.clone()));
+    let twice = phone.core.ask(None, None, "and then".to_owned(), resumed(), marked());
+    assert!(matches!(twice, Err(Unanswered::Refused { .. })), "a session takes one turn at a time");
+    drop(unread);
+    let after = phone.core.ask(None, None, "yes".to_owned(), resumed(), marked()).unwrap();
+    phone.steps(&after).unwrap();
+    let (told_after, _) = told(&host);
+    let unread = "a turn left unread is none before, so no answer agrees to its plan";
+    assert_eq!(on(&told_after, "before"), "unset", "{unread}");
+
     let these = Marked { issues: vec![7], pulls: vec![12] };
-    let tackled = phone.core.tackle(None, dir.to_str().unwrap().to_owned(), these);
+    let tackled = phone.core.tackle(None, dir.to_str().unwrap().to_owned(), these).unwrap();
     phone.steps(&tackled).unwrap();
     let (_, words) = told(&host);
     assert!(words.ends_with(&format!("\n\n{}", lune_phone::TACKLE)), "{words}");
     assert!(words.contains("the user marked issue #7, and pull request #12"), "{words}");
 
-    let failing = phone.core.ask(None, None, "please-fail".to_owned(), None, marked());
+    let failing = phone.core.ask(None, None, "please-fail".to_owned(), None, marked()).unwrap();
     assert_eq!(refused(phone.steps(&failing)), "Not logged in");
-    let blank = phone.core.ask(None, None, " ".to_owned(), None, marked());
+    let blank = phone.core.ask(None, None, " ".to_owned(), None, marked()).unwrap();
     assert!(refused(phone.steps(&blank)).contains("nothing asked"));
+}
+
+#[test]
+fn a_turn_the_phone_lets_go_of_stops_its_claude_before_claude_says_anything() {
+    let host = Host::new();
+    let ran = host.home.path().join("claude-pid");
+    let claude = format!("echo $$ > {0}.part && mv {0}.part {0}\nexec sleep 600\n", ran.display());
+    script(&host.bin().join("claude"), &claude);
+    let _daemon = start(host.vars()).unwrap();
+    let phone = Phone::of(&host);
+    let marked = Marked { issues: Vec::new(), pulls: Vec::new() };
+
+    let asking = phone.core.ask(None, None, "take your time".to_owned(), None, marked).unwrap();
+    let pid = eventually("claude starts", || fs::read_to_string(&ran).ok());
+    let alive = || Command::new("kill").args(["-0", pid.trim()]).status().unwrap().success();
+    assert!(alive(), "claude {pid} runs");
+    drop(asking);
+    eventually("claude is stopped", || (!alive()).then_some(()));
+}
+
+#[test]
+fn the_phone_takes_a_code_for_a_refusal_where_luned_s_own_reader_of_that_verb_does() {
+    use luned::changes::Unchanged;
+    use luned::issues::Unfiled;
+    use luned::rebases::Unrebased;
+    use tonic::{Code, Status};
+    let refused = |code, refusals| {
+        let read = Unanswered::of(&Status::new(code, "w"), refusals);
+        matches!(read, Unanswered::Refused { .. })
+    };
+    for code in (0..=16).map(Code::from) {
+        let changed = matches!(Unchanged::of(&Status::new(code, "w")), Unchanged::Refused(_));
+        assert_eq!(refused(code, Refusals::Changes), changed, "a change: {code:?}");
+        let filed = matches!(Unfiled::of("w".to_owned(), Some(code)), Unfiled::Refused(_));
+        assert_eq!(refused(code, Refusals::Filings), filed, "an issue filed: {code:?}");
+        let rebased = matches!(Unrebased::of("w".to_owned(), Some(code)), Unrebased::Refused(_));
+        assert_eq!(refused(code, Refusals::Others), rebased, "a rebase: {code:?}");
+    }
 }
 
 #[test]

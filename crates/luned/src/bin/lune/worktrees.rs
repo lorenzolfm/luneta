@@ -258,7 +258,7 @@ pub fn branched(
         let unsaid = || Unready::InDoubt("luned ended its answer with no worktree".to_owned());
         let id = |id| WorktreeId::of(id).ok_or_else(|| Unready::InDoubt(zero("worktree")));
         match answered.and_then(|answered| answered.landed).ok_or_else(unsaid)? {
-            Answered::Made(made) => id(made).map(Landed::Made),
+            Answered::Made(made) | Answered::Started(made) => id(made).map(Landed::Made),
             Answered::Found(found) => id(found).map(Landed::Found),
         }
     };

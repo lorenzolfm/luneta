@@ -22,20 +22,20 @@ impl TerminalKey {
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Model {
-    pub machines: Vec<Machine>,
+    pub here: Held,
+    pub far: Vec<Far>,
     pub inbox: Vec<Agent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct Machine {
-    pub on: Option<String>,
+pub struct Far {
+    pub on: String,
     pub reached: Reached,
     pub held: Held,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Reached {
-    Here,
     Reaching,
     Reached,
     Unreached { why: String, since: Option<SystemTime> },
@@ -54,8 +54,25 @@ pub struct Project {
     pub name: String,
     pub dir: String,
     pub missing: bool,
-    pub clone: bool,
-    pub worktrees: Vec<Worktree>,
+    pub holds: Holds,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum Holds {
+    Folder { worktree: Worktree },
+    Clone { worktrees: Vec<Worktree> },
+    Untold,
+}
+
+impl Holds {
+    #[must_use]
+    pub fn worktrees(&self) -> &[Worktree] {
+        match self {
+            Holds::Folder { worktree } => std::slice::from_ref(worktree),
+            Holds::Clone { worktrees } => worktrees,
+            Holds::Untold => &[],
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -96,10 +113,17 @@ pub struct Agent {
     pub on: Option<String>,
     pub terminal: Option<TerminalKey>,
     pub name: String,
-    pub project: Option<String>,
-    pub worktree: Option<String>,
+    pub placed: Option<Placed>,
     pub status: Status,
     pub since: Option<SystemTime>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Placed {
+    pub project: u64,
+    pub project_name: String,
+    pub worktree: u64,
+    pub worktree_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -109,6 +133,7 @@ pub enum Status {
     Waiting { why: Why },
     Shell,
     Other { said: String },
+    Untold,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -136,50 +161,53 @@ impl Model {
             git_statuses: &host.git_statuses,
             projects: host.projects.as_ref(),
         };
-        let mut seats = vec![(here, Reached::Here)];
+        let mut seats = Vec::with_capacity(host.remotes.len());
         for remote in &host.remotes {
-            let on = Some(remote.destination.as_str());
-            let seat = |agents, git_statuses, projects| Seat { on, agents, git_statuses, projects };
+            let on = remote.destination.as_str();
+            let seat =
+                |agents, git_statuses, projects| Seat { on: Some(on), agents, git_statuses, projects };
             match &remote.reached {
                 Some(remote::Reached::Here(())) => {},
                 Some(remote::Reached::Host(far)) => {
                     let seat = seat(&far.agents, &far.git_statuses, far.projects.as_ref());
-                    seats.push((seat, Reached::Reached));
+                    seats.push((on, seat, Reached::Reached));
                 },
                 Some(remote::Reached::Unreached(unreached)) => {
                     let since = unreached.since.and_then(|since| SystemTime::try_from(since).ok());
                     let why = unreached.why.clone();
                     let seat = seat(&[], &[], unreached.projects.as_ref());
-                    seats.push((seat, Reached::Unreached { why, since }));
+                    seats.push((on, seat, Reached::Unreached { why, since }));
                 },
                 Some(remote::Reached::Reaching(())) | None => {
-                    seats.push((seat(&[], &[], None), Reached::Reaching));
+                    seats.push((on, seat(&[], &[], None), Reached::Reaching));
                 },
             }
         }
-        let agents_count: usize = seats.iter().map(|(seat, _)| seat.agents.len()).sum();
+        let far_agents: usize = seats.iter().map(|(_, seat, _)| seat.agents.len()).sum();
+        let agents_count = here.agents.len() + far_agents;
         let mut inbox = Vec::with_capacity(agents_count);
-        let machines: Vec<Machine> = seats
+        let mut seated = |seat: &Seat<'_>| {
+            let held = held_of(seat);
+            inbox.extend(seat.agents.iter().map(|agent| agent_of(seat, &held, agent)));
+            held
+        };
+        let here = seated(&here);
+        let far = seats
             .into_iter()
-            .map(|(seat, reached)| {
-                let held = held_of(&seat);
-                inbox.extend(seat.agents.iter().map(|agent| agent_of(&seat, &held, agent)));
-                Machine { on: seat.on.map(str::to_owned), reached, held }
-            })
+            .map(|(on, seat, reached)| Far { on: on.to_owned(), reached, held: seated(&seat) })
             .collect();
         inbox.sort_by_key(inbox_place);
         assert_eq!(inbox.len(), agents_count);
-        assert_eq!(machines[0].reached, Reached::Here);
-        assert!(machines[0].on.is_none());
-        assert!(machines[1..].iter().all(|machine| machine.on.is_some()));
-        Model { machines, inbox }
+        Model { here, far, inbox }
     }
 }
 
 fn inbox_place(agent: &Agent) -> (bool, bool, Option<SystemTime>) {
     match agent.status {
         Status::Waiting { .. } => (false, agent.since.is_none(), agent.since),
-        Status::Busy | Status::Idle | Status::Shell | Status::Other { .. } => (true, false, None),
+        Status::Busy | Status::Idle | Status::Shell | Status::Other { .. } | Status::Untold => {
+            (true, false, None)
+        },
     }
 }
 
@@ -206,14 +234,22 @@ fn held_of(seat: &Seat<'_>) -> Held {
 }
 
 fn project_of(project: &api::Project, branches: &HashMap<&str, &str>) -> Project {
-    let worktrees = project.worktrees().unwrap_or_default();
+    let holds = match &project.holds {
+        Some(project::Holds::Folder(worktree)) => {
+            Holds::Folder { worktree: worktree_of(worktree, branches) }
+        },
+        Some(project::Holds::Clone(clone)) => {
+            let worktrees = clone.worktrees.iter().map(|it| worktree_of(it, branches)).collect();
+            Holds::Clone { worktrees }
+        },
+        None => Holds::Untold,
+    };
     Project {
         id: project.id,
         name: project.name.clone(),
         dir: project.dir.clone(),
         missing: project.missing,
-        clone: matches!(project.holds, Some(project::Holds::Clone(_))),
-        worktrees: worktrees.iter().map(|it| worktree_of(it, branches)).collect(),
+        holds,
     }
 }
 
@@ -259,22 +295,24 @@ fn view_of(view: &api::Terminal) -> View {
 
 fn agent_of(seat: &Seat<'_>, held: &Held, agent: &api::Agent) -> Agent {
     let terminal = agent.terminal.as_ref().and_then(TerminalKey::of);
-    let (project, worktree) = match (held, terminal) {
+    let placed = match (held, terminal) {
         (Held::Kept { projects }, Some(terminal)) => projects
             .iter()
-            .flat_map(|project| project.worktrees.iter().map(move |it| (project, it)))
+            .flat_map(|project| project.holds.worktrees().iter().map(move |it| (project, it)))
             .find(|(_, worktree)| worktree.views.iter().any(|it| it.terminal == Some(terminal)))
-            .map_or((None, None), |(project, worktree)| {
-                (Some(project.name.clone()), Some(worktree.name.clone()))
+            .map(|(project, worktree)| Placed {
+                project: project.id,
+                project_name: project.name.clone(),
+                worktree: worktree.id,
+                worktree_name: worktree.name.clone(),
             }),
-        _ => (None, None),
+        _ => None,
     };
     Agent {
         on: seat.on.map(str::to_owned),
         terminal,
         name: name_of(agent),
-        project,
-        worktree,
+        placed,
         status: status_of(agent),
         since: agent.status_since.and_then(|since| SystemTime::try_from(since).ok()),
     }
@@ -291,14 +329,14 @@ fn status_of(agent: &api::Agent) -> Status {
     let known = match &agent.status {
         Some(api::agent::Status::KnownStatus(known)) => api::Status::try_from(*known),
         Some(api::agent::Status::OtherStatus(said)) => return Status::Other { said: said.clone() },
-        None => return Status::Other { said: String::new() },
+        None => return Status::Untold,
     };
     match known {
         Ok(api::Status::Busy) => Status::Busy,
         Ok(api::Status::Idle) => Status::Idle,
         Ok(api::Status::Shell) => Status::Shell,
         Ok(api::Status::Waiting) => Status::Waiting { why: why_of(agent) },
-        Ok(api::Status::Unspecified) | Err(_) => Status::Other { said: String::new() },
+        Ok(api::Status::Unspecified) | Err(_) => Status::Untold,
     }
 }
 
@@ -400,14 +438,22 @@ mod tests {
             ..api::Host::default()
         };
         let model = Model::of(&host);
-        let placed = &model.inbox[0];
-        assert_eq!((placed.project.as_deref(), placed.worktree.as_deref()), (Some("lune"), Some("feat")));
-        assert_eq!(placed.terminal.map(|it| it.id), Some(8));
-        let Held::Kept { projects } = &model.machines[0].held else {
-            panic!("the projects are kept: {:?}", model.machines[0].held);
+        let agent = &model.inbox[0];
+        let placed = Placed {
+            project: 1,
+            project_name: "lune".to_owned(),
+            worktree: 6,
+            worktree_name: "feat".to_owned(),
         };
-        assert!(projects[0].clone);
-        assert_eq!(projects[0].worktrees[1].views[0].terminal, placed.terminal);
+        assert_eq!(agent.placed, Some(placed));
+        assert_eq!(agent.terminal.map(|it| it.id), Some(8));
+        let Held::Kept { projects } = &model.here else {
+            panic!("the projects are kept: {:?}", model.here);
+        };
+        let Holds::Clone { worktrees } = &projects[0].holds else {
+            panic!("the project is a clone: {:?}", projects[0].holds);
+        };
+        assert_eq!(worktrees[1].views[0].terminal, agent.terminal);
     }
 
     #[test]
@@ -423,10 +469,10 @@ mod tests {
             projects: Some(kept(vec![clone_of(vec![worktree_with(5, "fix", 9)])])),
             ..api::Host::default()
         };
-        let Held::Kept { projects } = &Model::of(&host).machines[0].held else {
+        let Held::Kept { projects } = &Model::of(&host).here else {
             panic!("the projects are kept");
         };
-        assert_eq!(projects[0].worktrees[0].branch.as_deref(), Some("issue-723"));
+        assert_eq!(projects[0].holds.worktrees()[0].branch.as_deref(), Some("issue-723"));
     }
 
     #[test]
@@ -450,16 +496,11 @@ mod tests {
             ..api::Host::default()
         };
         let model = Model::of(&host);
-        let machines: Vec<(Option<&str>, &Reached)> =
-            model.machines.iter().map(|it| (it.on.as_deref(), &it.reached)).collect();
+        let far: Vec<(&str, &Reached)> =
+            model.far.iter().map(|it| (it.on.as_str(), &it.reached)).collect();
         let unreached = Reached::Unreached { why: "ssh ended".to_owned(), since: None };
-        assert_eq!(machines, [
-            (None, &Reached::Here),
-            (Some("far"), &Reached::Reached),
-            (Some("vps"), &unreached),
-            (Some("mac"), &Reached::Reaching),
-        ]);
+        assert_eq!(far, [("far", &Reached::Reached), ("vps", &unreached), ("mac", &Reached::Reaching)]);
         assert_eq!(model.inbox[0].on.as_deref(), Some("far"));
-        assert_eq!(model.machines[0].held, Held::Untold);
+        assert_eq!(model.here, Held::Untold);
     }
 }

@@ -812,6 +812,7 @@ message MakeWorktreeResponse {
   oneof landed {
     fixed64 made = 1;
     fixed64 found = 2;
+    fixed64 started = 3;
   }
 }
 

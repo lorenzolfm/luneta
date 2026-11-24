@@ -3,15 +3,37 @@ use std::time::Duration;
 
 use tonic::{Code, Status};
 
-const REFUSALS: [Code; 7] = [
-    Code::InvalidArgument,
-    Code::FailedPrecondition,
-    Code::Aborted,
-    Code::NotFound,
-    Code::AlreadyExists,
-    Code::Unimplemented,
-    Code::PermissionDenied,
-];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusals {
+    Changes,
+    Filings,
+    Others,
+}
+
+impl Refusals {
+    #[must_use]
+    pub fn codes(self) -> &'static [Code] {
+        match self {
+            Refusals::Changes => &[
+                Code::InvalidArgument,
+                Code::FailedPrecondition,
+                Code::Aborted,
+                Code::NotFound,
+                Code::AlreadyExists,
+                Code::Unimplemented,
+            ],
+            Refusals::Filings => {
+                &[Code::InvalidArgument, Code::FailedPrecondition, Code::Unimplemented]
+            },
+            Refusals::Others => &[
+                Code::InvalidArgument,
+                Code::FailedPrecondition,
+                Code::NotFound,
+                Code::Unimplemented,
+            ],
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Error)]
 pub enum Unanswered {
@@ -21,10 +43,10 @@ pub enum Unanswered {
 
 impl Unanswered {
     #[must_use]
-    pub fn of(status: &Status) -> Unanswered {
+    pub fn of(status: &Status, refusals: Refusals) -> Unanswered {
         let why = status.message().to_owned();
         let why = if why.is_empty() { format!("luned said {}", status.code()) } else { why };
-        if REFUSALS.contains(&status.code()) {
+        if refusals.codes().contains(&status.code()) {
             Unanswered::Refused { why }
         } else {
             Unanswered::InDoubt { why }
@@ -69,11 +91,25 @@ mod tests {
 
     #[test]
     fn a_refusal_is_told_apart_from_an_answer_that_may_have_been_done() {
-        let refused = Unanswered::of(&Status::failed_precondition("fix has changes"));
+        let dirty = Status::failed_precondition("fix has changes");
+        let refused = Unanswered::of(&dirty, Refusals::Others);
         assert_eq!(refused, Unanswered::Refused { why: "fix has changes".to_owned() });
-        let in_doubt = Unanswered::of(&Status::unavailable("the bridge went"));
+        let in_doubt = Unanswered::of(&Status::unavailable("the bridge went"), Refusals::Changes);
         assert_eq!(in_doubt, Unanswered::InDoubt { why: "the bridge went".to_owned() });
-        let unsaid = Unanswered::of(&Status::new(Code::Internal, ""));
+        let unsaid = Unanswered::of(&Status::new(Code::Internal, ""), Refusals::Others);
         assert_eq!(unsaid.why(), "luned said Internal error");
+    }
+
+    #[test]
+    fn an_aborted_answer_is_a_refusal_only_of_a_change() {
+        let aborted = || Status::aborted("the worktree may be made");
+        let stale = Unanswered::of(&aborted(), Refusals::Changes);
+        assert!(matches!(stale, Unanswered::Refused { .. }), "a seen list that changed since");
+        for refusals in [Refusals::Filings, Refusals::Others] {
+            let read = Unanswered::of(&aborted(), refusals);
+            assert!(matches!(read, Unanswered::InDoubt { .. }), "{refusals:?}");
+        }
+        let unfiled = Unanswered::of(&Status::not_found("far went"), Refusals::Filings);
+        assert!(matches!(unfiled, Unanswered::InDoubt { .. }), "the bridge may have filed it");
     }
 }

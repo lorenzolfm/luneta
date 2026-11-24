@@ -1,8 +1,7 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::future::Future;
 use std::panic;
-use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -14,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep_until, timeout, timeout_at, Instant};
 use tonic::transport::{Channel, Endpoint, Uri};
+use lune_protocol::turn::Turn;
 use tonic::{Response, Status, Streaming};
 use tower::service_fn;
 
@@ -24,7 +24,7 @@ use crate::api::change_projects_request::{
 use crate::api::daemon_client::DaemonClient;
 use crate::api::{self, On};
 use crate::model::{Model, TerminalKey};
-use crate::unanswered::Unanswered;
+use crate::unanswered::{Refusals, Unanswered};
 use crate::verbs::{
     Answer, Filed, Goes, IssueRepository, Landed, Listed, Marked, Order, Plan, Pruned, Rebased,
     Step, Waiting,
@@ -73,32 +73,65 @@ pub struct Core {
     _workers: Workers,
 }
 
-struct Turns(VecDeque<(String, u64)>);
+struct Turns {
+    read: VecDeque<(String, u64)>,
+    running: HashMap<String, u64>,
+}
 
 impl Turns {
     fn new() -> Turns {
-        Turns(VecDeque::with_capacity(TURNS_HELD))
+        Turns { read: VecDeque::with_capacity(TURNS_HELD), running: HashMap::new() }
     }
 
-    fn before(&self, session: &str) -> Option<u64> {
-        assert!(self.0.len() <= TURNS_HELD);
-        self.0.iter().find(|(held, _)| held == session).map(|&(_, turn)| turn)
+    fn begin(&mut self, resumed: Option<&str>) -> Result<Turn, Unanswered> {
+        assert!(self.read.len() <= TURNS_HELD);
+        let Some(session) = resumed else {
+            return Ok(Turn::after(None));
+        };
+        if self.running.contains_key(session) {
+            let why = format!("a turn of session {session} still runs: read it to its end first");
+            return Err(Unanswered::refused(why));
+        }
+        let read = self.read.iter().position(|(held, _)| held == session);
+        let before = read.and_then(|at| self.read.remove(at)).map(|(_, turn)| turn);
+        let turn = Turn::after(before);
+        assert!(!self.running.values().any(|&running| running == turn.key()));
+        self.running.insert(session.to_owned(), turn.key());
+        Ok(turn)
+    }
+
+    fn run(&mut self, session: &str, turn: u64) {
+        self.running.entry(session.to_owned()).or_insert(turn);
+    }
+
+    fn ended(&mut self, session: Option<String>, turn: u64) {
+        if let Some(session) = session
+            && self.running.get(&session) == Some(&turn)
+        {
+            self.record(session, turn);
+        }
+        self.release(turn);
+    }
+
+    fn release(&mut self, turn: u64) {
+        self.running.retain(|_, &mut running| running != turn);
     }
 
     fn record(&mut self, session: String, turn: u64) {
-        assert!(self.0.len() <= TURNS_HELD);
-        self.0.retain(|(held, _)| *held != session);
-        if self.0.len() == TURNS_HELD {
-            self.0.pop_front();
+        assert!(self.read.len() <= TURNS_HELD);
+        self.read.retain(|(held, _)| *held != session);
+        if self.read.len() == TURNS_HELD {
+            self.read.pop_front();
         }
-        assert!(self.0.len() < TURNS_HELD);
-        self.0.push_back((session, turn));
+        assert!(self.read.len() < TURNS_HELD);
+        self.read.push_back((session, turn));
     }
 }
 
 struct Wait {
     answer: Duration,
     works: Duration,
+    refusals: Refusals,
 }
 
 fn held<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -131,11 +164,12 @@ fn tailnet(host: &str) -> Result<Endpoint, Unanswered> {
 
 async fn unary<T>(
     within: Duration,
+    refusals: Refusals,
     asked: impl Future<Output = Result<Response<T>, Status>>,
 ) -> Result<T, Unanswered> {
     match timeout(within, asked).await {
         Ok(Ok(answer)) => Ok(answer.into_inner()),
-        Ok(Err(status)) => Err(Unanswered::of(&status)),
+        Ok(Err(status)) => Err(Unanswered::of(&status, refusals)),
         Err(_) => Err(Unanswered::late(within)),
     }
 }
@@ -144,12 +178,12 @@ async fn first<T>(
     wait: Wait,
     asked: impl Future<Output = Result<Response<Streaming<T>>, Status>>,
 ) -> Result<Option<T>, Unanswered> {
-    let Wait { answer, works } = wait;
-    let mut answering = unary(answer, asked).await?;
+    let Wait { answer, works, refusals } = wait;
+    let mut answering = unary(answer, refusals, asked).await?;
     let within = answer.saturating_add(works);
     match timeout(within, answering.message()).await {
         Ok(Ok(said)) => Ok(said),
-        Ok(Err(status)) => Err(Unanswered::of(&status)),
+        Ok(Err(status)) => Err(Unanswered::of(&status, refusals)),
         Err(_) => Err(Unanswered::late(within)),
     }
 }
@@ -206,16 +240,10 @@ impl Core {
     async fn changed(&self, on: Option<String>, change: Change) -> Result<(), Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
         let request = api::ChangeProjectsRequest { on: self::on(on), change: Some(change) };
-        self.on_runtime(async move { unary(patience, daemon.change_projects(request)).await.map(drop) })
+        self.on_runtime(async move {
+            unary(patience, Refusals::Changes, daemon.change_projects(request)).await.map(drop)
+        })
             .await
-    }
-
-    fn turn_after(&self, resumed: Option<&str>) -> (u64, Option<u64>) {
-        let before = resumed.and_then(|session| held(&self.turns).before(session));
-        let key = RandomState::new().build_hasher().finish();
-        let key = if before == Some(key) { !key } else { key };
-        assert_ne!(Some(key), before);
-        (key, before)
     }
 }
 
@@ -249,32 +277,33 @@ impl Core {
         words: String,
         resumed: Option<String>,
         marked: Marked,
-    ) -> Arc<Asking> {
-        let (turn, before) = self.turn_after(resumed.as_deref());
+    ) -> Result<Arc<Asking>, Unanswered> {
+        let turn = held(&self.turns).begin(resumed.as_deref())?;
         let request = api::AskRequest {
             on: self::on(on),
             cwd,
             words,
             resumed,
             highlighted: String::new(),
-            turn,
-            before,
+            turn: turn.key(),
+            before: turn.before(),
             marked_issues: marked.issues,
             marked_pulls: marked.pulls,
         };
         let (tell, told) = mpsc::channel(STEPS_HELD);
-        let asked = Talk {
-            daemon: self.daemon.clone(),
-            patience: self.patience,
-            turns: self.turns.clone(),
-            turn,
-            tell,
-        };
+        let asked = Talk { daemon: self.daemon.clone(), patience: self.patience, tell };
         self.handle.spawn(asked.steps(request));
-        Arc::new(Asking { told: tokio::sync::Mutex::new(told) })
+        let listening = Listening { told, session: None, over: false };
+        let (listening, turns) = (tokio::sync::Mutex::new(listening), self.turns.clone());
+        Ok(Arc::new(Asking { listening, turns, turn: turn.key() }))
     }
 
-    pub fn tackle(&self, on: Option<String>, dir: String, marked: Marked) -> Arc<Asking> {
+    pub fn tackle(
+        &self,
+        on: Option<String>,
+        dir: String,
+        marked: Marked,
+    ) -> Result<Arc<Asking>, Unanswered> {
         self.ask(on, Some(dir), TACKLE.to_owned(), None, marked)
     }
 
@@ -286,7 +315,7 @@ impl Core {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
         let request = api::WaitingRequest { on: self::on(on), terminal: Some(terminal.to_api()) };
         self.on_runtime(async move {
-            Waiting::of(unary(patience, daemon.waiting(request)).await?)
+            Waiting::of(unary(patience, Refusals::Others, daemon.waiting(request)).await?)
         })
         .await
     }
@@ -295,17 +324,20 @@ impl Core {
         &self,
         on: Option<String>,
         terminal: TerminalKey,
-        shown: Option<u64>,
+        shown: u64,
         answer: Answer,
     ) -> Result<(), Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
         let request = api::AnswerRequest {
             on: self::on(on),
             terminal: Some(terminal.to_api()),
-            shown,
+            shown: Some(shown),
             answer: Some(answer.into_api()),
         };
-        self.on_runtime(async move { unary(patience, daemon.answer(request)).await.map(drop) }).await
+        self.on_runtime(async move {
+            unary(patience, Refusals::Changes, daemon.answer(request)).await.map(drop)
+        })
+        .await
     }
 
     pub async fn new_agent(
@@ -319,7 +351,7 @@ impl Core {
         let prompted = api::Prompted { harness: api::Harness::ClaudeCode.into(), words };
         let opens = Some(api::Opens { runs: Some(api::opens::Runs::Agent(prompted)) });
         let request = api::MakeWorktreeRequest { on: self::on(on), project, branch, opens };
-        let wait = Wait { answer: patience, works: waits::MAKING };
+        let wait = Wait { answer: patience, works: waits::MAKING, refusals: Refusals::Others };
         self.on_runtime(async move {
             Landed::of(first(wait, daemon.make_worktree(request)).await?)
         })
@@ -329,7 +361,7 @@ impl Core {
     pub async fn work(&self, on: Option<String>, project: u64) -> Result<Listed, Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
         let request = api::ListWorkRequest { on: self::on(on), project };
-        let wait = Wait { answer: patience, works: waits::LISTING };
+        let wait = Wait { answer: patience, works: waits::LISTING, refusals: Refusals::Others };
         self.on_runtime(async move {
             Listed::of(first(wait, daemon.list_work(request)).await?)
         })
@@ -402,7 +434,7 @@ impl Core {
     pub async fn prunes(&self, on: Option<String>, dir: String) -> Result<Plan, Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
         let request = api::PrunesRequest { on: self::on(on), dir };
-        let wait = Wait { answer: patience, works: waits::PLANNING };
+        let wait = Wait { answer: patience, works: waits::PLANNING, refusals: Refusals::Others };
         self.on_runtime(async move {
             let said = first(wait, daemon.prunes(request)).await?;
             said.map(Plan::of).ok_or_else(|| Unanswered::unread("it ended with no plan"))
@@ -419,7 +451,7 @@ impl Core {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
         let agreed = agreed.into_iter().map(Goes::deleting).collect();
         let request = api::PruneRequest { on: self::on(on), dir, agreed };
-        let wait = Wait { answer: patience, works: waits::DELETING };
+        let wait = Wait { answer: patience, works: waits::DELETING, refusals: Refusals::Others };
         self.on_runtime(async move {
             Pruned::of(first(wait, daemon.prune(request)).await?)
         })
@@ -434,7 +466,7 @@ impl Core {
     ) -> Result<Rebased, Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
         let request = api::RebaseRequest { on: self::on(on), dir, branch };
-        let wait = Wait { answer: patience, works: waits::REBASING };
+        let wait = Wait { answer: patience, works: waits::REBASING, refusals: Refusals::Others };
         self.on_runtime(async move {
             Rebased::of(first(wait, daemon.rebase(request)).await?)
         })
@@ -449,7 +481,8 @@ impl Core {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
         let request = api::IssueRepositoriesRequest { on: self::on(on), dir };
         self.on_runtime(async move {
-            let listed = unary(patience, daemon.issue_repositories(request)).await?;
+            let listing = daemon.issue_repositories(request);
+            let listed = unary(patience, Refusals::Others, listing).await?;
             let repository = |it: api::IssueRepository| IssueRepository {
                 remote: it.remote,
                 repository: it.repository,
@@ -468,7 +501,7 @@ impl Core {
     ) -> Result<Filed, Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
         let request = api::FileIssueRequest { on: self::on(on), dir, words, repository };
-        let wait = Wait { answer: patience, works: waits::FILING };
+        let wait = Wait { answer: patience, works: waits::FILING, refusals: Refusals::Filings };
         self.on_runtime(async move {
             Filed::of(first(wait, daemon.file_issue(request)).await?)
         })
@@ -481,7 +514,7 @@ async fn watched(mut daemon: Daemon, patience: Duration, observer: Arc<dyn Obser
     loop {
         let asked_at = Instant::now();
         let asked = api::WatchRequest { after, kept: None, shown: true };
-        let why = match unary(patience, daemon.watch(asked)).await {
+        let why = match unary(patience, Refusals::Others, daemon.watch(asked)).await {
             Ok(host) => match host.version {
                 Some(version) => {
                     after = Some(version);
@@ -507,57 +540,108 @@ async fn watched(mut daemon: Daemon, patience: Duration, observer: Arc<dyn Obser
     }
 }
 
+enum Told {
+    Step(Step),
+    Ended,
+    Failed(Unanswered),
+}
+
 struct Talk {
     daemon: Daemon,
     patience: Duration,
-    turns: Arc<Mutex<Turns>>,
-    turn: u64,
-    tell: mpsc::Sender<Result<Step, Unanswered>>,
+    tell: mpsc::Sender<Told>,
 }
 
 impl Talk {
     async fn steps(mut self, request: api::AskRequest) {
         let within = self.patience.saturating_add(waits::TURN);
         let deadline = Instant::now() + within;
-        let mut steps = match unary(self.patience, self.daemon.ask(request)).await {
+        let asked = tokio::select! {
+            () = self.tell.closed() => return,
+            asked = unary(self.patience, Refusals::Others, self.daemon.ask(request)) => asked,
+        };
+        let mut steps = match asked {
             Ok(steps) => steps,
-            Err(unanswered) => return self.ended(unanswered).await,
+            Err(unanswered) => return self.last(Told::Failed(unanswered)).await,
         };
         loop {
-            let said = match timeout_at(deadline, steps.message()).await {
+            let said = tokio::select! {
+                () = self.tell.closed() => return,
+                said = timeout_at(deadline, steps.message()) => said,
+            };
+            let said = match said {
                 Ok(Ok(Some(said))) => Step::of(said),
-                Ok(Ok(None)) => return,
-                Ok(Err(status)) => Err(Unanswered::of(&status)),
+                Ok(Ok(None)) => return self.last(Told::Ended).await,
+                Ok(Err(status)) => Err(Unanswered::of(&status, Refusals::Others)),
                 Err(_) => Err(Unanswered::late(within)),
             };
             let step = match said {
                 Ok(step) => step,
-                Err(unanswered) => return self.ended(unanswered).await,
+                Err(unanswered) => return self.last(Told::Failed(unanswered)).await,
             };
-            if let Step::Session { id } = &step {
-                held(&self.turns).record(id.clone(), self.turn);
-            }
-            if self.tell.send(Ok(step)).await.is_err() {
+            if self.tell.send(Told::Step(step)).await.is_err() {
                 return;
             }
         }
     }
 
-    async fn ended(self, unanswered: Unanswered) {
-        let told = self.tell.send(Err(unanswered)).await;
+    async fn last(self, told: Told) {
+        let told = self.tell.send(told).await;
         assert!(told.is_ok() || self.tell.is_closed());
     }
 }
 
+struct Listening {
+    told: mpsc::Receiver<Told>,
+    session: Option<String>,
+    over: bool,
+}
+
 #[derive(uniffi::Object)]
 pub struct Asking {
-    told: tokio::sync::Mutex<mpsc::Receiver<Result<Step, Unanswered>>>,
+    listening: tokio::sync::Mutex<Listening>,
+    turns: Arc<Mutex<Turns>>,
+    turn: u64,
 }
 
 #[uniffi::export]
 impl Asking {
     pub async fn next(&self) -> Result<Option<Step>, Unanswered> {
-        self.told.lock().await.recv().await.transpose()
+        let mut listening = self.listening.lock().await;
+        if listening.over {
+            return Ok(None);
+        }
+        let told = listening.told.recv().await;
+        if !matches!(told, Some(Told::Step(_))) {
+            listening.over = true;
+        }
+        match told {
+            Some(Told::Step(step)) => {
+                if let Step::Session { id } = &step {
+                    held(&self.turns).run(id, self.turn);
+                    listening.session = Some(id.clone());
+                }
+                Ok(Some(step))
+            },
+            Some(Told::Ended) => {
+                held(&self.turns).ended(listening.session.take(), self.turn);
+                Ok(None)
+            },
+            Some(Told::Failed(unanswered)) => {
+                held(&self.turns).release(self.turn);
+                Err(unanswered)
+            },
+            None => {
+                held(&self.turns).release(self.turn);
+                Err(Unanswered::InDoubt { why: "the core's talk ended before the turn did".to_owned() })
+            },
+        }
+    }
+}
+
+impl Drop for Asking {
+    fn drop(&mut self) {
+        held(&self.turns).release(self.turn);
     }
 }
 
@@ -576,6 +660,12 @@ mod tests {
         }
     }
 
+    fn before(turns: &mut Turns, session: &str) -> Option<u64> {
+        let turn = turns.begin(Some(session)).unwrap();
+        turns.release(turn.key());
+        turn.before()
+    }
+
     #[test]
     fn the_turns_held_forget_the_session_heard_of_longest_ago() {
         let mut turns = Turns::new();
@@ -584,9 +674,34 @@ mod tests {
         }
         turns.record("s0".to_owned(), 100);
         turns.record("new".to_owned(), 200);
-        assert_eq!(turns.0.len(), TURNS_HELD);
-        assert_eq!(turns.before("s1"), None);
-        assert_eq!(turns.before("s0"), Some(100));
-        assert_eq!(turns.before("new"), Some(200));
+        assert_eq!(turns.read.len(), TURNS_HELD);
+        assert_eq!(before(&mut turns, "s1"), None);
+        assert_eq!(before(&mut turns, "s0"), Some(100));
+        assert_eq!(before(&mut turns, "new"), Some(200));
+    }
+
+    #[test]
+    fn a_turn_is_the_one_before_only_once_it_was_read_to_its_end() {
+        let mut turns = Turns::new();
+        let first = turns.begin(None).unwrap();
+        turns.run("7c22", first.key());
+        turns.ended(Some("7c22".to_owned()), first.key());
+        let read = turns.begin(Some("7c22")).unwrap();
+        assert_eq!(read.before(), Some(first.key()));
+        turns.release(read.key());
+        let unread = turns.begin(Some("7c22")).unwrap();
+        assert_eq!(unread.before(), None, "the turn left unread is none before, nor the one before it");
+    }
+
+    #[test]
+    fn a_session_takes_one_turn_at_a_time() {
+        let mut turns = Turns::new();
+        let running = turns.begin(Some("7c22")).unwrap();
+        assert!(matches!(turns.begin(Some("7c22")), Err(Unanswered::Refused { .. })));
+        let other = turns.begin(Some("9f00")).unwrap();
+        turns.ended(Some("7c22".to_owned()), other.key());
+        assert_eq!(before(&mut turns, "9f00"), None, "a turn ended in one session is read in no other");
+        turns.release(running.key());
+        assert!(turns.begin(Some("7c22")).is_ok());
     }
 }
