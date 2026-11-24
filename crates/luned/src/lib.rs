@@ -9,6 +9,7 @@ mod claude;
 mod client;
 mod core;
 mod daemon;
+mod devices;
 mod directory;
 pub mod eza;
 mod fetches;
