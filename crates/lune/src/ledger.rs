@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use luned::projects::{ProjectId, ViewId};
+use lune_domain::projects::{ProjectId, ViewId};
 use serde::{Deserialize, Serialize};
 
 use crate::state;

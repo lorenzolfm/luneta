@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use lune_domain::agent::Harness;
 use serde::Deserialize;
 
-use crate::{program, Directory, Harness};
+use crate::{program, Directory};
 
 const FIND: &str = r#"dir=$(cd "$1" 2>/dev/null && pwd -P) || exit 0
 config=${CLAUDE_CONFIG_DIR:-$HOME/.claude}

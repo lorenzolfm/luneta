@@ -9,9 +9,10 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::names::SessionName;
 use luned::program::{self, Ran};
 use luned::transcripts::{digest, Digest, Reading, SessionId, IDS_MAX};
-use luned::{one_answer, Destination, SessionName};
+use luned::{one_answer, Destination};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

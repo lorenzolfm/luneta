@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
+use lune_domain::mux::TerminalKey;
 use lune_protocol::unread::Unplaced;
 
 pub use crate::agent::Unread;
 use crate::api::{Agent, UnreadFile};
-use crate::mux::TerminalKey;
 
 #[must_use]
 pub fn seated(agents: &[Agent]) -> HashMap<TerminalKey, &Agent> {

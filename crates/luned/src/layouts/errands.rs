@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
+use lune_domain::mux::TerminalKey;
+use lune_domain::projects::{Line, Size, TerminalViewId, VIEWS_MAX};
 use tokio::sync::mpsc::{self, error::TrySendError};
 
 use crate::mux::own::server::Terminals;
-use crate::mux::own::TerminalKey;
-use crate::projects::{Line, Size, TerminalViewId, VIEWS_MAX};
 use crate::tasks;
 
 pub const PASTES_PER_WAKE_MAX: usize = 1;
@@ -115,9 +115,10 @@ fn latest_kept(batch: &mut Vec<Errand>) {
 mod tests {
     use std::num::NonZeroU32;
 
+    use lune_domain::mux::{OwnMade, TerminalKey};
+    use lune_domain::projects::Size;
+
     use super::{latest_kept, Errand};
-    use crate::mux::own::{OwnMade, TerminalKey};
-    use crate::projects::Size;
 
     fn key(id: u32) -> TerminalKey {
         TerminalKey { id: NonZeroU32::new(id).unwrap(), made: OwnMade::from_nanos(1) }

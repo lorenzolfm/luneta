@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
+use lune_domain::projects::{Argv, Opens};
 use lune_waits::{eventually, Span};
 use luned::api::change_projects_request::{
     AddProject, AddWorktree, Change, CloseWorktree, Pull, RenameProject, ReorderProjects,
@@ -18,7 +19,6 @@ use luned::api::list_work_response::work::Issues;
 use luned::api::list_work_response::{Issue, Listed as Said, OpenIssues, Pull as ListedPull, Work};
 use luned::api::{ListWorkRequest, ListWorkResponse, MakeWorktreeRequest};
 use luned::api::Version;
-use luned::projects::{Argv, Opens};
 use luned::changes::Unchanged;
 use luned::SWEEP;
 use tonic::{Code, Status};

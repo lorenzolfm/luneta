@@ -34,8 +34,8 @@ impl From<Directory> for String {
     }
 }
 
-impl From<&crate::projects::Dir> for Directory {
-    fn from(dir: &crate::projects::Dir) -> Self {
+impl From<&lune_domain::projects::Dir> for Directory {
+    fn from(dir: &lune_domain::projects::Dir) -> Self {
         Directory(dir.as_str().to_owned())
     }
 }

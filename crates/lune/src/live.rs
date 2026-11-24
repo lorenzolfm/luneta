@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use luned::projects::ViewId;
+use lune_domain::projects::ViewId;
 
 use crate::ledger::{Key, Mark, Session};
 use crate::machines::Machine;
@@ -106,7 +106,7 @@ mod tests {
     use super::*;
 
     fn session(n: u64) -> Session {
-        Session::Project(luned::projects::ProjectId::of(n).unwrap())
+        Session::Project(lune_domain::projects::ProjectId::of(n).unwrap())
     }
 
     fn lists<const N: usize>(machines: [(&Machine, &[Session], bool); N]) -> Lists {

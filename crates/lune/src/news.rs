@@ -171,11 +171,11 @@ mod tests {
     }
 
     fn session(project: u64) -> Session {
-        Session::Project(luned::projects::ProjectId::of(project).unwrap())
+        Session::Project(lune_domain::projects::ProjectId::of(project).unwrap())
     }
 
-    fn id(view: u64) -> luned::projects::ViewId {
-        luned::projects::ViewId::of(view).unwrap()
+    fn id(view: u64) -> lune_domain::projects::ViewId {
+        lune_domain::projects::ViewId::of(view).unwrap()
     }
 
     fn view(view: u64) -> Key {
