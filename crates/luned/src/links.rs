@@ -21,7 +21,6 @@ use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common};
 use crate::program::{self, Ran};
 use crate::projects::{self, CloneRoot, Dir, Holders, ProjectName, SPOT_LOOK};
-use crate::terminate::LUNED;
 use crate::{zoxide, Destination, Directory};
 
 pub(crate) mod sync;
@@ -1158,7 +1157,7 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
 
-pub const MOVED_OFF: &str = "moved off: ";
+const MOVED_OFF: &str = "moved off: ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Taken<P> {
@@ -1180,12 +1179,31 @@ fn worktree_or_moved_off(dir: &str, of: &Of) -> Result<Taken<Directory>, Unready
 }
 
 fn ran_worktree(dir: &str, of: &Of, flags: &[&str]) -> Result<Ran, Unready> {
-    let mut luned = Command::new(luned()?);
+    let unrun = |why| format!("luned worktree could not be run: {why}");
+    let mut luned = Command::new(program::luned().map_err(unrun)?);
     git::local(luned.args(["worktree", "--repo", dir]).args(flags));
     luned.args(["--", &of.to_string()]);
     let ran = program::run_alone(&mut luned, MAKING)
         .map_err(|error| format!("luned worktree could not be run: {error}"))?;
     Ok(ran)
+}
+
+impl Taken<PathBuf> {
+    fn said(&self) -> String {
+        match self {
+            Taken::OnBranch(folder) => folder.display().to_string(),
+            Taken::MovedOff(folder) => format!("{MOVED_OFF}{}", folder.display()),
+        }
+    }
+}
+
+pub(crate) fn worktree_made(repo: &str, of: &Of, moved_off: bool) -> Result<String, String> {
+    let made = if moved_off {
+        made_or_moved_off(repo, of)?
+    } else {
+        Taken::OnBranch(made(repo, of)?)
+    };
+    Ok(made.said())
 }
 
 fn worktree_said(ran: Ran) -> Result<Taken<Directory>, Unready> {
@@ -1213,19 +1231,6 @@ fn worktree_said(ran: Ran) -> Result<Taken<Directory>, Unready> {
             MAKING.as_secs() / 60
         ))),
     }
-}
-
-pub(crate) fn luned() -> Result<PathBuf, String> {
-    let this = env::current_exe()
-        .map_err(|error| format!("lune cannot tell where it is: {error}"))?;
-    if this.file_name().is_some_and(|name| name == LUNED) {
-        return Ok(this);
-    }
-    let beside = this.with_file_name(LUNED);
-    if beside.is_file() {
-        return Ok(beside);
-    }
-    Err(format!("no luned is beside {}, to make the worktree with", this.display()))
 }
 
 pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
@@ -2044,6 +2049,18 @@ mod tests {
             let said = worktree_said(unsure);
             assert!(matches!(said, Err(Unready::InDoubt(_))), "{said:?}");
         }
+    }
+
+    #[test]
+    fn what_luned_worktree_says_of_a_worktree_reads_back_as_that_worktree() {
+        let scratch = tempfile::tempdir().unwrap();
+        let folder = fs::canonicalize(scratch.path()).unwrap();
+        let dir = directory(folder.to_str().unwrap());
+        let read = |taken: Taken<PathBuf>| {
+            worktree_said(ended(0, format!("{}\n", taken.said()).as_bytes(), b""))
+        };
+        assert_eq!(read(Taken::OnBranch(folder.clone())), Ok(Taken::OnBranch(dir.clone())));
+        assert_eq!(read(Taken::MovedOff(folder)), Ok(Taken::MovedOff(dir)));
     }
 
     #[test]

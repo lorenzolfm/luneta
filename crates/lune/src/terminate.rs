@@ -592,9 +592,10 @@ impl Ending {
         let running = terminate::running(folders);
         end_or(&running.lune_ids(), terminate::LUNE)?;
         self.lunes.extend(running.lunes.into_iter().map(|it| (it.id, role(&it.argv))));
-        let luneds = terminate::running(folders).luneds;
-        end_or(&luneds, terminate::LUNED)?;
-        self.luneds.extend(luneds);
+        let luned = terminate::running(folders);
+        end_or(&luned.luneds, terminate::LUNED)?;
+        end_or(&luned.helpers, terminate::LUNED)?;
+        self.luneds.extend(luned.luneds);
         Ok(())
     }
 
@@ -622,7 +623,8 @@ impl Ending {
         let running = terminate::running(folders);
         if !running.is_empty() {
             let of_lune = running.lune_ids().into_iter().map(|id| (terminate::LUNE, id));
-            let of_luned = running.luneds.into_iter().map(|id| (terminate::LUNED, id));
+            let luneds = running.luneds.into_iter().chain(running.helpers);
+            let of_luned = luneds.map(|id| (terminate::LUNED, id));
             let of_mux = running.muxes.into_iter().map(|id| (terminate::MUX, id));
             let left: Vec<String> = of_lune
                 .chain(of_luned)
@@ -717,6 +719,7 @@ mod tests {
         let running = Running {
             lunes: vec![lune(1, &[]), lune(2, &["api"]), lune(3, &["bridge"])],
             luneds: vec![id(4)],
+            helpers: vec![id(6)],
             muxes: vec![id(5)],
             served: vec![PathBuf::from("/run/user/1000/lune")],
             unreadable: Vec::new(),
@@ -772,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_s_key_holds_whether_an_agent_is_busy_or_a_command_runs() {
+    fn a_plan_s_key_holds_whether_an_agent_is_busy_or_a_command_or_a_helper_runs() {
         let lunes = vec![lune(1, &[])];
         let running = Running { lunes, luneds: vec![id(2)], ..Running::default() };
         let projects = Ok(Kept { projects: 1, worktrees: 0 });
@@ -783,6 +786,10 @@ mod tests {
         let mut commanded = idle.clone();
         commanded.running.lunes.push(lune(7, &["watch"]));
         assert_eq!(idle.key(), commanded.key());
+        let mut helped = idle.clone();
+        helped.running.helpers.push(id(9));
+        assert_eq!(idle.key(), helped.key());
+        assert_eq!(runs(&helped.running), runs(&idle.running));
 
         let mut fronted = idle.clone();
         fronted.running.lunes.push(lune(8, &[]));

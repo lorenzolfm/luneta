@@ -125,7 +125,8 @@ pub fn follow(core: SyncSender<core::Command>, sweep: Duration) -> io::Result<()
 }
 
 fn fetch(dir: &str, branch: &str) -> Result<Upstream, String> {
-    let mut luned = Command::new(links::luned()?);
+    let unrun = |why| format!("luned fetch-upstream could not be run: {why}");
+    let mut luned = Command::new(program::luned().map_err(unrun)?);
     git::local(git::configured(&mut luned, &QUIET).args(["fetch-upstream", "--", dir, branch]))
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("SSH_ASKPASS_REQUIRE", "never")

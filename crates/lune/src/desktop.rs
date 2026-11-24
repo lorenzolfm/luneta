@@ -107,6 +107,10 @@ impl Desktop {
         Desktop { serving: Some((orders, worker)), role: Role::Undecided, events }
     }
 
+    pub fn unserved(events: &Sender<Event>) -> Desktop {
+        Desktop { serving: None, role: Role::Undecided, events: events.clone() }
+    }
+
     pub fn post(&self, alert: Alert) {
         self.order(Order::Post(alert));
     }

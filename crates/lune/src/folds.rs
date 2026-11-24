@@ -86,9 +86,9 @@ enum Sharing {
 }
 
 impl Folds {
-    pub fn shared(state: &state::Folder) -> Self {
-        let dirs = state.path("folded").and_then(|sessions| {
-            Ok((sessions, state.path("folded-machines")?))
+    pub fn shared(state_folder: &state::Folder) -> Self {
+        let dirs = state_folder.path("folded").and_then(|sessions| {
+            Ok((sessions, state_folder.path("folded-machines")?))
         });
         match dirs {
             Ok((sessions, machines)) => Folds::within(sessions, machines),

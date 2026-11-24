@@ -1,7 +1,6 @@
 use std::cell::OnceCell;
-use std::env;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
@@ -14,11 +13,10 @@ use luned::api::InfoResponse;
 use luned::folder::{self, Folder, ANOTHER_RUNS, LOG};
 use luned::{program, Daemon};
 use luned::release::{self, Build, Of, Other, OWN};
+use luned::terminate::LUNED;
 use rustix::process::{Pid, Signal};
 
 use crate::commands::causes;
-
-const LUNED: &str = "luned";
 
 pub const START: Duration = Duration::from_secs(5);
 
@@ -279,12 +277,7 @@ fn start(folder: &Folder) -> Result<Started, String> {
 }
 
 fn luned() -> PathBuf {
-    let beside = env::current_exe()
-        .and_then(fs::canonicalize)
-        .ok()
-        .and_then(|lune| Some(lune.parent()?.join(LUNED)))
-        .filter(|luned| luned.is_file());
-    beside.unwrap_or_else(|| PathBuf::from(LUNED))
+    program::luned().unwrap_or_else(|_| PathBuf::from(LUNED))
 }
 
 fn makes_way(running: Option<Build>, own: Build, starting: impl FnOnce() -> Option<Build>) -> bool {

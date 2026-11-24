@@ -88,8 +88,8 @@ impl Default for Kept {
 }
 
 impl Kept {
-    pub fn shared(state: &state::Folder) -> (Self, Option<String>) {
-        match state.path(FILE) {
+    pub fn shared(state_folder: &state::Folder) -> (Self, Option<String>) {
+        match state_folder.path(FILE) {
             Ok(file) => Kept::within(file),
             Err(unset) => (Kept::default(), Some(unset.to_string())),
         }
@@ -136,7 +136,7 @@ impl Kept {
         let Some(file) = &self.file else {
             return Ok(());
         };
-        let folder = file.parent().expect("a file of `state::path` is in a folder");
+        let folder = file.parent().expect("a file of the state folder is in it");
         let unfinished = folder.join(format!("{FILE}.{}", state::unfinished()));
         let written = fs::create_dir_all(folder)
             .and_then(|()| fs::write(&unfinished, format!("{}\n", name(harness))))

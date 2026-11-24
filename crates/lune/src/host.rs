@@ -534,6 +534,7 @@ pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
             unkept,
             colours: answers.colours,
             releases: answers.kitty,
+            desktop: Desktop::start(&events, folder.clone()),
         };
         run_in(&mut terminal, (folder, &dir), arriving, events, &mut inbox, &mut sent)
     });
@@ -626,16 +627,16 @@ fn run_in(
 ) -> io::Result<Option<String>> {
     let area = Rect::from((Position::ORIGIN, terminal.size()?));
     let (columns, rows) = (area.width, area.height);
-    let opening = Opening { luned: folder, dir: dir.to_owned(), columns, rows };
-    let mut app = App::opened(opening, &state::Folder::of_user(), arriving, events);
+    let launch = Launch { folder, dir: dir.to_owned(), columns, rows };
+    let mut app = App::opened(launch, &state::Folder::of_user(), arriving, events);
     let ran = run_loop(terminal, &mut app, inbox);
     sent.extend(app.sent());
     ran?;
     Ok(app.failure())
 }
 
-pub struct Opening {
-    pub luned: Result<PathBuf, String>,
+pub struct Launch {
+    pub folder: Result<PathBuf, String>,
     pub dir: PathBuf,
     pub columns: u16,
     pub rows: u16,
@@ -648,15 +649,17 @@ struct Arriving {
     unkept: Option<String>,
     colours: Colours,
     releases: bool,
+    desktop: Desktop,
 }
 
 impl App {
     #[must_use]
-    pub fn open(opening: Opening, state: &Path) -> (App, Inbox) {
-        let news = match &opening.luned {
+    pub fn open(launch: Launch, state_folder: &Path) -> (App, Inbox) {
+        let news = match &launch.folder {
             Ok(runtime) => News::within(runtime),
             Err(why) => News::unshared(why),
         };
+        let (events, inbox) = mpsc::channel();
         let arriving = Arriving {
             start: None,
             runs_in: None,
@@ -664,27 +667,27 @@ impl App {
             unkept: None,
             colours: Colours::default(),
             releases: false,
+            desktop: Desktop::unserved(&events),
         };
-        let (events, inbox) = mpsc::channel();
-        let folder = state::Folder::at(state.to_owned());
-        (App::opened(opening, &folder, arriving, events), Inbox::new(inbox))
+        let state_folder = state::Folder::at(state_folder.to_owned());
+        (App::opened(launch, &state_folder, arriving, events), Inbox::new(inbox))
     }
 
     fn opened(
-        opening: Opening,
-        state: &state::Folder,
+        launch: Launch,
+        state_folder: &state::Folder,
         arriving: Arriving,
         events: Sender<Event>,
     ) -> App {
-        let Opening { luned: folder, dir, columns, rows } = opening;
-        let Arriving { start, runs_in, news, unkept, colours, releases } = arriving;
-        let (width, width_unread) = Width::kept(state);
-        let folds = Folds::shared(state);
+        let Launch { folder, dir, columns, rows } = launch;
+        let Arriving { start, runs_in, news, unkept, colours, releases, desktop } = arriving;
+        let (width, width_unread) = Width::kept(state_folder);
+        let folds = Folds::shared(state_folder);
         let folds_dirs = folds.dirs();
         let folds_watched =
             (!folds_dirs.is_empty()).then(|| folds::watch(&folds_dirs, events.clone())).transpose();
         let news_watched = news::watch(&news, events.clone());
-        let (agent, agent_unread) = Kept::shared(state);
+        let (agent, agent_unread) = Kept::shared(state_folder);
         let agent_watched =
             agent.file().map(|file| agents::watch(file, events.clone())).transpose();
         let mut sidebar = Sidebar::new(folds, news, agent, machines::local_name());
@@ -719,7 +722,6 @@ impl App {
         if let Some(why) = width_unread {
             sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
         }
-        let desktop = Desktop::start(&events, folder.clone());
         let daemon = match folder {
             Ok(folder) => Some(folder),
             Err(why) => {

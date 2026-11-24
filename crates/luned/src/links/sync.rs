@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{ASKING, GITHUB, Link, MAKING, failure, luned, remote, remotes, said, ssh_host};
+use super::{ASKING, GITHUB, Link, MAKING, failure, remote, remotes, said, ssh_host};
 use crate::git;
 use crate::program::{self, Ran};
 
@@ -86,7 +86,8 @@ fn top(dir: &str) -> Result<String, String> {
 }
 
 fn follow(dir: &str) -> Result<(), String> {
-    let mut luned = Command::new(luned()?);
+    let unrun = |why| format!("luned follow could not be run: {why}");
+    let mut luned = Command::new(program::luned().map_err(unrun)?);
     git::local(trusting_no_tree(&mut luned).args(["follow", dir]));
     let ran = program::run_alone(&mut luned, MAKING)
         .map_err(|error| format!("luned follow could not be run: {error}"))?;

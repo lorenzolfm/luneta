@@ -1,6 +1,9 @@
 use std::convert::Infallible;
+use std::env;
+use std::fs;
 use std::io::{self, Read, Write as _};
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -8,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use rustix::io::Errno;
 use rustix::process::{self, Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus};
+
+use crate::terminate::LUNED;
 
 const LOOK: Duration = Duration::from_millis(5);
 
@@ -43,6 +48,20 @@ impl Ran {
 fn first_line(said: &[u8]) -> Option<String> {
     let said = String::from_utf8_lossy(said);
     said.lines().map(str::trim).find(|line| !line.is_empty()).map(str::to_owned)
+}
+
+pub fn luned() -> Result<PathBuf, String> {
+    let this = env::current_exe()
+        .and_then(fs::canonicalize)
+        .map_err(|error| format!("this program cannot tell where it is: {error}"))?;
+    if this.file_name().is_some_and(|name| name == LUNED) {
+        return Ok(this);
+    }
+    let beside = this.with_file_name(LUNED);
+    if beside.is_file() {
+        return Ok(beside);
+    }
+    Err(format!("no luned is beside {}", this.display()))
 }
 
 pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {

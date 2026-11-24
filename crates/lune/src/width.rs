@@ -11,8 +11,8 @@ pub struct Width {
 }
 
 impl Width {
-    pub fn kept(state: &state::Folder) -> (Self, Option<String>) {
-        match state.path("width") {
+    pub fn kept(state_folder: &state::Folder) -> (Self, Option<String>) {
+        match state_folder.path("width") {
             Ok(file) => Width::within(file),
             Err(unset) => (Width { columns: sidebar::COLUMNS, file: Err(unset) }, None),
         }
@@ -46,7 +46,7 @@ impl Width {
 
     pub fn keep(&self) -> Result<(), String> {
         let file = self.file.as_ref().map_err(ToString::to_string)?;
-        let folder = file.parent().expect("a file of `state::path` is in a folder");
+        let folder = file.parent().expect("a file of the state folder is in it");
         let unfinished = folder.join(format!("width.{}", state::unfinished()));
         fs::create_dir_all(folder)
             .and_then(|()| fs::write(&unfinished, format!("{}\n", self.columns)))

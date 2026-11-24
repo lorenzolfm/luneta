@@ -66,7 +66,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use luned::{folder, release};
 
-pub use host::{App, Inbox, Opening};
+pub use host::{App, Inbox, Launch};
 
 #[derive(Parser)]
 #[command(
