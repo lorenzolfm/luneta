@@ -3,8 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use clap::Subcommand as _;
 use rustix::process::Signal;
 
+use crate::helper::Helper;
 use crate::{folder, process, projects};
 
 pub use crate::process::{Id, Start, Unended};
@@ -63,6 +65,7 @@ pub struct Lune {
 pub struct Running {
     pub lunes: Vec<Lune>,
     pub luneds: Vec<Id>,
+    pub helpers: Vec<Id>,
     pub muxes: Vec<Id>,
     pub served: Vec<PathBuf>,
     pub unreadable: Vec<Unreadable>,
@@ -71,7 +74,10 @@ pub struct Running {
 impl Running {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.lunes.is_empty() && self.luneds.is_empty() && self.muxes.is_empty()
+        self.lunes.is_empty()
+            && self.luneds.is_empty()
+            && self.helpers.is_empty()
+            && self.muxes.is_empty()
     }
 
     #[must_use]
@@ -120,6 +126,7 @@ fn running_of(mine: process::Mine<Program>, folders: &[&Path], me: u32) -> Runni
         };
         match found.program {
             Program::Lune => running.lunes.push(Lune { id: found.id, argv: found.argv }),
+            Program::Luned if helps(&found.argv) => running.helpers.push(found.id),
             Program::Luned => {
                 running.luneds.push(found.id);
                 if !running.served.iter().any(|served| served == folder) {
@@ -131,9 +138,14 @@ fn running_of(mine: process::Mine<Program>, folders: &[&Path], me: u32) -> Runni
     }
     running.lunes.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     running.luneds.sort_unstable();
+    running.helpers.sort_unstable();
     running.muxes.sort_unstable();
     running.unreadable.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     running
+}
+
+fn helps(argv: &[OsString]) -> bool {
+    argv.get(1).and_then(|first| first.to_str()).is_some_and(Helper::has_subcommand)
 }
 
 fn listened_in(found: &process::Found<Program>) -> Option<PathBuf> {
@@ -275,6 +287,27 @@ mod tests {
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
         let (daemons, muxes) = (pids(running.luneds), pids(running.muxes));
         assert_eq!((running.lunes, daemons, muxes), (vec![], vec![1], vec![2]));
+    }
+
+    #[test]
+    fn a_luned_that_runs_a_helper_is_no_daemon_and_serves_no_folder() {
+        let folder = Path::new("/run/user/1000/lune");
+        let ours = ["XDG_RUNTIME_DIR=/run/user/1000"];
+        let listed = vec![
+            given(1, Program::Luned, &["fetch-upstream", "--", "/w", "main"], &ours),
+            given(2, Program::Luned, &["worktree", "--repo", "/w", "--", "feat"], &ours),
+            given(3, Program::Luned, &["follow", "/w"], &ours),
+            given(4, Program::Luned, &["--detached"], &ours),
+        ];
+        let running = running_of(mine(listed), &[folder], 0);
+        let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
+        assert_eq!((pids(running.luneds), pids(running.helpers)), (vec![4], vec![1, 2, 3]));
+        assert_eq!(running.served, [folder.to_owned()]);
+
+        let left = given(1, Program::Luned, &["follow", "/w"], &ours);
+        let alone = running_of(mine(vec![left]), &[folder], 0);
+        assert_eq!(alone.served, Vec::<PathBuf>::new());
+        assert!(!alone.is_empty(), "a helper left running is ended too");
     }
 
     #[test]

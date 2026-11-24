@@ -1,5 +1,7 @@
 use std::convert::Infallible;
 use std::future::Future;
+use std::hash::{BuildHasher as _, Hasher as _, RandomState};
+use std::num::NonZeroU32;
 use std::panic;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -201,7 +203,7 @@ fn tailnet(named: &str) -> Result<Endpoint, Unanswered> {
         .connect_timeout(CONNECT)
         .http2_keep_alive_interval(QUIET)
         .keep_alive_timeout(PONG)
-        .keep_alive_while_idle(true))
+        .keep_alive_while_idle(false))
 }
 
 async fn unary<T>(
@@ -510,21 +512,29 @@ impl Core {
     }
 }
 
+enum Watch {
+    Fresh,
+    Heard { after: api::Version, shown: Model },
+    Lost { why: String, failed: NonZeroU32 },
+}
+
 async fn watched(mut daemon: Daemon, patience: Duration, observer: Arc<dyn Observer>) -> Infallible {
-    let (mut after, mut shown, mut missed) = (None, None, None);
+    let mut watch = Watch::Fresh;
     loop {
         let asked_at = Instant::now();
+        let after = match &watch {
+            Watch::Heard { after, .. } => Some(*after),
+            Watch::Fresh | Watch::Lost { .. } => None,
+        };
         let asked = api::WatchRequest { after, kept: None, shown: true };
         let why = match unary(patience, Refusals::Others, daemon.watch(asked)).await {
             Ok(host) => match host.version {
                 Some(version) => {
-                    after = Some(version);
-                    missed = None;
                     let model = Model::of(&host);
-                    if shown.as_ref() != Some(&model) {
+                    if !matches!(&watch, Watch::Heard { shown, .. } if *shown == model) {
                         observer.changed(model.clone());
-                        shown = Some(model);
                     }
+                    watch = Watch::Heard { after: version, shown: model };
                     sleep_until(asked_at + waits::PACE).await;
                     continue;
                 },
@@ -532,13 +542,25 @@ async fn watched(mut daemon: Daemon, patience: Duration, observer: Arc<dyn Obser
             },
             Err(unanswered) => unanswered.why().to_owned(),
         };
-        (after, shown) = (None, None);
-        if missed.as_ref() != Some(&why) {
-            observer.lost(why.clone());
-            missed = Some(why);
-        }
-        tokio::time::sleep(waits::AGAIN).await;
+        let failed = match &watch {
+            Watch::Lost { why: missed, failed } => {
+                if *missed != why {
+                    observer.lost(why.clone());
+                }
+                failed.saturating_add(1)
+            },
+            Watch::Fresh | Watch::Heard { .. } => {
+                observer.lost(why.clone());
+                NonZeroU32::MIN
+            },
+        };
+        watch = Watch::Lost { why, failed };
+        tokio::time::sleep(waits::again(failed, chance())).await;
     }
+}
+
+fn chance() -> u64 {
+    RandomState::new().build_hasher().finish()
 }
 
 #[derive(uniffi::Object)]

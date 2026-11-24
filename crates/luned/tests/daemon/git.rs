@@ -26,7 +26,7 @@ fn number(pull_request: &api::PullRequest) -> u32 {
 
 impl Host {
     fn watch(&self, after: Option<Version>) -> (api::Host, Lasted) {
-        let mut command = self.vars().command(LUNE);
+        let mut command = self.vars().command(&LUNE);
         command.arg("watch");
         if let Some(after) = after {
             command.arg(format!("--after={}:{}", after.pid, after.seq));

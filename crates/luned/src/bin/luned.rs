@@ -4,6 +4,7 @@ use std::os::fd::{BorrowedFd, RawFd};
 use std::process::ExitCode;
 
 use clap::Parser;
+use luned::helper::Helper;
 use luned::log::{self, Process};
 use luned::projects::{self, Unheld};
 use luned::{folder, panics, release, Claim, Refusal};
@@ -14,6 +15,7 @@ use rustix::io::FdFlags;
     version = release::SAID.as_str(),
     about = "The lune daemon of this host, for this user"
 )]
+#[command(args_conflicts_with_subcommands = true)]
 struct Args {
     #[arg(
         long,
@@ -22,10 +24,15 @@ struct Args {
                 handed open past its stdio, it closes"
     )]
     detached: bool,
+    #[command(subcommand)]
+    helper: Option<Helper>,
 }
 
 fn main() -> ExitCode {
     let args = Args::parse();
+    if let Some(helper) = args.helper {
+        return helper.run();
+    }
     let unkept = log::start(Process::Luned).err();
     let hooked = panics::abort_on_panic();
     if args.detached

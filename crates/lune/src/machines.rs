@@ -56,7 +56,7 @@ pub fn parsed() -> Result<HostsParsed, String> {
 }
 
 fn file() -> Result<std::path::PathBuf, String> {
-    state::path(HOSTS_FILE).map_err(|unset| unset.to_string())
+    state::Folder::of_user().path(HOSTS_FILE).map_err(|unset| unset.to_string())
 }
 
 fn add_to(file: &Path, destination: &Destination) -> Result<Added, String> {
@@ -100,7 +100,7 @@ fn changed<T>(
     file: &Path,
     change: impl FnOnce(&str) -> Result<(T, Option<String>), String>,
 ) -> Result<T, String> {
-    let folder = file.parent().expect("a file of `state::path` is in a folder");
+    let folder = file.parent().expect("a file of the state folder is in it");
     let failed = |error: io::Error| format!("{}: {error}", file.display());
     fs::create_dir_all(folder).map_err(failed)?;
     let lock = File::create(folder.join(format!("{HOSTS_FILE}.lock"))).map_err(failed)?;
@@ -121,7 +121,7 @@ fn read(file: &Path) -> Result<String, String> {
 }
 
 fn write(file: &Path, text: &str) -> Result<(), String> {
-    let folder = file.parent().expect("a file of `state::path` is in a folder");
+    let folder = file.parent().expect("a file of the state folder is in it");
     let unfinished = folder.join(format!("{HOSTS_FILE}.{}", state::unfinished()));
     let written = fs::write(&unfinished, text).and_then(|()| fs::rename(&unfinished, file));
     if written.is_err() {

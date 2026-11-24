@@ -15,7 +15,7 @@ use crate::projects::{command, project, worktree};
 use crate::worktree::{cloned_as_wt, git};
 
 fn started(host: &Host, from: &Path, what: &str, env: &[(&str, String)]) -> Output {
-    let mut lune = host.vars().command(LUNE);
+    let mut lune = host.vars().command(&LUNE);
     luned::local_git(&mut lune);
     lune.current_dir(from).args(["start", what]);
     lune.envs(env.iter().map(|(name, value)| (*name, value)));

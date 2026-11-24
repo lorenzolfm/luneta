@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self as std_mpsc, Receiver, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -195,6 +195,15 @@ impl Wake {
 pub struct Started {
     pub handle: Handle,
     pub pid: u32,
+    pub placing: Placing,
+}
+
+pub struct Placing(SyncSender<()>);
+
+impl Placing {
+    pub fn placed(self) {
+        self.0.send(()).expect("the terminal's thread waits to be placed");
+    }
 }
 
 pub fn start(
@@ -206,6 +215,7 @@ pub fn start(
 ) -> io::Result<Started> {
     let terminal = key.id;
     let (to, inbox) = mpsc::channel(MESSAGES_MAX);
+    let (placing, placed) = std_mpsc::sync_channel(1);
     let (wake, woken) = UnixStream::pair()?;
     wake.set_nonblocking(true)?;
     woken.set_nonblocking(true)?;
@@ -218,6 +228,9 @@ pub fn start(
     let (leader, exits) = Leader::waited(terminal, child, mux.leaders(), move || waking.wake())?;
     let pid = leader.pid();
     thread::Builder::new().name(format!("terminal {terminal}")).spawn(move || {
+        if placed.recv().is_err() {
+            return;
+        }
         let screen = match Screen::new(size, SCROLLBACK_BYTES) {
             Ok(screen) => screen,
             Err(error) => {
@@ -265,7 +278,7 @@ pub fn start(
         }
         leader.end();
     })?;
-    Ok(Started { handle, pid })
+    Ok(Started { handle, pid, placing: Placing(placing) })
 }
 
 struct Shown {

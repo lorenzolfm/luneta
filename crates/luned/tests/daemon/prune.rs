@@ -106,7 +106,7 @@ fn terminals(host: &luned::api::Host) -> usize {
 }
 
 fn prune(host: &Host, from: &Path, repo: &Path, more: &[&str]) -> Output {
-    let mut command = host.vars().command(LUNE);
+    let mut command = host.vars().command(&LUNE);
     command.current_dir(from).args(["prune", "--repo"]).arg(repo).args(more);
     answered(&mut command)
 }
@@ -394,7 +394,7 @@ fn in_the_ask_box_a_plan_takes_its_yes_only_in_the_next_turn() {
     host.gh.open("one", &merged(1, &head, "me"));
     let _serving = serving(&host, &repository.at("main"));
     let in_turn = |vars: &[(&str, &str)], more: &[&str]| {
-        let mut command = host.vars().command(LUNE);
+        let mut command = host.vars().command(&LUNE);
         command
             .current_dir(&scratch)
             .args(["prune", "--repo"])

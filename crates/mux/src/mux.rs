@@ -12,7 +12,7 @@ use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, Termina
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leaders;
 use crate::panics::Shared;
-use crate::terminal::{self, Exit, Handle, Viewer, ViewerOut, Wanted};
+use crate::terminal::{self, Exit, Handle, Placing, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
 
 pub const TERMINALS_MAX: usize = 1024;
@@ -53,6 +53,29 @@ impl Ending {
     }
 }
 
+#[must_use]
+pub struct Reserved {
+    mux: Arc<Mux>,
+    key: TerminalKey,
+}
+
+impl Reserved {
+    pub fn start(self, opens: &Opens, tag: Tag, size: Size) -> Result<TerminalKey, Status> {
+        let started = spawned(&self.mux, self.key, tag, opens, size);
+        self.place(started)
+    }
+
+    fn place(self, started: Result<(Terminal, Placing), Status>) -> Result<TerminalKey, Status> {
+        self.mux.change(|model| model.place(self.key, started))
+    }
+}
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        self.mux.change(|model| model.unreserve(self.key.id));
+    }
+}
+
 enum Model {
     Holds(Holding),
     Ended(Ending),
@@ -61,8 +84,21 @@ enum Model {
 #[derive(Default)]
 struct Holding {
     last: Ids,
-    terminals: Vec<Terminal>,
+    terminals: BTreeMap<TerminalId, Slot>,
     viewing: BTreeMap<ClientId, Viewing>,
+    empty: Empty,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Empty {
+    #[default]
+    Waits,
+    Ends,
+}
+
+enum Slot {
+    Starting,
+    Placed(Box<Terminal>),
 }
 
 #[derive(Default)]
@@ -112,7 +148,7 @@ impl Mux {
     }
 
     pub fn end_if_unused(&self) {
-        self.change(Model::end_if_empty);
+        self.change(Model::end_if_unused);
     }
 
     pub fn end_unreached(&self, unreached: Unreached) -> Option<usize> {
@@ -137,25 +173,9 @@ impl Mux {
         changed
     }
 
-    pub fn new_terminal(
-        self: &Arc<Mux>,
-        opens: &Opens,
-        tag: Tag,
-        size: Size,
-    ) -> Result<TerminalKey, Status> {
-        self.change(|model| {
-            let holding = model.holding()?;
-            refuse_if_full(holding.terminals.len(), TERMINALS_MAX, "terminals")?;
-            let id = TerminalId::next(&mut holding.last.terminal);
-            assert!(holding.index_of(id).is_none(), "terminal {id} is new");
-            let made = Made::of(SystemTime::now()).ok_or_else(|| {
-                Status::failed_precondition("the clock says a time before 1970, or after 2554")
-            })?;
-            let key = TerminalKey { id, made };
-            let terminal = spawned(self, key, tag, opens, size)?;
-            holding.terminals.push(terminal);
-            Ok(key)
-        })
+    pub fn reserve_terminal(self: &Arc<Mux>) -> Result<Reserved, Status> {
+        let key = self.change(Model::reserve)?;
+        Ok(Reserved { mux: Arc::clone(self), key })
     }
 
     pub fn close_terminal(&self, key: TerminalKey) -> Result<(), Status> {
@@ -296,8 +316,51 @@ impl Model {
         }
     }
 
+    fn reserve(&mut self) -> Result<TerminalKey, Status> {
+        let holding = self.holding()?;
+        refuse_if_full(holding.terminals.len(), TERMINALS_MAX, "terminals")?;
+        let made = made_now()?;
+        let id = TerminalId::next(&mut holding.last.terminal);
+        let was = holding.terminals.insert(id, Slot::Starting);
+        assert!(was.is_none(), "terminal {id} is new");
+        Ok(TerminalKey { id, made })
+    }
+
+    fn place(
+        &mut self,
+        key: TerminalKey,
+        spawned: Result<(Terminal, Placing), Status>,
+    ) -> Result<TerminalKey, Status> {
+        let (terminal, placing) = spawned?;
+        let holding = self.holding()?;
+        assert_eq!(terminal.key, key);
+        let slot = holding.terminals.get_mut(&key.id).expect("a reserved terminal has its slot");
+        assert!(matches!(slot, Slot::Starting), "terminal {} is placed once", key.id);
+        *slot = Slot::Placed(Box::new(terminal));
+        holding.empty = Empty::Ends;
+        placing.placed();
+        Ok(key)
+    }
+
+    fn unreserve(&mut self, terminal: TerminalId) {
+        if let Model::Holds(holding) = self
+            && let Some(Slot::Starting) = holding.terminals.get(&terminal)
+        {
+            holding.terminals.remove(&terminal);
+            self.end_if_empty();
+        }
+    }
+
+    fn end_if_unused(&mut self) {
+        if let Model::Holds(holding) = self {
+            holding.empty = Empty::Ends;
+        }
+        self.end_if_empty();
+    }
+
     fn end_if_empty(&mut self) {
         if let Model::Holds(holding) = self
+            && holding.empty == Empty::Ends
             && holding.terminals.is_empty()
         {
             *self = Model::Ended(Ending::Emptied);
@@ -309,7 +372,7 @@ impl Model {
             return None;
         };
         let closed = holding.terminals.len();
-        for terminal in holding.terminals.drain(..) {
+        for terminal in holding.placed() {
             terminal.handle.close();
         }
         *self = Model::Ended(Ending::Unreached(unreached));
@@ -328,7 +391,7 @@ impl Model {
         let Model::Holds(holding) = self else {
             return None;
         };
-        holding.terminals.iter_mut().find(|found| found.key.id == terminal)
+        holding.placed_mut(terminal)
     }
 
     fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
@@ -342,7 +405,8 @@ impl Model {
         let Model::Holds(holding) = self else {
             return Err(unmade(key));
         };
-        holding.terminals.iter_mut().find(|found| found.key == key).ok_or_else(|| unmade(key))
+        let found = holding.placed_mut(key.id).filter(|found| found.key == key);
+        found.ok_or_else(|| unmade(key))
     }
 
     fn show(
@@ -358,12 +422,25 @@ impl Model {
 }
 
 impl Holding {
-    fn index_of(&self, terminal: TerminalId) -> Option<usize> {
-        self.terminals.iter().position(|found| found.key.id == terminal)
+    fn placed(&self) -> impl Iterator<Item = &Terminal> {
+        self.terminals.values().filter_map(|slot| match slot {
+            Slot::Placed(terminal) => Some(terminal.as_ref()),
+            Slot::Starting => None,
+        })
+    }
+
+    fn placed_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
+        match self.terminals.get_mut(&terminal)? {
+            Slot::Placed(terminal) => Some(terminal.as_mut()),
+            Slot::Starting => None,
+        }
     }
 
     fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
-        self.terminals.iter().find(|found| found.key == key).ok_or_else(|| unmade(key))
+        match self.terminals.get(&key.id) {
+            Some(Slot::Placed(terminal)) if terminal.key == key => Ok(terminal),
+            Some(Slot::Placed(_) | Slot::Starting) | None => Err(unmade(key)),
+        }
     }
 
     fn show(
@@ -400,13 +477,14 @@ impl Holding {
     }
 
     fn close(&mut self, terminal: TerminalId) -> bool {
-        let Some(index) = self.index_of(terminal) else {
+        let Some(Slot::Placed(closed)) = self.terminals.get(&terminal) else {
             return false;
         };
-        let closed = self.terminals.remove(index);
         closed.handle.close();
+        let key = closed.key;
+        self.terminals.remove(&terminal);
         for viewing in self.viewing.values_mut() {
-            viewing.shows.remove(&closed.key);
+            viewing.shows.remove(&key);
         }
         true
     }
@@ -414,6 +492,8 @@ impl Holding {
     fn settle(&mut self) {
         assert!(self.viewing.len() <= CLIENTS_MAX);
         assert!(self.terminals.len() <= TERMINALS_MAX);
+        let placed = self.placed().next().is_some();
+        assert!(!placed || self.empty == Empty::Ends, "a placed terminal ends the first wait");
         let mut by_terminal: BTreeMap<TerminalKey, Vec<Viewer>> = BTreeMap::new();
         for (client, viewing) in &self.viewing {
             assert!(viewing.shows.len() <= SHOWN_MAX);
@@ -428,7 +508,7 @@ impl Holding {
                 by_terminal.entry(*key).or_default().push(viewer);
             }
         }
-        for terminal in &self.terminals {
+        for terminal in self.placed() {
             let viewers = by_terminal.remove(&terminal.key).unwrap_or_default();
             terminal.handle.want(Wanted { size: terminal.size, viewers: viewers.into() });
         }
@@ -436,7 +516,7 @@ impl Holding {
     }
 
     fn listing(&self) -> api::Listing {
-        api::Listing { terminals: self.terminals.iter().map(Terminal::said).collect() }
+        api::Listing { terminals: self.placed().map(Terminal::said).collect() }
     }
 }
 
@@ -460,13 +540,19 @@ impl Terminal {
     }
 }
 
+fn made_now() -> Result<Made, Status> {
+    Made::of(SystemTime::now()).ok_or_else(|| {
+        Status::failed_precondition("the clock says a time before 1970, or after 2554")
+    })
+}
+
 fn spawned(
     mux: &Arc<Mux>,
     key: TerminalKey,
     tag: Tag,
     opens: &Opens,
     size: Size,
-) -> Result<Terminal, Status> {
+) -> Result<(Terminal, Placing), Status> {
     let vars = [
         (pty::TERMINAL_VAR, key.id.to_string()),
         (pty::TERMINAL_MADE_VAR, key.made.nanos().to_string()),
@@ -479,7 +565,7 @@ fn spawned(
     })?;
     let started = terminal::start(Arc::clone(mux), key, pty, child, size)
         .map_err(|error| failed("the terminal did not start", error))?;
-    Ok(Terminal {
+    let terminal = Terminal {
         key,
         tag,
         size,
@@ -487,7 +573,8 @@ fn spawned(
         cwd: opens.cwd.clone(),
         program: Program::Runs { pid: started.pid, ends: opens.ends, foreground: None, ran: None },
         handle: started.handle,
-    })
+    };
+    Ok((terminal, started.placing))
 }
 
 fn unmade(key: TerminalKey) -> Status {
@@ -507,9 +594,162 @@ fn refuse_if_full(count: usize, max: usize, what: &str) -> Result<(), Status> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::Mux;
+    use std::fs;
+    use std::num::NonZeroU16;
+
+    use lune_protocol::socket::{self, Found, Unreached};
+    use lune_waits::eventually;
+    use rustix::io::Errno;
+    use rustix::process::{self, Pid};
+    use tonic::Code;
+
+    use super::{Ending, Listed, Mux, spawned};
+    use crate::api::Listing;
+    use crate::asked::{Ends, Opens, Size, Tag};
 
     pub(crate) fn panic_holding_the_model() {
         Mux::new().change(|_| panic!("the model's assertion fails"));
+    }
+
+    fn opens() -> Opens {
+        script("read x", &[])
+    }
+
+    fn script(script: &str, args: &[&str]) -> Opens {
+        let program = "/bin/sh".to_owned();
+        let args = ["-c", script].iter().chain(args).map(|arg| (*arg).to_owned()).collect();
+        Opens { cwd: "/".to_owned(), program, args, ends: Ends::Holds }
+    }
+
+    fn unstartable() -> Opens {
+        let (cwd, program) = ("/".to_owned(), "/nonexistent/program".to_owned());
+        Opens { cwd, program, args: Vec::new(), ends: Ends::Holds }
+    }
+
+    fn size() -> Size {
+        Size { columns: NonZeroU16::new(20).unwrap(), rows: NonZeroU16::new(4).unwrap() }
+    }
+
+    fn tag() -> Tag {
+        Tag::parse("tag", b"t".to_vec()).unwrap()
+    }
+
+    fn listed(mux: &Mux) -> Vec<u32> {
+        let listing = mux.listing().terminals.into_iter();
+        listing.map(|terminal| terminal.key.unwrap().id).collect()
+    }
+
+    fn unreached() -> Unreached {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("socket");
+        let (_listener, bound) = socket::bind(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let Found::Lost(unreached) = bound.found().unwrap() else {
+            panic!("a removed socket is lost");
+        };
+        unreached
+    }
+
+    #[test]
+    fn a_terminal_that_starts_keeps_the_mux_from_ending_as_empty() {
+        let mux = Mux::new();
+        let reserved = mux.reserve_terminal().unwrap();
+        mux.end_if_unused();
+        let key = reserved.start(&opens(), tag(), size()).unwrap();
+        assert_eq!(listed(&mux), [key.id.said()]);
+        mux.close_terminal(key).unwrap();
+        assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
+    }
+
+    #[test]
+    fn a_first_terminal_that_fails_to_start_leaves_the_mux_waiting_for_one() {
+        let mux = Mux::new();
+        let reserved = mux.reserve_terminal().unwrap();
+        let refusal = reserved.start(&unstartable(), tag(), size()).unwrap_err();
+        assert_eq!(refusal.code(), Code::FailedPrecondition);
+        assert!(refusal.message().starts_with("opens did not start: "), "{refusal:?}");
+        assert_eq!(*mux.watched().borrow(), Listed::Holds(Listing::default()));
+        let key = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        assert_eq!(listed(&mux), [key.id.said()]);
+    }
+
+    #[test]
+    fn a_reservation_dropped_unstarted_gives_its_place_back() {
+        let mux = Mux::new();
+        drop(mux.reserve_terminal().unwrap());
+        assert_eq!(*mux.watched().borrow(), Listed::Holds(Listing::default()));
+        mux.end_if_unused();
+        assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
+    }
+
+    #[test]
+    fn a_start_that_fails_once_the_first_wait_is_over_ends_the_mux() {
+        let mux = Mux::new();
+        let reserved = mux.reserve_terminal().unwrap();
+        mux.end_if_unused();
+        reserved.start(&unstartable(), tag(), size()).unwrap_err();
+        assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
+    }
+
+    #[test]
+    fn a_start_that_fails_once_the_last_terminal_closed_ends_the_mux() {
+        let mux = Mux::new();
+        let placed = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        let reserved = mux.reserve_terminal().unwrap();
+        mux.close_terminal(placed).unwrap();
+        assert_eq!(*mux.watched().borrow(), Listed::Holds(Listing::default()));
+        reserved.start(&unstartable(), tag(), size()).unwrap_err();
+        assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
+    }
+
+    #[test]
+    fn a_terminal_that_starts_as_the_mux_ends_is_not_placed() {
+        let folder = tempfile::tempdir().unwrap();
+        let said = folder.path().join("pid");
+        let mux = Mux::new();
+        let reserved = mux.reserve_terminal().unwrap();
+        let holds = r#"trap '' HUP TERM; echo $$ > "$0.new" && mv "$0.new" "$0"
+            while :; do sleep 1; done"#;
+        let holds = script(holds, &[said.to_str().unwrap()]);
+        let started = spawned(&mux, reserved.key, tag(), &holds, size());
+        let pid = eventually("the program says its pid", || {
+            fs::read_to_string(&said).ok()?.trim().parse::<i32>().ok()
+        });
+        let pid = Pid::from_raw(pid).unwrap();
+        let unreached = unreached();
+        assert_eq!(mux.end_unreached(unreached.clone()), Some(1));
+        let refusal = reserved.place(started).unwrap_err();
+        assert_eq!(refusal.code(), Code::Unavailable);
+        assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Unreached(unreached)));
+        assert_eq!(listed(&mux), [] as [u32; 0]);
+        eventually("the program ends, though it ignores hangups and terms", || {
+            (process::test_kill_process(pid) == Err(Errno::SRCH)).then_some(())
+        });
+    }
+
+    #[test]
+    fn a_terminal_that_fails_to_start_as_the_mux_ends_says_why_it_failed() {
+        let mux = Mux::new();
+        let reserved = mux.reserve_terminal().unwrap();
+        assert_eq!(mux.end_unreached(unreached()), Some(1));
+        let refusal = reserved.start(&unstartable(), tag(), size()).unwrap_err();
+        assert_eq!(refusal.code(), Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn what_a_terminal_says_before_it_is_placed_is_not_lost() {
+        let folder = tempfile::tempdir().unwrap();
+        let said = folder.path().join("said");
+        let mux = Mux::new();
+        let reserved = mux.reserve_terminal().unwrap();
+        let titles = r#"printf '\033]2;early\007'; : > "$0"; read x"#;
+        let titles = script(titles, &[said.to_str().unwrap()]);
+        let started = spawned(&mux, reserved.key, tag(), &titles, size());
+        eventually("the program said its title", || said.exists().then_some(()));
+        reserved.place(started).unwrap();
+        eventually("the title is listed", || {
+            let listing = mux.listing();
+            listing.terminals.iter().any(|terminal| terminal.title == "early").then_some(())
+        });
     }
 }
