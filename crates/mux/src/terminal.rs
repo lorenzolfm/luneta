@@ -6,7 +6,6 @@ use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self as std_mpsc, Receiver, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,6 +21,7 @@ use crate::asked::{Colours, Dumped, Input, Size, TerminalKey};
 use crate::frame::{self, Flags};
 use crate::front;
 use crate::id::{ClientId, TerminalId};
+use crate::leader::Leader;
 use crate::marks::Mark;
 use crate::mux::Mux;
 use crate::panics::{self, Panicked};
@@ -71,7 +71,7 @@ pub enum Exit {
 }
 
 impl Exit {
-    fn of(status: ExitStatus) -> Exit {
+    pub(crate) fn of(status: ExitStatus) -> Exit {
         match (status.code(), status.signal()) {
             (Some(code), _) => Exit::Code(code),
             (None, Some(signal)) => Exit::Signal(signal),
@@ -200,12 +200,11 @@ pub fn start(
     mux: Arc<Mux>,
     key: TerminalKey,
     pty: Pty,
-    mut child: Child,
+    child: Child,
     size: Size,
 ) -> io::Result<Started> {
     let terminal = key.id;
     let (to, inbox) = mpsc::channel(MESSAGES_MAX);
-    let (exited, exits) = std_mpsc::sync_channel(1);
     let (wake, woken) = UnixStream::pair()?;
     wake.set_nonblocking(true)?;
     woken.set_nonblocking(true)?;
@@ -214,10 +213,9 @@ pub fn start(
     let (wanted, wants) = watch::channel(Wanted { size, viewers: Arc::from(Vec::new()) });
     let wanted = Arc::new(wanted);
     let handle = Handle { to, closed: Arc::clone(&closed), wake: wake.clone(), wanted };
-    let pid = child.id();
-    thread::Builder::new().name(format!("terminal {terminal} waits")).spawn(move || {
-        waits(terminal, &mut child, &exited, &wake);
-    })?;
+    let waking = wake.clone();
+    let leader = Leader::waited(terminal, child, mux.unreaped(), move || waking.wake())?;
+    let pid = leader.pid();
     thread::Builder::new().name(format!("terminal {terminal}")).spawn(move || {
         let screen = match Screen::new(size, SCROLLBACK_BYTES) {
             Ok(screen) => screen,
@@ -225,57 +223,49 @@ pub fn start(
                 eprintln!("lune-mux: terminal {terminal}'s screen could not be made: {error}");
                 drop(pty);
                 mux.lost(terminal);
+                leader.end();
                 return;
             },
         };
-        let mut thread = Thread {
-            key,
-            mux,
-            inbox,
-            wants,
-            exits,
-            closed,
-            woken,
-            screen,
-            program: Program::Runs { pty, unread: Unread::default() },
-            buffer: vec![0; READ_BYTES].into_boxed_slice(),
-            watchers: Vec::new(),
-            dirty: false,
-            framed: Instant::now().checked_sub(FRAME_GAP).unwrap_or_else(Instant::now),
-            synced: None,
-            title: String::new(),
-            pwd: String::new(),
-            host: host(),
-            pid,
-            shell: Shell::default(),
-            looks: Looks::first(),
-            told: Told::default(),
-        };
-        let failed = match panics::contained(|| thread.run()) {
-            Ok(Ok(())) => None,
-            Ok(Err(error)) => Some(error.to_string()),
-            Err(Panicked) => Some("it panicked".to_owned()),
-        };
-        if let Some(failed) = failed {
-            eprintln!("lune-mux: terminal {terminal} failed: {failed}");
+        let leader = {
+            let mut thread = Thread {
+                key,
+                mux,
+                inbox,
+                wants,
+                leader,
+                closed,
+                woken,
+                screen,
+                program: Program::Runs { pty, unread: Unread::default() },
+                buffer: vec![0; READ_BYTES].into_boxed_slice(),
+                watchers: Vec::new(),
+                dirty: false,
+                framed: Instant::now().checked_sub(FRAME_GAP).unwrap_or_else(Instant::now),
+                synced: None,
+                title: String::new(),
+                pwd: String::new(),
+                host: host(),
+                pid,
+                shell: Shell::default(),
+                looks: Looks::first(),
+                told: Told::default(),
+            };
+            let failed = match panics::contained(|| thread.run()) {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(Panicked) => Some("it panicked".to_owned()),
+            };
             thread.program = Program::Gone;
-            thread.mux.lost(terminal);
-        }
+            if let Some(failed) = failed {
+                eprintln!("lune-mux: terminal {terminal} failed: {failed}");
+                thread.mux.lost(terminal);
+            }
+            thread.leader
+        };
+        leader.end();
     })?;
     Ok(Started { handle, pid })
-}
-
-fn waits(terminal: TerminalId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
-    match child.wait() {
-        Ok(status) => {
-            if exited.try_send(Exit::of(status)).is_ok() {
-                wake.wake();
-            }
-        },
-        Err(error) => {
-            eprintln!("lune-mux: terminal {terminal}'s program could not be waited for: {error}");
-        },
-    }
 }
 
 struct Shown {
@@ -312,7 +302,7 @@ struct Thread {
     mux: Arc<Mux>,
     inbox: mpsc::Receiver<ToTerminal>,
     wants: watch::Receiver<Wanted>,
-    exits: Receiver<Exit>,
+    leader: Leader,
     closed: Arc<AtomicBool>,
     woken: UnixStream,
     screen: Screen,
@@ -391,7 +381,7 @@ impl Thread {
             if self.want()? == Held::LetGo {
                 return Ok(());
             }
-            if let Ok(exit) = self.exits.try_recv()
+            if let Some(exit) = self.leader.exited()
                 && self.exited(exit)?
             {
                 return Ok(());
