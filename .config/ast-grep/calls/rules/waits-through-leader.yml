@@ -1,0 +1,36 @@
+id: waits-through-leader
+language: rust
+files:
+  - crates/mux/src/**
+ignores:
+  - crates/mux/src/leader.rs
+message: >-
+  Reap a terminal's program only through leader::Leader: its zombie keeps
+  the group's id from being another's until the terminal lets it go, and
+  lune-mux signals that group until then, so a second reaper, or SIGCHLD
+  ignored, would let lune-mux signal a group it no longer holds.
+rule:
+  all:
+    - any:
+        - kind: identifier
+          regex: ^(waitpid|waitid|wait_with_output|try_wait|SigIgn)$
+        - kind: field_identifier
+          regex: ^(wait_with_output|try_wait)$
+        - kind: call_expression
+          all:
+            - has:
+                field: function
+                kind: field_expression
+                has:
+                  field: field
+                  regex: ^wait$
+            - has:
+                field: arguments
+                regex: ^\(\s*\)$
+    - not:
+        inside:
+          kind: mod_item
+          has:
+            field: name
+            regex: ^tests$
+          stopBy: end

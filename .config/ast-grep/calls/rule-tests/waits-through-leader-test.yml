@@ -1,0 +1,14 @@
+id: waits-through-leader
+valid:
+  - "fn f(changed: &Condvar, held: MutexGuard<'_, bool>) { let held = changed.wait(held); }"
+  - "async fn f(mut watched: watch::Receiver<bool>) { watched.wait_for(|it| *it).await; }"
+  - "mod tests { fn f(mut child: Child) { child.wait().unwrap(); } }"
+  - "fn f() { let why = \"waitpid is leader's\"; }"
+invalid:
+  - "fn f(mut child: Child) { child.wait().unwrap(); }"
+  - "fn f(mut child: Child) { let _ = child.try_wait(); }"
+  - "fn f(child: Child) { let _ = child.wait_with_output(); }"
+  - "fn f(pid: Pid) { rustix::process::waitid(WaitId::Pid(pid), WaitIdOptions::EXITED); }"
+  - "fn f(pid: Pid) { rustix::process::waitpid(Some(pid), WaitOptions::empty()); }"
+  - "use rustix::process::waitpid;"
+  - "fn f() { signal(Signal::SIGCHLD, SigHandler::SigIgn); }"

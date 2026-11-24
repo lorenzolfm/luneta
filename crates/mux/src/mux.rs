@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -11,7 +10,7 @@ use tonic::Status;
 use crate::api;
 use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
 use crate::id::{ClientId, TerminalId};
-use crate::leader::{Leaders, Unreaped};
+use crate::leader::Leaders;
 use crate::panics::Shared;
 use crate::terminal::{self, Exit, Handle, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
@@ -108,12 +107,8 @@ impl Mux {
         self.listing.subscribe()
     }
 
-    pub fn unreaped(&self) -> Unreaped {
-        self.leaders.unreaped()
-    }
-
-    pub fn all_reaped(&self) -> impl Future<Output = ()> + 'static {
-        self.leaders.all_reaped()
+    pub fn leaders(&self) -> &Leaders {
+        &self.leaders
     }
 
     pub fn end_if_unused(&self) {

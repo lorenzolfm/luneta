@@ -320,7 +320,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
             Ok(())
         },
     };
-    if tokio::time::timeout(REAPED_WAIT, mux.all_reaped()).await.is_err() {
+    if tokio::time::timeout(REAPED_WAIT, mux.leaders().all_reaped()).await.is_err() {
         let waited = REAPED_WAIT.as_secs();
         eprintln!("lune-mux: programs of closed terminals still run after {waited}s, and are left");
     }

@@ -3,9 +3,10 @@ use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
-use std::process::{Child, ExitStatus};
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,7 +27,7 @@ use crate::marks::Mark;
 use crate::mux::Mux;
 use crate::panics::{self, Panicked};
 use crate::process::{self, Group};
-use crate::pty::{Pty, SignalKey};
+use crate::pty::{Led, Pty, SignalKey};
 use crate::ran::{Job, Now, Shell};
 use crate::screen::{Answers, Looked, Pushed, Screen, View, Wheel};
 use crate::unread::{Kept, Oldest, Refused, TYPED_BYTES_MAX, Unread};
@@ -200,7 +201,7 @@ pub fn start(
     mux: Arc<Mux>,
     key: TerminalKey,
     pty: Pty,
-    child: Child,
+    child: Led,
     size: Size,
 ) -> io::Result<Started> {
     let terminal = key.id;
@@ -214,7 +215,7 @@ pub fn start(
     let wanted = Arc::new(wanted);
     let handle = Handle { to, closed: Arc::clone(&closed), wake: wake.clone(), wanted };
     let waking = wake.clone();
-    let leader = Leader::waited(terminal, child, mux.unreaped(), move || waking.wake())?;
+    let (leader, exits) = Leader::waited(terminal, child, mux.leaders(), move || waking.wake())?;
     let pid = leader.pid();
     thread::Builder::new().name(format!("terminal {terminal}")).spawn(move || {
         let screen = match Screen::new(size, SCROLLBACK_BYTES) {
@@ -227,13 +228,13 @@ pub fn start(
                 return;
             },
         };
-        let leader = {
+        {
             let mut thread = Thread {
                 key,
                 mux,
                 inbox,
                 wants,
-                leader,
+                exits,
                 closed,
                 woken,
                 screen,
@@ -261,8 +262,7 @@ pub fn start(
                 eprintln!("lune-mux: terminal {terminal} failed: {failed}");
                 thread.mux.lost(terminal);
             }
-            thread.leader
-        };
+        }
         leader.end();
     })?;
     Ok(Started { handle, pid })
@@ -302,7 +302,7 @@ struct Thread {
     mux: Arc<Mux>,
     inbox: mpsc::Receiver<ToTerminal>,
     wants: watch::Receiver<Wanted>,
-    leader: Leader,
+    exits: Receiver<Exit>,
     closed: Arc<AtomicBool>,
     woken: UnixStream,
     screen: Screen,
@@ -381,7 +381,7 @@ impl Thread {
             if self.want()? == Held::LetGo {
                 return Ok(());
             }
-            if let Some(exit) = self.leader.exited()
+            if let Ok(exit) = self.exits.try_recv()
                 && self.exited(exit)?
             {
                 return Ok(());
