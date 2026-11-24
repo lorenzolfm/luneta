@@ -14,3 +14,4 @@ mod process;
 mod pty;
 mod ran;
 mod terminal;
+mod unread;

@@ -22,6 +22,7 @@ pub use libghostty_vt::render::CursorVisualStyle as CursorShape;
 pub use libghostty_vt::style::{Style, StyleColor, Underline};
 
 use answering::Answering;
+pub use answering::Answers;
 pub use input::{Click, Wheel};
 
 use crate::asked::Size;
@@ -130,7 +131,7 @@ impl View {
 }
 
 pub struct Written {
-    pub answers: Vec<u8>,
+    pub answers: Answers,
     pub marks: Vec<Mark>,
     pub pushed: Pushed,
 }
@@ -214,7 +215,7 @@ impl Screen {
         Ok(Written { answers, marks, pushed })
     }
 
-    pub fn resize(&mut self, size: Size) -> Result<Vec<u8>, Error> {
+    pub fn resize(&mut self, size: Size) -> Result<Answers, Error> {
         let (columns, rows) = size.get();
         let (resized, answers) =
             self.answering.drive(|terminal| terminal.resize(columns, rows, 0, 0));
@@ -502,7 +503,7 @@ mod tests {
     }
 
     fn answered(screen: &mut Screen, bytes: &[u8]) -> Vec<u8> {
-        screen.write(bytes).unwrap().answers
+        screen.write(bytes).unwrap().answers.bytes().to_vec()
     }
 
     fn read(bytes: &str) -> Vec<Line> {
@@ -631,7 +632,7 @@ mod tests {
         let mut screen = screen(10, 2);
         assert_eq!(answered(&mut screen, b"\x1b[?2048h"), b"");
         let answer = screen.resize(size(20, 5));
-        assert_eq!(String::from_utf8(answer.unwrap()).unwrap(), "\x1b[48;5;20;0;0t");
+        assert_eq!(answer.unwrap().bytes(), b"\x1b[48;5;20;0;0t");
         assert_eq!(screen.size(), size(20, 5));
     }
 

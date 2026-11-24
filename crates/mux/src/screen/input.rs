@@ -183,7 +183,7 @@ mod tests {
     }
 
     fn answered(screen: &mut Screen, bytes: &[u8]) -> Vec<u8> {
-        screen.write(bytes).unwrap().answers
+        screen.write(bytes).unwrap().answers.bytes().to_vec()
     }
 
     fn typed(

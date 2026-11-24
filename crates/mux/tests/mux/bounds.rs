@@ -56,3 +56,70 @@ fn a_server_holds_more_files_than_it_started_with_and_its_programs_get_that_back
         }
     });
 }
+
+#[test]
+fn a_flood_of_answers_leaves_a_terminal_drawing_and_taking_ctrl_c() {
+    ctrl_c_ends_a_program_asked_by("4000000");
+}
+
+#[test]
+fn ctrl_c_behind_a_line_of_answers_the_kernel_no_longer_takes_ends_the_program() {
+    ctrl_c_ends_a_program_asked_by("4000");
+}
+
+fn ctrl_c_ends_a_program_asked_by(asked_bytes: &str) {
+    run(async {
+        let server = Server::start().await;
+        let mut mux = server.client().await;
+        let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
+        let asks = format!(
+            "stty -icanon -echo; \
+            yes \"$(printf '\\033[6n')\" | tr -d '\\n' | head -c {asked_bytes}; \
+            echo; echo drawn; sleep 1000"
+        );
+        let opens = script(&asks, api::Ends::Holds);
+        let key = new_terminal(&mut mux, opens, b"asks", size(80, 24)).await;
+        let mut viewer = Viewer::new(&mut mux).await;
+        viewer.show(&[key]).await;
+        viewer.until_row(key.id, "drawn").await;
+        viewer.press_ctrl(key, 'c').await;
+        let interrupted = api::Exit { how: Some(api::exit::How::Signal(2)) };
+        watched_until(&mut watch, "the program ended on SIGINT", |listing| {
+            let program = listing.terminals.first().and_then(|terminal| terminal.program.as_ref());
+            program == Some(&api::terminal::Program::Ended(interrupted))
+        })
+        .await;
+    });
+}
+
+#[test]
+fn ctrl_c_behind_a_flood_of_answers_flushes_them() {
+    ctrl_c_behind_a_flood_of_answers_leaves("-noflsh", "input left: none");
+}
+
+#[test]
+fn ctrl_c_behind_a_flood_of_answers_keeps_them_under_noflsh() {
+    ctrl_c_behind_a_flood_of_answers_leaves("noflsh", "input left: some");
+}
+
+fn ctrl_c_behind_a_flood_of_answers_leaves(flushes: &str, left: &str) {
+    run(async {
+        let server = Server::start().await;
+        let mut mux = server.client().await;
+        let asks = format!(
+            "stty -icanon -echo min 0 time 10 {flushes}; \
+            trap 'n=$(( $(cat | wc -c) )); \
+                if [ \"$n\" -eq 0 ]; then echo \"input left: none\"; \
+                else echo \"input left: some\"; fi' INT; \
+            yes \"$(printf '\\033[6n')\" | tr -d '\\n' | head -c 4000000; \
+            echo; echo drawn; sleep 1000"
+        );
+        let opens = script(&asks, api::Ends::Holds);
+        let key = new_terminal(&mut mux, opens, b"asks", size(80, 24)).await;
+        let mut viewer = Viewer::new(&mut mux).await;
+        viewer.show(&[key]).await;
+        viewer.until_row(key.id, "drawn").await;
+        viewer.press_ctrl(key, 'c').await;
+        viewer.until_row(key.id, left).await;
+    });
+}

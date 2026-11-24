@@ -20,8 +20,9 @@ use crate::folder::Claim;
 use crate::id::ClientId;
 use crate::mux::{Listed, Mux};
 use crate::screen::Looked;
-use crate::terminal::{CLIENT_MESSAGES, ToTerminal, UNREAD_BYTES_MAX, ViewerOut};
+use crate::terminal::{CLIENT_MESSAGES, ToTerminal, ViewerOut};
 use crate::pty;
+use crate::unread::TYPED_BYTES_MAX;
 
 pub const FIRST_TERMINAL: Duration = Duration::from_secs(30);
 
@@ -35,7 +36,7 @@ const STREAMS_MAX: u32 = 256;
 
 const HELLO_WAIT: Duration = Duration::from_secs(5);
 
-const MESSAGE_BYTES_MAX: usize = UNREAD_BYTES_MAX;
+const MESSAGE_BYTES_MAX: usize = TYPED_BYTES_MAX;
 
 struct Service {
     mux: Arc<Mux>,

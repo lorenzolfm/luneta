@@ -146,7 +146,9 @@ impl Remote {
 
 pub fn remotes(dir: &Directory) -> Result<Vec<Remote>, String> {
     match links::remotes_gh_reads(dir.as_str()) {
-        Remotes::Listed(listed) => Ok(on_github(&listed, links::ssh_host)),
+        Remotes::Listed(listed) | Remotes::InBare(listed) => {
+            Ok(on_github(&listed, links::ssh_host))
+        },
         Remotes::Unlisted => Ok(Vec::new()),
         Remotes::Unsaid(why) => Err(format!("git did not say the remotes of {dir}: {why}")),
     }
@@ -472,11 +474,9 @@ fn unread(dir: &Directory) -> Vec<String> {
 }
 
 fn ignored(dir: &Directory) -> Result<Vec<u8>, String> {
-    let mut git = Command::new("git");
-    git.args(["-c", "core.fsmonitor=false", "-C", dir.as_str(), "ls-files", "-z"]);
-    git.args(["--others", "--ignored", "--exclude-standard", "--directory"]);
-    git::local(&mut git);
-    match program::run(&mut git, GIT).map_err(|error| unrun("git", &git, &error))? {
+    let mut git = git::Git::at(dir.as_str(), "ls-files");
+    git.args(["-z", "--others", "--ignored", "--exclude-standard", "--directory"]);
+    match git.run(GIT).map_err(|error| unrun_in("git", None, &error))? {
         Ran::Ended { status, stdout, .. } if status.success() => Ok(stdout),
         Ran::Ended { status, stderr, .. } => Err(refused(&stderr, status)),
         Ran::Stuck => Err(format!("it was still listing after {}s", GIT.as_secs())),
@@ -530,10 +530,14 @@ fn refused(stderr: &[u8], status: std::process::ExitStatus) -> String {
 }
 
 fn unrun(program: &str, command: &Command, error: &io::Error) -> String {
+    unrun_in(program, command.get_current_dir(), error)
+}
+
+fn unrun_in(program: &str, cwd: Option<&Path>, error: &io::Error) -> String {
     if error.kind() != io::ErrorKind::NotFound {
         return format!("{program} could not be run: {error}");
     }
-    match command.get_current_dir().filter(|cwd| !cwd.is_dir()) {
+    match cwd.filter(|cwd| !cwd.is_dir()) {
         Some(cwd) => format!("{} is gone", cwd.display()),
         None => format!("{program} is not on the PATH"),
     }
@@ -757,9 +761,7 @@ mod tests {
         assert_eq!(rules("/w/n", b".env\0\xff.env\0"), ["Read(//w/n/**)"]);
         let bare = tempfile::tempdir().unwrap();
         let real = bare.path().canonicalize().unwrap().display().to_string();
-        let mut git = Command::new("git");
-        git::local(git.args(["init", "--quiet", "--bare"]).arg(&real));
-        assert!(git.status().unwrap().success());
+        git::scratch(&real, &["init", "--quiet", "--bare"]).unwrap();
         let all = denied(&format!("{real}/"));
         assert!(unread(&Directory::parse(real).unwrap()).contains(&all), "{all}");
         let file = settings(&["Read(//w/n/.env)".to_owned()]).unwrap();

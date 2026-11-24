@@ -1,0 +1,18 @@
+id: git-through-git
+valid:
+  - "fn f(dir: &str) { let mut git = git::Git::at(dir); git.named([onto, branch]).run(LIMIT); }"
+  - "fn f() { let mut gh = Command::new(\"gh\"); }"
+  - "fn f() { let mut lune = Command::new(lune()?); }"
+  - "fn f() { say(\"git\"); }"
+  - "fn f() { unrun_in(\"git\", None, &error); }"
+  - "const ICONS: [(&str, char); 1] = [(\"git\", GIT)];"
+invalid:
+  - "fn f() { let mut git = Command::new(\"git\"); }"
+  - "fn f() { let mut git = std::process::Command::new(\"git\"); }"
+  - "fn f() { let mut git = process::Command::new(\"git\"); }"
+  - "fn f() { let mut git = Command::new(\"git\".to_owned()); }"
+  - "fn f() { let mut git = Command::new(OsStr::new(\"git\")); }"
+  - "const GIT: &str = \"git\";"
+  - "static GIT: &str = \"git\";"
+  - "fn f() { let program = \"git\"; }"
+  - "fn f() { let [program, args @ ..] = [\"git\", \"status\"]; }"

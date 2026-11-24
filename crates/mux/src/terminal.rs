@@ -26,9 +26,10 @@ use crate::marks::Mark;
 use crate::mux::Mux;
 use crate::panics::{self, Panicked};
 use crate::process::{self, Group};
-use crate::pty::Pty;
+use crate::pty::{Pty, SignalKey};
 use crate::ran::{Job, Now, Shell};
-use crate::screen::{Looked, Pushed, Screen, View, Wheel};
+use crate::screen::{Answers, Looked, Pushed, Screen, View, Wheel};
+use crate::unread::{Kept, Oldest, Refused, TYPED_BYTES_MAX, Unread};
 
 const SCROLLBACK_BYTES: usize = 10_000_000;
 
@@ -45,8 +46,6 @@ const READS_PER_TURN: usize = 16;
 const MESSAGES_MAX: usize = 256;
 
 const MESSAGES_PER_TURN: usize = 64;
-
-pub const UNREAD_BYTES_MAX: usize = 1024 * 1024;
 
 const LAST_WORDS_BYTES_MAX: usize = 1024 * 1024;
 
@@ -238,7 +237,7 @@ pub fn start(
             closed,
             woken,
             screen,
-            program: Program::Runs { pty, unread: Vec::new() },
+            program: Program::Runs { pty, unread: Unread::default() },
             buffer: vec![0; READ_BYTES].into_boxed_slice(),
             watchers: Vec::new(),
             dirty: false,
@@ -298,7 +297,7 @@ enum Does {
 }
 
 enum Program {
-    Runs { pty: Pty, unread: Vec<u8> },
+    Runs { pty: Pty, unread: Unread },
     Gone,
 }
 
@@ -471,18 +470,13 @@ impl Thread {
             tv_sec: timeout.as_secs().try_into().unwrap_or(i64::MAX),
             tv_nsec: timeout.subsec_nanos().into(),
         });
-        let mut reads = false;
         let mut fds = [
             PollFd::new(&self.woken, PollFlags::IN),
             PollFd::new(&self.woken, PollFlags::empty()),
         ];
         let mut count = 1;
         if let Program::Runs { pty, unread } = &self.program {
-            reads = unread.len() < UNREAD_BYTES_MAX;
-            let mut flags = PollFlags::empty();
-            if reads {
-                flags |= PollFlags::IN;
-            }
+            let mut flags = PollFlags::IN;
             if !unread.is_empty() {
                 flags |= PollFlags::OUT;
             }
@@ -496,7 +490,7 @@ impl Thread {
         }
         let woken = !fds[0].revents().is_empty();
         let near = if count == 2 { fds[1].revents() } else { PollFlags::empty() };
-        let readable = reads && near.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR);
+        let readable = near.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR);
         Ok((readable, near.contains(PollFlags::OUT), woken))
     }
 
@@ -576,16 +570,18 @@ impl Thread {
                 Does::Scroll(_) | Does::Nothing => {},
             }
         }
-        let Program::Runs { unread, .. } = &mut self.program else {
-            let ended = format!("terminal {}'s program ended", self.key.id);
+        let terminal = self.key.id;
+        let Program::Runs { pty, unread } = &mut self.program else {
+            let ended = format!("terminal {terminal}'s program ended");
             return Err(Status::failed_precondition(ended));
         };
-        if unread.len() + bytes.len() > UNREAD_BYTES_MAX {
-            let full = format!("terminal {} has {} unread bytes", self.key.id, unread.len());
-            return Err(Status::resource_exhausted(full));
-        }
-        unread.extend_from_slice(&bytes);
-        Ok(())
+        type_into(terminal, pty, unread, &bytes).map_err(|refused| {
+            let told = refused_text(terminal, refused);
+            match refused {
+                Refused::Behind { .. } => Status::resource_exhausted(told),
+                Refused::Larger { .. } => Status::invalid_argument(told),
+            }
+        })
     }
 
     fn exited(&mut self, exit: Exit) -> io::Result<bool> {
@@ -611,10 +607,10 @@ impl Thread {
             return Ok(());
         }
         let answers = self.screen.resize(size).map_err(io::Error::other)?;
-        if let Program::Runs { pty, unread } = &mut self.program {
+        if let Program::Runs { pty, .. } = &self.program {
             pty.resize(size)?;
-            unread.extend_from_slice(&answers);
         }
+        self.answered(&answers);
         let scrollback = self.screen.scrollback();
         for watcher in &mut self.watchers {
             watcher.back = watcher.back.min(scrollback);
@@ -628,7 +624,14 @@ impl Thread {
             self.back(client, None);
         }
         match self.does(input).map_err(io::Error::other)? {
-            Does::Write(bytes) => self.unread_push(&bytes),
+            Does::Write(bytes) => {
+                let terminal = self.key.id;
+                if let Program::Runs { pty, unread } = &mut self.program
+                    && let Err(refused) = type_into(terminal, pty, unread, &bytes)
+                {
+                    eprintln!("lune-mux: {}: input dropped", refused_text(terminal, refused));
+                }
+            },
             Does::Scroll(rows) => self.back(client, Some(rows)),
             Does::Nothing => {},
         }
@@ -658,19 +661,11 @@ impl Thread {
         })
     }
 
-    fn unread_push(&mut self, bytes: &[u8]) {
+    fn answered(&mut self, answers: &Answers) {
         let Program::Runs { unread, .. } = &mut self.program else {
             return;
         };
-        if unread.len() + bytes.len() <= UNREAD_BYTES_MAX {
-            unread.extend_from_slice(bytes);
-        } else {
-            eprintln!(
-                "lune-mux: terminal {} has {} unread bytes: input dropped",
-                self.key.id,
-                unread.len()
-            );
-        }
+        answers_lost(self.key.id, unread.answer(answers));
     }
 
     fn back(&mut self, client: ClientId, by: Option<isize>) {
@@ -696,14 +691,20 @@ impl Thread {
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
         let mut pushed = Pushed::Rows(0);
-        while total < most && unread.len() < UNREAD_BYTES_MAX {
+        let mut too_long = 0;
+        let mut oldest = Oldest::Kept;
+        while total < most {
             match pty.near.read(&mut self.buffer) {
                 Ok(0) => break,
                 Ok(read) => {
                     total += read;
                     let written =
                         self.screen.write(&self.buffer[..read]).map_err(io::Error::other)?;
-                    unread.extend_from_slice(&written.answers);
+                    let kept = unread.answer(&written.answers);
+                    too_long += kept.too_long;
+                    if kept.oldest == Oldest::Lost {
+                        oldest = Oldest::Lost;
+                    }
                     marks.extend(written.marks);
                     pushed = pushed.then(written.pushed);
                 },
@@ -717,6 +718,7 @@ impl Thread {
                 Err(error) => return Err(error),
             }
         }
+        answers_lost(self.key.id, Kept { too_long, oldest });
         if total == 0 {
             return Ok(());
         }
@@ -755,11 +757,11 @@ impl Thread {
         let Program::Runs { pty, unread } = &mut self.program else {
             return Ok(());
         };
-        while !unread.is_empty() {
-            match pty.near.write(unread) {
+        while let Some(lined_up) = unread.line_up() {
+            match pty.near.write(lined_up) {
                 Ok(written) => {
-                    assert!(written > 0, "the program took none of {} bytes", unread.len());
-                    unread.drain(..written);
+                    assert!(written > 0, "the program took none of {} bytes", lined_up.len());
+                    unread.sent(written);
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == ErrorKind::Interrupted => {},
@@ -836,6 +838,68 @@ impl Thread {
     }
 }
 
+fn type_into(
+    terminal: TerminalId,
+    pty: &Pty,
+    unread: &mut Unread,
+    bytes: &[u8],
+) -> Result<(), Refused> {
+    let [byte] = *bytes else {
+        return unread.type_in(bytes);
+    };
+    let key = match key_behind(pty, unread, byte) {
+        Ok(Some(key)) => key,
+        Ok(None) => return unread.type_in(bytes),
+        Err(error) => {
+            eprintln!("lune-mux: terminal {terminal}'s input could not be read: {error}");
+            return unread.type_in(bytes);
+        },
+    };
+    let signal = key.signal.name();
+    if let Err(error) = pty.raise(key.signal) {
+        eprintln!("lune-mux: terminal {terminal}'s {signal} could not be raised: {error}: typed");
+        return unread.type_in(bytes);
+    }
+    eprintln!("lune-mux: terminal {terminal}'s program is behind on its input: {signal} raised");
+    if key.flushes {
+        unread.clear();
+        if let Err(error) = pty.flush_input() {
+            eprintln!("lune-mux: terminal {terminal}'s input could not be flushed: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn key_behind(pty: &Pty, unread: &Unread, byte: u8) -> io::Result<Option<SignalKey>> {
+    if unread.is_empty() && !pty.line_full()? {
+        return Ok(None);
+    }
+    pty.signal_key(byte)
+}
+
+fn refused_text(terminal: TerminalId, refused: Refused) -> String {
+    match refused {
+        Refused::Behind { typed_bytes } => {
+            format!("terminal {terminal} has {typed_bytes} typed bytes unread")
+        },
+        Refused::Larger { bytes } => {
+            format!("terminal {terminal} takes {TYPED_BYTES_MAX} typed bytes at most, not {bytes}")
+        },
+    }
+}
+
+fn answers_lost(terminal: TerminalId, kept: Kept) {
+    if kept.too_long > 0 {
+        let too_long = kept.too_long;
+        eprintln!("lune-mux: terminal {terminal}'s screen gave {too_long} answers too long to keep");
+    }
+    if kept.oldest == Oldest::Lost {
+        eprintln!(
+            "lune-mux: terminal {terminal}'s program reads too few answers: the oldest are lost"
+        );
+    }
+}
+
 fn foreground(pid: u32) -> Option<api::Foreground> {
     Some(api::Foreground { pid, argv: process::argv(pid)? })
 }
@@ -896,7 +960,21 @@ fn arrows(screen: &mut Screen, wheel: Wheel) -> Result<Vec<u8>, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
+
     use super::*;
+
+    #[test]
+    fn a_signal_key_no_group_takes_is_typed_behind_what_waits() {
+        let columns = NonZeroU16::new(80).unwrap();
+        let rows = NonZeroU16::new(24).unwrap();
+        let pty = Pty::opened(Size { columns, rows }).unwrap();
+        assert!(pty.signal_key(0x03).unwrap().is_some());
+        let mut unread = Unread::default();
+        unread.type_in(b"waits").unwrap();
+        type_into(TerminalId::next(&mut None), &pty, &mut unread, b"\x03").unwrap();
+        assert_eq!(unread.line_up(), Some(&b"waits\x03"[..]));
+    }
 
     #[test]
     fn what_the_program_writes_brings_a_later_look_forward() {
