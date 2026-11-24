@@ -68,9 +68,14 @@ use crate::transcripts::{self, Reading, SessionId};
 use crate::agent::Agent;
 use crate::checks::{Failing, Log};
 use crate::{
-    changes, checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed,
-    projects, release, remote, repositories, skills, tailnet, topics, watch, work, Harness,
+    changes, checks, claude, client, devices, eza, fetches, git, github, keeps, log, owns, pi,
+    printed, projects, release, remote, repositories, skills, state, tailnet, topics, watch, work,
+    Harness,
 };
+
+mod over_tailnet;
+
+use over_tailnet::OverTailnet;
 
 pub const SWEEP: Duration = Duration::from_secs(2);
 
@@ -180,14 +185,16 @@ pub async fn serve(
     unkept: Option<String>,
 ) -> io::Result<()> {
     let (listener, bound) = claim.bind()?;
-    let tailnet = if projects.is_ok() {
-        let home = tailnet::in_own_home();
-        if let Err(why) = &home {
+    let devices_file = if projects.is_ok() {
+        let devices_file = tailnet::in_own_home().and_then(|()| {
+            state::path(devices::FILE).map_err(|unset| unset.to_string())
+        });
+        if let Err(why) = &devices_file {
             log::say(&format!("{why}, so luned stays off the tailnet"));
         }
-        home.is_ok()
+        devices_file.ok()
     } else {
-        false
+        None
     };
     let started = SystemTime::now();
     let (wake_git, git_woken) = mpsc::sync_channel(1);
@@ -240,22 +247,22 @@ pub async fn serve(
         let _ = closing.send(true);
         let _ = begun.send(());
     };
-    let router = |server: Server, host| {
+    let router = |server: Server| {
         server
             .max_concurrent_streams(QUESTIONS_MAX)
             .initial_stream_window_size(IN_FLIGHT)
             .layer(layer_fn(|routes| {
                 client::Within::new(routes, ANSWERING_MAX, client::unanswered)
             }))
-            .add_service(DaemonServer::from_arc(host))
     };
-    let tailnet_served = if tailnet {
+    let tailnet_served = if let Some(devices_file) = devices_file {
         let mut closed = closed;
         let closed = async move {
             let _ = closed.wait_for(|closed| *closed).await;
         };
-        let incoming = tailnet::incoming(SWEEP);
-        let served = router(tailnet::server(), Arc::clone(&host))
+        let incoming = tailnet::incoming(SWEEP, devices_file);
+        let served = router(tailnet::server())
+            .add_service(DaemonServer::new(OverTailnet(Arc::clone(&host))))
             .serve_with_incoming_shutdown(incoming, closed);
         Some(tokio::spawn(async move {
             if let Err(error) = served.await {
@@ -266,7 +273,8 @@ pub async fn serve(
         None
     };
     let served = tokio::spawn(
-        router(Server::builder(), host)
+        router(Server::builder())
+            .add_service(DaemonServer::from_arc(host))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
     );
     let _ = beginning.await;
@@ -933,12 +941,11 @@ impl Daemon for Host {
             return Ok(Response::new(Box::pin(answer)));
         }
         let unopenable = |why: String| Status::invalid_argument(format!("opens: {why}"));
-        let agent = |opens: &api::Opens| matches!(opens.runs, Some(api::opens::Runs::Agent(_)));
-        let agent_asked = opens.as_ref().is_some_and(agent);
         let opens = match opens {
             None => Opens::Shell,
             opens @ Some(_) => Opens::of_api(opens).map_err(unopenable)?,
         };
+        let agent_asked = matches!(opens, Opens::Agent(_));
         let layouts = self.layouts.clone();
         let answer = late(move || {
             let root = match rooted(&layouts, project)? {

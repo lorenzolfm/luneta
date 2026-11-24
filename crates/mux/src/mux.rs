@@ -10,6 +10,7 @@ use tonic::Status;
 use crate::api;
 use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
 use crate::id::{ClientId, TerminalId};
+use crate::leader::Leaders;
 use crate::panics::Shared;
 use crate::terminal::{self, Exit, Handle, Placing, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
@@ -23,6 +24,7 @@ const _: () = assert!(SHOWN_MAX <= TERMINALS_MAX);
 pub struct Mux {
     model: Shared<Model>,
     listing: watch::Sender<Listed>,
+    leaders: Leaders,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -133,11 +135,16 @@ impl Mux {
     #[must_use]
     pub fn new() -> Arc<Mux> {
         let (listing, _) = watch::channel(Listed::Holds(api::Listing::default()));
-        Arc::new(Mux { model: Shared::new(Model::Holds(Holding::default())), listing })
+        let model = Shared::new(Model::Holds(Holding::default()));
+        Arc::new(Mux { model, listing, leaders: Leaders::new() })
     }
 
     pub fn watched(&self) -> watch::Receiver<Listed> {
         self.listing.subscribe()
+    }
+
+    pub fn leaders(&self) -> &Leaders {
+        &self.leaders
     }
 
     pub fn end_if_unused(&self) {
@@ -592,6 +599,8 @@ pub(crate) mod tests {
 
     use lune_protocol::socket::{self, Found, Unreached};
     use lune_waits::eventually;
+    use rustix::io::Errno;
+    use rustix::process::{self, Pid};
     use tonic::Code;
 
     use super::{Ending, Listed, Mux, spawned};
@@ -696,21 +705,26 @@ pub(crate) mod tests {
     #[test]
     fn a_terminal_that_starts_as_the_mux_ends_is_not_placed() {
         let folder = tempfile::tempdir().unwrap();
-        let ready = folder.path().join("ready");
-        let hung_up = folder.path().join("hung up");
+        let said = folder.path().join("pid");
         let mux = Mux::new();
         let reserved = mux.reserve_terminal().unwrap();
-        let holds = r#"trap ': > "$1"; exit' HUP; : > "$0"; read x; : > "$1""#;
-        let holds = script(holds, &[ready.to_str().unwrap(), hung_up.to_str().unwrap()]);
+        let holds = r#"trap '' HUP TERM; echo $$ > "$0.new" && mv "$0.new" "$0"
+            while :; do sleep 1; done"#;
+        let holds = script(holds, &[said.to_str().unwrap()]);
         let started = spawned(&mux, reserved.key, tag(), &holds, size());
-        eventually("the program is ready to be hung up on", || ready.exists().then_some(()));
+        let pid = eventually("the program says its pid", || {
+            fs::read_to_string(&said).ok()?.trim().parse::<i32>().ok()
+        });
+        let pid = Pid::from_raw(pid).unwrap();
         let unreached = unreached();
         assert_eq!(mux.end_unreached(unreached.clone()), Some(1));
         let refusal = reserved.place(started).unwrap_err();
         assert_eq!(refusal.code(), Code::Unavailable);
         assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Unreached(unreached)));
         assert_eq!(listed(&mux), [] as [u32; 0]);
-        eventually("the program is hung up on", || hung_up.exists().then_some(()));
+        eventually("the program ends, though it ignores hangups and terms", || {
+            (process::test_kill_process(pid) == Err(Errno::SRCH)).then_some(())
+        });
     }
 
     #[test]

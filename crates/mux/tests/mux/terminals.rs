@@ -1,5 +1,9 @@
+use std::fs;
+
 use lune_mux::api;
 use lune_waits::{Patience, eventually_async};
+use rustix::io::Errno;
+use rustix::process::Pid;
 use tonic::Code;
 
 use crate::host::{
@@ -410,6 +414,32 @@ fn the_last_terminal_to_close_ends_the_server() {
         drop((viewer, watch, mux));
         assert!(server.ended().await.success());
         assert!(gone(&server.socket()));
+    });
+}
+
+#[test]
+fn a_closed_terminal_s_program_that_ignores_hangups_and_terms_ends_before_the_server() {
+    run(async {
+        let mut server = Server::start().await;
+        let mut mux = server.client().await;
+        let folder = tempfile::tempdir().unwrap();
+        let said = folder.path().join("pid");
+        let said = said.to_str().unwrap();
+        let stubborn = format!(
+            "trap '' HUP TERM; echo $$ > '{said}.new' && mv '{said}.new' '{said}'; \
+             while :; do sleep 1; done"
+        );
+        let opens = script(&stubborn, api::Ends::Closes);
+        let key = new_terminal(&mut mux, opens, b"stubborn", size(40, 10)).await;
+        let pid = eventually_async("the program says its pid", async || {
+            fs::read_to_string(said).ok()?.trim().parse::<i32>().ok()
+        })
+        .await;
+        let pid = Pid::from_raw(pid).unwrap();
+        mux.close_terminal(api::CloseTerminalRequest { terminal: Some(key) }).await.unwrap();
+        drop(mux);
+        assert!(server.ended().await.success());
+        assert_eq!(rustix::process::test_kill_process(pid), Err(Errno::SRCH));
     });
 }
 
