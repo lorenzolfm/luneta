@@ -124,12 +124,15 @@ impl Pty {
         Ok(rustix::io::ioctl_fionread(&self.far)? >= full)
     }
 
-    pub fn raise(&self, signal: KeySignal) -> io::Result<()> {
+    pub fn raise(&self, key: SignalKey) -> io::Result<()> {
         let group = termios::tcgetpgrp(&self.near)?;
-        Ok(rustix::process::kill_process_group(group, signal.signal())?)
+        if key.flushes {
+            self.flush_input()?;
+        }
+        Ok(rustix::process::kill_process_group(group, key.signal.signal())?)
     }
 
-    pub fn flush_input(&self) -> io::Result<()> {
+    fn flush_input(&self) -> io::Result<()> {
         Ok(termios::tcflush(&self.far, QueueSelector::IFlush)?)
     }
 
@@ -330,7 +333,7 @@ mod tests {
 
     #[test]
     fn a_signal_raised_on_a_terminal_with_no_front_group_fails() {
-        assert!(opened().raise(KeySignal::Interrupt).is_err());
+        assert!(opened().raise(key(KeySignal::Interrupt, true)).is_err());
     }
 
     #[cfg(target_os = "linux")]

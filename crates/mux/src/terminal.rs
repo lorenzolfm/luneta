@@ -859,16 +859,13 @@ fn type_into(
         },
     };
     let signal = key.signal.name();
-    if let Err(error) = pty.raise(key.signal) {
+    if let Err(error) = pty.raise(key) {
         eprintln!("lune-mux: terminal {terminal}'s {signal} could not be raised: {error}: typed");
         return unread.type_in(bytes);
     }
     eprintln!("lune-mux: terminal {terminal}'s program is behind on its input: {signal} raised");
     if key.flushes {
         unread.clear();
-        if let Err(error) = pty.flush_input() {
-            eprintln!("lune-mux: terminal {terminal}'s input could not be flushed: {error}");
-        }
     }
     Ok(())
 }
