@@ -315,52 +315,53 @@ fn the_phone_asks_in_turns_and_tackles_what_it_marked() {
     let dir = fs::canonicalize(host.home.path()).unwrap().join("w");
     fs::create_dir(&dir).unwrap();
     let phone = Phone::of(&host);
-    let marked = || Marked { issues: Vec::new(), pulls: Vec::new() };
     let on = |told: &[String], key: &str| -> String {
         let line = told.iter().find_map(|line| line.strip_prefix(&format!("{key}=")));
         line.unwrap_or_else(|| panic!("claude was told its {key}: {told:?}")).to_owned()
     };
 
-    let cwd = Some(dir.to_str().unwrap().to_owned());
-    let first = phone.core.ask(None, cwd, "which agents run".to_owned(), None, marked()).unwrap();
-    let session = Step::Session { id: "7c22".to_owned() };
+    let cwd = || Some(dir.to_str().unwrap().to_owned());
+    let talk = phone.core.clone().converse(None, cwd());
+    assert!(!talk.resumes());
+    let first = talk.clone().ask("which agents run".to_owned()).unwrap();
     let ran = Step::Ran { id: "toolu_1".to_owned(), command: "lune agents".to_owned() };
     let said = Step::Said { text: "No agent runs.".to_owned() };
-    assert_eq!(phone.steps(&first).unwrap(), [session.clone(), ran.clone(), said.clone()]);
+    assert_eq!(phone.steps(&first).unwrap(), [ran.clone(), said.clone()]);
+    assert!(talk.resumes(), "the session luned named is the conversation's");
     let (told_first, words) = told(&host);
     assert_eq!((on(&told_first, "cwd"), on(&told_first, "before")), (dir.display().to_string(), "unset".to_owned()));
     assert_eq!(words, "which agents run");
 
-    let resumed = || Some("7c22".to_owned());
-    let again = phone.core.ask(None, None, "yes".to_owned(), resumed(), marked()).unwrap();
-    assert_eq!(phone.steps(&again).unwrap(), [session.clone(), ran, said]);
+    let again = talk.clone().ask("yes".to_owned()).unwrap();
+    assert_eq!(phone.steps(&again).unwrap(), [ran.clone(), said]);
     let (told_again, _) = told(&host);
-    assert_eq!(on(&told_again, "resumed"), "7c22");
+    assert_eq!((on(&told_again, "resumed"), on(&told_again, "cwd")), ("7c22".to_owned(), dir.display().to_string()));
     assert_eq!(on(&told_again, "before"), on(&told_first, "turn"), "the turn before is the session's last");
     assert_ne!(on(&told_again, "turn"), on(&told_first, "turn"));
 
-    let unread = phone.core.ask(None, None, "and then".to_owned(), resumed(), marked()).unwrap();
-    let heard = phone.block_on(Patience::begun().awaited("the session", unread.next()));
-    assert_eq!(heard.unwrap(), Some(session.clone()));
-    let twice = phone.core.ask(None, None, "and then".to_owned(), resumed(), marked());
-    assert!(matches!(twice, Err(Unanswered::Refused { .. })), "a session takes one turn at a time");
+    let unread = talk.clone().ask("and then".to_owned()).unwrap();
+    let heard = phone.block_on(Patience::begun().awaited("the first step", unread.next()));
+    assert_eq!(heard.unwrap(), Some(ran));
+    let twice = talk.clone().ask("and then".to_owned());
+    assert!(matches!(twice, Err(Unanswered::Refused { .. })), "a conversation takes one turn at a time");
     drop(unread);
-    let after = phone.core.ask(None, None, "yes".to_owned(), resumed(), marked()).unwrap();
+    let after = talk.clone().ask("yes".to_owned()).unwrap();
     phone.steps(&after).unwrap();
     let (told_after, _) = told(&host);
     let unread = "a turn left unread is none before, so no answer agrees to its plan";
-    assert_eq!(on(&told_after, "before"), "unset", "{unread}");
+    assert_eq!((on(&told_after, "resumed"), on(&told_after, "before")), ("7c22".to_owned(), "unset".to_owned()), "{unread}");
 
     let these = Marked { issues: vec![7], pulls: vec![12] };
-    let tackled = phone.core.tackle(None, dir.to_str().unwrap().to_owned(), these).unwrap();
+    let tackled = phone.core.clone().converse(None, cwd()).tackle(these).unwrap();
     phone.steps(&tackled).unwrap();
-    let (_, words) = told(&host);
+    let (told_tackled, words) = told(&host);
+    assert_eq!(on(&told_tackled, "resumed"), "none", "a new conversation resumes no session");
     assert!(words.ends_with(&format!("\n\n{}", lune_phone::TACKLE)), "{words}");
     assert!(words.contains("the user marked issue #7, and pull request #12"), "{words}");
 
-    let failing = phone.core.ask(None, None, "please-fail".to_owned(), None, marked()).unwrap();
+    let failing = phone.core.clone().converse(None, None).ask("please-fail".to_owned()).unwrap();
     assert_eq!(refused(phone.steps(&failing)), "Not logged in");
-    let blank = phone.core.ask(None, None, " ".to_owned(), None, marked()).unwrap();
+    let blank = phone.core.clone().converse(None, None).ask(" ".to_owned()).unwrap();
     assert!(refused(phone.steps(&blank)).contains("nothing asked"));
 }
 
@@ -372,9 +373,8 @@ fn a_turn_the_phone_lets_go_of_stops_its_claude_before_claude_says_anything() {
     script(&host.bin().join("claude"), &claude);
     let _daemon = start(host.vars()).unwrap();
     let phone = Phone::of(&host);
-    let marked = Marked { issues: Vec::new(), pulls: Vec::new() };
 
-    let asking = phone.core.ask(None, None, "take your time".to_owned(), None, marked).unwrap();
+    let asking = phone.core.clone().converse(None, None).ask("take your time".to_owned()).unwrap();
     let pid = eventually("claude starts", || fs::read_to_string(&ran).ok());
     let alive = || Command::new("kill").args(["-0", pid.trim()]).status().unwrap().success();
     assert!(alive(), "claude {pid} runs");

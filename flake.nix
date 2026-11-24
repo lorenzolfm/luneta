@@ -223,7 +223,7 @@
               src = lintSrc;
               cargoArtifacts = daemonDeps;
               cargoExtraArgs = "--locked";
-              cargoClippyExtraArgs = "${clippyRun} -- -D warnings";
+              cargoClippyExtraArgs = "${clippyRun} --exclude lune-phone-bindgen -- -D warnings";
               doCheck = false;
               doInstallCargoArtifacts = false;
             }
@@ -274,6 +274,25 @@
             inherit clippy deny;
             luned = lunedWith { LUNE_BUILT = "1"; };
             statix = nixLint pkgs.statix "check .";
+            swift =
+              let
+                swift = import ./nix/swift.nix { inherit pkgs; };
+              in
+              pkgs.runCommand "lune-swift"
+                {
+                  src = pkgs.lib.fileset.toSource {
+                    root = ./.;
+                    fileset = pkgs.lib.fileset.unions [
+                      (pkgs.lib.fileset.fileFilter (file: file.hasExt "swift") ./ios)
+                      ./ios/.swiftlint.yml
+                    ];
+                  };
+                }
+                ''
+                  cd "$src"
+                  find . -name '*.swift' -print0 | ${pkgs.findutils}/bin/xargs -0 -r ${pkgs.lib.getExe swift.check}
+                  touch "$out"
+                '';
             deadnix = nixLint pkgs.deadnix "--hidden --fail .";
             comments =
               let

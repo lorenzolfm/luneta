@@ -4,12 +4,20 @@ use crate::api::{
 };
 use lune_protocol::CONFLICTED_NAMED_MAX;
 
+use crate::model::TerminalKey;
 use crate::unanswered::Unanswered;
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct Waiting {
-    pub screen: String,
+pub struct Screen {
+    pub on: Option<String>,
+    pub terminal: TerminalKey,
     pub shown: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Waiting {
+    pub at: Screen,
+    pub screen: String,
     pub asks: Asks,
     pub said: Option<String>,
 }
@@ -22,7 +30,11 @@ pub enum Asks {
 }
 
 impl Waiting {
-    pub(crate) fn of(said: api::WaitingResponse) -> Result<Waiting, Unanswered> {
+    pub(crate) fn of(
+        on: Option<String>,
+        terminal: TerminalKey,
+        said: api::WaitingResponse,
+    ) -> Result<Waiting, Unanswered> {
         let asks = match said.asks {
             Some(waiting_response::Asks::Words(())) => Asks::Words,
             Some(waiting_response::Asks::Menu(menu)) => {
@@ -31,7 +43,8 @@ impl Waiting {
             Some(waiting_response::Asks::Unread(why)) => Asks::Unread { why },
             None => return Err(Unanswered::unread("it says nothing of what the agent asks")),
         };
-        Ok(Waiting { screen: said.screen, shown: said.shown, asks, said: said.said })
+        let at = Screen { on, terminal, shown: said.shown };
+        Ok(Waiting { at, screen: said.screen, asks, said: said.said })
     }
 }
 
@@ -140,6 +153,16 @@ pub struct Marked {
     pub pulls: Vec<u32>,
 }
 
+impl Marked {
+    pub(crate) fn none() -> Marked {
+        Marked { issues: Vec::new(), pulls: Vec::new() }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.issues.is_empty() && self.pulls.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Order {
     pub seen: Vec<u64>,
@@ -148,21 +171,25 @@ pub struct Order {
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Step {
-    Session { id: String },
     Ran { id: String, command: String },
     Denied { id: String },
     Said { text: String },
 }
 
-impl Step {
-    pub(crate) fn of(said: api::AskResponse) -> Result<Step, Unanswered> {
+pub(crate) enum Heard {
+    Session(String),
+    Step(Step),
+}
+
+impl Heard {
+    pub(crate) fn of(said: api::AskResponse) -> Result<Heard, Unanswered> {
         match said.step.ok_or_else(|| Unanswered::unread("a step says nothing"))? {
-            ask_response::Step::Session(id) => Ok(Step::Session { id }),
+            ask_response::Step::Session(id) => Ok(Heard::Session(id)),
             ask_response::Step::Ran(ask_response::Ran { id, command }) => {
-                Ok(Step::Ran { id, command })
+                Ok(Heard::Step(Step::Ran { id, command }))
             },
-            ask_response::Step::Denied(id) => Ok(Step::Denied { id }),
-            ask_response::Step::Said(text) => Ok(Step::Said { text }),
+            ask_response::Step::Denied(id) => Ok(Heard::Step(Step::Denied { id })),
+            ask_response::Step::Said(text) => Ok(Heard::Step(Step::Said { text })),
         }
     }
 }

@@ -1,4 +1,3 @@
-use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::future::Future;
 use std::panic;
@@ -26,8 +25,8 @@ use crate::api::{self, On};
 use crate::model::{Model, TerminalKey};
 use crate::unanswered::{Refusals, Unanswered};
 use crate::verbs::{
-    Answer, Filed, Goes, IssueRepository, Landed, Listed, Marked, Order, Plan, Pruned, Rebased,
-    Step, Waiting,
+    Answer, Filed, Goes, Heard, IssueRepository, Landed, Listed, Marked, Order, Plan, Pruned,
+    Rebased, Screen, Step, Waiting,
 };
 use crate::waits;
 
@@ -42,8 +41,6 @@ const PONG: Duration = Duration::from_secs(10);
 const WORKERS: usize = 2;
 
 const STEPS_HELD: usize = 16;
-
-const TURNS_HELD: usize = 64;
 
 pub const TACKLE: &str = "Tackle these";
 
@@ -69,62 +66,101 @@ pub struct Core {
     handle: Handle,
     patience: Duration,
     watching: Mutex<Option<JoinHandle<Infallible>>>,
-    turns: Arc<Mutex<Turns>>,
     _workers: Workers,
 }
 
-struct Turns {
-    read: VecDeque<(String, u64)>,
-    running: HashMap<String, u64>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Rest {
+    Fresh,
+    Idle { session: String, read: Option<u64> },
 }
 
-impl Turns {
-    fn new() -> Turns {
-        Turns { read: VecDeque::with_capacity(TURNS_HELD), running: HashMap::new() }
+impl Rest {
+    fn after(session: Option<String>, read: Option<u64>) -> Rest {
+        match session {
+            Some(session) => Rest::Idle { session, read },
+            None => Rest::Fresh,
+        }
     }
 
-    fn begin(&mut self, resumed: Option<&str>) -> Result<Turn, Unanswered> {
-        assert!(self.read.len() <= TURNS_HELD);
-        let Some(session) = resumed else {
-            return Ok(Turn::after(None));
-        };
-        if self.running.contains_key(session) {
-            let why = format!("a turn of session {session} still runs: read it to its end first");
+    fn session(&self) -> Option<&str> {
+        match self {
+            Rest::Fresh => None,
+            Rest::Idle { session, .. } => Some(session),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    Read,
+    Refused,
+    Unread,
+}
+
+impl Ending {
+    fn of(unanswered: &Unanswered) -> Ending {
+        match unanswered {
+            Unanswered::Refused { .. } => Ending::Refused,
+            Unanswered::InDoubt { .. } => Ending::Unread,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Talked {
+    At(Rest),
+    Running { turn: u64, was: Rest, session: Option<String>, heard: bool },
+}
+
+impl Talked {
+    fn begin(&mut self) -> Result<(Turn, Option<String>), Unanswered> {
+        let Talked::At(rest) = self else {
+            let why = "a turn of this conversation still runs: read it to its end first";
             return Err(Unanswered::refused(why));
-        }
-        let read = self.read.iter().position(|(held, _)| held == session);
-        let before = read.and_then(|at| self.read.remove(at)).map(|(_, turn)| turn);
+        };
+        let was = rest.clone();
+        let (resumed, before) = match &was {
+            Rest::Fresh => (None, None),
+            Rest::Idle { session, read } => (Some(session.clone()), *read),
+        };
         let turn = Turn::after(before);
-        assert!(!self.running.values().any(|&running| running == turn.key()));
-        self.running.insert(session.to_owned(), turn.key());
-        Ok(turn)
+        *self = Talked::Running { turn: turn.key(), was, session: None, heard: false };
+        Ok((turn, resumed))
     }
 
-    fn run(&mut self, session: &str, turn: u64) {
-        self.running.entry(session.to_owned()).or_insert(turn);
-    }
-
-    fn ended(&mut self, session: Option<String>, turn: u64) {
-        if let Some(session) = session
-            && self.running.get(&session) == Some(&turn)
+    fn heard(&mut self, of: u64, named: Option<String>) {
+        if let Talked::Running { turn, session, heard, .. } = self
+            && *turn == of
         {
-            self.record(session, turn);
+            *heard = true;
+            if named.is_some() {
+                *session = named;
+            }
         }
-        self.release(turn);
     }
 
-    fn release(&mut self, turn: u64) {
-        self.running.retain(|_, &mut running| running != turn);
+    fn end(&mut self, of: u64, ending: Ending) {
+        let Talked::Running { turn, was, session, heard } = self else {
+            return;
+        };
+        if *turn != of {
+            return;
+        }
+        let session = session.take().or_else(|| was.session().map(str::to_owned));
+        let rest = match ending {
+            Ending::Refused if !*heard => was.clone(),
+            Ending::Read => Rest::after(session, Some(of)),
+            Ending::Refused | Ending::Unread => Rest::after(session, None),
+        };
+        *self = Talked::At(rest);
     }
 
-    fn record(&mut self, session: String, turn: u64) {
-        assert!(self.read.len() <= TURNS_HELD);
-        self.read.retain(|(held, _)| *held != session);
-        if self.read.len() == TURNS_HELD {
-            self.read.pop_front();
+    fn session(&self) -> Option<&str> {
+        match self {
+            Talked::At(rest) => rest.session(),
+            Talked::Running { was, session, .. } => session.as_deref().or_else(|| was.session()),
         }
-        assert!(self.read.len() < TURNS_HELD);
-        self.read.push_back((session, turn));
     }
 }
 
@@ -142,16 +178,22 @@ fn on(on: Option<String>) -> Option<On> {
     on.map(|destination| On { destination })
 }
 
-fn tailnet(host: &str) -> Result<Endpoint, Unanswered> {
-    let host = host.trim();
+#[uniffi::export]
+pub fn tailnet_name(named: &str) -> Result<String, Unanswered> {
+    let host = named.trim();
     let odd = |char: char| char.is_whitespace() || "/@?#".contains(char);
     if host.is_empty() || host.contains(odd) {
         return Err(Unanswered::refused(format!("{host:?} names no machine")));
     }
+    Ok(host.to_owned())
+}
+
+fn tailnet(named: &str) -> Result<Endpoint, Unanswered> {
+    let host = tailnet_name(named)?;
     let named = if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]")
     } else {
-        host.to_owned()
+        host.clone()
     };
     let uri = format!("http://{named}:{}", lune_protocol::TAILNET_PORT);
     let endpoint = Endpoint::from_shared(uri).map_err(|error| Unanswered::refused(format!("{host:?}: {error}")))?;
@@ -200,7 +242,6 @@ impl Core {
             handle,
             patience,
             watching: Mutex::new(None),
-            turns: Arc::new(Mutex::new(Turns::new())),
             _workers: Workers(Some(runtime)),
         })
     }
@@ -270,41 +311,10 @@ impl Core {
         }
     }
 
-    pub fn ask(
-        &self,
-        on: Option<String>,
-        cwd: Option<String>,
-        words: String,
-        resumed: Option<String>,
-        marked: Marked,
-    ) -> Result<Arc<Asking>, Unanswered> {
-        let turn = held(&self.turns).begin(resumed.as_deref())?;
-        let request = api::AskRequest {
-            on: self::on(on),
-            cwd,
-            words,
-            resumed,
-            highlighted: String::new(),
-            turn: turn.key(),
-            before: turn.before(),
-            marked_issues: marked.issues,
-            marked_pulls: marked.pulls,
-        };
-        let (tell, told) = mpsc::channel(STEPS_HELD);
-        let asked = Talk { daemon: self.daemon.clone(), patience: self.patience, tell };
-        self.handle.spawn(asked.steps(request));
-        let listening = Listening { told, session: None, over: false };
-        let (listening, turns) = (tokio::sync::Mutex::new(listening), self.turns.clone());
-        Ok(Arc::new(Asking { listening, turns, turn: turn.key() }))
-    }
-
-    pub fn tackle(
-        &self,
-        on: Option<String>,
-        dir: String,
-        marked: Marked,
-    ) -> Result<Arc<Asking>, Unanswered> {
-        self.ask(on, Some(dir), TACKLE.to_owned(), None, marked)
+    #[must_use]
+    pub fn converse(self: Arc<Self>, on: Option<String>, cwd: Option<String>) -> Arc<Conversation> {
+        let talked = Mutex::new(Talked::At(Rest::Fresh));
+        Arc::new(Conversation { core: self, on, cwd, talked })
     }
 
     pub async fn waiting(
@@ -313,21 +323,17 @@ impl Core {
         terminal: TerminalKey,
     ) -> Result<Waiting, Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
-        let request = api::WaitingRequest { on: self::on(on), terminal: Some(terminal.to_api()) };
+        let request = api::WaitingRequest { on: self::on(on.clone()), terminal: Some(terminal.to_api()) };
         self.on_runtime(async move {
-            Waiting::of(unary(patience, Refusals::Others, daemon.waiting(request)).await?)
+            let said = unary(patience, Refusals::Others, daemon.waiting(request)).await?;
+            Waiting::of(on, terminal, said)
         })
         .await
     }
 
-    pub async fn answer(
-        &self,
-        on: Option<String>,
-        terminal: TerminalKey,
-        shown: u64,
-        answer: Answer,
-    ) -> Result<(), Unanswered> {
+    pub async fn answer(&self, screen: Screen, answer: Answer) -> Result<(), Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
+        let Screen { on, terminal, shown } = screen;
         let request = api::AnswerRequest {
             on: self::on(on),
             terminal: Some(terminal.to_api()),
@@ -540,7 +546,57 @@ async fn watched(mut daemon: Daemon, patience: Duration, observer: Arc<dyn Obser
     }
 }
 
+#[derive(uniffi::Object)]
+pub struct Conversation {
+    core: Arc<Core>,
+    on: Option<String>,
+    cwd: Option<String>,
+    talked: Mutex<Talked>,
+}
+
+impl Conversation {
+    fn asked(self: Arc<Self>, words: String, marked: Marked) -> Result<Arc<Asking>, Unanswered> {
+        let (turn, resumed) = held(&self.talked).begin()?;
+        let request = api::AskRequest {
+            on: on(self.on.clone()),
+            cwd: self.cwd.clone(),
+            words,
+            resumed,
+            highlighted: String::new(),
+            turn: turn.key(),
+            before: turn.before(),
+            marked_issues: marked.issues,
+            marked_pulls: marked.pulls,
+        };
+        let (tell, told) = mpsc::channel(STEPS_HELD);
+        let talk = Talk { daemon: self.core.daemon.clone(), patience: self.core.patience, tell };
+        self.core.handle.spawn(talk.steps(request));
+        let listening = tokio::sync::Mutex::new(Listening { told, over: false });
+        Ok(Arc::new(Asking { listening, conversation: self, turn: turn.key() }))
+    }
+}
+
+#[uniffi::export]
+impl Conversation {
+    pub fn ask(self: Arc<Self>, words: String) -> Result<Arc<Asking>, Unanswered> {
+        self.asked(words, Marked::none())
+    }
+
+    pub fn tackle(self: Arc<Self>, marked: Marked) -> Result<Arc<Asking>, Unanswered> {
+        if marked.is_empty() {
+            return Err(Unanswered::refused("nothing is marked to tackle"));
+        }
+        self.asked(TACKLE.to_owned(), marked)
+    }
+
+    #[must_use]
+    pub fn resumes(&self) -> bool {
+        held(&self.talked).session().is_some()
+    }
+}
+
 enum Told {
+    Session(String),
     Step(Step),
     Ended,
     Failed(Unanswered),
@@ -570,16 +626,17 @@ impl Talk {
                 said = timeout_at(deadline, steps.message()) => said,
             };
             let said = match said {
-                Ok(Ok(Some(said))) => Step::of(said),
+                Ok(Ok(Some(said))) => Heard::of(said),
                 Ok(Ok(None)) => return self.last(Told::Ended).await,
                 Ok(Err(status)) => Err(Unanswered::of(&status, Refusals::Others)),
                 Err(_) => Err(Unanswered::late(within)),
             };
-            let step = match said {
-                Ok(step) => step,
+            let told = match said {
+                Ok(Heard::Session(session)) => Told::Session(session),
+                Ok(Heard::Step(step)) => Told::Step(step),
                 Err(unanswered) => return self.last(Told::Failed(unanswered)).await,
             };
-            if self.tell.send(Told::Step(step)).await.is_err() {
+            if self.tell.send(told).await.is_err() {
                 return;
             }
         }
@@ -593,55 +650,57 @@ impl Talk {
 
 struct Listening {
     told: mpsc::Receiver<Told>,
-    session: Option<String>,
     over: bool,
 }
 
 #[derive(uniffi::Object)]
 pub struct Asking {
     listening: tokio::sync::Mutex<Listening>,
-    turns: Arc<Mutex<Turns>>,
+    conversation: Arc<Conversation>,
     turn: u64,
+}
+
+impl Asking {
+    fn talked(&self) -> MutexGuard<'_, Talked> {
+        held(&self.conversation.talked)
+    }
 }
 
 #[uniffi::export]
 impl Asking {
     pub async fn next(&self) -> Result<Option<Step>, Unanswered> {
         let mut listening = self.listening.lock().await;
-        if listening.over {
-            return Ok(None);
-        }
-        let told = listening.told.recv().await;
-        if !matches!(told, Some(Told::Step(_))) {
+        loop {
+            if listening.over {
+                return Ok(None);
+            }
+            let ended = match listening.told.recv().await {
+                Some(Told::Session(session)) => {
+                    self.talked().heard(self.turn, Some(session));
+                    continue;
+                },
+                Some(Told::Step(step)) => {
+                    self.talked().heard(self.turn, None);
+                    return Ok(Some(step));
+                },
+                Some(Told::Ended) => Ok(None),
+                Some(Told::Failed(unanswered)) => Err(unanswered),
+                None => {
+                    let why = "the core's talk ended before the turn did".to_owned();
+                    Err(Unanswered::InDoubt { why })
+                },
+            };
             listening.over = true;
-        }
-        match told {
-            Some(Told::Step(step)) => {
-                if let Step::Session { id } = &step {
-                    held(&self.turns).run(id, self.turn);
-                    listening.session = Some(id.clone());
-                }
-                Ok(Some(step))
-            },
-            Some(Told::Ended) => {
-                held(&self.turns).ended(listening.session.take(), self.turn);
-                Ok(None)
-            },
-            Some(Told::Failed(unanswered)) => {
-                held(&self.turns).release(self.turn);
-                Err(unanswered)
-            },
-            None => {
-                held(&self.turns).release(self.turn);
-                Err(Unanswered::InDoubt { why: "the core's talk ended before the turn did".to_owned() })
-            },
+            let ending = ended.as_ref().map_or_else(Ending::of, |_| Ending::Read);
+            self.talked().end(self.turn, ending);
+            return ended;
         }
     }
 }
 
 impl Drop for Asking {
     fn drop(&mut self) {
-        held(&self.turns).release(self.turn);
+        self.talked().end(self.turn, Ending::Unread);
     }
 }
 
@@ -658,50 +717,64 @@ mod tests {
         for odd in ["", "me@desktop", "desktop/x", "two words"] {
             assert!(matches!(tailnet(odd), Err(Unanswered::Refused { .. })), "{odd:?}");
         }
+        assert_eq!(tailnet_name(" desktop\n"), Ok("desktop".to_owned()), "the name the core reaches");
     }
 
-    fn before(turns: &mut Turns, session: &str) -> Option<u64> {
-        let turn = turns.begin(Some(session)).unwrap();
-        turns.release(turn.key());
-        turn.before()
-    }
-
-    #[test]
-    fn the_turns_held_forget_the_session_heard_of_longest_ago() {
-        let mut turns = Turns::new();
-        for session in 0..TURNS_HELD as u64 {
-            turns.record(format!("s{session}"), session);
-        }
-        turns.record("s0".to_owned(), 100);
-        turns.record("new".to_owned(), 200);
-        assert_eq!(turns.read.len(), TURNS_HELD);
-        assert_eq!(before(&mut turns, "s1"), None);
-        assert_eq!(before(&mut turns, "s0"), Some(100));
-        assert_eq!(before(&mut turns, "new"), Some(200));
+    fn idle(session: &str, read: Option<u64>) -> Talked {
+        Talked::At(Rest::Idle { session: session.to_owned(), read })
     }
 
     #[test]
     fn a_turn_is_the_one_before_only_once_it_was_read_to_its_end() {
-        let mut turns = Turns::new();
-        let first = turns.begin(None).unwrap();
-        turns.run("7c22", first.key());
-        turns.ended(Some("7c22".to_owned()), first.key());
-        let read = turns.begin(Some("7c22")).unwrap();
-        assert_eq!(read.before(), Some(first.key()));
-        turns.release(read.key());
-        let unread = turns.begin(Some("7c22")).unwrap();
+        let mut talked = Talked::At(Rest::Fresh);
+        let (first, resumed) = talked.begin().unwrap();
+        assert_eq!((first.before(), resumed), (None, None));
+        talked.heard(first.key(), Some("7c22".to_owned()));
+        talked.end(first.key(), Ending::Read);
+        assert_eq!(talked, idle("7c22", Some(first.key())));
+        let (read, resumed) = talked.begin().unwrap();
+        assert_eq!((read.before(), resumed.as_deref()), (Some(first.key()), Some("7c22")));
+        talked.end(read.key(), Ending::Unread);
+        let (unread, _) = talked.begin().unwrap();
         assert_eq!(unread.before(), None, "the turn left unread is none before, nor the one before it");
     }
 
     #[test]
-    fn a_session_takes_one_turn_at_a_time() {
-        let mut turns = Turns::new();
-        let running = turns.begin(Some("7c22")).unwrap();
-        assert!(matches!(turns.begin(Some("7c22")), Err(Unanswered::Refused { .. })));
-        let other = turns.begin(Some("9f00")).unwrap();
-        turns.ended(Some("7c22".to_owned()), other.key());
-        assert_eq!(before(&mut turns, "9f00"), None, "a turn ended in one session is read in no other");
-        turns.release(running.key());
-        assert!(turns.begin(Some("7c22")).is_ok());
+    fn a_conversation_takes_one_turn_at_a_time_and_an_old_turn_ends_none_after_it() {
+        let mut talked = Talked::At(Rest::Fresh);
+        let (first, _) = talked.begin().unwrap();
+        assert!(matches!(talked.begin(), Err(Unanswered::Refused { .. })));
+        talked.heard(first.key(), Some("7c22".to_owned()));
+        talked.end(first.key(), Ending::Unread);
+        let (second, resumed) = talked.begin().unwrap();
+        assert_eq!(resumed.as_deref(), Some("7c22"), "a turn left unread still names its session");
+        talked.end(first.key(), Ending::Read);
+        assert!(matches!(talked, Talked::Running { turn, .. } if turn == second.key()));
+        assert_eq!(talked.session(), Some("7c22"));
+    }
+
+    #[test]
+    fn a_turn_refused_before_luned_said_anything_leaves_the_conversation_as_it_was() {
+        let mut talked = idle("7c22", Some(5));
+        let (refused, _) = talked.begin().unwrap();
+        talked.end(refused.key(), Ending::Refused);
+        assert_eq!(talked, idle("7c22", Some(5)));
+        let (heard, _) = talked.begin().unwrap();
+        assert_eq!(heard.before(), Some(5));
+        talked.heard(heard.key(), Some("7c22".to_owned()));
+        talked.end(heard.key(), Ending::Refused);
+        assert_eq!(talked, idle("7c22", None), "a turn luned began was a turn, refused or not");
+        let mut fresh = Talked::At(Rest::Fresh);
+        let (first, _) = fresh.begin().unwrap();
+        fresh.end(first.key(), Ending::Read);
+        assert_eq!(fresh, Talked::At(Rest::Fresh), "a turn that named no session has none to resume");
+    }
+
+    #[test]
+    fn a_conversation_tackles_nothing_when_nothing_is_marked() {
+        let conversation = Core::new("desktop").unwrap().converse(None, None);
+        let nothing = conversation.clone().tackle(Marked::none());
+        assert!(matches!(nothing, Err(Unanswered::Refused { .. })), "{:?}", nothing.err());
+        assert_eq!(*held(&conversation.talked), Talked::At(Rest::Fresh), "and starts no turn");
     }
 }

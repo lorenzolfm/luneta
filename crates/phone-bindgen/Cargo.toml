@@ -1,0 +1,17 @@
+[package]
+name = "lune-phone-bindgen"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+description = "UniFFI's Swift generator at the version lune-phone is built with, so the iPhone app's bindings come from the library they bind"
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "src/main.rs"
+
+[dependencies]
+uniffi = { version = "0.32.2", features = ["cli"] }
+
+[lints]
+workspace = true

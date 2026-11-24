@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use crate::api::{self, project, projects, remote, terminal, worktree};
+use crate::api::project::clone;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct TerminalKey {
@@ -60,7 +61,14 @@ pub struct Project {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Holds {
     Folder { worktree: Worktree },
-    Clone { worktrees: Vec<Worktree> },
+    Clone { worktrees: Vec<Worktree>, unopened: Unopened },
+    Untold,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum Unopened {
+    Listed { subfolders: Vec<String> },
+    Unlisted { why: String },
     Untold,
 }
 
@@ -69,7 +77,7 @@ impl Holds {
     pub fn worktrees(&self) -> &[Worktree] {
         match self {
             Holds::Folder { worktree } => std::slice::from_ref(worktree),
-            Holds::Clone { worktrees } => worktrees,
+            Holds::Clone { worktrees, .. } => worktrees,
             Holds::Untold => &[],
         }
     }
@@ -240,7 +248,14 @@ fn project_of(project: &api::Project, branches: &HashMap<&str, &str>) -> Project
         },
         Some(project::Holds::Clone(clone)) => {
             let worktrees = clone.worktrees.iter().map(|it| worktree_of(it, branches)).collect();
-            Holds::Clone { worktrees }
+            let unopened = match &clone.listing {
+                Some(clone::Listing::Unopened(unopened)) => {
+                    Unopened::Listed { subfolders: unopened.subfolders.clone() }
+                },
+                Some(clone::Listing::Unlisted(why)) => Unopened::Unlisted { why: why.clone() },
+                None => Unopened::Untold,
+            };
+            Holds::Clone { worktrees, unopened }
         },
         None => Holds::Untold,
     };
@@ -450,7 +465,7 @@ mod tests {
         let Held::Kept { projects } = &model.here else {
             panic!("the projects are kept: {:?}", model.here);
         };
-        let Holds::Clone { worktrees } = &projects[0].holds else {
+        let Holds::Clone { worktrees, .. } = &projects[0].holds else {
             panic!("the project is a clone: {:?}", projects[0].holds);
         };
         assert_eq!(worktrees[1].views[0].terminal, agent.terminal);
@@ -473,6 +488,32 @@ mod tests {
             panic!("the projects are kept");
         };
         assert_eq!(projects[0].holds.worktrees()[0].branch.as_deref(), Some("issue-723"));
+    }
+
+    #[test]
+    fn a_clone_whose_worktrees_luned_could_not_list_says_why() {
+        let unlisted = clone::Listing::Unlisted("/w/lune is missing".to_owned());
+        let listed = clone::Listing::Unopened(api::project::Unopened { subfolders: vec!["old".to_owned()] });
+        let unopened = |listing| {
+            let mut project = clone_of(vec![worktree_with(5, "fix", 9)]);
+            let Some(project::Holds::Clone(clone)) = &mut project.holds else {
+                panic!("the project is a clone");
+            };
+            clone.listing = listing;
+            let host = api::Host { projects: Some(kept(vec![project])), ..api::Host::default() };
+            match Model::of(&host).here {
+                Held::Kept { mut projects } => match projects.remove(0).holds {
+                    Holds::Clone { worktrees, unopened } => (worktrees.len(), unopened),
+                    holds => panic!("the project is a clone: {holds:?}"),
+                },
+                held => panic!("the projects are kept: {held:?}"),
+            }
+        };
+        let why = Unopened::Unlisted { why: "/w/lune is missing".to_owned() };
+        assert_eq!(unopened(Some(unlisted)), (1, why));
+        let subfolders = vec!["old".to_owned()];
+        assert_eq!(unopened(Some(listed)), (1, Unopened::Listed { subfolders }));
+        assert_eq!(unopened(None), (1, Unopened::Untold));
     }
 
     #[test]

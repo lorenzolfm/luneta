@@ -1,0 +1,24 @@
+disabled_rules:
+  - line_length
+  - opening_brace
+  - vertical_parameter_alignment
+  - trailing_comma
+  - statement_position
+opt_in_rules:
+  - accessibility_label_for_image
+  - accessibility_trait_for_button
+  - force_unwrapping
+  - implicitly_unwrapped_optional
+  - fatal_error_message
+  - unhandled_throwing_task
+  - unowned_variable_capture
+  - identical_operands
+  - discouraged_optional_boolean
+  - private_swiftui_state
+  - empty_count
+  - empty_string
+  - first_where
+  - last_where
+  - contains_over_first_not_nil
+  - sorted_first_last
+  - toggle_bool
