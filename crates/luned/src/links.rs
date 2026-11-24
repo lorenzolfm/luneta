@@ -895,7 +895,7 @@ fn moved_off(dir: &str, root: &Dir, own: &str) -> Result<Option<MovedOff>, Strin
 fn sits_there(dir: &str, there: &str, own: &str) -> Result<Option<MovedOff>, String> {
     let mut git = Git::at(dir);
     git.args(["worktree", "list", "--porcelain"]);
-    let ran = program::run(git.command(), ANSWER)
+    let ran = git.run(ANSWER)
         .map_err(|error| format!("git worktree list could not be run: {error}"))?;
     let listed = ran.answer().map_err(|why| format!("git worktree list: {why}"))?;
     let listed = String::from_utf8_lossy(&listed);
@@ -1099,14 +1099,16 @@ pub(crate) fn remotes_gh_reads(dir: &str) -> Remotes {
 fn remote_keys_in(dir: &str, keys: &str) -> Remotes {
     let listed = |mut git: Git| {
         git.args(["config", "--get-regexp", keys]).env("LC_ALL", "C");
-        Remotes::of(program::run(git.command(), ANSWER))
+        Remotes::of(git.run(ANSWER))
     };
     match listed(Git::at(dir)) {
         Remotes::Unlisted => match git::common_within(dir, ANSWER) {
-            Common::Unsaid(why) => bare_unread(&why).map_or(Remotes::Unlisted, |bare| {
-                listed(Git::of(bare))
-            }),
             Common::Of(_) | Common::NoRepository => Remotes::Unlisted,
+            Common::Unsaid(why) => match bare_unread(&why) {
+                Some(bare) => listed(Git::of(bare)),
+                None if directory_gone(why.as_bytes()) => Remotes::Unlisted,
+                None => Remotes::Unsaid(why),
+            },
         },
         said => said,
     }
@@ -1114,7 +1116,8 @@ fn remote_keys_in(dir: &str, keys: &str) -> Remotes {
 
 fn bare_unread(why: &str) -> Option<&str> {
     let named = why.strip_prefix(BARE_UNREAD)?.strip_prefix('\'')?;
-    named.rsplit_once("' (").map(|(bare, _)| bare)
+    let (bare, _) = named.rsplit_once("' (")?;
+    Path::new(bare).is_absolute().then_some(bare)
 }
 
 fn layout(dir: &str) -> Layout {
@@ -1132,8 +1135,8 @@ fn layout(dir: &str) -> Layout {
     }
 }
 
-fn said(git: &mut Git) -> Option<String> {
-    one_line(program::run(git.command(), ANSWER).ok()?.answer().ok()?)
+fn said(ran: io::Result<Ran>) -> Option<String> {
+    one_line(ran.ok()?.answer().ok()?)
 }
 
 fn page(link: &Link) -> Result<Link, String> {
@@ -1152,8 +1155,8 @@ fn page(link: &Link) -> Result<Link, String> {
 fn base(dir: &str, remote: &str, branch: &str) -> Result<(), String> {
     let head = format!("refs/heads/{branch}");
     let mut git = Git::at(dir);
-    git.args(["rev-parse", "--verify", "--quiet"]).named([&head]);
-    if said(&mut git).is_some() {
+    git.args(["rev-parse", "--verify", "--quiet"]);
+    if said(git.named([&head]).run(ANSWER)).is_some() {
         return Ok(());
     }
     let pushed = across(dir, "ls-remote", &[ORIGIN, &head])?;
@@ -1166,8 +1169,10 @@ fn base(dir: &str, remote: &str, branch: &str) -> Result<(), String> {
 
 fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut git = Git::at(dir);
-    git.arg(command).named(args);
-    let ran = program::run_alone(git.command(), MAKING)
+    git.arg(command);
+    let ran = git
+        .named(args)
+        .run_alone(MAKING)
         .map_err(|error| format!("git {command} could not be run: {error}"))?;
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
@@ -1303,8 +1308,7 @@ const REACHES: &str = concat!(
 fn reaches_as_the_user_does(dir: &str) -> Result<(), String> {
     let mut git = Git::at(dir);
     git.args(["config", "-z", "--show-scope", "--get-regexp", REACHES]).env("LC_ALL", "C");
-    let ran = program::run(git.command(), ANSWER)
-        .map_err(|error| format!("git config could not be run: {error}"))?;
+    let ran = git.run(ANSWER).map_err(|error| format!("git config could not be run: {error}"))?;
     if let Ran::Ended { status, stderr, .. } = &ran
         && status.code() == Some(1)
         && stderr.is_empty()
@@ -1799,9 +1803,8 @@ mod tests {
             .args(["-c", "safe.bareRepository=all"])
             .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
             .args(args);
-        let ran = git.command().output().unwrap();
-        let said = String::from_utf8(ran.stdout).unwrap();
-        ran.status.success().then(|| said.trim_end().to_owned())
+        let said = git.run(MAKING).unwrap().answer().ok()?;
+        Some(String::from_utf8(said).unwrap().trim_end().to_owned())
     }
 
     #[test]
@@ -2257,5 +2260,17 @@ mod tests {
         assert_eq!(ready(At::There(1)).placed(&views), Ok(ready(At::There("cdk:4"))));
         assert_eq!(ready(At::There(2)).placed(&views), Err(2));
         assert_eq!(ready(At::Unopened).placed(&views), Ok(ready(At::Unopened)));
+    }
+
+    #[test]
+    fn a_bare_repository_git_refused_is_read_only_by_an_absolute_path() {
+        let refused = |bare: &str| {
+            format!("{BARE_UNREAD}'{bare}' (safe.bareRepository is 'explicit')")
+        };
+        assert_eq!(bare_unread(&refused("/w/o/n.git")), Some("/w/o/n.git"));
+        assert_eq!(bare_unread(&refused("/w/it' (s).git")), Some("/w/it' (s).git"));
+        assert_eq!(bare_unread(&refused("n.git")), None, "it would be read from /");
+        assert_eq!(bare_unread("fatal: not a git repository"), None);
+        assert_eq!(bare_unread(BARE_UNREAD), None, "it named no repository");
     }
 }

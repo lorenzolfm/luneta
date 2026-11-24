@@ -18,6 +18,42 @@ snapshots:
       style: secondary
       start: 36
       end: 41
+  "fn f() { let mut git = Command::new(\"git\".to_owned()); }":
+    labels:
+    - source: Command::new("git".to_owned())
+      style: primary
+      start: 23
+      end: 53
+    - source: Command::new
+      style: secondary
+      start: 23
+      end: 35
+    - source: "\"git\""
+      style: secondary
+      start: 36
+      end: 41
+    - source: "\"git\""
+      style: secondary
+      start: 36
+      end: 41
+  "fn f() { let mut git = Command::new(OsStr::new(\"git\")); }":
+    labels:
+    - source: Command::new(OsStr::new("git"))
+      style: primary
+      start: 23
+      end: 54
+    - source: Command::new
+      style: secondary
+      start: 23
+      end: 35
+    - source: "\"git\""
+      style: secondary
+      start: 47
+      end: 52
+    - source: "\"git\""
+      style: secondary
+      start: 47
+      end: 52
   "fn f() { let mut git = process::Command::new(\"git\"); }":
     labels:
     - source: process::Command::new("git")

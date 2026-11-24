@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use super::{Dir, Subfolder, WORKTREES_MAX};
 use crate::git::{self, Common, Git};
-use crate::program::{self, Ran};
+use crate::program::Ran;
 
 pub const CLONE_WORKTREES_MAX: usize = 256;
 
@@ -174,7 +174,7 @@ fn left(until: Instant, look: Duration) -> Result<Duration, String> {
 fn toplevel(folder: &Dir, until: Instant, look: Duration) -> Result<Option<Dir>, String> {
     let mut git = Git::at(folder.as_str());
     git.args(["rev-parse", "--is-inside-work-tree", "--show-toplevel"]).env("LC_ALL", "C");
-    let stdout = match program::run(git.command(), left(until, look)?) {
+    let stdout = match git.run(left(until, look)?) {
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => stdout,
         Ok(Ran::Ended { .. }) => return Ok(None),
         Ok(Ran::Stuck) => return Err(format!("git did not answer in {}ms", look.as_millis())),
@@ -190,7 +190,7 @@ fn toplevel(folder: &Dir, until: Instant, look: Duration) -> Result<Option<Dir>,
 }
 
 fn ran(git: &mut Git, asked: &str, until: Instant, look: Duration) -> Result<Vec<u8>, String> {
-    let ran = program::run(git.command(), left(until, look)?);
+    let ran = git.run(left(until, look)?);
     let ran = ran.map_err(|error| format!("git {asked} did not run: {error}"))?;
     ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
@@ -202,7 +202,7 @@ pub fn clone_of(common: &str, look: Duration) -> Result<CloneRoot, String> {
 fn clone_within(common: &str, until: Instant, look: Duration) -> Result<CloneRoot, String> {
     let mut git = Git::of(common);
     git.args(["config", "--type=bool", "--get", "core.bare"]).env("LC_ALL", "C");
-    let ran = program::run(git.command(), left(until, look)?);
+    let ran = git.run(left(until, look)?);
     let ran = ran.map_err(|error| format!("git config core.bare did not run: {error}"))?;
     Ok(clone_root(common, bare(ran)?))
 }
@@ -324,8 +324,8 @@ mod tests {
     fn git(dir: &Path, args: &[&str]) {
         let mut git = Git::at(dir);
         git.args(args).env("GIT_CONFIG_GLOBAL", "/dev/null");
-        let status = git.command().status().unwrap();
-        assert!(status.success(), "git {args:?} in {}", dir.display());
+        let said = git.run(Duration::from_mins(1)).unwrap().answer();
+        assert!(said.is_ok(), "git {args:?} in {}: {said:?}", dir.display());
     }
 
     fn real(path: &Path) -> Dir {

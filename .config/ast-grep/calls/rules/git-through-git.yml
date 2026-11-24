@@ -21,3 +21,4 @@ rule:
         has:
           kind: string_literal
           regex: ^"git"$
+          stopBy: end

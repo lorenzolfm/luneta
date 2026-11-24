@@ -276,24 +276,19 @@ fn parse_listed(said: &[u8]) -> Vec<Listed> {
     listed
 }
 
-fn on_repository(common: &str) -> Git {
-    Git::of(common)
-}
-
 fn says(mut git: Git, limit: Duration, asked: &str) -> Result<Vec<u8>, String> {
-    let ran = program::run(git.command(), limit)
-        .map_err(|error| format!("git {asked} could not be run: {error}"))?;
+    let ran = git.run(limit).map_err(|error| format!("git {asked} could not be run: {error}"))?;
     ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
 
 fn says_alone(mut git: Git, asked: &str) -> Result<Vec<u8>, String> {
-    let ran = program::run_alone(git.command(), GIT_SAYS)
+    let ran = git.run_alone(GIT_SAYS)
         .map_err(|error| format!("git {asked} could not be run: {error}"))?;
     ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
 
 fn worktrees(common: &str) -> Result<Vec<Listed>, String> {
-    let mut git = on_repository(common);
+    let mut git = Git::of(common);
     git.args(["worktree", "list", "--porcelain", "-z"]);
     says(git, GIT_SAYS, "worktree list").map(|said| parse_listed(&said))
 }
@@ -378,7 +373,7 @@ fn at_once<T: Sync, S, R: Send>(
 }
 
 fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, String> {
-    let mut git = on_repository(common);
+    let mut git = Git::of(common);
     let head = format!("refs/heads/{branch}");
     git.args(["for-each-ref", "--format=%(push:remotename)%00%(push)", &head]);
     let said = says(git, GIT_SAYS, "for-each-ref")?;
@@ -393,14 +388,14 @@ fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, Strin
 }
 
 fn default_heard(common: &str, remote: &str) -> Result<Option<String>, String> {
-    git::pointed(on_repository(common), git::Symbolic::RemoteHead(remote), GIT_SAYS)
+    git::pointed(Git::of(common), git::Symbolic::RemoteHead(remote), GIT_SAYS)
 }
 
 fn remote_default(common: &str, remote: &str) -> Result<Option<String>, String> {
     if let Some(default) = default_heard(common, remote)? {
         return Ok(Some(default));
     }
-    let mut git = on_repository(common);
+    let mut git = Git::of(common);
     git.args(["ls-remote", "--symref", "--", remote, "HEAD"]);
     let said = says_alone(git, "ls-remote")?;
     let said = String::from_utf8_lossy(&said);
@@ -411,7 +406,7 @@ fn remote_default(common: &str, remote: &str) -> Result<Option<String>, String> 
 }
 
 fn remote_heads(common: &str, remote: &str) -> Result<HashMap<String, String>, String> {
-    let mut git = on_repository(common);
+    let mut git = Git::of(common);
     git.args(["ls-remote", "--heads", "--", remote]);
     let said = says_alone(git, "ls-remote")?;
     let said = String::from_utf8_lossy(&said);
@@ -423,7 +418,7 @@ fn remote_heads(common: &str, remote: &str) -> Result<HashMap<String, String>, S
 }
 
 fn push_urls(common: &str, remote: &str) -> Result<Vec<String>, String> {
-    let mut git = on_repository(common);
+    let mut git = Git::of(common);
     git.args(["config", "--get-regexp", r"^remote\..*\.(pushurl|url)$"]);
     let said = says(git, GIT_SAYS, "config")?;
     let said = String::from_utf8_lossy(&said);
@@ -713,7 +708,7 @@ fn stands_as_planned(
 }
 
 fn worktree_removed(common: &str, folder: &str) -> Result<(), String> {
-    let mut git = on_repository(common);
+    let mut git = Git::of(common);
     git.args(["-c", "status.showUntrackedFiles=normal", "worktree", "remove", "--", folder]);
     says(git, REMOVING, "worktree remove").map(|_| ())
 }
@@ -721,7 +716,7 @@ fn worktree_removed(common: &str, folder: &str) -> Result<(), String> {
 fn far_branch_deleted(common: &str, head: &str, far: &RemoteBranch) -> Result<(), String> {
     let RemoteBranch { remote, branch } = far;
     let there = format!("refs/heads/{branch}");
-    let mut git = on_repository(common);
+    let mut git = Git::of(common);
     git.arg("push").arg(format!("--force-with-lease={there}:{head}"));
     git.args(["--", remote, &format!(":{there}")]);
     says_alone(git, "push")
@@ -730,13 +725,13 @@ fn far_branch_deleted(common: &str, head: &str, far: &RemoteBranch) -> Result<()
 }
 
 fn branch_deleted(common: &str, goes: &Goes) -> Result<(), String> {
-    let mut at = on_repository(common);
+    let mut at = Git::of(common);
     at.args(["rev-parse", "--verify", &format!("refs/heads/{}^{{commit}}", goes.branch)]);
     let at = says(at, GIT_SAYS, "rev-parse")?;
     if String::from_utf8_lossy(&at).trim_end() != goes.head {
         return Err(format!("its branch {} stays: it has moved", goes.branch));
     }
-    let mut git = on_repository(common);
+    let mut git = Git::of(common);
     git.args(["branch", "-D", "--", &goes.branch]);
     says(git, GIT_SAYS, "branch -D")
         .map(|_| ())
@@ -1171,11 +1166,12 @@ mod tests {
         let common = scratch.path().join("r.git");
         let common = common.to_str().unwrap();
         let git = |args: &[&str]| {
-            let mut git = on_repository(common);
-            assert!(git.args(args).command().status().unwrap().success(), "{args:?}");
+            let mut git = Git::of(common);
+            let said = git.args(args).run(GIT_SAYS).unwrap().answer();
+            assert!(said.is_ok(), "{args:?}: {said:?}");
         };
         let mut init = Git::at(scratch.path());
-        assert!(init.args(["init", "-q", "--bare", common]).command().status().unwrap().success());
+        init.args(["init", "-q", "--bare", common]).run(GIT_SAYS).unwrap().answer().unwrap();
         git(&["config", "remote.fetched.url", "https://x/o/f"]);
         git(&["config", "remote.fetched-too.url", "https://x/o/too"]);
         git(&["config", "remote.pushed.url", "https://x/o/u"]);
@@ -1193,7 +1189,8 @@ mod tests {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
             .args(args);
-        assert!(git.command().status().unwrap().success(), "{args:?}");
+        let said = git.run(GIT_SAYS).unwrap().answer();
+        assert!(said.is_ok(), "{args:?}: {said:?}");
     }
 
     #[test]

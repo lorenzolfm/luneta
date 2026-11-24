@@ -13,7 +13,7 @@ use crate::directory::Directory;
 use crate::git::{self, Common, DefaultBranch, Git};
 use crate::github::{self, Pulled, RepositoryName};
 use crate::links::{self, sync};
-use crate::program::{self, Ran};
+use crate::program::Ran;
 
 const RUNNING_MAX: Duration = Duration::from_mins(20);
 
@@ -197,7 +197,7 @@ fn based(
 fn named_branch(top: &str, name: &str, until: Instant) -> Result<Option<NamedBranch>, String> {
     let mut git = Git::at(top);
     git.args(["check-ref-format", &format!("refs/heads/{name}")]);
-    let ran = program::run(git.command(), left(until, GIT_SAYS)?)
+    let ran = git.run(left(until, GIT_SAYS)?)
         .map_err(|error| format!("git check-ref-format could not be run: {error}"))?;
     match ran {
         Ran::Ended { status, .. } => Ok(status.success().then(|| NamedBranch(name.to_owned()))),
@@ -268,9 +268,9 @@ fn ahead(top: &str, reference: &str, branch: &str, until: Instant) -> Result<u32
 
 fn picked(top: &str, onto: &str, branch: &str, until: Instant) -> Result<Picked, Unrebased> {
     let mut git = Git::at(top);
-    git.arg("rebase").named([onto, branch]).env("GIT_EDITOR", ":").env("GIT_SEQUENCE_EDITOR", ":");
+    git.arg("rebase").env("GIT_EDITOR", ":").env("GIT_SEQUENCE_EDITOR", ":");
     let limit = left(until, PICKING).map_err(Unrebased::Refused)?;
-    let ran = program::run_alone(git.command(), limit).map_err(|error| {
+    let ran = git.named([onto, branch]).run_alone(limit).map_err(|error| {
         Unrebased::Refused(format!("git rebase could not be run: {error}"))
     })?;
     let code = match &ran {
@@ -297,7 +297,7 @@ fn picked(top: &str, onto: &str, branch: &str, until: Instant) -> Result<Picked,
 fn stopped_at(top: &str, until: Instant) -> Result<Option<String>, String> {
     let mut git = Git::at(top);
     git.args(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"]);
-    let ran = program::run(git.command(), left(until, GIT_SAYS)?)
+    let ran = git.run(left(until, GIT_SAYS)?)
         .map_err(|error| format!("git rev-parse could not be run: {error}"))?;
     if let Ran::Ended { status, stdout, .. } = &ran
         && status.code() == Some(UNVERIFIED_CODE)
@@ -502,10 +502,9 @@ mod tests {
             .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
             .args(["-c", "maintenance.auto=false", "-c", "init.defaultBranch=main"])
             .args(args);
-        let ran = git.command().output().unwrap();
-        let stderr = String::from_utf8_lossy(&ran.stderr);
-        assert!(ran.status.success(), "git {args:?} in {}: {stderr}", dir.display());
-        String::from_utf8(ran.stdout).unwrap().trim_end().to_owned()
+        let said = git.run(Duration::from_mins(1)).unwrap().answer();
+        let said = said.unwrap_or_else(|why| panic!("git {args:?} in {}: {why}", dir.display()));
+        String::from_utf8(said).unwrap().trim_end().to_owned()
     }
 
     fn commit(dir: &Path, file: &str, text: &str, subject: &str) -> String {

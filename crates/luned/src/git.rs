@@ -66,10 +66,13 @@ impl Git {
 
     #[must_use]
     pub fn of(common: impl AsRef<OsStr>) -> Git {
+        let common = common.as_ref();
+        let absolute = Path::new(common).is_absolute();
+        assert!(absolute, "--git-dir={} would be read from /", common.display());
         let mut git = Git::hardened();
-        let mut named = OsString::from("--git-dir=");
-        named.push(common);
-        git.0.arg(named).current_dir("/");
+        let mut git_dir = OsString::from("--git-dir=");
+        git_dir.push(common);
+        git.0.arg(git_dir).current_dir("/");
         git
     }
 
@@ -87,22 +90,50 @@ impl Git {
         self
     }
 
-    pub fn named<I, S>(&mut self, names: I) -> &mut Git
+    pub fn env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Git {
+        let key = key.as_ref();
+        assert!(
+            REPOSITORY_VARS.iter().all(|repository| key != OsStr::new(repository)),
+            "{} names a repository: name it with Git::at or Git::of",
+            key.display(),
+        );
+        self.0.env(key, value);
+        self
+    }
+
+    pub fn configured(&mut self, pairs: &[(&str, &str)]) -> &mut Git {
+        configured(&mut self.0, pairs);
+        self
+    }
+
+    #[must_use]
+    pub fn named<I, S>(mut self, names: I) -> Named
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         self.0.arg("--end-of-options").args(names);
-        self
+        Named(self.0)
     }
 
-    pub fn env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Git {
-        self.0.env(key, value);
-        self
+    pub fn run(&mut self, limit: Duration) -> io::Result<Ran> {
+        program::run(&mut self.0, limit)
     }
 
-    pub fn command(&mut self) -> &mut Command {
-        &mut self.0
+    pub fn run_alone(&mut self, limit: Duration) -> io::Result<Ran> {
+        program::run_alone(&mut self.0, limit)
+    }
+}
+
+pub struct Named(Command);
+
+impl Named {
+    pub fn run(mut self, limit: Duration) -> io::Result<Ran> {
+        program::run(&mut self.0, limit)
+    }
+
+    pub fn run_alone(mut self, limit: Duration) -> io::Result<Ran> {
+        program::run_alone(&mut self.0, limit)
     }
 }
 
@@ -120,7 +151,7 @@ pub fn configured<'a>(command: &'a mut Command, pairs: &[(&str, &str)]) -> &'a m
 fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Stood {
     let mut git = Git::at(dir);
     git.args(git::STATUS);
-    let ran = program::run(git.command(), LIMIT)
+    let ran = git.run(LIMIT)
         .map_err(|error| format!("git status in {dir} could not be run: {error}"))?;
     let said = match ran {
         Ran::Stuck => return Err(format!("git status in {dir} did not answer in time")),
@@ -209,7 +240,7 @@ pub fn common(dir: &str) -> Common {
 pub fn common_within(dir: &str, limit: Duration) -> Common {
     let mut git = Git::at(dir);
     git.args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).env("LC_ALL", "C");
-    let ran = program::run(git.command(), limit);
+    let ran = git.run(limit);
     Common::of(ran.map_err(|error| format!("it could not be run: {error}")).and_then(Ran::answer))
 }
 
@@ -270,8 +301,7 @@ pub fn pointed(
     let name = symbolic.name();
     git.args(["symbolic-ref", "--quiet", &name]);
     let asked = format!("git symbolic-ref {name}");
-    let ran = program::run(git.command(), limit)
-        .map_err(|error| format!("{asked} could not be run: {error}"))?;
+    let ran = git.run(limit).map_err(|error| format!("{asked} could not be run: {error}"))?;
     let said = match ran {
         Ran::Ended { status, .. } if status.code() == Some(1) => return Ok(None),
         ran => ran.answer().map_err(|why| format!("{asked}: {why}"))?,
@@ -284,13 +314,13 @@ pub fn pointed(
 pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
     let git = |args: &[&str], names: &[&str]| {
         let mut git = Git::at(dir);
-        git.args(args).named(names).env("GIT_NO_LAZY_FETCH", "1");
-        program::run(git.command(), LIMIT).map_err(|error| format!("git could not be run: {error}"))
+        git.args(args).env("GIT_NO_LAZY_FETCH", "1");
+        git.named(names).run(LIMIT).map_err(|error| format!("git could not be run: {error}"))
     };
     let tip = format!("refs/heads/{branch}");
-    let named = defaults();
+    let bases = defaults();
     let mut listing = vec![tip.as_str()];
-    listing.extend(named.iter().map(String::as_str));
+    listing.extend(bases.iter().map(String::as_str));
     let listed = git(&["for-each-ref", LISTING], &listing)?;
     let listed = listed.answer().map_err(|why| format!("git for-each-ref said {why}"))?;
     let listed = String::from_utf8_lossy(&listed);
@@ -298,7 +328,7 @@ pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
     let Some(&(tip, _)) = listed.get(tip.as_str()) else {
         return Ok(None);
     };
-    let Some((base, target)) = first_default(&named, &listed) else {
+    let Some((base, target)) = first_default(&bases, &listed) else {
         return Ok(None);
     };
     if DefaultBranch::of(target).is_some_and(|default| default.branch() == branch) {
@@ -453,7 +483,7 @@ pub(crate) fn says_within(dir: &str, args: &[&str], limit: Duration) -> Result<S
     let asked = args.join(" ");
     let mut git = Git::at(dir);
     git.args(args);
-    let ran = program::run(git.command(), limit)
+    let ran = git.run(limit)
         .map_err(|error| format!("git {asked} in {dir} could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("git {asked} in {dir}: {why}"))?;
     Ok(String::from_utf8_lossy(&said).trim_end().to_owned())
@@ -475,7 +505,7 @@ fn place(dir: &str) -> Result<Option<Place>, Unanswered> {
         "--git-dir",
         "--git-common-dir",
     ]);
-    match program::run(git.command(), LIMIT) {
+    match git.run(LIMIT) {
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => Ok(Place::parse(&stdout)),
         Ok(Ran::Ended { .. }) => Ok(None),
         Ok(Ran::Stuck) | Err(_) => Err(Unanswered),
@@ -496,7 +526,7 @@ impl Place {
 fn listed(top: &Path) -> Result<Vec<u8>, String> {
     let mut git = Git::at(top);
     git.args(["ls-files", "-z"]);
-    let ran = program::run(git.command(), LIMIT).map_err(|error| {
+    let ran = git.run(LIMIT).map_err(|error| {
         format!("git ls-files in {} could not be run: {error}", top.display())
     })?;
     ran.answer().map_err(|why| format!("git ls-files in {}: {why}", top.display()))
@@ -981,7 +1011,9 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{Changed, Common, DefaultBranch, Git, Symbolic, branch, changed, pointed, stamp};
+    use super::{
+        Changed, Common, DefaultBranch, Git, LIMIT, Symbolic, branch, changed, pointed, stamp,
+    };
 
     fn git(dir: &Path, args: &[&str]) -> bool {
         let mut git = Git::at(dir);
@@ -990,7 +1022,7 @@ mod tests {
             .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
             .args(["-c", "maintenance.auto=false"])
             .args(args);
-        git.command().status().unwrap().success()
+        git.run(LIMIT).unwrap().answer().is_ok()
     }
 
     #[test]
