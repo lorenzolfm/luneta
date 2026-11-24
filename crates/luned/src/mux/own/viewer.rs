@@ -254,6 +254,7 @@ async fn stream(
                 Err(why) => return Ok(format!("lune-mux said what lune cannot read: {why}")),
             },
             Some(to_viewer::Event::Refused(api::Refused { reason })) => told(Seen::Refused(reason)),
+            Some(to_viewer::Event::Closed(_)) => {},
             None => return Ok("lune-mux said nothing to its viewer".to_owned()),
         }
     }

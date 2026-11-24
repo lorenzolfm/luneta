@@ -141,6 +141,10 @@ private struct ViewRow: View {
                 NavigationLink(value: terminal) {
                     row(status: agent.status.words, waits: agent.waits)
                 }
+            } else if let terminal = view.key {
+                NavigationLink(value: TerminalPlace(terminal: terminal, title: view.title)) {
+                    row(status: view.found.words ?? view.command, waits: false)
+                }
             } else {
                 row(status: view.found.words ?? view.command, waits: false)
             }

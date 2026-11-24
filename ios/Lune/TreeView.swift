@@ -31,6 +31,7 @@ struct TreeView: View {
             .navigationTitle("Tree")
             .navigationDestination(for: ProjectSeat.self) { ProjectView(seat: $0) }
             .navigationDestination(for: TerminalKey.self) { AgentView(terminal: $0) }
+            .navigationDestination(for: TerminalPlace.self) { TerminalPage(place: $0) }
         }
     }
 }

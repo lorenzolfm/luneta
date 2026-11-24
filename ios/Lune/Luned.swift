@@ -129,6 +129,10 @@ final class Luned {
         try await reached().answer(screen: screen, answer: answer)
     }
 
+    func terminal(_ terminal: TerminalKey, appearance: Appearance) throws -> TerminalView {
+        try reached().terminal(terminal: terminal, appearance: appearance)
+    }
+
     private func reached() throws -> Core {
         switch reach {
         case .unnamed: throw Unanswered.Refused(why: "no machine is named")
