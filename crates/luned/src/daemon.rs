@@ -46,6 +46,7 @@ use crate::api::{
 };
 use crate::answers::{self, Answer, Runs, Unanswered};
 use crate::mux::Failure;
+use crate::panics::Hooked;
 use crate::asks::{Asked, Step};
 use crate::core::{self, After, Command, Full, Parked, Wakes};
 use crate::directory::Directory;
@@ -173,6 +174,7 @@ impl Claim {
 }
 
 pub async fn serve(
+    _hooked: Hooked,
     claim: Claim,
     projects: Result<Lock, String>,
     unkept: Option<String>,

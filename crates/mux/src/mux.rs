@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
+use lune_protocol::made::Made;
 use lune_protocol::socket::Unreached;
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
@@ -311,10 +312,11 @@ impl Model {
     fn reserve(&mut self) -> Result<TerminalKey, Status> {
         let holding = self.holding()?;
         refuse_if_full(holding.terminals.len(), TERMINALS_MAX, "terminals")?;
+        let made = made_now()?;
         let id = TerminalId::next(&mut holding.last.terminal);
         let was = holding.terminals.insert(id, Slot::Starting);
         assert!(was.is_none(), "terminal {id} is new");
-        Ok(TerminalKey { id, made: SystemTime::now() })
+        Ok(TerminalKey { id, made })
     }
 
     fn place(
@@ -531,9 +533,8 @@ impl Terminal {
     }
 }
 
-fn nanos(made: SystemTime) -> Result<u64, Status> {
-    let made = made.duration_since(UNIX_EPOCH).ok();
-    made.and_then(|since| u64::try_from(since.as_nanos()).ok()).ok_or_else(|| {
+fn made_now() -> Result<Made, Status> {
+    Made::of(SystemTime::now()).ok_or_else(|| {
         Status::failed_precondition("the clock says a time before 1970, or after 2554")
     })
 }
@@ -547,7 +548,7 @@ fn spawned(
 ) -> Result<(Terminal, Placing), Status> {
     let vars = [
         (pty::TERMINAL_VAR, key.id.to_string()),
-        (pty::TERMINAL_MADE_VAR, nanos(key.made)?.to_string()),
+        (pty::TERMINAL_MADE_VAR, key.made.nanos().to_string()),
     ];
     let failed =
         |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));

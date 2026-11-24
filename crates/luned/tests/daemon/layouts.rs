@@ -1,5 +1,6 @@
 use std::fmt::{self, Display};
 use std::fs;
+use std::iter;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
@@ -1730,6 +1731,87 @@ fn a_bridge_holds_its_most_shows_and_layouts_open_and_keeps_room_for_questions()
         };
         held.push(lune_waits::eventually_async("a show let go makes room for another", room).await);
     });
+}
+
+#[test]
+fn the_shows_and_viewers_lune_drops_give_their_places_on_a_bridge_back() {
+    let far = Owned::new();
+    let worktree = worktree_in_home(&far);
+    let here = Host::new();
+    FakeSsh::new(here.bin()).reaches("far", far.host.vars());
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    let luned = folder_in(here.runtime.path()).unwrap();
+    let destination: Destination = "far".parse().unwrap();
+    let shown_in = WorktreeId::of(worktree).unwrap();
+    let size = Size::of(80, 24).unwrap();
+    let show_far = || {
+        let (heard, hearing) = std::sync::mpsc::channel();
+        let told = move |it| drop(heard.send(it));
+        let at = Where::On(destination.clone());
+        let show = luned::show(luned.clone(), at, shown_in, size, false, told);
+        let laid = move || match lune_waits::heard("luned lays the show out", &hearing) {
+            Heard::Laid(laid) => laid,
+            other => panic!("a show within the most is laid out, not {other:?}"),
+        };
+        (show, laid)
+    };
+    let (first, laid) = show_far();
+    assert!(laid().is_empty());
+    first.ask(Asked::Open { beside: Beside::Largest, opens: command(&["sh"]) });
+    let keys = laid().keys();
+    let viewers_max = BRIDGE_HELD_MAX / 2;
+    let mut shows = vec![first];
+    while shows.len() < BRIDGE_HELD_MAX - viewers_max {
+        let (show, laid) = show_far();
+        drop(laid());
+        shows.push(show);
+    }
+    let greeting = Greeting { foreground: None, background: None };
+    let viewer = || {
+        let (seen, seeing) = std::sync::mpsc::channel();
+        let reach = Reach::On { luned: luned.clone(), destination: destination.clone() };
+        let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
+        viewer.show(keys.clone());
+        match lune_waits::heard("the viewer sees sh", &seeing) {
+            Seen::Frame(_) => viewer,
+            Seen::Refused(why) | Seen::Lost(why) => panic!("a viewer within the most sees: {why}"),
+        }
+    };
+    let viewers: Vec<_> = iter::repeat_with(viewer).take(viewers_max).collect();
+    far.block_on(async {
+        let mut daemon = luned::connect(&luned, PATIENT).await.unwrap();
+        let full = shown_through(&mut daemon, worktree).await.err().map(|it| it.code());
+        assert_eq!(full, Some(Code::ResourceExhausted), "lune's shows and viewers fill the bridge");
+        drop(viewers);
+        let what = "the viewers lune dropped give their places back";
+        let mut taken = places_taken(&mut daemon, worktree, viewers_max, what).await;
+        drop(shows);
+        let what = "the shows lune dropped give their places back";
+        let places = BRIDGE_HELD_MAX - viewers_max;
+        taken.extend(places_taken(&mut daemon, worktree, places, what).await);
+    });
+}
+
+async fn places_taken(
+    daemon: &mut Daemon,
+    worktree: u64,
+    places: usize,
+    what: &str,
+) -> Vec<(mpsc::Sender<ShowRequest>, Streaming<ShowResponse>)> {
+    let mut taken = Vec::new();
+    while taken.len() < places {
+        let take = async || match shown_through(daemon, worktree).await {
+            Ok(shown) => Some(shown),
+            Err(full) if full.code() == Code::ResourceExhausted => None,
+            Err(refused) => panic!("{what}, not {refused:?}"),
+        };
+        taken.push(lune_waits::eventually_async(what, take).await);
+    }
+    let full = shown_through(daemon, worktree).await.err().map(|it| it.code());
+    assert_eq!(full, Some(Code::ResourceExhausted), "{what}, and no more than theirs");
+    taken
 }
 
 #[test]

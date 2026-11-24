@@ -3,8 +3,8 @@ use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 
 use lune_phone::{
-    Came, Core, Held, Landed, Marked, Model, Observer, Order, Plan, Pruned, Rebase, Refusals,
-    Step, Unanswered, View, Worktree,
+    Came, Core, Found, Held, Landed, Marked, Model, Observer, Order, Plan, Pruned, Rebase,
+    Refusals, Step, Unanswered, View, Worktree,
 };
 use lune_waits::{eventually, Patience, PATIENCE};
 
@@ -95,7 +95,7 @@ fn worktree_of(model: &Model, worktree: u64) -> Option<&Worktree> {
 
 fn started_view(model: &Model, worktree: u64) -> Option<View> {
     let view = worktree_of(model, worktree)?.views.first()?;
-    view.terminal.is_some().then(|| view.clone())
+    matches!(view.found, Found::Key { .. }).then(|| view.clone())
 }
 
 fn names(model: &Model) -> Vec<&str> {
@@ -167,7 +167,10 @@ fn the_phone_renames_and_reorders_a_clone_s_worktrees_and_closes_a_view_and_a_wo
     phone.block_on(reorder).unwrap();
     phone.sees("the worktrees reordered", |model| order(model) == [two, main]);
 
-    phone.block_on(phone.core.close_view(None, last.terminal.unwrap())).unwrap();
+    let Found::Key { key } = last.found else {
+        panic!("the last view has its terminal: {last:?}");
+    };
+    phone.block_on(phone.core.close_view(key)).unwrap();
     phone.sees("the last view closed takes its worktree", |model| order(model) == [main]);
     let stale = refused(phone.block_on(phone.core.close_worktree(None, main, Vec::new())));
     assert!(stale.contains("changed since"), "{stale}");

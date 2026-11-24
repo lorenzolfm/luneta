@@ -654,7 +654,7 @@ impl Layouts {
         let view = terminal.view();
         let (placed, inner) = placement(found.layout(), None, Beside::Largest, view, size)?;
         let folder = project.folder(worktree).expect("a worktree held has its folder");
-        let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
+        let cwd = Directory::from(&folder);
         let made = Terminal::new(terminal, folder, opens.runs());
         self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
         let unopened = |why| format!("no terminal opens in worktree {worktree}: {why}");
@@ -680,12 +680,15 @@ impl Layouts {
             let inner = inner.expect("a layout lays out the terminal it holds");
             (project.id(), first.id(), first.folder().clone(), inner)
         };
-        let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
+        let cwd = Directory::from(&folder);
         let Err(failure) = self.spawned(terminal, &cwd, opens, inner) else {
             return Ok(());
         };
         let unopened = format!("no terminal opens in worktree {worktree}: {failure}");
-        let projects = self.store.projects().expect("projects just changed are kept");
+        let projects = match self.kept() {
+            Ok(projects) => projects,
+            Err(unkept) => return Err(format!("{unopened}, and {unkept}")),
+        };
         if projects.holding_view(terminal.view()).is_some() {
             return Err(unopened);
         }
@@ -1060,7 +1063,7 @@ impl Layouts {
             .and_then(|listed| Dir::parse(&listed.cwd).ok())
             .filter(|cwd| home.below(cwd).is_some());
         let folder = listed_cwd.unwrap_or(home);
-        let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
+        let cwd = Directory::from(&folder);
         let made = Terminal::new(terminal, folder, opens.runs());
         self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
         self.spawned(terminal, &cwd, opens, inner)?;
@@ -1234,7 +1237,7 @@ impl Layouts {
             let (kept, theirs) = (kept_folder.as_str(), worktree_folder.as_str());
             return Err(format!("neither {kept} nor its worktree's {theirs} is a folder"));
         };
-        let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
+        let cwd = Directory::from(&folder);
         let args: Vec<String>;
         let (opened, restore) = match &runs {
             Runs::Shell => (Opened::Shell(&self.shell), None),
@@ -1368,6 +1371,7 @@ impl Layouts {
             return;
         };
         let mut found: BTreeMap<TerminalViewId, (TerminalKey, Option<Size>)> = BTreeMap::new();
+        let mut keys: BTreeSet<TerminalKey> = BTreeSet::new();
         for listed in &terminals {
             let Some(view) = tagged(&listed.tag) else {
                 continue;
@@ -1381,6 +1385,11 @@ impl Layouts {
             let terminal = held.id();
             if found.contains_key(&terminal) {
                 let why = format!("two terminals are tagged {terminal}; the first is kept");
+                self.troubles.say(why);
+                continue;
+            }
+            if !keys.insert(listed.key) {
+                let why = format!("two terminals share key {}; the first is kept", listed.key.id);
                 self.troubles.say(why);
                 continue;
             }

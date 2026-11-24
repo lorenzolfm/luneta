@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
-use std::panic::{self, AssertUnwindSafe};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -17,6 +16,7 @@ use crate::directory::Directory;
 use crate::git::{self, NamedHead};
 use crate::links::{self, Remotes};
 use crate::log;
+use crate::panics::{self, Panicked};
 use crate::program;
 use crate::watch::Troubles;
 
@@ -233,7 +233,7 @@ fn fork(dir: &str, repository: &Directory, forks: &Forks) -> Result<Option<Fork>
         Remotes::Unsaid(why) => return Err(format!("git did not say the remotes of {dir}: {why}")),
     };
     let lineage = forks.of(repository);
-    let mut lineage = locked(&lineage);
+    let mut lineage = unpoisoned(&lineage);
     if let Some(known) = lineage.as_ref()
         && known.remotes == remotes
     {
@@ -394,6 +394,15 @@ impl Forks {
     fn retain(&self, keep: impl Fn(&Directory) -> bool) {
         locked(&self.0).retain(|repository, _| keep(repository));
     }
+}
+
+fn unpoisoned(lineage: &Mutex<Option<Lineage>>) -> MutexGuard<'_, Option<Lineage>> {
+    lineage.lock().unwrap_or_else(|poisoned| {
+        let mut unknown = poisoned.into_inner();
+        *unknown = None;
+        lineage.clear_poison();
+        unknown
+    })
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -576,8 +585,8 @@ pub fn follow(
                 let (of, forks) = (branch.clone(), Arc::clone(&forks));
                 let (answer, wake) = (answer.clone(), wake.clone());
                 let asks = thread::Builder::new().name("gh ask".to_owned()).spawn(move || {
-                    let said = panic::catch_unwind(AssertUnwindSafe(|| view(&dir, &of, &forks)))
-                        .unwrap_or_else(|_| Err(format!("gh's ask about {} panicked", of.1)));
+                    let said = panics::contained(|| view(&dir, &of, &forks))
+                        .unwrap_or_else(|Panicked| Err(format!("gh's ask about {} panicked", of.1)));
                     if answer.send(Answered { branch: of, said }).is_ok() {
                         let _ = wake.try_send(());
                     }
@@ -641,14 +650,30 @@ fn tell(
 
 #[cfg(test)]
 mod tests {
+    use std::panic;
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     use lune_protocol::github::{Checks, PullPage, PullRequest, State};
 
     use super::{
-        answered, checks_changed, fork_of, parse, standing, Answer, Asked, Pulled, RepositoryName,
-        Rests, Said,
+        answered, checks_changed, fork_of, parse, standing, unpoisoned, Answer, Asked, Lineage,
+        Pulled, RepositoryName, Rests, Said,
     };
+
+    #[test]
+    fn a_lineage_whose_ask_panicked_halfway_is_known_no_more() {
+        let lineage = Mutex::new(None);
+        let torn = panic::catch_unwind(|| {
+            let mut known = unpoisoned(&lineage);
+            *known = Some(Lineage { remotes: "origin".to_owned(), fork: None });
+            panic!("gh's answer about the fork does not read");
+        });
+        assert!(torn.is_err(), "the ask panicked");
+        assert!(lineage.is_poisoned(), "and left its lineage poisoned");
+        assert!(unpoisoned(&lineage).is_none(), "what it left is not read as known");
+        assert!(!lineage.is_poisoned(), "and the next ask finds it whole");
+    }
 
     fn pull(repository: &str, number: u32, state: State, checks: Option<Checks>) -> PullRequest {
         let page = PullPage::parse(&format!("https://github.com/{repository}/pull/{number}"));

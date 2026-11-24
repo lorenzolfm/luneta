@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::api::{
     self, ask_response, list_work_response, make_worktree_response, prune_request,
     prune_response, prunes_response, rebase_response, waiting_response,
@@ -9,8 +11,7 @@ use crate::unanswered::Unanswered;
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Screen {
-    pub on: Option<String>,
-    pub terminal: TerminalKey,
+    pub terminal: Arc<TerminalKey>,
     pub shown: u64,
 }
 
@@ -30,11 +31,7 @@ pub enum Asks {
 }
 
 impl Waiting {
-    pub(crate) fn of(
-        on: Option<String>,
-        terminal: TerminalKey,
-        said: api::WaitingResponse,
-    ) -> Result<Waiting, Unanswered> {
+    pub(crate) fn of(terminal: Arc<TerminalKey>, said: api::WaitingResponse) -> Result<Waiting, Unanswered> {
         let asks = match said.asks {
             Some(waiting_response::Asks::Words(())) => Asks::Words,
             Some(waiting_response::Asks::Menu(menu)) => {
@@ -43,7 +40,7 @@ impl Waiting {
             Some(waiting_response::Asks::Unread(why)) => Asks::Unread { why },
             None => return Err(Unanswered::unread("it says nothing of what the agent asks")),
         };
-        let at = Screen { on, terminal, shown: said.shown };
+        let at = Screen { terminal, shown: said.shown };
         Ok(Waiting { at, screen: said.screen, asks, said: said.said })
     }
 }
