@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 
+use lune_domain::mux::TerminalKey;
+use lune_domain::projects::LAYOUT_VIEWS_MAX;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
@@ -13,10 +15,8 @@ use tonic::{Status, Streaming};
 use super::api::{self, from_viewer, to_viewer, typed};
 use super::frames::{colours, Frame};
 use super::server::{connect, refused, runtime, socket, unreached_at, Reached};
-use super::TerminalKey;
 use crate::api::{frames_request, On, FramesRequest};
 use crate::folder::Folder;
-use crate::projects::LAYOUT_VIEWS_MAX;
 use crate::remote::Destination;
 use crate::streams::{self, Dropped, Inbox, Next, Outbox};
 

@@ -4,6 +4,7 @@ use std::iter;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
+use lune_domain::projects::{Opens, Size, WorktreeId};
 use lune_waits::{eventually, Patience, Span, QUIET};
 use luned::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use luned::api::show_response::{self, view::Found, Laid, View};
@@ -17,7 +18,6 @@ use luned::api::{frames_request, Arrangement, On, FramesRequest};
 use luned::mux::own::api::{self as mux_api, typed, Listing};
 use luned::mux::own::frames::{Line, Rows, Shows};
 use luned::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
-use luned::projects::{Opens, Size, WorktreeId};
 use luned::folder::Folder;
 use luned::Daemon;
 use luned::release;

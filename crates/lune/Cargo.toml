@@ -17,6 +17,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 cpal = "0.18.2"
 crossterm = "0.29.0"
 frizbee = { version = "0.13.0", default-features = false }
+lune-domain = { path = "../domain" }
 lune-protocol = { path = "../protocol" }
 luned = { path = "../luned" }
 notify = "8.2.0"

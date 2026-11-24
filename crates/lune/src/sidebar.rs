@@ -6,6 +6,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use lune_domain::mux::TerminalKey;
+use lune_domain::names::SessionName;
+use lune_domain::projects::{Arranged, ProjectName, WorktreeId};
+use lune_domain::projects::{self, Argv, Dir, Holders, Opens, Plain, ProjectId, Used, ViewId};
+use lune_domain::rows::{self, Told};
 use lune_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
 use lune_protocol::github::{PullRequest, State, Verdict};
 use lune_protocol::shell::{Doing, Ending, Front};
@@ -17,14 +22,11 @@ use luned::api::{self, Agent, Harness, Host, Saying, Status, UnreadFile};
 use luned::changes::Unchanged;
 use luned::issues::{Filed, Unfiled};
 use luned::links::{self, Branch};
-use luned::mux::TerminalKey;
-use luned::projects::{self, Argv, Dir, Holders, Opens, Plain, ProjectId, Used, ViewId};
-use luned::projects::{Arranged, ProjectName, WorktreeId};
 use luned::prunes;
 use luned::rebases::{Rebased, Unrebased};
 use luned::seats::{self, seated, Unread};
 use luned::transcripts::SessionId;
-use luned::{log, Destination, Directory, SessionName};
+use luned::{log, Destination, Directory};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -57,7 +59,6 @@ use crate::moonlight;
 use crate::news::News;
 use crate::picker::{Aim, Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
 use crate::printed::Printed;
-use crate::projected::{self, Told};
 use crate::prune;
 use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
@@ -191,7 +192,7 @@ impl Listed {
 
     #[cfg(test)]
     pub fn new_project(name: &str, id: u64) -> Self {
-        let kept = ledger::Session::Project(luned::projects::ProjectId::of(id).unwrap());
+        let kept = ledger::Session::Project(lune_domain::projects::ProjectId::of(id).unwrap());
         Listed { name: ProjectName::parse(name).unwrap(), kept }
     }
 }
@@ -861,7 +862,7 @@ enum KnownTerminal {
 }
 
 impl KnownTerminal {
-    fn of(terminal: &projected::Terminal) -> Self {
+    fn of(terminal: &rows::Terminal) -> Self {
         let Some(key) = terminal.key else {
             return KnownTerminal::Unfound(terminal.id);
         };
@@ -901,7 +902,7 @@ struct KnownView {
 }
 
 impl Known {
-    fn of(said: &projected::Project) -> Known {
+    fn of(said: &rows::Project) -> Known {
         let listed = Listed { name: said.name.clone(), kept: ledger::Session::Project(said.id) };
         let project = ProjectRow::of(listed);
         let worktrees = said.worktrees().iter().map(|worktree| KnownWorktree {
@@ -915,11 +916,11 @@ impl Known {
         });
         let worktrees = worktrees.collect();
         let unopened = match &said.holds {
-            projected::Holds::Folder(_) => Unopened::Folder,
-            projected::Holds::Clone { unopened: projected::Unopened::Listed(folders), .. } => {
+            rows::Holds::Folder(_) => Unopened::Folder,
+            rows::Holds::Clone { unopened: rows::Unopened::Listed(folders), .. } => {
                 Unopened::Listed(folders.clone())
             },
-            projected::Holds::Clone { unopened: projected::Unopened::Unlisted(why), .. } => {
+            rows::Holds::Clone { unopened: rows::Unopened::Unlisted(why), .. } => {
                 Unopened::Unlisted(why.clone())
             },
         };
@@ -1083,7 +1084,7 @@ fn shelved(machine: Machine, projects: Option<&api::Projects>) -> Shelf {
     let Some(api::projects::Held::Kept(kept)) = projects.and_then(|it| it.held.as_ref()) else {
         return Shelf { machine, ..Shelf::default() };
     };
-    let shelving = match projected::listed(&kept.projects) {
+    let shelving = match rows::listed(&kept.projects) {
         Ok(listed) => {
             assert_eq!(listed.len(), kept.projects.len(), "a listing read is read whole");
             Shelving::Kept(listed.iter().map(Known::of).collect())

@@ -4,7 +4,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::projects::{spot, Dir, ProjectName};
+use lune_domain::projects::{Dir, ProjectName};
+
+use crate::projects::spot;
 use crate::{zoxide, Directory};
 
 pub const OWNED_FOLDER: &str = "lune";

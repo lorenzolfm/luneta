@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::time::{Duration, Instant};
 
+use lune_domain::projects;
 use luned::api::keep_checks_response::{self, failed};
 use luned::api::{
     AskResponse, IssueRepositoriesRequest, KeepChecksRequest, ListContentsRequest,
@@ -14,7 +15,6 @@ use luned::images::{self, Png};
 use luned::issues::{self, Filed, Filing, Remote, Unfiled};
 use luned::links::{Pasted, Ready, Unready};
 use luned::printed::Kept;
-use luned::projects;
 use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
 use luned::repositories::{Found, Repository, OWNED_FOLDERS_MAX, REPOSITORIES_MAX};
@@ -412,7 +412,7 @@ mod tests {
         let dir = |path: &str| luned::api::list_repositories_response::Repository {
             path: path.to_owned(),
         };
-        let long = format!("/home/me/{}", "x".repeat(luned::projects::NAME_CHARS_MAX + 1));
+        let long = format!("/home/me/{}", "x".repeat(lune_domain::projects::NAME_CHARS_MAX + 1));
         let answer = ListRepositoriesResponse {
             repositories: vec![
                 dir("/home/me/api"),

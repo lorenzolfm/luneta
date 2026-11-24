@@ -1,6 +1,8 @@
 use std::num::NonZeroU16;
 
-use super::{api, TerminalKey};
+use lune_domain::mux::TerminalKey;
+
+use super::api;
 
 pub const SIDE_MAX: u16 = 1000;
 

@@ -4,13 +4,14 @@ use std::num::NonZeroU32;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::names::SessionName;
+use lune_domain::projects::{self, Argv, Arranged, Opens, ProjectId, ViewId, WorktreeId};
 use lune_protocol::github::{PullRequest, State};
 use lune_protocol::said::Said;
 use luned::links::Branch;
-use luned::projects::{self, Argv, Arranged, Opens, ProjectId, ViewId, WorktreeId};
 use luned::prunes;
 use luned::rebases::{self, Came, Rebased, Unrebased};
-use luned::{Destination, Directory, SessionName};
+use luned::{Destination, Directory};
 use lune_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -4042,7 +4043,7 @@ mod tests {
         Plan::of(act, Ok(&agents))
     }
 
-    fn at(id: u32) -> luned::mux::TerminalKey {
+    fn at(id: u32) -> lune_domain::mux::TerminalKey {
         ViewKey::terminal(id).key()
     }
 

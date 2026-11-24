@@ -12,6 +12,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
+use lune_domain::agent::Harness;
+use lune_domain::mux::TerminalKey;
+use lune_domain::projects::{folder_has_one_worktree, Holders, Made, Opens, ProjectId, WorktreeId};
 use lune_protocol::socket::{self, Bound, Found};
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
@@ -50,8 +53,7 @@ use crate::panics::Hooked;
 use crate::asks::{Asked, Step};
 use crate::core::{self, After, Command, Full, Parked, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Ask, Changed, Holders, Lock, Made, Opened, Opens, ProjectId, Store};
-use crate::projects::WorktreeId;
+use crate::projects::{Changed, Lock, Opened, Store};
 use crate::layouts::{self, Root, Unrooted};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
@@ -69,7 +71,7 @@ use crate::agent::Agent;
 use crate::checks::{Failing, Log};
 use crate::{
     changes, checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed,
-    projects, release, remote, repositories, skills, tailnet, topics, watch, work, Harness,
+    projects, release, remote, repositories, skills, tailnet, topics, watch, work,
 };
 
 pub const SWEEP: Duration = Duration::from_secs(2);
@@ -803,7 +805,6 @@ impl Daemon for Host {
         request: Request<Streaming<ShowRequest>>,
     ) -> Result<Response<Self::ShowStream>, Status> {
         use crate::api::show_request::{Event, Hello};
-        use crate::mux::own::TerminalKey;
         let mut heard = request.into_inner();
         let Some(ShowRequest { event: Some(Event::Hello(hello)) }) = heard.message().await? else {
             return Err(Status::invalid_argument("the first word is no hello"));
@@ -944,7 +945,7 @@ impl Daemon for Host {
             let root = match rooted(&layouts, project)? {
                 Root::Clone(root) => root,
                 Root::Folder { name, .. } => {
-                    let one = projects::folder_has_one_worktree(name.as_str());
+                    let one = folder_has_one_worktree(name.as_str());
                     return Err(Status::failed_precondition(one));
                 },
             };
@@ -1175,7 +1176,7 @@ fn change_made(
     layouts: &SyncSender<layouts::Command>,
     change: change_projects_request::Change,
 ) -> Result<Changed, Status> {
-    let change = Ask::of_api(change).map_err(Status::invalid_argument)?;
+    let change = projects::asked(change).map_err(Status::invalid_argument)?;
     let asked = layouts::ask(layouts, |answer| layouts::Command::Change { change, answer });
     let changed = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
     changed.map_err(changes::status)
@@ -1203,9 +1204,9 @@ fn unfinished(error: &task::JoinError) -> Status {
 
 fn terminal_named(
     terminal: Option<api::TerminalKey>,
-) -> Result<(crate::mux::own::TerminalKey, api::TerminalKey), Status> {
+) -> Result<(TerminalKey, api::TerminalKey), Status> {
     let asked = terminal.ok_or_else(|| Status::invalid_argument("it names no terminal"))?;
-    let key = crate::mux::own::TerminalKey::of(&asked);
+    let key = TerminalKey::of(&asked);
     let key = key.map_err(|why| Status::invalid_argument(format!("terminal: {why}")))?;
     Ok((key, asked))
 }

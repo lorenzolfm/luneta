@@ -3,12 +3,13 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use lune_domain::mux::TerminalKey;
+
 use crate::api::{answer_request, waiting_response, WaitingResponse};
 use crate::choices::{Choices, Moves, Seen, CHOICES_MAX, SCREEN_LINES_MAX};
 use crate::log;
 use crate::mux::own::api::{self as mux, pressed, Named};
 use crate::mux::own::server::{Looked, Pressed, Shown, Terminals, PRESSES_MAX};
-use crate::mux::own::TerminalKey;
 use crate::mux::Failure;
 use crate::transcripts;
 

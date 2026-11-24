@@ -3,10 +3,10 @@ use std::path::Path;
 use std::process::Output;
 use std::sync::mpsc;
 
+use lune_domain::projects::{Size, WorktreeId};
 use lune_waits::eventually;
 use luned::api::projects::Held;
 use luned::api::Project;
-use luned::projects::{Size, WorktreeId};
 use luned::{Asked, Beside, Heard, Where};
 
 use crate::host::{folder_in, script, Host, LUNE};

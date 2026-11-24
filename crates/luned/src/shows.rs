@@ -3,6 +3,9 @@ use std::iter;
 use std::num::NonZeroU64;
 use std::pin::pin;
 
+use lune_domain::mux::TerminalKey;
+use lune_domain::projects::{Arranged, Opens, Size, ViewId, WorktreeId};
+use lune_domain::projects::{FRAME_CELLS, LAYOUT_VIEWS_MAX};
 use tokio::runtime;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
@@ -11,15 +14,12 @@ use tonic::{Code, Status};
 
 use crate::api::{self, show_request, show_response};
 use crate::folder::Folder;
-use crate::mux::TerminalKey;
 use crate::remote::Destination;
-use crate::projects::{Arranged, Opens, Size, ViewId, WorktreeId};
-use crate::projects::{FRAME_CELLS, LAYOUT_VIEWS_MAX};
 use crate::streams::{self, Dropped, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
 
-pub use crate::projects::layout::{Direction, Growth, Rect};
+pub use lune_domain::projects::layout::{Direction, Growth, Rect};
 
 fn right(rect: Rect) -> u32 {
     u32::from(rect.column) + u32::from(rect.columns)

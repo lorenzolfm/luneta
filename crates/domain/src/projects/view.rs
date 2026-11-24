@@ -1,11 +1,11 @@
 use std::fmt;
 
-use crate::agent::Harness;
-use crate::api;
+use lune_protocol::v1 as api;
 
 use super::layout::{self, Leaf, Preordered, Rect, Removed, Sides, Towards, Tree};
 use super::layout::{FRAME_CELLS, LAYOUT_VIEWS_MAX, SHARES};
 use super::{Dir, Name, Size, ViewId};
+use crate::agent::Harness;
 
 pub const LINE_BYTES_MAX: usize = 1024;
 

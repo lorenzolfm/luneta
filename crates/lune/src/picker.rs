@@ -12,6 +12,8 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::names::SessionName;
+use lune_domain::projects::{self, ProjectId, ProjectName, Used};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Modifier, Style};
@@ -19,10 +21,9 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use luned::links::{Branch, Work};
-use luned::projects::{self, ProjectId, ProjectName, Used};
 use luned::repositories::{self, Repository};
 use luned::transcripts::SessionId;
-use luned::{eza, screens, Destination, Directory, SessionName};
+use luned::{eza, screens, Destination, Directory};
 
 use crate::actions::{self, Action, Pasted, Spec};
 use crate::alerts::Doing;
@@ -2624,13 +2625,13 @@ impl Layout {
 mod tests {
     use std::time::UNIX_EPOCH;
 
-    use luned::projects::{Name, ProjectName, WorktreeId};
+    use lune_domain::projects::{Name, ProjectName, WorktreeId};
     use ratatui::layout::Position;
 
     use super::*;
     use crate::close::Doing;
     use crate::menu::{Cwd, Folder, Ran, ViewRow, WorktreeRow};
-    use luned::projects::ViewId;
+    use lune_domain::projects::ViewId;
     use crate::spots::Hit;
 
     const NOW: Duration = Duration::from_secs(1000);

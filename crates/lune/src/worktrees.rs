@@ -4,6 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
+use lune_domain::mux::TerminalKey;
+use lune_domain::projects::{self, Argv, Holders, Name, Opens, ProjectId, Size, ViewId};
+use lune_domain::projects::ProjectName;
+use lune_domain::projects::WorktreeId;
+use lune_domain::rows::{self, Holds, Project};
 use luned::api::change_projects_request::{AddProject, AddWorktree, Change, CloseProject};
 use luned::api::change_projects_request::{CloseView, CloseWorktree, Pull, Start};
 use luned::api::change_projects_request::RenameProject;
@@ -16,11 +21,8 @@ use luned::api::projects::Held;
 use luned::api::{self, ChangeProjectsRequest, ListWorkRequest, MakeWorktreeRequest, On};
 use luned::api::{Version, WatchRequest};
 use luned::changes::{Unadded, Unchanged};
-use luned::mux::own::TerminalKey;
-use luned::projects::{self, Argv, Holders, Name, Opened, Opens, ProjectId, Size, ViewId};
-use luned::projects::ProjectName;
-use luned::projects::WorktreeId;
 use luned::links::{self, Branch, Unready};
+use luned::projects::Opened;
 use luned::repositories::OWNED_FOLDER;
 use luned::work::{self, Listed};
 use luned::{Asked, Beside, Daemon, Heard};
@@ -30,7 +32,6 @@ use luned::Directory;
 
 use crate::daemon;
 use crate::machines::Machine;
-use crate::projected::{self, Holds, Project};
 use crate::sidebar::Reorder;
 
 const ASKING: Duration = Duration::from_secs(15);
@@ -159,7 +160,7 @@ async fn answered_within<T, E>(
 }
 
 pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
-    projected::listed(&kept_as_said(path)?)
+    rows::listed(&kept_as_said(path)?)
 }
 
 pub fn holders(path: &Path) -> Result<Holders, String> {

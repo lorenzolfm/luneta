@@ -1,9 +1,9 @@
 use std::sync::mpsc::Sender;
 use std::thread;
 
+use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use lune_protocol::shell::Ending;
-use luned::mux::TerminalKey;
 pub use luned::printed::{Kept, Printed};
 
 use crate::due::Due;
