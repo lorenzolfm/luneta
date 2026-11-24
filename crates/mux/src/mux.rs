@@ -50,6 +50,29 @@ impl Ending {
     }
 }
 
+#[must_use]
+pub struct Reserved {
+    mux: Arc<Mux>,
+    key: TerminalKey,
+}
+
+impl Reserved {
+    pub fn start(self, opens: &Opens, tag: Tag, size: Size) -> Result<TerminalKey, Status> {
+        let started = spawned(&self.mux, self.key, tag, opens, size);
+        self.place(started)
+    }
+
+    fn place(self, started: Result<(Terminal, Placing), Status>) -> Result<TerminalKey, Status> {
+        self.mux.change(|model| model.place(self.key, started))
+    }
+}
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        self.mux.change(|model| model.unreserve(self.key.id));
+    }
+}
+
 enum Model {
     Holds(Holding),
     Ended(Ending),
@@ -58,9 +81,13 @@ enum Model {
 #[derive(Default)]
 struct Holding {
     last: Ids,
-    terminals: Vec<Terminal>,
-    starting: BTreeSet<TerminalId>,
+    terminals: BTreeMap<TerminalId, Slot>,
     viewing: BTreeMap<ClientId, Viewing>,
+}
+
+enum Slot {
+    Starting,
+    Placed(Box<Terminal>),
 }
 
 #[derive(Default)]
@@ -130,15 +157,9 @@ impl Mux {
         changed
     }
 
-    pub fn new_terminal(
-        self: &Arc<Mux>,
-        opens: &Opens,
-        tag: Tag,
-        size: Size,
-    ) -> Result<TerminalKey, Status> {
+    pub fn reserve_terminal(self: &Arc<Mux>) -> Result<Reserved, Status> {
         let key = self.change(Model::reserve)?;
-        let spawned = spawned(self, key, tag, opens, size);
-        self.change(|model| model.place(key, spawned))
+        Ok(Reserved { mux: Arc::clone(self), key })
     }
 
     pub fn close_terminal(&self, key: TerminalKey) -> Result<(), Status> {
@@ -281,12 +302,10 @@ impl Model {
 
     fn reserve(&mut self) -> Result<TerminalKey, Status> {
         let holding = self.holding()?;
-        let held = holding.terminals.len() + holding.starting.len();
-        refuse_if_full(held, TERMINALS_MAX, "terminals")?;
+        refuse_if_full(holding.terminals.len(), TERMINALS_MAX, "terminals")?;
         let id = TerminalId::next(&mut holding.last.terminal);
-        assert!(holding.index_of(id).is_none(), "terminal {id} is new");
-        let reserved = holding.starting.insert(id);
-        assert!(reserved, "terminal {id} is new");
+        let was = holding.terminals.insert(id, Slot::Starting);
+        assert!(was.is_none(), "terminal {id} is new");
         Ok(TerminalKey { id, made: SystemTime::now() })
     }
 
@@ -295,26 +314,28 @@ impl Model {
         key: TerminalKey,
         spawned: Result<(Terminal, Placing), Status>,
     ) -> Result<TerminalKey, Status> {
+        let (terminal, placing) = spawned?;
         let holding = self.holding()?;
-        let reserved = holding.starting.remove(&key.id);
-        assert!(reserved, "terminal {} was reserved", key.id);
-        let (terminal, placing) = match spawned {
-            Ok(spawned) => spawned,
-            Err(refusal) => {
-                self.end_if_empty();
-                return Err(refusal);
-            },
-        };
         assert_eq!(terminal.key, key);
-        holding.terminals.push(terminal);
+        let slot = holding.terminals.get_mut(&key.id).expect("a reserved terminal has its slot");
+        assert!(matches!(slot, Slot::Starting), "terminal {} is placed once", key.id);
+        *slot = Slot::Placed(Box::new(terminal));
         placing.placed();
         Ok(key)
+    }
+
+    fn unreserve(&mut self, terminal: TerminalId) {
+        if let Model::Holds(holding) = self
+            && let Some(Slot::Starting) = holding.terminals.get(&terminal)
+        {
+            holding.terminals.remove(&terminal);
+            self.end_if_empty();
+        }
     }
 
     fn end_if_empty(&mut self) {
         if let Model::Holds(holding) = self
             && holding.terminals.is_empty()
-            && holding.starting.is_empty()
         {
             *self = Model::Ended(Ending::Emptied);
         }
@@ -325,7 +346,7 @@ impl Model {
             return None;
         };
         let closed = holding.terminals.len();
-        for terminal in holding.terminals.drain(..) {
+        for terminal in holding.placed() {
             terminal.handle.close();
         }
         *self = Model::Ended(Ending::Unreached(unreached));
@@ -344,7 +365,7 @@ impl Model {
         let Model::Holds(holding) = self else {
             return None;
         };
-        holding.terminals.iter_mut().find(|found| found.key.id == terminal)
+        holding.placed_mut(terminal)
     }
 
     fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
@@ -358,7 +379,8 @@ impl Model {
         let Model::Holds(holding) = self else {
             return Err(unmade(key));
         };
-        holding.terminals.iter_mut().find(|found| found.key == key).ok_or_else(|| unmade(key))
+        let found = holding.placed_mut(key.id).filter(|found| found.key == key);
+        found.ok_or_else(|| unmade(key))
     }
 
     fn show(
@@ -374,12 +396,25 @@ impl Model {
 }
 
 impl Holding {
-    fn index_of(&self, terminal: TerminalId) -> Option<usize> {
-        self.terminals.iter().position(|found| found.key.id == terminal)
+    fn placed(&self) -> impl Iterator<Item = &Terminal> {
+        self.terminals.values().filter_map(|slot| match slot {
+            Slot::Placed(terminal) => Some(terminal.as_ref()),
+            Slot::Starting => None,
+        })
+    }
+
+    fn placed_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
+        match self.terminals.get_mut(&terminal)? {
+            Slot::Placed(terminal) => Some(terminal.as_mut()),
+            Slot::Starting => None,
+        }
     }
 
     fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
-        self.terminals.iter().find(|found| found.key == key).ok_or_else(|| unmade(key))
+        match self.terminals.get(&key.id) {
+            Some(Slot::Placed(terminal)) if terminal.key == key => Ok(terminal),
+            Some(Slot::Placed(_) | Slot::Starting) | None => Err(unmade(key)),
+        }
     }
 
     fn show(
@@ -416,20 +451,21 @@ impl Holding {
     }
 
     fn close(&mut self, terminal: TerminalId) -> bool {
-        let Some(index) = self.index_of(terminal) else {
+        let Some(Slot::Placed(closed)) = self.terminals.get(&terminal) else {
             return false;
         };
-        let closed = self.terminals.remove(index);
         closed.handle.close();
+        let key = closed.key;
+        self.terminals.remove(&terminal);
         for viewing in self.viewing.values_mut() {
-            viewing.shows.remove(&closed.key);
+            viewing.shows.remove(&key);
         }
         true
     }
 
     fn settle(&mut self) {
         assert!(self.viewing.len() <= CLIENTS_MAX);
-        assert!(self.terminals.len() + self.starting.len() <= TERMINALS_MAX);
+        assert!(self.terminals.len() <= TERMINALS_MAX);
         let mut by_terminal: BTreeMap<TerminalKey, Vec<Viewer>> = BTreeMap::new();
         for (client, viewing) in &self.viewing {
             assert!(viewing.shows.len() <= SHOWN_MAX);
@@ -444,9 +480,7 @@ impl Holding {
                 by_terminal.entry(*key).or_default().push(viewer);
             }
         }
-        for terminal in &self.terminals {
-            let id = terminal.key.id;
-            assert!(!self.starting.contains(&id), "terminal {id} is placed, so it starts no more");
+        for terminal in self.placed() {
             let viewers = by_terminal.remove(&terminal.key).unwrap_or_default();
             terminal.handle.want(Wanted { size: terminal.size, viewers: viewers.into() });
         }
@@ -454,7 +488,7 @@ impl Holding {
     }
 
     fn listing(&self) -> api::Listing {
-        api::Listing { terminals: self.terminals.iter().map(Terminal::said).collect() }
+        api::Listing { terminals: self.placed().map(Terminal::said).collect() }
     }
 }
 
@@ -538,9 +572,9 @@ pub(crate) mod tests {
 
     use lune_protocol::socket::{self, Found, Unreached};
     use lune_waits::eventually;
-    use tonic::{Code, Status};
+    use tonic::Code;
 
-    use super::{Ending, Listed, Model, Mux, spawned};
+    use super::{Ending, Listed, Mux, spawned};
     use crate::asked::{Ends, Opens, Size, Tag};
 
     pub(crate) fn panic_holding_the_model() {
@@ -555,6 +589,11 @@ pub(crate) mod tests {
         let program = "/bin/sh".to_owned();
         let args = ["-c", script].iter().chain(args).map(|arg| (*arg).to_owned()).collect();
         Opens { cwd: "/".to_owned(), program, args, ends: Ends::Holds }
+    }
+
+    fn unstartable() -> Opens {
+        let (cwd, program) = ("/".to_owned(), "/nonexistent/program".to_owned());
+        Opens { cwd, program, args: Vec::new(), ends: Ends::Holds }
     }
 
     fn size() -> Size {
@@ -584,10 +623,9 @@ pub(crate) mod tests {
     #[test]
     fn a_terminal_that_starts_keeps_the_mux_from_ending_as_empty() {
         let mux = Mux::new();
-        let key = mux.change(Model::reserve).unwrap();
+        let reserved = mux.reserve_terminal().unwrap();
         mux.end_if_unused();
-        let started = spawned(&mux, key, tag(), &opens(), size());
-        assert_eq!(mux.change(|model| model.place(key, started)).unwrap(), key);
+        let key = reserved.start(&opens(), tag(), size()).unwrap();
         assert_eq!(listed(&mux), [key.id.said()]);
         mux.close_terminal(key).unwrap();
         assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
@@ -596,25 +634,47 @@ pub(crate) mod tests {
     #[test]
     fn a_terminal_that_fails_to_start_gives_its_place_back() {
         let mux = Mux::new();
-        let key = mux.change(Model::reserve).unwrap();
-        let failed = Err(Status::failed_precondition("opens did not start"));
-        let refusal = mux.change(|model| model.place(key, failed)).unwrap_err();
-        let refused = (Code::FailedPrecondition, "opens did not start");
-        assert_eq!((refusal.code(), refusal.message()), refused);
+        let reserved = mux.reserve_terminal().unwrap();
+        let refusal = reserved.start(&unstartable(), tag(), size()).unwrap_err();
+        assert_eq!(refusal.code(), Code::FailedPrecondition);
+        assert!(refusal.message().starts_with("opens did not start: "), "{refusal:?}");
+        assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
+    }
+
+    #[test]
+    fn a_reservation_dropped_unstarted_gives_its_place_back() {
+        let mux = Mux::new();
+        drop(mux.reserve_terminal().unwrap());
         assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
     }
 
     #[test]
     fn a_terminal_that_starts_as_the_mux_ends_is_not_placed() {
+        let folder = tempfile::tempdir().unwrap();
+        let ready = folder.path().join("ready");
+        let hung_up = folder.path().join("hung up");
         let mux = Mux::new();
-        let key = mux.change(Model::reserve).unwrap();
-        let started = spawned(&mux, key, tag(), &opens(), size());
+        let reserved = mux.reserve_terminal().unwrap();
+        let holds = r#"trap ': > "$1"; exit' HUP; : > "$0"; read x; : > "$1""#;
+        let holds = script(holds, &[ready.to_str().unwrap(), hung_up.to_str().unwrap()]);
+        let started = spawned(&mux, reserved.key, tag(), &holds, size());
+        eventually("the program is ready to be hung up on", || ready.exists().then_some(()));
         let unreached = unreached();
-        assert_eq!(mux.end_unreached(unreached.clone()), Some(0));
-        let refusal = mux.change(|model| model.place(key, started)).unwrap_err();
+        assert_eq!(mux.end_unreached(unreached.clone()), Some(1));
+        let refusal = reserved.place(started).unwrap_err();
         assert_eq!(refusal.code(), Code::Unavailable);
         assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Unreached(unreached)));
         assert_eq!(listed(&mux), [] as [u32; 0]);
+        eventually("the program is hung up on", || hung_up.exists().then_some(()));
+    }
+
+    #[test]
+    fn a_terminal_that_fails_to_start_as_the_mux_ends_says_why_it_failed() {
+        let mux = Mux::new();
+        let reserved = mux.reserve_terminal().unwrap();
+        assert_eq!(mux.end_unreached(unreached()), Some(1));
+        let refusal = reserved.start(&unstartable(), tag(), size()).unwrap_err();
+        assert_eq!(refusal.code(), Code::FailedPrecondition);
     }
 
     #[test]
@@ -622,12 +682,12 @@ pub(crate) mod tests {
         let folder = tempfile::tempdir().unwrap();
         let said = folder.path().join("said");
         let mux = Mux::new();
-        let key = mux.change(Model::reserve).unwrap();
+        let reserved = mux.reserve_terminal().unwrap();
         let titles = r#"printf '\033]2;early\007'; : > "$0"; read x"#;
         let titles = script(titles, &[said.to_str().unwrap()]);
-        let started = spawned(&mux, key, tag(), &titles, size());
+        let started = spawned(&mux, reserved.key, tag(), &titles, size());
         eventually("the program said its title", || said.exists().then_some(()));
-        mux.change(|model| model.place(key, started)).unwrap();
+        reserved.place(started).unwrap();
         eventually("the title is listed", || {
             let listing = mux.listing();
             listing.terminals.iter().any(|terminal| terminal.title == "early").then_some(())

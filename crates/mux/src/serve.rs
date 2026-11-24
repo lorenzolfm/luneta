@@ -103,8 +103,8 @@ impl mux_server::Mux for Service {
         let opens = Opens::parse("opens", request.opens)?;
         let tag = Tag::parse("tag", request.tag)?;
         let size = Size::parse("size", request.size)?;
-        let mux = Arc::clone(&self.mux);
-        let started = tokio::task::spawn_blocking(move || mux.new_terminal(&opens, tag, size));
+        let reserved = self.mux.reserve_terminal()?;
+        let started = tokio::task::spawn_blocking(move || reserved.start(&opens, tag, size));
         let key = started.await.map_err(|error| {
             Status::internal(format!("the terminal's start was not waited for: {error}"))
         })??;
