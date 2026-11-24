@@ -5,6 +5,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use lune_protocol::github::State;
+use lune_protocol::CONFLICTED_NAMED_MAX;
 use tonic::{Code, Status};
 
 use crate::api::rebase_response::{self, Came as Said};
@@ -28,8 +29,6 @@ const PICKING: Duration = Duration::from_mins(10);
 const STOPPED_CODE: i32 = 1;
 
 const UNVERIFIED_CODE: i32 = 1;
-
-const CONFLICTED_NAMED_MAX: usize = 20;
 
 const UNDER_WAY: [(&str, Doing); 5] = [
     ("rebase-merge", Doing::Rebase),

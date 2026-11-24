@@ -17,6 +17,8 @@ mod host;
 #[cfg(test)]
 mod own;
 #[cfg(test)]
+mod phone;
+#[cfg(test)]
 mod pi;
 #[cfg(test)]
 mod projects;

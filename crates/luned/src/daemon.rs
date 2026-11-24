@@ -920,16 +920,23 @@ impl Daemon for Host {
         &self,
         request: Request<MakeWorktreeRequest>,
     ) -> Result<Response<Self::MakeWorktreeStream>, Status> {
-        let MakeWorktreeRequest { on, project, branch } = request.into_inner();
+        let MakeWorktreeRequest { on, project, branch, opens } = request.into_inner();
         let unnamed = || Status::invalid_argument("project: no id is 0");
         let project = ProjectId::of(project).ok_or_else(unnamed)?;
         let branch = asked_branch(&branch)?;
         if let Some(mut daemon) = self.bridged(on).await? {
             let (project, branch) = (project.get(), branch.as_str().to_owned());
-            let asked = MakeWorktreeRequest { on: None, project, branch };
+            let asked = MakeWorktreeRequest { on: None, project, branch, opens };
             let answer = daemon.make_worktree(asked).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
+        let unopenable = |why: String| Status::invalid_argument(format!("opens: {why}"));
+        let agent = |opens: &api::Opens| matches!(opens.runs, Some(api::opens::Runs::Agent(_)));
+        let agent_asked = opens.as_ref().is_some_and(agent);
+        let opens = match opens {
+            None => Opens::Shell,
+            opens @ Some(_) => Opens::of_api(opens).map_err(unopenable)?,
+        };
         let layouts = self.layouts.clone();
         let answer = late(move || {
             let root = match rooted(&layouts, project)? {
@@ -945,11 +952,12 @@ impl Daemon for Host {
                 let why = status.message();
                 Status::aborted(format!("{folder} is {of}'s worktree, and it is not opened: {why}"))
             };
-            let (project, opens) = (project.get(), Some(Opens::Shell.to_api()));
+            let (project, opens) = (project.get(), Some(opens.to_api()));
             let add = AddWorktree { project, folder: folder.to_string(), name: None, opens };
             let add = change_projects_request::Change::AddWorktree(add);
             let Changed { made, .. } = change_made(&layouts, add).map_err(unopened)?;
             let landed = match made {
+                Some(Made::Worktree(made)) if agent_asked => Landed::Started(made.get()),
                 Some(Made::Worktree(made)) => Landed::Made(made.get()),
                 Some(Made::Found(found)) => Landed::Found(found.get()),
                 made => unreachable!("an added worktree is made or found, not {made:?}"),

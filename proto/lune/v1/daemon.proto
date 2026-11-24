@@ -805,12 +805,14 @@ message MakeWorktreeRequest {
   On on = 1;
   fixed64 project = 2;
   string branch = 3;
+  Opens opens = 4;
 }
 
 message MakeWorktreeResponse {
   oneof landed {
     fixed64 made = 1;
     fixed64 found = 2;
+    fixed64 started = 3;
   }
 }
 

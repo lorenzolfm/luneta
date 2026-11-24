@@ -57,6 +57,7 @@ zbus ={ version = "6.2.1", default-features = false, features = ["proxy", "tokio
 tonic-prost-build = "0.14.6"
 
 [dev-dependencies]
+lune-phone = { path = "../phone" }
 lune-waits = { path = "../waits" }
 rustix = { version = "1.1.4", features = ["fs", "pty", "termios"] }
 

@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
-use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -25,8 +24,7 @@ pub const TURN: Duration = Duration::from_mins(10);
 
 pub const LOOK: Duration = Duration::from_millis(5);
 
-pub const TURN_VAR: &str = "LUNE_TURN";
-pub const BEFORE_VAR: &str = "LUNE_TURN_BEFORE";
+pub use lune_protocol::turn::{Turn, BEFORE_VAR, TURN_VAR};
 
 pub const ALLOWED: [&str; 11] = [
     "Bash(lune start:*)",
@@ -55,61 +53,6 @@ pub const SYSTEM: &str = "You run in lune's ask box. The user typed what they wa
     turn: to ask them anything, as the skill has you ask before a prune, or which of two things \
     they meant, end your turn with the question. Their answer comes as the next message. So a \
     prune takes --yes only in the turn after the one that said its plan.";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Turn {
-    key: u64,
-    before: Option<u64>,
-}
-
-impl Turn {
-    #[must_use]
-    pub fn after(before: Option<u64>) -> Turn {
-        let key = RandomState::new().build_hasher().finish();
-        let key = if before == Some(key) { !key } else { key };
-        Turn { key, before }
-    }
-
-    pub fn new(key: u64, before: Option<u64>) -> Result<Turn, String> {
-        if before == Some(key) {
-            return Err(format!("turn: {key:016x} is the key of the turn before it too"));
-        }
-        Ok(Turn { key, before })
-    }
-
-    #[must_use]
-    pub fn key(self) -> u64 {
-        self.key
-    }
-
-    #[must_use]
-    pub fn before(self) -> Option<u64> {
-        self.before
-    }
-
-    pub fn name_in(self, command: &mut Command) {
-        command.env(TURN_VAR, format!("{:016x}", self.key));
-        match self.before {
-            Some(before) => command.env(BEFORE_VAR, format!("{before:016x}")),
-            None => command.env_remove(BEFORE_VAR),
-        };
-    }
-
-    pub fn read(key: Option<&str>, before: Option<&str>) -> Result<Option<Turn>, String> {
-        let read = |name, spelled: &str| {
-            let read = u64::from_str_radix(spelled, 16);
-            read.map_err(|_| format!("{name} is no key of a turn of lune's ask box"))
-        };
-        match (key, before) {
-            (None, None) => Ok(None),
-            (None, Some(_)) => Err(format!("{BEFORE_VAR} is set, and {TURN_VAR} is not")),
-            (Some(key), before) => {
-                let before = before.map(|before| read(BEFORE_VAR, before)).transpose()?;
-                Turn::new(read(TURN_VAR, key)?, before).map(Some)
-            },
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -309,8 +252,8 @@ impl Asked {
             words: self.words.clone(),
             resumed: self.resumed.as_ref().map(|resumed| resumed.as_str().to_owned()),
             highlighted: self.highlighted.clone(),
-            turn: self.turn.key,
-            before: self.turn.before,
+            turn: self.turn.key(),
+            before: self.turn.before(),
             marked_issues: self.marked.issues().map(NonZeroU32::get).collect(),
             marked_pulls: self.marked.pulls().map(NonZeroU32::get).collect(),
         }
@@ -517,7 +460,7 @@ mod tests {
     use crate::program::tests::{given_up, outlasting_patience};
 
     fn turn() -> Turn {
-        Turn { key: 255, before: Some(10) }
+        Turn::new(255, Some(10)).unwrap()
     }
 
     fn session(id: &str) -> SessionId {
@@ -562,7 +505,7 @@ mod tests {
         assert_eq!(claude.get_current_dir(), env::var_os("HOME").as_deref().map(Path::new));
         assert_eq!(args(&claude)[15..17], ["--resume", "7c22"]);
 
-        let first = Turn { key: 10, before: None };
+        let first = Turn::new(10, None).unwrap();
         let claude = Asked::new(None, "yes", None, String::new(), first).unwrap().claude();
         assert_eq!(var(&claude, TURN_VAR), Some(Some("000000000000000a".to_owned())));
         assert_eq!(var(&claude, BEFORE_VAR), Some(None));
@@ -581,20 +524,6 @@ mod tests {
             assert_eq!(Turn::read(key.as_deref(), before.as_deref()), Ok(Some(turn)));
         }
         assert_eq!(Turn::read(None, None), Ok(None));
-    }
-
-    #[test]
-    fn the_agent_s_commands_read_no_turn_the_box_could_not_name() {
-        assert_eq!(Turn::read(Some("ff"), Some("0a")), Ok(Some(turn())));
-        for (key, before) in [
-            (Some(""), None),
-            (Some("forged"), None),
-            (Some("ff"), Some("")),
-            (None, Some("ff")),
-            (Some("ff"), Some("ff")),
-        ] {
-            assert!(Turn::read(key, before).is_err(), "{key:?} {before:?}");
-        }
     }
 
     fn marked(issues: &[u32], pulls: &[u32]) -> Marked {
@@ -637,16 +566,6 @@ mod tests {
         assert!(marks(told(marked(&[1, 2, 3], &[]))).contains("marked issues #1, #2 and #3:"));
         assert!(marks(told(marked(&[], &[7, 9]))).contains("marked pull requests #7 and #9:"));
         assert_eq!(told(Marked::default()), "tackle these", "an unmarked turn is the words alone");
-    }
-
-    #[test]
-    fn a_turn_goes_by_its_own_key_and_the_one_before() {
-        let first = Turn::after(None);
-        let second = Turn::after(Some(first.key()));
-        let third = Turn::after(Some(second.key()));
-        let befores = [first.before(), second.before(), third.before()];
-        assert_eq!(befores, [None, Some(first.key()), Some(second.key())]);
-        assert!(first.key() != second.key() && second.key() != third.key());
     }
 
     #[test]

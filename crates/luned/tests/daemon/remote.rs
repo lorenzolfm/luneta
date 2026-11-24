@@ -802,7 +802,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     });
 }
 
-fn claude_that_takes_turns(host: &Host) {
+pub fn claude_that_takes_turns(host: &Host) {
     let home = host.home.path().display();
     let slow = SLOW.as_secs_f64();
     let text = format!(
@@ -829,7 +829,7 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"No agent 
     script(&host.bin().join("claude"), &text);
 }
 
-fn told(host: &Host) -> (Vec<String>, String) {
+pub fn told(host: &Host) -> (Vec<String>, String) {
     let told = fs::read_to_string(host.home.path().join("told")).unwrap();
     let words = fs::read_to_string(host.home.path().join("words")).unwrap();
     (told.lines().map(str::to_owned).collect(), words)
@@ -970,7 +970,7 @@ fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
     });
 }
 
-fn claude_that_writes_issues(host: &Host) {
+pub fn claude_that_writes_issues(host: &Host) {
     let home = host.home.path().display();
     let text = format!(
         r#"words=$(cat)

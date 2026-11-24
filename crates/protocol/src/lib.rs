@@ -5,7 +5,12 @@ pub mod process;
 pub mod said;
 pub mod shell;
 pub mod socket;
+pub mod turn;
 pub mod unread;
+
+pub const TAILNET_PORT: u16 = 7473;
+
+pub const CONFLICTED_NAMED_MAX: usize = 20;
 
 #[allow(
     clippy::allow_attributes,

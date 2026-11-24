@@ -60,12 +60,22 @@ fn branched_on(
     project: u64,
     branch: &str,
 ) -> Result<Option<Landed>, Status> {
+    branched_opening(host, on, project, branch, None)
+}
+
+fn branched_opening(
+    host: &Host,
+    on: Option<&str>,
+    project: u64,
+    branch: &str,
+    opens: Option<api::Opens>,
+) -> Result<Option<Landed>, Status> {
     let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
         let on = on.map(|on| On { destination: on.to_owned() });
-        let asked = MakeWorktreeRequest { on, project, branch: branch.to_owned() };
+        let asked = MakeWorktreeRequest { on, project, branch: branch.to_owned(), opens };
         let mut answer = daemon.make_worktree(asked).await?.into_inner();
         let made = answer.message().await?.expect("luned answers once");
         assert!(answer.message().await?.is_none(), "and only once");
@@ -833,6 +843,11 @@ fn a_branch_s_worktree_is_made_in_a_clone_on_its_machine_and_opens_with_a_shell(
     let refused = branched(u64::MAX, "feat").unwrap_err();
     assert_eq!(refused.code(), Code::NotFound, "{refused:?}");
     assert_eq!(opened().len(), 2, "no refusal made a row");
+
+    let shell = Some(Opens::Shell.to_api());
+    let shelled = branched_opening(&here, Some("far"), lune, "shelled", shell).unwrap();
+    let made = matches!(shelled, Some(Landed::Made(_)));
+    assert!(made, "a shell asked for starts no agent: {shelled:?}");
 }
 
 #[test]
