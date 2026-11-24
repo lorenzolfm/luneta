@@ -27,7 +27,7 @@ use crate::api;
 use crate::client::{self, Unbridged};
 use crate::core::Command;
 use crate::log::{self, causes};
-use crate::{release, state};
+use crate::{release, state, tasks};
 use crate::watch::{self, Troubles};
 
 pub const FILE: &str = "hosts";
@@ -348,7 +348,6 @@ impl Failed {
 enum Stopped {
     Unbridged(Ssh, Option<SshSaid>),
     Lost,
-    Unwatched,
     Unmatched,
 }
 
@@ -382,7 +381,6 @@ impl Stopped {
                 (ssh.to_api(), said.as_ref().map(|said| said.0.clone()))
             },
             Stopped::Lost => (unreached::Stopped::Lost(()), None),
-            Stopped::Unwatched => (unreached::Stopped::Unwatched(()), None),
             Stopped::Unmatched => (unreached::Stopped::Unmatched(()), None),
         }
     }
@@ -468,8 +466,6 @@ pub fn follow(
     };
     let mut told = Named::default();
     let mut watched: Vec<(Destination, oneshot::Sender<()>)> = Vec::new();
-    let mut unwatched: HashMap<Destination, SystemTime> = HashMap::new();
-    let mut unwatchable = Troubles::default();
     let mut begun: u64 = 0;
     let tell = move |named: Option<Named>| {
         let named = match named {
@@ -481,7 +477,6 @@ pub fn follow(
                 return false;
             }
             watched.retain(|(destination, _)| named.far().any(|far| far == destination));
-            unwatched.retain(|destination, _| named.far().any(|far| far == destination));
             told = named;
         }
         for destination in told.far() {
@@ -491,26 +486,9 @@ pub fn follow(
             let bridges = Arc::clone(&bridges);
             begun += 1;
             let daemon = Bridged::new(bridges, destination.clone(), begun);
-            match watch(daemon, core.clone(), standing.clone(), folder.clone()) {
-                Ok(ends) => {
-                    unwatched.remove(destination);
-                    watched.push((destination.clone(), ends));
-                },
-                Err(error) => {
-                    unwatchable.say(format!("{destination} is not watched: {error}"));
-                    let since = unwatched.entry(destination.clone());
-                    let since = *since.or_insert_with(SystemTime::now);
-                    let why = format!("it is not watched: {error}");
-                    let failed = Failed::of(why, Stopped::Unwatched);
-                    let reached = Reached::Unreached { since, failed, projects: None };
-                    let destination = destination.clone();
-                    if core.send(Command::Remote { destination, reached }).is_err() {
-                        return false;
-                    }
-                },
-            }
+            let ends = watch(daemon, core.clone(), standing.clone(), folder.clone());
+            watched.push((destination.clone(), ends));
         }
-        unwatchable.done();
         true
     };
     let wanted = |path: &Path| path.file_name() == Some(OsStr::new(FILE));
@@ -585,27 +563,15 @@ fn watch(
     core: SyncSender<Command>,
     standing: Receiver<Standing>,
     folder: PathBuf,
-) -> io::Result<oneshot::Sender<()>> {
-    let (ends, ending) = oneshot::channel();
-    let (built, building) = mpsc::sync_channel(1);
-    let name = format!("remote {}", bridged.destination);
-    thread::Builder::new().name(name).spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = built.send(Err(error));
-                return;
-            },
-        };
-        let _ = built.send(Ok(()));
-        runtime.block_on(async move {
-            tokio::spawn(watched(bridged, core, standing, folder));
-            let _ = ending.await;
-        });
-    })?;
-    let ended = |_| io::Error::other("its thread ended before it had a runtime");
-    building.recv().map_err(ended)??;
-    Ok(ends)
+) -> oneshot::Sender<()> {
+    let tasks = tasks::shared();
+    let (ends, ending) = oneshot::channel::<()>();
+    let watching = tasks.spawn(watched(bridged, core, standing, folder));
+    tasks.spawn(async move {
+        let _ = ending.await;
+        watching.abort();
+    });
+    ends
 }
 
 async fn watched(
@@ -730,7 +696,8 @@ impl Seen {
 }
 
 fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached) -> bool {
-    core.send(Command::Remote { destination: destination.clone(), reached }).is_ok()
+    let command = Command::Remote { destination: destination.clone(), reached };
+    tokio::task::block_in_place(|| core.send(command)).is_ok()
 }
 
 async fn asked(
