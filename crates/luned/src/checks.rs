@@ -8,6 +8,7 @@ pub use lune_protocol::github::PullPage;
 use lune_protocol::github::Checks;
 use serde::Deserialize;
 
+use crate::panics::{self, Panicked};
 use crate::printed::Kept;
 use crate::{folder, git, keeps, program};
 
@@ -280,11 +281,13 @@ fn keep(
             kept.map_or_else(Log::Unkept, Log::Kept)
         },
     };
+    let panicked = || Log::Unkept(PANICKED.to_owned());
+    let contained = |plan| panics::contained(|| log(plan)).unwrap_or_else(|Panicked| panicked());
     let logs: Vec<Log> = thread::scope(|scope| {
         let fetching: Vec<_> =
-            plans.into_iter().map(|plan| scope.spawn(move || log(plan))).collect();
+            plans.into_iter().map(|plan| scope.spawn(move || contained(plan))).collect();
         let joined = fetching.into_iter().map(thread::ScopedJoinHandle::join);
-        joined.map(|log| log.unwrap_or_else(|_| Log::Unkept(PANICKED.to_owned()))).collect()
+        joined.map(|log| log.unwrap_or_else(|_| panicked())).collect()
     });
     let failed = failed.into_iter().zip(logs).map(|(Check { name, link, .. }, log)| Failed {
         name: name.clone(),

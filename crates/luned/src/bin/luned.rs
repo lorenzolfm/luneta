@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use luned::log::{self, Process};
 use luned::projects::{self, Unheld};
-use luned::{folder, release, Claim, Refusal};
+use luned::{folder, panics, release, Claim, Refusal};
 use rustix::io::FdFlags;
 
 #[derive(Parser)]
@@ -27,11 +27,7 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
     let unkept = log::start(Process::Luned).err();
-    let default = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic| {
-        log::panicked(panic);
-        default(panic);
-    }));
+    panics::abort_on_panic();
     if args.detached
         && let Err(error) = close_inherited()
     {

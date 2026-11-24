@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
-use std::panic::{self, AssertUnwindSafe};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -16,6 +15,7 @@ use crate::core;
 use crate::git::{self, NamedHead};
 use crate::links::{self, Remotes};
 use crate::log;
+use crate::panics::{self, Panicked};
 use crate::program;
 use crate::watch::Troubles;
 
@@ -575,8 +575,8 @@ pub fn follow(
                 let (of, forks) = (branch.clone(), Arc::clone(&forks));
                 let (answer, wake) = (answer.clone(), wake.clone());
                 let asks = thread::Builder::new().name("gh ask".to_owned()).spawn(move || {
-                    let said = panic::catch_unwind(AssertUnwindSafe(|| view(&dir, &of, &forks)))
-                        .unwrap_or_else(|_| Err(format!("gh's ask about {} panicked", of.1)));
+                    let said = panics::contained(|| view(&dir, &of, &forks))
+                        .unwrap_or_else(|Panicked| Err(format!("gh's ask about {} panicked", of.1)));
                     if answer.send(Answered { branch: of, said }).is_ok() {
                         let _ = wake.try_send(());
                     }

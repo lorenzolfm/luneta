@@ -28,7 +28,7 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tokio_stream::{pending, StreamExt as _};
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::host::{answered, folder_in, info, install, script, start, Host, Running, Vars, LUNE, LUNED, PATIENT, SOCKET};
+use crate::host::{answered, folder_in, info, install, script, start, start_as, Host, Running, Vars, LUNE, LUNED, PATIENT, SOCKET};
 use crate::terminate::gone;
 
 const OLDER: &str = "0.0.1";
@@ -173,6 +173,24 @@ fn the_cli_says_that_no_daemon_runs_and_starts_none() {
     drop(start(host.vars()).unwrap());
     assert!(host.runtime.path().join(SOCKET).exists(), "a crash leaves the socket behind");
     none_runs(&host);
+}
+
+#[test]
+fn lune_starts_a_fresh_daemon_in_the_place_of_one_that_aborted() {
+    let host = Host::new();
+    let mut undumped = host.vars().command("sh");
+    undumped.args(["-c", "ulimit -c 0 && exec \"$0\"", LUNED]);
+    let mut aborted = start_as(undumped).unwrap();
+    let aborting = Pid::from_raw(i32::try_from(aborted.pid()).unwrap()).unwrap();
+    rustix::process::kill_process(aborting, Signal::ABORT).unwrap();
+    let ended = aborted.ended("luned aborts");
+    assert_eq!(ended.signal(), Some(Signal::ABORT.as_raw()), "{ended}");
+    assert!(host.runtime.path().join(SOCKET).exists(), "an abort leaves the socket behind");
+
+    let fresh = pid(&watch(&host, Path::new(LUNE)));
+    let _fresh = Detached { host: &host, pid: fresh };
+    assert_ne!(fresh, aborted.pid());
+    assert_eq!(answering(&host), Some(fresh));
 }
 
 #[test]

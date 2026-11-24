@@ -165,9 +165,11 @@ fn install(pi: &Path, lune: &Path) -> io::Result<()> {
 fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<File>> {
     let file: File = serde_json::from_slice(&file_text(path)?)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    let stands = match &file.proc_start {
-        Some(recorded) => recorded == start,
-        None => started <= fs::metadata(path)?.modified()? + DATED_LATE,
+    let stands = if let Some(recorded) = &file.proc_start {
+        recorded == start
+    } else {
+        let late = fs::metadata(path)?.modified()?.checked_add(DATED_LATE);
+        late.is_none_or(|late| started <= late)
     };
     Ok(stands.then_some(file))
 }

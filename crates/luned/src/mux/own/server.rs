@@ -195,7 +195,9 @@ fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
         return Err(Failure::Own(unmatched.left_be()));
     }
     let pid = unmatched.pid.ok_or_else(|| unstopped("the kernel names no pid for it".to_owned()))?;
-    assert_ne!(pid, rustix::process::getpid(), "luned is never the lune-mux it stops");
+    if pid == rustix::process::getpid() {
+        return Err(unstopped("its socket leads back to luned itself".to_owned()));
+    }
     match rustix::process::kill_process(pid, Signal::TERM) {
         Ok(()) | Err(rustix::io::Errno::SRCH) => {},
         Err(error) => return Err(unstopped(error.to_string())),

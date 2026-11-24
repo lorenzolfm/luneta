@@ -685,7 +685,9 @@ impl Layouts {
             return Ok(());
         };
         let unopened = format!("no terminal opens in worktree {worktree}: {failure}");
-        let projects = self.store.projects().expect("projects just changed are kept");
+        let Some(projects) = self.store.projects() else {
+            return Err(unopened);
+        };
         if projects.holding_view(terminal.view()).is_some() {
             return Err(unopened);
         }
