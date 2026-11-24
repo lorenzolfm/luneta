@@ -253,7 +253,7 @@ jobs:
   ios:
     needs: code
     if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 40
 
     steps:
