@@ -26,43 +26,43 @@ pub enum CloneRoot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed(BTreeSet<Subfolder>);
+
+impl Listed {
+    pub fn of(subfolders: BTreeSet<Subfolder>) -> Result<Listed, String> {
+        let count = subfolders.len();
+        if count > CLONE_WORKTREES_MAX {
+            return Err(format!("{count} worktrees, over {CLONE_WORKTREES_MAX}"));
+        }
+        Ok(Listed(subfolders))
+    }
+
+    #[must_use]
+    pub fn subfolders(&self) -> &BTreeSet<Subfolder> {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Spot(Place);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Place {
-    Clone { root: Dir, subfolder: Option<Subfolder>, subfolders: BTreeSet<Subfolder> },
+    Clone { root: Dir, subfolder: Option<Subfolder>, listed: Listed },
     Folder { asked: Dir, repository: Option<Dir> },
 }
 
 impl Spot {
     #[must_use]
-    pub fn in_clone(
-        root: Dir,
-        subfolder: Option<Subfolder>,
-        subfolders: BTreeSet<Subfolder>,
-    ) -> Spot {
-        let count = subfolders.len();
-        assert!(
-            count <= CLONE_WORKTREES_MAX,
-            "{} holds {count} worktrees, over {CLONE_WORKTREES_MAX}",
-            root.0
-        );
-        if let Some(subfolder) = &subfolder {
-            let one = subfolders.contains(subfolder);
-            assert!(one, "worktree {} is one of {}'s", subfolder.as_str(), root.0);
-        }
-        Spot(Place::Clone { root, subfolder, subfolders })
+    pub fn in_clone(root: Dir, listed: Listed, at: Option<Subfolder>) -> Spot {
+        let subfolder = at.filter(|it| listed.0.contains(it));
+        Spot(Place::Clone { root, subfolder, listed })
     }
 
     #[must_use]
-    pub fn in_folder(asked: Dir) -> Spot {
-        Spot(Place::Folder { asked, repository: None })
-    }
-
-    #[must_use]
-    pub fn in_repository(asked: Dir, top: Dir) -> Spot {
-        assert!(top.below(&asked).is_some(), "{} holds {}, the folder asked", top.0, asked.0);
-        Spot(Place::Folder { asked, repository: Some(top) })
+    pub fn in_folder(asked: Dir, top: Option<Dir>) -> Spot {
+        let repository = top.filter(|top| top.below(&asked).is_some());
+        Spot(Place::Folder { asked, repository })
     }
 
     #[must_use]
@@ -99,16 +99,16 @@ impl Spot {
     }
 
     #[must_use]
-    pub fn subfolders(&self) -> Option<&BTreeSet<Subfolder>> {
+    pub fn listed(&self) -> Option<&Listed> {
         match &self.0 {
-            Place::Clone { subfolders, .. } => Some(subfolders),
+            Place::Clone { listed, .. } => Some(listed),
             Place::Folder { .. } => None,
         }
     }
 
     #[must_use]
     pub fn is_clone(&self) -> bool {
-        self.subfolders().is_some()
+        self.listed().is_some()
     }
 }
 
@@ -127,7 +127,7 @@ pub fn clone_root(common: &Path, bareness: Bareness) -> CloneRoot {
     }
 }
 
-pub fn porcelain(root: &Dir, said: &[u8]) -> Result<BTreeSet<Subfolder>, String> {
+pub fn porcelain(root: &Dir, said: &[u8]) -> Result<Listed, String> {
     let said = std::str::from_utf8(said).map_err(|_| "git listed a worktree that is not UTF-8")?;
     let mut found: Vec<(Dir, bool)> = Vec::new();
     for line in said.split('\0') {
@@ -150,10 +150,7 @@ pub fn porcelain(root: &Dir, said: &[u8]) -> Result<BTreeSet<Subfolder>, String>
     let kept = found.into_iter().filter(|(_, kept)| *kept);
     let subfolders: BTreeSet<Subfolder> =
         kept.filter_map(|(dir, _)| root.subfolder(&dir)).collect();
-    if subfolders.len() > CLONE_WORKTREES_MAX {
-        return Err(format!("{} holds over {CLONE_WORKTREES_MAX} worktrees", root.0));
-    }
-    Ok(subfolders)
+    Listed::of(subfolders).map_err(|why| format!("{} holds {why}", root.0))
 }
 
 #[cfg(test)]
@@ -195,7 +192,7 @@ mod tests {
             worktree /elsewhere/x\0HEAD 3\0detached\0\0\
             worktree /w/lune/issue-7\0HEAD 4\0branch refs/heads/issue-7\0locked\0\0";
         let want = BTreeSet::from([subfolder("issue-7"), subfolder("main")]);
-        assert_eq!(porcelain(&dir("/w/lune"), said), Ok(want));
+        assert_eq!(porcelain(&dir("/w/lune"), said).map(|it| it.subfolders().clone()), Ok(want));
     }
 
     #[test]
@@ -206,18 +203,27 @@ mod tests {
         assert!(refused.contains(&format!("over {LISTED_MAX} worktrees")), "{refused}");
         let said: String = (0..=CLONE_WORKTREES_MAX).map(entry).collect();
         let refused = porcelain(&dir("/w/lune"), said.as_bytes()).unwrap_err();
-        assert!(refused.contains(&format!("over {CLONE_WORKTREES_MAX} worktrees")), "{refused}");
+        let over = CLONE_WORKTREES_MAX + 1;
+        assert_eq!(refused, format!("/w/lune holds {over} worktrees, over {CLONE_WORKTREES_MAX}"));
     }
 
     #[test]
-    #[should_panic(expected = "is one of /w/lune's")]
-    fn a_clone_s_spot_is_in_one_of_its_worktrees_or_none() {
-        let _ = Spot::in_clone(dir("/w/lune"), Some(subfolder("main")), BTreeSet::new());
+    fn a_clone_s_spot_is_in_a_worktree_only_when_the_clone_lists_it() {
+        let listed = Listed::of(BTreeSet::from([subfolder("main")])).unwrap();
+        let at = |at: &str| Spot::in_clone(dir("/w/lune"), listed.clone(), Some(subfolder(at)));
+        assert_eq!(at("main").subfolder(), Some(&subfolder("main")));
+        assert_eq!(at("main").place(), dir("/w/lune/main"));
+        assert_eq!(at("notes").subfolder(), None);
+        assert_eq!(at("notes").place(), dir("/w/lune"));
     }
 
     #[test]
-    #[should_panic(expected = "the folder asked")]
-    fn a_folder_s_spot_holds_the_folder_asked() {
-        let _ = Spot::in_repository(dir("/w/elo"), dir("/w/lune"));
+    fn a_folder_s_spot_is_in_a_repository_only_when_its_top_holds_the_folder_asked() {
+        let src = Spot::in_folder(dir("/w/elo/src"), Some(dir("/w/elo")));
+        assert_eq!(src.repository(), Some(&dir("/w/elo")));
+        assert_eq!(src.dir(), &dir("/w/elo"));
+        let elsewhere = Spot::in_folder(dir("/w/elo"), Some(dir("/w/lune")));
+        assert_eq!(elsewhere, Spot::in_folder(dir("/w/elo"), None));
+        assert_eq!(elsewhere.dir(), &dir("/w/elo"));
     }
 }

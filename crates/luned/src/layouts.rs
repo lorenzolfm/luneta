@@ -14,7 +14,7 @@ use lune_domain::projects::{Holds, ProjectName, Worktree};
 use lune_domain::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
 use lune_domain::projects::{Session, Size, Terminal, TerminalViewId, Used, View, ViewId};
 use lune_domain::projects::{WorktreeId, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
-use lune_domain::projects::{quoted, Argv, Arranged, Opens, Subfolder, WORKTREES_MAX};
+use lune_domain::projects::{quoted, Argv, Arranged, Listed, Opens, WORKTREES_MAX};
 use lune_protocol::shell::Doing;
 use tokio::sync::{mpsc as answers, oneshot};
 use tonic::Status;
@@ -92,8 +92,8 @@ pub enum Command {
     Emptied { since: Instant },
     Crashed,
     Unreached { since: Instant },
-    Worktrees { root: Dir, subfolders: BTreeSet<Subfolder>, seen: BTreeSet<WorktreeId> },
-    Rooted { root: Dir, subfolders: BTreeSet<Subfolder> },
+    Worktrees { root: Dir, listed: Listed, seen: BTreeSet<WorktreeId> },
+    Rooted { root: Dir, listed: Listed },
     Root { project: ProjectId, answer: oneshot::Sender<Result<Root, Unrooted>> },
 }
 
@@ -515,8 +515,8 @@ impl Layouts {
                 self.known.clear();
                 self.listed.clear();
             },
-            Command::Worktrees { root, subfolders, seen } => {
-                let listed = Change::Listed { root: root.clone(), subfolders, seen };
+            Command::Worktrees { root, listed, seen } => {
+                let listed = Change::Listed { root: root.clone(), listed, seen };
                 if let Err(why) = self.followed(listed) {
                     let root = root.as_str();
                     self.troubles.say(format!("{root}: its worktrees are not kept: {why}"));
@@ -525,8 +525,8 @@ impl Layouts {
             Command::Root { project, answer } => {
                 let _ = answer.send(self.root(project));
             },
-            Command::Rooted { root, subfolders } => {
-                let rooted = Change::Rooted { root: root.clone(), subfolders };
+            Command::Rooted { root, listed } => {
+                let rooted = Change::Rooted { root: root.clone(), listed };
                 if let Err(why) = self.followed(rooted) {
                     let root = root.as_str();
                     self.troubles.say(format!("{root}: it is not kept as a clone: {why}"));

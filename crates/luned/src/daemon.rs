@@ -14,7 +14,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::agent::Harness;
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{folder_has_one_worktree, Holders, Made, Opens, ProjectId, WorktreeId};
+use lune_domain::projects::{folder_has_one_worktree, Holders, Made, Opens, OwnedFolder};
+use lune_domain::projects::{ProjectId, WorktreeId};
 use lune_protocol::socket::{self, Bound, Found};
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
@@ -587,7 +588,8 @@ impl Daemon for Host {
         let repository =
             |it: repositories::Repository| Repository { path: it.path().as_str().to_owned() };
         let repositories = repositories.into_iter().map(repository).collect();
-        let owned = owned.iter().map(|it| it.as_str().to_owned()).collect();
+        let owned = owned.iter().flat_map(OwnedFolder::folders).map(|it| it.as_str().to_owned());
+        let owned = owned.collect();
         Ok(Response::new(ListRepositoriesResponse { repositories, unread, owned }))
     }
 

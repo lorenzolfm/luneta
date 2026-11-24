@@ -5,7 +5,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{self, Argv, Holders, Name, Opens, ProjectId, Size, ViewId};
+use lune_domain::projects::{self, Argv, Holders, Name, Opens, OwnedFolder, ProjectId, Size};
+use lune_domain::projects::ViewId;
 use lune_domain::projects::ProjectName;
 use lune_domain::projects::WorktreeId;
 use lune_domain::rows::{self, Holds, Project};
@@ -58,10 +59,11 @@ impl Folder {
     }
 
     #[must_use]
-    pub fn holds_one_of(&self, folders: &[projects::Dir]) -> bool {
+    pub fn is_in(&self, owned: Option<&OwnedFolder>) -> bool {
+        let mut folders = owned.into_iter().flat_map(OwnedFolder::folders);
         match self {
             Folder::Home(_) => false,
-            Folder::At(at) => folders.iter().any(|folder| at.below(folder).is_some()),
+            Folder::At(at) => folders.any(|folder| at.below(folder).is_some()),
         }
     }
 }

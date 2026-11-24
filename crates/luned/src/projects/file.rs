@@ -294,8 +294,9 @@ impl Store {
     }
 
     fn applied(&self, change: Change) -> Result<(Projects, Option<Made>), Failed> {
-        let owned = repositories::owned_folders();
-        self.kept()?.changed(change, &owned, random_id).map_err(|refused| match refused {
+        let owned = repositories::owned_folder();
+        let changed = self.kept()?.changed(change, owned.as_ref(), random_id);
+        changed.map_err(|refused| match refused {
             Refused::Nests(why) => Failed::Nests(why),
             Refused::Stale(why) => Failed::Stale(why),
             Refused::Said(why) => Failed::Refused(why),
@@ -502,12 +503,12 @@ fn write(file: &Path, projects: &Projects) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::mpsc::{self, Receiver};
 
     use lune_domain::projects::layout::Towards;
-    use lune_domain::projects::{Arranged, Id, Name, Opens, Placed, ProjectId, ProjectName, Runs};
+    use lune_domain::projects::{Arranged, Id, Listed, Name, Opens, Placed, ProjectId, ProjectName};
+    use lune_domain::projects::Runs;
     use lune_domain::projects::{Size, Subfolder, Terminal, Used, View, USED_MILLIS_MAX};
     use lune_waits::{Gap, apart};
 
@@ -526,19 +527,23 @@ mod tests {
     }
 
     fn alone(at: &str) -> Spot {
-        Spot::in_folder(dir(at))
+        Spot::in_folder(dir(at), None)
     }
 
     fn tree(at: &str) -> Subfolder {
         Subfolder::parse(at).unwrap()
     }
 
+    fn listing(at: &[&str]) -> Listed {
+        Listed::of(at.iter().copied().map(tree).collect()).unwrap()
+    }
+
     fn clone_of(root: &str, subfolders: &[&str]) -> Spot {
-        Spot::in_clone(dir(root), None, subfolders.iter().copied().map(tree).collect())
+        Spot::in_clone(dir(root), listing(subfolders), None)
     }
 
     fn spot_at(root: &str, at: &str) -> Spot {
-        Spot::in_clone(dir(root), Some(tree(at)), BTreeSet::from([tree(at)]))
+        Spot::in_clone(dir(root), listing(&[at]), Some(tree(at)))
     }
 
     fn laid_row(id: u64, at: &str, terminal: u64) -> String {
@@ -563,7 +568,7 @@ mod tests {
     }
 
     fn parse(text: &str) -> Result<Projects, String> {
-        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone())));
+        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), None)));
         rooted_as(text, alone).map(|read| read.projects)
     }
 

@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{Dir, Holds, Name, Project, Projects, Seen, Stage, Subfolder};
-use lune_domain::projects::{ViewId, Worktree, WorktreeId, CLONE_WORKTREES_MAX};
+use lune_domain::projects::{Listed, ViewId, Worktree, WorktreeId};
 use lune_protocol::git::{GitStatus, Head};
 use lune_protocol::github::PullRequest;
 use lune_protocol::said::Said;
@@ -47,7 +47,7 @@ pub struct Branch {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Listing {
-    Listed(BTreeSet<Subfolder>),
+    Listed(Listed),
     Unlisted(String),
 }
 
@@ -478,9 +478,8 @@ impl Known {
             Some(Listing::Listed(listed)) => listed,
         };
         let opened: BTreeSet<&Subfolder> = rows.iter().map(|(subfolder, _)| subfolder).collect();
-        let unopened = listed.iter().filter(|it| !opened.contains(it));
+        let unopened = listed.subfolders().iter().filter(|it| !opened.contains(it));
         let subfolders: Vec<String> = unopened.map(|it| it.as_str().to_owned()).collect();
-        assert!(subfolders.len() <= CLONE_WORKTREES_MAX, "a clone lists so many worktrees at most");
         Said::Unopened(api::project::Unopened { subfolders })
     }
 

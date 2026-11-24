@@ -13,7 +13,7 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::names::SessionName;
-use lune_domain::projects::{self, ProjectId, ProjectName, Used};
+use lune_domain::projects::{self, OwnedFolder, ProjectId, ProjectName, Used};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Modifier, Style};
@@ -765,10 +765,10 @@ impl Picker {
         }
     }
 
-    fn owned_on(&self, on: &Machine) -> &[projects::Dir] {
+    fn owned_on(&self, on: &Machine) -> Option<&OwnedFolder> {
         match self.lookups.get(on) {
-            Some(Lookup::Listed(found)) => &found.owned,
-            Some(Lookup::Asking(_) | Lookup::Failed(_)) | None => &[],
+            Some(Lookup::Listed(found)) => found.owned.as_ref(),
+            Some(Lookup::Asking(_) | Lookup::Failed(_)) | None => None,
         }
     }
 
@@ -1637,7 +1637,7 @@ impl Picker {
                 });
                 let mut rows = place_rows(&fuzzy, &self.term, kept.chain(unkept));
                 let owned = self.owned_on(on);
-                if let Some(folder) = typed.as_ref().filter(|it| !it.holds_one_of(owned)) {
+                if let Some(folder) = typed.as_ref().filter(|it| !it.is_in(owned)) {
                     let key = Key::Folder { on: on.clone(), folder: folder.clone() };
                     rows.push(Row::plain(key, folder.to_string()));
                 }
@@ -2675,7 +2675,7 @@ mod tests {
     }
 
     fn found_in(owned: &str, repositories: Vec<Repository>) -> repositories::Found {
-        let owned = vec![projects::Dir::parse(owned).unwrap()];
+        let owned = Some(OwnedFolder::of(projects::Dir::parse(owned).unwrap(), None));
         repositories::Found { repositories, owned, unread: Vec::new() }
     }
 
@@ -4053,7 +4053,7 @@ mod tests {
         let said = "zoxide is not on the PATH, so only the clones in ~/lune are listed";
         let repositories = vec![repository("/home/you/lune/app")];
         let unread = vec![said.to_owned()];
-        let found = Ok(repositories::Found { repositories, owned: Vec::new(), unread });
+        let found = Ok(repositories::Found { repositories, owned: None, unread });
         picker.heard(Heard::Repositories { on: Machine::Local, ask: 1, found });
         let (lines, _) = list(&picker);
         assert_eq!(lines[..2].join(" "), said);

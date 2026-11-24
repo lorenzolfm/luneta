@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
-use super::{Below, Dir, Holds, Id, Line, Name, Project, ProjectId, ProjectName, Projects};
+use super::{Below, Dir, Holds, Id, Line, Listed, Name, Project, ProjectId, ProjectName, Projects};
 use super::{Runs, Session, Spot, Subfolder, Terminal, TerminalViewId, Used, View, ViewId};
 use super::{Arranged, Focus, Layout, Shape, Worktree, WorktreeId};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
@@ -508,7 +508,7 @@ fn root_project(
     };
     let name = named(spot.dir());
     let Unrooted { id, dir, worktrees, .. } = project;
-    let Some(subfolders) = spot.subfolders() else {
+    let Some(subfolders) = spot.listed().map(Listed::subfolders) else {
         let all = worktrees.into_iter().map(|(_, it)| it).collect();
         let dir = spot.dir().clone();
         return Ok(Gathered { id, name, dir, holds: Gathering::Folder(all) });
@@ -974,19 +974,23 @@ mod tests {
     }
 
     fn alone(at: &str) -> Spot {
-        Spot::in_folder(dir(at))
+        Spot::in_folder(dir(at), None)
     }
 
     fn tree(at: &str) -> Subfolder {
         Subfolder::parse(at).unwrap()
     }
 
+    fn listing(at: &[&str]) -> Listed {
+        Listed::of(at.iter().copied().map(tree).collect()).unwrap()
+    }
+
     fn clone_of(root: &str, subfolders: &[&str]) -> Spot {
-        Spot::in_clone(dir(root), None, subfolders.iter().copied().map(tree).collect())
+        Spot::in_clone(dir(root), listing(subfolders), None)
     }
 
     fn spot_at(root: &str, at: &str) -> Spot {
-        Spot::in_clone(dir(root), Some(tree(at)), BTreeSet::from([tree(at)]))
+        Spot::in_clone(dir(root), listing(&[at]), Some(tree(at)))
     }
 
     fn is_clone(project: &Project) -> bool {
@@ -1019,7 +1023,7 @@ mod tests {
     }
 
     fn parse(text: &str) -> Result<Projects, String> {
-        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone())));
+        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), None)));
         rooted_as(text, alone).map(|read| read.projects)
     }
 
@@ -1030,15 +1034,15 @@ mod tests {
         let mut drawn = ids.into_iter();
         let mut draw = || Ok(drawn.next().unwrap());
         let change = Change::AddProject { spot: clone_of("/w/lune", &["top"]), name: None };
-        (projects, _) = projects.changed(change, &[], &mut draw).unwrap();
+        (projects, _) = projects.changed(change, None, &mut draw).unwrap();
         let project = ProjectId::new(ids[0]);
         let top = add_in(project, spot_at("/w/lune", "top"));
-        (projects, _) = projects.changed(top, &[], &mut draw).unwrap();
+        (projects, _) = projects.changed(top, None, &mut draw).unwrap();
         let named = Some(Name::parse("release").unwrap());
         let main = add_named(project, spot_at("/w/lune", "main"), named);
-        (projects, _) = projects.changed(main, &[], &mut draw).unwrap();
+        (projects, _) = projects.changed(main, None, &mut draw).unwrap();
         let change = Change::AddProject { spot: alone("/home/me/Vault"), name: None };
-        (projects, _) = projects.changed(change, &[], &mut draw).unwrap();
+        (projects, _) = projects.changed(change, None, &mut draw).unwrap();
         let want = r#"{
   "version": 11,
   "projects": [
@@ -1124,7 +1128,7 @@ mod tests {
             "worktree": "old"
           },"#;
         let with_unopened = older.replace(r#""clone": ["#, unopened);
-        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone())));
+        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), None)));
         for before in [7, 8] {
             let version = format!(r#""version": {before}"#);
             let before = with_unopened.replace(r#""version": 11"#, &version);
@@ -1143,9 +1147,9 @@ mod tests {
         let mut drawn = ids.into_iter();
         let mut draw = || Ok(drawn.next().unwrap());
         let change = Change::AddProject { spot: clone_of("/w/lune", &["top"]), name: None };
-        (projects, _) = projects.changed(change, &[], &mut draw).unwrap();
+        (projects, _) = projects.changed(change, None, &mut draw).unwrap();
         let top = add_in(ProjectId::new(ids[0]), spot_at("/w/lune", "top"));
-        (projects, _) = projects.changed(top, &[], &mut draw).unwrap();
+        (projects, _) = projects.changed(top, None, &mut draw).unwrap();
         let worktree = WorktreeId::new(ids[1]);
         let size = super::super::Size::of(80, 24).unwrap();
         let [shell, vim, agent] = [3, 5, 6].map(|id| ViewId::of(id).unwrap());
@@ -1166,11 +1170,11 @@ mod tests {
         for (id, runs, placed) in runs {
             let terminal = Terminal::new(TerminalViewId::new(id), dir("/w/lune/top"), runs);
             let open = Change::Open { worktree, view: View::Terminal(terminal), placed, size };
-            (projects, _) = projects.changed(open, &[], &mut draw).unwrap();
+            (projects, _) = projects.changed(open, None, &mut draw).unwrap();
         }
         projects = projects.relaid(Relaid::Focus { view: shell }).unwrap();
         let panes = Change::Arrange { worktree, arranged: Arranged::Panes };
-        (projects, _) = projects.changed(panes, &[], &mut draw).unwrap();
+        (projects, _) = projects.changed(panes, None, &mut draw).unwrap();
         projects = projects.relaid(Relaid::Fill { worktree, full: Some(vim) }).unwrap();
         let want = r#"{
   "version": 11,
@@ -1248,7 +1252,7 @@ mod tests {
         assert_eq!(top.layout().last_focus(), Some(vim), "a full view is the last focus");
         let tabs = Change::Arrange { worktree, arranged: Arranged::Tabs };
         let as_tabs = projects.relaid(Relaid::Fill { worktree, full: None }).unwrap();
-        let (as_tabs, _) = as_tabs.changed(tabs, &[], &mut draw).unwrap();
+        let (as_tabs, _) = as_tabs.changed(tabs, None, &mut draw).unwrap();
         let (_, top) = as_tabs.find(worktree).unwrap();
         assert_eq!(top.layout().last_focus(), Some(vim), "the view filled is the tab focused");
         let vim_full = r#""full": "0000000000000005""#;
@@ -1333,7 +1337,7 @@ mod tests {
             "dir": "/a", "workstreams": [{"id": "0000000000000002"},
             {"id": "0000000000000003", "below": "b", "used_millis": 7}]}, {"id": "0000000000000004",
             "name": "c", "dir": "/c"}]}"#;
-        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone())));
+        let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), None)));
         let read = rooted_as(text, alone).unwrap();
         assert!(read.migrated, "an old file is rooted, and so written again at once");
         let kept = read.projects;

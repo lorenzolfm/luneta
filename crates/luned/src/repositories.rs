@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use lune_domain::projects::{Dir, ProjectName, OWNED_FOLDERS_MAX};
+use lune_domain::projects::{Dir, OwnedFolder, ProjectName};
 
 use crate::projects::spot;
 use crate::{zoxide, Directory};
@@ -41,24 +41,18 @@ impl Repository {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Found {
     pub repositories: Vec<Repository>,
-    pub owned: Vec<Dir>,
+    pub owned: Option<OwnedFolder>,
     pub unread: Vec<String>,
 }
 
 #[must_use]
-pub fn owned_folders() -> Vec<Dir> {
+pub fn owned_folder() -> Option<OwnedFolder> {
     let home = env::var_os("HOME").and_then(|home| fs::canonicalize(home).ok());
     let home = home.as_deref().and_then(Path::to_str).map(|home| home.trim_end_matches('/'));
-    let Some(named) = home.and_then(|home| Dir::parse(&format!("{home}/{OWNED_FOLDER}")).ok())
-    else {
-        return Vec::new();
-    };
+    let named = home.and_then(|home| Dir::parse(&format!("{home}/{OWNED_FOLDER}")).ok())?;
     let led = fs::canonicalize(named.as_str()).ok();
     let led = led.as_deref().and_then(Path::to_str).and_then(|led| Dir::parse(led).ok());
-    let led = led.filter(|led| *led != named);
-    let owned: Vec<Dir> = std::iter::once(named).chain(led).collect();
-    assert!(owned.len() <= OWNED_FOLDERS_MAX, "the folder as named, and where it leads");
-    owned
+    Some(OwnedFolder::of(named, led))
 }
 
 pub fn found() -> Found {
@@ -92,7 +86,7 @@ pub fn found() -> Found {
         unread.push(format!("listed the first {REPOSITORIES_MAX} clones, and no more"));
     }
     assert!(repositories.len() <= REPOSITORIES_MAX, "roots stops at REPOSITORIES_MAX");
-    Found { repositories, owned: owned_folders(), unread }
+    Found { repositories, owned: owned_folder(), unread }
 }
 
 struct Owned {

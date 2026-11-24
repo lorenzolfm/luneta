@@ -5,7 +5,7 @@ use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Duration;
 
-use lune_domain::projects::{Ask, Dir, Id, PROJECTS_MAX};
+use lune_domain::projects::{Ask, Dir, Id, Listed, PROJECTS_MAX};
 
 use crate::api;
 use crate::core::{self, Command};
@@ -99,44 +99,44 @@ pub fn follow(
                         continue;
                     },
                 };
-                let rooted = spot.subfolders().filter(|it| *spot.dir() == root && !it.is_empty());
-                let Some(subfolders) = rooted.cloned() else {
+                let held = |it: &&Listed| *spot.dir() == root && !it.subfolders().is_empty();
+                let Some(listed) = spot.listed().filter(held).cloned() else {
                     continue;
                 };
-                if layouts.send(layouts::Command::Rooted { root, subfolders }).is_err() {
+                if layouts.send(layouts::Command::Rooted { root, listed }).is_err() {
                     return;
                 }
             }
             let Some(clones) = core::ask(&core, Command::Clones) else {
                 return;
             };
-            let mut listed = BTreeMap::new();
+            let mut listings = BTreeMap::new();
             for (root, seen) in clones {
                 if missing.contains(&root) {
                     let gone = format!("{} is missing", root.as_str());
-                    listed.insert(root, core::Listing::Unlisted(gone));
+                    listings.insert(root, core::Listing::Unlisted(gone));
                     continue;
                 }
-                let subfolders = match spot::subfolders(&root, SPOT_LOOK) {
-                    Ok(subfolders) => subfolders,
+                let listed = match spot::subfolders(&root, SPOT_LOOK) {
+                    Ok(listed) => listed,
                     Err(why) => {
                         let at = root.as_str();
                         troubles.say(format!("{at}: its worktrees are not listed: {why}"));
-                        listed.insert(root, core::Listing::Unlisted(why));
+                        listings.insert(root, core::Listing::Unlisted(why));
                         continue;
                     },
                 };
-                listed.insert(root.clone(), core::Listing::Listed(subfolders.clone()));
-                if layouts.send(layouts::Command::Worktrees { root, subfolders, seen }).is_err() {
+                listings.insert(root.clone(), core::Listing::Listed(listed.clone()));
+                if layouts.send(layouts::Command::Worktrees { root, listed, seen }).is_err() {
                     return;
                 }
             }
-            assert!(listed.len() <= PROJECTS_MAX, "a sweep lists the worktrees of kept clones");
+            assert!(listings.len() <= PROJECTS_MAX, "a sweep lists the worktrees of kept clones");
             troubles.done();
             if core.send(Command::Missing(missing)).is_err() {
                 return;
             }
-            if core.send(Command::Listed(listed)).is_err() {
+            if core.send(Command::Listed(listings)).is_err() {
                 return;
             }
             thread::sleep(sweep);

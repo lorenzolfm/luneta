@@ -20,7 +20,8 @@ mod view;
 
 pub use kept::{parse, written, Parsed, FILE_BYTES_MAX};
 pub use layout::{Size, FRAME_CELLS, LAYOUT_VIEWS_MAX};
-pub use spot::{clone_root, porcelain, Bareness, CloneRoot, Spot, BARE, CLONE_WORKTREES_MAX};
+pub use spot::{clone_root, porcelain, Bareness, CloneRoot, Listed, Spot, BARE};
+pub use spot::CLONE_WORKTREES_MAX;
 pub use view::{quoted, Argv, Arranged, Layout, Line, Opens, Placed, Runs, Session};
 pub use view::{Focus, Shape};
 pub use view::{Terminal, TerminalViewId};
@@ -36,8 +37,6 @@ pub const VIEWS_MAX: usize = 1024;
 pub const NAME_CHARS_MAX: usize = 64;
 
 pub const PATH_BYTES_MAX: usize = 4096;
-
-pub const OWNED_FOLDERS_MAX: usize = 2;
 
 pub const USED_MILLIS_MAX: u64 = u64::MAX / 2;
 
@@ -310,6 +309,24 @@ impl Dir {
     #[must_use]
     pub fn nests(&self, other: &Dir) -> bool {
         self.below(other).is_some() || other.below(self).is_some()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedFolder {
+    named: Dir,
+    leads: Option<Dir>,
+}
+
+impl OwnedFolder {
+    #[must_use]
+    pub fn of(named: Dir, leads: Option<Dir>) -> OwnedFolder {
+        let leads = leads.filter(|leads| *leads != named);
+        OwnedFolder { named, leads }
+    }
+
+    pub fn folders(&self) -> impl Iterator<Item = &Dir> {
+        std::iter::once(&self.named).chain(&self.leads)
     }
 }
 
@@ -612,8 +629,8 @@ pub enum Change {
     Start { spot: Spot, name: Option<ProjectName> },
     Pull { spot: Spot, name: Name, agent: Option<Argv> },
     Join { spot: Spot, opens: Opens },
-    Listed { root: Dir, subfolders: BTreeSet<Subfolder>, seen: BTreeSet<WorktreeId> },
-    Rooted { root: Dir, subfolders: BTreeSet<Subfolder> },
+    Listed { root: Dir, listed: Listed, seen: BTreeSet<WorktreeId> },
+    Rooted { root: Dir, listed: Listed },
     RenameProject { project: ProjectId, to: ProjectName },
     RenameWorktree { worktree: WorktreeId, to: Option<Name> },
     ReorderProjects { seen: Vec<ProjectId>, projects: Vec<ProjectId> },
@@ -989,17 +1006,17 @@ impl Projects {
     pub fn changed(
         &self,
         change: Change,
-        owned: &[Dir],
+        owned: Option<&OwnedFolder>,
         draw: impl FnMut() -> io::Result<Id>,
     ) -> Result<(Projects, Option<Made>), Refused> {
-        assert!(owned.len() <= OWNED_FOLDERS_MAX, "the folder as named, and where it leads");
         if let Some(dir) = self.added_at(&change)
             && let Some(other) = self.projects.iter().find(|other| other.dir.nests(dir))
         {
             return Err(Refused::Nests(nested(dir, other)));
         }
+        let mut owned = owned.into_iter().flat_map(OwnedFolder::folders);
         if let Some(dir) = self.added_at(&change)
-            && let Some(owned) = owned.iter().find(|it| dir.below(it).is_some())
+            && let Some(owned) = owned.find(|it| dir.below(it).is_some())
         {
             return Err(Refused::Said(holds_owned(dir, owned)));
         }
@@ -1115,12 +1132,12 @@ impl Projects {
                 }
                 Some(self.landed(&mut changed, joined, &opens, &mut draw)?)
             },
-            Change::Listed { root, subfolders, seen } => {
-                changed.worktrees_listed(&root, &subfolders, &seen)?;
+            Change::Listed { root, listed, seen } => {
+                changed.worktrees_listed(&root, listed.subfolders(), &seen)?;
                 None
             },
-            Change::Rooted { root, subfolders } => {
-                changed.rooted(&root, &subfolders);
+            Change::Rooted { root, listed } => {
+                changed.rooted(&root, listed.subfolders());
                 None
             },
             Change::RenameProject { project, to } => {
@@ -1325,7 +1342,7 @@ impl Projects {
             return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
         }
         let id = ProjectId(self.fresh(draw)?);
-        let holds = match spot.subfolders() {
+        let holds = match spot.listed() {
             Some(_) => Holds::Clone(Vec::new()),
             None => Holds::Folder(Worktree::new(self.drawn(draw)?, None)),
         };
@@ -1785,7 +1802,7 @@ mod tests {
     fn refused(projects: &Projects, change: Change) -> Result<(Projects, Option<Made>), Refused> {
         let mut drawn = counting();
         let taken = |id: &Id| projects.holds(*id);
-        projects.changed(change, &[], || loop {
+        projects.changed(change, None, || loop {
             let id = drawn()?;
             if !taken(&id) {
                 return Ok(id);
@@ -1804,19 +1821,23 @@ mod tests {
     }
 
     fn folder(at: &str) -> Spot {
-        Spot::in_folder(dir(at))
+        Spot::in_folder(dir(at), None)
     }
 
     fn tree(at: &str) -> Subfolder {
         Subfolder::parse(at).unwrap()
     }
 
+    fn listing(at: &[&str]) -> Listed {
+        Listed::of(at.iter().copied().map(tree).collect()).unwrap()
+    }
+
     fn spot_at(root: &str, at: &str) -> Spot {
-        Spot::in_clone(dir(root), Some(tree(at)), BTreeSet::from([tree(at)]))
+        Spot::in_clone(dir(root), listing(&[at]), Some(tree(at)))
     }
 
     fn clone_of(root: &str, subfolders: &[&str]) -> Spot {
-        Spot::in_clone(dir(root), None, subfolders.iter().copied().map(tree).collect())
+        Spot::in_clone(dir(root), listing(subfolders), None)
     }
 
     fn is_clone(project: &Project) -> bool {
@@ -1959,10 +1980,10 @@ mod tests {
     #[test]
     fn no_project_holds_the_folder_where_lune_keeps_clones() {
         let projects = Projects::default();
-        let owned = [dir("/home/me/lune")];
+        let owned = OwnedFolder::of(dir("/home/me/lune"), None);
         let add = |at: &str| {
             let change = Change::AddProject { spot: folder(at), name: None };
-            projects.changed(change, &owned, counting())
+            projects.changed(change, Some(&owned), counting())
         };
         for at in ["/home/me", "/home/me/lune"] {
             let Err(Refused::Said(said)) = add(at) else { panic!("{at} is refused") };
@@ -2068,8 +2089,7 @@ mod tests {
         assert_eq!(Some(feat), at(&projects, "/w/lune/feat").map(Made::Worktree));
         assert_eq!(projects.all().len(), 1);
 
-        let subfolders = BTreeSet::from([tree("fix"), tree("main")]);
-        let spot = Spot::in_clone(dir("/w/elo"), Some(tree("main")), subfolders);
+        let spot = Spot::in_clone(dir("/w/elo"), listing(&["fix", "main"]), Some(tree("main")));
         let named = Change::Start { spot, name: Some(project_name("elo-app")) };
         let Made::Worktree(elo_main) = add(&mut projects, named) else {
             panic!("a start in a worktree of no project makes its project and goes there");
@@ -2206,19 +2226,20 @@ mod tests {
         let mut projects = Projects::default();
         let notes = project(&mut projects, "/n");
         let before = projects.clone();
-        let repository = Spot::in_repository(dir("/n/foo/src"), dir("/n/foo"));
+        let repository = Spot::in_folder(dir("/n/foo/src"), Some(dir("/n/foo")));
         let said = change(&projects, joining(repository)).unwrap_err();
         let one = "n is a folder, and its own is its one worktree";
         assert_eq!(said, format!("/n/foo is in /n, project n's folder; {one}"));
-        let top = change(&projects, joining(Spot::in_repository(dir("/n/foo"), dir("/n/foo"))));
+        let top = change(&projects, joining(Spot::in_folder(dir("/n/foo"), Some(dir("/n/foo")))));
         assert_eq!(top.unwrap_err(), said, "the repository's top is refused as its subfolder is");
         assert_eq!(projects, before);
         let own = projects.project_of(notes).unwrap().worktrees().next().unwrap().id();
-        let (_, found) = change(&projects, joining(Spot::in_repository(dir("/n/src"), dir("/n")))).unwrap();
+        let src = Spot::in_folder(dir("/n/src"), Some(dir("/n")));
+        let (_, found) = change(&projects, joining(src)).unwrap();
         assert_eq!(found, Some(Made::Found(own)), "a subfolder of the folder's own repository");
         let foo = project(&mut projects, "/m/foo/docs");
         let own = projects.project_of(foo).unwrap().worktrees().next().unwrap().id();
-        let inside = Spot::in_repository(dir("/m/foo/docs/a"), dir("/m/foo"));
+        let inside = Spot::in_folder(dir("/m/foo/docs/a"), Some(dir("/m/foo")));
         let (_, found) = change(&projects, joining(inside)).unwrap();
         assert_eq!(found, Some(Made::Found(own)), "a folder's project inside the repository");
     }
@@ -2343,10 +2364,10 @@ mod tests {
         let first = project(&mut projects, "/a");
         let mut draws = [first.0, first.0, Id::of(7).unwrap(), Id::of(8).unwrap()].into_iter();
         let change = Change::AddProject { spot: folder("/b"), name: None };
-        let (_, made) = projects.changed(change, &[], || Ok(draws.next().unwrap())).unwrap();
+        let (_, made) = projects.changed(change, None, || Ok(draws.next().unwrap())).unwrap();
         assert_eq!(made, Some(Made::Project(ProjectId(Id::of(7).unwrap()))));
         let always = Change::AddProject { spot: folder("/b"), name: None };
-        let refused = projects.changed(always, &[], || Ok(first.0));
+        let refused = projects.changed(always, None, || Ok(first.0));
         assert!(refused.unwrap_err().to_string().contains("were all taken"));
     }
 
@@ -2794,8 +2815,7 @@ mod tests {
             let mut clones = projects.clones();
             let seen = clones.find(|(it, _)| *it == dir(root)).map(|(_, seen)| seen);
             let seen = seen.unwrap_or_default();
-            let subfolders = at.iter().copied().map(tree).collect();
-            Change::Listed { root: dir(root), subfolders, seen }
+            Change::Listed { root: dir(root), listed: listing(at), seen }
         };
         let stale = listed(&projects, "/w/lune", &["main", "new"]);
         let late = worktree(&mut projects, lune, "/w/lune/late");
@@ -2836,8 +2856,7 @@ mod tests {
         let right = Placed::Beside { at: one, towards: layout::Towards::Right };
         welcome(&mut projects, both, 102, right);
         let seen = projects.clones().find(|(it, _)| *it == dir("/w/lune")).unwrap().1;
-        let subfolders = [tree("main")].into();
-        let listed = Change::Listed { root: dir("/w/lune"), subfolders, seen };
+        let listed = Change::Listed { root: dir("/w/lune"), listed: listing(&["main"]), seen };
         (projects, _) = change(&projects, listed).unwrap();
         assert_eq!(at(&projects, "/w/lune/welcomed"), None, "a welcome view holds nothing");
         assert!(projects.holding_view(ViewId::of(100).unwrap()).is_none(), "it goes with it");
@@ -2859,8 +2878,7 @@ mod tests {
         let both = vec![ran(one, "/w/lune/feat/src"), ran(two, "/w/lune/feat")];
         (projects, _) = change(&projects, Change::Ran(both)).unwrap();
         let rooted = |root: &str, at: &[&str]| {
-            let subfolders = at.iter().copied().map(tree).collect();
-            Change::Rooted { root: dir(root), subfolders }
+            Change::Rooted { root: dir(root), listed: listing(at) }
         };
         let (same, _) = change(&projects, rooted("/w/lune", &[])).unwrap();
         assert_eq!(same, projects, "with no worktree yet, it stays a folder's");

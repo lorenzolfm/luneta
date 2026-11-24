@@ -1,8 +1,7 @@
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use lune_domain::projects::{clone_root, porcelain, Bareness, CloneRoot, Dir, Spot, Subfolder};
+use lune_domain::projects::{clone_root, porcelain, Bareness, CloneRoot, Dir, Listed, Spot};
 use lune_domain::projects::BARE;
 
 use crate::directory::Directory;
@@ -15,7 +14,7 @@ pub fn of(folder: &Dir, look: Duration) -> Result<Spot, String> {
     let until = Instant::now() + look;
     let common = match git::common_within(folder.as_str(), left(until, look)?) {
         Common::Of(common) => common,
-        Common::NoRepository => return Ok(Spot::in_folder(folder.clone())),
+        Common::NoRepository => return Ok(Spot::in_folder(folder.clone(), None)),
         Common::Unsaid(why) => {
             let folder = folder.as_str();
             return Err(format!("git did not say what repository {folder} is in: {why}"));
@@ -28,10 +27,9 @@ pub fn of(folder: &Dir, look: Duration) -> Result<Spot, String> {
     let top = toplevel(folder, until, look)?;
     match clone_within(&common, until, look)? {
         CloneRoot::Of(root) => {
-            let subfolders = listed(&root, until, look)?;
-            let subfolder = top.and_then(|top| root.subfolder(&top));
-            let subfolder = subfolder.filter(|it| subfolders.contains(it));
-            return Ok(Spot::in_clone(root, subfolder, subfolders));
+            let listed = listed(&root, until, look)?;
+            let at = top.and_then(|top| root.subfolder(&top));
+            return Ok(Spot::in_clone(root, listed, at));
         },
         CloneRoot::Unparsed(why) => {
             return Err(format!(
@@ -41,10 +39,7 @@ pub fn of(folder: &Dir, look: Duration) -> Result<Spot, String> {
         },
         CloneRoot::Worked | CloneRoot::NoBare => {},
     }
-    Ok(match top.filter(|top| top.below(folder).is_some()) {
-        Some(top) => Spot::in_repository(folder.clone(), top),
-        None => Spot::in_folder(folder.clone()),
-    })
+    Ok(Spot::in_folder(folder.clone(), top))
 }
 
 #[must_use]
@@ -57,11 +52,11 @@ pub fn bare_in(folder: &Path) -> bool {
     folder.join(BARE).is_dir()
 }
 
-pub fn subfolders(root: &Dir, look: Duration) -> Result<BTreeSet<Subfolder>, String> {
+pub fn subfolders(root: &Dir, look: Duration) -> Result<Listed, String> {
     listed(root, Instant::now() + look, look)
 }
 
-fn listed(root: &Dir, until: Instant, look: Duration) -> Result<BTreeSet<Subfolder>, String> {
+fn listed(root: &Dir, until: Instant, look: Duration) -> Result<Listed, String> {
     let mut git = Git::of(&Directory::from(root).child(BARE), "worktree");
     git.args(["list", "--porcelain", "-z"]);
     let said = ran(git, "worktree list", until, look)?;
@@ -130,8 +125,11 @@ fn bareness(ran: Ran) -> Result<Bareness, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
+
+    use lune_domain::projects::Subfolder;
 
     use super::*;
 
@@ -168,9 +166,9 @@ mod tests {
         fs::create_dir_all(plain.join("src")).unwrap();
         fs::create_dir_all(alone.join("notes")).unwrap();
 
-        let subfolders = BTreeSet::from([subfolder("main")]);
+        let listed = Listed::of(BTreeSet::from([subfolder("main")])).unwrap();
         let clone_at = |at: Option<&str>| {
-            Spot::in_clone(real(&clone), at.map(subfolder), subfolders.clone())
+            Spot::in_clone(real(&clone), listed.clone(), at.map(subfolder))
         };
         let of = |folder: &Dir| of(folder, LOOK);
         assert_eq!(of(&real(&clone)), Ok(clone_at(None)));
@@ -178,14 +176,14 @@ mod tests {
         assert_eq!(of(&real(&clone.join("main"))), Ok(clone_at(Some("main"))));
         assert_eq!(of(&real(&clone.join("main/crates"))), Ok(clone_at(Some("main"))));
         let src = real(&plain.join("src"));
-        assert_eq!(of(&src), Ok(Spot::in_repository(src.clone(), real(&plain))));
+        assert_eq!(of(&src), Ok(Spot::in_folder(src.clone(), Some(real(&plain)))));
         let linked = scratch.join("linked");
         std::os::unix::fs::symlink(&plain, &linked).unwrap();
         let through = dir(linked.join("src").to_str().unwrap());
-        let alone_there = Spot::in_folder(through.clone());
+        let alone_there = Spot::in_folder(through.clone(), None);
         assert_eq!(of(&through), Ok(alone_there), "the top git names is real");
         let notes = real(&alone.join("notes"));
-        assert_eq!(of(&notes), Ok(Spot::in_folder(notes.clone())));
+        assert_eq!(of(&notes), Ok(Spot::in_folder(notes.clone(), None)));
         assert_eq!(clone_at(Some("main")).place(), real(&clone.join("main")));
         assert_eq!(clone_at(None).dir(), &real(&clone));
         let none_left = super::of(&real(&clone), Duration::ZERO).unwrap_err();
@@ -200,7 +198,7 @@ mod tests {
         let sep = format!("--separate-git-dir={}", sep.display());
         git(&scratch, &["init", "-q", "-b", "main", &sep, worked.to_str().unwrap()]);
         let worked = real(&worked);
-        assert_eq!(of(&worked, LOOK), Ok(Spot::in_repository(worked.clone(), worked.clone())));
+        assert_eq!(of(&worked, LOOK), Ok(Spot::in_folder(worked.clone(), Some(worked.clone()))));
 
         let unkept = scratch.join("lun\teta");
         fs::create_dir_all(unkept.join(".bare")).unwrap();
