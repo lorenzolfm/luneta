@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::{Dir, Subfolder, WORKTREES_MAX};
-use crate::git::{self, Common};
+use crate::git::{self, Common, Git};
 use crate::program::{self, Ran};
 
 pub const CLONE_WORKTREES_MAX: usize = 256;
@@ -158,9 +157,7 @@ pub fn subfolders(root: &Dir, look: Duration) -> Result<BTreeSet<Subfolder>, Str
 }
 
 fn listed(root: &Dir, until: Instant, look: Duration) -> Result<BTreeSet<Subfolder>, String> {
-    let mut git = Command::new("git");
-    git::local(&mut git).args(["-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false"]);
-    git.arg(format!("--git-dir={}/{BARE}", root.0)).current_dir("/");
+    let mut git = Git::of(format!("{}/{BARE}", root.0));
     git.args(["worktree", "list", "--porcelain", "-z"]).env("LC_ALL", "C");
     let said = ran(&mut git, "worktree list", until, look)?;
     porcelain(root, &said)
@@ -175,11 +172,9 @@ fn left(until: Instant, look: Duration) -> Result<Duration, String> {
 }
 
 fn toplevel(folder: &Dir, until: Instant, look: Duration) -> Result<Option<Dir>, String> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-c", "safe.bareRepository=explicit", "-C", folder.as_str()]))
-        .args(["rev-parse", "--is-inside-work-tree", "--show-toplevel"])
-        .env("LC_ALL", "C");
-    let stdout = match program::run(&mut git, left(until, look)?) {
+    let mut git = Git::at(folder.as_str());
+    git.args(["rev-parse", "--is-inside-work-tree", "--show-toplevel"]).env("LC_ALL", "C");
+    let stdout = match program::run(git.command(), left(until, look)?) {
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => stdout,
         Ok(Ran::Ended { .. }) => return Ok(None),
         Ok(Ran::Stuck) => return Err(format!("git did not answer in {}ms", look.as_millis())),
@@ -194,8 +189,8 @@ fn toplevel(folder: &Dir, until: Instant, look: Duration) -> Result<Option<Dir>,
     Dir::parse(top).map(Some)
 }
 
-fn ran(git: &mut Command, asked: &str, until: Instant, look: Duration) -> Result<Vec<u8>, String> {
-    let ran = program::run(git, left(until, look)?);
+fn ran(git: &mut Git, asked: &str, until: Instant, look: Duration) -> Result<Vec<u8>, String> {
+    let ran = program::run(git.command(), left(until, look)?);
     let ran = ran.map_err(|error| format!("git {asked} did not run: {error}"))?;
     ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
@@ -205,10 +200,9 @@ pub fn clone_of(common: &str, look: Duration) -> Result<CloneRoot, String> {
 }
 
 fn clone_within(common: &str, until: Instant, look: Duration) -> Result<CloneRoot, String> {
-    let mut git = Command::new("git");
-    git::local(&mut git).arg(format!("--git-dir={common}")).current_dir("/");
+    let mut git = Git::of(common);
     git.args(["config", "--type=bool", "--get", "core.bare"]).env("LC_ALL", "C");
-    let ran = program::run(&mut git, left(until, look)?);
+    let ran = program::run(git.command(), left(until, look)?);
     let ran = ran.map_err(|error| format!("git config core.bare did not run: {error}"))?;
     Ok(clone_root(common, bare(ran)?))
 }
@@ -328,9 +322,9 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let mut git = Command::new("git");
-        git::local(&mut git).current_dir(dir).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null");
-        let status = git.status().unwrap();
+        let mut git = Git::at(dir);
+        git.args(args).env("GIT_CONFIG_GLOBAL", "/dev/null");
+        let status = git.command().status().unwrap();
         assert!(status.success(), "git {args:?} in {}", dir.display());
     }
 

@@ -472,11 +472,10 @@ fn unread(dir: &Directory) -> Vec<String> {
 }
 
 fn ignored(dir: &Directory) -> Result<Vec<u8>, String> {
-    let mut git = Command::new("git");
-    git.args(["-c", "core.fsmonitor=false", "-C", dir.as_str(), "ls-files", "-z"]);
-    git.args(["--others", "--ignored", "--exclude-standard", "--directory"]);
-    git::local(&mut git);
-    match program::run(&mut git, GIT).map_err(|error| unrun("git", &git, &error))? {
+    let mut git = git::Git::at(dir.as_str());
+    git.args(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]);
+    let git = git.command();
+    match program::run(git, GIT).map_err(|error| unrun("git", git, &error))? {
         Ran::Ended { status, stdout, .. } if status.success() => Ok(stdout),
         Ran::Ended { status, stderr, .. } => Err(refused(&stderr, status)),
         Ran::Stuck => Err(format!("it was still listing after {}s", GIT.as_secs())),
@@ -757,9 +756,8 @@ mod tests {
         assert_eq!(rules("/w/n", b".env\0\xff.env\0"), ["Read(//w/n/**)"]);
         let bare = tempfile::tempdir().unwrap();
         let real = bare.path().canonicalize().unwrap().display().to_string();
-        let mut git = Command::new("git");
-        git::local(git.args(["init", "--quiet", "--bare"]).arg(&real));
-        assert!(git.status().unwrap().success());
+        let mut git = git::Git::at(&real);
+        assert!(git.args(["init", "--quiet", "--bare"]).command().status().unwrap().success());
         let all = denied(&format!("{real}/"));
         assert!(unread(&Directory::parse(real).unwrap()).contains(&all), "{all}");
         let file = settings(&["Read(//w/n/.env)".to_owned()]).unwrap();

@@ -13,7 +13,7 @@ use crate::api::projects::Held;
 use crate::api::terminal::Found;
 use crate::api::{self, On, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse};
 use crate::directory::Directory;
-use crate::git::{self, Common};
+use crate::git::{self, Common, Git};
 use crate::github::{self, Asker, Based, Pulled};
 use crate::mux::TerminalKey;
 use crate::program;
@@ -276,21 +276,18 @@ fn parse_listed(said: &[u8]) -> Vec<Listed> {
     listed
 }
 
-fn on_repository(common: &str) -> Command {
-    let mut git = Command::new("git");
-    git::local(&mut git).args(["-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false"]);
-    git.arg(format!("--git-dir={common}")).current_dir("/");
-    git
+fn on_repository(common: &str) -> Git {
+    Git::of(common)
 }
 
-fn says(mut git: Command, limit: Duration, asked: &str) -> Result<Vec<u8>, String> {
-    let ran = program::run(&mut git, limit)
+fn says(mut git: Git, limit: Duration, asked: &str) -> Result<Vec<u8>, String> {
+    let ran = program::run(git.command(), limit)
         .map_err(|error| format!("git {asked} could not be run: {error}"))?;
     ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
 
-fn says_alone(mut git: Command, asked: &str) -> Result<Vec<u8>, String> {
-    let ran = program::run_alone(&mut git, GIT_SAYS)
+fn says_alone(mut git: Git, asked: &str) -> Result<Vec<u8>, String> {
+    let ran = program::run_alone(git.command(), GIT_SAYS)
         .map_err(|error| format!("git {asked} could not be run: {error}"))?;
     ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
@@ -302,10 +299,8 @@ fn worktrees(common: &str) -> Result<Vec<Listed>, String> {
 }
 
 fn clean(folder: &str) -> Result<bool, String> {
-    let mut git = Command::new("git");
-    git::local(&mut git).args(["-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false"]);
-    git.args(["-C", folder, "--no-optional-locks", "status", "--porcelain"]);
-    git.arg("--untracked-files=normal");
+    let mut git = Git::at(folder);
+    git.args(["--no-optional-locks", "status", "--porcelain", "--untracked-files=normal"]);
     says(git, GIT_SAYS, "status").map(|said| said.is_empty())
 }
 
@@ -1177,10 +1172,10 @@ mod tests {
         let common = common.to_str().unwrap();
         let git = |args: &[&str]| {
             let mut git = on_repository(common);
-            assert!(git.args(args).status().unwrap().success(), "{args:?}");
+            assert!(git.args(args).command().status().unwrap().success(), "{args:?}");
         };
-        let mut init = Command::new("git");
-        assert!(init.args(["init", "-q", "--bare", common]).status().unwrap().success());
+        let mut init = Git::at(scratch.path());
+        assert!(init.args(["init", "-q", "--bare", common]).command().status().unwrap().success());
         git(&["config", "remote.fetched.url", "https://x/o/f"]);
         git(&["config", "remote.fetched-too.url", "https://x/o/too"]);
         git(&["config", "remote.pushed.url", "https://x/o/u"]);
@@ -1193,15 +1188,12 @@ mod tests {
     }
 
     fn ran(dir: &Path, args: &[&str]) {
-        let mut git = Command::new("git");
-        git::local(&mut git)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
+        let mut git = Git::at(dir);
+        git.env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-            .arg("-C")
-            .arg(dir)
             .args(args);
-        assert!(git.status().unwrap().success(), "{args:?}");
+        assert!(git.command().status().unwrap().success(), "{args:?}");
     }
 
     #[test]

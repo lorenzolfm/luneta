@@ -1,7 +1,6 @@
 use std::cmp;
 use std::fmt;
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use lune_protocol::github::State;
@@ -11,7 +10,7 @@ use tonic::{Code, Status};
 use crate::api::rebase_response::{self, Came as Said};
 use crate::api::{On, RebaseRequest, RebaseResponse};
 use crate::directory::Directory;
-use crate::git::{self, Common, DefaultBranch};
+use crate::git::{self, Common, DefaultBranch, Git};
 use crate::github::{self, Pulled, RepositoryName};
 use crate::links::{self, sync};
 use crate::program::{self, Ran};
@@ -196,9 +195,9 @@ fn based(
 }
 
 fn named_branch(top: &str, name: &str, until: Instant) -> Result<Option<NamedBranch>, String> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", top, "check-ref-format", &format!("refs/heads/{name}")]));
-    let ran = program::run(&mut git, left(until, GIT_SAYS)?)
+    let mut git = Git::at(top);
+    git.args(["check-ref-format", &format!("refs/heads/{name}")]);
+    let ran = program::run(git.command(), left(until, GIT_SAYS)?)
         .map_err(|error| format!("git check-ref-format could not be run: {error}"))?;
     match ran {
         Ran::Ended { status, .. } => Ok(status.success().then(|| NamedBranch(name.to_owned()))),
@@ -268,12 +267,10 @@ fn ahead(top: &str, reference: &str, branch: &str, until: Instant) -> Result<u32
 }
 
 fn picked(top: &str, onto: &str, branch: &str, until: Instant) -> Result<Picked, Unrebased> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", top, "rebase", onto, branch]))
-        .env("GIT_EDITOR", ":")
-        .env("GIT_SEQUENCE_EDITOR", ":");
+    let mut git = Git::at(top);
+    git.arg("rebase").named([onto, branch]).env("GIT_EDITOR", ":").env("GIT_SEQUENCE_EDITOR", ":");
     let limit = left(until, PICKING).map_err(Unrebased::Refused)?;
-    let ran = program::run_alone(&mut git, limit).map_err(|error| {
+    let ran = program::run_alone(git.command(), limit).map_err(|error| {
         Unrebased::Refused(format!("git rebase could not be run: {error}"))
     })?;
     let code = match &ran {
@@ -298,10 +295,9 @@ fn picked(top: &str, onto: &str, branch: &str, until: Instant) -> Result<Picked,
 }
 
 fn stopped_at(top: &str, until: Instant) -> Result<Option<String>, String> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-c", "safe.bareRepository=explicit", "-C", top]))
-        .args(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"]);
-    let ran = program::run(&mut git, left(until, GIT_SAYS)?)
+    let mut git = Git::at(top);
+    git.args(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"]);
+    let ran = program::run(git.command(), left(until, GIT_SAYS)?)
         .map_err(|error| format!("git rev-parse could not be run: {error}"))?;
     if let Ran::Ended { status, stdout, .. } = &ran
         && status.code() == Some(UNVERIFIED_CODE)
@@ -500,16 +496,13 @@ mod tests {
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let mut git = Command::new("git");
-        git::local(&mut git)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
+        let mut git = Git::at(dir);
+        git.env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
             .args(["-c", "maintenance.auto=false", "-c", "init.defaultBranch=main"])
-            .arg("-C")
-            .arg(dir)
             .args(args);
-        let ran = git.output().unwrap();
+        let ran = git.command().output().unwrap();
         let stderr = String::from_utf8_lossy(&ran.stderr);
         assert!(ran.status.success(), "git {args:?} in {}: {stderr}", dir.display());
         String::from_utf8(ran.stdout).unwrap().trim_end().to_owned()
@@ -588,6 +581,21 @@ mod tests {
         fs::create_dir(&docs).unwrap();
         let below = rebase(&directory(&docs), None).unwrap().came;
         assert_eq!(below, Came::Already, "from a folder below the top");
+    }
+
+    #[test]
+    fn a_branch_named_as_an_option_is_rebased_as_a_branch_not_run_as_one() {
+        let cloned = Cloned::new();
+        let named = "-xtouch${IFS}ran";
+        git(&cloned.dir, &["update-ref", &format!("refs/heads/{named}"), "HEAD"]);
+        fs::write(cloned.dir.join(".git/HEAD"), format!("ref: refs/heads/{named}\n")).unwrap();
+        commit(&cloned.dir, "own", "o\n", "own");
+        commit(&cloned.up, "theirs", "t\n", "theirs");
+        let rebased = rebase(&directory(&cloned.dir), Some(named)).unwrap();
+        assert_eq!((rebased.branch.as_str(), rebased.came), (named, Came::Clean { ahead: 1 }));
+        assert!(!cloned.dir.join("ran").exists(), "git took the branch for --exec and ran it");
+        let up = git(&cloned.up, &["rev-parse", "main"]);
+        assert_eq!(cloned.head(&format!("refs/heads/{named}~")), up);
     }
 
     #[test]

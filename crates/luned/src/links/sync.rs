@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::{ASKING, GITHUB, Link, MAKING, failure, lune, remote, remotes, said, ssh_host};
-use crate::git;
+use crate::git::{self, Git};
 use crate::program::{self, Ran};
 
 const NOTHING_OF_THE_TREE: [(&str, &str); 2] =
@@ -61,10 +61,10 @@ fn viewed(link: &Link) -> Result<Viewed, String> {
 
 pub(crate) fn fetch(dir: &str, remote: &str, base: &str, limit: Duration) -> Result<(), String> {
     let base = format!("+refs/heads/{base}:refs/remotes/{remote}/{base}");
-    let args = ["-C", dir, "fetch", "--no-tags", "--", remote, &base];
-    let mut git = Command::new("git");
-    git::local(trusting_no_tree(&mut git).args(args));
-    let ran = program::run_alone(&mut git, limit)
+    let mut git = Git::at(dir);
+    trusting_no_tree(git.command());
+    git.args(["fetch", "--no-tags", "--", remote, &base]);
+    let ran = program::run_alone(git.command(), limit)
         .map_err(|error| format!("git fetch could not be run: {error}"))?;
     ran.answer().map(drop).map_err(|why| format!("git fetch: {why}"))
 }
@@ -74,14 +74,14 @@ fn trusting_no_tree(command: &mut Command) -> &mut Command {
 }
 
 fn here(dir: &str) -> Result<String, String> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "rev-parse", "--verify", "HEAD"]));
+    let mut git = Git::at(dir);
+    git.args(["rev-parse", "--verify", "HEAD"]);
     said(&mut git).ok_or_else(|| "git did not say what HEAD is".to_owned())
 }
 
 fn top(dir: &str) -> Result<String, String> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "rev-parse", "--show-toplevel"]));
+    let mut git = Git::at(dir);
+    git.args(["rev-parse", "--show-toplevel"]);
     said(&mut git).ok_or_else(|| "git did not say where the worktree's top is".to_owned())
 }
 

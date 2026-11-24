@@ -1,0 +1,56 @@
+id: git-through-git
+snapshots:
+  "fn f() { let mut git = Command::new(\"git\"); }":
+    labels:
+    - source: Command::new("git")
+      style: primary
+      start: 23
+      end: 42
+    - source: Command::new
+      style: secondary
+      start: 23
+      end: 35
+    - source: "\"git\""
+      style: secondary
+      start: 36
+      end: 41
+    - source: "\"git\""
+      style: secondary
+      start: 36
+      end: 41
+  "fn f() { let mut git = process::Command::new(\"git\"); }":
+    labels:
+    - source: process::Command::new("git")
+      style: primary
+      start: 23
+      end: 51
+    - source: process::Command::new
+      style: secondary
+      start: 23
+      end: 44
+    - source: "\"git\""
+      style: secondary
+      start: 45
+      end: 50
+    - source: "\"git\""
+      style: secondary
+      start: 45
+      end: 50
+  "fn f() { let mut git = std::process::Command::new(\"git\"); }":
+    labels:
+    - source: std::process::Command::new("git")
+      style: primary
+      start: 23
+      end: 56
+    - source: std::process::Command::new
+      style: secondary
+      start: 23
+      end: 49
+    - source: "\"git\""
+      style: secondary
+      start: 50
+      end: 55
+    - source: "\"git\""
+      style: secondary
+      start: 50
+      end: 55

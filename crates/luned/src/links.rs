@@ -18,7 +18,7 @@ use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response;
 use crate::api::{On, PasteRequest, PasteResponse};
 use crate::client::Daemon;
-use crate::git::{self, directory_gone, one_line, Common};
+use crate::git::{self, directory_gone, one_line, Common, Git};
 use crate::program::{self, Ran};
 use crate::projects::{self, CloneRoot, Dir, Holders, ProjectName, SPOT_LOOK};
 use crate::{zoxide, Destination, Directory};
@@ -893,9 +893,9 @@ fn moved_off(dir: &str, root: &Dir, own: &str) -> Result<Option<MovedOff>, Strin
 }
 
 fn sits_there(dir: &str, there: &str, own: &str) -> Result<Option<MovedOff>, String> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "worktree", "list", "--porcelain"]));
-    let ran = program::run(&mut git, ANSWER)
+    let mut git = Git::at(dir);
+    git.args(["worktree", "list", "--porcelain"]);
+    let ran = program::run(git.command(), ANSWER)
         .map_err(|error| format!("git worktree list could not be run: {error}"))?;
     let listed = ran.answer().map_err(|why| format!("git worktree list: {why}"))?;
     let listed = String::from_utf8_lossy(&listed);
@@ -1097,9 +1097,24 @@ pub(crate) fn remotes_gh_reads(dir: &str) -> Remotes {
 }
 
 fn remote_keys_in(dir: &str, keys: &str) -> Remotes {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "config", "--get-regexp", keys])).env("LC_ALL", "C");
-    Remotes::of(program::run(&mut git, ANSWER))
+    let listed = |mut git: Git| {
+        git.args(["config", "--get-regexp", keys]).env("LC_ALL", "C");
+        Remotes::of(program::run(git.command(), ANSWER))
+    };
+    match listed(Git::at(dir)) {
+        Remotes::Unlisted => match git::common_within(dir, ANSWER) {
+            Common::Unsaid(why) => bare_unread(&why).map_or(Remotes::Unlisted, |bare| {
+                listed(Git::of(bare))
+            }),
+            Common::Of(_) | Common::NoRepository => Remotes::Unlisted,
+        },
+        said => said,
+    }
+}
+
+fn bare_unread(why: &str) -> Option<&str> {
+    let named = why.strip_prefix(BARE_UNREAD)?.strip_prefix('\'')?;
+    named.rsplit_once("' (").map(|(bare, _)| bare)
 }
 
 fn layout(dir: &str) -> Layout {
@@ -1117,8 +1132,8 @@ fn layout(dir: &str) -> Layout {
     }
 }
 
-fn said(git: &mut Command) -> Option<String> {
-    one_line(program::run(git, ANSWER).ok()?.answer().ok()?)
+fn said(git: &mut Git) -> Option<String> {
+    one_line(program::run(git.command(), ANSWER).ok()?.answer().ok()?)
 }
 
 fn page(link: &Link) -> Result<Link, String> {
@@ -1136,8 +1151,8 @@ fn page(link: &Link) -> Result<Link, String> {
 
 fn base(dir: &str, remote: &str, branch: &str) -> Result<(), String> {
     let head = format!("refs/heads/{branch}");
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "rev-parse", "--verify", "--quiet", &head]));
+    let mut git = Git::at(dir);
+    git.args(["rev-parse", "--verify", "--quiet"]).named([&head]);
     if said(&mut git).is_some() {
         return Ok(());
     }
@@ -1150,9 +1165,9 @@ fn base(dir: &str, remote: &str, branch: &str) -> Result<(), String> {
 }
 
 fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, command]).args(args));
-    let ran = program::run_alone(&mut git, MAKING)
+    let mut git = Git::at(dir);
+    git.arg(command).named(args);
+    let ran = program::run_alone(git.command(), MAKING)
         .map_err(|error| format!("git {command} could not be run: {error}"))?;
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
@@ -1286,10 +1301,9 @@ const REACHES: &str = concat!(
 );
 
 fn reaches_as_the_user_does(dir: &str) -> Result<(), String> {
-    let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "config", "-z", "--show-scope", "--get-regexp", REACHES]))
-        .env("LC_ALL", "C");
-    let ran = program::run(&mut git, ANSWER)
+    let mut git = Git::at(dir);
+    git.args(["config", "-z", "--show-scope", "--get-regexp", REACHES]).env("LC_ALL", "C");
+    let ran = program::run(git.command(), ANSWER)
         .map_err(|error| format!("git config could not be run: {error}"))?;
     if let Ran::Ended { status, stderr, .. } = &ran
         && status.code() == Some(1)
@@ -1779,15 +1793,13 @@ mod tests {
     }
 
     fn git(dir: impl AsRef<Path>, args: &[&str]) -> Option<String> {
-        let mut git = Command::new("git");
-        git::local(&mut git)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
+        let mut git = Git::at(dir.as_ref());
+        git.env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["-c", "safe.bareRepository=all"])
             .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-            .arg("-C")
-            .arg(dir.as_ref())
             .args(args);
-        let ran = git.output().unwrap();
+        let ran = git.command().output().unwrap();
         let said = String::from_utf8(ran.stdout).unwrap();
         ran.status.success().then(|| said.trim_end().to_owned())
     }

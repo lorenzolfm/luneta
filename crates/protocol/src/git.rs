@@ -3,23 +3,8 @@ use crate::v1;
 
 const DETACHED: &str = "(detached)";
 
-#[must_use]
-pub fn command(dir: &str) -> [&str; 12] {
-    [
-        "git",
-        "--no-optional-locks",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "safe.bareRepository=explicit",
-        "-C",
-        dir,
-        "status",
-        "--porcelain=v2",
-        "--branch",
-        "--show-stash",
-    ]
-}
+pub const STATUS: [&str; 5] =
+    ["--no-optional-locks", "status", "--porcelain=v2", "--branch", "--show-stash"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitStatus {
