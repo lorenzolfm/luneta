@@ -18,6 +18,7 @@ use crate::api::{self, mux_server};
 use crate::asked::{self, Dumped, Opens, Press, Size, Tag, TerminalKey, ViewerHeard};
 use crate::folder::Claim;
 use crate::id::ClientId;
+use crate::leader::GRACE;
 use crate::mux::{Listed, Mux};
 use crate::screen::Looked;
 use crate::terminal::{CLIENT_MESSAGES, ToTerminal, ViewerOut};
@@ -27,6 +28,8 @@ use crate::unread::TYPED_BYTES_MAX;
 pub const FIRST_TERMINAL: Duration = Duration::from_secs(30);
 
 const DRAIN: Duration = Duration::from_secs(5);
+
+const REAPED_WAIT: Duration = GRACE.saturating_add(Duration::from_secs(1));
 
 const SOCKET_LOOK: Duration = Duration::from_secs(1);
 
@@ -313,12 +316,17 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     );
     let _ = beginning.wait_for(|begun| *begun).await;
     drop(claim);
-    match tokio::time::timeout(DRAIN, served).await {
+    let served = match tokio::time::timeout(DRAIN, served).await {
         Ok(Ok(served)) => served.map_err(io::Error::other),
         Ok(Err(error)) => Err(io::Error::other(error)),
         Err(_) => {
             eprintln!("lune-mux: clients still connected after {}s are left", DRAIN.as_secs());
             Ok(())
         },
+    };
+    if tokio::time::timeout(REAPED_WAIT, mux.leaders().all_reaped()).await.is_err() {
+        let waited = REAPED_WAIT.as_secs();
+        eprintln!("lune-mux: programs of closed terminals still run after {waited}s, and are left");
     }
+    served
 }

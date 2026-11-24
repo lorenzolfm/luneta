@@ -713,9 +713,9 @@ impl Layouts {
         opens: &Opens,
         inner: Size,
     ) -> Result<(), String> {
-        let opened = match opens {
-            Opens::Shell => Opened::Shell(&self.shell),
-            Opens::Command(argv) => Opened::Command { program: argv.program(), args: argv.args() },
+        let opened = match opens.argv() {
+            None => Opened::Shell(&self.shell),
+            Some(argv) => Opened::Command { program: argv.program(), args: argv.args() },
         };
         match self.mux.made(cwd, opened, tag(terminal.view()), inner) {
             Ok(key) => {

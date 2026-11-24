@@ -117,6 +117,7 @@ pub enum Runs {
 pub enum Opens {
     Shell,
     Command(Argv),
+    Agent(Prompted),
 }
 
 impl Opens {
@@ -130,13 +131,7 @@ impl Opens {
             None => Err("it says nothing to open".to_owned()),
             Some(api::opens::Runs::Shell(())) => Ok(Opens::Shell),
             Some(api::opens::Runs::Command(argv)) => Argv::of_api(argv).map(Opens::Command),
-            Some(api::opens::Runs::Agent(api::Prompted { harness, words })) => {
-                let harness = Harness::said(Some(harness))?;
-                if words.trim().is_empty() {
-                    return Err("an agent is asked for with no words".to_owned());
-                }
-                Argv::on_words(harness, words, &[]).map(Opens::Command)
-            },
+            Some(api::opens::Runs::Agent(prompted)) => Prompted::of_api(prompted).map(Opens::Agent),
         }
     }
 
@@ -145,16 +140,59 @@ impl Opens {
         let runs = match self {
             Opens::Shell => api::opens::Runs::Shell(()),
             Opens::Command(argv) => api::opens::Runs::Command(argv.to_api()),
+            Opens::Agent(prompted) => api::opens::Runs::Agent(prompted.to_api()),
         };
         api::Opens { runs: Some(runs) }
     }
 
     #[must_use]
-    pub fn runs(&self) -> Runs {
+    pub fn argv(&self) -> Option<&Argv> {
         match self {
-            Opens::Shell => Runs::Shell,
-            Opens::Command(argv) => Runs::Command(argv.line.clone()),
+            Opens::Shell => None,
+            Opens::Command(argv) => Some(argv),
+            Opens::Agent(prompted) => Some(&prompted.argv),
         }
+    }
+
+    #[must_use]
+    pub fn runs(&self) -> Runs {
+        match self.argv() {
+            None => Runs::Shell,
+            Some(argv) => Runs::Command(argv.line.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prompted {
+    harness: Harness,
+    words: String,
+    argv: Argv,
+}
+
+impl Prompted {
+    pub fn of_api(api::Prompted { harness, words }: api::Prompted) -> Result<Prompted, String> {
+        let harness = Harness::said(Some(harness))?;
+        if words.trim().is_empty() {
+            return Err("an agent is asked for with no words".to_owned());
+        }
+        let argv = Argv::on_words(harness, words.clone(), &[])?;
+        Ok(Prompted { harness, words, argv })
+    }
+
+    #[must_use]
+    pub fn to_api(&self) -> api::Prompted {
+        api::Prompted { harness: self.harness.to_api().into(), words: self.words.clone() }
+    }
+
+    #[must_use]
+    pub fn harness(&self) -> Harness {
+        self.harness
+    }
+
+    #[must_use]
+    pub fn argv(&self) -> &Argv {
+        &self.argv
     }
 }
 
@@ -801,12 +839,16 @@ mod tests {
                 words: words.to_owned(),
             })),
         };
-        let opens = Opens::of_api(Some(asked(api::Harness::ClaudeCode, "Tackle #444"))).unwrap();
-        let Opens::Command(argv) = opens else { panic!("an agent opens as a command") };
-        assert_eq!(argv.words(), ["claude", "--", "Tackle #444"]);
-        let opens = Opens::of_api(Some(asked(api::Harness::Pi, "Tackle #444"))).unwrap();
-        let Opens::Command(argv) = opens else { panic!("an agent opens as a command") };
-        assert_eq!(argv.words(), ["pi", "--", "Tackle #444"]);
+        for (said, harness) in [(api::Harness::ClaudeCode, Harness::ClaudeCode), (api::Harness::Pi, Harness::Pi)] {
+            let asked = asked(said, "Tackle #444");
+            let opens = Opens::of_api(Some(asked.clone())).unwrap();
+            let Opens::Agent(prompted) = &opens else { panic!("an agent opens as an agent, not {opens:?}") };
+            assert_eq!(prompted.harness(), harness);
+            assert_eq!(prompted.argv().words(), [harness.program(), "--", "Tackle #444"]);
+            assert_eq!(opens.argv(), Some(prompted.argv()));
+            assert_eq!(opens.to_api(), asked, "an agent reads back as the agent asked for");
+            assert_eq!(opens.runs(), Runs::Command(prompted.argv().line.clone()));
+        }
         let unnamed = Opens::of_api(Some(asked(api::Harness::Unspecified, "Tackle #444")));
         assert_eq!(unnamed, Err("a harness this luned does not know".to_owned()));
         let blank = Opens::of_api(Some(asked(api::Harness::ClaudeCode, " \n")));
