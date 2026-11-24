@@ -30,7 +30,10 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
         Ok(luned) => luned,
         Err(why) => return failed(&untold(&why)),
     };
-    let here = here_of(&Machine::Local);
+    let here = match here_of(&Machine::Local) {
+        Ok(here) => here,
+        Err(why) => return failed(&why),
+    };
     let plan = match luned.prunes(&dir, here.as_ref()) {
         Ok(plan) => plan,
         Err(why) => return failed(&why),
@@ -53,12 +56,15 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
         None => Some(agreed),
         Some(turn) => turn.before().map(|before| Agreed::of_prune(&plan, Some(before))),
     };
-    if yes.is_none() || yes != takes {
-        eprintln!("lune: {}", unagreed(yes, agreed));
-        return ExitCode::from(PLANNED);
+    match (yes, takes) {
+        (Some(yes), Some(takes)) if yes == takes => {},
+        (yes, _) => {
+            eprintln!("lune: {}", unagreed(yes, agreed));
+            return ExitCode::from(PLANNED);
+        },
     }
     match luned.prune(&dir, &plan.deletes(), here.as_ref()) {
-        Ok(Pruned::Went(outcomes)) => said_of(&outcomes),
+        Ok(Pruned::Went(outcomes)) => exit_of(&outcomes),
         Ok(Pruned::Changed(now)) => {
             for line in listed(&now) {
                 println!("{line}");
@@ -70,12 +76,17 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
     }
 }
 
-fn here_of(on: &Machine) -> Option<Directory> {
+fn here_of(on: &Machine) -> Result<Option<Directory>, String> {
     let Machine::Local = on else {
-        return None;
+        return Ok(None);
     };
-    let here = env::current_dir().ok()?;
-    Directory::parse(here.to_string_lossy().into_owned()).ok()
+    let unplaced =
+        |why: &str| format!("lune cannot tell where it runs, so it deletes nothing: {why}");
+    let here = env::current_dir().map_err(|error| unplaced(&error.to_string()))?;
+    let shown = here.display().to_string();
+    let here = here.into_os_string().into_string();
+    let here = here.map_err(|_| unplaced(&format!("{shown} is not UTF-8, as lune needs")))?;
+    Directory::parse(here).map(Some).map_err(|why| unplaced(&why))
 }
 
 fn unagreed(yes: Option<Agreed>, agreed: Agreed) -> String {
@@ -102,7 +113,7 @@ fn untold(why: &str) -> String {
     format!("lune {UNTOLD}, so it deletes nothing: {why}")
 }
 
-fn said_of(outcomes: &[Outcome]) -> ExitCode {
+fn exit_of(outcomes: &[Outcome]) -> ExitCode {
     let mut well = true;
     for outcome in outcomes {
         let name = name_of(&outcome.folder);
@@ -170,7 +181,8 @@ pub fn plan(menu: u64, on: Machine, dir: Directory, events: &Sender<Event>) {
 }
 
 fn planned(on: &Machine, dir: &Directory) -> Result<Plan, String> {
-    Away::on(on, away::ANSWER)?.prunes(dir, here_of(on).as_ref())
+    let here = here_of(on)?;
+    Away::on(on, away::ANSWER)?.prunes(dir, here.as_ref())
 }
 
 pub fn delete(
@@ -185,7 +197,8 @@ pub fn delete(
 }
 
 fn deleted(on: &Machine, dir: &Directory, agreed: &BTreeSet<Deleting>) -> Result<Pruned, String> {
-    Away::on(on, away::ANSWER)?.prune(dir, agreed, here_of(on).as_ref())
+    let here = here_of(on)?;
+    Away::on(on, away::ANSWER)?.prune(dir, agreed, here.as_ref())
 }
 
 pub fn note(outcomes: &[Outcome]) -> Option<String> {

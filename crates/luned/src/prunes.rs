@@ -310,7 +310,7 @@ fn stays(
     all: &[Listed],
     head: &str,
     occupied: &Occupied,
-    here: Option<&Path>,
+    here: Option<&Directory>,
 ) -> Result<Option<&'static str>, String> {
     if listed.head != head {
         return Ok(Some(NOT_AT_HEAD));
@@ -334,7 +334,7 @@ fn stays(
     if let Some(why) = occupied.why_in(folder) {
         return Ok(Some(why));
     }
-    let runs_here = here.is_some_and(|here| {
+    let runs_here = here.map(|here| Path::new(here.as_str())).is_some_and(|here| {
         here.starts_with(folder)
             || fs::canonicalize(folder).is_ok_and(|real| here.starts_with(real))
     });
@@ -506,7 +506,7 @@ fn bytes_of(folder: &str) -> Option<u64> {
 pub(crate) fn plan(
     dir: &Directory,
     occupied: &Occupied,
-    here: Option<&Path>,
+    here: Option<&Directory>,
 ) -> Result<Planned, String> {
     let common = common_of(dir)?;
     let repository = git::holder(common.as_str())
@@ -606,7 +606,7 @@ fn sorted_out<'a>(
     merged: Vec<(OnBranch<'a>, Pulled)>,
     all: &[Listed],
     occupied: &Occupied,
-    here: Option<&Path>,
+    here: Option<&Directory>,
     common: &Directory,
 ) -> Result<Vec<Going<'a>>, String> {
     let mut default = None;
@@ -655,7 +655,7 @@ fn sorted_out<'a>(
 fn deleted(
     planned: Planned,
     occupied: impl Fn() -> Result<Occupied, String>,
-    here: Option<&Path>,
+    here: Option<&Directory>,
 ) -> Vec<Outcome> {
     let Planned { plan, common } = planned;
     let outcome = |goes: Goes| {
@@ -675,7 +675,7 @@ pub(crate) fn deleted_as_agreed(
     dir: &Directory,
     agreed: &BTreeSet<Deleting>,
     occupied: impl Fn() -> Result<Occupied, String>,
-    here: Option<&Path>,
+    here: Option<&Directory>,
 ) -> Result<Pruned, String> {
     let now = occupied().map_err(|why| format!("lune cannot tell its views: {why}"))?;
     let planned = plan(dir, &now, here)?;
@@ -689,7 +689,7 @@ fn removed(
     common: &Directory,
     goes: &Goes,
     occupied: &impl Fn() -> Result<Occupied, String>,
-    here: Option<&Path>,
+    here: Option<&Directory>,
 ) -> Result<(), String> {
     stands_as_planned(common, goes, occupied, here)?;
     let Pushed::Goes(far) = &goes.pushed else {
@@ -705,7 +705,7 @@ fn stands_as_planned(
     common: &Directory,
     goes: &Goes,
     occupied: &impl Fn() -> Result<Occupied, String>,
-    here: Option<&Path>,
+    here: Option<&Directory>,
 ) -> Result<(), String> {
     let occupied = occupied().map_err(|why| format!("lune cannot tell its views: {why}"))?;
     let all = worktrees(common)?;

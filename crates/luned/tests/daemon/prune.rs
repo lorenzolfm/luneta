@@ -603,7 +603,8 @@ fn a_plan_keeps_the_worktree_its_caller_runs_from_and_not_luned_s() {
         let refused = daemon.prunes(relative).await.unwrap_err();
         assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
     });
-    assert!(repository.at("one").exists() && repository.at("two").exists(), "it deleted");
+    assert!(repository.at("one").exists(), "it deleted one");
+    assert!(repository.at("two").exists(), "it deleted two");
 }
 
 #[test]
@@ -805,11 +806,17 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
         let on = || Some(On { destination: "far".to_owned() });
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
         let one = Directory::parse(repository.at("one").display().to_string()).unwrap();
-        let asked = prunes::asked(on(), &main, Some(&one));
+        let placed = daemon.prunes(prunes::asked(on(), &main, Some(&one))).await.unwrap_err();
+        assert_eq!(placed.code(), Code::InvalidArgument, "{placed:?}");
+        let placed = prunes::told(on(), &main, &BTreeSet::new(), Some(&one));
+        let placed = daemon.prune(placed).await.unwrap_err();
+        assert_eq!(placed.code(), Code::InvalidArgument, "{placed:?}");
+
+        let asked = prunes::asked(on(), &main, None);
         let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
         let plan: Plan = answer.unwrap().unwrap().into();
         let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
-        assert_eq!(goes, ["one"], "where the caller runs here means nothing on far");
+        assert_eq!(goes, ["one"]);
         assert_eq!(plan.kept[0].why, "it has a view");
         let Goes { pushed, .. } = &plan.goes[0];
         let origin =
@@ -817,7 +824,7 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
         assert_eq!(pushed, &origin);
         assert_eq!(here.gh.asked(), [] as [String; 0]);
 
-        let told = prunes::told(on(), &main, &plan.deletes(), Some(&one));
+        let told = prunes::told(on(), &main, &plan.deletes(), None);
         let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
         let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
         let Pruned::Went(outcomes) = pruned else {

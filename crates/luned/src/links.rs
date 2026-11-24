@@ -607,7 +607,7 @@ pub enum Unready {
 
 impl Unready {
     fn of(on: Option<&Destination>, status: &Status) -> Unready {
-        let why = remote::said_of(on, status);
+        let why = remote::said_by(on, status);
         match status.code() {
             Code::NotFound => Unready::Nowhere(why),
             Code::FailedPrecondition | Code::InvalidArgument | Code::Unimplemented => {
@@ -728,7 +728,7 @@ impl Pasted {
         let request = self.asked(on.map(|on| On { destination: on.to_string() }));
         let secs = patience.as_secs_f32();
         let minutes = PATIENCE.as_secs() / 60;
-        let in_doubt = |why: String| Err(Unready::InDoubt(remote::told_of(on, &why)));
+        let in_doubt = |why: String| Err(Unready::InDoubt(remote::told_by(on, &why)));
         let mut answer = match timeout(patience, daemon.paste(request)).await {
             Ok(Ok(answer)) => answer.into_inner(),
             Ok(Err(status)) => return Err(Unready::of(on, &status)),

@@ -706,7 +706,7 @@ impl Daemon for Host {
     ) -> Result<Response<Self::PrunesStream>, Status> {
         let PrunesRequest { on, dir, here } = request.into_inner();
         let dir = directory("dir", dir)?;
-        let here = here.map(|here| directory("here", here)).transpose()?;
+        let here = here_on(on.as_ref(), here)?;
         if let Some(mut daemon) = self.bridged(on).await? {
             let answer = daemon.prunes(prunes::asked(None, &dir, None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
@@ -714,8 +714,7 @@ impl Daemon for Host {
         let host = self.host().await?;
         let occupied = Occupied::of(&host).map_err(Status::failed_precondition)?;
         let answer = late(move || {
-            let here = here.as_ref().map(|here| Path::new(here.as_str()));
-            let planned = prunes::plan(&dir, &occupied, here);
+            let planned = prunes::plan(&dir, &occupied, here.as_ref());
             let said = planned.map(|planned| PrunesResponse::from(planned.plan()));
             said.map_err(Status::failed_precondition)
         });
@@ -730,7 +729,7 @@ impl Daemon for Host {
     ) -> Result<Response<Self::PruneStream>, Status> {
         let PruneRequest { on, dir, agreed, here } = request.into_inner();
         let dir = directory("dir", dir)?;
-        let here = here.map(|here| directory("here", here)).transpose()?;
+        let here = here_on(on.as_ref(), here)?;
         if let Some(mut daemon) = self.bridged(on).await? {
             let told = PruneRequest { on: None, dir: dir.into(), agreed, here: None };
             let answer = daemon.prune(told).await?.into_inner();
@@ -743,8 +742,7 @@ impl Daemon for Host {
                 let host = core::ask(&core, Command::Host).ok_or("luned's core did not say")?;
                 Occupied::of(&host)
             };
-            let here = here.as_ref().map(|here| Path::new(here.as_str()));
-            let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied, here)
+            let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied, here.as_ref())
                 .map_err(Status::failed_precondition)?;
             Ok(PruneResponse::from(&pruned))
         });
@@ -1154,6 +1152,18 @@ where
 
 fn directory(field: &str, dir: String) -> Result<Directory, Status> {
     Directory::parse(dir).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
+}
+
+fn here_on(on: Option<&api::On>, here: Option<String>) -> Result<Option<Directory>, Status> {
+    let Some(here) = here else {
+        return Ok(None);
+    };
+    if let Some(api::On { destination }) = on {
+        return Err(Status::invalid_argument(format!(
+            "here: {here} is a directory on the asking machine; it means nothing on {destination}"
+        )));
+    }
+    directory("here", here).map(Some)
 }
 
 fn asked_branch(branch: &str) -> Result<Branch, Status> {

@@ -71,5 +71,5 @@ pub use shows::{
 pub use remote::{
     named_by as hosts_named, parsed as hosts_parsed, sharing, Destination, Line as HostsLine,
     Parsed as HostsParsed, FILE as HOSTS_FILE, HELD_MAX as BRIDGE_HELD_MAX, HOSTS_MAX, THIS_MACHINE,
-    said_of as said_by, told_of as told_by,
+    said_by, told_by,
 };
