@@ -429,6 +429,7 @@ async fn stream(
             Some(Next::LetGo) | None => {
                 return Heard::Lost("luned let go of lune's layout".to_owned());
             },
+            Some(Next::Dropped) => return Heard::Lost("lune let go of its layout".to_owned()),
             Some(Next::GaveUp(why)) => return Heard::Lost(why),
             Some(Next::Said(asked)) => {
                 if let Err(TrySendError::Full(_)) = sending.try_send(asked.said()) {

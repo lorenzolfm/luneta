@@ -225,6 +225,7 @@ async fn stream(
             Some(Next::Heard(Ok(said))) => said,
             Some(Next::Heard(Err(status))) => return heard_from(reach, &status),
             Some(Next::LetGo) | None => return "lune-mux let go of it".to_owned(),
+            Some(Next::Dropped) => return "lune let go of its viewer".to_owned(),
             Some(Next::GaveUp(why)) => return why,
             Some(Next::Said(saying)) => {
                 if let Err(TrySendError::Full(_)) = sending.try_send(saying.said()) {

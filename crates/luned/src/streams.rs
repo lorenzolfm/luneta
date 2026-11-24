@@ -5,8 +5,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::Status;
 
-pub const LET_GO: &str = "lune let go of the stream";
-
 pub struct Outbox<T> {
     said: mpsc::Sender<T>,
     giving_up: mpsc::Sender<String>,
@@ -39,6 +37,7 @@ pub enum Next<Heard, Said> {
     Heard(Result<Heard, Status>),
     LetGo,
     Said(Said),
+    Dropped,
     GaveUp(String),
 }
 
@@ -48,8 +47,8 @@ impl<T> Inbox<T> {
         hearing: impl Stream<Item = Result<Heard, Status>>,
     ) -> impl Stream<Item = Next<Heard, T>> {
         let hearing = hearing.map(Next::Heard).chain(tokio_stream::once(Next::LetGo));
-        let let_go = Next::GaveUp(LET_GO.to_owned());
-        let said = ReceiverStream::new(self.said).map(Next::Said).chain(tokio_stream::once(let_go));
+        let dropped = tokio_stream::once(Next::Dropped);
+        let said = ReceiverStream::new(self.said).map(Next::Said).chain(dropped);
         let given_up = ReceiverStream::new(self.given_up).map(Next::GaveUp);
         hearing.merge(said).merge(given_up)
     }
@@ -80,22 +79,32 @@ pub fn on_thread<Told: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future as _;
     use std::pin::pin;
+    use std::task::{Context, Waker};
 
     use tokio::runtime;
     use tokio_stream::StreamExt as _;
     use tonic::Status;
 
-    use super::{boxes, Next, LET_GO};
+    use super::{boxes, Next};
 
     #[test]
     fn a_dropped_outbox_ends_a_stream_that_still_hears() {
         let runtime = runtime::Builder::new_current_thread().build().unwrap();
-        let (outbox, inbox) = boxes::<()>(1, String::new);
+        let (outbox, inbox) = boxes::<u32>(1, String::new);
         let hearing = tokio_stream::pending::<Result<(), Status>>();
         let mut next = pin!(inbox.merged(hearing));
+        let held = pin!(next.next()).poll(&mut Context::from_waker(Waker::noop()));
+        assert!(held.is_pending(), "a stream whose outbox is held goes on");
+        outbox.say(7);
         drop(outbox);
-        let ended = runtime.block_on(next.next());
-        assert!(matches!(ended, Some(Next::GaveUp(why)) if why == LET_GO));
+        let Some(Next::Said(said)) = runtime.block_on(next.next()) else {
+            panic!("what was said before the drop comes first");
+        };
+        assert_eq!(said, 7);
+        let Some(Next::Dropped) = runtime.block_on(next.next()) else {
+            panic!("a dropped outbox ends the stream");
+        };
     }
 }
