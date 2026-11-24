@@ -85,7 +85,7 @@ pub struct Unasked {
 }
 
 #[derive(Debug)]
-pub struct Planned {
+pub(crate) struct Planned {
     plan: Plan,
     common: Directory,
 }
@@ -94,11 +94,6 @@ impl Planned {
     #[must_use]
     pub fn plan(&self) -> &Plan {
         &self.plan
-    }
-
-    #[must_use]
-    pub fn into_plan(self) -> Plan {
-        self.plan
     }
 }
 
@@ -508,7 +503,11 @@ fn bytes_of(folder: &str) -> Option<u64> {
     kibibytes.checked_mul(1024)
 }
 
-pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result<Planned, String> {
+pub(crate) fn plan(
+    dir: &Directory,
+    occupied: &Occupied,
+    here: Option<&Path>,
+) -> Result<Planned, String> {
     let common = common_of(dir)?;
     let repository = git::holder(common.as_str())
         .ok_or_else(|| format!("no directory holds the repository {common}"))?;
@@ -653,7 +652,7 @@ fn sorted_out<'a>(
     Ok(going)
 }
 
-pub fn deleted(
+fn deleted(
     planned: Planned,
     occupied: impl Fn() -> Result<Occupied, String>,
     here: Option<&Path>,
@@ -672,7 +671,7 @@ pub fn deleted(
     plan.goes.into_iter().map(outcome).collect()
 }
 
-pub fn deleted_as_agreed(
+pub(crate) fn deleted_as_agreed(
     dir: &Directory,
     agreed: &BTreeSet<Deleting>,
     occupied: impl Fn() -> Result<Occupied, String>,
@@ -930,16 +929,23 @@ fn outcome_of(said: api::prune_response::Outcome) -> Result<Outcome, String> {
 }
 
 #[must_use]
-pub fn asked(on: Option<On>, dir: &Directory) -> PrunesRequest {
-    PrunesRequest { on, dir: dir.as_str().to_owned() }
+pub fn asked(on: Option<On>, dir: &Directory, here: Option<&Directory>) -> PrunesRequest {
+    let here = here.map(|here| here.as_str().to_owned());
+    PrunesRequest { on, dir: dir.as_str().to_owned(), here }
 }
 
 #[must_use]
-pub fn told(on: Option<On>, dir: &Directory, agreed: &BTreeSet<Deleting>) -> PruneRequest {
+pub fn told(
+    on: Option<On>,
+    dir: &Directory,
+    agreed: &BTreeSet<Deleting>,
+    here: Option<&Directory>,
+) -> PruneRequest {
     PruneRequest {
         on,
         dir: dir.as_str().to_owned(),
         agreed: agreed.iter().map(Into::into).collect(),
+        here: here.map(|here| here.as_str().to_owned()),
     }
 }
 
@@ -1365,7 +1371,7 @@ mod tests {
         assert_eq!(Plan::from(PrunesResponse::from(&plan)), plan);
         let agreed = plan.deletes();
         let dir = Directory::parse("/w".to_owned()).unwrap();
-        let said = told(None, &dir, &agreed).agreed.into_iter().map(Into::into);
+        let said = told(None, &dir, &agreed, None).agreed.into_iter().map(Into::into);
         assert_eq!(said.collect::<BTreeSet<Deleting>>(), agreed);
         let outcome = |folder: &str, came| Outcome { folder: folder.to_owned(), came };
         let went = Pruned::Went(vec![

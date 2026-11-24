@@ -436,7 +436,7 @@ impl Core {
 
     pub async fn prunes(&self, on: Option<String>, dir: String) -> Result<Plan, Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
-        let request = api::PrunesRequest { on: self::on(on), dir };
+        let request = api::PrunesRequest { on: self::on(on), dir, here: None };
         let wait = Wait { answer: patience, works: waits::PLANNING, refusals: Refusals::Others };
         self.on_runtime(async move {
             let said = first(wait, daemon.prunes(request)).await?;
@@ -453,7 +453,7 @@ impl Core {
     ) -> Result<Pruned, Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
         let agreed = agreed.into_iter().map(Goes::deleting).collect();
-        let request = api::PruneRequest { on: self::on(on), dir, agreed };
+        let request = api::PruneRequest { on: self::on(on), dir, agreed, here: None };
         let wait = Wait { answer: patience, works: waits::DELETING, refusals: Refusals::Others };
         self.on_runtime(async move {
             Pruned::of(first(wait, daemon.prune(request)).await?)

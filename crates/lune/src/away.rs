@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
+use std::path::Path;
 use std::pin::pin;
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,7 @@ use luned::rebases::{self, Rebased, Unrebased};
 use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
 use luned::skills::{Name, Runs, Skill};
 use luned::transcripts::{Reading, SessionId};
-use luned::{Daemon, Destination, Directory};
+use luned::{said_by, told_by, Daemon, Destination, Directory};
 use tokio::runtime::Runtime;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
@@ -29,6 +30,7 @@ use tonic::{Code, Response, Status, Streaming};
 
 use crate::agents::Harness;
 use crate::daemon;
+use crate::machines::Machine;
 
 pub const ANSWER: Duration = Duration::from_secs(6);
 
@@ -37,37 +39,45 @@ const SLOW: Duration = Duration::from_secs(1);
 pub struct Away {
     runtime: Runtime,
     daemon: Daemon,
-    on: Destination,
+    on: Machine,
     patience: Duration,
 }
 
 impl Away {
     pub fn reach(destination: &Destination, patience: Duration) -> Result<Away, String> {
+        Away::on(&Machine::Remote(destination.clone()), patience)
+    }
+
+    pub fn on(on: &Machine, patience: Duration) -> Result<Away, String> {
         let folder = luned::folder::find().map_err(|unfound| format!("{unfound}, to find luned in"))?;
+        Away::at(&folder, on, patience)
+    }
+
+    pub fn at(folder: &Path, on: &Machine, patience: Duration) -> Result<Away, String> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| format!("no runtime: {error}"))?;
-        let reached = daemon::running(&folder);
+        let reached = daemon::running(folder);
         let daemon = match runtime.block_on(async { tokio::time::timeout(patience, reached).await }) {
             Ok(reached) => reached?,
             Err(_) => return Err(format!("luned did not answer in {}s", patience.as_secs_f32())),
         };
-        Ok(Away { runtime, daemon, on: destination.clone(), patience })
+        Ok(Away { runtime, daemon, on: on.clone(), patience })
     }
 
     pub fn repositories(&mut self) -> Result<Found, String> {
-        let request = ListRepositoriesRequest { on: Some(self.on()) };
+        let request = ListRepositoriesRequest { on: self.asked_on() };
         let listed =
             self.ask(|mut daemon| async move { daemon.list_repositories(request).await })?;
         let Found { repositories, owned, unread } = repositories_of(listed);
-        let on = &self.on;
-        let unread = unread.into_iter().map(|note| format!("{on}: {note}")).collect();
+        let on = self.on.destination();
+        let unread = unread.into_iter().map(|note| told_by(on, &note)).collect();
         Ok(Found { repositories, owned, unread })
     }
 
     pub fn contents(&mut self, dir: &Directory) -> Result<String, String> {
-        let request = ListContentsRequest { on: Some(self.on()), dir: dir.to_string() };
+        let request = ListContentsRequest { on: self.asked_on(), dir: dir.to_string() };
         let listed = self.ask(|mut daemon| async move { daemon.list_contents(request).await })?;
         Ok(listed.listed)
     }
@@ -75,7 +85,7 @@ impl Away {
     pub fn skills(&mut self, dir: &Directory, harness: Harness) -> Result<Vec<Skill>, String> {
         let harness = Some(harness.to_api().into());
         let dir = dir.as_str().to_owned();
-        let request = ListSkillsRequest { on: Some(self.on()), dir, harness };
+        let request = ListSkillsRequest { on: self.asked_on(), dir, harness };
         let listed = self.ask(|mut daemon| async move { daemon.list_skills(request).await })?;
         let skill = |skill: luned::api::list_skills_response::Skill| {
             let runs = if skill.only_you { Runs::OnlyForYou } else { Runs::ForAnyone };
@@ -85,17 +95,15 @@ impl Away {
     }
 
     pub fn checks(&mut self, page: &PullPage) -> Result<Failing, String> {
-        let request = KeepChecksRequest { on: Some(self.on()), url: page.url().to_owned() };
+        let request = KeepChecksRequest { on: self.asked_on(), url: page.url().to_owned() };
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_of(checks::FETCHING, async move {
             timeout(patience, daemon.keep_checks(request)).await
         })?;
         let newer = || {
-            format!(
-                "{}: its luned says the log of a check in words this lune cannot read, as a \
-                 newer one does",
-                self.on
-            )
+            let why = "its luned says the log of a check in words this lune cannot read, as a \
+                       newer one does";
+            told_by(self.on.destination(), why)
         };
         let read = |check: keep_checks_response::Failed| {
             let log = match check.log.ok_or_else(newer)? {
@@ -114,7 +122,7 @@ impl Away {
     }
 
     pub fn ends(&mut self, reading: &Reading) -> Result<HashMap<SessionId, String>, String> {
-        let request = reading.asked(Some(self.on()));
+        let request = reading.asked(self.asked_on());
         let answer = self.ask(|mut daemon| async move { daemon.transcript_ends(request).await })?;
         let end = |(id, end): (String, String)| Some((SessionId::parse(&id)?, end));
         Ok(answer.ends.into_iter().filter_map(end).collect())
@@ -126,45 +134,48 @@ impl Away {
         wanted: &dyn Fn() -> bool,
         hear: &dyn Fn(Step),
     ) -> Option<Result<(), String>> {
-        let request = asked.asked(Some(self.on()));
-        let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
+        let request = asked.asked(self.asked_on());
+        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let on = self.on.destination();
         let deadline = Instant::now() + asks::TURN + patience;
         let secs = patience.as_secs_f32();
         self.runtime.block_on(async move {
             let steps = match tokio::time::timeout(patience, daemon.ask(request)).await {
                 Ok(Ok(steps)) => steps.into_inner(),
-                Ok(Err(status)) => return Some(Err(on.said(&status))),
-                Err(_) => return Some(Err(format!("{on}: luned did not answer in {secs}s"))),
+                Ok(Err(status)) => return Some(Err(said_by(on, &status))),
+                Err(_) => {
+                    return Some(Err(told_by(on, &format!("luned did not answer in {secs}s"))));
+                },
             };
             heard(on, steps, deadline, wanted, hear).await
         })
     }
 
     pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
-        let (patience, daemon, on) = (self.patience, self.daemon.clone(), &self.on);
+        let (patience, daemon, on) = (self.patience, self.daemon.clone(), self.on.destination());
         self.runtime.block_on(pasted.ready_on(daemon, on, patience))
     }
 
     pub fn issue_remotes(&mut self, dir: &Directory) -> Result<Vec<Remote>, String> {
-        let request = IssueRepositoriesRequest { on: Some(self.on()), dir: dir.to_string() };
+        let request = IssueRepositoriesRequest { on: self.asked_on(), dir: dir.to_string() };
         let listed =
             self.ask(|mut daemon| async move { daemon.issue_repositories(request).await })?;
         let remotes = listed.repositories.into_iter().map(Remote::of);
-        remotes.collect::<Result<_, _>>().map_err(|why| format!("{}: {why}", self.on))
+        remotes.collect::<Result<_, _>>().map_err(|why| told_by(self.on.destination(), &why))
     }
 
     pub fn file_issue(&mut self, filing: &Filing) -> Result<Filed, Unfiled> {
-        let request = filing.asked(Some(self.on()));
+        let request = filing.asked(self.asked_on());
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_or_code(issues::AT_MOST, async move {
             timeout(patience, daemon.file_issue(request)).await
         });
         let answer = answer.map_err(|(why, code)| Unfiled::of(why, code))?;
-        Filed::of(answer).map_err(|why| Unfiled::InDoubt(format!("{}: {why}", self.on)))
+        Filed::of(answer).map_err(|why| Unfiled::InDoubt(told_by(self.on.destination(), &why)))
     }
 
-    pub fn prunes(&mut self, dir: &Directory) -> Result<Plan, String> {
-        let request = prunes::asked(Some(self.on()), dir);
+    pub fn prunes(&mut self, dir: &Directory, here: Option<&Directory>) -> Result<Plan, String> {
+        let request = prunes::asked(self.asked_on(), dir, here);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_of(prunes::PLANNING, async move {
             timeout(patience, daemon.prunes(request)).await
@@ -176,8 +187,9 @@ impl Away {
         &mut self,
         dir: &Directory,
         agreed: &BTreeSet<Deleting>,
+        here: Option<&Directory>,
     ) -> Result<Pruned, String> {
-        let request = prunes::told(Some(self.on()), dir, agreed);
+        let request = prunes::told(self.asked_on(), dir, agreed, here);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_of(prunes::PLANNING + prunes::DELETING, async move {
             timeout(patience, daemon.prune(request)).await
@@ -186,13 +198,14 @@ impl Away {
     }
 
     pub fn rebase(&mut self, dir: &Directory, branch: &str) -> Result<Rebased, Unrebased> {
-        let request = rebases::asked(Some(self.on()), dir, Some(branch));
+        let request = rebases::asked(self.asked_on(), dir, Some(branch));
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_or_code(rebases::REBASING, async move {
             timeout(patience, daemon.rebase(request)).await
         });
         let answer = answer.map_err(|(why, code)| Unrebased::of(why, code))?;
-        Rebased::of_api(answer).map_err(|why| Unrebased::InDoubt(format!("{}: {why}", self.on)))
+        let on = self.on.destination();
+        Rebased::of_api(answer).map_err(|why| Unrebased::InDoubt(told_by(on, &why)))
     }
 
     fn answer_of<T>(
@@ -208,31 +221,30 @@ impl Away {
         late: Duration,
         asking: impl Future<Output = Result<Result<Response<Streaming<T>>, Status>, Elapsed>>,
     ) -> Result<T, (String, Option<Code>)> {
-        let on = &self.on;
+        let on = self.on.destination();
         let secs = self.patience.as_secs_f32();
         self.runtime.block_on(async {
-            let said = |status: &Status| (on.said(status), Some(status.code()));
+            let said = |status: &Status| (said_by(on, status), Some(status.code()));
+            let told = |why: &str| (told_by(on, why), None);
             let mut answer = match asking.await {
                 Ok(Ok(answer)) => answer.into_inner(),
                 Ok(Err(status)) => return Err(said(&status)),
-                Err(_) => return Err((format!("{on}: luned did not answer in {secs}s"), None)),
+                Err(_) => return Err(told(&format!("luned did not answer in {secs}s"))),
             };
             match timeout(late, answer.message()).await {
                 Ok(Ok(Some(answer))) => Ok(answer),
-                Ok(Ok(None)) => {
-                    Err((format!("{on}: luned's answer ended with nothing in it"), None))
-                },
+                Ok(Ok(None)) => Err(told("luned's answer ended with nothing in it")),
                 Ok(Err(status)) => Err(said(&status)),
-                Err(_) => {
-                    Err((format!("{on}: luned said nothing for {}s", late.as_secs()), None))
-                },
+                Err(_) => Err(told(&format!("luned said nothing for {}s", late.as_secs()))),
             }
         })
     }
 
     pub fn keep_image(&mut self, png: Png, slow: impl FnOnce()) -> Result<String, String> {
-        let request = png.asked(Some(self.on()));
-        let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
+        let request = png.asked(self.asked_on());
+        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let on = self.on.destination();
+        let told = |why: &str| Err(told_by(on, why));
         let secs = patience.as_secs_f32();
         let minutes = images::PATIENCE.as_secs() / 60;
         self.runtime.block_on(async move {
@@ -240,18 +252,18 @@ impl Away {
                 let answer = tokio::time::timeout(patience, daemon.keep_image(request)).await;
                 let mut answer = match answer {
                     Ok(Ok(answer)) => answer.into_inner(),
-                    Ok(Err(status)) => return Err(on.said(&status)),
-                    Err(_) => return Err(format!("{on}: luned did not answer in {secs}s")),
+                    Ok(Err(status)) => return Err(said_by(on, &status)),
+                    Err(_) => return told(&format!("luned did not answer in {secs}s")),
                 };
                 let deadline = images::PATIENCE + patience;
                 match tokio::time::timeout(deadline, answer.message()).await {
                     Ok(Ok(Some(kept))) if kept.path.starts_with('/') => Ok(kept.path),
                     Ok(Ok(Some(kept))) => {
-                        Err(format!("{on}: luned kept the image at \"{}\"", kept.path))
+                        told(&format!("luned kept the image at \"{}\"", kept.path))
                     },
-                    Ok(Ok(None)) => Err(format!("{on}: luned's answer ended with nothing in it")),
-                    Ok(Err(status)) => Err(on.said(&status)),
-                    Err(_) => Err(format!("{on}: the image had not gone after {minutes} minutes")),
+                    Ok(Ok(None)) => told("luned's answer ended with nothing in it"),
+                    Ok(Err(status)) => Err(said_by(on, &status)),
+                    Err(_) => told(&format!("the image had not gone after {minutes} minutes")),
                 }
             };
             let mut kept = pin!(kept);
@@ -263,15 +275,16 @@ impl Away {
         })
     }
 
-    fn on(&self) -> On {
-        On { destination: self.on.to_string() }
+    fn asked_on(&self) -> Option<On> {
+        let on = self.on.destination()?;
+        Some(On { destination: on.to_string() })
     }
 
     fn ask<T, F>(&mut self, asked: impl FnOnce(Daemon) -> F) -> Result<T, String>
     where
         F: Future<Output = Result<tonic::Response<T>, Status>>,
     {
-        self.answer(asked)?.map_err(|status| self.on.said(&status))
+        self.answer(asked)?.map_err(|status| said_by(self.on.destination(), &status))
     }
 
     fn answer<T, F>(
@@ -283,16 +296,16 @@ impl Away {
     {
         let (patience, daemon) = (self.patience, self.daemon.clone());
         let asked = async move { tokio::time::timeout(patience, asked(daemon)).await };
-        let (on, secs) = (&self.on, self.patience.as_secs_f32());
+        let (on, secs) = (self.on.destination(), self.patience.as_secs_f32());
         match self.runtime.block_on(asked) {
             Ok(answer) => Ok(answer.map(Response::into_inner)),
-            Err(_) => Err(format!("{on}: luned did not answer in {secs}s")),
+            Err(_) => Err(told_by(on, &format!("luned did not answer in {secs}s"))),
         }
     }
 }
 
 async fn heard(
-    on: &Destination,
+    on: Option<&Destination>,
     mut steps: impl Stream<Item = Result<AskResponse, Status>> + Unpin,
     deadline: Instant,
     wanted: &dyn Fn() -> bool,
@@ -304,15 +317,16 @@ async fn heard(
             return None;
         }
         if Instant::now() >= deadline {
-            return Some(Err(format!("{on}: the turn had not ended after {minutes} minutes")));
+            let why = format!("the turn had not ended after {minutes} minutes");
+            return Some(Err(told_by(on, &why)));
         }
         match tokio::time::timeout(asks::LOOK, steps.next()).await {
             Err(_) => {},
             Ok(Some(Ok(step))) => match Step::of(step) {
                 Ok(step) => step.into_iter().for_each(hear),
-                Err(why) => return Some(Err(format!("{on}: {why}"))),
+                Err(why) => return Some(Err(told_by(on, &why))),
             },
-            Ok(Some(Err(status))) => return Some(Err(on.said(&status))),
+            Ok(Some(Err(status))) => return Some(Err(said_by(on, &status))),
             Ok(None) => return Some(Ok(())),
         }
     }
@@ -375,11 +389,11 @@ mod tests {
 
     fn heard_of(steps: Steps, wanted: bool) -> (Vec<Step>, Option<Result<(), String>>) {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let on = "nixos".parse().unwrap();
+        let on: Destination = "nixos".parse().unwrap();
         let told = RefCell::new(Vec::new());
         let hear = |step: Step| told.borrow_mut().push(step);
         let deadline = Instant::now() + DEADLINE;
-        let ended = runtime.block_on(heard(&on, steps, deadline, &|| wanted, &hear));
+        let ended = runtime.block_on(heard(Some(&on), steps, deadline, &|| wanted, &hear));
         (told.into_inner(), ended)
     }
 

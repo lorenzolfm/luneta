@@ -547,12 +547,63 @@ fn a_plan_does_not_need_the_directory_it_runs_in() {
     runtime.block_on(async {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
         let main = Directory::parse(main).unwrap();
-        let asked = prunes::asked(None, &main);
+        let asked = prunes::asked(None, &main, None);
         let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
         let plan: Plan = answer.unwrap().unwrap().into();
         let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
         assert_eq!(goes, ["one"]);
     });
+}
+
+#[test]
+fn a_plan_keeps_the_worktree_its_caller_runs_from_and_not_luned_s() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    let head = repository.pushed("one");
+    host.gh.open("one", &merged(1, &head, "me"));
+    let head = repository.pushed("two");
+    host.gh.open("two", &merged(2, &head, "me"));
+    let mut from_one = host.vars().command(LUNED);
+    from_one.current_dir(repository.at("one"));
+    let _serving = serving_as(&host, &repository.at("main"), from_one);
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
+        let at = |name: &str| Directory::parse(repository.at(name).display().to_string()).unwrap();
+        let (main, two) = (at("main"), at("two"));
+        let unplaced = prunes::asked(None, &main, None);
+        let answer = daemon.prunes(unplaced).await.unwrap().into_inner().message().await;
+        let all: Plan = answer.unwrap().unwrap().into();
+        let goes: Vec<&str> = all.goes.iter().map(|goes| goes.branch.as_str()).collect();
+        assert_eq!(goes, ["one", "two"], "luned's own directory keeps nothing");
+
+        let from_two = prunes::asked(None, &main, Some(&two));
+        let answer = daemon.prunes(from_two).await.unwrap().into_inner().message().await;
+        let plan: Plan = answer.unwrap().unwrap().into();
+        let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
+        assert_eq!(goes, ["one"]);
+        let kept: Vec<(&str, &str)> =
+            plan.kept.iter().map(|kept| (kept.folder.as_str(), kept.why.as_str())).collect();
+        assert_eq!(kept, [(two.as_str(), "this runs from it")]);
+
+        let told = prunes::told(None, &main, &all.deletes(), Some(&two));
+        let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
+        let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
+        let Pruned::Changed(now) = pruned else {
+            panic!("it deleted the worktree its caller runs from: {pruned:?}");
+        };
+        assert_eq!(now.deletes(), plan.deletes());
+
+        let relative = PrunesRequest { on: None, dir: main.to_string(), here: Some("two".into()) };
+        let refused = daemon.prunes(relative).await.unwrap_err();
+        assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
+    });
+    assert!(repository.at("one").exists() && repository.at("two").exists(), "it deleted");
 }
 
 #[test]
@@ -591,7 +642,7 @@ fn the_daemon_deletes_only_what_it_would_plan_itself() {
             vec![deleting("one", &head, Some("one")), deleting("wip", &unpushed, None)],
         ] {
             let agreed: BTreeSet<Deleting> = agreed.into_iter().collect();
-            let told = prunes::told(None, &main, &agreed);
+            let told = prunes::told(None, &main, &agreed, None);
             let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
             let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
             let Pruned::Changed(plan) = pruned else {
@@ -664,10 +715,10 @@ fn what_was_agreed_goes_in_whatever_order_it_is_told() {
     runtime.block_on(async {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
-        let asked = prunes::asked(None, &main);
+        let asked = prunes::asked(None, &main, None);
         let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
         let plan: Plan = answer.unwrap().unwrap().into();
-        let mut told = prunes::told(None, &main, &plan.deletes());
+        let mut told = prunes::told(None, &main, &plan.deletes(), None);
         told.agreed.reverse();
         let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
         let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
@@ -753,11 +804,12 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
         let on = || Some(On { destination: "far".to_owned() });
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
-        let asked = prunes::asked(on(), &main);
+        let one = Directory::parse(repository.at("one").display().to_string()).unwrap();
+        let asked = prunes::asked(on(), &main, Some(&one));
         let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
         let plan: Plan = answer.unwrap().unwrap().into();
         let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
-        assert_eq!(goes, ["one"]);
+        assert_eq!(goes, ["one"], "where the caller runs here means nothing on far");
         assert_eq!(plan.kept[0].why, "it has a view");
         let Goes { pushed, .. } = &plan.goes[0];
         let origin =
@@ -765,7 +817,7 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
         assert_eq!(pushed, &origin);
         assert_eq!(here.gh.asked(), [] as [String; 0]);
 
-        let told = prunes::told(on(), &main, &plan.deletes());
+        let told = prunes::told(on(), &main, &plan.deletes(), Some(&one));
         let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
         let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
         let Pruned::Went(outcomes) = pruned else {
@@ -776,7 +828,7 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
         assert!(!repository.on_origin("one"));
         assert!(repository.at("viewed").exists());
 
-        let relative = PrunesRequest { on: on(), dir: "n/main".to_owned() };
+        let relative = PrunesRequest { on: on(), dir: "n/main".to_owned(), here: None };
         let refused = daemon.prunes(relative).await.unwrap_err();
         assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
     });

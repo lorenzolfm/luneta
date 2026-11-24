@@ -467,6 +467,7 @@ enum NameSource {
 message PrunesRequest {
   On on = 1;
   string dir = 2;
+  optional string here = 3;
 }
 
 message PrunesResponse {
@@ -508,6 +509,7 @@ message PruneRequest {
   On on = 1;
   string dir = 2;
   repeated Deleting agreed = 3;
+  optional string here = 4;
 
   message Deleting {
     string folder = 1;

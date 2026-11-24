@@ -22,7 +22,7 @@ use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common, Git};
 use crate::program::{self, Ran};
 use crate::projects::{self, SPOT_LOOK};
-use crate::{zoxide, Destination, Directory};
+use crate::{remote, zoxide, Destination, Directory};
 
 pub(crate) mod sync;
 
@@ -606,8 +606,8 @@ pub enum Unready {
 }
 
 impl Unready {
-    fn of(on: &Destination, status: &Status) -> Unready {
-        let why = on.said(status);
+    fn of(on: Option<&Destination>, status: &Status) -> Unready {
+        let why = remote::said_of(on, status);
         match status.code() {
             Code::NotFound => Unready::Nowhere(why),
             Code::FailedPrecondition | Code::InvalidArgument | Code::Unimplemented => {
@@ -722,13 +722,13 @@ impl Pasted {
     pub async fn ready_on(
         &self,
         mut daemon: Daemon,
-        on: &Destination,
+        on: Option<&Destination>,
         patience: Duration,
     ) -> Result<Ready<usize>, Unready> {
-        let request = self.asked(Some(On { destination: on.to_string() }));
+        let request = self.asked(on.map(|on| On { destination: on.to_string() }));
         let secs = patience.as_secs_f32();
         let minutes = PATIENCE.as_secs() / 60;
-        let in_doubt = |why: String| Err(Unready::InDoubt(format!("{on}: {why}")));
+        let in_doubt = |why: String| Err(Unready::InDoubt(remote::told_of(on, &why)));
         let mut answer = match timeout(patience, daemon.paste(request)).await {
             Ok(Ok(answer)) => answer.into_inner(),
             Ok(Err(status)) => return Err(Unready::of(on, &status)),
@@ -2150,11 +2150,11 @@ mod tests {
     fn only_a_daemon_that_says_it_made_nothing_lets_another_machine_go_on() {
         let on: Destination = "nixos".parse().unwrap();
         let why = || "nixos: why".to_owned();
-        assert_eq!(Unready::of(&on, &Status::not_found("why")), Unready::Nowhere(why()));
+        assert_eq!(Unready::of(Some(&on), &Status::not_found("why")), Unready::Nowhere(why()));
         for status in [Status::failed_precondition("why"), Status::invalid_argument("why")] {
-            assert_eq!(Unready::of(&on, &status), Unready::Failed(why()), "{status:?}");
+            assert_eq!(Unready::of(Some(&on), &status), Unready::Failed(why()), "{status:?}");
         }
-        let older = Unready::of(&on, &Status::unimplemented("why"));
+        let older = Unready::of(Some(&on), &Status::unimplemented("why"));
         assert!(matches!(older, Unready::Failed(_)), "{older:?}");
         let unsure = [
             Status::aborted("why"),
@@ -2165,7 +2165,7 @@ mod tests {
             Status::unknown("why"),
         ];
         for status in unsure {
-            assert_eq!(Unready::of(&on, &status), Unready::InDoubt(why()), "{status:?}");
+            assert_eq!(Unready::of(Some(&on), &status), Unready::InDoubt(why()), "{status:?}");
         }
     }
 

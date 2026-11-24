@@ -6,13 +6,10 @@ use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 
 use luned::asks::Turn;
-use luned::prunes::{
-    self, Came, Deleting, Goes, Occupied, Outcome, Plan, Planned, Pruned, Pushed, name_of,
-};
+use luned::prunes::{Came, Deleting, Goes, Outcome, Plan, Pruned, Pushed, name_of};
 use luned::Directory;
 
 use crate::away::{self, Away};
-use crate::commands;
 use crate::agreed::{self, Agreed, PLANNED};
 use crate::due::Due;
 use crate::host::Event;
@@ -29,17 +26,16 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
         Ok(dir) => dir,
         Err(why) => return failed(&why),
     };
-    let occupied = match commands::occupied(folder) {
-        Ok(occupied) => occupied,
+    let mut luned = match Away::at(folder, &Machine::Local, away::ANSWER) {
+        Ok(luned) => luned,
         Err(why) => return failed(&untold(&why)),
     };
-    let here = env::current_dir().ok();
-    let planned = match prunes::plan(&dir, &occupied, here.as_deref()) {
-        Ok(planned) => planned,
+    let here = here_of(&Machine::Local);
+    let plan = match luned.prunes(&dir, here.as_ref()) {
+        Ok(plan) => plan,
         Err(why) => return failed(&why),
     };
-    let plan = planned.plan();
-    for line in listed(plan) {
+    for line in listed(&plan) {
         println!("{line}");
     }
     if plan.goes.is_empty() {
@@ -52,17 +48,34 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
             "{name}: no merged worktree to delete of those it could ask about"
         ));
     }
-    let agreed = Agreed::of_prune(plan, turn.map(Turn::key));
+    let agreed = Agreed::of_prune(&plan, turn.map(Turn::key));
     let takes = match turn {
         None => Some(agreed),
-        Some(turn) => turn.before().map(|before| Agreed::of_prune(plan, Some(before))),
+        Some(turn) => turn.before().map(|before| Agreed::of_prune(&plan, Some(before))),
     };
-    if yes.is_some() && yes == takes {
-        let occupied = || commands::occupied(folder);
-        return said_of(&prunes::deleted(planned, occupied, here.as_deref()));
+    if yes.is_none() || yes != takes {
+        eprintln!("lune: {}", unagreed(yes, agreed));
+        return ExitCode::from(PLANNED);
     }
-    eprintln!("lune: {}", unagreed(yes, agreed));
-    ExitCode::from(PLANNED)
+    match luned.prune(&dir, &plan.deletes(), here.as_ref()) {
+        Ok(Pruned::Went(outcomes)) => said_of(&outcomes),
+        Ok(Pruned::Changed(now)) => {
+            for line in listed(&now) {
+                println!("{line}");
+            }
+            eprintln!("lune: {}", unagreed(yes, Agreed::of_prune(&now, turn.map(Turn::key))));
+            ExitCode::from(PLANNED)
+        },
+        Err(why) => failed(&why),
+    }
+}
+
+fn here_of(on: &Machine) -> Option<Directory> {
+    let Machine::Local = on else {
+        return None;
+    };
+    let here = env::current_dir().ok()?;
+    Directory::parse(here.to_string_lossy().into_owned()).ok()
 }
 
 fn unagreed(yes: Option<Agreed>, agreed: Agreed) -> String {
@@ -157,19 +170,7 @@ pub fn plan(menu: u64, on: Machine, dir: Directory, events: &Sender<Event>) {
 }
 
 fn planned(on: &Machine, dir: &Directory) -> Result<Plan, String> {
-    match on {
-        Machine::Local => {
-            let here = env::current_dir().ok();
-            let occupied = local_occupied().map_err(|why| untold(&why))?;
-            prunes::plan(dir, &occupied, here.as_deref()).map(Planned::into_plan)
-        },
-        Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.prunes(dir),
-    }
-}
-
-fn local_occupied() -> Result<Occupied, String> {
-    let folder = luned::folder::find().map_err(|unfound| format!("{unfound}, to find luned in"))?;
-    commands::occupied(&folder)
+    Away::on(on, away::ANSWER)?.prunes(dir, here_of(on).as_ref())
 }
 
 pub fn delete(
@@ -184,13 +185,7 @@ pub fn delete(
 }
 
 fn deleted(on: &Machine, dir: &Directory, agreed: &BTreeSet<Deleting>) -> Result<Pruned, String> {
-    match on {
-        Machine::Local => {
-            let here = env::current_dir().ok();
-            prunes::deleted_as_agreed(dir, agreed, local_occupied, here.as_deref())
-        },
-        Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.prune(dir, agreed),
-    }
+    Away::on(on, away::ANSWER)?.prune(dir, agreed, here_of(on).as_ref())
 }
 
 pub fn note(outcomes: &[Outcome]) -> Option<String> {
@@ -215,7 +210,7 @@ pub fn note(outcomes: &[Outcome]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use luned::prunes::RemoteBranch;
+    use luned::prunes::{self, RemoteBranch};
 
     use super::*;
 

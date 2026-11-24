@@ -62,6 +62,24 @@ const SOCKET_MAKING: usize = 17;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Destination(String);
 
+#[must_use]
+pub fn told_of(on: Option<&Destination>, why: &str) -> String {
+    match on {
+        Some(on) => format!("{on}: {why}"),
+        None => why.to_owned(),
+    }
+}
+
+#[must_use]
+pub fn said_of(on: Option<&Destination>, status: &Status) -> String {
+    match (on, status.code()) {
+        (Some(on), _) => on.said(status),
+        (None, Code::Unimplemented) => "luned is older than what lune asked of it".to_owned(),
+        (None, code) if status.message().is_empty() => format!("luned: {code}"),
+        (None, _) => status.message().to_owned(),
+    }
+}
+
 impl Destination {
     #[must_use]
     pub fn said(&self, status: &Status) -> String {
@@ -940,6 +958,20 @@ mod tests {
             assert!(named.is_on("nixos"), "{destination} is this machine");
         }
         assert!(!"nixos.lan".parse::<Destination>().unwrap().is_on("nixos"));
+    }
+
+    #[test]
+    fn what_luned_says_names_its_machine_only_when_it_is_another() {
+        let far: Destination = "far".parse().unwrap();
+        assert_eq!(told_of(Some(&far), "no answer"), "far: no answer");
+        assert_eq!(told_of(None, "no answer"), "no answer");
+        let refused = Status::failed_precondition("is in no repository");
+        assert_eq!(said_of(Some(&far), &refused), "far: is in no repository");
+        assert_eq!(said_of(None, &refused), "is in no repository");
+        let blank = said_of(None, &Status::unavailable(""));
+        assert_eq!(blank, format!("luned: {}", Code::Unavailable));
+        let older = said_of(None, &Status::unimplemented("Prunes"));
+        assert_eq!(older, "luned is older than what lune asked of it");
     }
 
     #[test]
