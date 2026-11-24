@@ -83,6 +83,14 @@ struct Holding {
     last: Ids,
     terminals: BTreeMap<TerminalId, Slot>,
     viewing: BTreeMap<ClientId, Viewing>,
+    empty: Empty,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Empty {
+    #[default]
+    Waits,
+    Ends,
 }
 
 enum Slot {
@@ -132,7 +140,7 @@ impl Mux {
     }
 
     pub fn end_if_unused(&self) {
-        self.change(Model::end_if_empty);
+        self.change(Model::end_if_unused);
     }
 
     pub fn end_unreached(&self, unreached: Unreached) -> Option<usize> {
@@ -320,6 +328,7 @@ impl Model {
         let slot = holding.terminals.get_mut(&key.id).expect("a reserved terminal has its slot");
         assert!(matches!(slot, Slot::Starting), "terminal {} is placed once", key.id);
         *slot = Slot::Placed(Box::new(terminal));
+        holding.empty = Empty::Ends;
         placing.placed();
         Ok(key)
     }
@@ -333,8 +342,16 @@ impl Model {
         }
     }
 
+    fn end_if_unused(&mut self) {
+        if let Model::Holds(holding) = self {
+            holding.empty = Empty::Ends;
+        }
+        self.end_if_empty();
+    }
+
     fn end_if_empty(&mut self) {
         if let Model::Holds(holding) = self
+            && holding.empty == Empty::Ends
             && holding.terminals.is_empty()
         {
             *self = Model::Ended(Ending::Emptied);
@@ -466,6 +483,8 @@ impl Holding {
     fn settle(&mut self) {
         assert!(self.viewing.len() <= CLIENTS_MAX);
         assert!(self.terminals.len() <= TERMINALS_MAX);
+        let placed = self.placed().next().is_some();
+        assert!(!placed || self.empty == Empty::Ends, "a placed terminal ends the first wait");
         let mut by_terminal: BTreeMap<TerminalKey, Vec<Viewer>> = BTreeMap::new();
         for (client, viewing) in &self.viewing {
             assert!(viewing.shows.len() <= SHOWN_MAX);
@@ -575,6 +594,7 @@ pub(crate) mod tests {
     use tonic::Code;
 
     use super::{Ending, Listed, Mux, spawned};
+    use crate::api::Listing;
     use crate::asked::{Ends, Opens, Size, Tag};
 
     pub(crate) fn panic_holding_the_model() {
@@ -632,19 +652,43 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_terminal_that_fails_to_start_gives_its_place_back() {
+    fn a_first_terminal_that_fails_to_start_leaves_the_mux_waiting_for_one() {
         let mux = Mux::new();
         let reserved = mux.reserve_terminal().unwrap();
         let refusal = reserved.start(&unstartable(), tag(), size()).unwrap_err();
         assert_eq!(refusal.code(), Code::FailedPrecondition);
         assert!(refusal.message().starts_with("opens did not start: "), "{refusal:?}");
-        assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
+        assert_eq!(*mux.watched().borrow(), Listed::Holds(Listing::default()));
+        let key = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        assert_eq!(listed(&mux), [key.id.said()]);
     }
 
     #[test]
     fn a_reservation_dropped_unstarted_gives_its_place_back() {
         let mux = Mux::new();
         drop(mux.reserve_terminal().unwrap());
+        assert_eq!(*mux.watched().borrow(), Listed::Holds(Listing::default()));
+        mux.end_if_unused();
+        assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
+    }
+
+    #[test]
+    fn a_start_that_fails_once_the_first_wait_is_over_ends_the_mux() {
+        let mux = Mux::new();
+        let reserved = mux.reserve_terminal().unwrap();
+        mux.end_if_unused();
+        reserved.start(&unstartable(), tag(), size()).unwrap_err();
+        assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
+    }
+
+    #[test]
+    fn a_start_that_fails_once_the_last_terminal_closed_ends_the_mux() {
+        let mux = Mux::new();
+        let placed = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        let reserved = mux.reserve_terminal().unwrap();
+        mux.close_terminal(placed).unwrap();
+        assert_eq!(*mux.watched().borrow(), Listed::Holds(Listing::default()));
+        reserved.start(&unstartable(), tag(), size()).unwrap_err();
         assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Emptied));
     }
 
