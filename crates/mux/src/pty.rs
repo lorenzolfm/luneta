@@ -407,6 +407,10 @@ mod tests {
         let mut child = pty.spawned(&opens, &[]).unwrap().child();
         let output_written = || written.exists().then_some(());
         lune_waits::eventually("the program's output is written", output_written);
+        #[cfg(target_os = "linux")]
+        lune_waits::eventually("the program's output reaches the near side", || {
+            (rustix::io::ioctl_fionread(&pty.near).unwrap() == 500).then_some(())
+        });
         interrupted(&pty);
         let mut left = Vec::new();
         lune_waits::eventually("the program's trap runs", || {
