@@ -4,20 +4,25 @@ use std::time::SystemTime;
 use crate::api::{self, project, projects, remote, terminal, worktree};
 use crate::api::project::clone;
 
+const NANOS_PER_SECOND: i32 = 1_000_000_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct TerminalKey {
     pub id: u32,
-    pub made_at: SystemTime,
+    pub made_seconds: i64,
+    pub made_nanos: i32,
 }
 
 impl TerminalKey {
     fn of(key: &api::TerminalKey) -> Option<TerminalKey> {
-        let made_at = SystemTime::try_from(key.made_at?).ok()?;
-        Some(TerminalKey { id: key.id, made_at })
+        let made = key.made_at?;
+        let whole = (0..NANOS_PER_SECOND).contains(&made.nanos);
+        whole.then_some(TerminalKey { id: key.id, made_seconds: made.seconds, made_nanos: made.nanos })
     }
 
     pub(crate) fn to_api(self) -> api::TerminalKey {
-        api::TerminalKey { id: self.id, made_at: Some(self.made_at.into()) }
+        let made_at = prost_types::Timestamp { seconds: self.made_seconds, nanos: self.made_nanos };
+        api::TerminalKey { id: self.id, made_at: Some(made_at) }
     }
 }
 
@@ -488,6 +493,19 @@ mod tests {
             panic!("the projects are kept");
         };
         assert_eq!(projects[0].holds.worktrees()[0].branch.as_deref(), Some("issue-723"));
+    }
+
+    #[test]
+    fn a_terminal_key_goes_back_to_luned_to_the_nanosecond() {
+        let made_at = Some(Timestamp { seconds: 1_795_525_750, nanos: 483_697_731 });
+        let made = api::TerminalKey { id: 17, made_at };
+        let key = TerminalKey::of(&made).unwrap();
+        assert_eq!((key.made_seconds, key.made_nanos), (1_795_525_750, 483_697_731));
+        assert_eq!(key.to_api(), made);
+        for nanos in [-1, NANOS_PER_SECOND] {
+            let odd = api::TerminalKey { id: 17, made_at: Some(Timestamp { seconds: 1, nanos }) };
+            assert_eq!(TerminalKey::of(&odd), None, "{nanos}");
+        }
     }
 
     #[test]
