@@ -1,0 +1,50 @@
+name: Lune
+options:
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_APPROACHABLE_CONCURRENCY: true
+    SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY: true
+    ENABLE_USER_SCRIPT_SANDBOXING: true
+    TARGETED_DEVICE_FAMILY: "1"
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  LunePhone:
+    type: framework.static
+    platform: iOS
+    sources:
+      - path: build/bindings
+    dependencies:
+      - framework: build/LunePhone.xcframework
+        link: false
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lorenzolfm.lune.phone
+        GENERATE_INFOPLIST_FILE: true
+        SKIP_INSTALL: true
+  Lune:
+    type: application
+    platform: iOS
+    sources:
+      - path: Lune
+    dependencies:
+      - target: LunePhone
+      - framework: build/LunePhone.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lorenzolfm.lune
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: true
+        GCC_TREAT_WARNINGS_AS_ERRORS: true
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_CFBundleDisplayName: Lune
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait

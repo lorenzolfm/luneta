@@ -1,0 +1,41 @@
+id: no-swift-comments
+snapshots:
+  ? |-
+    /* a
+    /* b */ */
+    let a = 1
+  : labels:
+    - source: |-
+        /* a
+        /* b */ */
+      style: primary
+      start: 0
+      end: 15
+  ? |-
+    // a
+    let a = 1
+  : labels:
+    - source: // a
+      style: primary
+      start: 0
+      end: 4
+  ? |-
+    /// a
+    func f() {}
+  : labels:
+    - source: /// a
+      style: primary
+      start: 0
+      end: 5
+  f(/* a */):
+    labels:
+    - source: /* a */
+      style: primary
+      start: 2
+      end: 9
+  let a = 1 // a:
+    labels:
+    - source: // a
+      style: primary
+      start: 10
+      end: 14

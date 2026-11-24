@@ -44,8 +44,16 @@ pub enum Unanswered {
 impl Unanswered {
     #[must_use]
     pub fn of(status: &Status, refusals: Refusals) -> Unanswered {
-        let why = status.message().to_owned();
-        let why = if why.is_empty() { format!("luned said {}", status.code()) } else { why };
+        let said = status.message();
+        let mut why = if said.is_empty() { format!("luned said {}", status.code()) } else { said.to_owned() };
+        let mut cause = std::error::Error::source(status);
+        while let Some(error) = cause {
+            let told = error.to_string();
+            if !why.split(": ").any(|part| part == told) {
+                why = format!("{why}: {told}");
+            }
+            cause = error.source();
+        }
         if refusals.codes().contains(&status.code()) {
             Unanswered::Refused { why }
         } else {
@@ -98,6 +106,40 @@ mod tests {
         assert_eq!(in_doubt, Unanswered::InDoubt { why: "the bridge went".to_owned() });
         let unsaid = Unanswered::of(&Status::new(Code::Internal, ""), Refusals::Others);
         assert_eq!(unsaid.why(), "luned said Internal error");
+    }
+
+    #[derive(Debug)]
+    struct Said(&'static str, Option<Box<Said>>);
+
+    impl fmt::Display for Said {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Said {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|said| said as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    #[test]
+    fn a_failure_to_reach_luned_says_each_cause_once() {
+        let refused = Said("Connection refused (os error 61)", None);
+        let connect = Said("tcp connect error", Some(Box::new(refused)));
+        let transport = Said("transport error", Some(Box::new(connect)));
+        let status = Status::from_error(Box::new(transport));
+        assert_eq!(status.message(), "transport error");
+        let unreached = Unanswered::of(&status, Refusals::Others);
+        let why = "transport error: tcp connect error: Connection refused (os error 61)";
+        assert_eq!(unreached, Unanswered::InDoubt { why: why.to_owned() });
+        let late = Said("deadline has elapsed", None);
+        let connect = Said("tcp connect error", Some(Box::new(late)));
+        let transport = Said("transport error", Some(Box::new(connect)));
+        let mut status = Status::unavailable("tcp connect error");
+        status.set_source(std::sync::Arc::new(transport));
+        let late = Unanswered::of(&status, Refusals::Others);
+        assert_eq!(late.why(), "tcp connect error: transport error: deadline has elapsed");
     }
 
     #[test]

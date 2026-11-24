@@ -91,6 +91,7 @@ jobs:
           .#checks.x86_64-linux.statix
           .#checks.x86_64-linux.deadnix
           .#checks.x86_64-linux.comments
+          .#checks.x86_64-linux.swift
 
       - name: Bans, licenses and sources
         run: nix build -L --out-link deny .#checks.x86_64-linux.deny
@@ -248,3 +249,37 @@ jobs:
         run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).luned"
 
       - *attic-push
+
+  ios:
+    needs: code
+    if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
+    runs-on: macos-latest
+    timeout-minutes: 40
+
+    steps:
+      - *checkout-head
+
+      - *install-nix
+
+      - name: Select the Xcode the app is built with
+        run: |
+          version="$(nix eval --raw --file nix/ios.nix --apply 'ios: (ios { pkgs = { }; }).xcodeVersion')"
+          xcode="/Applications/Xcode_$version.app"
+          if [[ ! -d $xcode ]]; then
+            echo "::error::this runner has no $xcode; it has:"
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+
+      - name: Build the app for the simulator
+        run: nix run .#dev -- ios build
+
+      - name: actions/upload-artifact v7, xcodebuild's whole output
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: xcodebuild-logs
+          path: ios/build/logs
+          if-no-files-found: ignore
+          retention-days: 7

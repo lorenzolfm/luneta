@@ -1,0 +1,14 @@
+id: no-swift-comments
+language: swift
+message: >-
+  No comments. Say it in the code: a name, a type, a test.
+rule:
+  any:
+    - kind: comment
+    - kind: multiline_comment
+  not:
+    inside:
+      any:
+        - kind: line_string_literal
+        - kind: multi_line_string_literal
+        - kind: raw_string_literal
