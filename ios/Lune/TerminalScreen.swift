@@ -22,6 +22,12 @@ struct TerminalFont {
     }
 }
 
+struct TerminalInput {
+    let typed: (String) -> Void
+    let deleted: () -> Void
+    let scroll: (Int32) -> Void
+}
+
 struct Pull: Equatable {
     let pastTop: CGFloat
     let pastBottom: CGFloat
@@ -31,9 +37,7 @@ struct TerminalScreen: View {
     let grid: TerminalGrid
     @Binding var size: CGFloat
     @Binding var typing: Bool
-    let typed: (String) -> Void
-    let deleted: () -> Void
-    let scroll: (Int32) -> Void
+    let input: TerminalInput?
     @State private var pinched: CGFloat = 1
     @State private var pulled = false
 
@@ -64,7 +68,7 @@ struct TerminalScreen: View {
                     .onTapGesture(count: 2) {
                         size = abs(size - fit) < 0.5 ? TerminalFont.readable : fit
                     }
-                    .onTapGesture { typing = true }
+                    .onTapGesture { typing = input != nil }
                 }
                 .scrollBounceBehavior(.always, axes: .vertical)
                 .background(Color(grid.background))
@@ -85,7 +89,9 @@ struct TerminalScreen: View {
                         seen - geometry.contentInsets.bottom - geometry.contentSize.height
                     return Pull(pastTop: top, pastBottom: bottom)
                 } action: { _, pull in
-                    pulledTo(pull)
+                    if let input {
+                        pulledTo(pull, scroll: input.scroll)
+                    }
                 }
                 .onChange(of: grid.cursor) {
                     if typing {
@@ -96,8 +102,10 @@ struct TerminalScreen: View {
             }
             .overlay(alignment: .top) { scrolledBack }
             .background {
-                KeyInput(typing: $typing, typed: typed, deleted: deleted)
-                    .frame(width: 0, height: 0)
+                if let input {
+                    KeyInput(typing: $typing, typed: input.typed, deleted: input.deleted)
+                        .frame(width: 0, height: 0)
+                }
             }
         }
     }
@@ -108,8 +116,10 @@ struct TerminalScreen: View {
             HStack {
                 Text("\(grid.scrolledBack) of \(grid.scrollback) lines back")
                     .font(.caption)
-                Button("Now") { scroll(-Int32(clamping: grid.scrolledBack)) }
-                    .font(.caption.bold())
+                if let input {
+                    Button("Now") { input.scroll(-Int32(clamping: grid.scrolledBack)) }
+                        .font(.caption.bold())
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -118,7 +128,7 @@ struct TerminalScreen: View {
         }
     }
 
-    private func pulledTo(_ pull: Pull) {
+    private func pulledTo(_ pull: Pull, scroll: (Int32) -> Void) {
         let far = TerminalScreen.pullFar
         if pull.pastTop < far / 2 && pull.pastBottom < far / 2 {
             pulled = false

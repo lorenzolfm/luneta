@@ -374,11 +374,16 @@ message ToViewer {
   oneof event {
     Frame frame = 1;
     Refused refused = 2;
+    Closed closed = 3;
   }
 }
 
 message Refused {
   string reason = 1;
+}
+
+message Closed {
+  TerminalKey terminal = 1;
 }
 
 message Frame {

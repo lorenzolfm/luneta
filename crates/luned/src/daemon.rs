@@ -870,42 +870,7 @@ impl Daemon for Host {
         &self,
         request: Request<Streaming<FramesRequest>>,
     ) -> Result<Response<Self::FramesStream>, Status> {
-        use crate::api::frames_request::{Event, Hello};
-        use crate::mux::own::api::from_viewer;
-        let mut heard = request.into_inner();
-        let Some(FramesRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
-            heard.message().await?
-        else {
-            return Err(Status::invalid_argument("the first word is no hello"));
-        };
-        let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
-        if on.is_some() && greeting.runs_in.is_some() {
-            return Err(Status::invalid_argument(RUNS_IN_ON));
-        }
-        let (refuse, refused) = oneshot::channel();
-        let mut refuse = Some(refuse);
-        let said = heard.map_while(move |word| {
-            let refusal = match word {
-                Ok(FramesRequest { event: Some(Event::Said(said)) }) => return Some(said),
-                Ok(FramesRequest { event: Some(Event::Hello(_)) }) => "a hello comes only first",
-                Ok(FramesRequest { event: None }) => "a word of the frames says nothing",
-                Err(_) => return None,
-            };
-            let refuse = refuse.take().expect("the words for frames end at the first refused");
-            drop(refuse.send(Status::invalid_argument(refusal)));
-            None
-        });
-        if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
-            let hello = Hello { on: None, greeting: Some(greeting) };
-            let first = FramesRequest { event: Some(Event::Hello(hello)) };
-            let rest = said.map(|said| FramesRequest { event: Some(Event::Said(said)) });
-            let answer = daemon.frames(tokio_stream::once(first).chain(rest)).await?;
-            let stream = ended_by(answer.into_inner(), refused);
-            return Ok(Response::new(Box::pin(Held { stream, _permit: permit })));
-        }
-        let first = FromViewer { event: Some(from_viewer::Event::Hello(greeting)) };
-        let answer = viewer::relayed(tokio_stream::once(first).chain(said)).await?;
-        Ok(Response::new(ended_by(answer, refused)))
+        self.frames_served(request, |_| Ok(())).await
     }
 
     async fn change_projects(
@@ -1231,6 +1196,55 @@ fn unanswered(unanswered: &Unanswered) -> Status {
 }
 
 impl Host {
+    async fn frames_served(
+        &self,
+        request: Request<Streaming<FramesRequest>>,
+        served: fn(&FromViewer) -> Result<(), Status>,
+    ) -> Result<Response<<Host as Daemon>::FramesStream>, Status> {
+        use crate::api::frames_request::{Event, Hello};
+        use crate::mux::own::api::from_viewer;
+        let mut heard = request.into_inner();
+        let Some(FramesRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
+            heard.message().await?
+        else {
+            return Err(Status::invalid_argument("the first word is no hello"));
+        };
+        let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
+        if on.is_some() && greeting.runs_in.is_some() {
+            return Err(Status::invalid_argument(RUNS_IN_ON));
+        }
+        let (refuse, refused) = oneshot::channel();
+        let mut refuse = Some(refuse);
+        let said = heard.map_while(move |word| {
+            let unread = |why: &str| Status::invalid_argument(why);
+            let refusal = match word {
+                Ok(FramesRequest { event: Some(Event::Said(said)) }) => match served(&said) {
+                    Ok(()) => return Some(said),
+                    Err(unserved) => unserved,
+                },
+                Ok(FramesRequest { event: Some(Event::Hello(_)) }) => {
+                    unread("a hello comes only first")
+                },
+                Ok(FramesRequest { event: None }) => unread("a word of the frames says nothing"),
+                Err(_) => return None,
+            };
+            let refuse = refuse.take().expect("the words for frames end at the first refused");
+            drop(refuse.send(refusal));
+            None
+        });
+        if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
+            let hello = Hello { on: None, greeting: Some(greeting) };
+            let first = FramesRequest { event: Some(Event::Hello(hello)) };
+            let rest = said.map(|said| FramesRequest { event: Some(Event::Said(said)) });
+            let answer = daemon.frames(tokio_stream::once(first).chain(rest)).await?;
+            let stream = ended_by(answer.into_inner(), refused);
+            return Ok(Response::new(Box::pin(Held { stream, _permit: permit })));
+        }
+        let first = FromViewer { event: Some(from_viewer::Event::Hello(greeting)) };
+        let answer = viewer::relayed(tokio_stream::once(first).chain(said)).await?;
+        Ok(Response::new(ended_by(answer, refused)))
+    }
+
     async fn runs_in(&self, terminal: &api::TerminalKey) -> Runs {
         let id = terminal.id;
         let ListAgentsResponse { agents, .. } = match self.ask(Command::List).await {

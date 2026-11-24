@@ -120,9 +120,19 @@ fn shows(phone: &Phone, view: &TerminalView, what: &str, shown: impl Fn(&Grid) -
         match phone.block_on(patience.awaited(waited, view.next())) {
             Framed::Shown { grid } if shown(&grid) => return grid,
             Framed::Shown { grid } => last = Some(grid),
-            ended @ (Framed::Lost { .. } | Framed::Refused { .. }) => {
+            ended @ (Framed::Closed | Framed::Lost { .. } | Framed::Refused { .. }) => {
                 panic!("the terminal is not shown: {ended:?}")
             },
+        }
+    }
+}
+
+fn ends(phone: &Phone, view: &TerminalView, what: &str) -> Framed {
+    let patience = Patience::begun();
+    loop {
+        match phone.block_on(patience.awaited(what, view.next())) {
+            Framed::Shown { .. } => {},
+            ended @ (Framed::Closed | Framed::Lost { .. } | Framed::Refused { .. }) => return ended,
         }
     }
 }
@@ -208,7 +218,7 @@ fn the_phone_renames_and_reorders_a_clone_s_worktrees_and_closes_a_view_and_a_wo
 }
 
 #[test]
-fn the_phone_shows_a_terminal_types_into_it_scrolls_back_and_lets_it_go() {
+fn the_phone_shows_a_terminal_types_into_it_scrolls_back_lets_it_go_and_hears_it_close() {
     let owned = Owned::new();
     let worktree = crate::layouts::worktree_in_home(&owned);
     let mut shown = crate::layouts::Shown::new(&owned, worktree, 80, 24);
@@ -236,7 +246,8 @@ fn the_phone_shows_a_terminal_types_into_it_scrolls_back_and_lets_it_go() {
     });
     assert!(!texts(&typed).iter().any(|line| line == "wrong"), "ctrl-u let the line go: {:?}", texts(&typed));
 
-    view.typed("seq 1 200\n", false).unwrap();
+    view.typed("seq 1 200", false).unwrap();
+    view.pressed(KeyName::Enter, false).unwrap();
     shows(&phone, &view, "the shell counts to 200", |grid| texts(grid).iter().any(|line| line == "200"));
     view.scroll(5).unwrap();
     let back = shows(&phone, &view, "the screen five rows back", |grid| grid.scrolled_back == 5);
@@ -244,12 +255,17 @@ fn the_phone_shows_a_terminal_types_into_it_scrolls_back_and_lets_it_go() {
     view.pressed(KeyName::Left, false).unwrap();
     shows(&phone, &view, "a key brings the screen back to now", |grid| grid.scrolled_back == 0);
 
-    view.close();
-    assert!(matches!(phone.block_on(view.next()), Framed::Lost { .. }));
-    let gone = view.typed("x", false);
+    let again = phone.core.terminal(&shell, Appearance::Light);
+    shows(&phone, &again, "the terminal's screen shown twice", |_| true);
+    again.close();
+    assert!(matches!(phone.block_on(again.next()), Framed::Lost { .. }));
+    let gone = again.typed("x", false);
     assert!(matches!(gone, Err(Unanswered::Refused { .. })), "{gone:?}");
 
     phone.block_on(phone.core.close_view(shell.clone())).unwrap();
+    assert_eq!(ends(&phone, &view, "the shown terminal closes"), Framed::Closed);
+    let closed = view.typed("x", false);
+    assert!(matches!(closed, Err(Unanswered::Refused { .. })), "{closed:?}");
     phone.sees("the shell's view gone", |model| keyed(model) == 1);
     let unmade = phone.core.terminal(&shell, Appearance::Light);
     let refused = phone.block_on(Patience::begun().awaited("luned refuses it", unmade.next()));

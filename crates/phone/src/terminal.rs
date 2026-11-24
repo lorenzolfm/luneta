@@ -91,12 +91,14 @@ pub struct Grid {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Framed {
     Shown { grid: Grid },
+    Closed,
     Lost { why: String },
     Refused { why: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum End {
+    Closed,
     Lost { why: String },
     Refused { why: String },
 }
@@ -115,6 +117,7 @@ impl End {
 
     fn framed(&self) -> Framed {
         match self {
+            End::Closed => Framed::Closed,
             End::Lost { why } => Framed::Lost { why: why.clone() },
             End::Refused { why } => Framed::Refused { why: why.clone() },
         }
@@ -418,37 +421,10 @@ impl Size {
     }
 }
 
-enum Lines {
-    Whole(Vec<Row>),
-    Changed(Vec<(usize, Row)>),
-}
-
-struct Paint {
-    size: Size,
-    lines: Lines,
-    cursor: Option<Cursor>,
-    scrolled_back: u32,
-    scrollback: u32,
-}
-
-impl Paint {
-    fn onto(self, grid: &mut Grid) {
-        match self.lines {
-            Lines::Whole(rows) => grid.rows = rows,
-            Lines::Changed(rows) => {
-                assert_eq!(Size::shown(grid), self.size, "a changed frame is painted onto a screen of its size");
-                for (at, row) in rows {
-                    grid.rows[at] = row;
-                }
-            },
-        }
-        grid.width = self.size.width;
-        grid.cursor = self.cursor;
-        grid.scrolled_back = self.scrolled_back;
-        grid.scrollback = self.scrollback;
-        assert_eq!(Size::shown(grid), self.size);
-        assert!(grid.scrolled_back <= grid.scrollback);
-    }
+enum Seen {
+    Opening,
+    Shown(Grid),
+    Ended(End),
 }
 
 struct Painter {
@@ -461,42 +437,40 @@ impl Painter {
         Painter { terminal, palette: appearance.palette() }
     }
 
-    fn unseen(&self) -> Grid {
-        Grid {
-            width: 0,
-            rows: Vec::new(),
-            cursor: None,
-            scrolled_back: 0,
-            scrollback: 0,
-            foreground: self.palette.foreground,
-            background: self.palette.background,
+    fn painted(&self, seen: &mut Seen, frame: mux::Frame) -> Result<bool, String> {
+        if let Seen::Ended(_) = seen {
+            return Ok(false);
         }
-    }
-
-    fn paint(&self, frame: mux::Frame, shown: Size) -> Result<Paint, String> {
         if frame.terminal.as_ref() != Some(&self.terminal) {
             return Err(format!("a frame is of {:?}, which the phone does not show", frame.terminal));
         }
         let size = Size::of(frame.size)?;
-        if frame.scrolled_back > frame.scrollback {
-            let (back, kept) = (frame.scrolled_back, frame.scrollback);
-            return Err(format!("a frame is {back} lines back of the {kept} it keeps"));
+        let (scrolled_back, scrollback) = (frame.scrolled_back, frame.scrollback);
+        if scrolled_back > scrollback {
+            return Err(format!("a frame is {scrolled_back} lines back of the {scrollback} it keeps"));
         }
         let cursor = frame.cursor.map(|cursor| cursor_of(&cursor, size)).transpose()?;
         let palette = self.palette;
-        let lines = match frame.rows.ok_or("a frame has no rows")? {
+        match frame.rows.ok_or("a frame has no rows")? {
             mux::frame::Rows::Whole(mux::Whole { lines }) => {
                 if lines.len() != usize::from(size.height) {
                     return Err(format!("a frame of {} rows has {}", size.height, lines.len()));
                 }
                 let rows = lines.into_iter().map(|line| row(palette, line, size.width));
-                Lines::Whole(rows.collect::<Result<_, _>>()?)
+                let rows = rows.collect::<Result<_, _>>()?;
+                let (foreground, background) = (palette.foreground, palette.background);
+                let width = size.width;
+                let grid = Grid { width, rows, cursor, scrolled_back, scrollback, foreground, background };
+                *seen = Seen::Shown(grid);
             },
             mux::frame::Rows::Changed(mux::Changed { rows }) => {
-                if shown != size {
-                    let Size { width, height } = size;
-                    return Err(format!("a frame changes rows of a {width}x{height} screen the phone has not seen whole"));
-                }
+                let grid = match seen {
+                    Seen::Shown(grid) if Size::shown(grid) == size => grid,
+                    Seen::Opening | Seen::Shown(_) | Seen::Ended(_) => {
+                        let Size { width, height } = size;
+                        return Err(format!("a frame changes rows of a {width}x{height} screen the phone has not seen whole"));
+                    },
+                };
                 let mut changed = vec![false; usize::from(size.height)];
                 let mut rows_painted = Vec::new();
                 for mux::Row { index, line } in rows {
@@ -507,10 +481,13 @@ impl Painter {
                     }
                     rows_painted.push((at, row(palette, line.ok_or("a row of a frame has no line")?, size.width)?));
                 }
-                Lines::Changed(rows_painted)
+                for (at, row) in rows_painted {
+                    grid.rows[at] = row;
+                }
+                (grid.cursor, grid.scrolled_back, grid.scrollback) = (cursor, scrolled_back, scrollback);
             },
-        };
-        Ok(Paint { size, lines, cursor, scrolled_back: frame.scrolled_back, scrollback: frame.scrollback })
+        }
+        Ok(true)
     }
 }
 
@@ -540,16 +517,21 @@ fn key(named: mux::Named, ctrl: bool) -> mux::typed::Event {
     })
 }
 
-fn keystroke(text: &str, ctrl: bool) -> Option<mux::typed::Event> {
+fn keystroke(text: &str, ctrl: bool) -> Result<Option<mux::typed::Event>, String> {
     let mut characters = text.chars();
     let (Some(character), None) = (characters.next(), characters.next()) else {
-        let pasted = mux::typed::Event::Paste(mux::Paste { text: text.to_owned() });
-        return (!text.is_empty()).then_some(pasted);
+        if text.is_empty() {
+            return Ok(None);
+        }
+        if ctrl {
+            return Err(format!("ctrl goes with one key, not the {} characters of {text:?}", text.chars().count()));
+        }
+        return Ok(Some(mux::typed::Event::Paste(mux::Paste { text: text.to_owned() })));
     };
     match character {
-        '\n' | '\r' => return Some(key(mux::Named::Enter, ctrl)),
-        '\t' => return Some(key(mux::Named::Tab, ctrl)),
-        character if character.is_control() => return None,
+        '\n' | '\r' => return Ok(Some(key(mux::Named::Enter, ctrl))),
+        '\t' => return Ok(Some(key(mux::Named::Tab, ctrl))),
+        character if character.is_control() => return Err(format!("{character:?} is no key the phone types")),
         _ => {},
     }
     let mut lower = character.to_lowercase();
@@ -557,35 +539,31 @@ fn keystroke(text: &str, ctrl: bool) -> Option<mux::typed::Event> {
         (Some(lower), None) => lower,
         _ => character,
     };
-    Some(mux::typed::Event::Key(mux::Key {
+    Ok(Some(mux::typed::Event::Key(mux::Key {
         press: mux::Press::Down.into(),
         modifiers: Some(modifiers(ctrl, unshifted != character)),
         key: Some(mux::key::Key::Character(unshifted.into())),
         text: character.to_string(),
-    }))
+    })))
 }
 
-struct Seen {
-    grid: Grid,
-    end: Option<End>,
-}
-
-fn shown(tell: &watch::Sender<Seen>, paint: Paint) {
+fn shown(tell: &watch::Sender<Seen>, painter: &Painter, frame: mux::Frame) -> Result<(), String> {
+    let mut unread = Ok(());
     tell.send_if_modified(|seen| {
-        if seen.end.is_some() {
-            return false;
-        }
-        paint.onto(&mut seen.grid);
-        true
+        painter.painted(seen, frame).unwrap_or_else(|why| {
+            unread = Err(why);
+            false
+        })
     });
+    unread
 }
 
 fn ended(tell: &watch::Sender<Seen>, end: End) {
     tell.send_if_modified(|seen| {
-        if seen.end.is_some() {
+        if let Seen::Ended(_) = seen {
             return false;
         }
-        seen.end = Some(end);
+        *seen = Seen::Ended(end);
         true
     });
 }
@@ -612,11 +590,15 @@ async fn read(
         };
         match event {
             mux::to_viewer::Event::Frame(frame) => {
-                let on_screen = Size::shown(&tell.borrow().grid);
-                match painter.paint(frame, on_screen) {
-                    Ok(paint) => shown(tell, paint),
-                    Err(why) => return End::unread(why),
+                if let Err(why) = shown(tell, &painter, frame) {
+                    return End::unread(why);
                 }
+            },
+            mux::to_viewer::Event::Closed(mux::Closed { terminal }) => {
+                if terminal.as_ref() == Some(&painter.terminal) {
+                    return End::Closed;
+                }
+                return End::unread(format!("{terminal:?} closed, which the phone does not show"));
             },
             mux::to_viewer::Event::Refused(mux::Refused { reason }) => return End::Refused { why: reason },
         }
@@ -656,7 +638,7 @@ impl TerminalView {
             says.try_send(first_word).expect("the first words fit before any other is said");
         }
         let painter = Painter::new(terminal, appearance);
-        let (tell, seen) = watch::channel(Seen { grid: painter.unseen(), end: None });
+        let (tell, seen) = watch::channel(Seen::Opening);
         let tell = Arc::new(tell);
         let telling = Arc::clone(&tell);
         let reading = handle.spawn(async move {
@@ -668,7 +650,7 @@ impl TerminalView {
     }
 
     fn say(&self, event: mux::typed::Event) -> Result<(), Unanswered> {
-        if self.tell.borrow().end.is_some() {
+        if let Seen::Ended(_) = *self.tell.borrow() {
             return Err(Unanswered::refused("the terminal is shown no more"));
         }
         let typed = mux::Typed { terminal: Some(self.terminal), event: Some(event) };
@@ -688,20 +670,25 @@ impl TerminalView {
 impl TerminalView {
     pub async fn next(&self) -> Framed {
         let mut seen = self.seen.lock().await;
-        let ready = seen.has_changed().expect(HELD) || seen.borrow().end.is_some();
-        if !ready {
+        let mut woken = false;
+        loop {
+            {
+                let now = seen.borrow_and_update();
+                match &*now {
+                    Seen::Ended(end) => return end.framed(),
+                    Seen::Shown(grid) if woken || now.has_changed() => {
+                        return Framed::Shown { grid: grid.clone() };
+                    },
+                    Seen::Opening | Seen::Shown(_) => {},
+                }
+            }
             seen.changed().await.expect(HELD);
+            woken = true;
         }
-        let now = seen.borrow_and_update();
-        if let Some(end) = &now.end {
-            return end.framed();
-        }
-        assert_ne!(now.grid.width, 0, "a change shows a whole screen or ends it");
-        Framed::Shown { grid: now.grid.clone() }
     }
 
     pub fn typed(&self, text: &str, ctrl: bool) -> Result<(), Unanswered> {
-        match keystroke(text, ctrl) {
+        match keystroke(text, ctrl).map_err(Unanswered::refused)? {
             Some(event) => self.say(event),
             None => Ok(()),
         }
@@ -733,20 +720,24 @@ mod tests {
 
     struct Screen {
         painter: Painter,
-        grid: Grid,
+        seen: Seen,
     }
 
     impl Screen {
         fn new(appearance: Appearance) -> Screen {
-            let painter = Painter::new(key_of(), appearance);
-            let grid = painter.unseen();
-            Screen { painter, grid }
+            Screen { painter: Painter::new(key_of(), appearance), seen: Seen::Opening }
         }
 
         fn apply(&mut self, frame: mux::Frame) -> Result<Grid, String> {
-            let paint = self.painter.paint(frame, Size::shown(&self.grid))?;
-            paint.onto(&mut self.grid);
-            Ok(self.grid.clone())
+            assert!(self.painter.painted(&mut self.seen, frame)?, "a frame before the end draws");
+            Ok(self.grid())
+        }
+
+        fn grid(&self) -> Grid {
+            match &self.seen {
+                Seen::Shown(grid) => grid.clone(),
+                Seen::Opening | Seen::Ended(_) => panic!("the screen shows no grid"),
+            }
         }
     }
 
@@ -842,7 +833,7 @@ mod tests {
         assert_eq!(screen.apply(twice).unwrap_err(), "a frame changes row 0 twice");
         let past = changed(1, 2, vec![(2, line(vec![narrow("d")]))]);
         assert_eq!(screen.apply(past).unwrap_err(), "a frame has no row 2");
-        assert_eq!(screen.grid, grid, "a frame that does not draw leaves the screen as it was");
+        assert_eq!(screen.grid(), grid, "a frame that does not draw leaves the screen as it was");
     }
 
     #[test]
@@ -905,9 +896,9 @@ mod tests {
         assert_eq!(indexed(&DARK, 255), rgb(238, 238, 238));
     }
 
-    fn pressed(event: Option<mux::typed::Event>) -> (mux::key::Key, bool, bool, String) {
+    fn pressed(event: Result<Option<mux::typed::Event>, String>) -> (mux::key::Key, bool, bool, String) {
         match event {
-            Some(mux::typed::Event::Key(mux::Key { key: Some(key), modifiers: Some(modifiers), text, press })) => {
+            Ok(Some(mux::typed::Event::Key(mux::Key { key: Some(key), modifiers: Some(modifiers), text, press }))) => {
                 assert_eq!(press, i32::from(mux::Press::Down));
                 (key, modifiers.ctrl, modifiers.shift, text)
             },
@@ -924,18 +915,20 @@ mod tests {
     }
 
     #[test]
-    fn a_keystroke_goes_up_as_a_key_and_more_than_one_character_as_a_paste() {
+    fn a_keystroke_goes_up_as_a_key_and_more_than_one_character_as_a_paste_with_no_ctrl() {
         assert_eq!(pressed(keystroke("a", false)), (character('a'), false, false, "a".to_owned()));
         assert_eq!(pressed(keystroke("A", false)), (character('a'), false, true, "A".to_owned()));
         assert_eq!(pressed(keystroke("c", true)), (character('c'), true, false, "c".to_owned()));
         assert_eq!(pressed(keystroke("\n", false)), (named(mux::Named::Enter), false, false, String::new()));
         assert_eq!(pressed(keystroke("\t", true)), (named(mux::Named::Tab), true, false, String::new()));
         assert_eq!(pressed(keystroke("!", false)), (character('!'), false, false, "!".to_owned()));
-        let pasted = keystroke("git status\n", true);
-        assert_eq!(pasted, Some(mux::typed::Event::Paste(mux::Paste { text: "git status\n".to_owned() })));
-        assert_eq!(keystroke("", true), None);
-        assert_eq!(keystroke("\u{7}", false), None, "a control character alone is no keystroke");
-        assert_eq!(pressed(Some(key(KeyName::Escape.named(), false))), (named(mux::Named::Escape), false, false, String::new()));
+        let pasted = keystroke("git status\n", false);
+        assert_eq!(pasted, Ok(Some(mux::typed::Event::Paste(mux::Paste { text: "git status\n".to_owned() }))));
+        let ctrl_pasted = keystroke("ab", true);
+        assert_eq!(ctrl_pasted, Err("ctrl goes with one key, not the 2 characters of \"ab\"".to_owned()));
+        assert_eq!(keystroke("", true), Ok(None));
+        assert_eq!(keystroke("\u{7}", false), Err("'\\u{7}' is no key the phone types".to_owned()));
+        assert_eq!(pressed(Ok(Some(key(KeyName::Escape.named(), false)))), (named(mux::Named::Escape), false, false, String::new()));
     }
 
     #[test]
@@ -949,12 +942,45 @@ mod tests {
     #[test]
     fn a_frame_after_the_end_changes_nothing() {
         let painter = Painter::new(key_of(), Appearance::Dark);
-        let (tell, seen) = watch::channel(Seen { grid: painter.unseen(), end: None });
-        ended(&tell, End::Lost { why: CLOSED.to_owned() });
+        let (tell, seen) = watch::channel(Seen::Opening);
+        shown(&tell, &painter, whole(1, vec![line(vec![narrow("a")])])).unwrap();
+        ended(&tell, End::Closed);
         ended(&tell, End::Refused { why: "later".to_owned() });
-        let paint = painter.paint(whole(1, vec![line(vec![narrow("a")])]), Size { width: 0, height: 0 });
-        shown(&tell, paint.unwrap());
-        assert_eq!(seen.borrow().end, Some(End::Lost { why: CLOSED.to_owned() }));
-        assert_eq!(seen.borrow().grid, painter.unseen());
+        shown(&tell, &painter, whole(1, vec![line(vec![narrow("b")])])).unwrap();
+        assert!(matches!(*seen.borrow(), Seen::Ended(End::Closed)));
+    }
+
+    #[test]
+    fn the_view_tells_the_latest_screen_once_and_then_its_end() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let painter = Painter::new(key_of(), Appearance::Dark);
+        let (tell, heard) = mpsc::channel(SAID_HELD);
+        let (tell_seen, seen) = watch::channel(Seen::Opening);
+        let tell_seen = Arc::new(tell_seen);
+        let reading = runtime.spawn(async {});
+        let terminal = key_of();
+        let seen = tokio::sync::Mutex::new(seen);
+        let view = TerminalView { terminal, says: tell, tell: Arc::clone(&tell_seen), seen, reading };
+        shown(&tell_seen, &painter, whole(1, vec![line(vec![narrow("a")])])).unwrap();
+        shown(&tell_seen, &painter, whole(1, vec![line(vec![narrow("b")])])).unwrap();
+        let Framed::Shown { grid } = runtime.block_on(view.next()) else {
+            panic!("a screen is shown");
+        };
+        assert_eq!(texts(&grid), vec![vec![(0, "b")]], "frames piled up show only the latest");
+        let painted_later = async {
+            tokio::task::yield_now().await;
+            shown(&tell_seen, &painter, whole(1, vec![line(vec![narrow("c")])])).unwrap();
+        };
+        let (later, ()) = runtime.block_on(async { tokio::join!(view.next(), painted_later) });
+        let Framed::Shown { grid } = later else {
+            panic!("a screen painted while the view waits is shown");
+        };
+        assert_eq!(texts(&grid), vec![vec![(0, "c")]]);
+        ended(&tell_seen, End::Closed);
+        assert_eq!(runtime.block_on(view.next()), Framed::Closed);
+        assert_eq!(runtime.block_on(view.next()), Framed::Closed, "an end is told again to each ask");
+        let typed = view.typed("x", false);
+        assert!(matches!(typed, Err(Unanswered::Refused { .. })), "{typed:?}");
+        drop(heard);
     }
 }

@@ -195,6 +195,7 @@ type Screens = BTreeMap<u32, (Vec<String>, api::Frame)>;
 
 pub struct Viewer {
     pub refused: Vec<String>,
+    pub closed: Vec<u32>,
     screens: Screens,
     to: mpsc::Sender<api::FromViewer>,
     from: Streaming<api::ToViewer>,
@@ -212,7 +213,7 @@ impl Viewer {
         let (to, said) = mpsc::channel(64);
         to.send(viewer_said(api::from_viewer::Event::Hello(greeting))).await.unwrap();
         let from = mux.show(ReceiverStream::new(said)).await?.into_inner();
-        Ok(Viewer { refused: Vec::new(), screens: BTreeMap::new(), to, from })
+        Ok(Viewer { refused: Vec::new(), closed: Vec::new(), screens: BTreeMap::new(), to, from })
     }
 
     pub async fn send(&self, said: api::from_viewer::Event) {
@@ -255,6 +256,7 @@ impl Viewer {
         match &event {
             api::to_viewer::Event::Frame(frame) => applied(&mut self.screens, frame),
             api::to_viewer::Event::Refused(refused) => self.refused.push(refused.reason.clone()),
+            api::to_viewer::Event::Closed(closed) => self.closed.push(closed.terminal.unwrap().id),
         }
         Ok(Some(event))
     }

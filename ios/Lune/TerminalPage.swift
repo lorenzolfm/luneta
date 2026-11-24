@@ -9,7 +9,9 @@ struct TerminalPlace: Hashable {
 
 private enum Seeing {
     case opening
-    case shown(TerminalGrid)
+    case shown(TerminalGrid, through: TerminalView)
+    case paused(TerminalGrid)
+    case closed
     case ended(String)
 }
 
@@ -25,7 +27,6 @@ struct TerminalPage: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.scenePhase) private var phase
     @State private var seeing = Seeing.opening
-    @State private var viewing: TerminalView?
     @State private var opens: UInt64 = 0
     @State private var typing = false
     @State private var ctrl = false
@@ -47,8 +48,8 @@ struct TerminalPage: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                if case .shown = seeing {
-                    KeyBar(ctrl: $ctrl, typing: $typing, press: press)
+                if case .shown(_, let view) = seeing {
+                    KeyBar(ctrl: $ctrl, typing: $typing) { press($0, into: view) }
                 }
             }
             .task(id: Viewing(opens: opens, active: phase == .active, appearance: appearance)) {
@@ -65,10 +66,14 @@ struct TerminalPage: View {
         switch seeing {
         case .opening:
             ProgressView("Opening the terminal")
-        case .shown(let grid):
-            TerminalScreen(
-                grid: grid, size: $size, typing: $typing, typed: type,
-                deleted: { press(.backspace) }, scroll: scroll)
+        case .shown(let grid, let view):
+            TerminalScreen(grid: grid, size: $size, typing: $typing, input: input(into: view))
+        case .paused(let grid):
+            TerminalScreen(grid: grid, size: $size, typing: $typing, input: nil)
+        case .closed:
+            ContentUnavailableView(
+                "The terminal closed", systemImage: "terminal",
+                description: Text("Its program ended, or the desktop closed it."))
         case .ended(let why):
             ContentUnavailableView {
                 Label("The terminal is not shown", systemImage: "terminal")
@@ -89,12 +94,11 @@ struct TerminalPage: View {
             seeing = .ended(reason(error))
             return
         }
-        viewing = view
         failed = nil
         defer {
             view.close()
-            if viewing === view {
-                viewing = nil
+            if case .shown(let grid, let shownBy) = seeing, shownBy === view {
+                seeing = .paused(grid)
             }
         }
         while !Task.isCancelled {
@@ -106,7 +110,10 @@ struct TerminalPage: View {
             guard !Task.isCancelled else { return }
             switch framed {
             case .shown(let grid):
-                seeing = .shown(grid)
+                seeing = .shown(grid, through: view)
+            case .closed:
+                seeing = .closed
+                return
             case .lost(let why), .refused(let why):
                 seeing = .ended(why)
                 return
@@ -114,27 +121,24 @@ struct TerminalPage: View {
         }
     }
 
-    private func type(_ text: String) {
-        said { try $0.typed(text: text, ctrl: ctrl) }
+    private func input(into view: TerminalView) -> TerminalInput {
+        TerminalInput(
+            typed: { text in
+                said { try view.typed(text: text, ctrl: ctrl) }
+                ctrl = false
+            },
+            deleted: { press(.backspace, into: view) },
+            scroll: { back in said { try view.scroll(back: back) } })
+    }
+
+    private func press(_ key: KeyName, into view: TerminalView) {
+        said { try view.pressed(key: key, ctrl: ctrl) }
         ctrl = false
     }
 
-    private func press(_ key: KeyName) {
-        said { try $0.pressed(key: key, ctrl: ctrl) }
-        ctrl = false
-    }
-
-    private func scroll(_ back: Int32) {
-        said { try $0.scroll(back: back) }
-    }
-
-    private func said(_ saying: (TerminalView) throws -> Void) {
-        guard let viewing else {
-            failed = "the terminal is opening again, so that went nowhere"
-            return
-        }
+    private func said(_ saying: () throws -> Void) {
         do {
-            try saying(viewing)
+            try saying()
             failed = nil
         } catch {
             failed = reason(error)

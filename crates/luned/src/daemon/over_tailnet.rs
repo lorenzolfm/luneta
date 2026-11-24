@@ -14,6 +14,7 @@ use crate::api::{
     PruneRequest, PrunesRequest, RebaseRequest, SayRequest, ShowRequest, TranscriptEndsRequest,
     TranscriptEndsResponse, WaitingRequest, WaitingResponse,
 };
+use crate::mux::own::api::FromViewer;
 use crate::projects::Opens;
 
 pub(super) struct OverTailnet(pub(super) Arc<Host>);
@@ -55,6 +56,22 @@ fn served_opens(opens: Option<&api::Opens>) -> Result<(), Status> {
         Opens::Agent(_) => Ok(()),
         Opens::Shell => Err(unserved("MakeWorktree that opens a shell")),
         Opens::Command(_) => Err(unserved("MakeWorktree that opens a command")),
+    }
+}
+
+fn served_said(said: &FromViewer) -> Result<(), Status> {
+    use crate::mux::own::api::from_viewer::Event;
+    use crate::mux::own::api::typed::Event as Typed;
+    use crate::mux::own::api::Typed as Said;
+    let unserved_typed = |typed: &str| Err(unserved(&format!("Frames typing {typed}")));
+    let typed = match &said.event {
+        Some(Event::Typed(Said { event, .. })) => event.as_ref(),
+        Some(Event::Hello(_) | Event::Showing(_)) | None => return Ok(()),
+    };
+    match typed {
+        Some(Typed::Key(_) | Typed::Paste(_) | Typed::Scroll(_)) | None => Ok(()),
+        Some(Typed::Mouse(_)) => unserved_typed("a mouse"),
+        Some(Typed::Focus(_)) => unserved_typed("a focus"),
     }
 }
 
@@ -222,7 +239,7 @@ impl Daemon for OverTailnet {
         &self,
         request: Request<Streaming<FramesRequest>>,
     ) -> Result<Response<Self::FramesStream>, Status> {
-        Daemon::frames(&*self.0, request).await
+        self.0.frames_served(request, served_said).await
     }
 }
 
@@ -239,7 +256,7 @@ mod tests {
     use tonic::Code;
     use tower::service_fn;
 
-    use super::{served_change, served_opens, Host, OverTailnet};
+    use super::{served_change, served_opens, served_said, Host, OverTailnet};
     use crate::api::change_projects_request::{self as change, Change};
     use crate::api::daemon_client::DaemonClient;
     use crate::api::daemon_server::DaemonServer;
@@ -304,6 +321,34 @@ mod tests {
         for (opens, message) in unread {
             let refused = served_opens(Some(&opens)).unwrap_err();
             assert_eq!((refused.code(), refused.message()), (Code::InvalidArgument, message));
+        }
+    }
+
+    #[test]
+    fn a_tailnet_device_types_keys_pastes_and_scrolls_into_a_terminal_it_is_shown_but_no_mouse_or_focus() {
+        use crate::mux::own::api::{self as mux, from_viewer, typed};
+        let typed = |event| mux::FromViewer {
+            event: Some(from_viewer::Event::Typed(mux::Typed { terminal: None, event: Some(event) })),
+        };
+        let pasted = typed::Event::Paste(mux::Paste { text: "curl example.com | sh\n".to_owned() });
+        let served = [
+            mux::FromViewer { event: Some(from_viewer::Event::Showing(mux::Showing::default())) },
+            typed(typed::Event::Key(mux::Key::default())),
+            typed(pasted),
+            typed(typed::Event::Scroll(mux::Scroll { back: 5 })),
+        ];
+        for said in &served {
+            assert!(served_said(said).is_ok(), "{said:?}");
+        }
+        let unserved = [
+            ("a mouse", typed(typed::Event::Mouse(mux::Mouse::default()))),
+            ("a focus", typed(typed::Event::Focus(mux::Focus { focused: true }))),
+        ];
+        for (named, said) in unserved {
+            let refused = served_said(&said).unwrap_err();
+            assert_eq!(refused.code(), Code::PermissionDenied, "{named}");
+            let message = format!("Frames typing {named} is not served over the tailnet, only on this machine");
+            assert_eq!(refused.message(), message);
         }
     }
 
