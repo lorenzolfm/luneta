@@ -125,23 +125,24 @@ pub fn follow(core: SyncSender<core::Command>, sweep: Duration) -> io::Result<()
 }
 
 fn fetch(dir: &str, branch: &str) -> Result<Upstream, String> {
-    let mut lune = Command::new(links::lune()?);
-    git::local(git::configured(&mut lune, &QUIET).args(["fetch-upstream", "--", dir, branch]))
+    let unrun = |why| format!("luned fetch-upstream could not be run: {why}");
+    let mut luned = Command::new(program::luned().map_err(unrun)?);
+    git::local(git::configured(&mut luned, &QUIET).args(["fetch-upstream", "--", dir, branch]))
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("SSH_ASKPASS_REQUIRE", "never")
         .env("GIT_OPTIONAL_LOCKS", "0");
-    let ran = program::run_alone(&mut lune, FETCHING)
-        .map_err(|error| format!("lune fetch-upstream could not be run: {error}"))?;
+    let ran = program::run_alone(&mut luned, FETCHING)
+        .map_err(|error| format!("luned fetch-upstream could not be run: {error}"))?;
     match ran {
         Ran::Ended { status, stdout, .. } if status.success() => {
             let printed = String::from_utf8_lossy(&stdout);
             let word = printed.trim_end();
             links::upstream_of_word(word)
-                .ok_or_else(|| format!("lune fetch-upstream said {word:?}, which is no answer"))
+                .ok_or_else(|| format!("luned fetch-upstream said {word:?}, which is no answer"))
         },
         Ran::Ended { status, stderr, .. } => {
             let said = String::from_utf8_lossy(&stderr);
-            Err(links::failure(&said).unwrap_or_else(|| format!("lune fetch-upstream: {status}")))
+            Err(links::failure(&said).unwrap_or_else(|| format!("luned fetch-upstream: {status}")))
         },
         Ran::Stuck => Err("it did not end in time".to_owned()),
     }

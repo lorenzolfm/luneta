@@ -725,7 +725,7 @@ fn a_lune_started_in_a_shell_of_the_view_it_shows_leaves_the_view_its_size() {
     eventually("lune shows work", || shown(&owned, &dir.path));
     let size = || owned.listing().terminals.first()?.size.map(|it| (it.columns, it.rows));
     let first = eventually("the shell is sized", size);
-    window.send(&format!("{LUNE}\r"));
+    window.send(&format!("{}\r", LUNE.as_str()));
     eventually("the inner lune says it runs there", || window.shows(HERE).then_some(()));
     let resized = || (size() != Some(first)).then(|| (size(), window.screen()));
     let quiet = const { Span::of(QUIET.saturating_mul(2)) };

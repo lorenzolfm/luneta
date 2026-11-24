@@ -45,7 +45,7 @@ const WORKED_MAX: usize = 1024;
 
 const ORIGIN: &str = "origin";
 
-pub const WHY: &str = "lune: ";
+pub const WHY: &str = "luned: ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
@@ -1187,7 +1187,7 @@ fn across(dir: &str, command: &'static str, args: &[&str]) -> Result<Vec<u8>, St
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
 
-pub const MOVED_OFF: &str = "moved off: ";
+const MOVED_OFF: &str = "moved off: ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Taken<P> {
@@ -1199,7 +1199,7 @@ pub fn worktree(dir: &str, of: &Of) -> Result<Directory, Unready> {
     match worktree_said(ran_worktree(dir, of, &[])?)? {
         Taken::OnBranch(folder) => Ok(folder),
         Taken::MovedOff(folder) => Err(Unready::InDoubt(format!(
-            "lune worktree said {folder} moved off the branch, which luned did not ask of it"
+            "luned worktree said {folder} moved off the branch, which luned did not ask of it"
         ))),
     }
 }
@@ -1209,12 +1209,31 @@ fn worktree_or_moved_off(dir: &str, of: &Of) -> Result<Taken<Directory>, Unready
 }
 
 fn ran_worktree(dir: &str, of: &Of, flags: &[&str]) -> Result<Ran, Unready> {
-    let mut lune = Command::new(lune()?);
-    git::local(lune.args(["worktree", "--repo", dir]).args(flags));
-    lune.args(["--", &of.to_string()]);
-    let ran = program::run_alone(&mut lune, MAKING)
-        .map_err(|error| format!("lune worktree could not be run: {error}"))?;
+    let unrun = |why| format!("luned worktree could not be run: {why}");
+    let mut luned = Command::new(program::luned().map_err(unrun)?);
+    git::local(luned.args(["worktree", "--repo", dir]).args(flags));
+    luned.args(["--", &of.to_string()]);
+    let ran = program::run_alone(&mut luned, MAKING)
+        .map_err(|error| format!("luned worktree could not be run: {error}"))?;
     Ok(ran)
+}
+
+impl Taken<PathBuf> {
+    fn said(&self) -> String {
+        match self {
+            Taken::OnBranch(folder) => folder.display().to_string(),
+            Taken::MovedOff(folder) => format!("{MOVED_OFF}{}", folder.display()),
+        }
+    }
+}
+
+pub(crate) fn worktree_made(repo: &str, of: &Of, moved_off: bool) -> Result<String, String> {
+    let made = if moved_off {
+        made_or_moved_off(repo, of)?
+    } else {
+        Taken::OnBranch(made(repo, of)?)
+    };
+    Ok(made.said())
 }
 
 fn worktree_said(ran: Ran) -> Result<Taken<Directory>, Unready> {
@@ -1223,38 +1242,25 @@ fn worktree_said(ran: Ran) -> Result<Taken<Directory>, Unready> {
             let printed = String::from_utf8_lossy(&stdout);
             let said = printed.strip_suffix('\n').filter(|said| !said.is_empty());
             let Some(said) = said else {
-                return Err(Unready::InDoubt("lune worktree said no worktree".to_owned()));
+                return Err(Unready::InDoubt("luned worktree said no worktree".to_owned()));
             };
             let taken = match said.strip_prefix(MOVED_OFF) {
                 Some(path) => directory(path).map(Taken::MovedOff),
                 None => directory(said).map(Taken::OnBranch),
             };
             taken.ok_or_else(|| {
-                Unready::InDoubt(format!("lune worktree said {said}, which is no directory"))
+                Unready::InDoubt(format!("luned worktree said {said}, which is no directory"))
             })
         },
         Ran::Ended { status, stderr, .. } => match failure(&String::from_utf8_lossy(&stderr)) {
             Some(why) => Err(Unready::Failed(why)),
-            None => Err(Unready::InDoubt(format!("lune worktree: {status}"))),
+            None => Err(Unready::InDoubt(format!("luned worktree: {status}"))),
         },
         Ran::Stuck => Err(Unready::InDoubt(format!(
             "the worktree took longer than {} minutes to make",
             MAKING.as_secs() / 60
         ))),
     }
-}
-
-pub(crate) fn lune() -> Result<PathBuf, String> {
-    let this = env::current_exe()
-        .map_err(|error| format!("lune cannot tell where it is: {error}"))?;
-    if this.file_name().is_some_and(|name| name == "lune") {
-        return Ok(this);
-    }
-    let beside = this.with_file_name("lune");
-    if beside.is_file() {
-        return Ok(beside);
-    }
-    Err(format!("no lune is beside {}, to make the worktree with", this.display()))
 }
 
 pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
@@ -1844,7 +1850,7 @@ mod tests {
     #[test]
     fn why_no_worktree_was_made_comes_last_after_what_wt_says_as_it_goes() {
         let stderr = "  pull       #2736 (asking origin for its branch)\n\
-                      lune: wt add: wt cannot fetch origin/feat\n  run git fetch origin feat\n";
+                      luned: wt add: wt cannot fetch origin/feat\n  run git fetch origin feat\n";
         assert_eq!(
             failure(stderr).as_deref(),
             Some("wt add: wt cannot fetch origin/feat, run git fetch origin feat")
@@ -2043,7 +2049,7 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_may_be_made_unless_lune_worktree_said_why_it_failed() {
+    fn a_worktree_may_be_made_unless_luned_worktree_said_why_it_failed() {
         let failed = format!("{WHY}it is not there\n");
         let failed = worktree_said(ended(1, b"", failed.as_bytes()));
         assert_eq!(failed, Err(Unready::Failed("it is not there".to_owned())));
@@ -2063,6 +2069,18 @@ mod tests {
             let said = worktree_said(unsure);
             assert!(matches!(said, Err(Unready::InDoubt(_))), "{said:?}");
         }
+    }
+
+    #[test]
+    fn what_luned_worktree_says_of_a_worktree_reads_back_as_that_worktree() {
+        let scratch = tempfile::tempdir().unwrap();
+        let folder = fs::canonicalize(scratch.path()).unwrap();
+        let dir = directory(folder.to_str().unwrap());
+        let read = |taken: Taken<PathBuf>| {
+            worktree_said(ended(0, format!("{}\n", taken.said()).as_bytes(), b""))
+        };
+        assert_eq!(read(Taken::OnBranch(folder.clone())), Ok(Taken::OnBranch(dir.clone())));
+        assert_eq!(read(Taken::MovedOff(folder)), Ok(Taken::MovedOff(dir)));
     }
 
     #[test]

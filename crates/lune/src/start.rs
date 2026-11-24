@@ -11,6 +11,7 @@ use luned::projects::{Argv, Dir, Opens, WorktreeId};
 use luned::Directory;
 
 use crate::agents::Kept;
+use crate::state;
 use crate::machines::Machine;
 use crate::worktrees::{self, Landed, Landing, Opening, Went};
 
@@ -190,7 +191,7 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let off = ready.moved_off.then(|| Work::Link(link.clone()).off_branch(ready.branch.as_deref()));
     let agent = match (link.kind(), &off) {
         (Kind::Issue, None) => {
-            let harness = Kept::shared().0.harness();
+            let harness = Kept::shared(&state::Folder::of_user()).0.harness();
             let agent = Argv::on_words(harness, format!("{TACKLE} {}", link.url()), &[]);
             let unstarted = |why| format!("no agent starts on {}: {why}", link.tab());
             Opens::Command(agent.map_err(unstarted)?)

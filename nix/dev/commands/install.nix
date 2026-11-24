@@ -19,7 +19,7 @@ in
 
     ${compileEnv}
     stamp="$(date +%s)"
-    LUNE_BUILT="$stamp" cargo build --locked -p luned -p lune-mux
+    LUNE_BUILT="$stamp" cargo build --locked -p lune -p luned -p lune-mux
     target="$(cargo metadata --locked --no-deps --format-version 1 | jq -r .target_directory)/debug"
 
     mkdir -p "$bin" "$builds"

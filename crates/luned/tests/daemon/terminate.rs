@@ -19,7 +19,7 @@ struct Said {
 }
 
 fn terminate(vars: Vars, yes: Option<&str>) -> Said {
-    let mut command = vars.command(LUNE);
+    let mut command = vars.command(&LUNE);
     command.arg("terminate").stdin(Stdio::null());
     if let Some(plan) = yes {
         command.args(["--yes", plan]);
@@ -70,7 +70,7 @@ fn lune_terminate_ends_luned_the_mux_its_terminals_and_lunes_and_forgets_the_pro
         panic!("the terminal runs: {listing:?}");
     };
     let shell = runs.pid;
-    let mut bridge = owned.host.vars().command(LUNE);
+    let mut bridge = owned.host.vars().command(&LUNE);
     bridge.arg("bridge").stdin(Stdio::piped()).stdout(Stdio::piped());
     let mut bridge = Running::spawn(&mut bridge);
     let _held = bridge.piped();
@@ -269,7 +269,7 @@ fn lune_terminate_skips_a_hosts_line_that_names_this_machine_and_runs_no_ssh_to_
 }
 
 fn here_ending(vars: Vars, key: &str, set: &[(&str, &str)]) -> Said {
-    let mut command = vars.command(LUNE);
+    let mut command = vars.command(&LUNE);
     command.args(["terminate", "--here", "--ending", key]).stdin(Stdio::null());
     command.envs(set.iter().copied());
     let output = answered(&mut command);
@@ -285,7 +285,7 @@ fn here_ending(vars: Vars, key: &str, set: &[(&str, &str)]) -> Said {
 fn lune_terminate_here_ends_nothing_in_lune_s_terminal_or_on_a_key_that_changed() {
     let host = Host::new();
     let mut daemon = start(host.vars()).unwrap();
-    let mut asked = host.vars().command(LUNE);
+    let mut asked = host.vars().command(&LUNE);
     let asked = answered(asked.args(["terminate", "--here"]).stdin(Stdio::null()));
     assert!(asked.status.success(), "{}", String::from_utf8_lossy(&asked.stderr));
     let stdout = String::from_utf8(asked.stdout).unwrap();

@@ -35,7 +35,7 @@ pub const ALLOWED: [&str; 11] = [
     "Bash(gh issue list:*)",
     "Bash(gh pr view:*)",
     "Bash(gh pr list:*)",
-    "Bash(lune worktree:*)",
+    "Bash(luned worktree:*)",
     "Bash(git worktree add:*)",
     "Bash(git worktree list:*)",
 ];
@@ -48,7 +48,7 @@ pub const SYSTEM: &str = "You run in lune's ask box. The user typed what they wa
     they ask with lune's commands, as the lune skill below says, and end with a line or two \
     on what you did, and where. Run one command in each call to Bash, with nothing around it: \
     no $(…), no pipes, no && and no ;. Only these run: lune start, agents and prune, zoxide \
-    query, gh issue view and list, gh pr view and list, lune worktree, and git worktree add \
+    query, gh issue view and list, gh pr view and list, luned worktree, and git worktree add \
     and list. Claude Code denies any other. You cannot wait for the user in the middle of a \
     turn: to ask them anything, as the skill has you ask before a prune, or which of two things \
     they meant, end your turn with the question. Their answer comes as the next message. So a \

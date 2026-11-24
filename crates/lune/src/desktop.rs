@@ -95,7 +95,7 @@ pub enum Reader<'a> {
 }
 
 impl Desktop {
-    pub fn start(events: &Sender<Event>) -> Desktop {
+    pub fn start(events: &Sender<Event>, luned: Result<PathBuf, String>) -> Desktop {
         let events = events.clone();
         if elsewhere() {
             return Desktop { serving: None, role: Role::Elsewhere, events };
@@ -103,8 +103,12 @@ impl Desktop {
         let (orders, taken) = channel::unbounded_channel();
         let serving = events.clone();
         let worker = thread::spawn(move || serve(taken, &serving));
-        peers::wait(events.clone());
+        peers::wait(events.clone(), luned);
         Desktop { serving: Some((orders, worker)), role: Role::Undecided, events }
+    }
+
+    pub fn unserved(events: &Sender<Event>) -> Desktop {
+        Desktop { serving: None, role: Role::Undecided, events: events.clone() }
     }
 
     pub fn post(&self, alert: Alert) {

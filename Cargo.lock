@@ -1505,6 +1505,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "lune"
+version = "0.3.0"
+dependencies = [
+ "alacritty_terminal",
+ "alsa",
+ "base64 0.22.1",
+ "clap",
+ "cpal",
+ "crossterm",
+ "frizbee",
+ "lune-protocol",
+ "lune-waits",
+ "luned",
+ "notify",
+ "prost",
+ "prost-types",
+ "ptts",
+ "ratatui",
+ "rustix",
+ "serde",
+ "serde_json",
+ "signal-hook 0.3.18",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "transcribe-cpp",
+ "unicode-segmentation",
+ "unicode-width",
+ "xn",
+ "zbus",
+]
+
+[[package]]
 name = "lune-mux"
 version = "0.3.0"
 dependencies = [
@@ -1572,12 +1606,8 @@ name = "luned"
 version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
- "alsa",
  "base64 0.22.1",
  "clap",
- "cpal",
- "crossterm",
- "frizbee",
  "hyper-util",
  "libc",
  "lune-phone",
@@ -1586,12 +1616,9 @@ dependencies = [
  "notify",
  "prost",
  "prost-types",
- "ptts",
- "ratatui",
  "rustix",
  "serde",
  "serde_json",
- "signal-hook 0.3.18",
  "sysinfo",
  "tempfile",
  "tokio",
@@ -1600,13 +1627,8 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tower",
- "transcribe-cpp",
- "unicode-segmentation",
- "unicode-width",
  "uzers",
  "wt",
- "xn",
- "zbus",
 ]
 
 [[package]]
