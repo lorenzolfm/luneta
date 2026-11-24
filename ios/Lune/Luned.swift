@@ -2,11 +2,6 @@ import Foundation
 import LunePhone
 import Observation
 
-struct Seat: Hashable {
-    let machine: String?
-    let terminal: TerminalKey
-}
-
 struct ProjectSeat: Hashable {
     let machine: String?
     let project: UInt64
@@ -83,8 +78,8 @@ final class Luned {
         reach = .watching(host: host, core: core, heard: heard.unwatched)
     }
 
-    func agent(at seat: Seat) -> Agent? {
-        model?.inbox.first { $0.seat == seat }
+    func agent(at terminal: TerminalKey) -> Agent? {
+        model?.inbox.first { $0.terminal == terminal }
     }
 
     func held(on machine: String?) -> Held? {
@@ -117,8 +112,8 @@ final class Luned {
         try await reached().newAgent(on: machine, project: project, branch: branch, words: words)
     }
 
-    func close(_ view: TerminalKey, on machine: String?) async throws {
-        try await reached().closeView(on: machine, terminal: view)
+    func close(_ view: TerminalKey) async throws {
+        try await reached().closeView(terminal: view)
     }
 
     func close(_ worktree: Worktree, on machine: String?) async throws {
@@ -126,8 +121,8 @@ final class Luned {
             on: machine, worktree: worktree.id, seen: worktree.views.map(\.id))
     }
 
-    func waiting(at seat: Seat) async throws -> Waiting {
-        try await reached().waiting(on: seat.machine, terminal: seat.terminal)
+    func waiting(at terminal: TerminalKey) async throws -> Waiting {
+        try await reached().waiting(terminal: terminal)
     }
 
     func answer(_ answer: Answer, on screen: Screen) async throws {

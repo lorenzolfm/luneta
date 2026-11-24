@@ -30,7 +30,7 @@ struct TreeView: View {
             }
             .navigationTitle("Tree")
             .navigationDestination(for: ProjectSeat.self) { ProjectView(seat: $0) }
-            .navigationDestination(for: Seat.self) { AgentView(seat: $0) }
+            .navigationDestination(for: TerminalKey.self) { AgentView(terminal: $0) }
         }
     }
 }

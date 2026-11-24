@@ -278,9 +278,9 @@ impl Core {
         }
     }
 
-    async fn changed(&self, on: Option<String>, change: Change) -> Result<(), Unanswered> {
+    async fn changed(&self, on: Option<On>, change: Change) -> Result<(), Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
-        let request = api::ChangeProjectsRequest { on: self::on(on), change: Some(change) };
+        let request = api::ChangeProjectsRequest { on, change: Some(change) };
         self.on_runtime(async move {
             unary(patience, Refusals::Changes, daemon.change_projects(request)).await.map(drop)
         })
@@ -317,26 +317,24 @@ impl Core {
         Arc::new(Conversation { core: self, on, cwd, talked })
     }
 
-    pub async fn waiting(
-        &self,
-        on: Option<String>,
-        terminal: TerminalKey,
-    ) -> Result<Waiting, Unanswered> {
+    pub async fn waiting(&self, terminal: Arc<TerminalKey>) -> Result<Waiting, Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
-        let request = api::WaitingRequest { on: self::on(on.clone()), terminal: Some(terminal.to_api()) };
+        let (on, key) = terminal.to_api();
+        let request = api::WaitingRequest { on, terminal: Some(key) };
         self.on_runtime(async move {
             let said = unary(patience, Refusals::Others, daemon.waiting(request)).await?;
-            Waiting::of(on, terminal, said)
+            Waiting::of(terminal, said)
         })
         .await
     }
 
     pub async fn answer(&self, screen: Screen, answer: Answer) -> Result<(), Unanswered> {
         let (mut daemon, patience) = (self.daemon.clone(), self.patience);
-        let Screen { on, terminal, shown } = screen;
+        let Screen { terminal, shown } = screen;
+        let (on, key) = terminal.to_api();
         let request = api::AnswerRequest {
-            on: self::on(on),
-            terminal: Some(terminal.to_api()),
+            on,
+            terminal: Some(key),
             shown: Some(shown),
             answer: Some(answer.into_api()),
         };
@@ -374,12 +372,9 @@ impl Core {
         .await
     }
 
-    pub async fn close_view(
-        &self,
-        on: Option<String>,
-        terminal: TerminalKey,
-    ) -> Result<(), Unanswered> {
-        let change = Change::CloseView(CloseView { terminal: Some(terminal.to_api()) });
+    pub async fn close_view(&self, terminal: Arc<TerminalKey>) -> Result<(), Unanswered> {
+        let (on, key) = terminal.to_api();
+        let change = Change::CloseView(CloseView { terminal: Some(key) });
         self.changed(on, change).await
     }
 
@@ -389,7 +384,7 @@ impl Core {
         worktree: u64,
         seen: Vec<u64>,
     ) -> Result<(), Unanswered> {
-        self.changed(on, Change::CloseWorktree(CloseWorktree { worktree, seen })).await
+        self.changed(self::on(on), Change::CloseWorktree(CloseWorktree { worktree, seen })).await
     }
 
     pub async fn rename_project(
@@ -398,7 +393,7 @@ impl Core {
         project: u64,
         to: String,
     ) -> Result<(), Unanswered> {
-        self.changed(on, Change::RenameProject(RenameProject { project, to })).await
+        self.changed(self::on(on), Change::RenameProject(RenameProject { project, to })).await
     }
 
     pub async fn rename_worktree(
@@ -407,7 +402,7 @@ impl Core {
         worktree: u64,
         to: Option<String>,
     ) -> Result<(), Unanswered> {
-        self.changed(on, Change::RenameWorktree(RenameWorktree { worktree, to })).await
+        self.changed(self::on(on), Change::RenameWorktree(RenameWorktree { worktree, to })).await
     }
 
     pub async fn rename_view(
@@ -417,13 +412,13 @@ impl Core {
         to: Option<String>,
     ) -> Result<(), Unanswered> {
         let change = Change::RenameTerminal(RenameTerminal { terminal: view, to });
-        self.changed(on, change).await
+        self.changed(self::on(on), change).await
     }
 
     pub async fn reorder_projects(&self, on: Option<String>, order: Order) -> Result<(), Unanswered> {
         let Order { seen, wanted } = order;
         let change = Change::ReorderProjects(ReorderProjects { projects: wanted, seen });
-        self.changed(on, change).await
+        self.changed(self::on(on), change).await
     }
 
     pub async fn reorder_worktrees(
@@ -434,7 +429,7 @@ impl Core {
     ) -> Result<(), Unanswered> {
         let Order { seen, wanted } = order;
         let reorder = ReorderWorktrees { project, worktrees: wanted, seen };
-        self.changed(on, Change::ReorderWorktrees(reorder)).await
+        self.changed(self::on(on), Change::ReorderWorktrees(reorder)).await
     }
 
     pub async fn prunes(&self, on: Option<String>, dir: String) -> Result<Plan, Unanswered> {

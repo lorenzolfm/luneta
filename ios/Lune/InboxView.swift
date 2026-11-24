@@ -22,7 +22,7 @@ struct InboxView: View {
                 }
             }
             .navigationTitle("Inbox")
-            .navigationDestination(for: Seat.self) { AgentView(seat: $0) }
+            .navigationDestination(for: TerminalKey.self) { AgentView(terminal: $0) }
             .toolbar {
                 if luned.reach.host != nil {
                     Button("Machine", systemImage: "desktopcomputer") { naming = true }
@@ -68,8 +68,8 @@ private struct AgentRow: View {
     let agent: Agent
 
     var body: some View {
-        if let seat = agent.seat {
-            NavigationLink(value: seat) { row }
+        if let terminal = agent.terminal {
+            NavigationLink(value: terminal) { row }
         } else {
             row
         }
