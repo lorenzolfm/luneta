@@ -2,6 +2,7 @@
 unused-ignored-advisory = "deny"
 ignore = [
   { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained proc-macro, not a vulnerability" },
+  { id = "RUSTSEC-2026-0374", reason = "basic-toml: unmaintained, read by askama's derive while uniffi-bindgen-swift is built, not a vulnerability" },
 ]
 
 [sources]
@@ -31,9 +32,11 @@ allow = [
 
 exceptions = [
   { crate = "uniffi", allow = ["MPL-2.0"] },
+  { crate = "uniffi_bindgen", allow = ["MPL-2.0"] },
   { crate = "uniffi_core", allow = ["MPL-2.0"] },
   { crate = "uniffi_internal_macros", allow = ["MPL-2.0"] },
   { crate = "uniffi_macros", allow = ["MPL-2.0"] },
   { crate = "uniffi_meta", allow = ["MPL-2.0"] },
   { crate = "uniffi_pipeline", allow = ["MPL-2.0"] },
+  { crate = "uniffi_udl", allow = ["MPL-2.0"] },
 ]

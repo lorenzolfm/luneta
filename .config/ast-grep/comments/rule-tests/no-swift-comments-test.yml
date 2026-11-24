@@ -1,0 +1,12 @@
+id: no-swift-comments
+valid:
+  - 'let a = "// a"'
+  - 'let a = "/* a */"'
+  - "let a = \"\"\"\n// a\n/* b */\n\"\"\""
+  - "let a = #\"/* a */\"#"
+invalid:
+  - "// a\nlet a = 1"
+  - "let a = 1 // a"
+  - "/// a\nfunc f() {}"
+  - "f(/* a */)"
+  - "/* a\n/* b */ */\nlet a = 1"
