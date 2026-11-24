@@ -27,7 +27,7 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
     let unkept = log::start(Process::Luned).err();
-    panics::abort_on_panic();
+    let hooked = panics::abort_on_panic();
     if args.detached
         && let Err(error) = close_inherited()
     {
@@ -72,7 +72,7 @@ fn main() -> ExitCode {
         },
     };
     let socket = claim.socket().to_owned();
-    if let Err(error) = runtime.block_on(luned::serve(claim, kept, unkept)) {
+    if let Err(error) = runtime.block_on(luned::serve(hooked, claim, kept, unkept)) {
         log::say(&format!("{}: {error}", socket.display()));
         return ExitCode::FAILURE;
     }

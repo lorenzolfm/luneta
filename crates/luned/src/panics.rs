@@ -1,7 +1,9 @@
 use std::cell::Cell;
+use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle, Scope, ScopedJoinHandle};
 
 use crate::log;
 
@@ -13,7 +15,9 @@ static HOOKED: AtomicBool = AtomicBool::new(false);
 
 pub const ABORTS: &str = "a thread panicked, so luned aborts";
 
-pub fn abort_on_panic() {
+pub struct Hooked(());
+
+pub fn abort_on_panic() -> Hooked {
     assert!(!HOOKED.swap(true, Ordering::Relaxed), "the hook that aborts is set once");
     let default = panic::take_hook();
     panic::set_hook(Box::new(move |panic| {
@@ -24,6 +28,7 @@ pub fn abort_on_panic() {
             process::abort();
         }
     }));
+    Hooked(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -37,6 +42,36 @@ pub fn contained<T>(run: impl FnOnce() -> T) -> Result<T, Panicked> {
     ran.map_err(|_| Panicked)
 }
 
+pub struct Contained<T>(JoinHandle<Result<T, Panicked>>);
+
+impl<T> Contained<T> {
+    pub fn join(self) -> Result<T, Panicked> {
+        self.0.join().unwrap_or(Err(Panicked))
+    }
+}
+
+pub fn spawn<T: Send + 'static>(
+    thread: thread::Builder,
+    run: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<Contained<T>> {
+    thread.spawn(move || contained(run)).map(Contained)
+}
+
+pub struct ContainedIn<'scope, T>(ScopedJoinHandle<'scope, Result<T, Panicked>>);
+
+impl<T> ContainedIn<'_, T> {
+    pub fn join(self) -> Result<T, Panicked> {
+        self.0.join().unwrap_or(Err(Panicked))
+    }
+}
+
+pub fn spawn_in<'scope, T: Send + 'scope>(
+    scope: &'scope Scope<'scope, '_>,
+    run: impl FnOnce() -> T + Send + 'scope,
+) -> ContainedIn<'scope, T> {
+    ContainedIn(scope.spawn(move || contained(run)))
+}
+
 #[cfg(test)]
 mod tests {
     use std::env;
@@ -44,7 +79,7 @@ mod tests {
     use std::process::{Command, ExitStatus, Stdio};
     use std::thread;
 
-    use super::{abort_on_panic, contained, Panicked};
+    use super::{abort_on_panic, contained, spawn, Panicked};
 
     const PANICS: &str = "LUNED_TEST_PANICS";
 
@@ -122,7 +157,7 @@ mod tests {
         let undumped = rustix::process::Rlimit { current: Some(0), maximum: Some(0) };
         rustix::process::setrlimit(rustix::process::Resource::Core, undumped).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        abort_on_panic();
+        let _hooked = abort_on_panic();
         match way {
             Way::InAThread => {
                 let core = thread::Builder::new().name("core".to_owned());
@@ -138,8 +173,9 @@ mod tests {
                 assert!(caught.is_err(), "the panic was caught");
             },
             Way::Contained => {
-                let ran = thread::spawn(|| contained(|| panic!("a gh answer's assertion fails")));
-                assert_eq!(ran.join().unwrap(), Err(Panicked));
+                let asks = thread::Builder::new().name("gh ask".to_owned());
+                let ran = spawn(asks, || panic!("a gh answer's assertion fails")).unwrap();
+                assert_eq!(ran.join(), Err(Panicked));
             },
             Way::ContainedInContained => {
                 let ran = contained(|| {
@@ -160,7 +196,7 @@ mod tests {
                 });
                 assert!(ran.is_ok_and(|joined| joined.is_err()), "the reader panicked");
             },
-            Way::HookedTwice => abort_on_panic(),
+            Way::HookedTwice => _ = abort_on_panic(),
         }
         eprintln!("{RAN_ON}");
     }

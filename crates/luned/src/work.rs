@@ -379,9 +379,8 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
         return Ok(Listed::Unhosted);
     }
     let folder = dir.as_str().to_owned();
-    let pulls = thread::Builder::new()
-        .name("work-pulls".to_owned())
-        .spawn(move || panics::contained(|| gh::<ListedPull>(&folder, &PULLS, PULL_FIELDS)))
+    let named = thread::Builder::new().name("work-pulls".to_owned());
+    let pulls = panics::spawn(named, move || gh::<ListedPull>(&folder, &PULLS, PULL_FIELDS))
         .map_err(|error| format!("no thread to list pull requests in: {error}"))?;
     let asked = Instant::now();
     let issue = |ListedIssue { number, title, labels }: ListedIssue| {
@@ -393,8 +392,7 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
         Ok((issues, more)) => Ok((Issues::Open(issues.into_iter().map(issue).collect()), more)),
         Err(unlisted) => issues_off(dir.as_str(), asked, unlisted).map(|()| (Issues::Off, false)),
     };
-    let pulls = pulls.join().expect("a contained listing does not unwind its thread");
-    let pulls = pulls.unwrap_or_else(|Panicked| {
+    let pulls = pulls.join().unwrap_or_else(|Panicked| {
         Err(format!("gh's listing of the pull requests in {} panicked", dir.as_str()))
     });
     let (issues, more_issues) = issues?;
