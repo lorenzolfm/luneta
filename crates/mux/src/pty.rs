@@ -124,12 +124,16 @@ impl Pty {
         Ok(rustix::io::ioctl_fionread(&self.far)? >= full)
     }
 
-    pub fn raise(&self, key: SignalKey) -> io::Result<()> {
-        let group = termios::tcgetpgrp(&self.near)?;
+    pub fn raise(&self, key: SignalKey) -> Result<(), Unraised> {
+        let group = termios::tcgetpgrp(&self.near).map_err(|error| Unraised::Kept(error.into()))?;
+        let signal = key.signal.signal();
         if key.flushes {
-            self.flush_input()?;
+            self.flush_input().map_err(Unraised::Kept)?;
+            let signalled = rustix::process::kill_process_group(group, signal);
+            return signalled.map_err(|error| Unraised::Flushed(error.into()));
         }
-        Ok(rustix::process::kill_process_group(group, key.signal.signal())?)
+        let signalled = rustix::process::kill_process_group(group, signal);
+        signalled.map_err(|error| Unraised::Kept(error.into()))
     }
 
     fn flush_input(&self) -> io::Result<()> {
@@ -173,6 +177,12 @@ impl Led {
 pub struct SignalKey {
     pub signal: KeySignal,
     pub flushes: bool,
+}
+
+#[derive(Debug)]
+pub enum Unraised {
+    Kept(io::Error),
+    Flushed(io::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -259,7 +269,6 @@ fn leads(command: &mut Command) -> &mut Command {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
     use std::io::Write as _;
     use std::num::NonZeroU16;
 
@@ -332,8 +341,15 @@ mod tests {
     }
 
     #[test]
-    fn a_signal_raised_on_a_terminal_with_no_front_group_fails() {
-        assert!(opened().raise(key(KeySignal::Interrupt, true)).is_err());
+    fn a_signal_raised_on_a_terminal_with_no_front_group_fails_and_keeps_what_waits() {
+        let pty = opened();
+        (&pty.near).write_all(b"waits\n").unwrap();
+        lune_waits::eventually("the kernel takes what waits", || {
+            (rustix::io::ioctl_fionread(&pty.far).unwrap() == 6).then_some(())
+        });
+        assert!(matches!(pty.raise(key(KeySignal::Interrupt, true)), Err(Unraised::Kept(_))));
+        assert!(matches!(pty.raise(key(KeySignal::Interrupt, false)), Err(Unraised::Kept(_))));
+        assert_eq!(rustix::io::ioctl_fionread(&pty.far).unwrap(), 6);
     }
 
     #[cfg(target_os = "linux")]

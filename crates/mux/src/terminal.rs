@@ -27,7 +27,7 @@ use crate::marks::Mark;
 use crate::mux::Mux;
 use crate::panics::{self, Panicked};
 use crate::process::{self, Group};
-use crate::pty::{Led, Pty, SignalKey};
+use crate::pty::{Led, Pty, SignalKey, Unraised};
 use crate::ran::{Job, Now, Shell};
 use crate::screen::{Answers, Looked, Pushed, Screen, View, Wheel};
 use crate::unread::{Kept, Oldest, Refused, TYPED_BYTES_MAX, Unread};
@@ -859,9 +859,21 @@ fn type_into(
         },
     };
     let signal = key.signal.name();
-    if let Err(error) = pty.raise(key) {
-        eprintln!("lune-mux: terminal {terminal}'s {signal} could not be raised: {error}: typed");
-        return unread.type_in(bytes);
+    match pty.raise(key) {
+        Ok(()) => {},
+        Err(Unraised::Kept(error)) => {
+            eprintln!("lune-mux: terminal {terminal}'s {signal} could not be raised: {error}: typed");
+            return unread.type_in(bytes);
+        },
+        Err(Unraised::Flushed(error)) => {
+            assert!(key.flushes, "only a key that flushes has its input flushed before its signal");
+            unread.clear();
+            eprintln!(
+                "lune-mux: terminal {terminal}'s input was flushed, but its {signal} could not be \
+                raised: {error}: typed"
+            );
+            return unread.type_in(bytes);
+        },
     }
     eprintln!("lune-mux: terminal {terminal}'s program is behind on its input: {signal} raised");
     if key.flushes {
