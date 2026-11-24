@@ -1119,13 +1119,14 @@ fn remote_keys_in(dir: &str, keys: &'static str) -> Remotes {
         Remotes::of(git.run(ANSWER))
     };
     match listed(Git::at(dir, "config")) {
-        Remotes::Unlisted => match git::common_within(dir, ANSWER) {
-            Common::Of(_) | Common::NoRepository | Common::Gone => Remotes::Unlisted,
+        Remotes::Unlisted if Path::new(dir).is_dir() => match git::common_within(dir, ANSWER) {
             Common::BareUnread(bare) => match listed(Git::of(&bare, "config")) {
                 Remotes::Listed(listed) => Remotes::InBare(listed),
                 said => said,
             },
-            Common::Unsaid(why) => Remotes::Unsaid(why),
+            Common::Of(_) | Common::NoRepository | Common::Gone | Common::Unsaid(_) => {
+                Remotes::Unlisted
+            },
         },
         said => said,
     }
@@ -1384,7 +1385,7 @@ fn git_reads(dir: &str) -> Result<(), String> {
     let named = git::REPOSITORY_VARS.into_iter().find(|name| env::var_os(name).is_some());
     match named {
         Some(name) => {
-            Err(format!("{name} is set, and git would take another repository for {dir}'s"))
+            Err(format!("{name} is set, and wt's git would not read {dir}'s repository as it is"))
         },
         None => Ok(()),
     }
@@ -2102,6 +2103,28 @@ mod tests {
         assert_eq!(Remotes::of(Ok(Ran::Stuck)), stuck);
         let unrun = Remotes::of(Err(io::Error::from(io::ErrorKind::NotFound)));
         assert!(matches!(unrun, Remotes::Unsaid(_)), "{unrun:?}");
+    }
+
+    #[test]
+    fn a_repository_git_distrusts_lists_no_remotes_rather_than_failing() {
+        const UNTRUSTED: &str = "LUNE_TEST_UNTRUSTED_REPOSITORY";
+        if let Some(untrusted) = env::var_os(UNTRUSTED) {
+            assert_eq!(remotes_in(untrusted.to_str().unwrap()), Remotes::Unlisted);
+            return;
+        }
+        let scratch = tempfile::tempdir().unwrap();
+        let untrusted = scratch.path().join("theirs");
+        assert!(git(scratch.path(), &["init", "-q", "theirs"]).is_some());
+        assert!(git(&untrusted, &["remote", "add", "origin", "git@github.com:o/n.git"]).is_some());
+        let name = "links::tests::a_repository_git_distrusts_lists_no_remotes_rather_than_failing";
+        let ran = Command::new(env::current_exe().unwrap())
+            .args(["--exact", name])
+            .env(UNTRUSTED, &untrusted)
+            .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&ran.stdout);
+        assert!(ran.status.success() && said.contains("1 passed"), "{said}");
     }
 
     #[test]

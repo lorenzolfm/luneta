@@ -22,6 +22,8 @@ use crate::seats;
 
 const MOVED: &str = " but expected ";
 
+const UNSET: &[u8] = b"fatal: no such section: ";
+
 pub const PLANNING: Duration = Duration::from_mins(5);
 
 pub const DELETING: Duration = Duration::from_mins(30);
@@ -721,15 +723,32 @@ fn far_branch_deleted(common: &Directory, head: &str, far: &RemoteBranch) -> Res
 }
 
 fn branch_deleted(common: &Directory, goes: &Goes) -> Result<(), String> {
+    let stays = |why: &str| format!("its branch {} stays: {why}", goes.branch);
+    let on_it = |listed: &&Listed| listed.branch.as_deref() == Some(goes.branch.as_str());
+    if let Some(other) = worktrees(common).map_err(|why| stays(&why))?.iter().find(on_it) {
+        return Err(stays(&format!("the worktree {} is on it", other.path)));
+    }
     let mut git = Git::of(common, "update-ref");
     git.arg("-d");
     let branch = format!("refs/heads/{}", goes.branch);
     match says(git.named([branch.as_str(), goes.head.as_str()]).run(GIT_SAYS), "update-ref -d") {
-        Ok(_) => Ok(()),
-        Err(why) if why.contains(MOVED) => {
-            Err(format!("its branch {} stays: it has moved", goes.branch))
+        Ok(_) => {},
+        Err(why) if why.contains(MOVED) => return Err(stays("it has moved")),
+        Err(why) => return Err(stays(&why)),
+    }
+    unset(common, &goes.branch)
+        .map_err(|why| format!("its branch {} went, but its settings stay: {why}", goes.branch))
+}
+
+fn unset(common: &Directory, branch: &str) -> Result<(), String> {
+    let mut git = Git::of(common, "config");
+    git.arg("--remove-section");
+    let ran = git.named([format!("branch.{branch}")]).run(GIT_SAYS);
+    match ran.map_err(|error| format!("git config could not be run: {error}"))? {
+        Ran::Ended { status, stderr, .. } if !status.success() && stderr.starts_with(UNSET) => {
+            Ok(())
         },
-        Err(why) => Err(format!("its branch {} stays: {why}", goes.branch)),
+        ran => ran.answer().map(drop).map_err(|why| format!("git config: {why}")),
     }
 }
 
@@ -1226,10 +1245,37 @@ mod tests {
         let why = "its branch fix stays: it has moved";
         assert_eq!(branch_deleted(common, &seen), Err(why.to_owned()));
         assert_eq!(tip("fix"), tip("main"), "the commit made since it was seen is kept");
+        ran(&repository, &["config", "branch.fix.remote", "origin"]);
+        ran(&repository, &["config", "branch.fix.merge", "refs/pull/12/head"]);
         let now = Goes { head: tip("fix"), ..seen };
         assert_eq!(branch_deleted(common, &now), Ok(()));
         let left = git::scratch(&repository, &["rev-parse", "--verify", "-q", "refs/heads/fix"]);
         assert!(left.is_err(), "{left:?}");
+        let set = git::scratch(&repository, &["config", "--get-regexp", r"^branch\.fix\."]);
+        assert!(set.is_err(), "a branch made fix later would track its pull request: {set:?}");
+        ran(&repository, &["branch", "fix"]);
+        assert_eq!(branch_deleted(common, &now), Ok(()), "a branch with no settings goes too");
+    }
+
+    #[test]
+    fn a_branch_another_worktree_is_on_stays_though_that_worktree_is_gone() {
+        let scratch = tempfile::tempdir().unwrap();
+        let scratch = scratch.path().canonicalize().unwrap();
+        let repository = scratch.join("r");
+        ran(&scratch, &["init", "-q", "-b", "main", repository.to_str().unwrap()]);
+        ran(&repository, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let other = scratch.join("other");
+        ran(&repository, &["worktree", "add", "-q", "-b", "fix", other.to_str().unwrap()]);
+        let common = &common_in(&repository);
+        let said = git::scratch(&repository, &["rev-parse", "refs/heads/fix"]).unwrap();
+        let head = String::from_utf8(said).unwrap().trim_end().to_owned();
+        let goes = Goes { head, ..goes("/w", Pushed::Nowhere, None) };
+        let why = format!("its branch fix stays: the worktree {} is on it", other.display());
+        assert_eq!(branch_deleted(common, &goes), Err(why.clone()));
+        fs::remove_dir_all(&other).unwrap();
+        assert_eq!(branch_deleted(common, &goes), Err(why), "git still lists it, as prunable");
+        let left = git::scratch(&repository, &["rev-parse", "--verify", "-q", "refs/heads/fix"]);
+        assert!(left.is_ok(), "{left:?}");
     }
 
     #[test]

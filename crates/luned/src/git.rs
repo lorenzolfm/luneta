@@ -58,11 +58,12 @@ const HARDENED: [&str; 4] = ["-c", "core.fsmonitor=false", "-c", "safe.bareRepos
 
 fn hardened() -> Command {
     let mut git = Command::new("git");
-    local(git.args(HARDENED))
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C");
+    local(git.args(HARDENED)).env("GIT_TERMINAL_PROMPT", "0");
     git
+}
+
+fn read_by_luned(git: &mut Command) -> &mut Command {
+    git.env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C")
 }
 
 pub struct Git {
@@ -147,7 +148,7 @@ pub struct Named(Command);
 
 impl Named {
     pub fn run(mut self, limit: Duration) -> io::Result<Ran> {
-        program::run(&mut self.0, limit)
+        program::run(read_by_luned(&mut self.0), limit)
     }
 
     pub fn run_alone(mut self, limit: Duration) -> io::Result<Ran> {
@@ -158,7 +159,8 @@ impl Named {
 #[cfg(test)]
 pub(crate) fn scratch(dir: impl AsRef<OsStr>, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut git = hardened();
-    git.arg("-C")
+    read_by_luned(&mut git)
+        .arg("-C")
         .arg(dir)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
