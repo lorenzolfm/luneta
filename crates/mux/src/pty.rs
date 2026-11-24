@@ -141,7 +141,7 @@ impl Pty {
         Ok(device_of(&self.far)?)
     }
 
-    pub fn spawned(&self, opens: &Opens, vars: &[(&str, String)]) -> io::Result<Child> {
+    pub fn spawned(&self, opens: &Opens, vars: &[(&str, String)]) -> io::Result<Led> {
         let mut command = Command::new(&opens.program);
         command.args(&opens.args);
         command.current_dir(&opens.cwd);
@@ -154,7 +154,15 @@ impl Pty {
         for (name, value) in vars {
             command.env(name, value);
         }
-        leads(&mut command).spawn()
+        leads(&mut command).spawn().map(Led)
+    }
+}
+
+pub struct Led(Child);
+
+impl Led {
+    pub fn child(self) -> Child {
+        self.0
     }
 }
 
