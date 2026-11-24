@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 pub const ANSWER: Duration = Duration::from_secs(10);
@@ -29,9 +30,8 @@ const _: () = assert!(AGAIN.as_millis() <= AGAIN_MOST.as_millis() / 2);
 const _: () = assert!(PACE.as_millis() < AGAIN.as_millis());
 
 #[must_use]
-pub fn again(failed: u32, chance: u64) -> Duration {
-    assert!(failed > 0, "the core waits again only after a watch failed");
-    let multiple = 1_u32.checked_shl(failed).unwrap_or(u32::MAX);
+pub fn again(failed: NonZeroU32, chance: u64) -> Duration {
+    let multiple = 1_u32.checked_shl(failed.get()).unwrap_or(u32::MAX);
     let most_ms = AGAIN.saturating_mul(multiple).min(AGAIN_MOST).as_millis() as u64;
     let least_ms = most_ms / 2;
     let waited = Duration::from_millis(least_ms + chance % (most_ms - least_ms + 1));
@@ -44,32 +44,36 @@ pub fn again(failed: u32, chance: u64) -> Duration {
 mod tests {
     use super::*;
 
+    fn failed(times: u32) -> NonZeroU32 {
+        NonZeroU32::new(times).unwrap()
+    }
+
     #[test]
     fn a_failed_watch_waits_twice_as_long_as_the_one_before_up_to_a_cap() {
-        let bounds = |failed| {
-            let longest = (0..=AGAIN_MOST.as_millis() as u64).map(|chance| again(failed, chance)).max();
-            (again(failed, 0), longest.unwrap())
+        let bounds = |times| {
+            let longest = (0..=AGAIN_MOST.as_millis() as u64).map(|chance| again(failed(times), chance)).max();
+            (again(failed(times), 0), longest.unwrap())
         };
         assert_eq!(bounds(1), (AGAIN, AGAIN * 2));
         assert_eq!(bounds(2), (AGAIN * 2, AGAIN * 4));
         assert_eq!(bounds(3), (AGAIN * 4, AGAIN * 8));
         assert_eq!(bounds(4), (AGAIN_MOST / 2, AGAIN_MOST));
-        for failed in [5, 31, 32, 33, u32::MAX] {
-            assert_eq!(bounds(failed), (AGAIN_MOST / 2, AGAIN_MOST), "{failed} failed");
+        for times in [5, 31, 32, 33, u32::MAX] {
+            assert_eq!(bounds(times), (AGAIN_MOST / 2, AGAIN_MOST), "{times} failed");
         }
     }
 
     #[test]
     fn a_failed_watch_waits_anywhere_in_its_span_so_phones_do_not_retry_in_step() {
         let spread = AGAIN.as_millis() as u64;
-        assert_eq!(again(1, spread), AGAIN * 2);
-        assert_eq!(again(1, spread + 1), AGAIN, "the chance wraps around the span");
-        assert_eq!(again(1, 250), AGAIN + Duration::from_millis(250));
+        assert_eq!(again(failed(1), spread), AGAIN * 2);
+        assert_eq!(again(failed(1), spread + 1), AGAIN, "the chance wraps around the span");
+        assert_eq!(again(failed(1), 250), AGAIN + Duration::from_millis(250));
         for chance in [0, 1, 999, 1_000, 1_001, u64::MAX] {
-            for failed in 1..=8 {
-                let waited = again(failed, chance);
-                assert!(waited >= AGAIN, "{failed}, {chance}: {waited:?}");
-                assert!(waited <= AGAIN_MOST, "{failed}, {chance}: {waited:?}");
+            for times in 1..=8 {
+                let waited = again(failed(times), chance);
+                assert!(waited >= AGAIN, "{times}, {chance}: {waited:?}");
+                assert!(waited <= AGAIN_MOST, "{times}, {chance}: {waited:?}");
             }
         }
     }
