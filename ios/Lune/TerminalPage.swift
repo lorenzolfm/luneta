@@ -16,6 +16,7 @@ private enum Seeing {
 private struct Viewing: Equatable {
     let opens: UInt64
     let active: Bool
+    let appearance: Appearance
 }
 
 struct TerminalPage: View {
@@ -50,7 +51,13 @@ struct TerminalPage: View {
                     KeyBar(ctrl: $ctrl, typing: $typing, press: press)
                 }
             }
-            .task(id: Viewing(opens: opens, active: phase == .active)) { await show() }
+            .task(id: Viewing(opens: opens, active: phase == .active, appearance: appearance)) {
+                await show()
+            }
+    }
+
+    private var appearance: Appearance {
+        scheme == .dark ? .dark : .light
     }
 
     @ViewBuilder
@@ -75,7 +82,6 @@ struct TerminalPage: View {
 
     private func show() async {
         guard phase == .active else { return }
-        let appearance: Appearance = scheme == .dark ? .dark : .light
         let view: TerminalView
         do {
             view = try luned.terminal(place.terminal, appearance: appearance)
@@ -123,7 +129,10 @@ struct TerminalPage: View {
     }
 
     private func said(_ saying: (TerminalView) throws -> Void) {
-        guard let viewing else { return }
+        guard let viewing else {
+            failed = "the terminal is opening again, so that went nowhere"
+            return
+        }
         do {
             try saying(viewing)
             failed = nil

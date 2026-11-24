@@ -44,13 +44,13 @@ struct TerminalScreen: View {
         GeometryReader { outer in
             let shown = min(max(size * pinched, TerminalFont.smallest), TerminalFont.largest)
             let cell = TerminalFont.cell(shown)
-            let fit = TerminalFont.fitting(grid.columns, in: outer.size.width)
+            let fit = TerminalFont.fitting(grid.width, in: outer.size.width)
             ScrollViewReader { reader in
                 ScrollView([.horizontal, .vertical]) {
                     ZStack(alignment: .topLeading) {
                         GridCanvas(grid: grid, size: shown, cell: cell)
                             .frame(
-                                width: cell.width * CGFloat(grid.columns),
+                                width: cell.width * CGFloat(grid.width),
                                 height: cell.height * CGFloat(grid.rows.count))
                         if let cursor = grid.cursor {
                             Color.clear
@@ -149,7 +149,7 @@ struct GridCanvas: View {
                 for run in row.runs {
                     let place = CGRect(
                         x: CGFloat(run.column) * cell.width, y: top,
-                        width: CGFloat(run.columns) * cell.width, height: cell.height)
+                        width: CGFloat(run.width) * cell.width, height: cell.height)
                     if let background = run.background {
                         context.fill(Path(place), with: .color(Color(background)))
                     }
@@ -158,7 +158,7 @@ struct GridCanvas: View {
                     if run.italic { text = text.italic() }
                     if run.underlined { text = text.underline() }
                     if run.struck { text = text.strikethrough() }
-                    if run.columns == 2 && run.text.count == 1 {
+                    if run.width == 2 && run.text.count == 1 {
                         context.draw(
                             text, at: CGPoint(x: place.midX, y: place.midY), anchor: .center)
                     } else {
