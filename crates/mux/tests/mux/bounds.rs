@@ -56,3 +56,27 @@ fn a_server_holds_more_files_than_it_started_with_and_its_programs_get_that_back
         }
     });
 }
+
+#[test]
+fn a_flood_of_answers_leaves_a_terminal_drawing_and_taking_ctrl_c() {
+    run(async {
+        let server = Server::start().await;
+        let mut mux = server.client().await;
+        let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
+        let asks = "stty -icanon -echo; \
+            yes \"$(printf '\\033[6n')\" | tr -d '\\n' | head -c 4000000; \
+            echo; echo drawn; sleep 1000";
+        let opens = script(asks, api::Ends::Holds);
+        let key = new_terminal(&mut mux, opens, b"asks", size(80, 24)).await;
+        let mut viewer = Viewer::new(&mut mux).await;
+        viewer.show(&[key]).await;
+        viewer.until_row(key.id, "drawn").await;
+        viewer.press_ctrl(key, 'c').await;
+        let interrupted = api::Exit { how: Some(api::exit::How::Signal(2)) };
+        watched_until(&mut watch, "the program ended on SIGINT", |listing| {
+            let program = listing.terminals.first().and_then(|terminal| terminal.program.as_ref());
+            program == Some(&api::terminal::Program::Ended(interrupted))
+        })
+        .await;
+    });
+}

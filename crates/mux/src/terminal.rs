@@ -28,7 +28,8 @@ use crate::panics::{self, Panicked};
 use crate::process::{self, Group};
 use crate::pty::Pty;
 use crate::ran::{Job, Now, Shell};
-use crate::screen::{Looked, Pushed, Screen, View, Wheel};
+use crate::screen::{Answers, Looked, Pushed, Screen, View, Wheel};
+use crate::unread::{Full, Kept, Unread};
 
 const SCROLLBACK_BYTES: usize = 10_000_000;
 
@@ -45,8 +46,6 @@ const READS_PER_TURN: usize = 16;
 const MESSAGES_MAX: usize = 256;
 
 const MESSAGES_PER_TURN: usize = 64;
-
-pub const UNREAD_BYTES_MAX: usize = 1024 * 1024;
 
 const LAST_WORDS_BYTES_MAX: usize = 1024 * 1024;
 
@@ -238,7 +237,7 @@ pub fn start(
             closed,
             woken,
             screen,
-            program: Program::Runs { pty, unread: Vec::new() },
+            program: Program::Runs { pty, unread: Unread::default() },
             buffer: vec![0; READ_BYTES].into_boxed_slice(),
             watchers: Vec::new(),
             dirty: false,
@@ -298,7 +297,7 @@ enum Does {
 }
 
 enum Program {
-    Runs { pty: Pty, unread: Vec<u8> },
+    Runs { pty: Pty, unread: Unread },
     Gone,
 }
 
@@ -471,18 +470,13 @@ impl Thread {
             tv_sec: timeout.as_secs().try_into().unwrap_or(i64::MAX),
             tv_nsec: timeout.subsec_nanos().into(),
         });
-        let mut reads = false;
         let mut fds = [
             PollFd::new(&self.woken, PollFlags::IN),
             PollFd::new(&self.woken, PollFlags::empty()),
         ];
         let mut count = 1;
         if let Program::Runs { pty, unread } = &self.program {
-            reads = unread.len() < UNREAD_BYTES_MAX;
-            let mut flags = PollFlags::empty();
-            if reads {
-                flags |= PollFlags::IN;
-            }
+            let mut flags = PollFlags::IN;
             if !unread.is_empty() {
                 flags |= PollFlags::OUT;
             }
@@ -496,7 +490,7 @@ impl Thread {
         }
         let woken = !fds[0].revents().is_empty();
         let near = if count == 2 { fds[1].revents() } else { PollFlags::empty() };
-        let readable = reads && near.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR);
+        let readable = near.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR);
         Ok((readable, near.contains(PollFlags::OUT), woken))
     }
 
@@ -576,16 +570,14 @@ impl Thread {
                 Does::Scroll(_) | Does::Nothing => {},
             }
         }
-        let Program::Runs { unread, .. } = &mut self.program else {
+        let Program::Runs { .. } = &self.program else {
             let ended = format!("terminal {}'s program ended", self.key.id);
             return Err(Status::failed_precondition(ended));
         };
-        if unread.len() + bytes.len() > UNREAD_BYTES_MAX {
-            let full = format!("terminal {} has {} unread bytes", self.key.id, unread.len());
-            return Err(Status::resource_exhausted(full));
-        }
-        unread.extend_from_slice(&bytes);
-        Ok(())
+        self.typed(&bytes).map_err(|full| {
+            let full = format!("terminal {} has {} typed bytes unread", self.key.id, full.typed);
+            Status::resource_exhausted(full)
+        })
     }
 
     fn exited(&mut self, exit: Exit) -> io::Result<bool> {
@@ -611,10 +603,10 @@ impl Thread {
             return Ok(());
         }
         let answers = self.screen.resize(size).map_err(io::Error::other)?;
-        if let Program::Runs { pty, unread } = &mut self.program {
+        if let Program::Runs { pty, .. } = &self.program {
             pty.resize(size)?;
-            unread.extend_from_slice(&answers);
         }
+        self.answered(&answers);
         let scrollback = self.screen.scrollback();
         for watcher in &mut self.watchers {
             watcher.back = watcher.back.min(scrollback);
@@ -628,7 +620,14 @@ impl Thread {
             self.back(client, None);
         }
         match self.does(input).map_err(io::Error::other)? {
-            Does::Write(bytes) => self.unread_push(&bytes),
+            Does::Write(bytes) => {
+                if let Err(Full { typed }) = self.typed(&bytes) {
+                    eprintln!(
+                        "lune-mux: terminal {} has {typed} typed bytes unread: input dropped",
+                        self.key.id
+                    );
+                }
+            },
             Does::Scroll(rows) => self.back(client, Some(rows)),
             Does::Nothing => {},
         }
@@ -658,18 +657,39 @@ impl Thread {
         })
     }
 
-    fn unread_push(&mut self, bytes: &[u8]) {
+    fn typed(&mut self, bytes: &[u8]) -> Result<(), Full> {
+        let id = self.key.id;
+        let Program::Runs { pty, unread } = &mut self.program else {
+            return Ok(());
+        };
+        if unread.is_empty() {
+            return unread.type_in(bytes);
+        }
+        let key = match pty.signal_key(bytes) {
+            Ok(Some(key)) => key,
+            Ok(None) => return unread.type_in(bytes),
+            Err(error) => {
+                eprintln!("lune-mux: terminal {id}'s modes could not be read: {error}");
+                return unread.type_in(bytes);
+            },
+        };
+        let signal = key.name;
+        eprintln!("lune-mux: terminal {id}'s program is behind on its input: {signal} is raised");
+        if let Err(error) = pty.raise(key) {
+            eprintln!("lune-mux: terminal {id}'s {signal} could not be raised: {error}");
+        }
+        if key.flushes {
+            unread.clear();
+        }
+        Ok(())
+    }
+
+    fn answered(&mut self, answers: &Answers) {
         let Program::Runs { unread, .. } = &mut self.program else {
             return;
         };
-        if unread.len() + bytes.len() <= UNREAD_BYTES_MAX {
-            unread.extend_from_slice(bytes);
-        } else {
-            eprintln!(
-                "lune-mux: terminal {} has {} unread bytes: input dropped",
-                self.key.id,
-                unread.len()
-            );
+        if unread.answer(answers) == Kept::LostOldest {
+            answers_lost(self.key.id);
         }
     }
 
@@ -696,14 +716,15 @@ impl Thread {
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
         let mut pushed = Pushed::Rows(0);
-        while total < most && unread.len() < UNREAD_BYTES_MAX {
+        let mut lost = false;
+        while total < most {
             match pty.near.read(&mut self.buffer) {
                 Ok(0) => break,
                 Ok(read) => {
                     total += read;
                     let written =
                         self.screen.write(&self.buffer[..read]).map_err(io::Error::other)?;
-                    unread.extend_from_slice(&written.answers);
+                    lost |= unread.answer(&written.answers) == Kept::LostOldest;
                     marks.extend(written.marks);
                     pushed = pushed.then(written.pushed);
                 },
@@ -716,6 +737,9 @@ impl Thread {
                 },
                 Err(error) => return Err(error),
             }
+        }
+        if lost {
+            answers_lost(self.key.id);
         }
         if total == 0 {
             return Ok(());
@@ -755,11 +779,11 @@ impl Thread {
         let Program::Runs { pty, unread } = &mut self.program else {
             return Ok(());
         };
-        while !unread.is_empty() {
-            match pty.near.write(unread) {
+        while let Some(waiting) = unread.waiting() {
+            match pty.near.write(waiting) {
                 Ok(written) => {
-                    assert!(written > 0, "the program took none of {} bytes", unread.len());
-                    unread.drain(..written);
+                    assert!(written > 0, "the program took none of {} bytes", waiting.len());
+                    unread.sent(written);
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == ErrorKind::Interrupted => {},
@@ -834,6 +858,10 @@ impl Thread {
         assert!(views.len() <= self.watchers.len());
         Ok(())
     }
+}
+
+fn answers_lost(terminal: TerminalId) {
+    eprintln!("lune-mux: terminal {terminal}'s program reads too few answers: the oldest are lost");
 }
 
 fn foreground(pid: u32) -> Option<api::Foreground> {

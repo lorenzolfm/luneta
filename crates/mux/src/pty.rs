@@ -9,9 +9,11 @@ use std::process::{Child, Command};
 use std::sync::OnceLock;
 
 use rustix::fs::{Mode, OFlags};
-use rustix::process::{Resource, Rlimit};
+use rustix::process::{Pid, Resource, Rlimit, Signal};
 use rustix::pty::OpenptFlags;
-use rustix::termios::{self, InputModes, LocalModes, OptionalActions, Winsize};
+use rustix::termios::{
+    self, InputModes, LocalModes, OptionalActions, QueueSelector, SpecialCodeIndex, Winsize,
+};
 
 use crate::asked::{Opens, Size};
 use crate::process::Group;
@@ -27,6 +29,18 @@ pub const ZELLIJ_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PAN
 const TERM: &str = "xterm-256color";
 
 const OPEN_MAX: u64 = 10_240;
+
+const SIGNAL_KEYS: [(SpecialCodeIndex, Signal, &str); 3] = [
+    (SpecialCodeIndex::VINTR, Signal::INT, "SIGINT"),
+    (SpecialCodeIndex::VQUIT, Signal::QUIT, "SIGQUIT"),
+    (SpecialCodeIndex::VSUSP, Signal::TSTP, "SIGTSTP"),
+];
+
+#[cfg(target_os = "linux")]
+const KEY_TURNED_OFF: u8 = 0;
+
+#[cfg(target_os = "macos")]
+const KEY_TURNED_OFF: u8 = 0xff;
 
 static FILES_FOUND: OnceLock<Rlimit> = OnceLock::new();
 
@@ -90,6 +104,34 @@ impl Pty {
         u32::try_from(group.as_raw_nonzero().get()).ok().map(Group)
     }
 
+    pub fn signal_key(&self, typed: &[u8]) -> io::Result<Option<SignalKey>> {
+        let [byte] = *typed else {
+            return Ok(None);
+        };
+        if byte == KEY_TURNED_OFF {
+            return Ok(None);
+        }
+        let modes = termios::tcgetattr(&self.far)?;
+        if !modes.local_modes.contains(LocalModes::ISIG) {
+            return Ok(None);
+        }
+        let flushes = !modes.local_modes.contains(LocalModes::NOFLSH);
+        let key = SIGNAL_KEYS.iter().find(|(code, ..)| modes.special_codes[*code] == byte);
+        Ok(key.map(|&(_, signal, name)| SignalKey { signal, name, flushes }))
+    }
+
+    pub fn raise(&self, key: SignalKey) -> io::Result<()> {
+        if key.flushes {
+            termios::tcflush(&self.far, QueueSelector::IFlush)?;
+        }
+        let Some(group) = self.front_group() else {
+            return Ok(());
+        };
+        let group = i32::try_from(group.leader()).ok().and_then(Pid::from_raw);
+        let group = group.expect("a front group is a pid");
+        Ok(rustix::process::kill_process_group(group, key.signal)?)
+    }
+
     pub fn modes(&self) -> io::Result<Modes> {
         Modes::of(&self.far)
     }
@@ -113,6 +155,13 @@ impl Pty {
         }
         leads(&mut command).spawn()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignalKey {
+    pub signal: Signal,
+    pub name: &'static str,
+    pub flushes: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
