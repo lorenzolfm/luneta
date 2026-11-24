@@ -2071,3 +2071,57 @@ fn a_viewer_reads_no_more_frames_than_lune_has_taken() {
     let _again = frame(Patience::begun(), "a frame comes once lune lets one go");
     lune_waits::never("more than one frame comes for the one let go", unheld);
 }
+
+#[test]
+fn a_viewer_is_seen_while_others_on_the_same_lune_mux_hold_their_frames() {
+    let owned = Owned::new();
+    let worktree = WorktreeId::of(worktree_in_home(&owned)).unwrap();
+    let folder = folder_in(owned.host.runtime.path()).unwrap();
+    let (heard, hearing) = std::sync::mpsc::channel();
+    let size = Size::of(200, 60).unwrap();
+    let told = move |it| drop(heard.send(it));
+    luned::tasks::start().unwrap();
+    let show = luned::show(folder, Where::Here { runs_in: None }, worktree, size, false, told);
+    let laid = || match lune_waits::heard("luned lays the layout out", &hearing) {
+        Heard::Laid(laid) => laid,
+        Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
+            panic!("the layout is not laid out: {why}")
+        },
+        Heard::Edged { direction, .. } => panic!("the layout is at its {direction:?} edge"),
+        Heard::Sent(to) => panic!("the layout is sent to worktree {to}"),
+        Heard::Left(gone) => panic!("worktree {gone} is gone"),
+    };
+    assert!(laid().is_empty());
+    let busy = ["sh", "-c", "while :; do head -c 30000 /dev/urandom | base64 -w 190; done"];
+    show.ask(Asked::Open { beside: Beside::Largest, opens: command(&busy) });
+    let opened = laid();
+
+    let greeting = Greeting { foreground: None, background: None };
+    let watching = || {
+        let (seen, seeing) = std::sync::mpsc::channel();
+        let reach = Reach::Mux { socket: owned.socket(), runs_in: None };
+        let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
+        viewer.show(opened.keys());
+        (viewer, seeing)
+    };
+    let frame = |patience: Patience, what: &str, seeing: &std::sync::mpsc::Receiver<Seen>| {
+        match patience.heard(what, seeing) {
+            Seen::Frame(framed) => framed,
+            Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
+        }
+    };
+    let mut holding = Vec::new();
+    let patience = Patience::begun();
+    for holder in 0..3 {
+        let (viewer, seeing) = watching();
+        let held: Vec<_> = (0..FRAMES_MAX)
+            .map(|told| frame(patience, &format!("holder {holder} hears frame {told}"), &seeing))
+            .collect();
+        holding.push((viewer, seeing, held));
+    }
+    let unheld = || holding.iter().find_map(|(_, seeing, _)| seeing.try_recv().ok());
+    lune_waits::never("a frame comes past those a holder still holds", unheld);
+
+    let (_fresh, seeing) = watching();
+    let _seen = frame(Patience::begun(), "a frame comes while others hold theirs", &seeing);
+}

@@ -78,6 +78,15 @@ const _: () = assert!(
     "the one connection to lune-mux holds the viewers luned relays and the questions it asks"
 );
 
+const STREAM_WINDOW: u32 = 64 * 1024;
+
+const CONNECTION_WINDOW: u32 = lune_protocol::MUX_STREAMS_MAX * STREAM_WINDOW;
+
+const _: () = assert!(
+    CONNECTION_WINDOW as u64 <= i32::MAX as u64,
+    "a window of every stream lune does not read fits in what HTTP/2 lets a connection hold"
+);
+
 pub(super) static ASKED: Semaphore = Semaphore::const_new(ASKED_MAX);
 
 pub(super) static RELAYED: Semaphore = Semaphore::const_new(RELAYED_MAX);
@@ -535,6 +544,8 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
     let first = Arc::new(Mutex::new(Some(first)));
     let channel = Endpoint::from_static("http://lune-mux")
         .connect_timeout(CONNECT)
+        .initial_stream_window_size(STREAM_WINDOW)
+        .initial_connection_window_size(CONNECTION_WINDOW)
         .connect_with_connector(service_fn(move |_: Uri| {
             let first = first.lock().unwrap_or_else(PoisonError::into_inner).take();
             async move {
