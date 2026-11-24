@@ -21,7 +21,6 @@ use luned::prunes::Occupied;
 use luned::sayings::BYTES_MAX;
 use luned::{release, Daemon, Destination};
 use prost::Message as _;
-use tokio::runtime::Handle;
 
 use crate::agreed::{self, Agreed};
 use crate::bridge;
@@ -219,13 +218,7 @@ where
     F: FnOnce(Daemon) -> Asked,
     Asked: Future<Output = Result<(), Box<dyn Error>>>,
 {
-    let tasks = match tasks() {
-        Ok(tasks) => tasks,
-        Err(why) => {
-            eprintln!("lune: {why}");
-            return ExitCode::FAILURE;
-        },
-    };
+    let tasks = luned::tasks::shared();
     let daemon = match tasks.block_on(reaching) {
         Ok(daemon) => daemon,
         Err(unreached) => {
@@ -278,13 +271,7 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         },
     }
-    let tasks = match tasks() {
-        Ok(tasks) => tasks,
-        Err(why) => {
-            eprintln!("lune: {why}");
-            return ExitCode::FAILURE;
-        },
-    };
+    let tasks = luned::tasks::shared();
     let daemon = match tasks.block_on(daemon::running(folder)) {
         Ok(daemon) => daemon,
         Err(why) => {
@@ -346,14 +333,8 @@ async fn first_reach(
     }
 }
 
-pub fn tasks() -> Result<Handle, String> {
-    luned::tasks::start()?;
-    Ok(luned::tasks::shared())
-}
-
 pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
-    let tasks = tasks()?;
-    tasks.block_on(async {
+    luned::tasks::shared().block_on(async {
         let mut daemon = daemon::running(folder).await?;
         let listed = daemon.list_agents(()).await;
         listed.map(tonic::Response::into_inner).map_err(|error| causes(&error))
@@ -365,8 +346,7 @@ pub fn occupied(folder: &Path) -> Result<Occupied, String> {
 }
 
 pub fn host(folder: &Path) -> Result<luned::api::Host, String> {
-    let tasks = tasks()?;
-    tasks.block_on(async {
+    luned::tasks::shared().block_on(async {
         let mut daemon = daemon::running(folder).await?;
         let asked = daemon.watch(WatchRequest { after: None, kept: None, shown: false }).await;
         Ok(asked.map_err(|error| causes(&error))?.into_inner())

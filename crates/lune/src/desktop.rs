@@ -255,10 +255,7 @@ fn say(events: &Sender<Event>, said: &mut bool, why: &str) {
 
 #[cfg(not(target_os = "macos"))]
 fn serve(orders: UnboundedReceiver<Order>, events: &Sender<Event>) {
-    match crate::commands::tasks() {
-        Ok(tasks) => tasks.block_on(freedesktop::serve(orders, events)),
-        Err(why) => say(events, &mut false, &why),
-    }
+    luned::tasks::shared().block_on(freedesktop::serve(orders, events));
 }
 
 #[cfg(target_os = "macos")]

@@ -91,6 +91,9 @@ pub async fn of_any_build(path: &Path) -> Result<Daemon, Unreached> {
 }
 
 pub async fn current(path: &Path) -> Result<Current, String> {
+    let on = thread::current();
+    let blocks = "reaching luned blocks, so it runs on the thread that waits for it";
+    assert_ne!(on.name(), Some(luned::tasks::WORKER), "{blocks}");
     let folder = match folder::open(path).map_err(|refusal| refusal.to_string())? {
         Some(folder) => folder,
         None => folder::make(path).map_err(|refusal| refusal.to_string())?,

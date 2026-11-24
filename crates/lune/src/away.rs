@@ -28,7 +28,6 @@ use tokio_stream::{Stream, StreamExt as _};
 use tonic::{Code, Response, Status, Streaming};
 
 use crate::agents::Harness;
-use crate::commands;
 use crate::daemon;
 
 pub const ANSWER: Duration = Duration::from_secs(6);
@@ -45,7 +44,7 @@ pub struct Away {
 impl Away {
     pub fn reach(destination: &Destination, patience: Duration) -> Result<Away, String> {
         let folder = luned::folder::find().map_err(|unfound| format!("{unfound}, to find luned in"))?;
-        let tasks = commands::tasks()?;
+        let tasks = luned::tasks::shared();
         let reached = daemon::running(&folder);
         let daemon = match tasks.block_on(async { tokio::time::timeout(patience, reached).await }) {
             Ok(reached) => reached?,

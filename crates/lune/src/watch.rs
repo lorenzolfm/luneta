@@ -8,7 +8,7 @@ use std::time::Duration;
 use luned::api::{Version, WatchRequest};
 use tokio::time::Instant;
 
-use crate::commands::{self, causes};
+use crate::commands::causes;
 use crate::daemon::{self, Current};
 use crate::host::Event;
 
@@ -21,14 +21,7 @@ const _: () = assert!(MAKING_WAY.as_millis() < AGAIN.as_millis());
 
 pub fn start(folder: PathBuf, events: Sender<Event>) {
     thread::spawn(move || {
-        let tasks = match commands::tasks() {
-            Ok(tasks) => tasks,
-            Err(why) => {
-                let _ = events.send(Event::Daemon(Err(why)));
-                return;
-            },
-        };
-        tasks.block_on(watch(folder, events));
+        luned::tasks::shared().block_on(watch(folder, events));
     });
 }
 

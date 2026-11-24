@@ -31,7 +31,6 @@ use tonic::{Code, Status};
 
 use luned::Directory;
 
-use crate::commands;
 use crate::daemon;
 use crate::machines::Machine;
 use crate::sidebar::Reorder;
@@ -143,7 +142,7 @@ fn asked_or<T, E>(
     asking: impl AsyncFnOnce(&mut Daemon) -> Result<T, E>,
     late: impl FnOnce(String) -> E,
 ) -> Result<Result<T, E>, String> {
-    commands::tasks()?.block_on(async {
+    luned::tasks::shared().block_on(async {
         let mut daemon = daemon::current(path).await?.daemon;
         Ok(answered_within(within, asking(&mut daemon), late).await)
     })

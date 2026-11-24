@@ -4,6 +4,8 @@ use tokio::runtime::{self, Handle, Runtime, RuntimeFlavor};
 
 const WORKERS: usize = 2;
 
+pub const WORKER: &str = "lune tasks";
+
 static SHARED: OnceLock<Runtime> = OnceLock::new();
 
 pub fn start() -> Result<(), String> {
@@ -31,7 +33,7 @@ pub fn shared() -> Handle {
 fn built() -> std::io::Result<Runtime> {
     runtime::Builder::new_multi_thread()
         .worker_threads(WORKERS)
-        .thread_name("lune tasks")
+        .thread_name(WORKER)
         .enable_all()
         .build()
 }
@@ -41,7 +43,7 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
-    use super::shared;
+    use super::{shared, WORKER};
 
     #[test]
     fn a_task_goes_on_after_the_thread_that_handed_it_over_ends() {
@@ -56,6 +58,6 @@ mod tests {
         handing.join().unwrap();
         started.send(()).unwrap();
         let name = heard.recv().unwrap();
-        assert_eq!(name.as_deref(), Some("lune tasks"));
+        assert_eq!(name.as_deref(), Some(WORKER));
     }
 }
