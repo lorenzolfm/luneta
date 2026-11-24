@@ -27,7 +27,7 @@ use crate::api;
 use crate::client::{self, Unbridged};
 use crate::core::Command;
 use crate::log::{self, causes};
-use crate::{release, state};
+use crate::{release, state, tasks};
 use crate::watch::{self, Troubles};
 
 pub const FILE: &str = "hosts";
@@ -586,25 +586,13 @@ fn watch(
     standing: Receiver<Standing>,
     folder: PathBuf,
 ) -> io::Result<oneshot::Sender<()>> {
-    let (ends, ending) = oneshot::channel();
-    let (built, building) = mpsc::sync_channel(1);
-    let name = format!("remote {}", bridged.destination);
-    thread::Builder::new().name(name).spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = built.send(Err(error));
-                return;
-            },
-        };
-        let _ = built.send(Ok(()));
-        runtime.block_on(async move {
-            tokio::spawn(watched(bridged, core, standing, folder));
-            let _ = ending.await;
-        });
-    })?;
-    let ended = |_| io::Error::other("its thread ended before it had a runtime");
-    building.recv().map_err(ended)??;
+    let tasks = tasks::shared().map_err(io::Error::other)?;
+    let (ends, ending) = oneshot::channel::<()>();
+    let watching = tasks.spawn(watched(bridged, core, standing, folder));
+    tasks.spawn(async move {
+        let _ = ending.await;
+        watching.abort();
+    });
     Ok(ends)
 }
 
@@ -730,7 +718,8 @@ impl Seen {
 }
 
 fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached) -> bool {
-    core.send(Command::Remote { destination: destination.clone(), reached }).is_ok()
+    let command = Command::Remote { destination: destination.clone(), reached };
+    tokio::task::block_in_place(|| core.send(command)).is_ok()
 }
 
 async fn asked(

@@ -563,6 +563,30 @@ fn a_step_with_no_terminal_that_way_says_the_edge_of_the_worktree_it_is_on() {
 }
 
 #[test]
+fn a_client_is_answered_while_lune_mux_has_yet_to_size_another_client_s_terminal() {
+    let owned = Owned::new();
+    let (_, sizing, other) = two_in_a_clone(&owned, "clone");
+    let mut resized = Shown::new(&owned, sizing, 80, 24);
+    let [terminal] = resized.terminals()[..] else { panic!("a worktree is made with one terminal") };
+    eventually("the terminal fills its client", || {
+        (sized(&owned, terminal) == Some((78, 22))).then_some(())
+    });
+    let mut beside = Shown::new(&owned, other, 80, 24);
+    let stalled = owned.stall_mux();
+    resized.ask(Event::Size(size(60, 20)));
+    resized.until("the smaller size", |laid| laid.size == Some(size(60, 20)));
+    let left = Some(focus::To::Direction(show_request::Direction::Left.into()));
+    beside.ask(Event::Focus(show_request::Focus { to: left, step: 1 }));
+    assert_eq!(beside.until_edged().worktree, other, "the other client is answered");
+    let log = logged(&owned);
+    assert!(!log.contains("is not sized"), "luned waited on lune-mux first: {log}");
+    drop(stalled);
+    eventually("the terminal fits the smaller client once lune-mux answers", || {
+        (sized(&owned, terminal) == Some((58, 18))).then_some(())
+    });
+}
+
+#[test]
 fn a_bring_sends_the_clients_on_the_terminal_it_is_asked_from_to_the_worktree() {
     let owned = Owned::new();
     let (_, here, there) = two_in_a_clone(&owned, "clone");

@@ -32,8 +32,6 @@ const SOCKET_LOOK: Duration = Duration::from_secs(1);
 
 const _: () = assert!(!SOCKET_LOOK.is_zero(), "a look at the socket waits between looks");
 
-const STREAMS_MAX: u32 = 256;
-
 const HELLO_WAIT: Duration = Duration::from_secs(5);
 
 const MESSAGE_BYTES_MAX: usize = TYPED_BYTES_MAX;
@@ -300,7 +298,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     };
     let served = tokio::spawn(
         Server::builder()
-            .max_concurrent_streams(STREAMS_MAX)
+            .max_concurrent_streams(lune_protocol::MUX_STREAMS_MAX)
             .add_service(
                 mux_server::MuxServer::new(Service { mux: Arc::clone(&mux) })
                     .max_decoding_message_size(MESSAGE_BYTES_MAX),
