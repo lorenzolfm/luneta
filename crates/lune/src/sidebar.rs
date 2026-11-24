@@ -4996,9 +4996,11 @@ fn moved<T: Clone>(items: &[T], taken: Range<usize>, to: usize) -> Vec<T> {
 
 fn transcript(agent: &Agent) -> Transcript {
     match agent.runs_in() {
-        Harness::ClaudeCode | Harness::Antigravity => {
-            SessionId::parse(&agent.session_id).map_or(Transcript::Unnamed, Transcript::Named)
-        },
+        Harness::ClaudeCode | Harness::Antigravity => agent
+            .session_id
+            .as_deref()
+            .and_then(SessionId::parse)
+            .map_or(Transcript::Unnamed, Transcript::Named),
         Harness::Pi | Harness::Unspecified => Transcript::NotRead,
     }
 }
@@ -5928,7 +5930,7 @@ mod tests {
         Agent {
             pid: view,
             harness: Some(Harness::ClaudeCode.into()),
-            session_id: format!("id-{view}"),
+            session_id: Some(format!("id-{view}")),
             cwd: "/w/lune/main".to_owned(),
             status: Some(Reported::KnownStatus(status.into())),
             status_since: Some(Timestamp { seconds: 100, nanos: 0 }),
@@ -9998,7 +10000,7 @@ mod tests {
         let mut sidebar = two_sessions();
         let mut host = sidebar.host.clone().expect("a host");
         let id = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
-        host.agents[0].session_id = id.to_owned();
+        host.agents[0].session_id = Some(id.to_owned());
         let head = Some(api::checkout::Head::Branch(api::Branch {
             name: "feat/brief".to_owned(),
             upstream: None,
@@ -10091,12 +10093,12 @@ mod tests {
         let (of_pi_id, of_claude_id) = ("01a05a24-2bcb-7198", "7c22-5d4c-3b2a");
         let of_pi = |agent: Agent| Agent {
             harness: Some(Harness::Pi.into()),
-            session_id: of_pi_id.to_owned(),
+            session_id: Some(of_pi_id.to_owned()),
             ..agent
         };
         let pi = of_pi(agent("both", 1, Status::Idle, Some("pi")));
         let claude = Agent {
-            session_id: of_claude_id.to_owned(),
+            session_id: Some(of_claude_id.to_owned()),
             ..agent("both", 2, Status::Idle, Some("claude"))
         };
         let alone = of_pi(agent("alone", 3, Status::Idle, Some("alone")));
@@ -12225,7 +12227,7 @@ mod tests {
         ];
         let play = vec![view(5, 0, "/w/p", "fish")];
         let fold = Agent {
-            session_id: "0b7e1c2a-5d1f-4c8e-9a43-1f2e3d4c5b6a".to_owned(),
+            session_id: Some("0b7e1c2a-5d1f-4c8e-9a43-1f2e3d4c5b6a".to_owned()),
             status_since: None,
             ..agent("work", 3, Status::Idle, Some("fold"))
         };

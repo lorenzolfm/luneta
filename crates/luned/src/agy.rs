@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions, Permissions};
+use std::fs::{self, File, Metadata, OpenOptions, Permissions, TryLockError};
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 use lune_protocol::said::Said;
 use serde::Deserialize;
@@ -24,13 +25,17 @@ fi
 LUNE_AGY_TITLE_DEPTH=1
 export LUNE_AGY_TITLE_DEPTH
 wrote=0
+size=0
 buf=""
 if [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ]; then
     tmp="$dir/.$$.tmp"
     buf="$dir/.$$.in"
-    if head -c 65000 > "$buf" 2>/dev/null; then
+    if head -c 65001 > "$buf" 2>/dev/null; then
         wrote=1
-        if [ -s "$buf" ]; then
+        set -- $(wc -c < "$buf" 2>/dev/null)
+        size=$1
+        case $size in ''|*[!0-9]*) size=65001 ;; esac
+        if [ "$size" -gt 0 ] && [ "$size" -le 65000 ]; then
             start=""
             if [ -r "/proc/$PPID/stat" ] && IFS= read -r line < "/proc/$PPID/stat" 2>/dev/null; then
                 rest=${line##*)}
@@ -52,7 +57,11 @@ if [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ]; then
 fi
 if [ -n "$chain" ]; then
     if [ "$wrote" = 1 ]; then
-        sh -c "$chain" < "$buf"
+        if [ "$size" -gt 65000 ]; then
+            { cat "$buf"; cat; } | sh -c "$chain"
+        else
+            sh -c "$chain" < "$buf"
+        fi
         code=$?
         rm -f "$buf" 2>/dev/null
         exit "$code"
@@ -67,11 +76,15 @@ const SCRIPT_FILE: &str = "lune-title.sh";
 
 const SETTINGS_FILE: &str = "settings.json";
 
+const LOCK_FILE: &str = ".lune-title.lock";
+
 const CHAIN_PREFIX: &str = "# lune-chain: ";
 
 const FOLDER: &str = "agy";
 
 const DATED_LATE: Duration = Duration::from_secs(1);
+
+const TORN: Duration = Duration::from_secs(1);
 
 const AGENT_FILES_MAX: usize = 1024;
 
@@ -79,14 +92,18 @@ const SCRIPT_BYTES_MAX: u64 = 64 * 1024;
 
 const SETTINGS_BYTES_MAX: u64 = 1024 * 1024;
 
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
 const _: () = assert!(AGENT_FILES_MAX > 0);
 const _: () = assert!(SCRIPT_BYTES_MAX <= SETTINGS_BYTES_MAX);
 const _: () = assert!(DATED_LATE.as_secs() > 0);
+const _: () = assert!(TORN.as_secs() > 0);
 
 #[must_use]
 pub fn folder() -> Option<PathBuf> {
-    let set = |name| std::env::var_os(name).filter(|value: &OsString| !value.is_empty());
-    set("HOME").map(|home| PathBuf::from(home).join(".gemini/antigravity-cli"))
+    let home = std::env::var_os("HOME").filter(|value: &OsString| !value.is_empty())?;
+    let home = PathBuf::from(home);
+    home.is_absolute().then(|| home.join(".gemini/antigravity-cli"))
 }
 
 #[derive(Deserialize)]
@@ -112,12 +129,20 @@ struct Workspace {
     current_dir: Option<String>,
 }
 
+struct Snapshot {
+    cwd: Directory,
+    session_id: Option<Said>,
+    name: Option<Name>,
+    status: Status,
+    modified: SystemTime,
+}
+
 #[derive(Clone)]
 struct Process {
     started: SystemTime,
     terminal: Option<TerminalKey>,
-    status: Status,
-    status_since: SystemTime,
+    agent: Agent,
+    torn_since: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +157,12 @@ struct FileStamp {
 struct InstalledStamp {
     settings: Option<FileStamp>,
     script: Option<FileStamp>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InstallOutcome {
+    Installed(InstalledStamp),
+    Retry,
 }
 
 pub struct AgentFiles {
@@ -177,7 +208,8 @@ impl AgentFiles {
             return;
         }
         match install(agy, &self.lune) {
-            Ok(stamp) => self.installed = Some(stamp),
+            Ok(InstallOutcome::Installed(stamp)) => self.installed = Some(stamp),
+            Ok(InstallOutcome::Retry) => self.installed = None,
             Err(error) => {
                 self.installed = None;
                 self.troubles.say(format!("agy's title hook in {}: {error}", agy.display()));
@@ -237,42 +269,48 @@ impl AgentFiles {
                 continue;
             };
             match read(&path, id.start.as_str(), started) {
-                Ok(Some((state, modified))) => {
-                    let Some(cwd) = state.cwd() else {
-                        self.troubles.say(format!("{}: cwd is missing or relative", path.display()));
-                        continue;
-                    };
-                    let status = status_of(&state);
+                Ok(Some(snapshot)) => {
                     let status_since = match cached.as_ref() {
-                        Some(was) if was.status == status => was.status_since,
-                        Some(_) | None => modified,
+                        Some(was) if was.agent.status == snapshot.status => {
+                            was.agent.status_since.unwrap_or(snapshot.modified)
+                        },
+                        Some(_) | None => snapshot.modified,
                     };
                     let terminal = cached.map_or_else(
                         || terminal_or_trouble(pid, mux::terminal_of(&id), &mut self.troubles),
                         |it| it.terminal,
                     );
+                    let built = agent(pid, snapshot, started, status_since, terminal);
                     let found = Process {
                         started,
                         terminal,
-                        status: status.clone(),
-                        status_since,
+                        agent: built.clone(),
+                        torn_since: None,
                     };
-                    processes.insert(id, found.clone());
-                    agents.push(agent(pid, &state, cwd, found));
+                    processes.insert(id, found);
+                    agents.push(built);
                 },
                 Ok(None) => {
                     self.reap(&path);
                 },
                 Err(error) => {
-                    processes.extend(cached.map(|it| (id, it)));
-                    if error.kind() != ErrorKind::NotFound {
-                        self.troubles.say(format!("{}: {error}", path.display()));
+                    if error.kind() == ErrorKind::NotFound {
+                        continue;
                     }
+                    if let Some(mut was) = cached {
+                        let since = *was.torn_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() < TORN {
+                            agents.push(was.agent.clone());
+                            processes.insert(id, was);
+                            continue;
+                        }
+                    }
+                    self.troubles.say(format!("{}: {error}", path.display()));
                 },
             }
         }
         assert!(agents.len() <= paths_count);
-        assert!(processes.len() <= paths_count);
+        assert_eq!(agents.len(), processes.len());
         self.processes = processes;
         self.troubles.done();
         agents
@@ -288,17 +326,12 @@ impl Payload {
             .or_else(|| self.workspace.as_ref()?.current_dir.as_deref().and_then(parse))
     }
 
-    fn session_id(&self, pid: u32) -> Said {
-        assert!(pid > 1);
-        let id = self
-            .conversation_id
+    fn session_id(&self) -> Option<Said> {
+        self.conversation_id
             .as_deref()
             .filter(|id| !id.trim().is_empty())
             .or(self.session_id.as_deref())
-            .and_then(|id| Said::new(id.trim().to_owned()));
-        id.unwrap_or_else(|| {
-            Said::new(format!("-{pid}")).expect("a pid with a dash is not empty")
-        })
+            .and_then(|id| Said::new(id.trim().to_owned()))
     }
 
     fn name(&self) -> Option<Name> {
@@ -324,19 +357,25 @@ fn status_of(state: &Payload) -> Status {
     }
 }
 
-fn agent(pid: u32, state: &Payload, cwd: Directory, process: Process) -> Agent {
+fn agent(
+    pid: u32,
+    snapshot: Snapshot,
+    started: SystemTime,
+    status_since: SystemTime,
+    terminal: Option<TerminalKey>,
+) -> Agent {
     assert!(pid > 1);
     Agent {
         pid,
         harness: Harness::Antigravity,
-        session_id: state.session_id(pid),
-        cwd,
-        status: process.status,
-        status_since: Some(process.status_since),
-        started_at: Some(process.started),
-        name: state.name(),
+        session_id: snapshot.session_id,
+        cwd: snapshot.cwd,
+        status: snapshot.status,
+        status_since: Some(status_since),
+        started_at: Some(started),
+        name: snapshot.name,
         entrypoint: Some(Said::new("tui".to_owned()).expect("tui is not empty")),
-        terminal: process.terminal,
+        terminal,
     }
 }
 
@@ -368,7 +407,7 @@ fn read_bounded(path: &Path, bytes_max: u64) -> io::Result<Vec<u8>> {
     read_bounded_file(File::open(path)?, bytes_max)
 }
 
-fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<(Payload, SystemTime)>> {
+fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snapshot>> {
     assert_ne!(start, "");
     let file = File::open(path)?;
     let modified = file.metadata()?.modified()?;
@@ -380,21 +419,37 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<(Pay
     } else {
         dated_since(modified, started)
     };
-    Ok(stands.then_some((envelope.state, modified)))
+    if !stands {
+        return Ok(None);
+    }
+    let Some(cwd) = envelope.state.cwd() else {
+        return Err(io::Error::new(ErrorKind::InvalidData, "cwd is missing or relative"));
+    };
+    Ok(Some(Snapshot {
+        cwd,
+        session_id: envelope.state.session_id(),
+        name: envelope.state.name(),
+        status: status_of(&envelope.state),
+        modified,
+    }))
 }
 
 fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
     modified.checked_add(DATED_LATE).is_none_or(|late| started <= late)
 }
 
-fn file_stamp(path: &Path) -> Option<FileStamp> {
-    let meta = fs::metadata(path).ok()?;
-    Some(FileStamp {
+fn file_stamp_of(meta: &Metadata) -> FileStamp {
+    FileStamp {
         ino: meta.ino(),
         len: meta.len(),
         mode: meta.permissions().mode() & 0o777,
         modified: meta.modified().ok(),
-    })
+    }
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = fs::metadata(path).ok()?;
+    Some(file_stamp_of(&meta))
 }
 
 fn current_install_stamp(agy: &Path) -> InstalledStamp {
@@ -411,12 +466,35 @@ fn shell_quote(text: &str) -> String {
     quoted
 }
 
-fn script(lune: &Path, chain: Option<&str>) -> io::Result<String> {
+struct ExternalCommand(String);
+
+impl ExternalCommand {
+    fn parse(raw: &str, script_path: &Path, ours: &str) -> io::Result<Option<Self>> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        if is_own_command(trimmed, script_path, ours) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!("{SCRIPT_FILE} chains back into itself"),
+            ));
+        }
+        Ok(Some(Self(trimmed.to_owned())))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn script(lune: &Path, chain: Option<&ExternalCommand>) -> io::Result<String> {
     let dir = lune.join(FOLDER);
     let Some(dir) = dir.to_str() else {
         return Err(io::Error::new(ErrorKind::InvalidData, "the daemon's folder is not UTF-8"));
     };
     assert_ne!(dir, "");
+    let chain = chain.map(ExternalCommand::as_str);
     let chain_json = serde_json::to_string(&chain)?;
     let dir_sh = shell_quote(dir);
     let chain_sh = shell_quote(chain.unwrap_or(""));
@@ -427,7 +505,11 @@ fn script(lune: &Path, chain: Option<&str>) -> io::Result<String> {
     Ok(rendered)
 }
 
-fn parse_chain(bytes: &[u8]) -> io::Result<Option<String>> {
+fn parse_chain(
+    bytes: &[u8],
+    script_path: &Path,
+    ours: &str,
+) -> io::Result<Option<ExternalCommand>> {
     let text = std::str::from_utf8(bytes)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     let Some(line) = text.lines().take(4).find_map(|line| line.strip_prefix(CHAIN_PREFIX)) else {
@@ -436,17 +518,24 @@ fn parse_chain(bytes: &[u8]) -> io::Result<Option<String>> {
             format!("{SCRIPT_FILE} is missing its {CHAIN_PREFIX}header"),
         ));
     };
-    serde_json::from_str::<Option<String>>(line)
-        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+    let raw = serde_json::from_str::<Option<String>>(line)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    match raw {
+        Some(command) => ExternalCommand::parse(&command, script_path, ours),
+        None => Ok(None),
+    }
 }
 
-fn read_script_and_chain(script_path: &Path) -> io::Result<Option<(Vec<u8>, Option<String>)>> {
+fn read_script_and_chain(
+    script_path: &Path,
+    ours: &str,
+) -> io::Result<Option<(Vec<u8>, Option<ExternalCommand>)>> {
     let bytes = match read_bounded(script_path, SCRIPT_BYTES_MAX) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let chain = parse_chain(&bytes)?;
+    let chain = parse_chain(&bytes, script_path, ours)?;
     Ok(Some((bytes, chain)))
 }
 
@@ -471,25 +560,27 @@ fn is_own_command(command: &str, script_path: &Path, ours: &str) -> bool {
         .any(|token| token == SCRIPT_FILE || token.ends_with(&suffix))
 }
 
-fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<FileStamp> {
     assert_eq!(mode & !0o777, 0);
     let dir = path.parent().expect("atomic write target has a parent directory");
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .expect("atomic write target has a UTF-8 file name");
-    let new = dir.join(format!(".{file_name}.{}.new", std::process::id()));
-    let write_and_rename = || -> io::Result<()> {
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let new = dir.join(format!(".{file_name}.{}.{seq}.new", std::process::id()));
+    let write_and_rename = || -> io::Result<FileStamp> {
         let mut file = OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(mode)
             .open(&new)?;
         file.write_all(bytes)?;
         file.set_permissions(Permissions::from_mode(mode))?;
+        let stamp = file_stamp_of(&file.metadata()?);
         drop(file);
-        fs::rename(&new, path)
+        fs::rename(&new, path)?;
+        Ok(stamp)
     };
     write_and_rename().inspect_err(|_| {
         if let Err(error) = fs::remove_file(&new)
@@ -504,7 +595,7 @@ fn write_script(
     script_path: &Path,
     text: &str,
     existing: Option<&[u8]>,
-) -> io::Result<()> {
+) -> io::Result<FileStamp> {
     let matches = match existing {
         Some(there) => there == text.as_bytes(),
         None => match read_bounded(script_path, SCRIPT_BYTES_MAX) {
@@ -513,66 +604,152 @@ fn write_script(
             Err(error) => return Err(error),
         },
     };
-    let executable = match fs::metadata(script_path) {
-        Ok(meta) => meta.permissions().mode() & 0o100 != 0,
-        Err(error) if error.kind() == ErrorKind::NotFound => false,
-        Err(error) => return Err(error),
-    };
-    if matches && executable {
-        return Ok(());
+    if matches {
+        match fs::metadata(script_path) {
+            Ok(meta) if meta.permissions().mode() & 0o100 != 0 => {
+                return Ok(file_stamp_of(&meta));
+            },
+            Ok(_) => {},
+            Err(error) if error.kind() == ErrorKind::NotFound => {},
+            Err(error) => return Err(error),
+        }
     }
     atomic_write(script_path, text.as_bytes(), 0o700)
 }
 
-fn write_settings(settings_path: &Path, object: &Map<String, Value>) -> io::Result<()> {
-    let mode = match fs::metadata(settings_path) {
-        Ok(meta) => meta.permissions().mode() & 0o777,
-        Err(error) if error.kind() == ErrorKind::NotFound => 0o600,
+enum SettingsSnapshot {
+    Missing,
+    Present { map: Map<String, Value>, stamp: FileStamp, mode: u32 },
+}
+
+impl SettingsSnapshot {
+    fn map(&self) -> Option<&Map<String, Value>> {
+        match self {
+            SettingsSnapshot::Missing => None,
+            SettingsSnapshot::Present { map, .. } => Some(map),
+        }
+    }
+
+    fn into_map(self) -> Map<String, Value> {
+        match self {
+            SettingsSnapshot::Missing => Map::new(),
+            SettingsSnapshot::Present { map, .. } => map,
+        }
+    }
+
+    fn stamp(&self) -> Option<FileStamp> {
+        match self {
+            SettingsSnapshot::Missing => None,
+            SettingsSnapshot::Present { stamp, .. } => Some(*stamp),
+        }
+    }
+
+    fn mode(&self) -> u32 {
+        match self {
+            SettingsSnapshot::Missing => 0o600,
+            SettingsSnapshot::Present { mode, .. } => *mode,
+        }
+    }
+}
+
+fn read_settings(settings_path: &Path) -> io::Result<SettingsSnapshot> {
+    let file = match File::open(settings_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(SettingsSnapshot::Missing),
         Err(error) => return Err(error),
     };
+    let meta = file.metadata()?;
+    let stamp = file_stamp_of(&meta);
+    let mode = stamp.mode;
+    let bytes = read_bounded_file(file, SETTINGS_BYTES_MAX)?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let map = if text.trim().is_empty() {
+        Map::new()
+    } else {
+        match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(map)) => map,
+            Ok(_) => {
+                let why = format!("{} is not a JSON object", settings_path.display());
+                return Err(io::Error::new(ErrorKind::InvalidData, why));
+            },
+            Err(error) => return Err(io::Error::new(ErrorKind::InvalidData, error)),
+        }
+    };
+    Ok(SettingsSnapshot::Present { map, stamp, mode })
+}
+
+fn write_settings(
+    settings_path: &Path,
+    object: &Map<String, Value>,
+    mode: u32,
+) -> io::Result<FileStamp> {
     let mut text = serde_json::to_string_pretty(object)?;
     text.push('\n');
     atomic_write(settings_path, text.as_bytes(), mode)
 }
 
+enum ChainSource {
+    None,
+    External(ExternalCommand),
+    FromExistingScript,
+}
+
 enum TitleAction {
     LeaveUntouched,
     RefreshScript,
-    Wire { chain: Option<String>, keep_chain_from_script: bool },
+    Wire(ChainSource),
 }
 
 fn decide_title_action(
-    settings: &Map<String, Value>,
+    settings: Option<&Map<String, Value>>,
     script_path: &Path,
     ours: &str,
 ) -> io::Result<TitleAction> {
-    match settings.get("title") {
+    match settings.and_then(|map| map.get("title")) {
         Some(Value::Bool(false)) => Ok(TitleAction::LeaveUntouched),
-        Some(Value::Bool(true)) | None => {
-            Ok(TitleAction::Wire { chain: None, keep_chain_from_script: false })
-        },
+        Some(Value::Bool(true)) | None => Ok(TitleAction::Wire(ChainSource::None)),
         Some(Value::Object(title)) => {
-            if title.get("enabled").and_then(Value::as_bool) == Some(false) {
-                return Ok(TitleAction::LeaveUntouched);
-            }
-            if title.get("type").and_then(Value::as_str).is_some_and(|kind| kind != "command") {
-                return Ok(TitleAction::LeaveUntouched);
-            }
-            let command = title
-                .get("command")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|command| !command.is_empty());
-            match command {
-                Some(command) if command == ours => Ok(TitleAction::RefreshScript),
-                Some(command) if is_own_command(command, script_path, ours) => {
-                    Ok(TitleAction::Wire { chain: None, keep_chain_from_script: true })
+            match title.get("enabled") {
+                None | Some(Value::Bool(true)) => {},
+                Some(Value::Bool(false)) => return Ok(TitleAction::LeaveUntouched),
+                Some(_) => {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("{SETTINGS_FILE}: title.enabled is not a boolean"),
+                    ));
                 },
-                Some(command) => Ok(TitleAction::Wire {
-                    chain: Some(command.to_owned()),
-                    keep_chain_from_script: false,
-                }),
-                None => Ok(TitleAction::Wire { chain: None, keep_chain_from_script: false }),
+            }
+            match title.get("type") {
+                None => {},
+                Some(Value::String(kind)) if kind == "command" => {},
+                Some(Value::String(_)) => return Ok(TitleAction::LeaveUntouched),
+                Some(_) => {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("{SETTINGS_FILE}: title.type is not a string"),
+                    ));
+                },
+            }
+            match title.get("command") {
+                None => Ok(TitleAction::Wire(ChainSource::None)),
+                Some(Value::String(raw)) => {
+                    let trimmed = raw.trim();
+                    if trimmed == ours {
+                        Ok(TitleAction::RefreshScript)
+                    } else if is_own_command(trimmed, script_path, ours) {
+                        Ok(TitleAction::Wire(ChainSource::FromExistingScript))
+                    } else {
+                        match ExternalCommand::parse(trimmed, script_path, ours)? {
+                            Some(cmd) => Ok(TitleAction::Wire(ChainSource::External(cmd))),
+                            None => Ok(TitleAction::Wire(ChainSource::None)),
+                        }
+                    }
+                },
+                Some(_) => Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("{SETTINGS_FILE}: title.command is not a string"),
+                )),
             }
         },
         Some(_) => Err(io::Error::new(
@@ -582,85 +759,75 @@ fn decide_title_action(
     }
 }
 
-fn validate_chain(
-    chain: Option<String>,
-    script_path: &Path,
-    ours: &str,
-) -> io::Result<Option<String>> {
-    if let Some(ref command) = chain
-        && is_own_command(command, script_path, ours)
-    {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            format!("{SCRIPT_FILE} chains back into itself"),
-        ));
+struct FileLock(File);
+
+impl FileLock {
+    fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
+        let file = OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(FileLock(file))),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(error)) => Err(error),
+        }
     }
-    Ok(chain)
 }
 
-fn install(agy: &Path, lune: &Path) -> io::Result<InstalledStamp> {
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn install(agy: &Path, lune: &Path) -> io::Result<InstallOutcome> {
     assert!(agy.is_dir());
+    let Some(_lock) = FileLock::try_acquire(&agy.join(LOCK_FILE))? else {
+        return Ok(InstallOutcome::Retry);
+    };
+
     let script_path = agy.join(SCRIPT_FILE);
     let settings_path = agy.join(SETTINGS_FILE);
     let ours = own_command(&script_path)?;
     assert_ne!(ours, "");
 
-    let mut settings: Map<String, Value> = match read_bounded(&settings_path, SETTINGS_BYTES_MAX) {
-        Ok(bytes) => {
-            let text = std::str::from_utf8(&bytes)
-                .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-            if text.trim().is_empty() {
-                Map::new()
-            } else {
-                match serde_json::from_str::<Value>(text) {
-                    Ok(Value::Object(map)) => map,
-                    Ok(_) => {
-                        let why = format!("{} is not a JSON object", settings_path.display());
-                        return Err(io::Error::new(ErrorKind::InvalidData, why));
-                    },
-                    Err(error) => return Err(io::Error::new(ErrorKind::InvalidData, error)),
-                }
-            }
-        },
-        Err(error) if error.kind() == ErrorKind::NotFound => Map::new(),
-        Err(error) => return Err(error),
-    };
+    let snapshot = read_settings(&settings_path)?;
+    let action = decide_title_action(snapshot.map(), &script_path, &ours)?;
 
-    match decide_title_action(&settings, &script_path, &ours)? {
-        TitleAction::LeaveUntouched => Ok(current_install_stamp(agy)),
+    match action {
+        TitleAction::LeaveUntouched => Ok(InstallOutcome::Installed(InstalledStamp {
+            settings: snapshot.stamp(),
+            script: file_stamp(&script_path),
+        })),
         TitleAction::RefreshScript => {
-            let loaded = read_script_and_chain(&script_path)?;
+            let loaded = read_script_and_chain(&script_path, &ours)?;
             let existing = loaded.as_ref().map(|(bytes, _)| bytes.as_slice());
-            let chain = validate_chain(
-                loaded.as_ref().and_then(|(_, chain)| chain.clone()),
-                &script_path,
-                &ours,
-            )?;
-            if let Some(ref command) = chain {
-                assert!(!is_own_command(command, &script_path, &ours));
-            }
-            let text = script(lune, chain.as_deref())?;
-            write_script(&script_path, &text, existing)?;
-            Ok(current_install_stamp(agy))
+            let chain = loaded.as_ref().and_then(|(_, chain)| chain.as_ref());
+            let text = script(lune, chain)?;
+            let script_stamp = write_script(&script_path, &text, existing)?;
+            Ok(InstallOutcome::Installed(InstalledStamp {
+                settings: snapshot.stamp(),
+                script: Some(script_stamp),
+            }))
         },
-        TitleAction::Wire { chain, keep_chain_from_script } => {
-            let (existing, chain) = if keep_chain_from_script {
-                let loaded = read_script_and_chain(&script_path)?;
-                let chain = validate_chain(
-                    loaded.as_ref().and_then(|(_, chain)| chain.clone()),
-                    &script_path,
-                    &ours,
-                )?;
-                (loaded.map(|(bytes, _)| bytes), chain)
-            } else {
-                (None, validate_chain(chain, &script_path, &ours)?)
+        TitleAction::Wire(source) => {
+            let (existing, chain) = match source {
+                ChainSource::None => (None, None),
+                ChainSource::External(cmd) => (None, Some(cmd)),
+                ChainSource::FromExistingScript => {
+                    let loaded = read_script_and_chain(&script_path, &ours)?;
+                    match loaded {
+                        Some((bytes, chain)) => (Some(bytes), chain),
+                        None => (None, None),
+                    }
+                },
             };
-            if let Some(ref command) = chain {
-                assert!(!is_own_command(command, &script_path, &ours));
-            }
-            let text = script(lune, chain.as_deref())?;
-            write_script(&script_path, &text, existing.as_deref())?;
+            let text = script(lune, chain.as_ref())?;
+            let script_stamp = write_script(&script_path, &text, existing.as_deref())?;
 
+            if file_stamp(&settings_path) != snapshot.stamp() {
+                return Ok(InstallOutcome::Retry);
+            }
+            let mode = snapshot.mode();
+            let mut settings = snapshot.into_map();
             let mut title = settings
                 .remove("title")
                 .and_then(|value| match value {
@@ -671,8 +838,11 @@ fn install(agy: &Path, lune: &Path) -> io::Result<InstalledStamp> {
             title.entry("type".to_owned()).or_insert_with(|| Value::String("command".to_owned()));
             title.insert("command".to_owned(), Value::String(ours));
             settings.insert("title".to_owned(), Value::Object(title));
-            write_settings(&settings_path, &settings)?;
-            Ok(current_install_stamp(agy))
+            let settings_stamp = write_settings(&settings_path, &settings, mode)?;
+            Ok(InstallOutcome::Installed(InstalledStamp {
+                settings: Some(settings_stamp),
+                script: Some(script_stamp),
+            }))
         },
     }
 }
@@ -720,7 +890,10 @@ mod tests {
     }
 
     fn chain_of(script_path: &Path) -> Option<String> {
-        read_script_and_chain(script_path).unwrap().and_then(|(_, chain)| chain)
+        let ours = own_command(script_path).unwrap();
+        read_script_and_chain(script_path, &ours)
+            .unwrap()
+            .and_then(|(_, chain)| chain.map(|cmd| cmd.as_str().to_owned()))
     }
 
     #[test]
@@ -805,8 +978,18 @@ mod tests {
             non_command
         );
 
-        fs::write(agy.join(SETTINGS_FILE), json!({"title": "plain"}).to_string()).unwrap();
-        assert!(install(&agy, &lune).is_err());
+        for invalid in [
+            json!({"title": "plain"}),
+            json!({"title": {"enabled": "false", "command": "echo keep"}}),
+            json!({"title": {"type": 123, "command": "echo keep"}}),
+            json!({"title": {"type": "command", "command": ["echo", "keep"]}}),
+            json!({"title": {"type": "command", "command": null}}),
+        ] {
+            let text = invalid.to_string();
+            fs::write(agy.join(SETTINGS_FILE), &text).unwrap();
+            assert!(install(&agy, &lune).is_err(), "{text}");
+            assert_eq!(fs::read_to_string(agy.join(SETTINGS_FILE)).unwrap(), text);
+        }
 
         fs::write(agy.join(SETTINGS_FILE), "not json").unwrap();
         assert!(install(&agy, &lune).is_err());
@@ -851,6 +1034,68 @@ mod tests {
     }
 
     #[test]
+    fn install_retries_when_lock_is_held_elsewhere() {
+        let scratch = tempfile::tempdir().unwrap();
+        let agy = scratch.path().join("agy");
+        let lune = scratch.path().join("lune");
+        fs::create_dir_all(&agy).unwrap();
+        fs::create_dir_all(lune.join(FOLDER)).unwrap();
+
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(agy.join(LOCK_FILE))
+            .unwrap();
+        lock.try_lock().unwrap();
+        assert_eq!(install(&agy, &lune).unwrap(), InstallOutcome::Retry);
+        assert!(!agy.join(SETTINGS_FILE).exists());
+        drop(lock);
+        assert!(matches!(install(&agy, &lune).unwrap(), InstallOutcome::Installed(_)));
+    }
+
+    #[test]
+    fn oversized_hook_stdin_keeps_existing_state_file_and_forwards_full_stdin_to_chain() {
+        let scratch = tempfile::tempdir().unwrap();
+        let agy = scratch.path().join("agy");
+        let lune = scratch.path().join("lune");
+        fs::create_dir_all(&agy).unwrap();
+        fs::create_dir_all(lune.join(FOLDER)).unwrap();
+
+        let existing = json!({"title": {"type": "command", "command": "wc -c"}});
+        fs::write(agy.join(SETTINGS_FILE), existing.to_string()).unwrap();
+        install(&agy, &lune).unwrap();
+        let updated: Value =
+            serde_json::from_str(&fs::read_to_string(agy.join(SETTINGS_FILE)).unwrap()).unwrap();
+        let cmd = updated["title"]["command"].as_str().unwrap().to_owned();
+
+        let valid = json!({"cwd": "/w", "conversation_id": "c1", "agent_state": "idle"}).to_string();
+        let run = |input: &[u8]| {
+            let mut child = Command::new("sh")
+                .args(["-c", &cmd])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input).unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+
+        assert_eq!(run(valid.as_bytes()), valid.len().to_string());
+        let mine = lune.join(FOLDER).join(format!("{}.json", std::process::id()));
+        let before = fs::read_to_string(&mine).unwrap();
+
+        let huge = format!(
+            "{{\"cwd\":\"/w\",\"conversation_title\":\"{}\",\"agent_state\":\"working\"}}",
+            "x".repeat(70_000)
+        );
+        assert_eq!(run(huge.as_bytes()), huge.len().to_string());
+        assert_eq!(fs::read_to_string(&mine).unwrap(), before);
+    }
+
+    #[test]
     fn payload_cwd_trims_and_falls_back_to_workspace_current_dir() {
         let make = |cwd: Option<&str>, current_dir: Option<&str>| Payload {
             cwd: cwd.map(str::to_owned),
@@ -887,5 +1132,35 @@ mod tests {
         let first_stamp = files.installed.expect("hook installed and stamped");
         assert_eq!(files.scan(), []);
         assert_eq!(files.installed, Some(first_stamp));
+    }
+
+    #[test]
+    fn scan_retains_live_agent_during_torn_read() {
+        let scratch = tempfile::tempdir().unwrap();
+        let lune = scratch.path().join("lune");
+        fs::create_dir_all(&lune).unwrap();
+
+        let mut files = AgentFiles::new(&lune, None);
+        let pid = std::process::id();
+        let start = process::start(pid).unwrap();
+        let state_file = files.dir().join(format!("{pid}.json"));
+        let valid = json!({
+            "procStart": start.as_str(),
+            "state": {
+                "cwd": "/w",
+                "conversation_id": "",
+                "agent_state": "idle"
+            }
+        });
+        fs::write(&state_file, valid.to_string()).unwrap();
+
+        let first = files.scan();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].session_id, None);
+        assert_eq!(first[0].status, Status::Idle);
+
+        fs::write(&state_file, "{truncated").unwrap();
+        let during_torn = files.scan();
+        assert_eq!(during_torn, first);
     }
 }

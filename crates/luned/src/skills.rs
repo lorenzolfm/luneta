@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File};
-use std::io::{ErrorKind, Read};
+use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -95,17 +95,23 @@ impl std::fmt::Display for Name {
     }
 }
 
+fn env_dir(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
 pub fn found_in(cwd: &Directory, harness: Harness) -> Result<Vec<Skill>, String> {
     match harness {
         Harness::ClaudeCode => claude_found_in(cwd),
         Harness::Pi => {
-            let set = |name: &str| env::var_os(name).map(PathBuf::from);
-            let home = set("HOME");
-            let agent = set("PI_CODING_AGENT_DIR").or_else(|| Some(home.as_ref()?.join(PI_AGENT)));
+            let home = env_dir("HOME");
+            let agent = env_dir("PI_CODING_AGENT_DIR").or_else(|| Some(home.as_ref()?.join(PI_AGENT)));
             Ok(pi_found(Path::new(cwd.as_str()), home.as_deref(), agent.as_deref()))
         },
         Harness::Antigravity => {
-            let home = env::var_os("HOME").map(PathBuf::from);
+            let home = env_dir("HOME");
             Ok(agy_found(Path::new(cwd.as_str()), home.as_deref()))
         },
     }
@@ -191,7 +197,7 @@ fn pi_found(cwd: &Path, home: Option<&Path>, agent: Option<&Path>) -> Vec<Skill>
         skill_files(root, root, *kept, 0, &mut files);
     }
     let found = files.into_iter().filter_map(|file| {
-        let mut front = Front::read(&frontmatter(&file)?);
+        let mut front = Front::read(&frontmatter(&file).ok().flatten()?);
         if front.description.trim().is_empty() {
             return None;
         }
@@ -289,7 +295,16 @@ fn agy_found(cwd: &Path, home: Option<&Path>) -> Vec<Skill> {
     }
     assert!(files.len() <= AGY_SKILL_FILES_MAX);
     let found = files.into_iter().filter_map(|file| {
-        let mut front = frontmatter(&file).map_or_else(Front::default, |text| Front::read(&text));
+        let mut front = match frontmatter(&file) {
+            Ok(Some(text)) => Front::read(&text),
+            Ok(None) => Front::default(),
+            Err(error) => {
+                if error.kind() != ErrorKind::NotFound {
+                    log::say(&format!("skills in {}: {error}", file.display()));
+                }
+                return None;
+            },
+        };
         let folder = file.parent()?.file_name()?.to_str()?;
         let name = front.name.take().filter(|name| !name.is_empty());
         Some((name.unwrap_or_else(|| folder.to_owned()), front))
@@ -358,16 +373,16 @@ fn skill_files(dir: &Path, root: &Path, kept: Kept, depth: usize, files: &mut Ve
     }
 }
 
-fn frontmatter(file: &Path) -> Option<String> {
+fn frontmatter(file: &Path) -> io::Result<Option<String>> {
     let mut text = String::new();
-    File::open(file).ok()?.take(FRONT_BYTES).read_to_string(&mut text).ok()?;
+    File::open(file)?.take(FRONT_BYTES).read_to_string(&mut text)?;
     let mut lines = text.lines();
-    if lines.next()?.trim_end() != "---" {
-        return None;
+    if lines.next().is_none_or(|line| line.trim_end() != "---") {
+        return Ok(None);
     }
     let front: Vec<&str> =
         lines.take(64).take_while(|line| line.trim_end() != "---").collect();
-    Some(front.join("\n"))
+    Ok(Some(front.join("\n")))
 }
 
 fn own(path: &str, text: &str) -> Option<(String, Front)> {
@@ -468,6 +483,8 @@ impl Default for Front {
 impl Front {
     fn read(front: &str) -> Self {
         let mut read = Front::default();
+        let mut user_invocable: Option<bool> = None;
+        let mut disable_slash = false;
         let mut lines = front.lines().peekable();
         while let Some(line) = lines.next() {
             let Some((key, value)) = line.split_once(':') else {
@@ -486,9 +503,11 @@ impl Front {
             match key {
                 "name" => read.name = Some(unquote(&parts.join(" "))),
                 "description" => read.description = unquote(&parts.join(" ")),
-                "user-invocable" => read.invocable = unquote(&parts.join(" ")) != "false",
+                "user-invocable" => {
+                    user_invocable = Some(!unquote(&parts.join(" ")).eq_ignore_ascii_case("false"));
+                },
                 "disable-slash-command" if truthy(&unquote(&parts.join(" "))) => {
-                    read.invocable = false;
+                    disable_slash = true;
                 },
                 "disable-model-invocation" if truthy(&unquote(&parts.join(" "))) => {
                     read.runs = Runs::OnlyForYou;
@@ -496,6 +515,7 @@ impl Front {
                 _ => {},
             }
         }
+        read.invocable = !disable_slash && user_invocable.unwrap_or(true);
         read
     }
 }
@@ -811,6 +831,17 @@ mod tests {
             skill("shared", "Shared."),
             skill("user-agent", "Home agents."),
         ]);
+
+        let invalid_dir = root.join("plain/parent/child/.agents/skills/corrupt");
+        fs::create_dir_all(&invalid_dir).unwrap();
+        fs::write(invalid_dir.join("SKILL.md"), [0xff, 0xfe, 0x00]).unwrap();
+        put(root, "plain/parent/child/.agents/skills/bare/SKILL.md", "No frontmatter.\n");
+        assert_eq!(agy_found(&root.join("plain/parent/child"), None), [
+            skill("bare", ""),
+            skill("here", "Here."),
+        ]);
+        assert!(!Front::read("disable-slash-command: true\nuser-invocable: true").invocable);
+        assert!(!Front::read("user-invocable: False").invocable);
     }
 
     #[test]

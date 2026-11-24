@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
@@ -671,8 +671,14 @@ impl Daemon for Host {
         }
         let read = task::spawn_blocking(move || reading.ends(&folders)).await;
         let read = read.map_err(|error| unfinished(&error))?;
-        let ends = read.into_iter().map(|(id, end)| (id.as_str().to_owned(), end)).collect();
-        Ok(Response::new(TranscriptEndsResponse { ends }))
+        let mut ends = HashMap::with_capacity(read.len());
+        let mut typed_ends = HashMap::with_capacity(read.len());
+        for (id, end) in read {
+            let key = id.as_str().to_owned();
+            typed_ends.insert(key.clone(), end.to_api());
+            ends.insert(key, end.lines().to_owned());
+        }
+        Ok(Response::new(TranscriptEndsResponse { ends, typed_ends }))
     }
 
     type AskStream = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>> + Send>>;
@@ -1277,7 +1283,8 @@ impl Host {
             },
         }
         let projects = self.claude_folder.as_ref().map(|folder| folder.join("projects"));
-        let Some((projects, session)) = projects.zip(SessionId::parse(&agent.session_id)) else {
+        let session = agent.session_id.as_deref().and_then(SessionId::parse);
+        let Some((projects, session)) = projects.zip(session) else {
             return Runs::Claude { transcript: None };
         };
         let found = task::spawn_blocking(move || transcripts::find(&projects, &session)).await;

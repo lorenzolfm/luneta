@@ -386,7 +386,8 @@ impl Known {
 
     fn agents(&self) -> Vec<api::Agent> {
         let claude = self.found.agents.iter().map(|agent| {
-            let topic = self.topics.get(agent.session_id.as_str()).cloned();
+            let topic =
+                agent.session_id.as_ref().and_then(|id| self.topics.get(id.as_str())).cloned();
             agent.to_api(topic)
         });
         let others = self.pi.iter().chain(&self.agy).map(|agent| agent.to_api(None));

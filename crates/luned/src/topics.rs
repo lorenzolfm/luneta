@@ -236,7 +236,7 @@ fn topical(agent: &Agent) -> Option<SessionId> {
     if agent.terminal.is_none() || !at_prompt || given {
         return None;
     }
-    SessionId::parse(agent.session_id.as_str())
+    SessionId::parse(agent.session_id.as_ref()?.as_str())
 }
 
 fn names_no_subject(asked: &Asked) -> bool {
@@ -368,7 +368,7 @@ mod tests {
         Agent {
             pid: 2,
             harness: Harness::ClaudeCode,
-            session_id: Said::new(id.to_owned()).unwrap(),
+            session_id: Some(Said::new(id.to_owned()).unwrap()),
             cwd: Directory::parse("/w".to_owned()).unwrap(),
             status,
             status_since: Some(SystemTime::UNIX_EPOCH + Duration::from_mins(since)),
@@ -922,7 +922,10 @@ mod tests {
         ];
         for (agent, called) in cases {
             let projects = Projects::new();
-            projects.prompted(agent.session_id.as_str(), "fold the sessions");
+            projects.prompted(
+                agent.session_id.as_ref().map_or("", Said::as_str),
+                "fold the sessions",
+            );
             let due = projects.topics().look(std::slice::from_ref(&agent), true);
             assert_eq!(due.len(), usize::from(called), "{agent:?}");
         }

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use luned::api::agent::{Status as Reported, WaitingFor as Waits};
 use luned::api::{Agent, Status, WaitingFor};
-use luned::transcripts::{on_what, one_line, Reading, SessionId};
+use luned::transcripts::{on_what, one_line, Reading, SessionId, TranscriptEnd, Turn};
 use serde_json::Value;
 
 use crate::brief;
@@ -415,7 +415,7 @@ pub struct Alert {
 }
 
 impl Alert {
-    pub fn of(due: &Due, end: Option<&str>) -> Alert {
+    pub fn of(due: &Due, end: Option<&TranscriptEnd>) -> Alert {
         let turn = end.map_or_default(Turn::of);
         let tool = turn.tool.as_ref().map(|(name, input)| (name.as_str(), input));
         let (kind, body) = match (&due.want, tool) {
@@ -464,90 +464,8 @@ impl Alert {
     }
 }
 
-#[derive(Debug, Default)]
-struct Turn {
-    tool: Option<(String, Value)>,
-    said: Option<String>,
-}
-
-impl Turn {
-    fn of(end: &str) -> Turn {
-        let mut calls: Vec<Call> = Vec::new();
-        let mut said = None;
-        for line in end.lines() {
-            let Ok(record) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if record["isSidechain"].as_bool() == Some(true) {
-                continue;
-            }
-            let blocks = record["message"]["content"].as_array().into_iter().flatten();
-            match record["type"].as_str() {
-                Some("assistant") => {
-                    for block in blocks {
-                        match block["type"].as_str() {
-                            Some("text") => said = text_of(block).or(said),
-                            Some("tool_use") => calls.extend(Call::of(block)),
-                            _ => {},
-                        }
-                    }
-                },
-                Some("user") => {
-                    for block in blocks.filter(|block| block["type"] == "tool_result") {
-                        if let Some(answered) = block["tool_use_id"].as_str() {
-                            calls.retain(|call| call.id.as_deref() != Some(answered));
-                        }
-                    }
-                },
-                Some("USER_INPUT") => {
-                    calls.clear();
-                },
-                Some("PLANNER_RESPONSE") => {
-                    if let Some(text) =
-                        record["content"].as_str().map(str::trim).filter(|text| !text.is_empty())
-                    {
-                        said = Some(text.to_owned());
-                    }
-                    calls.clear();
-                    for call in record["tool_calls"].as_array().into_iter().flatten() {
-                        if let Some(name) = call["name"].as_str() {
-                            let input = luned::transcripts::agy_args(&call["args"]);
-                            calls.push(Call { id: None, name: name.to_owned(), input });
-                        }
-                    }
-                },
-                _ => {},
-            }
-        }
-        let tool = calls.pop().map(|call| (call.name, call.input));
-        Turn { tool, said }
-    }
-}
-
-struct Call {
-    id: Option<String>,
-    name: String,
-    input: Value,
-}
-
-impl Call {
-    fn of(block: &Value) -> Option<Call> {
-        let (id, name) = (block["id"].as_str()?, block["name"].as_str()?);
-        Some(Call {
-            id: Some(id.to_owned()),
-            name: name.to_owned(),
-            input: block["input"].clone(),
-        })
-    }
-}
-
 fn run_on(input: &Value) -> Option<&str> {
     on_what(input).filter(|what| !what.trim().is_empty())
-}
-
-fn text_of(block: &Value) -> Option<String> {
-    let text = block["text"].as_str()?.trim();
-    (!text.is_empty()).then(|| text.to_owned())
 }
 
 #[derive(Debug)]
@@ -564,7 +482,7 @@ pub fn read(due: Due, folders: luned::transcripts::Folders, events: &Sender<Even
             let ends = brief::read(&due.key.on, &reading, &folders).ok()?;
             ends.into_values().next()
         });
-        let alert = Alert::of(&due, end.as_deref());
+        let alert = Alert::of(&due, end.as_ref());
         let _ = events.send(Event::Alerted(Read { number: due.number, alert }));
     });
 }
@@ -930,8 +848,14 @@ mod tests {
         assert_eq!(closes(&alerts.heard(here(Vec::new()), now)), [remote]);
     }
 
-    fn end(records: &[Value]) -> String {
-        records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")
+    fn claude_end(records: &[Value]) -> TranscriptEnd {
+        TranscriptEnd::Claude(records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"))
+    }
+
+    fn agy_end(records: &[Value]) -> TranscriptEnd {
+        TranscriptEnd::Antigravity(
+            records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"),
+        )
     }
 
     fn assistant(blocks: &Value) -> Value {
@@ -956,7 +880,7 @@ mod tests {
     fn a_notification_says_what_the_agent_wants_by_its_transcript() {
         let mut subagent = assistant(&json!([call("c", "Grep", &json!({"pattern": "x"}))]));
         subagent["isSidechain"] = json!(true);
-        let calls = end(&[
+        let calls = claude_end(&[
             assistant(&json!([
                 {"type": "text", "text": "Let me look."},
                 call("a", "Read", &json!({"file_path": "/w/x.rs"})),
@@ -965,7 +889,7 @@ mod tests {
             answer("a"),
             subagent,
         ]);
-        let said = |wait, end: Option<&str>| {
+        let said = |wait, end: Option<&TranscriptEnd>| {
             let alert = Alert::of(&due(Want::Wait(wait), Machine::Local), end);
             (alert.kind, alert.title, alert.body)
         };
@@ -975,13 +899,13 @@ mod tests {
             (Kind::Permission, title("needs permission"), "Bash: cargo test".to_owned())
         );
         let plan = call("p", "ExitPlanMode", &json!({"plan": "1. fix"}));
-        let plan = end(&[assistant(&json!([plan]))]);
+        let plan = claude_end(&[assistant(&json!([plan]))]);
         assert_eq!(
             said(Wait::Permission, Some(&plan)),
             (Kind::Plan, title("has a plan for you"), "Waiting on your review".to_owned())
         );
         let asked = json!({"questions": [{"question": "Which   one?"}]});
-        let question = end(&[assistant(&json!([call("q", "AskUserQuestion", &asked)]))]);
+        let question = claude_end(&[assistant(&json!([call("q", "AskUserQuestion", &asked)]))]);
         assert_eq!(
             said(Wait::Input, Some(&question)),
             (Kind::Asked, title("asked you something"), "Which one?".to_owned())
@@ -991,7 +915,7 @@ mod tests {
             (Kind::Permission, title("needs permission"), "Waiting on your permission".to_owned())
         );
         let blank = json!({"questions": [{"question": "  "}]});
-        let blank = end(&[assistant(&json!([call("b", "AskUserQuestion", &blank)]))]);
+        let blank = claude_end(&[assistant(&json!([call("b", "AskUserQuestion", &blank)]))]);
         assert_eq!(said(Wait::Input, Some(&blank)).2, "Waiting on your answer");
         assert_eq!(said(Wait::Other("sandbox request".to_owned()), None).2, "sandbox request");
         assert_eq!(said(Wait::Unsaid, None).2, "Waiting on you");
@@ -1000,7 +924,7 @@ mod tests {
     #[test]
     fn a_turn_that_ended_says_what_the_agent_said_last() {
         let long = "word ".repeat(100);
-        let said = end(&[
+        let said = claude_end(&[
             assistant(&json!([{"type": "text", "text": "first"}])),
             assistant(&json!([{"type": "text", "text": format!("Done:\n\n{long}")}])),
             json!({"type": "system", "subtype": "turn_duration"}),
@@ -1015,7 +939,7 @@ mod tests {
 
     #[test]
     fn an_antigravity_transcript_fills_permission_question_and_done_notifications() {
-        let perm = end(&[json!({
+        let perm = agy_end(&[json!({
             "type": "PLANNER_RESPONSE",
             "tool_calls": [{
                 "name": "run_command",
@@ -1025,7 +949,7 @@ mod tests {
         let alert = Alert::of(&due(Want::Wait(Wait::Permission), Machine::Local), Some(&perm));
         assert_eq!((alert.kind, alert.body.as_str()), (Kind::Permission, "run_command: Run tests"));
 
-        let ask = end(&[json!({
+        let ask = agy_end(&[json!({
             "type": "PLANNER_RESPONSE",
             "tool_calls": [{
                 "name": "ask_question",
@@ -1035,7 +959,7 @@ mod tests {
         let alert = Alert::of(&due(Want::Wait(Wait::Input), Machine::Local), Some(&ask));
         assert_eq!((alert.kind, alert.body.as_str()), (Kind::Asked, "Which harness?"));
 
-        let done = end(&[
+        let done = agy_end(&[
             json!({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "<USER_REQUEST>\nhi\n</USER_REQUEST>"}),
             json!({"type": "PLANNER_RESPONSE", "content": "All tests pass."}),
         ]);

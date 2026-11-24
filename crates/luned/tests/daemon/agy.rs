@@ -117,7 +117,7 @@ fn the_title_hook_is_installed_only_once_agy_s_folder_exists_and_chains_a_user_t
 
     let agent = as_status(&host, pid, Status::Idle);
     assert_eq!(agent.runs_in(), Harness::Antigravity);
-    assert_eq!(agent.session_id, "9c696c75-660f-4097-934f-e1cc290e4bd1");
+    assert_eq!(agent.session_id.as_deref(), Some("9c696c75-660f-4097-934f-e1cc290e4bd1"));
     assert_eq!(agent.cwd, "/home/you/work");
     assert!(agent.at_a_prompt());
     assert_eq!(agent.terminal, Some(terminal(4)));
@@ -138,7 +138,7 @@ fn an_agy_agent_reports_status_waits_and_keeps_status_since_across_updates() {
     }));
     assert_eq!(printed, "");
     let empty = as_status(&host, pid, Status::Idle);
-    assert!(empty.session_id.starts_with('-'), "empty conversation gets a non-resumable id");
+    assert_eq!(empty.session_id, None, "empty conversation leaves session_id absent");
 
     agy.sends(&json!({
         "cwd": "/home/you/work",
@@ -212,11 +212,14 @@ fn transcript_ends_returns_antigravity_transcripts() {
 
     let folder = crate::host::folder_in(host.runtime()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let ends = runtime.block_on(async {
+    let response = runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
         let request = TranscriptEndsRequest { on: None, ids: vec![id.to_owned()], share: 8192 };
-        daemon.transcript_ends(request).await.unwrap().into_inner().ends
+        daemon.transcript_ends(request).await.unwrap().into_inner()
     });
-    let end = ends.get(id).expect("the antigravity transcript is returned");
+    let end = response.ends.get(id).expect("the antigravity transcript is returned");
     assert!(end.contains("Added Antigravity support."), "{end}");
+    let typed = response.typed_ends.get(id).expect("the typed antigravity transcript is returned");
+    assert_eq!(typed.harness, i32::from(Harness::Antigravity));
+    assert!(typed.lines.contains("Added Antigravity support."), "{}", typed.lines);
 }

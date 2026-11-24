@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luned::program::{self, Ran};
-use luned::transcripts::{digest, Digest, Folders, Reading, SessionId, IDS_MAX};
+use luned::transcripts::{digest_end, Digest, Folders, Reading, SessionId, TranscriptEnd, IDS_MAX};
 use luned::{one_answer, Destination, SessionName};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -271,7 +271,7 @@ impl Brief {
                 let read = reading.join().unwrap_or_else(lost);
                 told.extend(placed.into_iter().map(|(at, id)| match &read {
                     Ok(ends) => match ends.get(&id) {
-                        Some(end) => (at, Told::Read(digest(end, steps))),
+                        Some(end) => (at, Told::Read(digest_end(end, steps))),
                         None => (at, Told::NotFound),
                     },
                     Err(why) => (at, Told::Unread(why.clone())),
@@ -329,13 +329,13 @@ impl Brief {
 }
 
 type Reads<'a> =
-    dyn Fn(&Machine, &Reading) -> Result<HashMap<SessionId, String>, String> + Sync + 'a;
+    dyn Fn(&Machine, &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> + Sync + 'a;
 
 pub fn read(
     on: &Machine,
     reading: &Reading,
     folders: &Folders,
-) -> Result<HashMap<SessionId, String>, String> {
+) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
     match on {
         Machine::Local => Ok(reading.ends(folders)),
         Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.ends(reading),
@@ -643,12 +643,12 @@ mod tests {
 
     fn read_here(
         folders: Folders,
-    ) -> impl Fn(&Machine, &Reading) -> Result<HashMap<SessionId, String>, String> + Sync {
+    ) -> impl Fn(&Machine, &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> + Sync {
         move |on, reading| read(on, reading, &folders)
     }
 
     #[expect(clippy::unnecessary_wraps, reason = "it is a `Reads`")]
-    fn none_read(_: &Machine, _: &Reading) -> Result<HashMap<SessionId, String>, String> {
+    fn none_read(_: &Machine, _: &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
         Ok(HashMap::new())
     }
 
@@ -785,7 +785,7 @@ Its transcript is unknown: Claude Code names none for it.
         let here = read_here(folders);
         let told = brief.told(&|on, reading| {
             let ends = here(on, reading)?;
-            *kept.lock().expect("no panic") += ends.values().map(String::len).sum::<usize>();
+            *kept.lock().expect("no panic") += ends.values().map(|end| end.lines().len()).sum::<usize>();
             Ok(ends)
         });
 
@@ -853,7 +853,9 @@ Its transcript is unknown: Claude Code names none for it.
         let asked = Mutex::new(HashMap::new());
         let said = |text: &str| {
             let block = json!({"type": "text", "text": text});
-            json!({"type": "assistant", "message": {"content": [block]}}).to_string()
+            TranscriptEnd::Claude(
+                json!({"type": "assistant", "message": {"content": [block]}}).to_string(),
+            )
         };
         let reads = |machine: &Machine, reading: &Reading| {
             let TranscriptEndsRequest { ids: read, share, .. } = reading.asked(None);

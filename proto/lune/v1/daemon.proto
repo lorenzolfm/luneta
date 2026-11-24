@@ -112,6 +112,12 @@ message TranscriptEndsRequest {
 
 message TranscriptEndsResponse {
   map<string, string> ends = 1;
+  map<string, TranscriptEnd> typed_ends = 2;
+
+  message TranscriptEnd {
+    Harness harness = 1;
+    string lines = 2;
+  }
 }
 
 message AskRequest {
@@ -409,7 +415,7 @@ message UnreadFile {
 
 message Agent {
   uint32 pid = 1;
-  string session_id = 2;
+  optional string session_id = 2;
   string cwd = 3;
   oneof status {
     Status known_status = 4;
