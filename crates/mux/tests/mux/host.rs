@@ -247,7 +247,9 @@ impl Viewer {
         patience: Patience,
         what: &str,
     ) -> Result<Option<api::to_viewer::Event>, tonic::Status> {
-        let next = patience.awaited(what, self.from.message()).await;
+        let screens = &self.screens;
+        let awaited_and_seen = fmt::from_fn(|f| write!(f, "{what}, but {}", seen(screens)));
+        let next = patience.awaited(awaited_and_seen, self.from.message()).await;
         let Some(message) = next? else {
             return Ok(None);
         };
@@ -281,6 +283,23 @@ impl Viewer {
     pub fn frame_of(&self, terminal: u32) -> Option<&api::Frame> {
         self.screens.get(&terminal).map(|(_, frame)| frame)
     }
+}
+
+fn seen(screens: &Screens) -> impl fmt::Display {
+    fmt::from_fn(move |f| {
+        if screens.is_empty() {
+            return write!(f, "no terminal was shown");
+        }
+        let mut separator = "";
+        for (terminal, (rows, _)) in screens {
+            write!(f, "{separator}terminal {terminal} shows:")?;
+            for row in rows.iter().filter(|row| !row.trim().is_empty()) {
+                write!(f, "\n  {row:?}")?;
+            }
+            separator = "\n";
+        }
+        Ok(())
+    })
 }
 
 fn applied(screens: &mut Screens, frame: &api::Frame) {
