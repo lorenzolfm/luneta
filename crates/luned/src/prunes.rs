@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -16,6 +16,7 @@ use crate::directory::Directory;
 use crate::git::{self, Common};
 use crate::github::{self, Asker, Based, Pulled};
 use crate::mux::TerminalKey;
+use crate::panics::{self, Panicked};
 use crate::program;
 use crate::seats;
 
@@ -38,6 +39,7 @@ const A_VIEW: &str = "it has a view";
 const AN_AGENT: &str = "an agent works in it";
 const RUNS_HERE: &str = "this runs from it";
 const DEFAULT: &str = "it is the default branch";
+const PANICKED: &str = "what asked about it panicked";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
@@ -357,29 +359,41 @@ fn at_once<T: Sync, S, R: Send>(
     items: &[T],
     state: impl Fn() -> S + Sync,
     ask: impl Fn(&mut S, &T) -> R + Sync,
-) -> Vec<R> {
+) -> Vec<Result<R, String>> {
     let next = AtomicUsize::new(0);
     let answers = Mutex::new(Vec::with_capacity(items.len()));
-    thread::scope(|scope| {
-        for _ in 0..ASKS_AT_ONCE.min(items.len()) {
-            scope.spawn(|| {
-                let mut state = state();
-                loop {
-                    let at = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(item) = items.get(at) else {
-                        return;
-                    };
-                    let answer = ask(&mut state, item);
-                    if let Ok(mut answers) = answers.lock() {
-                        answers.push((at, answer));
-                    }
-                }
-            });
+    let asking = || {
+        let mut state = state();
+        loop {
+            let at = next.fetch_add(1, Ordering::Relaxed);
+            let Some(item) = items.get(at) else {
+                return;
+            };
+            let answer = panics::contained(|| ask(&mut state, item));
+            let answer = answer.map_err(|Panicked| PANICKED.to_owned());
+            answers.lock().unwrap_or_else(PoisonError::into_inner).push((at, answer));
         }
+    };
+    let unspawned = thread::scope(|scope| {
+        for _ in 0..ASKS_AT_ONCE.min(items.len()) {
+            let asker = thread::Builder::new().name("prune ask".to_owned());
+            if let Err(error) = panics::spawn_in(asker, scope, asking) {
+                return Some(error);
+            }
+        }
+        None
     });
-    let mut answers = answers.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-    answers.sort_by_key(|(at, _)| *at);
-    answers.into_iter().map(|(_, answer)| answer).collect()
+    let mut answered: Vec<Option<Result<R, String>>> = items.iter().map(|_| None).collect();
+    for (at, answer) in answers.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        if let Some(slot) = answered.get_mut(at) {
+            *slot = Some(answer);
+        }
+    }
+    let unasked = || match &unspawned {
+        Some(error) => format!("no thread asks about it: {error}"),
+        None => "no thread asked about it".to_owned(),
+    };
+    answered.into_iter().map(|answer| answer.unwrap_or_else(|| Err(unasked()))).collect()
 }
 
 fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, String> {
@@ -514,6 +528,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
     let answers = at_once(&askable, Asker::default, |asker, on: &OnBranch<'_>| {
         asker.pull_of(&on.listed.path, &common, on.branch)
     });
+    let answers = answers.into_iter().map(|answer| answer.and_then(|pulled| pulled));
     let mut plan = Plan { repository, goes: Vec::new(), kept: Vec::new(), unasked: Vec::new() };
     let mut merged: Vec<(OnBranch<'_>, Pulled)> = Vec::new();
     for (on, answer) in askable.into_iter().zip(answers) {
@@ -529,6 +544,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
     let others = at_once(&going, Asker::default, |asker, (on, pulled, _): &Going<'_>| {
         others_of(asker, &common, on, pulled)
     });
+    let others = others.into_iter().map(|others| others.and_then(|others| others));
     let mut remotes = Remotes {
         common: &common,
         heads: HashMap::new(),
@@ -561,7 +577,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
     }
     let bytes = at_once(&goes, || (), |(), goes: &Goes| bytes_of(&goes.folder));
     for (goes, bytes) in goes.iter_mut().zip(bytes) {
-        goes.bytes = bytes;
+        goes.bytes = bytes.ok().flatten();
     }
     goes.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.folder.cmp(&b.folder)));
     plan.goes = goes;
@@ -1266,8 +1282,21 @@ mod tests {
     fn answers_asked_at_once_keep_their_order() {
         let items: Vec<usize> = (0..50).collect();
         let doubled = at_once(&items, || (), |(), item: &usize| item * 2);
-        assert_eq!(doubled, items.iter().map(|item| item * 2).collect::<Vec<_>>());
-        assert_eq!(at_once(&[] as &[usize], || (), |(), item: &usize| *item), [] as [usize; 0]);
+        assert_eq!(doubled, items.iter().map(|item| Ok(item * 2)).collect::<Vec<_>>());
+        assert_eq!(at_once(&[] as &[usize], || (), |(), item: &usize| *item), []);
+    }
+
+    #[test]
+    fn an_ask_that_panics_is_answered_as_unasked_and_the_rest_still_answer() {
+        let items: Vec<usize> = (0..20).collect();
+        let answers = at_once(&items, || (), |(), item: &usize| {
+            assert_ne!(*item % 7, 3, "gh's answer about {item} does not read");
+            *item
+        });
+        let unasked = |item: usize| (item % 7 == 3).then(|| super::PANICKED.to_owned());
+        let wanted: Vec<Result<usize, String>> =
+            items.iter().map(|&item| unasked(item).map_or(Ok(item), Err)).collect();
+        assert_eq!(answers, wanted);
     }
 
     #[test]

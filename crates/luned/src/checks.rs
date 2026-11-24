@@ -8,7 +8,7 @@ pub use lune_protocol::github::PullPage;
 use lune_protocol::github::Checks;
 use serde::Deserialize;
 
-use crate::panics::{self, Panicked};
+use crate::panics::{self, ContainedIn, Panicked};
 use crate::printed::Kept;
 use crate::{folder, git, keeps, program};
 
@@ -245,6 +245,22 @@ enum Plan {
     Past,
 }
 
+enum Fetching<'scope> {
+    Running(ContainedIn<'scope, Log>),
+    Done(Log),
+}
+
+impl Fetching<'_> {
+    fn log(self) -> Log {
+        match self {
+            Fetching::Running(running) => {
+                running.join().unwrap_or_else(|Panicked| Log::Unkept(PANICKED.to_owned()))
+            },
+            Fetching::Done(log) => log,
+        }
+    }
+}
+
 fn keep(
     runtime: &Path,
     head: String,
@@ -269,23 +285,35 @@ fn keep(
         },
     });
     let plans: Vec<Plan> = plans.collect();
-    let log = |plan: Plan| match plan {
-        Plan::NoJob => Log::Unkept(NO_JOB.to_owned()),
-        Plan::Elsewhere(Job { host, repository, .. }) => Log::Unkept(format!(
-            "its job ran in {host}/{repository}, which is neither the pull request's repository \
-             nor its head's"
-        )),
-        Plan::Past => Log::Unkept(format!("lune fetches no more than {LOGS_MAX} logs")),
-        Plan::Fetch(job) => {
-            let kept = fetch(&job).and_then(|(log, before)| write(runtime, &log, before, now));
-            kept.map_or_else(Log::Unkept, Log::Kept)
-        },
+    let fetched = |job: Job| {
+        let kept = fetch(&job).and_then(|(log, before)| write(runtime, &log, before, now));
+        kept.map_or_else(Log::Unkept, Log::Kept)
     };
-    let (log, panicked) = (&log, |Panicked| Log::Unkept(PANICKED.to_owned()));
+    let fetched = &fetched;
     let logs: Vec<Log> = thread::scope(|scope| {
-        let fetching: Vec<_> =
-            plans.into_iter().map(|plan| panics::spawn_in(scope, move || log(plan))).collect();
-        fetching.into_iter().map(|fetch| fetch.join().unwrap_or_else(panicked)).collect()
+        let fetching: Vec<Fetching<'_>> = plans
+            .into_iter()
+            .map(|plan| match plan {
+                Plan::NoJob => Fetching::Done(Log::Unkept(NO_JOB.to_owned())),
+                Plan::Elsewhere(Job { host, repository, .. }) => Fetching::Done(Log::Unkept(format!(
+                    "its job ran in {host}/{repository}, which is neither the pull request's \
+                     repository nor its head's"
+                ))),
+                Plan::Past => {
+                    Fetching::Done(Log::Unkept(format!("lune fetches no more than {LOGS_MAX} logs")))
+                },
+                Plan::Fetch(job) => {
+                    let named = thread::Builder::new().name("check log".to_owned());
+                    match panics::spawn_in(named, scope, move || fetched(job)) {
+                        Ok(running) => Fetching::Running(running),
+                        Err(error) => Fetching::Done(Log::Unkept(format!(
+                            "no thread fetches its log: {error}"
+                        ))),
+                    }
+                },
+            })
+            .collect();
+        fetching.into_iter().map(Fetching::log).collect()
     });
     let failed = failed.into_iter().zip(logs).map(|(Check { name, link, .. }, log)| Failed {
         name: name.clone(),

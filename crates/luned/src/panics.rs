@@ -25,10 +25,17 @@ pub fn abort_on_panic() -> Hooked {
         default(panic);
         if !CONTAINED.get() {
             log::say(ABORTS);
+            undumped();
             process::abort();
         }
     }));
     Hooked(())
+}
+
+fn undumped() {
+    let core = rustix::process::Resource::Core;
+    let maximum = rustix::process::getrlimit(core).maximum;
+    let _ = rustix::process::setrlimit(core, rustix::process::Rlimit { current: Some(0), maximum });
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,10 +73,11 @@ impl<T> ContainedIn<'_, T> {
 }
 
 pub fn spawn_in<'scope, T: Send + 'scope>(
+    thread: thread::Builder,
     scope: &'scope Scope<'scope, '_>,
     run: impl FnOnce() -> T + Send + 'scope,
-) -> ContainedIn<'scope, T> {
-    ContainedIn(scope.spawn(move || contained(run)))
+) -> io::Result<ContainedIn<'scope, T>> {
+    thread.spawn_scoped(scope, move || contained(run)).map(ContainedIn)
 }
 
 #[cfg(test)]
@@ -79,7 +87,7 @@ mod tests {
     use std::process::{Command, ExitStatus, Stdio};
     use std::thread;
 
-    use super::{abort_on_panic, contained, spawn, Panicked};
+    use super::{abort_on_panic, contained, spawn, undumped, Panicked};
 
     const PANICS: &str = "LUNED_TEST_PANICS";
 
@@ -234,6 +242,16 @@ mod tests {
     #[test]
     fn a_panic_in_a_thread_a_contained_run_spawns_aborts_luned() {
         assert_aborts(Way::SpawnedInContained);
+    }
+
+    #[test]
+    fn an_abort_dumps_no_core_and_keeps_the_hard_limit() {
+        let core = rustix::process::Resource::Core;
+        let hard = rustix::process::getrlimit(core).maximum;
+        undumped();
+        let after = rustix::process::getrlimit(core);
+        assert_eq!(after.current, Some(0), "no core is dumped");
+        assert_eq!(after.maximum, hard, "the hard limit is left as it was");
     }
 
     #[test]
