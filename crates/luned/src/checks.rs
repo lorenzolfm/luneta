@@ -281,13 +281,13 @@ fn keep(
             kept.map_or_else(Log::Unkept, Log::Kept)
         },
     };
-    let panicked = || Log::Unkept(PANICKED.to_owned());
-    let contained = |plan| panics::contained(|| log(plan)).unwrap_or_else(|Panicked| panicked());
+    let panicked = |Panicked| Log::Unkept(PANICKED.to_owned());
+    let contained = |plan| panics::contained(|| log(plan)).unwrap_or_else(panicked);
     let logs: Vec<Log> = thread::scope(|scope| {
         let fetching: Vec<_> =
             plans.into_iter().map(|plan| scope.spawn(move || contained(plan))).collect();
         let joined = fetching.into_iter().map(thread::ScopedJoinHandle::join);
-        joined.map(|log| log.unwrap_or_else(|_| panicked())).collect()
+        joined.map(|log| log.expect("a contained fetch does not unwind its thread")).collect()
     });
     let failed = failed.into_iter().zip(logs).map(|(Check { name, link, .. }, log)| Failed {
         name: name.clone(),

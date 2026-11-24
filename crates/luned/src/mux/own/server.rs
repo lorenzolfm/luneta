@@ -840,6 +840,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn luned_refuses_to_stop_a_lune_mux_whose_socket_leads_back_to_it() {
+        let runtime = runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let itself = Unmatched { pid: Some(rustix::process::getpid()), build: None };
+        let refused = stop(&runtime, &itself);
+        let Err(Failure::Own(why)) = refused else {
+            panic!("luned stops itself: {refused:?}");
+        };
+        assert!(why.ends_with("its socket leads back to luned itself"), "{why}");
+    }
+
+    #[test]
     fn only_a_watch_that_says_it_emptied_is_heard_as_emptied() {
         use api::watched::{Emptied, Ended, Is, Unreached, ended::Why};
         let since = Instant::now();

@@ -484,6 +484,41 @@ fn a_worktree_whose_first_terminal_does_not_start_is_not_made_nor_a_project_made
 }
 
 #[test]
+fn a_worktree_whose_first_terminal_does_not_start_while_its_projects_file_changes_says_both() {
+    let owned = crate::own::Owned::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let clone = scratch.join("lune");
+    cloned_as_wt(&scratch, &scratch.join("up"), &clone);
+    worktree_added(&clone, "two");
+    let lune = project(&owned.host, &clone, None);
+    worktree(&owned.host, lune, &clone.join("main"));
+    let file = kept(&owned.host);
+    let stalled = owned.stall_mux();
+    let refused = thread::scope(|scope| {
+        let adding = scope.spawn(|| {
+            let folder = text(&clone.join("two"));
+            let add = AddWorktree { project: lune, folder, name: None, opens: Some(running(&FIRST)) };
+            changed(&owned.host, Change::AddWorktree(add))
+        });
+        let written = eventually("luned keeps the worktree before its terminal opens", || {
+            let written = fs::read_to_string(&file).unwrap();
+            written.contains("\"two\"").then_some(written)
+        });
+        let mut edited: serde_json::Value = serde_json::from_str(&written).unwrap();
+        edited["projects"][0]["name"] = "edited by hand".into();
+        fs::write(&file, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
+        adding.join().unwrap().unwrap_err()
+    });
+    drop(stalled);
+    assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
+    let said = refused.message();
+    assert!(said.contains("no terminal opens in worktree"), "{said}");
+    assert!(said.contains("it changed since luned read it"), "{said}");
+    let Held::Unkept(_) = held(&owned.host) else { panic!("luned keeps no projects it did not read") };
+}
+
+#[test]
 fn a_pull_that_finds_its_worktree_runs_its_command_there_or_says_why_it_does_not() {
     let owned = crate::own::Owned::new();
     let host = &owned.host;

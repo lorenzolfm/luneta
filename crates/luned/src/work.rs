@@ -393,12 +393,10 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
         Ok((issues, more)) => Ok((Issues::Open(issues.into_iter().map(issue).collect()), more)),
         Err(unlisted) => issues_off(dir.as_str(), asked, unlisted).map(|()| (Issues::Off, false)),
     };
-    let pulls = match pulls.join() {
-        Ok(Ok(listed)) => listed,
-        Ok(Err(Panicked)) | Err(_) => {
-            Err(format!("gh's listing of the pull requests in {} panicked", dir.as_str()))
-        },
-    };
+    let pulls = pulls.join().expect("a contained listing does not unwind its thread");
+    let pulls = pulls.unwrap_or_else(|Panicked| {
+        Err(format!("gh's listing of the pull requests in {} panicked", dir.as_str()))
+    });
     let (issues, more_issues) = issues?;
     let (pulls, more_pulls) = pulls?;
     let pulls = pulls.into_iter().map(|pull| {

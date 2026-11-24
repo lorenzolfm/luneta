@@ -32,7 +32,8 @@ pub struct Panicked;
 pub fn contained<T>(run: impl FnOnce() -> T) -> Result<T, Panicked> {
     let was = CONTAINED.replace(true);
     let ran = panic::catch_unwind(AssertUnwindSafe(run));
-    CONTAINED.set(was);
+    let held = CONTAINED.replace(was);
+    assert!(held, "a contained run leaves its thread contained as it found it");
     ran.map_err(|_| Panicked)
 }
 
@@ -57,17 +58,19 @@ mod tests {
         Contained,
         ContainedInContained,
         AfterContained,
+        SpawnedInContained,
         HookedTwice,
     }
 
     impl Way {
-        const ALL: [Way; 7] = [
+        const ALL: [Way; 8] = [
             Way::InAThread,
             Way::InATask,
             Way::Caught,
             Way::Contained,
             Way::ContainedInContained,
             Way::AfterContained,
+            Way::SpawnedInContained,
             Way::HookedTwice,
         ];
 
@@ -79,6 +82,7 @@ mod tests {
                 Way::Contained => "contained",
                 Way::ContainedInContained => "contained in contained",
                 Way::AfterContained => "after contained",
+                Way::SpawnedInContained => "spawned in contained",
                 Way::HookedTwice => "hooked twice",
             }
         }
@@ -146,7 +150,15 @@ mod tests {
             },
             Way::AfterContained => {
                 assert_eq!(contained(|| ()), Ok(()));
-                let _ = std::panic::catch_unwind(|| panic!("the core's assertion fails"));
+                let caught = std::panic::catch_unwind(|| panic!("the core's assertion fails"));
+                assert!(caught.is_err(), "the panic was caught");
+            },
+            Way::SpawnedInContained => {
+                let ran = contained(|| {
+                    let reader = thread::Builder::new().name("program".to_owned());
+                    reader.spawn(|| panic!("a reader's assertion fails")).unwrap().join()
+                });
+                assert!(ran.is_ok_and(|joined| joined.is_err()), "the reader panicked");
             },
             Way::HookedTwice => abort_on_panic(),
         }
@@ -181,6 +193,11 @@ mod tests {
     #[test]
     fn a_panic_once_a_contained_run_has_ended_aborts_luned() {
         assert_aborts(Way::AfterContained);
+    }
+
+    #[test]
+    fn a_panic_in_a_thread_a_contained_run_spawns_aborts_luned() {
+        assert_aborts(Way::SpawnedInContained);
     }
 
     #[test]

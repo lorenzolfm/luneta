@@ -685,8 +685,9 @@ impl Layouts {
             return Ok(());
         };
         let unopened = format!("no terminal opens in worktree {worktree}: {failure}");
-        let Some(projects) = self.store.projects() else {
-            return Err(unopened);
+        let projects = match self.kept() {
+            Ok(projects) => projects,
+            Err(unkept) => return Err(format!("{unopened}, and {unkept}")),
         };
         if projects.holding_view(terminal.view()).is_some() {
             return Err(unopened);
