@@ -6,16 +6,19 @@ message: >-
   Run lune's asks of luned on luned::tasks::shared(): lune's main builds that
   one runtime, so a failure to build it is told at launch, and the tasks a
   call hands over go on once the call returns, where a runtime of the call's
-  own would drop them with it.
+  own would drop them with it. lune holds the runtime by its Handle alone, so
+  it names no Runtime or LocalRuntime, under any path or alias.
 rule:
   all:
     - any:
         - kind: identifier
-          regex: ^(new_current_thread|new_multi_thread)$
-        - kind: scoped_identifier
-          regex: ^(tokio::)?(runtime::)?Runtime::new$
+          regex: ^new_(current_thread|multi_thread)
+        - kind: identifier
+          regex: ^(Runtime|LocalRuntime)$
+        - kind: type_identifier
+          regex: ^(Runtime|LocalRuntime)$
         - kind: attribute
-          regex: ^tokio::main
+          regex: ^(\w+::)+(main|test)\b
     - not:
         inside:
           kind: mod_item
