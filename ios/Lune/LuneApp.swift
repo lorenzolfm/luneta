@@ -1,3 +1,4 @@
+import LunePhone
 import SwiftUI
 
 @main
@@ -7,8 +8,13 @@ struct LuneApp: App {
 
     var body: some Scene {
         WindowGroup {
-            HostView()
-                .environment(luned)
+            TabView {
+                Tab("Inbox", systemImage: "tray") {
+                    InboxView()
+                }
+                .badge(luned.model?.inbox.filter(\.waits).count ?? 0)
+            }
+            .environment(luned)
         }
         .onChange(of: phase, initial: true) { _, now in
             if now == .active {

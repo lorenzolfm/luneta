@@ -2,10 +2,9 @@ import Foundation
 import LunePhone
 import Observation
 
-enum Heard: Equatable {
-    case nothing
-    case model(Model)
-    case lost(String)
+struct Seat: Hashable {
+    let machine: String?
+    let terminal: TerminalKey
 }
 
 @Observable
@@ -13,7 +12,8 @@ final class Luned {
     private static let hostKey = "host"
 
     private(set) var host: String
-    private(set) var heard = Heard.nothing
+    private(set) var model: Model?
+    private(set) var lost: String?
     private(set) var refused: String?
     private var core: Core?
 
@@ -26,6 +26,7 @@ final class Luned {
         UserDefaults.standard.set(host, forKey: Luned.hostKey)
         close()
         core = nil
+        model = nil
         open()
     }
 
@@ -43,15 +44,34 @@ final class Luned {
 
     func close() {
         core?.stop()
-        heard = .nothing
+        lost = nil
+    }
+
+    func agent(at seat: Seat) -> Agent? {
+        model?.inbox.first { $0.seat == seat }
+    }
+
+    func waiting(at seat: Seat) async throws -> Waiting {
+        try await reached().waiting(on: seat.machine, terminal: seat.terminal)
+    }
+
+    func answer(at seat: Seat, shown: UInt64, with answer: Answer) async throws {
+        try await reached().answer(
+            on: seat.machine, terminal: seat.terminal, shown: shown, answer: answer)
+    }
+
+    private func reached() throws -> Core {
+        guard let core else { throw Unanswered.Refused(why: "no machine is named") }
+        return core
     }
 
     fileprivate func changed(_ model: Model) {
-        heard = .model(model)
+        self.model = model
+        lost = nil
     }
 
     fileprivate func lost(_ why: String) {
-        heard = .lost(why)
+        lost = why
     }
 }
 
