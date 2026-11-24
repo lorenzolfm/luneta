@@ -33,6 +33,7 @@ pub struct Agent {
 pub enum Harness {
     ClaudeCode,
     Pi,
+    Antigravity,
 }
 
 impl Harness {
@@ -40,6 +41,7 @@ impl Harness {
         match said.map(api::Harness::try_from) {
             None | Some(Ok(api::Harness::ClaudeCode)) => Ok(Harness::ClaudeCode),
             Some(Ok(api::Harness::Pi)) => Ok(Harness::Pi),
+            Some(Ok(api::Harness::Antigravity)) => Ok(Harness::Antigravity),
             Some(Ok(api::Harness::Unspecified) | Err(_)) => {
                 Err("a harness this luned does not know".to_owned())
             },
@@ -51,6 +53,7 @@ impl Harness {
         match self {
             Harness::ClaudeCode => api::Harness::ClaudeCode,
             Harness::Pi => api::Harness::Pi,
+            Harness::Antigravity => api::Harness::Antigravity,
         }
     }
 
@@ -59,13 +62,14 @@ impl Harness {
         match self {
             Harness::ClaudeCode => "claude",
             Harness::Pi => "pi",
+            Harness::Antigravity => "agy",
         }
     }
 
     #[must_use]
     pub const fn resumes(self) -> &'static str {
         match self {
-            Harness::ClaudeCode => "--resume",
+            Harness::ClaudeCode | Harness::Antigravity => "--resume",
             Harness::Pi => "--session",
         }
     }
@@ -290,7 +294,7 @@ mod tests {
     #[test]
     fn a_request_names_a_harness_this_luned_knows() {
         assert_eq!(Harness::said(None), Ok(Harness::ClaudeCode));
-        for harness in [Harness::ClaudeCode, Harness::Pi] {
+        for harness in [Harness::ClaudeCode, Harness::Pi, Harness::Antigravity] {
             assert_eq!(Harness::said(Some(harness.to_api().into())), Ok(harness));
         }
         for unknown in [api::Harness::Unspecified.into(), 99] {

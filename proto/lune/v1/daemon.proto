@@ -393,6 +393,7 @@ message InfoResponse {
   google.protobuf.Timestamp started_at = 3;
   optional bytes claude_folder = 5;
   optional uint64 built = 6;
+  optional bytes agy_folder = 7;
 }
 
 message ListAgentsResponse {
@@ -431,6 +432,7 @@ enum Harness {
   HARNESS_UNSPECIFIED = 0;
   HARNESS_CLAUDE_CODE = 1;
   HARNESS_PI = 2;
+  HARNESS_ANTIGRAVITY = 3;
 }
 
 enum Status {

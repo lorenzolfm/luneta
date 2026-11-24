@@ -68,7 +68,7 @@ use crate::transcripts::{self, Reading, SessionId};
 use crate::agent::Agent;
 use crate::checks::{Failing, Log};
 use crate::{
-    changes, checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed,
+    agy, changes, checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed,
     projects, release, remote, repositories, skills, tailnet, topics, watch, work, Harness,
 };
 
@@ -204,9 +204,10 @@ pub async fn serve(
     projects::follow(core.clone(), layouts.clone(), SWEEP)?;
     let (end, ending) = oneshot::channel();
     let claude_folder = claude::folder();
+    let agy_folder = agy::folder();
     let watchers = Arc::new(Watchers::default());
     let owns = Arc::new(AtomicBool::new(false));
-    follow(&core, &claim.folder, claude_folder.clone())?;
+    follow(&core, &claim.folder, claude_folder.clone(), agy_folder.clone())?;
     tokio::spawn(stand(watchers.clone(), owns.clone(), bound.clone(), end));
     owns::follow(layouts.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
@@ -227,7 +228,16 @@ pub async fn serve(
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
     let listings = Arc::new(work::Listings::default());
-    let host = Arc::new(Host { started, claude_folder, core, watchers, bridges, layouts, listings });
+    let host = Arc::new(Host {
+        started,
+        claude_folder,
+        agy_folder,
+        core,
+        watchers,
+        bridges,
+        layouts,
+        listings,
+    });
     let (begun, beginning) = oneshot::channel();
     let (closing, closed) = tokio::sync::watch::channel(false);
     let ended = async move {
@@ -326,6 +336,7 @@ fn follow(
     core: &SyncSender<Command>,
     folder: &Path,
     claude_folder: Option<PathBuf>,
+    agy_folder: Option<PathBuf>,
 ) -> io::Result<()> {
     match claude_folder {
         Some(folder) => {
@@ -350,7 +361,15 @@ fn follow(
     let any = |_: &Path| true;
     let mode = RecursiveMode::NonRecursive;
     let pids = |agents: &Vec<Agent>| agents.iter().map(|agent| agent.pid).collect();
-    watch::watch_ending("pi", dir, mode, any, SWEEP, read, pids, tell)
+    watch::watch_ending("pi", dir, mode, any, SWEEP, read, pids, tell)?;
+    let mut files = agy::AgentFiles::new(folder, agy_folder);
+    let dir = files.dir().to_owned();
+    let read = move || files.scan();
+    let tell = {
+        let core = core.clone();
+        move |found| core.send(Command::AgyAgents(found)).is_ok()
+    };
+    watch::watch_ending("agy", dir, mode, any, SWEEP, read, pids, tell)
 }
 
 async fn stand(
@@ -478,6 +497,7 @@ impl Drop for Waits<'_> {
 struct Host {
     started: SystemTime,
     claude_folder: Option<PathBuf>,
+    agy_folder: Option<PathBuf>,
     core: SyncSender<Command>,
     watchers: Arc<Watchers>,
     bridges: Arc<Bridges>,
@@ -494,6 +514,7 @@ impl Daemon for Host {
             started_at: Some(self.started.into()),
             claude_folder: self.claude_folder.as_ref().map(|it| it.as_os_str().as_bytes().to_vec()),
             built: release::BUILT,
+            agy_folder: self.agy_folder.as_ref().map(|it| it.as_os_str().as_bytes().to_vec()),
         }))
     }
 
@@ -641,10 +662,14 @@ impl Daemon for Host {
         if let Some(mut daemon) = self.bridged(on).await? {
             return daemon.transcript_ends(reading.asked(None)).await;
         }
-        let Some(projects) = self.claude_folder.as_ref().map(|it| it.join("projects")) else {
-            return Ok(Response::new(TranscriptEndsResponse::default()));
+        let folders = transcripts::Folders {
+            claude: self.claude_folder.clone(),
+            agy: self.agy_folder.clone(),
         };
-        let read = task::spawn_blocking(move || reading.ends(&projects)).await;
+        if folders.claude.is_none() && folders.agy.is_none() {
+            return Ok(Response::new(TranscriptEndsResponse::default()));
+        }
+        let read = task::spawn_blocking(move || reading.ends(&folders)).await;
         let read = read.map_err(|error| unfinished(&error))?;
         let ends = read.into_iter().map(|(id, end)| (id.as_str().to_owned(), end)).collect();
         Ok(Response::new(TranscriptEndsResponse { ends }))
@@ -1241,6 +1266,10 @@ impl Host {
             api::Harness::ClaudeCode => {},
             api::Harness::Pi => {
                 let why = format!("terminal {id} runs Pi, whose menus luned does not read");
+                return Runs::Unread(why);
+            },
+            api::Harness::Antigravity => {
+                let why = format!("terminal {id} runs Antigravity, whose menus luned does not read");
                 return Runs::Unread(why);
             },
             api::Harness::Unspecified => {

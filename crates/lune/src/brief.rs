@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -10,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luned::program::{self, Ran};
-use luned::transcripts::{digest, Digest, Reading, SessionId, IDS_MAX};
+use luned::transcripts::{digest, Digest, Folders, Reading, SessionId, IDS_MAX};
 use luned::{one_answer, Destination, SessionName};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -33,7 +32,7 @@ const CLOCK: Duration = Duration::from_secs(1);
 
 const GIVING_UP: Duration = Duration::from_millis(100);
 
-const ONLY_CLAUDE_CODE: &str = "lune reads only Claude Code's transcripts so far";
+const UNREAD_HARNESS: &str = "lune reads only Claude Code's and Antigravity's transcripts so far";
 
 const MAX_NOTES: usize = 32;
 const _: () = assert!(MAX_NOTES <= IDS_MAX);
@@ -223,7 +222,7 @@ impl Brief {
             });
         };
         if notes.iter().all(|note| note.transcript == Transcript::NotRead) {
-            return Err(format!("brief: {ONLY_CLAUDE_CODE}"));
+            return Err(format!("brief: {UNREAD_HARNESS}"));
         }
         let title = match &over {
             Over::Sessions { .. } => "Brief of every session".to_owned(),
@@ -250,7 +249,7 @@ impl Brief {
                 },
                 Transcript::Unnamed => told.push((at, Told::NoId)),
                 Transcript::NotRead => {
-                    told.push((at, Told::Unread(ONLY_CLAUDE_CODE.to_owned())));
+                    told.push((at, Told::Unread(UNREAD_HARNESS.to_owned())));
                 },
             }
         }
@@ -335,10 +334,10 @@ type Reads<'a> =
 pub fn read(
     on: &Machine,
     reading: &Reading,
-    projects: Option<&Path>,
+    folders: &Folders,
 ) -> Result<HashMap<SessionId, String>, String> {
     match on {
-        Machine::Local => Ok(projects.map_or_default(|projects| reading.ends(projects))),
+        Machine::Local => Ok(reading.ends(folders)),
         Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.ends(reading),
     }
 }
@@ -405,7 +404,7 @@ pub struct Written {
 pub fn ask(
     number: u64,
     brief: Brief,
-    claude_folder: Option<PathBuf>,
+    folders: Folders,
     events: &Sender<Event>,
 ) -> Briefing {
     let title = brief.title().to_owned();
@@ -415,8 +414,7 @@ pub fn ask(
     });
     let asking = Asking::on_thread(move |wanted| {
         let at = clock();
-        let projects = claude_folder.map(|folder| folder.join("projects"));
-        let reads = |on: &Machine, reading: &Reading| read(on, reading, projects.as_deref());
+        let reads = |on: &Machine, reading: &Reading| read(on, reading, &folders);
         let prompt = brief.prompt(&reads, SystemTime::now);
         if !wanted() {
             return;
@@ -644,10 +642,9 @@ mod tests {
     }
 
     fn read_here(
-        projects: &Path,
-    ) -> impl Fn(&Machine, &Reading) -> Result<HashMap<SessionId, String>, String> + Sync + '_
-    {
-        move |on, reading| read(on, reading, Some(projects))
+        folders: Folders,
+    ) -> impl Fn(&Machine, &Reading) -> Result<HashMap<SessionId, String>, String> + Sync {
+        move |on, reading| read(on, reading, &folders)
     }
 
     #[expect(clippy::unnecessary_wraps, reason = "it is a `Reads`")]
@@ -690,10 +687,11 @@ mod tests {
         let lines = |records: &[Value]| -> String {
             records.iter().map(|record| record.to_string() + "\n").collect()
         };
-        let projects = tempfile::tempdir().expect("a directory");
-        let project = projects.path().join("-w-b");
-        fs::create_dir(&project).expect("a directory");
-        fs::create_dir(projects.path().join("-w-a")).expect("a directory");
+        let claude = tempfile::tempdir().expect("a directory");
+        let projects = claude.path().join("projects");
+        let project = projects.join("-w-b");
+        fs::create_dir_all(&project).expect("a directory");
+        fs::create_dir_all(projects.join("-w-a")).expect("a directory");
         let cut = r#"me": "cut short", "type":"user"}]}}"#;
         let fold_file = format!("{cut}\n{}", lines(&fold_end));
         fs::write(project.join(format!("{fold}.jsonl")), fold_file).expect("a file");
@@ -707,7 +705,8 @@ mod tests {
             Note { since: None, ..note("b", 7, "spare", None) },
         ];
         let brief = Brief::new(every(&["a", "b"]), notes).expect("a brief");
-        let prompt = brief.prompt(&read_here(projects.path()), now).expect("a reading");
+        let folders = Folders { claude: Some(claude.path().to_owned()), agy: None };
+        let prompt = brief.prompt(&read_here(folders), now).expect("a reading");
         let notes = prompt.split_once("The notes:\n").expect("the notes").1;
         assert_eq!(
             notes,
@@ -751,9 +750,9 @@ Its transcript is unknown: Claude Code names none for it.
 
     #[test]
     fn a_brief_reads_a_share_of_each_transcript_of_what_the_notes_tell() {
-        let projects = tempfile::tempdir().expect("a directory");
-        let project = projects.path().join("-w");
-        fs::create_dir(&project).expect("a directory");
+        let claude = tempfile::tempdir().expect("a directory");
+        let project = claude.path().join("projects/-w");
+        fs::create_dir_all(&project).expect("a directory");
         let asked = json!({"type": "api-request", "params": {"system": "x".repeat(64 * 1024)}});
         let ids: Vec<String> =
             (0..MAX_NOTES).map(|n| format!("{n:08x}-0000-4000-8000-000000000000")).collect();
@@ -782,7 +781,8 @@ Its transcript is unknown: Claude Code names none for it.
         let notes = ids.iter().enumerate().map(note).collect();
         let brief = Brief::new(every(&["a"]), notes).expect("a brief");
         let kept = Mutex::new(0);
-        let here = read_here(projects.path());
+        let folders = Folders { claude: Some(claude.path().to_owned()), agy: None };
+        let here = read_here(folders);
         let told = brief.told(&|on, reading| {
             let ends = here(on, reading)?;
             *kept.lock().expect("no panic") += ends.values().map(String::len).sum::<usize>();
@@ -954,7 +954,7 @@ Sessions, in order: a
 Agent \"fold\" in session a
 Status: idle
 Works in /w/a
-Its transcript was not read: lune reads only Claude Code's transcripts so far
+Its transcript was not read: lune reads only Claude Code's and Antigravity's transcripts so far
 
 Agent \"tree\" in session a
 Status: idle

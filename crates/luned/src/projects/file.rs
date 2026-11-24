@@ -306,6 +306,7 @@ struct KeptAgent {
 enum KeptHarness {
     ClaudeCode,
     Pi,
+    Antigravity,
 }
 
 pub struct Store {
@@ -1418,6 +1419,7 @@ impl KeptHarness {
         match self {
             KeptHarness::ClaudeCode => Harness::ClaudeCode,
             KeptHarness::Pi => Harness::Pi,
+            KeptHarness::Antigravity => Harness::Antigravity,
         }
     }
 
@@ -1425,6 +1427,7 @@ impl KeptHarness {
         match harness {
             Harness::ClaudeCode => KeptHarness::ClaudeCode,
             Harness::Pi => KeptHarness::Pi,
+            Harness::Antigravity => KeptHarness::Antigravity,
         }
     }
 }

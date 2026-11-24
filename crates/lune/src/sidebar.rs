@@ -4996,7 +4996,7 @@ fn moved<T: Clone>(items: &[T], taken: Range<usize>, to: usize) -> Vec<T> {
 
 fn transcript(agent: &Agent) -> Transcript {
     match agent.runs_in() {
-        Harness::ClaudeCode => {
+        Harness::ClaudeCode | Harness::Antigravity => {
             SessionId::parse(&agent.session_id).map_or(Transcript::Unnamed, Transcript::Named)
         },
         Harness::Pi | Harness::Unspecified => Transcript::NotRead,
@@ -10106,7 +10106,7 @@ mod tests {
         ];
         sidebar.hear(host(sessions, vec![pi, claude, alone]));
         sidebar.focus(Keys::Sidebar);
-        let note = "brief: lune reads only Claude Code's transcripts so far";
+        let note = "brief: lune reads only Claude Code's and Antigravity's transcripts so far";
 
         for (place, key) in [(view_of("both", 10, 1), 'h'), (view_of("alone", 20, 3), 's')] {
             sidebar.light(Spot::Local(place));

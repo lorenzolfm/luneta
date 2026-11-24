@@ -1,4 +1,5 @@
 mod agent;
+mod agy;
 mod answers;
 pub mod api;
 pub mod asks;
@@ -53,6 +54,7 @@ pub mod work;
 pub mod zoxide;
 
 pub use agent::Harness;
+pub use agy::folder as agy_folder;
 pub use claude::{folder as claude_folder, one_answer, TORN};
 pub use client::{connect, listening, stream, through, unanswered, Answer, Daemon, RoundTrip};
 pub use client::{Unbridged, ANSWER, BRIDGED, REACH};

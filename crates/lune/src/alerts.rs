@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -437,7 +436,7 @@ impl Alert {
                 (Kind::Permission, body)
             },
             (Want::Wait(Wait::Input), tool) => {
-                let asked = tool.filter(|(name, _)| *name == "AskUserQuestion");
+                let asked = tool.filter(|(name, _)| matches!(*name, "AskUserQuestion" | "ask_question"));
                 let question = asked.and_then(|(_, input)| run_on(input));
                 (Kind::Asked, question.unwrap_or("Waiting on your answer").to_owned())
             },
@@ -499,6 +498,23 @@ impl Turn {
                         calls.retain(|call| Some(call.id.as_str()) != answered);
                     }
                 },
+                Some("USER_INPUT") => {
+                    calls.clear();
+                },
+                Some("PLANNER_RESPONSE") => {
+                    if let Some(text) =
+                        record["content"].as_str().map(str::trim).filter(|text| !text.is_empty())
+                    {
+                        said = Some(text.to_owned());
+                    }
+                    calls.clear();
+                    for call in record["tool_calls"].as_array().into_iter().flatten() {
+                        if let Some(name) = call["name"].as_str() {
+                            let input = luned::transcripts::agy_args(&call["args"]);
+                            calls.push(Call { id: String::new(), name: name.to_owned(), input });
+                        }
+                    }
+                },
                 _ => {},
             }
         }
@@ -535,13 +551,12 @@ pub struct Read {
     pub alert: Alert,
 }
 
-pub fn read(due: Due, claude_folder: Option<PathBuf>, events: &Sender<Event>) {
+pub fn read(due: Due, folders: luned::transcripts::Folders, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || {
-        let projects = claude_folder.map(|folder| folder.join("projects"));
         let end = due.transcript.clone().and_then(|id| {
             let reading = Reading::new(vec![id], SHARE_BYTES).ok()?;
-            let ends = brief::read(&due.key.on, &reading, projects.as_deref()).ok()?;
+            let ends = brief::read(&due.key.on, &reading, &folders).ok()?;
             ends.into_values().next()
         });
         let alert = Alert::of(&due, end.as_deref());
@@ -991,5 +1006,35 @@ mod tests {
         assert_eq!(alert.body.chars().count(), BODY_CHARS);
         assert!(alert.body.ends_with('…'));
         assert_eq!(Alert::of(&due(Want::Done, Machine::Local), None).body, "Its turn is over");
+    }
+
+    #[test]
+    fn an_antigravity_transcript_fills_permission_question_and_done_notifications() {
+        let perm = end(&[json!({
+            "type": "PLANNER_RESPONSE",
+            "tool_calls": [{
+                "name": "run_command",
+                "args": {"CommandLine": "\"cargo test\"", "toolSummary": "\"Run tests\""}
+            }]
+        })]);
+        let alert = Alert::of(&due(Want::Wait(Wait::Permission), Machine::Local), Some(&perm));
+        assert_eq!((alert.kind, alert.body.as_str()), (Kind::Permission, "run_command: Run tests"));
+
+        let ask = end(&[json!({
+            "type": "PLANNER_RESPONSE",
+            "tool_calls": [{
+                "name": "ask_question",
+                "args": {"questions": "[{\"question\":\"Which harness?\"}]"}
+            }]
+        })]);
+        let alert = Alert::of(&due(Want::Wait(Wait::Input), Machine::Local), Some(&ask));
+        assert_eq!((alert.kind, alert.body.as_str()), (Kind::Asked, "Which harness?"));
+
+        let done = end(&[
+            json!({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "<USER_REQUEST>\nhi\n</USER_REQUEST>"}),
+            json!({"type": "PLANNER_RESPONSE", "content": "All tests pass."}),
+        ]);
+        let alert = Alert::of(&due(Want::Done, Machine::Local), Some(&done));
+        assert_eq!((alert.kind, alert.body.as_str()), (Kind::Done, "All tests pass."));
     }
 }

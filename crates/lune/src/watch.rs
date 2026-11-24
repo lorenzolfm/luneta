@@ -38,11 +38,16 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
         let mut after: Option<Version> = None;
         let failure = match daemon::current(&folder).await {
             Ok(Current { mut daemon, info, .. }) => {
-                let claude_folder = info
+                let claude = info
                     .claude_folder
                     .map(|folder| PathBuf::from(OsString::from_vec(folder)))
                     .or_else(luned::claude_folder);
-                if events.send(Event::Reached { claude_folder }).is_err() {
+                let agy = info
+                    .agy_folder
+                    .map(|folder| PathBuf::from(OsString::from_vec(folder)))
+                    .or_else(luned::agy_folder);
+                let transcripts = luned::transcripts::Folders { claude, agy };
+                if events.send(Event::Reached { transcripts }).is_err() {
                     return;
                 }
                 loop {

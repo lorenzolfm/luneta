@@ -53,6 +53,7 @@ pub enum Listing {
 pub enum Command {
     Agents(Scan),
     PiAgents(Vec<Agent>),
+    AgyAgents(Vec<Agent>),
     Terminals(BTreeMap<ViewId, Located>),
     GitStatus {
         dir: String,
@@ -140,6 +141,7 @@ impl Remote {
 struct Known {
     found: Scan,
     pi: Vec<Agent>,
+    agy: Vec<Agent>,
     terminals: BTreeMap<ViewId, Located>,
     statuses: BTreeMap<String, GitStatus>,
     pull_requests: BTreeMap<String, Found>,
@@ -160,6 +162,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
     let mut known = Known {
         found: Scan { agents: Vec::new(), unread: Vec::new() },
         pi: Vec::new(),
+        agy: Vec::new(),
         terminals: BTreeMap::new(),
         statuses: BTreeMap::new(),
         pull_requests: BTreeMap::new(),
@@ -187,6 +190,11 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let pids: HashSet<u32> = now.iter().map(|agent| agent.pid).collect();
                 assert_eq!(pids.len(), now.len(), "an agent's pid comes twice");
                 known.pi = now;
+            },
+            Command::AgyAgents(now) => {
+                let pids: HashSet<u32> = now.iter().map(|agent| agent.pid).collect();
+                assert_eq!(pids.len(), now.len(), "an agent's pid comes twice");
+                known.agy = now;
             },
             Command::Terminals(now) => {
                 let before = known.dirs();
@@ -273,7 +281,8 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 continue;
             },
             Command::AllAgents(answer) => {
-                let _ = answer.send(known.found.agents.iter().chain(&known.pi).cloned().collect());
+                let all = known.found.agents.iter().chain(&known.pi).chain(&known.agy);
+                let _ = answer.send(all.cloned().collect());
                 continue;
             },
             Command::List(answer) => {
@@ -380,7 +389,8 @@ impl Known {
             let topic = self.topics.get(agent.session_id.as_str()).cloned();
             agent.to_api(topic)
         });
-        claude.chain(self.pi.iter().map(|agent| agent.to_api(None))).collect()
+        let others = self.pi.iter().chain(&self.agy).map(|agent| agent.to_api(None));
+        claude.chain(others).collect()
     }
 
     fn unread(&self) -> (u32, Vec<api::UnreadFile>) {

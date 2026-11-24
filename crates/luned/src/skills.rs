@@ -104,6 +104,10 @@ pub fn found_in(cwd: &Directory, harness: Harness) -> Result<Vec<Skill>, String>
             let agent = set("PI_CODING_AGENT_DIR").or_else(|| Some(home.as_ref()?.join(PI_AGENT)));
             Ok(pi_found(Path::new(cwd.as_str()), home.as_deref(), agent.as_deref()))
         },
+        Harness::Antigravity => {
+            let home = env::var_os("HOME").map(PathBuf::from);
+            Ok(agy_found(Path::new(cwd.as_str()), home.as_deref()))
+        },
     }
 }
 
@@ -196,6 +200,87 @@ fn pi_found(cwd: &Path, home: Option<&Path>, agent: Option<&Path>) -> Vec<Skill>
         Some((name.unwrap_or_else(|| folder.to_owned()), front))
     });
     listed(found)
+}
+
+const AGY_ROOTS: [&str; 4] = [".agents", ".agent", "_agents", "_agent"];
+
+fn agy_found(cwd: &Path, home: Option<&Path>) -> Vec<Skill> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home {
+        roots.push(home.join(".gemini/antigravity-cli/skills"));
+        roots.push(home.join(".gemini/skills"));
+    }
+    let top = cwd.ancestors().find(|dir| dir.join(".git").exists());
+    let mut plugin_roots: Vec<PathBuf> = Vec::new();
+    for dir in cwd.ancestors() {
+        for name in AGY_ROOTS {
+            let base = dir.join(name);
+            roots.push(base.join("skills"));
+            plugin_roots.push(base.join("plugins"));
+        }
+        if top.is_none() || Some(dir) == top {
+            break;
+        }
+    }
+    if let Some(home) = home {
+        roots.push(home.join(".gemini/config/skills"));
+        roots.push(home.join(".agents/skills"));
+        plugin_roots.push(home.join(".gemini/config/plugins"));
+    }
+    for plugins in &plugin_roots {
+        agy_plugin_skills(plugins, &mut roots);
+    }
+    let mut files = Vec::new();
+    for root in &roots {
+        agy_skill_files(root, &mut files);
+    }
+    let found = files.into_iter().filter_map(|file| {
+        let mut front = frontmatter(&file).map_or_else(Front::default, |text| Front::read(&text));
+        let folder = file.parent()?.file_name()?.to_str()?;
+        let name = front.name.take().filter(|name| !name.is_empty());
+        Some((name.unwrap_or_else(|| folder.to_owned()), front))
+    });
+    listed(found.filter(|(_, front)| front.invocable))
+}
+
+fn agy_plugin_skills(plugins_dir: &Path, roots: &mut Vec<PathBuf>) {
+    let Ok(listed) = fs::read_dir(plugins_dir) else {
+        return;
+    };
+    let mut entries: Vec<(String, PathBuf)> = listed
+        .filter_map(Result::ok)
+        .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.path())))
+        .collect();
+    entries.sort();
+    for (name, path) in entries {
+        if name.starts_with('.') || !path.is_dir() {
+            continue;
+        }
+        let skills = path.join("skills");
+        if skills.is_dir() {
+            roots.push(skills);
+        }
+    }
+}
+
+fn agy_skill_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(listed) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<(String, PathBuf)> = listed
+        .filter_map(Result::ok)
+        .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.path())))
+        .collect();
+    entries.sort();
+    for (name, path) in entries {
+        if name.starts_with('.') || name == "node_modules" || !path.is_dir() {
+            continue;
+        }
+        let skill = path.join("SKILL.md");
+        if skill.is_file() {
+            files.push(skill);
+        }
+    }
 }
 
 fn skill_files(dir: &Path, root: &Path, kept: Kept, depth: usize, files: &mut Vec<PathBuf>) {
@@ -327,14 +412,15 @@ struct Front {
     runs: Runs,
 }
 
+impl Default for Front {
+    fn default() -> Self {
+        Front { name: None, description: String::new(), invocable: true, runs: Runs::ForAnyone }
+    }
+}
+
 impl Front {
     fn read(front: &str) -> Self {
-        let mut read = Front {
-            name: None,
-            description: String::new(),
-            invocable: true,
-            runs: Runs::ForAnyone,
-        };
+        let mut read = Front::default();
         let mut lines = front.lines().peekable();
         while let Some(line) = lines.next() {
             let Some((key, value)) = line.split_once(':') else {
@@ -354,6 +440,9 @@ impl Front {
                 "name" => read.name = Some(unquote(&parts.join(" "))),
                 "description" => read.description = unquote(&parts.join(" ")),
                 "user-invocable" => read.invocable = unquote(&parts.join(" ")) != "false",
+                "disable-slash-command" if truthy(&unquote(&parts.join(" "))) => {
+                    read.invocable = false;
+                },
                 "disable-model-invocation" if truthy(&unquote(&parts.join(" "))) => {
                     read.runs = Runs::OnlyForYou;
                 },
@@ -625,6 +714,47 @@ mod tests {
         put(root, "a/.agents/skills/up/SKILL.md", "---\ndescription: Up.\n---\n");
         let found = pi_found(&root.join("a/b/c"), None, None);
         assert!(found.contains(&skill("up", "Up.")), "{found:?}");
+    }
+
+    #[test]
+    fn the_finder_finds_what_antigravity_runs_where_it_finds_it() {
+        let Ok(scratch) = tempfile::tempdir() else {
+            panic!("no scratch directory");
+        };
+        let root = scratch.path();
+        let home = root.join("home");
+        let front = |description: &str| format!("---\ndescription: {description}\n---\nDo it.\n");
+        put(root, "outside/.agents/skills/far/SKILL.md", &front("Above the repository."));
+        put(root, "outside/repo/.git/HEAD", "");
+        put(root, "outside/repo/.agents/skills/top/SKILL.md", &front("At the top."));
+        put(root, "outside/repo/.agents/skills/deep/nested/SKILL.md", &front("Too deep."));
+        put(root, "outside/repo/inner/.agent/skills/near/SKILL.md", &front("Near."));
+        put(
+            root,
+            "outside/repo/inner/.agents/skills/hidden-cmd/SKILL.md",
+            "---\ndescription: Hidden.\ndisable-slash-command: true\n---\n",
+        );
+        put(root, "home/.gemini/antigravity-cli/skills/near/SKILL.md", &front("CLI wins."));
+        put(root, "home/.gemini/skills/shared/SKILL.md", &front("Shared."));
+        put(root, "home/.gemini/config/skills/global/SKILL.md", &front("Global."));
+        put(root, "home/.agents/skills/user-agent/SKILL.md", &front("Home agents."));
+        put(
+            root,
+            "home/.gemini/config/plugins/review/skills/deep-review/SKILL.md",
+            "---\nname: deep-review\ndescription: Plugin review.\n---\n",
+        );
+        let cwd = root.join("outside/repo/inner");
+        assert_eq!(agy_found(&cwd, Some(&home)), [
+            skill("deep-review", "Plugin review."),
+            skill("global", "Global."),
+            skill("near", "CLI wins."),
+            skill("shared", "Shared."),
+            skill("top", "At the top."),
+            skill("user-agent", "Home agents."),
+        ]);
+        put(root, "plain/parent/.agents/skills/above/SKILL.md", &front("Above."));
+        put(root, "plain/parent/child/.agents/skills/here/SKILL.md", &front("Here."));
+        assert_eq!(agy_found(&root.join("plain/parent/child"), None), [skill("here", "Here.")]);
     }
 
     #[test]

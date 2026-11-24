@@ -59,6 +59,10 @@ impl Host {
         self.home.path().join(".pi/agent")
     }
 
+    pub fn agy_folder(&self) -> PathBuf {
+        self.home.path().join(".gemini/antigravity-cli")
+    }
+
     fn file_of(&self, pid: u32) -> PathBuf {
         self.sessions().join(format!("{pid}.json"))
     }
