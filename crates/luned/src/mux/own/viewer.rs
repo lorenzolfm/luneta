@@ -242,7 +242,7 @@ async fn stream(
             },
             Some(to_viewer::Event::Refused(api::Refused { reason })) => told(Seen::Refused(reason)),
             Some(to_viewer::Event::Closed(_)) => {},
-            None =>return Ok("lune-mux said nothing to its viewer".to_owned()),
+            None => return Ok("lune-mux said nothing to its viewer".to_owned()),
         }
     }
 }

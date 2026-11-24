@@ -83,11 +83,11 @@ struct TerminalScreen: View {
                         }
                 )
                 .onScrollGeometryChange(for: Pull.self) { geometry in
-                    let top = -(geometry.contentOffset.y + geometry.contentInsets.top)
-                    let seen = geometry.contentOffset.y + geometry.containerSize.height
-                    let bottom =
-                        seen - geometry.contentInsets.bottom - geometry.contentSize.height
-                    return Pull(pastTop: top, pastBottom: bottom)
+                    let insets = geometry.contentInsets
+                    let down = geometry.contentOffset.y + insets.top
+                    let visible = geometry.containerSize.height - insets.top - insets.bottom
+                    let lowest = max(geometry.contentSize.height - visible, 0)
+                    return Pull(pastTop: -down, pastBottom: down - lowest)
                 } action: { _, pull in
                     if let input {
                         pulledTo(pull, scroll: input.scroll)

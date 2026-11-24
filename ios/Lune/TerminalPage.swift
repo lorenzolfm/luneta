@@ -87,6 +87,7 @@ struct TerminalPage: View {
 
     private func show() async {
         guard phase == .active else { return }
+        if case .closed = seeing { return }
         let view: TerminalView
         do {
             view = try luned.terminal(place.terminal, appearance: appearance)
