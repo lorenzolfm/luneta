@@ -574,8 +574,9 @@ impl Thread {
             let ended = format!("terminal {}'s program ended", self.key.id);
             return Err(Status::failed_precondition(ended));
         };
-        self.typed(&bytes).map_err(|full| {
-            let full = format!("terminal {} has {} typed bytes unread", self.key.id, full.typed);
+        self.type_in(&bytes).map_err(|full| {
+            let full =
+                format!("terminal {} has {} typed bytes unread", self.key.id, full.typed_bytes);
             Status::resource_exhausted(full)
         })
     }
@@ -621,9 +622,9 @@ impl Thread {
         }
         match self.does(input).map_err(io::Error::other)? {
             Does::Write(bytes) => {
-                if let Err(Full { typed }) = self.typed(&bytes) {
+                if let Err(Full { typed_bytes }) = self.type_in(&bytes) {
                     eprintln!(
-                        "lune-mux: terminal {} has {typed} typed bytes unread: input dropped",
+                        "lune-mux: terminal {} has {typed_bytes} typed bytes unread: input dropped",
                         self.key.id
                     );
                 }
@@ -657,31 +658,11 @@ impl Thread {
         })
     }
 
-    fn typed(&mut self, bytes: &[u8]) -> Result<(), Full> {
-        let id = self.key.id;
+    fn type_in(&mut self, bytes: &[u8]) -> Result<(), Full> {
         let Program::Runs { pty, unread } = &mut self.program else {
             return Ok(());
         };
-        if unread.is_empty() {
-            return unread.type_in(bytes);
-        }
-        let key = match pty.signal_key(bytes) {
-            Ok(Some(key)) => key,
-            Ok(None) => return unread.type_in(bytes),
-            Err(error) => {
-                eprintln!("lune-mux: terminal {id}'s modes could not be read: {error}");
-                return unread.type_in(bytes);
-            },
-        };
-        let signal = key.name;
-        eprintln!("lune-mux: terminal {id}'s program is behind on its input: {signal} is raised");
-        if let Err(error) = pty.raise(key) {
-            eprintln!("lune-mux: terminal {id}'s {signal} could not be raised: {error}");
-        }
-        if key.flushes {
-            unread.clear();
-        }
-        Ok(())
+        type_into(self.key.id, pty, unread, bytes)
     }
 
     fn answered(&mut self, answers: &Answers) {
@@ -779,10 +760,10 @@ impl Thread {
         let Program::Runs { pty, unread } = &mut self.program else {
             return Ok(());
         };
-        while let Some(waiting) = unread.waiting() {
-            match pty.near.write(waiting) {
+        while let Some(lined_up) = unread.line_up() {
+            match pty.near.write(lined_up) {
                 Ok(written) => {
-                    assert!(written > 0, "the program took none of {} bytes", waiting.len());
+                    assert!(written > 0, "the program took none of {} bytes", lined_up.len());
                     unread.sent(written);
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
@@ -860,6 +841,39 @@ impl Thread {
     }
 }
 
+fn type_into(
+    terminal: TerminalId,
+    pty: &Pty,
+    unread: &mut Unread,
+    bytes: &[u8],
+) -> Result<(), Full> {
+    if unread.is_empty() {
+        return unread.type_in(bytes);
+    }
+    let key = match pty.signal_key(bytes) {
+        Ok(Some(key)) => key,
+        Ok(None) => return unread.type_in(bytes),
+        Err(error) => {
+            eprintln!("lune-mux: terminal {terminal}'s modes could not be read: {error}");
+            return unread.type_in(bytes);
+        },
+    };
+    assert_eq!(bytes.len(), 1, "a signal key is one byte");
+    let signal = key.name;
+    if let Err(error) = pty.raise(key.signal) {
+        eprintln!("lune-mux: terminal {terminal}'s {signal} could not be raised: {error}: typed");
+        return unread.type_in(bytes);
+    }
+    eprintln!("lune-mux: terminal {terminal}'s program is behind on its input: {signal} raised");
+    if key.flushes {
+        unread.clear();
+        if let Err(error) = pty.flush_input() {
+            eprintln!("lune-mux: terminal {terminal}'s input could not be flushed: {error}");
+        }
+    }
+    Ok(())
+}
+
 fn answers_lost(terminal: TerminalId) {
     eprintln!("lune-mux: terminal {terminal}'s program reads too few answers: the oldest are lost");
 }
@@ -924,7 +938,21 @@ fn arrows(screen: &mut Screen, wheel: Wheel) -> Result<Vec<u8>, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
+
     use super::*;
+
+    #[test]
+    fn a_signal_key_no_group_takes_is_typed_behind_what_waits() {
+        let columns = NonZeroU16::new(80).unwrap();
+        let rows = NonZeroU16::new(24).unwrap();
+        let pty = Pty::opened(Size { columns, rows }).unwrap();
+        assert!(pty.signal_key(b"\x03").unwrap().is_some());
+        let mut unread = Unread::default();
+        unread.type_in(b"waits").unwrap();
+        type_into(TerminalId::next(&mut None), &pty, &mut unread, b"\x03").unwrap();
+        assert_eq!(unread.line_up(), Some(&b"waits\x03"[..]));
+    }
 
     #[test]
     fn what_the_program_writes_brings_a_later_look_forward() {

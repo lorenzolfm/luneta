@@ -9,7 +9,7 @@ use std::process::{Child, Command};
 use std::sync::OnceLock;
 
 use rustix::fs::{Mode, OFlags};
-use rustix::process::{Pid, Resource, Rlimit, Signal};
+use rustix::process::{Resource, Rlimit, Signal};
 use rustix::pty::OpenptFlags;
 use rustix::termios::{
     self, InputModes, LocalModes, OptionalActions, QueueSelector, SpecialCodeIndex, Winsize,
@@ -120,16 +120,13 @@ impl Pty {
         Ok(key.map(|&(_, signal, name)| SignalKey { signal, name, flushes }))
     }
 
-    pub fn raise(&self, key: SignalKey) -> io::Result<()> {
-        if key.flushes {
-            termios::tcflush(&self.far, QueueSelector::IFlush)?;
-        }
-        let Some(group) = self.front_group() else {
-            return Ok(());
-        };
-        let group = i32::try_from(group.leader()).ok().and_then(Pid::from_raw);
-        let group = group.expect("a front group is a pid");
-        Ok(rustix::process::kill_process_group(group, key.signal)?)
+    pub fn raise(&self, signal: Signal) -> io::Result<()> {
+        let group = termios::tcgetpgrp(&self.near)?;
+        Ok(rustix::process::kill_process_group(group, signal)?)
+    }
+
+    pub fn flush_input(&self) -> io::Result<()> {
+        Ok(termios::tcflush(&self.far, QueueSelector::IFlush)?)
     }
 
     pub fn modes(&self) -> io::Result<Modes> {
@@ -208,4 +205,75 @@ fn leads(command: &mut Command) -> &mut Command {
         });
     }
     command
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU16;
+
+    use super::*;
+
+    fn opened() -> Pty {
+        let columns = NonZeroU16::new(80).unwrap();
+        let rows = NonZeroU16::new(24).unwrap();
+        let pty = Pty::opened(Size { columns, rows }).unwrap();
+        changed(&pty, |modes| {
+            modes.special_codes[SpecialCodeIndex::VINTR] = 0x03;
+            modes.special_codes[SpecialCodeIndex::VQUIT] = 0x1c;
+            modes.special_codes[SpecialCodeIndex::VSUSP] = 0x1a;
+            modes.local_modes.set(LocalModes::ISIG, true);
+            modes.local_modes.set(LocalModes::NOFLSH, false);
+        });
+        pty
+    }
+
+    fn changed(pty: &Pty, change: impl FnOnce(&mut termios::Termios)) {
+        let mut modes = termios::tcgetattr(&pty.far).unwrap();
+        change(&mut modes);
+        termios::tcsetattr(&pty.far, OptionalActions::Now, &modes).unwrap();
+    }
+
+    fn key(signal: Signal, name: &'static str, flushes: bool) -> SignalKey {
+        SignalKey { signal, name, flushes }
+    }
+
+    #[test]
+    fn a_signal_key_is_one_byte_the_terminal_signals_on() {
+        let pty = opened();
+        assert_eq!(pty.signal_key(b"\x03").unwrap(), Some(key(Signal::INT, "SIGINT", true)));
+        assert_eq!(pty.signal_key(b"\x1c").unwrap(), Some(key(Signal::QUIT, "SIGQUIT", true)));
+        assert_eq!(pty.signal_key(b"\x1a").unwrap(), Some(key(Signal::TSTP, "SIGTSTP", true)));
+        assert_eq!(pty.signal_key(b"\x03\x03").unwrap(), None);
+        assert_eq!(pty.signal_key(b"c").unwrap(), None);
+        assert_eq!(pty.signal_key(b"").unwrap(), None);
+    }
+
+    #[test]
+    fn a_signal_key_under_noflsh_keeps_what_waits() {
+        let pty = opened();
+        changed(&pty, |modes| modes.local_modes.set(LocalModes::NOFLSH, true));
+        assert_eq!(pty.signal_key(b"\x03").unwrap(), Some(key(Signal::INT, "SIGINT", false)));
+    }
+
+    #[test]
+    fn no_key_signals_with_isig_off() {
+        let pty = opened();
+        changed(&pty, |modes| modes.local_modes.set(LocalModes::ISIG, false));
+        assert_eq!(pty.signal_key(b"\x03").unwrap(), None);
+        assert_eq!(pty.signal_key(b"\x1c").unwrap(), None);
+    }
+
+    #[test]
+    fn a_key_turned_off_is_a_byte_like_any_other() {
+        let pty = opened();
+        changed(&pty, |modes| modes.special_codes[SpecialCodeIndex::VINTR] = KEY_TURNED_OFF);
+        assert_eq!(pty.signal_key(&[KEY_TURNED_OFF]).unwrap(), None);
+        assert_eq!(pty.signal_key(b"\x03").unwrap(), None);
+        assert_eq!(pty.signal_key(b"\x1c").unwrap(), Some(key(Signal::QUIT, "SIGQUIT", true)));
+    }
+
+    #[test]
+    fn a_signal_raised_on_a_terminal_with_no_front_group_fails() {
+        assert!(opened().raise(Signal::INT).is_err());
+    }
 }

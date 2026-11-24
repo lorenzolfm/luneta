@@ -80,3 +80,35 @@ fn a_flood_of_answers_leaves_a_terminal_drawing_and_taking_ctrl_c() {
         .await;
     });
 }
+
+#[test]
+fn ctrl_c_behind_a_flood_of_answers_flushes_them() {
+    ctrl_c_behind_a_flood_of_answers_leaves("-noflsh", "input left: none");
+}
+
+#[test]
+fn ctrl_c_behind_a_flood_of_answers_keeps_them_under_noflsh() {
+    ctrl_c_behind_a_flood_of_answers_leaves("noflsh", "input left: some");
+}
+
+fn ctrl_c_behind_a_flood_of_answers_leaves(flushes: &str, left: &str) {
+    run(async {
+        let server = Server::start().await;
+        let mut mux = server.client().await;
+        let asks = format!(
+            "stty -icanon -echo min 0 time 10 {flushes}; \
+            trap 'n=$(( $(cat | wc -c) )); \
+                if [ \"$n\" -eq 0 ]; then echo \"input left: none\"; \
+                else echo \"input left: some\"; fi' INT; \
+            yes \"$(printf '\\033[6n')\" | tr -d '\\n' | head -c 4000000; \
+            echo; echo drawn; sleep 1000"
+        );
+        let opens = script(&asks, api::Ends::Holds);
+        let key = new_terminal(&mut mux, opens, b"asks", size(80, 24)).await;
+        let mut viewer = Viewer::new(&mut mux).await;
+        viewer.show(&[key]).await;
+        viewer.until_row(key.id, "drawn").await;
+        viewer.press_ctrl(key, 'c').await;
+        viewer.until_row(key.id, left).await;
+    });
+}

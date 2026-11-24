@@ -14,13 +14,14 @@ pub(super) struct Answering {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Answers {
     bytes: Vec<u8>,
-    ends: Vec<usize>,
+    lengths: Vec<usize>,
 }
 
 impl Answers {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.ends.is_empty()
+        assert_eq!(self.lengths.is_empty(), self.bytes.is_empty(), "answers of no bytes");
+        self.lengths.is_empty()
     }
 
     #[must_use]
@@ -29,14 +30,18 @@ impl Answers {
     }
 
     pub fn each(&self) -> impl Iterator<Item = &[u8]> {
-        let starts = std::iter::once(0).chain(self.ends.iter().copied());
-        starts.zip(&self.ends).map(|(start, &end)| &self.bytes[start..end])
+        let mut start = 0;
+        self.lengths.iter().map(move |&length| {
+            let answer = &self.bytes[start..start + length];
+            start += length;
+            answer
+        })
     }
 
     fn push(&mut self, answer: &[u8]) {
         assert!(!answer.is_empty(), "an answer of no bytes");
         self.bytes.extend_from_slice(answer);
-        self.ends.push(self.bytes.len());
+        self.lengths.push(answer.len());
     }
 }
 

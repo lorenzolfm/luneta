@@ -11,6 +11,7 @@ const _: () = assert!(ANSWERS_BYTES_MAX <= TYPED_BYTES_MAX);
 #[derive(Default)]
 pub struct Unread {
     sending: Vec<u8>,
+    sent_bytes: usize,
     typed: Vec<u8>,
     answers: Vec<u8>,
     answer_lengths: VecDeque<usize>,
@@ -19,7 +20,7 @@ pub struct Unread {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Full {
-    pub typed: usize,
+    pub typed_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +38,7 @@ impl Unread {
 
     pub fn type_in(&mut self, bytes: &[u8]) -> Result<(), Full> {
         if self.typed.len() + bytes.len() > TYPED_BYTES_MAX {
-            return Err(Full { typed: self.typed.len() });
+            return Err(Full { typed_bytes: self.typed.len() });
         }
         self.typed.extend_from_slice(bytes);
         self.assert_bounded();
@@ -46,7 +47,10 @@ impl Unread {
 
     pub fn answer(&mut self, answers: &Answers) -> Kept {
         let mut lost = false;
+        let mut taken = 0;
         for answer in answers.each() {
+            assert!(!answer.is_empty(), "an answer of no bytes");
+            taken += answer.len();
             if answer.len() > ANSWERS_BYTES_MAX {
                 lost = true;
                 continue;
@@ -54,6 +58,7 @@ impl Unread {
             self.answers.extend_from_slice(answer);
             self.answer_lengths.push_back(answer.len());
         }
+        assert_eq!(taken, answers.bytes().len(), "answers left bytes over");
         let mut oldest = 0;
         while self.answers.len() - oldest > ANSWERS_BYTES_MAX {
             oldest += self.answer_lengths.pop_front().expect("bytes over the bound are answers");
@@ -70,7 +75,7 @@ impl Unread {
         }
     }
 
-    pub fn waiting(&mut self) -> Option<&[u8]> {
+    pub fn line_up(&mut self) -> Option<&[u8]> {
         if self.sending.is_empty() {
             if !self.typed.is_empty() {
                 std::mem::swap(&mut self.sending, &mut self.typed);
@@ -81,12 +86,23 @@ impl Unread {
             }
         }
         self.assert_bounded();
-        (!self.sending.is_empty()).then_some(&self.sending[..])
+        if self.sending.is_empty() {
+            assert!(self.is_empty(), "input waits behind nothing lined up");
+            return None;
+        }
+        Some(&self.sending[self.sent_bytes..])
     }
 
     pub fn sent(&mut self, count: usize) {
-        assert!(0 < count && count <= self.sending.len(), "{count} of {}", self.sending.len());
-        self.sending.drain(..count);
+        let lined_up = self.sending.len() - self.sent_bytes;
+        assert!(count > 0, "none of {lined_up} bytes sent");
+        assert!(count <= lined_up, "{count} of {lined_up} bytes sent");
+        self.sent_bytes += count;
+        if self.sent_bytes == self.sending.len() {
+            self.sending.clear();
+            self.sent_bytes = 0;
+        }
+        self.assert_bounded();
     }
 
     pub fn clear(&mut self) {
@@ -97,7 +113,14 @@ impl Unread {
         assert!(self.typed.len() <= TYPED_BYTES_MAX, "{} typed bytes", self.typed.len());
         assert!(self.answers.len() <= ANSWERS_BYTES_MAX, "{} bytes of answers", self.answers.len());
         assert!(self.sending.len() <= TYPED_BYTES_MAX, "{} bytes in flight", self.sending.len());
-        assert_eq!(self.answer_lengths.iter().sum::<usize>(), self.answers.len());
+        assert!(self.answer_lengths.len() <= self.answers.len(), "an answer of no bytes");
+        assert_eq!(self.answer_lengths.is_empty(), self.answers.is_empty());
+        if self.sending.is_empty() {
+            assert_eq!(self.sent_bytes, 0, "bytes sent of nothing in flight");
+        } else {
+            assert!(self.sent_bytes < self.sending.len(), "all in flight is sent but kept");
+        }
+        debug_assert_eq!(self.answer_lengths.iter().sum::<usize>(), self.answers.len());
     }
 }
 
@@ -118,9 +141,9 @@ mod tests {
 
     fn sent_all(unread: &mut Unread) -> Vec<u8> {
         let mut sent = Vec::new();
-        while let Some(waiting) = unread.waiting() {
-            let count = waiting.len().min(3);
-            sent.extend_from_slice(&waiting[..count]);
+        while let Some(lined_up) = unread.line_up() {
+            let count = lined_up.len().min(3);
+            sent.extend_from_slice(&lined_up[..count]);
             unread.sent(count);
         }
         sent
@@ -131,10 +154,11 @@ mod tests {
         let mut unread = Unread::default();
         assert_eq!(unread.answer(&answers_to(b"\x1b[6n")), Kept::All);
         unread.type_in(b"a").unwrap();
-        assert_eq!(unread.waiting(), Some(&b"a"[..]));
+        assert_eq!(unread.line_up(), Some(&b"a"[..]));
         unread.sent(1);
-        assert_eq!(unread.waiting(), Some(&b"\x1b[1;1R"[..]));
+        assert_eq!(unread.line_up(), Some(&b"\x1b[1;1R"[..]));
         unread.sent(2);
+        assert_eq!(unread.line_up(), Some(&b"1;1R"[..]));
         unread.type_in(b"\x03").unwrap();
         assert_eq!(unread.answer(&answers_to(b"\x1b[5n")), Kept::All);
         assert_eq!(sent_all(&mut unread), b"1;1R\x03\x1b[0n");
@@ -164,12 +188,12 @@ mod tests {
         let answers = answers_to(&b"\x1b[5n".repeat(ANSWERS_BYTES_MAX));
         assert_eq!(unread.answer(&answers), Kept::LostOldest);
         unread.type_in(&vec![b'x'; TYPED_BYTES_MAX]).unwrap();
-        assert_eq!(unread.type_in(b"y"), Err(Full { typed: TYPED_BYTES_MAX }));
+        assert_eq!(unread.type_in(b"y"), Err(Full { typed_bytes: TYPED_BYTES_MAX }));
         assert_eq!(unread.answer(&answers), Kept::StillLosing);
-        assert_eq!(unread.waiting().map(<[u8]>::len), Some(TYPED_BYTES_MAX));
+        assert_eq!(unread.line_up().map(<[u8]>::len), Some(TYPED_BYTES_MAX));
         unread.type_in(b"y").unwrap();
         unread.clear();
         assert!(unread.is_empty());
-        assert_eq!(unread.waiting(), None);
+        assert_eq!(unread.line_up(), None);
     }
 }
