@@ -8,6 +8,7 @@ struct AgentView: View {
     @State private var failed: String?
     @State private var words = ""
     @State private var answering = false
+    @State private var asking: AskPlace?
 
     var body: some View {
         let agent = luned.agent(at: seat)
@@ -56,6 +57,19 @@ struct AgentView: View {
         }
         .navigationTitle(agent?.name ?? "Agent")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let placed = agent?.placed,
+                let worktree = luned.worktree(placed.worktree, on: seat.machine)
+            {
+                Button("Ask here", systemImage: "bubble.left") {
+                    asking = AskPlace(
+                        machine: seat.machine, cwd: worktree.folder, title: worktree.name)
+                }
+            }
+        }
+        .sheet(item: $asking) { place in
+            NavigationStack { AskView(place: place, opening: nil) }
+        }
         .refreshable { await load() }
         .task(id: agent) { await load() }
     }

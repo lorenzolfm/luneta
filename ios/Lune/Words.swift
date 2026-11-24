@@ -43,3 +43,44 @@ extension Why {
         }
     }
 }
+
+extension Holds {
+    var worktrees: [Worktree] {
+        switch self {
+        case .folder(let worktree): [worktree]
+        case .clone(let worktrees): worktrees
+        case .untold: []
+        }
+    }
+}
+
+extension Seen {
+    var words: String? {
+        switch self {
+        case .missing: "missing"
+        case .unread: "unread"
+        case .noBranch: "no branch"
+        case .working: nil
+        case .pullRequestOpen: "pull request open"
+        case .checksFailing: "checks failing"
+        case .merged: "merged"
+        case .untold: nil
+        }
+    }
+}
+
+extension LuneView {
+    var title: String {
+        name ?? topic ?? command ?? "shell"
+    }
+}
+
+extension Landed {
+    var words: String {
+        switch self {
+        case .started: "The agent starts in a new worktree."
+        case .found: "The branch had a worktree already, and the agent opens there."
+        case .shell: "luned made the worktree with a shell in it."
+        }
+    }
+}

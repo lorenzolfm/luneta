@@ -13,6 +13,15 @@ struct LuneApp: App {
                     InboxView()
                 }
                 .badge(luned.model?.inbox.filter(\.waits).count ?? 0)
+                Tab("Tree", systemImage: "list.bullet.indent") {
+                    TreeView()
+                }
+                Tab("Ask", systemImage: "bubble.left.and.text.bubble.right") {
+                    NavigationStack {
+                        AskView(
+                            place: AskPlace(machine: nil, cwd: nil, title: "Ask"), opening: nil)
+                    }
+                }
             }
             .environment(luned)
         }
