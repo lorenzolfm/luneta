@@ -14,7 +14,7 @@ use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 
-pub const UNTOLD: &str = "cannot tell where the views are";
+pub use luned::prunes::UNTOLD;
 
 pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let turn = match agreed::turn_here() {
@@ -36,15 +36,8 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
     for line in listed(&plan) {
         println!("{line}");
     }
-    if plan.goes.is_empty() {
-        let name = plan.repository_name();
-        if plan.unasked.is_empty() {
-            eprintln!("lune: {name} has no merged worktree to delete");
-            return ExitCode::SUCCESS;
-        }
-        return failed(&format!(
-            "{name}: no merged worktree to delete of those it could ask about"
-        ));
+    if let Some(none) = none_goes(&plan) {
+        return none;
     }
     let agreed = Agreed::of_prune(&plan, turn.map(Turn::key));
     let takes = match turn {
@@ -64,11 +57,26 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
             for line in listed(&now) {
                 println!("{line}");
             }
+            if let Some(none) = none_goes(&now) {
+                return none;
+            }
             eprintln!("lune: {}", unagreed(yes, Agreed::of_prune(&now, turn.map(Turn::key))));
             ExitCode::from(PLANNED)
         },
         Err(why) => failed(&why),
     }
+}
+
+fn none_goes(plan: &Plan) -> Option<ExitCode> {
+    if !plan.goes.is_empty() {
+        return None;
+    }
+    let name = plan.repository_name();
+    if plan.unasked.is_empty() {
+        eprintln!("lune: {name} has no merged worktree to delete");
+        return Some(ExitCode::SUCCESS);
+    }
+    Some(failed(&format!("{name}: no merged worktree to delete of those it could ask about")))
 }
 
 fn unagreed(yes: Option<Agreed>, agreed: Agreed) -> String {

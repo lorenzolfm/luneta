@@ -30,6 +30,8 @@ pub const PLANNING: Duration = Duration::from_mins(5);
 
 pub const DELETING: Duration = Duration::from_mins(30);
 
+pub const UNTOLD: &str = "cannot tell where the views are";
+
 const ASKS_AT_ONCE: usize = 8;
 
 const GIT_SAYS: Duration = Duration::from_mins(1);
@@ -527,7 +529,15 @@ fn bytes_of(folder: &str) -> Option<u64> {
     kibibytes.checked_mul(1024)
 }
 
-pub(crate) fn plan(dir: &Directory, occupied: &Occupied) -> Result<Planned, String> {
+fn untold(why: &str) -> String {
+    format!("luned {UNTOLD}, so it deletes nothing: {why}")
+}
+
+pub(crate) fn plan(
+    dir: &Directory,
+    occupied: impl FnOnce() -> Result<Occupied, String>,
+) -> Result<Planned, String> {
+    let occupied = occupied().map_err(|why| untold(&why))?;
     let common = common_of(dir)?;
     let repository = git::holder(common.as_str())
         .ok_or_else(|| format!("no directory holds the repository {common}"))?;
@@ -549,7 +559,7 @@ pub(crate) fn plan(dir: &Directory, occupied: &Occupied) -> Result<Planned, Stri
             Err(why) => plan.unasked.push(Unasked { folder: on.listed.path.clone(), why }),
         }
     }
-    let going = sorted_out(&mut plan, merged, &listed, occupied, &common)?;
+    let going = sorted_out(&mut plan, merged, &listed, &occupied, &common)?;
     let others = at_once(&going, Asker::default, |asker, (on, pulled, _): &Going<'_>| {
         others_of(asker, &common, on, pulled)
     });
@@ -694,8 +704,7 @@ pub(crate) fn deleted_as_agreed(
     agreed: &BTreeSet<Deleting>,
     occupied: impl Fn() -> Result<Occupied, String>,
 ) -> Result<Pruned, String> {
-    let now = occupied().map_err(|why| format!("lune cannot tell its views: {why}"))?;
-    let planned = plan(dir, &now)?;
+    let planned = plan(dir, &occupied)?;
     if planned.plan.deletes() != *agreed {
         return Ok(Pruned::Changed(planned.plan));
     }
@@ -1031,6 +1040,17 @@ mod tests {
         let occupied = Occupied::of(&host, Lunes::none()).unwrap();
         assert_eq!(occupied.why_in(Path::new("/w/c")), Some(AN_AGENT));
         assert_eq!(occupied.why_in(Path::new("/w/cc")), None);
+    }
+
+    #[test]
+    fn what_cannot_tell_where_the_views_are_plans_and_deletes_nothing() {
+        let dir = Directory::parse("/w/a".to_owned()).unwrap();
+        let untold = || Err("luned cannot tell where lune 9 runs: gone wrong".to_owned());
+        let why = "luned cannot tell where the views are, so it deletes nothing: luned cannot \
+                   tell where lune 9 runs: gone wrong";
+        assert_eq!(plan(&dir, untold).err(), Some(why.to_owned()));
+        let pruned = deleted_as_agreed(&dir, &BTreeSet::new(), untold);
+        assert_eq!(pruned.err(), Some(why.to_owned()));
     }
 
     #[test]

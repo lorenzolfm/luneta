@@ -712,11 +712,9 @@ impl Daemon for Host {
         }
         let host = self.host().await?;
         let answer = late(move || {
-            let occupied = Lunes::running().and_then(|lunes| Occupied::of(&host, lunes));
-            let occupied = occupied.map_err(Status::failed_precondition)?;
-            let planned = prunes::plan(&dir, &occupied);
-            let said = planned.map(|planned| PrunesResponse::from(planned.plan()));
-            said.map_err(Status::failed_precondition)
+            let occupied = || Occupied::of(&host, Lunes::running()?);
+            let planned = prunes::plan(&dir, occupied).map_err(Status::failed_precondition)?;
+            Ok(PrunesResponse::from(planned.plan()))
         });
         Ok(Response::new(Box::pin(answer)))
     }

@@ -246,6 +246,20 @@ mod tests {
     }
 
     #[test]
+    fn where_a_process_runs_reads_while_it_runs_and_is_gone_once_it_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let mut child = Command::new("sleep").arg("60").current_dir(&dir).spawn().unwrap();
+        let pid = child.id();
+        assert_eq!(super::cwd(pid), Ok(dir));
+        child.kill().unwrap();
+        hears_it_ended(pid, "ended, and not waited for");
+        assert_eq!(super::cwd(pid), Err(super::Unread::Gone), "an ended process runs nowhere");
+        child.wait().unwrap();
+        assert_eq!(super::cwd(pid), Err(super::Unread::Gone));
+    }
+
+    #[test]
     fn no_end_is_heard_of_a_pid_no_process_can_have() {
         assert!(super::ends(0).is_err());
         assert!(super::ends(u32::MAX).is_err());
