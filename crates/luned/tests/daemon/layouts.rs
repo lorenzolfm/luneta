@@ -38,7 +38,7 @@ const WAITS: [&str; 2] = ["sleep", "600"];
 
 const RESTORE_ATTEMPTS_MAX: u32 = 3;
 
-struct Shown<'a> {
+pub struct Shown<'a> {
     owned: &'a Owned,
     asks: mpsc::Sender<ShowRequest>,
     heard: Streaming<ShowResponse>,
@@ -69,7 +69,7 @@ fn word(
 }
 
 impl<'a> Shown<'a> {
-    fn new(owned: &'a Owned, worktree: u64, columns: u32, rows: u32) -> Shown<'a> {
+    pub fn new(owned: &'a Owned, worktree: u64, columns: u32, rows: u32) -> Shown<'a> {
         Shown::running_in(owned, worktree, (columns, rows), None)
     }
 
@@ -113,7 +113,7 @@ impl<'a> Shown<'a> {
         self.open_running(&WAITS)
     }
 
-    fn open_running(&mut self, words: &[&str]) -> u64 {
+    pub fn open_running(&mut self, words: &[&str]) -> u64 {
         self.open_beside(open::Beside::Largest(()), words)
     }
 
@@ -329,7 +329,7 @@ pub fn two_in_a_clone(owned: &Owned, name: &str) -> (u64, u64, u64) {
     (made, main, two)
 }
 
-fn worktree_in_home(owned: &Owned) -> u64 {
+pub fn worktree_in_home(owned: &Owned) -> u64 {
     worktree(&owned.host, project_in_home(owned), &work_folder(owned))
 }
 

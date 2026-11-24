@@ -23,6 +23,7 @@ struct InboxView: View {
             }
             .navigationTitle("Inbox")
             .navigationDestination(for: TerminalKey.self) { AgentView(terminal: $0) }
+            .navigationDestination(for: TerminalPlace.self) { TerminalPage(place: $0) }
             .toolbar {
                 if luned.reach.host != nil {
                     Button("Machine", systemImage: "desktopcomputer") { naming = true }

@@ -220,9 +220,9 @@ impl Daemon for OverTailnet {
 
     async fn frames(
         &self,
-        _: Request<Streaming<FramesRequest>>,
+        request: Request<Streaming<FramesRequest>>,
     ) -> Result<Response<Self::FramesStream>, Status> {
-        Err(unserved("Frames"))
+        Daemon::frames(&*self.0, request).await
     }
 }
 
@@ -347,7 +347,6 @@ mod tests {
                 ("KeepImage", device.keep_image(tokio_stream::iter(Vec::<KeepImageRequest>::new())).await.map(drop)),
                 ("Say", device.say(api::SayRequest::default()).await.map(drop)),
                 ("Show", device.show(tokio_stream::iter(Vec::<ShowRequest>::new())).await.map(drop)),
-                ("Frames", device.frames(tokio_stream::iter(Vec::<FramesRequest>::new())).await.map(drop)),
             ];
             let changed = |change| api::ChangeProjectsRequest { on: None, change: Some(change) };
             let opening = |runs: Option<Runs>| api::MakeWorktreeRequest { opens: runs.map(|runs| api::Opens { runs: Some(runs) }), ..Default::default() };
@@ -372,6 +371,9 @@ mod tests {
             assert!(matches!(questions.try_recv(), Err(TryRecvError::Empty)));
             assert!(matches!(laid.try_recv(), Err(TryRecvError::Empty)));
             drop((questions, laid));
+            let unhello = device.frames(tokio_stream::iter(Vec::<FramesRequest>::new())).await.err();
+            let unhello = unhello.expect("frames that say no hello are refused");
+            assert_eq!((unhello.code(), unhello.message()), (Code::InvalidArgument, "the first word is no hello"));
             let stopped = (Code::Unavailable, "the daemon's core has stopped");
             let watched = device.watch(api::WatchRequest::default()).await.unwrap_err();
             assert_eq!((watched.code(), watched.message()), stopped);

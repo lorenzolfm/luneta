@@ -25,6 +25,7 @@ use crate::api::change_projects_request::{
 use crate::api::daemon_client::DaemonClient;
 use crate::api::{self, On};
 use crate::model::{Model, TerminalKey};
+use crate::terminal::{Appearance, TerminalView};
 use crate::unanswered::{Refusals, Unanswered};
 use crate::verbs::{
     Answer, Filed, Goes, Heard, IssueRepository, Landed, Listed, Marked, Order, Plan, Pruned,
@@ -32,7 +33,7 @@ use crate::verbs::{
 };
 use crate::waits;
 
-type Daemon = DaemonClient<Channel>;
+pub(crate) type Daemon = DaemonClient<Channel>;
 
 const CONNECT: Duration = Duration::from_secs(5);
 
@@ -317,6 +318,11 @@ impl Core {
     pub fn converse(self: Arc<Self>, on: Option<String>, cwd: Option<String>) -> Arc<Conversation> {
         let talked = Mutex::new(Talked::At(Rest::Fresh));
         Arc::new(Conversation { core: self, on, cwd, talked })
+    }
+
+    #[must_use]
+    pub fn terminal(&self, terminal: &TerminalKey, appearance: Appearance) -> Arc<TerminalView> {
+        TerminalView::open(self.daemon.clone(), &self.handle, self.patience, terminal, appearance)
     }
 
     pub async fn waiting(&self, terminal: Arc<TerminalKey>) -> Result<Waiting, Unanswered> {
