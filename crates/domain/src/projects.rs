@@ -20,7 +20,7 @@ mod view;
 
 pub use kept::{parse, written, Parsed, FILE_BYTES_MAX};
 pub use layout::{Size, FRAME_CELLS, LAYOUT_VIEWS_MAX};
-pub use spot::{clone_root, porcelain, CloneRoot, Spot, BARE, CLONE_WORKTREES_MAX};
+pub use spot::{clone_root, porcelain, Bareness, CloneRoot, Spot, BARE, CLONE_WORKTREES_MAX};
 pub use view::{quoted, Argv, Arranged, Layout, Line, Opens, Placed, Runs, Session};
 pub use view::{Focus, Shape};
 pub use view::{Terminal, TerminalViewId};
@@ -36,6 +36,8 @@ pub const VIEWS_MAX: usize = 1024;
 pub const NAME_CHARS_MAX: usize = 64;
 
 pub const PATH_BYTES_MAX: usize = 4096;
+
+pub const OWNED_FOLDERS_MAX: usize = 2;
 
 pub const USED_MILLIS_MAX: u64 = u64::MAX / 2;
 
@@ -990,6 +992,7 @@ impl Projects {
         owned: &[Dir],
         draw: impl FnMut() -> io::Result<Id>,
     ) -> Result<(Projects, Option<Made>), Refused> {
+        assert!(owned.len() <= OWNED_FOLDERS_MAX, "the folder as named, and where it leads");
         if let Some(dir) = self.added_at(&change)
             && let Some(other) = self.projects.iter().find(|other| other.dir.nests(dir))
         {

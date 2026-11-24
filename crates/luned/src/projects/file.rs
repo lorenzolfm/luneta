@@ -467,7 +467,7 @@ fn read(file: &Path) -> Result<Parsed, String> {
         },
         Err(error) => return Err(error.to_string()),
     };
-    let limit = u64::try_from(FILE_BYTES_MAX).expect("8 MiB fits a u64") + 1;
+    let limit = u64::try_from(FILE_BYTES_MAX).expect("FILE_BYTES_MAX fits a u64") + 1;
     opened.take(limit).read_to_string(&mut text).map_err(|error| error.to_string())?;
     if text.len() > FILE_BYTES_MAX {
         return Err(format!("it is over {FILE_BYTES_MAX} bytes"));

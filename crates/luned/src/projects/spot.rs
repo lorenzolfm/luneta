@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use lune_domain::projects::{clone_root, porcelain, CloneRoot, Dir, Spot, Subfolder, BARE};
+use lune_domain::projects::{clone_root, porcelain, Bareness, CloneRoot, Dir, Spot, Subfolder};
+use lune_domain::projects::BARE;
 
 use crate::directory::Directory;
 use crate::git::{self, Common, Git};
@@ -108,21 +109,21 @@ fn clone_within(common: &Directory, until: Instant, look: Duration) -> Result<Cl
     git.args(["--type=bool", "--get", "core.bare"]);
     let ran = git.run(left(until, look)?);
     let ran = ran.map_err(|error| format!("git config core.bare did not run: {error}"))?;
-    Ok(clone_root(common.as_str(), bare(ran)?))
+    Ok(clone_root(Path::new(common.as_str()), bareness(ran)?))
 }
 
-fn bare(ran: Ran) -> Result<bool, String> {
+fn bareness(ran: Ran) -> Result<Bareness, String> {
     if let Ran::Ended { status, stdout, stderr } = &ran
         && status.code() == Some(1)
         && stdout.is_empty()
         && stderr.is_empty()
     {
-        return Ok(false);
+        return Ok(Bareness::Worked);
     }
     let said = ran.answer().map_err(|why| format!("git config core.bare: {why}"))?;
     match said.as_slice() {
-        b"true\n" => Ok(true),
-        b"false\n" => Ok(false),
+        b"true\n" => Ok(Bareness::Bare),
+        b"false\n" => Ok(Bareness::Worked),
         _ => Err(format!("git said core.bare is {:?}", String::from_utf8_lossy(&said))),
     }
 }

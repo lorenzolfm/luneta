@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::time::{Duration, Instant};
 
-use lune_domain::projects;
+use lune_domain::projects::{self, OWNED_FOLDERS_MAX};
 use luned::api::keep_checks_response::{self, failed};
 use luned::api::{
     AskResponse, IssueRepositoriesRequest, KeepChecksRequest, ListContentsRequest,
@@ -17,7 +17,7 @@ use luned::links::{Pasted, Ready, Unready};
 use luned::printed::Kept;
 use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
-use luned::repositories::{Found, Repository, OWNED_FOLDERS_MAX, REPOSITORIES_MAX};
+use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
 use luned::skills::{Name, Runs, Skill};
 use luned::transcripts::{Reading, SessionId};
 use luned::{Daemon, Destination, Directory};

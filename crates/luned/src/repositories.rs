@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use lune_domain::projects::{Dir, ProjectName};
+use lune_domain::projects::{Dir, ProjectName, OWNED_FOLDERS_MAX};
 
 use crate::projects::spot;
 use crate::{zoxide, Directory};
@@ -12,8 +12,6 @@ use crate::{zoxide, Directory};
 pub const OWNED_FOLDER: &str = "lune";
 
 pub const REPOSITORIES_MAX: usize = 512;
-
-pub const OWNED_FOLDERS_MAX: usize = 2;
 
 const OWNED_ENTRIES_MAX: usize = 1024;
 

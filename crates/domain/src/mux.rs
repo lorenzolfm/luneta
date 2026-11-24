@@ -1,13 +1,14 @@
 use std::num::NonZeroU32;
 
-use lune_protocol::made::Made;
+pub use lune_protocol::made::Made as OwnMade;
+
 use lune_protocol::mux::v1 as mux;
 use lune_protocol::v1 as api;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalKey {
     pub id: NonZeroU32,
-    pub made: Made,
+    pub made: OwnMade,
 }
 
 impl TerminalKey {
@@ -15,14 +16,14 @@ impl TerminalKey {
         let key = key.ok_or("a terminal with no key")?;
         let id = NonZeroU32::new(key.id).ok_or("0 is no terminal's id")?;
         let made = key.made_at.ok_or_else(|| format!("terminal {id} has no made_at"))?;
-        let made = Made::read(made).map_err(|why| format!("terminal {id}'s made_at: {why}"))?;
+        let made = OwnMade::read(made).map_err(|why| format!("terminal {id}'s made_at: {why}"))?;
         Ok(TerminalKey { id, made })
     }
 
     pub fn of(key: &api::TerminalKey) -> Result<Self, String> {
         let id = NonZeroU32::new(key.id).ok_or("0 is no terminal's id")?;
         let made = key.made_at.ok_or_else(|| format!("terminal {id} has no made_at"))?;
-        let made = Made::read(made).map_err(|why| format!("terminal {id}'s made_at: {why}"))?;
+        let made = OwnMade::read(made).map_err(|why| format!("terminal {id}'s made_at: {why}"))?;
         Ok(TerminalKey { id, made })
     }
 

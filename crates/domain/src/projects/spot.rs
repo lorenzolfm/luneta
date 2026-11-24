@@ -11,6 +11,12 @@ const LISTED_MAX: usize = 2 * CLONE_WORKTREES_MAX;
 
 const _: () = assert!(CLONE_WORKTREES_MAX <= WORKTREES_MAX);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bareness {
+    Bare,
+    Worked,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloneRoot {
     Of(Dir),
@@ -107,15 +113,14 @@ impl Spot {
 }
 
 #[must_use]
-pub fn clone_root(common: &str, bare: bool) -> CloneRoot {
-    if !bare {
+pub fn clone_root(common: &Path, bareness: Bareness) -> CloneRoot {
+    if bareness == Bareness::Worked {
         return CloneRoot::Worked;
     }
-    let bare = Path::new(common);
-    if bare.file_name().and_then(|name| name.to_str()) != Some(BARE) {
+    if common.file_name().and_then(|name| name.to_str()) != Some(BARE) {
         return CloneRoot::NoBare;
     }
-    let root = bare.parent().and_then(Path::to_str).expect("a named path of a str has a parent");
+    let root = common.parent().and_then(Path::to_str).expect("a named path of a str has a parent");
     match Dir::parse(root) {
         Ok(root) => CloneRoot::Of(root),
         Err(why) => CloneRoot::Unparsed(why),
@@ -165,17 +170,19 @@ mod tests {
 
     #[test]
     fn a_clone_s_root_is_the_folder_that_holds_its_bare_repository() {
-        assert_eq!(clone_root("/w/lune/.bare", true), CloneRoot::Of(dir("/w/lune")));
-        assert_eq!(clone_root("/w/lune/.bare", false), CloneRoot::Worked);
-        assert_eq!(clone_root("/w/lune/.git", false), CloneRoot::Worked);
-        assert_eq!(clone_root("/w/lune/.git", true), CloneRoot::NoBare);
-        assert_eq!(clone_root("/w/lune.bare", true), CloneRoot::NoBare);
+        use Bareness::{Bare, Worked};
+        let root = |common: &str, bareness| clone_root(Path::new(common), bareness);
+        assert_eq!(root("/w/lune/.bare", Bare), CloneRoot::Of(dir("/w/lune")));
+        assert_eq!(root("/w/lune/.bare", Worked), CloneRoot::Worked);
+        assert_eq!(root("/w/lune/.git", Worked), CloneRoot::Worked);
+        assert_eq!(root("/w/lune/.git", Bare), CloneRoot::NoBare);
+        assert_eq!(root("/w/lune.bare", Bare), CloneRoot::NoBare);
         assert_eq!(
-            clone_root("/.bare", true),
+            root("/.bare", Bare),
             CloneRoot::Unparsed("/ holds every folder, and so is no project's".to_owned())
         );
         assert_eq!(
-            clone_root("/w/lun\teta/.bare", true),
+            root("/w/lun\teta/.bare", Bare),
             CloneRoot::Unparsed("\"/w/lun\\teta\": a path holds a control character".to_owned())
         );
     }

@@ -3,8 +3,7 @@ use std::num::ParseIntError;
 use std::process::Command;
 use std::str::FromStr;
 
-pub use lune_protocol::made::Made as OwnMade;
-
+pub use lune_domain::mux::OwnMade;
 use lune_domain::mux::TerminalKey;
 
 use crate::mux::value_in;
