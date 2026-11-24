@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::future::Future;
+use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::panic;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -201,7 +202,7 @@ fn tailnet(named: &str) -> Result<Endpoint, Unanswered> {
         .connect_timeout(CONNECT)
         .http2_keep_alive_interval(QUIET)
         .keep_alive_timeout(PONG)
-        .keep_alive_while_idle(true))
+        .keep_alive_while_idle(false))
 }
 
 async fn unary<T>(
@@ -512,6 +513,7 @@ impl Core {
 
 async fn watched(mut daemon: Daemon, patience: Duration, observer: Arc<dyn Observer>) -> Infallible {
     let (mut after, mut shown, mut missed) = (None, None, None);
+    let mut failed = 0_u32;
     loop {
         let asked_at = Instant::now();
         let asked = api::WatchRequest { after, kept: None, shown: true };
@@ -519,7 +521,7 @@ async fn watched(mut daemon: Daemon, patience: Duration, observer: Arc<dyn Obser
             Ok(host) => match host.version {
                 Some(version) => {
                     after = Some(version);
-                    missed = None;
+                    (missed, failed) = (None, 0);
                     let model = Model::of(&host);
                     if shown.as_ref() != Some(&model) {
                         observer.changed(model.clone());
@@ -537,8 +539,13 @@ async fn watched(mut daemon: Daemon, patience: Duration, observer: Arc<dyn Obser
             observer.lost(why.clone());
             missed = Some(why);
         }
-        tokio::time::sleep(waits::AGAIN).await;
+        failed = failed.saturating_add(1);
+        tokio::time::sleep(waits::again(failed, chance())).await;
     }
+}
+
+fn chance() -> u64 {
+    RandomState::new().build_hasher().finish()
 }
 
 #[derive(uniffi::Object)]
