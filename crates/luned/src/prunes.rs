@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -13,11 +14,15 @@ use crate::api::projects::Held;
 use crate::api::terminal::Found;
 use crate::api::{self, On, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse};
 use crate::directory::Directory;
-use crate::git::{self, Common};
+use crate::git::{self, Common, Git};
 use crate::github::{self, Asker, Based, Pulled};
 use crate::mux::TerminalKey;
-use crate::program;
+use crate::program::{self, Ran};
 use crate::seats;
+
+const MOVED: &str = " but expected ";
+
+const UNSET: &[u8] = b"fatal: no such section: ";
 
 pub const PLANNING: Duration = Duration::from_mins(5);
 
@@ -80,7 +85,7 @@ pub struct Unasked {
 #[derive(Debug)]
 pub struct Planned {
     plan: Plan,
-    common: String,
+    common: Directory,
 }
 
 impl Planned {
@@ -276,43 +281,29 @@ fn parse_listed(said: &[u8]) -> Vec<Listed> {
     listed
 }
 
-fn on_repository(common: &str) -> Command {
-    let mut git = Command::new("git");
-    git::local(&mut git).args(["-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false"]);
-    git.arg(format!("--git-dir={common}")).current_dir("/");
-    git
-}
-
-fn says(mut git: Command, limit: Duration, asked: &str) -> Result<Vec<u8>, String> {
-    let ran = program::run(&mut git, limit)
-        .map_err(|error| format!("git {asked} could not be run: {error}"))?;
+fn says(ran: io::Result<Ran>, asked: &str) -> Result<Vec<u8>, String> {
+    let ran = ran.map_err(|error| format!("git {asked} could not be run: {error}"))?;
     ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
 
-fn says_alone(mut git: Command, asked: &str) -> Result<Vec<u8>, String> {
-    let ran = program::run_alone(&mut git, GIT_SAYS)
-        .map_err(|error| format!("git {asked} could not be run: {error}"))?;
-    ran.answer().map_err(|why| format!("git {asked}: {why}"))
-}
-
-fn worktrees(common: &str) -> Result<Vec<Listed>, String> {
-    let mut git = on_repository(common);
-    git.args(["worktree", "list", "--porcelain", "-z"]);
-    says(git, GIT_SAYS, "worktree list").map(|said| parse_listed(&said))
+fn worktrees(common: &Directory) -> Result<Vec<Listed>, String> {
+    let mut git = Git::of(common, "worktree");
+    git.args(["list", "--porcelain", "-z"]);
+    says(git.run(GIT_SAYS), "worktree list").map(|said| parse_listed(&said))
 }
 
 fn clean(folder: &str) -> Result<bool, String> {
-    let mut git = Command::new("git");
-    git::local(&mut git).args(["-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false"]);
-    git.args(["-C", folder, "--no-optional-locks", "status", "--porcelain"]);
-    git.arg("--untracked-files=normal");
-    says(git, GIT_SAYS, "status").map(|said| said.is_empty())
+    let mut git = Git::at(folder, "status");
+    git.args(["--porcelain", "--untracked-files=normal"]);
+    says(git.run(GIT_SAYS), "status").map(|said| said.is_empty())
 }
 
-fn common_of(dir: &Directory) -> Result<String, String> {
+fn common_of(dir: &Directory) -> Result<Directory, String> {
     match git::common(dir.as_str()) {
         Common::Of(common) => Ok(common),
         Common::NoRepository => Err(format!("{dir} is in no repository")),
+        Common::BareUnread(bare) => Err(format!("{dir} is in {}", Common::bare_unread(&bare))),
+        Common::Gone => Err(format!("{dir} is gone")),
         Common::Unsaid(why) => Err(format!("git did not say what repository {dir} is in: {why}")),
     }
 }
@@ -382,11 +373,10 @@ fn at_once<T: Sync, S, R: Send>(
     answers.into_iter().map(|(_, answer)| answer).collect()
 }
 
-fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, String> {
-    let mut git = on_repository(common);
-    let head = format!("refs/heads/{branch}");
-    git.args(["for-each-ref", "--format=%(push:remotename)%00%(push)", &head]);
-    let said = says(git, GIT_SAYS, "for-each-ref")?;
+fn push_target(common: &Directory, branch: &str) -> Result<Option<RemoteBranch>, String> {
+    let mut git = Git::of(common, "for-each-ref");
+    git.arg("--format=%(push:remotename)%00%(push)");
+    let said = says(git.named([format!("refs/heads/{branch}")]).run(GIT_SAYS), "for-each-ref")?;
     let said = String::from_utf8_lossy(&said);
     let Some((remote, tracking)) = said.trim_end().split_once('\0') else {
         return Ok(None);
@@ -397,17 +387,17 @@ fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, Strin
     Ok(Some(RemoteBranch { remote: remote.to_owned(), branch: there.to_owned() }))
 }
 
-fn default_heard(common: &str, remote: &str) -> Result<Option<String>, String> {
-    git::pointed(on_repository(common), git::Symbolic::RemoteHead(remote), GIT_SAYS)
+fn default_heard(common: &Directory, remote: &str) -> Result<Option<String>, String> {
+    git::pointed(|command| Git::of(common, command), git::Symbolic::RemoteHead(remote), GIT_SAYS)
 }
 
-fn remote_default(common: &str, remote: &str) -> Result<Option<String>, String> {
+fn remote_default(common: &Directory, remote: &str) -> Result<Option<String>, String> {
     if let Some(default) = default_heard(common, remote)? {
         return Ok(Some(default));
     }
-    let mut git = on_repository(common);
-    git.args(["ls-remote", "--symref", "--", remote, "HEAD"]);
-    let said = says_alone(git, "ls-remote")?;
+    let mut git = Git::of(common, "ls-remote");
+    git.arg("--symref");
+    let said = says(git.named([remote, "HEAD"]).run_alone(GIT_SAYS), "ls-remote")?;
     let said = String::from_utf8_lossy(&said);
     let named = said.lines().find_map(|line| {
         line.strip_prefix("ref: refs/heads/")?.strip_suffix("\tHEAD")
@@ -415,10 +405,10 @@ fn remote_default(common: &str, remote: &str) -> Result<Option<String>, String> 
     Ok(named.map(str::to_owned))
 }
 
-fn remote_heads(common: &str, remote: &str) -> Result<HashMap<String, String>, String> {
-    let mut git = on_repository(common);
-    git.args(["ls-remote", "--heads", "--", remote]);
-    let said = says_alone(git, "ls-remote")?;
+fn remote_heads(common: &Directory, remote: &str) -> Result<HashMap<String, String>, String> {
+    let mut git = Git::of(common, "ls-remote");
+    git.arg("--heads");
+    let said = says(git.named([remote]).run_alone(GIT_SAYS), "ls-remote")?;
     let said = String::from_utf8_lossy(&said);
     let heads = said.lines().filter_map(|line| {
         let (head, name) = line.split_once('\t')?;
@@ -427,10 +417,10 @@ fn remote_heads(common: &str, remote: &str) -> Result<HashMap<String, String>, S
     Ok(heads.collect())
 }
 
-fn push_urls(common: &str, remote: &str) -> Result<Vec<String>, String> {
-    let mut git = on_repository(common);
-    git.args(["config", "--get-regexp", r"^remote\..*\.(pushurl|url)$"]);
-    let said = says(git, GIT_SAYS, "config")?;
+fn push_urls(common: &Directory, remote: &str) -> Result<Vec<String>, String> {
+    let mut git = Git::of(common, "config");
+    git.args(["--get-regexp", r"^remote\..*\.(pushurl|url)$"]);
+    let said = says(git.run(GIT_SAYS), "config")?;
     let said = String::from_utf8_lossy(&said);
     let of = |key: &str| -> Vec<String> {
         let key = format!("remote.{remote}.{key} ");
@@ -445,7 +435,7 @@ fn push_urls(common: &str, remote: &str) -> Result<Vec<String>, String> {
 }
 
 struct Remotes<'a> {
-    common: &'a str,
+    common: &'a Directory,
     heads: HashMap<String, Result<HashMap<String, String>, String>>,
     urls: HashMap<String, Result<Vec<String>, String>>,
     logins: HashMap<String, Result<String, String>>,
@@ -506,7 +496,7 @@ fn bytes_of(folder: &str) -> Option<u64> {
 
 pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result<Planned, String> {
     let common = common_of(dir)?;
-    let repository = git::holder(&common)
+    let repository = git::holder(common.as_str())
         .ok_or_else(|| format!("no directory holds the repository {common}"))?;
     let listed = worktrees(&common)?;
     let askable: Vec<OnBranch<'_>> =
@@ -578,7 +568,7 @@ enum Others {
 
 fn others_of(
     asker: &mut Asker,
-    common: &str,
+    common: &Directory,
     on: &OnBranch<'_>,
     pulled: &Pulled,
 ) -> Result<Others, String> {
@@ -602,7 +592,7 @@ fn sorted_out<'a>(
     all: &[Listed],
     occupied: &Occupied,
     here: Option<&Path>,
-    common: &str,
+    common: &Directory,
 ) -> Result<Vec<Going<'a>>, String> {
     let mut default = None;
     let mut defaults: HashMap<String, Result<Option<String>, String>> = HashMap::new();
@@ -681,7 +671,7 @@ pub fn deleted_as_agreed(
 }
 
 fn removed(
-    common: &str,
+    common: &Directory,
     goes: &Goes,
     occupied: &impl Fn() -> Result<Occupied, String>,
     here: Option<&Path>,
@@ -697,7 +687,7 @@ fn removed(
 }
 
 fn stands_as_planned(
-    common: &str,
+    common: &Directory,
     goes: &Goes,
     occupied: &impl Fn() -> Result<Occupied, String>,
     here: Option<&Path>,
@@ -717,35 +707,49 @@ fn stands_as_planned(
     }
 }
 
-fn worktree_removed(common: &str, folder: &str) -> Result<(), String> {
-    let mut git = on_repository(common);
-    git.args(["-c", "status.showUntrackedFiles=normal", "worktree", "remove", "--", folder]);
-    says(git, REMOVING, "worktree remove").map(|_| ())
+fn worktree_removed(common: &Directory, folder: &str) -> Result<(), String> {
+    let mut git = Git::of(common, "worktree");
+    git.configured(&[("status.showUntrackedFiles", "normal")]).arg("remove");
+    says(git.named([folder]).run(REMOVING), "worktree remove").map(|_| ())
 }
 
-fn far_branch_deleted(common: &str, head: &str, far: &RemoteBranch) -> Result<(), String> {
+fn far_branch_deleted(common: &Directory, head: &str, far: &RemoteBranch) -> Result<(), String> {
     let RemoteBranch { remote, branch } = far;
-    let there = format!("refs/heads/{branch}");
-    let mut git = on_repository(common);
-    git.arg("push").arg(format!("--force-with-lease={there}:{head}"));
-    git.args(["--", remote, &format!(":{there}")]);
-    says_alone(git, "push")
+    let mut git = Git::of(common, "push");
+    git.leased(branch, head);
+    says(git.named([remote, &format!(":refs/heads/{branch}")]).run_alone(GIT_SAYS), "push")
         .map(|_| ())
         .map_err(|why| format!("its branch on {remote} stays: {why}"))
 }
 
-fn branch_deleted(common: &str, goes: &Goes) -> Result<(), String> {
-    let mut at = on_repository(common);
-    at.args(["rev-parse", "--verify", &format!("refs/heads/{}^{{commit}}", goes.branch)]);
-    let at = says(at, GIT_SAYS, "rev-parse")?;
-    if String::from_utf8_lossy(&at).trim_end() != goes.head {
-        return Err(format!("its branch {} stays: it has moved", goes.branch));
+fn branch_deleted(common: &Directory, goes: &Goes) -> Result<(), String> {
+    let stays = |why: &str| format!("its branch {} stays: {why}", goes.branch);
+    let on_it = |listed: &&Listed| listed.branch.as_deref() == Some(goes.branch.as_str());
+    if let Some(other) = worktrees(common).map_err(|why| stays(&why))?.iter().find(on_it) {
+        return Err(stays(&format!("the worktree {} is on it", other.path)));
     }
-    let mut git = on_repository(common);
-    git.args(["branch", "-D", "--", &goes.branch]);
-    says(git, GIT_SAYS, "branch -D")
-        .map(|_| ())
-        .map_err(|why| format!("its branch {} stays: {why}", goes.branch))
+    let mut git = Git::of(common, "update-ref");
+    git.arg("-d");
+    let branch = format!("refs/heads/{}", goes.branch);
+    match says(git.named([branch.as_str(), goes.head.as_str()]).run(GIT_SAYS), "update-ref -d") {
+        Ok(_) => {},
+        Err(why) if why.contains(MOVED) => return Err(stays("it has moved")),
+        Err(why) => return Err(stays(&why)),
+    }
+    unset(common, &goes.branch)
+        .map_err(|why| format!("its branch {} went, but its settings stay: {why}", goes.branch))
+}
+
+fn unset(common: &Directory, branch: &str) -> Result<(), String> {
+    let mut git = Git::of(common, "config");
+    git.arg("--remove-section");
+    let ran = git.named([format!("branch.{branch}")]).run(GIT_SAYS);
+    match ran.map_err(|error| format!("git config could not be run: {error}"))? {
+        Ran::Ended { status, stderr, .. } if !status.success() && stderr.starts_with(UNSET) => {
+            Ok(())
+        },
+        ran => ran.answer().map(drop).map_err(|why| format!("git config: {why}")),
+    }
 }
 
 impl From<&RemoteBranch> for api::prunes_response::RemoteBranch {
@@ -1105,8 +1109,9 @@ mod tests {
         let ok = |remote: &str, head: &str| {
             Ok(HashMap::from([(format!("{remote}-branch"), head.to_owned())]))
         };
+        let nowhere = Directory::parse("/nowhere".to_owned()).unwrap();
         let mut remotes = Remotes {
-            common: "/nowhere",
+            common: &nowhere,
             heads: HashMap::from([
                 ("origin".to_owned(), ok("origin", "abc")),
                 ("gone".to_owned(), Err("no key".to_owned())),
@@ -1176,11 +1181,12 @@ mod tests {
         let common = scratch.path().join("r.git");
         let common = common.to_str().unwrap();
         let git = |args: &[&str]| {
-            let mut git = on_repository(common);
-            assert!(git.args(args).status().unwrap().success(), "{args:?}");
+            let args = [["--git-dir", common].as_slice(), args].concat();
+            let said = git::scratch(scratch.path(), &args);
+            assert!(said.is_ok(), "{args:?}: {said:?}");
         };
-        let mut init = Command::new("git");
-        assert!(init.args(["init", "-q", "--bare", common]).status().unwrap().success());
+        git::scratch(scratch.path(), &["init", "-q", "--bare", common]).unwrap();
+        let common = &Directory::parse(common.to_owned()).unwrap();
         git(&["config", "remote.fetched.url", "https://x/o/f"]);
         git(&["config", "remote.fetched-too.url", "https://x/o/too"]);
         git(&["config", "remote.pushed.url", "https://x/o/u"]);
@@ -1193,15 +1199,12 @@ mod tests {
     }
 
     fn ran(dir: &Path, args: &[&str]) {
-        let mut git = Command::new("git");
-        git::local(&mut git)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-            .arg("-C")
-            .arg(dir)
-            .args(args);
-        assert!(git.status().unwrap().success(), "{args:?}");
+        let said = git::scratch(dir, args);
+        assert!(said.is_ok(), "{args:?}: {said:?}");
+    }
+
+    fn common_in(repository: &Path) -> Directory {
+        Directory::parse(repository.join(".git").to_str().unwrap().to_owned()).unwrap()
     }
 
     #[test]
@@ -1215,13 +1218,64 @@ mod tests {
         let at = folder.to_str().unwrap();
         ran(&repository, &["worktree", "add", "-q", "-b", "w", at]);
         fs::write(folder.join("new"), "not yet added").unwrap();
-        let common = repository.join(".git");
-        let common = common.to_str().unwrap();
+        let common = &common_in(&repository);
         assert!(worktree_removed(common, at).is_err());
         assert!(folder.join("new").exists());
         fs::remove_file(folder.join("new")).unwrap();
         assert_eq!(worktree_removed(common, at), Ok(()));
         assert!(!folder.exists());
+    }
+
+    #[test]
+    fn a_branch_that_moves_after_it_was_seen_stays_and_one_that_did_not_goes() {
+        let scratch = tempfile::tempdir().unwrap();
+        let scratch = scratch.path().canonicalize().unwrap();
+        let repository = scratch.join("r");
+        ran(&scratch, &["init", "-q", "-b", "main", repository.to_str().unwrap()]);
+        ran(&repository, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        ran(&repository, &["branch", "fix"]);
+        let common = &common_in(&repository);
+        let tip = |refname: &str| {
+            let said = git::scratch(&repository, &["rev-parse", refname]).unwrap();
+            String::from_utf8(said).unwrap().trim_end().to_owned()
+        };
+        let seen = Goes { head: tip("fix"), ..goes("/w", Pushed::Nowhere, None) };
+        ran(&repository, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        ran(&repository, &["branch", "-f", "fix", "main"]);
+        let why = "its branch fix stays: it has moved";
+        assert_eq!(branch_deleted(common, &seen), Err(why.to_owned()));
+        assert_eq!(tip("fix"), tip("main"), "the commit made since it was seen is kept");
+        ran(&repository, &["config", "branch.fix.remote", "origin"]);
+        ran(&repository, &["config", "branch.fix.merge", "refs/pull/12/head"]);
+        let now = Goes { head: tip("fix"), ..seen };
+        assert_eq!(branch_deleted(common, &now), Ok(()));
+        let left = git::scratch(&repository, &["rev-parse", "--verify", "-q", "refs/heads/fix"]);
+        assert!(left.is_err(), "{left:?}");
+        let set = git::scratch(&repository, &["config", "--get-regexp", r"^branch\.fix\."]);
+        assert!(set.is_err(), "a branch made fix later would track its pull request: {set:?}");
+        ran(&repository, &["branch", "fix"]);
+        assert_eq!(branch_deleted(common, &now), Ok(()), "a branch with no settings goes too");
+    }
+
+    #[test]
+    fn a_branch_another_worktree_is_on_stays_though_that_worktree_is_gone() {
+        let scratch = tempfile::tempdir().unwrap();
+        let scratch = scratch.path().canonicalize().unwrap();
+        let repository = scratch.join("r");
+        ran(&scratch, &["init", "-q", "-b", "main", repository.to_str().unwrap()]);
+        ran(&repository, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let other = scratch.join("other");
+        ran(&repository, &["worktree", "add", "-q", "-b", "fix", other.to_str().unwrap()]);
+        let common = &common_in(&repository);
+        let said = git::scratch(&repository, &["rev-parse", "refs/heads/fix"]).unwrap();
+        let head = String::from_utf8(said).unwrap().trim_end().to_owned();
+        let goes = Goes { head, ..goes("/w", Pushed::Nowhere, None) };
+        let why = format!("its branch fix stays: the worktree {} is on it", other.display());
+        assert_eq!(branch_deleted(common, &goes), Err(why.clone()));
+        fs::remove_dir_all(&other).unwrap();
+        assert_eq!(branch_deleted(common, &goes), Err(why), "git still lists it, as prunable");
+        let left = git::scratch(&repository, &["rev-parse", "--verify", "-q", "refs/heads/fix"]);
+        assert!(left.is_ok(), "{left:?}");
     }
 
     #[test]
@@ -1236,8 +1290,7 @@ mod tests {
         let at = folder.to_str().unwrap();
         ran(&repository, &["worktree", "add", "-q", "-b", "fix", at]);
         ran(&repository, &["push", "-q", "origin", "fix"]);
-        let common = repository.join(".git");
-        let common = common.to_str().unwrap();
+        let common = &common_in(&repository);
         let listed = worktrees(common).unwrap();
         let head = listed.iter().find(|listed| listed.path == at).unwrap().head.clone();
 
@@ -1253,7 +1306,7 @@ mod tests {
             head,
             ..goes(at, Pushed::Goes(on_origin("fix")), None)
         };
-        let planned = Planned { plan: plan_of(vec![goes]), common: common.to_owned() };
+        let planned = Planned { plan: plan_of(vec![goes]), common: common.clone() };
         let outcomes = deleted(planned, occupied, None);
         let why = "it has a view; its branch on origin has gone";
         assert_eq!(outcomes[0].came, Came::Stays(why.to_owned()));

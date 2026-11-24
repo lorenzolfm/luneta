@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -20,6 +20,7 @@ use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::core;
+use crate::directory::Directory;
 use crate::log;
 use crate::program::{self, Ran};
 use crate::watch::{self, Troubles};
@@ -30,13 +31,20 @@ const TREE_DIRS_MAX: usize = 4096;
 
 const _: () = assert!(program::SAID_MAX <= u32::MAX as u64);
 
-pub const REPOSITORY_VARS: [&str; 6] = [
+pub const REPOSITORY_VARS: [&str; 13] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
     "GIT_INDEX_FILE",
     "GIT_COMMON_DIR",
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_GRAFT_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_PREFIX",
 ];
 
 pub fn local(command: &mut Command) -> &mut Command {
@@ -46,22 +54,146 @@ pub fn local(command: &mut Command) -> &mut Command {
     command
 }
 
-pub fn configured<'a>(command: &'a mut Command, pairs: &[(&str, &str)]) -> &'a mut Command {
-    let count = env::var("GIT_CONFIG_COUNT").ok();
-    let mut next = count.and_then(|count| count.parse().ok()).unwrap_or(0_u32);
-    for (key, value) in pairs {
-        command.env(format!("GIT_CONFIG_KEY_{next}"), key);
-        command.env(format!("GIT_CONFIG_VALUE_{next}"), value);
-        next = next.saturating_add(1);
+const HARDENED: [&str; 4] = ["-c", "core.fsmonitor=false", "-c", "safe.bareRepository=explicit"];
+
+fn hardened() -> Command {
+    let mut git = Command::new("git");
+    local(git.args(HARDENED)).env("GIT_TERMINAL_PROMPT", "0");
+    git
+}
+
+fn read_by_luned(git: &mut Command) -> &mut Command {
+    git.env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C")
+}
+
+pub struct Git {
+    command: Command,
+    words: Vec<OsString>,
+}
+
+impl Git {
+    #[must_use]
+    pub fn at(dir: impl AsRef<OsStr>, command: &'static str) -> Git {
+        let mut git = hardened();
+        git.arg("-C").arg(dir);
+        Git { command: git, words: vec![command.into()] }
     }
-    command.env("GIT_CONFIG_COUNT", next.to_string())
+
+    #[must_use]
+    pub fn of(common: &Directory, command: &'static str) -> Git {
+        let mut git = hardened();
+        let mut git_dir = OsString::from("--git-dir=");
+        git_dir.push(common.as_str());
+        git.arg(git_dir).current_dir("/");
+        Git { command: git, words: vec![command.into()] }
+    }
+
+    pub fn arg(&mut self, word: &'static str) -> &mut Git {
+        self.words.push(word.into());
+        self
+    }
+
+    pub fn args(&mut self, words: impl IntoIterator<Item = &'static str>) -> &mut Git {
+        self.words.extend(words.into_iter().map(OsString::from));
+        self
+    }
+
+    pub fn branch_ref(&mut self, branch: &str) -> &mut Git {
+        self.words.push(format!("refs/heads/{branch}").into());
+        self
+    }
+
+    pub fn leased(&mut self, branch: &str, at: &str) -> &mut Git {
+        self.words.push(format!("--force-with-lease=refs/heads/{branch}:{at}").into());
+        self
+    }
+
+    pub fn editing_nothing(&mut self) -> &mut Git {
+        self.command.env("GIT_EDITOR", ":").env("GIT_SEQUENCE_EDITOR", ":");
+        self
+    }
+
+    fn fetching_nothing_lazily(&mut self) -> &mut Git {
+        self.command.env("GIT_NO_LAZY_FETCH", "1");
+        self
+    }
+
+    pub fn configured(&mut self, pairs: &[(&'static str, &'static str)]) -> &mut Git {
+        for (key, value) in pairs {
+            self.command.arg("-c").arg(format!("{key}={value}"));
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn named<I, S>(mut self, names: I) -> Named
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.command.args(&self.words);
+        let mut names = names.into_iter().peekable();
+        if names.peek().is_some() {
+            self.command.arg("--end-of-options").args(names);
+        }
+        Named(self.command)
+    }
+
+    pub fn run(self, limit: Duration) -> io::Result<Ran> {
+        self.named(std::iter::empty::<&str>()).run(limit)
+    }
+}
+
+pub struct Named(Command);
+
+impl Named {
+    pub fn run(mut self, limit: Duration) -> io::Result<Ran> {
+        program::run(read_by_luned(&mut self.0), limit)
+    }
+
+    pub fn run_alone(mut self, limit: Duration) -> io::Result<Ran> {
+        program::run_alone(&mut self.0, limit)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn scratch(dir: impl AsRef<OsStr>, args: &[&str]) -> Result<Vec<u8>, String> {
+    let mut git = hardened();
+    read_by_luned(&mut git)
+        .arg("-C")
+        .arg(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args(["-c", "maintenance.auto=false"])
+        .args(args);
+    let ran = program::run(&mut git, LIMIT).map_err(|error| format!("git {args:?}: {error}"))?;
+    ran.answer().map_err(|why| format!("git {args:?}: {why}"))
+}
+
+pub fn configured<'a>(command: &'a mut Command, pairs: &[(&str, &str)]) -> &'a mut Command {
+    let Some(first) = config_count(env::var_os("GIT_CONFIG_COUNT").as_deref()) else {
+        return command;
+    };
+    for (at, (key, value)) in pairs.iter().enumerate() {
+        command.env(format!("GIT_CONFIG_KEY_{}", first + at), key);
+        command.env(format!("GIT_CONFIG_VALUE_{}", first + at), value);
+    }
+    command.env("GIT_CONFIG_COUNT", (first + pairs.len()).to_string())
+}
+
+fn config_count(inherited: Option<&OsStr>) -> Option<usize> {
+    match inherited {
+        None => Some(0),
+        Some(count) if count.is_empty() => Some(0),
+        Some(count) => count.to_str()?.parse().ok(),
+    }
 }
 
 fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Stood {
-    let [program, args @ ..] = git::command(dir);
-    let mut git = Command::new(program);
-    local(git.args(args));
-    let ran = program::run(&mut git, LIMIT)
+    let mut git = Git::at(dir, "status");
+    git.args(git::STATUS);
+    let ran = git.run(LIMIT)
         .map_err(|error| format!("git status in {dir} could not be run: {error}"))?;
     let said = match ran {
         Ran::Stuck => return Err(format!("git status in {dir} did not answer in time")),
@@ -107,9 +239,9 @@ fn counted(dir: &str, branch: &str, count: &mut Option<Changed>) -> Option<Strin
 
 fn holder_of(dir: &str) -> Result<Option<Said>, String> {
     match common(dir) {
-        Common::Of(common) => holder_said(&common).map(Some),
-        Common::NoRepository => Ok(None),
-        Common::Unsaid(why) if directory_gone(why.as_bytes()) => Ok(None),
+        Common::Of(common) => holder_said(common.as_str()).map(Some),
+        Common::NoRepository | Common::Gone => Ok(None),
+        Common::BareUnread(bare) => Err(format!("{dir} is in {}", Common::bare_unread(&bare))),
         Common::Unsaid(why) => Err(format!("git did not say what repository {dir} is in: {why}")),
     }
 }
@@ -122,10 +254,14 @@ fn holder_said(common: &str) -> Result<Said, String> {
 
 const IN_NO_REPOSITORY: &str = "fatal: not a git repository (or any ";
 
+pub const BARE_UNREAD: &str = "fatal: cannot use bare repository ";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Common {
-    Of(String),
+    Of(Directory),
     NoRepository,
+    BareUnread(Directory),
+    Gone,
     Unsaid(String),
 }
 
@@ -133,12 +269,24 @@ impl Common {
     #[must_use]
     pub fn of(answer: Result<Vec<u8>, String>) -> Common {
         match answer.map(one_line) {
-            Ok(Some(common)) => Common::Of(common),
+            Ok(Some(common)) => Directory::parse(common).map_or_else(Common::Unsaid, Common::Of),
             Ok(None) => Common::Unsaid("it named no directory".to_owned()),
             Err(why) if why.starts_with(IN_NO_REPOSITORY) => Common::NoRepository,
-            Err(why) => Common::Unsaid(why),
+            Err(why) if directory_gone(why.as_bytes()) => Common::Gone,
+            Err(why) => bare_unread(&why).map_or(Common::Unsaid(why), Common::BareUnread),
         }
     }
+
+    #[must_use]
+    pub fn bare_unread(bare: &Directory) -> String {
+        format!("the bare repository {bare}, which git opens only when named")
+    }
+}
+
+fn bare_unread(why: &str) -> Option<Directory> {
+    let named = why.strip_prefix(BARE_UNREAD)?.strip_prefix('\'')?;
+    let (bare, _) = named.rsplit_once("' (")?;
+    Directory::parse(bare.to_owned()).ok()
 }
 
 #[must_use]
@@ -148,11 +296,9 @@ pub fn common(dir: &str) -> Common {
 
 #[must_use]
 pub fn common_within(dir: &str, limit: Duration) -> Common {
-    let mut git = Command::new("git");
-    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]))
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .env("LC_ALL", "C");
-    let ran = program::run(&mut git, limit);
+    let mut git = Git::at(dir, "rev-parse");
+    git.args(["--path-format=absolute", "--git-common-dir"]);
+    let ran = git.run(limit);
     Common::of(ran.map_err(|error| format!("it could not be run: {error}")).and_then(Ran::answer))
 }
 
@@ -180,9 +326,8 @@ pub fn branch(dir: &str) -> Result<Option<String>, String> {
 }
 
 pub fn branch_within(dir: &str, limit: Duration) -> Result<Option<String>, String> {
-    let mut git = Command::new("git");
-    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]));
-    pointed(git, Symbolic::Head, limit).map_err(|why| format!("in {dir}: {why}"))
+    pointed(|command| Git::at(dir, command), Symbolic::Head, limit)
+        .map_err(|why| format!("in {dir}: {why}"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,14 +353,15 @@ impl Symbolic<'_> {
 }
 
 pub fn pointed(
-    mut git: Command,
+    git: impl FnOnce(&'static str) -> Git,
     symbolic: Symbolic<'_>,
     limit: Duration,
 ) -> Result<Option<String>, String> {
     let name = symbolic.name();
-    git.args(["symbolic-ref", "--quiet", &name]);
+    let mut git = git("symbolic-ref");
+    git.arg("--quiet");
     let asked = format!("git symbolic-ref {name}");
-    let ran = program::run(&mut git, limit)
+    let ran = git.named([&name]).run(limit)
         .map_err(|error| format!("{asked} could not be run: {error}"))?;
     let said = match ran {
         Ran::Ended { status, .. } if status.code() == Some(1) => return Ok(None),
@@ -227,36 +373,34 @@ pub fn pointed(
 }
 
 pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
-    let git = |args: &[&str]| {
-        let mut git = Command::new("git");
-        local(git.args(["-c", "core.fsmonitor=false", "-c", "safe.bareRepository=explicit"]))
-            .args(["-C", dir])
-            .args(args)
-            .env("GIT_NO_LAZY_FETCH", "1");
-        program::run(&mut git, LIMIT).map_err(|error| format!("git could not be run: {error}"))
+    let git = |command: &'static str, args: &[&'static str], names: &[&str]| {
+        let mut git = Git::at(dir, command);
+        git.args(args.iter().copied()).fetching_nothing_lazily();
+        git.named(names).run(LIMIT).map_err(|error| format!("git could not be run: {error}"))
     };
     let tip = format!("refs/heads/{branch}");
-    let named = defaults();
-    let mut listing = vec!["for-each-ref", LISTING, tip.as_str()];
-    listing.extend(named.iter().map(String::as_str));
-    let listed = git(&listing)?.answer().map_err(|why| format!("git for-each-ref said {why}"))?;
+    let bases = defaults();
+    let mut listing = vec![tip.as_str()];
+    listing.extend(bases.iter().map(String::as_str));
+    let listed = git("for-each-ref", &[LISTING], &listing)?;
+    let listed = listed.answer().map_err(|why| format!("git for-each-ref said {why}"))?;
     let listed = String::from_utf8_lossy(&listed);
     let listed = refs(&listed);
     let Some(&(tip, _)) = listed.get(tip.as_str()) else {
         return Ok(None);
     };
-    let Some((base, target)) = first_default(&named, &listed) else {
+    let Some((base, target)) = first_default(&bases, &listed) else {
         return Ok(None);
     };
     if DefaultBranch::of(target).is_some_and(|default| default.branch() == branch) {
         return Ok(None);
     }
-    let fork = match git(&["merge-base", tip, base])? {
+    let fork = match git("merge-base", &[], &[tip, base])? {
         Ran::Ended { status, .. } if status.code() == Some(1) => return Ok(None),
         ran => ran.answer().map_err(|why| format!("git merge-base said {why}"))?,
     };
     let fork = one_line(fork).ok_or("git merge-base named no commit")?;
-    let said = git(&["diff-index", "-M", "--numstat", "--no-textconv", &fork])?
+    let said = git("diff-index", &["-M", "--numstat", "--no-textconv"], &[&fork])?
         .answer()
         .map_err(|why| format!("git diff-index said {why}"))?;
     let (mut added, mut deleted) = (0u32, 0u32);
@@ -354,9 +498,7 @@ impl fmt::Display for DefaultBranch {
 
 pub fn default_branch(dir: &str, limit: Duration) -> Result<DefaultBranch, String> {
     let named = defaults();
-    let mut listing = vec!["for-each-ref", LISTING];
-    listing.extend(named.iter().map(String::as_str));
-    let listed = says_within(dir, &listing, limit)?;
+    let listed = says_within(dir, "for-each-ref", &[LISTING], &named, limit)?;
     let listed = refs(&listed);
     let remotes = DEFAULT_REMOTES.join(", ");
     let Some((_, target)) = first_default(&named, &listed) else {
@@ -374,33 +516,44 @@ pub enum NamedHead {
 
 pub fn named_head(dir: &str, branch: &str) -> Result<Option<NamedHead>, String> {
     let head = format!("refs/heads/{branch}");
-    let push = says(dir, &["for-each-ref", "--format=%(push:remotename)", &head])?;
+    let push = says(dir, "for-each-ref", &["--format=%(push:remotename)"], &[&head])?;
     if push.is_empty() {
         return Ok(None);
     }
     let config = |name: &str| {
-        says(dir, &["config", "--default", "", "--get", &format!("branch.{branch}.{name}")])
+        says(dir, "config", &["--default", "", "--get"], &[format!("branch.{branch}.{name}")])
     };
     let (merge, remote) = (config("merge")?, config("remote")?);
     if merge.starts_with("refs/pull/") {
         if remote.is_empty() {
             return Ok(None);
         }
-        let remote_url = says(dir, &["ls-remote", "--get-url", "--", &remote])?;
+        let remote_url = says(dir, "ls-remote", &["--get-url"], &[&remote])?;
         return Ok(Some(NamedHead::PullRef { remote_url }));
     }
     Ok((push != remote || merge == head).then_some(NamedHead::OnRemote))
 }
 
-pub(crate) fn says(dir: &str, args: &[&str]) -> Result<String, String> {
-    says_within(dir, args, LIMIT)
+pub(crate) fn says<S: AsRef<OsStr>>(
+    dir: &str,
+    command: &'static str,
+    args: &[&'static str],
+    names: &[S],
+) -> Result<String, String> {
+    says_within(dir, command, args, names, LIMIT)
 }
 
-pub(crate) fn says_within(dir: &str, args: &[&str], limit: Duration) -> Result<String, String> {
-    let asked = args.join(" ");
-    let mut git = Command::new("git");
-    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]).args(args));
-    let ran = program::run(&mut git, limit)
+pub(crate) fn says_within<S: AsRef<OsStr>>(
+    dir: &str,
+    command: &'static str,
+    args: &[&'static str],
+    names: &[S],
+    limit: Duration,
+) -> Result<String, String> {
+    let asked = [command].iter().chain(args).copied().collect::<Vec<_>>().join(" ");
+    let mut git = Git::at(dir, command);
+    git.args(args.iter().copied());
+    let ran = git.named(names).run(limit)
         .map_err(|error| format!("git {asked} in {dir} could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("git {asked} in {dir}: {why}"))?;
     Ok(String::from_utf8_lossy(&said).trim_end().to_owned())
@@ -414,15 +567,14 @@ struct Place {
 }
 
 fn place(dir: &str) -> Result<Option<Place>, Unanswered> {
-    let mut git = Command::new("git");
-    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir])).args([
-        "rev-parse",
+    let mut git = Git::at(dir, "rev-parse");
+    git.args([
         "--path-format=absolute",
         "--show-toplevel",
         "--git-dir",
         "--git-common-dir",
     ]);
-    match program::run(&mut git, LIMIT) {
+    match git.run(LIMIT) {
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => Ok(Place::parse(&stdout)),
         Ok(Ran::Ended { .. }) => Ok(None),
         Ok(Ran::Stuck) | Err(_) => Err(Unanswered),
@@ -441,10 +593,9 @@ impl Place {
 }
 
 fn listed(top: &Path) -> Result<Vec<u8>, String> {
-    let mut git = Command::new("git");
-    git.args(["-c", "core.fsmonitor=false", "-c", "safe.bareRepository=explicit", "-C"]).arg(top);
-    local(&mut git).args(["ls-files", "-z"]);
-    let ran = program::run(&mut git, LIMIT).map_err(|error| {
+    let mut git = Git::at(top, "ls-files");
+    git.arg("-z");
+    let ran = git.run(LIMIT).map_err(|error| {
         format!("git ls-files in {} could not be run: {error}", top.display())
     })?;
     ran.answer().map_err(|why| format!("git ls-files in {}: {why}", top.display()))
@@ -929,23 +1080,15 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{Changed, Common, DefaultBranch, Symbolic, branch, changed, pointed, stamp};
+    use std::ffi::OsStr;
+
+    use super::{
+        BARE_UNREAD, Changed, Common, DefaultBranch, Directory, Git, LIMIT,
+        REPOSITORY_VARS, Symbolic, branch, changed, config_count, pointed, scratch, stamp,
+    };
 
     fn git(dir: &Path, args: &[&str]) -> bool {
-        let mut git = std::process::Command::new("git");
-        for repository in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"] {
-            git.env_remove(repository);
-        }
-        git.env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-            .args(["-c", "maintenance.auto=false"])
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .status()
-            .unwrap()
-            .success()
+        scratch(dir, args).is_ok()
     }
 
     #[test]
@@ -987,11 +1130,9 @@ mod tests {
         let unmade = branch(gone.to_str().unwrap()).expect_err("no repository is there");
         assert!(unmade.contains("git symbolic-ref HEAD"), "{unmade}");
         assert!(git(dir.path(), &["init", "-q", "-b", "x"]));
-        let remote = || {
-            let mut git = std::process::Command::new("git");
-            super::local(git.args(["-C", at]));
-            pointed(git, Symbolic::RemoteHead("origin"), Duration::from_secs(60))
-        };
+        let limit = Duration::from_secs(60);
+        let origin = Symbolic::RemoteHead("origin");
+        let remote = || pointed(|command| Git::at(at, command), origin, limit);
         assert_eq!(remote(), Ok(None), "an origin never heard of");
         assert!(git(dir.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/x"]));
         assert_eq!(remote(), Ok(None), "it points outside the folder");
@@ -1099,13 +1240,72 @@ mod tests {
             "fatal: detected dubious ownership in repository at '/w'",
             "fatal: gitfile does not point to a valid repository: /w/.git",
             "fatal: not a git repository: /w/.bare/worktrees/gone",
-            "fatal: cannot change to '/w': No such file or directory",
+            "fatal: cannot change to '/w': Stale file handle",
             "it did not answer in time",
         ] {
             assert_eq!(said(why), Common::Unsaid(why.to_owned()), "{why}");
         }
-        assert_eq!(Common::of(Ok(b"/w/.bare\n".to_vec())), Common::Of("/w/.bare".to_owned()));
+        assert_eq!(said("fatal: cannot change to '/w': No such file or directory"), Common::Gone);
+        let dir = |path: &str| Directory::parse(path.to_owned()).unwrap();
+        assert_eq!(Common::of(Ok(b"/w/.bare\n".to_vec())), Common::Of(dir("/w/.bare")));
+        assert!(matches!(Common::of(Ok(b".bare\n".to_vec())), Common::Unsaid(_)));
         assert!(matches!(Common::of(Ok(Vec::new())), Common::Unsaid(_)));
+    }
+
+    #[test]
+    fn a_bare_repository_git_will_not_open_unnamed_is_one_it_names_by_an_absolute_path() {
+        let refused = |bare: &str| {
+            format!("{BARE_UNREAD}'{bare}' (safe.bareRepository is 'explicit')")
+        };
+        let said = |why: &str| Common::of(Err(why.to_owned()));
+        let bare = |path: &str| Common::BareUnread(Directory::parse(path.to_owned()).unwrap());
+        assert_eq!(said(&refused("/w/o/n.git")), bare("/w/o/n.git"));
+        assert_eq!(said(&refused("/w/it' (s).git")), bare("/w/it' (s).git"));
+        let relative = refused("n.git");
+        assert_eq!(said(&relative), Common::Unsaid(relative.clone()), "it would be read from /");
+        assert_eq!(said(BARE_UNREAD), Common::Unsaid(BARE_UNREAD.to_owned()), "it named none");
+    }
+
+    #[test]
+    fn each_variable_git_keeps_to_a_repository_is_dropped_or_kept_on_purpose() {
+        const CONFIG_VARS: [&str; 2] = ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"];
+        let mut git = Git::at("/", "rev-parse");
+        git.arg("--local-env-vars");
+        let said = git.run(LIMIT).unwrap().answer().unwrap();
+        let said = String::from_utf8(said).unwrap();
+        for name in said.lines() {
+            let known = REPOSITORY_VARS.contains(&name) || CONFIG_VARS.contains(&name);
+            assert!(known, "git keeps {name} to a repository; luned neither drops nor keeps it");
+        }
+    }
+
+    #[test]
+    fn config_given_to_git_follows_what_was_inherited_and_leaves_a_bogus_count_to_git() {
+        let count = |inherited: &str| config_count(Some(OsStr::new(inherited)));
+        assert_eq!(config_count(None), Some(0));
+        assert_eq!(count(""), Some(0));
+        assert_eq!(count("2"), Some(2));
+        assert_eq!(count("abc"), None);
+        assert_eq!(count("-1"), None);
+    }
+
+    #[test]
+    fn config_luned_gives_git_wins_over_config_a_parent_git_gave_it() {
+        if std::env::var_os("GIT_CONFIG_PARAMETERS").is_some() {
+            let mut git = Git::at("/", "config");
+            git.configured(&[("status.showUntrackedFiles", "normal")]);
+            git.args(["--get", "status.showUntrackedFiles"]);
+            assert_eq!(git.run(LIMIT).unwrap().answer().unwrap(), b"normal\n");
+            return;
+        }
+        let name = "git::tests::config_luned_gives_git_wins_over_config_a_parent_git_gave_it";
+        let ran = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name])
+            .env("GIT_CONFIG_PARAMETERS", "'status.showuntrackedfiles'='no'")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&ran.stdout);
+        assert!(ran.status.success() && said.contains("1 passed"), "{said}");
     }
 
     #[test]

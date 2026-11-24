@@ -162,7 +162,7 @@ fn with_git_told_of_another_repository_none_is_made() {
     assert!(!refused.status.success());
     assert_eq!(refused.stdout, b"");
     let why = format!(
-        "lune: GIT_DIR is set, and git would take another repository for {}'s",
+        "lune: GIT_DIR is set, and wt's git would not read {}'s repository as it is",
         main.display()
     );
     assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
@@ -185,7 +185,7 @@ fn with_git_told_of_another_repository_nothing_follows() {
         lune.env("GIT_DIR", plain.join(".git")).arg("follow").arg(&main).output().unwrap();
     assert!(!refused.status.success());
     let why = format!(
-        "lune: GIT_DIR is set, and git would take another repository for {}'s",
+        "lune: GIT_DIR is set, and wt's git would not read {}'s repository as it is",
         main.display()
     );
     assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
