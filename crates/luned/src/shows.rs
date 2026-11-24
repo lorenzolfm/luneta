@@ -15,7 +15,7 @@ use crate::mux::TerminalKey;
 use crate::remote::Destination;
 use crate::projects::{Arranged, Opens, Size, ViewId, WorktreeId};
 use crate::projects::{FRAME_CELLS, LAYOUT_VIEWS_MAX};
-use crate::streams::{self, Inbox, Next, Outbox};
+use crate::streams::{self, Dropped, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
 
@@ -345,10 +345,6 @@ impl Show {
     pub fn ask(&self, asked: Asked) {
         self.outbox.say(asked);
     }
-
-    pub fn give_up(&self, why: String) {
-        self.outbox.give_up(why);
-    }
 }
 
 fn untaken() -> String {
@@ -379,7 +375,7 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
     again: bool,
     told: Told,
 ) -> Show {
-    let (outbox, inbox) = streams::boxes(SAID_MAX, untaken);
+    let (outbox, inbox) = streams::boxes(SAID_MAX);
     let showing = move |mut told: Told| {
         let built = runtime::Builder::new_current_thread().enable_all().build();
         let size = Some(size_said(size));
@@ -394,9 +390,11 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
         let hello = show_request::Hello { worktree: worktree.get(), size, runs_in, again, on };
         let last = match built {
             Ok(runtime) => runtime.block_on(stream(&folder, hello, inbox, &mut told)),
-            Err(error) => Heard::Lost(format!("no runtime: {error}")),
+            Err(error) => Ok(Heard::Lost(format!("no runtime: {error}"))),
         };
-        told(last);
+        if let Ok(last) = last {
+            told(last);
+        }
     };
     if let Err((mut told, error)) = streams::on_thread("luned layout", told, showing) {
         told(Heard::Lost(format!("no thread for a layout of luned's: {error}")));
@@ -409,30 +407,31 @@ async fn stream(
     hello: show_request::Hello,
     inbox: Inbox<Asked>,
     told: &mut impl FnMut(Heard),
-) -> Heard {
+) -> Result<Heard, Dropped> {
     let mut daemon = match crate::connect(folder, crate::ANSWER).await {
         Ok(daemon) => daemon,
-        Err(error) => return Heard::Lost(format!("luned is not reached: {error}")),
+        Err(error) => return Ok(Heard::Lost(format!("luned is not reached: {error}"))),
     };
     let (sending, sent) = mpsc::channel(SAID_MAX);
     let first = api::ShowRequest { event: Some(show_request::Event::Hello(hello)) };
     let said = tokio_stream::once(first).chain(ReceiverStream::new(sent));
     let hearing = match daemon.show(said).await {
         Ok(hearing) => hearing.into_inner(),
-        Err(status) => return ended(&status),
+        Err(status) => return Ok(ended(&status)),
     };
     let mut next = pin!(inbox.merged(hearing));
     loop {
         let said = match next.next().await {
             Some(Next::Heard(Ok(said))) => said,
-            Some(Next::Heard(Err(status))) => return ended(&status),
+            Some(Next::Heard(Err(status))) => return Ok(ended(&status)),
             Some(Next::LetGo) | None => {
-                return Heard::Lost("luned let go of lune's layout".to_owned());
+                return Ok(Heard::Lost("luned let go of lune's layout".to_owned()));
             },
-            Some(Next::GaveUp(why)) => return Heard::Lost(why),
+            Some(Next::Untaken) => return Ok(Heard::Lost(untaken())),
+            Some(Next::Dropped) => return Err(Dropped),
             Some(Next::Said(asked)) => {
                 if let Err(TrySendError::Full(_)) = sending.try_send(asked.said()) {
-                    return Heard::Lost(untaken());
+                    return Ok(Heard::Lost(untaken()));
                 }
                 continue;
             },
@@ -441,29 +440,29 @@ async fn stream(
             Some(show_response::Event::Laid(laid)) => match Laid::heard(laid) {
                 Ok(laid) => told(Heard::Laid(laid)),
                 Err(why) => {
-                    return Heard::Lost(format!("luned said what lune cannot follow: {why}"));
+                    return Ok(Heard::Lost(format!("luned said what lune cannot follow: {why}")));
                 },
             },
             Some(show_response::Event::Edged(edged)) => match edged_heard(&edged) {
                 Ok(heard) => told(heard),
                 Err(why) => {
-                    return Heard::Lost(format!("luned said what lune cannot follow: {why}"));
+                    return Ok(Heard::Lost(format!("luned said what lune cannot follow: {why}")));
                 },
             },
             Some(show_response::Event::Sent(worktree)) => match WorktreeId::of(worktree) {
                 Some(worktree) => told(Heard::Sent(worktree)),
                 None => {
-                    return Heard::Lost("luned sent lune's layout to worktree 0".to_owned());
+                    return Ok(Heard::Lost("luned sent lune's layout to worktree 0".to_owned()));
                 },
             },
             Some(show_response::Event::Left(worktree)) => match WorktreeId::of(worktree) {
                 Some(worktree) => told(Heard::Left(worktree)),
                 None => {
-                    return Heard::Lost("luned said lune's worktree 0 is gone".to_owned());
+                    return Ok(Heard::Lost("luned said lune's worktree 0 is gone".to_owned()));
                 },
             },
             Some(show_response::Event::Refused(why)) => told(Heard::Refused(why)),
-            None => return Heard::Lost("luned said nothing to lune's layout".to_owned()),
+            None => return Ok(Heard::Lost("luned said nothing to lune's layout".to_owned())),
         }
     }
 }

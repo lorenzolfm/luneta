@@ -18,7 +18,7 @@ use crate::api::{frames_request, On, FramesRequest};
 use crate::folder::Folder;
 use crate::projects::LAYOUT_VIEWS_MAX;
 use crate::remote::Destination;
-use crate::streams::{self, Inbox, Next, Outbox};
+use crate::streams::{self, Dropped, Inbox, Next, Outbox};
 
 pub const SHOWN_MAX: usize = 1024;
 
@@ -98,10 +98,6 @@ impl Viewer {
     pub fn typed(&self, key: TerminalKey, event: typed::Event) {
         self.outbox.say(Saying::Typed(key, event));
     }
-
-    pub fn give_up(&self, why: String) {
-        self.outbox.give_up(why);
-    }
 }
 
 impl Drop for Viewer {
@@ -121,15 +117,17 @@ pub fn start<Told: FnMut(Seen) + Send + 'static>(
     greeting: Greeting,
     told: Told,
 ) -> Viewer {
-    let (outbox, inbox) = streams::boxes(SAID_MAX, untaken);
+    let (outbox, inbox) = streams::boxes(SAID_MAX);
     let frames = Arc::new(Semaphore::new(FRAMES_MAX));
     let budget = Arc::clone(&frames);
     let viewing = move |mut told: Told| {
         let last = match runtime() {
             Ok(runtime) => runtime.block_on(stream(&reach, greeting, inbox, &budget, &mut told)),
-            Err(failure) => failure.to_string(),
+            Err(failure) => Ok(failure.to_string()),
         };
-        told(Seen::Lost(last));
+        if let Ok(last) = last {
+            told(Seen::Lost(last));
+        }
     };
     if let Err((mut told, error)) = streams::on_thread("lune-mux viewer", told, viewing) {
         told(Seen::Lost(format!("no thread for a viewer of lune-mux: {error}")));
@@ -213,22 +211,23 @@ async fn stream(
     inbox: Inbox<Saying>,
     frames: &Arc<Semaphore>,
     told: &mut impl FnMut(Seen),
-) -> String {
+) -> Result<String, Dropped> {
     let (sending, sent) = mpsc::channel(SAID_MAX);
     let hearing = match hearing(reach, greeting, sent).await {
         Ok(hearing) => hearing,
-        Err(why) => return why,
+        Err(why) => return Ok(why),
     };
     let mut next = pin!(inbox.merged(hearing));
     loop {
         let said = match next.next().await {
             Some(Next::Heard(Ok(said))) => said,
-            Some(Next::Heard(Err(status))) => return heard_from(reach, &status),
-            Some(Next::LetGo) | None => return "lune-mux let go of it".to_owned(),
-            Some(Next::GaveUp(why)) => return why,
+            Some(Next::Heard(Err(status))) => return Ok(heard_from(reach, &status)),
+            Some(Next::LetGo) | None => return Ok("lune-mux let go of it".to_owned()),
+            Some(Next::Untaken) => return Ok(untaken()),
+            Some(Next::Dropped) => return Err(Dropped),
             Some(Next::Said(saying)) => {
                 if let Err(TrySendError::Full(_)) = sending.try_send(saying.said()) {
-                    return untaken();
+                    return Ok(untaken());
                 }
                 continue;
             },
@@ -237,12 +236,12 @@ async fn stream(
             Some(to_viewer::Event::Frame(frame)) => match Frame::heard(frame) {
                 Ok(frame) => match Arc::clone(frames).acquire_owned().await {
                     Ok(taken) => told(Seen::Frame(Framed { frame, _taken: taken })),
-                    Err(_closed) => return "lune let go of its viewer".to_owned(),
+                    Err(_closed) => return Err(Dropped),
                 },
-                Err(why) => return format!("lune-mux said what lune cannot read: {why}"),
+                Err(why) => return Ok(format!("lune-mux said what lune cannot read: {why}")),
             },
             Some(to_viewer::Event::Refused(api::Refused { reason })) => told(Seen::Refused(reason)),
-            None => return "lune-mux said nothing to its viewer".to_owned(),
+            None => return Ok("lune-mux said nothing to its viewer".to_owned()),
         }
     }
 }
