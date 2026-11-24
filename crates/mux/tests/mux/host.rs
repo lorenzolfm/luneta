@@ -231,6 +231,17 @@ impl Viewer {
         }
     }
 
+    pub async fn press_ctrl(&self, terminal: api::TerminalKey, character: char) {
+        let key = api::Key {
+            press: api::Press::Down.into(),
+            modifiers: Some(api::Modifiers { ctrl: true, ..api::Modifiers::default() }),
+            key: Some(api::key::Key::Character(character.into())),
+            text: String::new(),
+        };
+        let (terminal, event) = (Some(terminal), Some(api::typed::Event::Key(key)));
+        self.send(api::from_viewer::Event::Typed(api::Typed { terminal, event })).await;
+    }
+
     pub async fn next(
         &mut self,
         patience: Patience,
