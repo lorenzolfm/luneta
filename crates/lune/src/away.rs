@@ -21,13 +21,14 @@ use luned::repositories::{Found, Repository, OWNED_FOLDERS_MAX, REPOSITORIES_MAX
 use luned::skills::{Name, Runs, Skill};
 use luned::transcripts::{Reading, SessionId};
 use luned::{Daemon, Destination, Directory};
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::{Code, Response, Status, Streaming};
 
 use crate::agents::Harness;
+use crate::commands;
 use crate::daemon;
 
 pub const ANSWER: Duration = Duration::from_secs(6);
@@ -35,7 +36,7 @@ pub const ANSWER: Duration = Duration::from_secs(6);
 const SLOW: Duration = Duration::from_secs(1);
 
 pub struct Away {
-    runtime: Runtime,
+    tasks: Handle,
     daemon: Daemon,
     on: Destination,
     patience: Duration,
@@ -44,16 +45,13 @@ pub struct Away {
 impl Away {
     pub fn reach(destination: &Destination, patience: Duration) -> Result<Away, String> {
         let folder = luned::folder::find().map_err(|unfound| format!("{unfound}, to find luned in"))?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| format!("no runtime: {error}"))?;
+        let tasks = commands::tasks()?;
         let reached = daemon::running(&folder);
-        let daemon = match runtime.block_on(async { tokio::time::timeout(patience, reached).await }) {
+        let daemon = match tasks.block_on(async { tokio::time::timeout(patience, reached).await }) {
             Ok(reached) => reached?,
             Err(_) => return Err(format!("luned did not answer in {}s", patience.as_secs_f32())),
         };
-        Ok(Away { runtime, daemon, on: destination.clone(), patience })
+        Ok(Away { tasks, daemon, on: destination.clone(), patience })
     }
 
     pub fn repositories(&mut self) -> Result<Found, String> {
@@ -130,7 +128,7 @@ impl Away {
         let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
         let deadline = Instant::now() + asks::TURN + patience;
         let secs = patience.as_secs_f32();
-        self.runtime.block_on(async move {
+        self.tasks.block_on(async move {
             let steps = match tokio::time::timeout(patience, daemon.ask(request)).await {
                 Ok(Ok(steps)) => steps.into_inner(),
                 Ok(Err(status)) => return Some(Err(on.said(&status))),
@@ -142,7 +140,7 @@ impl Away {
 
     pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
         let (patience, daemon, on) = (self.patience, self.daemon.clone(), &self.on);
-        self.runtime.block_on(pasted.ready_on(daemon, on, patience))
+        self.tasks.block_on(pasted.ready_on(daemon, on, patience))
     }
 
     pub fn issue_remotes(&mut self, dir: &Directory) -> Result<Vec<Remote>, String> {
@@ -210,7 +208,7 @@ impl Away {
     ) -> Result<T, (String, Option<Code>)> {
         let on = &self.on;
         let secs = self.patience.as_secs_f32();
-        self.runtime.block_on(async {
+        self.tasks.block_on(async {
             let said = |status: &Status| (on.said(status), Some(status.code()));
             let mut answer = match asking.await {
                 Ok(Ok(answer)) => answer.into_inner(),
@@ -235,7 +233,7 @@ impl Away {
         let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
         let secs = patience.as_secs_f32();
         let minutes = images::PATIENCE.as_secs() / 60;
-        self.runtime.block_on(async move {
+        self.tasks.block_on(async move {
             let kept = async {
                 let answer = tokio::time::timeout(patience, daemon.keep_image(request)).await;
                 let mut answer = match answer {
@@ -284,7 +282,7 @@ impl Away {
         let (patience, daemon) = (self.patience, self.daemon.clone());
         let asked = async move { tokio::time::timeout(patience, asked(daemon)).await };
         let (on, secs) = (&self.on, self.patience.as_secs_f32());
-        match self.runtime.block_on(asked) {
+        match self.tasks.block_on(asked) {
             Ok(answer) => Ok(answer.map(Response::into_inner)),
             Err(_) => Err(format!("{on}: luned did not answer in {secs}s")),
         }

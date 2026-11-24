@@ -28,6 +28,7 @@ use tonic::{Code, Status};
 
 use luned::Directory;
 
+use crate::commands;
 use crate::daemon;
 use crate::machines::Machine;
 use crate::projected::{self, Holds, Project};
@@ -139,11 +140,7 @@ fn asked_or<T, E>(
     asking: impl AsyncFnOnce(&mut Daemon) -> Result<T, E>,
     late: impl FnOnce(String) -> E,
 ) -> Result<Result<T, E>, String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("no runtime: {error}"))?;
-    runtime.block_on(async {
+    commands::tasks()?.block_on(async {
         let mut daemon = daemon::current(path).await?.daemon;
         Ok(answered_within(within, asking(&mut daemon), late).await)
     })

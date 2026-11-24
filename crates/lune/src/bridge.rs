@@ -37,8 +37,7 @@ pub fn run(folder: &Path) -> ExitCode {
 }
 
 fn reached(path: &Path) -> Result<UnixStream, String> {
-    let runtime = commands::runtime()?;
-    let socket = runtime.block_on(async {
+    let socket = commands::tasks()?.block_on(async {
         let reaching = timeout(REACHING, daemon::current(path)).await;
         let late = |_| format!("no luned answered in {}s", REACHING.as_secs());
         let daemon::Current { folder, .. } = reaching.map_err(late)??;

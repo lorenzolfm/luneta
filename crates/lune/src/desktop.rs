@@ -255,9 +255,9 @@ fn say(events: &Sender<Event>, said: &mut bool, why: &str) {
 
 #[cfg(not(target_os = "macos"))]
 fn serve(orders: UnboundedReceiver<Order>, events: &Sender<Event>) {
-    match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(runtime) => runtime.block_on(freedesktop::serve(orders, events)),
-        Err(error) => say(events, &mut false, &format!("no runtime: {error}")),
+    match crate::commands::tasks() {
+        Ok(tasks) => tasks.block_on(freedesktop::serve(orders, events)),
+        Err(why) => say(events, &mut false, &why),
     }
 }
 
