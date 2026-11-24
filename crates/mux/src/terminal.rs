@@ -194,6 +194,15 @@ impl Wake {
 pub struct Started {
     pub handle: Handle,
     pub pid: u32,
+    pub placing: Placing,
+}
+
+pub struct Placing(SyncSender<()>);
+
+impl Placing {
+    pub fn placed(self) {
+        self.0.send(()).expect("the terminal's thread waits to be placed");
+    }
 }
 
 pub fn start(
@@ -206,6 +215,7 @@ pub fn start(
     let terminal = key.id;
     let (to, inbox) = mpsc::channel(MESSAGES_MAX);
     let (exited, exits) = std_mpsc::sync_channel(1);
+    let (placing, placed) = std_mpsc::sync_channel(1);
     let (wake, woken) = UnixStream::pair()?;
     wake.set_nonblocking(true)?;
     woken.set_nonblocking(true)?;
@@ -219,6 +229,9 @@ pub fn start(
         waits(terminal, &mut child, &exited, &wake);
     })?;
     thread::Builder::new().name(format!("terminal {terminal}")).spawn(move || {
+        if placed.recv().is_err() {
+            return;
+        }
         let screen = match Screen::new(size, SCROLLBACK_BYTES) {
             Ok(screen) => screen,
             Err(error) => {
@@ -262,7 +275,7 @@ pub fn start(
             thread.mux.lost(terminal);
         }
     })?;
-    Ok(Started { handle, pid })
+    Ok(Started { handle, pid, placing: Placing(placing) })
 }
 
 fn waits(terminal: TerminalId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
