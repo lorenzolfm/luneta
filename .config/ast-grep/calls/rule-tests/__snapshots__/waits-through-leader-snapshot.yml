@@ -1,11 +1,47 @@
 id: waits-through-leader
 snapshots:
+  fn f() { let flags = SaFlags::SA_NOCLDWAIT; }:
+    labels:
+    - source: SA_NOCLDWAIT
+      style: primary
+      start: 30
+      end: 42
+  fn f() { rustix::process::wait(WaitOptions::empty()); }:
+    labels:
+    - source: rustix::process::wait(WaitOptions::empty())
+      style: primary
+      start: 9
+      end: 52
+    - source: wait
+      style: secondary
+      start: 26
+      end: 30
+    - source: rustix::process::wait
+      style: secondary
+      start: 9
+      end: 30
   fn f() { signal(Signal::SIGCHLD, SigHandler::SigIgn); }:
     labels:
     - source: SigIgn
       style: primary
       start: 45
       end: 51
+  fn f() { unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) }; }:
+    labels:
+    - source: SIG_IGN
+      style: primary
+      start: 52
+      end: 59
+  fn f() { wait(); }:
+    labels:
+    - source: wait()
+      style: primary
+      start: 9
+      end: 15
+    - source: wait
+      style: secondary
+      start: 9
+      end: 13
   'fn f(child: Child) { let _ = child.wait_with_output(); }':
     labels:
     - source: wait_with_output
@@ -48,6 +84,30 @@ snapshots:
       style: primary
       start: 34
       end: 41
+  'fn f(status: *mut i32) { unsafe { libc::wait(status) }; }':
+    labels:
+    - source: libc::wait(status)
+      style: primary
+      start: 34
+      end: 52
+    - source: wait
+      style: secondary
+      start: 40
+      end: 44
+    - source: libc::wait
+      style: secondary
+      start: 34
+      end: 44
+  use rustix::process::wait;:
+    labels:
+    - source: wait
+      style: primary
+      start: 21
+      end: 25
+    - source: use rustix::process::wait;
+      style: secondary
+      start: 0
+      end: 26
   use rustix::process::waitpid;:
     labels:
     - source: waitpid

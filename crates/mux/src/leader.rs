@@ -3,6 +3,7 @@ use std::future::Future;
 use std::io;
 use std::process::Child;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvError, Sender};
 use std::thread;
 use std::time::Duration;
@@ -12,24 +13,17 @@ use rustix::process::{self, Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus};
 use tokio::sync::watch;
 
 use crate::id::TerminalId;
-use crate::panics::Shared;
 use crate::pty::Led;
 use crate::terminal::Exit;
 
 pub const GRACE: Duration = Duration::from_secs(2);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Hold {
-    Held,
-    Lost,
-}
 
 struct Unwaited;
 
 pub struct Leader {
     terminal: TerminalId,
     pid: Pid,
-    hold: Arc<Shared<Hold>>,
+    lost: Arc<AtomicBool>,
     _kept: Sender<Infallible>,
 }
 
@@ -42,12 +36,12 @@ impl Leader {
     ) -> io::Result<(Leader, Receiver<Exit>)> {
         let mut child = led.child();
         let pid = Pid::from_child(&child);
-        let hold = Arc::new(Shared::new(Hold::Held));
+        let lost = Arc::new(AtomicBool::new(false));
         let (exited, exits) = mpsc::sync_channel(1);
         let (kept, let_go) = mpsc::channel::<Infallible>();
-        let loses = Arc::clone(&hold);
+        let loses = Arc::clone(&lost);
         let unreaped = leaders.unreaped();
-        let leader = Leader { terminal, pid, hold, _kept: kept };
+        let leader = Leader { terminal, pid, lost, _kept: kept };
         thread::Builder::new().name(format!("terminal {terminal} waits")).spawn(move || {
             match ended(terminal, pid) {
                 Ok(exit) => {
@@ -57,7 +51,7 @@ impl Leader {
                     let Err(RecvError) = let_go.recv();
                     reaped(terminal, &mut child, exit);
                 },
-                Err(Unwaited) => *loses.lock() = Hold::Lost,
+                Err(Unwaited) => loses.store(true, Ordering::Release),
             }
             drop(unreaped);
         })?;
@@ -80,12 +74,11 @@ impl Leader {
     }
 
     fn holds(&self) -> bool {
-        *self.hold.lock() == Hold::Held
+        !self.lost.load(Ordering::Acquire)
     }
 
     fn signalled(&self, signal: Signal, name: &str) {
-        let hold = self.hold.lock();
-        if *hold == Hold::Lost {
+        if !self.holds() {
             return;
         }
         match process::kill_process_group(self.pid, signal) {
@@ -184,6 +177,7 @@ mod tests {
 
     use super::*;
     use crate::asked::{Ends, Opens, Size};
+    use crate::panics::Shared;
     use crate::pty::Pty;
 
     fn led(script: &str) -> (Led, String) {
@@ -245,13 +239,16 @@ mod tests {
     }
 
     #[test]
-    fn a_leader_let_go_without_its_end_is_killed_at_once() {
+    fn a_leader_let_go_without_its_end_while_the_model_is_held_is_killed_at_once() {
         let (led, said) = led("trap '' HUP TERM; echo trapped; while :; do sleep 1; done");
         assert_eq!(said, "trapped");
         let leaders = Leaders::new();
         let terminal = TerminalId::next(&mut None);
         let (leader, exits) = Leader::waited(terminal, led, &leaders, || {}).unwrap();
+        let model = Shared::new(());
+        let held = model.lock();
         drop(leader);
+        drop(held);
         reaped(&leaders);
         assert_eq!(exits.try_recv(), Ok(Exit::Signal(Signal::KILL.as_raw())));
     }

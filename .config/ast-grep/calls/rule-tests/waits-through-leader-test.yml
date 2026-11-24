@@ -4,6 +4,7 @@ valid:
   - "async fn f(mut watched: watch::Receiver<bool>) { watched.wait_for(|it| *it).await; }"
   - "mod tests { fn f(mut child: Child) { child.wait().unwrap(); } }"
   - "fn f() { let why = \"waitpid is leader's\"; }"
+  - "fn f(timeout: Option<Duration>) { let wait = timeout; poll(&mut fds, wait.as_ref()); }"
 invalid:
   - "fn f(mut child: Child) { child.wait().unwrap(); }"
   - "fn f(mut child: Child) { let _ = child.try_wait(); }"
@@ -12,3 +13,9 @@ invalid:
   - "fn f(pid: Pid) { rustix::process::waitpid(Some(pid), WaitOptions::empty()); }"
   - "use rustix::process::waitpid;"
   - "fn f() { signal(Signal::SIGCHLD, SigHandler::SigIgn); }"
+  - "fn f() { rustix::process::wait(WaitOptions::empty()); }"
+  - "fn f(status: *mut i32) { unsafe { libc::wait(status) }; }"
+  - "fn f() { wait(); }"
+  - "use rustix::process::wait;"
+  - "fn f() { unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) }; }"
+  - "fn f() { let flags = SaFlags::SA_NOCLDWAIT; }"
