@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{ANSWER, ASKING, GITHUB, Link, MAKING, failure, lune, remote, remotes, said, ssh_host};
+use super::{ANSWER, ASKING, GITHUB, Link, MAKING, failure, remote, remotes, said, ssh_host};
 use crate::git::{self, Git};
 use crate::program::{self, Ran};
 
@@ -87,15 +87,16 @@ fn top(dir: &str) -> Result<String, String> {
 }
 
 fn follow(dir: &str) -> Result<(), String> {
-    let mut lune = Command::new(lune()?);
-    git::local(trusting_no_tree(&mut lune).args(["follow", dir]));
-    let ran = program::run_alone(&mut lune, MAKING)
-        .map_err(|error| format!("lune follow could not be run: {error}"))?;
+    let unrun = |why| format!("luned follow could not be run: {why}");
+    let mut luned = Command::new(program::luned().map_err(unrun)?);
+    git::local(trusting_no_tree(&mut luned).args(["follow", dir]));
+    let ran = program::run_alone(&mut luned, MAKING)
+        .map_err(|error| format!("luned follow could not be run: {error}"))?;
     match ran {
         Ran::Ended { status, .. } if status.success() => Ok(()),
         Ran::Ended { status, stderr, .. } => {
             let said = String::from_utf8_lossy(&stderr);
-            Err(failure(&said).unwrap_or_else(|| format!("lune follow: {status}")))
+            Err(failure(&said).unwrap_or_else(|| format!("luned follow: {status}")))
         },
         Ran::Stuck => Err("wt follow did not end in time".to_owned()),
     }

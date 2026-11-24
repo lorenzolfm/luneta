@@ -107,7 +107,7 @@ pub fn work_in(owned: &Owned, name: &str) -> Directory {
 }
 
 pub fn lune(vars: Vars, dir: &Path) -> Command {
-    lune_at(LUNE, vars, dir)
+    lune_at(&LUNE, vars, dir)
 }
 
 fn lune_at(program: &str, vars: Vars, dir: &Path) -> Command {

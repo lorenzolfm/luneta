@@ -6,6 +6,7 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::LazyLock;
 use std::thread;
 
 use lune_waits::{Patience, Span, PATIENCE};
@@ -16,7 +17,12 @@ use tempfile::TempDir;
 
 pub const LUNED: &str = env!("CARGO_BIN_EXE_luned");
 
-pub const LUNE: &str = env!("CARGO_BIN_EXE_lune");
+pub static LUNE: LazyLock<String> = LazyLock::new(|| {
+    let beside = Path::new(LUNED).with_file_name("lune");
+    let built = beside.is_file();
+    assert!(built, "no lune is built beside luned, at {}: test with -p lune too", beside.display());
+    beside.into_os_string().into_string().expect("cargo builds lune at a UTF-8 path")
+});
 
 pub const SOCKET: &str = "lune/luned.sock";
 
@@ -677,7 +683,7 @@ pub fn answered(command: &mut Command) -> Output {
 }
 
 pub fn info(vars: Vars) -> String {
-    let output = vars.command(LUNE).arg("info").output().unwrap();
+    let output = vars.command(&LUNE).arg("info").output().unwrap();
     let said = String::from_utf8(output.stdout).unwrap();
     let why = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "lune info failed: {why}");

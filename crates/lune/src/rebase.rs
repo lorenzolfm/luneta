@@ -8,6 +8,7 @@ use luned::rebases::{self, Came, Rebased, Stopped, Unrebased};
 use luned::Directory;
 
 use crate::agents::Kept;
+use crate::state;
 use crate::away::{self, Away};
 use crate::agreed;
 use crate::due::Due;
@@ -37,7 +38,7 @@ pub fn run(dir: Option<&Path>, path: &Path) -> ExitCode {
     };
     eprintln!("lune: {}", said(&rebased));
     let words = rebases::prompt(&rebased.branch, &rebased.onto, stopped);
-    let agent = Argv::on_words(Kept::shared().0.harness(), words, &[]);
+    let agent = Argv::on_words(Kept::shared(&state::Folder::of_user()).0.harness(), words, &[]);
     match agent.and_then(|agent| handed(path, &dir, agent)) {
         Ok(()) => eprintln!("lune: an agent resolves it, in a view of the worktree"),
         Err(why) => eprintln!("lune: no agent started, and the rebase waits for you: {why}"),

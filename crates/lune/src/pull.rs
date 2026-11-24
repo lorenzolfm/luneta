@@ -1,10 +1,9 @@
-use std::process::ExitCode;
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use luned::links::{self, Pasted, Taken, Unready};
+use luned::links::{self, Pasted, Unready};
 use luned::projects::Holders;
-pub use luned::links::{At, Kind, Link, Of, Readied, Wanted, Work};
+pub use luned::links::{At, Kind, Link, Readied, Wanted, Work};
 use luned::log;
 
 use crate::away::{self, Away};
@@ -132,51 +131,6 @@ fn naming(machine: &Machine, why: String) -> String {
 }
 
 const UNASKED: &str = "luned says the key goes to a view lune did not ask of";
-
-pub fn make(repo: &str, of: &Of, moved_off: bool) -> ExitCode {
-    let made = if moved_off {
-        links::made_or_moved_off(repo, of)
-    } else {
-        links::made(repo, of).map(Taken::OnBranch)
-    };
-    match made {
-        Ok(Taken::OnBranch(folder)) => {
-            println!("{}", folder.display());
-            ExitCode::SUCCESS
-        },
-        Ok(Taken::MovedOff(folder)) => {
-            println!("{}{}", links::MOVED_OFF, folder.display());
-            ExitCode::SUCCESS
-        },
-        Err(why) => {
-            eprintln!("{}{why}", links::WHY);
-            ExitCode::FAILURE
-        },
-    }
-}
-
-pub fn follow(dir: &str) -> ExitCode {
-    match links::followed(dir) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(why) => {
-            eprintln!("{}{why}", links::WHY);
-            ExitCode::FAILURE
-        },
-    }
-}
-
-pub fn fetch_upstream(dir: &str, branch: &str) -> ExitCode {
-    match links::fetched_upstream(dir, branch) {
-        Ok(found) => {
-            println!("{}", links::upstream_word(found));
-            ExitCode::SUCCESS
-        },
-        Err(why) => {
-            eprintln!("{}{why}", links::WHY);
-            ExitCode::FAILURE
-        },
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -7,7 +7,7 @@ use luned::api::{self, Saying};
 use crate::host::{answered, folder_in, start, Host, LUNE};
 
 fn lune(host: &Host, args: &[&str]) -> Output {
-    answered(host.vars().command(LUNE).args(args))
+    answered(host.vars().command(&LUNE).args(args))
 }
 
 type Read<'a> = (&'static str, &'a str);
@@ -53,7 +53,7 @@ fn lune_say_queues_what_it_is_given_and_returns() {
 fn lune_say_takes_what_comes_on_stdin() {
     let host = Host::new();
     let _daemon = start(host.vars()).unwrap();
-    let mut command = host.vars().command(LUNE);
+    let mut command = host.vars().command(&LUNE);
     command.arg("say").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();
     child.stdin.take().unwrap().write_all(b"from a pipe\n").unwrap();

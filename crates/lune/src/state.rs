@@ -1,11 +1,34 @@
+use std::ffi::OsStr;
 use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-pub use luned::state::{path, Unset};
+pub use luned::state::Unset;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::host::Event;
+
+#[derive(Clone, Debug)]
+pub struct Folder(Result<PathBuf, Unset>);
+
+impl Folder {
+    #[must_use]
+    pub fn of_user() -> Folder {
+        Folder(luned::state::folder())
+    }
+
+    #[must_use]
+    pub fn at(folder: PathBuf) -> Folder {
+        assert!(folder.is_absolute(), "{} is no absolute state folder", folder.display());
+        Folder(Ok(folder))
+    }
+
+    pub fn path(&self, name: &str) -> Result<PathBuf, Unset> {
+        let file = Path::new(name).file_name();
+        assert_eq!(file, Some(OsStr::new(name)), "lune keeps its state in the folder itself");
+        self.0.as_ref().map(|folder| folder.join(name)).map_err(|unset| *unset)
+    }
+}
 
 pub fn unfinished() -> String {
     format!("{:016x}.new", RandomState::new().hash_one(()))

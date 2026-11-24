@@ -13,7 +13,7 @@ const OPENING: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x0
 const SETTINGS: u8 = 0x4;
 
 fn bridge(host: &Host) -> Command {
-    let mut command = host.vars().command(LUNE);
+    let mut command = host.vars().command(&LUNE);
     command.arg("bridge");
     command
 }

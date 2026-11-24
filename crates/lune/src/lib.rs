@@ -66,6 +66,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use luned::{folder, release};
 
+pub use host::{App, Inbox, Launch};
+
 #[derive(Parser)]
 #[command(
     name = "lune",
@@ -95,54 +97,6 @@ enum Command {
     Asked(commands::Command),
     #[command(
         hide = true,
-        about = "Make a worktree of a branch, or of a pull request by its link, in a repository \
-                 `wt clone` made, as `wt add` does, and print where it is, or where one of the \
-                 branch is already. lune makes the worktree of a link pasted in its sidebar so, \
-                 with wt's code, and no `wt` on the `PATH`. Why it made none comes last on \
-                 stderr, after `lune: `"
-    )]
-    Worktree {
-        #[arg(long, value_name = "DIR", help = "A directory of the repository")]
-        repo: String,
-        #[arg(
-            long,
-            help = "When no worktree has the branch, and a worktree of the repository on another \
-                    branch, or on none, is where wt would make one, make none and print that \
-                    worktree after `moved off: `"
-        )]
-        moved_off: bool,
-        #[arg(
-            value_parser = pull::Of::parse,
-            value_name = "BRANCH",
-            help = "The branch, or the link of a pull request on GitHub, with or without its \
-                    `https://`"
-        )]
-        of: pull::Of,
-    },
-    #[command(
-        hide = true,
-        about = "Bring a worktree to its upstream branch, as `wt follow` does. Why it did not \
-                 comes last on stderr, after `lune: `"
-    )]
-    Follow {
-        #[arg(value_name = "DIR")]
-        dir: String,
-    },
-    #[command(
-        hide = true,
-        about = "Fetch the upstream branch of a branch of the repository a directory is in, as \
-                 `wt follow` fetches it, and move no branch. luned has it fetched so, for the \
-                 count of how far behind it a branch is. What wt found of it is one word on \
-                 stdout; why it did not fetch it comes last on stderr, after `lune: `"
-    )]
-    FetchUpstream {
-        #[arg(value_name = "DIR")]
-        dir: String,
-        #[arg(value_name = "BRANCH")]
-        branch: String,
-    },
-    #[command(
-        hide = true,
         about = "Tell the lune listening on a socket that its notification of a group was \
                  clicked, as a click on one runs on macOS"
     )]
@@ -153,7 +107,7 @@ enum Command {
     },
 }
 
-fn main() -> ExitCode {
+pub fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Err(why) = luned::tasks::start() {
         eprintln!("lune: {why}");
@@ -164,9 +118,6 @@ fn main() -> ExitCode {
         return host::run(cli.name.as_deref(), folder);
     };
     let command = match command {
-        Command::Worktree { repo, moved_off, of } => return pull::make(&repo, &of, moved_off),
-        Command::Follow { dir } => return pull::follow(&dir),
-        Command::FetchUpstream { dir, branch } => return pull::fetch_upstream(&dir, &branch),
         Command::Clicked { socket, group } => {
             return match peers::tell(&socket, &group) {
                 Ok(()) => ExitCode::SUCCESS,

@@ -390,7 +390,7 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     });
     assert!(unread.agents.is_empty(), "{:?}", unread.agents);
 
-    let output = host.vars().command(LUNE).arg("agents").output().unwrap();
+    let output = host.vars().command(&LUNE).arg("agents").output().unwrap();
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(said.contains("cannot read 7 of Claude Code's session files"), "{said}");
 

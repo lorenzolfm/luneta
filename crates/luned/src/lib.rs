@@ -15,6 +15,7 @@ mod fetches;
 pub mod folder;
 mod git;
 mod github;
+pub mod helper;
 pub mod images;
 pub mod issues;
 mod keeps;

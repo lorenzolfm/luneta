@@ -113,7 +113,7 @@ fn the_cli_refuses_a_folder_that_is_not_yours_alone() {
     let _daemon = start(vars).unwrap();
     fs::set_permissions(root.path().join("lune"), Permissions::from_mode(0o755)).unwrap();
 
-    let output = vars.command(LUNE).arg("info").output().unwrap();
+    let output = vars.command(&LUNE).arg("info").output().unwrap();
     let said = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{said}");
     assert!(said.contains("is open to other users"), "{said}");
