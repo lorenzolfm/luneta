@@ -283,7 +283,7 @@ pub fn start(
     sweep: Duration,
 ) -> io::Result<SyncSender<Command>> {
     let (send, commands) = mpsc::sync_channel(COMMANDS_MAX);
-    let errands = Errands::start().map_err(io::Error::other)?;
+    let errands = Errands::start();
     let layouts = Layouts {
         store,
         core,
@@ -349,7 +349,7 @@ struct Stranded {
 struct Known {
     key: TerminalKey,
     heard: Heard,
-    sized: Option<Size>,
+    settled: Option<Size>,
     agent_front: Option<u32>,
     remade: Option<Remade>,
 }
@@ -1109,7 +1109,7 @@ impl Layouts {
     ) {
         let heard_none = !self.known.values().any(|known| known.heard == Heard::Seen);
         let heard = Heard::Made(Instant::now());
-        let known = Known { key, heard, sized, agent_front: None, remade };
+        let known = Known { key, heard, settled: sized, agent_front: None, remade };
         assert!(self.known.insert(terminal, known).is_none(), "terminal {terminal} is made once");
         if heard_none {
             match self.follower.try_send(()) {
@@ -1282,21 +1282,26 @@ impl Layouts {
     }
 
     fn unrun(&mut self) {
+        let Layouts { known, errands, troubles, .. } = self;
+        let mut owners: Option<BTreeMap<TerminalKey, TerminalViewId>> = None;
         for _ in 0..errands::ERRANDS_MAX {
-            let Some(unrun) = self.errands.unrun() else {
+            let Some(unrun) = errands.unrun() else {
                 return;
             };
             match unrun {
                 Unrun::Sized { key, size, why } => {
-                    let Some(known) = self.known.values_mut().find(|known| known.key == key) else {
+                    let owners = owners.get_or_insert_with(|| {
+                        known.iter().map(|(terminal, known)| (known.key, *terminal)).collect()
+                    });
+                    let Some(known) = owners.get(&key).and_then(|it| known.get_mut(it)) else {
                         continue;
                     };
-                    if known.sized == Some(size) {
-                        known.sized = None;
+                    if known.settled == Some(size) {
+                        known.settled = None;
                     }
-                    self.troubles.say(format!("terminal {} is not sized: {why}", key.id));
+                    troubles.say(format!("terminal {} is not sized: {why}", key.id));
                 },
-                Unrun::Pasted { terminals, why } => self.troubles.say(untyped(&terminals, &why)),
+                Unrun::Pasted { terminals, why } => troubles.say(untyped(&terminals, &why)),
             }
         }
     }
@@ -1439,12 +1444,13 @@ impl Layouts {
                 Some(known) if known.key == key => {
                     known.heard = Heard::Seen;
                     if size.is_some() {
-                        known.sized = size;
+                        known.settled = size;
                     }
                 },
                 Some(_) | None => {
                     let heard = Heard::Seen;
-                    let known = Known { key, heard, sized: size, agent_front: None, remade: None };
+                    let (settled, agent_front, remade) = (size, None, None);
+                    let known = Known { key, heard, settled, agent_front, remade };
                     self.known.insert(terminal, known);
                 },
             }
@@ -1659,6 +1665,7 @@ impl Layouts {
             let fitted = fitted.expect("a worktree shown has a client");
             fits.insert(worktree, fitted);
         }
+        let mut sizes_asked: usize = 0;
         for (&worktree, &Fit { size, outside }) in &fits {
             let (_, found) = projects.find(worktree).expect("a client's worktree is held");
             let (_, sized) = found.layout().sized(size);
@@ -1674,17 +1681,19 @@ impl Layouts {
                     it.worktree == worktree && it.runs_in == Some(known.key)
                 };
                 let pinned = !outside && clients.values().any(runs_in);
-                if known.sized == Some(wanted) || pinned {
+                if known.settled == Some(wanted) || pinned {
                     continue;
                 }
+                sizes_asked += 1;
                 if errands.size(known.key, wanted) {
-                    known.sized = Some(wanted);
+                    known.settled = Some(wanted);
                 } else {
                     let id = known.key.id;
                     troubles.say(format!("terminal {id} is not sized: {}", errands::UNTAKEN));
                 }
             }
         }
+        assert!(sizes_asked <= VIEWS_MAX, "a settle asks at most one size of each view");
         let mut slow = Vec::new();
         for (id, client) in clients.iter_mut() {
             let found = projects.find(client.worktree);

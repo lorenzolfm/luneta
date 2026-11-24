@@ -155,6 +155,10 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Err(why) = luned::tasks::start() {
+        eprintln!("lune: {why}");
+        return ExitCode::FAILURE;
+    }
     let folder: Result<PathBuf, String> = folder::find().map_err(|unfound| format!("{unfound}, to find luned in"));
     let Some(command) = cli.command else {
         return host::run(cli.name.as_deref(), folder);

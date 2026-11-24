@@ -13,7 +13,7 @@ use tonic::{Status, Streaming};
 
 use super::api::{self, from_viewer, to_viewer, typed};
 use super::frames::{colours, Frame};
-use super::server::{reached_at, refused, socket, unreached_at, Reached};
+use super::server::{reached_at, refused, socket, unreached_at, Reached, ASKED_MAX};
 use super::TerminalKey;
 use crate::api::{frames_request, On, FramesRequest};
 use crate::folder::Folder;
@@ -33,8 +33,8 @@ const _: () = assert!(LAYOUT_VIEWS_MAX <= SHOWN_MAX);
 pub const RELAYED_MAX: usize = 192;
 
 const _: () = assert!(
-    RELAYED_MAX < lune_protocol::MUX_STREAMS_MAX as usize,
-    "the one connection to lune-mux keeps room for luned's own questions past the viewers it relays"
+    RELAYED_MAX + ASKED_MAX <= lune_protocol::MUX_STREAMS_MAX as usize,
+    "the one connection to lune-mux holds the viewers luned relays and the questions it asks"
 );
 
 static RELAYED: Semaphore = Semaphore::const_new(RELAYED_MAX);
@@ -131,14 +131,11 @@ pub fn start<Told: FnMut(Seen) + Send + 'static>(
     let (outbox, inbox) = streams::boxes(SAID_MAX);
     let frames = Arc::new(Semaphore::new(FRAMES_MAX));
     let budget = Arc::clone(&frames);
-    match tasks::shared() {
-        Ok(tasks) => drop(tasks.spawn(async move {
-            if let Ok(last) = stream(&reach, greeting, inbox, &budget, &mut told).await {
-                told(Seen::Lost(last));
-            }
-        })),
-        Err(why) => told(Seen::Lost(format!("{why}, for a viewer of lune-mux"))),
-    }
+    drop(tasks::shared().spawn(async move {
+        if let Ok(last) = stream(&reach, greeting, inbox, &budget, &mut told).await {
+            told(Seen::Lost(last));
+        }
+    }));
     Viewer { outbox, frames }
 }
 
@@ -279,7 +276,7 @@ mod tests {
     fn luned_refuses_to_relay_a_viewer_past_the_most_it_relays_at_once() {
         let most = u32::try_from(RELAYED_MAX).unwrap();
         let held = RELAYED.try_acquire_many(most).unwrap();
-        let tasks = crate::tasks::shared().unwrap();
+        let tasks = crate::tasks::shared();
         let Err(refused) = tasks.block_on(relayed(tokio_stream::empty())) else {
             panic!("a viewer past the most is relayed");
         };

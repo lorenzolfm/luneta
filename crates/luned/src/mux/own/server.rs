@@ -18,7 +18,7 @@ use lune_protocol::shell::Doing;
 use rustix::process::{Pid, Signal};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
-use tokio::runtime::Handle;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::{Code, Response, Status, Streaming};
 use tower::service_fn;
@@ -67,6 +67,10 @@ const _: () = assert!(PRESSES_MAX >= 2, "a text answer's paste and Enter go at o
 const AGAIN: Duration = Duration::from_millis(100);
 
 const KEPT_MAX: usize = 16;
+
+pub const ASKED_MAX: usize = 64;
+
+static ASKED: Semaphore = Semaphore::const_new(ASKED_MAX);
 
 static KEPT: Mutex<VecDeque<(PathBuf, Matched)>> = Mutex::new(VecDeque::new());
 
@@ -134,7 +138,10 @@ fn kept(socket: &Path) -> Option<Matched> {
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
     kept.retain(|(_, matched)| !matched.is_gone());
     assert!(kept.len() <= KEPT_MAX, "luned keeps at most {KEPT_MAX} channels to lune-mux");
-    kept.iter().find(|(at, _)| at == socket).map(|(_, matched)| matched.clone())
+    let mut at_socket = kept.iter().filter(|(at, _)| at == socket);
+    let matched = at_socket.next().map(|(_, matched)| matched.clone());
+    assert!(at_socket.next().is_none(), "luned keeps one channel to each lune-mux");
+    matched
 }
 
 fn keep(socket: &Path, matched: &Matched) {
@@ -145,15 +152,21 @@ fn keep(socket: &Path, matched: &Matched) {
     }
     kept.push_back((socket.to_owned(), matched.clone()));
     assert!(kept.len() <= KEPT_MAX, "luned keeps at most {KEPT_MAX} channels to lune-mux");
+    let at_socket = kept.iter().filter(|(at, _)| at == socket).count();
+    assert_eq!(at_socket, 1, "luned keeps one channel to each lune-mux");
+}
+
+fn asked_room() -> Result<SemaphorePermit<'static>, Status> {
+    let most = || format!("luned asks lune-mux at most {ASKED_MAX} questions at once");
+    ASKED.try_acquire().map_err(|_| Status::resource_exhausted(most()))
 }
 
 pub(super) async fn reached_at(socket: &Path) -> io::Result<Reached> {
     if let Some(matched) = kept(socket) {
         return Ok(Reached::Matched(matched));
     }
-    let tasks = tasks::shared().map_err(io::Error::other)?;
     let at = socket.to_owned();
-    let connected = tasks.spawn(async move { connect(&at).await });
+    let connected = tasks::shared().spawn(async move { connect(&at).await });
     let reached = connected.await.map_err(io::Error::other)??;
     if let Reached::Matched(matched) = &reached {
         keep(socket, matched);
@@ -225,6 +238,12 @@ impl AsyncWrite for Tracked {
     }
 }
 
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        self.gone.store(true, Ordering::Relaxed);
+    }
+}
+
 pub(super) struct Streams(MuxClient<Channel>);
 
 impl Streams {
@@ -241,39 +260,34 @@ impl Streams {
 }
 
 struct Server {
-    tasks: Handle,
     client: MuxClient<Within<Channel>>,
+    gone: Arc<AtomicBool>,
 }
 
 impl Server {
-    fn matched(tasks: Handle, matched: Matched) -> Server {
-        let client = MuxClient::new(Within::new(matched.channel, ANSWER, unanswered));
-        Server { tasks, client }
+    fn matched(matched: Matched) -> Server {
+        let Matched { channel, gone } = matched;
+        Server { client: MuxClient::new(Within::new(channel, ANSWER, unanswered)), gone }
     }
 
-    async fn reaching(tasks: Handle) -> Result<Option<Server>, Failure> {
+    async fn here() -> Result<Option<Server>, Failure> {
         match reached_here().await? {
-            Reached::Matched(matched) => Ok(Some(Server::matched(tasks, matched))),
+            Reached::Matched(matched) => Ok(Some(Server::matched(matched))),
             Reached::Unreached => Ok(None),
             Reached::Unmatched(unmatched) => Err(Failure::Own(unmatched.to_string())),
         }
     }
 
-    fn reached() -> Result<Option<Server>, Failure> {
-        let tasks = shared()?;
-        tasks.clone().block_on(Server::reaching(tasks))
+    fn here_blocking() -> Result<Option<Server>, Failure> {
+        tasks::shared().block_on(Server::here())
     }
 
-    fn reached_on(tasks: &Handle) -> Result<Reached, Failure> {
-        tasks.block_on(reached_here())
-    }
-
-    fn matched_on(tasks: &Handle) -> Result<Option<Server>, Failure> {
-        match Server::reached_on(tasks)? {
-            Reached::Matched(matched) => Ok(Some(Server::matched(tasks.clone(), matched))),
+    fn matched_or_stopped() -> Result<Option<Server>, Failure> {
+        match reached_here_blocking()? {
+            Reached::Matched(matched) => Ok(Some(Server::matched(matched))),
             Reached::Unreached => Ok(None),
             Reached::Unmatched(unmatched) => {
-                stop(tasks, &unmatched)?;
+                stop(&unmatched)?;
                 Ok(None)
             },
         }
@@ -286,14 +300,25 @@ impl Server {
     where
         F: Future<Output = Result<Response<T>, Status>>,
     {
-        asking(self.client.clone()).await.map(Response::into_inner)
+        let _room = asked_room()?;
+        let answer = asking(self.client.clone()).await;
+        self.went(answer).map(Response::into_inner)
     }
 
     fn ask<T, F>(&self, asking: impl FnOnce(MuxClient<Within<Channel>>) -> F) -> Result<T, Status>
     where
         F: Future<Output = Result<Response<T>, Status>>,
     {
-        self.tasks.block_on(self.asked(asking))
+        tasks::shared().block_on(self.asked(asking))
+    }
+
+    fn went<T>(&self, answer: Result<T, Status>) -> Result<T, Status> {
+        if let Err(status) = &answer
+            && status.code() == Code::Unavailable
+        {
+            self.gone.store(true, Ordering::Relaxed);
+        }
+        answer
     }
 }
 
@@ -303,7 +328,11 @@ async fn reached_here() -> Result<Reached, Failure> {
     reached.map_err(|error| Failure::Own(unreached_at(&socket, &error)))
 }
 
-fn stop(tasks: &Handle, unmatched: &Unmatched) -> Result<(), Failure> {
+fn reached_here_blocking() -> Result<Reached, Failure> {
+    tasks::shared().block_on(reached_here())
+}
+
+fn stop(unmatched: &Unmatched) -> Result<(), Failure> {
     let unstopped = |why: String| Failure::Own(format!("{unmatched}, and is not stopped: {why}"));
     if let Some(pid) = unmatched.pid
         && Pid::from_raw(STARTED.load(Ordering::Relaxed)) == Some(pid)
@@ -329,7 +358,7 @@ fn stop(tasks: &Handle, unmatched: &Unmatched) -> Result<(), Failure> {
     let deadline = stopped + STOPPING;
     let mut answered = "it neither answers nor goes".to_owned();
     loop {
-        let asked = tasks.block_on(async {
+        let asked = tasks::shared().block_on(async {
             tokio::time::timeout_at(deadline.into(), connect(&socket)).await
         });
         match asked {
@@ -349,10 +378,6 @@ fn stop(tasks: &Handle, unmatched: &Unmatched) -> Result<(), Failure> {
         }
         thread::sleep(LOOK);
     }
-}
-
-fn shared() -> Result<Handle, Failure> {
-    tasks::shared().map_err(|why| Failure::Own(format!("{why}, to reach lune-mux")))
 }
 
 fn unanswered(within: Duration) -> String {
@@ -543,18 +568,19 @@ pub fn followed(
     mut told: impl FnMut(Vec<String>, TerminalsListed) -> bool,
 ) -> Result<Followed, Failure> {
     let at = Instant::now();
-    let tasks = shared()?;
-    let mut streams = match Server::reached_on(&tasks)? {
+    let tasks = tasks::shared();
+    let mut streams = match reached_here_blocking()? {
         Reached::Matched(matched) => matched.streams(),
         Reached::Unreached => return Ok(Followed::Unreached { at }),
         Reached::Unmatched(unmatched) if unmatched.is_newer() => {
             return Ok(Followed::Newer(unmatched.left_be()));
         },
         Reached::Unmatched(unmatched) => {
-            stop(&tasks, &unmatched)?;
+            stop(&unmatched)?;
             return Ok(Followed::Unmatched);
         },
     };
+    let _room = asked_room().map_err(|status| refused(&status))?;
     let since = Instant::now();
     let watched = tasks.block_on(streams.watch());
     let mut stream = watched.map_err(|status| refused(&status))?.into_inner();
@@ -702,9 +728,11 @@ impl Terminals {
         }
         assert_eq!(words.len(), pastes.len() + 2, "a hello, a showing and one word per paste");
         let refusals_max = 2 * pastes.len();
-        let mut client = reached_now().await?.client;
+        let _room = asked_room().map_err(|status| refused(&status))?;
+        let server = server().await?;
+        let mut client = server.client.clone();
         let deadline = tokio::time::Instant::now() + ANSWER;
-        let shown = client.show(tokio_stream::iter(words)).await;
+        let shown = server.went(client.show(tokio_stream::iter(words)).await);
         let mut heard = shown.map_err(|status| refused(&status))?.into_inner();
         let drained = async move {
             let mut reasons = Vec::new();
@@ -733,20 +761,20 @@ impl Terminals {
         let (columns, rows) = size.get();
         let size = Some(api::Size { columns: columns.into(), rows: rows.into() });
         let request = api::SizeTerminalRequest { terminal: Some(key.said()), size };
-        let server = reached_now().await?;
+        let server = server().await?;
         let asked = server.asked(|mut client| async move { client.size_terminal(request).await });
         asked.await.map(drop).map_err(|status| refused(&status))
     }
 
     pub fn dumped(&self, key: TerminalKey, dumped: api::Dumped) -> Result<String, Failure> {
         let request = api::DumpRequest { dumped: dumped.into(), terminal: Some(key.said()) };
-        let asked = reached()?.ask(|mut client| async move { client.dump(request).await });
+        let asked = server_blocking()?.ask(|mut client| async move { client.dump(request).await });
         Ok(asked.map_err(|status| refused(&status))?.text)
     }
 
     pub fn looked(&self, key: TerminalKey) -> Result<Looked, Failure> {
         let request = api::LookRequest { terminal: Some(key.said()) };
-        let asked = reached()?.ask(|mut client| async move { client.look(request).await });
+        let asked = server_blocking()?.ask(|mut client| async move { client.look(request).await });
         let api::Looked { text, shown } = asked.map_err(|status| refused(&status))?;
         Ok(Looked { text, shown: Shown(shown) })
     }
@@ -765,7 +793,7 @@ impl Terminals {
             shown: Some(shown.0),
             pressed: pressed.collect(),
         };
-        match reached()?.ask(|mut client| async move { client.press(request).await }) {
+        match server_blocking()?.ask(|mut client| async move { client.press(request).await }) {
             Ok(api::PressResponse {}) => Ok(Pressed::Done),
             Err(status) if status.code() == Code::Aborted => Ok(Pressed::Changed),
             Err(status) => Err(refused(&status)),
@@ -774,7 +802,8 @@ impl Terminals {
 
     pub fn closed(&self, key: TerminalKey) -> Result<(), Failure> {
         let request = api::CloseTerminalRequest { terminal: Some(key.said()) };
-        match reached()?.ask(|mut client| async move { client.close_terminal(request).await }) {
+        let server = server_blocking()?;
+        match server.ask(|mut client| async move { client.close_terminal(request).await }) {
             Ok(_) => Ok(()),
             Err(status) if status.code() == Code::NotFound => Ok(()),
             Err(status) => {
@@ -793,19 +822,19 @@ impl Terminals {
 }
 
 fn listed() -> Result<Vec<api::Terminal>, Failure> {
-    let Some(server) = Server::reached()? else {
+    let Some(server) = Server::here_blocking()? else {
         return Ok(Vec::new());
     };
     let listed = server.ask(|mut client| async move { client.list(api::ListRequest {}).await });
     Ok(listed.map_err(|status| refused(&status))?.terminals)
 }
 
-fn reached() -> Result<Server, Failure> {
-    Server::reached()?.ok_or_else(runs_no_more)
+async fn server() -> Result<Server, Failure> {
+    Server::here().await?.ok_or_else(runs_no_more)
 }
 
-async fn reached_now() -> Result<Server, Failure> {
-    Server::reaching(shared()?).await?.ok_or_else(runs_no_more)
+fn server_blocking() -> Result<Server, Failure> {
+    Server::here_blocking()?.ok_or_else(runs_no_more)
 }
 
 fn runs_no_more() -> Failure {
@@ -816,14 +845,13 @@ fn on_started<T>(
     mut ask: impl FnMut(&Server) -> Result<T, Status>,
 ) -> Result<(Server, T), Failure> {
     let deadline = Instant::now() + MAKING;
-    let tasks = shared()?;
     loop {
         if Instant::now() >= deadline {
             return Err(Failure::Own("no lune-mux answered in time".to_owned()));
         }
-        let server = match Server::matched_on(&tasks)? {
+        let server = match Server::matched_or_stopped()? {
             Some(server) => server,
-            None => started(&tasks, deadline)?,
+            None => started(deadline)?,
         };
         match ask(&server) {
             Ok(answer) => return Ok((server, answer)),
@@ -843,10 +871,10 @@ fn gone_by(server: &Server, deadline: Instant) -> Result<(), Failure> {
     Ok(())
 }
 
-fn started(tasks: &Handle, deadline: Instant) -> Result<Server, Failure> {
+fn started(deadline: Instant) -> Result<Server, Failure> {
     loop {
         let mut started = Started::spawned()?;
-        match listened(&mut started, tasks, deadline) {
+        match listened(&mut started, deadline) {
             Ok(Some(server)) => {
                 started.reaped();
                 return Ok(server);
@@ -856,7 +884,7 @@ fn started(tasks: &Handle, deadline: Instant) -> Result<Server, Failure> {
         }
         let again = Instant::now() + AGAIN;
         while Instant::now() < again {
-            if let Some(server) = Server::matched_on(tasks)? {
+            if let Some(server) = Server::matched_or_stopped()? {
                 return Ok(server);
             }
             thread::sleep(LOOK);
@@ -867,16 +895,12 @@ fn started(tasks: &Handle, deadline: Instant) -> Result<Server, Failure> {
     }
 }
 
-fn listened(
-    started: &mut Started,
-    tasks: &Handle,
-    deadline: Instant,
-) -> Result<Option<Server>, Failure> {
+fn listened(started: &mut Started, deadline: Instant) -> Result<Option<Server>, Failure> {
     loop {
-        match Server::reached_on(tasks)? {
-            Reached::Matched(matched) => return Ok(Some(Server::matched(tasks.clone(), matched))),
+        match reached_here_blocking()? {
+            Reached::Matched(matched) => return Ok(Some(Server::matched(matched))),
             Reached::Unreached => {},
-            Reached::Unmatched(unmatched) => stop(tasks, &unmatched)?,
+            Reached::Unmatched(unmatched) => stop(&unmatched)?,
         }
         let unread = |error| Failure::Own(format!("the lune-mux started is unread: {error}"));
         let ended = started.child.try_wait().map_err(unread)?;
@@ -957,7 +981,7 @@ mod tests {
     #[test]
     fn luned_refuses_to_stop_a_lune_mux_whose_socket_leads_back_to_it() {
         let itself = Unmatched { pid: Some(rustix::process::getpid()), build: None };
-        let refused = stop(&crate::tasks::shared().unwrap(), &itself);
+        let refused = stop(&itself);
         let Err(Failure::Own(why)) = refused else {
             panic!("luned stops itself: {refused:?}");
         };
@@ -966,7 +990,7 @@ mod tests {
 
     #[test]
     fn luned_keeps_one_connection_to_lune_mux_until_it_goes() {
-        let tasks = crate::tasks::shared().unwrap();
+        let tasks = crate::tasks::shared();
         let folder = tempfile::tempdir().unwrap();
         let socket = folder.path().join(SOCKET);
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
@@ -987,6 +1011,42 @@ mod tests {
         lune_waits::eventually("luned sees its connection go", || first.is_gone().then_some(()));
         let _fresh = matched();
         lune_waits::eventually("luned connects again", || listener.accept().ok());
+    }
+
+    #[test]
+    fn a_connection_hyper_lets_go_of_marks_its_channel_gone() {
+        let _entered = crate::tasks::shared().enter();
+        let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let gone = Arc::new(AtomicBool::new(false));
+        let stream = UnixStream::from_std(ours).unwrap();
+        let tracked = Tracked { stream, gone: Arc::clone(&gone) };
+        assert!(!gone.load(Ordering::Relaxed), "a connection held is not gone");
+        drop(tracked);
+        assert!(gone.load(Ordering::Relaxed), "a connection let go of without a word is gone");
+    }
+
+    #[test]
+    fn luned_refuses_to_ask_lune_mux_past_the_most_it_asks_at_once() {
+        let tasks = crate::tasks::shared();
+        let folder = tempfile::tempdir().unwrap();
+        let socket = folder.path().join(SOCKET);
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        MATCHED.store(rustix::process::getpid().as_raw_pid(), Ordering::Relaxed);
+        let Ok(Reached::Matched(matched)) = tasks.block_on(reached_at(&socket)) else {
+            panic!("lune-mux is not matched");
+        };
+        let server = Server::matched(matched);
+        let held = ASKED.try_acquire_many(u32::try_from(ASKED_MAX).unwrap()).unwrap();
+        let asked = server.ask(|mut client| async move { client.list(api::ListRequest {}).await });
+        let Err(refused) = asked else {
+            panic!("a question past the most is asked");
+        };
+        assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
+        let said = format!("at most {ASKED_MAX} questions");
+        assert!(refused.message().contains(&said), "{}", refused.message());
+        assert!(!server.gone.load(Ordering::Relaxed), "a question refused here leaves the channel");
+        drop(held);
     }
 
     #[test]

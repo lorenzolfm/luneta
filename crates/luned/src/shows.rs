@@ -386,14 +386,12 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
         Where::On(on) => (None, Some(api::On { destination: on.to_string() })),
     };
     let hello = show_request::Hello { worktree: worktree.get(), size, runs_in, again, on };
-    match tasks::shared() {
-        Ok(tasks) => drop(tasks.spawn(async move {
-            if let Ok(last) = stream(&folder, hello, inbox, &mut told).await {
-                told(last);
-            }
-        })),
-        Err(why) => told(Heard::Lost(format!("{why}, for a layout of luned's"))),
-    }
+    drop(tasks::shared().spawn(async move {
+        let mut told_aside = |heard| tokio::task::block_in_place(|| told(heard));
+        if let Ok(last) = stream(&folder, hello, inbox, &mut told_aside).await {
+            told_aside(last);
+        }
+    }));
     Show { outbox }
 }
 

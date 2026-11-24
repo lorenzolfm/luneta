@@ -1,26 +1,38 @@
 use std::sync::OnceLock;
 
-use tokio::runtime::{self, Handle, Runtime};
+use tokio::runtime::{self, Handle, Runtime, RuntimeFlavor};
 
 const WORKERS: usize = 2;
 
 static SHARED: OnceLock<Runtime> = OnceLock::new();
 
-pub fn shared() -> Result<Handle, String> {
-    if let Some(runtime) = SHARED.get() {
-        return Ok(runtime.handle().clone());
+pub fn start() -> Result<(), String> {
+    if SHARED.get().is_some() {
+        return Ok(());
     }
-    let built = runtime::Builder::new_multi_thread()
+    let built = built().map_err(|error| format!("no runtime for lune's tasks: {error}"))?;
+    if let Err(second) = SHARED.set(built) {
+        second.shutdown_background();
+    }
+    assert!(SHARED.get().is_some(), "the runtime just set is held");
+    Ok(())
+}
+
+#[must_use]
+pub fn shared() -> Handle {
+    let unstarted = || built().expect("a process that started no tasks builds them at once");
+    let runtime = SHARED.get_or_init(unstarted);
+    let handle = runtime.handle().clone();
+    assert_eq!(handle.runtime_flavor(), RuntimeFlavor::MultiThread, "a task may block in place");
+    handle
+}
+
+fn built() -> std::io::Result<Runtime> {
+    runtime::Builder::new_multi_thread()
         .worker_threads(WORKERS)
         .thread_name("lune tasks")
         .enable_all()
         .build()
-        .map_err(|error| format!("no runtime: {error}"))?;
-    if let Err(second) = SHARED.set(built) {
-        second.shutdown_background();
-    }
-    let runtime = SHARED.get().expect("the runtime just set is held");
-    Ok(runtime.handle().clone())
 }
 
 #[cfg(test)]
@@ -35,7 +47,7 @@ mod tests {
         let (started, starting) = tokio::sync::oneshot::channel::<()>();
         let (ran, heard) = mpsc::channel();
         let handing = thread::spawn(move || {
-            shared().unwrap().spawn(async move {
+            shared().spawn(async move {
                 let _ = starting.await;
                 drop(ran.send(thread::current().name().map(str::to_owned)));
             });
