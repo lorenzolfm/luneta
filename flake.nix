@@ -153,7 +153,7 @@
             export LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libiconv ]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
           '';
 
-          testRun = "-p luned -p lune-protocol -p lune-mux -p lune-phone";
+          testRun = "-p lune -p luned -p lune-protocol -p lune-mux -p lune-phone";
 
           nextest = import ./nix/nextest.nix { inherit pkgs testRun; };
 
@@ -162,7 +162,7 @@
             inherit version src;
             strictDeps = true;
 
-            cargoExtraArgs = "--locked -p luned -p lune-mux";
+            cargoExtraArgs = "--locked -p lune -p luned -p lune-mux";
 
             nativeBuildInputs = [ pkgs.protobuf ] ++ speechBuild;
             buildInputs = speechLibs ++ [ libghosttyVt.dev ];

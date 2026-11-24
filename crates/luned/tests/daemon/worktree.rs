@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-use crate::host::{Vars, LUNE};
+use crate::host::{Vars, LUNED};
 
 pub fn git(dir: &Path, args: &[&str]) {
     let mut git = Command::new("git");
@@ -26,12 +26,12 @@ fn worktree(dir: &Path, branch: &str) -> Output {
 }
 
 fn worktree_with(dir: &Path, words: &[&str], named: Option<(&str, &Path)>) -> Output {
-    let mut lune = Vars::default().command(LUNE);
-    luned::local_git(&mut lune);
+    let mut luned = Vars::default().command(LUNED);
+    luned::local_git(&mut luned);
     if let Some((name, repository)) = named {
-        lune.env(name, repository);
+        luned.env(name, repository);
     }
-    lune.arg("worktree").arg("--repo").arg(dir).args(words).output().unwrap()
+    luned.arg("worktree").arg("--repo").arg(dir).args(words).output().unwrap()
 }
 
 pub fn cloned_as_wt(scratch: &Path, up: &Path, clone: &Path) {
@@ -84,7 +84,7 @@ fn who_asks_for_a_branch_gets_no_worktree_that_moved_off_it() {
     let refused = worktree(&clone.join("main"), "issue-7");
     assert!(!refused.status.success());
     assert_eq!(refused.stdout, b"");
-    let why = format!("lune: wt add: {} is already present", clone.join("issue-7").display());
+    let why = format!("luned: wt add: {} is already present", clone.join("issue-7").display());
     assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
 }
 
@@ -99,7 +99,7 @@ fn in_a_clone_git_made_none_is_made_and_why_comes_last_on_stderr() {
     assert!(!refused.status.success());
     assert_eq!(refused.stdout, b"");
     let why = format!(
-        "lune: {} is in a clone git made, and wt would make the worktree in its .git; wt clone \
+        "luned: {} is in a clone git made, and wt would make the worktree in its .git; wt clone \
          it first",
         plain.display()
     );
@@ -121,7 +121,7 @@ fn in_a_bare_repository_that_is_not_a_dot_bare_none_is_made_and_why_comes_last_o
     assert!(!refused.status.success());
     assert_eq!(refused.stdout, b"");
     let why = format!(
-        "lune: {} is in a bare repository that is not a .bare, and wt would make the worktree \
+        "luned: {} is in a bare repository that is not a .bare, and wt would make the worktree \
          inside it; wt clone it first",
         infra.display()
     );
@@ -141,7 +141,7 @@ fn in_a_clone_s_bare_itself_none_is_made_and_why_comes_last_on_stderr() {
     assert!(!refused.status.success());
     assert_eq!(refused.stdout, b"");
     let why = format!(
-        "lune: {} is in a bare repository, not in a worktree of it; lune reads a bare \
+        "luned: {} is in a bare repository, not in a worktree of it; lune reads a bare \
          repository only through its worktrees, as a clone can hold one committed as plain files",
         bare.display()
     );
@@ -162,7 +162,7 @@ fn with_git_told_of_another_repository_none_is_made() {
     assert!(!refused.status.success());
     assert_eq!(refused.stdout, b"");
     let why = format!(
-        "lune: GIT_DIR is set, and git would take another repository for {}'s",
+        "luned: GIT_DIR is set, and git would take another repository for {}'s",
         main.display()
     );
     assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
@@ -179,13 +179,13 @@ fn with_git_told_of_another_repository_nothing_follows() {
     git(&scratch, &["clone", "-q", &up.display().to_string(), "plain"]);
 
     let main = clone.join("main");
-    let mut lune = Vars::default().command(LUNE);
-    luned::local_git(&mut lune);
+    let mut luned = Vars::default().command(LUNED);
+    luned::local_git(&mut luned);
     let refused =
-        lune.env("GIT_DIR", plain.join(".git")).arg("follow").arg(&main).output().unwrap();
+        luned.env("GIT_DIR", plain.join(".git")).arg("follow").arg(&main).output().unwrap();
     assert!(!refused.status.success());
     let why = format!(
-        "lune: GIT_DIR is set, and git would take another repository for {}'s",
+        "luned: GIT_DIR is set, and git would take another repository for {}'s",
         main.display()
     );
     assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
@@ -220,6 +220,6 @@ fn a_name_with_a_dash_first_is_no_branch_s_and_runs_nothing() {
     assert_eq!(refused.stdout, b"");
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(!ran.exists(), "{stderr}");
-    let why = format!("lune: wt add: {option} is not a valid branch name");
+    let why = format!("luned: wt add: {option} is not a valid branch name");
     assert_eq!(stderr.lines().last(), Some(why.as_str()));
 }

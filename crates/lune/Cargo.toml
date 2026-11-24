@@ -1,0 +1,48 @@
+[package]
+name = "lune"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+description = "lune: the terminals of a worktree beside a sidebar of the host, and the CLI that asks luned, as a library under a thin binary"
+
+[[bin]]
+name = "lune"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+base64 = "0.22.1"
+clap = { version = "4.6.6", features = ["derive"] }
+cpal = "0.18.2"
+crossterm = "0.29.0"
+frizbee = { version = "0.13.0", default-features = false }
+lune-protocol = { path = "../protocol" }
+luned = { path = "../luned" }
+notify = "8.2.0"
+prost = "0.14.4"
+prost-types = "0.14.4"
+ptts = { version = "=0.6.0", features = ["hf"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+rustix = { version = "1.1.4", features = ["process", "system"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3.18"
+tokio = { version = "1.53.1", features = ["io-util", "net", "process", "rt", "sync", "time"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
+tonic = "0.14.6"
+transcribe-cpp = "=0.4.1"
+unicode-segmentation = "1.13.3"
+unicode-width = { version = "0.2.2", default-features = false }
+xn = "=0.2.13"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+alsa = "0.11.0"
+zbus ={ version = "6.2.1", default-features = false, features = ["proxy", "tokio"] }
+
+[dev-dependencies]
+lune-waits = { path = "../waits" }
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

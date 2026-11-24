@@ -97,7 +97,7 @@ fn log(host: &Host) -> String {
 
 pub fn moved() -> tempfile::TempDir {
     let elsewhere = tempfile::tempdir().unwrap();
-    install(Path::new(LUNE), &elsewhere.path().join("lune"));
+    install(Path::new(LUNE.as_str()), &elsewhere.path().join("lune"));
     elsewhere
 }
 
@@ -118,7 +118,7 @@ impl Drop for Detached<'_> {
 fn lune_watch_starts_a_detached_daemon_where_none_runs() {
     let host = Host::new();
     let mut handed = host.vars().command("sh");
-    handed.args(["-c", "exec \"$0\" watch 7>&1", LUNE]);
+    handed.args(["-c", "exec \"$0\" watch 7>&1", LUNE.as_str()]);
     let first = written(&mut handed);
     let daemon = Detached { host: &host, pid: pid(&first) };
 
@@ -126,7 +126,7 @@ fn lune_watch_starts_a_detached_daemon_where_none_runs() {
     assert_eq!(rustix::process::getsid(leader).unwrap(), leader.unwrap());
     let log = log(&host);
     assert!(log.contains("luned: listening on "), "{log}");
-    assert_eq!(pid(&watch(&host, Path::new(LUNE))), daemon.pid);
+    assert_eq!(pid(&watch(&host, Path::new(LUNE.as_str()))), daemon.pid);
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn the_cli_says_that_no_daemon_runs_and_starts_none() {
     let host = Host::new();
     let none_runs = |host: &Host| {
         for command in ["info", "agents"] {
-            let output = answered(host.vars().command(LUNE).arg(command));
+            let output = answered(host.vars().command(&LUNE).arg(command));
             let said = String::from_utf8_lossy(&output.stderr);
             assert_eq!(output.status.code(), Some(NONE_RUNS), "{command}: {said}");
             let none = format!("lune: no luned runs in {}", host.folder().display());
@@ -317,7 +317,7 @@ fn lune_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     assert!(said.contains(&kept), "{said}");
     assert_eq!(older.exit_status(), None);
 
-    let current = watch(&host, Path::new(LUNE));
+    let current = watch(&host, Path::new(LUNE.as_str()));
     let _daemon = Detached { host: &host, pid: pid(&current) };
     let ended = older.ended("lune stops the older daemon");
     assert_eq!(ended.signal(), Some(Signal::TERM.as_raw()));
@@ -333,19 +333,19 @@ fn lune_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
 
     let later = Host::new();
     let mut after = stand_in(&later, &stamped(u64::MAX), None);
-    let said = refused(&later, Path::new(LUNE));
+    let said = refused(&later, Path::new(LUNE.as_str()));
     assert!(said.contains(&format!("is newer than this lune, {}", *release::SAID)), "{said}");
     assert_eq!(after.exit_status(), None);
 
     let host = Host::new();
     let mut before = stand_in(&host, &stamped(0), None);
     if release::BUILT.is_some() {
-        let reached = pid(&watch(&host, Path::new(LUNE)));
+        let reached = pid(&watch(&host, Path::new(LUNE.as_str())));
         let _daemon = Detached { host: &host, pid: reached };
         before.ended("lune stops the stamped daemon");
         assert_ne!(reached, before.pid());
     } else {
-        let said = refused(&host, Path::new(LUNE));
+        let said = refused(&host, Path::new(LUNE.as_str()));
         assert!(said.contains(&format!("luned {} (pid ", stamped(0))), "{said}");
         assert_eq!(before.exit_status(), None);
     }
@@ -353,7 +353,7 @@ fn lune_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
 
 #[test]
 fn lune_and_luned_say_their_build_alike() {
-    for (program, name) in [(LUNE, "lune"), (LUNED, "luned")] {
+    for (program, name) in [(LUNE.as_str(), "lune"), (LUNED, "luned")] {
         let said = Command::new(program).arg("--version").output().unwrap();
         assert!(said.status.success(), "{name} --version failed");
         assert_eq!(String::from_utf8_lossy(&said.stdout), format!("{name} {}\n", *release::SAID));
@@ -367,7 +367,7 @@ fn lunes_that_find_an_older_daemon_at_once_reach_the_one_in_its_place() {
     let mut older = stand_in(&host, OLDER, None);
     let pids: Vec<u32> = thread::scope(|scope| {
         let asking: Vec<_> = (0..LUNES)
-            .map(|_| scope.spawn(|| pid(&watch(&host, Path::new(LUNE)))))
+            .map(|_| scope.spawn(|| pid(&watch(&host, Path::new(LUNE.as_str())))))
             .collect();
         asking.into_iter().map(|asked| asked.join().unwrap()).collect()
     });
@@ -380,7 +380,7 @@ fn lunes_that_find_an_older_daemon_at_once_reach_the_one_in_its_place() {
 fn lune_watch_refuses_a_daemon_newer_than_it_and_leaves_it_be() {
     let host = Host::new();
     let mut newer = stand_in(&host, NEWER, None);
-    let said = refused(&host, Path::new(LUNE));
+    let said = refused(&host, Path::new(LUNE.as_str()));
     let (pid, own) = (newer.pid(), release::SAID.as_str());
     let both = format!("luned {NEWER} (pid {pid}) is newer than this lune, {own}");
     assert!(said.contains(&both), "{said}");
@@ -393,14 +393,14 @@ fn the_cli_asks_no_daemon_of_another_build_and_info_says_it_is_one() {
     for version in [OLDER, NEWER] {
         let host = Host::new();
         let mut other = stand_in(&host, version, None);
-        let output = answered(host.vars().command(LUNE).arg("agents"));
+        let output = answered(host.vars().command(&LUNE).arg("agents"));
         let said = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{said}");
         let theirs = format!("luned {version} (pid {})", other.pid());
         assert!(said.contains(&theirs), "{said}");
         assert!(said.contains(release::SAID.as_str()), "{said}");
 
-        let output = answered(host.vars().command(LUNE).arg("info"));
+        let output = answered(host.vars().command(&LUNE).arg("info"));
         let out = String::from_utf8_lossy(&output.stdout);
         let said = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{said}");
@@ -415,7 +415,7 @@ fn lune_watch_stops_no_process_but_the_one_the_kernel_says_listens() {
     let host = Host::new();
     let mut decoy = Running::spawn(Command::new("sleep").arg("60"));
     let mut older = stand_in(&host, OLDER, Some(decoy.pid()));
-    let said = refused(&host, Path::new(LUNE));
+    let said = refused(&host, Path::new(LUNE.as_str()));
     let listens = "but the kernel says another process listens on its socket, so lune stops none";
     assert!(said.contains(listens), "{said}");
     assert_eq!(decoy.exit_status(), None);

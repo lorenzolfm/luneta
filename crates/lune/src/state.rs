@@ -7,6 +7,25 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::host::Event;
 
+#[derive(Clone, Debug)]
+pub struct Folder(Result<PathBuf, Unset>);
+
+impl Folder {
+    #[must_use]
+    pub fn of_user() -> Folder {
+        Folder(luned::state::folder())
+    }
+
+    #[must_use]
+    pub fn at(folder: PathBuf) -> Folder {
+        Folder(Ok(folder))
+    }
+
+    pub fn path(&self, name: &str) -> Result<PathBuf, Unset> {
+        self.0.as_ref().map(|folder| folder.join(name)).map_err(|unset| *unset)
+    }
+}
+
 pub fn unfinished() -> String {
     format!("{:016x}.new", RandomState::new().hash_one(()))
 }

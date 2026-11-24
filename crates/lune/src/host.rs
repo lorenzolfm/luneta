@@ -37,7 +37,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::{DefaultTerminal, Terminal};
+use ratatui::{DefaultTerminal, Frame, Terminal};
 
 use crate::actions::{Chord, COLLAPSE, DOWN, GROW, LEFT, MENU, RIGHT, SHRINK, SWAP, UP};
 use crate::alerts::{self, Alerts};
@@ -76,6 +76,7 @@ use crate::sidebar::{
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
+use crate::state;
 use crate::projected::{self, Projected};
 use crate::viewed::{self, Across, Heeded, Viewed};
 use crate::worktrees::{self, Arrival, Landing};
@@ -366,7 +367,7 @@ pub struct Inbox {
 }
 
 impl Inbox {
-    pub fn new(events: Receiver<Event>) -> Self {
+    pub(crate) fn new(events: Receiver<Event>) -> Self {
         Inbox { events, aside: VecDeque::new() }
     }
 
@@ -409,7 +410,7 @@ enum Homed {
     Gone { on: Machine },
 }
 
-struct App {
+pub struct App {
     right: Option<Right>,
     homes: home::Homes,
     shown_number_dropped: u64,
@@ -526,19 +527,15 @@ pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
             execute!(io::stdout(), PushKeyboardEnhancementFlags(flags))?;
         }
-        run_in(
-            &mut terminal,
-            (start, runs_in),
+        let arriving = Arriving {
+            start,
+            runs_in,
             news,
-            folder,
             unkept,
-            &dir,
-            answers.colours,
-            answers.kitty,
-            events,
-            &mut inbox,
-            &mut sent,
-        )
+            colours: answers.colours,
+            releases: answers.kitty,
+        };
+        run_in(&mut terminal, (folder, &dir), arriving, events, &mut inbox, &mut sent)
     });
     if let Err(error) = &ran {
         say_ends(&error.to_string());
@@ -621,139 +618,190 @@ fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
 
 fn run_in(
     terminal: &mut DefaultTerminal,
-    (start, runs_in): (Option<Arrival>, Option<TerminalKey>),
-    news: News,
-    folder: Result<PathBuf, String>,
-    unkept: Option<String>,
-    dir: &Path,
-    colours: Colours,
-    releases: bool,
+    (folder, dir): (Result<PathBuf, String>, &Path),
+    arriving: Arriving,
     events: Sender<Event>,
     inbox: &mut Inbox,
     sent: &mut Vec<JoinHandle<()>>,
 ) -> io::Result<Option<String>> {
-    let (width, width_unread) = Width::kept();
-    let folds = Folds::shared();
-    let folds_dirs = folds.dirs();
-    let folds_watched =
-        (!folds_dirs.is_empty()).then(|| folds::watch(&folds_dirs, events.clone())).transpose();
-    let news_watched = news::watch(&news, events.clone());
-    let (agent, agent_unread) = Kept::shared();
-    let agent_watched = agent.file().map(|file| agents::watch(file, events.clone())).transpose();
-    let mut sidebar = Sidebar::new(folds, news, agent, machines::local_name());
-    if let Some(why) = unkept {
-        sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
-    }
-    let mut watching = Vec::new();
-    match folds_watched {
-        Ok(watcher) => watching.extend(watcher),
-        Err(error) => {
-            sidebar.notify(format!("folds made elsewhere show from lune's next start: {error}"));
-        },
-    }
-    match news_watched {
-        Ok(watcher) => watching.push(watcher),
-        Err(error) => {
-            sidebar.notify(format!("dots of other lunes show from lune's next start: {error}"));
-        },
-    }
-    match agent_watched {
-        Ok(watcher) => watching.extend(watcher),
-        Err(error) => {
-            let why = format!("a harness picked elsewhere holds from lune's next start: {error}");
-            sidebar.notify(why);
-        },
-    }
-    if let Some(why) = agent_unread {
-        sidebar.notify(format!("the menu starts agents in claude: {why}"));
-    }
-    if let Some(why) = width_unread {
-        sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
-    }
-    let daemon = match folder {
-        Ok(folder) => Some(folder),
-        Err(why) => {
-            sidebar.lost(why);
-            None
-        },
-    };
-    let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
-    let luned = daemon.clone().unwrap_or_default();
-    let (size, greeting, here) = (layout_size(areas.1), greeting(colours), Machine::Local);
-    let (start, root) = match start {
-        Some(Arrival::Worktree(start)) => (Some(start), None),
-        Some(Arrival::Home(root)) => (None, Some(root)),
-        None => (None, None),
-    };
-    let right = start.map(|start| {
-        let viewed = Viewed::start(1, luned.clone(), here, start, size, greeting, runs_in, &events);
-        Right::Worktree(viewed)
-    });
-    let focus = Focus::on(if right.is_some() { Side::Session } else { Side::Sidebar });
-    sidebar.focus(focus.keys());
-    let reported = Holder::of(&focus, sidebar.holding()).reported();
-    let desktop = Desktop::start(&events);
-    let focused = true;
-    let mut app = App {
-        right,
-        homes: home::Homes::default(),
-        shown_number_dropped: 0,
-        runs_in,
-        projected: Projected::default(),
-        luned,
-        movers: HashMap::new(),
-        sidebar,
-        areas,
-        width,
-        held: Held::Nothing,
-        last_press: LastPress::Elsewhere,
-        focus,
-        reported,
-        focused,
-        burst: None,
-        settling: Settling::default(),
-        drawn: Drawn::Nothing,
-        pointer: None,
-        cursor: None,
-        title: None,
-        colours,
-        briefs: 0,
-        asks: 0,
-        issues: 0,
-        unfiled: issue::Kept::default(),
-        pickers: 0,
-        inputs: 0,
-        dictations: 0,
-        image: images::Going::default(),
-        repeats: dictation::Repeats::of(dictation::KEY),
-        aloud_repeats: dictation::Repeats::of(aloud::KEY),
-        aloud: Aloud::new(events.clone()),
-        copies: Copies::default(),
-        browser: Browser::default(),
-        speech: None,
-        fetching: None,
-        releases,
-        claude_folder: None,
-        daemon,
-        events,
-        _watching: watching,
-        dir: dir.to_owned(),
-        gave_up: None,
-        changes: Vec::new(),
-        naming: Naming::Idle,
-        alerts: Alerts::new(focused),
-        desktop,
-        quit_asked: false,
-    };
-    app.watch();
-    if let Some(root) = root {
-        app.go_home(&Machine::Local, root);
-        app.give(Focus::on(Side::Session));
-    }
+    let area = Rect::from((Position::ORIGIN, terminal.size()?));
+    let (columns, rows) = (area.width, area.height);
+    let opening = Opening { luned: folder, dir: dir.to_owned(), columns, rows };
+    let mut app = App::opened(opening, &state::Folder::of_user(), arriving, events);
     let ran = run_loop(terminal, &mut app, inbox);
     sent.extend(app.sent());
     ran?;
     Ok(app.failure())
+}
+
+pub struct Opening {
+    pub luned: Result<PathBuf, String>,
+    pub dir: PathBuf,
+    pub columns: u16,
+    pub rows: u16,
+}
+
+struct Arriving {
+    start: Option<Arrival>,
+    runs_in: Option<TerminalKey>,
+    news: News,
+    unkept: Option<String>,
+    colours: Colours,
+    releases: bool,
+}
+
+impl App {
+    #[must_use]
+    pub fn open(opening: Opening, state: &Path) -> (App, Inbox) {
+        let news = match &opening.luned {
+            Ok(runtime) => News::within(runtime),
+            Err(why) => News::unshared(why),
+        };
+        let arriving = Arriving {
+            start: None,
+            runs_in: None,
+            news,
+            unkept: None,
+            colours: Colours::default(),
+            releases: false,
+        };
+        let (events, inbox) = mpsc::channel();
+        let folder = state::Folder::at(state.to_owned());
+        (App::opened(opening, &folder, arriving, events), Inbox::new(inbox))
+    }
+
+    fn opened(
+        opening: Opening,
+        state: &state::Folder,
+        arriving: Arriving,
+        events: Sender<Event>,
+    ) -> App {
+        let Opening { luned: folder, dir, columns, rows } = opening;
+        let Arriving { start, runs_in, news, unkept, colours, releases } = arriving;
+        let (width, width_unread) = Width::kept(state);
+        let folds = Folds::shared(state);
+        let folds_dirs = folds.dirs();
+        let folds_watched =
+            (!folds_dirs.is_empty()).then(|| folds::watch(&folds_dirs, events.clone())).transpose();
+        let news_watched = news::watch(&news, events.clone());
+        let (agent, agent_unread) = Kept::shared(state);
+        let agent_watched =
+            agent.file().map(|file| agents::watch(file, events.clone())).transpose();
+        let mut sidebar = Sidebar::new(folds, news, agent, machines::local_name());
+        if let Some(why) = unkept {
+            sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
+        }
+        let mut watching = Vec::new();
+        match folds_watched {
+            Ok(watcher) => watching.extend(watcher),
+            Err(error) => {
+                let why = format!("folds made elsewhere show from lune's next start: {error}");
+                sidebar.notify(why);
+            },
+        }
+        match news_watched {
+            Ok(watcher) => watching.push(watcher),
+            Err(error) => {
+                sidebar.notify(format!("dots of other lunes show from lune's next start: {error}"));
+            },
+        }
+        match agent_watched {
+            Ok(watcher) => watching.extend(watcher),
+            Err(error) => {
+                let why =
+                    format!("a harness picked elsewhere holds from lune's next start: {error}");
+                sidebar.notify(why);
+            },
+        }
+        if let Some(why) = agent_unread {
+            sidebar.notify(format!("the menu starts agents in claude: {why}"));
+        }
+        if let Some(why) = width_unread {
+            sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
+        }
+        let desktop = Desktop::start(&events, folder.clone());
+        let daemon = match folder {
+            Ok(folder) => Some(folder),
+            Err(why) => {
+                sidebar.lost(why);
+                None
+            },
+        };
+        let areas = areas(Rect::new(0, 0, columns, rows), width.columns());
+        let luned = daemon.clone().unwrap_or_default();
+        let (size, greeting, here) = (layout_size(areas.1), greeting(colours), Machine::Local);
+        let (start, root) = match start {
+            Some(Arrival::Worktree(start)) => (Some(start), None),
+            Some(Arrival::Home(root)) => (None, Some(root)),
+            None => (None, None),
+        };
+        let right = start.map(|start| {
+            let viewed =
+                Viewed::start(1, luned.clone(), here, start, size, greeting, runs_in, &events);
+            Right::Worktree(viewed)
+        });
+        let focus = Focus::on(if right.is_some() { Side::Session } else { Side::Sidebar });
+        sidebar.focus(focus.keys());
+        let reported = Holder::of(&focus, sidebar.holding()).reported();
+        let focused = true;
+        let mut app = App {
+            right,
+            homes: home::Homes::default(),
+            shown_number_dropped: 0,
+            runs_in,
+            projected: Projected::default(),
+            luned,
+            movers: HashMap::new(),
+            sidebar,
+            areas,
+            width,
+            held: Held::Nothing,
+            last_press: LastPress::Elsewhere,
+            focus,
+            reported,
+            focused,
+            burst: None,
+            settling: Settling::default(),
+            drawn: Drawn::Nothing,
+            pointer: None,
+            cursor: None,
+            title: None,
+            colours,
+            briefs: 0,
+            asks: 0,
+            issues: 0,
+            unfiled: issue::Kept::default(),
+            pickers: 0,
+            inputs: 0,
+            dictations: 0,
+            image: images::Going::default(),
+            repeats: dictation::Repeats::of(dictation::KEY),
+            aloud_repeats: dictation::Repeats::of(aloud::KEY),
+            aloud: Aloud::new(events.clone()),
+            copies: Copies::default(),
+            browser: Browser::default(),
+            speech: None,
+            fetching: None,
+            releases,
+            claude_folder: None,
+            daemon,
+            events,
+            _watching: watching,
+            dir,
+            gave_up: None,
+            changes: Vec::new(),
+            naming: Naming::Idle,
+            alerts: Alerts::new(focused),
+            desktop,
+            quit_asked: false,
+        };
+        app.watch();
+        if let Some(root) = root {
+            app.go_home(&Machine::Local, root);
+            app.give(Focus::on(Side::Session));
+        }
+        app
+    }
 }
 
 fn greeting(colours: Colours) -> Greeting {
@@ -2737,82 +2785,7 @@ impl App {
     }
 
     fn frame(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        let now = SystemTime::now();
-        terminal.draw(|frame| {
-            let collapsed = self.focus.side == Side::Collapsed;
-            let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
-            let (sidebar, right) = areas(frame.area(), own);
-            self.areas = (sidebar, right);
-            let size = window(right);
-            if let Some(right) = self.viewed_mut() {
-                right.resize(size.columns, size.lines);
-            }
-            let buffer = frame.buffer_mut();
-            let beside = if collapsed {
-                self.sidebar.draw_collapsed(buffer, sidebar, now);
-                Drawn::Nothing
-            } else {
-                self.sidebar.draw(buffer, sidebar, now)
-            };
-            self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
-            let covered = self.covered();
-            let uncovered = |at: &Position| !covered && right.contains(*at);
-            let spot = |at: Position| attached::Spot { row: at.y - right.y, column: at.x - right.x };
-            let hover = self.pointer.filter(uncovered).map(spot);
-            let cursor = match &self.right {
-                Some(Right::Worktree(shown)) => shown.draw(buffer, right, hover),
-                Some(Right::Home(shown)) => {
-                    self.homes.shown(shown).draw(buffer, right, now);
-                    None
-                },
-                None => {
-                    draw_unshown(buffer, right);
-                    None
-                },
-            };
-            let drawn = match &self.focus.over {
-                Some(Over::Brief(briefing)) => {
-                    briefing.draw(buffer, right, now);
-                    Drawn::Nothing
-                },
-                Some(Over::Ask(ask)) => {
-                    ask.draw(buffer, right, now);
-                    Drawn::Nothing
-                },
-                Some(Over::Issue(issue)) => {
-                    issue.draw(buffer, right, now);
-                    Drawn::Nothing
-                },
-                Some(Over::Picker(picker)) => picker.draw(buffer, right, now),
-                Some(Over::Dictation(dictation, under)) => {
-                    match under {
-                        Where::Ask(ask) => ask.draw(buffer, right, now),
-                        Where::Issue(issue) => issue.draw(buffer, right, now),
-                        Where::Session(_) => {},
-                    }
-                    dictation.draw(buffer, right, (now, Instant::now()));
-                    Drawn::Nothing
-                },
-                None => match self.sidebar.floating() {
-                    Some(Floating::Menu(menu)) => menu.draw(buffer, right, now),
-                    Some(Floating::Note(note)) => {
-                        menu::draw_note(buffer, right, note);
-                        Drawn::Nothing
-                    },
-                    None => beside,
-                },
-            };
-            if let Some(pointer) = self.pointer {
-                drawn.light(buffer, pointer);
-                self.sidebar.aloud_buttons().light(buffer, pointer);
-            }
-            if matches!(self.holder(), Holder::Terminal)
-                && let Some(cursor) = cursor
-            {
-                frame.set_cursor_position(cursor);
-            }
-            self.drawn = drawn;
-        })?;
+        terminal.draw(|frame| self.paint(frame))?;
         let cursor = self.viewed().map_or(UNSHOWN_CURSOR, Viewed::cursor_style);
         if self.cursor != Some(cursor) {
             self.cursor = Some(cursor);
@@ -2825,6 +2798,83 @@ impl App {
             self.title = Some(title.to_owned());
         }
         Ok(())
+    }
+
+    pub fn paint(&mut self, frame: &mut Frame<'_>) {
+        let now = SystemTime::now();
+        let collapsed = self.focus.side == Side::Collapsed;
+        let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
+        let (sidebar, right) = areas(frame.area(), own);
+        self.areas = (sidebar, right);
+        let size = window(right);
+        if let Some(right) = self.viewed_mut() {
+            right.resize(size.columns, size.lines);
+        }
+        let buffer = frame.buffer_mut();
+        let beside = if collapsed {
+            self.sidebar.draw_collapsed(buffer, sidebar, now);
+            Drawn::Nothing
+        } else {
+            self.sidebar.draw(buffer, sidebar, now)
+        };
+        self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
+        let covered = self.covered();
+        let uncovered = |at: &Position| !covered && right.contains(*at);
+        let spot = |at: Position| attached::Spot { row: at.y - right.y, column: at.x - right.x };
+        let hover = self.pointer.filter(uncovered).map(spot);
+        let cursor = match &self.right {
+            Some(Right::Worktree(shown)) => shown.draw(buffer, right, hover),
+            Some(Right::Home(shown)) => {
+                self.homes.shown(shown).draw(buffer, right, now);
+                None
+            },
+            None => {
+                draw_unshown(buffer, right);
+                None
+            },
+        };
+        let drawn = match &self.focus.over {
+            Some(Over::Brief(briefing)) => {
+                briefing.draw(buffer, right, now);
+                Drawn::Nothing
+            },
+            Some(Over::Ask(ask)) => {
+                ask.draw(buffer, right, now);
+                Drawn::Nothing
+            },
+            Some(Over::Issue(issue)) => {
+                issue.draw(buffer, right, now);
+                Drawn::Nothing
+            },
+            Some(Over::Picker(picker)) => picker.draw(buffer, right, now),
+            Some(Over::Dictation(dictation, under)) => {
+                match under {
+                    Where::Ask(ask) => ask.draw(buffer, right, now),
+                    Where::Issue(issue) => issue.draw(buffer, right, now),
+                    Where::Session(_) => {},
+                }
+                dictation.draw(buffer, right, (now, Instant::now()));
+                Drawn::Nothing
+            },
+            None => match self.sidebar.floating() {
+                Some(Floating::Menu(menu)) => menu.draw(buffer, right, now),
+                Some(Floating::Note(note)) => {
+                    menu::draw_note(buffer, right, note);
+                    Drawn::Nothing
+                },
+                None => beside,
+            },
+        };
+        if let Some(pointer) = self.pointer {
+            drawn.light(buffer, pointer);
+            self.sidebar.aloud_buttons().light(buffer, pointer);
+        }
+        if matches!(self.holder(), Holder::Terminal)
+            && let Some(cursor) = cursor
+        {
+            frame.set_cursor_position(cursor);
+        }
+        self.drawn = drawn;
     }
 }
 

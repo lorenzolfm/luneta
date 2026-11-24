@@ -11,8 +11,8 @@ pub struct Width {
 }
 
 impl Width {
-    pub fn kept() -> (Self, Option<String>) {
-        match state::path("width") {
+    pub fn kept(state: &state::Folder) -> (Self, Option<String>) {
+        match state.path("width") {
             Ok(file) => Width::within(file),
             Err(unset) => (Width { columns: sidebar::COLUMNS, file: Err(unset) }, None),
         }

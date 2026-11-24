@@ -809,7 +809,7 @@ mod tests {
     fn only_a_lune_with_no_command_is_a_front_end() {
         assert_eq!(role(&lune(1, &[]).argv), Role::Front);
         assert_eq!(role(&lune(1, &["floresta"]).argv), Role::Front);
-        for command in [&["bridge"][..], &["terminate", "--here"], &["--version"], &["worktree"]] {
+        for command in [&["bridge"][..], &["terminate", "--here"], &["--version"], &["clicked"]] {
             assert_eq!(role(&lune(1, command).argv), Role::Command, "{command:?}");
         }
     }

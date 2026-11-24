@@ -150,11 +150,9 @@ fn checked(path: &Path) -> Result<PathBuf, String> {
     Ok(folder.path().to_owned())
 }
 
-pub fn wait(events: Sender<Event>) {
+pub fn wait(events: Sender<Event>, luned: Result<PathBuf, String>) {
     thread::spawn(move || {
-        let found = luned::folder::find();
-        let found = found.map_err(|unfound| unfound.to_string());
-        if let Err(why) = found.and_then(|folder| take(&folder, &events)) {
+        if let Err(why) = luned.and_then(|folder| take(&folder, &events)) {
             let why = format!("no notifications, and nothing read aloud: {why}");
             let _ = events.send(Event::Notice(why));
         }

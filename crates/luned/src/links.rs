@@ -21,6 +21,7 @@ use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common};
 use crate::program::{self, Ran};
 use crate::projects::{self, CloneRoot, Dir, Holders, ProjectName, SPOT_LOOK};
+use crate::terminate::LUNED;
 use crate::{zoxide, Destination, Directory};
 
 pub(crate) mod sync;
@@ -46,7 +47,7 @@ const WORKED_MAX: usize = 1024;
 
 const ORIGIN: &str = "origin";
 
-pub const WHY: &str = "lune: ";
+pub const WHY: &str = "luned: ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
@@ -1169,7 +1170,7 @@ pub fn worktree(dir: &str, of: &Of) -> Result<Directory, Unready> {
     match worktree_said(ran_worktree(dir, of, &[])?)? {
         Taken::OnBranch(folder) => Ok(folder),
         Taken::MovedOff(folder) => Err(Unready::InDoubt(format!(
-            "lune worktree said {folder} moved off the branch, which luned did not ask of it"
+            "luned worktree said {folder} moved off the branch, which luned did not ask of it"
         ))),
     }
 }
@@ -1179,11 +1180,11 @@ fn worktree_or_moved_off(dir: &str, of: &Of) -> Result<Taken<Directory>, Unready
 }
 
 fn ran_worktree(dir: &str, of: &Of, flags: &[&str]) -> Result<Ran, Unready> {
-    let mut lune = Command::new(lune()?);
-    git::local(lune.args(["worktree", "--repo", dir]).args(flags));
-    lune.args(["--", &of.to_string()]);
-    let ran = program::run_alone(&mut lune, MAKING)
-        .map_err(|error| format!("lune worktree could not be run: {error}"))?;
+    let mut luned = Command::new(luned()?);
+    git::local(luned.args(["worktree", "--repo", dir]).args(flags));
+    luned.args(["--", &of.to_string()]);
+    let ran = program::run_alone(&mut luned, MAKING)
+        .map_err(|error| format!("luned worktree could not be run: {error}"))?;
     Ok(ran)
 }
 
@@ -1193,19 +1194,19 @@ fn worktree_said(ran: Ran) -> Result<Taken<Directory>, Unready> {
             let printed = String::from_utf8_lossy(&stdout);
             let said = printed.strip_suffix('\n').filter(|said| !said.is_empty());
             let Some(said) = said else {
-                return Err(Unready::InDoubt("lune worktree said no worktree".to_owned()));
+                return Err(Unready::InDoubt("luned worktree said no worktree".to_owned()));
             };
             let taken = match said.strip_prefix(MOVED_OFF) {
                 Some(path) => directory(path).map(Taken::MovedOff),
                 None => directory(said).map(Taken::OnBranch),
             };
             taken.ok_or_else(|| {
-                Unready::InDoubt(format!("lune worktree said {said}, which is no directory"))
+                Unready::InDoubt(format!("luned worktree said {said}, which is no directory"))
             })
         },
         Ran::Ended { status, stderr, .. } => match failure(&String::from_utf8_lossy(&stderr)) {
             Some(why) => Err(Unready::Failed(why)),
-            None => Err(Unready::InDoubt(format!("lune worktree: {status}"))),
+            None => Err(Unready::InDoubt(format!("luned worktree: {status}"))),
         },
         Ran::Stuck => Err(Unready::InDoubt(format!(
             "the worktree took longer than {} minutes to make",
@@ -1214,17 +1215,17 @@ fn worktree_said(ran: Ran) -> Result<Taken<Directory>, Unready> {
     }
 }
 
-pub(crate) fn lune() -> Result<PathBuf, String> {
+pub(crate) fn luned() -> Result<PathBuf, String> {
     let this = env::current_exe()
         .map_err(|error| format!("lune cannot tell where it is: {error}"))?;
-    if this.file_name().is_some_and(|name| name == "lune") {
+    if this.file_name().is_some_and(|name| name == LUNED) {
         return Ok(this);
     }
-    let beside = this.with_file_name("lune");
+    let beside = this.with_file_name(LUNED);
     if beside.is_file() {
         return Ok(beside);
     }
-    Err(format!("no lune is beside {}, to make the worktree with", this.display()))
+    Err(format!("no luned is beside {}, to make the worktree with", this.display()))
 }
 
 pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
@@ -1824,7 +1825,7 @@ mod tests {
     #[test]
     fn why_no_worktree_was_made_comes_last_after_what_wt_says_as_it_goes() {
         let stderr = "  pull       #2736 (asking origin for its branch)\n\
-                      lune: wt add: wt cannot fetch origin/feat\n  run git fetch origin feat\n";
+                      luned: wt add: wt cannot fetch origin/feat\n  run git fetch origin feat\n";
         assert_eq!(
             failure(stderr).as_deref(),
             Some("wt add: wt cannot fetch origin/feat, run git fetch origin feat")
@@ -2023,7 +2024,7 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_may_be_made_unless_lune_worktree_said_why_it_failed() {
+    fn a_worktree_may_be_made_unless_luned_worktree_said_why_it_failed() {
         let failed = format!("{WHY}it is not there\n");
         let failed = worktree_said(ended(1, b"", failed.as_bytes()));
         assert_eq!(failed, Err(Unready::Failed("it is not there".to_owned())));

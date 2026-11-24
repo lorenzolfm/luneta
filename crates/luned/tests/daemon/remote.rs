@@ -160,7 +160,7 @@ fn bridge(vars: &Vars) -> String {
 }
 
 fn lune(vars: &Vars, args: &str) -> String {
-    let bridge = vars.command(LUNE);
+    let bridge = vars.command(&LUNE);
     let (mut unset, mut set) = (String::new(), String::new());
     for (name, value) in bridge.get_envs() {
         let name = name.to_str().unwrap();
@@ -169,7 +169,7 @@ fn lune(vars: &Vars, args: &str) -> String {
             Some(value) => write!(set, " {name}={}", quoted(value.to_str().unwrap())).unwrap(),
         }
     }
-    format!("exec env{unset}{set} {} {args}\n", quoted(LUNE))
+    format!("exec env{unset}{set} {} {args}\n", quoted(&LUNE))
 }
 
 fn quoted(text: &str) -> String {
@@ -318,7 +318,7 @@ fn what_another_machine_is_told_to_say_comes_with_its_host() {
     let _here = start(here.vars()).unwrap();
     reached(&here, "far", |_| true);
 
-    let said = answered(far.vars().command(LUNE).args(["say", "over here"]));
+    let said = answered(far.vars().command(&LUNE).args(["say", "over here"]));
     assert!(said.status.success(), "{}", String::from_utf8_lossy(&said.stderr));
 
     let far_host = reached(&here, "far", |far| !far.sayings.is_empty());
@@ -642,7 +642,7 @@ fn lune_ssh_adds_a_machine_and_says_how_luned_reaches_it() {
     let _far = start(far.vars()).unwrap();
     hosts(&here, "nowhere\n");
     let ssh_to = |destination: &str| {
-        let output = here.vars().command(LUNE).args(["ssh", destination]).output().unwrap();
+        let output = here.vars().command(&LUNE).args(["ssh", destination]).output().unwrap();
         let said = String::from_utf8(output.stdout).unwrap();
         (output.status.success(), said, String::from_utf8(output.stderr).unwrap())
     };
@@ -2396,9 +2396,9 @@ fn a_worktree_where_a_pull_request_s_would_go_is_taken_off_its_head_branch() {
         let refused = answer.message().await.unwrap_err();
         assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
         assert!(refused.message().ends_with("feat is already present"), "{refused:?}");
-        let mut lune = far.vars().command(LUNE);
-        luned::local_git(&mut lune);
-        let made = lune.args(["worktree", "--repo"]).arg(&main).arg(pull.url()).output();
+        let mut luned = far.vars().command(LUNED);
+        luned::local_git(&mut luned);
+        let made = luned.args(["worktree", "--repo"]).arg(&main).arg(pull.url()).output();
         let made = made.unwrap();
         let stderr = String::from_utf8_lossy(&made.stderr);
         assert!(!made.status.success(), "{stderr}");

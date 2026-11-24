@@ -75,7 +75,7 @@ pub fn commit(dir: &Path, file: &str, text: &str) {
 }
 
 fn rebased(host: &Host, dir: &Path) -> Output {
-    let mut lune = host.vars().command(LUNE);
+    let mut lune = host.vars().command(&LUNE);
     luned::local_git(&mut lune);
     lune.current_dir(dir).arg("rebase");
     answered(&mut lune)

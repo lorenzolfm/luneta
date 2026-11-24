@@ -88,8 +88,8 @@ impl Default for Kept {
 }
 
 impl Kept {
-    pub fn shared() -> (Self, Option<String>) {
-        match state::path(FILE) {
+    pub fn shared(state: &state::Folder) -> (Self, Option<String>) {
+        match state.path(FILE) {
             Ok(file) => Kept::within(file),
             Err(unset) => (Kept::default(), Some(unset.to_string())),
         }
