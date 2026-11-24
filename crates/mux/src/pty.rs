@@ -30,17 +30,17 @@ const TERM: &str = "xterm-256color";
 
 const OPEN_MAX: u64 = 10_240;
 
-const SIGNAL_KEYS: [(SpecialCodeIndex, Signal, &str); 3] = [
-    (SpecialCodeIndex::VINTR, Signal::INT, "SIGINT"),
-    (SpecialCodeIndex::VQUIT, Signal::QUIT, "SIGQUIT"),
-    (SpecialCodeIndex::VSUSP, Signal::TSTP, "SIGTSTP"),
-];
-
 #[cfg(target_os = "linux")]
 const KEY_TURNED_OFF: u8 = 0;
 
 #[cfg(target_os = "macos")]
 const KEY_TURNED_OFF: u8 = 0xff;
+
+#[cfg(target_os = "linux")]
+const LINE_FULL_BYTES: Option<u64> = Some(4093);
+
+#[cfg(target_os = "macos")]
+const LINE_FULL_BYTES: Option<u64> = None;
 
 static FILES_FOUND: OnceLock<Rlimit> = OnceLock::new();
 
@@ -104,10 +104,7 @@ impl Pty {
         u32::try_from(group.as_raw_nonzero().get()).ok().map(Group)
     }
 
-    pub fn signal_key(&self, typed: &[u8]) -> io::Result<Option<SignalKey>> {
-        let [byte] = *typed else {
-            return Ok(None);
-        };
+    pub fn signal_key(&self, byte: u8) -> io::Result<Option<SignalKey>> {
         if byte == KEY_TURNED_OFF {
             return Ok(None);
         }
@@ -116,13 +113,20 @@ impl Pty {
             return Ok(None);
         }
         let flushes = !modes.local_modes.contains(LocalModes::NOFLSH);
-        let key = SIGNAL_KEYS.iter().find(|(code, ..)| modes.special_codes[*code] == byte);
-        Ok(key.map(|&(_, signal, name)| SignalKey { signal, name, flushes }))
+        let signal = KeySignal::ALL.into_iter().find(|key| modes.special_codes[key.code()] == byte);
+        Ok(signal.map(|signal| SignalKey { signal, flushes }))
     }
 
-    pub fn raise(&self, signal: Signal) -> io::Result<()> {
+    pub fn line_full(&self) -> io::Result<bool> {
+        let Some(full) = LINE_FULL_BYTES else {
+            return Ok(false);
+        };
+        Ok(rustix::io::ioctl_fionread(&self.far)? >= full)
+    }
+
+    pub fn raise(&self, signal: KeySignal) -> io::Result<()> {
         let group = termios::tcgetpgrp(&self.near)?;
-        Ok(rustix::process::kill_process_group(group, signal)?)
+        Ok(rustix::process::kill_process_group(group, signal.signal())?)
     }
 
     pub fn flush_input(&self) -> io::Result<()> {
@@ -156,9 +160,44 @@ impl Pty {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignalKey {
-    pub signal: Signal,
-    pub name: &'static str,
+    pub signal: KeySignal,
     pub flushes: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeySignal {
+    Interrupt,
+    Quit,
+    Suspend,
+}
+
+impl KeySignal {
+    const ALL: [KeySignal; 3] = [KeySignal::Interrupt, KeySignal::Quit, KeySignal::Suspend];
+
+    fn code(self) -> SpecialCodeIndex {
+        match self {
+            KeySignal::Interrupt => SpecialCodeIndex::VINTR,
+            KeySignal::Quit => SpecialCodeIndex::VQUIT,
+            KeySignal::Suspend => SpecialCodeIndex::VSUSP,
+        }
+    }
+
+    fn signal(self) -> Signal {
+        match self {
+            KeySignal::Interrupt => Signal::INT,
+            KeySignal::Quit => Signal::QUIT,
+            KeySignal::Suspend => Signal::TSTP,
+        }
+    }
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            KeySignal::Interrupt => "SIGINT",
+            KeySignal::Quit => "SIGQUIT",
+            KeySignal::Suspend => "SIGTSTP",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +248,8 @@ fn leads(command: &mut Command) -> &mut Command {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use std::io::Write as _;
     use std::num::NonZeroU16;
 
     use super::*;
@@ -233,47 +274,73 @@ mod tests {
         termios::tcsetattr(&pty.far, OptionalActions::Now, &modes).unwrap();
     }
 
-    fn key(signal: Signal, name: &'static str, flushes: bool) -> SignalKey {
-        SignalKey { signal, name, flushes }
+    fn key(signal: KeySignal, flushes: bool) -> SignalKey {
+        SignalKey { signal, flushes }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn typed_far(pty: &Pty, bytes: usize) {
+        let mut near = &pty.near;
+        let mut left = bytes;
+        while left > 0 {
+            left -= near.write(&vec![b'a'; left]).unwrap();
+        }
     }
 
     #[test]
     fn a_signal_key_is_one_byte_the_terminal_signals_on() {
         let pty = opened();
-        assert_eq!(pty.signal_key(b"\x03").unwrap(), Some(key(Signal::INT, "SIGINT", true)));
-        assert_eq!(pty.signal_key(b"\x1c").unwrap(), Some(key(Signal::QUIT, "SIGQUIT", true)));
-        assert_eq!(pty.signal_key(b"\x1a").unwrap(), Some(key(Signal::TSTP, "SIGTSTP", true)));
-        assert_eq!(pty.signal_key(b"\x03\x03").unwrap(), None);
-        assert_eq!(pty.signal_key(b"c").unwrap(), None);
-        assert_eq!(pty.signal_key(b"").unwrap(), None);
+        assert_eq!(pty.signal_key(0x03).unwrap(), Some(key(KeySignal::Interrupt, true)));
+        assert_eq!(pty.signal_key(0x1c).unwrap(), Some(key(KeySignal::Quit, true)));
+        assert_eq!(pty.signal_key(0x1a).unwrap(), Some(key(KeySignal::Suspend, true)));
+        assert_eq!(pty.signal_key(b'c').unwrap(), None);
     }
 
     #[test]
     fn a_signal_key_under_noflsh_keeps_what_waits() {
         let pty = opened();
         changed(&pty, |modes| modes.local_modes.set(LocalModes::NOFLSH, true));
-        assert_eq!(pty.signal_key(b"\x03").unwrap(), Some(key(Signal::INT, "SIGINT", false)));
+        assert_eq!(pty.signal_key(0x03).unwrap(), Some(key(KeySignal::Interrupt, false)));
     }
 
     #[test]
     fn no_key_signals_with_isig_off() {
         let pty = opened();
         changed(&pty, |modes| modes.local_modes.set(LocalModes::ISIG, false));
-        assert_eq!(pty.signal_key(b"\x03").unwrap(), None);
-        assert_eq!(pty.signal_key(b"\x1c").unwrap(), None);
+        assert_eq!(pty.signal_key(0x03).unwrap(), None);
+        assert_eq!(pty.signal_key(0x1c).unwrap(), None);
     }
 
     #[test]
     fn a_key_turned_off_is_a_byte_like_any_other() {
         let pty = opened();
         changed(&pty, |modes| modes.special_codes[SpecialCodeIndex::VINTR] = KEY_TURNED_OFF);
-        assert_eq!(pty.signal_key(&[KEY_TURNED_OFF]).unwrap(), None);
-        assert_eq!(pty.signal_key(b"\x03").unwrap(), None);
-        assert_eq!(pty.signal_key(b"\x1c").unwrap(), Some(key(Signal::QUIT, "SIGQUIT", true)));
+        assert_eq!(pty.signal_key(KEY_TURNED_OFF).unwrap(), None);
+        assert_eq!(pty.signal_key(0x03).unwrap(), None);
+        assert_eq!(pty.signal_key(0x1c).unwrap(), Some(key(KeySignal::Quit, true)));
     }
 
     #[test]
     fn a_signal_raised_on_a_terminal_with_no_front_group_fails() {
-        assert!(opened().raise(Signal::INT).is_err());
+        assert!(opened().raise(KeySignal::Interrupt).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_line_of_input_the_kernel_no_longer_takes_is_full() {
+        let pty = opened();
+        changed(&pty, |modes| {
+            modes.local_modes.set(LocalModes::ICANON, false);
+            modes.local_modes.set(LocalModes::ECHO, false);
+        });
+        typed_far(&pty, 4000);
+        lune_waits::eventually("the kernel takes 4000 bytes", || {
+            (rustix::io::ioctl_fionread(&pty.far).unwrap() == 4000).then_some(())
+        });
+        assert!(!pty.line_full().unwrap());
+        typed_far(&pty, 1000);
+        lune_waits::eventually("the kernel's line fills", || pty.line_full().unwrap().then_some(()));
+        pty.flush_input().unwrap();
+        assert!(!pty.line_full().unwrap());
     }
 }

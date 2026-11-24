@@ -26,10 +26,10 @@ use crate::marks::Mark;
 use crate::mux::Mux;
 use crate::panics::{self, Panicked};
 use crate::process::{self, Group};
-use crate::pty::Pty;
+use crate::pty::{Pty, SignalKey};
 use crate::ran::{Job, Now, Shell};
 use crate::screen::{Answers, Looked, Pushed, Screen, View, Wheel};
-use crate::unread::{Full, Kept, Unread};
+use crate::unread::{Kept, Oldest, Refused, TYPED_BYTES_MAX, Unread};
 
 const SCROLLBACK_BYTES: usize = 10_000_000;
 
@@ -570,14 +570,17 @@ impl Thread {
                 Does::Scroll(_) | Does::Nothing => {},
             }
         }
-        let Program::Runs { .. } = &self.program else {
-            let ended = format!("terminal {}'s program ended", self.key.id);
+        let terminal = self.key.id;
+        let Program::Runs { pty, unread } = &mut self.program else {
+            let ended = format!("terminal {terminal}'s program ended");
             return Err(Status::failed_precondition(ended));
         };
-        self.type_in(&bytes).map_err(|full| {
-            let full =
-                format!("terminal {} has {} typed bytes unread", self.key.id, full.typed_bytes);
-            Status::resource_exhausted(full)
+        type_into(terminal, pty, unread, &bytes).map_err(|refused| {
+            let told = refused_text(terminal, refused);
+            match refused {
+                Refused::Behind { .. } => Status::resource_exhausted(told),
+                Refused::Larger { .. } => Status::invalid_argument(told),
+            }
         })
     }
 
@@ -622,11 +625,11 @@ impl Thread {
         }
         match self.does(input).map_err(io::Error::other)? {
             Does::Write(bytes) => {
-                if let Err(Full { typed_bytes }) = self.type_in(&bytes) {
-                    eprintln!(
-                        "lune-mux: terminal {} has {typed_bytes} typed bytes unread: input dropped",
-                        self.key.id
-                    );
+                let terminal = self.key.id;
+                if let Program::Runs { pty, unread } = &mut self.program
+                    && let Err(refused) = type_into(terminal, pty, unread, &bytes)
+                {
+                    eprintln!("lune-mux: {}: input dropped", refused_text(terminal, refused));
                 }
             },
             Does::Scroll(rows) => self.back(client, Some(rows)),
@@ -658,20 +661,11 @@ impl Thread {
         })
     }
 
-    fn type_in(&mut self, bytes: &[u8]) -> Result<(), Full> {
-        let Program::Runs { pty, unread } = &mut self.program else {
-            return Ok(());
-        };
-        type_into(self.key.id, pty, unread, bytes)
-    }
-
     fn answered(&mut self, answers: &Answers) {
         let Program::Runs { unread, .. } = &mut self.program else {
             return;
         };
-        if unread.answer(answers) == Kept::LostOldest {
-            answers_lost(self.key.id);
-        }
+        answers_lost(self.key.id, unread.answer(answers));
     }
 
     fn back(&mut self, client: ClientId, by: Option<isize>) {
@@ -697,7 +691,8 @@ impl Thread {
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
         let mut pushed = Pushed::Rows(0);
-        let mut lost = false;
+        let mut too_long = 0;
+        let mut oldest = Oldest::Kept;
         while total < most {
             match pty.near.read(&mut self.buffer) {
                 Ok(0) => break,
@@ -705,7 +700,11 @@ impl Thread {
                     total += read;
                     let written =
                         self.screen.write(&self.buffer[..read]).map_err(io::Error::other)?;
-                    lost |= unread.answer(&written.answers) == Kept::LostOldest;
+                    let kept = unread.answer(&written.answers);
+                    too_long += kept.too_long;
+                    if kept.oldest == Oldest::Lost {
+                        oldest = Oldest::Lost;
+                    }
                     marks.extend(written.marks);
                     pushed = pushed.then(written.pushed);
                 },
@@ -719,9 +718,7 @@ impl Thread {
                 Err(error) => return Err(error),
             }
         }
-        if lost {
-            answers_lost(self.key.id);
-        }
+        answers_lost(self.key.id, Kept { too_long, oldest });
         if total == 0 {
             return Ok(());
         }
@@ -846,20 +843,19 @@ fn type_into(
     pty: &Pty,
     unread: &mut Unread,
     bytes: &[u8],
-) -> Result<(), Full> {
-    if unread.is_empty() {
+) -> Result<(), Refused> {
+    let [byte] = *bytes else {
         return unread.type_in(bytes);
-    }
-    let key = match pty.signal_key(bytes) {
+    };
+    let key = match key_behind(pty, unread, byte) {
         Ok(Some(key)) => key,
         Ok(None) => return unread.type_in(bytes),
         Err(error) => {
-            eprintln!("lune-mux: terminal {terminal}'s modes could not be read: {error}");
+            eprintln!("lune-mux: terminal {terminal}'s input could not be read: {error}");
             return unread.type_in(bytes);
         },
     };
-    assert_eq!(bytes.len(), 1, "a signal key is one byte");
-    let signal = key.name;
+    let signal = key.signal.name();
     if let Err(error) = pty.raise(key.signal) {
         eprintln!("lune-mux: terminal {terminal}'s {signal} could not be raised: {error}: typed");
         return unread.type_in(bytes);
@@ -874,8 +870,34 @@ fn type_into(
     Ok(())
 }
 
-fn answers_lost(terminal: TerminalId) {
-    eprintln!("lune-mux: terminal {terminal}'s program reads too few answers: the oldest are lost");
+fn key_behind(pty: &Pty, unread: &Unread, byte: u8) -> io::Result<Option<SignalKey>> {
+    if unread.is_empty() && !pty.line_full()? {
+        return Ok(None);
+    }
+    pty.signal_key(byte)
+}
+
+fn refused_text(terminal: TerminalId, refused: Refused) -> String {
+    match refused {
+        Refused::Behind { typed_bytes } => {
+            format!("terminal {terminal} has {typed_bytes} typed bytes unread")
+        },
+        Refused::Larger { bytes } => {
+            format!("terminal {terminal} takes {TYPED_BYTES_MAX} typed bytes at most, not {bytes}")
+        },
+    }
+}
+
+fn answers_lost(terminal: TerminalId, kept: Kept) {
+    if kept.too_long > 0 {
+        let too_long = kept.too_long;
+        eprintln!("lune-mux: terminal {terminal}'s screen gave {too_long} answers too long to keep");
+    }
+    if kept.oldest == Oldest::Lost {
+        eprintln!(
+            "lune-mux: terminal {terminal}'s program reads too few answers: the oldest are lost"
+        );
+    }
 }
 
 fn foreground(pid: u32) -> Option<api::Foreground> {
@@ -947,7 +969,7 @@ mod tests {
         let columns = NonZeroU16::new(80).unwrap();
         let rows = NonZeroU16::new(24).unwrap();
         let pty = Pty::opened(Size { columns, rows }).unwrap();
-        assert!(pty.signal_key(b"\x03").unwrap().is_some());
+        assert!(pty.signal_key(0x03).unwrap().is_some());
         let mut unread = Unread::default();
         unread.type_in(b"waits").unwrap();
         type_into(TerminalId::next(&mut None), &pty, &mut unread, b"\x03").unwrap();

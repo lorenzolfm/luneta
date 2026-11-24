@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 use libghostty_vt::{Error, Terminal};
@@ -14,7 +16,7 @@ pub(super) struct Answering {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Answers {
     bytes: Vec<u8>,
-    lengths: Vec<usize>,
+    lengths: VecDeque<NonZeroUsize>,
 }
 
 impl Answers {
@@ -31,17 +33,44 @@ impl Answers {
 
     pub fn each(&self) -> impl Iterator<Item = &[u8]> {
         let mut start = 0;
-        self.lengths.iter().map(move |&length| {
-            let answer = &self.bytes[start..start + length];
-            start += length;
+        self.lengths.iter().map(move |length| {
+            let answer = &self.bytes[start..start + length.get()];
+            start += length.get();
             answer
         })
     }
 
-    fn push(&mut self, answer: &[u8]) {
-        assert!(!answer.is_empty(), "an answer of no bytes");
+    pub fn push(&mut self, answer: &[u8]) {
+        let Some(length) = NonZeroUsize::new(answer.len()) else {
+            return;
+        };
         self.bytes.extend_from_slice(answer);
-        self.lengths.push(answer.len());
+        self.lengths.push_back(length);
+    }
+
+    pub fn keep_newest(&mut self, most: usize) -> bool {
+        let mut oldest = 0;
+        while self.bytes.len() - oldest > most {
+            oldest += self.lengths.pop_front().expect("bytes over the bound are answers").get();
+        }
+        self.bytes.drain(..oldest);
+        self.assert_whole();
+        oldest > 0
+    }
+
+    pub fn move_into(&mut self, sending: &mut Vec<u8>) {
+        assert!(sending.is_empty(), "answers moved behind {} bytes", sending.len());
+        std::mem::swap(sending, &mut self.bytes);
+        self.lengths.clear();
+    }
+
+    fn assert_whole(&self) {
+        assert_eq!(self.lengths.is_empty(), self.bytes.is_empty(), "answers of no bytes");
+        debug_assert_eq!(
+            self.lengths.iter().map(|length| length.get()).sum::<usize>(),
+            self.bytes.len(),
+            "answers' lengths and bytes differ"
+        );
     }
 }
 
@@ -54,11 +83,7 @@ impl Answering {
         assert_eq!(terminal.scrollback_max_bytes()?, Some(scrollback_bytes));
         let answers = Rc::new(RefCell::new(Answers::default()));
         let written = Rc::clone(&answers);
-        terminal.on_pty_write(move |_, bytes| {
-            if !bytes.is_empty() {
-                written.borrow_mut().push(bytes);
-            }
-        })?;
+        terminal.on_pty_write(move |_, bytes| written.borrow_mut().push(bytes))?;
         Ok(Answering { terminal, answers })
     }
 
