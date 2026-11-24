@@ -143,7 +143,7 @@ impl Pty {
     }
 
     fn flush(&self) -> io::Result<()> {
-        Ok(termios::tcflush(&self.far, QueueSelector::IFlush)?)
+        Ok(termios::tcflush(&self.far, QueueSelector::IOFlush)?)
     }
 
     pub fn modes(&self) -> io::Result<Modes> {
@@ -292,10 +292,11 @@ fn leads(command: &mut Command) -> &mut Command {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
+    use std::io::{Read as _, Write as _};
     use std::num::NonZeroU16;
 
     use super::*;
+    use crate::asked::Ends;
 
     fn opened() -> Pty {
         let columns = NonZeroU16::new(80).unwrap();
@@ -376,6 +377,49 @@ mod tests {
             assert!(raise.signalled.is_err());
         }
         assert_eq!(rustix::io::ioctl_fionread(&pty.far).unwrap(), 6);
+    }
+
+    #[test]
+    fn a_flushing_raise_leaves_the_programs_output_as_the_kernels_own_key_does() {
+        let by_the_kernel = output_left_after(|pty| (&pty.near).write_all(&[0x03]).unwrap());
+        let by_a_raise = output_left_after(|pty| {
+            let key = pty.signal_key(0x03).unwrap().unwrap();
+            let raise = pty.raise(key);
+            assert_eq!(raise.queue, Queue::Flushed);
+            raise.signalled.unwrap();
+        });
+        assert_eq!(by_a_raise, by_the_kernel);
+    }
+
+    fn output_left_after(interrupted: impl FnOnce(&Pty)) -> usize {
+        let folder = tempfile::tempdir().unwrap();
+        let written = folder.path().join("written");
+        let pty = opened();
+        changed(&pty, |modes| modes.local_modes.set(LocalModes::ECHO, false));
+        let script =
+            "trap 'printf T; sleep 1000' INT; printf %0500d 0; : > \"$0\"; sleep 1000 & wait";
+        let opens = Opens {
+            cwd: "/".to_owned(),
+            program: "/bin/sh".to_owned(),
+            args: vec!["-c".to_owned(), script.to_owned(), written.to_str().unwrap().to_owned()],
+            ends: Ends::Closes,
+        };
+        let mut child = pty.spawned(&opens, &[]).unwrap().child();
+        let output_written = || written.exists().then_some(());
+        lune_waits::eventually("the program's output is written", output_written);
+        interrupted(&pty);
+        let mut left = Vec::new();
+        lune_waits::eventually("the program's trap runs", || {
+            let mut read = [0; 1024];
+            if let Ok(count) = (&pty.near).read(&mut read) {
+                left.extend_from_slice(&read[..count]);
+            }
+            left.ends_with(b"T").then_some(())
+        });
+        let group = rustix::process::Pid::from_child(&child);
+        rustix::process::kill_process_group(group, Signal::KILL).unwrap();
+        child.wait().unwrap();
+        left.len() - 1
     }
 
     #[cfg(target_os = "linux")]
