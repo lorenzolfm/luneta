@@ -15,10 +15,10 @@ use ratatui::text::Line;
 use crate::away::{self, Away};
 use crate::brief::{self, Asking};
 use crate::due::Due;
-use crate::gruvbox;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint, ViewRow, ProjectTarget, Target};
+use crate::moonlight;
 use crate::sidebar::{self, ACCENT};
 
 const TITLE: &str = "Ask";
@@ -294,12 +294,12 @@ impl Ask {
                     let command = sidebar::cut(&plain(command), inner.saturating_sub(5));
                     lines.push(match denied {
                         false => Line::styled(format!("   $ {command}"), dim),
-                        true => Line::styled(format!("   ✗ {command}"), Style::new().fg(gruvbox::RED)),
+                        true => Line::styled(format!("   ✗ {command}"), Style::new().fg(moonlight::RED)),
                     });
                 },
                 Said::Agent(said) => lines.extend(brief::paragraphs(said, inner, Style::new())),
                 Said::Wrong(why) => {
-                    lines.extend(brief::paragraphs(why, inner, Style::new().fg(gruvbox::RED)));
+                    lines.extend(brief::paragraphs(why, inner, Style::new().fg(moonlight::RED)));
                 },
             }
         }
@@ -395,7 +395,7 @@ mod tests {
         }
         ask.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
-            assert!(gruvbox::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
         }
         (0..height)
             .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())

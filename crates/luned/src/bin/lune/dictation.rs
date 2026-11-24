@@ -417,7 +417,7 @@ mod tests {
     use std::sync::mpsc::{Receiver, TryRecvError};
 
     use super::*;
-    use crate::gruvbox;
+    use crate::moonlight;
     use crate::skills::Runs;
 
     fn alt_r(kind: KeyEventKind) -> KeyEvent {
@@ -578,7 +578,7 @@ mod tests {
         }
         dictation.draw(&mut buffer, area, (SystemTime::UNIX_EPOCH, now));
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
-            assert!(gruvbox::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
         }
         (0..height)
             .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())

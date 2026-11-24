@@ -87,7 +87,7 @@ fn side(window: &Window, split: usize) -> Option<Side> {
 
 fn tops(window: &Window) -> Vec<(usize, usize)> {
     let screen = window.screen();
-    let edge = screen.first().and_then(|line| line.chars().position(|it| it == '│'));
+    let edge = screen.first().and_then(|line| line.chars().position(|it| it == '╮'));
     let edge = edge.expect("the sidebar's edge is drawn");
     let tops = screen.iter().enumerate().flat_map(|(row, line)| {
         let right = line.chars().enumerate().skip(edge);
@@ -472,7 +472,7 @@ fn ctrl_h_on_a_project_s_home_gives_the_sidebar_the_keys() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    let row = sidebar_row(&window, "▾ work");
+    let row = sidebar_row(&window, "● work");
     click(&mut window, row);
     eventually("a click on work's row shows its home", || window.shows(UNHOSTED).then_some(()));
     window.send(&format!("{LEFT}?"));
@@ -511,7 +511,7 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
     });
     let left = main + 1;
     let screen = window.screen();
-    let below: String = screen[left].chars().take_while(|it| *it != '│').collect();
+    let below = in_sidebar(&screen[left]);
     assert!(below.contains(" work/main"), "main's first view sits below its row: {screen:?}");
     click(&mut window, left);
     eventually("a click on a view's row focuses it", || {
@@ -537,7 +537,7 @@ fn a_click_on_a_project_s_row_goes_to_its_home_and_one_on_a_worktree_s_back() {
     let used = |id: u64| used(&owned, id);
     window.send(RIGHT);
     eventually("Ctrl l goes to docs", || (used(docs) > used(main)).then_some(()));
-    let row = sidebar_row(&window, "▾ work");
+    let row = sidebar_row(&window, "● work");
     click(&mut window, row);
     eventually("a click on work's row shows its home", || window.shows(UNHOSTED).then_some(()));
     assert!(used(docs) > used(main), "the home goes to no worktree");
@@ -577,7 +577,7 @@ fn a_tie_for_the_worktree_used_last_goes_to_the_first_listed_wherever_lune_picks
     eventually("one's last pane closed, lune goes to the first open of those left", || {
         (gone_to() == [two]).then_some(())
     });
-    let row = sidebar_row(&window, "▾ other");
+    let row = sidebar_row(&window, "● other");
     click(&mut window, row);
     eventually("a click on other's row shows its home", || window.shows(UNHOSTED).then_some(()));
     assert_eq!(gone_to(), [two], "and goes to none of other's worktrees");
@@ -613,7 +613,7 @@ esac
     script(&owned.host.bin().join("claude"), &claude);
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    let row = sidebar_row(&window, "▾ work");
+    let row = sidebar_row(&window, "● work");
     click(&mut window, row);
     eventually("a click on work's row shows its home", || window.shows(UNHOSTED).then_some(()));
     window.send("tackle these\r");
@@ -624,7 +624,7 @@ esac
     eventually("the agent answered while the home was not shown", || {
         home.join("answered").exists().then_some(())
     });
-    let row = sidebar_row(&window, "▾ work");
+    let row = sidebar_row(&window, "● work");
     click(&mut window, row);
     eventually("the home comes back with its talk and the answer", || {
         (window.shows("tackle these") && window.shows("Started all three.")).then_some(())
@@ -649,10 +649,13 @@ esac
 fn sidebar_row(window: &Window, text: &str) -> usize {
     eventually(&format!("the sidebar shows {text:?}"), || {
         window.screen().iter().position(|line| {
-            let sidebar: String = line.chars().take_while(|it| *it != '│').collect();
-            sidebar.contains(text)
+            in_sidebar(line).contains(text)
         })
     })
+}
+
+fn in_sidebar(line: &str) -> String {
+    line.chars().skip_while(|it| *it == '│').take_while(|it| *it != '│').collect()
 }
 
 fn click(window: &mut Window, row: usize) {
