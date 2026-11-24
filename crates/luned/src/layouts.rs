@@ -1310,6 +1310,7 @@ impl Layouts {
         let Layouts { known, listed, errands, troubles, .. } = self;
         let now = Instant::now();
         let mut pastes_due: Vec<(TerminalViewId, TerminalKey, Line)> = Vec::new();
+        let mut given_up_by: Vec<(TerminalViewId, Instant)> = Vec::new();
         for (terminal, known) in known.iter_mut() {
             let Some(remade) = &mut known.remade else {
                 continue;
@@ -1320,7 +1321,11 @@ impl Layouts {
             let is = listed.get(&known.key).map(|listed| &listed.is);
             match pasted(is, *due, *by, now) {
                 Paste::Later => continue,
-                Paste::Now => pastes_due.push((*terminal, known.key, line.clone())),
+                Paste::Now => {
+                    pastes_due.push((*terminal, known.key, line.clone()));
+                    given_up_by.push((*terminal, *by));
+                    continue;
+                },
                 Paste::Never => {
                     let untyped = format!("terminal {terminal}'s last command is not typed");
                     troubles.say(format!("{untyped}, as it ran or runs another program first"));
@@ -1332,8 +1337,16 @@ impl Layouts {
         if pastes_due.is_empty() {
             return;
         }
+        assert_eq!(given_up_by.len(), pastes_due.len(), "each paste due has its last moment");
         let terminals: Vec<TerminalViewId> = pastes_due.iter().map(|(it, ..)| *it).collect();
-        if !errands.paste(pastes_due) {
+        let taken = errands.paste(pastes_due);
+        for (terminal, by) in given_up_by {
+            if taken || now >= by {
+                let remade = known.get_mut(&terminal).and_then(|known| known.remade.as_mut());
+                remade.expect("a paste due is of a terminal remade").restored = None;
+            }
+        }
+        if !taken {
             troubles.say(untyped(&terminals, errands::UNTAKEN));
         }
     }

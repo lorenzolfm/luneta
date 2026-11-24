@@ -6,14 +6,14 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tokio::sync::mpsc::{self, error::TrySendError};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::{Status, Streaming};
 
 use super::api::{self, from_viewer, to_viewer, typed};
 use super::frames::{colours, Frame};
-use super::server::{reached_at, refused, socket, unreached_at, Reached, ASKED_MAX};
+use super::server::{reached_at, refused, socket, unreached_at, Reached, Room, Roomed};
 use super::TerminalKey;
 use crate::api::{frames_request, On, FramesRequest};
 use crate::folder::Folder;
@@ -29,15 +29,6 @@ pub const FRAMES_MAX: usize = 64;
 pub const SAID_MAX: usize = 1024;
 
 const _: () = assert!(LAYOUT_VIEWS_MAX <= SHOWN_MAX);
-
-pub const RELAYED_MAX: usize = 192;
-
-const _: () = assert!(
-    RELAYED_MAX + ASKED_MAX <= lune_protocol::MUX_STREAMS_MAX as usize,
-    "the one connection to lune-mux holds the viewers luned relays and the questions it asks"
-);
-
-static RELAYED: Semaphore = Semaphore::const_new(RELAYED_MAX);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Greeting {
@@ -139,35 +130,20 @@ pub fn start<Told: FnMut(Seen) + Send + 'static>(
     Viewer { outbox, frames }
 }
 
-struct Relaying<S> {
-    heard: S,
-    _relaying: SemaphorePermit<'static>,
-}
-
-impl<S: Stream + Unpin> Stream for Relaying<S> {
-    type Item = S::Item;
-
-    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<S::Item>> {
-        Pin::new(&mut self.heard).poll_next(context)
-    }
-}
-
 pub async fn relayed(
     said: impl Stream<Item = api::FromViewer> + Send + 'static,
 ) -> Result<impl Stream<Item = Result<api::ToViewer, Status>> + Send + 'static, Status> {
-    let most = || format!("luned relays at most {RELAYED_MAX} viewers of lune-mux at once");
-    let relaying = RELAYED.try_acquire().map_err(|_| Status::resource_exhausted(most()))?;
+    let room = Room::relayed()?;
     let socket = socket().map_err(|failure| Status::failed_precondition(failure.to_string()))?;
     let unreached =
         |error: io::Error| Status::unavailable(unreached_at(&socket, &error));
-    let mut streams = match reached_at(&socket).await.map_err(unreached)? {
-        Reached::Matched(matched) => matched.streams(),
+    let streams = match reached_at(&socket).await.map_err(unreached)? {
+        Reached::Matched(matched) => matched.streams(room),
         Reached::Unreached => return Err(Status::unavailable("lune-mux does not run")),
         Reached::Unmatched(unmatched) => return Err(Status::unavailable(unmatched.to_string())),
     };
     let heard = streams.show(said).await.map_err(|status| relayed_from_mux(&status))?;
-    let heard = heard.into_inner().map(|heard| heard.map_err(|status| relayed_from_mux(&status)));
-    Ok(Relaying { heard, _relaying: relaying })
+    Ok(heard.map(|heard| heard.map_err(|status| relayed_from_mux(&status))))
 }
 
 fn relayed_from_mux(status: &Status) -> Status {
@@ -192,16 +168,33 @@ fn untaken() -> String {
     format!("lune-mux has yet to take the last {SAID_MAX} events sent its viewer")
 }
 
+enum Hearing {
+    Mux(Roomed<Streaming<api::ToViewer>>),
+    On(Streaming<api::ToViewer>),
+}
+
+impl Stream for Hearing {
+    type Item = Result<api::ToViewer, Status>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.get_mut() {
+            Hearing::Mux(heard) => Pin::new(heard).poll_next(context),
+            Hearing::On(heard) => Pin::new(heard).poll_next(context),
+        }
+    }
+}
+
 async fn hearing(
     reach: &Reach,
     greeting: Greeting,
     sent: mpsc::Receiver<api::FromViewer>,
-) -> Result<Streaming<api::ToViewer>, String> {
+) -> Result<Hearing, String> {
     let sent = ReceiverStream::new(sent);
-    let heard = match reach {
+    match reach {
         Reach::Mux { socket, runs_in } => {
-            let mut streams = match reached_at(socket).await {
-                Ok(Reached::Matched(matched)) => matched.streams(),
+            let room = Room::relayed().map_err(|status| refused(&status).to_string())?;
+            let streams = match reached_at(socket).await {
+                Ok(Reached::Matched(matched)) => matched.streams(room),
                 Ok(Reached::Unreached) => return Err("lune-mux does not run".to_owned()),
                 Ok(Reached::Unmatched(unmatched)) => return Err(unmatched.to_string()),
                 Err(error) => return Err(unreached_at(socket, &error)),
@@ -209,7 +202,7 @@ async fn hearing(
             let hello = from_viewer::Event::Hello(greeting.greeted(*runs_in));
             let first = api::FromViewer { event: Some(hello) };
             let heard = streams.show(tokio_stream::once(first).chain(sent)).await;
-            heard.map_err(|status| refused(&status).to_string())
+            heard.map(Hearing::Mux).map_err(|status| refused(&status).to_string())
         },
         Reach::On { luned, destination } => {
             let reached = crate::connect(luned, crate::ANSWER).await;
@@ -219,10 +212,10 @@ async fn hearing(
             let first = FramesRequest { event: Some(frames_request::Event::Hello(hello)) };
             let said = |said| FramesRequest { event: Some(frames_request::Event::Said(said)) };
             let heard = daemon.frames(tokio_stream::once(first).chain(sent.map(said))).await;
-            heard.map_err(|status| said_by_luned(&status))
+            let heard = heard.map_err(|status| said_by_luned(&status))?;
+            Ok(Hearing::On(heard.into_inner()))
         },
-    };
-    heard.map(tonic::Response::into_inner)
+    }
 }
 
 async fn stream(
@@ -270,7 +263,8 @@ async fn stream(
 mod tests {
     use tonic::Code;
 
-    use super::{relayed, RELAYED, RELAYED_MAX};
+    use super::relayed;
+    use crate::mux::own::server::{RELAYED, RELAYED_MAX};
 
     #[test]
     fn luned_refuses_to_relay_a_viewer_past_the_most_it_relays_at_once() {

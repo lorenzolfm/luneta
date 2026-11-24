@@ -20,8 +20,9 @@ pub fn start() -> Result<(), String> {
 
 #[must_use]
 pub fn shared() -> Handle {
-    let unstarted = || built().expect("a process that started no tasks builds them at once");
-    let runtime = SHARED.get_or_init(unstarted);
+    #[cfg(test)]
+    start().expect("a test builds lune's tasks as it first hands one over");
+    let runtime = SHARED.get().expect("a process starts lune's tasks before it hands one over");
     let handle = runtime.handle().clone();
     assert_eq!(handle.runtime_flavor(), RuntimeFlavor::MultiThread, "a task may block in place");
     handle

@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind, IoSlice};
@@ -19,6 +19,7 @@ use rustix::process::{Pid, Signal};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
 use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio_stream::Stream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::{Code, Response, Status, Streaming};
 use tower::service_fn;
@@ -70,9 +71,18 @@ const KEPT_MAX: usize = 16;
 
 pub const ASKED_MAX: usize = 64;
 
-static ASKED: Semaphore = Semaphore::const_new(ASKED_MAX);
+pub const RELAYED_MAX: usize = 192;
 
-static KEPT: Mutex<VecDeque<(PathBuf, Matched)>> = Mutex::new(VecDeque::new());
+const _: () = assert!(
+    RELAYED_MAX + ASKED_MAX <= lune_protocol::MUX_STREAMS_MAX as usize,
+    "the one connection to lune-mux holds the viewers luned relays and the questions it asks"
+);
+
+pub(super) static ASKED: Semaphore = Semaphore::const_new(ASKED_MAX);
+
+pub(super) static RELAYED: Semaphore = Semaphore::const_new(RELAYED_MAX);
+
+static KEPT: Mutex<BTreeMap<PathBuf, Matched>> = Mutex::new(BTreeMap::new());
 
 static MATCHED: AtomicI32 = AtomicI32::new(0);
 
@@ -118,47 +128,86 @@ pub(super) enum Reached {
     Unmatched(Unmatched),
 }
 
+#[derive(Clone, Default)]
+struct Gone(Arc<AtomicBool>);
+
+impl Gone {
+    fn mark(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn is(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Matched {
     channel: Channel,
-    gone: Arc<AtomicBool>,
+    gone: Gone,
 }
 
 impl Matched {
-    pub(super) fn streams(self) -> Streams {
-        Streams(MuxClient::new(self.channel))
-    }
-
-    fn is_gone(&self) -> bool {
-        self.gone.load(Ordering::Relaxed)
+    pub(super) fn streams(self, room: Room) -> Streams {
+        Streams { client: MuxClient::new(self.channel), room }
     }
 }
 
 fn kept(socket: &Path) -> Option<Matched> {
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
-    kept.retain(|(_, matched)| !matched.is_gone());
+    kept.retain(|_, matched| !matched.gone.is());
     assert!(kept.len() <= KEPT_MAX, "luned keeps at most {KEPT_MAX} channels to lune-mux");
-    let mut at_socket = kept.iter().filter(|(at, _)| at == socket);
-    let matched = at_socket.next().map(|(_, matched)| matched.clone());
-    assert!(at_socket.next().is_none(), "luned keeps one channel to each lune-mux");
-    matched
+    kept.get(socket).cloned()
 }
 
 fn keep(socket: &Path, matched: &Matched) {
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
-    kept.retain(|(at, held)| at != socket && !held.is_gone());
-    if kept.len() == KEPT_MAX {
-        kept.pop_front();
+    kept.retain(|_, held| !held.gone.is());
+    if kept.len() == KEPT_MAX && !kept.contains_key(socket) {
+        kept.pop_first();
     }
-    kept.push_back((socket.to_owned(), matched.clone()));
+    kept.insert(socket.to_owned(), matched.clone());
     assert!(kept.len() <= KEPT_MAX, "luned keeps at most {KEPT_MAX} channels to lune-mux");
-    let at_socket = kept.iter().filter(|(at, _)| at == socket).count();
-    assert_eq!(at_socket, 1, "luned keeps one channel to each lune-mux");
 }
 
-fn asked_room() -> Result<SemaphorePermit<'static>, Status> {
-    let most = || format!("luned asks lune-mux at most {ASKED_MAX} questions at once");
-    ASKED.try_acquire().map_err(|_| Status::resource_exhausted(most()))
+pub(super) struct Room {
+    _held: SemaphorePermit<'static>,
+}
+
+impl Room {
+    pub(super) fn asked() -> Result<Room, Status> {
+        let most = || format!("luned asks lune-mux at most {ASKED_MAX} questions at once");
+        Room::taken(&ASKED, most)
+    }
+
+    pub(super) fn relayed() -> Result<Room, Status> {
+        let most = || format!("luned relays at most {RELAYED_MAX} viewers of lune-mux at once");
+        Room::taken(&RELAYED, most)
+    }
+
+    fn taken(budget: &'static Semaphore, most: impl FnOnce() -> String) -> Result<Room, Status> {
+        let held = budget.try_acquire().map_err(|_| Status::resource_exhausted(most()))?;
+        Ok(Room { _held: held })
+    }
+}
+
+pub(super) struct Roomed<S> {
+    heard: S,
+    _room: Room,
+}
+
+impl<T> Roomed<Streaming<T>> {
+    pub(super) async fn message(&mut self) -> Result<Option<T>, Status> {
+        self.heard.message().await
+    }
+}
+
+impl<S: Stream + Unpin> Stream for Roomed<S> {
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<S::Item>> {
+        Pin::new(&mut self.heard).poll_next(context)
+    }
 }
 
 pub(super) async fn reached_at(socket: &Path) -> io::Result<Reached> {
@@ -176,13 +225,13 @@ pub(super) async fn reached_at(socket: &Path) -> io::Result<Reached> {
 
 struct Tracked {
     stream: UnixStream,
-    gone: Arc<AtomicBool>,
+    gone: Gone,
 }
 
 impl Tracked {
     fn marked<T>(&self, polled: Poll<io::Result<T>>) -> Poll<io::Result<T>> {
         if let Poll::Ready(Err(_)) = &polled {
-            self.gone.store(true, Ordering::Relaxed);
+            self.gone.mark();
         }
         polled
     }
@@ -198,7 +247,7 @@ impl AsyncRead for Tracked {
         let polled = Pin::new(&mut self.stream).poll_read(cx, buf);
         let ended = matches!(polled, Poll::Ready(Ok(()))) && room > 0;
         if ended && buf.filled().len() == before {
-            self.gone.store(true, Ordering::Relaxed);
+            self.gone.mark();
         }
         self.marked(polled)
     }
@@ -233,35 +282,42 @@ impl AsyncWrite for Tracked {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.gone.store(true, Ordering::Relaxed);
+        self.gone.mark();
         Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 
 impl Drop for Tracked {
     fn drop(&mut self) {
-        self.gone.store(true, Ordering::Relaxed);
+        self.gone.mark();
     }
 }
 
-pub(super) struct Streams(MuxClient<Channel>);
+pub(super) struct Streams {
+    client: MuxClient<Channel>,
+    room: Room,
+}
 
 impl Streams {
     pub(super) async fn show(
-        &mut self,
+        self,
         words: impl tonic::IntoStreamingRequest<Message = api::FromViewer>,
-    ) -> Result<Response<Streaming<api::ToViewer>>, Status> {
-        self.0.show(words).await
+    ) -> Result<Roomed<Streaming<api::ToViewer>>, Status> {
+        let Streams { mut client, room } = self;
+        let heard = client.show(words).await?.into_inner();
+        Ok(Roomed { heard, _room: room })
     }
 
-    async fn watch(&mut self) -> Result<Response<Streaming<api::Watched>>, Status> {
-        self.0.watch(api::WatchRequest {}).await
+    async fn watch(self) -> Result<Roomed<Streaming<api::Watched>>, Status> {
+        let Streams { mut client, room } = self;
+        let heard = client.watch(api::WatchRequest {}).await?.into_inner();
+        Ok(Roomed { heard, _room: room })
     }
 }
 
 struct Server {
     client: MuxClient<Within<Channel>>,
-    gone: Arc<AtomicBool>,
+    gone: Gone,
 }
 
 impl Server {
@@ -300,9 +356,18 @@ impl Server {
     where
         F: Future<Output = Result<Response<T>, Status>>,
     {
-        let _room = asked_room()?;
+        let _room = Room::asked()?;
         let answer = asking(self.client.clone()).await;
         self.went(answer).map(Response::into_inner)
+    }
+
+    async fn shown(
+        &self,
+        words: impl tonic::IntoStreamingRequest<Message = api::FromViewer>,
+    ) -> Result<Roomed<Streaming<api::ToViewer>>, Status> {
+        let room = Room::asked()?;
+        let heard = self.went(self.client.clone().show(words).await)?.into_inner();
+        Ok(Roomed { heard, _room: room })
     }
 
     fn ask<T, F>(&self, asking: impl FnOnce(MuxClient<Within<Channel>>) -> F) -> Result<T, Status>
@@ -316,7 +381,7 @@ impl Server {
         if let Err(status) = &answer
             && status.code() == Code::Unavailable
         {
-            self.gone.store(true, Ordering::Relaxed);
+            self.gone.mark();
         }
         answer
     }
@@ -465,8 +530,8 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
         },
         Err(error) => return Err(error),
     };
-    let gone = Arc::new(AtomicBool::new(false));
-    let first = Tracked { stream: first, gone: Arc::clone(&gone) };
+    let gone = Gone::default();
+    let first = Tracked { stream: first, gone: gone.clone() };
     let first = Arc::new(Mutex::new(Some(first)));
     let channel = Endpoint::from_static("http://lune-mux")
         .connect_timeout(CONNECT)
@@ -569,8 +634,8 @@ pub fn followed(
 ) -> Result<Followed, Failure> {
     let at = Instant::now();
     let tasks = tasks::shared();
-    let mut streams = match reached_here_blocking()? {
-        Reached::Matched(matched) => matched.streams(),
+    let matched = match reached_here_blocking()? {
+        Reached::Matched(matched) => matched,
         Reached::Unreached => return Ok(Followed::Unreached { at }),
         Reached::Unmatched(unmatched) if unmatched.is_newer() => {
             return Ok(Followed::Newer(unmatched.left_be()));
@@ -580,10 +645,10 @@ pub fn followed(
             return Ok(Followed::Unmatched);
         },
     };
-    let _room = asked_room().map_err(|status| refused(&status))?;
+    let streams = matched.streams(Room::asked().map_err(|status| refused(&status))?);
     let since = Instant::now();
     let watched = tasks.block_on(streams.watch());
-    let mut stream = watched.map_err(|status| refused(&status))?.into_inner();
+    let mut stream = watched.map_err(|status| refused(&status))?;
     loop {
         let watched = tasks.block_on(stream.message());
         let listing = match heard(watched.map_err(|status| refused(&status))?, since)? {
@@ -728,12 +793,10 @@ impl Terminals {
         }
         assert_eq!(words.len(), pastes.len() + 2, "a hello, a showing and one word per paste");
         let refusals_max = 2 * pastes.len();
-        let _room = asked_room().map_err(|status| refused(&status))?;
         let server = server().await?;
-        let mut client = server.client.clone();
         let deadline = tokio::time::Instant::now() + ANSWER;
-        let shown = server.went(client.show(tokio_stream::iter(words)).await);
-        let mut heard = shown.map_err(|status| refused(&status))?.into_inner();
+        let shown = server.shown(tokio_stream::iter(words)).await;
+        let mut heard = shown.map_err(|status| refused(&status))?;
         let drained = async move {
             let mut reasons = Vec::new();
             while let Some(word) = heard.message().await? {
@@ -1008,7 +1071,7 @@ mod tests {
         let taken = listener.accept();
         assert!(taken.is_err(), "a channel kept takes no connection more");
         drop(accepted);
-        lune_waits::eventually("luned sees its connection go", || first.is_gone().then_some(()));
+        lune_waits::eventually("luned sees its connection go", || first.gone.is().then_some(()));
         let _fresh = matched();
         lune_waits::eventually("luned connects again", || listener.accept().ok());
     }
@@ -1018,12 +1081,12 @@ mod tests {
         let _entered = crate::tasks::shared().enter();
         let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
         ours.set_nonblocking(true).unwrap();
-        let gone = Arc::new(AtomicBool::new(false));
+        let gone = Gone::default();
         let stream = UnixStream::from_std(ours).unwrap();
-        let tracked = Tracked { stream, gone: Arc::clone(&gone) };
-        assert!(!gone.load(Ordering::Relaxed), "a connection held is not gone");
+        let tracked = Tracked { stream, gone: gone.clone() };
+        assert!(!gone.is(), "a connection held is not gone");
         drop(tracked);
-        assert!(gone.load(Ordering::Relaxed), "a connection let go of without a word is gone");
+        assert!(gone.is(), "a connection let go of without a word is gone");
     }
 
     #[test]
@@ -1045,7 +1108,7 @@ mod tests {
         assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
         let said = format!("at most {ASKED_MAX} questions");
         assert!(refused.message().contains(&said), "{}", refused.message());
-        assert!(!server.gone.load(Ordering::Relaxed), "a question refused here leaves the channel");
+        assert!(!server.gone.is(), "a question refused here leaves the channel");
         drop(held);
     }
 
