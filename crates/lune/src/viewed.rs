@@ -971,9 +971,7 @@ impl Viewed {
     }
 
     fn unwatch(&mut self) {
-        if let Some(watcher) = self.watcher.take() {
-            watcher.viewer.give_up("lune lets go of its viewer".to_owned());
-        }
+        self.watcher = None;
         self.layout.screens.clear();
     }
 

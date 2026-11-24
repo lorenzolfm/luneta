@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -385,21 +385,33 @@ fn talk(
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(words.as_bytes());
     }
+    let unread = |child: &mut Child, error: io::Error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        Some(Err(format!("no thread reads what claude says: {error}")))
+    };
     let stdout = child.stdout.take().expect("its stdout is piped");
     let (said, lines) = mpsc::channel();
-    thread::spawn(move || {
+    let reading = thread::Builder::new().name("claude says".to_owned()).spawn(move || {
         for line in BufReader::new(stdout).lines() {
             if said.send(line).is_err() {
                 return;
             }
         }
     });
+    if let Err(error) = reading {
+        return unread(&mut child, error);
+    }
     let stderr = child.stderr.take().expect("its stderr is piped");
-    let stderr = thread::spawn(move || {
+    let stderr = thread::Builder::new().name("claude's stderr".to_owned()).spawn(move || {
         let mut said = Vec::new();
         let _ = stderr.take(program::SAID_MAX).read_to_end(&mut said);
         said
     });
+    let stderr = match stderr {
+        Ok(stderr) => stderr,
+        Err(error) => return unread(&mut child, error),
+    };
     let deadline = Instant::now() + TURN;
     let (mut ended, mut spoke) = (None, false);
     loop {

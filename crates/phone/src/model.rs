@@ -1,23 +1,34 @@
 use std::collections::HashMap;
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::SystemTime;
+
+use lune_protocol::made::Made;
 
 use crate::api::{self, project, projects, remote, terminal, worktree};
 use crate::api::project::clone;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+#[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
+#[uniffi::export(Eq, Hash)]
 pub struct TerminalKey {
-    pub id: u32,
-    pub made_at: SystemTime,
+    on: Option<String>,
+    id: NonZeroU32,
+    made: Made,
 }
 
 impl TerminalKey {
-    fn of(key: &api::TerminalKey) -> Option<TerminalKey> {
-        let made_at = SystemTime::try_from(key.made_at?).ok()?;
-        Some(TerminalKey { id: key.id, made_at })
+    fn of(on: Option<&str>, said: &api::TerminalKey) -> Result<Arc<TerminalKey>, String> {
+        let id = NonZeroU32::new(said.id).ok_or("0 is no terminal's id")?;
+        let made = said.made_at.ok_or_else(|| format!("terminal {id} has no made_at"))?;
+        let made = Made::read(made).map_err(|why| format!("terminal {id}'s made_at: {why}"))?;
+        let key = TerminalKey { on: on.map(str::to_owned), id, made };
+        assert_eq!(key.to_api().1, *said);
+        Ok(Arc::new(key))
     }
 
-    pub(crate) fn to_api(self) -> api::TerminalKey {
-        api::TerminalKey { id: self.id, made_at: Some(self.made_at.into()) }
+    pub(crate) fn to_api(&self) -> (Option<api::On>, api::TerminalKey) {
+        let on = self.on.clone().map(|destination| api::On { destination });
+        (on, api::TerminalKey { id: self.id.get(), made_at: Some(self.made.into()) })
     }
 }
 
@@ -109,24 +120,44 @@ pub enum Seen {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct View {
     pub id: u64,
-    pub terminal: Option<TerminalKey>,
+    pub found: Found,
     pub name: Option<String>,
     pub topic: Option<String>,
     pub command: Option<String>,
     pub folder: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[uniffi::export(Eq, Hash)]
+pub enum Found {
+    Key { key: Arc<TerminalKey> },
+    Lost,
+    Looking,
+    Unread { why: String },
+    Untold,
+}
+
+impl View {
+    fn key(&self) -> Option<&Arc<TerminalKey>> {
+        match &self.found {
+            Found::Key { key } => Some(key),
+            Found::Lost | Found::Looking | Found::Unread { .. } | Found::Untold => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+#[uniffi::export(Eq, Hash)]
 pub struct Agent {
     pub on: Option<String>,
-    pub terminal: Option<TerminalKey>,
+    pub terminal: Option<Arc<TerminalKey>>,
     pub name: String,
     pub placed: Option<Placed>,
     pub status: Status,
     pub since: Option<SystemTime>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct Placed {
     pub project: u64,
     pub project_name: String,
@@ -134,7 +165,7 @@ pub struct Placed {
     pub worktree_name: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum Status {
     Busy,
     Idle,
@@ -144,7 +175,7 @@ pub enum Status {
     Untold,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum Why {
     Permission,
     Input,
@@ -233,7 +264,7 @@ fn held_of(seat: &Seat<'_>) -> Held {
         .collect();
     match seat.projects.and_then(|projects| projects.held.as_ref()) {
         Some(projects::Held::Kept(kept)) => {
-            let projects = kept.projects.iter().map(|it| project_of(it, &branches)).collect();
+            let projects = kept.projects.iter().map(|it| project_of(seat.on, it, &branches)).collect();
             Held::Kept { projects }
         },
         Some(projects::Held::Unkept(why)) => Held::Unkept { why: why.clone() },
@@ -241,13 +272,17 @@ fn held_of(seat: &Seat<'_>) -> Held {
     }
 }
 
-fn project_of(project: &api::Project, branches: &HashMap<&str, &str>) -> Project {
+fn project_of(
+    on: Option<&str>,
+    project: &api::Project,
+    branches: &HashMap<&str, &str>,
+) -> Project {
     let holds = match &project.holds {
         Some(project::Holds::Folder(worktree)) => {
-            Holds::Folder { worktree: worktree_of(worktree, branches) }
+            Holds::Folder { worktree: worktree_of(on, worktree, branches) }
         },
         Some(project::Holds::Clone(clone)) => {
-            let worktrees = clone.worktrees.iter().map(|it| worktree_of(it, branches)).collect();
+            let worktrees = clone.worktrees.iter().map(|it| worktree_of(on, it, branches)).collect();
             let unopened = match &clone.listing {
                 Some(clone::Listing::Unopened(unopened)) => {
                     Unopened::Listed { subfolders: unopened.subfolders.clone() }
@@ -268,7 +303,11 @@ fn project_of(project: &api::Project, branches: &HashMap<&str, &str>) -> Project
     }
 }
 
-fn worktree_of(worktree: &api::Worktree, branches: &HashMap<&str, &str>) -> Worktree {
+fn worktree_of(
+    on: Option<&str>,
+    worktree: &api::Worktree,
+    branches: &HashMap<&str, &str>,
+) -> Worktree {
     let seen = match worktree.seen {
         Some(worktree::Seen::Missing(())) => Seen::Missing,
         Some(worktree::Seen::Unread(())) => Seen::Unread,
@@ -289,18 +328,23 @@ fn worktree_of(worktree: &api::Worktree, branches: &HashMap<&str, &str>) -> Work
         folder: worktree.folder.clone(),
         branch: branches.get(worktree.folder.as_str()).map(|&branch| branch.to_owned()),
         seen,
-        views: worktree.terminals.iter().map(view_of).collect(),
+        views: worktree.terminals.iter().map(|it| view_of(on, it)).collect(),
     }
 }
 
-fn view_of(view: &api::Terminal) -> View {
-    let terminal = match &view.found {
-        Some(terminal::Found::Key(key)) => TerminalKey::of(key),
-        Some(terminal::Found::Lost(()) | terminal::Found::Looking(())) | None => None,
+fn view_of(on: Option<&str>, view: &api::Terminal) -> View {
+    let found = match &view.found {
+        Some(terminal::Found::Key(key)) => match TerminalKey::of(on, key) {
+            Ok(key) => Found::Key { key },
+            Err(why) => Found::Unread { why },
+        },
+        Some(terminal::Found::Lost(())) => Found::Lost,
+        Some(terminal::Found::Looking(())) => Found::Looking,
+        None => Found::Untold,
     };
     View {
         id: view.id,
-        terminal,
+        found,
         name: view.name.clone(),
         topic: view.titled.as_ref().and_then(|titled| titled.topic.clone()),
         command: view.command.clone(),
@@ -309,12 +353,12 @@ fn view_of(view: &api::Terminal) -> View {
 }
 
 fn agent_of(seat: &Seat<'_>, held: &Held, agent: &api::Agent) -> Agent {
-    let terminal = agent.terminal.as_ref().and_then(TerminalKey::of);
-    let placed = match (held, terminal) {
+    let terminal = agent.terminal.as_ref().and_then(|key| TerminalKey::of(seat.on, key).ok());
+    let placed = match (held, &terminal) {
         (Held::Kept { projects }, Some(terminal)) => projects
             .iter()
             .flat_map(|project| project.holds.worktrees().iter().map(move |it| (project, it)))
-            .find(|(_, worktree)| worktree.views.iter().any(|it| it.terminal == Some(terminal)))
+            .find(|(_, worktree)| worktree.views.iter().any(|it| it.key() == Some(terminal)))
             .map(|(project, worktree)| Placed {
                 project: project.id,
                 project_name: project.name.clone(),
@@ -461,14 +505,15 @@ mod tests {
             worktree_name: "feat".to_owned(),
         };
         assert_eq!(agent.placed, Some(placed));
-        assert_eq!(agent.terminal.map(|it| it.id), Some(8));
+        assert_eq!(agent.terminal.as_ref().map(|it| it.id.get()), Some(8));
+        assert_eq!(agent.terminal.as_ref().map(|it| it.to_api()), Some((None, key(8))));
         let Held::Kept { projects } = &model.here else {
             panic!("the projects are kept: {:?}", model.here);
         };
         let Holds::Clone { worktrees, .. } = &projects[0].holds else {
             panic!("the project is a clone: {:?}", projects[0].holds);
         };
-        assert_eq!(worktrees[1].views[0].terminal, agent.terminal);
+        assert_eq!(worktrees[1].views[0].key(), agent.terminal.as_ref());
     }
 
     #[test]
@@ -488,6 +533,31 @@ mod tests {
             panic!("the projects are kept");
         };
         assert_eq!(projects[0].holds.worktrees()[0].branch.as_deref(), Some("issue-723"));
+    }
+
+    #[test]
+    fn a_terminal_key_names_the_machine_its_terminal_runs_on() {
+        let made = key(17);
+        let here = TerminalKey::of(None, &made).unwrap();
+        let far = TerminalKey::of(Some("far"), &made).unwrap();
+        assert_eq!(here.to_api(), (None, made));
+        assert_eq!(far.to_api(), (Some(api::On { destination: "far".to_owned() }), made));
+        assert_ne!(here, far, "terminal 17 here is not terminal 17 on far");
+    }
+
+    #[test]
+    fn a_view_says_whether_its_terminal_is_found_lost_looked_for_or_unread() {
+        let found = |found| view_of(Some("far"), &api::Terminal { found, ..api::Terminal::default() }).found;
+        let three = TerminalKey::of(Some("far"), &key(3)).unwrap();
+        assert_eq!(found(Some(terminal::Found::Key(key(3)))), Found::Key { key: three });
+        assert_eq!(found(Some(terminal::Found::Lost(()))), Found::Lost);
+        assert_eq!(found(Some(terminal::Found::Looking(()))), Found::Looking);
+        assert_eq!(found(None), Found::Untold);
+        let unmade = [api::TerminalKey { made_at: None, ..key(3) }, key(0)];
+        for unmade in unmade {
+            let unread = found(Some(terminal::Found::Key(unmade)));
+            assert!(matches!(unread, Found::Unread { .. }), "{unmade:?}: {unread:?}");
+        }
     }
 
     #[test]

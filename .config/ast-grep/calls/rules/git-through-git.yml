@@ -1,0 +1,39 @@
+id: git-through-git
+language: rust
+files:
+  - crates/*/src/**
+ignores:
+  - crates/luned/src/git.rs
+message: >-
+  Run git through luned::git::Git: it turns core.fsmonitor off, opens a bare
+  repository only when named by --git-dir, never prompts on a terminal,
+  drops the GIT_* variables that point at a repository, takes the
+  subcommand first so no flag reaches git's own options, takes only
+  literal flags, and puts --end-of-options before the refs and paths
+  given to Git::named, so a branch named -x is read as a branch, not as
+  rebase's --exec. No constant, binding or array holds "git" either, as
+  Command::new would start it from there unseen.
+rule:
+  any:
+    - kind: call_expression
+      all:
+        - has:
+            field: function
+            regex: (^|::)Command::new$
+        - has:
+            field: arguments
+            has:
+              kind: string_literal
+              regex: ^"git"$
+              stopBy: end
+    - kind: string_literal
+      regex: ^"git"$
+      any:
+        - inside:
+            kind: const_item
+        - inside:
+            kind: static_item
+        - inside:
+            kind: let_declaration
+        - inside:
+            kind: array_expression

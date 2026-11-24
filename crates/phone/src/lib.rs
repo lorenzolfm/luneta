@@ -9,8 +9,8 @@ pub mod waits;
 
 pub use crate::core::{tailnet_name, Asking, Conversation, Core, Observer, TACKLE};
 pub use crate::model::{
-    Agent, Far, Held, Holds, Model, Placed, Project, Reached, Seen, Status, TerminalKey, Unopened,
-    View, Why, Worktree,
+    Agent, Far, Found, Held, Holds, Model, Placed, Project, Reached, Seen, Status, TerminalKey,
+    Unopened, View, Why, Worktree,
 };
 pub use crate::unanswered::{Refusals, Unanswered};
 pub use crate::verbs::{

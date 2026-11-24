@@ -7,7 +7,7 @@ use clap::Parser;
 use luned::helper::Helper;
 use luned::log::{self, Process};
 use luned::projects::{self, Unheld};
-use luned::{folder, release, Claim, Refusal};
+use luned::{folder, panics, release, Claim, Refusal};
 use rustix::io::FdFlags;
 
 #[derive(Parser)]
@@ -34,11 +34,7 @@ fn main() -> ExitCode {
         return helper.run();
     }
     let unkept = log::start(Process::Luned).err();
-    let default = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic| {
-        log::panicked(panic);
-        default(panic);
-    }));
+    let hooked = panics::abort_on_panic();
     if args.detached
         && let Err(error) = close_inherited()
     {
@@ -83,7 +79,7 @@ fn main() -> ExitCode {
         },
     };
     let socket = claim.socket().to_owned();
-    if let Err(error) = runtime.block_on(luned::serve(claim, kept, unkept)) {
+    if let Err(error) = runtime.block_on(luned::serve(hooked, claim, kept, unkept)) {
         log::say(&format!("{}: {error}", socket.display()));
         return ExitCode::FAILURE;
     }

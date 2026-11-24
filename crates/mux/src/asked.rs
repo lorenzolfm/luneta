@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU16;
 use std::path::Path;
-use std::time::SystemTime;
 
 use libghostty_vt::key::{self as keys, Mods};
 use libghostty_vt::mouse;
+use lune_protocol::made::Made;
 use tonic::Status;
 
 use crate::api;
@@ -194,7 +194,7 @@ impl Colours {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TerminalKey {
     pub id: TerminalId,
-    pub made: SystemTime,
+    pub made: Made,
 }
 
 impl TerminalKey {
@@ -202,8 +202,7 @@ impl TerminalKey {
         let key = present(field, key)?;
         let id = TerminalId::parse(&format!("{field}.id"), key.id)?;
         let made_at = format!("{field}.made_at");
-        let made = SystemTime::try_from(present(&made_at, key.made_at)?)
-            .map_err(|why| refused(&made_at, why))?;
+        let made = Made::read(present(&made_at, key.made_at)?).map_err(|why| refused(&made_at, why))?;
         Ok(TerminalKey { id, made })
     }
 

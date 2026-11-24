@@ -24,6 +24,7 @@ pub mod log;
 pub mod mux;
 pub mod names;
 mod owns;
+pub mod panics;
 mod pi;
 pub mod printed;
 mod process;

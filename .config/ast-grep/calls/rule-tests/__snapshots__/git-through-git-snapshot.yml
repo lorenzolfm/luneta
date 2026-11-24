@@ -1,0 +1,132 @@
+id: git-through-git
+snapshots:
+  "const GIT: &str = \"git\";":
+    labels:
+    - source: "\"git\""
+      style: primary
+      start: 18
+      end: 23
+    - source: "const GIT: &str = \"git\";"
+      style: secondary
+      start: 0
+      end: 24
+  "fn f() { let [program, args @ ..] = [\"git\", \"status\"]; }":
+    labels:
+    - source: "\"git\""
+      style: primary
+      start: 37
+      end: 42
+    - source: "[\"git\", \"status\"]"
+      style: secondary
+      start: 36
+      end: 53
+  "fn f() { let mut git = Command::new(\"git\"); }":
+    labels:
+    - source: Command::new("git")
+      style: primary
+      start: 23
+      end: 42
+    - source: Command::new
+      style: secondary
+      start: 23
+      end: 35
+    - source: "\"git\""
+      style: secondary
+      start: 36
+      end: 41
+    - source: "\"git\""
+      style: secondary
+      start: 36
+      end: 41
+  "fn f() { let mut git = Command::new(\"git\".to_owned()); }":
+    labels:
+    - source: Command::new("git".to_owned())
+      style: primary
+      start: 23
+      end: 53
+    - source: Command::new
+      style: secondary
+      start: 23
+      end: 35
+    - source: "\"git\""
+      style: secondary
+      start: 36
+      end: 41
+    - source: "\"git\""
+      style: secondary
+      start: 36
+      end: 41
+  "fn f() { let mut git = Command::new(OsStr::new(\"git\")); }":
+    labels:
+    - source: Command::new(OsStr::new("git"))
+      style: primary
+      start: 23
+      end: 54
+    - source: Command::new
+      style: secondary
+      start: 23
+      end: 35
+    - source: "\"git\""
+      style: secondary
+      start: 47
+      end: 52
+    - source: "\"git\""
+      style: secondary
+      start: 47
+      end: 52
+  "fn f() { let mut git = process::Command::new(\"git\"); }":
+    labels:
+    - source: process::Command::new("git")
+      style: primary
+      start: 23
+      end: 51
+    - source: process::Command::new
+      style: secondary
+      start: 23
+      end: 44
+    - source: "\"git\""
+      style: secondary
+      start: 45
+      end: 50
+    - source: "\"git\""
+      style: secondary
+      start: 45
+      end: 50
+  "fn f() { let mut git = std::process::Command::new(\"git\"); }":
+    labels:
+    - source: std::process::Command::new("git")
+      style: primary
+      start: 23
+      end: 56
+    - source: std::process::Command::new
+      style: secondary
+      start: 23
+      end: 49
+    - source: "\"git\""
+      style: secondary
+      start: 50
+      end: 55
+    - source: "\"git\""
+      style: secondary
+      start: 50
+      end: 55
+  "fn f() { let program = \"git\"; }":
+    labels:
+    - source: "\"git\""
+      style: primary
+      start: 23
+      end: 28
+    - source: let program = "git";
+      style: secondary
+      start: 9
+      end: 29
+  "static GIT: &str = \"git\";":
+    labels:
+    - source: "\"git\""
+      style: primary
+      start: 19
+      end: 24
+    - source: "static GIT: &str = \"git\";"
+      style: secondary
+      start: 0
+      end: 25

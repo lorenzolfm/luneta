@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroU32;
-use std::panic;
 use std::process::Command;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -17,6 +16,7 @@ use crate::api::list_work_response::{
 };
 use crate::api::ListWorkResponse;
 use crate::directory::Directory;
+use crate::panics::{self, Panicked};
 use crate::projects::{Dir, PROJECTS_MAX};
 use crate::{git, issues, program};
 
@@ -245,11 +245,12 @@ impl Listings {
             Seen::Unlisted => slots.run(dir, now)?,
         }
         drop(slots);
-        let listed = panic::catch_unwind(|| listed_by_gh(dir));
+        let listed = panics::contained(|| listed_by_gh(dir));
         let kept = listed.as_ref().ok().map(|listed| (Instant::now(), listed.clone()));
         locked(&self.slots).ran(dir, kept);
         self.done.notify_all();
-        listed.unwrap_or_else(|panic| panic::resume_unwind(panic))
+        let panicked = |Panicked| Err(format!("gh's listing of the work in {} panicked", dir.as_str()));
+        listed.unwrap_or_else(panicked)
     }
 
     fn list_waited<'a>(
@@ -378,9 +379,8 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
         return Ok(Listed::Unhosted);
     }
     let folder = dir.as_str().to_owned();
-    let pulls = thread::Builder::new()
-        .name("work-pulls".to_owned())
-        .spawn(move || gh::<ListedPull>(&folder, &PULLS, PULL_FIELDS))
+    let named = thread::Builder::new().name("work-pulls".to_owned());
+    let pulls = panics::spawn(named, move || gh::<ListedPull>(&folder, &PULLS, PULL_FIELDS))
         .map_err(|error| format!("no thread to list pull requests in: {error}"))?;
     let asked = Instant::now();
     let issue = |ListedIssue { number, title, labels }: ListedIssue| {
@@ -392,7 +392,9 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
         Ok((issues, more)) => Ok((Issues::Open(issues.into_iter().map(issue).collect()), more)),
         Err(unlisted) => issues_off(dir.as_str(), asked, unlisted).map(|()| (Issues::Off, false)),
     };
-    let pulls = pulls.join().unwrap_or_else(|panic| panic::resume_unwind(panic));
+    let pulls = pulls.join().unwrap_or_else(|Panicked| {
+        Err(format!("gh's listing of the pull requests in {} panicked", dir.as_str()))
+    });
     let (issues, more_issues) = issues?;
     let (pulls, more_pulls) = pulls?;
     let pulls = pulls.into_iter().map(|pull| {

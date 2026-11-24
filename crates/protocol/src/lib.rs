@@ -1,5 +1,6 @@
 pub mod git;
 pub mod github;
+pub mod made;
 pub mod release;
 pub mod process;
 pub mod said;

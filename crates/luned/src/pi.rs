@@ -165,11 +165,16 @@ fn install(pi: &Path, lune: &Path) -> io::Result<()> {
 fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<File>> {
     let file: File = serde_json::from_slice(&file_text(path)?)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    let stands = match &file.proc_start {
-        Some(recorded) => recorded == start,
-        None => started <= fs::metadata(path)?.modified()? + DATED_LATE,
+    let stands = if let Some(recorded) = &file.proc_start {
+        recorded == start
+    } else {
+        dated_since(fs::metadata(path)?.modified()?, started)
     };
     Ok(stands.then_some(file))
+}
+
+fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
+    modified.checked_add(DATED_LATE).is_none_or(|late| started <= late)
 }
 
 fn agent(pid: u32, file: File, process: Process) -> Agent {
@@ -184,5 +189,29 @@ fn agent(pid: u32, file: File, process: Process) -> Agent {
         name: None,
         entrypoint: file.mode.and_then(|mode| Said::new(mode.trim().to_owned())),
         terminal: process.terminal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::{dated_since, DATED_LATE};
+
+    #[test]
+    fn a_file_dated_since_its_process_started_stands() {
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        assert!(dated_since(started, started));
+        assert!(dated_since(started - DATED_LATE, started), "a file dated a little late stands");
+        let earlier = started - DATED_LATE - Duration::from_nanos(1);
+        assert!(!dated_since(earlier, started), "a file from an earlier process does not");
+    }
+
+    #[test]
+    fn a_file_dated_at_the_last_time_there_is_stands() {
+        let secs = u64::try_from(i64::MAX).unwrap();
+        let last = SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, 999_999_999)).unwrap();
+        assert_eq!(last.checked_add(DATED_LATE), None, "nothing is later than the last time");
+        assert!(dated_since(last, SystemTime::now()));
     }
 }

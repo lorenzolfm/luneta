@@ -24,7 +24,7 @@ struct ProjectView: View {
                 ForEach(project.holds.worktrees, id: \.id) { worktree in
                     Section {
                         ForEach(worktree.views, id: \.id) { view in
-                            ViewRow(view: view, machine: seat.machine, failed: $failed)
+                            ViewRow(view: view, failed: $failed)
                         }
                         if worktree.views.isEmpty {
                             Text("No views").foregroundStyle(.secondary)
@@ -130,30 +130,29 @@ private struct WorktreeHeader: View {
 
 private struct ViewRow: View {
     let view: LuneView
-    let machine: String?
     @Binding var failed: String?
     @Environment(Luned.self) private var luned
     @State private var closing = false
 
     var body: some View {
-        let agent = view.terminal.flatMap { luned.agent(at: Seat(machine: machine, terminal: $0)) }
+        let agent = view.key.flatMap { luned.agent(at: $0) }
         Group {
-            if let agent, let seat = agent.seat {
-                NavigationLink(value: seat) {
+            if let agent, let terminal = agent.terminal {
+                NavigationLink(value: terminal) {
                     row(status: agent.status.words, waits: agent.waits)
                 }
             } else {
-                row(status: view.command, waits: false)
+                row(status: view.found.words ?? view.command, waits: false)
             }
         }
         .swipeActions {
-            if let terminal = view.terminal {
+            if let terminal = view.key {
                 Button("Close", role: .destructive) {
                     precondition(!closing)
                     closing = true
                     Task {
                         do {
-                            try await luned.close(terminal, on: machine)
+                            try await luned.close(terminal)
                         } catch {
                             failed = reason(error)
                         }
