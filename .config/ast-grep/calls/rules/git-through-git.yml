@@ -7,9 +7,11 @@ ignores:
 message: >-
   Run git through luned::git::Git: it turns core.fsmonitor off, opens a bare
   repository only when named by --git-dir, never prompts on a terminal,
-  drops the GIT_* variables that point at a repository, and puts
-  --end-of-options before the refs and paths given to Git::named, so a
-  branch named -x is read as a branch, not as rebase's --exec.
+  drops the GIT_* variables that point at a repository, takes the
+  subcommand first so no flag reaches git's own options, takes only
+  literal flags, and puts --end-of-options before the refs and paths
+  given to Git::named, so a branch named -x is read as a branch, not as
+  rebase's --exec.
 rule:
   kind: call_expression
   all:

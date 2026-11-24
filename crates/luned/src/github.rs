@@ -615,7 +615,7 @@ fn located(branches: &BTreeMap<String, String>) -> BTreeMap<Branch, Vec<String>>
     let mut on: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
     for (dir, branch) in branches {
         if let git::Common::Of(repository) = git::common(dir) {
-            on.entry((repository, branch.clone())).or_default().push(dir.clone());
+            on.entry((repository.into(), branch.clone())).or_default().push(dir.clone());
         }
     }
     on

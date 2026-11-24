@@ -15,6 +15,11 @@ impl Directory {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[must_use]
+    pub fn child(&self, name: &str) -> Directory {
+        Directory(format!("{}/{name}", self.0.trim_end_matches('/')))
+    }
 }
 
 impl fmt::Display for Directory {

@@ -119,7 +119,7 @@ pub fn rebase(dir: &Directory, expected: Option<&str>) -> Result<Rebased, Unreba
 }
 
 fn ready(dir: &Directory, expected: Option<&str>, until: Instant) -> Result<Ready, String> {
-    let top = says(dir.as_str(), &["rev-parse", "--show-toplevel"], until)?;
+    let top = says(dir.as_str(), "rev-parse", &["--show-toplevel"], &[], until)?;
     if top.is_empty() {
         return Err(format!("{dir} is in no worktree of a repository"));
     }
@@ -165,9 +165,14 @@ fn pulled(top: &str, branch: &str, until: Instant) -> Result<Option<Pulled>, Str
         Common::Of(common) => common,
         Common::NoRepository => return Err(format!("{top} is in no repository")),
         Common::Unsaid(why) => return Err(format!("git did not say whose {top} is: {why}")),
+        Common::BareUnread(bare) => {
+            return Err(format!("{top} is in {}", Common::bare_unread(&bare)));
+        },
+        Common::Gone => return Err(format!("{top} is gone")),
     };
     let unasked = |why| format!("no telling whether {branch} has a pull request open: {why}");
-    let pulled = github::Asker::default().pull_of(top, &repository, branch).map_err(unasked)?;
+    let pulled = github::Asker::default().pull_of(top, repository.as_str(), branch);
+    let pulled = pulled.map_err(unasked)?;
     let open = |pulled: &Pulled| matches!(pulled.pull_request.state, State::Open | State::Draft);
     Ok(pulled.filter(open))
 }
@@ -195,8 +200,8 @@ fn based(
 }
 
 fn named_branch(top: &str, name: &str, until: Instant) -> Result<Option<NamedBranch>, String> {
-    let mut git = Git::at(top);
-    git.args(["check-ref-format", &format!("refs/heads/{name}")]);
+    let mut git = Git::at(top, "check-ref-format");
+    git.branch_ref(name);
     let ran = git.run(left(until, GIT_SAYS)?)
         .map_err(|error| format!("git check-ref-format could not be run: {error}"))?;
     match ran {
@@ -218,16 +223,22 @@ fn left(until: Instant, most: Duration) -> Result<Duration, String> {
     Ok(cmp::min(left, most))
 }
 
-fn says(dir: &str, args: &[&str], until: Instant) -> Result<String, String> {
-    git::says_within(dir, args, left(until, GIT_SAYS)?)
+fn says(
+    dir: &str,
+    command: &'static str,
+    args: &[&'static str],
+    names: &[&str],
+    until: Instant,
+) -> Result<String, String> {
+    git::says_within(dir, command, args, names, left(until, GIT_SAYS)?)
 }
 
 fn under_way(top: &str, until: Instant) -> Result<Option<Doing>, String> {
-    let mut asked = vec!["rev-parse"];
+    let mut asked = Vec::new();
     for (path, _) in UNDER_WAY {
         asked.extend(["--git-path", path]);
     }
-    let said = says(top, &asked, until)?;
+    let said = says(top, "rev-parse", &asked, &[], until)?;
     let paths: Vec<&str> = said.lines().collect();
     if paths.len() != UNDER_WAY.len() {
         return Err(format!("git rev-parse said {} paths of {}", paths.len(), UNDER_WAY.len()));
@@ -246,29 +257,29 @@ fn found(top: &str, path: &str) -> Result<bool, String> {
 }
 
 fn branch(top: &str, until: Instant) -> Result<Option<String>, String> {
-    let head = says(top, &["rev-parse", "--symbolic-full-name", "HEAD"], until)?;
+    let head = says(top, "rev-parse", &["--symbolic-full-name", "HEAD"], &[], until)?;
     Ok(head.strip_prefix("refs/heads/").filter(|branch| !branch.is_empty()).map(str::to_owned))
 }
 
 fn committed(top: &str, until: Instant) -> Result<bool, String> {
-    let asked = ["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"];
-    let said = says(top, &[asked.as_slice(), &["--ignore-submodules"]].concat(), until)?;
+    let asked = ["--porcelain", "--untracked-files=no", "--ignore-submodules"];
+    let said = says(top, "status", &asked, &[], until)?;
     Ok(said.is_empty())
 }
 
 fn tip(top: &str, branch: &str, until: Instant) -> Result<String, String> {
-    says(top, &["rev-parse", "--verify", &format!("refs/heads/{branch}")], until)
+    says(top, "rev-parse", &["--verify"], &[&format!("refs/heads/{branch}")], until)
 }
 
 fn ahead(top: &str, reference: &str, branch: &str, until: Instant) -> Result<u32, String> {
     let counted = format!("{reference}..refs/heads/{branch}");
-    let said = says(top, &["rev-list", "--count", &counted], until)?;
+    let said = says(top, "rev-list", &["--count"], &[&counted], until)?;
     said.parse().map_err(|_| format!("git rev-list counted {said}, which is no count"))
 }
 
 fn picked(top: &str, onto: &str, branch: &str, until: Instant) -> Result<Picked, Unrebased> {
-    let mut git = Git::at(top);
-    git.arg("rebase").env("GIT_EDITOR", ":").env("GIT_SEQUENCE_EDITOR", ":");
+    let mut git = Git::at(top, "rebase");
+    git.env("GIT_EDITOR", ":").env("GIT_SEQUENCE_EDITOR", ":");
     let limit = left(until, PICKING).map_err(Unrebased::Refused)?;
     let ran = git.named([onto, branch]).run_alone(limit).map_err(|error| {
         Unrebased::Refused(format!("git rebase could not be run: {error}"))
@@ -295,8 +306,8 @@ fn picked(top: &str, onto: &str, branch: &str, until: Instant) -> Result<Picked,
 }
 
 fn stopped_at(top: &str, until: Instant) -> Result<Option<String>, String> {
-    let mut git = Git::at(top);
-    git.args(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"]);
+    let mut git = Git::at(top, "rev-parse");
+    git.args(["--verify", "--quiet", "REBASE_HEAD"]);
     let ran = git.run(left(until, GIT_SAYS)?)
         .map_err(|error| format!("git rev-parse could not be run: {error}"))?;
     if let Ran::Ended { status, stdout, .. } = &ran
@@ -306,12 +317,12 @@ fn stopped_at(top: &str, until: Instant) -> Result<Option<String>, String> {
         return Ok(None);
     }
     ran.answer().map_err(|why| format!("git rev-parse REBASE_HEAD in {top}: {why}"))?;
-    let asked = ["log", "-1", "--no-show-signature", "--format=%h %s", "REBASE_HEAD", "--"];
-    says(top, &asked, until).map(Some)
+    let asked = ["-1", "--no-show-signature", "--format=%h %s", "REBASE_HEAD", "--"];
+    says(top, "log", &asked, &[], until).map(Some)
 }
 
 fn conflicted(top: &str, until: Instant) -> Result<Conflicted, String> {
-    let said = says(top, &["ls-files", "--unmerged", "-z"], until)?;
+    let said = says(top, "ls-files", &["--unmerged", "-z"], &[], until)?;
     if said.is_empty() {
         return Ok(Conflicted::of(Vec::new()));
     }
@@ -496,13 +507,8 @@ mod tests {
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let mut git = Git::at(dir);
-        git.env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-            .args(["-c", "maintenance.auto=false", "-c", "init.defaultBranch=main"])
-            .args(args);
-        let said = git.run(Duration::from_mins(1)).unwrap().answer();
+        let args = [["-c", "init.defaultBranch=main"].as_slice(), args].concat();
+        let said = git::scratch(dir, &args);
         let said = said.unwrap_or_else(|why| panic!("git {args:?} in {}: {why}", dir.display()));
         String::from_utf8(said).unwrap().trim_end().to_owned()
     }

@@ -472,8 +472,8 @@ fn unread(dir: &Directory) -> Vec<String> {
 }
 
 fn ignored(dir: &Directory) -> Result<Vec<u8>, String> {
-    let mut git = git::Git::at(dir.as_str());
-    git.args(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]);
+    let mut git = git::Git::at(dir.as_str(), "ls-files");
+    git.args(["-z", "--others", "--ignored", "--exclude-standard", "--directory"]);
     match git.run(GIT).map_err(|error| unrun_in("git", None, &error))? {
         Ran::Ended { status, stdout, .. } if status.success() => Ok(stdout),
         Ran::Ended { status, stderr, .. } => Err(refused(&stderr, status)),
@@ -759,8 +759,7 @@ mod tests {
         assert_eq!(rules("/w/n", b".env\0\xff.env\0"), ["Read(//w/n/**)"]);
         let bare = tempfile::tempdir().unwrap();
         let real = bare.path().canonicalize().unwrap().display().to_string();
-        let mut git = git::Git::at(&real);
-        git.args(["init", "--quiet", "--bare"]).run(GIT).unwrap().answer().unwrap();
+        git::scratch(&real, &["init", "--quiet", "--bare"]).unwrap();
         let all = denied(&format!("{real}/"));
         assert!(unread(&Directory::parse(real).unwrap()).contains(&all), "{all}");
         let file = settings(&["Read(//w/n/.env)".to_owned()]).unwrap();

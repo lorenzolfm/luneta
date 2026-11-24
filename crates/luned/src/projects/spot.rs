@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use super::{Dir, Subfolder, WORKTREES_MAX};
+use crate::directory::Directory;
 use crate::git::{self, Common, Git};
 use crate::program::Ran;
 
@@ -42,6 +43,10 @@ impl Spot {
             Common::Unsaid(why) => {
                 return Err(format!("git did not say what repository {} is in: {why}", folder.0));
             },
+            Common::BareUnread(bare) => {
+                return Err(format!("{} is in {}", folder.0, Common::bare_unread(&bare)));
+            },
+            Common::Gone => return Err(format!("{} is gone", folder.0)),
         };
         let top = toplevel(folder, until, look)?;
         match clone_within(&common, until, look)? {
@@ -157,8 +162,8 @@ pub fn subfolders(root: &Dir, look: Duration) -> Result<BTreeSet<Subfolder>, Str
 }
 
 fn listed(root: &Dir, until: Instant, look: Duration) -> Result<BTreeSet<Subfolder>, String> {
-    let mut git = Git::of(format!("{}/{BARE}", root.0));
-    git.args(["worktree", "list", "--porcelain", "-z"]).env("LC_ALL", "C");
+    let mut git = Git::of(&Directory::from(root).child(BARE), "worktree");
+    git.args(["list", "--porcelain", "-z"]);
     let said = ran(&mut git, "worktree list", until, look)?;
     porcelain(root, &said)
 }
@@ -172,8 +177,8 @@ fn left(until: Instant, look: Duration) -> Result<Duration, String> {
 }
 
 fn toplevel(folder: &Dir, until: Instant, look: Duration) -> Result<Option<Dir>, String> {
-    let mut git = Git::at(folder.as_str());
-    git.args(["rev-parse", "--is-inside-work-tree", "--show-toplevel"]).env("LC_ALL", "C");
+    let mut git = Git::at(folder.as_str(), "rev-parse");
+    git.args(["--is-inside-work-tree", "--show-toplevel"]);
     let stdout = match git.run(left(until, look)?) {
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => stdout,
         Ok(Ran::Ended { .. }) => return Ok(None),
@@ -195,13 +200,13 @@ fn ran(git: &mut Git, asked: &str, until: Instant, look: Duration) -> Result<Vec
     ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
 
-pub fn clone_of(common: &str, look: Duration) -> Result<CloneRoot, String> {
+pub fn clone_of(common: &Directory, look: Duration) -> Result<CloneRoot, String> {
     clone_within(common, Instant::now() + look, look)
 }
 
-fn clone_within(common: &str, until: Instant, look: Duration) -> Result<CloneRoot, String> {
-    let mut git = Git::of(common);
-    git.args(["config", "--type=bool", "--get", "core.bare"]).env("LC_ALL", "C");
+fn clone_within(common: &Directory, until: Instant, look: Duration) -> Result<CloneRoot, String> {
+    let mut git = Git::of(common, "config");
+    git.args(["--type=bool", "--get", "core.bare"]);
     let ran = git.run(left(until, look)?);
     let ran = ran.map_err(|error| format!("git config core.bare did not run: {error}"))?;
     Ok(clone_root(common, bare(ran)?))
@@ -223,11 +228,11 @@ fn bare(ran: Ran) -> Result<bool, String> {
     }
 }
 
-fn clone_root(common: &str, bare: bool) -> CloneRoot {
+fn clone_root(common: &Directory, bare: bool) -> CloneRoot {
     if !bare {
         return CloneRoot::Worked;
     }
-    let bare = Path::new(common);
+    let bare = Path::new(common.as_str());
     if bare.file_name().and_then(|name| name.to_str()) != Some(BARE) {
         return CloneRoot::NoBare;
     }
@@ -284,6 +289,9 @@ mod tests {
 
     #[test]
     fn a_clone_s_root_is_the_folder_that_holds_its_bare_repository() {
+        let clone_root = |common: &str, bare| {
+            clone_root(&Directory::parse(common.to_owned()).unwrap(), bare)
+        };
         assert_eq!(clone_root("/w/lune/.bare", true), CloneRoot::Of(dir("/w/lune")));
         assert_eq!(clone_root("/w/lune/.bare", false), CloneRoot::Worked);
         assert_eq!(clone_root("/w/lune/.git", false), CloneRoot::Worked);
@@ -322,9 +330,7 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let mut git = Git::at(dir);
-        git.args(args).env("GIT_CONFIG_GLOBAL", "/dev/null");
-        let said = git.run(Duration::from_mins(1)).unwrap().answer();
+        let said = git::scratch(dir, args);
         assert!(said.is_ok(), "git {args:?} in {}: {said:?}", dir.display());
     }
 

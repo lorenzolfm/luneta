@@ -3,8 +3,7 @@ use crate::v1;
 
 const DETACHED: &str = "(detached)";
 
-pub const STATUS: [&str; 5] =
-    ["--no-optional-locks", "status", "--porcelain=v2", "--branch", "--show-stash"];
+pub const STATUS: [&str; 3] = ["--porcelain=v2", "--branch", "--show-stash"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitStatus {

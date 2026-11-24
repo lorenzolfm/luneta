@@ -61,8 +61,8 @@ fn viewed(link: &Link) -> Result<Viewed, String> {
 
 pub(crate) fn fetch(dir: &str, remote: &str, base: &str, limit: Duration) -> Result<(), String> {
     let base = format!("+refs/heads/{base}:refs/remotes/{remote}/{base}");
-    let mut git = Git::at(dir);
-    git.configured(&NOTHING_OF_THE_TREE).args(["fetch", "--no-tags"]);
+    let mut git = Git::at(dir, "fetch");
+    git.configured(&NOTHING_OF_THE_TREE).arg("--no-tags");
     let ran = git
         .named([remote, &base])
         .run_alone(limit)
@@ -75,14 +75,14 @@ fn trusting_no_tree(command: &mut Command) -> &mut Command {
 }
 
 fn here(dir: &str) -> Result<String, String> {
-    let mut git = Git::at(dir);
-    git.args(["rev-parse", "--verify", "HEAD"]);
+    let mut git = Git::at(dir, "rev-parse");
+    git.args(["--verify", "HEAD"]);
     said(git.run(ANSWER)).ok_or_else(|| "git did not say what HEAD is".to_owned())
 }
 
 fn top(dir: &str) -> Result<String, String> {
-    let mut git = Git::at(dir);
-    git.args(["rev-parse", "--show-toplevel"]);
+    let mut git = Git::at(dir, "rev-parse");
+    git.arg("--show-toplevel");
     said(git.run(ANSWER)).ok_or_else(|| "git did not say where the worktree's top is".to_owned())
 }
 
