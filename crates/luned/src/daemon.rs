@@ -941,12 +941,11 @@ impl Daemon for Host {
             return Ok(Response::new(Box::pin(answer)));
         }
         let unopenable = |why: String| Status::invalid_argument(format!("opens: {why}"));
-        let agent = |opens: &api::Opens| matches!(opens.runs, Some(api::opens::Runs::Agent(_)));
-        let agent_asked = opens.as_ref().is_some_and(agent);
         let opens = match opens {
             None => Opens::Shell,
             opens @ Some(_) => Opens::of_api(opens).map_err(unopenable)?,
         };
+        let agent_asked = matches!(opens, Opens::Agent(_));
         let layouts = self.layouts.clone();
         let answer = late(move || {
             let root = match rooted(&layouts, project)? {

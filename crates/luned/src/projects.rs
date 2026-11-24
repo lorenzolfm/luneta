@@ -27,7 +27,7 @@ pub use file::{forget, holder, kept, take, Changed, Elsewhere, Failed, Forgotten
 pub use file::{Opened, Store, Unheld};
 pub use layout::{Size, FRAME_CELLS, LAYOUT_VIEWS_MAX};
 pub use spot::{clone_of, subfolders, CloneRoot, Spot, CLONE_WORKTREES_MAX, LOOK as SPOT_LOOK};
-pub use view::{quoted, Argv, Arranged, Layout, Line, Opens, Placed, Runs, Session};
+pub use view::{quoted, Argv, Arranged, Layout, Line, Opens, Placed, Prompted, Runs, Session};
 pub use view::{Focus, Shape};
 pub use view::{Terminal, TerminalViewId};
 pub use view::View;

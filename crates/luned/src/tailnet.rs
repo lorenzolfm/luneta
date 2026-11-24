@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt;
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
@@ -158,16 +159,31 @@ struct Peer {
     tags: Vec<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct Device {
     user: UserId,
     id: DeviceId,
     name: String,
 }
 
+impl Device {
+    fn line(&self) -> String {
+        let name = self.name.trim_end_matches('.').escape_debug().to_string();
+        let line = if name.is_empty() { self.id.to_string() } else { format!("{} {name}", self.id) };
+        assert!(!line.chars().any(char::is_control), "{line:?} goes into luned.log as one line");
+        line
+    }
+}
+
 pub struct Admitted {
     stream: TcpStream,
-    epoch: watch::Receiver<()>,
+    listened: Listened,
     _connection: OwnedSemaphorePermit,
+}
+
+enum Listened {
+    On(Pin<Box<dyn Future<Output = ()> + Send>>),
+    Ended,
 }
 
 #[derive(Default)]
@@ -346,9 +362,9 @@ async fn accept(listener: TcpListener, admission: Admission) {
         tokio::spawn(async move {
             let (tailscaled, devices_file) = (admission.tailscaled, &*admission.devices_file);
             match admits(tailscaled, devices_file, &admission.machine, peer).await {
-                Ok(()) => {
-                    let epoch = admission.epoch.clone();
-                    let admitted = Admitted { stream, epoch, _connection: connection };
+                Ok(device) => {
+                    log::say(&format!("{peer} is admitted as {}", device.line()));
+                    let admitted = Admitted::new(stream, admission.epoch.clone(), connection);
                     let _ = admission.admitted.send(Ok(admitted)).await;
                 },
                 Err(why) => log::say(&format!("{peer} is turned away: {why}")),
@@ -369,7 +385,7 @@ async fn admits(
     devices_file: &Path,
     machine: &Machine,
     peer: SocketAddr,
-) -> Result<(), String> {
+) -> Result<Device, String> {
     let Ok(address) = TailnetAddress::try_from(peer.ip()) else {
         return Err("it is not on the tailnet".to_owned());
     };
@@ -383,12 +399,9 @@ async fn admits(
         return Err(format!("it is {}'s, and luned answers only {user}", device.user));
     }
     if allowed_in(devices_file).await?.lets_in(&device.id) {
-        return Ok(());
+        return Ok(device);
     }
-    let Device { id, name, .. } = device;
-    let name = name.trim_end_matches('.').escape_debug().to_string();
-    let line = if name.is_empty() { id.to_string() } else { format!("{id} {name}") };
-    let devices_file = devices_file.display();
+    let (devices_file, line) = (devices_file.display(), device.line());
     Err(format!("it is not in {devices_file}; the line \"{line}\" there lets it in"))
 }
 
@@ -472,9 +485,17 @@ fn device_of(body: &[u8]) -> Result<Device, String> {
 }
 
 impl Admitted {
-    fn ended(&self) -> io::Result<()> {
-        if self.epoch.has_changed().is_ok() {
-            return Ok(());
+    fn new(stream: TcpStream, mut epoch: watch::Receiver<()>, connection: OwnedSemaphorePermit) -> Admitted {
+        let unlistened = async move { while epoch.changed().await.is_ok() {} };
+        Admitted { stream, listened: Listened::On(Box::pin(unlistened)), _connection: connection }
+    }
+
+    fn ended(&mut self, context: &mut Context<'_>) -> io::Result<()> {
+        if let Listened::On(unlistened) = &mut self.listened {
+            if unlistened.as_mut().poll(context).is_pending() {
+                return Ok(());
+            }
+            self.listened = Listened::Ended;
         }
         let why = "the machine it was admitted for is no longer listened on";
         Err(io::Error::new(io::ErrorKind::ConnectionAborted, why))
@@ -487,10 +508,11 @@ impl AsyncRead for Admitted {
         context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if let Err(error) = self.ended() {
+        let admitted = self.get_mut();
+        if let Err(error) = admitted.ended(context) {
             return Poll::Ready(Err(error));
         }
-        Pin::new(&mut self.get_mut().stream).poll_read(context, buffer)
+        Pin::new(&mut admitted.stream).poll_read(context, buffer)
     }
 }
 
@@ -500,10 +522,11 @@ impl AsyncWrite for Admitted {
         context: &mut Context<'_>,
         buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if let Err(error) = self.ended() {
+        let admitted = self.get_mut();
+        if let Err(error) = admitted.ended(context) {
             return Poll::Ready(Err(error));
         }
-        Pin::new(&mut self.get_mut().stream).poll_write(context, buffer)
+        Pin::new(&mut admitted.stream).poll_write(context, buffer)
     }
 
     fn poll_write_vectored(
@@ -511,10 +534,11 @@ impl AsyncWrite for Admitted {
         context: &mut Context<'_>,
         buffers: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        if let Err(error) = self.ended() {
+        let admitted = self.get_mut();
+        if let Err(error) = admitted.ended(context) {
             return Poll::Ready(Err(error));
         }
-        Pin::new(&mut self.get_mut().stream).poll_write_vectored(context, buffers)
+        Pin::new(&mut admitted.stream).poll_write_vectored(context, buffers)
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -522,10 +546,11 @@ impl AsyncWrite for Admitted {
     }
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if let Err(error) = self.ended() {
+        let admitted = self.get_mut();
+        if let Err(error) = admitted.ended(context) {
             return Poll::Ready(Err(error));
         }
-        Pin::new(&mut self.get_mut().stream).poll_flush(context)
+        Pin::new(&mut admitted.stream).poll_flush(context)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -544,6 +569,7 @@ impl Connected for Admitted {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
 
@@ -646,7 +672,7 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let connection = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
             let (epoch, admitted_in) = watch::channel(());
-            let mut admitted = Admitted { stream, epoch: admitted_in, _connection: connection };
+            let mut admitted = Admitted::new(stream, admitted_in, connection);
             device.write_all(b"ping").await.unwrap();
             let mut read = [0; 4];
             admitted.read_exact(&mut read).await.unwrap();
@@ -654,6 +680,26 @@ mod tests {
             drop(epoch);
             assert_eq!(admitted.read(&mut read).await.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
             assert_eq!(admitted.write(b"pong").await.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+            assert_eq!(admitted.read(&mut read).await.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+        });
+    }
+
+    #[test]
+    fn a_connection_waiting_to_read_ends_once_its_machine_is_no_longer_listened_on() {
+        runtime().block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let _device = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let connection = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+            let (epoch, admitted_in) = watch::channel(());
+            let mut admitted = Admitted::new(stream, admitted_in, connection);
+            let reading = tokio::spawn(async move { admitted.read(&mut [0; 4]).await });
+            tokio::task::yield_now().await;
+            assert!(!reading.is_finished(), "the device sent nothing, so the read waits");
+            drop(epoch);
+            let read = lune_waits::awaited("the read ends with the epoch, not with the next byte", reading).await;
+            let read = read.unwrap();
+            assert_eq!(read.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
         });
     }
 
@@ -755,7 +801,9 @@ mod tests {
             let unlisted = |line: &str| format!("it is not in {}; the line \"{line}\" there lets it in", file.display());
             assert_eq!(admits("100.101.2.4:51000").await, Err(unlisted("nPhone4CNTRL phone.tail1.ts.net")));
             std::fs::write(&file, "nPhone4CNTRL my phone\nnTheirs5CNTRL\nnServer7CNTRL\n").unwrap();
-            assert_eq!(admits("100.101.2.4:51000").await, Ok(()));
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let admitted = admits("100.101.2.4:51000").await.map(|device| device.line());
+            assert_eq!(admitted, Ok("nPhone4CNTRL phone.tail1.ts.net".to_owned()));
             let theirs = admits("100.101.2.5:51000").await.unwrap_err();
             assert_eq!(theirs, "it is user 8's, and luned answers only user 7");
             let tagged = admits("100.101.2.7:51000").await.unwrap_err();
@@ -768,7 +816,7 @@ mod tests {
             assert!(unknown.starts_with("tailscaled answered HTTP/1.0 404"), "{unknown}");
             std::fs::write(&file, "nPhone4CNTRL\nphone.tail1.ts.net\n").unwrap();
             let unread = admits("100.101.2.4:51000").await.unwrap_err();
-            let why = "line 2: \"phone.tail1.ts.net\" is not a device's StableID";
+            let why = "line 2: \"phone.tail1.ts.net\" is not a device's StableID: it has a byte that is no letter or digit";
             assert_eq!(unread, format!("{}: {why}", file.display()));
         });
     }

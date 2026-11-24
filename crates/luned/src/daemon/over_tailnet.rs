@@ -5,7 +5,6 @@ use tonic::{Request, Response, Status, Streaming};
 use super::Host;
 use crate::api::change_projects_request::Change;
 use crate::api::daemon_server::Daemon;
-use crate::api::opens::Runs;
 use crate::api::{
     self, AnswerRequest, AskRequest, ChangeProjectsRequest, ChangeProjectsResponse,
     FileIssueRequest, FramesRequest, InfoResponse, IssueRepositoriesRequest,
@@ -15,6 +14,7 @@ use crate::api::{
     PruneRequest, PrunesRequest, RebaseRequest, SayRequest, ShowRequest, TranscriptEndsRequest,
     TranscriptEndsResponse, WaitingRequest, WaitingResponse,
 };
+use crate::projects::Opens;
 
 pub(super) struct OverTailnet(pub(super) Arc<Host>);
 
@@ -25,8 +25,7 @@ fn unserved(call: &str) -> Status {
 fn served_change(change: Option<&Change>) -> Result<(), Status> {
     let unserved_change = |change: &str| Err(unserved(&format!("ChangeProjects {change}")));
     match change {
-        None
-        | Some(
+        Some(
             Change::CloseView(_)
             | Change::CloseWorktree(_)
             | Change::RenameProject(_)
@@ -35,6 +34,7 @@ fn served_change(change: Option<&Change>) -> Result<(), Status> {
             | Change::ReorderProjects(_)
             | Change::ReorderWorktrees(_),
         ) => Ok(()),
+        None => Err(unserved("ChangeProjects with no change")),
         Some(Change::AddProject(_)) => unserved_change("AddProject"),
         Some(Change::AddWorktree(_)) => unserved_change("AddWorktree"),
         Some(Change::Start(_)) => unserved_change("Start"),
@@ -47,11 +47,14 @@ fn served_change(change: Option<&Change>) -> Result<(), Status> {
 }
 
 fn served_opens(opens: Option<&api::Opens>) -> Result<(), Status> {
-    match opens.and_then(|opens| opens.runs.as_ref()) {
-        Some(Runs::Agent(_)) => Ok(()),
-        Some(Runs::Shell(())) => Err(unserved("MakeWorktree that opens a shell")),
-        Some(Runs::Command(_)) => Err(unserved("MakeWorktree that opens a command")),
-        None => Err(unserved("MakeWorktree that opens nothing, and so a shell")),
+    let Some(opens) = opens else {
+        return Err(unserved("MakeWorktree that opens nothing, and so a shell"));
+    };
+    let unopenable = |why: String| Status::invalid_argument(format!("opens: {why}"));
+    match Opens::of_api(Some(opens.clone())).map_err(unopenable)? {
+        Opens::Agent(_) => Ok(()),
+        Opens::Shell => Err(unserved("MakeWorktree that opens a shell")),
+        Opens::Command(_) => Err(unserved("MakeWorktree that opens a command")),
     }
 }
 
@@ -236,12 +239,73 @@ mod tests {
     use tonic::Code;
     use tower::service_fn;
 
-    use super::{Host, OverTailnet};
+    use super::{served_change, served_opens, Host, OverTailnet};
     use crate::api::change_projects_request::{self as change, Change};
     use crate::api::daemon_client::DaemonClient;
     use crate::api::daemon_server::DaemonServer;
     use crate::api::opens::Runs;
     use crate::api::{self, KeepImageRequest, ShowRequest, FramesRequest};
+
+    #[test]
+    fn a_tailnet_device_changes_projects_only_by_closing_renaming_and_reordering() {
+        let served = [
+            Change::CloseView(change::CloseView::default()),
+            Change::CloseWorktree(change::CloseWorktree::default()),
+            Change::RenameProject(change::RenameProject::default()),
+            Change::RenameWorktree(change::RenameWorktree::default()),
+            Change::RenameTerminal(change::RenameTerminal::default()),
+            Change::ReorderProjects(change::ReorderProjects::default()),
+            Change::ReorderWorktrees(change::ReorderWorktrees::default()),
+        ];
+        for change in &served {
+            assert!(served_change(Some(change)).is_ok(), "{change:?}");
+        }
+        let unserved = [
+            ("AddProject", Some(Change::AddProject(change::AddProject::default()))),
+            ("AddWorktree", Some(Change::AddWorktree(change::AddWorktree::default()))),
+            ("Start", Some(Change::Start(change::Start::default()))),
+            ("Join", Some(Change::Join(change::Join::default()))),
+            ("Pull", Some(Change::Pull(change::Pull::default()))),
+            ("ForgetProject", Some(Change::ForgetProject(change::ForgetProject::default()))),
+            ("CloseProject", Some(Change::CloseProject(change::CloseProject::default()))),
+            ("Bring", Some(Change::Bring(change::Bring::default()))),
+            ("with no change", None),
+        ];
+        for (named, change) in unserved {
+            let refused = served_change(change.as_ref()).unwrap_err();
+            assert_eq!(refused.code(), Code::PermissionDenied, "{named}");
+            let message = format!("ChangeProjects {named} is not served over the tailnet, only on this machine");
+            assert_eq!(refused.message(), message);
+        }
+    }
+
+    #[test]
+    fn a_tailnet_device_makes_a_worktree_only_to_open_an_agent() {
+        let opens = |runs| api::Opens { runs };
+        let prompted = api::Prompted { harness: api::Harness::ClaudeCode.into(), words: "Tackle #741".to_owned() };
+        let agent = opens(Some(Runs::Agent(prompted)));
+        assert!(served_opens(Some(&agent)).is_ok());
+        let argv = api::Argv { words: vec!["id".to_owned()] };
+        let unserved = [
+            ("that opens a shell", Some(opens(Some(Runs::Shell(()))))),
+            ("that opens a command", Some(opens(Some(Runs::Command(argv))))),
+            ("that opens nothing, and so a shell", None),
+        ];
+        for (named, opens) in unserved {
+            let refused = served_opens(opens.as_ref()).unwrap_err();
+            assert_eq!(refused.code(), Code::PermissionDenied, "{named}");
+            let message = format!("MakeWorktree {named} is not served over the tailnet, only on this machine");
+            assert_eq!(refused.message(), message);
+        }
+        let unread = [
+            (opens(None), "opens: it says nothing to open"),
+            (opens(Some(Runs::Agent(api::Prompted::default()))), "opens: a harness this luned does not know"),
+        ];
+        for (opens, message) in unread {
+            let refused = served_opens(Some(&opens)).unwrap_err();
+            assert_eq!((refused.code(), refused.message()), (Code::InvalidArgument, message));
+        }
+    }
 
     #[test]
     fn a_tailnet_device_reaches_only_what_the_phone_calls() {
