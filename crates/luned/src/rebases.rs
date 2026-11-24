@@ -171,8 +171,7 @@ fn pulled(top: &str, branch: &str, until: Instant) -> Result<Option<Pulled>, Str
         Common::Gone => return Err(format!("{top} is gone")),
     };
     let unasked = |why| format!("no telling whether {branch} has a pull request open: {why}");
-    let pulled = github::Asker::default().pull_of(top, repository.as_str(), branch);
-    let pulled = pulled.map_err(unasked)?;
+    let pulled = github::Asker::default().pull_of(top, &repository, branch).map_err(unasked)?;
     let open = |pulled: &Pulled| matches!(pulled.pull_request.state, State::Open | State::Draft);
     Ok(pulled.filter(open))
 }
@@ -279,7 +278,7 @@ fn ahead(top: &str, reference: &str, branch: &str, until: Instant) -> Result<u32
 
 fn picked(top: &str, onto: &str, branch: &str, until: Instant) -> Result<Picked, Unrebased> {
     let mut git = Git::at(top, "rebase");
-    git.env("GIT_EDITOR", ":").env("GIT_SEQUENCE_EDITOR", ":");
+    git.editing_nothing();
     let limit = left(until, PICKING).map_err(Unrebased::Refused)?;
     let ran = git.named([onto, branch]).run_alone(limit).map_err(|error| {
         Unrebased::Refused(format!("git rebase could not be run: {error}"))

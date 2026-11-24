@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::checks;
 use crate::core;
+use crate::directory::Directory;
 use crate::git::{self, NamedHead};
 use crate::links::{self, Remotes};
 use crate::log;
@@ -225,9 +226,9 @@ fn find(dir: &str, base: Option<&str>) -> Result<Option<Pulled>, String> {
     }
 }
 
-fn fork(dir: &str, repository: &str, forks: &Forks) -> Result<Option<Fork>, String> {
+fn fork(dir: &str, repository: &Directory, forks: &Forks) -> Result<Option<Fork>, String> {
     let remotes = match links::remotes_gh_reads(dir) {
-        Remotes::Listed(listed) => listed,
+        Remotes::Listed(listed) | Remotes::InBare(listed) => listed,
         Remotes::Unlisted => return Ok(None),
         Remotes::Unsaid(why) => return Err(format!("git did not say the remotes of {dir}: {why}")),
     };
@@ -251,7 +252,7 @@ fn fork(dir: &str, repository: &str, forks: &Forks) -> Result<Option<Fork>, Stri
 
 fn in_parent(
     dir: &str,
-    repository: &str,
+    repository: &Directory,
     branch: &str,
     forks: &Forks,
 ) -> Result<Option<Pulled>, String> {
@@ -286,7 +287,7 @@ fn standing(was: Option<PullRequest>, own: Option<PullRequest>) -> Option<PullRe
     }
 }
 
-type Branch = (String, String);
+type Branch = (Directory, String);
 
 #[derive(Default)]
 pub struct Asker {
@@ -297,10 +298,10 @@ impl Asker {
     pub fn pull_of(
         &mut self,
         dir: &str,
-        repository: &str,
+        repository: &Directory,
         branch: &str,
     ) -> Result<Option<Pulled>, String> {
-        let asked = (repository.to_owned(), branch.to_owned());
+        let asked = (repository.clone(), branch.to_owned());
         match view(dir, &asked, &self.forks)? {
             Answer::Stayed(found) => Ok(found),
             Answer::Partly { why, .. } => Err(why),
@@ -311,7 +312,7 @@ impl Asker {
     pub fn open_on_parent(
         &mut self,
         dir: &str,
-        repository: &str,
+        repository: &Directory,
         branch: &str,
     ) -> Result<Option<u32>, String> {
         let found = in_parent(dir, repository, branch, &self.forks)?;
@@ -383,14 +384,14 @@ struct Lineage {
 }
 
 #[derive(Default)]
-struct Forks(Mutex<HashMap<String, Arc<Mutex<Option<Lineage>>>>>);
+struct Forks(Mutex<HashMap<Directory, Arc<Mutex<Option<Lineage>>>>>);
 
 impl Forks {
-    fn of(&self, repository: &str) -> Arc<Mutex<Option<Lineage>>> {
-        Arc::clone(locked(&self.0).entry(repository.to_owned()).or_default())
+    fn of(&self, repository: &Directory) -> Arc<Mutex<Option<Lineage>>> {
+        Arc::clone(locked(&self.0).entry(repository.clone()).or_default())
     }
 
-    fn retain(&self, keep: impl Fn(&str) -> bool) {
+    fn retain(&self, keep: impl Fn(&Directory) -> bool) {
         locked(&self.0).retain(|repository, _| keep(repository));
     }
 }
@@ -615,7 +616,7 @@ fn located(branches: &BTreeMap<String, String>) -> BTreeMap<Branch, Vec<String>>
     let mut on: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
     for (dir, branch) in branches {
         if let git::Common::Of(repository) = git::common(dir) {
-            on.entry((repository.into(), branch.clone())).or_default().push(dir.clone());
+            on.entry((repository, branch.clone())).or_default().push(dir.clone());
         }
     }
     on

@@ -47,8 +47,6 @@ pub const REPOSITORY_VARS: [&str; 13] = [
     "GIT_PREFIX",
 ];
 
-pub const CONFIG_VARS: [&str; 2] = ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"];
-
 pub fn local(command: &mut Command) -> &mut Command {
     for repository in REPOSITORY_VARS {
         command.env_remove(repository);
@@ -69,15 +67,15 @@ fn hardened() -> Command {
 
 pub struct Git {
     command: Command,
-    config: Vec<(&'static str, &'static str)>,
+    words: Vec<OsString>,
 }
 
 impl Git {
     #[must_use]
     pub fn at(dir: impl AsRef<OsStr>, command: &'static str) -> Git {
         let mut git = hardened();
-        git.arg("-C").arg(dir).arg(command);
-        Git { command: git, config: Vec::new() }
+        git.arg("-C").arg(dir);
+        Git { command: git, words: vec![command.into()] }
     }
 
     #[must_use]
@@ -85,42 +83,44 @@ impl Git {
         let mut git = hardened();
         let mut git_dir = OsString::from("--git-dir=");
         git_dir.push(common.as_str());
-        git.arg(git_dir).current_dir("/").arg(command);
-        Git { command: git, config: Vec::new() }
+        git.arg(git_dir).current_dir("/");
+        Git { command: git, words: vec![command.into()] }
     }
 
     pub fn arg(&mut self, word: &'static str) -> &mut Git {
-        self.command.arg(word);
+        self.words.push(word.into());
         self
     }
 
     pub fn args(&mut self, words: impl IntoIterator<Item = &'static str>) -> &mut Git {
-        self.command.args(words);
+        self.words.extend(words.into_iter().map(OsString::from));
         self
     }
 
     pub fn branch_ref(&mut self, branch: &str) -> &mut Git {
-        self.command.arg(format!("refs/heads/{branch}"));
+        self.words.push(format!("refs/heads/{branch}").into());
         self
     }
 
     pub fn leased(&mut self, branch: &str, at: &str) -> &mut Git {
-        self.command.arg(format!("--force-with-lease=refs/heads/{branch}:{at}"));
+        self.words.push(format!("--force-with-lease=refs/heads/{branch}:{at}").into());
         self
     }
 
-    pub fn env(&mut self, key: &'static str, value: impl AsRef<OsStr>) -> &mut Git {
-        assert!(
-            !REPOSITORY_VARS.contains(&key) && !CONFIG_VARS.contains(&key),
-            "{key} names a repository or its config: Git::at, Git::of and Git::configured set it",
-        );
-        self.command.env(key, value);
+    pub fn editing_nothing(&mut self) -> &mut Git {
+        self.command.env("GIT_EDITOR", ":").env("GIT_SEQUENCE_EDITOR", ":");
+        self
+    }
+
+    fn fetching_nothing_lazily(&mut self) -> &mut Git {
+        self.command.env("GIT_NO_LAZY_FETCH", "1");
         self
     }
 
     pub fn configured(&mut self, pairs: &[(&'static str, &'static str)]) -> &mut Git {
-        self.config.extend_from_slice(pairs);
-        configured(&mut self.command, &self.config);
+        for (key, value) in pairs {
+            self.command.arg("-c").arg(format!("{key}={value}"));
+        }
         self
     }
 
@@ -130,6 +130,7 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.command.args(&self.words);
         let mut names = names.into_iter().peekable();
         if names.peek().is_some() {
             self.command.arg("--end-of-options").args(names);
@@ -137,8 +138,8 @@ impl Git {
         Named(self.command)
     }
 
-    pub fn run(&mut self, limit: Duration) -> io::Result<Ran> {
-        program::run(&mut self.command, limit)
+    pub fn run(self, limit: Duration) -> io::Result<Ran> {
+        self.named(std::iter::empty::<&str>()).run(limit)
     }
 }
 
@@ -372,7 +373,7 @@ pub fn pointed(
 pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
     let git = |command: &'static str, args: &[&'static str], names: &[&str]| {
         let mut git = Git::at(dir, command);
-        git.args(args.iter().copied()).env("GIT_NO_LAZY_FETCH", "1");
+        git.args(args.iter().copied()).fetching_nothing_lazily();
         git.named(names).run(LIMIT).map_err(|error| format!("git could not be run: {error}"))
     };
     let tip = format!("refs/heads/{branch}");
@@ -1080,7 +1081,7 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::{
-        BARE_UNREAD, CONFIG_VARS, Changed, Common, DefaultBranch, Directory, Git, LIMIT,
+        BARE_UNREAD, Changed, Common, DefaultBranch, Directory, Git, LIMIT,
         REPOSITORY_VARS, Symbolic, branch, changed, config_count, pointed, scratch, stamp,
     };
 
@@ -1265,6 +1266,7 @@ mod tests {
 
     #[test]
     fn each_variable_git_keeps_to_a_repository_is_dropped_or_kept_on_purpose() {
+        const CONFIG_VARS: [&str; 2] = ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"];
         let mut git = Git::at("/", "rev-parse");
         git.arg("--local-env-vars");
         let said = git.run(LIMIT).unwrap().answer().unwrap();
@@ -1283,6 +1285,25 @@ mod tests {
         assert_eq!(count("2"), Some(2));
         assert_eq!(count("abc"), None);
         assert_eq!(count("-1"), None);
+    }
+
+    #[test]
+    fn config_luned_gives_git_wins_over_config_a_parent_git_gave_it() {
+        if std::env::var_os("GIT_CONFIG_PARAMETERS").is_some() {
+            let mut git = Git::at("/", "config");
+            git.configured(&[("status.showUntrackedFiles", "normal")]);
+            git.args(["--get", "status.showUntrackedFiles"]);
+            assert_eq!(git.run(LIMIT).unwrap().answer().unwrap(), b"normal\n");
+            return;
+        }
+        let name = "git::tests::config_luned_gives_git_wins_over_config_a_parent_git_gave_it";
+        let ran = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name])
+            .env("GIT_CONFIG_PARAMETERS", "'status.showuntrackedfiles'='no'")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&ran.stdout);
+        assert!(ran.status.success() && said.contains("1 passed"), "{said}");
     }
 
     #[test]

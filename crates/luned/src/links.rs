@@ -501,6 +501,12 @@ fn repository(dir: &str, link: &Link, ssh_host: impl FnMut(&str) -> Option<Strin
             },
             None => Looked::NotOf,
         },
+        Remotes::InBare(listed) => match remote(&listed, link, ssh_host) {
+            Some(remote) => {
+                Looked::Of(Repository { by: Remote::of(&remote), layout: Layout::InBare }, remote)
+            },
+            None => Looked::NotOf,
+        },
         Remotes::Unlisted => Looked::NotOf,
         Remotes::Unsaid(why) => Looked::Unsaid(why),
     }
@@ -529,7 +535,7 @@ pub(crate) fn any_on_github(listed: &str) -> bool {
 
 pub(crate) fn remotes(dir: &str) -> Result<Option<String>, String> {
     match remotes_in(dir) {
-        Remotes::Listed(listed) => Ok(Some(listed)),
+        Remotes::Listed(listed) | Remotes::InBare(listed) => Ok(Some(listed)),
         Remotes::Unlisted => Ok(None),
         Remotes::Unsaid(why) => Err(format!("git did not say the remotes of {dir}: {why}")),
     }
@@ -1075,6 +1081,7 @@ fn cloned(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Remotes {
     Listed(String),
+    InBare(String),
     Unlisted,
     Unsaid(String),
 }
@@ -1114,7 +1121,10 @@ fn remote_keys_in(dir: &str, keys: &'static str) -> Remotes {
     match listed(Git::at(dir, "config")) {
         Remotes::Unlisted => match git::common_within(dir, ANSWER) {
             Common::Of(_) | Common::NoRepository | Common::Gone => Remotes::Unlisted,
-            Common::BareUnread(bare) => listed(Git::of(&bare, "config")),
+            Common::BareUnread(bare) => match listed(Git::of(&bare, "config")) {
+                Remotes::Listed(listed) => Remotes::InBare(listed),
+                said => said,
+            },
             Common::Unsaid(why) => Remotes::Unsaid(why),
         },
         said => said,
@@ -2066,7 +2076,10 @@ mod tests {
         let url = "git@github.com:o/n.git";
         assert!(git(repository("with"), &["remote", "add", "origin", url]).is_some());
         let listed = format!("remote.origin.url {url}\n");
-        assert_eq!(remotes("with"), Remotes::Listed(listed));
+        assert_eq!(remotes("with"), Remotes::Listed(listed.clone()));
+        assert!(git(scratch.path(), &["init", "-q", "--bare", "bare.git"]).is_some());
+        assert!(git(dir("bare.git"), &["remote", "add", "origin", url]).is_some());
+        assert_eq!(remotes("bare.git"), Remotes::InBare(listed), "git opens it only when named");
 
         repository("without");
         fs::create_dir(dir("plain")).unwrap();

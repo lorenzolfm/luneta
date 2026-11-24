@@ -164,7 +164,7 @@ pub fn subfolders(root: &Dir, look: Duration) -> Result<BTreeSet<Subfolder>, Str
 fn listed(root: &Dir, until: Instant, look: Duration) -> Result<BTreeSet<Subfolder>, String> {
     let mut git = Git::of(&Directory::from(root).child(BARE), "worktree");
     git.args(["list", "--porcelain", "-z"]);
-    let said = ran(&mut git, "worktree list", until, look)?;
+    let said = ran(git, "worktree list", until, look)?;
     porcelain(root, &said)
 }
 
@@ -194,7 +194,7 @@ fn toplevel(folder: &Dir, until: Instant, look: Duration) -> Result<Option<Dir>,
     Dir::parse(top).map(Some)
 }
 
-fn ran(git: &mut Git, asked: &str, until: Instant, look: Duration) -> Result<Vec<u8>, String> {
+fn ran(git: Git, asked: &str, until: Instant, look: Duration) -> Result<Vec<u8>, String> {
     let ran = git.run(left(until, look)?);
     let ran = ran.map_err(|error| format!("git {asked} did not run: {error}"))?;
     ran.answer().map_err(|why| format!("git {asked}: {why}"))

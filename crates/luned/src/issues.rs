@@ -146,7 +146,9 @@ impl Remote {
 
 pub fn remotes(dir: &Directory) -> Result<Vec<Remote>, String> {
     match links::remotes_gh_reads(dir.as_str()) {
-        Remotes::Listed(listed) => Ok(on_github(&listed, links::ssh_host)),
+        Remotes::Listed(listed) | Remotes::InBare(listed) => {
+            Ok(on_github(&listed, links::ssh_host))
+        },
         Remotes::Unlisted => Ok(Vec::new()),
         Remotes::Unsaid(why) => Err(format!("git did not say the remotes of {dir}: {why}")),
     }

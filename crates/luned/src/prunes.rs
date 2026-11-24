@@ -20,6 +20,8 @@ use crate::mux::TerminalKey;
 use crate::program::{self, Ran};
 use crate::seats;
 
+const MOVED: &str = " but expected ";
+
 pub const PLANNING: Duration = Duration::from_mins(5);
 
 pub const DELETING: Duration = Duration::from_mins(30);
@@ -498,7 +500,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
     let askable: Vec<OnBranch<'_>> =
         listed.iter().filter(|it| !it.prunable).filter_map(OnBranch::of).collect();
     let answers = at_once(&askable, Asker::default, |asker, on: &OnBranch<'_>| {
-        asker.pull_of(&on.listed.path, common.as_str(), on.branch)
+        asker.pull_of(&on.listed.path, &common, on.branch)
     });
     let mut plan = Plan { repository, goes: Vec::new(), kept: Vec::new(), unasked: Vec::new() };
     let mut merged: Vec<(OnBranch<'_>, Pulled)> = Vec::new();
@@ -569,7 +571,7 @@ fn others_of(
     pulled: &Pulled,
 ) -> Result<Others, String> {
     let dir = &on.listed.path;
-    if let Some(open) = asker.open_on_parent(dir, common.as_str(), on.branch)? {
+    if let Some(open) = asker.open_on_parent(dir, common, on.branch)? {
         return Ok(Others::Need(format!("#{open} is open on its parent")));
     }
     let Some(repository) = &pulled.head_repository else {
@@ -719,18 +721,16 @@ fn far_branch_deleted(common: &Directory, head: &str, far: &RemoteBranch) -> Res
 }
 
 fn branch_deleted(common: &Directory, goes: &Goes) -> Result<(), String> {
-    let mut at = Git::of(common, "rev-parse");
-    at.arg("--verify");
-    let commit = format!("refs/heads/{}^{{commit}}", goes.branch);
-    let at = says(at.named([commit]).run(GIT_SAYS), "rev-parse")?;
-    if String::from_utf8_lossy(&at).trim_end() != goes.head {
-        return Err(format!("its branch {} stays: it has moved", goes.branch));
+    let mut git = Git::of(common, "update-ref");
+    git.arg("-d");
+    let branch = format!("refs/heads/{}", goes.branch);
+    match says(git.named([branch.as_str(), goes.head.as_str()]).run(GIT_SAYS), "update-ref -d") {
+        Ok(_) => Ok(()),
+        Err(why) if why.contains(MOVED) => {
+            Err(format!("its branch {} stays: it has moved", goes.branch))
+        },
+        Err(why) => Err(format!("its branch {} stays: {why}", goes.branch)),
     }
-    let mut git = Git::of(common, "branch");
-    git.arg("-D");
-    says(git.named([&goes.branch]).run(GIT_SAYS), "branch -D")
-        .map(|_| ())
-        .map_err(|why| format!("its branch {} stays: {why}", goes.branch))
 }
 
 impl From<&RemoteBranch> for api::prunes_response::RemoteBranch {
@@ -1205,6 +1205,31 @@ mod tests {
         fs::remove_file(folder.join("new")).unwrap();
         assert_eq!(worktree_removed(common, at), Ok(()));
         assert!(!folder.exists());
+    }
+
+    #[test]
+    fn a_branch_that_moves_after_it_was_seen_stays_and_one_that_did_not_goes() {
+        let scratch = tempfile::tempdir().unwrap();
+        let scratch = scratch.path().canonicalize().unwrap();
+        let repository = scratch.join("r");
+        ran(&scratch, &["init", "-q", "-b", "main", repository.to_str().unwrap()]);
+        ran(&repository, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        ran(&repository, &["branch", "fix"]);
+        let common = &common_in(&repository);
+        let tip = |refname: &str| {
+            let said = git::scratch(&repository, &["rev-parse", refname]).unwrap();
+            String::from_utf8(said).unwrap().trim_end().to_owned()
+        };
+        let seen = Goes { head: tip("fix"), ..goes("/w", Pushed::Nowhere, None) };
+        ran(&repository, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        ran(&repository, &["branch", "-f", "fix", "main"]);
+        let why = "its branch fix stays: it has moved";
+        assert_eq!(branch_deleted(common, &seen), Err(why.to_owned()));
+        assert_eq!(tip("fix"), tip("main"), "the commit made since it was seen is kept");
+        let now = Goes { head: tip("fix"), ..seen };
+        assert_eq!(branch_deleted(common, &now), Ok(()));
+        let left = git::scratch(&repository, &["rev-parse", "--verify", "-q", "refs/heads/fix"]);
+        assert!(left.is_err(), "{left:?}");
     }
 
     #[test]

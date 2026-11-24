@@ -11,16 +11,29 @@ message: >-
   subcommand first so no flag reaches git's own options, takes only
   literal flags, and puts --end-of-options before the refs and paths
   given to Git::named, so a branch named -x is read as a branch, not as
-  rebase's --exec.
+  rebase's --exec. No constant, binding or array holds "git" either, as
+  Command::new would start it from there unseen.
 rule:
-  kind: call_expression
-  all:
-    - has:
-        field: function
-        regex: (^|::)Command::new$
-    - has:
-        field: arguments
-        has:
-          kind: string_literal
-          regex: ^"git"$
-          stopBy: end
+  any:
+    - kind: call_expression
+      all:
+        - has:
+            field: function
+            regex: (^|::)Command::new$
+        - has:
+            field: arguments
+            has:
+              kind: string_literal
+              regex: ^"git"$
+              stopBy: end
+    - kind: string_literal
+      regex: ^"git"$
+      any:
+        - inside:
+            kind: const_item
+        - inside:
+            kind: static_item
+        - inside:
+            kind: let_declaration
+        - inside:
+            kind: array_expression
