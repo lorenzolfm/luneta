@@ -1,0 +1,32 @@
+id: runtimes-through-tasks
+snapshots:
+  '#[tokio::main] async fn main() {}':
+    labels:
+    - source: tokio::main
+      style: primary
+      start: 2
+      end: 13
+  fn f() { let runtime = Builder::new_multi_thread().build(); }:
+    labels:
+    - source: new_multi_thread
+      style: primary
+      start: 32
+      end: 48
+  fn f() { let runtime = Runtime::new(); }:
+    labels:
+    - source: Runtime::new
+      style: primary
+      start: 23
+      end: 35
+  fn f() { let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build(); }:
+    labels:
+    - source: new_current_thread
+      style: primary
+      start: 48
+      end: 66
+  fn f() { let runtime = tokio::runtime::Runtime::new(); }:
+    labels:
+    - source: tokio::runtime::Runtime::new
+      style: primary
+      start: 23
+      end: 51

@@ -1686,7 +1686,6 @@ fn a_layout_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
     let at = Where::On(nowhere.clone());
-    luned::tasks::start().unwrap();
     let _show = luned::show(luned.clone(), at, worktree, size, false, told);
     match lune_waits::heard("luned answers a layout of nowhere", &hearing) {
         Heard::Lost(why) => assert_eq!(why, "luned does not reach nowhere now"),
@@ -1695,7 +1694,6 @@ fn a_layout_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
     let (seen, seeing) = std::sync::mpsc::channel();
     let greeting = Greeting { foreground: None, background: None };
     let reach = Reach::On { luned, destination: nowhere };
-    luned::tasks::start().unwrap();
     let _viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
     match lune_waits::heard("luned answers a viewer of nowhere", &seeing) {
         Seen::Lost(why) => assert_eq!(why, "luned does not reach nowhere now"),
@@ -1776,7 +1774,6 @@ fn the_shows_and_viewers_lune_drops_give_their_places_on_a_bridge_back() {
         let (heard, hearing) = std::sync::mpsc::channel();
         let told = move |it| drop(heard.send(it));
         let at = Where::On(destination.clone());
-        luned::tasks::start().unwrap();
         let show = luned::show(luned.clone(), at, shown_in, size, false, told);
         let laid = move || match lune_waits::heard("luned lays the show out", &hearing) {
             Heard::Laid(laid) => laid,
@@ -1799,7 +1796,6 @@ fn the_shows_and_viewers_lune_drops_give_their_places_on_a_bridge_back() {
     let viewer = || {
         let (seen, seeing) = std::sync::mpsc::channel();
         let reach = Reach::On { luned: luned.clone(), destination: destination.clone() };
-        luned::tasks::start().unwrap();
         let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
         viewer.show(keys.clone());
         match lune_waits::heard("the viewer sees sh", &seeing) {
@@ -1968,7 +1964,6 @@ fn seen_and_typed_into(
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
-    luned::tasks::start().unwrap();
     let show = luned::show(folder, at, worktree, size, false, told);
     let laid = || match lune_waits::heard("luned lays the layout out", &hearing) {
         Heard::Laid(laid) => laid,
@@ -1988,7 +1983,6 @@ fn seen_and_typed_into(
 
     let (seen, seeing) = std::sync::mpsc::channel();
     let greeting = Greeting { foreground: None, background: None };
-    luned::tasks::start().unwrap();
     let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let paste = |text: &str| typed::Event::Paste(mux_api::Paste { text: text.to_owned() });
@@ -2034,7 +2028,6 @@ fn a_viewer_reads_no_more_frames_than_lune_has_taken() {
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
-    luned::tasks::start().unwrap();
     let show = luned::show(folder, Where::Here { runs_in: None }, worktree, size, false, told);
     let laid = || match lune_waits::heard("luned lays the layout out", &hearing) {
         Heard::Laid(laid) => laid,
@@ -2053,7 +2046,6 @@ fn a_viewer_reads_no_more_frames_than_lune_has_taken() {
     let (seen, seeing) = std::sync::mpsc::channel();
     let greeting = Greeting { foreground: None, background: None };
     let reach = Reach::Mux { socket: owned.socket(), runs_in: None };
-    luned::tasks::start().unwrap();
     let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let frame = |patience: Patience, what: &str| match patience.heard(what, &seeing) {
@@ -2080,7 +2072,6 @@ fn a_viewer_is_seen_while_others_on_the_same_lune_mux_hold_their_frames() {
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(200, 60).unwrap();
     let told = move |it| drop(heard.send(it));
-    luned::tasks::start().unwrap();
     let show = luned::show(folder, Where::Here { runs_in: None }, worktree, size, false, told);
     let laid = || match lune_waits::heard("luned lays the layout out", &hearing) {
         Heard::Laid(laid) => laid,

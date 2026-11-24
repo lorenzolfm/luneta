@@ -4,7 +4,7 @@ use tokio::runtime::{self, Handle, Runtime, RuntimeFlavor};
 
 const WORKERS: usize = 2;
 
-pub const WORKER: &str = "lune tasks";
+const WORKER: &str = "lune tasks";
 
 static SHARED: OnceLock<Runtime> = OnceLock::new();
 
@@ -22,9 +22,8 @@ pub fn start() -> Result<(), String> {
 
 #[must_use]
 pub fn shared() -> Handle {
-    #[cfg(test)]
-    start().expect("a test builds lune's tasks as it first hands one over");
-    let runtime = SHARED.get().expect("a process starts lune's tasks before it hands one over");
+    let building = || built().expect("lune's tasks build as they are first handed over");
+    let runtime = SHARED.get_or_init(building);
     let handle = runtime.handle().clone();
     assert_eq!(handle.runtime_flavor(), RuntimeFlavor::MultiThread, "a task may block in place");
     handle

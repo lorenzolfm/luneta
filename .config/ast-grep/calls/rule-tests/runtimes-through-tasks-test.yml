@@ -1,0 +1,12 @@
+id: runtimes-through-tasks
+valid:
+  - "fn f() -> Result<(), String> { luned::tasks::shared().block_on(ask()) }"
+  - "mod tests { fn f() { let runtime = Builder::new_current_thread().build().unwrap(); } }"
+  - "fn f() { let why = \"new_current_thread is the test's\"; }"
+  - "fn f(runtime: &Runtime) { runtime.block_on(ask()); }"
+invalid:
+  - "fn f() { let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build(); }"
+  - "fn f() { let runtime = Builder::new_multi_thread().build(); }"
+  - "fn f() { let runtime = tokio::runtime::Runtime::new(); }"
+  - "fn f() { let runtime = Runtime::new(); }"
+  - "#[tokio::main] async fn main() {}"

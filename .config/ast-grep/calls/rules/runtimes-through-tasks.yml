@@ -1,0 +1,25 @@
+id: runtimes-through-tasks
+language: rust
+files:
+  - crates/lune/src/**
+message: >-
+  Run lune's asks of luned on luned::tasks::shared(): lune's main builds that
+  one runtime, so a failure to build it is told at launch, and the tasks a
+  call hands over go on once the call returns, where a runtime of the call's
+  own would drop them with it.
+rule:
+  all:
+    - any:
+        - kind: identifier
+          regex: ^(new_current_thread|new_multi_thread)$
+        - kind: scoped_identifier
+          regex: ^(tokio::)?(runtime::)?Runtime::new$
+        - kind: attribute
+          regex: ^tokio::main
+    - not:
+        inside:
+          kind: mod_item
+          has:
+            field: name
+            regex: ^tests$
+          stopBy: end
