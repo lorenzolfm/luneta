@@ -83,7 +83,6 @@ let
         echo "dev ios: built $bundle in $app" >&2
         ;;
       run)
-        xcrun simctl boot "$udid" 2>/dev/null || true
         xcrun simctl bootstatus "$udid" -b >/dev/null
         xcrun simctl install "$udid" "$app"
         echo "dev ios: $bundle runs on $(checkout-simulator name), which DeviceHub shows" >&2

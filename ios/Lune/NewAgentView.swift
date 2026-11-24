@@ -58,10 +58,11 @@ struct NewAgentView: View {
             do {
                 landed = try await luned.newAgent(
                     on: machine, project: project.id,
-                    branch: branch.trimmingCharacters(in: .whitespaces), words: words)
+                    branch: branch.trimmingCharacters(in: .whitespaces),
+                    words: words.trimmingCharacters(in: .whitespacesAndNewlines))
                 failed = nil
             } catch {
-                failed = said(error)
+                failed = reason(error)
             }
             starting = false
         }

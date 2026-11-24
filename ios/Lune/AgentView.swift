@@ -5,7 +5,9 @@ struct AgentView: View {
     let seat: Seat
     @Environment(Luned.self) private var luned
     @State private var waiting: Waiting?
-    @State private var failed: String?
+    @State private var unread: String?
+    @State private var unanswered: String?
+    @State private var loads: UInt64 = 0
     @State private var words = ""
     @State private var answering = false
     @State private var asking: AskPlace?
@@ -26,9 +28,14 @@ struct AgentView: View {
                     Text("luned no longer shows this agent").foregroundStyle(.secondary)
                 }
             }
-            if let failed {
+            if let unanswered {
                 Section {
-                    Text(failed).foregroundStyle(.red)
+                    Text(unanswered).foregroundStyle(.red)
+                }
+            }
+            if let unread {
+                Section {
+                    Text(unread).foregroundStyle(.red)
                 }
             }
             if let waiting {
@@ -47,11 +54,11 @@ struct AgentView: View {
                     }
                 }
                 Section("Answer") {
-                    answers(to: waiting.asks)
-                    Button("Escape", role: .destructive) { answer(.escape) }
+                    answers(to: waiting)
+                    Button("Escape", role: .destructive) { answer(.escape, on: waiting.at) }
                 }
                 .disabled(answering)
-            } else if failed == nil {
+            } else if unread == nil {
                 ProgressView()
             }
         }
@@ -75,12 +82,12 @@ struct AgentView: View {
     }
 
     @ViewBuilder
-    private func answers(to asks: Asks) -> some View {
-        switch asks {
+    private func answers(to waiting: Waiting) -> some View {
+        switch waiting.asks {
         case .menu(let choices, let chosen):
             ForEach(Array(choices.enumerated()), id: \.offset) { index, label in
                 Button {
-                    answer(.choice(index: UInt32(index), label: label))
+                    answer(.choice(index: UInt32(index), label: label), on: waiting.at)
                 } label: {
                     HStack {
                         Text("\(index + 1). \(label)")
@@ -95,7 +102,7 @@ struct AgentView: View {
         case .words:
             TextField("Your words", text: $words, axis: .vertical)
                 .lineLimit(1...8)
-            Button("Send") { answer(.text(text: words)) }
+            Button("Send") { answer(.text(text: words), on: waiting.at) }
                 .disabled(words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         case .unread(let why):
             Text(why).foregroundStyle(.secondary)
@@ -103,24 +110,34 @@ struct AgentView: View {
     }
 
     private func load() async {
+        loads += 1
+        let load = loads
+        let read: Result<Waiting, Error>
         do {
-            waiting = try await luned.waiting(at: seat)
-            failed = nil
+            read = .success(try await luned.waiting(at: seat))
         } catch {
-            failed = said(error)
+            read = .failure(error)
+        }
+        guard load == loads else { return }
+        switch read {
+        case .success(let read):
+            waiting = read
+            unread = nil
+        case .failure(let error):
+            unread = reason(error)
         }
     }
 
-    private func answer(_ answer: Answer) {
-        guard let shown = waiting?.shown else { return }
+    private func answer(_ answer: Answer, on screen: Screen) {
+        precondition(!answering)
         answering = true
         Task {
             do {
-                try await luned.answer(at: seat, shown: shown, with: answer)
+                try await luned.answer(answer, on: screen)
                 words = ""
-                failed = nil
+                unanswered = nil
             } catch {
-                failed = said(error)
+                unanswered = reason(error)
             }
             await load()
             answering = false

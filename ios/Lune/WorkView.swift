@@ -6,18 +6,16 @@ struct WorkView: View {
     let project: Project
     @Environment(Luned.self) private var luned
     @Environment(\.dismiss) private var dismiss
-    @State private var listed: Listed?
+    @State private var listing: Listing?
     @State private var failed: String?
-    @State private var issues: Set<UInt32> = []
-    @State private var pulls: Set<UInt32> = []
-    @State private var tackling = false
+    @State private var tackling: Marked?
 
     var body: some View {
         List {
             if let failed {
                 Text(failed).foregroundStyle(.red)
             }
-            switch listed {
+            switch listing?.listed {
             case .work(let open, let shownPulls, let morePulls)?:
                 Section("Issues") {
                     switch open {
@@ -25,7 +23,8 @@ struct WorkView: View {
                         ForEach(shown, id: \.number) { issue in
                             Marking(
                                 number: issue.number, title: issue.title,
-                                detail: issue.labels.joined(separator: ", "), marked: $issues)
+                                detail: issue.labels.joined(separator: ", "),
+                                marked: marks(\.issues))
                         }
                         if shown.isEmpty {
                             Text("No open issues").foregroundStyle(.secondary)
@@ -43,7 +42,7 @@ struct WorkView: View {
                         Marking(
                             number: pull.number, title: pull.title,
                             detail: "\(pull.draft ? "draft · " : "")\(pull.branch)\(author)",
-                            marked: $pulls)
+                            marked: marks(\.pulls))
                     }
                     if shownPulls.isEmpty {
                         Text("No open pull requests").foregroundStyle(.secondary)
@@ -67,34 +66,68 @@ struct WorkView: View {
                 Button("Cancel") { dismiss() }
             }
             ToolbarItem(placement: .confirmationAction) {
-                Button("Tackle") { tackling = true }
-                    .disabled(issues.isEmpty && pulls.isEmpty)
+                Button("Tackle") { tackling = listing?.marked }
+                    .disabled(listing?.marks != true)
             }
         }
-        .navigationDestination(isPresented: $tackling) {
+        .navigationDestination(item: $tackling) { marked in
             AskView(
                 place: AskPlace(machine: machine, cwd: project.dir, title: project.name),
-                opening: .tackle(
-                    dir: project.dir,
-                    marked: Marked(issues: issues.sorted(), pulls: pulls.sorted()),
-                    said: marking))
+                opening: .tackle(marked: marked, asked: marked.asked))
         }
         .refreshable { await load() }
         .task { await load() }
     }
 
-    private var marking: String {
-        let named = issues.sorted().map { "#\($0)" } + pulls.sorted().map { "!\($0)" }
-        return "Tackle \(named.joined(separator: ", "))"
+    private func marks(_ kind: WritableKeyPath<Listing, Set<UInt32>>) -> Binding<Set<UInt32>> {
+        Binding(
+            get: { listing?[keyPath: kind] ?? [] },
+            set: { listing?[keyPath: kind] = $0 })
     }
 
     private func load() async {
         do {
-            listed = try await luned.work(on: machine, project: project.id)
+            let listed = try await luned.work(on: machine, project: project.id)
+            listing = Listing(listed, keeping: listing)
             failed = nil
         } catch {
-            failed = said(error)
+            failed = reason(error)
         }
+    }
+}
+
+private struct Listing {
+    let listed: Listed
+    var issues: Set<UInt32>
+    var pulls: Set<UInt32>
+
+    init(_ listed: Listed, keeping kept: Listing?) {
+        self.listed = listed
+        issues = (kept?.issues ?? []).intersection(listed.issueNumbers)
+        pulls = (kept?.pulls ?? []).intersection(listed.pullNumbers)
+    }
+
+    var marks: Bool { !issues.isEmpty || !pulls.isEmpty }
+
+    var marked: Marked { Marked(issues: issues.sorted(), pulls: pulls.sorted()) }
+}
+
+extension Marked {
+    fileprivate var asked: String {
+        let named = issues.map { "#\($0)" } + pulls.map { "!\($0)" }
+        return "Tackle \(named.joined(separator: ", "))"
+    }
+}
+
+extension Listed {
+    fileprivate var issueNumbers: Set<UInt32> {
+        guard case .work(.open(let shown, _), _, _) = self else { return [] }
+        return Set(shown.map(\.number))
+    }
+
+    fileprivate var pullNumbers: Set<UInt32> {
+        guard case .work(_, let shown, _) = self else { return [] }
+        return Set(shown.map(\.number))
     }
 }
 

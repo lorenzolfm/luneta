@@ -35,6 +35,12 @@ impl Refusals {
     }
 }
 
+const CAUSES_TOLD_MAX: usize = 16;
+
+fn says(why: &str, told: &str) -> bool {
+    told.is_empty() || format!(": {why}: ").contains(&format!(": {told}: "))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Error)]
 pub enum Unanswered {
     Refused { why: String },
@@ -46,14 +52,14 @@ impl Unanswered {
     pub fn of(status: &Status, refusals: Refusals) -> Unanswered {
         let said = status.message();
         let mut why = if said.is_empty() { format!("luned said {}", status.code()) } else { said.to_owned() };
-        let mut cause = std::error::Error::source(status);
-        while let Some(error) = cause {
+        let causes = std::iter::successors(std::error::Error::source(status), |&error| error.source());
+        for error in causes.take(CAUSES_TOLD_MAX) {
             let told = error.to_string();
-            if !why.split(": ").any(|part| part == told) {
+            if !says(&why, &told) {
                 why = format!("{why}: {told}");
             }
-            cause = error.source();
         }
+        assert_ne!(why, "");
         if refusals.codes().contains(&status.code()) {
             Unanswered::Refused { why }
         } else {
@@ -140,6 +146,40 @@ mod tests {
         status.set_source(std::sync::Arc::new(transport));
         let late = Unanswered::of(&status, Refusals::Others);
         assert_eq!(late.why(), "tcp connect error: transport error: deadline has elapsed");
+    }
+
+    #[test]
+    fn a_cause_that_tells_its_own_cause_is_said_once() {
+        let refused = Said("Connection refused (os error 61)", None);
+        let connect = Said("tcp connect error", Some(Box::new(refused)));
+        let trying = Said("error trying to connect: tcp connect error", Some(Box::new(connect)));
+        let status = Status::from_error(Box::new(trying));
+        let unreached = Unanswered::of(&status, Refusals::Others);
+        let why = "error trying to connect: tcp connect error: Connection refused (os error 61)";
+        assert_eq!(unreached.why(), why);
+    }
+
+    #[derive(Debug)]
+    struct Looped;
+
+    impl fmt::Display for Looped {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("looped")
+        }
+    }
+
+    impl std::error::Error for Looped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(self)
+        }
+    }
+
+    #[test]
+    fn a_chain_of_causes_that_loops_is_read_to_an_end() {
+        let mut status = Status::unavailable("the bridge went");
+        status.set_source(std::sync::Arc::new(Looped));
+        let looped = Unanswered::of(&status, Refusals::Others);
+        assert_eq!(looped.why(), "the bridge went: looped");
     }
 
     #[test]

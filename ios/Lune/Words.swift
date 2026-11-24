@@ -48,8 +48,16 @@ extension Holds {
     var worktrees: [Worktree] {
         switch self {
         case .folder(let worktree): [worktree]
-        case .clone(let worktrees): worktrees
+        case .clone(let worktrees, _): worktrees
         case .untold: []
+        }
+    }
+
+    var unlisted: String? {
+        switch self {
+        case .clone(_, .unlisted(let why)): why
+        case .untold: "luned says nothing of this project's worktrees"
+        case .folder, .clone(_, .listed), .clone(_, .untold): nil
         }
     }
 }

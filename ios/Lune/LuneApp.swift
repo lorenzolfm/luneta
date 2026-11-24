@@ -19,7 +19,9 @@ struct LuneApp: App {
                 Tab("Ask", systemImage: "bubble.left.and.text.bubble.right") {
                     NavigationStack {
                         AskView(
-                            place: AskPlace(machine: nil, cwd: nil, title: "Ask"), opening: nil)
+                            place: AskPlace(machine: nil, cwd: nil, title: "Ask"), opening: nil
+                        )
+                        .id(luned.reach.host)
                     }
                 }
             }
@@ -27,9 +29,9 @@ struct LuneApp: App {
         }
         .onChange(of: phase, initial: true) { _, now in
             if now == .active {
-                luned.open()
+                luned.watch()
             } else {
-                luned.close()
+                luned.unwatch()
             }
         }
     }

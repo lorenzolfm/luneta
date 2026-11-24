@@ -19,19 +19,19 @@ struct MachineView: View {
             } footer: {
                 Text("The tailnet name of the machine whose luned the phone watches.")
             }
-            if let why = luned.refused ?? luned.lost {
+            if let why = luned.reach.trouble {
                 Section("luned") {
                     Text(why).foregroundStyle(.red)
                 }
             }
         }
         .navigationTitle("Machine")
-        .onAppear { typed = luned.host }
+        .onAppear { typed = luned.reach.host ?? "" }
     }
 
     private func reach() {
         guard !typed.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        luned.reach(typed)
+        luned.name(typed)
         dismiss()
     }
 }

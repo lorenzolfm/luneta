@@ -10,7 +10,15 @@ struct AskPlace: Identifiable, Hashable {
 }
 
 enum Opening {
-    case tackle(dir: String, marked: Marked, said: String)
+    case tackle(marked: Marked, asked: String)
+}
+
+nonisolated private final class Listener {
+    var listening: Task<Void, Never>?
+
+    deinit {
+        listening?.cancel()
+    }
 }
 
 private struct Turn: Identifiable {
@@ -27,8 +35,9 @@ struct AskView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var turns: [Turn] = []
     @State private var words = ""
-    @State private var session: String?
+    @State private var conversation: Conversation?
     @State private var asking: Asking?
+    @State private var listener = Listener()
 
     var body: some View {
         List {
@@ -65,9 +74,12 @@ struct AskView: View {
         }
         .safeAreaInset(edge: .bottom) {
             HStack(alignment: .bottom) {
-                TextField(session == nil ? "Ask" : "Answer", text: $words, axis: .vertical)
-                    .lineLimit(1...6)
-                    .textFieldStyle(.roundedBorder)
+                TextField(
+                    conversation?.resumes() == true ? "Answer" : "Ask", text: $words,
+                    axis: .vertical
+                )
+                .lineLimit(1...6)
+                .textFieldStyle(.roundedBorder)
                 Button("Send", systemImage: "arrow.up.circle.fill", action: send)
                     .labelStyle(.iconOnly)
                     .font(.title2)
@@ -79,50 +91,44 @@ struct AskView: View {
             .background(.bar)
         }
         .task {
-            guard case .tackle(let dir, let marked, let said)? = opening, turns.isEmpty else {
+            guard case .tackle(let marked, let asked)? = opening, turns.isEmpty else {
                 return
             }
-            start(said) { try luned.tackle(on: place.machine, in: dir, marked: marked) }
+            start(asked) { try $0.tackle(marked: marked) }
         }
-        .onDisappear { asking = nil }
     }
 
     private func send() {
         let asked = words.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !asked.isEmpty else { return }
         words = ""
-        let resumed = session
-        start(asked) {
-            try luned.ask(on: place.machine, in: place.cwd, words: asked, resumed: resumed)
-        }
+        start(asked) { try $0.ask(words: asked) }
     }
 
-    private func start(_ asked: String, _ ask: () throws -> Asking) {
+    private func start(_ asked: String, _ ask: (Conversation) throws -> Asking) {
         turns.append(Turn(words: asked))
         let index = turns.count - 1
         let talk: Asking
         do {
-            talk = try ask()
+            let conversation =
+                try self.conversation ?? luned.converse(on: place.machine, in: place.cwd)
+            self.conversation = conversation
+            talk = try ask(conversation)
         } catch {
-            turns[index].failed = said(error)
+            turns[index].failed = reason(error)
             return
         }
         asking = talk
-        Task {
+        listener.listening = Task {
             do {
-                while let step = try await talk.next() {
-                    if case .session(let id) = step {
-                        session = id
-                    } else {
-                        turns[index].steps.append(step)
-                    }
+                while !Task.isCancelled, let step = try await talk.next() {
+                    turns[index].steps.append(step)
                 }
             } catch {
-                turns[index].failed = said(error)
+                turns[index].failed = reason(error)
             }
-            if asking === talk {
-                asking = nil
-            }
+            precondition(asking === talk)
+            asking = nil
         }
     }
 }
@@ -140,8 +146,6 @@ private struct StepRow: View {
                 .foregroundStyle(.secondary)
         case .denied:
             Text("A command was denied").font(.caption).foregroundStyle(.orange)
-        case .session:
-            EmptyView()
         }
     }
 }

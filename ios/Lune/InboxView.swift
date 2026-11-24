@@ -8,22 +8,23 @@ struct InboxView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if luned.host.isEmpty {
+                switch luned.reach {
+                case .unnamed:
                     MachineView()
-                } else if let model = luned.model {
-                    InboxList(model: model, lost: luned.lost)
-                } else if let why = luned.refused ?? luned.lost {
+                case .refused(_, let why), .watching(_, _, .lost(let why)):
                     ContentUnavailableView(
                         "luned is out of reach", systemImage: "wifi.exclamationmark",
                         description: Text(why))
-                } else {
-                    ProgressView("Reaching \(luned.host)")
+                case .watching(let host, _, .nothing):
+                    ProgressView("Reaching \(host)")
+                case .watching(_, _, .model(let model, let lost)):
+                    InboxList(model: model, lost: lost)
                 }
             }
             .navigationTitle("Inbox")
             .navigationDestination(for: Seat.self) { AgentView(seat: $0) }
             .toolbar {
-                if !luned.host.isEmpty {
+                if luned.reach.host != nil {
                     Button("Machine", systemImage: "desktopcomputer") { naming = true }
                 }
             }

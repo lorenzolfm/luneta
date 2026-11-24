@@ -8,12 +8,19 @@ struct ProjectView: View {
     @State private var startingAgent = false
     @State private var tackling = false
     @State private var closing: Worktree?
+    @State private var closings: Set<UInt64> = []
     @State private var failed: String?
 
     var body: some View {
         let project = luned.project(at: seat)
         List {
             if let project {
+                if let why = project.holds.unlisted {
+                    Section {
+                        Label(why, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 ForEach(project.holds.worktrees, id: \.id) { worktree in
                     Section {
                         ForEach(worktree.views, id: \.id) { view in
@@ -30,6 +37,7 @@ struct ProjectView: View {
                                     machine: seat.machine, cwd: worktree.folder,
                                     title: worktree.name)
                             },
+                            closes: !closings.contains(worktree.id),
                             close: { closing = worktree })
                     }
                 }
@@ -64,12 +72,15 @@ struct ProjectView: View {
             titleVisibility: .visible, presenting: closing
         ) { worktree in
             Button("Close the worktree and its views", role: .destructive) {
+                let (closed, _) = closings.insert(worktree.id)
+                precondition(closed)
                 Task {
                     do {
                         try await luned.close(worktree, on: seat.machine)
                     } catch {
-                        failed = said(error)
+                        failed = reason(error)
                     }
+                    closings.remove(worktree.id)
                 }
             }
         }
@@ -92,21 +103,23 @@ struct ProjectView: View {
 private struct WorktreeHeader: View {
     let worktree: Worktree
     let ask: () -> Void
+    let closes: Bool
     let close: () -> Void
 
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
                 Text(worktree.name)
-                let said = [worktree.branch, worktree.seen.words].compactMap { $0 }
-                if !said.isEmpty {
-                    Text(said.joined(separator: " · ")).font(.caption2).textCase(nil)
+                let caption = [worktree.branch, worktree.seen.words].compactMap { $0 }
+                if !caption.isEmpty {
+                    Text(caption.joined(separator: " · ")).font(.caption2).textCase(nil)
                 }
             }
             Spacer()
             Menu {
                 Button("Ask here", systemImage: "bubble.left", action: ask)
                 Button("Close worktree", systemImage: "xmark", role: .destructive, action: close)
+                    .disabled(!closes)
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .accessibilityLabel("Worktree actions")
@@ -120,6 +133,7 @@ private struct ViewRow: View {
     let machine: String?
     @Binding var failed: String?
     @Environment(Luned.self) private var luned
+    @State private var closing = false
 
     var body: some View {
         let agent = view.terminal.flatMap { luned.agent(at: Seat(machine: machine, terminal: $0)) }
@@ -135,14 +149,18 @@ private struct ViewRow: View {
         .swipeActions {
             if let terminal = view.terminal {
                 Button("Close", role: .destructive) {
+                    precondition(!closing)
+                    closing = true
                     Task {
                         do {
                             try await luned.close(terminal, on: machine)
                         } catch {
-                            failed = said(error)
+                            failed = reason(error)
                         }
+                        closing = false
                     }
                 }
+                .disabled(closing)
             }
         }
     }

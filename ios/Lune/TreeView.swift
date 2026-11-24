@@ -7,16 +7,16 @@ struct TreeView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if let model = luned.model {
+                if case .watching(let host, _, .model(let model, let lost)) = luned.reach {
                     List {
-                        if let lost = luned.lost {
+                        if let lost {
                             Section {
                                 Label(lost, systemImage: "exclamationmark.triangle")
                                     .foregroundStyle(.red)
                             }
                         }
                         MachineSection(
-                            name: luned.host, machine: nil, reached: nil, held: model.here)
+                            name: host, machine: nil, reached: nil, held: model.here)
                         ForEach(model.far, id: \.on) { far in
                             MachineSection(
                                 name: far.on, machine: far.on, reached: far.reached, held: far.held)
@@ -25,8 +25,7 @@ struct TreeView: View {
                 } else {
                     ContentUnavailableView(
                         "No tree yet", systemImage: "folder",
-                        description: Text(
-                            luned.refused ?? luned.lost ?? "luned has said nothing yet"))
+                        description: Text(luned.reach.trouble ?? "luned has said nothing yet"))
                 }
             }
             .navigationTitle("Tree")
