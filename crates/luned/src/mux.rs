@@ -2,11 +2,13 @@ use std::ffi::OsString;
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 
+use lune_domain::mux::TerminalKey;
+
 use crate::{process, shells};
 
 pub mod own;
 
-pub use own::{OwnMade, TerminalKey};
+pub use own::OwnMade;
 
 #[derive(Debug)]
 pub enum Failure {

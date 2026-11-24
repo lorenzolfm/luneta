@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use lune_domain::projects::Opens;
 use tonic::{Request, Response, Status, Streaming};
 
 use super::Host;
@@ -14,7 +15,6 @@ use crate::api::{
     PruneRequest, PrunesRequest, RebaseRequest, SayRequest, ShowRequest, TranscriptEndsRequest,
     TranscriptEndsResponse, WaitingRequest, WaitingResponse,
 };
-use crate::projects::Opens;
 
 pub(super) struct OverTailnet(pub(super) Arc<Host>);
 

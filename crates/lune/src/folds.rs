@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-use luned::projects::{ProjectId, WorktreeId};
+use lune_domain::projects::{ProjectId, WorktreeId};
 use luned::Destination;
 use notify::RecommendedWatcher;
 

@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use clap::Subcommand;
+use lune_domain::mux::TerminalKey;
 use lune_protocol::unread::Unread;
 use luned::api::agent::Status as Reported;
 use luned::api::projects::Held;
@@ -15,7 +16,6 @@ use luned::api::{
     Agent, ListAgentsResponse, Say, SayRequest, Status, Utterance, Version, WatchRequest,
 };
 use luned::folder::SOCKET;
-use luned::mux::TerminalKey;
 pub use luned::log::causes;
 use luned::prunes::Occupied;
 use luned::sayings::BYTES_MAX;

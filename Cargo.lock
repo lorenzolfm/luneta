@@ -1515,6 +1515,7 @@ dependencies = [
  "cpal",
  "crossterm",
  "frizbee",
+ "lune-domain",
  "lune-protocol",
  "lune-waits",
  "luned",
@@ -1536,6 +1537,16 @@ dependencies = [
  "unicode-width",
  "xn",
  "zbus",
+]
+
+[[package]]
+name = "lune-domain"
+version = "0.3.0"
+dependencies = [
+ "lune-protocol",
+ "prost-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1610,6 +1621,7 @@ dependencies = [
  "clap",
  "hyper-util",
  "libc",
+ "lune-domain",
  "lune-phone",
  "lune-protocol",
  "lune-waits",

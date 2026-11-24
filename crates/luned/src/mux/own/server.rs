@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use std::{env, fs};
 
 use hyper_util::rt::TokioIo;
+use lune_domain::mux::TerminalKey;
+use lune_domain::projects::{Line, Size, VIEWS_MAX};
 use lune_protocol::shell::Doing;
 use rustix::process::{Pid, Signal};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -26,11 +28,10 @@ use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
 use super::frames::colours;
-use super::{in_no_terminal, TerminalKey};
+use super::in_no_terminal;
 use crate::changes::Unchanged;
 use crate::client::Within;
 use crate::mux::{Failure, Runs};
-use crate::projects::{Line, Size, VIEWS_MAX};
 use crate::{folder, log, release, tasks, Directory};
 
 pub const SOCKET: &str = "mux.sock";

@@ -7,6 +7,14 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use lune_domain::mux::TerminalKey;
+use lune_domain::projects::layout::{self, Direction, Order, Sides, Towards, SIDE_MAX};
+use lune_domain::projects::{Ask, Change, Closing, Dir, Home, Id, Line, Placed};
+use lune_domain::projects::{Holds, ProjectName, Worktree};
+use lune_domain::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
+use lune_domain::projects::{Session, Size, Terminal, TerminalViewId, Used, View, ViewId};
+use lune_domain::projects::{WorktreeId, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
+use lune_domain::projects::{quoted, Argv, Arranged, Listed, Opens, WORKTREES_MAX};
 use lune_protocol::shell::Doing;
 use tokio::sync::{mpsc as answers, oneshot};
 use tonic::Status;
@@ -15,16 +23,9 @@ use crate::agent::Agent;
 use crate::api::{self, show_request, show_response};
 use crate::core::{self, Command as Core, Located, Shown};
 use crate::mux::own::server::{self, Is, Terminals, TerminalsListed};
-use crate::mux::own::TerminalKey;
 use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
-use crate::projects::layout::{self, Direction, Order, Sides, Towards, SIDE_MAX};
-use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
-use crate::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
-use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
-use crate::projects::{Holds, ProjectName, Spot, Worktree};
-use crate::projects::{WorktreeId, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
-use crate::projects::{self, quoted, Argv, Arranged, Opens, Subfolder, WORKTREES_MAX};
+use crate::projects::{self, Changed, Failed, Store};
 use crate::shells::Shell;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
@@ -95,8 +96,8 @@ pub enum Command {
     Emptied { since: Instant },
     Crashed,
     Unreached { since: Instant },
-    Worktrees { root: Dir, subfolders: BTreeSet<Subfolder>, seen: BTreeSet<WorktreeId> },
-    Rooted { root: Dir, subfolders: BTreeSet<Subfolder> },
+    Worktrees { root: Dir, listed: Listed, seen: BTreeSet<WorktreeId> },
+    Rooted { root: Dir, listed: Listed },
     Root { project: ProjectId, answer: oneshot::Sender<Result<Root, Unrooted>> },
 }
 
@@ -522,8 +523,8 @@ impl Layouts {
                 self.known.clear();
                 self.listed.clear();
             },
-            Command::Worktrees { root, subfolders, seen } => {
-                let listed = Change::Listed { root: root.clone(), subfolders, seen };
+            Command::Worktrees { root, listed, seen } => {
+                let listed = Change::Listed { root: root.clone(), listed, seen };
                 if let Err(why) = self.followed(listed) {
                     let root = root.as_str();
                     self.troubles.say(format!("{root}: its worktrees are not kept: {why}"));
@@ -532,8 +533,8 @@ impl Layouts {
             Command::Root { project, answer } => {
                 let _ = answer.send(self.root(project));
             },
-            Command::Rooted { root, subfolders } => {
-                let rooted = Change::Rooted { root: root.clone(), subfolders };
+            Command::Rooted { root, listed } => {
+                let rooted = Change::Rooted { root: root.clone(), listed };
                 if let Err(why) = self.followed(rooted) {
                     let root = root.as_str();
                     self.troubles.say(format!("{root}: it is not kept as a clone: {why}"));
@@ -1556,7 +1557,7 @@ impl Layouts {
         let (_, held) = held.expect("a terminal waiting for a home is held");
         let folder = held.folder().clone();
         let stays = format!("terminal {terminal}, gone to {}, stays", folder.as_str());
-        let spot = match Spot::of(&folder, FOLDER_LOOK) {
+        let spot = match projects::spot::of(&folder, FOLDER_LOOK) {
             Ok(spot) => spot,
             Err(why) => return self.troubles.say(format!("{stays}: its worktree is unknown: {why}")),
         };
@@ -2031,11 +2032,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::SystemTime;
 
+    use lune_domain::agent::Harness;
     use lune_protocol::said::Said;
     use lune_protocol::shell::Front;
 
     use super::*;
-    use crate::agent::{Harness, Status};
+    use crate::agent::Status;
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
 

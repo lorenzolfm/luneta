@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use lune_domain::projects::{held_by_folder, CloneRoot, Dir, Holders, ProjectName};
 use tokio::time::timeout;
 use tonic::{Code, Status};
 use wt::cmd::add::{self, Fetch, Plan};
@@ -20,7 +21,7 @@ use crate::api::{On, PasteRequest, PasteResponse};
 use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common, Git};
 use crate::program::{self, Ran};
-use crate::projects::{self, CloneRoot, Dir, Holders, ProjectName, SPOT_LOOK};
+use crate::projects::{self, SPOT_LOOK};
 use crate::{zoxide, Destination, Directory};
 
 pub(crate) mod sync;
@@ -846,7 +847,7 @@ fn synced(
 
 fn lands(root: &Dir, holders: &Holders) -> Result<(), String> {
     if let Some(held) = holders.plain.iter().find(|it| it.dir.below(root).is_some()) {
-        return Err(format!("nothing made: {}", projects::held_by_folder(root, held)));
+        return Err(format!("nothing made: {}", held_by_folder(root, held)));
     }
     projects::subfolders(root, SPOT_LOOK).map_err(|why| format!("nothing made: {why}"))?;
     if holders.clones.contains(root) {

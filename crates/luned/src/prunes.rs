@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use lune_domain::mux::TerminalKey;
 use lune_protocol::github::State;
 
 use crate::api::projects::Held;
@@ -16,7 +17,6 @@ use crate::api::{self, On, PruneRequest, PruneResponse, PrunesRequest, PrunesRes
 use crate::directory::Directory;
 use crate::git::{self, Common, Git};
 use crate::github::{self, Asker, Based, Pulled};
-use crate::mux::TerminalKey;
 use crate::panics::{self, Panicked};
 use crate::program::{self, Ran};
 use crate::seats;

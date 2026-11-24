@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 
-use luned::projects::{Argv, Opens};
+use lune_domain::projects::{Argv, Opens};
 use luned::rebases::{self, Came, Rebased, Stopped, Unrebased};
 use luned::Directory;
 
