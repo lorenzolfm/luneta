@@ -19,10 +19,10 @@ use ratatui::text::Line;
 
 use crate::away::{self, Away};
 use crate::due::Due;
-use crate::palette;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
+use crate::moonlight;
 use crate::sidebar::{self, ViewKey};
 
 const MODEL: &str = "haiku";
@@ -548,7 +548,7 @@ impl Briefing {
             Some(Written { at, said }) => {
                 let lines = match said {
                     Ok(said) => paragraphs(said, inner, Style::new()),
-                    Err(why) => paragraphs(why, inner, Style::new().fg(palette::RED)),
+                    Err(why) => paragraphs(why, inner, Style::new().fg(moonlight::RED)),
                 };
                 (lines, (Hint::AnyKey, "Close"), at.as_ref().map(|at| format!("at {at}")))
             },
@@ -988,7 +988,7 @@ Its transcript is unknown: Claude Code names none for it.
         }
         briefing.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
-            assert!(palette::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
         }
         (0..height)
             .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())

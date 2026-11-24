@@ -29,8 +29,8 @@ use crate::alerts::Doing;
 use crate::away::{self, Away};
 use crate::close::{self, Act, Plan};
 use crate::fuzzy::{Fuzzy, Score, Typos};
-use crate::palette;
 use crate::host::Event;
+use crate::moonlight;
 use crate::screen;
 use crate::machines::Machine;
 use crate::menu::{self, Chain, Chained, Done, Hint, Origin, Pull, Target};
@@ -1788,7 +1788,7 @@ impl Picker {
         }
         let rows = self.rows();
         if rows.rows.is_empty() {
-            lines.extend(menu::wrap(&self.empty(), width, Style::new().fg(palette::MUTE)));
+            lines.extend(menu::wrap(&self.empty(), width, Style::new().fg(moonlight::MUTE)));
             return (lines, spots);
         }
         let mut items = Vec::new();
@@ -1838,7 +1838,7 @@ impl Picker {
     fn row_line(&self, row: &Row, width: usize, frame: usize, now: SystemTime) -> Line<'static> {
         let bold = Style::new().add_modifier(Modifier::BOLD);
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let grey = Style::new().fg(palette::MUTE);
+        let grey = Style::new().fg(moonlight::MUTE);
         let fill = match &row.key {
             Key::Worktree { on, place } if self.is_shown(on, place) => Fill::Rule,
             _ => Fill::Blank,
@@ -1892,7 +1892,7 @@ impl Picker {
                 let age = seated.since.map_or_default(|since| sidebar::age(since, now));
                 let mut right = Vec::new();
                 if width >= row.name.width() + seated.dir.width() + age.width() + 10 {
-                    right.push(Span::styled(seated.dir.clone(), Style::new().fg(palette::MUTE)));
+                    right.push(Span::styled(seated.dir.clone(), Style::new().fg(moonlight::MUTE)));
                     right.push(Span::raw("  "));
                 }
                 right.push(Span::styled(age, dim));
@@ -1904,22 +1904,23 @@ impl Picker {
             },
             Key::Repository { repository, .. } => {
                 let path = repository.path().as_str();
-                return place_line(row, path, Style::new().fg(palette::TEXT), width);
+                return place_line(row, path, Style::new().fg(moonlight::TEXT), width);
             },
             Key::Folder { .. } => {
-                let lead = Span::styled("+", Style::new().fg(palette::GREEN));
+                let lead = Span::styled("+", Style::new().fg(moonlight::GREEN));
                 (Some(lead), bold, vec![Span::styled("new project", grey)])
             },
             Key::New { .. } => {
-                let lead = Span::styled("+", Style::new().fg(palette::GREEN));
+                let lead = Span::styled("+", Style::new().fg(moonlight::GREEN));
                 (Some(lead), bold, vec![Span::styled("new worktree", grey)])
             },
             Key::Action(action, _) => {
                 let key = menu::spelled(*action, self.palette.origin);
-                (None, Style::new().fg(palette::TEXT), vec![Span::styled(key, dim)])
+                (None, Style::new().fg(moonlight::TEXT), vec![Span::styled(key, dim)])
             },
             Key::Pasted { work, .. } => {
-                (None, Style::new().fg(palette::TEXT), vec![Span::styled(menu::whence(work), dim)])
+                let whence = vec![Span::styled(menu::whence(work), dim)];
+                (None, Style::new().fg(moonlight::TEXT), whence)
             },
         };
         let right_width: usize = right.iter().map(|span| span.content.width()).sum();
@@ -2005,7 +2006,7 @@ impl Picker {
 
     fn draw_preview(&self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         let inner = usize::from(area.width.saturating_sub(2));
-        let grey = Style::new().fg(palette::MUTE);
+        let grey = Style::new().fg(moonlight::MUTE);
         let dim = Style::new().add_modifier(Modifier::DIM);
         let Some(row) = self.rows().selected() else {
             let mut lines = vec![Line::styled(" nothing highlighted", grey)];
@@ -2117,7 +2118,7 @@ impl Picker {
                     let status = if seated.mark == Mark::Waiting {
                         Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
                     } else {
-                        Style::new().fg(palette::TEXT)
+                        Style::new().fg(moonlight::TEXT)
                     };
                     let age = seated.since.map(|since| sidebar::age(since, now));
                     caption.extend([
@@ -2163,7 +2164,7 @@ impl Picker {
         path: &Directory,
     ) {
         let inner = usize::from(area.width.saturating_sub(2));
-        let grey = Style::new().fg(palette::MUTE);
+        let grey = Style::new().fg(moonlight::MUTE);
         let mut caption = vec![Span::raw(" ")];
         caption.extend(machined(on, inner));
         let room = inner.saturating_sub(1 + caption.iter().map(Span::width).sum::<usize>());
@@ -2460,7 +2461,7 @@ fn place_line(row: &Row, path: &str, style: Style, width: usize) -> Line<'static
     assert!(row.hits.iter().all(|hit| *hit < path.len()), "a row's hits are in its path");
     let name = sidebar::cut(&row.name, width.saturating_sub(4 + path.width()).max(width / 3));
     let room = width.saturating_sub(4 + name.width());
-    let grey = Style::new().fg(palette::MUTE);
+    let grey = Style::new().fg(moonlight::MUTE);
     let (shown, wide) = sidebar::lit(path, room, Keep::End, &row.hits, grey);
     let gap = width.saturating_sub(1 + name.width() + wide + 1);
     let mut spans = vec![Span::raw(" "), Span::styled(name, style), Span::raw(" ".repeat(gap))];
@@ -2513,7 +2514,7 @@ fn machine_rule(name: &str, width: usize) -> Line<'static> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     Line::from(vec![
         Span::styled("─ ", dim),
-        Span::styled(name, Style::new().fg(palette::TEXT).add_modifier(Modifier::BOLD)),
+        Span::styled(name, Style::new().fg(moonlight::TEXT).add_modifier(Modifier::BOLD)),
         Span::raw(" "),
         Span::styled("─".repeat(rule), dim),
     ])

@@ -137,7 +137,7 @@ impl Window {
 
     pub fn running(command: Command) -> Window {
         let window = Window::started(command);
-        eventually("lune draws its sidebar", || window.shows("─ lune").then_some(()));
+        eventually("lune draws its sidebar", || window.shows("☾ lune").then_some(()));
         window
     }
 

@@ -25,10 +25,10 @@ use crate::agents::{self, Harness, Picked};
 use crate::brief;
 use crate::checks::{self, Failing, PullPage};
 use crate::close::{Act, Plan, Scope};
-use crate::palette;
 use crate::icons;
 use crate::issue::Repository;
 use crate::machines::Machine;
+use crate::moonlight;
 use crate::printed::{self, Printed};
 use crate::prune;
 use crate::rebase;
@@ -1943,7 +1943,7 @@ impl Menu {
                         spots.add(body.len(), 0..width, Choice::Key(KeyEvent::from(KeyCode::Tab)));
                         body.push(agent_line(Picked::ByYou(*agent), inner));
                         if let Some(wrong) = wrong {
-                            body.extend(wrap(wrong, width, Style::new().fg(palette::RED)));
+                            body.extend(wrap(wrong, width, Style::new().fg(moonlight::RED)));
                         }
                         body
                     },
@@ -2052,7 +2052,7 @@ impl Menu {
 pub fn chain_says(chain: &Chain, width: usize) -> Vec<Line<'static>> {
     match chain.says() {
         Says::Hint(hint) => wrap(hint, width, Style::new().fg(NAME)),
-        Says::Wrong(wrong) => wrap(wrong, width, Style::new().fg(palette::RED)),
+        Says::Wrong(wrong) => wrap(wrong, width, Style::new().fg(moonlight::RED)),
     }
 }
 
@@ -2130,7 +2130,7 @@ pub fn boxed(buffer: &mut Buffer, area: Rect, rule: &Line<'_>, lines: &[Line<'_>
         return;
     };
     let dim = Style::new().add_modifier(Modifier::DIM);
-    let plain = Style::reset().fg(palette::TEXT);
+    let plain = Style::reset().fg(moonlight::TEXT);
     for row in area.rows() {
         buffer.set_string(row.x, row.y, " ".repeat(usize::from(row.width)), plain);
     }
@@ -2270,7 +2270,7 @@ fn goes_lines(goes: &[prunes::Goes], width: usize, room: usize) -> Vec<Line<'sta
         lines.push(Line::from(vec![
             Span::raw(" "),
             Span::styled(format!("{name}{gap}  "), Style::new().fg(NAME)),
-            Span::styled(format!("{number}{number_gap}  "), Style::new().fg(palette::MAUVE)),
+            Span::styled(format!("{number}{number_gap}  "), Style::new().fg(moonlight::MAUVE)),
             Span::styled(format!("{size_gap}{size}"), Style::new().fg(TAG)),
         ]));
     }
@@ -2468,7 +2468,7 @@ fn entry_spots(entries: &[Entry], width: usize) -> Spots<KeyEvent> {
 }
 
 pub fn rule(title: &str, right: &str, width: usize) -> Line<'static> {
-    let dim = Style::new().fg(palette::LIFTED);
+    let dim = Style::new().fg(moonlight::LIFTED);
     let head = 2 + 1 + 1;
     let tail = right.width() + 3;
     let fits = !right.is_empty() && head + title.width() + tail <= width;
@@ -2477,7 +2477,7 @@ pub fn rule(title: &str, right: &str, width: usize) -> Line<'static> {
     let stretch = width.saturating_sub(head - 1 + title.width() + tail);
     let mut spans = vec![
         Span::styled("─ ", dim),
-        Span::styled(title, Style::new().fg(palette::TEXT).add_modifier(Modifier::BOLD)),
+        Span::styled(title, Style::new().fg(moonlight::TEXT).add_modifier(Modifier::BOLD)),
         Span::raw(" "),
         Span::styled("─".repeat(stretch), dim),
     ];
@@ -2658,7 +2658,7 @@ fn search_lines(
     let dim = Style::new().add_modifier(Modifier::DIM);
     let note = match search.skills() {
         Skills::Finding => Some(("finding skills…".to_owned(), dim)),
-        Skills::Failed(why) => Some((why.clone(), Style::new().fg(palette::RED))),
+        Skills::Failed(why) => Some((why.clone(), Style::new().fg(moonlight::RED))),
         Skills::Found(skills) if skills.is_empty() => Some(("no skills here".to_owned(), dim)),
         Skills::Found(_) if search.count() == 0 => Some(("no match".to_owned(), dim)),
         Skills::Found(_) => None,
@@ -4178,7 +4178,7 @@ mod tests {
         draw(&mut buffer, over);
         let content = buffer.content().iter();
         for cell in content.filter(|cell| !matches!(cell.symbol(), "z" | " ")) {
-            assert!(palette::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
         }
         let row = |y| (RIGHT_X..RIGHT_X + width).map(|x| buffer[(x, y)].symbol()).collect();
         (0..height).map(row).collect()

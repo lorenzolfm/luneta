@@ -7,12 +7,12 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 
 use crate::aloud::Button;
-use crate::palette;
 use crate::menu::Choice;
+use crate::moonlight;
 use crate::picker::Pick;
 use crate::pull::Link;
 
-pub const POINTED: Color = palette::SURFACE;
+pub const POINTED: Color = moonlight::SURFACE;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
@@ -92,8 +92,8 @@ impl<S> Spots<S> {
             if let Some(cell) = buffer.cell_mut(at) {
                 let raised = match cell.bg {
                     Color::Reset => POINTED,
-                    POINTED => palette::LIFTED,
-                    _ => palette::RAISED,
+                    POINTED => moonlight::LIFTED,
+                    _ => moonlight::RAISED,
                 };
                 cell.set_bg(raised);
             }
@@ -260,13 +260,13 @@ mod tests {
         let mut spots = Spots::default();
         spots.add(0, 0..4, key('a'));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 2));
-        buffer[(1, 0)].set_bg(palette::LIFTED);
+        buffer[(1, 0)].set_bg(moonlight::LIFTED);
         spots.light(&mut buffer, Position::new(5, 0));
         spots.light(&mut buffer, Position::new(0, 1));
         assert!(buffer.content().iter().all(|cell| cell.bg != POINTED));
         spots.light(&mut buffer, Position::new(2, 0));
         let lit: Vec<Color> = (0..6).map(|x| buffer[(x, 0)].bg).collect();
-        assert_eq!(lit, [POINTED, palette::LIFTED, POINTED, POINTED, Color::Reset, Color::Reset]);
+        assert_eq!(lit, [POINTED, moonlight::LIFTED, POINTED, POINTED, Color::Reset, Color::Reset]);
     }
 
     #[test]
@@ -275,8 +275,8 @@ mod tests {
         spots.add(0, 1..3, Link::parse("https://github.com/o/r/pull/1").expect("a link"));
         for (on, raised) in [
             (Color::Reset, POINTED),
-            (POINTED, palette::LIFTED),
-            (palette::LIFTED, palette::RAISED),
+            (POINTED, moonlight::LIFTED),
+            (moonlight::LIFTED, moonlight::RAISED),
         ] {
             let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
             buffer.set_style(buffer.area, ratatui::style::Style::new().bg(on));

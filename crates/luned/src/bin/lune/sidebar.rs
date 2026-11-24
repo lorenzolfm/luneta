@@ -43,7 +43,6 @@ use crate::close::{self, Act, Plan, Scope, Untold};
 use crate::copied::{Copied, Excerpt};
 use crate::folds::{Fold, Folds};
 use crate::fuzzy::{Fuzzy, Score, Typos};
-use crate::palette;
 use crate::icons;
 use crate::issue::Repository;
 use crate::ledger::{self, Key};
@@ -54,6 +53,7 @@ use crate::menu::{
     ViewRow,
     ProjectTarget, Ran, Rename, Target, Top, Wants, WorktreeRow,
 };
+use crate::moonlight;
 use crate::news::News;
 use crate::picker::{Aim, Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
 use crate::printed::Printed;
@@ -85,9 +85,9 @@ const COPIED_SHOWS: Duration = Duration::from_secs(3);
 
 pub const NARROWEST: u16 = 16;
 
-pub const COLLAPSED: u16 = 4;
+const COLLAPSED_ROWS: u16 = 4;
 
-pub const COLLAPSED_FRAMED: u16 = COLLAPSED + 1;
+pub const COLLAPSED: u16 = COLLAPSED_ROWS + 1;
 
 const HERE_MARK: &str = "▌";
 const NEW: &str = "•";
@@ -108,12 +108,12 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 pub const SPIN: Duration = Duration::from_millis(100);
 pub const SCROLL: Duration = Duration::from_millis(60);
 
-pub const ACCENT: Color = palette::MAUVE;
-pub const NAME: Color = palette::TEXT;
-pub const TAG: Color = palette::YELLOW;
-pub const ERROR: Color = palette::RED;
-pub const LIT: Color = palette::LIFTED;
-const RESTING: Color = palette::SURFACE;
+pub const ACCENT: Color = moonlight::MAUVE;
+pub const NAME: Color = moonlight::TEXT;
+pub const TAG: Color = moonlight::YELLOW;
+pub const ERROR: Color = moonlight::RED;
+pub const LIT: Color = moonlight::LIFTED;
+const RESTING: Color = moonlight::SURFACE;
 
 const MARK: usize = 1;
 
@@ -427,13 +427,13 @@ impl Mark {
             Mark::Waiting => ("●".to_owned(), style.fg(ACCENT).add_modifier(Modifier::BOLD)),
             Mark::Idle => ("✓".to_owned(), style.add_modifier(Modifier::DIM)),
             Mark::Finished | Mark::Passed => {
-                ("✓".to_owned(), style.fg(palette::GREEN).add_modifier(Modifier::BOLD))
+                ("✓".to_owned(), style.fg(moonlight::GREEN).add_modifier(Modifier::BOLD))
             },
             Mark::Busy => (SPINNER[frame].to_owned(), style.fg(TAG)),
             Mark::Shell => ("$".to_owned(), style.add_modifier(Modifier::DIM)),
             Mark::Other(letter) => (letter.to_string(), style.fg(TAG)),
             Mark::Unreported => ("?".to_owned(), style.add_modifier(Modifier::DIM)),
-            Mark::Failed => ("✗".to_owned(), style.fg(palette::RED).add_modifier(Modifier::BOLD)),
+            Mark::Failed => ("✗".to_owned(), style.fg(moonlight::RED).add_modifier(Modifier::BOLD)),
             Mark::Ran => ("$".to_owned(), style),
         }
     }
@@ -700,13 +700,13 @@ fn changed_shown(changed: Changed) -> (Vec<Span<'static>>, usize) {
     let (added, deleted) = (changed.added(), changed.deleted());
     let mut spans = Vec::new();
     if added > 0 {
-        spans.push(Span::styled(format!("+{added}"), Style::new().fg(palette::GREEN)));
+        spans.push(Span::styled(format!("+{added}"), Style::new().fg(moonlight::GREEN)));
     }
     if deleted > 0 {
         if added > 0 {
             spans.push(Span::raw(" "));
         }
-        spans.push(Span::styled(format!("-{deleted}"), Style::new().fg(palette::RED)));
+        spans.push(Span::styled(format!("-{deleted}"), Style::new().fg(moonlight::RED)));
     }
     let width = spans.iter().map(Span::width).sum();
     (spans, width)
@@ -756,12 +756,22 @@ impl Row {
         }
     }
 
-    fn height(&self) -> usize {
+    fn gap(&self) -> usize {
+        match self {
+            Row::Project { .. } => 1,
+            Row::Machine { .. } | Row::Worktree { .. } | Row::View { .. } => 0,
+        }
+    }
+
+    fn own(&self) -> usize {
         match self {
             Row::Worktree { named, .. } => named.height(),
-            Row::Project { .. } => 2,
-            Row::Machine { .. } | Row::View { .. } => 1,
+            Row::Machine { .. } | Row::Project { .. } | Row::View { .. } => 1,
         }
+    }
+
+    fn height(&self) -> usize {
+        self.gap() + self.own()
     }
 }
 
@@ -1326,6 +1336,10 @@ impl Taken {
 }
 
 const HEADER: usize = 2;
+
+const TRAILING: usize = 1;
+
+const TITLE_GAP_MIN: usize = 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Keys {
@@ -3366,7 +3380,7 @@ impl Sidebar {
             return Some((spans, lifted));
         }
         let lines = |span: Range<usize>| self.rows[span].iter().map(Row::height).sum::<usize>();
-        let above = HEADER + lines(lifted.start..at);
+        let above = HEADER + lines(lifted.start..at) + self.rows[at].gap();
         let top = (self.top + usize::from(line)) as isize - above as isize;
         let mut line = lines(0..rows[0].start);
         let mut gaps = Vec::with_capacity(rows.len());
@@ -4270,7 +4284,11 @@ impl Sidebar {
         Asked::Go { on, place }
     }
 
-    pub fn mouse(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
+    pub fn mouse(&mut self, mouse: MouseEvent, framed: Rect) -> Asked {
+        self.mouse_rows(mouse, framed_rows(framed))
+    }
+
+    fn mouse_rows(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         if matches!(
             mouse.kind,
             MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
@@ -4401,7 +4419,7 @@ impl Sidebar {
     }
 
     fn line_of(&self, y: u16, area: Rect) -> Option<usize> {
-        let line = usize::from(y.saturating_sub(area.y));
+        let line = usize::from(y.checked_sub(area.y)?);
         let shown = line.checked_sub(HEADER).filter(|line| *line < self.room)?;
         Some(self.top + shown)
     }
@@ -4462,6 +4480,9 @@ impl Sidebar {
     fn row_at(&self, line: usize) -> Option<usize> {
         let mut start = 0;
         for (at, row) in self.rows.iter().enumerate() {
+            if line < start + row.gap() {
+                return None;
+            }
             let end = start + row.height();
             if line < end {
                 return Some(at);
@@ -4493,7 +4514,18 @@ impl Sidebar {
         }
     }
 
-    pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) -> Drawn {
+    pub fn draw(&mut self, buffer: &mut Buffer, framed: Rect, now: SystemTime) -> Drawn {
+        let drawn = self.draw_rows(buffer, framed_rows(framed), now);
+        self.frame(buffer, framed);
+        drawn
+    }
+
+    pub fn draw_collapsed(&mut self, buffer: &mut Buffer, framed: Rect, now: SystemTime) {
+        self.draw_collapsed_rows(buffer, framed_rows(framed), now);
+        self.frame(buffer, framed);
+    }
+
+    fn draw_rows(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) -> Drawn {
         self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
@@ -4564,7 +4596,8 @@ impl Sidebar {
             let background = on.map(|(_, _, background)| *background);
             let RowLines { lines: row_drawn, number, cuts: row_cuts } =
                 row_lines(row, width, frame, now);
-            assert_eq!(row_drawn.len(), row.height(), "a row draws the lines it takes");
+            assert_eq!(row_drawn.len(), row.own(), "a row draws the lines it takes");
+            drawn.resize(drawn.len() + row.gap(), Line::default());
             if !lifted
                 && let Some(number) = number
             {
@@ -4572,9 +4605,9 @@ impl Sidebar {
             }
             let first = drawn.len();
             cuts.extend(row_cuts.into_iter().map(|cut| CutAt { line: first + cut.line, ..cut }));
-            rows.push((row.spot(), row_drawn.len()));
+            rows.push((row.spot(), row.height()));
             for mut line in row_drawn {
-                if let Some(background) = background.filter(|_| !line.spans.is_empty()) {
+                if let Some(background) = background {
                     line = line.patch_style(Style::new().bg(background));
                 }
                 drawn.push(line);
@@ -4619,7 +4652,7 @@ impl Sidebar {
         }
     }
 
-    pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
+    fn draw_collapsed_rows(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
         self.unsweep();
         self.aloud_buttons = Spots::default();
@@ -4629,7 +4662,7 @@ impl Sidebar {
         } else if self.image_going.is_some() || self.copied.is_some() {
             Style::new().fg(NAME)
         } else {
-            Style::new().fg(palette::MUTE)
+            Style::new().fg(moonlight::MUTE)
         };
         let mut lines = vec![Line::styled(RULE.repeat(width), rule), Line::default()];
         for (count, (glyph, style)) in tallies(self.counts, frame(now)) {
@@ -4656,7 +4689,9 @@ impl Sidebar {
         [self.title(width, frame), Line::default()]
     }
 
-    pub fn frame(&self, buffer: &mut Buffer, framed: Rect) {
+    fn frame(&self, buffer: &mut Buffer, framed: Rect) {
+        let inside = buffer.area.intersection(framed);
+        assert_eq!(inside, framed, "the sidebar is framed inside the buffer");
         let framing = self.framing();
         border(buffer, framed, framed, "", framing, framing);
     }
@@ -4665,15 +4700,15 @@ impl Sidebar {
         if self.has_keys() {
             Style::new().fg(ACCENT)
         } else {
-            Style::new().fg(palette::LIFTED)
+            Style::new().fg(moonlight::LIFTED)
         }
     }
 
     fn title(&self, width: usize, frame: usize) -> Line<'static> {
         let focused = self.has_keys();
-        let dim = Style::new().fg(palette::MUTE);
+        let dim = Style::new().fg(moonlight::MUTE);
         let moon = if focused { Style::new().fg(ACCENT) } else { dim };
-        let name = if focused { Style::new().fg(palette::TEXT) } else { dim };
+        let name = if focused { Style::new().fg(moonlight::TEXT) } else { dim };
         let Counts { projects, waiting, .. } = self.counts;
         let mut counts: Vec<Span<'static>> = Vec::new();
         let waits = (waiting, Mark::Waiting.glyph(frame));
@@ -4695,9 +4730,10 @@ impl Sidebar {
             1 => "  1 project".to_owned(),
             n => format!("  {n} projects"),
         };
-        let fits = named + word.width() + counted + 2 <= width;
+        let fits = named + word.width() + TITLE_GAP_MIN + counted + TRAILING <= width;
         let word = if fits { word } else { String::new() };
-        let gap = width.saturating_sub(named + word.width() + counted + 1);
+        let used = named + word.width() + counted;
+        let gap = width.saturating_sub(used + TRAILING);
         let mut spans = vec![
             Span::styled(lead, moon),
             Span::styled(menu::TITLE, name.add_modifier(Modifier::BOLD)),
@@ -4705,7 +4741,11 @@ impl Sidebar {
             Span::raw(" ".repeat(gap)),
         ];
         spans.extend(counts);
-        Line::from(spans)
+        let line = Line::from(spans);
+        if used + TRAILING <= width {
+            assert_eq!(line.width(), width - TRAILING, "the title fills its row to the margin");
+        }
+        line
     }
 
     fn notes(
@@ -4898,12 +4938,17 @@ fn tallies(counts: Counts, frame: usize) -> [(usize, (String, Style)); 3] {
     ]
 }
 
-pub fn within(framed: Rect) -> Rect {
+fn framed_rows(framed: Rect) -> Rect {
     let x = framed.x.saturating_add(1).min(framed.right());
     let y = framed.y.saturating_add(1).min(framed.bottom());
     let width = framed.right() - x;
     let height = framed.bottom().saturating_sub(1).max(y) - y;
-    Rect { x, y, width, height }
+    let rows = Rect { x, y, width, height };
+    assert_eq!(rows.right(), framed.right(), "the rows share the frame's right column");
+    let height = framed.height.saturating_sub(2);
+    assert_eq!(rows.height, height, "the frame takes a row above and below");
+    assert!(framed.y <= rows.y && rows.bottom() <= framed.bottom(), "the rows are in the frame");
+    rows
 }
 
 pub fn edge(area: Rect) -> Option<u16> {
@@ -4915,7 +4960,7 @@ fn inside(area: Rect) -> Rect {
 }
 
 fn put(buffer: &mut Buffer, area: Rect, lines: &[Line<'static>], framing: Style) {
-    buffer.set_style(area, Style::reset().fg(palette::TEXT));
+    buffer.set_style(area, Style::reset().fg(moonlight::TEXT));
     for (line, y) in lines.iter().zip(area.top()..area.bottom()) {
         buffer.set_line(area.x, y, line, area.width.saturating_sub(1));
     }
@@ -5114,9 +5159,9 @@ fn checkout(status: &GitStatus, pull_request: Option<&PullRequest>) -> Option<Ch
 
 fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
     let colour = match pull_request.state {
-        State::Open => palette::GREEN,
-        State::Draft => palette::MUTE,
-        State::Merged => palette::MAUVE,
+        State::Open => moonlight::GREEN,
+        State::Draft => moonlight::MUTE,
+        State::Merged => moonlight::MAUVE,
         State::Closed => return None,
     };
     let checks = pull_request.verdict();
@@ -5128,11 +5173,11 @@ fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
 
 fn verdict_mark(verdict: Verdict, stale: bool) -> Span<'static> {
     let (mark, colour) = match verdict {
-        Verdict::Failing => ("✗", palette::RED),
-        Verdict::Pending => ("●", palette::YELLOW),
-        Verdict::Passing => ("✓", palette::GREEN),
+        Verdict::Failing => ("✗", moonlight::RED),
+        Verdict::Pending => ("●", moonlight::YELLOW),
+        Verdict::Passing => ("✓", moonlight::GREEN),
     };
-    let colour = if stale { palette::MUTE } else { colour };
+    let colour = if stale { moonlight::MUTE } else { colour };
     Span::styled(mark, Style::new().fg(colour))
 }
 
@@ -5197,6 +5242,15 @@ fn cut_at(line: usize, column: usize, text: &str, room: usize) -> Option<CutAt> 
     Some(CutAt { line, column: column + cells(kept), took })
 }
 
+fn machine_label(name: &str, shown: &str) -> String {
+    let Some(rest) = shown.strip_prefix(name) else {
+        return shown.to_owned();
+    };
+    let label = format!("{}{rest}", name.to_ascii_uppercase());
+    assert_eq!(cells(&label), cells(shown), "uppercasing keeps a machine's width");
+    label
+}
+
 struct RowLines<'a> {
     lines: Vec<Line<'static>>,
     number: Option<NumberAt<'a>>,
@@ -5211,36 +5265,29 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let age = since.map_or_default(|since| age(since, now));
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
             let room = width.saturating_sub(MACHINE_LEAD + reserve + 1);
-            let bare = name.as_str();
             let word = format!(" · {word}");
-            let (name, word) = match machine {
+            let (text, word) = match machine {
                 Machine::Local => (name.clone(), word),
                 Machine::Remote(_) => (format!("{name}{word}"), String::new()),
             };
             let named = room.saturating_sub(cells(&word)).max(room.min(1));
-            let shown = cut(&name, named);
+            let shown = cut(&text, named);
             let worded = room - cells(&shown);
-            let said = format!("{shown}{}", cut(&word, worded));
+            let said = format!("{}{}", machine_label(name, &shown), cut(&word, worded));
             assert!(cells(&said) <= room, "a machine's name and word fit their room");
-            let whole = said == format!("{name}{word}");
-            let rest = said.strip_prefix(bare).filter(|_| whole).map(str::to_owned);
-            let caps = rest.map(|rest| (bare.to_ascii_uppercase(), rest));
-            let (named_part, rest) = caps.unwrap_or((said, String::new()));
-            let shown_cells = cells(&named_part) + cells(&rest);
-            let gap = width.saturating_sub(MACHINE_LEAD + shown_cells + age.width() + 1);
+            let gap = width.saturating_sub(MACHINE_LEAD + cells(&said) + age.width() + 1);
             let line = Line::from(vec![
                 Span::raw(" "),
                 Span::styled(FOLDED, dim),
                 Span::raw(" "),
                 Span::styled(COMPUTER, dim),
                 Span::raw(" "),
-                Span::styled(named_part, dim),
-                Span::styled(rest, dim),
+                Span::styled(said, dim),
                 Span::raw(" ".repeat(gap)),
                 Span::styled(age, dim),
             ]);
             let cuts = [
-                cut_at(0, MACHINE_LEAD, &name, named),
+                cut_at(0, MACHINE_LEAD, &text, named),
                 cut_at(0, MACHINE_LEAD + cells(&shown), &word, worded),
             ];
             let cuts = cuts.into_iter().flatten().collect();
@@ -5257,14 +5304,13 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let aged = if age.is_empty() { 0 } else { age.width() + 1 };
             let room = width.saturating_sub(MACHINE_LEAD + 1 + aged + reserve + 1);
             let cuts = cut_at(0, MACHINE_LEAD, name, room).into_iter().collect();
-            let shown = cut(name, room);
+            let shown = machine_label(name, &cut(name, room));
             let word = cut(&word, room.saturating_sub(cells(&shown)));
             let said = cells(&shown) + cells(&word);
             assert!(said <= room, "a machine's name and word fit their room");
             let gap = room - said;
-            let colour = if *here && *folded { ACCENT } else { palette::MUTE };
+            let colour = if *here && *folded { ACCENT } else { moonlight::MUTE };
             let label = Style::new().fg(colour).add_modifier(Modifier::BOLD);
-            let shown = if shown == *name { shown.to_ascii_uppercase() } else { shown };
             let mut spans = vec![
                 Span::raw(" "),
                 Span::styled(if *folded { FOLDED } else { UNFOLDED }, dim),
@@ -5295,7 +5341,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let room = width.saturating_sub(fixed);
             let bold = Style::new().fg(*colour).add_modifier(Modifier::BOLD);
             let (name, named) = lit(session.name.as_str(), room, Keep::Start, hits, bold);
-            let cuts = cut_at(1, PROJECT, session.name.as_str(), room).into_iter().collect();
+            let cuts = cut_at(0, PROJECT, session.name.as_str(), room).into_iter().collect();
             let gap = room.saturating_sub(named);
             let glyph = if folded { FOLDED } else { PROJECT_DOT };
             let glyph_style = if *here && folded { Style::new().fg(ACCENT) } else { bold };
@@ -5306,7 +5352,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 spans.push(Span::raw(" "));
                 spans.push(badge);
             }
-            RowLines { lines: vec![Line::default(), Line::from(spans)], number: None, cuts }
+            RowLines { lines: vec![Line::from(spans)], number: None, cuts }
         },
         Row::Worktree { named, missing, hits, under, here, colour, waiting, dot, busy, .. } => {
             let folded = *under == Under::Folded;
@@ -5323,9 +5369,9 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let status = beside.as_ref().map_or("", |beside| beside.status.as_str());
             let room = line_room.saturating_sub(beside.as_ref().map_or(0, Beside::taken));
             let style = if *here {
-                Style::new().fg(palette::TEXT).add_modifier(Modifier::BOLD)
+                Style::new().fg(moonlight::TEXT).add_modifier(Modifier::BOLD)
             } else {
-                Style::new().fg(palette::TEXT)
+                Style::new().fg(moonlight::TEXT)
             };
             let (shown, wide) = lit(name, room, Keep::Start, hits, style);
             let mut cuts: Vec<CutAt> = cut_at(0, WORKTREE, name, room).into_iter().collect();
@@ -5345,7 +5391,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 number = beside.number_at(0, start);
                 spans.extend(beside.spans);
                 spans.push(Span::raw(" ".repeat(gap)));
-                spans.push(Span::styled(beside.status, Style::new().fg(palette::PEACH)));
+                spans.push(Span::styled(beside.status, Style::new().fg(moonlight::PEACH)));
             } else {
                 spans.push(Span::raw(" ".repeat(gap)));
             }
@@ -5480,12 +5526,12 @@ pub(crate) fn colour_of(project: ProjectId) -> Color {
 
 fn hue(colour: Colour) -> Color {
     match colour {
-        Colour::Blue => palette::BLUE,
-        Colour::Yellow => palette::YELLOW,
-        Colour::Purple => palette::MAUVE,
-        Colour::Aqua => palette::CYAN,
-        Colour::Orange => palette::PEACH,
-        Colour::Green => palette::GREEN,
+        Colour::Blue => moonlight::BLUE,
+        Colour::Yellow => moonlight::YELLOW,
+        Colour::Purple => moonlight::MAUVE,
+        Colour::Aqua => moonlight::CYAN,
+        Colour::Orange => moonlight::PEACH,
+        Colour::Green => moonlight::GREEN,
     }
 }
 
@@ -5596,13 +5642,13 @@ fn checkout_line(
     let mut spans = vec![
         margin(here),
         Span::raw(" ".repeat(LABEL - 1)),
-        Span::styled(branch, Style::new().fg(palette::MUTE)),
+        Span::styled(branch, Style::new().fg(moonlight::MUTE)),
     ];
     let start: usize = spans.iter().map(Span::width).sum();
     let number = beside.number_at(at, start);
     spans.extend(beside.spans);
     spans.push(Span::raw(" ".repeat(gap)));
-    spans.push(Span::styled(beside.status, Style::new().fg(palette::PEACH)));
+    spans.push(Span::styled(beside.status, Style::new().fg(moonlight::PEACH)));
     (Line::from(spans), number, room)
 }
 
@@ -6011,24 +6057,24 @@ mod tests {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         sidebar.focus(if focused { Keys::Sidebar } else { Keys::Terminal });
-        sidebar.draw(&mut buffer, area, now);
+        sidebar.draw_rows(&mut buffer, area, now);
         let lit: &[Color] = if focused { &[LIT, RESTING] } else { &[RESTING] };
-        in_palette(&buffer, &[&[Color::Reset], lit].concat());
+        in_moonlight(&buffer, &[&[Color::Reset], lit].concat());
         buffer
     }
 
     fn collapsed(sidebar: &mut Sidebar, height: u16, now: SystemTime) -> Buffer {
-        let area = Rect::new(0, 0, COLLAPSED, height);
+        let area = Rect::new(0, 0, COLLAPSED_ROWS, height);
         let mut buffer = Buffer::empty(area);
-        sidebar.draw_collapsed(&mut buffer, area, now);
-        in_palette(&buffer, &[Color::Reset]);
+        sidebar.draw_collapsed_rows(&mut buffer, area, now);
+        in_moonlight(&buffer, &[Color::Reset]);
         buffer
     }
 
-    fn in_palette(buffer: &Buffer, backgrounds: &[Color]) {
+    fn in_moonlight(buffer: &Buffer, backgrounds: &[Color]) {
         for cell in buffer.content() {
-            assert!(palette::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
-            let named = Colour::ALL.map(hue).contains(&cell.bg) && cell.fg == palette::INK;
+            assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            let named = Colour::ALL.map(hue).contains(&cell.bg) && cell.fg == moonlight::INK;
             let on = backgrounds.contains(&cell.bg) || named;
             assert!(on, "{:?} on {:?}", cell.symbol(), cell.bg);
         }
@@ -6248,6 +6294,25 @@ mod tests {
     }
 
     #[test]
+    fn the_blank_line_above_a_project_is_no_row_s() {
+        let mut sidebar = two_sessions();
+        let area = Rect::new(0, 0, 32, 12);
+        let lines = screen(&mut sidebar, false, area.width, area.height);
+        assert_eq!(lines[9..11], ["", " ● newer"]);
+        let newer = Fold::Project(&Machine::Local, ProjectId::of(20).unwrap());
+        for column in [1, 10] {
+            assert_eq!(click(&mut sidebar, column, 9, area), Asked::Take, "{column}");
+            assert!(!sidebar.folds.contains(newer), "{column}");
+        }
+        let down = mouse(MouseEventKind::Down(MouseButton::Left), 10, 9);
+        sidebar.mouse_rows(down, area);
+        let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 10, 4);
+        assert_eq!(sidebar.mouse_rows(drag, area), Asked::Nothing, "the gap lifts no row");
+        sidebar.let_go();
+        assert_eq!(click(&mut sidebar, 10, 10, area), go_here(Place::Session(listed("newer", 20))));
+    }
+
+    #[test]
     fn a_worktree_s_row_closes_the_worktree_with_its_views() {
         let mut sidebar = fresh();
         let fix = worktree_of(31, "fix", "/w/fix", &[1, 2]);
@@ -6386,7 +6451,7 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(listing(&[("a", 1), ("b", 2), ("c", 9)]));
         let buffer = drawn(&mut sidebar, false, 32, 17);
-        let (y, p, a) = (palette::YELLOW, palette::MAUVE, palette::CYAN);
+        let (y, p, a) = (moonlight::YELLOW, moonlight::MAUVE, moonlight::CYAN);
         assert_eq!([chip(&buffer, 4), chip(&buffer, 9), chip(&buffer, 14)], [y, p, a]);
         assert_eq!(buffer[(1, 4)].symbol(), PROJECT_DOT);
         assert_eq!(buffer[(1, 4)].fg, y);
@@ -6394,7 +6459,7 @@ mod tests {
         let mut there = fresh();
         there.hear(listing(&[("e", 4), ("c", 9)]));
         let buffer = drawn(&mut there, false, 32, 17);
-        assert_eq!([chip(&buffer, 4), chip(&buffer, 9)], [palette::PEACH, a]);
+        assert_eq!([chip(&buffer, 4), chip(&buffer, 9)], [moonlight::PEACH, a]);
     }
 
     #[test]
@@ -6405,8 +6470,8 @@ mod tests {
             let has = |modifier| cell.modifier.contains(modifier);
             (cell.fg, has(Modifier::DIM), has(Modifier::BOLD))
         };
-        let dim = [(palette::MUTE, false, false), (palette::MUTE, false, true)];
-        let lit = [(ACCENT, false, false), (palette::TEXT, false, true)];
+        let dim = [(moonlight::MUTE, false, false), (moonlight::MUTE, false, true)];
+        let lit = [(ACCENT, false, false), (moonlight::TEXT, false, true)];
         for (focused, looks) in [(false, dim), (true, lit), (false, dim)] {
             assert_eq!(screen(&mut sidebar, focused, 32, 3)[0], " ☾ lune  2 projects         ●1");
             let buffer = drawn(&mut sidebar, focused, 32, 3);
@@ -6420,8 +6485,8 @@ mod tests {
         let area = Rect::new(0, 0, 32, 12);
         let draw = |sidebar: &mut Sidebar| {
             let mut buffer = Buffer::empty(area);
-            sidebar.draw(&mut buffer, area, moment(160_000));
-            in_palette(&buffer, &[Color::Reset, LIT]);
+            sidebar.draw_rows(&mut buffer, area, moment(160_000));
+            in_moonlight(&buffer, &[Color::Reset, LIT]);
             let start = |y: u16| (0..7).map(|x| buffer[(x, y)].symbol()).collect::<String>();
             let titled = (0..area.height)
                 .filter(|y| matches!(start(*y).as_str(), "─ lune " | " ☾ lune"))
@@ -6438,7 +6503,7 @@ mod tests {
         let (titled, lit, fg, dim) = draw(&mut sidebar);
         assert_eq!((titled, fg, dim, lit.is_empty()), (2, ACCENT, false, false));
         sidebar.focus(Keys::Lent);
-        assert_eq!(draw(&mut sidebar), (1, lit.clone(), palette::MUTE, false));
+        assert_eq!(draw(&mut sidebar), (1, lit.clone(), moonlight::MUTE, false));
         sidebar.focus(Keys::Sidebar);
         assert_eq!(draw(&mut sidebar), (2, lit, ACCENT, false));
         assert_eq!(sidebar.lit_spot().cloned(), cursor);
@@ -6480,7 +6545,8 @@ mod tests {
         sidebar.hear(host(vec![session("s", 10, views)], agents));
         let strip = |sidebar: &mut Sidebar, now| {
             let buffer = collapsed(sidebar, 6, now);
-            let line = |y| (0..COLLAPSED - 1).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            let line =
+                |y| (0..COLLAPSED_ROWS - 1).map(|x| buffer[(x, y)].symbol()).collect::<String>();
             (0..6).map(|y| line(y).trim_end().to_owned()).collect::<Vec<_>>()
         };
         assert_eq!(strip(&mut sidebar, moment(160_500)), ["───", "", "•1", "$1…", "", ""]);
@@ -6562,14 +6628,14 @@ mod tests {
             (0..buffer.area.height).map(look).collect::<Vec<_>>()
         };
         let accent = ("│".to_owned(), ACCENT, Color::Reset, Modifier::empty());
-        let dim = ("│".to_owned(), palette::LIFTED, Color::Reset, Modifier::empty());
+        let dim = ("│".to_owned(), moonlight::LIFTED, Color::Reset, Modifier::empty());
         let open = drawn(&mut sidebar, true, COLUMNS, 10);
         assert!((0..10).any(|y| open[(0, y)].bg == LIT), "a row is lit");
         assert_eq!(edge(&open), vec![accent; 10]);
         sidebar.focus(Keys::Lent);
         let area = Rect::new(0, 0, COLUMNS, 10);
         let mut lent = Buffer::empty(area);
-        sidebar.draw(&mut lent, area, moment(160_000));
+        sidebar.draw_rows(&mut lent, area, moment(160_000));
         assert_eq!(edge(&lent), vec![dim.clone(); 10]);
         assert_eq!(edge(&drawn(&mut sidebar, false, COLUMNS, 10)), vec![dim.clone(); 10]);
         assert_eq!(edge(&collapsed(&mut sidebar, 10, moment(160_000))), vec![dim; 10]);
@@ -6579,13 +6645,12 @@ mod tests {
     fn the_sidebar_is_a_rounded_box_round_its_rows() {
         let mut sidebar = two_sessions();
         let framed = Rect::new(0, 0, COLUMNS, 10);
-        let rows = within(framed);
+        let rows = framed_rows(framed);
         assert_eq!(rows, Rect::new(1, 1, COLUMNS - 1, 8));
         assert_eq!(edge(rows), edge(framed));
         let mut buffer = Buffer::empty(framed);
         sidebar.focus(Keys::Sidebar);
-        sidebar.draw(&mut buffer, rows, moment(160_000));
-        sidebar.frame(&mut buffer, framed);
+        let _ = sidebar.draw(&mut buffer, framed, moment(160_000));
         let (right, bottom) = (COLUMNS - 1, 9);
         let at = |x, y| (buffer[(x, y)].symbol().to_owned(), buffer[(x, y)].fg);
         let accent = |symbol: &str| (symbol.to_owned(), ACCENT);
@@ -6595,7 +6660,7 @@ mod tests {
         assert_eq!(at(right, bottom), accent("╯"));
         assert!((1..right).all(|x| at(x, 0) == accent("─") && at(x, bottom) == accent("─")));
         assert!((1..bottom).all(|y| at(0, y) == accent("│") && at(right, y) == accent("│")));
-        assert_eq!(within(Rect::new(3, 2, 1, 1)), Rect::new(4, 3, 0, 0));
+        assert_eq!(framed_rows(Rect::new(3, 2, 1, 1)), Rect::new(4, 3, 0, 0));
     }
 
     fn kept_mut(projects: Option<&mut api::Projects>) -> &mut Vec<api::Project> {
@@ -6762,14 +6827,14 @@ mod tests {
         assert_eq!(lit_place(&sidebar), second);
         let area = Rect::new(0, 0, 32, 11);
         screen(&mut sidebar, true, area.width, area.height);
-        sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
         assert_eq!(lit_place(&sidebar), second);
-        sidebar.mouse(mouse(MouseEventKind::Moved, 0, 0), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 0, 0), area);
         sidebar.key(&g, moment(160_000));
         assert_eq!(lit_place(&sidebar), first);
         sidebar.key(&g, moment(160_000));
-        assert_eq!(click(&mut sidebar, 1, 9, area), Asked::Take);
+        assert_eq!(click(&mut sidebar, 1, 10, area), Asked::Take);
         let folded = Some(Place::Session(listed("newer", 20)));
         sidebar.key(&g, moment(160_000));
         assert_eq!(lit_place(&sidebar), folded);
@@ -6939,8 +7004,8 @@ mod tests {
 
     fn click(sidebar: &mut Sidebar, column: u16, row: u16, area: Rect) -> Asked {
         let down = mouse(MouseEventKind::Down(MouseButton::Left), column, row);
-        assert_eq!(sidebar.mouse(down, area), Asked::Nothing);
-        sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, row), area)
+        assert_eq!(sidebar.mouse_rows(down, area), Asked::Nothing);
+        sidebar.mouse_rows(mouse(MouseEventKind::Up(MouseButton::Left), column, row), area)
     }
 
     #[test]
@@ -7701,9 +7766,9 @@ mod tests {
                 "       old",
             ]
         );
-        assert_eq!(colour(6), Some(palette::GREEN));
-        assert_eq!(colour(9), Some(palette::MAUVE));
-        assert_eq!(colour(12), Some(palette::MUTE));
+        assert_eq!(colour(6), Some(moonlight::GREEN));
+        assert_eq!(colour(9), Some(moonlight::MAUVE));
+        assert_eq!(colour(12), Some(moonlight::MUTE));
     }
 
     #[test]
@@ -7762,10 +7827,10 @@ mod tests {
         };
         let first = 6;
         let added = (0..34).find(|x| buffer[(*x, first)].symbol() == "+").expect("the mark");
-        assert_eq!(buffer[(added, first)].fg, palette::GREEN);
-        assert_eq!(colour(first, added, "-"), palette::RED);
-        assert_eq!(colour(first + 3, 0, "+"), palette::GREEN);
-        assert_eq!(colour(first + 6, 0, "-"), palette::RED);
+        assert_eq!(buffer[(added, first)].fg, moonlight::GREEN);
+        assert_eq!(colour(first, added, "-"), moonlight::RED);
+        assert_eq!(colour(first + 3, 0, "+"), moonlight::GREEN);
+        assert_eq!(colour(first + 6, 0, "-"), moonlight::RED);
     }
 
     #[test]
@@ -7819,10 +7884,10 @@ mod tests {
             let x = (0..32).find(|x| buffer[(*x, y)].symbol() == mark).expect("the mark");
             buffer[(x, y)].fg
         };
-        assert_eq!(mark(6, "✗"), palette::RED);
-        assert_eq!(mark(9, "●"), palette::YELLOW);
-        assert_eq!(mark(12, "✓"), palette::GREEN);
-        assert_eq!(mark(24, "●"), palette::MUTE);
+        assert_eq!(mark(6, "✗"), moonlight::RED);
+        assert_eq!(mark(9, "●"), moonlight::YELLOW);
+        assert_eq!(mark(12, "✓"), moonlight::GREEN);
+        assert_eq!(mark(24, "●"), moonlight::MUTE);
     }
 
     #[test]
@@ -7851,7 +7916,7 @@ mod tests {
         assert_eq!(lines[5..10], [&[one, "     \u{e795} w/issue-489"][..], &tidy[..]].concat());
         let area = Rect::new(0, 0, 32, 12);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
         let columns = |y: u16, number: &str| {
             let cells: Vec<&str> = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
             let start = cells.windows(number.len()).position(|it| it.concat() == number);
@@ -8167,7 +8232,7 @@ mod tests {
         type_in(&mut sidebar, "/pix");
         let area = Rect::new(0, 0, 32, 16);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
         let keys: String = (0..31).map(|x| buffer[(x, 15)].symbol()).collect();
         let at = |key: &str| Position::new(u16::try_from(keys.find(key).unwrap()).unwrap(), 15);
         let (enter, esc) = (KeyEvent::from(KeyCode::Enter), KeyEvent::from(KeyCode::Esc));
@@ -8190,7 +8255,7 @@ mod tests {
         let rule = format!("─ Search {} 2/7 ─", "─".repeat(16));
         sidebar.focus(Keys::Lent);
         let mut buffer = Buffer::empty(area);
-        sidebar.draw(&mut buffer, area, moment(160_000));
+        sidebar.draw_rows(&mut buffer, area, moment(160_000));
         let line = |y: u16| (0..31).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         assert_eq!([line(14).trim_end(), line(15).trim_end()], [rule.as_str(), " pix_"]);
         let clicked = sidebar.keys_clicked(Keyed::Search, &enter, moment(160_000));
@@ -8407,11 +8472,11 @@ mod tests {
         sidebar.light(one);
         let area = Rect::new(0, 0, 32, 24);
         sidebar.key(&char('y'), now);
-        sidebar.mouse(mouse(MouseEventKind::ScrollUp, 10, 4), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::ScrollUp, 10, 4), area);
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
 
         sidebar.key(&char('y'), now);
-        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 10, 4), area);
         assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
     }
 
@@ -8471,7 +8536,7 @@ mod tests {
         let mut sidebar = pull_said("https://ghe.example/owner/repo/pull/5");
         let area = Rect::new(0, 0, 32, 24);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw(&mut buffer, area, now);
+        let drawn = sidebar.draw_rows(&mut buffer, area, now);
         let line: String = (0..31).map(|x| buffer[(x, 6)].symbol()).collect();
         assert!(line.contains("fix #5"), "{line}");
         assert_eq!(number_spot(&drawn, 6), [] as [u16; 0]);
@@ -8580,7 +8645,7 @@ mod tests {
             sidebar.focus(keys);
             let area = Rect::new(0, 0, 32, 32);
             let mut buffer = Buffer::empty(area);
-            let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+            let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
             let columns = |y: u16, number: &str| {
                 let cells: Vec<&str> = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
                 let start = cells.windows(number.len()).position(|it| it.concat() == number);
@@ -8604,26 +8669,26 @@ mod tests {
         sidebar.focus(Keys::Terminal);
         let area = Rect::new(0, 0, 32, 8);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
         assert_eq!(number_spot(&drawn, 6).len(), "#246".len());
 
         sidebar.top = 5;
-        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
         assert_eq!((0..8).flat_map(|y| number_spot(&drawn, y)).count(), 0);
 
         sidebar.top = 0;
         sidebar.notify("something went wrong".to_owned());
         let short = Rect::new(0, 0, 32, 7);
-        let drawn = sidebar.draw(&mut Buffer::empty(short), short, moment(160_000));
+        let drawn = sidebar.draw_rows(&mut Buffer::empty(short), short, moment(160_000));
         assert_eq!(number_spot(&drawn, 6), [] as [u16; 0]);
         sidebar.notice = None;
 
         let area = Rect::new(0, 0, 32, 24);
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 5), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 7), area), Asked::Take);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 5), area);
+        assert_eq!(sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 7), area), Asked::Take);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
         assert_eq!((0..24).flat_map(|y| number_spot(&drawn, y)).count(), 0);
     }
 
@@ -8659,7 +8724,7 @@ mod tests {
     fn clicks(sidebar: &mut Sidebar, from: u16) -> Vec<(String, Option<Hit>)> {
         let area = Rect::new(0, 0, 32, 20);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
+        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
         let text = |y| (0..31).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         let click = |y| (text(y).trim_end().to_owned(), drawn.at(Position::new(4, y)));
         (from..20).map(click).collect()
@@ -8920,7 +8985,7 @@ mod tests {
         let area = Rect::new(0, 0, 32, 10);
         let drawn = |sidebar: &mut Sidebar| {
             let mut buffer = Buffer::empty(area);
-            let drawn = sidebar.draw(&mut buffer, area, now);
+            let drawn = sidebar.draw_rows(&mut buffer, area, now);
             let last = (0..31).map(|x| buffer[(x, 9)].symbol()).collect::<String>();
             (last.trim_end().to_owned(), drawn.at(Position::new(4, 9)))
         };
@@ -8935,7 +9000,7 @@ mod tests {
         let lines = screen(&mut sidebar, true, 32, 10);
         assert_eq!(lines[8], " ?  All keys", "{lines:#?}");
         let mut buffer = Buffer::empty(area);
-        let at = sidebar.draw(&mut buffer, area, now).at(Position::new(4, 8));
+        let at = sidebar.draw_rows(&mut buffer, area, now).at(Position::new(4, 8));
         assert_eq!(at, all);
         assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
         assert!(sidebar.open().is_none());
@@ -9728,7 +9793,7 @@ mod tests {
         let standing = |sidebar: &mut Sidebar| {
             let area = Rect::new(0, 0, 32, 14);
             let mut buffer = Buffer::empty(area);
-            sidebar.draw(&mut buffer, area, moment(160_000));
+            sidebar.draw_rows(&mut buffer, area, moment(160_000));
             let row = |y| (0..32).map(|x| buffer[(x, y)].symbol()).collect::<String>();
             (0..14).map(row).collect::<Vec<_>>()
         };
@@ -10452,7 +10517,7 @@ mod tests {
         type_in(&mut sidebar, "jvjjk");
         let (_, lit) = drawn_rows(&mut sidebar);
         assert_eq!(lit, [1, 2, 3, 4]);
-        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 26));
+        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 26));
         let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
         let seen = vec![tab_of(10, 0), tab_of(10, 1), tab_of(10, 2)];
         let wanted = vec![tab_of(10, 2), tab_of(10, 0), tab_of(10, 1)];
@@ -10493,23 +10558,51 @@ mod tests {
         };
         let (bipa, notes) = (row(" ● bipa"), row(" ● notes"));
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, notes), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 20), area), Asked::Take);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, notes), area);
+        assert_eq!(
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 20), area),
+            Asked::Take
+        );
         let (rows, lit) = drawn_rows(&mut sidebar);
         assert_eq!(rows[16], " ● notes", "{rows:#?}");
         assert_eq!(lit, [16, 17, 18]);
         let order = projects(&[10, 20, 30], &[10, 30, 20]);
         let asked = Asked::Move { on: Machine::Local, order, ticket: 1 };
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 20), area), asked);
+        assert_eq!(sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 20), area), asked);
 
         let lines = screen(&mut sidebar, true, area.width, area.height);
         let notes = lines.iter().position(|line| line.starts_with(" ● notes")).unwrap();
         let notes = u16::try_from(notes).unwrap();
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, notes), area);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, bipa), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, notes), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, bipa), area);
         let order = projects(&[10, 30, 20], &[20, 10, 30]);
         let asked = Asked::Move { on: Machine::Local, order, ticket: 1 };
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, bipa), area), asked);
+        assert_eq!(sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, bipa), area), asked);
+    }
+
+    #[test]
+    fn a_folded_project_dragged_onto_the_name_above_or_below_lands_past_it() {
+        let left = MouseButton::Left;
+        let area = Rect::new(0, 0, 32, 28);
+        for (onto, wanted) in [(" ▸ bipa", [20, 10, 30]), (" ▸ zed", [10, 30, 20])] {
+            let mut sidebar = searched();
+            for id in [10, 20, 30] {
+                sidebar.folds.set(Fold::Project(&Machine::Local, ProjectId::of(id).unwrap()), true);
+            }
+            sidebar.rebuild();
+            let lines = screen(&mut sidebar, true, area.width, area.height);
+            let row = |name: &str| {
+                let at = lines.iter().position(|line| line.starts_with(name)).expect(name);
+                u16::try_from(at).unwrap()
+            };
+            let (notes, to) = (row(" ▸ notes"), row(onto));
+            sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, notes), area);
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, to), area);
+            let order = projects(&[10, 20, 30], &wanted);
+            let asked = Asked::Move { on: Machine::Local, order, ticket: 1 };
+            let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, to), area);
+            assert_eq!(up, asked, "{onto}");
+        }
     }
 
     #[test]
@@ -10519,14 +10612,14 @@ mod tests {
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         let lift_notes = |sidebar: &mut Sidebar| {
-            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 12), area);
-            sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 5), area);
+            sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area);
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 5), area);
             assert_ne!(drawn_rows(sidebar).0, listed);
         };
         lift_notes(&mut sidebar);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 40, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 40, 5), area);
         assert_eq!(drawn_rows(&mut sidebar), (listed.clone(), (8..11).collect()));
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 40, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 40, 5), area);
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
         lift_notes(&mut sidebar);
@@ -10535,8 +10628,8 @@ mod tests {
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
         lift_notes(&mut sidebar);
-        sidebar.mouse(mouse(MouseEventKind::Moved, 10, 5), area);
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 10, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 5), area);
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
     }
 
@@ -10554,12 +10647,12 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area);
         assert_eq!(sidebar.holding(), Holding::Press, "the press");
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 5), area);
         assert_ne!(drawn_rows(&mut sidebar).0, listed, "a row is lifted");
         assert_eq!(sidebar.holding(), Holding::Press, "the drag");
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 5), area);
         assert_eq!(sidebar.holding(), Holding::Nothing, "the row landed");
     }
 
@@ -10570,17 +10663,20 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area);
         type_in(&mut sidebar, "vn");
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area);
-        let asked = sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 4), area);
+        let asked = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 4), area);
         let order = projects(&[10, 20, 30], &[20, 10, 30]);
         assert_eq!(asked, Asked::Move { on: Machine::Local, order, ticket: 1 });
         assert!(sidebar.open().is_none());
 
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 6), area);
         assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000)), Asked::Nothing);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 6), area), Asked::Nothing);
+        assert_eq!(
+            sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 6), area),
+            Asked::Nothing
+        );
     }
 
     #[test]
@@ -10592,15 +10688,18 @@ mod tests {
         let (listed, _) = drawn_rows(&mut sidebar);
         assert_eq!(listed[0], " ● zed");
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 6), area), Asked::Nothing);
-        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 6), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 4), area);
+        assert_eq!(
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 6), area),
+            Asked::Nothing
+        );
+        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 6), area);
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
     }
 
     fn framed(sidebar: &mut Sidebar, area: Rect) -> Buffer {
         let mut buffer = Buffer::empty(area);
-        sidebar.draw(&mut buffer, area, moment(160_000));
+        sidebar.draw_rows(&mut buffer, area, moment(160_000));
         buffer
     }
 
@@ -10611,13 +10710,13 @@ mod tests {
 
     fn dragged(sidebar: &mut Sidebar, area: Rect, from: (u16, u16), to: (u16, u16)) {
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), from.0, from.1), area);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), to.0, to.1), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), from.0, from.1), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), to.0, to.1), area);
     }
 
     fn swept(sidebar: &mut Sidebar, area: Rect, from: (u16, u16), to: (u16, u16)) -> Asked {
         dragged(sidebar, area, from, to);
-        sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1), area)
+        sidebar.mouse_rows(mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1), area)
     }
 
     fn excerpt(text: &str) -> Excerpt {
@@ -10637,16 +10736,16 @@ mod tests {
         assert_eq!(swept(&mut sidebar, area, (7, 6), (13, 6)), copied("a-p-i-x"));
         assert_eq!(swept(&mut sidebar, area, (13, 6), (9, 6)), copied("p-i-x"));
         dragged(&mut sidebar, area, (7, 6), (9, 6));
-        let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 13, 6), area);
+        let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(MouseButton::Left), 13, 6), area);
         assert_eq!(up, copied("a-p-i-x"));
         assert_eq!(swept(&mut sidebar, area, (3, 0), (6, 0)), copied("lune"));
         assert_eq!(sidebar.lit_spot().cloned(), here);
 
         dragged(&mut sidebar, area, (9, 6), (11, 6));
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 40, 8), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 40, 8), area);
         assert!(sidebar.pressed());
-        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 40, 8), area);
+        let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 40, 8), area);
         assert_eq!(up, copied("p-i-x\n  ▾ Tab #2\n       dda-bank-slip"));
         assert!(!sidebar.pressed());
 
@@ -10672,19 +10771,25 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 3, 4), area);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 6, 4), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 7, 5), area), Asked::Nothing);
-        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 7, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 3, 4), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 6, 4), area);
+        assert_eq!(
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 7, 5), area),
+            Asked::Nothing
+        );
+        let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 7, 5), area);
         assert_eq!(up, copied("bipa\n  ▾ Tab"));
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
         assert_eq!(swept(&mut sidebar, area, (3, 4), (6, 4)), copied("bipa"));
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 11, 11), area), Asked::Nothing);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 11, 12), area), Asked::Take);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area);
+        let drag = |sidebar: &mut Sidebar, row| {
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 11, row), area)
+        };
+        assert_eq!(drag(&mut sidebar, 12), Asked::Nothing);
+        assert_eq!(drag(&mut sidebar, 13), Asked::Take);
     }
 
     #[test]
@@ -10696,10 +10801,10 @@ mod tests {
         let cells = [(7, 6), (8, 6), (9, 6)];
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
 
-        let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 9, 6), area);
+        let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(MouseButton::Left), 9, 6), area);
         assert_eq!(up, copied("a-p"));
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
-        sidebar.mouse(mouse(MouseEventKind::Moved, 20, 13), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 20, 13), area);
         sidebar.hear(searched().host.unwrap());
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
         sidebar.hear(first_view_is(1, "a-p-i-y"));
@@ -10732,7 +10837,7 @@ mod tests {
         };
         let moves: [&dyn Fn(&mut Sidebar); 7] = [
             &|sidebar| {
-                sidebar.mouse(mouse(MouseEventKind::ScrollDown, 7, 5), area);
+                sidebar.mouse_rows(mouse(MouseEventKind::ScrollDown, 7, 5), area);
             },
             &|sidebar| {
                 sidebar.hear(more_rows());
@@ -10750,7 +10855,7 @@ mod tests {
                 framed(sidebar, Rect::new(0, 0, 28, 26));
             },
             &|sidebar| {
-                sidebar.draw_collapsed(&mut Buffer::empty(area), area, moment(160_000));
+                sidebar.draw_collapsed_rows(&mut Buffer::empty(area), area, moment(160_000));
             },
         ];
         for (case, moved) in moves.iter().enumerate() {
@@ -10805,7 +10910,7 @@ mod tests {
                 sidebar.key(&esc, moment(160_000));
             },
             &|sidebar| {
-                sidebar.mouse(mouse(MouseEventKind::Moved, 9, 6), area);
+                sidebar.mouse_rows(mouse(MouseEventKind::Moved, 9, 6), area);
             },
         ];
         for (case, let_go) in lets_go.iter().enumerate() {
@@ -10817,7 +10922,7 @@ mod tests {
             assert!(!sidebar.pressed(), "case {case}");
             assert_eq!(sidebar.notice.as_deref(), Some("a note"), "case {case}");
             assert_eq!(reversed(&framed(&mut sidebar, area)), [], "case {case}");
-            let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 9, 6), area);
+            let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(MouseButton::Left), 9, 6), area);
             assert_eq!(up, Asked::Nothing, "case {case}");
         }
     }
@@ -10861,7 +10966,7 @@ mod tests {
         }
         assert_eq!(swept(&mut sidebar, area, (7, 7), (11, 7)), copied("a-tex"));
 
-        sidebar.mouse(mouse(MouseEventKind::ScrollDown, 7, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::ScrollDown, 7, 5), area);
         framed(&mut sidebar, area);
         assert_eq!(swept(&mut sidebar, area, (7, 4), (22, 4)), copied(long));
     }
@@ -10894,8 +10999,8 @@ mod tests {
         let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 7)[HEADER].clone();
         assert_eq!(first(&mut sidebar), " ▾ \u{f108} MAC");
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 6), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 4), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 6), area);
         let start = steady(moment(160_000));
         let tick = |sidebar: &mut Sidebar, millis: u64| {
             let at = moment(160_000 + millis);
@@ -10909,7 +11014,7 @@ mod tests {
             firsts.push(tick(&mut sidebar, millis));
         }
         let end = sidebar.scrolling();
-        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 3), area);
         let lifted = ["", "", " ● notes", "  ▾ Tab #1", "     \u{e795} me/Documents"];
         assert_eq!(firsts[..5], lifted, "one line a SCROLL");
         assert_eq!(firsts[13..15], ["", " ● bipa"], "bipa carried along");
@@ -11902,11 +12007,14 @@ mod tests {
         };
         let (dev, first) = (row(" ● dev"), row(" ▾ \u{f108} NIXOS") + 2);
         let left = MouseButton::Left;
-        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, dev), area);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, first), area), Asked::Take);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, dev), area);
+        assert_eq!(
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, first), area),
+            Asked::Take
+        );
         let order = projects(&[20, 40], &[40, 20]);
         let asked = Asked::Move { on: Machine::Remote(nixos()), order, ticket: 1 };
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, first), area), asked);
+        assert_eq!(sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, first), area), asked);
     }
 
     #[test]
@@ -11959,8 +12067,8 @@ mod tests {
             lines[HEADER..HEADER + 3],
             [
                 " ▸ \u{f108} Mac-176357… · no projects",
-                " ▸ \u{f108} lorenzo@nixos · unrea… 1m",
-                " ▸ \u{f108} me@vps-frankfurt · un… 1m",
+                " ▸ \u{f108} LORENZO@NIXOS · unrea… 1m",
+                " ▸ \u{f108} ME@VPS-FRANKFURT · un… 1m",
             ]
         );
     }
@@ -12087,11 +12195,11 @@ mod tests {
     #[test]
     fn a_pause_shows_on_the_sidebar_collapsed() {
         let marked = |shown| {
-            let area = Rect::new(0, 0, COLLAPSED, 6);
+            let area = Rect::new(0, 0, COLLAPSED_ROWS, 6);
             let mut sidebar = Sidebar::default();
             sidebar.aloud(Some(shown));
             let mut buffer = Buffer::empty(area);
-            sidebar.draw_collapsed(&mut buffer, area, SystemTime::UNIX_EPOCH);
+            sidebar.draw_collapsed_rows(&mut buffer, area, SystemTime::UNIX_EPOCH);
             buffer.content().iter().any(|cell| cell.symbol() == aloud::PLAY)
         };
         for paused in [false, true] {
