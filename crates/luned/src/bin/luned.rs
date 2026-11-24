@@ -7,7 +7,7 @@ use clap::Parser;
 use luned::helper::Helper;
 use luned::log::{self, Process};
 use luned::projects::{self, Unheld};
-use luned::{folder, panics, release, Claim, Refusal};
+use luned::{folder, panics, release, tasks, Claim, Refusal};
 use rustix::io::FdFlags;
 
 #[derive(Parser)]
@@ -44,6 +44,10 @@ fn main() -> ExitCode {
         && let Err(error) = rustix::process::setsid()
     {
         log::say(&format!("no session of its own: {error}"));
+        return ExitCode::FAILURE;
+    }
+    if let Err(why) = tasks::start() {
+        log::say(&why);
         return ExitCode::FAILURE;
     }
     let folder = match folder::find() {

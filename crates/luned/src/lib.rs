@@ -42,6 +42,7 @@ pub mod shells;
 mod streams;
 pub mod skills;
 mod tailnet;
+pub mod tasks;
 pub mod state;
 pub mod terminate;
 mod titles;

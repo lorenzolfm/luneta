@@ -1537,6 +1537,7 @@ mod tests {
 
     #[test]
     fn a_worktree_emptied_is_left_and_one_gone_back_to_opens_again() {
+        luned::tasks::start().unwrap();
         let unserved = tempfile::tempdir().unwrap();
         let (events, _heard) = std::sync::mpsc::channel();
         let size = layout_size(side(20), side(6));

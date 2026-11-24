@@ -6,7 +6,6 @@ use std::pin::pin;
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{Arranged, Opens, Size, ViewId, WorktreeId};
 use lune_domain::projects::{FRAME_CELLS, LAYOUT_VIEWS_MAX};
-use tokio::runtime;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
@@ -16,6 +15,7 @@ use crate::api::{self, show_request, show_response};
 use crate::folder::Folder;
 use crate::remote::Destination;
 use crate::streams::{self, Dropped, Inbox, Next, Outbox};
+use crate::tasks;
 
 const SAID_MAX: usize = 64;
 
@@ -373,32 +373,25 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
     worktree: WorktreeId,
     size: Size,
     again: bool,
-    told: Told,
+    mut told: Told,
 ) -> Show {
     let (outbox, inbox) = streams::boxes(SAID_MAX);
-    let showing = move |mut told: Told| {
-        let built = runtime::Builder::new_current_thread().enable_all().build();
-        let size = Some(size_said(size));
-        let said = |key: TerminalKey| api::TerminalKey {
-            id: key.id.get(),
-            made_at: Some(key.made.into()),
-        };
-        let (runs_in, on) = match at {
-            Where::Here { runs_in } => (runs_in.map(said), None),
-            Where::On(on) => (None, Some(api::On { destination: on.to_string() })),
-        };
-        let hello = show_request::Hello { worktree: worktree.get(), size, runs_in, again, on };
-        let last = match built {
-            Ok(runtime) => runtime.block_on(stream(&folder, hello, inbox, &mut told)),
-            Err(error) => Ok(Heard::Lost(format!("no runtime: {error}"))),
-        };
-        if let Ok(last) = last {
-            told(last);
-        }
+    let size = Some(size_said(size));
+    let said = |key: TerminalKey| api::TerminalKey {
+        id: key.id.get(),
+        made_at: Some(key.made.into()),
     };
-    if let Err((mut told, error)) = streams::on_thread("luned layout", told, showing) {
-        told(Heard::Lost(format!("no thread for a layout of luned's: {error}")));
-    }
+    let (runs_in, on) = match at {
+        Where::Here { runs_in } => (runs_in.map(said), None),
+        Where::On(on) => (None, Some(api::On { destination: on.to_string() })),
+    };
+    let hello = show_request::Hello { worktree: worktree.get(), size, runs_in, again, on };
+    drop(tasks::shared().spawn(async move {
+        let mut told_aside = |heard| tokio::task::block_in_place(|| told(heard));
+        if let Ok(last) = stream(&folder, hello, inbox, &mut told_aside).await {
+            told_aside(last);
+        }
+    }));
     Show { outbox }
 }
 

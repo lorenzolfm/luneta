@@ -31,6 +31,10 @@ use crate::shows::direction_said;
 use crate::watch::Troubles;
 use crate::{shells, Directory};
 
+use errands::{Errands, Unrun};
+
+mod errands;
+
 pub const CLIENTS_MAX: usize = 64;
 
 pub const ANSWERS_MAX: usize = 64;
@@ -280,11 +284,13 @@ pub fn start(
     sweep: Duration,
 ) -> io::Result<SyncSender<Command>> {
     let (send, commands) = mpsc::sync_channel(COMMANDS_MAX);
+    let errands = Errands::start();
     let layouts = Layouts {
         store,
         core,
         follower,
         mux: Terminals,
+        errands,
         clients: BTreeMap::new(),
         stranded: BTreeMap::new(),
         arrivals: 0,
@@ -309,6 +315,7 @@ struct Layouts {
     core: SyncSender<Core>,
     follower: SyncSender<()>,
     mux: Terminals,
+    errands: Errands,
     clients: BTreeMap<ClientId, Client>,
     stranded: BTreeMap<ClientId, Stranded>,
     arrivals: u64,
@@ -343,7 +350,7 @@ struct Stranded {
 struct Known {
     key: TerminalKey,
     heard: Heard,
-    sized: Option<Size>,
+    settled: Option<Size>,
     agent_front: Option<u32>,
     remade: Option<Remade>,
 }
@@ -442,6 +449,7 @@ fn run(mut layouts: Layouts, commands: &Receiver<Command>, sweep: Duration) {
             layouts.flushed();
             swept = Instant::now();
         }
+        layouts.unrun();
         layouts.restore();
         layouts.type_due();
         layouts.settle();
@@ -1102,7 +1110,7 @@ impl Layouts {
     ) {
         let heard_none = !self.known.values().any(|known| known.heard == Heard::Seen);
         let heard = Heard::Made(Instant::now());
-        let known = Known { key, heard, sized, agent_front: None, remade };
+        let known = Known { key, heard, settled: sized, agent_front: None, remade };
         assert!(self.known.insert(terminal, known).is_none(), "terminal {terminal} is made once");
         if heard_none {
             match self.follower.try_send(()) {
@@ -1274,10 +1282,36 @@ impl Layouts {
         Ok(())
     }
 
+    fn unrun(&mut self) {
+        let Layouts { known, errands, troubles, .. } = self;
+        let mut owners: Option<BTreeMap<TerminalKey, TerminalViewId>> = None;
+        for _ in 0..errands::ERRANDS_MAX {
+            let Some(unrun) = errands.unrun() else {
+                return;
+            };
+            match unrun {
+                Unrun::Sized { key, size, why } => {
+                    let owners = owners.get_or_insert_with(|| {
+                        known.iter().map(|(terminal, known)| (known.key, *terminal)).collect()
+                    });
+                    let Some(known) = owners.get(&key).and_then(|it| known.get_mut(it)) else {
+                        continue;
+                    };
+                    if known.settled == Some(size) {
+                        known.settled = None;
+                    }
+                    troubles.say(format!("terminal {} is not sized: {why}", key.id));
+                },
+                Unrun::Pasted { terminals, why } => troubles.say(untyped(&terminals, &why)),
+            }
+        }
+    }
+
     fn type_due(&mut self) {
-        let Layouts { known, listed, mux, troubles, .. } = self;
+        let Layouts { known, listed, errands, troubles, .. } = self;
         let now = Instant::now();
         let mut pastes_due: Vec<(TerminalViewId, TerminalKey, Line)> = Vec::new();
+        let mut given_up_by: Vec<(TerminalViewId, Instant)> = Vec::new();
         for (terminal, known) in known.iter_mut() {
             let Some(remade) = &mut known.remade else {
                 continue;
@@ -1288,7 +1322,11 @@ impl Layouts {
             let is = listed.get(&known.key).map(|listed| &listed.is);
             match pasted(is, *due, *by, now) {
                 Paste::Later => continue,
-                Paste::Now => pastes_due.push((*terminal, known.key, line.clone())),
+                Paste::Now => {
+                    pastes_due.push((*terminal, known.key, line.clone()));
+                    given_up_by.push((*terminal, *by));
+                    continue;
+                },
                 Paste::Never => {
                     let untyped = format!("terminal {terminal}'s last command is not typed");
                     troubles.say(format!("{untyped}, as it ran or runs another program first"));
@@ -1300,13 +1338,17 @@ impl Layouts {
         if pastes_due.is_empty() {
             return;
         }
-        let pastes: Vec<(TerminalKey, &Line)> =
-            pastes_due.iter().map(|(_, key, line)| (*key, line)).collect();
-        if let Err(failure) = mux.typed(&pastes) {
-            let terminals: Vec<String> =
-                pastes_due.iter().map(|(terminal, ..)| terminal.to_string()).collect();
-            let kept = format!("the last commands of terminals {} are kept", terminals.join(", "));
-            troubles.say(format!("{kept}, maybe not typed: {failure}"));
+        assert_eq!(given_up_by.len(), pastes_due.len(), "each paste due has its last moment");
+        let terminals: Vec<TerminalViewId> = pastes_due.iter().map(|(it, ..)| *it).collect();
+        let taken = errands.paste(pastes_due);
+        for (terminal, by) in given_up_by {
+            if taken || now >= by {
+                let remade = known.get_mut(&terminal).and_then(|known| known.remade.as_mut());
+                remade.expect("a paste due is of a terminal remade").restored = None;
+            }
+        }
+        if !taken {
+            troubles.say(untyped(&terminals, errands::UNTAKEN));
         }
     }
 
@@ -1416,12 +1458,13 @@ impl Layouts {
                 Some(known) if known.key == key => {
                     known.heard = Heard::Seen;
                     if size.is_some() {
-                        known.sized = size;
+                        known.settled = size;
                     }
                 },
                 Some(_) | None => {
                     let heard = Heard::Seen;
-                    let known = Known { key, heard, sized: size, agent_front: None, remade: None };
+                    let (settled, agent_front, remade) = (size, None, None);
+                    let known = Known { key, heard, settled, agent_front, remade };
                     self.known.insert(terminal, known);
                 },
             }
@@ -1596,7 +1639,7 @@ impl Layouts {
     }
 
     fn settle(&mut self) {
-        let Layouts { store, clients, stranded, known, looked, mux, troubles, .. } = self;
+        let Layouts { store, clients, stranded, known, looked, errands, troubles, .. } = self;
         let Some(projects) = store.projects() else {
             let why = store.unkept().unwrap_or("no projects are kept").to_owned();
             let outs = std::mem::take(clients).into_values().map(|it| it.out);
@@ -1636,6 +1679,7 @@ impl Layouts {
             let fitted = fitted.expect("a worktree shown has a client");
             fits.insert(worktree, fitted);
         }
+        let mut sizes_asked: usize = 0;
         for (&worktree, &Fit { size, outside }) in &fits {
             let (_, found) = projects.find(worktree).expect("a client's worktree is held");
             let (_, sized) = found.layout().sized(size);
@@ -1651,17 +1695,19 @@ impl Layouts {
                     it.worktree == worktree && it.runs_in == Some(known.key)
                 };
                 let pinned = !outside && clients.values().any(runs_in);
-                if known.sized == Some(wanted) || pinned {
+                if known.settled == Some(wanted) || pinned {
                     continue;
                 }
-                match mux.sized(known.key, wanted) {
-                    Ok(()) => known.sized = Some(wanted),
-                    Err(failure) => {
-                        troubles.say(format!("terminal {} is not sized: {failure}", known.key.id));
-                    },
+                sizes_asked += 1;
+                if errands.size(known.key, wanted) {
+                    known.settled = Some(wanted);
+                } else {
+                    let id = known.key.id;
+                    troubles.say(format!("terminal {id} is not sized: {}", errands::UNTAKEN));
                 }
             }
         }
+        assert!(sizes_asked <= VIEWS_MAX, "a settle asks at most one size of each view");
         let mut slow = Vec::new();
         for (id, client) in clients.iter_mut() {
             let found = projects.find(client.worktree);
@@ -1685,6 +1731,12 @@ impl Layouts {
         let both = clients.keys().any(|it| stranded.contains_key(it));
         assert!(!both, "a client shows or is stranded");
     }
+}
+
+fn untyped(terminals: &[TerminalViewId], why: &str) -> String {
+    let terminals: Vec<String> = terminals.iter().map(ToString::to_string).collect();
+    let kept = format!("the last commands of terminals {} are kept", terminals.join(", "));
+    format!("{kept}, maybe not typed: {why}")
 }
 
 #[derive(Clone, Copy)]
