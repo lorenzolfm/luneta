@@ -41,10 +41,15 @@ struct TerminalScreen: View {
     let input: TerminalInput?
     @State private var pinched: CGFloat = 1
     @State private var pulled = false
-    @State private var following = false
+    @State private var echoDue: Date?
 
     private static let cursorAt = "cursor"
     private static let pullFar: CGFloat = 48
+    private static let echoWait: TimeInterval = 1
+
+    private static func visibleHeight(_ geometry: ScrollGeometry) -> CGFloat {
+        geometry.containerSize.height - geometry.contentInsets.top - geometry.contentInsets.bottom
+    }
 
     var body: some View {
         GeometryReader { outer in
@@ -87,7 +92,7 @@ struct TerminalScreen: View {
                 .onScrollGeometryChange(for: Pull.self) { geometry in
                     let insets = geometry.contentInsets
                     let down = geometry.contentOffset.y + insets.top
-                    let visible = geometry.containerSize.height - insets.top - insets.bottom
+                    let visible = TerminalScreen.visibleHeight(geometry)
                     let lowest = max(geometry.contentSize.height - visible, 0)
                     return Pull(pastTop: -down, pastBottom: down - lowest)
                 } action: { _, pull in
@@ -96,18 +101,24 @@ struct TerminalScreen: View {
                     }
                 }
                 .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                    let insets = geometry.contentInsets
-                    return geometry.containerSize.height - insets.top - insets.bottom
+                    TerminalScreen.visibleHeight(geometry)
                 } action: { before, after in
-                    if typing && after < before {
-                        reader.scrollTo(TerminalScreen.cursorAt)
+                    if typing {
+                        if after < before {
+                            reader.scrollTo(TerminalScreen.cursorAt)
+                        }
                     }
                 }
-                .onChange(of: keystrokes) { following = true }
+                .onChange(of: keystrokes) {
+                    precondition(input != nil)
+                    echoDue = .now + TerminalScreen.echoWait
+                }
                 .onChange(of: grid.cursor) {
-                    if following {
-                        following = false
-                        reader.scrollTo(TerminalScreen.cursorAt)
+                    if let due = echoDue {
+                        echoDue = nil
+                        if Date.now < due {
+                            reader.scrollTo(TerminalScreen.cursorAt)
+                        }
                     }
                 }
                 .onAppear { reader.scrollTo(TerminalScreen.cursorAt, anchor: .center) }

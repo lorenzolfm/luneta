@@ -137,23 +137,30 @@ struct TerminalPage: View {
     }
 
     private func type(_ text: String, into view: TerminalView) {
-        said { try view.typed(text: text, ctrl: ctrl) }
+        let sent = said { try view.typed(text: text, ctrl: ctrl) }
         ctrl = false
-        keystrokes &+= 1
+        if sent {
+            keystrokes &+= 1
+        }
     }
 
     private func press(_ key: KeyName, into view: TerminalView) {
-        said { try view.pressed(key: key, ctrl: ctrl) }
+        let sent = said { try view.pressed(key: key, ctrl: ctrl) }
         ctrl = false
-        keystrokes &+= 1
+        if sent {
+            keystrokes &+= 1
+        }
     }
 
-    private func said(_ saying: () throws -> Void) {
+    @discardableResult
+    private func said(_ saying: () throws -> Void) -> Bool {
         do {
             try saying()
             failed = nil
+            return true
         } catch {
             failed = reason(error)
+            return false
         }
     }
 }
@@ -165,7 +172,11 @@ private struct KeyBar: View {
     let type: (String) -> Void
 
     private static let symbols = ["/", "-", "|", "~"]
-    private static let tall: CGFloat = 36
+    private static let keyHeight: CGFloat = 36
+    private static let keyWidthMin: CGFloat = 40
+    private static let keyPadding: CGFloat = 10
+    private static let keyboardWidthMin: CGFloat = 48
+    private static let dividerHeight = keyHeight * 0.6
 
     var body: some View {
         HStack(spacing: 0) {
@@ -195,7 +206,7 @@ private struct KeyBar: View {
             }
             .scrollIndicators(.hidden)
             Divider()
-                .frame(height: KeyBar.tall * 0.6)
+                .frame(height: KeyBar.dividerHeight)
             Button(
                 typing ? "Hide the keyboard" : "Show the keyboard",
                 systemImage: typing ? "keyboard.chevron.compact.down" : "keyboard"
@@ -203,7 +214,7 @@ private struct KeyBar: View {
                 typing.toggle()
             }
             .labelStyle(.iconOnly)
-            .frame(minWidth: 48, minHeight: KeyBar.tall)
+            .frame(minWidth: KeyBar.keyboardWidthMin, minHeight: KeyBar.keyHeight)
         }
         .buttonStyle(.borderless)
         .font(.system(.body, design: .monospaced))
@@ -216,17 +227,17 @@ private struct KeyBar: View {
         Button(action: action) { keyFace(label) }
     }
 
-    private func arrow(_ name: String, _ image: String, _ named: KeyName) -> some View {
-        Button(name, systemImage: image) { press(named) }
+    private func arrow(_ label: String, _ systemImage: String, _ key: KeyName) -> some View {
+        Button(label, systemImage: systemImage) { press(key) }
             .labelStyle(.iconOnly)
-            .frame(minWidth: 40, minHeight: KeyBar.tall)
+            .frame(minWidth: KeyBar.keyWidthMin, minHeight: KeyBar.keyHeight)
     }
 
     private func keyFace(_ label: String) -> some View {
         Text(label)
             .fixedSize()
-            .padding(.horizontal, 10)
-            .frame(minWidth: 40, minHeight: KeyBar.tall)
+            .padding(.horizontal, KeyBar.keyPadding)
+            .frame(minWidth: KeyBar.keyWidthMin, minHeight: KeyBar.keyHeight)
     }
 }
 
