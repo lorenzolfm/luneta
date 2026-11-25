@@ -2102,7 +2102,7 @@ fn a_machine_whose_answer_stalls_may_have_made_the_worktree() {
         let daemon = luned::connect(&folder, PATIENT).await.unwrap();
         let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
         let pasted = Pasted::new(Work::Link(issue), Vec::new());
-        pasted.ready_on(daemon, &"far".parse().unwrap(), GIVES_UP).await
+        pasted.ready_on(daemon, Some(&"far".parse().unwrap()), GIVES_UP).await
     });
     drop(stalled);
     let Err(Unready::InDoubt(why)) = said else {

@@ -18,7 +18,7 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("luned reads processes on Linux and macOS, and on nothing else yet");
 
-pub use os::{environ, signalled, start, started, Domain};
+pub use os::{cwd, environ, signalled, start, started, Domain};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id {
@@ -243,6 +243,20 @@ mod tests {
         let pids: Vec<u32> = mine.found.iter().map(|it| it.id.pid).collect();
         assert!(pids.contains(&me), "{pids:?} lists this test's process");
         assert!(!pids.contains(&forked), "{pids:?} lists the held child {forked}");
+    }
+
+    #[test]
+    fn where_a_process_runs_reads_while_it_runs_and_is_gone_once_it_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let mut child = Command::new("sleep").arg("60").current_dir(&dir).spawn().unwrap();
+        let pid = child.id();
+        assert_eq!(super::cwd(pid), Ok(dir));
+        child.kill().unwrap();
+        hears_it_ended(pid, "ended, and not waited for");
+        assert_eq!(super::cwd(pid), Err(super::Unread::Gone), "an ended process runs nowhere");
+        child.wait().unwrap();
+        assert_eq!(super::cwd(pid), Err(super::Unread::Gone));
     }
 
     #[test]

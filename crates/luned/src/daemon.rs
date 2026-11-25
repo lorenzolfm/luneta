@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
 use std::mem;
@@ -58,7 +57,7 @@ use crate::projects::{Changed, Lock, Opened, Store};
 use crate::layouts::{self, Root, Unrooted};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
-use crate::prunes::{self, Occupied};
+use crate::prunes::{self, Lunes, Occupied};
 use crate::rebases;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
@@ -712,12 +711,10 @@ impl Daemon for Host {
             return Ok(Response::new(Box::pin(answer)));
         }
         let host = self.host().await?;
-        let occupied = Occupied::of(&host).map_err(Status::failed_precondition)?;
-        let here = env::current_dir().ok();
         let answer = late(move || {
-            let planned = prunes::plan(&dir, &occupied, here.as_deref());
-            let said = planned.map(|planned| PrunesResponse::from(planned.plan()));
-            said.map_err(Status::failed_precondition)
+            let occupied = || Occupied::of(&host, Lunes::running()?);
+            let planned = prunes::plan(&dir, occupied).map_err(Status::failed_precondition)?;
+            Ok(PrunesResponse::from(planned.plan()))
         });
         Ok(Response::new(Box::pin(answer)))
     }
@@ -737,13 +734,12 @@ impl Daemon for Host {
         }
         let agreed: BTreeSet<prunes::Deleting> = agreed.into_iter().map(Into::into).collect();
         let core = self.core.clone();
-        let here = env::current_dir().ok();
         let answer = late(move || {
             let occupied = || {
                 let host = core::ask(&core, Command::Host).ok_or("luned's core did not say")?;
-                Occupied::of(&host)
+                Occupied::of(&host, Lunes::running()?)
             };
-            let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied, here.as_deref())
+            let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied)
                 .map_err(Status::failed_precondition)?;
             Ok(PruneResponse::from(&pruned))
         });

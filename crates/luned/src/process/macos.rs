@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,6 +32,15 @@ pub fn start(pid: u32) -> Option<Start> {
 pub fn started(pid: u32) -> Option<SystemTime> {
     let secs = with(pid, ProcessRefreshKind::nothing(), Process::start_time)?;
     UNIX_EPOCH.checked_add(Duration::from_secs(secs.checked_add(1)?))
+}
+
+pub fn cwd(pid: u32) -> Result<PathBuf, Unread> {
+    let refresh = ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always);
+    match with(pid, refresh, |process| process.cwd().map(Path::to_owned)) {
+        Some(Some(cwd)) => Ok(cwd),
+        Some(None) => Err(Unread::Failed(format!("macOS does not say where {pid} runs"))),
+        None => Err(Unread::Gone),
+    }
 }
 
 pub fn environ(pid: u32) -> Result<Vec<OsString>, Unread> {

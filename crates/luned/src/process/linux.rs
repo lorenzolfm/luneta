@@ -92,6 +92,10 @@ pub fn environ(pid: u32) -> Result<Vec<OsString>, Unread> {
     Ok(entries(&exec_strings(pid, "environ")?))
 }
 
+pub fn cwd(pid: u32) -> Result<PathBuf, Unread> {
+    fs::read_link(proc(pid, "cwd")).map_err(|error| unread(pid, &error))
+}
+
 fn exec_strings(pid: u32, leaf: &str) -> Result<Vec<u8>, Unread> {
     let most = u64::try_from(EXEC_STRINGS_BYTES_MAX).expect("6 MiB fit a u64");
     let mut read = Vec::new();
