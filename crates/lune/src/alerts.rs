@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use lune_protocol::agent_status::{AgentStatus, BlockedReason};
+use lune_protocol::program_status::Message;
 use lune_protocol::said::Said;
 use luned::api::Agent;
 use luned::transcripts::{on_what, one_line, Reading, SessionId, TranscriptEnd, Turn};
@@ -41,9 +42,9 @@ pub enum Doing {
     Busy,
     Idle,
     Stopped,
-    Done { message: Option<Said> },
-    Error { message: Option<Said> },
-    Waiting { wait: Wait, message: Option<Said>, since: Option<SystemTime> },
+    Done { message: Option<Message> },
+    Error { message: Option<Message> },
+    Waiting { wait: Wait, message: Option<Message>, since: Option<SystemTime> },
     Quiet,
 }
 
@@ -84,7 +85,7 @@ pub struct Due {
     pub number: u64,
     pub key: Key,
     pub want: Want,
-    pub message: Option<Said>,
+    pub message: Option<Message>,
     pub label: String,
     pub transcript: Option<SessionId>,
     pub again: bool,
@@ -129,9 +130,9 @@ enum State {
     Busy,
     Idle(Told),
     Stopped,
-    Done { message: Option<Said>, told: Told },
-    Error { message: Option<Said>, told: Told },
-    Waiting { wait: Wait, message: Option<Said>, since: Option<SystemTime>, hold: Hold },
+    Done { message: Option<Message>, told: Told },
+    Error { message: Option<Message>, told: Told },
+    Waiting { wait: Wait, message: Option<Message>, since: Option<SystemTime>, hold: Hold },
     Quiet,
 }
 
@@ -252,7 +253,7 @@ impl Followed {
         key: &Key,
         number: u64,
         want: Want,
-        message: Option<Said>,
+        message: Option<Message>,
         again: bool,
     ) -> Due {
         let (key, label, transcript) = (key.clone(), self.label.clone(), self.transcript.clone());
@@ -470,7 +471,7 @@ impl Alert {
     pub fn of(due: &Due, end: Option<&TranscriptEnd>) -> Alert {
         let turn = end.map_or_default(Turn::of);
         let tool = turn.tool.as_ref().map(|(name, input)| (name.as_str(), input));
-        let message = due.message.as_ref().map(Said::as_str);
+        let message = due.message.as_ref().map(Message::as_str);
         let (kind, body) = match (&due.want, message, tool) {
             (Want::Done, Some(message), _) => (Kind::Done, message.to_owned()),
             (Want::Done, None, _) => {

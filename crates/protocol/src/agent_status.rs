@@ -1,3 +1,4 @@
+use crate::program_status::Message;
 use crate::said::Said;
 use crate::v1;
 
@@ -87,9 +88,9 @@ pub enum AgentStatus {
     Working,
     Idle,
     Stopped,
-    Done { message: Option<Said> },
-    Blocked { reason: BlockedReason, message: Option<Said> },
-    Error { message: Option<Said> },
+    Done { message: Option<Message> },
+    Blocked { reason: BlockedReason, message: Option<Message> },
+    Error { message: Option<Message> },
     Shell,
     Other(Said),
     Unreported,
@@ -104,14 +105,14 @@ impl AgentStatus {
                 v1::agent::ReportedStatus::Idle(()) => AgentStatus::Idle,
                 v1::agent::ReportedStatus::Stopped(()) => AgentStatus::Stopped,
                 v1::agent::ReportedStatus::Done(done) => {
-                    AgentStatus::Done { message: trimmed_said(done.message.as_deref()) }
+                    AgentStatus::Done { message: bounded_message(done.message.as_deref()) }
                 },
                 v1::agent::ReportedStatus::Blocked(blocked) => AgentStatus::Blocked {
                     reason: BlockedReason::of_api_reason(blocked.reason.as_ref()),
-                    message: trimmed_said(blocked.message.as_deref()),
+                    message: bounded_message(blocked.message.as_deref()),
                 },
                 v1::agent::ReportedStatus::Error(error) => {
-                    AgentStatus::Error { message: trimmed_said(error.message.as_deref()) }
+                    AgentStatus::Error { message: bounded_message(error.message.as_deref()) }
                 },
                 v1::agent::ReportedStatus::Shell(()) => AgentStatus::Shell,
                 v1::agent::ReportedStatus::OtherReportedStatus(word) => {
@@ -152,6 +153,10 @@ impl AgentStatus {
     }
 }
 
+fn bounded_message(text: Option<&str>) -> Option<Message> {
+    Message::from_raw_bytes(text?.as_bytes())
+}
+
 fn trimmed_said(text: Option<&str>) -> Option<Said> {
     Said::new(text?.trim().to_owned())
 }
@@ -159,6 +164,7 @@ fn trimmed_said(text: Option<&str>) -> Option<Said> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::program_status::MESSAGE_BYTES_MAX;
 
     #[test]
     fn reported_status_parses_distinct_stopped_done_error_and_blocked_reasons() {
@@ -178,7 +184,7 @@ mod tests {
         };
         assert_eq!(
             AgentStatus::of_api(&done),
-            AgentStatus::Done { message: Said::new("All good".to_owned()) }
+            AgentStatus::Done { message: Message::parse("message", "All good").ok() }
         );
         assert!(AgentStatus::of_api(&done).is_finished_turn());
 
@@ -192,6 +198,19 @@ mod tests {
         assert_eq!(
             AgentStatus::of_api(&empty_other),
             AgentStatus::Blocked { reason: BlockedReason::Unspecified, message: None }
+        );
+
+        let untrusted = v1::Agent {
+            reported_status: Some(v1::agent::ReportedStatus::Error(v1::ErrorStatus {
+                message: Some(format!("  \u{202e}{}  ", "x".repeat(MESSAGE_BYTES_MAX + 32))),
+            })),
+            ..v1::Agent::default()
+        };
+        assert_eq!(
+            AgentStatus::of_api(&untrusted),
+            AgentStatus::Error {
+                message: Message::parse("message", &"x".repeat(MESSAGE_BYTES_MAX)).ok(),
+            }
         );
     }
 

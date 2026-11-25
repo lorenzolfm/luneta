@@ -142,7 +142,10 @@ impl Session {
             .as_deref()
             .and_then(|text| Said::new(text.trim().to_owned()))
             .map(|word| Source::of(word.as_str()));
-        let name = raw.name.and_then(Said::new).map(|text| Name { text, source: name_source });
+        let name = raw
+            .name
+            .and_then(|text| Said::new(text.trim().to_owned()))
+            .map(|text| Name { text, source: name_source });
         let feed = Feed::parse(
             raw.entrypoint,
             raw.status.as_deref(),
@@ -400,7 +403,9 @@ mod tests {
             b"[]",
             b"null",
             br#"{"sessionId":"","cwd":"/w","procStart":"42"}"#,
+            br#"{"sessionId":"   ","cwd":"/w","procStart":"42"}"#,
             br#"{"sessionId":"s1","cwd":"/w","procStart":""}"#,
+            br#"{"sessionId":"s1","cwd":"/w","procStart":"   "}"#,
         ] {
             assert!(parse_leading_file(invalid).is_err());
         }

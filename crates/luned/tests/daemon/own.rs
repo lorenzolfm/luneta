@@ -300,7 +300,7 @@ impl Drop for Owned {
 #[test]
 fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
     use lune_protocol::agent_status::{AgentStatus, BlockedReason};
-    use lune_protocol::said::Said;
+    use lune_protocol::program_status::Message;
     use luned::api::{self, Harness, StatusRung};
 
     let owned = Owned::new();
@@ -369,7 +369,7 @@ fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
         AgentStatus::of_api(&blocked),
         AgentStatus::Blocked {
             reason: BlockedReason::Permission,
-            message: Said::new("approve touch".to_owned()),
+            message: Message::parse("message", "approve touch").ok(),
         }
     );
     assert_eq!(blocked.subagents.len(), 1);
@@ -390,7 +390,7 @@ fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
     });
     assert_eq!(
         AgentStatus::of_api(&done),
-        AgentStatus::Done { message: Said::new("All done".to_owned()) }
+        AgentStatus::Done { message: Message::parse("message", "All done").ok() }
     );
 
     fs::write(&step3, "").unwrap();

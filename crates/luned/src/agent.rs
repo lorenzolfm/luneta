@@ -123,9 +123,9 @@ pub fn named_pid(path: &Path) -> Option<AgentPid> {
     AgentPid::new(pid)
 }
 
-pub fn file_text(path: &Path) -> io::Result<Vec<u8>> {
+pub fn read_file_text(file: fs::File) -> io::Result<Vec<u8>> {
     let mut text = Vec::new();
-    fs::File::open(path)?.take(FILE_BYTES_MAX + 1).read_to_end(&mut text)?;
+    file.take(FILE_BYTES_MAX + 1).read_to_end(&mut text)?;
     let bytes = u64::try_from(text.len()).expect("a length under a u64 limit fits a u64");
     if bytes <= FILE_BYTES_MAX {
         Ok(text)
@@ -135,8 +135,16 @@ pub fn file_text(path: &Path) -> io::Result<Vec<u8>> {
     }
 }
 
+pub fn file_text(path: &Path) -> io::Result<Vec<u8>> {
+    read_file_text(fs::File::open(path)?)
+}
+
 pub fn nonempty<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Said, D::Error> {
-    Said::new(String::deserialize(text)?).ok_or_else(|| serde::de::Error::custom("it is empty"))
+    let value = String::deserialize(text)?;
+    (!value.trim().is_empty())
+        .then(|| Said::new(value))
+        .flatten()
+        .ok_or_else(|| serde::de::Error::custom("it is empty"))
 }
 
 pub fn absolute<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Directory, D::Error> {

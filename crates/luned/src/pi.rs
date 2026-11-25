@@ -12,7 +12,7 @@ use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, SeenAgent,
+    absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble, SeenAgent,
 };
 use crate::mux;
 use crate::process::{self, AgentId};
@@ -52,6 +52,21 @@ struct RawFile {
     status_since: u64,
     proc_start: Option<String>,
     mode: Option<String>,
+    phase: Option<RawPhase>,
+    prompt_open: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct RawResting {
+    status: String,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum RawPhase {
+    Resting { resting: RawResting },
+    Running { outcome: RawResting },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,13 +82,11 @@ impl PiStatus {
     fn parse(word: &str, message: Option<&str>) -> Option<Self> {
         match word.trim().to_ascii_lowercase().as_str() {
             "stopped" | "idle" => Some(PiStatus::Stopped),
-            "busy" | "working" => Some(PiStatus::Working),
-            "waiting" | "blocked" => Some(PiStatus::Waiting),
+            "busy" => Some(PiStatus::Working),
+            "waiting" => Some(PiStatus::Waiting),
             "done" => Some(PiStatus::Done),
             "error" => Some(PiStatus::Error {
-                message: message
-                    .and_then(|text| Message::from_raw_bytes(text.as_bytes()))
-                    .and_then(|parsed| parsed.trimmed()),
+                message: message.and_then(|text| Message::from_raw_bytes(text.as_bytes())),
             }),
             _ => None,
         }
@@ -92,11 +105,41 @@ impl PiStatus {
     }
 }
 
+fn parse_resting(raw: &RawResting) -> io::Result<PiStatus> {
+    match raw.status.trim().to_ascii_lowercase().as_str() {
+        "stopped" | "idle" => Ok(PiStatus::Stopped),
+        "done" => Ok(PiStatus::Done),
+        "error" => Ok(PiStatus::Error {
+            message: raw
+                .message
+                .as_deref()
+                .and_then(|text| Message::from_raw_bytes(text.as_bytes())),
+        }),
+        _ => Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!("unknown pi resting status {:?}", raw.status),
+        )),
+    }
+}
+
+fn project_phase(phase: &RawPhase, prompt_open: bool) -> io::Result<PiStatus> {
+    match phase {
+        RawPhase::Resting { resting } => {
+            let resting = parse_resting(resting)?;
+            Ok(if prompt_open { PiStatus::Waiting } else { resting })
+        },
+        RawPhase::Running { outcome } => {
+            let _ = parse_resting(outcome)?;
+            Ok(if prompt_open { PiStatus::Waiting } else { PiStatus::Working })
+        },
+    }
+}
+
 struct File {
     session_id: Said,
     cwd: Directory,
     status: PiStatus,
-    status_since: u64,
+    status_since: SystemTime,
     proc_start: Option<process::Start>,
     entrypoint: Option<Said>,
 }
@@ -106,6 +149,24 @@ impl File {
         let status = PiStatus::parse(&raw.status, raw.status_message.as_deref()).ok_or_else(|| {
             io::Error::new(ErrorKind::InvalidData, format!("unknown pi status {:?}", raw.status))
         })?;
+        match (raw.phase.as_ref(), raw.prompt_open) {
+            (Some(phase), Some(prompt_open)) => {
+                let projected = project_phase(phase, prompt_open)?;
+                if projected != status {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "pi status disagrees with phase and promptOpen",
+                    ));
+                }
+            },
+            (None, None) => {},
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "phase and promptOpen must appear together",
+                ));
+            },
+        }
         let proc_start = raw
             .proc_start
             .map(|value| {
@@ -118,7 +179,7 @@ impl File {
             session_id: raw.session_id,
             cwd: raw.cwd,
             status,
-            status_since: raw.status_since,
+            status_since: moment(raw.status_since),
             proc_start,
             entrypoint,
         })
@@ -200,7 +261,7 @@ impl AgentFiles {
             else {
                 continue;
             };
-            match read(&path, id.start().as_str(), started) {
+            match read(&path, id.start(), started) {
                 Ok(Some(file)) => {
                     let terminal = cached.map_or_else(
                         || {
@@ -257,14 +318,16 @@ fn install(pi: &Path, lune: &Path) -> io::Result<()> {
     })
 }
 
-fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<File>> {
-    let raw: RawFile = serde_json::from_slice(&file_text(path)?)
+fn read(path: &Path, start: &process::Start, started: SystemTime) -> io::Result<Option<File>> {
+    let handle = fs::File::open(path)?;
+    let modified = handle.metadata()?.modified()?;
+    let bytes = read_file_text(handle)?;
+    let raw: RawFile = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     let file = File::parse(raw)?;
-    let stands = if let Some(recorded) = &file.proc_start {
-        recorded.as_str() == start
-    } else {
-        dated_since(fs::metadata(path)?.modified()?, started)
+    let stands = match &file.proc_start {
+        Some(recorded) => recorded == start,
+        None => dated_since(modified, started),
     };
     Ok(stands.then_some(file))
 }
@@ -276,7 +339,7 @@ fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
 fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
     let update = RungUpdate::Active {
         status: file.status.into_active(),
-        at: Some(moment(file.status_since)),
+        at: Some(file.status_since),
         subagents: Vec::new(),
     };
     let report = Report { agent: id.clone(), rung: Rung::Extension, update };
@@ -300,7 +363,7 @@ mod tests {
     use lune_protocol::program_status::Message;
     use lune_protocol::said::Said;
 
-    use super::{dated_since, File, PiStatus, RawFile, DATED_LATE};
+    use super::{dated_since, File, PiStatus, RawFile, RawPhase, RawResting, DATED_LATE};
     use crate::statuses::ActiveStatus;
     use crate::Directory;
 
@@ -335,12 +398,14 @@ mod tests {
             })
         );
         assert_eq!(parse("error", Some("   ")), Some(ActiveStatus::Error { message: None }));
+        assert_eq!(parse("working", None), None);
+        assert_eq!(parse("blocked", None), None);
         assert_eq!(parse("   ", None), None);
         assert_eq!(parse("unknown", None), None);
     }
 
     #[test]
-    fn pi_file_rejects_empty_proc_start_and_whitespace_status() {
+    fn pi_file_validates_proc_start_status_and_phase_projection() {
         let base = |status: &str, proc_start: Option<&str>| RawFile {
             session_id: Said::new("s1".to_owned()).unwrap(),
             cwd: Directory::parse("/w".to_owned()).unwrap(),
@@ -349,9 +414,37 @@ mod tests {
             status_since: 1_000,
             proc_start: proc_start.map(str::to_owned),
             mode: Some("tui".to_owned()),
+            phase: None,
+            prompt_open: None,
         };
         assert!(File::parse(base("stopped", Some("42"))).is_ok());
         assert!(File::parse(base("stopped", Some(""))).is_err());
+        assert!(File::parse(base("stopped", Some("   "))).is_err());
         assert!(File::parse(base("   ", Some("42"))).is_err());
+
+        let mut consistent = base("waiting", Some("42"));
+        consistent.phase = Some(RawPhase::Running {
+            outcome: RawResting { status: "error".to_owned(), message: Some("boom".to_owned()) },
+        });
+        consistent.prompt_open = Some(true);
+        assert!(File::parse(consistent).is_ok());
+
+        let mut mismatched = base("done", Some("42"));
+        mismatched.phase = Some(RawPhase::Running {
+            outcome: RawResting { status: "done".to_owned(), message: None },
+        });
+        mismatched.prompt_open = Some(true);
+        assert!(File::parse(mismatched).is_err());
+
+        let mut half_snapshot = base("done", Some("42"));
+        half_snapshot.prompt_open = Some(false);
+        assert!(File::parse(half_snapshot).is_err());
+
+        let mut bad_outcome = base("busy", Some("42"));
+        bad_outcome.phase = Some(RawPhase::Running {
+            outcome: RawResting { status: "busy".to_owned(), message: None },
+        });
+        bad_outcome.prompt_open = Some(false);
+        assert!(File::parse(bad_outcome).is_err());
     }
 }

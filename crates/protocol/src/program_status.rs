@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::time::SystemTime;
 
 use crate::mux::v1 as mux;
-use crate::said::Said;
 
 pub const RECORDS_MAX: usize = 256;
 
@@ -152,6 +151,9 @@ impl<const MAX: usize> BoundedText<MAX> {
         if raw.is_empty() {
             return Err(format!("{field} is empty"));
         }
+        if raw.trim() != raw {
+            return Err(format!("{field} holds leading or trailing whitespace"));
+        }
         if raw.len() > MAX {
             return Err(format!("{field} is {} bytes, over {MAX}", raw.len()));
         }
@@ -163,24 +165,29 @@ impl<const MAX: usize> BoundedText<MAX> {
 
     #[must_use]
     pub fn from_raw_bytes(bytes: &[u8]) -> Option<Self> {
-        let cleaned = sanitize(bytes, MAX);
-        (!cleaned.is_empty()).then_some(Self(cleaned))
+        let raw_limit = MAX.saturating_mul(SANITIZE_INPUT_FACTOR);
+        let bounded = &bytes[..bytes.len().min(raw_limit)];
+        let text = String::from_utf8_lossy(bounded);
+        let mut cleaned = String::with_capacity(bounded.len().min(MAX));
+        for character in text.chars() {
+            if is_invisible_formatting(character) {
+                continue;
+            }
+            if cleaned.is_empty() && character.is_whitespace() {
+                continue;
+            }
+            if cleaned.len() + character.len_utf8() > MAX {
+                break;
+            }
+            cleaned.push(character);
+        }
+        let trimmed = cleaned.trim_end();
+        (!trimmed.is_empty()).then(|| Self(trimmed.to_owned()))
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    #[must_use]
-    pub fn to_said(&self) -> Option<Said> {
-        Said::new(self.0.trim().to_owned())
-    }
-
-    #[must_use]
-    pub fn trimmed(&self) -> Option<Self> {
-        let trimmed = self.0.trim();
-        (!trimmed.is_empty()).then(|| Self(trimmed.to_owned()))
     }
 }
 
@@ -642,13 +649,16 @@ mod tests {
         assert!(AppName::parse("").is_err());
         assert!(AppName::parse("claude\x07").is_err());
         assert!(Message::parse("message", "").is_err());
+        assert!(Message::parse("message", "   ").is_err());
+        assert!(Message::parse("message", " padded ").is_err());
         assert!(Message::parse("message", "bad\u{202e}text").is_err());
         assert!(Message::parse("message", &"x".repeat(MESSAGE_BYTES_MAX + 1)).is_err());
         assert_eq!(
-            Message::from_raw_bytes(b"  rate limited  ").and_then(|m| m.trimmed()),
+            Message::from_raw_bytes(b"  rate limited  "),
             Message::parse("message", "rate limited").ok()
         );
-        assert_eq!(Message::from_raw_bytes(b"   ").and_then(|m| m.trimmed()), None);
+        assert_eq!(Message::from_raw_bytes(b"   "), None);
+        assert_eq!(Message::from_raw_bytes("\u{200b}\u{202e}".as_bytes()), None);
     }
 
     #[test]

@@ -6,8 +6,7 @@ use std::process::{ChildStdin, ChildStdout, Stdio};
 use std::time::SystemTime;
 
 use lune_protocol::agent_status::AgentStatus;
-use lune_protocol::program_status::MESSAGE_BYTES_MAX;
-use lune_protocol::said::Said;
+use lune_protocol::program_status::{Message, MESSAGE_BYTES_MAX};
 use lune_waits::eventually;
 use luned::api::agent::Status as Reported;
 use luned::api::{Agent, Harness, Status};
@@ -255,13 +254,19 @@ fn a_prompt_restores_the_state_from_before_it() {
     }));
     pi.event("agent_settled");
     let failed = as_status(&host, pid, Status::Error);
-    assert_eq!(AgentStatus::of_api(&failed), AgentStatus::Error { message: Said::new("boom".to_owned()) });
+    assert_eq!(
+        AgentStatus::of_api(&failed),
+        AgentStatus::Error { message: Message::parse("message", "boom").ok() }
+    );
 
     pi.event("ui_prompt_start");
     as_status(&host, pid, Status::Waiting);
     pi.event("ui_prompt_end");
     let restored = as_status(&host, pid, Status::Error);
-    assert_eq!(AgentStatus::of_api(&restored), AgentStatus::Error { message: Said::new("boom".to_owned()) });
+    assert_eq!(
+        AgentStatus::of_api(&restored),
+        AgentStatus::Error { message: Message::parse("message", "boom").ok() }
+    );
 
     pi.event("agent_start");
     as_status(&host, pid, Status::Busy);
@@ -304,7 +309,7 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     assert!(!failed.is_finished_turn());
     assert_eq!(
         AgentStatus::of_api(&failed),
-        AgentStatus::Error { message: Said::new("rate limited".to_owned()) }
+        AgentStatus::Error { message: Message::parse("message", "rate limited").ok() }
     );
 
     pi.event("agent_start");
@@ -358,11 +363,15 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
         "type": "message_end",
         "message": { "role": "assistant" }
     }));
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "   " }
+    }));
     pi.says(&json!({ "type": "agent_settled", "aborted": false }));
     let capped = as_status(&host, pid, Status::Error);
     assert_eq!(
         AgentStatus::of_api(&capped),
-        AgentStatus::Error { message: Said::new(prefix.clone()) }
+        AgentStatus::Error { message: Message::parse("message", &prefix).ok() }
     );
 
     pi.says(&json!({ "type": "agent_settled", "aborted": false }));
@@ -370,8 +379,20 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     assert_eq!(status_in(&file), "error");
     assert_eq!(
         AgentStatus::of_api(&as_status(&host, pid, Status::Error)),
-        AgentStatus::Error { message: Said::new(prefix) }
+        AgentStatus::Error { message: Message::parse("message", &prefix).ok() }
     );
+
+    pi.event("agent_start");
+    as_status(&host, pid, Status::Busy);
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "error", "errorMessage": "\u{200b}\u{202e}" }
+    }));
+    pi.says(&json!({ "type": "agent_settled", "aborted": false }));
+    let invisible = as_status(&host, pid, Status::Error);
+    assert_eq!(AgentStatus::of_api(&invisible), AgentStatus::Error { message: None });
+    let written: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert!(written.get("statusMessage").is_none(), "{written}");
 }
 
 #[test]
@@ -455,10 +476,20 @@ fn a_file_stands_only_for_the_process_that_wrote_it() {
 
     let unread = [
         json!({ "cwd": "/w", "status": "idle", "statusSince": 1_000 }),
+        json!({ "sessionId": "   ", "cwd": "/w", "status": "stopped", "statusSince": 1_000 }),
         json!({ "sessionId": "no status", "cwd": "/w", "statusSince": 1_000 }),
         json!({ "sessionId": "blank status", "cwd": "/w", "status": "   ", "statusSince": 1_000 }),
         json!({ "sessionId": "unknown status", "cwd": "/w", "status": "banana", "statusSince": 1_000 }),
         json!({ "sessionId": "empty start", "cwd": "/w", "status": "stopped", "statusSince": 1_000, "procStart": "" }),
+        json!({ "sessionId": "blank start", "cwd": "/w", "status": "stopped", "statusSince": 1_000, "procStart": "   " }),
+        json!({
+            "sessionId": "mismatch",
+            "cwd": "/w",
+            "status": "done",
+            "statusSince": 1_000,
+            "phase": { "kind": "running", "outcome": { "status": "done" } },
+            "promptOpen": true
+        }),
         json!({ "sessionId": "no date", "cwd": "/w", "status": "idle" }),
         json!({ "sessionId": "relative", "cwd": "w", "status": "idle", "statusSince": 1_000 }),
     ];
@@ -589,7 +620,7 @@ fn a_turn_goes_on_through_a_reload() {
     let restored = as_status(&host, pid, Status::Error);
     assert_eq!(
         AgentStatus::of_api(&restored),
-        AgentStatus::Error { message: Said::new("rate limited".to_owned()) }
+        AgentStatus::Error { message: Message::parse("message", "rate limited").ok() }
     );
 
     pi.event("agent_start");
@@ -602,6 +633,20 @@ fn a_turn_goes_on_through_a_reload() {
     pi.says(&json!({ "type": "session_start", "reason": "reload" }));
     pi.event("ui_prompt_end");
     assert_eq!(status_in(&file), "done");
+
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("phase");
+    legacy.as_object_mut().unwrap().remove("promptOpen");
+    legacy["statusSince"] = json!(1_234_567_u64);
+    fs::write(&file, legacy.to_string()).unwrap();
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    let rewritten: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_eq!(rewritten["status"], json!("done"));
+    assert_eq!(rewritten["statusSince"], json!(1_234_567_u64));
+    assert!(rewritten.get("phase").is_some());
+    assert_eq!(rewritten["promptOpen"], json!(false));
 
     let mut stale: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     stale["sessionId"] = json!("stale");

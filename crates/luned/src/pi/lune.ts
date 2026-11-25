@@ -18,8 +18,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isControlCodePoint(codePoint: number): boolean {
-  return codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f);
+function isInvisibleFormatting(codePoint: number): boolean {
+  return (
+    codePoint < 0x20 ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    codePoint === 0x00ad ||
+    (codePoint >= 0x0600 && codePoint <= 0x0605) ||
+    codePoint === 0x061c ||
+    codePoint === 0x06dd ||
+    codePoint === 0x070f ||
+    (codePoint >= 0x0890 && codePoint <= 0x0891) ||
+    codePoint === 0x08e2 ||
+    codePoint === 0x180e ||
+    (codePoint >= 0x200b && codePoint <= 0x200f) ||
+    (codePoint >= 0x202a && codePoint <= 0x202e) ||
+    (codePoint >= 0x2060 && codePoint <= 0x2064) ||
+    (codePoint >= 0x2066 && codePoint <= 0x206f) ||
+    codePoint === 0xfeff ||
+    (codePoint >= 0xfff9 && codePoint <= 0xfffb) ||
+    codePoint === 0x110bd ||
+    codePoint === 0x110cd ||
+    (codePoint >= 0x13430 && codePoint <= 0x1343f) ||
+    (codePoint >= 0x1bca0 && codePoint <= 0x1bca3) ||
+    (codePoint >= 0x1d173 && codePoint <= 0x1d17a) ||
+    codePoint === 0xe0001 ||
+    (codePoint >= 0xe0020 && codePoint <= 0xe007f)
+  );
 }
 
 function utf8BytesOfCodePoint(codePoint: number): number {
@@ -48,7 +72,7 @@ class ErrorMessage {
       if (character === "\r" || character === "\n") break;
       const codePoint = character.codePointAt(0);
       invariant(codePoint !== undefined, "iterated character has a code point");
-      if (isControlCodePoint(codePoint)) continue;
+      if (isInvisibleFormatting(codePoint)) continue;
       const width = utf8BytesOfCodePoint(codePoint);
       if (bytes + width > MESSAGE_BYTES_MAX) break;
       out += character;
@@ -64,6 +88,12 @@ class ErrorMessage {
     return this.#text;
   }
 }
+
+type SessionIdentity = {
+  readonly sessionId: string;
+  readonly cwd: string;
+  readonly mode: string;
+};
 
 type RestingReport =
   | { readonly status: "stopped" }
@@ -84,16 +114,21 @@ type Snapshot = {
   readonly promptOpen: boolean;
 };
 
-type Written = {
-  readonly snapshot: Snapshot;
-  readonly since: number;
-};
+type DiskState =
+  | { readonly kind: "unwritten" }
+  | { readonly kind: "needsRewrite"; readonly report: Report; readonly since: number }
+  | {
+      readonly kind: "synced";
+      readonly identity: SessionIdentity;
+      readonly snapshot: Snapshot;
+      readonly since: number;
+    };
 
 type ActiveState = {
   readonly kind: "active";
   phase: Phase;
   promptOpen: boolean;
-  written: Written | undefined;
+  disk: DiskState;
 };
 
 type Lifecycle = ActiveState | { readonly kind: "shutDown" };
@@ -107,23 +142,36 @@ type PersistedPhase =
   | { readonly kind: "resting"; readonly resting: PersistedResting }
   | { readonly kind: "running"; readonly outcome: PersistedResting };
 
-type OutboundFile = {
-  sessionId: string;
-  cwd: string;
-  status: Report["status"];
-  statusMessage?: string;
-  statusSince: number;
-  mode: string;
-  procStart?: string;
-  phase: PersistedPhase;
-  promptOpen: boolean;
+type OutboundReport =
+  | { readonly status: "stopped" }
+  | { readonly status: "done" }
+  | { readonly status: "busy" }
+  | { readonly status: "waiting" }
+  | { readonly status: "error"; readonly statusMessage?: string };
+
+type OutboundFile = OutboundReport & {
+  readonly sessionId: string;
+  readonly cwd: string;
+  readonly statusSince: number;
+  readonly mode: string;
+  readonly procStart?: string;
+  readonly phase: PersistedPhase;
+  readonly promptOpen: boolean;
 };
 
-type RestoredSnapshot = {
-  readonly snapshot: Snapshot;
-  readonly since: number;
-  readonly exact: boolean;
-};
+type RestoredSnapshot =
+  | {
+      readonly kind: "exact";
+      readonly identity: SessionIdentity;
+      readonly snapshot: Snapshot;
+      readonly since: number;
+    }
+  | {
+      readonly kind: "needsRewrite";
+      readonly identity: SessionIdentity;
+      readonly snapshot: Snapshot;
+      readonly since: number;
+    };
 
 type StopOutcome = "error" | "aborted" | "done";
 
@@ -134,18 +182,24 @@ type Context = {
   isIdle?: () => boolean;
 };
 
-type Event = {
-  reason?: string;
-  aborted?: boolean;
-  message?: {
-    role?: string;
-    stopReason?: string;
-    errorMessage?: string;
+type PiEvents = {
+  session_start: { readonly reason?: string };
+  agent_start: Record<string, never>;
+  message_end: {
+    readonly message?: {
+      readonly role?: string;
+      readonly stopReason?: string;
+      readonly errorMessage?: string;
+    };
   };
+  agent_settled: { readonly aborted?: boolean };
+  ui_prompt_start: Record<string, never>;
+  ui_prompt_end: Record<string, never>;
+  session_shutdown: { readonly reason?: string };
 };
 
 type Pi = {
-  on(event: string, handler: (event: Event, ctx: Context) => void): void;
+  on<K extends keyof PiEvents>(event: K, handler: (event: PiEvents[K], ctx: Context) => void): void;
 };
 
 function fileOfThisProcess(): string | undefined {
@@ -165,6 +219,18 @@ function procStart(): string | undefined {
   const stat = readFileSync("/proc/self/stat", "utf8");
   const field = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
   return field !== undefined && field.length > 0 ? field : undefined;
+}
+
+function parseIdentity(ctx: Context): SessionIdentity | undefined {
+  const sessionId = ctx.sessionManager.getSessionId();
+  if (typeof sessionId !== "string" || sessionId.trim().length === 0) return undefined;
+  if (typeof ctx.cwd !== "string" || !ctx.cwd.startsWith("/")) return undefined;
+  if (typeof ctx.mode !== "string") return undefined;
+  return { sessionId, cwd: ctx.cwd, mode: ctx.mode };
+}
+
+function sameIdentity(a: SessionIdentity, b: SessionIdentity): boolean {
+  return a.sessionId === b.sessionId && a.cwd === b.cwd && a.mode === b.mode;
 }
 
 function errorReport(raw: unknown): RestingReport {
@@ -199,6 +265,44 @@ function serializePhase(phase: Phase): PersistedPhase {
     default:
       return assertNever(phase);
   }
+}
+
+function serializeReport(report: Report): OutboundReport {
+  switch (report.status) {
+    case "stopped":
+      return { status: "stopped" };
+    case "done":
+      return { status: "done" };
+    case "busy":
+      return { status: "busy" };
+    case "waiting":
+      return { status: "waiting" };
+    case "error":
+      return report.message !== undefined
+        ? { status: "error", statusMessage: report.message.text }
+        : { status: "error" };
+    default:
+      return assertNever(report);
+  }
+}
+
+function serializeOutbound(
+  identity: SessionIdentity,
+  snapshot: Snapshot,
+  since: number,
+  started: string | undefined,
+): OutboundFile {
+  const report = serializeReport(currentReport(snapshot.phase, snapshot.promptOpen));
+  return {
+    sessionId: identity.sessionId,
+    cwd: identity.cwd,
+    ...report,
+    statusSince: since,
+    mode: identity.mode,
+    ...(started !== undefined ? { procStart: started } : {}),
+    phase: serializePhase(snapshot.phase),
+    promptOpen: snapshot.promptOpen,
+  };
 }
 
 function parseRestingStatus(status: unknown, message: unknown): RestingReport | undefined {
@@ -248,8 +352,10 @@ function parsePersistedPhase(raw: unknown): Phase | undefined {
 }
 
 function parseStopReason(raw: unknown): StopOutcome | undefined {
-  if (typeof raw !== "string" || raw.length === 0) return undefined;
-  switch (raw) {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return undefined;
+  switch (trimmed) {
     case "error":
       return "error";
     case "aborted":
@@ -311,18 +417,22 @@ function isCanonicalReportFields(record: Record<string, unknown>, report: Report
 }
 
 function snapshotInFile(ctx: Context, started: string | undefined): RestoredSnapshot | undefined {
+  const identity = parseIdentity(ctx);
+  if (identity === undefined) return undefined;
   const file = fileOfThisProcess();
   if (!file) return undefined;
   const stats = lstatSync(file);
   if (!stats.isFile() || stats.size > FILE_BYTES_MAX) return undefined;
   const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
   if (!isRecord(parsed)) return undefined;
-  if (parsed["sessionId"] !== ctx.sessionManager.getSessionId()) return undefined;
-  if (parsed["cwd"] !== ctx.cwd) return undefined;
-  if (parsed["mode"] !== ctx.mode) return undefined;
-  if (started !== undefined && parsed["procStart"] !== started) return undefined;
+  if (parsed["sessionId"] !== identity.sessionId) return undefined;
+  if (parsed["cwd"] !== identity.cwd) return undefined;
+  if (parsed["mode"] !== identity.mode) return undefined;
+  if (started !== undefined ? parsed["procStart"] !== started : parsed["procStart"] !== undefined) {
+    return undefined;
+  }
   const since = parsed["statusSince"];
-  if (typeof since !== "number" || !Number.isFinite(since) || since < 0) return undefined;
+  if (typeof since !== "number" || !Number.isSafeInteger(since) || since < 0) return undefined;
   const report = parseReport(parsed["status"], parsed["statusMessage"]);
   if (report === undefined) return undefined;
 
@@ -332,31 +442,33 @@ function snapshotInFile(ctx: Context, started: string | undefined): RestoredSnap
     if (phase === undefined || typeof promptOpen !== "boolean") return undefined;
     const projected = currentReport(phase, promptOpen);
     if (!sameReport(report, projected)) return undefined;
-    const exact = isCanonicalReportFields(parsed, projected);
-    return { snapshot: { phase, promptOpen }, since, exact };
+    const kind = isCanonicalReportFields(parsed, projected) ? "exact" : "needsRewrite";
+    return { kind, identity, snapshot: { phase, promptOpen }, since };
   }
 
   switch (report.status) {
     case "busy":
       return {
+        kind: "needsRewrite",
+        identity,
         snapshot: { phase: { kind: "running", outcome: { status: "done" } }, promptOpen: false },
         since,
-        exact: false,
       };
     case "waiting": {
       const running = ctx.isIdle !== undefined && !ctx.isIdle();
       const phase: Phase = running
         ? { kind: "running", outcome: { status: "done" } }
         : { kind: "resting", resting: { status: "stopped" } };
-      return { snapshot: { phase, promptOpen: true }, since, exact: false };
+      return { kind: "needsRewrite", identity, snapshot: { phase, promptOpen: true }, since };
     }
     case "stopped":
     case "done":
     case "error":
       return {
+        kind: "needsRewrite",
+        identity,
         snapshot: { phase: { kind: "resting", resting: report }, promptOpen: false },
         since,
-        exact: false,
       };
     default:
       return assertNever(report);
@@ -377,36 +489,40 @@ export default function (pi: Pi): void {
     kind: "active",
     phase: { kind: "resting", resting: { status: "stopped" } },
     promptOpen: false,
-    written: undefined,
+    disk: { kind: "unwritten" },
   };
 
   function sync(state: ActiveState, ctx: Context): void {
+    const identity = parseIdentity(ctx);
+    if (identity === undefined) return;
     const next: Snapshot = { phase: state.phase, promptOpen: state.promptOpen };
-    if (state.written !== undefined && sameSnapshot(state.written.snapshot, next)) return;
+    if (
+      state.disk.kind === "synced" &&
+      sameIdentity(state.disk.identity, identity) &&
+      sameSnapshot(state.disk.snapshot, next)
+    ) {
+      return;
+    }
     const now = currentReport(next.phase, next.promptOpen);
-    const previousReport =
-      state.written !== undefined
-        ? currentReport(state.written.snapshot.phase, state.written.snapshot.promptOpen)
-        : undefined;
+    let previousReport: Report | undefined;
+    let previousSince: number | undefined;
+    switch (state.disk.kind) {
+      case "synced":
+        previousReport = currentReport(state.disk.snapshot.phase, state.disk.snapshot.promptOpen);
+        previousSince = state.disk.since;
+        break;
+      case "needsRewrite":
+        previousReport = state.disk.report;
+        previousSince = state.disk.since;
+        break;
+      case "unwritten":
+        break;
+      default:
+        assertNever(state.disk);
+    }
     const since =
-      state.written !== undefined && sameReport(previousReport, now)
-        ? state.written.since
-        : Date.now();
-    const said: OutboundFile = {
-      sessionId: ctx.sessionManager.getSessionId(),
-      cwd: ctx.cwd,
-      status: now.status,
-      statusSince: since,
-      mode: ctx.mode,
-      phase: serializePhase(next.phase),
-      promptOpen: next.promptOpen,
-    };
-    if (started !== undefined) {
-      said.procStart = started;
-    }
-    if (now.status === "error" && now.message !== undefined) {
-      said.statusMessage = now.message.text;
-    }
+      previousSince !== undefined && sameReport(previousReport, now) ? previousSince : Date.now();
+    const said = serializeOutbound(identity, next, since, started);
     const payload = JSON.stringify(said);
     quietly(() => {
       const file = fileOfThisProcess();
@@ -419,7 +535,7 @@ export default function (pi: Pi): void {
         quietly(() => rmSync(temporary, { force: true }));
         throw error;
       }
-      state.written = { snapshot: next, since };
+      state.disk = { kind: "synced", identity, snapshot: next, since };
     });
   }
 
@@ -430,17 +546,31 @@ export default function (pi: Pi): void {
     if (restored === undefined) {
       lifecycle.phase = { kind: "resting", resting: { status: "stopped" } };
       lifecycle.promptOpen = false;
-      lifecycle.written = undefined;
+      lifecycle.disk = { kind: "unwritten" };
       sync(lifecycle, ctx);
       return;
     }
     lifecycle.phase = restored.snapshot.phase;
     lifecycle.promptOpen = restored.snapshot.promptOpen;
-    if (restored.exact) {
-      lifecycle.written = { snapshot: restored.snapshot, since: restored.since };
-    } else {
-      lifecycle.written = undefined;
-      sync(lifecycle, ctx);
+    switch (restored.kind) {
+      case "exact":
+        lifecycle.disk = {
+          kind: "synced",
+          identity: restored.identity,
+          snapshot: restored.snapshot,
+          since: restored.since,
+        };
+        break;
+      case "needsRewrite":
+        lifecycle.disk = {
+          kind: "needsRewrite",
+          report: currentReport(restored.snapshot.phase, restored.snapshot.promptOpen),
+          since: restored.since,
+        };
+        sync(lifecycle, ctx);
+        break;
+      default:
+        assertNever(restored);
     }
   });
 

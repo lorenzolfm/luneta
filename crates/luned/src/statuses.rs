@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use lune_domain::agent::Rung;
 pub use lune_protocol::agent_status::BlockedReason;
-use lune_protocol::program_status::{ChildId, Message, Progress};
+use lune_protocol::program_status::{ChildId, Message, Progress, Title};
 use lune_protocol::said::Said;
 use lune_protocol::PROGRAM_STATUS_RECORDS_MAX;
 
@@ -82,9 +82,9 @@ pub enum SubagentPhase {
     Idle,
     Stopped,
     Working { progress: Option<Progress> },
-    Done { message: Option<Said> },
-    Blocked { reason: BlockedReason, message: Option<Said> },
-    Error { message: Option<Said> },
+    Done { message: Option<Message> },
+    Blocked { reason: BlockedReason, message: Option<Message> },
+    Error { message: Option<Message> },
     Shell,
     Other(Said),
 }
@@ -119,7 +119,7 @@ impl SubagentPhase {
 pub struct Subagent {
     pub id: ChildId,
     pub phase: SubagentPhase,
-    pub title: Option<Said>,
+    pub title: Option<Title>,
     pub status_since: Option<SystemTime>,
 }
 
