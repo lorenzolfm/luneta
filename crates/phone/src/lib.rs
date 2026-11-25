@@ -8,7 +8,8 @@ mod unanswered;
 mod verbs;
 pub mod waits;
 
-pub use crate::core::{tailnet_name, Asking, Conversation, Core, Observer, TACKLE};
+pub use crate::core::{tailnet_name, Asking, Backoff, Conversation, Core, Observer, TACKLE};
+pub use crate::waits::NonZeroDuration;
 pub use crate::model::{
     Agent, Far, Found, Held, Holds, Model, Placed, Project, Reached, Seen, Status, TerminalKey,
     Unopened, View, Why, Worktree,
