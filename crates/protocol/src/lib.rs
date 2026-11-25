@@ -13,6 +13,8 @@ pub const TAILNET_PORT: u16 = 7473;
 
 pub const CONFLICTED_NAMED_MAX: usize = 20;
 
+pub const MUX_STREAMS_MAX: u32 = 256;
+
 #[allow(
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,

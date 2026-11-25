@@ -21,13 +21,14 @@ use crossterm::event::{
 };
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use crossterm::{execute, queue};
+use lune_domain::mux::TerminalKey;
+use lune_domain::projects::{self, Arranged, Opens, ProjectId, ViewId, WorktreeId};
+use lune_domain::rows;
 use luned::api::{Host, Version};
 use luned::changes::Unchanged;
 use luned::issues::{Filed, OnGitHub, Remote, Unfiled};
 use luned::log::{self, Process};
 use luned::mux::own::viewer::{Greeting, Seen};
-use luned::mux::TerminalKey;
-use luned::projects::{self, Arranged, Opens, ProjectId, ViewId, WorktreeId};
 use luned::prunes;
 use luned::asks::Marked;
 use luned::rebases::{Rebased, Unrebased};
@@ -811,7 +812,7 @@ fn greeting(colours: Colours) -> Greeting {
     Greeting { foreground, background }
 }
 
-fn layout_size(area: Rect) -> luned::projects::Size {
+fn layout_size(area: Rect) -> lune_domain::projects::Size {
     let size = window(area);
     viewed::layout_size(size.columns, size.lines)
 }
@@ -2516,7 +2517,7 @@ impl App {
     fn go_other_than(&mut self, on: &Machine, left: Option<WorktreeId>) {
         let held = |machine: &Machine| {
             let projects = self.projected.projects(machine).iter();
-            let worktrees = projects.flat_map(projected::Project::worktrees);
+            let worktrees = projects.flat_map(rows::Project::worktrees);
             let open = worktrees.filter(|it| !it.terminals.is_empty());
             let others = open.filter(|it| machine != on || Some(it.id) != left);
             projects::last_used(others.map(|it| (it.id, it.used)))
@@ -2953,7 +2954,7 @@ mod tests {
         let project = ProjectId::of(3).unwrap();
         let named = |on: Machine| {
             let mut home = Home::new(1, 1, on, project);
-            home.named("lune", &luned::projects::Dir::parse("/w/lune").unwrap());
+            home.named("lune", &lune_domain::projects::Dir::parse("/w/lune").unwrap());
             home
         };
         assert!(gone(&projected, &named(Machine::Local)));

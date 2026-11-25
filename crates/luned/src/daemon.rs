@@ -12,6 +12,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
+use lune_domain::agent::Harness;
+use lune_domain::mux::TerminalKey;
+use lune_domain::projects::{folder_has_one_worktree, Holders, Made, Opens, OwnedFolder};
+use lune_domain::projects::{ProjectId, WorktreeId};
 use lune_protocol::socket::{self, Bound, Found};
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
@@ -50,8 +54,7 @@ use crate::panics::Hooked;
 use crate::asks::{Asked, Step};
 use crate::core::{self, After, Command, Full, Parked, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Ask, Changed, Holders, Lock, Made, Opened, Opens, ProjectId, Store};
-use crate::projects::WorktreeId;
+use crate::projects::{Changed, Lock, Opened, Store};
 use crate::layouts::{self, Root, Unrooted};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
@@ -68,9 +71,13 @@ use crate::transcripts::{self, Reading, SessionId};
 use crate::agent::Agent;
 use crate::checks::{Failing, Log};
 use crate::{
-    agy, changes, checks, claude, client, eza, fetches, git, github, keeps, log, owns, pi, printed,
-    projects, release, remote, repositories, skills, tailnet, topics, watch, work, Harness,
+    agy, changes, checks, claude, client, devices, eza, fetches, git, github, keeps, log, owns, pi,
+    printed, projects, release, remote, repositories, skills, state, tailnet, topics, watch, work,
 };
+
+mod over_tailnet;
+
+use over_tailnet::OverTailnet;
 
 pub const SWEEP: Duration = Duration::from_secs(2);
 
@@ -180,14 +187,16 @@ pub async fn serve(
     unkept: Option<String>,
 ) -> io::Result<()> {
     let (listener, bound) = claim.bind()?;
-    let tailnet = if projects.is_ok() {
-        let home = tailnet::in_own_home();
-        if let Err(why) = &home {
+    let devices_file = if projects.is_ok() {
+        let devices_file = tailnet::in_own_home().and_then(|()| {
+            state::path(devices::FILE).map_err(|unset| unset.to_string())
+        });
+        if let Err(why) = &devices_file {
             log::say(&format!("{why}, so luned stays off the tailnet"));
         }
-        home.is_ok()
+        devices_file.ok()
     } else {
-        false
+        None
     };
     let started = SystemTime::now();
     let (wake_git, git_woken) = mpsc::sync_channel(1);
@@ -250,22 +259,22 @@ pub async fn serve(
         let _ = closing.send(true);
         let _ = begun.send(());
     };
-    let router = |server: Server, host| {
+    let router = |server: Server| {
         server
             .max_concurrent_streams(QUESTIONS_MAX)
             .initial_stream_window_size(IN_FLIGHT)
             .layer(layer_fn(|routes| {
                 client::Within::new(routes, ANSWERING_MAX, client::unanswered)
             }))
-            .add_service(DaemonServer::from_arc(host))
     };
-    let tailnet_served = if tailnet {
+    let tailnet_served = if let Some(devices_file) = devices_file {
         let mut closed = closed;
         let closed = async move {
             let _ = closed.wait_for(|closed| *closed).await;
         };
-        let incoming = tailnet::incoming(SWEEP);
-        let served = router(tailnet::server(), Arc::clone(&host))
+        let incoming = tailnet::incoming(SWEEP, devices_file);
+        let served = router(tailnet::server())
+            .add_service(DaemonServer::new(OverTailnet(Arc::clone(&host))))
             .serve_with_incoming_shutdown(incoming, closed);
         Some(tokio::spawn(async move {
             if let Err(error) = served.await {
@@ -276,7 +285,8 @@ pub async fn serve(
         None
     };
     let served = tokio::spawn(
-        router(Server::builder(), host)
+        router(Server::builder())
+            .add_service(DaemonServer::from_arc(host))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
     );
     let _ = beginning.await;
@@ -606,7 +616,8 @@ impl Daemon for Host {
         let repository =
             |it: repositories::Repository| Repository { path: it.path().as_str().to_owned() };
         let repositories = repositories.into_iter().map(repository).collect();
-        let owned = owned.iter().map(|it| it.as_str().to_owned()).collect();
+        let owned = owned.iter().flat_map(OwnedFolder::folders).map(|it| it.as_str().to_owned());
+        let owned = owned.collect();
         Ok(Response::new(ListRepositoriesResponse { repositories, unread, owned }))
     }
 
@@ -834,7 +845,6 @@ impl Daemon for Host {
         request: Request<Streaming<ShowRequest>>,
     ) -> Result<Response<Self::ShowStream>, Status> {
         use crate::api::show_request::{Event, Hello};
-        use crate::mux::own::TerminalKey;
         let mut heard = request.into_inner();
         let Some(ShowRequest { event: Some(Event::Hello(hello)) }) = heard.message().await? else {
             return Err(Status::invalid_argument("the first word is no hello"));
@@ -893,42 +903,7 @@ impl Daemon for Host {
         &self,
         request: Request<Streaming<FramesRequest>>,
     ) -> Result<Response<Self::FramesStream>, Status> {
-        use crate::api::frames_request::{Event, Hello};
-        use crate::mux::own::api::from_viewer;
-        let mut heard = request.into_inner();
-        let Some(FramesRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
-            heard.message().await?
-        else {
-            return Err(Status::invalid_argument("the first word is no hello"));
-        };
-        let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
-        if on.is_some() && greeting.runs_in.is_some() {
-            return Err(Status::invalid_argument(RUNS_IN_ON));
-        }
-        let (refuse, refused) = oneshot::channel();
-        let mut refuse = Some(refuse);
-        let said = heard.map_while(move |word| {
-            let refusal = match word {
-                Ok(FramesRequest { event: Some(Event::Said(said)) }) => return Some(said),
-                Ok(FramesRequest { event: Some(Event::Hello(_)) }) => "a hello comes only first",
-                Ok(FramesRequest { event: None }) => "a word of the frames says nothing",
-                Err(_) => return None,
-            };
-            let refuse = refuse.take().expect("the words for frames end at the first refused");
-            drop(refuse.send(Status::invalid_argument(refusal)));
-            None
-        });
-        if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
-            let hello = Hello { on: None, greeting: Some(greeting) };
-            let first = FramesRequest { event: Some(Event::Hello(hello)) };
-            let rest = said.map(|said| FramesRequest { event: Some(Event::Said(said)) });
-            let answer = daemon.frames(tokio_stream::once(first).chain(rest)).await?;
-            let stream = ended_by(answer.into_inner(), refused);
-            return Ok(Response::new(Box::pin(Held { stream, _permit: permit })));
-        }
-        let first = FromViewer { event: Some(from_viewer::Event::Hello(greeting)) };
-        let answer = viewer::relayed(tokio_stream::once(first).chain(said)).await?;
-        Ok(Response::new(ended_by(answer, refused)))
+        self.frames_served(request, |_| Ok(())).await
     }
 
     async fn change_projects(
@@ -964,18 +939,17 @@ impl Daemon for Host {
             return Ok(Response::new(Box::pin(answer)));
         }
         let unopenable = |why: String| Status::invalid_argument(format!("opens: {why}"));
-        let agent = |opens: &api::Opens| matches!(opens.runs, Some(api::opens::Runs::Agent(_)));
-        let agent_asked = opens.as_ref().is_some_and(agent);
         let opens = match opens {
             None => Opens::Shell,
             opens @ Some(_) => Opens::of_api(opens).map_err(unopenable)?,
         };
+        let agent_asked = matches!(opens, Opens::Agent(_));
         let layouts = self.layouts.clone();
         let answer = late(move || {
             let root = match rooted(&layouts, project)? {
                 Root::Clone(root) => root,
                 Root::Folder { name, .. } => {
-                    let one = projects::folder_has_one_worktree(name.as_str());
+                    let one = folder_has_one_worktree(name.as_str());
                     return Err(Status::failed_precondition(one));
                 },
             };
@@ -1206,7 +1180,7 @@ fn change_made(
     layouts: &SyncSender<layouts::Command>,
     change: change_projects_request::Change,
 ) -> Result<Changed, Status> {
-    let change = Ask::of_api(change).map_err(Status::invalid_argument)?;
+    let change = projects::asked(change).map_err(Status::invalid_argument)?;
     let asked = layouts::ask(layouts, |answer| layouts::Command::Change { change, answer });
     let changed = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
     changed.map_err(changes::status)
@@ -1234,9 +1208,9 @@ fn unfinished(error: &task::JoinError) -> Status {
 
 fn terminal_named(
     terminal: Option<api::TerminalKey>,
-) -> Result<(crate::mux::own::TerminalKey, api::TerminalKey), Status> {
+) -> Result<(TerminalKey, api::TerminalKey), Status> {
     let asked = terminal.ok_or_else(|| Status::invalid_argument("it names no terminal"))?;
-    let key = crate::mux::own::TerminalKey::of(&asked);
+    let key = TerminalKey::of(&asked);
     let key = key.map_err(|why| Status::invalid_argument(format!("terminal: {why}")))?;
     Ok((key, asked))
 }
@@ -1255,6 +1229,55 @@ fn unanswered(unanswered: &Unanswered) -> Status {
 }
 
 impl Host {
+    async fn frames_served(
+        &self,
+        request: Request<Streaming<FramesRequest>>,
+        served: fn(&FromViewer) -> Result<(), Status>,
+    ) -> Result<Response<<Host as Daemon>::FramesStream>, Status> {
+        use crate::api::frames_request::{Event, Hello};
+        use crate::mux::own::api::from_viewer;
+        let mut heard = request.into_inner();
+        let Some(FramesRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
+            heard.message().await?
+        else {
+            return Err(Status::invalid_argument("the first word is no hello"));
+        };
+        let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
+        if on.is_some() && greeting.runs_in.is_some() {
+            return Err(Status::invalid_argument(RUNS_IN_ON));
+        }
+        let (refuse, refused) = oneshot::channel();
+        let mut refuse = Some(refuse);
+        let said = heard.map_while(move |word| {
+            let unread = |why: &str| Status::invalid_argument(why);
+            let refusal = match word {
+                Ok(FramesRequest { event: Some(Event::Said(said)) }) => match served(&said) {
+                    Ok(()) => return Some(said),
+                    Err(unserved) => unserved,
+                },
+                Ok(FramesRequest { event: Some(Event::Hello(_)) }) => {
+                    unread("a hello comes only first")
+                },
+                Ok(FramesRequest { event: None }) => unread("a word of the frames says nothing"),
+                Err(_) => return None,
+            };
+            let refuse = refuse.take().expect("the words for frames end at the first refused");
+            drop(refuse.send(refusal));
+            None
+        });
+        if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
+            let hello = Hello { on: None, greeting: Some(greeting) };
+            let first = FramesRequest { event: Some(Event::Hello(hello)) };
+            let rest = said.map(|said| FramesRequest { event: Some(Event::Said(said)) });
+            let answer = daemon.frames(tokio_stream::once(first).chain(rest)).await?;
+            let stream = ended_by(answer.into_inner(), refused);
+            return Ok(Response::new(Box::pin(Held { stream, _permit: permit })));
+        }
+        let first = FromViewer { event: Some(from_viewer::Event::Hello(greeting)) };
+        let answer = viewer::relayed(tokio_stream::once(first).chain(said)).await?;
+        Ok(Response::new(ended_by(answer, refused)))
+    }
+
     async fn runs_in(&self, terminal: &api::TerminalKey) -> Runs {
         let id = terminal.id;
         let ListAgentsResponse { agents, .. } = match self.ask(Command::List).await {

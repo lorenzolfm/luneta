@@ -112,7 +112,7 @@ fn ctrl_c_behind_a_flood_of_answers_leaves(flushes: &str, left: &str) {
                 if [ \"$n\" -eq 0 ]; then echo \"input left: none\"; \
                 else echo \"input left: some\"; fi' INT; \
             yes \"$(printf '\\033[6n')\" | tr -d '\\n' | head -c 4000000; \
-            echo; echo drawn; sleep 1000"
+            echo; echo drawn; sleep 1000 & wait"
         );
         let opens = script(&asks, api::Ends::Holds);
         let key = new_terminal(&mut mux, opens, b"asks", size(80, 24)).await;

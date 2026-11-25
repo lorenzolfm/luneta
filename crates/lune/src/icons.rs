@@ -37,11 +37,11 @@ const ICONS: [(&str, &str); 13] = [
     ("htop", "\u{eb31}"),
 ];
 
-pub const fn harness(harness: luned::Harness) -> &'static str {
+pub const fn harness(harness: lune_domain::agent::Harness) -> &'static str {
     match harness {
-        luned::Harness::ClaudeCode => CLAUDE,
-        luned::Harness::Pi => PI,
-        luned::Harness::Antigravity => AGY,
+        lune_domain::agent::Harness::ClaudeCode => CLAUDE,
+        lune_domain::agent::Harness::Pi => PI,
+        lune_domain::agent::Harness::Antigravity => AGY,
     }
 }
 

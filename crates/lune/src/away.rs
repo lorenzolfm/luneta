@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::time::{Duration, Instant};
 
+use lune_domain::projects::{self, OwnedFolder};
 use luned::api::keep_checks_response::{self, failed};
 use luned::api::{
     AskResponse, IssueRepositoriesRequest, KeepChecksRequest, ListContentsRequest,
@@ -14,10 +15,9 @@ use luned::images::{self, Png};
 use luned::issues::{self, Filed, Filing, Remote, Unfiled};
 use luned::links::{Pasted, Ready, Unready};
 use luned::printed::Kept;
-use luned::projects;
 use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
-use luned::repositories::{Found, Repository, OWNED_FOLDERS_MAX, REPOSITORIES_MAX};
+use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
 use luned::skills::{Name, Runs, Skill};
 use luned::transcripts::{Reading, SessionId, TranscriptEnd};
 use luned::{Daemon, Destination, Directory};
@@ -345,16 +345,16 @@ fn repositories_of(answer: ListRepositoriesResponse) -> Found {
     }
     let repositories: Vec<Repository> = read.into_iter().take(REPOSITORIES_MAX).collect();
     let owned_sent = owned.len();
-    let owned = owned.iter().filter_map(|it| projects::Dir::parse(it).ok());
-    let owned: Vec<projects::Dir> = owned.take(OWNED_FOLDERS_MAX).collect();
-    let owned_left_out = owned_sent - owned.len();
+    let mut read = owned.iter().filter_map(|it| projects::Dir::parse(it).ok());
+    let owned = read.next().map(|named| OwnedFolder::of(named, read.next()));
+    let owned_read = owned.iter().flat_map(OwnedFolder::folders).count();
+    let owned_left_out = owned_sent - owned_read;
     if owned_left_out > 0 {
         unread.push(format!("left out {owned_left_out} of the folders lune keeps clones in"));
     }
     unread_there.truncate(UNREAD_MAX);
     unread.extend(unread_there);
     assert!(repositories.len() <= REPOSITORIES_MAX, "another machine's clones stop at the most");
-    assert!(owned.len() <= OWNED_FOLDERS_MAX, "another machine's clone folders stop at the most");
     assert!(unread.len() <= UNREAD_MAX + 3, "another machine's notes stop at the most");
     Found { repositories, owned, unread }
 }
@@ -420,7 +420,7 @@ mod tests {
         let dir = |path: &str| luned::api::list_repositories_response::Repository {
             path: path.to_owned(),
         };
-        let long = format!("/home/me/{}", "x".repeat(luned::projects::NAME_CHARS_MAX + 1));
+        let long = format!("/home/me/{}", "x".repeat(lune_domain::projects::NAME_CHARS_MAX + 1));
         let answer = ListRepositoriesResponse {
             repositories: vec![
                 dir("/home/me/api"),
@@ -436,21 +436,23 @@ mod tests {
         let made = |path: &str| Repository::at(projects::Dir::parse(path).unwrap()).unwrap();
         let repositories = vec![made("/home/me/api"), made("/home/me/-dash")];
         assert_eq!(repositories[1].name().as_str(), "-dash");
-        let owned = ["/home/me/lune", "/srv/lune"].map(|it| projects::Dir::parse(it).unwrap());
+        let folder = |at: &str| projects::Dir::parse(at).unwrap();
+        let owned = Some(OwnedFolder::of(folder("/home/me/lune"), Some(folder("/srv/lune"))));
         let unread = vec![
             "left out 4 clones no project can be named for".to_owned(),
             "left out 1 of the folders lune keeps clones in".to_owned(),
             "zoxide is not on the PATH".to_owned(),
         ];
-        assert_eq!(repositories_of(answer), Found { repositories, owned: owned.to_vec(), unread });
+        assert_eq!(repositories_of(answer), Found { repositories, owned, unread });
 
         let many = (0..=REPOSITORIES_MAX).map(|at| dir(&format!("/w/c{at}")));
         let notes = (0..=UNREAD_MAX).map(|at| format!("note {at}"));
         let (repositories, unread) = (many.collect(), notes.collect());
-        let owned = (0..=OWNED_FOLDERS_MAX).map(|at| format!("/w/lune{at}")).collect();
+        let owned = ["/w/lune", "/srv/lune", "/w/lune-too"].map(str::to_owned).to_vec();
         let answer = ListRepositoriesResponse { repositories, unread, owned };
         let Found { repositories, owned, unread } = repositories_of(answer);
-        assert_eq!(owned.len(), OWNED_FOLDERS_MAX);
+        let folder = |at: &str| projects::Dir::parse(at).unwrap();
+        assert_eq!(owned, Some(OwnedFolder::of(folder("/w/lune"), Some(folder("/srv/lune")))));
         assert_eq!(repositories.len(), REPOSITORIES_MAX);
         assert_eq!(unread.len(), 2 + UNREAD_MAX, "the cuts are said, and the notes stop");
         let cut = format!("listed the first {REPOSITORIES_MAX} of {} clones", REPOSITORIES_MAX + 1);

@@ -11,9 +11,10 @@ use std::thread;
 use std::time::Duration;
 
 use clap::CommandFactory as _;
+use lune_domain::projects::Projects;
 use luned::asks::Turn;
 use luned::program::{self, Ran};
-use luned::projects::{self, Forgotten, Projects};
+use luned::projects::{self, Forgotten};
 use luned::terminate::{self, Folders, Id, Running, Unended, Unreadable};
 use luned::{Destination, HostsLine, HostsParsed};
 use signal_hook::consts::SIGHUP;

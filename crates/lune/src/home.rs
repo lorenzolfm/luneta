@@ -4,8 +4,8 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::projects::{Dir, ProjectId};
 use luned::asks::Marked;
-use luned::projects::{Dir, ProjectId};
 use luned::work::{self, Issues, Item, Listed, Work};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

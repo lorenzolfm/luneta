@@ -6,6 +6,7 @@ use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lune_domain::projects::{Dir, PROJECTS_MAX};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
@@ -17,7 +18,6 @@ use crate::api::list_work_response::{
 use crate::api::ListWorkResponse;
 use crate::directory::Directory;
 use crate::panics::{self, Panicked};
-use crate::projects::{Dir, PROJECTS_MAX};
 use crate::{git, issues, program};
 
 pub const LISTED_MAX: usize = 50;

@@ -11,10 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use lune_domain::mux::TerminalKey;
 use lune_waits::{eventually, Began, Gap, Span};
 use luned::api::agent::{Status as Reported, WaitingFor as Waits};
 use luned::api::{self, Agent, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor};
-use luned::mux::{OwnMade, TerminalKey};
+use luned::mux::OwnMade;
 use luned::{SETTLE, SWEEP, TORN};
 use serde_json::json;
 use tempfile::TempDir;

@@ -1,0 +1,16 @@
+[package]
+name = "lune-domain"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+description = "What lune's projects are, apart from any IO: their worktrees, views and layouts, how a change to them is checked, how they are kept as text, the rows a client reads them into, and the names, agents and terminals they hold"
+
+[dependencies]
+lune-protocol = { path = "../protocol" }
+prost-types = "0.14.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

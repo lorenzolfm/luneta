@@ -6,14 +6,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use lune_domain::agent::Harness;
+use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Harness, Name,
-    Source, Status, Unread,
+    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Name, Source,
+    Status, Unread,
 };
-use crate::mux::{self, TerminalKey};
+use crate::mux;
 use crate::{log, process, program};
 use crate::watch::{self, Troubles};
 use crate::Directory;

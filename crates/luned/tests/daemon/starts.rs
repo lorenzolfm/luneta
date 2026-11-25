@@ -470,7 +470,7 @@ fn a_lune_whose_terminal_variables_name_no_terminal_opens_nothing() {
 fn a_named_lune_says_why_luned_keeps_no_more_projects_rather_than_go_to_another() {
     let owned = Owned::new();
     let kept = directory("kept");
-    for at in 0..luned::projects::PROJECTS_MAX {
+    for at in 0..lune_domain::projects::PROJECTS_MAX {
         let dir = kept.path.join(format!("p{at}"));
         fs::create_dir(&dir).unwrap();
         project(&owned.host, Path::new(&real(&dir)), None);

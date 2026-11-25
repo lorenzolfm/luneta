@@ -1,12 +1,12 @@
 use std::fmt;
 
+use lune_domain::mux::TerminalKey;
+use lune_domain::names::SessionName;
+use lune_domain::projects::{ProjectId, ViewId, WorktreeId};
 use lune_protocol::unread::Unplaced;
 use luned::api::agent::Status as Reported;
 use luned::api::{Agent, Status};
-use luned::mux::TerminalKey;
-use luned::projects::{ProjectId, ViewId, WorktreeId};
 use luned::seats::Unread;
-use luned::SessionName;
 
 use crate::actions::Action;
 use crate::sidebar::{Place, ViewKey};

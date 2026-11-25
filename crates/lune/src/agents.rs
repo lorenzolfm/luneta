@@ -3,9 +3,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
+use lune_domain::projects::Argv;
 use luned::api;
-use luned::projects::Argv;
-pub use luned::Harness;
+pub use lune_domain::agent::Harness;
 
 use notify::RecommendedWatcher;
 
@@ -161,7 +161,7 @@ pub fn watch(file: &Path, events: Sender<Event>) -> notify::Result<RecommendedWa
 
 #[cfg(test)]
 mod tests {
-    use luned::projects::{Line, LINE_BYTES_MAX};
+    use lune_domain::projects::{Line, LINE_BYTES_MAX};
 
     use super::*;
 
