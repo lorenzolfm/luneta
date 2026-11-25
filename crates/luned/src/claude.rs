@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::agent::{
     absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Name, SeenAgent,
-    Source, Unread,
+    Source, Unread, FILE_BYTES_MAX,
 };
 use crate::mux;
 use crate::process::{self, AgentId, AgentPid};
@@ -148,7 +148,7 @@ impl SessionFiles {
             };
             let was = self.seen.remove(&pid);
             let now = match file_text(&path) {
-                Ok(text) => match serde_json::from_slice::<File>(&text) {
+                Ok(text) => match parse_leading_file(&text) {
                     Ok(file) => Seen::Whole(file),
                     Err(error) => torn(was, first, &path, &error),
                 },
@@ -222,17 +222,41 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
     }
 }
 
+fn parse_leading_file(bytes: &[u8]) -> io::Result<File> {
+    assert!(u64::try_from(bytes.len()).is_ok_and(|len| len <= FILE_BYTES_MAX));
+    let mut stream = serde_json::Deserializer::from_slice(bytes).into_iter::<File>();
+    let file = match stream.next() {
+        Some(Ok(file)) => file,
+        Some(Err(error)) => return Err(io::Error::new(ErrorKind::InvalidData, error)),
+        None => return Err(io::Error::new(ErrorKind::UnexpectedEof, "empty session file")),
+    };
+    assert!(stream.byte_offset() > 0);
+    assert!(stream.byte_offset() <= bytes.len());
+    Ok(file)
+}
+
+fn is_sdk_entrypoint(entrypoint: Option<&Said>) -> bool {
+    entrypoint.is_some_and(|word| {
+        word.as_str().get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("sdk-"))
+    })
+}
+
 fn reported(id: AgentId, file: &File, terminal: Option<TerminalKey>) -> ReportedAgent {
     let word = |text: &Option<String>| Said::new(text.as_deref()?.trim().to_owned());
     let name = file.name.clone().and_then(Said::new);
     let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
-    let update = match statuses::parse_word(file.status.as_deref(), file.waiting_for.as_deref()) {
-        Some(status) => RungUpdate::Active {
-            status,
-            at: file.status_updated_at.map(moment),
-            subagents: Vec::new(),
-        },
-        None => RungUpdate::Clear,
+    let entrypoint = word(&file.entrypoint);
+    let update = if is_sdk_entrypoint(entrypoint.as_ref()) {
+        RungUpdate::Clear
+    } else {
+        match statuses::parse_word(file.status.as_deref(), file.waiting_for.as_deref()) {
+            Some(status) => RungUpdate::Active {
+                status,
+                at: file.status_updated_at.map(moment),
+                subagents: Vec::new(),
+            },
+            None => RungUpdate::Clear,
+        }
     };
     let report = Report { agent: id.clone(), rung: Rung::Feed, update };
     let seen = SeenAgent {
@@ -242,7 +266,7 @@ fn reported(id: AgentId, file: &File, terminal: Option<TerminalKey>) -> Reported
         cwd: file.cwd.clone(),
         started_at: file.started_at.map(moment),
         name: name.map(|text| Name { text, source }),
-        entrypoint: word(&file.entrypoint),
+        entrypoint,
         terminal,
     };
     ReportedAgent { seen, report }
@@ -253,6 +277,7 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::*;
+    use crate::process::{AgentPid, Start as ProcessStart};
 
     #[test]
     fn one_answer_runs_in_no_terminal_with_no_tools() {
@@ -269,5 +294,62 @@ mod tests {
         assert_eq!(unset, ["LUNE_MUX_TERMINAL", "LUNE_MUX_TERMINAL_MADE"].map(OsStr::new));
         let heard = Command::new("cat").stdin(told).output().unwrap();
         assert_eq!(heard.stdout, b"the prompt");
+    }
+
+    #[test]
+    fn parse_leading_file_tolerates_stray_tails_and_rejects_truncated_objects() {
+        let base = br#"{"sessionId":"s1","cwd":"/w","procStart":"42","status":"idle"}"#;
+        let tails: [&[u8]; 4] = [
+            b"",
+            br#"rompt","statusUpdatedAt":1792859293927}"#,
+            br#"{"sessionId":"old","cwd":"/old","procStart":"99","status":"busy"}"#,
+            b"\0\xff\xfe",
+        ];
+        for tail in tails {
+            let mut bytes = base.to_vec();
+            bytes.extend_from_slice(tail);
+            let parsed = parse_leading_file(&bytes).unwrap();
+            assert_eq!(parsed.session_id.as_str(), "s1");
+            assert_eq!(parsed.status.as_deref(), Some("idle"));
+        }
+        for invalid in [
+            &b""[..],
+            br#"{"sessionId":"s1","cwd":"/w""#,
+            b"[]",
+            b"null",
+            br#"{"sessionId":"","cwd":"/w","procStart":"42"}"#,
+        ] {
+            assert!(parse_leading_file(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn sdk_entrypoints_clear_feed_status_while_keeping_agent_metadata() {
+        let id = AgentId::new(
+            AgentPid::new(42).unwrap(),
+            ProcessStart::spelled("100".to_owned()).unwrap(),
+        );
+        let file = |entrypoint: Option<&str>| File {
+            session_id: Said::new("s1".to_owned()).unwrap(),
+            cwd: Directory::parse("/w".to_owned()).unwrap(),
+            proc_start: Start::Spelled("100".to_owned()),
+            pid_domain: None,
+            status: Some("busy".to_owned()),
+            waiting_for: None,
+            status_updated_at: Some(1_000),
+            started_at: Some(500),
+            name: None,
+            name_source: None,
+            entrypoint: entrypoint.map(str::to_owned),
+        };
+        for sdk in ["sdk-cli", "sdk-ts", "  SDK-py  ", "sdk-"] {
+            let entry = reported(id.clone(), &file(Some(sdk)), None);
+            assert_eq!(entry.report.update, RungUpdate::Clear, "{sdk}");
+            assert_eq!(entry.seen.entrypoint.as_ref().map(Said::as_str), Some(sdk.trim()));
+        }
+        for interactive in [Some("cli"), Some("claude-vscode"), Some("sdk"), None] {
+            let entry = reported(id.clone(), &file(interactive), None);
+            assert!(matches!(entry.report.update, RungUpdate::Active { .. }), "{interactive:?}");
+        }
     }
 }

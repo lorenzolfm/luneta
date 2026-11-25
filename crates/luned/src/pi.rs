@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
+use lune_protocol::program_status::Message;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 
@@ -15,7 +16,7 @@ use crate::agent::{
 };
 use crate::mux;
 use crate::process::{self, AgentId};
-use crate::statuses::{self, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
+use crate::statuses::{self, ActiveStatus, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
 use crate::watch::{self, Troubles};
 use crate::{log, Directory};
 
@@ -46,6 +47,7 @@ struct File {
     cwd: Directory,
     #[serde(deserialize_with = "nonempty")]
     status: Said,
+    status_message: Option<String>,
     status_since: u64,
     proc_start: Option<String>,
     mode: Option<String>,
@@ -198,8 +200,20 @@ fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
     modified.checked_add(DATED_LATE).is_none_or(|late| started <= late)
 }
 
+fn parse_status(word: &Said, message: Option<&str>) -> Option<ActiveStatus> {
+    let detail = message
+        .and_then(|text| Message::from_raw_bytes(text.as_bytes()))
+        .and_then(|parsed| parsed.to_said());
+    let parsed = match statuses::parse_word(Some(word.as_str()), None)? {
+        ActiveStatus::Idle => ActiveStatus::Stopped,
+        ActiveStatus::Error { .. } => ActiveStatus::Error { message: detail },
+        other => other,
+    };
+    Some(parsed)
+}
+
 fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
-    let update = match statuses::parse_word(Some(file.status.as_str()), None) {
+    let update = match parse_status(&file.status, file.status_message.as_deref()) {
         Some(status) => RungUpdate::Active {
             status,
             at: Some(moment(file.status_since)),
@@ -225,7 +239,10 @@ fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use super::{dated_since, DATED_LATE};
+    use lune_protocol::said::Said;
+
+    use super::{dated_since, parse_status, DATED_LATE};
+    use crate::statuses::ActiveStatus;
 
     #[test]
     fn a_file_dated_since_its_process_started_stands() {
@@ -242,5 +259,19 @@ mod tests {
         let last = SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, 999_999_999)).unwrap();
         assert_eq!(last.checked_add(DATED_LATE), None, "nothing is later than the last time");
         assert!(dated_since(last, SystemTime::now()));
+    }
+
+    #[test]
+    fn parse_status_maps_idle_to_stopped_and_sanitizes_error_messages() {
+        let word = |text: &str| Said::new(text.to_owned()).unwrap();
+        assert_eq!(parse_status(&word("idle"), None), Some(ActiveStatus::Stopped));
+        assert_eq!(parse_status(&word("done"), Some("ignored")), Some(ActiveStatus::Done { message: None }));
+        assert_eq!(parse_status(&word("busy"), Some("ignored")), Some(ActiveStatus::Working));
+        assert_eq!(
+            parse_status(&word("error"), Some("  \x1b[31mrate\u{200b} limited  ")),
+            Some(ActiveStatus::Error { message: Said::new("[31mrate limited".to_owned()) })
+        );
+        assert_eq!(parse_status(&word("error"), Some("   ")), Some(ActiveStatus::Error { message: None }));
+        assert_eq!(parse_status(&word("   "), None), None);
     }
 }

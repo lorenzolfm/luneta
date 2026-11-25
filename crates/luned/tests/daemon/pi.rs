@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, ChildStdout, Stdio};
 use std::time::SystemTime;
 
+use lune_protocol::agent_status::AgentStatus;
+use lune_protocol::said::Said;
 use lune_waits::eventually;
 use luned::api::agent::Status as Reported;
 use luned::api::{Agent, Harness, Status};
@@ -143,7 +145,7 @@ fn a_pi_in_a_shell_that_moved_tmpdir_is_listed() {
     let shell = Vars { runtime: None, temp: Some(moved.path()), ..host.vars() };
     let mut pi = Pi::start_with(&host, shell, "tui");
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
-    as_status(&host, pi.process.pid(), Status::Idle);
+    as_status(&host, pi.process.pid(), Status::Stopped);
     assert!(!moved.path().join("lune").exists());
 }
 
@@ -180,7 +182,7 @@ fn a_daemon_takes_the_extension_back_from_one_that_took_it_and_went() {
     });
     let mut pi = Pi::start(&host, "tui");
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
-    as_status(&host, pi.process.pid(), Status::Idle);
+    as_status(&host, pi.process.pid(), Status::Stopped);
 }
 
 #[test]
@@ -191,40 +193,141 @@ fn a_pi_agent_is_listed_by_what_its_extension_hears() {
 
     let before = SystemTime::now();
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
-    let idle = as_status(&host, pid, Status::Idle);
-    assert_eq!(idle.runs_in(), Harness::Pi);
-    assert_eq!((idle.session_id.as_deref(), idle.cwd.as_str()), (Some("first"), "/home/you/work"));
-    assert_eq!(idle.entrypoint.as_deref(), Some("tui"));
-    assert!(idle.at_a_prompt());
-    assert_eq!(idle.terminal, Some(terminal(3)));
-    let since: SystemTime = idle.status_since.unwrap().try_into().unwrap();
+    let stopped = as_status(&host, pid, Status::Stopped);
+    assert!(!stopped.is_finished_turn());
+    assert_eq!(stopped.runs_in(), Harness::Pi);
+    assert_eq!((stopped.session_id.as_deref(), stopped.cwd.as_str()), (Some("first"), "/home/you/work"));
+    assert_eq!(stopped.entrypoint.as_deref(), Some("tui"));
+    assert!(stopped.at_a_prompt());
+    assert_eq!(stopped.terminal, Some(terminal(3)));
+    let since: SystemTime = stopped.status_since.unwrap().try_into().unwrap();
     let millis = |at: SystemTime| at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
     assert!(millis(before) <= millis(since), "dated {since:?}, after {before:?}");
-    assert!(idle.started_at.is_some());
+    assert!(stopped.started_at.is_some());
 
     pi.event("agent_start");
     let busy = as_status(&host, pid, Status::Busy);
-    assert_ne!(busy.status_since, idle.status_since);
+    assert_ne!(busy.status_since, stopped.status_since);
     pi.event("ui_prompt_start");
     as_status(&host, pid, Status::Waiting);
     pi.event("ui_prompt_end");
     as_status(&host, pid, Status::Busy);
     pi.event("agent_settled");
-    as_status(&host, pid, Status::Idle);
+    let done = as_status(&host, pid, Status::Done);
+    assert!(done.is_finished_turn());
 }
 
 #[test]
-fn a_prompt_at_rest_leaves_an_idle_agent_idle() {
+fn a_prompt_restores_the_state_from_before_it() {
     let (host, _daemon) = with_pi();
     let mut pi = Pi::start(&host, "tui");
+    let pid = pi.process.pid();
+    let file = file_of(&host, pid);
+
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
-    let file = file_of(&host, pi.process.pid());
-    let idle = fs::read(&file).unwrap();
+    as_status(&host, pid, Status::Stopped);
 
     pi.event("ui_prompt_start");
-    assert_eq!(fs::read(&file).unwrap(), idle);
+    as_status(&host, pid, Status::Waiting);
     pi.event("ui_prompt_end");
-    assert_eq!(fs::read(&file).unwrap(), idle);
+    as_status(&host, pid, Status::Stopped);
+    assert_eq!(status_in(&file), "idle");
+
+    pi.event("agent_start");
+    as_status(&host, pid, Status::Busy);
+    pi.event("agent_settled");
+    as_status(&host, pid, Status::Done);
+
+    pi.event("ui_prompt_start");
+    as_status(&host, pid, Status::Waiting);
+    pi.event("ui_prompt_end");
+    as_status(&host, pid, Status::Done);
+    assert_eq!(status_in(&file), "done");
+
+    pi.event("agent_start");
+    as_status(&host, pid, Status::Busy);
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "error", "errorMessage": "boom\ndetail" }
+    }));
+    pi.event("agent_settled");
+    let failed = as_status(&host, pid, Status::Error);
+    assert_eq!(AgentStatus::of_api(&failed), AgentStatus::Error { message: Said::new("boom".to_owned()) });
+
+    pi.event("ui_prompt_start");
+    as_status(&host, pid, Status::Waiting);
+    pi.event("ui_prompt_end");
+    let restored = as_status(&host, pid, Status::Error);
+    assert_eq!(AgentStatus::of_api(&restored), AgentStatus::Error { message: Said::new("boom".to_owned()) });
+
+    pi.event("agent_start");
+    as_status(&host, pid, Status::Busy);
+    pi.event("ui_prompt_start");
+    as_status(&host, pid, Status::Waiting);
+    pi.event("agent_settled");
+    assert_eq!(status_in(&file), "waiting");
+    pi.event("ui_prompt_end");
+    as_status(&host, pid, Status::Done);
+    assert_eq!(status_in(&file), "done");
+}
+
+#[test]
+fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
+    let (host, _daemon) = with_pi();
+    let mut pi = Pi::start(&host, "tui");
+    let pid = pi.process.pid();
+    let file = file_of(&host, pid);
+
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    as_status(&host, pid, Status::Stopped);
+
+    pi.event("agent_start");
+    as_status(&host, pid, Status::Busy);
+    pi.says(&json!({
+        "type": "message_end",
+        "message": {
+            "role": "assistant",
+            "stopReason": "error",
+            "errorMessage": "\nrate limited\nretry after 5s"
+        }
+    }));
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "toolResult", "content": "ignored" }
+    }));
+    assert_eq!(status_in(&file), "busy");
+    pi.says(&json!({ "type": "agent_settled", "aborted": false }));
+    let failed = as_status(&host, pid, Status::Error);
+    assert!(!failed.is_finished_turn());
+    assert_eq!(
+        AgentStatus::of_api(&failed),
+        AgentStatus::Error { message: Said::new("rate limited".to_owned()) }
+    );
+
+    pi.event("agent_start");
+    as_status(&host, pid, Status::Busy);
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "error", "errorMessage": "transient" }
+    }));
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "stop" }
+    }));
+    pi.says(&json!({ "type": "agent_settled", "aborted": false }));
+    let retried = as_status(&host, pid, Status::Done);
+    assert!(retried.is_finished_turn());
+
+    pi.event("agent_start");
+    as_status(&host, pid, Status::Busy);
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "error", "errorMessage": "cancelled" }
+    }));
+    pi.says(&json!({ "type": "agent_settled", "aborted": true }));
+    let aborted = as_status(&host, pid, Status::Stopped);
+    assert!(!aborted.is_finished_turn());
+    assert_eq!(status_in(&file), "idle");
 }
 
 #[test]
@@ -235,7 +338,7 @@ fn a_pi_agent_goes_on_through_a_new_session_and_goes_as_it_quits() {
     let file = file_of(&host, pid);
 
     pi.says(&json!({ "type": "session_start", "reason": "reload" }));
-    let first = as_status(&host, pid, Status::Idle);
+    let first = as_status(&host, pid, Status::Stopped);
     assert_eq!(first.session_id.as_deref(), Some("first"));
 
     let said = fs::read(&file).unwrap();
@@ -269,7 +372,7 @@ fn a_pi_agent_that_is_killed_leaves_the_list_as_it_ends() {
     let mut pi = Pi::start(&host, "tui");
     let pid = pi.process.pid();
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
-    as_status(&host, pid, Status::Idle);
+    as_status(&host, pid, Status::Stopped);
 
     pi.process.kill();
     eventually("the agent has gone", || host.agents().is_empty().then_some(()));
@@ -281,7 +384,7 @@ fn a_pi_at_no_prompt_says_how_it_runs() {
     let (host, _daemon) = with_pi();
     let mut pi = Pi::start(&host, "print");
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
-    let agent = as_status(&host, pi.process.pid(), Status::Idle);
+    let agent = as_status(&host, pi.process.pid(), Status::Stopped);
     assert_eq!(agent.entrypoint.as_deref(), Some("print"));
 }
 
