@@ -8,7 +8,7 @@ use std::thread;
 
 use hyper_util::rt::TokioIo;
 use lune_mux::api::{self, mux_client::MuxClient};
-use lune_waits::Patience;
+use lune_waits::{shell, Patience};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -121,7 +121,7 @@ impl Drop for Server {
 pub fn shell() -> api::Opens {
     api::Opens {
         cwd: "/".to_owned(),
-        program: Some(api::Program { argv: vec!["/bin/sh".to_owned()] }),
+        program: Some(api::Program { argv: shell::AT_A_PROMPT.map(str::to_owned).to_vec() }),
         ends: api::Ends::Closes.into(),
     }
 }
@@ -276,6 +276,30 @@ impl Viewer {
             viewer.rows_of(terminal).iter().any(|row| row == text)
         })
         .await;
+    }
+
+    pub async fn until_prompted(&mut self, terminal: u32) {
+        self.until(&format!("terminal {terminal}'s shell prompts"), |viewer| {
+            shell::prompted(viewer.rows_of(terminal), viewer.cursor_of(terminal))
+        })
+        .await;
+    }
+
+    pub async fn until_said(&mut self, terminal: u32, line: &str) -> Vec<String> {
+        let what = format!("terminal {terminal} says what {line:?} does, then prompts");
+        self.until(&what, |viewer| viewer.said(terminal, line).is_some()).await;
+        self.said(terminal, line).expect("the line said it once shown").to_vec()
+    }
+
+    fn said(&self, terminal: u32, line: &str) -> Option<&[String]> {
+        shell::said(self.rows_of(terminal), self.cursor_of(terminal), line)
+    }
+
+    fn cursor_of(&self, terminal: u32) -> Option<shell::Cursor> {
+        let cursor = self.frame_of(terminal)?.cursor.as_ref()?;
+        let row = usize::try_from(cursor.row).unwrap();
+        let column = usize::try_from(cursor.column).unwrap();
+        Some(shell::Cursor { row, column })
     }
 
     pub fn rows_of(&self, terminal: u32) -> &[String] {

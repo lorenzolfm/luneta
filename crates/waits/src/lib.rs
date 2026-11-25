@@ -7,6 +7,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub mod shell;
+
 pub const PATIENCE: Duration = Duration::from_mins(1);
 
 pub const QUIET: Duration = Duration::from_secs(1);

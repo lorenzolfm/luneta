@@ -6,7 +6,7 @@ use lune_phone::{
     Appearance, Came, Core, Found, Framed, Grid, Held, KeyName, Landed, Marked, Model, Observer,
     Order, Plan, Pruned, Rebase, Refusals, Step, TerminalView, Unanswered, View, Worktree,
 };
-use lune_waits::{eventually, Patience, PATIENCE};
+use lune_waits::{eventually, shell, Patience, PATIENCE};
 
 use crate::host::{folder_in, script, start, Host};
 use crate::own::Owned;
@@ -127,6 +127,22 @@ fn shows(phone: &Phone, view: &TerminalView, what: &str, shown: impl Fn(&Grid) -
     }
 }
 
+fn cursor_of(grid: &Grid) -> Option<shell::Cursor> {
+    let cursor = grid.cursor.as_ref()?;
+    Some(shell::Cursor { row: usize::from(cursor.row), column: usize::from(cursor.column) })
+}
+
+fn prompted(phone: &Phone, view: &TerminalView) -> Grid {
+    shows(phone, view, "the shell's prompt", |grid| shell::prompted(&texts(grid), cursor_of(grid)))
+}
+
+fn said(phone: &Phone, view: &TerminalView, line: &str) -> Vec<String> {
+    let what = format!("what {line:?} says, then the shell's next prompt");
+    let grid = shows(phone, view, &what, |grid| shell::said(&texts(grid), cursor_of(grid), line).is_some());
+    let texts = texts(&grid);
+    shell::said(&texts, cursor_of(&grid), line).expect("the line said it once shown").to_vec()
+}
+
 fn ends(phone: &Phone, view: &TerminalView, what: &str) -> Framed {
     let patience = Patience::begun();
     loop {
@@ -222,7 +238,7 @@ fn the_phone_shows_a_terminal_types_into_it_scrolls_back_lets_it_go_and_hears_it
     let owned = Owned::new();
     let worktree = crate::layouts::worktree_in_home(&owned);
     let mut shown = crate::layouts::Shown::new(&owned, worktree, 80, 24);
-    shown.open_running(&["sh"]);
+    shown.open_running(&shell::AT_A_PROMPT);
     shown.open_running(&["sleep", "600"]);
     let phone = Phone::of(&owned.host);
     let keyed = |model: &Model| {
@@ -234,21 +250,22 @@ fn the_phone_shows_a_terminal_types_into_it_scrolls_back_lets_it_go_and_hears_it
         panic!("the shell's view has its terminal");
     };
     let view = phone.core.terminal(&shell, Appearance::Dark);
-    let first = shows(&phone, &view, "the terminal's screen", |_| true);
+    let first = prompted(&phone, &view);
     assert_eq!(first.scrolled_back, 0);
 
     view.typed("echo wr''ong", false).unwrap();
     view.typed("u", true).unwrap();
     view.typed("echo right-$((40 + 2))", false).unwrap();
     view.pressed(KeyName::Enter, false).unwrap();
-    let typed = shows(&phone, &view, "the shell says right-42", |grid| {
-        texts(grid).iter().any(|line| line == "right-42")
-    });
-    assert!(!texts(&typed).iter().any(|line| line == "wrong"), "ctrl-u let the line go: {:?}", texts(&typed));
+    assert_eq!(said(&phone, &view, "echo right-$((40 + 2))"), ["right-42"], "ctrl-u let the first line go");
 
     view.typed("seq 1 200", false).unwrap();
     view.pressed(KeyName::Enter, false).unwrap();
-    shows(&phone, &view, "the shell counts to 200", |grid| texts(grid).iter().any(|line| line == "200"));
+    shows(&phone, &view, "the shell counts to 200, then prompts", |grid| {
+        let (texts, cursor) = (texts(grid), cursor_of(grid));
+        let above = cursor.and_then(|cursor| cursor.row.checked_sub(1)).map(|row| texts[row].as_str());
+        shell::prompted(&texts, cursor) && above == Some("200")
+    });
     view.scroll(5).unwrap();
     let back = shows(&phone, &view, "the screen five rows back", |grid| grid.scrolled_back == 5);
     assert!(back.scrollback >= 5, "{back:?}");

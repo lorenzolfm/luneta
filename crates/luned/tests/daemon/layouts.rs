@@ -5,7 +5,7 @@ use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
 use lune_domain::projects::{Opens, Size, WorktreeId};
-use lune_waits::{eventually, Patience, Span, QUIET};
+use lune_waits::{eventually, shell, Patience, Span, QUIET};
 use luned::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use luned::api::show_response::{self, view::Found, Laid, View};
 use luned::api::change_projects_request::{
@@ -1646,6 +1646,11 @@ fn an_agent_in_a_layout_s_terminal_is_there_by_the_terminal_s_key() {
     assert_eq!(agent.terminal, Some(key));
 }
 
+fn cursor_of(cursor: Option<luned::mux::own::frames::Cursor>) -> Option<shell::Cursor> {
+    let cursor = cursor?;
+    Some(shell::Cursor { row: usize::from(cursor.row), column: usize::from(cursor.column) })
+}
+
 fn text_of(lines: &[Line]) -> Vec<String> {
     let shown = |glyph: &luned::mux::own::frames::Glyph| match &glyph.shows {
         Shows::Blank => " ".to_owned(),
@@ -1783,7 +1788,7 @@ fn the_shows_and_viewers_lune_drops_give_their_places_on_a_bridge_back() {
     };
     let (first, laid) = show_far();
     assert!(laid().is_empty());
-    first.ask(Asked::Open { beside: Beside::Largest, opens: command(&["sh"]) });
+    first.ask(Asked::Open { beside: Beside::Largest, opens: command(&shell::AT_A_PROMPT) });
     let keys = laid().keys();
     let viewers_max = BRIDGE_HELD_MAX / 2;
     let mut shows = vec![first];
@@ -1916,7 +1921,8 @@ fn lune_shows_another_machine_s_worktree_types_there_and_opens_a_terminal_beside
     let made = project(&far.host, &yonder, Some("faraway"));
     let worktree = worktree(&far.host, made, &yonder);
     let mut shown = Shown::new(&far, worktree, 400, 200);
-    let terminal = shown.open_running(&["sh", "-c", "echo far-is-$((6 * 7)); exec sh"]);
+    let script = format!("echo far-is-$((6 * 7)); {}", shell::SCRIPT);
+    let terminal = shown.open_running(&["sh", "-c", &script]);
     drop(shown);
     let here = Owned::new();
     FakeSsh::new(here.host.bin()).reaches("far", far.host.vars());
@@ -1931,6 +1937,8 @@ fn lune_shows_another_machine_s_worktree_types_there_and_opens_a_terminal_beside
         let quiet = const { Span::of(QUIET.saturating_mul(2)) };
         lune_waits::seen_within(quiet, || window.shows("far-is-42").then_some(()))
     });
+    let prompt = shell::PROMPT.trim_end();
+    eventually("far's shell prompts", || window.shows(prompt).then_some(()));
     window.send("echo typed-$((40 + 2))\r");
     eventually("far's terminal shows what was typed here", || {
         window.shows("typed-42").then_some(())
@@ -1975,7 +1983,7 @@ fn seen_and_typed_into(
         Heard::Left(gone) => panic!("worktree {gone} is gone"),
     };
     assert!(laid().is_empty());
-    show.ask(Asked::Open { beside: Beside::Largest, opens: command(&["sh"]) });
+    show.ask(Asked::Open { beside: Beside::Largest, opens: command(&shell::AT_A_PROMPT) });
     let opened = laid();
     let view = *opened.views().next().expect("the layout lays out the terminal opened");
     let key = view.key().expect("luned says the key of a terminal it opened");
@@ -1985,6 +1993,32 @@ fn seen_and_typed_into(
     let greeting = Greeting { foreground: None, background: None };
     let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
+    let mut lines = Vec::new();
+    let mut cursor = None;
+    let mut until = |what: &str, shown: &dyn Fn(&[String], Option<shell::Cursor>) -> bool| {
+        let patience = Patience::begun();
+        while !shown(&text_of(&lines), cursor) {
+            let waited = fmt::from_fn(|f| write!(f, "{what}, not only {:?}", text_of(&lines)));
+            let framed = match patience.heard(waited, &seeing) {
+                Seen::Frame(framed) => framed,
+                Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
+            };
+            let frame = framed.frame();
+            assert_eq!(frame.terminal(), key, "the mux shows only the terminal asked for");
+            assert_eq!((frame.size().columns.get(), frame.size().rows.get()), (78, 22));
+            match frame.rows() {
+                Rows::Whole(whole) => lines.clone_from(whole),
+                Rows::Changed(rows) => {
+                    for (row, line) in rows {
+                        lines[usize::from(*row)] = line.clone();
+                    }
+                },
+            }
+            cursor = cursor_of(frame.cursor());
+        }
+        text_of(&lines)
+    };
+    until("the shell's prompt", &shell::prompted);
     let paste = |text: &str| typed::Event::Paste(mux_api::Paste { text: text.to_owned() });
     viewer.typed(key, paste("echo seen-$((40 + 2))"));
     let enter = mux_api::Key {
@@ -1994,30 +2028,11 @@ fn seen_and_typed_into(
         text: String::new(),
     };
     viewer.typed(key, typed::Event::Key(enter));
-    let patience = Patience::begun();
-    let mut lines = Vec::new();
-    loop {
-        let waited = fmt::from_fn(|f| write!(f, "the terminal shows seen-42, not only {:?}", text_of(&lines)));
-        let seen = patience.heard(waited, &seeing);
-        let framed = match seen {
-            Seen::Frame(framed) => framed,
-            Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
-        };
-        let frame = framed.frame();
-        assert_eq!(frame.terminal(), key, "the mux shows only the terminal asked for");
-        assert_eq!((frame.size().columns.get(), frame.size().rows.get()), (78, 22));
-        match frame.rows() {
-            Rows::Whole(whole) => lines.clone_from(whole),
-            Rows::Changed(rows) => {
-                for (row, line) in rows {
-                    lines[usize::from(*row)] = line.clone();
-                }
-            },
-        }
-        if text_of(&lines).iter().any(|line| line.ends_with("seen-42")) {
-            break;
-        }
-    }
+    let line = "echo seen-$((40 + 2))";
+    let said = |texts: &[String], cursor| shell::said(texts, cursor, line).is_some();
+    let texts = until("the terminal shows seen-42, then the shell's next prompt", &said);
+    let said = shell::said(&texts, cursor, line).expect("the line said it once shown");
+    assert_eq!(said, ["seen-42"]);
 }
 
 #[test]

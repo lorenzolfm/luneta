@@ -1,0 +1,54 @@
+id: tests-type-at-a-prompt
+snapshots:
+  fn f() { g("cd /tmp; exec /bin/sh; true"); }:
+    labels:
+    - source: '"cd /tmp; exec /bin/sh; true"'
+      style: primary
+      start: 11
+      end: 40
+  fn f() { let argv = vec!["/bin/sh".to_owned()]; }:
+    labels:
+    - source: '["/bin/sh".to_owned()]'
+      style: primary
+      start: 24
+      end: 46
+    - source: vec
+      style: secondary
+      start: 20
+      end: 23
+    - source: vec!["/bin/sh".to_owned()]
+      style: secondary
+      start: 20
+      end: 46
+  fn f() { let argv = vec!["sh".into()]; }:
+    labels:
+    - source: '["sh".into()]'
+      style: primary
+      start: 24
+      end: 37
+    - source: vec
+      style: secondary
+      start: 20
+      end: 23
+    - source: vec!["sh".into()]
+      style: secondary
+      start: 20
+      end: 37
+  fn f() { opens(command(&["/bin/sh"])); }:
+    labels:
+    - source: '["/bin/sh"]'
+      style: primary
+      start: 24
+      end: 35
+  fn f() { shown.open_running(&["sh", "-c", "echo far; exec sh"]); }:
+    labels:
+    - source: '"echo far; exec sh"'
+      style: primary
+      start: 42
+      end: 61
+  fn f() { shown.open_running(&["sh"]); }:
+    labels:
+    - source: '["sh"]'
+      style: primary
+      start: 29
+      end: 35
