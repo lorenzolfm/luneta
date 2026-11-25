@@ -4,6 +4,7 @@ use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 
 use lune_domain::projects::{Argv, Opens};
+use lune_protocol::said::Said;
 use luned::rebases::{self, Came, Rebased, Stopped, Unrebased};
 use luned::Directory;
 
@@ -65,7 +66,7 @@ pub fn start(
     menu: u64,
     on: Machine,
     dir: Directory,
-    branch: String,
+    branch: Said,
     events: &Sender<Event>,
 ) -> JoinHandle<()> {
     let due = Due::new(events, move |rebased: Result<Result<Rebased, Unrebased>, String>| {
@@ -75,8 +76,7 @@ pub fn start(
     thread::spawn(move || due.pay(Ok(rebased(&on, &dir, &branch))))
 }
 
-fn rebased(on: &Machine, dir: &Directory, branch: &str) -> Result<Rebased, Unrebased> {
-    assert!(!branch.is_empty(), "the menu rebases a branch it names");
+fn rebased(on: &Machine, dir: &Directory, branch: &Said) -> Result<Rebased, Unrebased> {
     let mut luned = Luned::on(on, reach::ANSWER).map_err(Unrebased::Refused)?;
     luned.rebase(dir, Some(branch))
 }
@@ -106,7 +106,8 @@ mod tests {
     use super::*;
 
     fn rebased(came: Came) -> Rebased {
-        Rebased { branch: "issue-429".to_owned(), onto: "origin/main".to_owned(), came }
+        let named = |name: &str| Said::new(name.to_owned()).expect("a name");
+        Rebased { branch: named("issue-429"), onto: named("origin/main"), came }
     }
 
     #[test]

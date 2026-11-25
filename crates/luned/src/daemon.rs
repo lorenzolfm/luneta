@@ -15,6 +15,7 @@ use lune_domain::agent::Harness;
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{folder_has_one_worktree, Holders, Made, Opens, OwnedFolder};
 use lune_domain::projects::{ProjectId, WorktreeId};
+use lune_protocol::said::Said;
 use lune_protocol::socket::{self, Bound, Found};
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
@@ -40,10 +41,11 @@ use crate::api::{
     self, AskRequest, AskResponse, ChangeProjectsRequest, ChangeProjectsResponse,
     FileIssueRequest, FileIssueResponse, InfoResponse, IssueRepositoriesRequest,
     IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest,
+    KeepPrintedRequest, KeepPrintedResponse,
     KeepImageResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
     ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, ListSkillsResponse,
     ListWorkRequest, ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest,
-    PasteResponse, PrintedFile, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
+    PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
     RebaseRequest, RebaseResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
     TranscriptEndsResponse, FramesRequest, AnswerRequest, WaitingRequest, WaitingResponse,
 };
@@ -602,6 +604,21 @@ impl Daemon for Host {
         Ok(Response::new(Box::pin(answer)))
     }
 
+    async fn keep_printed(
+        &self,
+        request: Request<KeepPrintedRequest>,
+    ) -> Result<Response<KeepPrintedResponse>, Status> {
+        let KeepPrintedRequest { on, terminal, typed } = request.into_inner();
+        let (terminal, _) = terminal_named(terminal)?;
+        let typed = Said::new(typed).ok_or_else(|| Status::invalid_argument("typed: nothing"))?;
+        if let Some(mut daemon) = self.bridged(on).await? {
+            return daemon.keep_printed(printed::asked(None, terminal, &typed)).await;
+        }
+        let kept = task::spawn_blocking(move || printed::kept_in(terminal, &typed)).await;
+        let kept = kept.map_err(|error| unfinished(&error))?;
+        Ok(Response::new(kept.map_err(Status::failed_precondition)?.to_api()))
+    }
+
     async fn list_repositories(
         &self,
         request: Request<ListRepositoriesRequest>,
@@ -786,13 +803,15 @@ impl Daemon for Host {
     ) -> Result<Response<Self::RebaseStream>, Status> {
         let RebaseRequest { on, dir, branch } = request.into_inner();
         let dir = directory("dir", dir)?;
+        let unnamed = || Status::invalid_argument("branch: it names no branch");
+        let branch = branch.map(|branch| Said::new(branch).ok_or_else(unnamed)).transpose()?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            let asked = rebases::asked(None, &dir, branch.as_deref());
+            let asked = rebases::asked(None, &dir, branch.as_ref());
             let answer = daemon.rebase(asked).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
         let answer = late(move || {
-            let rebased = rebases::rebase(&dir, branch.as_deref());
+            let rebased = rebases::rebase(&dir, branch.as_ref());
             let rebased = rebased.map_err(rebases::Unrebased::status)?;
             Ok(rebased.to_api())
         });
@@ -1047,11 +1066,7 @@ fn kept_image(
 }
 
 fn kept_checks(Failing { head, failed, pending, passed }: Failing) -> KeepChecksResponse {
-    let file = |KeptFile { file, lines, left_out }| PrintedFile {
-        path: file,
-        lines: lines as u64,
-        left_out: left_out as u64,
-    };
+    let file = |kept: KeptFile| kept.to_api();
     let failed = failed.into_iter().map(|checks::Failed { name, link, log }| FailedCheck {
         name,
         link: link.unwrap_or_default(),

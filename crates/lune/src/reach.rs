@@ -4,24 +4,27 @@ use std::path::Path;
 use std::pin::pin;
 use std::time::{Duration, Instant};
 
+use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{self, OwnedFolder};
+use lune_protocol::said::Said;
 use luned::api::keep_checks_response::{self, failed};
 use luned::api::{
     AskResponse, IssueRepositoriesRequest, KeepChecksRequest, ListContentsRequest,
-    ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, On, PrintedFile,
+    ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, On,
+    TranscriptEndsResponse,
 };
 use luned::asks::{self, Asked, Step};
 use luned::checks::{self, Failed, Failing, Log, PullPage};
 use luned::images::{self, Png};
 use luned::issues::{self, Filed, Filing, Remote, Unfiled};
 use luned::links::{Pasted, Ready, Unready};
-use luned::printed::Kept;
+use luned::printed::{self, Kept, Printed};
 use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
 use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
 use luned::skills::{Name, Runs, Skill};
 use luned::transcripts::{Reading, SessionId, TranscriptEnd};
-use luned::{said_by, told_by, Daemon, Destination, Directory};
+use luned::{log, said_by, told_by, Daemon, Destination, Directory};
 use tokio::runtime::Handle;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
@@ -45,7 +48,8 @@ pub struct Luned {
 
 impl Luned {
     pub fn on(on: &Machine, patience: Duration) -> Result<Luned, String> {
-        let folder = luned::folder::find().map_err(|unfound| format!("{unfound}, to find luned in"))?;
+        let unfound = |unfound| format!("{unfound}, to find luned in");
+        let folder = luned::folder::find().map_err(unfound)?;
         Luned::at(&folder, on, patience)
     }
 
@@ -99,12 +103,9 @@ impl Luned {
             told_by(self.on.destination(), why)
         };
         let read = |check: keep_checks_response::Failed| {
+            let unread = |why: String| told_by(self.on.destination(), &why);
             let log = match check.log.ok_or_else(newer)? {
-                failed::Log::Kept(PrintedFile { path, lines, left_out }) => Log::Kept(Kept {
-                    file: path,
-                    lines: usize::try_from(lines).unwrap_or(usize::MAX),
-                    left_out: usize::try_from(left_out).unwrap_or(usize::MAX),
-                }),
+                failed::Log::Kept(kept) => Log::Kept(Kept::of_api(kept).map_err(unread)?),
                 failed::Log::Unkept(why) => Log::Unkept(why),
             };
             let link = Some(check.link).filter(|link| !link.is_empty());
@@ -117,16 +118,18 @@ impl Luned {
     pub fn ends(&mut self, reading: &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
         let request = reading.asked(self.asked_on());
         let answer = self.ask(|mut daemon| async move { daemon.transcript_ends(request).await })?;
-        if !answer.typed_ends.is_empty() {
-            let end = |(id, end): (String, _)| {
-                Some((SessionId::parse(&id)?, TranscriptEnd::of_api(end)?))
-            };
-            return Ok(answer.typed_ends.into_iter().filter_map(end).collect());
+        let (read, unread) = ends_of(answer);
+        if let Some(first) = unread.first() {
+            let why = format!("{} transcript ends were not read, as {first}", unread.len());
+            log::say(&told_by(self.on.destination(), &why));
         }
-        let end = |(id, end): (String, String)| {
-            Some((SessionId::parse(&id)?, TranscriptEnd::Claude(end)))
-        };
-        Ok(answer.ends.into_iter().filter_map(end).collect())
+        Ok(read)
+    }
+
+    pub fn printed(&mut self, terminal: TerminalKey, typed: &Said) -> Result<Printed, String> {
+        let request = printed::asked(self.asked_on(), terminal, typed);
+        let kept = self.ask(|mut daemon| async move { daemon.keep_printed(request).await })?;
+        Printed::of_api(kept).map_err(|why| told_by(self.on.destination(), &why))
     }
 
     pub fn talk(
@@ -197,7 +200,7 @@ impl Luned {
         prunes::pruned_of(answer)
     }
 
-    pub fn rebase(&mut self, dir: &Directory, branch: Option<&str>) -> Result<Rebased, Unrebased> {
+    pub fn rebase(&mut self, dir: &Directory, branch: Option<&Said>) -> Result<Rebased, Unrebased> {
         let request = rebases::asked(self.asked_on(), dir, branch);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_or_code(rebases::REBASING, async move {
@@ -332,6 +335,34 @@ async fn heard(
     }
 }
 
+fn ends_of(answer: TranscriptEndsResponse) -> (HashMap<SessionId, TranscriptEnd>, Vec<String>) {
+    let TranscriptEndsResponse { ends, typed_ends } = answer;
+    let read = |id: &str, end: Result<TranscriptEnd, String>| {
+        let end = end.map_err(|why| format!("{id}: {why}"))?;
+        Ok((session(id)?, end))
+    };
+    let said: Vec<Result<(SessionId, TranscriptEnd), String>> = if typed_ends.is_empty() {
+        ends.into_iter().map(|(id, end)| read(&id, Ok(TranscriptEnd::Claude(end)))).collect()
+    } else {
+        typed_ends.into_iter().map(|(id, end)| read(&id, TranscriptEnd::of_api(end))).collect()
+    };
+    let (mut read, mut unread) = (HashMap::new(), Vec::new());
+    for said in said {
+        match said {
+            Ok((id, end)) => {
+                read.insert(id, end);
+            },
+            Err(why) => unread.push(why),
+        }
+    }
+    unread.sort();
+    (read, unread)
+}
+
+fn session(id: &str) -> Result<SessionId, String> {
+    SessionId::parse(id).ok_or_else(|| format!("\"{id}\" names no session"))
+}
+
 const UNREAD_MAX: usize = 8;
 
 fn repositories_of(answer: ListRepositoriesResponse) -> Found {
@@ -419,6 +450,38 @@ mod tests {
         assert_eq!(none, (Vec::new(), Some(Err(why))));
 
         assert_eq!(heard_of(stuck(Vec::new()), false), (Vec::new(), None));
+    }
+
+    #[test]
+    fn transcript_ends_this_lune_cannot_read_are_said_and_not_dropped_unsaid() {
+        use luned::api::transcript_ends_response::TranscriptEnd as Typed;
+        let claude = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
+        let pi = "5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a";
+        let typed =
+            |harness: luned::api::Harness| Typed { harness: harness.into(), lines: "l".to_owned() };
+        let typed_ends = HashMap::from([
+            (claude.to_owned(), typed(luned::api::Harness::ClaudeCode)),
+            (pi.to_owned(), typed(luned::api::Harness::Pi)),
+            ("../x".to_owned(), typed(luned::api::Harness::ClaudeCode)),
+            (claude.replace('0', "1"), Typed { harness: 99, lines: "l".to_owned() }),
+        ]);
+        let ends = HashMap::from([(claude.to_owned(), "l".to_owned())]);
+        let (read, unread) = ends_of(TranscriptEndsResponse { ends, typed_ends });
+        let id = |id: &str| SessionId::parse(id).unwrap();
+        assert_eq!(read, HashMap::from([(id(claude), TranscriptEnd::Claude("l".to_owned()))]));
+        let unread_said = vec![
+            "\"../x\" names no session".to_owned(),
+            format!("{}: harness 99 is one this lune does not know", claude.replace('0', "1")),
+            format!("{pi}: pi keeps no transcript this lune reads"),
+        ];
+        assert_eq!(unread, unread_said);
+
+        let ends = [(claude.to_owned(), "l".to_owned()), ("x".to_owned(), "l".to_owned())];
+        let (ends, typed_ends) = (HashMap::from(ends), HashMap::new());
+        let older = TranscriptEndsResponse { ends, typed_ends };
+        let (read, unread) = ends_of(older);
+        assert_eq!(read, HashMap::from([(id(claude), TranscriptEnd::Claude("l".to_owned()))]));
+        assert_eq!(unread, vec!["\"x\" names no session".to_owned()]);
     }
 
     #[test]

@@ -1984,7 +1984,8 @@ impl App {
                 skills::find(&on, &dir, agent, &self.events, said);
             },
             Asked::Printed { menu, on, view, ended, .. } => {
-                printed::read(menu, projected::route(&on, view), ended, &self.events);
+                let terminal = projected::route(&on, view);
+                printed::read(menu, on, terminal, ended, &self.events);
             },
             Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
             Asked::Brief(brief) => {

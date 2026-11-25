@@ -362,7 +362,7 @@ mod tests {
             place: ViewPlace::new_in("lune", 3, 1, 4),
             terminal: None,
             cwd: Cwd::of(Some(Directory::parse("/w/lune/main".to_owned()).unwrap()), |dir| {
-                let branch = Some("feat/ask".to_owned());
+                let branch = lune_protocol::said::Said::new("feat/ask".to_owned());
                 Folder { dir, branch, repository: None, pull_request: None }
             }),
             ran: Ran::Unhooked,
