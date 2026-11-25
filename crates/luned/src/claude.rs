@@ -222,8 +222,12 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
     }
 }
 
+const SDK_ENTRYPOINT_PREFIX: &str = "sdk-";
+const _: () = assert!(SDK_ENTRYPOINT_PREFIX.is_ascii());
+
 fn parse_leading_file(bytes: &[u8]) -> io::Result<File> {
-    assert!(u64::try_from(bytes.len()).is_ok_and(|len| len <= FILE_BYTES_MAX));
+    let bytes_len = u64::try_from(bytes.len()).expect("a slice length fits a u64");
+    assert!(bytes_len <= FILE_BYTES_MAX);
     let mut stream = serde_json::Deserializer::from_slice(bytes).into_iter::<File>();
     let file = match stream.next() {
         Some(Ok(file)) => file,
@@ -235,10 +239,13 @@ fn parse_leading_file(bytes: &[u8]) -> io::Result<File> {
     Ok(file)
 }
 
-fn is_sdk_entrypoint(entrypoint: Option<&Said>) -> bool {
-    entrypoint.is_some_and(|word| {
-        word.as_str().get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("sdk-"))
-    })
+fn is_sdk_entrypoint(entrypoint: &Said) -> bool {
+    let text = entrypoint.as_str();
+    assert_ne!(text, "");
+    assert_eq!(text, text.trim());
+    text.as_bytes()
+        .get(..SDK_ENTRYPOINT_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(SDK_ENTRYPOINT_PREFIX.as_bytes()))
 }
 
 fn reported(id: AgentId, file: &File, terminal: Option<TerminalKey>) -> ReportedAgent {
@@ -246,7 +253,8 @@ fn reported(id: AgentId, file: &File, terminal: Option<TerminalKey>) -> Reported
     let name = file.name.clone().and_then(Said::new);
     let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
     let entrypoint = word(&file.entrypoint);
-    let update = if is_sdk_entrypoint(entrypoint.as_ref()) {
+    let sdk = entrypoint.as_ref().is_some_and(is_sdk_entrypoint);
+    let update = if sdk {
         RungUpdate::Clear
     } else {
         match statuses::parse_word(file.status.as_deref(), file.waiting_for.as_deref()) {
@@ -269,6 +277,10 @@ fn reported(id: AgentId, file: &File, terminal: Option<TerminalKey>) -> Reported
         entrypoint,
         terminal,
     };
+    assert_eq!(report.agent, seen.id);
+    if sdk {
+        assert_eq!(report.update, RungUpdate::Clear);
+    }
     ReportedAgent { seen, report }
 }
 

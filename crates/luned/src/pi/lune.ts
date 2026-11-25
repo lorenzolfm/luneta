@@ -37,7 +37,13 @@ type Pi = {
 };
 
 const FOLDER = "LUNE_FOLDER";
-const MESSAGE_CHARS_MAX = 512;
+const FILE_BYTES_MAX = 64 * 1024;
+const MESSAGE_BYTES_MAX = 1024;
+const MESSAGE_RAW_CODE_UNITS_MAX = MESSAGE_BYTES_MAX * 4;
+
+function invariant(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
 
 function fileOfThisProcess(): string | undefined {
   try {
@@ -57,41 +63,75 @@ function procStart(): string | undefined {
   return stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
 }
 
+function utf8BytesOfCodePoint(codePoint: number): number {
+  invariant(codePoint >= 0 && codePoint <= 0x10ffff, "code point out of range");
+  if (codePoint <= 0x7f) return 1;
+  if (codePoint <= 0x7ff) return 2;
+  if (codePoint <= 0xffff) return 3;
+  return 4;
+}
+
 function firstLine(text: string | undefined): string | undefined {
   if (typeof text !== "string") return undefined;
-  const line = text.trim().split(/\r?\n/, 1)[0]?.trim();
-  return line ? line.slice(0, MESSAGE_CHARS_MAX) : undefined;
+  const bounded = text.slice(0, MESSAGE_RAW_CODE_UNITS_MAX).toWellFormed();
+  const trimmed = bounded.trim();
+  if (trimmed.length === 0) return undefined;
+  let out = "";
+  let bytes = 0;
+  for (const character of trimmed) {
+    if (character === "\r" || character === "\n") break;
+    const codePoint = character.codePointAt(0);
+    invariant(codePoint !== undefined, "iterated character has a code point");
+    const width = utf8BytesOfCodePoint(codePoint);
+    if (bytes + width > MESSAGE_BYTES_MAX) break;
+    out += character;
+    bytes += width;
+  }
+  invariant(bytes <= MESSAGE_BYTES_MAX, "message exceeds byte bound");
+  const cleaned = out.trim();
+  if (cleaned.length === 0) return undefined;
+  invariant(!cleaned.includes("\n") && !cleaned.includes("\r"), "message spans multiple lines");
+  return cleaned;
 }
 
 function errorReport(text: string | undefined): RestingReport {
   const message = firstLine(text);
-  return message ? { status: "error", message } : { status: "error" };
+  if (message !== undefined) {
+    invariant(message.length > 0, "error message is empty");
+    return { status: "error", message };
+  }
+  return { status: "error" };
 }
 
 function reportInFile(): Report | undefined {
   const file = fileOfThisProcess();
   if (!file) return undefined;
-  const parsed = JSON.parse(readFileSync(file, "utf8")) as {
+  const stats = lstatSync(file);
+  if (!stats.isFile() || stats.size > FILE_BYTES_MAX) return undefined;
+  const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const record = parsed as {
     status?: unknown;
     statusMessage?: unknown;
   };
-  switch (parsed.status) {
+  switch (record.status) {
     case "idle":
     case "busy":
     case "done":
     case "waiting":
-      return { status: parsed.status };
+      return { status: record.status };
     case "error":
-      return errorReport(typeof parsed.statusMessage === "string" ? parsed.statusMessage : undefined);
+      return errorReport(typeof record.statusMessage === "string" ? record.statusMessage : undefined);
     default:
       return undefined;
   }
 }
 
-function sameReport(a: Report | undefined, b: Report): boolean {
-  if (!a || a.status !== b.status) return false;
-  if (a.status === "error" && b.status === "error") {
-    return a.message === b.message;
+function sameReport(written: Report | undefined, current: Report): boolean {
+  if (written === undefined) return false;
+  if (written.status !== current.status) return false;
+  if (written.status === "error" && current.status === "error") {
+    return written.message === current.message;
   }
   return true;
 }
@@ -99,6 +139,7 @@ function sameReport(a: Report | undefined, b: Report): boolean {
 function currentReport(phase: Phase, promptOpen: boolean): Report {
   if (promptOpen) return { status: "waiting" };
   if (phase.kind === "running") return { status: "busy" };
+  invariant(phase.kind === "resting", "phase must be resting");
   return phase.resting;
 }
 
@@ -118,32 +159,41 @@ export default function (pi: Pi): void {
   let shutDown = false;
 
   function sync(ctx: Context): void {
+    if (shutDown) return;
     const now = currentReport(phase, promptOpen);
-    if (sameReport(written, now) || shutDown) return;
+    if (sameReport(written, now)) return;
+    const said: {
+      sessionId: string;
+      cwd: string;
+      status: Report["status"];
+      statusMessage?: string;
+      statusSince: number;
+      mode: string;
+      procStart: string | undefined;
+    } = {
+      sessionId: ctx.sessionManager.getSessionId(),
+      cwd: ctx.cwd,
+      status: now.status,
+      statusSince: Date.now(),
+      mode: ctx.mode,
+      procStart: started,
+    };
+    if (now.status === "error" && now.message !== undefined) {
+      invariant(now.message.length > 0, "error report holds empty message");
+      said.statusMessage = now.message;
+    }
+    const payload = JSON.stringify(said);
     quietly(() => {
       const file = fileOfThisProcess();
       if (!file) return;
-      const said: {
-        sessionId: string;
-        cwd: string;
-        status: Report["status"];
-        statusMessage?: string;
-        statusSince: number;
-        mode: string;
-        procStart: string | undefined;
-      } = {
-        sessionId: ctx.sessionManager.getSessionId(),
-        cwd: ctx.cwd,
-        status: now.status,
-        statusSince: Date.now(),
-        mode: ctx.mode,
-        procStart: started,
-      };
-      if (now.status === "error" && now.message) {
-        said.statusMessage = now.message;
+      const temporary = `${file}.new`;
+      writeFileSync(temporary, payload);
+      try {
+        renameSync(temporary, file);
+      } catch (error) {
+        quietly(() => rmSync(temporary, { force: true }));
+        throw error;
       }
-      writeFileSync(`${file}.new`, JSON.stringify(said));
-      renameSync(`${file}.new`, file);
       written = now;
     });
   }
@@ -163,12 +213,16 @@ export default function (pi: Pi): void {
         phase = { kind: "running", outcome: { status: "done" } };
         promptOpen = false;
         break;
-      case "waiting":
-        phase = ctx.isIdle?.() === false
-          ? { kind: "running", outcome: { status: "done" } }
-          : { kind: "resting", resting: { status: "idle" } };
+      case "waiting": {
+        const running = ctx.isIdle !== undefined && !ctx.isIdle();
+        if (running) {
+          phase = { kind: "running", outcome: { status: "done" } };
+        } else {
+          phase = { kind: "resting", resting: { status: "idle" } };
+        }
         promptOpen = true;
         break;
+      }
       case "idle":
       case "done":
       case "error":
@@ -187,22 +241,25 @@ export default function (pi: Pi): void {
     if (phase.kind !== "running") return;
     const message = event.message;
     if (!message || message.role !== "assistant") return;
-    if (message.stopReason === "error") {
-      phase = { kind: "running", outcome: errorReport(message.errorMessage) };
-    } else if (message.stopReason === "aborted") {
-      phase = { kind: "running", outcome: { status: "idle" } };
-    } else {
-      phase = { kind: "running", outcome: { status: "done" } };
+    switch (message.stopReason) {
+      case "error":
+        phase = { kind: "running", outcome: errorReport(message.errorMessage) };
+        break;
+      case "aborted":
+        phase = { kind: "running", outcome: { status: "idle" } };
+        break;
+      default:
+        phase = { kind: "running", outcome: { status: "done" } };
+        break;
     }
   });
 
   pi.on("agent_settled", (event, ctx) => {
-    const resting: RestingReport = event.aborted
-      ? { status: "idle" }
-      : phase.kind === "running"
-        ? phase.outcome
-        : { status: "done" };
-    phase = { kind: "resting", resting };
+    if (event.aborted === true) {
+      phase = { kind: "resting", resting: { status: "idle" } };
+    } else if (phase.kind === "running") {
+      phase = { kind: "resting", resting: phase.outcome };
+    }
     sync(ctx);
   });
 

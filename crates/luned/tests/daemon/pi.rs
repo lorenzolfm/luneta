@@ -6,6 +6,7 @@ use std::process::{ChildStdin, ChildStdout, Stdio};
 use std::time::SystemTime;
 
 use lune_protocol::agent_status::AgentStatus;
+use lune_protocol::program_status::MESSAGE_BYTES_MAX;
 use lune_protocol::said::Said;
 use lune_waits::eventually;
 use luned::api::agent::Status as Reported;
@@ -34,6 +35,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (event.load) {
     session = event.load;
     await load();
+  } else if (typeof event.idle === "boolean") {
+    ctx.isIdle = () => event.idle;
   } else {
     await handlers.get(event.type)?.(event, ctx);
   }
@@ -328,6 +331,42 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     let aborted = as_status(&host, pid, Status::Stopped);
     assert!(!aborted.is_finished_turn());
     assert_eq!(status_in(&file), "idle");
+
+    pi.event("agent_settled");
+    assert_eq!(status_in(&file), "idle");
+
+    pi.event("agent_start");
+    as_status(&host, pid, Status::Busy);
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "aborted" }
+    }));
+    pi.says(&json!({ "type": "agent_settled", "aborted": false }));
+    let stopped = as_status(&host, pid, Status::Stopped);
+    assert!(!stopped.is_finished_turn());
+    assert_eq!(status_in(&file), "idle");
+
+    pi.event("agent_start");
+    as_status(&host, pid, Status::Busy);
+    let prefix = "a".repeat(MESSAGE_BYTES_MAX - 1);
+    let boundary_error = format!("{prefix}🔥{}", "x".repeat(MESSAGE_BYTES_MAX * 8));
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "error", "errorMessage": boundary_error }
+    }));
+    pi.says(&json!({ "type": "agent_settled", "aborted": false }));
+    let capped = as_status(&host, pid, Status::Error);
+    assert_eq!(
+        AgentStatus::of_api(&capped),
+        AgentStatus::Error { message: Said::new(prefix.clone()) }
+    );
+
+    pi.says(&json!({ "type": "agent_settled", "aborted": false }));
+    assert_eq!(status_in(&file), "error");
+    assert_eq!(
+        AgentStatus::of_api(&as_status(&host, pid, Status::Error)),
+        AgentStatus::Error { message: Said::new(prefix) }
+    );
 }
 
 #[test]
@@ -508,4 +547,32 @@ fn a_turn_goes_on_through_a_reload() {
 
     pi.event("ui_prompt_start");
     assert_eq!(status_in(&file), "waiting");
+
+    pi.says(&json!({ "idle": false }));
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    assert_eq!(status_in(&file), "waiting");
+
+    pi.event("ui_prompt_end");
+    assert_eq!(status_in(&file), "busy");
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "error", "errorMessage": "rate limited" }
+    }));
+    pi.event("agent_settled");
+    assert_eq!(status_in(&file), "error");
+
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    assert_eq!(status_in(&file), "error");
+    pi.event("ui_prompt_start");
+    assert_eq!(status_in(&file), "waiting");
+    pi.event("ui_prompt_end");
+    let restored = as_status(&host, pi.process.pid(), Status::Error);
+    assert_eq!(
+        AgentStatus::of_api(&restored),
+        AgentStatus::Error { message: Said::new("rate limited".to_owned()) }
+    );
 }

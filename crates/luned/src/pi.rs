@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
-use lune_protocol::program_status::Message;
+use lune_protocol::program_status::{Message, MESSAGE_BYTES_MAX};
 use lune_protocol::said::Said;
 use serde::Deserialize;
 
@@ -201,14 +201,20 @@ fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
 }
 
 fn parse_status(word: &Said, message: Option<&str>) -> Option<ActiveStatus> {
-    let detail = message
-        .and_then(|text| Message::from_raw_bytes(text.as_bytes()))
-        .and_then(|parsed| parsed.to_said());
+    assert_ne!(word.as_str(), "");
     let parsed = match statuses::parse_word(Some(word.as_str()), None)? {
         ActiveStatus::Idle => ActiveStatus::Stopped,
-        ActiveStatus::Error { .. } => ActiveStatus::Error { message: detail },
+        ActiveStatus::Error { .. } => ActiveStatus::Error {
+            message: message
+                .and_then(|text| Message::from_raw_bytes(text.as_bytes()))
+                .and_then(|parsed| parsed.to_said()),
+        },
         other => other,
     };
+    assert!(!matches!(parsed, ActiveStatus::Idle));
+    if let ActiveStatus::Error { message: Some(text) } = &parsed {
+        assert!(text.as_str().len() <= MESSAGE_BYTES_MAX);
+    }
     Some(parsed)
 }
 
@@ -232,6 +238,8 @@ fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
         entrypoint: file.mode.and_then(|mode| Said::new(mode.trim().to_owned())),
         terminal: process.terminal,
     };
+    assert_eq!(report.agent, seen.id);
+    assert!(!matches!(report.update, RungUpdate::Active { status: ActiveStatus::Idle, .. }));
     ReportedAgent { seen, report }
 }
 
