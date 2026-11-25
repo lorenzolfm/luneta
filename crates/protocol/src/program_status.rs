@@ -176,6 +176,12 @@ impl<const MAX: usize> BoundedText<MAX> {
     pub fn to_said(&self) -> Option<Said> {
         Said::new(self.0.trim().to_owned())
     }
+
+    #[must_use]
+    pub fn trimmed(&self) -> Option<Self> {
+        let trimmed = self.0.trim();
+        (!trimmed.is_empty()).then(|| Self(trimmed.to_owned()))
+    }
 }
 
 impl<const MAX: usize> From<BoundedText<MAX>> for String {
@@ -638,6 +644,11 @@ mod tests {
         assert!(Message::parse("message", "").is_err());
         assert!(Message::parse("message", "bad\u{202e}text").is_err());
         assert!(Message::parse("message", &"x".repeat(MESSAGE_BYTES_MAX + 1)).is_err());
+        assert_eq!(
+            Message::from_raw_bytes(b"  rate limited  ").and_then(|m| m.trimmed()),
+            Message::parse("message", "rate limited").ok()
+        );
+        assert_eq!(Message::from_raw_bytes(b"   ").and_then(|m| m.trimmed()), None);
     }
 
     #[test]

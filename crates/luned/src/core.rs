@@ -810,14 +810,14 @@ fn osc_phase(phase: &ProgramPhase) -> ActiveStatus {
         ProgramPhase::Idle => ActiveStatus::Stopped,
         ProgramPhase::Working { .. } => ActiveStatus::Working,
         ProgramPhase::Done { message } => {
-            ActiveStatus::Done { message: message.as_ref().and_then(Message::to_said) }
+            ActiveStatus::Done { message: message.as_ref().and_then(Message::trimmed) }
         },
         ProgramPhase::Blocked { kind, message } => ActiveStatus::Blocked {
             reason: osc_reason(*kind),
-            message: message.as_ref().and_then(Message::to_said),
+            message: message.as_ref().and_then(Message::trimmed),
         },
         ProgramPhase::Error { message } => {
-            ActiveStatus::Error { message: message.as_ref().and_then(Message::to_said) }
+            ActiveStatus::Error { message: message.as_ref().and_then(Message::trimmed) }
         },
     }
 }

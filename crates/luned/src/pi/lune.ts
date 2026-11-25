@@ -1,10 +1,74 @@
 import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+const FOLDER = "LUNE_FOLDER";
+const FILE_BYTES_MAX = 64 * 1024;
+const MESSAGE_BYTES_MAX = 1024;
+const MESSAGE_RAW_CODE_UNITS_MAX = MESSAGE_BYTES_MAX * 4;
+
+function invariant(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+function assertNever(value: never): never {
+  throw new Error(`unexpected value: ${String(value)}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isControlCodePoint(codePoint: number): boolean {
+  return codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f);
+}
+
+function utf8BytesOfCodePoint(codePoint: number): number {
+  invariant(codePoint >= 0 && codePoint <= 0x10ffff, "code point out of range");
+  if (codePoint <= 0x7f) return 1;
+  if (codePoint <= 0x7ff) return 2;
+  if (codePoint <= 0xffff) return 3;
+  return 4;
+}
+
+class ErrorMessage {
+  readonly #text: string;
+
+  private constructor(text: string) {
+    this.#text = text;
+  }
+
+  static parse(raw: unknown): ErrorMessage | undefined {
+    if (typeof raw !== "string") return undefined;
+    const bounded = raw.slice(0, MESSAGE_RAW_CODE_UNITS_MAX).toWellFormed();
+    const trimmed = bounded.trim();
+    if (trimmed.length === 0) return undefined;
+    let out = "";
+    let bytes = 0;
+    for (const character of trimmed) {
+      if (character === "\r" || character === "\n") break;
+      const codePoint = character.codePointAt(0);
+      invariant(codePoint !== undefined, "iterated character has a code point");
+      if (isControlCodePoint(codePoint)) continue;
+      const width = utf8BytesOfCodePoint(codePoint);
+      if (bytes + width > MESSAGE_BYTES_MAX) break;
+      out += character;
+      bytes += width;
+    }
+    invariant(bytes <= MESSAGE_BYTES_MAX, "message exceeds byte bound");
+    const cleaned = out.trim();
+    if (cleaned.length === 0) return undefined;
+    return new ErrorMessage(cleaned);
+  }
+
+  get text(): string {
+    return this.#text;
+  }
+}
+
 type RestingReport =
-  | { readonly status: "idle" }
+  | { readonly status: "stopped" }
   | { readonly status: "done" }
-  | { readonly status: "error"; readonly message?: string };
+  | { readonly status: "error"; readonly message?: ErrorMessage };
 
 type Report =
   | RestingReport
@@ -14,6 +78,54 @@ type Report =
 type Phase =
   | { readonly kind: "resting"; readonly resting: RestingReport }
   | { readonly kind: "running"; readonly outcome: RestingReport };
+
+type Snapshot = {
+  readonly phase: Phase;
+  readonly promptOpen: boolean;
+};
+
+type Written = {
+  readonly snapshot: Snapshot;
+  readonly since: number;
+};
+
+type ActiveState = {
+  readonly kind: "active";
+  phase: Phase;
+  promptOpen: boolean;
+  written: Written | undefined;
+};
+
+type Lifecycle = ActiveState | { readonly kind: "shutDown" };
+
+type PersistedResting =
+  | { readonly status: "stopped" }
+  | { readonly status: "done" }
+  | { readonly status: "error"; readonly message?: string };
+
+type PersistedPhase =
+  | { readonly kind: "resting"; readonly resting: PersistedResting }
+  | { readonly kind: "running"; readonly outcome: PersistedResting };
+
+type OutboundFile = {
+  sessionId: string;
+  cwd: string;
+  status: Report["status"];
+  statusMessage?: string;
+  statusSince: number;
+  mode: string;
+  procStart?: string;
+  phase: PersistedPhase;
+  promptOpen: boolean;
+};
+
+type RestoredSnapshot = {
+  readonly snapshot: Snapshot;
+  readonly since: number;
+  readonly exact: boolean;
+};
+
+type StopOutcome = "error" | "aborted" | "done";
 
 type Context = {
   cwd: string;
@@ -36,20 +148,11 @@ type Pi = {
   on(event: string, handler: (event: Event, ctx: Context) => void): void;
 };
 
-const FOLDER = "LUNE_FOLDER";
-const FILE_BYTES_MAX = 64 * 1024;
-const MESSAGE_BYTES_MAX = 1024;
-const MESSAGE_RAW_CODE_UNITS_MAX = MESSAGE_BYTES_MAX * 4;
-
-function invariant(condition: boolean, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
-
 function fileOfThisProcess(): string | undefined {
   try {
     mkdirSync(FOLDER, { mode: 0o700 });
   } catch (error) {
-    if ((error as { code?: string }).code !== "EEXIST") throw error;
+    if (!isRecord(error) || error["code"] !== "EEXIST") throw error;
   }
   const found = lstatSync(FOLDER);
   const yours = found.isDirectory() && found.uid === process.getuid?.();
@@ -60,87 +163,204 @@ function fileOfThisProcess(): string | undefined {
 
 function procStart(): string | undefined {
   const stat = readFileSync("/proc/self/stat", "utf8");
-  return stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
+  const field = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/)[19];
+  return field !== undefined && field.length > 0 ? field : undefined;
 }
 
-function utf8BytesOfCodePoint(codePoint: number): number {
-  invariant(codePoint >= 0 && codePoint <= 0x10ffff, "code point out of range");
-  if (codePoint <= 0x7f) return 1;
-  if (codePoint <= 0x7ff) return 2;
-  if (codePoint <= 0xffff) return 3;
-  return 4;
-}
-
-function firstLine(text: string | undefined): string | undefined {
-  if (typeof text !== "string") return undefined;
-  const bounded = text.slice(0, MESSAGE_RAW_CODE_UNITS_MAX).toWellFormed();
-  const trimmed = bounded.trim();
-  if (trimmed.length === 0) return undefined;
-  let out = "";
-  let bytes = 0;
-  for (const character of trimmed) {
-    if (character === "\r" || character === "\n") break;
-    const codePoint = character.codePointAt(0);
-    invariant(codePoint !== undefined, "iterated character has a code point");
-    const width = utf8BytesOfCodePoint(codePoint);
-    if (bytes + width > MESSAGE_BYTES_MAX) break;
-    out += character;
-    bytes += width;
-  }
-  invariant(bytes <= MESSAGE_BYTES_MAX, "message exceeds byte bound");
-  const cleaned = out.trim();
-  if (cleaned.length === 0) return undefined;
-  invariant(!cleaned.includes("\n") && !cleaned.includes("\r"), "message spans multiple lines");
-  return cleaned;
-}
-
-function errorReport(text: string | undefined): RestingReport {
-  const message = firstLine(text);
+function errorReport(raw: unknown): RestingReport {
+  const message = ErrorMessage.parse(raw);
   if (message !== undefined) {
-    invariant(message.length > 0, "error message is empty");
     return { status: "error", message };
   }
   return { status: "error" };
 }
 
-function reportInFile(): Report | undefined {
-  const file = fileOfThisProcess();
-  if (!file) return undefined;
-  const stats = lstatSync(file);
-  if (!stats.isFile() || stats.size > FILE_BYTES_MAX) return undefined;
-  const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-  if (typeof parsed !== "object" || parsed === null) return undefined;
-  const record = parsed as {
-    status?: unknown;
-    statusMessage?: unknown;
-  };
-  switch (record.status) {
-    case "idle":
-    case "busy":
+function serializeResting(resting: RestingReport): PersistedResting {
+  switch (resting.status) {
+    case "stopped":
+      return { status: "stopped" };
     case "done":
-    case "waiting":
-      return { status: record.status };
+      return { status: "done" };
     case "error":
-      return errorReport(typeof record.statusMessage === "string" ? record.statusMessage : undefined);
+      return resting.message !== undefined
+        ? { status: "error", message: resting.message.text }
+        : { status: "error" };
+    default:
+      return assertNever(resting);
+  }
+}
+
+function serializePhase(phase: Phase): PersistedPhase {
+  switch (phase.kind) {
+    case "resting":
+      return { kind: "resting", resting: serializeResting(phase.resting) };
+    case "running":
+      return { kind: "running", outcome: serializeResting(phase.outcome) };
+    default:
+      return assertNever(phase);
+  }
+}
+
+function parseRestingStatus(status: unknown, message: unknown): RestingReport | undefined {
+  switch (status) {
+    case "stopped":
+    case "idle":
+      return { status: "stopped" };
+    case "done":
+      return { status: "done" };
+    case "error":
+      return errorReport(message);
     default:
       return undefined;
   }
 }
 
-function sameReport(written: Report | undefined, current: Report): boolean {
-  if (written === undefined) return false;
-  if (written.status !== current.status) return false;
-  if (written.status === "error" && current.status === "error") {
-    return written.message === current.message;
+function parseReport(status: unknown, message: unknown): Report | undefined {
+  switch (status) {
+    case "busy":
+      return { status: "busy" };
+    case "waiting":
+      return { status: "waiting" };
+    default:
+      return parseRestingStatus(status, message);
+  }
+}
+
+function parsePersistedResting(raw: unknown): RestingReport | undefined {
+  if (!isRecord(raw)) return undefined;
+  return parseRestingStatus(raw["status"], raw["message"]);
+}
+
+function parsePersistedPhase(raw: unknown): Phase | undefined {
+  if (!isRecord(raw)) return undefined;
+  switch (raw["kind"]) {
+    case "resting": {
+      const resting = parsePersistedResting(raw["resting"]);
+      return resting !== undefined ? { kind: "resting", resting } : undefined;
+    }
+    case "running": {
+      const outcome = parsePersistedResting(raw["outcome"]);
+      return outcome !== undefined ? { kind: "running", outcome } : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+function parseStopReason(raw: unknown): StopOutcome | undefined {
+  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  switch (raw) {
+    case "error":
+      return "error";
+    case "aborted":
+      return "aborted";
+    default:
+      return "done";
+  }
+}
+
+function sameResting(a: RestingReport, b: RestingReport): boolean {
+  if (a.status !== b.status) return false;
+  if (a.status === "error" && b.status === "error") {
+    return a.message?.text === b.message?.text;
   }
   return true;
 }
 
+function sameReport(a: Report | undefined, b: Report): boolean {
+  if (a === undefined || a.status !== b.status) return false;
+  if (a.status === "error" && b.status === "error") {
+    return a.message?.text === b.message?.text;
+  }
+  return true;
+}
+
+function samePhase(a: Phase, b: Phase): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "resting" && b.kind === "resting") {
+    return sameResting(a.resting, b.resting);
+  }
+  if (a.kind === "running" && b.kind === "running") {
+    return sameResting(a.outcome, b.outcome);
+  }
+  return false;
+}
+
+function sameSnapshot(a: Snapshot, b: Snapshot): boolean {
+  return a.promptOpen === b.promptOpen && samePhase(a.phase, b.phase);
+}
+
 function currentReport(phase: Phase, promptOpen: boolean): Report {
   if (promptOpen) return { status: "waiting" };
-  if (phase.kind === "running") return { status: "busy" };
-  invariant(phase.kind === "resting", "phase must be resting");
-  return phase.resting;
+  switch (phase.kind) {
+    case "running":
+      return { status: "busy" };
+    case "resting":
+      return phase.resting;
+    default:
+      return assertNever(phase);
+  }
+}
+
+function isCanonicalReportFields(record: Record<string, unknown>, report: Report): boolean {
+  if (record["status"] !== report.status) return false;
+  if (report.status === "error") {
+    return record["statusMessage"] === report.message?.text;
+  }
+  return record["statusMessage"] === undefined;
+}
+
+function snapshotInFile(ctx: Context, started: string | undefined): RestoredSnapshot | undefined {
+  const file = fileOfThisProcess();
+  if (!file) return undefined;
+  const stats = lstatSync(file);
+  if (!stats.isFile() || stats.size > FILE_BYTES_MAX) return undefined;
+  const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+  if (!isRecord(parsed)) return undefined;
+  if (parsed["sessionId"] !== ctx.sessionManager.getSessionId()) return undefined;
+  if (parsed["cwd"] !== ctx.cwd) return undefined;
+  if (parsed["mode"] !== ctx.mode) return undefined;
+  if (started !== undefined && parsed["procStart"] !== started) return undefined;
+  const since = parsed["statusSince"];
+  if (typeof since !== "number" || !Number.isFinite(since) || since < 0) return undefined;
+  const report = parseReport(parsed["status"], parsed["statusMessage"]);
+  if (report === undefined) return undefined;
+
+  if ("phase" in parsed || "promptOpen" in parsed) {
+    const phase = parsePersistedPhase(parsed["phase"]);
+    const promptOpen = parsed["promptOpen"];
+    if (phase === undefined || typeof promptOpen !== "boolean") return undefined;
+    const projected = currentReport(phase, promptOpen);
+    if (!sameReport(report, projected)) return undefined;
+    const exact = isCanonicalReportFields(parsed, projected);
+    return { snapshot: { phase, promptOpen }, since, exact };
+  }
+
+  switch (report.status) {
+    case "busy":
+      return {
+        snapshot: { phase: { kind: "running", outcome: { status: "done" } }, promptOpen: false },
+        since,
+        exact: false,
+      };
+    case "waiting": {
+      const running = ctx.isIdle !== undefined && !ctx.isIdle();
+      const phase: Phase = running
+        ? { kind: "running", outcome: { status: "done" } }
+        : { kind: "resting", resting: { status: "stopped" } };
+      return { snapshot: { phase, promptOpen: true }, since, exact: false };
+    }
+    case "stopped":
+    case "done":
+    case "error":
+      return {
+        snapshot: { phase: { kind: "resting", resting: report }, promptOpen: false },
+        since,
+        exact: false,
+      };
+    default:
+      return assertNever(report);
+  }
 }
 
 function quietly<T>(work: () => T): T | undefined {
@@ -153,34 +373,39 @@ function quietly<T>(work: () => T): T | undefined {
 
 export default function (pi: Pi): void {
   const started = quietly(procStart);
-  let phase: Phase = { kind: "resting", resting: { status: "idle" } };
-  let promptOpen = false;
-  let written: Report | undefined;
-  let shutDown = false;
+  let lifecycle: Lifecycle = {
+    kind: "active",
+    phase: { kind: "resting", resting: { status: "stopped" } },
+    promptOpen: false,
+    written: undefined,
+  };
 
-  function sync(ctx: Context): void {
-    if (shutDown) return;
-    const now = currentReport(phase, promptOpen);
-    if (sameReport(written, now)) return;
-    const said: {
-      sessionId: string;
-      cwd: string;
-      status: Report["status"];
-      statusMessage?: string;
-      statusSince: number;
-      mode: string;
-      procStart: string | undefined;
-    } = {
+  function sync(state: ActiveState, ctx: Context): void {
+    const next: Snapshot = { phase: state.phase, promptOpen: state.promptOpen };
+    if (state.written !== undefined && sameSnapshot(state.written.snapshot, next)) return;
+    const now = currentReport(next.phase, next.promptOpen);
+    const previousReport =
+      state.written !== undefined
+        ? currentReport(state.written.snapshot.phase, state.written.snapshot.promptOpen)
+        : undefined;
+    const since =
+      state.written !== undefined && sameReport(previousReport, now)
+        ? state.written.since
+        : Date.now();
+    const said: OutboundFile = {
       sessionId: ctx.sessionManager.getSessionId(),
       cwd: ctx.cwd,
       status: now.status,
-      statusSince: Date.now(),
+      statusSince: since,
       mode: ctx.mode,
-      procStart: started,
+      phase: serializePhase(next.phase),
+      promptOpen: next.promptOpen,
     };
+    if (started !== undefined) {
+      said.procStart = started;
+    }
     if (now.status === "error" && now.message !== undefined) {
-      invariant(now.message.length > 0, "error report holds empty message");
-      said.statusMessage = now.message;
+      said.statusMessage = now.message.text;
     }
     const payload = JSON.stringify(said);
     quietly(() => {
@@ -194,87 +419,82 @@ export default function (pi: Pi): void {
         quietly(() => rmSync(temporary, { force: true }));
         throw error;
       }
-      written = now;
+      state.written = { snapshot: next, since };
     });
   }
 
   pi.on("session_start", (event, ctx) => {
-    const existing = event.reason === "reload" ? quietly(reportInFile) : undefined;
-    if (existing === undefined) {
-      phase = { kind: "resting", resting: { status: "idle" } };
-      promptOpen = false;
-      written = undefined;
-      sync(ctx);
+    if (lifecycle.kind !== "active") return;
+    const restored =
+      event.reason === "reload" ? quietly(() => snapshotInFile(ctx, started)) : undefined;
+    if (restored === undefined) {
+      lifecycle.phase = { kind: "resting", resting: { status: "stopped" } };
+      lifecycle.promptOpen = false;
+      lifecycle.written = undefined;
+      sync(lifecycle, ctx);
       return;
     }
-    written = existing;
-    switch (existing.status) {
-      case "busy":
-        phase = { kind: "running", outcome: { status: "done" } };
-        promptOpen = false;
-        break;
-      case "waiting": {
-        const running = ctx.isIdle !== undefined && !ctx.isIdle();
-        if (running) {
-          phase = { kind: "running", outcome: { status: "done" } };
-        } else {
-          phase = { kind: "resting", resting: { status: "idle" } };
-        }
-        promptOpen = true;
-        break;
-      }
-      case "idle":
-      case "done":
-      case "error":
-        phase = { kind: "resting", resting: existing };
-        promptOpen = false;
-        break;
+    lifecycle.phase = restored.snapshot.phase;
+    lifecycle.promptOpen = restored.snapshot.promptOpen;
+    if (restored.exact) {
+      lifecycle.written = { snapshot: restored.snapshot, since: restored.since };
+    } else {
+      lifecycle.written = undefined;
+      sync(lifecycle, ctx);
     }
   });
 
   pi.on("agent_start", (_event, ctx) => {
-    phase = { kind: "running", outcome: { status: "done" } };
-    sync(ctx);
+    if (lifecycle.kind !== "active") return;
+    lifecycle.phase = { kind: "running", outcome: { status: "done" } };
+    sync(lifecycle, ctx);
   });
 
-  pi.on("message_end", (event) => {
-    if (phase.kind !== "running") return;
+  pi.on("message_end", (event, ctx) => {
+    if (lifecycle.kind !== "active" || lifecycle.phase.kind !== "running") return;
     const message = event.message;
     if (!message || message.role !== "assistant") return;
-    switch (message.stopReason) {
+    const stop = parseStopReason(message.stopReason);
+    if (stop === undefined) return;
+    switch (stop) {
       case "error":
-        phase = { kind: "running", outcome: errorReport(message.errorMessage) };
+        lifecycle.phase = { kind: "running", outcome: errorReport(message.errorMessage) };
         break;
       case "aborted":
-        phase = { kind: "running", outcome: { status: "idle" } };
+        lifecycle.phase = { kind: "running", outcome: { status: "stopped" } };
+        break;
+      case "done":
+        lifecycle.phase = { kind: "running", outcome: { status: "done" } };
         break;
       default:
-        phase = { kind: "running", outcome: { status: "done" } };
-        break;
+        assertNever(stop);
     }
+    sync(lifecycle, ctx);
   });
 
   pi.on("agent_settled", (event, ctx) => {
-    if (event.aborted === true) {
-      phase = { kind: "resting", resting: { status: "idle" } };
-    } else if (phase.kind === "running") {
-      phase = { kind: "resting", resting: phase.outcome };
-    }
-    sync(ctx);
+    if (lifecycle.kind !== "active" || lifecycle.phase.kind !== "running") return;
+    const resting: RestingReport =
+      event.aborted === true ? { status: "stopped" } : lifecycle.phase.outcome;
+    lifecycle.phase = { kind: "resting", resting };
+    sync(lifecycle, ctx);
   });
 
   pi.on("ui_prompt_start", (_event, ctx) => {
-    promptOpen = true;
-    sync(ctx);
+    if (lifecycle.kind !== "active") return;
+    lifecycle.promptOpen = true;
+    sync(lifecycle, ctx);
   });
 
   pi.on("ui_prompt_end", (_event, ctx) => {
-    promptOpen = false;
-    sync(ctx);
+    if (lifecycle.kind !== "active") return;
+    lifecycle.promptOpen = false;
+    sync(lifecycle, ctx);
   });
 
   pi.on("session_shutdown", (event) => {
-    shutDown = true;
+    if (lifecycle.kind !== "active") return;
+    lifecycle = { kind: "shutDown" };
     if (event.reason !== "quit") return;
     quietly(() => {
       const file = fileOfThisProcess();

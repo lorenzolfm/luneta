@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
-use lune_protocol::program_status::{Message, MESSAGE_BYTES_MAX};
+use lune_protocol::program_status::Message;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 
@@ -16,7 +16,9 @@ use crate::agent::{
 };
 use crate::mux;
 use crate::process::{self, AgentId};
-use crate::statuses::{self, ActiveStatus, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
+use crate::statuses::{
+    ActiveStatus, BlockedReason, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
+};
 use crate::watch::{self, Troubles};
 use crate::{log, Directory};
 
@@ -40,17 +42,87 @@ pub fn folder() -> Option<PathBuf> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct File {
+struct RawFile {
     #[serde(deserialize_with = "nonempty")]
     session_id: Said,
     #[serde(deserialize_with = "absolute")]
     cwd: Directory,
-    #[serde(deserialize_with = "nonempty")]
-    status: Said,
+    status: String,
     status_message: Option<String>,
     status_since: u64,
     proc_start: Option<String>,
     mode: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PiStatus {
+    Stopped,
+    Working,
+    Waiting,
+    Done,
+    Error { message: Option<Message> },
+}
+
+impl PiStatus {
+    fn parse(word: &str, message: Option<&str>) -> Option<Self> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "stopped" | "idle" => Some(PiStatus::Stopped),
+            "busy" | "working" => Some(PiStatus::Working),
+            "waiting" | "blocked" => Some(PiStatus::Waiting),
+            "done" => Some(PiStatus::Done),
+            "error" => Some(PiStatus::Error {
+                message: message
+                    .and_then(|text| Message::from_raw_bytes(text.as_bytes()))
+                    .and_then(|parsed| parsed.trimmed()),
+            }),
+            _ => None,
+        }
+    }
+
+    fn into_active(self) -> ActiveStatus {
+        match self {
+            PiStatus::Stopped => ActiveStatus::Stopped,
+            PiStatus::Working => ActiveStatus::Working,
+            PiStatus::Waiting => {
+                ActiveStatus::Blocked { reason: BlockedReason::Unspecified, message: None }
+            },
+            PiStatus::Done => ActiveStatus::Done { message: None },
+            PiStatus::Error { message } => ActiveStatus::Error { message },
+        }
+    }
+}
+
+struct File {
+    session_id: Said,
+    cwd: Directory,
+    status: PiStatus,
+    status_since: u64,
+    proc_start: Option<process::Start>,
+    entrypoint: Option<Said>,
+}
+
+impl File {
+    fn parse(raw: RawFile) -> io::Result<Self> {
+        let status = PiStatus::parse(&raw.status, raw.status_message.as_deref()).ok_or_else(|| {
+            io::Error::new(ErrorKind::InvalidData, format!("unknown pi status {:?}", raw.status))
+        })?;
+        let proc_start = raw
+            .proc_start
+            .map(|value| {
+                process::Start::spelled(value)
+                    .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "procStart is empty"))
+            })
+            .transpose()?;
+        let entrypoint = raw.mode.and_then(|mode| Said::new(mode.trim().to_owned()));
+        Ok(File {
+            session_id: raw.session_id,
+            cwd: raw.cwd,
+            status,
+            status_since: raw.status_since,
+            proc_start,
+            entrypoint,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -186,10 +258,11 @@ fn install(pi: &Path, lune: &Path) -> io::Result<()> {
 }
 
 fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<File>> {
-    let file: File = serde_json::from_slice(&file_text(path)?)
+    let raw: RawFile = serde_json::from_slice(&file_text(path)?)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let file = File::parse(raw)?;
     let stands = if let Some(recorded) = &file.proc_start {
-        recorded == start
+        recorded.as_str() == start
     } else {
         dated_since(fs::metadata(path)?.modified()?, started)
     };
@@ -200,32 +273,11 @@ fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
     modified.checked_add(DATED_LATE).is_none_or(|late| started <= late)
 }
 
-fn parse_status(word: &Said, message: Option<&str>) -> Option<ActiveStatus> {
-    assert_ne!(word.as_str(), "");
-    let parsed = match statuses::parse_word(Some(word.as_str()), None)? {
-        ActiveStatus::Idle => ActiveStatus::Stopped,
-        ActiveStatus::Error { .. } => ActiveStatus::Error {
-            message: message
-                .and_then(|text| Message::from_raw_bytes(text.as_bytes()))
-                .and_then(|parsed| parsed.to_said()),
-        },
-        other => other,
-    };
-    assert!(!matches!(parsed, ActiveStatus::Idle));
-    if let ActiveStatus::Error { message: Some(text) } = &parsed {
-        assert!(text.as_str().len() <= MESSAGE_BYTES_MAX);
-    }
-    Some(parsed)
-}
-
 fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
-    let update = match parse_status(&file.status, file.status_message.as_deref()) {
-        Some(status) => RungUpdate::Active {
-            status,
-            at: Some(moment(file.status_since)),
-            subagents: Vec::new(),
-        },
-        None => RungUpdate::Clear,
+    let update = RungUpdate::Active {
+        status: file.status.into_active(),
+        at: Some(moment(file.status_since)),
+        subagents: Vec::new(),
     };
     let report = Report { agent: id.clone(), rung: Rung::Extension, update };
     let seen = SeenAgent {
@@ -235,11 +287,9 @@ fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
         cwd: file.cwd,
         started_at: Some(process.started),
         name: None,
-        entrypoint: file.mode.and_then(|mode| Said::new(mode.trim().to_owned())),
+        entrypoint: file.entrypoint,
         terminal: process.terminal,
     };
-    assert_eq!(report.agent, seen.id);
-    assert!(!matches!(report.update, RungUpdate::Active { status: ActiveStatus::Idle, .. }));
     ReportedAgent { seen, report }
 }
 
@@ -247,10 +297,12 @@ fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
 mod tests {
     use std::time::{Duration, SystemTime};
 
+    use lune_protocol::program_status::Message;
     use lune_protocol::said::Said;
 
-    use super::{dated_since, parse_status, DATED_LATE};
+    use super::{dated_since, File, PiStatus, RawFile, DATED_LATE};
     use crate::statuses::ActiveStatus;
+    use crate::Directory;
 
     #[test]
     fn a_file_dated_since_its_process_started_stands() {
@@ -270,16 +322,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_status_maps_idle_to_stopped_and_sanitizes_error_messages() {
-        let word = |text: &str| Said::new(text.to_owned()).unwrap();
-        assert_eq!(parse_status(&word("idle"), None), Some(ActiveStatus::Stopped));
-        assert_eq!(parse_status(&word("done"), Some("ignored")), Some(ActiveStatus::Done { message: None }));
-        assert_eq!(parse_status(&word("busy"), Some("ignored")), Some(ActiveStatus::Working));
+    fn pi_status_maps_stopped_and_legacy_idle_and_rejects_unknown_words() {
+        let parse = |word, message| PiStatus::parse(word, message).map(PiStatus::into_active);
+        assert_eq!(parse("stopped", None), Some(ActiveStatus::Stopped));
+        assert_eq!(parse("idle", None), Some(ActiveStatus::Stopped));
+        assert_eq!(parse("done", Some("ignored")), Some(ActiveStatus::Done { message: None }));
+        assert_eq!(parse("busy", Some("ignored")), Some(ActiveStatus::Working));
         assert_eq!(
-            parse_status(&word("error"), Some("  \x1b[31mrate\u{200b} limited  ")),
-            Some(ActiveStatus::Error { message: Said::new("[31mrate limited".to_owned()) })
+            parse("error", Some("  \x1b[31mrate\u{200b} limited  ")),
+            Some(ActiveStatus::Error {
+                message: Message::parse("message", "[31mrate limited").ok(),
+            })
         );
-        assert_eq!(parse_status(&word("error"), Some("   ")), Some(ActiveStatus::Error { message: None }));
-        assert_eq!(parse_status(&word("   "), None), None);
+        assert_eq!(parse("error", Some("   ")), Some(ActiveStatus::Error { message: None }));
+        assert_eq!(parse("   ", None), None);
+        assert_eq!(parse("unknown", None), None);
+    }
+
+    #[test]
+    fn pi_file_rejects_empty_proc_start_and_whitespace_status() {
+        let base = |status: &str, proc_start: Option<&str>| RawFile {
+            session_id: Said::new("s1".to_owned()).unwrap(),
+            cwd: Directory::parse("/w".to_owned()).unwrap(),
+            status: status.to_owned(),
+            status_message: None,
+            status_since: 1_000,
+            proc_start: proc_start.map(str::to_owned),
+            mode: Some("tui".to_owned()),
+        };
+        assert!(File::parse(base("stopped", Some("42"))).is_ok());
+        assert!(File::parse(base("stopped", Some(""))).is_err());
+        assert!(File::parse(base("   ", Some("42"))).is_err());
     }
 }

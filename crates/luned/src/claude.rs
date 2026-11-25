@@ -4,7 +4,7 @@ use std::fmt;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
@@ -40,14 +40,14 @@ pub fn folder() -> Option<PathBuf> {
         .or_else(|| set("HOME").map(|home| PathBuf::from(home).join(".claude")))
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct File {
+struct RawFile {
     #[serde(deserialize_with = "nonempty")]
     session_id: Said,
     #[serde(deserialize_with = "absolute")]
     cwd: Directory,
-    proc_start: Start,
+    proc_start: RawStart,
     pid_domain: Option<String>,
     status: Option<String>,
     waiting_for: Option<String>,
@@ -58,25 +58,112 @@ struct File {
     entrypoint: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Deserialize)]
 #[serde(untagged)]
-enum Start {
+enum RawStart {
     Spelled(String),
     Counted(u64),
 }
 
-impl Start {
-    fn spelled(&self) -> String {
+impl RawStart {
+    fn into_start(self) -> Option<process::Start> {
+        let spelled = match self {
+            RawStart::Spelled(start) => start,
+            RawStart::Counted(start) => start.to_string(),
+        };
+        process::Start::spelled(spelled)
+    }
+}
+
+#[derive(Clone)]
+enum Feed {
+    Sdk { entrypoint: Said },
+    Interactive { entrypoint: Option<Said>, update: RungUpdate },
+}
+
+impl Feed {
+    fn parse(
+        entrypoint: Option<String>,
+        status: Option<&str>,
+        waiting_for: Option<&str>,
+        status_updated_at: Option<u64>,
+    ) -> Self {
+        let entrypoint = entrypoint.and_then(|text| Said::new(text.trim().to_owned()));
+        match entrypoint {
+            Some(entrypoint) if has_sdk_prefix(entrypoint.as_str()) => Feed::Sdk { entrypoint },
+            entrypoint => {
+                let update = match statuses::parse_word(status, waiting_for) {
+                    Some(status) => RungUpdate::Active {
+                        status,
+                        at: status_updated_at.map(moment),
+                        subagents: Vec::new(),
+                    },
+                    None => RungUpdate::Clear,
+                };
+                Feed::Interactive { entrypoint, update }
+            },
+        }
+    }
+
+    fn entrypoint(&self) -> Option<Said> {
         match self {
-            Start::Spelled(start) => start.clone(),
-            Start::Counted(start) => start.to_string(),
+            Feed::Sdk { entrypoint } => Some(entrypoint.clone()),
+            Feed::Interactive { entrypoint, .. } => entrypoint.clone(),
+        }
+    }
+
+    fn update(&self) -> RungUpdate {
+        match self {
+            Feed::Sdk { .. } => RungUpdate::Clear,
+            Feed::Interactive { update, .. } => update.clone(),
         }
     }
 }
 
+#[derive(Clone)]
+struct Session {
+    id: Said,
+    cwd: Directory,
+    proc_start: process::Start,
+    pid_domain: Option<String>,
+    started_at: Option<SystemTime>,
+    name: Option<Name>,
+    feed: Feed,
+}
+
+impl Session {
+    fn parse(raw: RawFile) -> io::Result<Self> {
+        let proc_start = raw
+            .proc_start
+            .into_start()
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "procStart is empty"))?;
+        let name_source = raw
+            .name_source
+            .as_deref()
+            .and_then(|text| Said::new(text.trim().to_owned()))
+            .map(|word| Source::of(word.as_str()));
+        let name = raw.name.and_then(Said::new).map(|text| Name { text, source: name_source });
+        let feed = Feed::parse(
+            raw.entrypoint,
+            raw.status.as_deref(),
+            raw.waiting_for.as_deref(),
+            raw.status_updated_at,
+        );
+        Ok(Session {
+            id: raw.session_id,
+            cwd: raw.cwd,
+            proc_start,
+            pid_domain: raw.pid_domain,
+            started_at: raw.started_at.map(moment),
+            name,
+            feed,
+        })
+    }
+}
+
 enum Seen {
-    Whole(File),
-    Torn { since: Instant, before: Option<File> },
+    Whole(Session),
+    Torn { since: Instant, before: Option<Session> },
     Unread,
 }
 
@@ -171,8 +258,8 @@ impl SessionFiles {
         let mut agents = Vec::with_capacity(self.seen.len());
         let mut unread = Vec::new();
         for (&pid, found) in &self.seen {
-            let file = match found {
-                Seen::Whole(file) | Seen::Torn { before: Some(file), .. } => file,
+            let session = match found {
+                Seen::Whole(session) | Seen::Torn { before: Some(session), .. } => session,
                 Seen::Torn { before: None, .. } => continue,
                 Seen::Unread => {
                     if let Some(start) = process::start(pid.get()) {
@@ -182,18 +269,18 @@ impl SessionFiles {
                     continue;
                 },
             };
-            if !local(&self.domain, file) {
+            if !local(&self.domain, session) {
                 continue;
             }
-            let spelled = file.proc_start.spelled();
-            let Some(start) = process::start(pid.get()).filter(|start| start.as_str() == spelled)
+            let Some(start) =
+                process::start(pid.get()).filter(|start| *start == session.proc_start)
             else {
                 continue;
             };
             let id = AgentId::new(pid, start);
             let read = terminal_of(id.clone());
             let terminal = terminal_or_trouble(pid, read, &mut self.troubles);
-            agents.push(reported(id, file, terminal));
+            agents.push(reported(id, session, terminal));
         }
         self.terminals = terminals;
         assert!(agents.len() + unread.len() <= self.seen.len());
@@ -201,8 +288,8 @@ impl SessionFiles {
     }
 }
 
-fn local(domain: &process::Domain, file: &File) -> bool {
-    file.pid_domain.as_deref().is_none_or(|recorded| domain.admits(recorded))
+fn local(domain: &process::Domain, session: &Session) -> bool {
+    session.pid_domain.as_deref().is_none_or(|recorded| domain.admits(recorded))
 }
 
 fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) -> Seen {
@@ -211,7 +298,7 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
         Seen::Unread
     };
     match was {
-        Some(Seen::Whole(file)) => Seen::Torn { since: Instant::now(), before: Some(file) },
+        Some(Seen::Whole(session)) => Seen::Torn { since: Instant::now(), before: Some(session) },
         None if first => unread(),
         None => Seen::Torn { since: Instant::now(), before: None },
         Some(Seen::Torn { since, before }) if since.elapsed() < TORN => {
@@ -225,62 +312,38 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
 const SDK_ENTRYPOINT_PREFIX: &str = "sdk-";
 const _: () = assert!(SDK_ENTRYPOINT_PREFIX.is_ascii());
 
-fn parse_leading_file(bytes: &[u8]) -> io::Result<File> {
+fn parse_leading_file(bytes: &[u8]) -> io::Result<Session> {
     let bytes_len = u64::try_from(bytes.len()).expect("a slice length fits a u64");
     assert!(bytes_len <= FILE_BYTES_MAX);
-    let mut stream = serde_json::Deserializer::from_slice(bytes).into_iter::<File>();
-    let file = match stream.next() {
-        Some(Ok(file)) => file,
+    let mut stream = serde_json::Deserializer::from_slice(bytes).into_iter::<RawFile>();
+    let raw = match stream.next() {
+        Some(Ok(raw)) => raw,
         Some(Err(error)) => return Err(io::Error::new(ErrorKind::InvalidData, error)),
         None => return Err(io::Error::new(ErrorKind::UnexpectedEof, "empty session file")),
     };
     assert!(stream.byte_offset() > 0);
     assert!(stream.byte_offset() <= bytes.len());
-    Ok(file)
+    Session::parse(raw)
 }
 
-fn is_sdk_entrypoint(entrypoint: &Said) -> bool {
-    let text = entrypoint.as_str();
-    assert_ne!(text, "");
-    assert_eq!(text, text.trim());
+fn has_sdk_prefix(text: &str) -> bool {
     text.as_bytes()
         .get(..SDK_ENTRYPOINT_PREFIX.len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(SDK_ENTRYPOINT_PREFIX.as_bytes()))
 }
 
-fn reported(id: AgentId, file: &File, terminal: Option<TerminalKey>) -> ReportedAgent {
-    let word = |text: &Option<String>| Said::new(text.as_deref()?.trim().to_owned());
-    let name = file.name.clone().and_then(Said::new);
-    let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
-    let entrypoint = word(&file.entrypoint);
-    let sdk = entrypoint.as_ref().is_some_and(is_sdk_entrypoint);
-    let update = if sdk {
-        RungUpdate::Clear
-    } else {
-        match statuses::parse_word(file.status.as_deref(), file.waiting_for.as_deref()) {
-            Some(status) => RungUpdate::Active {
-                status,
-                at: file.status_updated_at.map(moment),
-                subagents: Vec::new(),
-            },
-            None => RungUpdate::Clear,
-        }
-    };
-    let report = Report { agent: id.clone(), rung: Rung::Feed, update };
+fn reported(id: AgentId, session: &Session, terminal: Option<TerminalKey>) -> ReportedAgent {
+    let report = Report { agent: id.clone(), rung: Rung::Feed, update: session.feed.update() };
     let seen = SeenAgent {
         id,
         harness: Harness::ClaudeCode,
-        session_id: Some(file.session_id.clone()),
-        cwd: file.cwd.clone(),
-        started_at: file.started_at.map(moment),
-        name: name.map(|text| Name { text, source }),
-        entrypoint,
+        session_id: Some(session.id.clone()),
+        cwd: session.cwd.clone(),
+        started_at: session.started_at,
+        name: session.name.clone(),
+        entrypoint: session.feed.entrypoint(),
         terminal,
     };
-    assert_eq!(report.agent, seen.id);
-    if sdk {
-        assert_eq!(report.update, RungUpdate::Clear);
-    }
     ReportedAgent { seen, report }
 }
 
@@ -321,8 +384,15 @@ mod tests {
             let mut bytes = base.to_vec();
             bytes.extend_from_slice(tail);
             let parsed = parse_leading_file(&bytes).unwrap();
-            assert_eq!(parsed.session_id.as_str(), "s1");
-            assert_eq!(parsed.status.as_deref(), Some("idle"));
+            assert_eq!(parsed.id.as_str(), "s1");
+            assert_eq!(
+                parsed.feed.update(),
+                RungUpdate::Active {
+                    status: statuses::ActiveStatus::Idle,
+                    at: None,
+                    subagents: Vec::new(),
+                }
+            );
         }
         for invalid in [
             &b""[..],
@@ -330,6 +400,7 @@ mod tests {
             b"[]",
             b"null",
             br#"{"sessionId":"","cwd":"/w","procStart":"42"}"#,
+            br#"{"sessionId":"s1","cwd":"/w","procStart":""}"#,
         ] {
             assert!(parse_leading_file(invalid).is_err());
         }
@@ -341,26 +412,29 @@ mod tests {
             AgentPid::new(42).unwrap(),
             ProcessStart::spelled("100".to_owned()).unwrap(),
         );
-        let file = |entrypoint: Option<&str>| File {
-            session_id: Said::new("s1".to_owned()).unwrap(),
-            cwd: Directory::parse("/w".to_owned()).unwrap(),
-            proc_start: Start::Spelled("100".to_owned()),
-            pid_domain: None,
-            status: Some("busy".to_owned()),
-            waiting_for: None,
-            status_updated_at: Some(1_000),
-            started_at: Some(500),
-            name: None,
-            name_source: None,
-            entrypoint: entrypoint.map(str::to_owned),
+        let session = |entrypoint: Option<&str>| {
+            Session::parse(RawFile {
+                session_id: Said::new("s1".to_owned()).unwrap(),
+                cwd: Directory::parse("/w".to_owned()).unwrap(),
+                proc_start: RawStart::Spelled("100".to_owned()),
+                pid_domain: None,
+                status: Some("busy".to_owned()),
+                waiting_for: None,
+                status_updated_at: Some(1_000),
+                started_at: Some(500),
+                name: None,
+                name_source: None,
+                entrypoint: entrypoint.map(str::to_owned),
+            })
+            .unwrap()
         };
         for sdk in ["sdk-cli", "sdk-ts", "  SDK-py  ", "sdk-"] {
-            let entry = reported(id.clone(), &file(Some(sdk)), None);
+            let entry = reported(id.clone(), &session(Some(sdk)), None);
             assert_eq!(entry.report.update, RungUpdate::Clear, "{sdk}");
             assert_eq!(entry.seen.entrypoint.as_ref().map(Said::as_str), Some(sdk.trim()));
         }
         for interactive in [Some("cli"), Some("claude-vscode"), Some("sdk"), None] {
-            let entry = reported(id.clone(), &file(interactive), None);
+            let entry = reported(id.clone(), &session(interactive), None);
             assert!(matches!(entry.report.update, RungUpdate::Active { .. }), "{interactive:?}");
         }
     }

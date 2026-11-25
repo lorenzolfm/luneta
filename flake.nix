@@ -303,6 +303,22 @@
                 find . -type f -print0 | ${pkgs.lib.getExe comments}
                 touch "$out"
               '';
+            typescript =
+              let
+                typescript = import ./nix/typescript.nix { inherit pkgs; };
+              in
+              pkgs.runCommand "lune-typescript"
+                {
+                  src = pkgs.lib.fileset.toSource {
+                    root = ./.;
+                    fileset = pkgs.lib.fileset.fileFilter (file: file.hasExt "ts") ./crates;
+                  };
+                }
+                ''
+                  cd "$src"
+                  find . -name '*.ts' -print0 | ${pkgs.findutils}/bin/xargs -0 -r ${pkgs.lib.getExe typescript}
+                  touch "$out"
+                '';
           };
 
           shell = pkgs.mkShell {

@@ -395,7 +395,8 @@ fn an_agent_that_crashes_leaves_the_list_as_it_ends() {
 fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let host = Host::new();
     let (cut, newer, folder, long) = (process(None), process(None), process(None), process(None));
-    let (unnamed, nowhere, relative) = (process(None), process(None), process(None));
+    let (unnamed, nowhere, relative, unstarted) =
+        (process(None), process(None), process(None), process(None));
     host.write(cut.pid(), &file_for("cut", &cut, "busy"));
     let _daemon = start(host.vars()).unwrap();
     assert!(host.agent("cut").is_some());
@@ -415,20 +416,23 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let mut near = file_for("relative", &relative, "busy");
     near["cwd"] = json!("w");
     host.write(relative.pid(), &near);
-    let unread = eventually("seven files are unread", || {
+    let mut empty_start = file_for("unstarted", &unstarted, "busy");
+    empty_start["procStart"] = json!("");
+    host.write(unstarted.pid(), &empty_start);
+    let unread = eventually("eight files are unread", || {
         let listed = host.list();
-        (listed.unread == 7).then_some(listed)
+        (listed.unread == 8).then_some(listed)
     });
     assert!(unread.agents.is_empty(), "{:?}", unread.agents);
 
     let output = host.vars().command(&LUNE).arg("agents").output().unwrap();
     let said = String::from_utf8_lossy(&output.stderr);
-    assert!(said.contains("cannot read 7 of Claude Code's session files"), "{said}");
+    assert!(said.contains("cannot read 8 of Claude Code's session files"), "{said}");
 
     let left = host.file_of(newer.pid());
     drop(newer);
     assert!(left.exists());
-    eventually("six files are unread", || (host.list().unread == 6).then_some(()));
+    eventually("seven files are unread", || (host.list().unread == 7).then_some(()));
 }
 
 #[test]

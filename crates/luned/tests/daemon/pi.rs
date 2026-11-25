@@ -234,7 +234,7 @@ fn a_prompt_restores_the_state_from_before_it() {
     as_status(&host, pid, Status::Waiting);
     pi.event("ui_prompt_end");
     as_status(&host, pid, Status::Stopped);
-    assert_eq!(status_in(&file), "idle");
+    assert_eq!(status_in(&file), "stopped");
 
     pi.event("agent_start");
     as_status(&host, pid, Status::Busy);
@@ -330,10 +330,10 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     pi.says(&json!({ "type": "agent_settled", "aborted": true }));
     let aborted = as_status(&host, pid, Status::Stopped);
     assert!(!aborted.is_finished_turn());
-    assert_eq!(status_in(&file), "idle");
+    assert_eq!(status_in(&file), "stopped");
 
     pi.event("agent_settled");
-    assert_eq!(status_in(&file), "idle");
+    assert_eq!(status_in(&file), "stopped");
 
     pi.event("agent_start");
     as_status(&host, pid, Status::Busy);
@@ -344,7 +344,7 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     pi.says(&json!({ "type": "agent_settled", "aborted": false }));
     let stopped = as_status(&host, pid, Status::Stopped);
     assert!(!stopped.is_finished_turn());
-    assert_eq!(status_in(&file), "idle");
+    assert_eq!(status_in(&file), "stopped");
 
     pi.event("agent_start");
     as_status(&host, pid, Status::Busy);
@@ -354,6 +354,10 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
         "type": "message_end",
         "message": { "role": "assistant", "stopReason": "error", "errorMessage": boundary_error }
     }));
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant" }
+    }));
     pi.says(&json!({ "type": "agent_settled", "aborted": false }));
     let capped = as_status(&host, pid, Status::Error);
     assert_eq!(
@@ -362,6 +366,7 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     );
 
     pi.says(&json!({ "type": "agent_settled", "aborted": false }));
+    pi.says(&json!({ "type": "agent_settled", "aborted": true }));
     assert_eq!(status_in(&file), "error");
     assert_eq!(
         AgentStatus::of_api(&as_status(&host, pid, Status::Error)),
@@ -451,6 +456,9 @@ fn a_file_stands_only_for_the_process_that_wrote_it() {
     let unread = [
         json!({ "cwd": "/w", "status": "idle", "statusSince": 1_000 }),
         json!({ "sessionId": "no status", "cwd": "/w", "statusSince": 1_000 }),
+        json!({ "sessionId": "blank status", "cwd": "/w", "status": "   ", "statusSince": 1_000 }),
+        json!({ "sessionId": "unknown status", "cwd": "/w", "status": "banana", "statusSince": 1_000 }),
+        json!({ "sessionId": "empty start", "cwd": "/w", "status": "stopped", "statusSince": 1_000, "procStart": "" }),
         json!({ "sessionId": "no date", "cwd": "/w", "status": "idle" }),
         json!({ "sessionId": "relative", "cwd": "w", "status": "idle", "statusSince": 1_000 }),
     ];
@@ -526,7 +534,7 @@ fn a_status_that_could_not_be_written_is_written_when_it_next_comes() {
     fs::set_permissions(folder, Permissions::from_mode(0o500)).unwrap();
     pi.event("agent_start");
     fs::set_permissions(folder, Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(status_in(&file), "idle");
+    assert_eq!(status_in(&file), "stopped");
 
     pi.event("agent_start");
     assert_eq!(status_in(&file), "busy");
@@ -536,19 +544,19 @@ fn a_status_that_could_not_be_written_is_written_when_it_next_comes() {
 fn a_turn_goes_on_through_a_reload() {
     let (host, _daemon) = with_pi();
     let mut pi = Pi::start(&host, "rpc");
+    let pid = pi.process.pid();
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
     pi.event("agent_start");
 
     pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
     pi.says(&json!({ "load": "first" }));
     pi.says(&json!({ "type": "session_start", "reason": "reload" }));
-    let file = file_of(&host, pi.process.pid());
+    let file = file_of(&host, pid);
     assert_eq!(status_in(&file), "busy");
 
     pi.event("ui_prompt_start");
     assert_eq!(status_in(&file), "waiting");
 
-    pi.says(&json!({ "idle": false }));
     pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
     pi.says(&json!({ "load": "first" }));
     pi.says(&json!({ "type": "session_start", "reason": "reload" }));
@@ -560,19 +568,48 @@ fn a_turn_goes_on_through_a_reload() {
         "type": "message_end",
         "message": { "role": "assistant", "stopReason": "error", "errorMessage": "rate limited" }
     }));
-    pi.event("agent_settled");
-    assert_eq!(status_in(&file), "error");
+    assert_eq!(status_in(&file), "busy");
 
     pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
     pi.says(&json!({ "load": "first" }));
     pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    assert_eq!(status_in(&file), "busy");
+
+    pi.event("agent_settled");
     assert_eq!(status_in(&file), "error");
+
     pi.event("ui_prompt_start");
     assert_eq!(status_in(&file), "waiting");
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    assert_eq!(status_in(&file), "waiting");
+
     pi.event("ui_prompt_end");
-    let restored = as_status(&host, pi.process.pid(), Status::Error);
+    let restored = as_status(&host, pid, Status::Error);
     assert_eq!(
         AgentStatus::of_api(&restored),
         AgentStatus::Error { message: Said::new("rate limited".to_owned()) }
     );
+
+    pi.event("agent_start");
+    pi.event("agent_settled");
+    assert_eq!(status_in(&file), "done");
+    pi.event("ui_prompt_start");
+    assert_eq!(status_in(&file), "waiting");
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    pi.event("ui_prompt_end");
+    assert_eq!(status_in(&file), "done");
+
+    let mut stale: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    stale["sessionId"] = json!("stale");
+    fs::write(&file, stale.to_string()).unwrap();
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    assert_eq!(status_in(&file), "stopped");
+    let refreshed = as_status(&host, pid, Status::Stopped);
+    assert_eq!(refreshed.session_id.as_deref(), Some("first"));
 }

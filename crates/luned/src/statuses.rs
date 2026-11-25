@@ -3,7 +3,7 @@ use std::time::SystemTime;
 
 use lune_domain::agent::Rung;
 pub use lune_protocol::agent_status::BlockedReason;
-use lune_protocol::program_status::{ChildId, Progress};
+use lune_protocol::program_status::{ChildId, Message, Progress};
 use lune_protocol::said::Said;
 use lune_protocol::PROGRAM_STATUS_RECORDS_MAX;
 
@@ -28,9 +28,9 @@ pub enum ActiveStatus {
     Working,
     Idle,
     Stopped,
-    Done { message: Option<Said> },
-    Blocked { reason: BlockedReason, message: Option<Said> },
-    Error { message: Option<Said> },
+    Done { message: Option<Message> },
+    Blocked { reason: BlockedReason, message: Option<Message> },
+    Error { message: Option<Message> },
     Shell,
     Other(Said),
 }
@@ -364,7 +364,7 @@ mod tests {
 
         let blocked = ActiveStatus::Blocked {
             reason: BlockedReason::Permission,
-            message: Said::new("approve touch".to_owned()),
+            message: Message::parse("message", "approve touch").ok(),
         };
         statuses.record(report(&id, Rung::Osc7501, blocked.clone(), 15));
         assert_eq!(
@@ -412,13 +412,13 @@ mod tests {
         statuses.record(report(
             &id,
             Rung::Osc7501,
-            ActiveStatus::Done { message: Said::new("All done".to_owned()) },
+            ActiveStatus::Done { message: Message::parse("message", "All done").ok() },
             12,
         ));
         assert_eq!(
             statuses.decide(&id),
             Decided::Reported {
-                status: ActiveStatus::Done { message: Said::new("All done".to_owned()) },
+                status: ActiveStatus::Done { message: Message::parse("message", "All done").ok() },
                 since: Some(at(10)),
                 rung: Rung::Osc7501,
                 subagents: Vec::new(),
