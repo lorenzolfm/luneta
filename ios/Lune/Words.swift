@@ -20,7 +20,9 @@ extension Status {
         switch self {
         case .busy: "busy"
         case .idle: "idle"
-        case .waiting(let why): why.words
+        case .done(let message): message ?? "finished"
+        case .waiting(let why, let message): message ?? why.words
+        case .error(let message): message ?? "failed"
         case .shell: "at its shell"
         case .other(let said): said
         case .untold: "says nothing of itself"
@@ -33,6 +35,7 @@ extension Why {
         switch self {
         case .permission: "asks for permission"
         case .input: "waits for your words"
+        case .auth: "needs sign-in"
         case .dialog: "shows a dialog"
         case .other(let said): said
         case .untold: "waits"

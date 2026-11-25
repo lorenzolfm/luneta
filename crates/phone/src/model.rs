@@ -169,7 +169,9 @@ pub struct Placed {
 pub enum Status {
     Busy,
     Idle,
-    Waiting { why: Why },
+    Done { message: Option<String> },
+    Waiting { why: Why, message: Option<String> },
+    Error { message: Option<String> },
     Shell,
     Other { said: String },
     Untold,
@@ -179,6 +181,7 @@ pub enum Status {
 pub enum Why {
     Permission,
     Input,
+    Auth,
     Dialog,
     Other { said: String },
     Untold,
@@ -244,9 +247,13 @@ impl Model {
 fn inbox_place(agent: &Agent) -> (bool, bool, Option<SystemTime>) {
     match agent.status {
         Status::Waiting { .. } => (false, agent.since.is_none(), agent.since),
-        Status::Busy | Status::Idle | Status::Shell | Status::Other { .. } | Status::Untold => {
-            (true, false, None)
-        },
+        Status::Busy
+        | Status::Idle
+        | Status::Done { .. }
+        | Status::Error { .. }
+        | Status::Shell
+        | Status::Other { .. }
+        | Status::Untold => (true, false, None),
     }
 }
 
@@ -390,11 +397,19 @@ fn status_of(agent: &api::Agent) -> Status {
         Some(api::agent::Status::OtherStatus(said)) => return Status::Other { said: said.clone() },
         None => return Status::Untold,
     };
+    let message = agent
+        .status_message
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
     match known {
         Ok(api::Status::Busy) => Status::Busy,
         Ok(api::Status::Idle) => Status::Idle,
+        Ok(api::Status::Done) => Status::Done { message },
+        Ok(api::Status::Error) => Status::Error { message },
         Ok(api::Status::Shell) => Status::Shell,
-        Ok(api::Status::Waiting) => Status::Waiting { why: why_of(agent) },
+        Ok(api::Status::Waiting) => Status::Waiting { why: why_of(agent), message },
         Ok(api::Status::Unspecified) | Err(_) => Status::Untold,
     }
 }
@@ -405,12 +420,18 @@ fn why_of(agent: &api::Agent) -> Why {
             match api::WaitingFor::try_from(*known) {
                 Ok(api::WaitingFor::PermissionPrompt) => Why::Permission,
                 Ok(api::WaitingFor::InputNeeded) => Why::Input,
+                Ok(api::WaitingFor::Auth) => Why::Auth,
                 Ok(api::WaitingFor::DialogOpen) => Why::Dialog,
                 Ok(api::WaitingFor::Unspecified) | Err(_) => Why::Untold,
             }
         },
         Some(api::agent::WaitingFor::OtherWaitingFor(said)) => Why::Other { said: said.clone() },
-        None => Why::Untold,
+        None => match agent.blocked_kind.and_then(|kind| api::BlockedKind::try_from(kind).ok()) {
+            Some(api::BlockedKind::Permission) => Why::Permission,
+            Some(api::BlockedKind::Question) => Why::Input,
+            Some(api::BlockedKind::Auth) => Why::Auth,
+            Some(api::BlockedKind::Other | api::BlockedKind::Unspecified) | None => Why::Untold,
+        },
     }
 }
 
@@ -485,7 +506,7 @@ mod tests {
         let model = Model::of(&host);
         let names: Vec<&str> = model.inbox.iter().map(|agent| agent.name.as_str()).collect();
         assert_eq!(names, ["agent-4", "agent-2", "agent-5", "agent-1", "agent-3"]);
-        assert_eq!(model.inbox[0].status, Status::Waiting { why: Why::Permission });
+        assert_eq!(model.inbox[0].status, Status::Waiting { why: Why::Permission, message: None });
     }
 
     #[test]
@@ -613,5 +634,34 @@ mod tests {
         assert_eq!(far, [("far", &Reached::Reached), ("vps", &unreached), ("mac", &Reached::Reaching)]);
         assert_eq!(model.inbox[0].on.as_deref(), Some("far"));
         assert_eq!(model.here, Held::Untold);
+    }
+
+    #[test]
+    fn done_error_auth_and_status_messages_map_onto_the_phone_model() {
+        let with_msg = |pid, status: api::Status, msg: &str, kind: Option<api::BlockedKind>| {
+            api::Agent {
+                pid,
+                cwd: format!("/w/a-{pid}"),
+                status: Some(api::agent::Status::KnownStatus(status.into())),
+                status_message: Some(msg.to_owned()),
+                blocked_kind: kind.map(Into::into),
+                ..api::Agent::default()
+            }
+        };
+        let host = api::Host {
+            agents: vec![
+                with_msg(1, api::Status::Done, "All tests pass", None),
+                with_msg(2, api::Status::Error, "Token expired", None),
+                with_msg(3, api::Status::Waiting, "Log in", Some(api::BlockedKind::Auth)),
+            ],
+            ..api::Host::default()
+        };
+        let model = Model::of(&host);
+        assert_eq!(
+            model.inbox[0].status,
+            Status::Waiting { why: Why::Auth, message: Some("Log in".to_owned()) }
+        );
+        assert_eq!(model.inbox[1].status, Status::Done { message: Some("All tests pass".to_owned()) });
+        assert_eq!(model.inbox[2].status, Status::Error { message: Some("Token expired".to_owned()) });
     }
 }

@@ -45,7 +45,7 @@ impl From<&Agent> for Doing {
         match &agent.status {
             Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
                 Ok(Status::Busy) => Doing::Busy,
-                Ok(Status::Idle) => Doing::Idle,
+                Ok(Status::Idle | Status::Done | Status::Error) => Doing::Idle,
                 Ok(Status::Waiting) => Doing::Waiting,
                 Ok(Status::Shell) => Doing::Shell,
                 Ok(Status::Unspecified) | Err(_) => Doing::Unknown,

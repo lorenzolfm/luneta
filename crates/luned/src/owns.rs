@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use notify::RecursiveMode;
 
+use crate::core;
 use crate::mux::own::server::{self, Followed, SOCKET};
 use crate::layouts;
 use crate::watch::{self, Troubles};
@@ -17,6 +18,7 @@ const UNREACHED_TRIES: u32 = 50;
 const UNREACHED_PAUSE: Duration = Duration::from_millis(20);
 
 pub fn follow(
+    core: SyncSender<core::Command>,
     layouts: SyncSender<layouts::Command>,
     (wake, woken): (SyncSender<()>, Receiver<()>),
     running: Arc<AtomicBool>,
@@ -50,6 +52,9 @@ pub fn follow(
                     troubles.say(format!("lune-mux's terminals: {why}"));
                 }
                 troubles.done();
+                if core.send(core::Command::MuxTerminals(terminals.terminals.clone())).is_err() {
+                    return false;
+                }
                 layouts.send(layouts::Command::Listed(terminals)).is_ok()
             });
             running.store(false, Ordering::Relaxed);
@@ -81,10 +86,13 @@ pub fn follow(
             if !unreached_now {
                 unreached = 0;
             }
-            if let Some(unlisted) = unlisted
-                && layouts.send(unlisted).is_err()
-            {
-                return;
+            if let Some(unlisted) = unlisted {
+                if core.send(core::Command::MuxTerminals(Vec::new())).is_err() {
+                    return;
+                }
+                if layouts.send(unlisted).is_err() {
+                    return;
+                }
             }
             if unreached_now && listens_soon && unreached < UNREACHED_TRIES {
                 unreached += 1;

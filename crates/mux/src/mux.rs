@@ -116,6 +116,7 @@ struct Terminal {
     title: String,
     cwd: String,
     program: Program,
+    statuses: Vec<api::ProgramStatus>,
     handle: Handle,
 }
 
@@ -285,6 +286,15 @@ impl Mux {
             let found = model.terminal_of_id_mut(terminal).map(|found| &mut found.program);
             if let Some(Program::Runs { foreground: was, ran: said, .. }) = found {
                 (*was, *said) = (foreground, ran);
+            }
+        });
+    }
+
+    pub fn program_statuses(&self, terminal: TerminalId, statuses: Vec<api::ProgramStatus>) {
+        assert!(statuses.len() <= crate::program_status::RECORDS_MAX);
+        self.change(|model| {
+            if let Some(found) = model.terminal_of_id_mut(terminal) {
+                found.statuses = statuses;
             }
         });
     }
@@ -539,6 +549,7 @@ impl Terminal {
             title: self.title.clone(),
             cwd: self.cwd.clone(),
             program: Some(program),
+            statuses: self.statuses.clone(),
         }
     }
 }
@@ -575,6 +586,7 @@ fn spawned(
         title: String::new(),
         cwd: opens.cwd.clone(),
         program: Program::Runs { pid: started.pid, ends: opens.ends, foreground: None, ran: None },
+        statuses: Vec::new(),
         handle: started.handle,
     };
     Ok((terminal, started.placing))

@@ -406,8 +406,9 @@ impl Mark {
         match &agent.status {
             Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
                 Ok(Status::Waiting) => Mark::Waiting,
-                Ok(Status::Idle) => Mark::Idle,
+                Ok(Status::Idle | Status::Done) => Mark::Idle,
                 Ok(Status::Busy) => Mark::Busy,
+                Ok(Status::Error) => Mark::Failed,
                 Ok(Status::Shell) => Mark::Shell,
                 Ok(Status::Unspecified) | Err(_) => Mark::Unreported,
             },
@@ -5027,7 +5028,7 @@ fn label(agent: Option<&Agent>, view: &KnownView) -> String {
 
 fn agent_marked(news: &News, agent: &Agent, key: Key, here: bool) -> (Marked, Option<SystemTime>) {
     let mut marked = Marked::of(agent);
-    let done = marked.since.filter(|_| marked.mark == Mark::Idle);
+    let done = marked.since.filter(|_| agent.is_finished_turn());
     if !here && news.is_new(key, done) {
         marked.mark = Mark::Finished;
     }
@@ -5039,7 +5040,9 @@ fn status_word(agent: &Agent) -> String {
         Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
             Ok(Status::Waiting) => "waiting".to_owned(),
             Ok(Status::Idle) => "idle".to_owned(),
+            Ok(Status::Done) => "done".to_owned(),
             Ok(Status::Busy) => "busy".to_owned(),
+            Ok(Status::Error) => "error".to_owned(),
             Ok(Status::Shell) => "shell".to_owned(),
             Ok(Status::Unspecified) | Err(_) => "unknown".to_owned(),
         },
@@ -5941,6 +5944,7 @@ mod tests {
             terminal: Some(in_named(session, view)),
             waiting_for: None,
             topic: None,
+            ..Agent::default()
         }
     }
 

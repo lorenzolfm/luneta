@@ -7,16 +7,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use lune_domain::agent::Harness;
+use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::agent::{
-    named_pid, terminal_or_trouble, Agent, Name, Source, Status, WaitingFor, FILE_BYTES_MAX,
+    named_pid, terminal_or_trouble, Name, SeenAgent, Source, FILE_BYTES_MAX,
 };
 use crate::mux;
+use crate::statuses::{self, BlockedKind, Report, ReportedAgent, State};
 use crate::watch::{self, Troubles};
 use crate::{log, process, Directory};
 
@@ -134,7 +135,8 @@ struct Snapshot {
     cwd: Directory,
     session_id: Option<Said>,
     name: Option<Name>,
-    status: Status,
+    state: State,
+    kind: Option<BlockedKind>,
     modified: SystemTime,
 }
 
@@ -142,7 +144,7 @@ struct Snapshot {
 struct Process {
     started: SystemTime,
     terminal: Option<TerminalKey>,
-    agent: Agent,
+    reported: ReportedAgent,
     torn_since: Option<Instant>,
 }
 
@@ -226,7 +228,7 @@ impl AgentFiles {
         }
     }
 
-    pub fn scan(&mut self) -> Vec<Agent> {
+    pub fn scan(&mut self) -> Vec<ReportedAgent> {
         self.ensure_installed();
         let mut paths = match watch::listed(&self.dir) {
             Ok(paths) => paths,
@@ -271,21 +273,15 @@ impl AgentFiles {
             };
             match read(&path, id.start.as_str(), started) {
                 Ok(Some(snapshot)) => {
-                    let status_since = match cached.as_ref() {
-                        Some(was) if was.agent.status == snapshot.status => {
-                            was.agent.status_since.unwrap_or(snapshot.modified)
-                        },
-                        Some(_) | None => snapshot.modified,
-                    };
                     let terminal = cached.map_or_else(
                         || terminal_or_trouble(pid, mux::terminal_of(&id), &mut self.troubles),
                         |it| it.terminal,
                     );
-                    let built = agent(pid, snapshot, started, status_since, terminal);
+                    let built = reported(id.clone(), snapshot, started, terminal);
                     let found = Process {
                         started,
                         terminal,
-                        agent: built.clone(),
+                        reported: built.clone(),
                         torn_since: None,
                     };
                     processes.insert(id, found);
@@ -301,7 +297,7 @@ impl AgentFiles {
                     if let Some(mut was) = cached {
                         let since = *was.torn_since.get_or_insert_with(Instant::now);
                         if since.elapsed() < TORN {
-                            agents.push(was.agent.clone());
+                            agents.push(was.reported.clone());
                             processes.insert(id, was);
                             continue;
                         }
@@ -341,43 +337,50 @@ impl Payload {
     }
 }
 
-fn status_of(state: &Payload) -> Status {
+fn state_of(state: &Payload) -> (State, Option<BlockedKind>) {
     if state.tool_confirmation_pending == Some(true) {
-        return Status::Waiting(Some(WaitingFor::PermissionPrompt));
+        return (State::Blocked, Some(BlockedKind::Permission));
     }
     let Some(word) = state.agent_state.as_deref().map(str::trim).filter(|word| !word.is_empty())
     else {
-        return Status::Unreported;
+        return (State::Unreported, None);
     };
     match word.to_ascii_lowercase().as_str() {
-        "idle" => Status::Idle,
-        "working" | "tool_use" | "initializing" => Status::Busy,
-        "reviewing" => Status::Waiting(Some(WaitingFor::InputNeeded)),
-        "authenticating" => Status::Waiting(Some(WaitingFor::DialogOpen)),
-        _ => Status::of(Some(word), None),
+        "idle" => (State::Idle, None),
+        "working" | "tool_use" | "initializing" => (State::Working, None),
+        "reviewing" => (State::Blocked, Some(BlockedKind::Question)),
+        "authenticating" => (State::Blocked, Some(BlockedKind::Auth)),
+        _ => statuses::parse_word(Some(word), None),
     }
 }
 
-fn agent(
-    pid: u32,
+fn reported(
+    id: process::Id,
     snapshot: Snapshot,
     started: SystemTime,
-    status_since: SystemTime,
     terminal: Option<TerminalKey>,
-) -> Agent {
-    assert!(pid > 1);
-    Agent {
-        pid,
+) -> ReportedAgent {
+    assert!(id.pid > 1);
+    let report = Report {
+        agent: id.clone(),
+        rung: Rung::Hook,
+        state: snapshot.state,
+        kind: snapshot.kind,
+        message: None,
+        at: Some(snapshot.modified),
+        subagents: Vec::new(),
+    };
+    let seen = SeenAgent {
+        id,
         harness: Harness::Antigravity,
         session_id: snapshot.session_id,
         cwd: snapshot.cwd,
-        status: snapshot.status,
-        status_since: Some(status_since),
         started_at: Some(started),
         name: snapshot.name,
         entrypoint: Some(Said::new("tui".to_owned()).expect("tui is not empty")),
         terminal,
-    }
+    };
+    ReportedAgent { seen, report }
 }
 
 fn temp_file_pid(path: &Path) -> Option<u32> {
@@ -426,11 +429,13 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
     let Some(cwd) = envelope.state.cwd() else {
         return Err(io::Error::new(ErrorKind::InvalidData, "cwd is missing or relative"));
     };
+    let (state, kind) = state_of(&envelope.state);
     Ok(Some(Snapshot {
         cwd,
         session_id: envelope.state.session_id(),
         name: envelope.state.name(),
-        status: status_of(&envelope.state),
+        state,
+        kind,
         modified,
     }))
 }
@@ -867,27 +872,24 @@ mod tests {
             agent_state: agent_state.map(str::to_owned),
             tool_confirmation_pending: pending,
         };
-        assert_eq!(status_of(&state(Some("idle"), None)), Status::Idle);
-        assert_eq!(status_of(&state(Some("working"), None)), Status::Busy);
-        assert_eq!(status_of(&state(Some("tool_use"), None)), Status::Busy);
-        assert_eq!(status_of(&state(Some("initializing"), None)), Status::Busy);
+        assert_eq!(state_of(&state(Some("idle"), None)), (State::Idle, None));
+        assert_eq!(state_of(&state(Some("working"), None)), (State::Working, None));
+        assert_eq!(state_of(&state(Some("tool_use"), None)), (State::Working, None));
+        assert_eq!(state_of(&state(Some("initializing"), None)), (State::Working, None));
         assert_eq!(
-            status_of(&state(Some("working"), Some(true))),
-            Status::Waiting(Some(WaitingFor::PermissionPrompt))
+            state_of(&state(Some("working"), Some(true))),
+            (State::Blocked, Some(BlockedKind::Permission))
         );
         assert_eq!(
-            status_of(&state(Some("reviewing"), None)),
-            Status::Waiting(Some(WaitingFor::InputNeeded))
+            state_of(&state(Some("reviewing"), None)),
+            (State::Blocked, Some(BlockedKind::Question))
         );
         assert_eq!(
-            status_of(&state(Some("authenticating"), None)),
-            Status::Waiting(Some(WaitingFor::DialogOpen))
+            state_of(&state(Some("authenticating"), None)),
+            (State::Blocked, Some(BlockedKind::Auth))
         );
-        assert_eq!(
-            status_of(&state(Some("error"), None)),
-            Status::Other(Said::new("error".to_owned()).unwrap())
-        );
-        assert_eq!(status_of(&state(None, None)), Status::Unreported);
+        assert_eq!(state_of(&state(Some("error"), None)), (State::Error, None));
+        assert_eq!(state_of(&state(None, None)), (State::Unreported, None));
     }
 
     fn chain_of(script_path: &Path) -> Option<String> {
@@ -1151,8 +1153,8 @@ mod tests {
 
         let first = files.scan();
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].session_id, None);
-        assert_eq!(first[0].status, Status::Idle);
+        assert_eq!(first[0].seen.session_id, None);
+        assert_eq!(first[0].report.state, State::Idle);
 
         fs::write(&state_file, "{truncated").unwrap();
         let during_torn = files.scan();

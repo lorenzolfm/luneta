@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
 use std::time::SystemTime;
 
+use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{Dir, Holds, Name, Project, Projects, Seen, Stage, Subfolder};
 use lune_domain::projects::{Listed, ViewId, Worktree, WorktreeId};
@@ -14,17 +15,20 @@ use lune_protocol::said::Said;
 use lune_protocol::shell::Doing;
 use tokio::sync::oneshot;
 
-use crate::agent::{Agent, Unread};
+use crate::agent::{Agent, SeenAgent, Unread};
 use crate::api;
 use crate::claude::Scan;
 use crate::git;
 use crate::github::Found;
-use crate::mux::own::server::{self, Is};
+use crate::mux::own::server::{self, Is, ProgramStatus, ProgramStatusKind, ProgramStatusState};
 use crate::titles::{self, Titled};
 use crate::projects::Revision;
 use crate::remote::{Destination, Line, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
+use crate::statuses::{BlockedKind, Report, ReportedAgent, State, Statuses, SubagentReport};
 use crate::transcripts::SessionId;
+use crate::watch::Troubles;
+use crate::{process, Directory};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shown {
@@ -53,8 +57,9 @@ pub enum Listing {
 
 pub enum Command {
     Agents(Scan),
-    PiAgents(Vec<Agent>),
-    AgyAgents(Vec<Agent>),
+    PiAgents(Vec<ReportedAgent>),
+    AgyAgents(Vec<ReportedAgent>),
+    MuxTerminals(Vec<server::Terminal>),
     Terminals(BTreeMap<ViewId, Located>),
     GitStatus {
         dir: String,
@@ -139,10 +144,21 @@ impl Remote {
     }
 }
 
+struct CachedProcess {
+    id: process::Id,
+    started_at: Option<SystemTime>,
+    cwd: Option<Directory>,
+}
+
 struct Known {
     found: Scan,
-    pi: Vec<Agent>,
-    agy: Vec<Agent>,
+    pi: Vec<ReportedAgent>,
+    agy: Vec<ReportedAgent>,
+    mux_terminals: BTreeMap<TerminalKey, server::Terminal>,
+    osc_agents: Vec<SeenAgent>,
+    osc_processes: HashMap<(TerminalKey, u32), CachedProcess>,
+    osc_troubles: Troubles,
+    agent_statuses: Statuses,
     terminals: BTreeMap<ViewId, Located>,
     statuses: BTreeMap<String, GitStatus>,
     pull_requests: BTreeMap<String, Found>,
@@ -164,6 +180,11 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         found: Scan { agents: Vec::new(), unread: Vec::new() },
         pi: Vec::new(),
         agy: Vec::new(),
+        mux_terminals: BTreeMap::new(),
+        osc_agents: Vec::new(),
+        osc_processes: HashMap::new(),
+        osc_troubles: Troubles::default(),
+        agent_statuses: Statuses::default(),
         terminals: BTreeMap::new(),
         statuses: BTreeMap::new(),
         pull_requests: BTreeMap::new(),
@@ -183,19 +204,35 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
     for command in commands {
         match command {
             Command::Agents(now) => {
-                let pids: HashSet<u32> = now.agents.iter().map(|agent| agent.pid).collect();
+                let pids: HashSet<u32> = now.agents.iter().map(|agent| agent.seen.id.pid).collect();
                 assert_eq!(pids.len(), now.agents.len(), "an agent's pid comes twice");
+                let reports = now.agents.iter().map(|agent| agent.report.clone()).collect();
                 known.found = now;
+                known.agent_statuses.replace_rung(Rung::Feed, reports);
+                known.reconcile_osc_statuses();
             },
             Command::PiAgents(now) => {
-                let pids: HashSet<u32> = now.iter().map(|agent| agent.pid).collect();
+                let pids: HashSet<u32> = now.iter().map(|agent| agent.seen.id.pid).collect();
                 assert_eq!(pids.len(), now.len(), "an agent's pid comes twice");
+                let reports = now.iter().map(|agent| agent.report.clone()).collect();
                 known.pi = now;
+                known.agent_statuses.replace_rung(Rung::Extension, reports);
+                known.reconcile_osc_statuses();
             },
             Command::AgyAgents(now) => {
-                let pids: HashSet<u32> = now.iter().map(|agent| agent.pid).collect();
+                let pids: HashSet<u32> = now.iter().map(|agent| agent.seen.id.pid).collect();
                 assert_eq!(pids.len(), now.len(), "an agent's pid comes twice");
+                let reports = now.iter().map(|agent| agent.report.clone()).collect();
                 known.agy = now;
+                known.agent_statuses.replace_rung(Rung::Hook, reports);
+                known.reconcile_osc_statuses();
+            },
+            Command::MuxTerminals(now) => {
+                let count = now.len();
+                known.mux_terminals =
+                    now.into_iter().map(|terminal| (terminal.key, terminal)).collect();
+                assert_eq!(known.mux_terminals.len(), count, "a mux terminal's key comes twice");
+                known.reconcile_osc_statuses();
             },
             Command::Terminals(now) => {
                 let before = known.dirs();
@@ -278,12 +315,16 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 continue;
             },
             Command::Claudes(answer) => {
-                let _ = answer.send(known.found.agents.clone());
+                let claudes = known
+                    .all_agents()
+                    .into_iter()
+                    .filter(|agent| agent.harness == Harness::ClaudeCode)
+                    .collect();
+                let _ = answer.send(claudes);
                 continue;
             },
             Command::AllAgents(answer) => {
-                let all = known.found.agents.iter().chain(&known.pi).chain(&known.agy);
-                let _ = answer.send(all.cloned().collect());
+                let _ = answer.send(known.all_agents());
                 continue;
             },
             Command::List(answer) => {
@@ -385,14 +426,131 @@ impl Known {
         self.statuses.iter().filter_map(tracking).collect()
     }
 
+    fn reconcile_osc_statuses(&mut self) {
+        let mut by_terminal: HashMap<(TerminalKey, Harness), process::Id> = HashMap::new();
+        let mut known_pids: HashSet<u32> = HashSet::new();
+        for reported in self.found.agents.iter().chain(&self.pi).chain(&self.agy) {
+            known_pids.insert(reported.seen.id.pid);
+            if let Some(terminal) = reported.seen.terminal {
+                by_terminal
+                    .entry((terminal, reported.seen.harness))
+                    .or_insert_with(|| reported.seen.id.clone());
+            }
+        }
+        let mut osc_reports = Vec::new();
+        let mut osc_agents = Vec::new();
+        let mut active_processes = HashSet::new();
+        for terminal in self.mux_terminals.values() {
+            assert!(terminal.statuses.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
+            assert!(
+                terminal.statuses.iter().filter(|status| status.id.is_empty()).count() <= 1,
+                "a terminal reports at most one root program status"
+            );
+            let Is::Running { root, front, doing } = &terminal.is else {
+                continue;
+            };
+            let Some(root_record) = terminal.statuses.iter().find(|status| status.id.is_empty())
+            else {
+                continue;
+            };
+            let Some(harness) = Harness::from_osc_7501_app(&root_record.app) else {
+                continue;
+            };
+            let subagents: Vec<SubagentReport> = terminal
+                .statuses
+                .iter()
+                .filter(|status| !status.id.is_empty() && status.app == root_record.app)
+                .map(subagent_report)
+                .collect();
+            if let Some(matched) = by_terminal.get(&(terminal.key, harness)) {
+                let in_foreground = front
+                    .as_ref()
+                    .is_none_or(|front| front.pid != *root || matched.pid == *root);
+                if in_foreground {
+                    osc_reports.push(osc_report(matched.clone(), root_record, subagents));
+                }
+                continue;
+            }
+            if matches!(doing, Some(Doing::Ready | Doing::Ended { .. })) {
+                continue;
+            }
+            let pid = front.as_ref().map_or(*root, |front| front.pid);
+            if pid <= 1 {
+                continue;
+            }
+            if !known_pids.insert(pid) {
+                continue;
+            }
+            let Some((id, started_at, cwd)) = resolve_osc_process(
+                &mut self.osc_processes,
+                &mut self.osc_troubles,
+                terminal,
+                pid,
+            ) else {
+                continue;
+            };
+            active_processes.insert((terminal.key, pid));
+            let entrypoint =
+                harness.to_api().prompt_word().and_then(|word| Said::new(word.to_owned()));
+            osc_agents.push(SeenAgent {
+                id: id.clone(),
+                harness,
+                session_id: None,
+                cwd,
+                started_at,
+                name: None,
+                entrypoint,
+                terminal: Some(terminal.key),
+            });
+            osc_reports.push(osc_report(id, root_record, subagents));
+        }
+        self.osc_processes.retain(|key, _| active_processes.contains(key));
+        self.osc_troubles.done();
+        assert!(osc_agents.len() <= self.mux_terminals.len());
+        assert!(osc_reports.len() <= self.mux_terminals.len());
+        assert!(self.osc_processes.len() <= self.mux_terminals.len());
+        self.osc_agents = osc_agents;
+        self.agent_statuses.replace_rung(Rung::Osc7501, osc_reports);
+        let live: HashSet<process::Id> = self
+            .found
+            .agents
+            .iter()
+            .chain(&self.pi)
+            .chain(&self.agy)
+            .map(|reported| reported.seen.id.clone())
+            .chain(self.osc_agents.iter().map(|seen| seen.id.clone()))
+            .collect();
+        self.agent_statuses.retain_live(&live);
+    }
+
+    fn all_agents(&self) -> Vec<Agent> {
+        self.found
+            .agents
+            .iter()
+            .chain(&self.pi)
+            .chain(&self.agy)
+            .map(|reported| &reported.seen)
+            .chain(&self.osc_agents)
+            .map(|seen| self.agent_statuses.apply(seen))
+            .collect()
+    }
+
     fn agents(&self) -> Vec<api::Agent> {
-        let claude = self.found.agents.iter().map(|agent| {
-            let topic =
-                agent.session_id.as_ref().and_then(|id| self.topics.get(id.as_str())).cloned();
-            agent.to_api(topic)
-        });
-        let others = self.pi.iter().chain(&self.agy).map(|agent| agent.to_api(None));
-        claude.chain(others).collect()
+        self.all_agents()
+            .into_iter()
+            .map(|agent| {
+                let topic = (agent.harness == Harness::ClaudeCode)
+                    .then(|| {
+                        agent
+                            .session_id
+                            .as_ref()
+                            .and_then(|id| self.topics.get(id.as_str()))
+                            .cloned()
+                    })
+                    .flatten();
+                agent.to_api(topic)
+            })
+            .collect()
     }
 
     fn unread(&self) -> (u32, Vec<api::UnreadFile>) {
@@ -596,9 +754,209 @@ impl Known {
     }
 }
 
+fn osc_state(state: ProgramStatusState) -> State {
+    match state {
+        ProgramStatusState::Idle => State::Idle,
+        ProgramStatusState::Working => State::Working,
+        ProgramStatusState::Done => State::Done,
+        ProgramStatusState::Blocked => State::Blocked,
+        ProgramStatusState::Error => State::Error,
+    }
+}
+
+fn osc_kind(kind: ProgramStatusKind) -> Option<BlockedKind> {
+    match kind {
+        ProgramStatusKind::None => None,
+        ProgramStatusKind::Permission => Some(BlockedKind::Permission),
+        ProgramStatusKind::Question => Some(BlockedKind::Question),
+        ProgramStatusKind::Auth => Some(BlockedKind::Auth),
+    }
+}
+
+fn osc_report(
+    agent: process::Id,
+    status: &ProgramStatus,
+    subagents: Vec<SubagentReport>,
+) -> Report {
+    assert!(agent.pid > 1);
+    let state = osc_state(status.state);
+    let kind = if matches!(state, State::Blocked) { osc_kind(status.kind) } else { None };
+    Report {
+        agent,
+        rung: Rung::Osc7501,
+        state,
+        kind,
+        message: Said::new(status.message.trim().to_owned()),
+        at: status.at,
+        subagents,
+    }
+}
+
+fn subagent_report(status: &ProgramStatus) -> SubagentReport {
+    assert_ne!(status.id, "");
+    let state = osc_state(status.state);
+    let kind = if matches!(state, State::Blocked) { osc_kind(status.kind) } else { None };
+    SubagentReport {
+        id: status.id.clone(),
+        state,
+        kind,
+        title: Said::new(status.title.trim().to_owned()),
+        message: Said::new(status.message.trim().to_owned()),
+        progress: status.progress,
+        at: status.at,
+    }
+}
+
+fn resolve_osc_process(
+    cache: &mut HashMap<(TerminalKey, u32), CachedProcess>,
+    troubles: &mut Troubles,
+    terminal: &server::Terminal,
+    pid: u32,
+) -> Option<(process::Id, Option<SystemTime>, Directory)> {
+    assert!(pid > 1);
+    let parsed_cwd = Directory::parse(terminal.cwd.clone()).ok();
+    if let Some(cached) = cache.get(&(terminal.key, pid)) {
+        let cwd = parsed_cwd.or_else(|| cached.cwd.clone())?;
+        return Some((cached.id.clone(), cached.started_at, cwd));
+    }
+    let start = process::start(pid)?;
+    let id = process::Id { pid, start };
+    let started_at = process::started(pid);
+    let process_cwd = if parsed_cwd.is_some() {
+        None
+    } else {
+        process_cwd_or_trouble(pid, troubles)
+    };
+    let cwd = parsed_cwd.or_else(|| process_cwd.clone())?;
+    cache.insert(
+        (terminal.key, pid),
+        CachedProcess { id: id.clone(), started_at, cwd: process_cwd },
+    );
+    Some((id, started_at, cwd))
+}
+
+fn process_cwd_or_trouble(pid: u32, troubles: &mut Troubles) -> Option<Directory> {
+    assert!(pid > 1);
+    match process::cwd(pid) {
+        Ok(path) => Directory::parse(path.to_str()?.to_owned()).ok(),
+        Err(process::Unread::Gone) => None,
+        Err(process::Unread::Failed(why)) => {
+            troubles.say(format!("agent {pid}'s cwd is unread: {why}"));
+            None
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use lune_domain::mux::OwnMade;
+
     use super::*;
+
+    fn key(id: u32) -> TerminalKey {
+        TerminalKey { id: NonZeroU32::new(id).unwrap(), made: OwnMade::from_nanos(10) }
+    }
+
+    #[test]
+    fn osc_7501_overrides_lower_rung_and_yields_when_agent_leaves_foreground() {
+        let wake = || mpsc::sync_channel(1).0;
+        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let pid = std::process::id();
+        let start_id = process::start(pid).unwrap();
+        let id = process::Id { pid, start: start_id };
+        let terminal = key(7);
+        let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
+
+        let seen = SeenAgent {
+            id: id.clone(),
+            harness: Harness::ClaudeCode,
+            session_id: Said::new("s1".to_owned()),
+            cwd: Directory::parse("/w".to_owned()).unwrap(),
+            started_at: Some(at(1)),
+            name: None,
+            entrypoint: Said::new("cli".to_owned()),
+            terminal: Some(terminal),
+        };
+        let feed = Report {
+            agent: id,
+            rung: Rung::Feed,
+            state: State::Working,
+            kind: None,
+            message: None,
+            at: Some(at(10)),
+            subagents: Vec::new(),
+        };
+        core.send(Command::Agents(Scan {
+            agents: vec![ReportedAgent { seen, report: feed }],
+            unread: Vec::new(),
+        }))
+        .unwrap();
+
+        let listed = || ask(&core, Command::List).unwrap().agents;
+        let initial = listed();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].status, Some(api::agent::Status::KnownStatus(api::Status::Busy.into())));
+        assert_eq!(initial[0].status_rung, Some(api::StatusRung::Feed.into()));
+
+        let root_status = ProgramStatus {
+            id: String::new(),
+            state: ProgramStatusState::Blocked,
+            kind: ProgramStatusKind::Permission,
+            progress: None,
+            app: "claude-code".to_owned(),
+            title: String::new(),
+            message: "approve touch".to_owned(),
+            at: Some(at(20)),
+        };
+        let child_status = ProgramStatus {
+            id: "sub-1".to_owned(),
+            state: ProgramStatusState::Working,
+            kind: ProgramStatusKind::None,
+            progress: Some(50),
+            app: "claude-code".to_owned(),
+            title: "Explore".to_owned(),
+            message: String::new(),
+            at: Some(at(21)),
+        };
+        let mux_terminal = |front_pid| server::Terminal {
+            key: terminal,
+            tag: Vec::new(),
+            size: None,
+            cwd: "/w".to_owned(),
+            title: String::new(),
+            is: Is::Running {
+                root: 100,
+                front: Some(server::Foreground { pid: front_pid, argv: vec!["claude".to_owned()] }),
+                doing: None,
+            },
+            statuses: vec![root_status.clone(), child_status.clone()],
+        };
+
+        core.send(Command::MuxTerminals(vec![mux_terminal(pid)])).unwrap();
+        let after = listed();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].status, Some(api::agent::Status::KnownStatus(api::Status::Waiting.into())));
+        assert_eq!(after[0].status_rung, Some(api::StatusRung::Osc7501.into()));
+        assert_eq!(after[0].blocked_kind, Some(api::BlockedKind::Permission.into()));
+        assert_eq!(after[0].status_message.as_deref(), Some("approve touch"));
+        assert_eq!(after[0].subagents.len(), 1);
+        assert_eq!(after[0].subagents[0].id, "sub-1");
+        assert_eq!(after[0].subagents[0].title.as_deref(), Some("Explore"));
+        assert_eq!(after[0].subagents[0].progress, Some(50));
+
+        core.send(Command::MuxTerminals(vec![mux_terminal(100)])).unwrap();
+        let fallback = listed();
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(
+            fallback[0].status,
+            Some(api::agent::Status::KnownStatus(api::Status::Busy.into()))
+        );
+        assert_eq!(fallback[0].status_rung, Some(api::StatusRung::Feed.into()));
+        assert_eq!(fallback[0].subagents, []);
+    }
 
     #[test]
     fn a_line_naming_this_machine_takes_no_word_of_a_watch_until_it_names_another() {

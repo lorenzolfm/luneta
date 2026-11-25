@@ -1,6 +1,39 @@
 use lune_protocol::v1 as api;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Rung {
+    Osc7501 = 1,
+    Feed = 2,
+    Extension = 3,
+    Hook = 4,
+    Transcript = 5,
+    Screen = 6,
+}
+
+impl Rung {
+    pub const ALL: [Rung; 6] = [
+        Rung::Osc7501,
+        Rung::Feed,
+        Rung::Extension,
+        Rung::Hook,
+        Rung::Transcript,
+        Rung::Screen,
+    ];
+
+    #[must_use]
+    pub const fn to_api(self) -> api::StatusRung {
+        match self {
+            Rung::Osc7501 => api::StatusRung::Osc7501,
+            Rung::Feed => api::StatusRung::Feed,
+            Rung::Extension => api::StatusRung::Extension,
+            Rung::Hook => api::StatusRung::Hook,
+            Rung::Transcript => api::StatusRung::Transcript,
+            Rung::Screen => api::StatusRung::Screen,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Harness {
     ClaudeCode,
     Pi,
@@ -8,6 +41,8 @@ pub enum Harness {
 }
 
 impl Harness {
+    pub const ALL: [Harness; 3] = [Harness::ClaudeCode, Harness::Pi, Harness::Antigravity];
+
     pub fn said(said: Option<i32>) -> Result<Harness, String> {
         match said.map(api::Harness::try_from) {
             None | Some(Ok(api::Harness::ClaudeCode)) => Ok(Harness::ClaudeCode),
@@ -43,6 +78,20 @@ impl Harness {
             Harness::ClaudeCode | Harness::Antigravity => "--resume",
             Harness::Pi => "--session",
         }
+    }
+
+    #[must_use]
+    pub const fn osc_7501_app(self) -> Option<&'static str> {
+        match self {
+            Harness::ClaudeCode => Some("claude-code"),
+            Harness::Pi => Some("pi"),
+            Harness::Antigravity => Some("antigravity"),
+        }
+    }
+
+    #[must_use]
+    pub fn from_osc_7501_app(app: &str) -> Option<Harness> {
+        Harness::ALL.into_iter().find(|harness| harness.osc_7501_app() == Some(app))
     }
 }
 

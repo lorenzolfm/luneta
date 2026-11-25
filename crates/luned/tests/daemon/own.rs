@@ -298,6 +298,103 @@ impl Drop for Owned {
 }
 
 #[test]
+fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
+    use luned::api::agent::Status as Reported;
+    use luned::api::{BlockedKind, Harness, Status as ApiStatus, StatusRung};
+
+    let owned = Owned::new();
+    let program = built_server();
+    let mut mux = owned.host.vars().command(program.to_str().unwrap());
+    mux.arg(owned.host.folder()).env("TERM_PROGRAM", "ghostty");
+    let _mux = Running::spawn(mux.stdin(Stdio::null()));
+    let socket = owned.socket();
+    eventually("the server listens", || socket.exists().then_some(()));
+
+    let dir = tempfile::tempdir().unwrap();
+    let step1 = dir.path().join("step1");
+    let step2 = dir.path().join("step2");
+    let step3 = dir.path().join("step3");
+    let step4 = dir.path().join("step4");
+    let term_program = dir.path().join("term_program");
+    let script_path = dir.path().join("agent.sh");
+    let body = format!(
+        "printf '%s' \"${{TERM_PROGRAM-unset}}\" > '{}'\n\
+         printf '\\033]7501;state=working:app=claude-code\\007'\n\
+         while [ ! -f '{}' ]; do :; done\n\
+         printf '\\033]7501;state=blocked:kind=permission:app=claude-code:msg=YXBwcm92ZSB0b3VjaA==\\007'\n\
+         printf '\\033]7501;state=working:id=sub-1:title=RXhwbG9yZQ==:progress=50\\007'\n\
+         while [ ! -f '{}' ]; do :; done\n\
+         printf '\\033]7501;state=done:app=claude-code:msg=QWxsIGRvbmU=\\007'\n\
+         while [ ! -f '{}' ]; do :; done\n\
+         printf '\\033]7501;state=clear\\007'\n\
+         while [ ! -f '{}' ]; do :; done\n",
+        term_program.display(),
+        step1.display(),
+        step2.display(),
+        step3.display(),
+        step4.display(),
+    );
+    script(&script_path, &body);
+    let _key = owned.new_terminal_running(b"osc", vec![script_path.to_str().unwrap().to_owned()]);
+
+    eventually("TERM_PROGRAM is unset inside lune-mux", || {
+        (fs::read_to_string(&term_program).ok().as_deref() == Some("unset")).then_some(())
+    });
+
+    let working = eventually("luned sees the OSC 7501 working agent", || {
+        owned.host.host().agents.into_iter().find(|agent| {
+            agent.runs_in() == Harness::ClaudeCode
+                && agent.status == Some(Reported::KnownStatus(ApiStatus::Busy.into()))
+                && agent.status_rung == Some(StatusRung::Osc7501.into())
+        })
+    });
+    let pid = working.pid;
+
+    let sessions = owned.host.home.path().join(".claude/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = crate::agents::file_of_pid("osc-session", pid, "busy");
+    fs::write(sessions.join(format!("{pid}.json")), file.to_string()).unwrap();
+    fs::write(&step1, "").unwrap();
+
+    let blocked = eventually("rung 1 blocked overrides rung 2 busy and carries subagents", || {
+        owned.host.host().agents.into_iter().find(|agent| {
+            agent.pid == pid
+                && agent.session_id.as_deref() == Some("osc-session")
+                && agent.status == Some(Reported::KnownStatus(ApiStatus::Waiting.into()))
+                && agent.status_rung == Some(StatusRung::Osc7501.into())
+        })
+    });
+    assert_eq!(blocked.blocked_kind, Some(BlockedKind::Permission.into()));
+    assert_eq!(blocked.status_message.as_deref(), Some("approve touch"));
+    assert_eq!(blocked.subagents.len(), 1);
+    assert_eq!(blocked.subagents[0].id, "sub-1");
+    assert_eq!(blocked.subagents[0].title.as_deref(), Some("Explore"));
+    assert_eq!(blocked.subagents[0].progress, Some(50));
+
+    fs::write(&step2, "").unwrap();
+    let done = eventually("rung 1 done with summary arrives", || {
+        owned.host.host().agents.into_iter().find(|agent| {
+            agent.pid == pid
+                && agent.status == Some(Reported::KnownStatus(ApiStatus::Done.into()))
+                && agent.status_rung == Some(StatusRung::Osc7501.into())
+        })
+    });
+    assert_eq!(done.status_message.as_deref(), Some("All done"));
+
+    fs::write(&step3, "").unwrap();
+    let fallback = eventually("clearing rung 1 falls back to rung 2 busy", || {
+        owned.host.host().agents.into_iter().find(|agent| {
+            agent.pid == pid
+                && agent.status == Some(Reported::KnownStatus(ApiStatus::Busy.into()))
+                && agent.status_rung == Some(StatusRung::Feed.into())
+        })
+    });
+    assert_eq!(fallback.status_message, None);
+    assert_eq!(fallback.subagents, []);
+    fs::write(&step4, "").unwrap();
+}
+
+#[test]
 fn the_server_listens_and_gives_way_as_the_daemon_has_it() {
     let host = Host::new();
     let program = built_server();

@@ -6,16 +6,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use lune_domain::agent::Harness;
+use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Name, Source,
-    Status, Unread,
+    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Name, SeenAgent,
+    Source, Unread,
 };
 use crate::mux;
+use crate::statuses::{self, Report, ReportedAgent};
 use crate::{log, process, program};
 use crate::watch::{self, Troubles};
 use crate::Directory;
@@ -79,7 +80,7 @@ enum Seen {
 }
 
 pub struct Scan {
-    pub agents: Vec<Agent>,
+    pub agents: Vec<ReportedAgent>,
     pub unread: Vec<Unread>,
 }
 
@@ -87,7 +88,7 @@ impl Scan {
     #[must_use]
     pub fn pids(&self) -> Vec<u32> {
         let Scan { agents, unread } = self;
-        let agents = agents.iter().map(|agent| agent.pid);
+        let agents = agents.iter().map(|agent| agent.seen.id.pid);
         agents.chain(unread.iter().map(|unread| unread.pid)).collect()
     }
 }
@@ -175,9 +176,10 @@ impl SessionFiles {
             let Some(start) = process::start(pid).filter(|start| start.as_str() == spelled) else {
                 continue;
             };
-            let read = terminal_of(process::Id { pid, start });
+            let id = process::Id { pid, start };
+            let read = terminal_of(id.clone());
             let terminal = terminal_or_trouble(pid, read, &mut self.troubles);
-            agents.push(agent(pid, file, terminal));
+            agents.push(reported(id, file, terminal));
         }
         self.terminals = terminals;
         assert!(agents.len() + unread.len() <= self.seen.len());
@@ -206,22 +208,32 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
     }
 }
 
-fn agent(pid: u32, file: &File, terminal: Option<TerminalKey>) -> Agent {
+fn reported(id: process::Id, file: &File, terminal: Option<TerminalKey>) -> ReportedAgent {
+    assert!(id.pid > 1);
     let word = |text: &Option<String>| Said::new(text.as_deref()?.trim().to_owned());
     let name = file.name.clone().and_then(Said::new);
     let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
-    Agent {
-        pid,
+    let (state, kind) = statuses::parse_word(file.status.as_deref(), file.waiting_for.as_deref());
+    let report = Report {
+        agent: id.clone(),
+        rung: Rung::Feed,
+        state,
+        kind,
+        message: None,
+        at: file.status_updated_at.map(moment),
+        subagents: Vec::new(),
+    };
+    let seen = SeenAgent {
+        id,
         harness: Harness::ClaudeCode,
         session_id: Some(file.session_id.clone()),
         cwd: file.cwd.clone(),
-        status: Status::of(file.status.as_deref(), file.waiting_for.as_deref()),
-        status_since: file.status_updated_at.map(moment),
         started_at: file.started_at.map(moment),
         name: name.map(|text| Name { text, source }),
         entrypoint: word(&file.entrypoint),
         terminal,
-    }
+    };
+    ReportedAgent { seen, report }
 }
 
 #[cfg(test)]

@@ -2038,14 +2038,14 @@ mod tests {
     use lune_protocol::shell::Front;
 
     use super::*;
-    use crate::agent::Status;
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
+    use crate::statuses::Status;
 
     fn listed(is: Is) -> server::Terminal {
         let key = TerminalKey { id: 1.try_into().unwrap(), made: OwnMade::from_nanos(5) };
         let (tag, cwd, title) = (Vec::new(), "/w".to_owned(), String::new());
-        server::Terminal { key, tag, size: None, cwd, title, is }
+        server::Terminal { key, tag, size: None, cwd, title, is, statuses: Vec::new() }
     }
 
     fn running(front: Option<(u32, &[&str])>, doing: Option<Doing>) -> server::Terminal {
@@ -2069,6 +2069,8 @@ mod tests {
             cwd: Directory::parse("/w".to_owned()).unwrap(),
             status: Status::Idle,
             status_since: None,
+            status_rung: None,
+            subagents: Vec::new(),
             started_at: Some(SystemTime::UNIX_EPOCH),
             name: None,
             entrypoint: None,

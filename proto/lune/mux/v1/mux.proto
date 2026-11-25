@@ -154,6 +154,34 @@ message Terminal {
     Running runs = 6;
     Exit ended = 7;
   }
+  repeated ProgramStatus statuses = 8;
+}
+
+message ProgramStatus {
+  string id = 1;
+  ProgramStatusState state = 2;
+  ProgramStatusKind kind = 3;
+  optional uint32 progress = 4;
+  string app = 5;
+  string title = 6;
+  string message = 7;
+  google.protobuf.Timestamp at = 8;
+}
+
+enum ProgramStatusState {
+  PROGRAM_STATUS_STATE_UNSPECIFIED = 0;
+  PROGRAM_STATUS_STATE_IDLE = 1;
+  PROGRAM_STATUS_STATE_WORKING = 2;
+  PROGRAM_STATUS_STATE_DONE = 3;
+  PROGRAM_STATUS_STATE_BLOCKED = 4;
+  PROGRAM_STATUS_STATE_ERROR = 5;
+}
+
+enum ProgramStatusKind {
+  PROGRAM_STATUS_KIND_UNSPECIFIED = 0;
+  PROGRAM_STATUS_KIND_PERMISSION = 1;
+  PROGRAM_STATUS_KIND_QUESTION = 2;
+  PROGRAM_STATUS_KIND_AUTH = 3;
 }
 
 message Running {

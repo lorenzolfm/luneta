@@ -393,7 +393,9 @@ fn line(seat: &str, width: usize, agent: &Agent) -> String {
         Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
             Ok(Status::Busy) => "busy",
             Ok(Status::Idle) => "idle",
+            Ok(Status::Done) => "done",
             Ok(Status::Waiting) => "waiting",
+            Ok(Status::Error) => "error",
             Ok(Status::Shell) => "shell",
             Ok(Status::Unspecified) | Err(_) => "?",
         },

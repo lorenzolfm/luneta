@@ -15,6 +15,13 @@ pub const CONFLICTED_NAMED_MAX: usize = 20;
 
 pub const MUX_STREAMS_MAX: u32 = 256;
 
+pub const PROGRAM_STATUS_RECORDS_MAX: usize = 256;
+
+pub const PROGRAM_STATUS_PROGRESS_PERCENT_MAX: u8 = 100;
+
+const _: () = assert!(PROGRAM_STATUS_RECORDS_MAX >= 64);
+const _: () = assert!(PROGRAM_STATUS_PROGRESS_PERCENT_MAX == 100);
+
 #[allow(
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,
@@ -50,6 +57,25 @@ impl v1::Agent {
     pub fn at_a_prompt(&self) -> bool {
         let word = self.runs_in().prompt_word();
         word.is_some_and(|word| self.entrypoint.as_deref() == Some(word))
+    }
+
+    #[must_use]
+    pub fn is_finished_turn(&self) -> bool {
+        let Some(v1::agent::Status::KnownStatus(known)) = &self.status else {
+            return false;
+        };
+        match v1::Status::try_from(*known) {
+            Ok(v1::Status::Done) => true,
+            Ok(v1::Status::Idle) => self.status_rung != Some(v1::StatusRung::Osc7501.into()),
+            Ok(
+                v1::Status::Busy
+                | v1::Status::Waiting
+                | v1::Status::Error
+                | v1::Status::Shell
+                | v1::Status::Unspecified,
+            )
+            | Err(_) => false,
+        }
     }
 }
 
@@ -87,5 +113,28 @@ impl v1::Name {
         let source = self.source.map(v1::NameSource::try_from);
         let given = matches!(source, None | Some(Ok(v1::NameSource::User | v1::NameSource::Peer)));
         Some(self.text.trim()).filter(|text| given && !text.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::v1::{agent::Status as Reported, Agent, Status, StatusRung};
+
+    fn with_status(status: Status, rung: Option<StatusRung>) -> Agent {
+        Agent {
+            status: Some(Reported::KnownStatus(status.into())),
+            status_rung: rung.map(Into::into),
+            ..Agent::default()
+        }
+    }
+
+    #[test]
+    fn finished_turn_distinguishes_osc_7501_idle_from_done_and_legacy_idle() {
+        assert!(with_status(Status::Done, Some(StatusRung::Osc7501)).is_finished_turn());
+        assert!(!with_status(Status::Idle, Some(StatusRung::Osc7501)).is_finished_turn());
+        assert!(with_status(Status::Idle, Some(StatusRung::Feed)).is_finished_turn());
+        assert!(with_status(Status::Idle, None).is_finished_turn());
+        assert!(!with_status(Status::Busy, Some(StatusRung::Osc7501)).is_finished_turn());
+        assert!(!with_status(Status::Error, Some(StatusRung::Osc7501)).is_finished_turn());
     }
 }

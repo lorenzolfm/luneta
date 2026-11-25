@@ -3,8 +3,9 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use lune_protocol::said::Said;
 use luned::api::agent::{Status as Reported, WaitingFor as Waits};
-use luned::api::{Agent, Status, WaitingFor};
+use luned::api::{Agent, BlockedKind, Status, WaitingFor};
 use luned::transcripts::{on_what, one_line, Reading, SessionId, TranscriptEnd, Turn};
 use serde_json::Value;
 
@@ -30,6 +31,7 @@ pub struct Key {
 pub enum Wait {
     Permission,
     Input,
+    Auth,
     Other(String),
     Unsaid,
 }
@@ -38,7 +40,10 @@ pub enum Wait {
 pub enum Doing {
     Busy,
     Idle,
-    Waiting { wait: Wait, since: Option<SystemTime> },
+    Stopped,
+    Done { message: Option<Said> },
+    Error { message: Option<Said> },
+    Waiting { wait: Wait, message: Option<Said>, since: Option<SystemTime> },
     Quiet,
 }
 
@@ -47,22 +52,40 @@ impl Doing {
         let Some(Reported::KnownStatus(known)) = &agent.status else {
             return Doing::Quiet;
         };
+        let message = agent
+            .status_message
+            .as_deref()
+            .and_then(|text| Said::new(text.trim().to_owned()));
         match Status::try_from(*known) {
             Ok(Status::Busy) => Doing::Busy,
-            Ok(Status::Idle) => Doing::Idle,
+            Ok(Status::Idle) => {
+                if agent.is_finished_turn() {
+                    Doing::Idle
+                } else {
+                    Doing::Stopped
+                }
+            },
+            Ok(Status::Done) => Doing::Done { message },
+            Ok(Status::Error) => Doing::Error { message },
             Ok(Status::Waiting) => {
                 let wait = match &agent.waiting_for {
                     Some(Waits::KnownWaitingFor(known)) => match WaitingFor::try_from(*known) {
                         Ok(WaitingFor::PermissionPrompt) => Wait::Permission,
                         Ok(WaitingFor::InputNeeded) => Wait::Input,
+                        Ok(WaitingFor::Auth) => Wait::Auth,
                         Ok(WaitingFor::DialogOpen) => return Doing::Quiet,
                         Ok(WaitingFor::Unspecified) | Err(_) => Wait::Unsaid,
                     },
                     Some(Waits::OtherWaitingFor(word)) => Wait::Other(word.clone()),
-                    None => Wait::Unsaid,
+                    None => match agent.blocked_kind.and_then(|kind| BlockedKind::try_from(kind).ok()) {
+                        Some(BlockedKind::Permission) => Wait::Permission,
+                        Some(BlockedKind::Question) => Wait::Input,
+                        Some(BlockedKind::Auth) => Wait::Auth,
+                        Some(BlockedKind::Other | BlockedKind::Unspecified) | None => Wait::Unsaid,
+                    },
                 };
                 let since = agent.status_since.and_then(|at| at.try_into().ok());
-                Doing::Waiting { wait, since }
+                Doing::Waiting { wait, message, since }
             },
             Ok(Status::Shell | Status::Unspecified) | Err(_) => Doing::Quiet,
         }
@@ -73,6 +96,7 @@ impl Doing {
 pub enum Want {
     Wait(Wait),
     Done,
+    Error,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +104,7 @@ pub struct Due {
     pub number: u64,
     pub key: Key,
     pub want: Want,
+    pub message: Option<Said>,
     pub label: String,
     pub transcript: Option<SessionId>,
     pub again: bool,
@@ -123,7 +148,10 @@ enum Hold {
 enum State {
     Busy,
     Idle(Told),
-    Waiting { wait: Wait, since: Option<SystemTime>, hold: Hold },
+    Stopped,
+    Done { message: Option<Said>, told: Told },
+    Error { message: Option<Said>, told: Told },
+    Waiting { wait: Wait, message: Option<Said>, since: Option<SystemTime>, hold: Hold },
     Quiet,
 }
 
@@ -132,9 +160,12 @@ impl State {
         match doing {
             Doing::Busy => State::Busy,
             Doing::Idle => State::Idle(Told::Not),
-            Doing::Waiting { wait, since } => {
+            Doing::Stopped => State::Stopped,
+            Doing::Done { message } => State::Done { message, told: Told::Not },
+            Doing::Error { message } => State::Error { message, told: Told::Not },
+            Doing::Waiting { wait, message, since } => {
                 let hold = if as_is { Hold::Told(Told::Not) } else { Hold::Held(now) };
-                State::Waiting { wait, since, hold }
+                State::Waiting { wait, message, since, hold }
             },
             Doing::Quiet => State::Quiet,
         }
@@ -144,33 +175,49 @@ impl State {
         match (self, doing) {
             (State::Busy, Doing::Busy)
             | (State::Idle(_), Doing::Idle)
+            | (State::Stopped, Doing::Stopped)
             | (State::Quiet, Doing::Quiet) => true,
-            (State::Waiting { wait, since, .. }, Doing::Waiting { wait: now, since: from }) => {
-                wait == now && since == from
-            },
+            (State::Done { message, .. }, Doing::Done { message: now })
+            | (State::Error { message, .. }, Doing::Error { message: now }) => message == now,
+            (
+                State::Waiting { wait, message, since, .. },
+                Doing::Waiting { wait: now, message: now_message, since: from },
+            ) => wait == now && message == now_message && since == from,
             _ => false,
         }
     }
 
     fn told(&mut self) -> Option<&mut Told> {
         match self {
-            State::Idle(told) | State::Waiting { hold: Hold::Told(told), .. } => Some(told),
-            State::Busy | State::Waiting { hold: Hold::Held(_), .. } | State::Quiet => None,
+            State::Idle(told)
+            | State::Done { told, .. }
+            | State::Error { told, .. }
+            | State::Waiting { hold: Hold::Told(told), .. } => Some(told),
+            State::Busy | State::Stopped | State::Waiting { hold: Hold::Held(_), .. } | State::Quiet => {
+                None
+            },
         }
     }
 
     fn is_up(&self) -> bool {
         match self {
-            State::Idle(told) | State::Waiting { hold: Hold::Told(told), .. } => told.is_up(),
-            State::Busy | State::Waiting { hold: Hold::Held(_), .. } | State::Quiet => false,
+            State::Idle(told)
+            | State::Done { told, .. }
+            | State::Error { told, .. }
+            | State::Waiting { hold: Hold::Told(told), .. } => told.is_up(),
+            State::Busy | State::Stopped | State::Waiting { hold: Hold::Held(_), .. } | State::Quiet => {
+                false
+            },
         }
     }
 
     fn down(&mut self) {
         match self {
-            State::Idle(told) => *told = Told::Not,
+            State::Idle(told) | State::Done { told, .. } | State::Error { told, .. } => {
+                *told = Told::Not;
+            },
             State::Waiting { hold, .. } => *hold = Hold::Told(Told::Not),
-            State::Busy | State::Quiet => {},
+            State::Busy | State::Stopped | State::Quiet => {},
         }
     }
 }
@@ -199,20 +246,37 @@ impl Followed {
         if self.state.is_up() {
             acts.push(Act::Close(key.clone()));
         }
-        let ended = matches!((&self.state, &doing), (State::Busy, Doing::Idle));
-        self.state = if ended && !focused {
-            *numbered += 1;
-            acts.push(Act::Read(self.due(key, *numbered, Want::Done, false)));
-            State::Idle(Told::Reading(*numbered))
-        } else {
-            State::new(doing, now, false)
+        self.state = match (&self.state, doing) {
+            (State::Busy, Doing::Idle) if !focused => {
+                *numbered += 1;
+                acts.push(Act::Read(self.due(key, *numbered, Want::Done, None, false)));
+                State::Idle(Told::Reading(*numbered))
+            },
+            (State::Busy, Doing::Done { message }) if !focused => {
+                *numbered += 1;
+                acts.push(Act::Read(self.due(key, *numbered, Want::Done, message.clone(), false)));
+                State::Done { message, told: Told::Reading(*numbered) }
+            },
+            (_, Doing::Error { message }) if !focused => {
+                *numbered += 1;
+                acts.push(Act::Read(self.due(key, *numbered, Want::Error, message.clone(), false)));
+                State::Error { message, told: Told::Reading(*numbered) }
+            },
+            (_, doing) => State::new(doing, now, false),
         };
         acts
     }
 
-    fn due(&self, key: &Key, number: u64, want: Want, again: bool) -> Due {
+    fn due(
+        &self,
+        key: &Key,
+        number: u64,
+        want: Want,
+        message: Option<Said>,
+        again: bool,
+    ) -> Due {
         let (key, label, transcript) = (key.clone(), self.label.clone(), self.transcript.clone());
-        Due { number, key, want, label, transcript, again }
+        Due { number, key, want, message, label, transcript, again }
     }
 }
 
@@ -237,7 +301,8 @@ impl Alerts {
             return acts;
         }
         for (key, followed) in &mut self.followed {
-            if let State::Idle(told) = &mut followed.state
+            if let State::Idle(told) | State::Done { told, .. } | State::Error { told, .. } =
+                &mut followed.state
                 && told.is_up()
             {
                 acts.push(Act::Close(key.clone()));
@@ -324,6 +389,9 @@ impl Alerts {
             State::Waiting { hold: Hold::Held(at), .. } => Some(at + HELD),
             State::Busy
             | State::Idle(_)
+            | State::Stopped
+            | State::Done { .. }
+            | State::Error { .. }
             | State::Waiting { hold: Hold::Told(_), .. }
             | State::Quiet => None,
         });
@@ -333,7 +401,7 @@ impl Alerts {
     pub fn ticked(&mut self, now: Instant) -> Vec<Act> {
         let mut acts = Vec::new();
         for (key, followed) in &mut self.followed {
-            let State::Waiting { wait, hold, .. } = &mut followed.state else {
+            let State::Waiting { wait, message, hold, .. } = &mut followed.state else {
                 continue;
             };
             let Hold::Held(at) = *hold else {
@@ -344,8 +412,8 @@ impl Alerts {
             }
             self.numbered += 1;
             *hold = Hold::Told(Told::Reading(self.numbered));
-            let want = Want::Wait(wait.clone());
-            acts.push(Act::Read(followed.due(key, self.numbered, want, false)));
+            let (want, message) = (Want::Wait(wait.clone()), message.clone());
+            acts.push(Act::Read(followed.due(key, self.numbered, want, message, false)));
         }
         acts
     }
@@ -353,19 +421,21 @@ impl Alerts {
     pub fn again(&mut self) -> Vec<Act> {
         let mut acts = Vec::new();
         for (key, followed) in &mut self.followed {
-            let wait = match &mut followed.state {
-                State::Idle(told) => {
+            let (wait, message) = match &mut followed.state {
+                State::Idle(told) | State::Done { told, .. } | State::Error { told, .. } => {
                     *told = Told::Not;
                     continue;
                 },
-                State::Waiting { wait, hold: Hold::Told(told), .. } if *told == Told::Shown => {
+                State::Waiting { wait, message, hold: Hold::Told(told), .. }
+                    if *told == Told::Shown =>
+                {
                     self.numbered += 1;
                     *told = Told::Reading(self.numbered);
-                    wait.clone()
+                    (wait.clone(), message.clone())
                 },
-                State::Busy | State::Waiting { .. } | State::Quiet => continue,
+                State::Busy | State::Stopped | State::Waiting { .. } | State::Quiet => continue,
             };
-            acts.push(Act::Read(followed.due(key, self.numbered, Want::Wait(wait), true)));
+            acts.push(Act::Read(followed.due(key, self.numbered, Want::Wait(wait), message, true)));
         }
         acts
     }
@@ -395,8 +465,10 @@ pub enum Kind {
     Asked,
     Plan,
     Permission,
+    Auth,
     Wants,
     Done,
+    Error,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -418,14 +490,21 @@ impl Alert {
     pub fn of(due: &Due, end: Option<&TranscriptEnd>) -> Alert {
         let turn = end.map_or_default(Turn::of);
         let tool = turn.tool.as_ref().map(|(name, input)| (name.as_str(), input));
-        let (kind, body) = match (&due.want, tool) {
-            (Want::Done, _) => {
+        let message = due.message.as_ref().map(Said::as_str);
+        let (kind, body) = match (&due.want, message, tool) {
+            (Want::Done, Some(message), _) => (Kind::Done, message.to_owned()),
+            (Want::Done, None, _) => {
                 (Kind::Done, turn.said.unwrap_or_else(|| "Its turn is over".to_owned()))
             },
-            (Want::Wait(Wait::Permission), Some(("ExitPlanMode", _))) => {
+            (Want::Error, Some(message), _) => (Kind::Error, message.to_owned()),
+            (Want::Error, None, _) => (Kind::Error, "Its turn failed".to_owned()),
+            (Want::Wait(Wait::Permission), None, Some(("ExitPlanMode", _))) => {
                 (Kind::Plan, "Waiting on your review".to_owned())
             },
-            (Want::Wait(Wait::Permission), tool) => {
+            (Want::Wait(Wait::Permission), Some(message), _) => {
+                (Kind::Permission, message.to_owned())
+            },
+            (Want::Wait(Wait::Permission), None, tool) => {
                 let body = match tool {
                     Some((name, input)) => match run_on(input) {
                         Some(what) => format!("{name}: {what}"),
@@ -435,20 +514,32 @@ impl Alert {
                 };
                 (Kind::Permission, body)
             },
-            (Want::Wait(Wait::Input), tool) => {
-                let asked = tool.filter(|(name, _)| matches!(*name, "AskUserQuestion" | "ask_question"));
+            (Want::Wait(Wait::Input), Some(message), _) => (Kind::Asked, message.to_owned()),
+            (Want::Wait(Wait::Input), None, tool) => {
+                let asked = tool.filter(|(name, _)| {
+                    matches!(*name, "AskUserQuestion" | "ask_question")
+                });
                 let question = asked.and_then(|(_, input)| run_on(input));
                 (Kind::Asked, question.unwrap_or("Waiting on your answer").to_owned())
             },
-            (Want::Wait(Wait::Other(word)), _) => (Kind::Wants, word.clone()),
-            (Want::Wait(Wait::Unsaid), _) => (Kind::Wants, "Waiting on you".to_owned()),
+            (Want::Wait(Wait::Auth), Some(message), _) => (Kind::Auth, message.to_owned()),
+            (Want::Wait(Wait::Auth), None, _) => {
+                (Kind::Auth, "Waiting for you to sign in".to_owned())
+            },
+            (Want::Wait(Wait::Other(_) | Wait::Unsaid), Some(message), _) => {
+                (Kind::Wants, message.to_owned())
+            },
+            (Want::Wait(Wait::Other(word)), None, _) => (Kind::Wants, word.clone()),
+            (Want::Wait(Wait::Unsaid), None, _) => (Kind::Wants, "Waiting on you".to_owned()),
         };
         let headline = match kind {
             Kind::Asked => "asked you something",
             Kind::Plan => "has a plan for you",
             Kind::Permission => "needs permission",
+            Kind::Auth => "needs sign-in",
             Kind::Wants => "needs you",
             Kind::Done => "done",
+            Kind::Error => "failed",
         };
         let title = match &due.key.on {
             Machine::Local => format!("{} — {headline}", due.label),
@@ -456,10 +547,12 @@ impl Alert {
         };
         let sound = match kind {
             Kind::Asked | Kind::Plan => Some(Sound::Question),
-            Kind::Permission | Kind::Wants => Some(Sound::Bell),
+            Kind::Permission | Kind::Auth | Kind::Wants | Kind::Error => Some(Sound::Bell),
             Kind::Done => None,
         };
         let (key, body) = (due.key.clone(), one_line(&body, BODY_CHARS));
+        assert_ne!(title, "");
+        assert_ne!(body, "");
         Alert { key, kind, title, body, sound: sound.filter(|_| !due.again) }
     }
 }
@@ -521,7 +614,11 @@ mod tests {
     }
 
     fn waits(wait: Wait, since: u64) -> Doing {
-        Doing::Waiting { wait, since: Some(UNIX_EPOCH + Duration::from_secs(since)) }
+        Doing::Waiting {
+            wait,
+            message: None,
+            since: Some(UNIX_EPOCH + Duration::from_secs(since)),
+        }
     }
 
     fn heard(agents: Vec<Seated>) -> Reach {
@@ -679,9 +776,12 @@ mod tests {
         assert_eq!(Doing::of(&dialog), Doing::Quiet);
         let newer = waiting(2, Some(Waits::OtherWaitingFor("sandbox request".to_owned())));
         let other = Wait::Other("sandbox request".to_owned());
-        assert_eq!(Doing::of(&newer), Doing::Waiting { wait: other, since: None });
+        assert_eq!(Doing::of(&newer), Doing::Waiting { wait: other, message: None, since: None });
         let unsaid = waiting(3, Some(Waits::KnownWaitingFor(99)));
-        assert_eq!(Doing::of(&unsaid), Doing::Waiting { wait: Wait::Unsaid, since: None });
+        assert_eq!(
+            Doing::of(&unsaid),
+            Doing::Waiting { wait: Wait::Unsaid, message: None, since: None }
+        );
 
         let mut alerts = Alerts::default();
         let now = Instant::now();
@@ -873,7 +973,7 @@ mod tests {
 
     fn due(want: Want, on: Machine) -> Due {
         let (key, label) = (Key { on, pid: 2 }, "fix the sidebar".to_owned());
-        Due { number: 1, key, want, label, transcript: None, again: false }
+        Due { number: 1, key, want, message: None, label, transcript: None, again: false }
     }
 
     #[test]
@@ -965,5 +1065,55 @@ mod tests {
         ]);
         let alert = Alert::of(&due(Want::Done, Machine::Local), Some(&done));
         assert_eq!((alert.kind, alert.body.as_str()), (Kind::Done, "All tests pass."));
+    }
+
+    #[test]
+    fn osc_7501_done_error_auth_and_interrupted_idle_behave_distinctly() {
+        use luned::api::StatusRung;
+
+        let osc_agent = |status: Status, kind: Option<BlockedKind>, message: Option<&str>| Agent {
+            pid: 1,
+            status: Some(Reported::KnownStatus(status.into())),
+            status_rung: Some(StatusRung::Osc7501.into()),
+            blocked_kind: kind.map(Into::into),
+            status_message: message.map(str::to_owned),
+            ..Agent::default()
+        };
+
+        let stopped = osc_agent(Status::Idle, None, None);
+        assert_eq!(Doing::of(&stopped), Doing::Stopped);
+        let mut alerts = Alerts::default();
+        let now = Instant::now();
+        alerts.heard(here(vec![seated(1, Doing::Busy)]), now);
+        assert_eq!(alerts.heard(here(vec![seated(1, Doing::of(&stopped))]), now), []);
+
+        let done = osc_agent(Status::Done, None, Some("Fixed the bug."));
+        alerts.heard(here(vec![seated(1, Doing::Busy)]), now);
+        let acts = alerts.heard(here(vec![seated(1, Doing::of(&done))]), now);
+        assert_eq!(reads(&acts), [(1, Want::Done)]);
+        let Act::Read(due_done) = &acts[0] else { unreachable!() };
+        let alert = Alert::of(due_done, None);
+        assert_eq!((alert.kind, alert.body.as_str()), (Kind::Done, "Fixed the bug."));
+
+        let err = osc_agent(Status::Error, None, Some("API rate limit"));
+        let acts = alerts.heard(here(vec![seated(1, Doing::of(&err))]), now);
+        assert_eq!(reads(&acts), [(1, Want::Error)]);
+        let [Act::Close(_), Act::Read(due_err)] = acts.as_slice() else { unreachable!() };
+        let alert = Alert::of(due_err, None);
+        assert_eq!(
+            (alert.kind, alert.title.as_str(), alert.body.as_str(), alert.sound),
+            (Kind::Error, "agent 1 — failed", "API rate limit", Some(Sound::Bell))
+        );
+
+        let auth = osc_agent(Status::Waiting, Some(BlockedKind::Auth), Some("Sign in to GitHub"));
+        alerts.heard(here(vec![seated(1, Doing::of(&auth))]), now);
+        let acts = alerts.ticked(now + HELD);
+        assert_eq!(reads(&acts), [(1, Want::Wait(Wait::Auth))]);
+        let Act::Read(due_auth) = &acts[0] else { unreachable!() };
+        let alert = Alert::of(due_auth, None);
+        assert_eq!(
+            (alert.kind, alert.title.as_str(), alert.body.as_str(), alert.sound),
+            (Kind::Auth, "agent 1 — needs sign-in", "Sign in to GitHub", Some(Sound::Bell))
+        );
     }
 }

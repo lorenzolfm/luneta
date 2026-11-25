@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs};
 
 use hyper_util::rt::TokioIo;
@@ -691,6 +691,36 @@ pub struct Terminal {
     pub cwd: String,
     pub title: String,
     pub is: Is,
+    pub statuses: Vec<ProgramStatus>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgramStatusState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgramStatusKind {
+    None,
+    Permission,
+    Question,
+    Auth,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramStatus {
+    pub id: String,
+    pub state: ProgramStatusState,
+    pub kind: ProgramStatusKind,
+    pub progress: Option<u8>,
+    pub app: String,
+    pub title: String,
+    pub message: String,
+    pub at: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -715,8 +745,8 @@ fn terminals(listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>, Vec<Str
             Ok((read, _)) if !ids.insert(read.key.id) => {
                 unread.push(format!("terminal {} is listed twice", read.key.id));
             },
-            Ok((read, shell)) => {
-                unsaid.extend(shell.map(|why| format!("terminal {}'s shell: {why}", read.key.id)));
+            Ok((read, warnings)) => {
+                unsaid.extend(warnings);
                 terminals.push(read);
             },
             Err(why) => unread.push(why),
@@ -726,11 +756,11 @@ fn terminals(listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>, Vec<Str
     (terminals, unread, unsaid)
 }
 
-fn terminal_of(terminal: api::Terminal) -> Result<(Terminal, Option<String>), String> {
+fn terminal_of(terminal: api::Terminal) -> Result<(Terminal, Vec<String>), String> {
     let key = TerminalKey::read(terminal.key)?;
     let size = terminal.size.map(|size| Size::of(size.columns, size.rows));
     let size = size.transpose().map_err(|why| format!("terminal {}'s size: {why}", key.id))?;
-    let mut unsaid = None;
+    let mut warnings = Vec::new();
     let is = match terminal.program {
         None => return Err(format!("terminal {} runs nothing it says", key.id)),
         Some(api::terminal::Program::Ended(_)) => Is::Ended,
@@ -740,15 +770,106 @@ fn terminal_of(terminal: api::Terminal) -> Result<(Terminal, Option<String>), St
             let doing = match runs.ran.as_ref().map(Doing::of_mux).transpose() {
                 Ok(doing) => doing,
                 Err(why) => {
-                    unsaid = Some(why);
+                    warnings.push(format!("terminal {}'s shell: {why}", key.id));
                     None
                 },
             };
             Is::Running { root: runs.pid, front, doing }
         },
     };
+    if terminal.statuses.len() > lune_protocol::PROGRAM_STATUS_RECORDS_MAX {
+        return Err(format!(
+            "terminal {} reported {} program statuses, over the limit of {}",
+            key.id,
+            terminal.statuses.len(),
+            lune_protocol::PROGRAM_STATUS_RECORDS_MAX,
+        ));
+    }
+    let mut statuses = Vec::with_capacity(terminal.statuses.len());
+    let mut status_ids = HashSet::with_capacity(terminal.statuses.len());
+    for raw in terminal.statuses {
+        match program_status_of(raw) {
+            Ok(status) => {
+                if status_ids.insert(status.id.clone()) {
+                    statuses.push(status);
+                } else {
+                    warnings.push(format!(
+                        "terminal {}'s program status {:?} came twice",
+                        key.id, status.id
+                    ));
+                }
+            },
+            Err(why) => {
+                warnings.push(format!("terminal {}'s program status: {why}", key.id));
+            },
+        }
+    }
+    assert!(statuses.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
     let (tag, cwd, title) = (terminal.tag, terminal.cwd, terminal.title);
-    Ok((Terminal { key, tag, size, cwd, title, is }, unsaid))
+    Ok((Terminal { key, tag, size, cwd, title, is, statuses }, warnings))
+}
+
+fn program_status_of(status: api::ProgramStatus) -> Result<ProgramStatus, String> {
+    let state = match api::ProgramStatusState::try_from(status.state) {
+        Ok(api::ProgramStatusState::Idle) => ProgramStatusState::Idle,
+        Ok(api::ProgramStatusState::Working) => ProgramStatusState::Working,
+        Ok(api::ProgramStatusState::Done) => ProgramStatusState::Done,
+        Ok(api::ProgramStatusState::Blocked) => ProgramStatusState::Blocked,
+        Ok(api::ProgramStatusState::Error) => ProgramStatusState::Error,
+        Ok(api::ProgramStatusState::Unspecified) => {
+            return Err("state is unspecified".to_owned());
+        },
+        Err(_) => return Err(format!("state {} is unknown", status.state)),
+    };
+    let parsed_kind = match api::ProgramStatusKind::try_from(status.kind) {
+        Ok(api::ProgramStatusKind::Permission) => ProgramStatusKind::Permission,
+        Ok(api::ProgramStatusKind::Question) => ProgramStatusKind::Question,
+        Ok(api::ProgramStatusKind::Auth) => ProgramStatusKind::Auth,
+        Ok(api::ProgramStatusKind::Unspecified) => ProgramStatusKind::None,
+        Err(_) => return Err(format!("kind {} is unknown", status.kind)),
+    };
+    let kind = if state == ProgramStatusState::Blocked {
+        parsed_kind
+    } else {
+        ProgramStatusKind::None
+    };
+    let progress = match status.progress {
+        Some(value) => {
+            let percent = u8::try_from(value)
+                .ok()
+                .filter(|percent| *percent <= lune_protocol::PROGRAM_STATUS_PROGRESS_PERCENT_MAX)
+                .ok_or_else(|| {
+                    format!(
+                        "progress {value} is over {}",
+                        lune_protocol::PROGRAM_STATUS_PROGRESS_PERCENT_MAX
+                    )
+                })?;
+            Some(percent)
+        },
+        None => None,
+    };
+    let at = match status.at {
+        Some(timestamp) => {
+            Some(SystemTime::try_from(timestamp).map_err(|_| "timestamp is out of range".to_owned())?)
+        },
+        None => None,
+    };
+    if let Some(percent) = progress {
+        assert!(percent <= lune_protocol::PROGRAM_STATUS_PROGRESS_PERCENT_MAX);
+    }
+    if state != ProgramStatusState::Blocked {
+        assert_eq!(kind, ProgramStatusKind::None);
+    }
+    Ok(ProgramStatus {
+        id: status.id,
+        state,
+        kind,
+        progress,
+        app: status.app,
+        title: status.title,
+        message: status.message,
+        at,
+    })
 }
 
 pub struct Terminals;
@@ -1205,5 +1326,46 @@ mod tests {
         let ids: Vec<u32> = terminals.iter().map(|terminal| terminal.key.id.get()).collect();
         assert_eq!(ids, [1, 4]);
         assert_eq!((unread.len(), unsaid.len()), (3, 0), "{unread:?}");
+    }
+
+    #[test]
+    fn malformed_duplicate_and_excess_program_statuses_are_reported() {
+        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let ended = Some(api::terminal::Program::Ended(api::Exit::default()));
+        let status = |id: &str, state: i32, kind: i32, progress: Option<u32>| api::ProgramStatus {
+            id: id.to_owned(),
+            state,
+            kind,
+            progress,
+            ..api::ProgramStatus::default()
+        };
+        let working = api::ProgramStatusState::Working.into();
+        let bad_terminal = api::Terminal {
+            key: Some(api::TerminalKey { id: 1, made_at }),
+            program: ended.clone(),
+            statuses: vec![
+                status("", working, 0, Some(50)),
+                status("", working, 0, None),
+                status("bad-state", 99, 0, None),
+                status("bad-kind", working, 99, None),
+                status("bad-progress", working, 0, Some(101)),
+            ],
+            ..api::Terminal::default()
+        };
+        let excess_statuses = (0..=lune_protocol::PROGRAM_STATUS_RECORDS_MAX)
+            .map(|index| status(&format!("r{index}"), working, 0, None))
+            .collect();
+        let excess_terminal = api::Terminal {
+            key: Some(api::TerminalKey { id: 2, made_at }),
+            program: ended,
+            statuses: excess_statuses,
+            ..api::Terminal::default()
+        };
+        let (terminals, unread, unsaid) = super::terminals(vec![bad_terminal, excess_terminal]);
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0].statuses.len(), 1);
+        assert_eq!(terminals[0].statuses[0].id, "");
+        assert_eq!(unread.len(), 1, "{unread:?}");
+        assert_eq!(unsaid.len(), 4, "{unsaid:?}");
     }
 }

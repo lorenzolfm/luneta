@@ -1,7 +1,10 @@
 mod answering;
 mod input;
 
+use std::cell::RefCell;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::rc::Rc;
+use std::time::SystemTime;
 
 use libghostty_vt::effect::{
     ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
@@ -25,8 +28,10 @@ use answering::Answering;
 pub use answering::Answers;
 pub use input::{Click, Wheel};
 
+use crate::api;
 use crate::asked::Size;
 use crate::marks::{Mark, Marks};
+use crate::program_status::ProgramStatuses;
 
 const NAME: &str = concat!("lune-mux ", env!("CARGO_PKG_VERSION"));
 
@@ -168,6 +173,7 @@ pub struct Screen {
     answering: Answering,
     size: Size,
     marks: Marks,
+    statuses: Rc<RefCell<ProgramStatuses>>,
     render: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
@@ -177,10 +183,15 @@ pub struct Screen {
 impl Screen {
     pub fn new(size: Size, scrollback_bytes: usize) -> Result<Screen, Error> {
         let mut answering = Answering::new(size, scrollback_bytes)?;
+        let statuses = Rc::new(RefCell::new(ProgramStatuses::default()));
+        let heard = Rc::clone(&statuses);
         let (made, answers) = answering.drive(|terminal| {
             terminal
                 .on_xtversion(|_| Some(NAME))?
                 .on_device_attributes(|_| Some(ATTRIBUTES))?
+                .on_program_status(move |_, report| {
+                    heard.borrow_mut().apply(report, SystemTime::now());
+                })?
                 .set_mode(Mode::GRAPHEME_CLUSTER, true)
                 .map(|_| ())
         });
@@ -190,6 +201,7 @@ impl Screen {
             answering,
             size,
             marks: Marks::default(),
+            statuses,
             render: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
@@ -200,10 +212,13 @@ impl Screen {
     pub fn write(&mut self, bytes: &[u8]) -> Result<Written, Error> {
         let (columns, rows) = self.size.get();
         let scanner = &mut self.marks;
+        let statuses = &self.statuses;
         let (wrote, answers) = self.answering.drive(|terminal| {
             let end = ScrollbackEnd::of(terminal);
             let mut marks = Vec::new();
-            scanner.write(terminal, bytes, &mut marks)?;
+            scanner.write(terminal, bytes, &mut marks, || {
+                statuses.borrow_mut().prompt_started();
+            })?;
             if (terminal.cols()?, terminal.rows()?) != (columns, rows) {
                 terminal.resize(columns, rows, 0, 0)?;
             }
@@ -213,6 +228,20 @@ impl Screen {
         });
         let (marks, pushed) = wrote?;
         Ok(Written { answers, marks, pushed })
+    }
+
+    #[must_use]
+    pub fn program_statuses(&self) -> Vec<api::ProgramStatus> {
+        self.statuses.borrow().said()
+    }
+
+    #[must_use]
+    pub fn program_statuses_version(&self) -> u64 {
+        self.statuses.borrow().version()
+    }
+
+    pub fn program_exited(&mut self) {
+        self.statuses.borrow_mut().exited();
     }
 
     pub fn resize(&mut self, size: Size) -> Result<Answers, Error> {
@@ -724,5 +753,134 @@ mod tests {
         let mut screen = screen(10, 2);
         assert_eq!(screen.write(b"\x1b]133;A\x07$ \x1b]133;D").unwrap().marks, [Mark::Prompt]);
         assert_eq!(screen.write(b";1\x07").unwrap().marks, [Mark::Done(Some(1))]);
+    }
+
+    #[test]
+    fn an_osc_7501_probe_is_answered_before_da1() {
+        let mut screen = screen(10, 2);
+        let reply = String::from_utf8(answered(&mut screen, b"\x1b]7501;?\x1b\\\x1b[c")).unwrap();
+        let probe = reply.find("\x1b]7501;?").expect("the terminal answers the OSC 7501 probe");
+        let da1 = reply.find("\x1b[?62;").expect("the terminal answers DA1");
+        assert!(probe < da1, "probe reply must precede DA1 reply: {reply:?}");
+    }
+
+    #[test]
+    fn osc_7501_keeps_records_inherits_app_sanitizes_and_clears_subtrees() {
+        let mut screen = screen(10, 2);
+        let msg = "YWxsb3cg4oCuZGFuZ2Vy";
+        let title = "c3Vi4oCLdGFzaw==";
+        let bytes = format!(
+            "\x1b]7501;state=blocked:kind=permission:app=claude-code:msg={msg}\x1b\\\
+             \x1b]7501;state=working:id=agent-1:title={title}:progress=42\x1b\\\
+             \x1b]7501;state=working:id=agent-1/step\x1b\\\
+             \x1b]7501;state=done:id=agent-10\x1b\\"
+        );
+        assert_eq!(answered(&mut screen, bytes.as_bytes()), b"");
+        let listed = screen.program_statuses();
+        assert_eq!(listed.len(), 4);
+        assert_eq!(listed[0].id, "");
+        assert_eq!(listed[0].state(), api::ProgramStatusState::Blocked);
+        assert_eq!(listed[0].kind(), api::ProgramStatusKind::Permission);
+        assert_eq!(listed[0].app, "claude-code");
+        assert_eq!(listed[0].message, "allow danger");
+        assert_eq!(listed[1].id, "agent-1");
+        assert_eq!(listed[1].app, "claude-code");
+        assert_eq!(listed[1].title, "subtask");
+        assert_eq!(listed[1].progress, Some(42));
+        assert_eq!(listed[2].id, "agent-1/step");
+        assert_eq!(listed[2].app, "claude-code");
+        assert_eq!(listed[3].id, "agent-10");
+        assert_eq!(listed[3].app, "claude-code");
+
+        assert_eq!(answered(&mut screen, b"\x1b]7501;state=clear:id=agent-1\x07"), b"");
+        let ids: Vec<String> = screen.program_statuses().into_iter().map(|it| it.id).collect();
+        assert_eq!(ids, ["", "agent-10"]);
+
+        assert_eq!(answered(&mut screen, b"\x1b]7501;state=done\x07"), b"");
+        let root = &screen.program_statuses()[0];
+        assert_eq!(root.state(), api::ProgramStatusState::Done);
+        assert_eq!(root.message, "");
+        assert_eq!(root.app, "");
+
+        assert_eq!(answered(&mut screen, b"\x1b]7501;state=clear\x07"), b"");
+        assert_eq!(screen.program_statuses(), [] as [api::ProgramStatus; 0]);
+    }
+
+    #[test]
+    fn osc_133_a_drops_working_and_blocked_in_byte_order_and_keeps_done_and_error() {
+        let mut screen = screen(10, 2);
+        let bytes = concat!(
+            "\x1b]7501;state=working:app=claude-code\x07",
+            "\x1b]7501;state=done:id=finished\x07",
+            "\x1b]7501;state=error:id=failed\x07",
+            "\x1b]133;A\x07",
+            "\x1b]7501;state=working:app=claude-code:id=next\x07",
+        );
+        assert_eq!(answered(&mut screen, bytes.as_bytes()), b"");
+        let kept: Vec<(String, api::ProgramStatusState)> = screen
+            .program_statuses()
+            .into_iter()
+            .map(|it| (it.id.clone(), it.state()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("failed".to_owned(), api::ProgramStatusState::Error),
+                ("finished".to_owned(), api::ProgramStatusState::Done),
+                ("next".to_owned(), api::ProgramStatusState::Working),
+            ]
+        );
+
+        assert_eq!(answered(&mut screen, b"\x1b]133;A\x07"), b"");
+        let kept: Vec<String> = screen.program_statuses().into_iter().map(|it| it.id).collect();
+        assert_eq!(kept, ["failed", "finished"]);
+
+        assert_eq!(answered(&mut screen, b"\x1b]7501;state=idle:app=pi\x07"), b"");
+        screen.program_exited();
+        let kept: Vec<String> = screen.program_statuses().into_iter().map(|it| it.id).collect();
+        assert_eq!(kept, ["failed", "finished"]);
+
+        assert_eq!(answered(&mut screen, b"\x1bc"), b"");
+        assert_eq!(screen.program_statuses(), [] as [api::ProgramStatus; 0]);
+    }
+
+    #[test]
+    fn osc_7501_evicts_oldest_updated_record_past_the_limit() {
+        use std::fmt::Write as _;
+
+        let mut screen = screen(10, 2);
+        let mut bytes = String::new();
+        for i in 0..=crate::program_status::RECORDS_MAX {
+            let _ = write!(bytes, "\x1b]7501;state=working:id=r{i:03}\x07");
+        }
+        assert_eq!(answered(&mut screen, bytes.as_bytes()), b"");
+        let ids: Vec<String> = screen.program_statuses().into_iter().map(|it| it.id).collect();
+        assert_eq!(ids.len(), crate::program_status::RECORDS_MAX);
+        assert!(!ids.contains(&"r000".to_owned()));
+        assert!(ids.contains(&"r001".to_owned()));
+        assert!(ids.contains(&format!("r{:03}", crate::program_status::RECORDS_MAX)));
+    }
+
+    #[test]
+    fn osc_7501_bounds_id_depth_and_keeps_version_steady_on_plain_output() {
+        let mut screen = screen(10, 2);
+        assert_eq!(screen.program_statuses_version(), 0);
+        assert_eq!(answered(&mut screen, b"plain output\r\n"), b"");
+        assert_eq!(screen.program_statuses_version(), 0);
+
+        let too_deep = (0..=crate::program_status::ID_DEPTH_MAX)
+            .map(|index| format!("s{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let sequence = format!("\x1b]7501;state=working:id={too_deep}\x07");
+        assert_eq!(answered(&mut screen, sequence.as_bytes()), b"");
+        assert_eq!(screen.program_statuses(), [] as [api::ProgramStatus; 0]);
+        assert_eq!(screen.program_statuses_version(), 0);
+
+        assert_eq!(answered(&mut screen, b"\x1b]7501;state=working:app=pi\x07"), b"");
+        let after_working = screen.program_statuses_version();
+        assert!(after_working > 0);
+        assert_eq!(answered(&mut screen, b"more plain output\r\n"), b"");
+        assert_eq!(screen.program_statuses_version(), after_working);
     }
 }

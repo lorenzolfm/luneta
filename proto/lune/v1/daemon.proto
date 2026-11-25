@@ -432,6 +432,10 @@ message Agent {
   }
   optional Harness harness = 13;
   optional string topic = 14;
+  optional string status_message = 15;
+  optional StatusRung status_rung = 16;
+  optional BlockedKind blocked_kind = 17;
+  repeated Subagent subagents = 18;
 }
 
 enum Harness {
@@ -447,6 +451,8 @@ enum Status {
   STATUS_IDLE = 2;
   STATUS_WAITING = 3;
   STATUS_SHELL = 4;
+  STATUS_DONE = 5;
+  STATUS_ERROR = 6;
 }
 
 enum WaitingFor {
@@ -454,6 +460,35 @@ enum WaitingFor {
   WAITING_FOR_PERMISSION_PROMPT = 1;
   WAITING_FOR_INPUT_NEEDED = 2;
   WAITING_FOR_DIALOG_OPEN = 3;
+  WAITING_FOR_AUTH = 4;
+}
+
+enum BlockedKind {
+  BLOCKED_KIND_UNSPECIFIED = 0;
+  BLOCKED_KIND_PERMISSION = 1;
+  BLOCKED_KIND_QUESTION = 2;
+  BLOCKED_KIND_AUTH = 3;
+  BLOCKED_KIND_OTHER = 4;
+}
+
+enum StatusRung {
+  STATUS_RUNG_UNSPECIFIED = 0;
+  STATUS_RUNG_OSC_7501 = 1;
+  STATUS_RUNG_FEED = 2;
+  STATUS_RUNG_EXTENSION = 3;
+  STATUS_RUNG_HOOK = 4;
+  STATUS_RUNG_TRANSCRIPT = 5;
+  STATUS_RUNG_SCREEN = 6;
+}
+
+message Subagent {
+  string id = 1;
+  Status status = 2;
+  optional BlockedKind blocked_kind = 3;
+  optional string title = 4;
+  optional string message = 5;
+  optional uint32 progress = 6;
+  google.protobuf.Timestamp status_since = 7;
 }
 
 message Name {

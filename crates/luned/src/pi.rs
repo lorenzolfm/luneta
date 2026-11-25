@@ -5,15 +5,16 @@ use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use lune_domain::agent::Harness;
+use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Status,
+    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, SeenAgent,
 };
 use crate::mux;
+use crate::statuses::{self, Report, ReportedAgent};
 use crate::watch::{self, Troubles};
 use crate::{log, process};
 use crate::Directory;
@@ -87,7 +88,7 @@ impl AgentFiles {
         &self.dir
     }
 
-    pub fn scan(&mut self) -> Vec<Agent> {
+    pub fn scan(&mut self) -> Vec<ReportedAgent> {
         if let Some(pi) = self.pi.as_ref().filter(|pi| pi.is_dir())
             && let Err(error) = install(pi, &self.lune)
         {
@@ -121,8 +122,9 @@ impl AgentFiles {
                         |it| it.terminal,
                     );
                     let found = Process { started, terminal };
+                    let built = reported(id.clone(), file, found);
                     processes.insert(id, found);
-                    agents.push(agent(pid, file, found));
+                    agents.push(built);
                 },
                 Ok(None) => {
                     let why = format!("{}: no process of its pid wrote it", path.display());
@@ -179,19 +181,29 @@ fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
     modified.checked_add(DATED_LATE).is_none_or(|late| started <= late)
 }
 
-fn agent(pid: u32, file: File, process: Process) -> Agent {
-    Agent {
-        pid,
+fn reported(id: process::Id, file: File, process: Process) -> ReportedAgent {
+    assert!(id.pid > 1);
+    let (state, kind) = statuses::parse_word(Some(file.status.as_str()), None);
+    let report = Report {
+        agent: id.clone(),
+        rung: Rung::Extension,
+        state,
+        kind,
+        message: None,
+        at: Some(moment(file.status_since)),
+        subagents: Vec::new(),
+    };
+    let seen = SeenAgent {
+        id,
         harness: Harness::Pi,
         session_id: Some(file.session_id),
         cwd: file.cwd,
-        status: Status::of(Some(file.status.as_str()), None),
-        status_since: Some(moment(file.status_since)),
         started_at: Some(process.started),
         name: None,
         entrypoint: file.mode.and_then(|mode| Said::new(mode.trim().to_owned())),
         terminal: process.terminal,
-    }
+    };
+    ReportedAgent { seen, report }
 }
 
 #[cfg(test)]

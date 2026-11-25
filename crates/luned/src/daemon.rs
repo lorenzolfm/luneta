@@ -67,7 +67,7 @@ use crate::sayings::ToSay;
 use crate::remote::{Bridges, Bridging, Destination, Standing};
 use crate::printed::Kept as KeptFile;
 use crate::transcripts::{self, Reading, SessionId};
-use crate::agent::Agent;
+use crate::statuses::ReportedAgent;
 use crate::checks::{Failing, Log};
 use crate::{
     agy, changes, checks, claude, client, devices, eza, fetches, git, github, keeps, log, owns, pi,
@@ -217,7 +217,7 @@ pub async fn serve(
     let owns = Arc::new(AtomicBool::new(false));
     follow(&core, &claim.folder, claude_folder.clone(), agy_folder.clone())?;
     tokio::spawn(stand(watchers.clone(), owns.clone(), bound.clone(), end));
-    owns::follow(layouts.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
+    owns::follow(core.clone(), layouts.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
@@ -369,7 +369,7 @@ fn follow(
     };
     let any = |_: &Path| true;
     let mode = RecursiveMode::NonRecursive;
-    let pids = |agents: &Vec<Agent>| agents.iter().map(|agent| agent.pid).collect();
+    let pids = |agents: &Vec<ReportedAgent>| agents.iter().map(|agent| agent.seen.id.pid).collect();
     watch::watch_ending("pi", dir, mode, any, SWEEP, read, pids, tell)?;
     let mut files = agy::AgentFiles::new(folder, agy_folder);
     let dir = files.dir().to_owned();

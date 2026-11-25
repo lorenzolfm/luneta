@@ -40,6 +40,7 @@ pub mod screens;
 pub mod seats;
 mod shows;
 pub mod shells;
+mod statuses;
 mod streams;
 pub mod skills;
 mod tailnet;
