@@ -37,9 +37,11 @@ struct TerminalScreen: View {
     let grid: TerminalGrid
     @Binding var size: CGFloat
     @Binding var typing: Bool
+    let keystrokes: UInt64
     let input: TerminalInput?
     @State private var pinched: CGFloat = 1
     @State private var pulled = false
+    @State private var following = false
 
     private static let cursorAt = "cursor"
     private static let pullFar: CGFloat = 48
@@ -93,9 +95,19 @@ struct TerminalScreen: View {
                         pulledTo(pull, scroll: input.scroll)
                     }
                 }
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    let insets = geometry.contentInsets
+                    return geometry.containerSize.height - insets.top - insets.bottom
+                } action: { before, after in
+                    if typing && after < before {
+                        reader.scrollTo(TerminalScreen.cursorAt)
+                    }
+                }
+                .onChange(of: keystrokes) { following = true }
                 .onChange(of: grid.cursor) {
-                    if typing {
-                        reader.scrollTo(TerminalScreen.cursorAt, anchor: .center)
+                    if following {
+                        following = false
+                        reader.scrollTo(TerminalScreen.cursorAt)
                     }
                 }
                 .onAppear { reader.scrollTo(TerminalScreen.cursorAt, anchor: .center) }
