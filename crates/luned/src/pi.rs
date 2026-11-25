@@ -7,15 +7,18 @@ use std::time::{Duration, SystemTime};
 
 use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
+use lune_protocol::program_status::Message;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, SeenAgent,
+    absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble, SeenAgent,
 };
 use crate::mux;
 use crate::process::{self, AgentId};
-use crate::statuses::{self, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
+use crate::statuses::{
+    ActiveStatus, BlockedReason, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
+};
 use crate::watch::{self, Troubles};
 use crate::{log, Directory};
 
@@ -39,16 +42,148 @@ pub fn folder() -> Option<PathBuf> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct File {
+struct RawFile {
     #[serde(deserialize_with = "nonempty")]
     session_id: Said,
     #[serde(deserialize_with = "absolute")]
     cwd: Directory,
-    #[serde(deserialize_with = "nonempty")]
-    status: Said,
+    status: String,
+    status_message: Option<String>,
     status_since: u64,
     proc_start: Option<String>,
     mode: Option<String>,
+    phase: Option<RawPhase>,
+    prompt_open: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct RawResting {
+    status: String,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum RawPhase {
+    Resting { resting: RawResting },
+    Running { outcome: RawResting },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PiStatus {
+    Stopped,
+    Working,
+    Waiting,
+    Done,
+    Error { message: Option<Message> },
+}
+
+impl PiStatus {
+    fn parse(word: &str, message: Option<&str>) -> Option<Self> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "stopped" | "idle" => Some(PiStatus::Stopped),
+            "busy" => Some(PiStatus::Working),
+            "waiting" => Some(PiStatus::Waiting),
+            "done" => Some(PiStatus::Done),
+            "error" => Some(PiStatus::Error {
+                message: message.and_then(|text| Message::from_raw_bytes(text.as_bytes())),
+            }),
+            _ => None,
+        }
+    }
+
+    fn into_active(self) -> ActiveStatus {
+        match self {
+            PiStatus::Stopped => ActiveStatus::Stopped,
+            PiStatus::Working => ActiveStatus::Working,
+            PiStatus::Waiting => {
+                ActiveStatus::Blocked { reason: BlockedReason::Unspecified, message: None }
+            },
+            PiStatus::Done => ActiveStatus::Done { message: None },
+            PiStatus::Error { message } => ActiveStatus::Error { message },
+        }
+    }
+}
+
+fn parse_resting(raw: &RawResting) -> io::Result<PiStatus> {
+    match raw.status.trim().to_ascii_lowercase().as_str() {
+        "stopped" | "idle" => Ok(PiStatus::Stopped),
+        "done" => Ok(PiStatus::Done),
+        "error" => Ok(PiStatus::Error {
+            message: raw
+                .message
+                .as_deref()
+                .and_then(|text| Message::from_raw_bytes(text.as_bytes())),
+        }),
+        _ => Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!("unknown pi resting status {:?}", raw.status),
+        )),
+    }
+}
+
+fn project_phase(phase: &RawPhase, prompt_open: bool) -> io::Result<PiStatus> {
+    match phase {
+        RawPhase::Resting { resting } => {
+            let resting = parse_resting(resting)?;
+            Ok(if prompt_open { PiStatus::Waiting } else { resting })
+        },
+        RawPhase::Running { outcome } => {
+            let _ = parse_resting(outcome)?;
+            Ok(if prompt_open { PiStatus::Waiting } else { PiStatus::Working })
+        },
+    }
+}
+
+struct File {
+    session_id: Said,
+    cwd: Directory,
+    status: PiStatus,
+    status_since: SystemTime,
+    proc_start: Option<process::Start>,
+    entrypoint: Option<Said>,
+}
+
+impl File {
+    fn parse(raw: RawFile) -> io::Result<Self> {
+        let status = PiStatus::parse(&raw.status, raw.status_message.as_deref()).ok_or_else(|| {
+            io::Error::new(ErrorKind::InvalidData, format!("unknown pi status {:?}", raw.status))
+        })?;
+        match (raw.phase.as_ref(), raw.prompt_open) {
+            (Some(phase), Some(prompt_open)) => {
+                let projected = project_phase(phase, prompt_open)?;
+                if projected != status {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "pi status disagrees with phase and promptOpen",
+                    ));
+                }
+            },
+            (None, None) => {},
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "phase and promptOpen must appear together",
+                ));
+            },
+        }
+        let proc_start = raw
+            .proc_start
+            .map(|value| {
+                process::Start::spelled(value)
+                    .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "procStart is empty"))
+            })
+            .transpose()?;
+        let entrypoint = raw.mode.and_then(|mode| Said::new(mode.trim().to_owned()));
+        Ok(File {
+            session_id: raw.session_id,
+            cwd: raw.cwd,
+            status,
+            status_since: moment(raw.status_since),
+            proc_start,
+            entrypoint,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -126,7 +261,7 @@ impl AgentFiles {
             else {
                 continue;
             };
-            match read(&path, id.start().as_str(), started) {
+            match read(&path, id.start(), started) {
                 Ok(Some(file)) => {
                     let terminal = cached.map_or_else(
                         || {
@@ -183,13 +318,16 @@ fn install(pi: &Path, lune: &Path) -> io::Result<()> {
     })
 }
 
-fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<File>> {
-    let file: File = serde_json::from_slice(&file_text(path)?)
+fn read(path: &Path, start: &process::Start, started: SystemTime) -> io::Result<Option<File>> {
+    let handle = fs::File::open(path)?;
+    let modified = handle.metadata()?.modified()?;
+    let bytes = read_file_text(handle)?;
+    let raw: RawFile = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    let stands = if let Some(recorded) = &file.proc_start {
-        recorded == start
-    } else {
-        dated_since(fs::metadata(path)?.modified()?, started)
+    let file = File::parse(raw)?;
+    let stands = match &file.proc_start {
+        Some(recorded) => recorded == start,
+        None => dated_since(modified, started),
     };
     Ok(stands.then_some(file))
 }
@@ -199,13 +337,10 @@ fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
 }
 
 fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
-    let update = match statuses::parse_word(Some(file.status.as_str()), None) {
-        Some(status) => RungUpdate::Active {
-            status,
-            at: Some(moment(file.status_since)),
-            subagents: Vec::new(),
-        },
-        None => RungUpdate::Clear,
+    let update = RungUpdate::Active {
+        status: file.status.into_active(),
+        at: Some(file.status_since),
+        subagents: Vec::new(),
     };
     let report = Report { agent: id.clone(), rung: Rung::Extension, update };
     let seen = SeenAgent {
@@ -215,7 +350,7 @@ fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
         cwd: file.cwd,
         started_at: Some(process.started),
         name: None,
-        entrypoint: file.mode.and_then(|mode| Said::new(mode.trim().to_owned())),
+        entrypoint: file.entrypoint,
         terminal: process.terminal,
     };
     ReportedAgent { seen, report }
@@ -225,7 +360,12 @@ fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use super::{dated_since, DATED_LATE};
+    use lune_protocol::program_status::Message;
+    use lune_protocol::said::Said;
+
+    use super::{dated_since, File, PiStatus, RawFile, RawPhase, RawResting, DATED_LATE};
+    use crate::statuses::ActiveStatus;
+    use crate::Directory;
 
     #[test]
     fn a_file_dated_since_its_process_started_stands() {
@@ -242,5 +382,69 @@ mod tests {
         let last = SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, 999_999_999)).unwrap();
         assert_eq!(last.checked_add(DATED_LATE), None, "nothing is later than the last time");
         assert!(dated_since(last, SystemTime::now()));
+    }
+
+    #[test]
+    fn pi_status_maps_stopped_and_legacy_idle_and_rejects_unknown_words() {
+        let parse = |word, message| PiStatus::parse(word, message).map(PiStatus::into_active);
+        assert_eq!(parse("stopped", None), Some(ActiveStatus::Stopped));
+        assert_eq!(parse("idle", None), Some(ActiveStatus::Stopped));
+        assert_eq!(parse("done", Some("ignored")), Some(ActiveStatus::Done { message: None }));
+        assert_eq!(parse("busy", Some("ignored")), Some(ActiveStatus::Working));
+        assert_eq!(
+            parse("error", Some("  \x1b[31mrate\u{200b} limited  ")),
+            Some(ActiveStatus::Error {
+                message: Message::parse("message", "[31mrate limited").ok(),
+            })
+        );
+        assert_eq!(parse("error", Some("   ")), Some(ActiveStatus::Error { message: None }));
+        assert_eq!(parse("working", None), None);
+        assert_eq!(parse("blocked", None), None);
+        assert_eq!(parse("   ", None), None);
+        assert_eq!(parse("unknown", None), None);
+    }
+
+    #[test]
+    fn pi_file_validates_proc_start_status_and_phase_projection() {
+        let base = |status: &str, proc_start: Option<&str>| RawFile {
+            session_id: Said::new("s1".to_owned()).unwrap(),
+            cwd: Directory::parse("/w".to_owned()).unwrap(),
+            status: status.to_owned(),
+            status_message: None,
+            status_since: 1_000,
+            proc_start: proc_start.map(str::to_owned),
+            mode: Some("tui".to_owned()),
+            phase: None,
+            prompt_open: None,
+        };
+        assert!(File::parse(base("stopped", Some("42"))).is_ok());
+        assert!(File::parse(base("stopped", Some(""))).is_err());
+        assert!(File::parse(base("stopped", Some("   "))).is_err());
+        assert!(File::parse(base("   ", Some("42"))).is_err());
+
+        let mut consistent = base("waiting", Some("42"));
+        consistent.phase = Some(RawPhase::Running {
+            outcome: RawResting { status: "error".to_owned(), message: Some("boom".to_owned()) },
+        });
+        consistent.prompt_open = Some(true);
+        assert!(File::parse(consistent).is_ok());
+
+        let mut mismatched = base("done", Some("42"));
+        mismatched.phase = Some(RawPhase::Running {
+            outcome: RawResting { status: "done".to_owned(), message: None },
+        });
+        mismatched.prompt_open = Some(true);
+        assert!(File::parse(mismatched).is_err());
+
+        let mut half_snapshot = base("done", Some("42"));
+        half_snapshot.prompt_open = Some(false);
+        assert!(File::parse(half_snapshot).is_err());
+
+        let mut bad_outcome = base("busy", Some("42"));
+        bad_outcome.phase = Some(RawPhase::Running {
+            outcome: RawResting { status: "busy".to_owned(), message: None },
+        });
+        bad_outcome.prompt_open = Some(false);
+        assert!(File::parse(bad_outcome).is_err());
     }
 }

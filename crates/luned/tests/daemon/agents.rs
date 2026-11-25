@@ -244,11 +244,15 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
 fn the_daemon_says_what_claude_code_says_and_no_more() {
     let host = Host::new();
     let (shell, newer, older) = (process(None), process(None), process(None));
-    let waits = process(None);
+    let (waits, sdk) = (process(None), process(None));
     let mut said = file_for("shell", &shell, "shell");
     said["nameSource"] = json!("user");
-    said["entrypoint"] = json!("sdk-cli");
+    said["entrypoint"] = json!("claude-desktop");
     host.write(shell.pid(), &said);
+    let mut said = file_for("sdk", &sdk, "busy");
+    said["entrypoint"] = json!("sdk-cli");
+    said["waitingFor"] = json!("Permission Prompt");
+    host.write(sdk.pid(), &said);
     let mut said = file_for("newer", &newer, "Compacting");
     said["nameSource"] = json!("someone");
     said["entrypoint"] = json!("claude-vscode");
@@ -285,10 +289,28 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
         [
             (Some("newer"), other("Compacting"), true, newer.0, newer.1, None),
             (Some("older"), None, false, None, None, None),
-            (Some("shell"), shell, true, Some(NameSource::User), Some("sdk-cli"), None),
+            (Some("sdk"), None, false, Some(NameSource::Derived), Some("sdk-cli"), None),
+            (Some("shell"), shell, true, Some(NameSource::User), Some("claude-desktop"), None),
             (Some("waits"), waiting, true, Some(NameSource::Derived), Some("cli"), sandbox),
         ]
     );
+}
+
+#[test]
+fn a_session_file_with_a_stray_tail_reads_its_leading_object() {
+    let host = Host::new();
+    let agent = process(None);
+    host.write(agent.pid(), &file_for("rewritten", &agent, "busy"));
+    let _daemon = start(host.vars()).unwrap();
+    let busy = Some(known(Status::Busy));
+    eventually("rewritten is busy", || host.agent("rewritten").filter(|it| it.status == busy));
+
+    let leading = file_for("rewritten", &agent, "idle").to_string();
+    let with_tail = format!(r#"{leading}rompt","statusUpdatedAt":1792859293927}}"#);
+    fs::write(host.file_of(agent.pid()), with_tail).unwrap();
+    let idle = Some(known(Status::Idle));
+    eventually("rewritten is idle", || host.agent("rewritten").filter(|it| it.status == idle));
+    assert_eq!(host.list().unread, 0);
 }
 
 #[test]
@@ -373,7 +395,14 @@ fn an_agent_that_crashes_leaves_the_list_as_it_ends() {
 fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let host = Host::new();
     let (cut, newer, folder, long) = (process(None), process(None), process(None), process(None));
-    let (unnamed, nowhere, relative) = (process(None), process(None), process(None));
+    let (unnamed, blank_id, nowhere, relative, unstarted, blank_start) = (
+        process(None),
+        process(None),
+        process(None),
+        process(None),
+        process(None),
+        process(None),
+    );
     host.write(cut.pid(), &file_for("cut", &cut, "busy"));
     let _daemon = start(host.vars()).unwrap();
     assert!(host.agent("cut").is_some());
@@ -387,26 +416,33 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let padded = " ".repeat(64 * 1024) + &file_for("long", &long, "busy").to_string();
     fs::write(host.file_of(long.pid()), padded).unwrap();
     host.write(unnamed.pid(), &file_for("", &unnamed, "busy"));
+    host.write(blank_id.pid(), &file_for("   ", &blank_id, "busy"));
     let mut blank = file_for("nowhere", &nowhere, "busy");
     blank["cwd"] = json!("");
     host.write(nowhere.pid(), &blank);
     let mut near = file_for("relative", &relative, "busy");
     near["cwd"] = json!("w");
     host.write(relative.pid(), &near);
-    let unread = eventually("seven files are unread", || {
+    let mut empty_start = file_for("unstarted", &unstarted, "busy");
+    empty_start["procStart"] = json!("");
+    host.write(unstarted.pid(), &empty_start);
+    let mut space_start = file_for("blank_start", &blank_start, "busy");
+    space_start["procStart"] = json!("   ");
+    host.write(blank_start.pid(), &space_start);
+    let unread = eventually("ten files are unread", || {
         let listed = host.list();
-        (listed.unread == 7).then_some(listed)
+        (listed.unread == 10).then_some(listed)
     });
     assert!(unread.agents.is_empty(), "{:?}", unread.agents);
 
     let output = host.vars().command(&LUNE).arg("agents").output().unwrap();
     let said = String::from_utf8_lossy(&output.stderr);
-    assert!(said.contains("cannot read 7 of Claude Code's session files"), "{said}");
+    assert!(said.contains("cannot read 10 of Claude Code's session files"), "{said}");
 
     let left = host.file_of(newer.pid());
     drop(newer);
     assert!(left.exists());
-    eventually("six files are unread", || (host.list().unread == 6).then_some(()));
+    eventually("nine files are unread", || (host.list().unread == 9).then_some(()));
 }
 
 #[test]

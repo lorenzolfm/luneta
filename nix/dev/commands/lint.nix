@@ -2,11 +2,12 @@
 let
   comments = import ../../comments.nix { inherit pkgs; };
   swift = import ../../swift.nix { inherit pkgs; };
+  typescript = import ../../typescript.nix { inherit pkgs; };
 in
 {
   name = "lint";
   usage = "[--breaking]";
-  help = "statix, deadnix, no comments, swift-format and swiftlint over the app, no clock waits in tests, no call past its wrapper, no shell script files and buf breaking; --breaking runs that one alone";
+  help = "statix, deadnix, no comments, swift-format and swiftlint over the app, typescript over extensions, no clock waits in tests, no call past its wrapper, no shell script files and buf breaking; --breaking runs that one alone";
   tools = [
     pkgs.buf
     pkgs.deadnix
@@ -15,6 +16,7 @@ in
     pkgs.statix
     comments
     swift.check
+    typescript
   ];
   text = ''
     breaking() {
@@ -40,6 +42,8 @@ in
         git ls-files -z --cached --others --exclude-standard | lune-comments || status=1
         git ls-files -z --cached --others --exclude-standard '*.swift' |
           xargs -0 -r swift-check || status=1
+        git ls-files -z --cached --others --exclude-standard 'crates/*.ts' |
+          xargs -0 -r lune-typescript || status=1
         breaking || status=1
         exit "$status"
         ;;

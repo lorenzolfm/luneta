@@ -89,7 +89,7 @@ pub struct Start(String);
 impl Start {
     #[must_use]
     pub fn spelled(spelling: String) -> Option<Start> {
-        (!spelling.is_empty()).then_some(Start(spelling))
+        (!spelling.trim().is_empty()).then_some(Start(spelling))
     }
 
     #[must_use]

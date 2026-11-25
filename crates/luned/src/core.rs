@@ -12,7 +12,7 @@ use lune_domain::projects::{Listed, ViewId, Worktree, WorktreeId};
 use lune_protocol::git::{GitStatus, Head};
 use lune_protocol::github::PullRequest;
 use lune_protocol::program_status::{
-    bound_fair, ChildProgramStatus, Message, OscBlockedKind, ProgramPhase, ProgramStatus, Title,
+    bound_fair, ChildProgramStatus, OscBlockedKind, ProgramPhase, ProgramStatus,
 };
 use lune_protocol::said::Said;
 use lune_protocol::shell::Doing;
@@ -809,16 +809,11 @@ fn osc_phase(phase: &ProgramPhase) -> ActiveStatus {
     match phase {
         ProgramPhase::Idle => ActiveStatus::Stopped,
         ProgramPhase::Working { .. } => ActiveStatus::Working,
-        ProgramPhase::Done { message } => {
-            ActiveStatus::Done { message: message.as_ref().and_then(Message::to_said) }
+        ProgramPhase::Done { message } => ActiveStatus::Done { message: message.clone() },
+        ProgramPhase::Blocked { kind, message } => {
+            ActiveStatus::Blocked { reason: osc_reason(*kind), message: message.clone() }
         },
-        ProgramPhase::Blocked { kind, message } => ActiveStatus::Blocked {
-            reason: osc_reason(*kind),
-            message: message.as_ref().and_then(Message::to_said),
-        },
-        ProgramPhase::Error { message } => {
-            ActiveStatus::Error { message: message.as_ref().and_then(Message::to_said) }
-        },
+        ProgramPhase::Error { message } => ActiveStatus::Error { message: message.clone() },
     }
 }
 
@@ -826,16 +821,11 @@ fn osc_subagent_phase(phase: &ProgramPhase) -> SubagentPhase {
     match phase {
         ProgramPhase::Idle => SubagentPhase::Stopped,
         ProgramPhase::Working { progress } => SubagentPhase::Working { progress: *progress },
-        ProgramPhase::Done { message } => {
-            SubagentPhase::Done { message: message.as_ref().and_then(Message::to_said) }
+        ProgramPhase::Done { message } => SubagentPhase::Done { message: message.clone() },
+        ProgramPhase::Blocked { kind, message } => {
+            SubagentPhase::Blocked { reason: osc_reason(*kind), message: message.clone() }
         },
-        ProgramPhase::Blocked { kind, message } => SubagentPhase::Blocked {
-            reason: osc_reason(*kind),
-            message: message.as_ref().and_then(Message::to_said),
-        },
-        ProgramPhase::Error { message } => {
-            SubagentPhase::Error { message: message.as_ref().and_then(Message::to_said) }
-        },
+        ProgramPhase::Error { message } => SubagentPhase::Error { message: message.clone() },
     }
 }
 
@@ -851,7 +841,7 @@ fn osc_subagent(child: &ChildProgramStatus) -> Subagent {
     Subagent {
         id: child.id.clone(),
         phase: osc_subagent_phase(&child.status.phase),
-        title: child.status.title.as_ref().and_then(Title::to_said),
+        title: child.status.title.clone(),
         status_since: child.status.at,
     }
 }
@@ -962,7 +952,7 @@ mod tests {
 
     use lune_domain::mux::OwnMade;
     use lune_protocol::agent_status::{AgentStatus, BlockedReason};
-    use lune_protocol::program_status::{AppName, ChildId, ProgramStatuses, Progress};
+    use lune_protocol::program_status::{AppName, ChildId, Message, ProgramStatuses, Progress, Title};
 
     use super::*;
 
@@ -1056,7 +1046,7 @@ mod tests {
             AgentStatus::of_api(&after[0]),
             AgentStatus::Blocked {
                 reason: BlockedReason::Permission,
-                message: Said::new("approve touch".to_owned()),
+                message: Message::parse("message", "approve touch").ok(),
             }
         );
         assert_eq!(after[0].status_rung, Some(api::StatusRung::Osc7501.into()));
