@@ -36,7 +36,7 @@ fn a_folder_named_in_no_utf_8_breaks_no_terminal() {
             matches!(program, Some(api::terminal::Program::Ended(_)))
         };
         assert!(!ended(&mux.list(api::ListRequest {}).await.unwrap().into_inner()));
-        viewer.type_line(key, "").await;
+        viewer.press_enter(key).await;
         watched_until(&mut watch, "the program ended", ended).await;
     });
 }

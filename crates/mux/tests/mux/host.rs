@@ -225,7 +225,11 @@ impl Viewer {
         self.send(api::from_viewer::Event::Showing(showing)).await;
     }
 
-    pub async fn type_line(&self, terminal: api::TerminalKey, text: &str) {
+    pub async fn press_enter(&self, terminal: api::TerminalKey) {
+        self.type_line(terminal, "").await;
+    }
+
+    async fn type_line(&self, terminal: api::TerminalKey, text: &str) {
         for key in line_keys(text) {
             let (terminal, event) = (Some(terminal), Some(api::typed::Event::Key(key)));
             self.send(api::from_viewer::Event::Typed(api::Typed { terminal, event })).await;

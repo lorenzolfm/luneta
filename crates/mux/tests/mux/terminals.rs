@@ -64,8 +64,9 @@ fn a_terminal_takes_the_size_it_is_given_and_not_its_viewer_s() {
                 viewer.frame_of(key.id).is_some_and(|frame| frame.size == Some(size(50, 12)))
             })
             .await;
-        viewer.type_line(key, "stty size").await;
-        viewer.until_row(key.id, "12 50").await;
+        let prompted = viewer.until_prompted(key.id).await;
+        let typed = viewer.type_at(key, &prompted, "echo $(stty size)").await;
+        assert_eq!(viewer.until_said(key.id, &typed).await, ["12 50"]);
         let listing = listed(&mut mux).await;
         assert_eq!(terminal(&listing, &key).unwrap().size, Some(size(50, 12)));
     });
@@ -140,7 +141,7 @@ fn typing_in_a_terminal_not_shown_is_refused_and_the_viewer_goes_on() {
         let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let mut viewer = Viewer::new(&mut mux).await;
-        viewer.type_line(key, "").await;
+        viewer.press_enter(key).await;
         viewer.until("a refusal", |viewer| !viewer.refused.is_empty()).await;
         assert_eq!(viewer.refused[0], format!("terminal {} is not shown", key.id));
         viewer.show(&[key]).await;
@@ -315,7 +316,7 @@ fn a_held_terminal_says_how_its_program_ended_and_a_closing_one_leaves() {
         .await;
         let viewer = Viewer::new(&mut mux).await;
         viewer.show(&[closes]).await;
-        viewer.type_line(closes, "").await;
+        viewer.press_enter(closes).await;
         let listing = watched_until(&mut watch, "the closing terminal left", |listing| {
             terminal(listing, &closes).is_none()
         })
@@ -399,7 +400,7 @@ fn a_closed_terminal_leaves_what_its_viewers_show_and_tells_them_it_closed() {
         mux.close_terminal(api::CloseTerminalRequest { terminal: Some(one) }).await.unwrap();
         viewer.until("terminal one closed", |viewer| !viewer.closed.is_empty()).await;
         assert_eq!(viewer.closed, [one.id]);
-        viewer.type_line(one, "").await;
+        viewer.press_enter(one).await;
         viewer.until("a refusal", |viewer| !viewer.refused.is_empty()).await;
         assert_eq!(viewer.refused, [format!("terminal {} is not shown", one.id)]);
         let prompted = viewer.until_prompted(two.id).await;
@@ -481,7 +482,7 @@ fn a_terminal_works_where_it_says_on_this_machine() {
         viewer.show(&[key]).await;
         viewer.until_row(key.id, "one").await;
         assert_eq!(terminal(&listed(&mut mux).await, &key).unwrap().cwd, "/");
-        viewer.type_line(key, "").await;
+        viewer.press_enter(key).await;
         viewer.until_row(key.id, "two").await;
         assert_eq!(terminal(&listed(&mut mux).await, &key).unwrap().cwd, "/tmp");
     });
@@ -534,7 +535,7 @@ fn a_viewer_back_in_the_scrollback_stays_on_its_rows() {
         let rows = reading.rows_of(key.id).to_vec();
         let before = reading.frame_of(key.id).unwrap().clone();
         assert_eq!(before.scrolled_back, 10);
-        typing.type_line(key, "").await;
+        typing.press_enter(key).await;
         typing.until_row(key.id, "more3").await;
         reading
             .until("the program's three rows more", |viewer| {

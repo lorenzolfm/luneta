@@ -66,7 +66,7 @@ fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
         let front = running.foreground.as_ref().expect("something runs in front");
         assert_eq!(front.pid, running.pid);
         assert_eq!(front.argv[..2], ["/bin/sh", "-c"]);
-        viewer.type_line(key, "").await;
+        viewer.press_enter(key).await;
         let listing = watched_until(&mut watch, "make test ended", |listing| {
             matches!(said(listing), Some(Is::Ended(_)))
         })
@@ -103,7 +103,7 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
         .await;
         let Some(Is::Stopped(stopped)) = said(&listing) else { unreachable!() };
         assert_eq!(stopped.command.as_deref(), Some("sleep 30"));
-        viewer.type_line(key, "").await;
+        viewer.press_enter(key).await;
         let listing = watched_until(&mut watch, "sleep brought back", |listing| {
             in_front(listing, "sleep") && matches!(said(listing), Some(Is::Going(_)))
         })
@@ -118,7 +118,7 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
         let Some(Is::Ended(ended)) = said(&listing) else { unreachable!() };
         assert_eq!(ended.command.as_deref(), Some("sleep 30"));
         assert_eq!(ended.ending, Some(api::ran::ended::Ending::Resumed(api::ran::Resumed {})));
-        viewer.type_line(key, "").await;
+        viewer.press_enter(key).await;
         watched_until(&mut watch, "nothing said once the program ended", |listing| {
             let program = listing.terminals.first().and_then(|terminal| terminal.program.as_ref());
             matches!(program, Some(api::terminal::Program::Ended(_)))
@@ -146,7 +146,7 @@ fn the_marks_of_a_shell_the_command_runs_are_none_of_the_terminal_s() {
         .await;
         let Some(Is::Going(going)) = said(&listing) else { unreachable!() };
         assert_eq!(going.command.as_deref(), Some("inner"));
-        viewer.type_line(key, "").await;
+        viewer.press_enter(key).await;
         let listing = watched_until(&mut watch, "inner ended", |listing| {
             matches!(said(listing), Some(Is::Ended(_)))
         })
@@ -172,7 +172,7 @@ fn a_job_in_front_under_one_that_is_not_reads_as_asking() {
             matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
         })
         .await;
-        viewer.type_line(key, "").await;
+        viewer.press_enter(key).await;
         watched_until(&mut watch, "nested ended", |listing| {
             matches!(said(listing), Some(Is::Ended(_)))
         })
