@@ -30,6 +30,7 @@ struct TerminalPage: View {
     @State private var opens: UInt64 = 0
     @State private var typing = false
     @State private var ctrl = false
+    @State private var keystrokes: UInt64 = 0
     @State private var size = TerminalFont.readable
     @State private var failed: String?
 
@@ -49,7 +50,10 @@ struct TerminalPage: View {
             }
             .safeAreaInset(edge: .bottom) {
                 if case .shown(_, let view) = seeing {
-                    KeyBar(ctrl: $ctrl, typing: $typing) { press($0, into: view) }
+                    KeyBar(
+                        ctrl: $ctrl, typing: $typing,
+                        press: { press($0, into: view) },
+                        type: { type($0, into: view) })
                 }
             }
             .task(id: Viewing(opens: opens, active: phase == .active, appearance: appearance)) {
@@ -124,25 +128,36 @@ struct TerminalPage: View {
 
     private func input(into view: TerminalView) -> TerminalInput {
         TerminalInput(
-            typed: { text in
-                said { try view.typed(text: text, ctrl: ctrl) }
-                ctrl = false
-            },
+            typed: { type($0, into: view) },
             deleted: { press(.backspace, into: view) },
-            scroll: { back in said { try view.scroll(back: back) } })
+            scroll: { back in said { try view.scroll(back: back) } },
+            keystrokes: keystrokes)
+    }
+
+    private func type(_ text: String, into view: TerminalView) {
+        send { try view.typed(text: text, ctrl: ctrl) }
     }
 
     private func press(_ key: KeyName, into view: TerminalView) {
-        said { try view.pressed(key: key, ctrl: ctrl) }
-        ctrl = false
+        send { try view.pressed(key: key, ctrl: ctrl) }
     }
 
-    private func said(_ saying: () throws -> Void) {
+    private func send(_ saying: () throws -> Void) {
+        if said(saying) {
+            ctrl = false
+            keystrokes &+= 1
+        }
+    }
+
+    @discardableResult
+    private func said(_ saying: () throws -> Void) -> Bool {
         do {
             try saying()
             failed = nil
+            return true
         } catch {
             failed = reason(error)
+            return false
         }
     }
 }
@@ -151,31 +166,75 @@ private struct KeyBar: View {
     @Binding var ctrl: Bool
     @Binding var typing: Bool
     let press: (KeyName) -> Void
+    let type: (String) -> Void
+
+    private static let symbols = ["/", "-", "|", "~"]
+    private static let keyHeight: CGFloat = 36
+    private static let keyWidthMin: CGFloat = 40
+    private static let keyPadding: CGFloat = 10
+    private static let keyboardWidthMin: CGFloat = 48
+    private static let dividerHeight = keyHeight * 0.6
 
     var body: some View {
-        HStack(spacing: 8) {
-            Button("esc") { press(.escape) }
-            Button("tab") { press(.tab) }
-            Toggle("ctrl", isOn: $ctrl).toggleStyle(.button)
-            Spacer()
-            Button("Left", systemImage: "arrow.left") { press(.left) }
-            Button("Up", systemImage: "arrow.up") { press(.up) }
-            Button("Down", systemImage: "arrow.down") { press(.down) }
-            Button("Right", systemImage: "arrow.right") { press(.right) }
-            Spacer()
+        HStack(spacing: 0) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 0) {
+                    key("esc") { press(.escape) }
+                    key("tab") { press(.tab) }
+                    Button {
+                        ctrl.toggle()
+                    } label: {
+                        keyFace("ctrl")
+                            .foregroundStyle(ctrl ? Color(.systemBackground) : Color.accentColor)
+                            .background(
+                                ctrl ? Color.accentColor : .clear,
+                                in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .accessibilityAddTraits(ctrl ? .isSelected : [])
+                    arrow("Left", "arrow.left", .left)
+                    arrow("Up", "arrow.up", .up)
+                    arrow("Down", "arrow.down", .down)
+                    arrow("Right", "arrow.right", .right)
+                    ForEach(KeyBar.symbols, id: \.self) { symbol in
+                        key(symbol) { type(symbol) }
+                    }
+                }
+                .padding(.horizontal, 4)
+            }
+            .scrollIndicators(.hidden)
+            Divider()
+                .frame(height: KeyBar.dividerHeight)
             Button(
                 typing ? "Hide the keyboard" : "Show the keyboard",
                 systemImage: typing ? "keyboard.chevron.compact.down" : "keyboard"
             ) {
                 typing.toggle()
             }
+            .labelStyle(.iconOnly)
+            .frame(minWidth: KeyBar.keyboardWidthMin, minHeight: KeyBar.keyHeight)
         }
-        .labelStyle(.iconOnly)
-        .buttonStyle(.bordered)
+        .buttonStyle(.borderless)
         .font(.system(.body, design: .monospaced))
-        .padding(.horizontal)
-        .padding(.vertical, 6)
+        .dynamicTypeSize(...DynamicTypeSize.xLarge)
+        .padding(.vertical, 4)
         .background(.bar)
+    }
+
+    private func key(_ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { keyFace(label) }
+    }
+
+    private func arrow(_ label: String, _ systemImage: String, _ key: KeyName) -> some View {
+        Button(label, systemImage: systemImage) { press(key) }
+            .labelStyle(.iconOnly)
+            .frame(minWidth: KeyBar.keyWidthMin, minHeight: KeyBar.keyHeight)
+    }
+
+    private func keyFace(_ label: String) -> some View {
+        Text(label)
+            .fixedSize()
+            .padding(.horizontal, KeyBar.keyPadding)
+            .frame(minWidth: KeyBar.keyWidthMin, minHeight: KeyBar.keyHeight)
     }
 }
 

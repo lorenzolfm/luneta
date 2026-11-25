@@ -26,6 +26,7 @@ struct TerminalInput {
     let typed: (String) -> Void
     let deleted: () -> Void
     let scroll: (Int32) -> Void
+    let keystrokes: UInt64
 }
 
 struct Pull: Equatable {
@@ -40,9 +41,15 @@ struct TerminalScreen: View {
     let input: TerminalInput?
     @State private var pinched: CGFloat = 1
     @State private var pulled = false
+    @State private var followUntil: ContinuousClock.Instant?
 
     private static let cursorAt = "cursor"
     private static let pullFar: CGFloat = 48
+    private static let echoWait = Duration.seconds(1)
+
+    private static func visibleHeight(_ geometry: ScrollGeometry) -> CGFloat {
+        geometry.containerSize.height - geometry.contentInsets.top - geometry.contentInsets.bottom
+    }
 
     var body: some View {
         GeometryReader { outer in
@@ -57,11 +64,18 @@ struct TerminalScreen: View {
                                 width: cell.width * CGFloat(grid.width),
                                 height: cell.height * CGFloat(grid.rows.count))
                         if let cursor = grid.cursor {
-                            Color.clear
-                                .frame(width: cell.width, height: cell.height)
-                                .padding(.leading, CGFloat(cursor.column) * cell.width)
-                                .padding(.top, CGFloat(cursor.row) * cell.height)
-                                .id(TerminalScreen.cursorAt)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Color.clear
+                                    .frame(width: 1, height: CGFloat(cursor.row) * cell.height)
+                                HStack(spacing: 0) {
+                                    Color.clear
+                                        .frame(
+                                            width: CGFloat(cursor.column) * cell.width, height: 1)
+                                    Color.clear
+                                        .frame(width: cell.width, height: cell.height)
+                                        .id(TerminalScreen.cursorAt)
+                                }
+                            }
                         }
                     }
                     .contentShape(Rectangle())
@@ -85,7 +99,7 @@ struct TerminalScreen: View {
                 .onScrollGeometryChange(for: Pull.self) { geometry in
                     let insets = geometry.contentInsets
                     let down = geometry.contentOffset.y + insets.top
-                    let visible = geometry.containerSize.height - insets.top - insets.bottom
+                    let visible = TerminalScreen.visibleHeight(geometry)
                     let lowest = max(geometry.contentSize.height - visible, 0)
                     return Pull(pastTop: -down, pastBottom: down - lowest)
                 } action: { _, pull in
@@ -93,9 +107,21 @@ struct TerminalScreen: View {
                         pulledTo(pull, scroll: input.scroll)
                     }
                 }
-                .onChange(of: grid.cursor) {
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    TerminalScreen.visibleHeight(geometry)
+                } action: { before, after in
                     if typing {
-                        reader.scrollTo(TerminalScreen.cursorAt, anchor: .center)
+                        if after < before {
+                            reader.scrollTo(TerminalScreen.cursorAt)
+                        }
+                    }
+                }
+                .onChange(of: input?.keystrokes) {
+                    followUntil = .now + TerminalScreen.echoWait
+                }
+                .onChange(of: grid.cursor) {
+                    if let followUntil, ContinuousClock.now < followUntil {
+                        reader.scrollTo(TerminalScreen.cursorAt)
                     }
                 }
                 .onAppear { reader.scrollTo(TerminalScreen.cursorAt, anchor: .center) }
