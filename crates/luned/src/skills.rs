@@ -216,9 +216,13 @@ const AGY_SKILLS_PER_ROOT_MAX: usize = 512;
 
 const AGY_SKILL_FILES_MAX: usize = 2048;
 
+const AGY_DIR_ENTRIES_MAX: usize = 4096;
+
 const _: () = assert!(AGY_PLUGINS_MAX > 0);
 const _: () = assert!(AGY_SKILLS_PER_ROOT_MAX > 0);
 const _: () = assert!(AGY_SKILLS_PER_ROOT_MAX <= AGY_SKILL_FILES_MAX);
+const _: () = assert!(AGY_SKILLS_PER_ROOT_MAX <= AGY_DIR_ENTRIES_MAX);
+const _: () = assert!(AGY_PLUGINS_MAX <= AGY_DIR_ENTRIES_MAX);
 
 fn push_unique_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
     if seen.insert(path.clone()) {
@@ -226,7 +230,11 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path:
     }
 }
 
-fn sorted_dir_entries(dir: &Path, limit: usize) -> Vec<(String, PathBuf)> {
+fn sorted_dir_entries(
+    dir: &Path,
+    limit: usize,
+    keep: impl Fn(&str, &Path) -> bool,
+) -> Vec<(String, PathBuf)> {
     assert!(limit > 0);
     let listed = match fs::read_dir(dir) {
         Ok(listed) => listed,
@@ -237,11 +245,21 @@ fn sorted_dir_entries(dir: &Path, limit: usize) -> Vec<(String, PathBuf)> {
         },
     };
     let mut entries = Vec::new();
-    for entry in listed {
+    for (seen, entry) in listed.enumerate() {
+        if seen >= AGY_DIR_ENTRIES_MAX {
+            log::say(&format!(
+                "skills in {}: more than {AGY_DIR_ENTRIES_MAX} directory entries",
+                dir.display()
+            ));
+            break;
+        }
         match entry {
             Ok(entry) => {
                 if let Ok(name) = entry.file_name().into_string() {
-                    entries.push((name, entry.path()));
+                    let path = entry.path();
+                    if keep(&name, &path) {
+                        entries.push((name, path));
+                    }
                 }
             },
             Err(error) if error.kind() == ErrorKind::NotFound => {},
@@ -313,34 +331,23 @@ fn agy_found(cwd: &Path, home: Option<&Path>) -> Vec<Skill> {
 }
 
 fn agy_plugin_skills(plugins_dir: &Path) -> Vec<PathBuf> {
-    let entries = sorted_dir_entries(plugins_dir, AGY_PLUGINS_MAX);
-    let mut roots = Vec::new();
-    for (name, path) in entries {
-        if name.starts_with('.') || !path.is_dir() {
-            continue;
-        }
-        let skills = path.join("skills");
-        if skills.is_dir() {
-            roots.push(skills);
-        }
-    }
+    let entries = sorted_dir_entries(plugins_dir, AGY_PLUGINS_MAX, |name, path| {
+        !name.starts_with('.') && path.is_dir() && path.join("skills").is_dir()
+    });
+    let roots: Vec<PathBuf> = entries.into_iter().map(|(_, path)| path.join("skills")).collect();
     assert!(roots.len() <= AGY_PLUGINS_MAX);
     roots
 }
 
 fn agy_skill_files(dir: &Path, limit: usize) -> Vec<PathBuf> {
     assert!(limit > 0);
-    let entries = sorted_dir_entries(dir, limit);
-    let mut files = Vec::new();
-    for (name, path) in entries {
-        if name.starts_with('.') || name == "node_modules" || !path.is_dir() {
-            continue;
-        }
-        let skill = path.join("SKILL.md");
-        if skill.is_file() {
-            files.push(skill);
-        }
-    }
+    let entries = sorted_dir_entries(dir, limit, |name, path| {
+        !name.starts_with('.')
+            && name != "node_modules"
+            && path.is_dir()
+            && path.join("SKILL.md").is_file()
+    });
+    let files: Vec<PathBuf> = entries.into_iter().map(|(_, path)| path.join("SKILL.md")).collect();
     assert!(files.len() <= limit);
     files
 }
@@ -374,8 +381,17 @@ fn skill_files(dir: &Path, root: &Path, kept: Kept, depth: usize, files: &mut Ve
 }
 
 fn frontmatter(file: &Path) -> io::Result<Option<String>> {
-    let mut text = String::new();
-    File::open(file)?.take(FRONT_BYTES).read_to_string(&mut text)?;
+    let mut bytes = Vec::new();
+    File::open(file)?.take(FRONT_BYTES).read_to_end(&mut bytes)?;
+    let truncated = u64::try_from(bytes.len()).is_ok_and(|len| len == FRONT_BYTES);
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(error) if truncated && error.error_len().is_none() => {
+            std::str::from_utf8(&bytes[..error.valid_up_to()])
+                .map_err(|utf8| io::Error::new(ErrorKind::InvalidData, utf8))?
+        },
+        Err(error) => return Err(io::Error::new(ErrorKind::InvalidData, error)),
+    };
     let mut lines = text.lines();
     if lines.next().is_none_or(|line| line.trim_end() != "---") {
         return Ok(None);
@@ -836,10 +852,22 @@ mod tests {
         fs::create_dir_all(&invalid_dir).unwrap();
         fs::write(invalid_dir.join("SKILL.md"), [0xff, 0xfe, 0x00]).unwrap();
         put(root, "plain/parent/child/.agents/skills/bare/SKILL.md", "No frontmatter.\n");
+        let header = "---\ndescription: Long UTF-8.\n---\n";
+        let pad = usize::try_from(FRONT_BYTES).unwrap() - header.len() - 1;
+        let long_utf8 = format!("{header}{}é\n", "a".repeat(pad));
+        put(root, "plain/parent/child/.agents/skills/long/SKILL.md", &long_utf8);
         assert_eq!(agy_found(&root.join("plain/parent/child"), None), [
             skill("bare", ""),
             skill("here", "Here."),
+            skill("long", "Long UTF-8."),
         ]);
+        let filtered = root.join("filtered");
+        put(&filtered, ".DS_Store", "");
+        put(&filtered, ".hidden/SKILL.md", &front("Hidden."));
+        fs::create_dir_all(filtered.join("aaa-empty")).unwrap();
+        put(&filtered, "node_modules/dep/SKILL.md", &front("Dep."));
+        put(&filtered, "real/SKILL.md", &front("Real."));
+        assert_eq!(agy_skill_files(&filtered, 1), [filtered.join("real/SKILL.md")]);
         assert!(!Front::read("disable-slash-command: true\nuser-invocable: true").invocable);
         assert!(!Front::read("user-invocable: False").invocable);
     }

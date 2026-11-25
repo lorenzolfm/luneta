@@ -30,7 +30,7 @@ buf=""
 if [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ]; then
     tmp="$dir/.$$.tmp"
     buf="$dir/.$$.in"
-    if head -c 65001 > "$buf" 2>/dev/null; then
+    if if [ -n "$chain" ]; then dd ibs=1 obs=4096 count=65001; else head -c 65001; fi > "$buf" 2>/dev/null; then
         wrote=1
         set -- $(wc -c < "$buf" 2>/dev/null)
         size=$1
@@ -1041,13 +1041,7 @@ mod tests {
         fs::create_dir_all(&agy).unwrap();
         fs::create_dir_all(lune.join(FOLDER)).unwrap();
 
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(agy.join(LOCK_FILE))
-            .unwrap();
-        lock.try_lock().unwrap();
+        let lock = FileLock::try_acquire(&agy.join(LOCK_FILE)).unwrap().unwrap();
         assert_eq!(install(&agy, &lune).unwrap(), InstallOutcome::Retry);
         assert!(!agy.join(SETTINGS_FILE).exists());
         drop(lock);
