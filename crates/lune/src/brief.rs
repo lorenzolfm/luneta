@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::names::SessionName;
 use luned::program::{self, Ran};
-use luned::transcripts::{digest_end, Digest, Folders, Reading, SessionId, TranscriptEnd, IDS_MAX};
+use luned::transcripts::{digest_end, Digest, Reading, SessionId, TranscriptEnd, IDS_MAX};
 use luned::{one_answer, Destination};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -332,15 +332,8 @@ impl Brief {
 type Reads<'a> =
     dyn Fn(&Machine, &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> + Sync + 'a;
 
-pub fn read(
-    on: &Machine,
-    reading: &Reading,
-    folders: &Folders,
-) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
-    match on {
-        Machine::Local => Ok(reading.ends(folders)),
-        Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.ends(reading),
-    }
+pub fn read(on: &Machine, reading: &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
+    Away::on(on, away::ANSWER)?.ends(reading)
 }
 
 fn leaves_out(left_out: &[Note]) -> String {
@@ -405,7 +398,6 @@ pub struct Written {
 pub fn ask(
     number: u64,
     brief: Brief,
-    folders: Folders,
     events: &Sender<Event>,
 ) -> Briefing {
     let title = brief.title().to_owned();
@@ -415,8 +407,7 @@ pub fn ask(
     });
     let asking = Asking::on_thread(move |wanted| {
         let at = clock();
-        let reads = |on: &Machine, reading: &Reading| read(on, reading, &folders);
-        let prompt = brief.prompt(&reads, SystemTime::now);
+        let prompt = brief.prompt(&read, SystemTime::now);
         if !wanted() {
             return;
         }
@@ -608,7 +599,7 @@ mod tests {
     use std::sync::Mutex;
 
     use luned::api::TranscriptEndsRequest;
-    use luned::transcripts::TAILS_BYTES;
+    use luned::transcripts::{Folders, TAILS_BYTES};
     use serde_json::{json, Value};
 
     use super::*;
@@ -645,7 +636,7 @@ mod tests {
     fn read_here(
         folders: Folders,
     ) -> impl Fn(&Machine, &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> + Sync {
-        move |on, reading| read(on, reading, &folders)
+        move |_, reading| Ok(reading.ends(&folders))
     }
 
     #[expect(clippy::unnecessary_wraps, reason = "it is a `Reads`")]

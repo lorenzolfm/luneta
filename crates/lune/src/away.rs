@@ -44,10 +44,6 @@ pub struct Away {
 }
 
 impl Away {
-    pub fn reach(destination: &Destination, patience: Duration) -> Result<Away, String> {
-        Away::on(&Machine::Remote(destination.clone()), patience)
-    }
-
     pub fn on(on: &Machine, patience: Duration) -> Result<Away, String> {
         let folder = luned::folder::find().map_err(|unfound| format!("{unfound}, to find luned in"))?;
         Away::at(&folder, on, patience)
@@ -201,8 +197,8 @@ impl Away {
         prunes::pruned_of(answer)
     }
 
-    pub fn rebase(&mut self, dir: &Directory, branch: &str) -> Result<Rebased, Unrebased> {
-        let request = rebases::asked(self.asked_on(), dir, Some(branch));
+    pub fn rebase(&mut self, dir: &Directory, branch: Option<&str>) -> Result<Rebased, Unrebased> {
+        let request = rebases::asked(self.asked_on(), dir, branch);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_or_code(rebases::REBASING, async move {
             timeout(patience, daemon.rebase(request)).await

@@ -706,7 +706,7 @@ impl Pasted {
         PasteRequest { on, work: Some(work), worked, at_head, reads_moved_off }
     }
 
-    pub fn ready(&self, holders: &Holders) -> Result<Ready<usize>, Unready> {
+    pub(crate) fn ready(&self, holders: &Holders) -> Result<Ready<usize>, Unready> {
         let (worked, reads_moved_off) = (self.worked.as_slice(), self.reads_moved_off);
         match &self.work {
             Work::Link(link) => ready(link, self.wanted, reads_moved_off, worked, holders),

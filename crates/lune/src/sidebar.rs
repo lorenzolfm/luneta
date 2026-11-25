@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{Arranged, ProjectName, WorktreeId};
-use lune_domain::projects::{self, Argv, Dir, Holders, Opens, Plain, ProjectId, Used, ViewId};
+use lune_domain::projects::{self, Argv, Dir, Opens, ProjectId, Used, ViewId};
 use lune_domain::rows::{self, Told};
 use lune_protocol::agent_status::AgentStatus;
 use lune_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
@@ -104,8 +104,6 @@ const PROJECT_DOT: &str = "●";
 const MACHINE_LEAD: usize = 5;
 const MISSING: &str = " missing";
 const NO_PROJECTS: &str = "no projects";
-const UNSEEN_PROJECTS: &str =
-    "luned has not said yet what projects this machine keeps, so nothing is made: paste it again";
 const COMPUTER: &str = "\u{f108}";
 const EDGE: &str = "│";
 const INDENT: &str = " ";
@@ -1252,7 +1250,6 @@ pub enum Asked {
         wanted: Wanted,
         worked: Vec<Worked>,
         others: Others,
-        held_here: Holders,
     },
     Find { menu: u64, on: Machine, dir: Directory, agent: agents::Harness },
     Printed { menu: u64, on: Machine, session: Listed, view: ViewKey, ended: menu::Ended },
@@ -3877,10 +3874,10 @@ impl Sidebar {
                 unreachable!("an open is asked of the host before the menu is kept")
             },
             Wants::Pull(work, wanted) => {
-                match self.worked(&on).and_then(|worked| Ok((worked, self.held_here()?))) {
-                    Ok((worked, held_here)) => {
+                match self.worked(&on) {
+                    Ok(worked) => {
                         let others = self.others(&on);
-                        Asked::Pull { menu: number, on, work, wanted, worked, others, held_here }
+                        Asked::Pull { menu: number, on, work, wanted, worked, others }
                     },
                     Err(why) => self.pulled(number, Err(why)),
                 }
@@ -3991,23 +3988,6 @@ impl Sidebar {
             worked.push(Worked { place, works: it });
         }
         Ok(worked)
-    }
-
-    fn held_here(&self) -> Result<Holders, String> {
-        let Some(seen) = self.seen(&Machine::Local) else {
-            return Err(UNSEEN_PROJECTS.to_owned());
-        };
-        let mut holders = Holders::default();
-        for it in seen.projects {
-            match &it.unopened {
-                Unopened::Folder => {
-                    let name = it.listed().name().clone();
-                    holders.plain.push(Plain { dir: it.dir.clone(), name });
-                },
-                Unopened::Unlisted(_) | Unopened::Listed(_) => holders.clones.push(it.dir.clone()),
-            }
-        }
-        Ok(holders)
     }
 
     fn others(&self, on: &Machine) -> Others {
@@ -9304,9 +9284,8 @@ mod tests {
         let work = Work::Link(link.clone());
         let wanted = Wanted::AsItIs;
         let on = Machine::Local;
-        let clones = vec![Dir::parse("/w").unwrap(), Dir::parse("/w").unwrap()];
-        let (others, held_here) = (Vec::new(), Holders { plain: Vec::new(), clones });
-        let pull = Asked::Pull { menu: 1, on, work, wanted, worked, others, held_here };
+        let others = Vec::new();
+        let pull = Asked::Pull { menu: 1, on, work, wanted, worked, others };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
 
         let at = At::Unopened;
@@ -11442,9 +11421,8 @@ mod tests {
         let others = vec![(Machine::Local, Ok(local)), unreached("me@vps"), unreached("pi")];
         let asked = Work::Link(link.clone());
         let wanted = Wanted::AsItIs;
-        let held_here = Holders { plain: Vec::new(), clones: vec![Dir::parse("/w").unwrap()] };
         let (menu, on_it, work) = (number, on.clone(), asked);
-        let pull = Asked::Pull { menu, on: on_it, work, wanted, worked, others, held_here };
+        let pull = Asked::Pull { menu, on: on_it, work, wanted, worked, others };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
         let at = At::Unopened;
         let folder = directory("/w/n/feat");

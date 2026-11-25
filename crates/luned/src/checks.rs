@@ -191,7 +191,7 @@ struct Owner {
     login: String,
 }
 
-pub fn kept_failing(page: &PullPage) -> Result<Failing, String> {
+pub(crate) fn kept_failing(page: &PullPage) -> Result<Failing, String> {
     let url = page.url();
     let mut gh = Command::new("gh");
     git::local(gh.args(["pr", "view", url, "--json", VIEWED]));

@@ -548,12 +548,12 @@ pub struct Read {
     pub alert: Alert,
 }
 
-pub fn read(due: Due, folders: luned::transcripts::Folders, events: &Sender<Event>) {
+pub fn read(due: Due, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || {
         let end = due.transcript.clone().and_then(|id| {
             let reading = Reading::new(vec![id], SHARE_BYTES).ok()?;
-            let ends = brief::read(&due.key.on, &reading, &folders).ok()?;
+            let ends = brief::read(&due.key.on, &reading).ok()?;
             ends.into_values().next()
         });
         let alert = Alert::of(&due, end.as_ref());

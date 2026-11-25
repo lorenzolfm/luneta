@@ -1,7 +1,6 @@
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use lune_domain::projects::Holders;
 use luned::links::{self, Pasted, Unready};
 pub use luned::links::{At, Kind, Link, Readied, Wanted, Work};
 use luned::log;
@@ -36,29 +35,16 @@ pub struct Asking {
     pub wanted: Wanted,
     pub worked: Vec<Worked>,
     pub others: Others,
-    pub held_here: Holders,
 }
 
 pub fn prepare(menu: u64, asking: Asking, events: &Sender<Event>) {
     let due = Due::new(events, move |found| Event::Pulled { menu, found });
-    let Asking { on, work, wanted, worked, others, held_here } = asking;
-    let ask = move |on: &Machine, pasted: &Pasted| asked(on, pasted, &held_here);
-    thread::spawn(move || due.pay(first_found(on, &work, wanted, worked, others, ask)));
+    let Asking { on, work, wanted, worked, others } = asking;
+    thread::spawn(move || due.pay(first_found(on, &work, wanted, worked, others, asked)));
 }
 
-fn asked(
-    on: &Machine,
-    pasted: &Pasted,
-    held_here: &Holders,
-) -> Result<links::Ready<usize>, Unready> {
-    match on {
-        Machine::Local => pasted.ready(held_here),
-        Machine::Remote(destination) => {
-            let reached = Away::reach(destination, away::ANSWER);
-            let unreached = |why| Unready::Failed(format!("{destination}: {why}"));
-            reached.map_err(unreached)?.paste(pasted)
-        },
-    }
+fn asked(on: &Machine, pasted: &Pasted) -> Result<links::Ready<usize>, Unready> {
+    Away::on(on, away::ANSWER).map_err(Unready::Failed)?.paste(pasted)
 }
 
 fn first_found(

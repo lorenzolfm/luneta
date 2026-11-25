@@ -19,11 +19,7 @@ pub fn find(
 ) {
     let (on, dir, events) = (on.clone(), dir.clone(), events.clone());
     thread::spawn(move || {
-        let skills = match &on {
-            Machine::Local => luned::skills::found_in(&dir, harness),
-            Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                .and_then(|mut away| away.skills(&dir, harness)),
-        };
+        let skills = Away::on(&on, away::ANSWER).and_then(|mut luned| luned.skills(&dir, harness));
         let _ = events.send(said(skills));
     });
 }

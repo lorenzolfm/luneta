@@ -7,6 +7,7 @@ use luned::Destination;
 use crate::away::{self, Away};
 use crate::clipboard;
 use crate::host::Event;
+use crate::machines::Machine;
 
 pub const KEY: (KeyCode, KeyModifiers) = (KeyCode::Char('v'), KeyModifiers::CONTROL);
 
@@ -48,7 +49,8 @@ fn went(on: Destination, key: KeyEvent, events: &Sender<Event>) -> Went {
     let slow = || {
         let _ = events.send(Event::ImageSlow(on.clone()));
     };
-    let kept = Away::reach(&on, away::ANSWER).and_then(|mut away| away.keep_image(png, slow));
+    let luned = Away::on(&Machine::Remote(on.clone()), away::ANSWER);
+    let kept = luned.and_then(|mut luned| luned.keep_image(png, slow));
     match kept {
         Ok(path) => Went::Kept { on, path },
         Err(why) => Went::Failed(why),

@@ -9,7 +9,6 @@ use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use luned::api::InfoResponse;
 use luned::folder::{self, Folder, ANOTHER_RUNS, LOG};
 use luned::{program, Daemon};
 use luned::release::{self, Build, Of, Other, OWN};
@@ -33,7 +32,6 @@ pub const NONE_RUNS: u8 = 5;
 pub struct Current {
     pub folder: Folder,
     pub daemon: Daemon,
-    pub info: InfoResponse,
 }
 
 pub enum Unreached {
@@ -119,7 +117,7 @@ async fn reach(path: &Path) -> Result<Current, String> {
                         format!("luned {version} (pid {pid}) was stopped, and has not ended")
                     } else if of == Of::Own {
                         reap(started);
-                        return Ok(Current { folder, daemon, info });
+                        return Ok(Current { folder, daemon });
                     } else if let Of::Other(other) = &of
                         && !makes_way(other.build(), OWN, || *starting.get_or_init(build))
                     {

@@ -195,12 +195,10 @@ impl Ask {
             let hear = |step| {
                 let _ = events.send(Event::Heard { number, heard: Heard::Step(step) });
             };
-            let ended = match on {
-                None => asked.talk(wanted, &hear),
-                Some(on) => match Away::reach(&on, away::ANSWER) {
-                    Ok(mut away) => away.talk(&asked, wanted, &hear),
-                    Err(why) => Some(Err(format!("{on}: {why}"))),
-                },
+            let on = on.map_or(Machine::Local, Machine::Remote);
+            let ended = match Away::on(&on, away::ANSWER) {
+                Ok(mut luned) => luned.talk(&asked, wanted, &hear),
+                Err(why) => Some(Err(why)),
             };
             if let Some(ended) = ended {
                 due.pay(Ok(ended));

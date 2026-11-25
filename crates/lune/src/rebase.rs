@@ -24,7 +24,8 @@ pub fn run(dir: Option<&Path>, path: &Path) -> ExitCode {
         Ok(dir) => dir,
         Err(why) => return failed(&why),
     };
-    let rebased = match rebases::rebase(&dir, None) {
+    let rebased = Away::at(path, &Machine::Local, away::ANSWER).map_err(Unrebased::Refused);
+    let rebased = match rebased.and_then(|mut luned| luned.rebase(&dir, None)) {
         Ok(rebased) => rebased,
         Err(Unrebased::Refused(why)) => return failed(&format!("no rebase: {why}")),
         Err(Unrebased::InDoubt(why)) => {
@@ -75,13 +76,8 @@ pub fn start(
 }
 
 fn rebased(on: &Machine, dir: &Directory, branch: &str) -> Result<Rebased, Unrebased> {
-    match on {
-        Machine::Local => rebases::rebase(dir, Some(branch)),
-        Machine::Remote(destination) => match Away::reach(destination, away::ANSWER) {
-            Ok(mut away) => away.rebase(dir, branch),
-            Err(why) => Err(Unrebased::Refused(format!("{destination}: {why}"))),
-        },
-    }
+    let mut luned = Away::on(on, away::ANSWER).map_err(Unrebased::Refused)?;
+    luned.rebase(dir, Some(branch))
 }
 
 #[must_use]

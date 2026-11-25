@@ -99,7 +99,7 @@ enum Onto {
 
 struct NamedBranch(String);
 
-pub fn rebase(dir: &Directory, expected: Option<&str>) -> Result<Rebased, Unrebased> {
+pub(crate) fn rebase(dir: &Directory, expected: Option<&str>) -> Result<Rebased, Unrebased> {
     let until = Instant::now() + RUNNING_MAX;
     let Ready { top, branch, onto, before } =
         ready(dir, expected, until).map_err(Unrebased::Refused)?;

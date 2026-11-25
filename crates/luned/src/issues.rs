@@ -144,7 +144,7 @@ impl Remote {
     }
 }
 
-pub fn remotes(dir: &Directory) -> Result<Vec<Remote>, String> {
+pub(crate) fn remotes(dir: &Directory) -> Result<Vec<Remote>, String> {
     match links::remotes_gh_reads(dir.as_str()) {
         Remotes::Listed(listed) | Remotes::InBare(listed) => {
             Ok(on_github(&listed, links::ssh_host))
@@ -217,7 +217,7 @@ impl Filing {
         }
     }
 
-    pub fn file(&self) -> Result<Filed, Unfiled> {
+    pub(crate) fn file(&self) -> Result<Filed, Unfiled> {
         let listing = ["label", "list", "--limit", "100", "--json", "name"];
         let listed = self.listed(&listing).map_err(Unfiled::Refused)?;
         let labels = names(&listed).map_err(Unfiled::Refused)?;

@@ -85,13 +85,8 @@ impl Issue {
         });
         let (on, dir) = (repository.on.clone(), repository.dir.clone());
         thread::spawn(move || {
-            let remotes = match &on {
-                Machine::Local => issues::remotes(&dir),
-                Machine::Remote(on) => match Away::reach(on, away::ANSWER) {
-                    Ok(mut away) => away.issue_remotes(&dir),
-                    Err(why) => Err(format!("{on}: {why}")),
-                },
-            };
+            let remotes =
+                Away::on(&on, away::ANSWER).and_then(|mut luned| luned.issue_remotes(&dir));
             due.pay(Ok(remotes));
         });
         Issue::new(number, repository, kept)
@@ -236,12 +231,9 @@ impl Issue {
             Event::Filed { number, repository, to: sent_to, words, filed }
         });
         let filing = thread::spawn(move || {
-            let filed = match &on {
-                Machine::Local => filing.file(),
-                Machine::Remote(on) => match Away::reach(on, away::ANSWER) {
-                    Ok(mut away) => away.file_issue(&filing),
-                    Err(why) => Err(Unfiled::Refused(format!("{on}: {why}"))),
-                },
+            let filed = match Away::on(&on, away::ANSWER) {
+                Ok(mut luned) => luned.file_issue(&filing),
+                Err(why) => Err(Unfiled::Refused(why)),
             };
             due.pay(Ok(filed));
         });

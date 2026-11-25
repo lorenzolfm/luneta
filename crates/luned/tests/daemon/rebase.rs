@@ -200,6 +200,23 @@ fn lune_rebase_moves_a_stacked_branch_onto_its_open_pull_request_s_base() {
 }
 
 #[test]
+fn lune_rebase_with_no_luned_moves_nothing() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let repository = Repository::new(&scratch);
+    let fix = &repository.fix;
+    commit(fix, "own", "o\n");
+    commit(&repository.up, "theirs", "t\n");
+    let before = tip(fix);
+    let refused = rebased(&host, fix);
+    let why = stderr(&refused);
+    assert_eq!(refused.status.code(), Some(1), "{why}");
+    assert!(why.starts_with("lune: no rebase: no luned runs in "), "{why}");
+    assert_eq!(tip(fix), before, "the branch stays where it was");
+}
+
+#[test]
 fn a_rebase_in_a_repository_a_folder_s_project_holds_starts_no_agent_in_the_folder() {
     let owned = Owned::new();
     let host = &owned.host;
