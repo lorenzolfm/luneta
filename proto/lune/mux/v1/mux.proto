@@ -154,27 +154,49 @@ message Terminal {
     Running runs = 6;
     Exit ended = 7;
   }
-  repeated ProgramStatus statuses = 8;
+  ProgramStatuses statuses = 8;
+}
+
+message ProgramStatuses {
+  ProgramStatus root = 1;
+  repeated ChildProgramStatus children = 2;
 }
 
 message ProgramStatus {
-  string id = 1;
-  ProgramStatusState state = 2;
-  ProgramStatusKind kind = 3;
-  optional uint32 progress = 4;
-  string app = 5;
-  string title = 6;
-  string message = 7;
+  oneof phase {
+    ProgramStatusIdle idle = 1;
+    ProgramStatusWorking working = 2;
+    ProgramStatusDone done = 3;
+    ProgramStatusBlocked blocked = 4;
+    ProgramStatusError error = 5;
+  }
+  optional string app = 6;
+  optional string title = 7;
   google.protobuf.Timestamp at = 8;
 }
 
-enum ProgramStatusState {
-  PROGRAM_STATUS_STATE_UNSPECIFIED = 0;
-  PROGRAM_STATUS_STATE_IDLE = 1;
-  PROGRAM_STATUS_STATE_WORKING = 2;
-  PROGRAM_STATUS_STATE_DONE = 3;
-  PROGRAM_STATUS_STATE_BLOCKED = 4;
-  PROGRAM_STATUS_STATE_ERROR = 5;
+message ChildProgramStatus {
+  string id = 1;
+  ProgramStatus status = 2;
+}
+
+message ProgramStatusIdle {}
+
+message ProgramStatusWorking {
+  optional uint32 progress = 1;
+}
+
+message ProgramStatusDone {
+  optional string message = 1;
+}
+
+message ProgramStatusBlocked {
+  optional ProgramStatusKind kind = 1;
+  optional string message = 2;
+}
+
+message ProgramStatusError {
+  optional string message = 1;
 }
 
 enum ProgramStatusKind {

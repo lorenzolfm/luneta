@@ -13,10 +13,11 @@ use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, Termina
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leaders;
 use crate::panics::Shared;
+use crate::program_status::{EndedProgramStatuses, Snapshot as ProgramStatuses};
 use crate::terminal::{self, Exit, Handle, Placing, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
 
-pub const TERMINALS_MAX: usize = 1024;
+pub const TERMINALS_MAX: usize = lune_protocol::MUX_TERMINALS_MAX;
 
 pub const CLIENTS_MAX: usize = 256;
 
@@ -116,13 +117,21 @@ struct Terminal {
     title: String,
     cwd: String,
     program: Program,
-    statuses: Vec<api::ProgramStatus>,
     handle: Handle,
 }
 
 enum Program {
-    Runs { pid: u32, ends: Ends, foreground: Option<api::Foreground>, ran: Option<api::Ran> },
-    Ended(Exit),
+    Runs {
+        pid: u32,
+        ends: Ends,
+        foreground: Option<api::Foreground>,
+        ran: Option<api::Ran>,
+        statuses: ProgramStatuses,
+    },
+    Ended {
+        exit: Exit,
+        statuses: EndedProgramStatuses,
+    },
 }
 
 struct Viewing {
@@ -290,16 +299,23 @@ impl Mux {
         });
     }
 
-    pub fn program_statuses(&self, terminal: TerminalId, statuses: Vec<api::ProgramStatus>) {
-        assert!(statuses.len() <= crate::program_status::RECORDS_MAX);
+    pub fn program_statuses(&self, terminal: TerminalId, statuses: ProgramStatuses) {
+        assert!(statuses.children.len() <= crate::program_status::RECORDS_MAX);
         self.change(|model| {
-            if let Some(found) = model.terminal_of_id_mut(terminal) {
-                found.statuses = statuses;
+            let found = model.terminal_of_id_mut(terminal).map(|found| &mut found.program);
+            if let Some(Program::Runs { statuses: was, .. }) = found {
+                *was = statuses;
             }
         });
     }
 
-    pub fn ended(&self, terminal: TerminalId, exit: Exit) -> bool {
+    pub fn ended(
+        &self,
+        terminal: TerminalId,
+        exit: Exit,
+        statuses: EndedProgramStatuses,
+    ) -> bool {
+        assert!(statuses.children.len() <= crate::program_status::RECORDS_MAX);
         self.change(|model| {
             let Some(found) = model.terminal_of_id_mut(terminal) else {
                 return true;
@@ -308,7 +324,7 @@ impl Mux {
                 model.close(terminal);
                 return true;
             }
-            found.program = Program::Ended(exit);
+            found.program = Program::Ended { exit, statuses };
             false
         })
     }
@@ -535,12 +551,16 @@ impl Holding {
 
 impl Terminal {
     fn said(&self) -> api::Terminal {
-        let program = match &self.program {
-            Program::Runs { pid, foreground, ran, .. } => {
+        let (program, statuses) = match &self.program {
+            Program::Runs { pid, foreground, ran, statuses, .. } => {
                 let (foreground, ran) = (foreground.clone(), ran.clone());
-                api::terminal::Program::Runs(api::Running { pid: *pid, foreground, ran })
+                let program =
+                    api::terminal::Program::Runs(api::Running { pid: *pid, foreground, ran });
+                (program, statuses.to_mux())
             },
-            Program::Ended(exit) => api::terminal::Program::Ended(exit.said()),
+            Program::Ended { exit, statuses } => {
+                (api::terminal::Program::Ended(exit.said()), statuses.to_mux())
+            },
         };
         api::Terminal {
             key: Some(self.key.said()),
@@ -549,7 +569,7 @@ impl Terminal {
             title: self.title.clone(),
             cwd: self.cwd.clone(),
             program: Some(program),
-            statuses: self.statuses.clone(),
+            statuses,
         }
     }
 }
@@ -585,8 +605,13 @@ fn spawned(
         size,
         title: String::new(),
         cwd: opens.cwd.clone(),
-        program: Program::Runs { pid: started.pid, ends: opens.ends, foreground: None, ran: None },
-        statuses: Vec::new(),
+        program: Program::Runs {
+            pid: started.pid,
+            ends: opens.ends,
+            foreground: None,
+            ran: None,
+            statuses: ProgramStatuses::default(),
+        },
         handle: started.handle,
     };
     Ok((terminal, started.placing))

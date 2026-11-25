@@ -299,8 +299,9 @@ impl Drop for Owned {
 
 #[test]
 fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
-    use luned::api::agent::Status as Reported;
-    use luned::api::{BlockedKind, Harness, Status as ApiStatus, StatusRung};
+    use lune_protocol::agent_status::{AgentStatus, BlockedReason};
+    use lune_protocol::said::Said;
+    use luned::api::{self, Harness, StatusRung};
 
     let owned = Owned::new();
     let program = built_server();
@@ -344,7 +345,7 @@ fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
     let working = eventually("luned sees the OSC 7501 working agent", || {
         owned.host.host().agents.into_iter().find(|agent| {
             agent.runs_in() == Harness::ClaudeCode
-                && agent.status == Some(Reported::KnownStatus(ApiStatus::Busy.into()))
+                && AgentStatus::of_api(agent) == AgentStatus::Working
                 && agent.status_rung == Some(StatusRung::Osc7501.into())
         })
     });
@@ -360,36 +361,46 @@ fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
         owned.host.host().agents.into_iter().find(|agent| {
             agent.pid == pid
                 && agent.session_id.as_deref() == Some("osc-session")
-                && agent.status == Some(Reported::KnownStatus(ApiStatus::Waiting.into()))
+                && matches!(AgentStatus::of_api(agent), AgentStatus::Blocked { .. })
                 && agent.status_rung == Some(StatusRung::Osc7501.into())
         })
     });
-    assert_eq!(blocked.blocked_kind, Some(BlockedKind::Permission.into()));
-    assert_eq!(blocked.status_message.as_deref(), Some("approve touch"));
+    assert_eq!(
+        AgentStatus::of_api(&blocked),
+        AgentStatus::Blocked {
+            reason: BlockedReason::Permission,
+            message: Said::new("approve touch".to_owned()),
+        }
+    );
     assert_eq!(blocked.subagents.len(), 1);
     assert_eq!(blocked.subagents[0].id, "sub-1");
     assert_eq!(blocked.subagents[0].title.as_deref(), Some("Explore"));
-    assert_eq!(blocked.subagents[0].progress, Some(50));
+    assert_eq!(
+        blocked.subagents[0].phase,
+        Some(api::subagent::Phase::Working(api::WorkingStatus { progress: Some(50) }))
+    );
 
     fs::write(&step2, "").unwrap();
     let done = eventually("rung 1 done with summary arrives", || {
         owned.host.host().agents.into_iter().find(|agent| {
             agent.pid == pid
-                && agent.status == Some(Reported::KnownStatus(ApiStatus::Done.into()))
+                && matches!(AgentStatus::of_api(agent), AgentStatus::Done { .. })
                 && agent.status_rung == Some(StatusRung::Osc7501.into())
         })
     });
-    assert_eq!(done.status_message.as_deref(), Some("All done"));
+    assert_eq!(
+        AgentStatus::of_api(&done),
+        AgentStatus::Done { message: Said::new("All done".to_owned()) }
+    );
 
     fs::write(&step3, "").unwrap();
     let fallback = eventually("clearing rung 1 falls back to rung 2 busy", || {
         owned.host.host().agents.into_iter().find(|agent| {
             agent.pid == pid
-                && agent.status == Some(Reported::KnownStatus(ApiStatus::Busy.into()))
+                && AgentStatus::of_api(agent) == AgentStatus::Working
                 && agent.status_rung == Some(StatusRung::Feed.into())
         })
     });
-    assert_eq!(fallback.status_message, None);
     assert_eq!(fallback.subagents, []);
     fs::write(&step4, "").unwrap();
 }

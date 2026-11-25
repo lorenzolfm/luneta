@@ -20,6 +20,7 @@ extension Status {
         switch self {
         case .busy: "busy"
         case .idle: "idle"
+        case .stopped: "stopped"
         case .done(let message): message ?? "finished"
         case .waiting(let why, let message): message ?? why.words
         case .error(let message): message ?? "failed"

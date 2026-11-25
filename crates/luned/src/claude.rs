@@ -16,8 +16,9 @@ use crate::agent::{
     Source, Unread,
 };
 use crate::mux;
-use crate::statuses::{self, Report, ReportedAgent};
-use crate::{log, process, program};
+use crate::process::{self, AgentId, AgentPid};
+use crate::statuses::{self, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
+use crate::{log, program};
 use crate::watch::{self, Troubles};
 use crate::Directory;
 
@@ -88,7 +89,7 @@ impl Scan {
     #[must_use]
     pub fn pids(&self) -> Vec<u32> {
         let Scan { agents, unread } = self;
-        let agents = agents.iter().map(|agent| agent.seen.id.pid);
+        let agents = agents.iter().map(|agent| agent.seen.id.pid().get());
         agents.chain(unread.iter().map(|unread| unread.pid)).collect()
     }
 }
@@ -96,8 +97,8 @@ impl Scan {
 pub struct SessionFiles {
     dir: PathBuf,
     domain: process::Domain,
-    seen: HashMap<u32, Seen>,
-    terminals: HashMap<process::Id, Result<Option<TerminalKey>, String>>,
+    seen: HashMap<AgentPid, Seen>,
+    terminals: HashMap<AgentId, Result<Option<TerminalKey>, String>>,
     troubles: Troubles,
     scanned: bool,
 }
@@ -121,13 +122,22 @@ impl SessionFiles {
     }
 
     pub fn scan(&mut self) -> Scan {
-        let paths = match watch::listed(&self.dir) {
+        let mut paths = match watch::listed(&self.dir) {
             Ok(paths) => paths,
             Err(error) => {
                 self.troubles.say(format!("{}: {error}", self.dir.display()));
                 Vec::new()
             },
         };
+        if paths.len() > SOURCE_AGENTS_MAX {
+            self.troubles.say(format!(
+                "{}: {} files exceed the limit of {SOURCE_AGENTS_MAX}",
+                self.dir.display(),
+                paths.len()
+            ));
+            paths.sort();
+            paths.truncate(SOURCE_AGENTS_MAX);
+        }
         self.troubles.done();
         let first = !self.scanned;
         self.scanned = true;
@@ -150,8 +160,11 @@ impl SessionFiles {
         self.seen = seen;
 
         let mut terminals = HashMap::with_capacity(self.seen.len());
-        let mut terminal_of = |id: process::Id| {
-            let terminal = self.terminals.remove(&id).unwrap_or_else(|| mux::terminal_of(&id));
+        let mut terminal_of = |id: AgentId| {
+            let terminal = self
+                .terminals
+                .remove(&id)
+                .unwrap_or_else(|| mux::terminal_of(&id.to_process_id()));
             terminals.insert(id, terminal.clone());
             terminal
         };
@@ -162,9 +175,9 @@ impl SessionFiles {
                 Seen::Whole(file) | Seen::Torn { before: Some(file), .. } => file,
                 Seen::Torn { before: None, .. } => continue,
                 Seen::Unread => {
-                    if let Some(start) = process::start(pid) {
-                        let terminal = terminal_of(process::Id { pid, start }).ok().flatten();
-                        unread.push(Unread { pid, terminal });
+                    if let Some(start) = process::start(pid.get()) {
+                        let terminal = terminal_of(AgentId::new(pid, start)).ok().flatten();
+                        unread.push(Unread { pid: pid.get(), terminal });
                     }
                     continue;
                 },
@@ -173,10 +186,11 @@ impl SessionFiles {
                 continue;
             }
             let spelled = file.proc_start.spelled();
-            let Some(start) = process::start(pid).filter(|start| start.as_str() == spelled) else {
+            let Some(start) = process::start(pid.get()).filter(|start| start.as_str() == spelled)
+            else {
                 continue;
             };
-            let id = process::Id { pid, start };
+            let id = AgentId::new(pid, start);
             let read = terminal_of(id.clone());
             let terminal = terminal_or_trouble(pid, read, &mut self.troubles);
             agents.push(reported(id, file, terminal));
@@ -208,21 +222,19 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
     }
 }
 
-fn reported(id: process::Id, file: &File, terminal: Option<TerminalKey>) -> ReportedAgent {
-    assert!(id.pid > 1);
+fn reported(id: AgentId, file: &File, terminal: Option<TerminalKey>) -> ReportedAgent {
     let word = |text: &Option<String>| Said::new(text.as_deref()?.trim().to_owned());
     let name = file.name.clone().and_then(Said::new);
     let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
-    let (state, kind) = statuses::parse_word(file.status.as_deref(), file.waiting_for.as_deref());
-    let report = Report {
-        agent: id.clone(),
-        rung: Rung::Feed,
-        state,
-        kind,
-        message: None,
-        at: file.status_updated_at.map(moment),
-        subagents: Vec::new(),
+    let update = match statuses::parse_word(file.status.as_deref(), file.waiting_for.as_deref()) {
+        Some(status) => RungUpdate::Active {
+            status,
+            at: file.status_updated_at.map(moment),
+            subagents: Vec::new(),
+        },
+        None => RungUpdate::Clear,
     };
+    let report = Report { agent: id.clone(), rung: Rung::Feed, update };
     let seen = SeenAgent {
         id,
         harness: Harness::ClaudeCode,

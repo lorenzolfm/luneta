@@ -3,6 +3,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use lune_protocol::agent_status::{AgentStatus, BlockedReason};
 use lune_protocol::made::Made;
 
 use crate::api::{self, project, projects, remote, terminal, worktree};
@@ -169,6 +170,7 @@ pub struct Placed {
 pub enum Status {
     Busy,
     Idle,
+    Stopped,
     Done { message: Option<String> },
     Waiting { why: Why, message: Option<String> },
     Error { message: Option<String> },
@@ -249,6 +251,7 @@ fn inbox_place(agent: &Agent) -> (bool, bool, Option<SystemTime>) {
         Status::Waiting { .. } => (false, agent.since.is_none(), agent.since),
         Status::Busy
         | Status::Idle
+        | Status::Stopped
         | Status::Done { .. }
         | Status::Error { .. }
         | Status::Shell
@@ -392,46 +395,29 @@ fn name_of(agent: &api::Agent) -> String {
 }
 
 fn status_of(agent: &api::Agent) -> Status {
-    let known = match &agent.status {
-        Some(api::agent::Status::KnownStatus(known)) => api::Status::try_from(*known),
-        Some(api::agent::Status::OtherStatus(said)) => return Status::Other { said: said.clone() },
-        None => return Status::Untold,
-    };
-    let message = agent
-        .status_message
-        .as_deref()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned);
-    match known {
-        Ok(api::Status::Busy) => Status::Busy,
-        Ok(api::Status::Idle) => Status::Idle,
-        Ok(api::Status::Done) => Status::Done { message },
-        Ok(api::Status::Error) => Status::Error { message },
-        Ok(api::Status::Shell) => Status::Shell,
-        Ok(api::Status::Waiting) => Status::Waiting { why: why_of(agent), message },
-        Ok(api::Status::Unspecified) | Err(_) => Status::Untold,
+    match AgentStatus::of_api(agent) {
+        AgentStatus::Working => Status::Busy,
+        AgentStatus::Idle => Status::Idle,
+        AgentStatus::Stopped => Status::Stopped,
+        AgentStatus::Done { message } => Status::Done { message: message.map(Into::into) },
+        AgentStatus::Error { message } => Status::Error { message: message.map(Into::into) },
+        AgentStatus::Shell => Status::Shell,
+        AgentStatus::Blocked { reason, message } => {
+            Status::Waiting { why: why_of(reason), message: message.map(Into::into) }
+        },
+        AgentStatus::Other(said) => Status::Other { said: said.into() },
+        AgentStatus::Unreported => Status::Untold,
     }
 }
 
-fn why_of(agent: &api::Agent) -> Why {
-    match &agent.waiting_for {
-        Some(api::agent::WaitingFor::KnownWaitingFor(known)) => {
-            match api::WaitingFor::try_from(*known) {
-                Ok(api::WaitingFor::PermissionPrompt) => Why::Permission,
-                Ok(api::WaitingFor::InputNeeded) => Why::Input,
-                Ok(api::WaitingFor::Auth) => Why::Auth,
-                Ok(api::WaitingFor::DialogOpen) => Why::Dialog,
-                Ok(api::WaitingFor::Unspecified) | Err(_) => Why::Untold,
-            }
-        },
-        Some(api::agent::WaitingFor::OtherWaitingFor(said)) => Why::Other { said: said.clone() },
-        None => match agent.blocked_kind.and_then(|kind| api::BlockedKind::try_from(kind).ok()) {
-            Some(api::BlockedKind::Permission) => Why::Permission,
-            Some(api::BlockedKind::Question) => Why::Input,
-            Some(api::BlockedKind::Auth) => Why::Auth,
-            Some(api::BlockedKind::Other | api::BlockedKind::Unspecified) | None => Why::Untold,
-        },
+fn why_of(reason: BlockedReason) -> Why {
+    match reason {
+        BlockedReason::Permission => Why::Permission,
+        BlockedReason::Question => Why::Input,
+        BlockedReason::Auth => Why::Auth,
+        BlockedReason::Dialog => Why::Dialog,
+        BlockedReason::Other(said) => Why::Other { said: said.into() },
+        BlockedReason::Unspecified => Why::Untold,
     }
 }
 
@@ -638,21 +624,34 @@ mod tests {
 
     #[test]
     fn done_error_auth_and_status_messages_map_onto_the_phone_model() {
-        let with_msg = |pid, status: api::Status, msg: &str, kind: Option<api::BlockedKind>| {
-            api::Agent {
-                pid,
-                cwd: format!("/w/a-{pid}"),
-                status: Some(api::agent::Status::KnownStatus(status.into())),
-                status_message: Some(msg.to_owned()),
-                blocked_kind: kind.map(Into::into),
-                ..api::Agent::default()
-            }
+        let with_reported = |pid, reported_status: api::agent::ReportedStatus| api::Agent {
+            pid,
+            cwd: format!("/w/a-{pid}"),
+            reported_status: Some(reported_status),
+            ..api::Agent::default()
         };
         let host = api::Host {
             agents: vec![
-                with_msg(1, api::Status::Done, "All tests pass", None),
-                with_msg(2, api::Status::Error, "Token expired", None),
-                with_msg(3, api::Status::Waiting, "Log in", Some(api::BlockedKind::Auth)),
+                with_reported(
+                    1,
+                    api::agent::ReportedStatus::Done(api::DoneStatus {
+                        message: Some("All tests pass".to_owned()),
+                    }),
+                ),
+                with_reported(
+                    2,
+                    api::agent::ReportedStatus::Error(api::ErrorStatus {
+                        message: Some("Token expired".to_owned()),
+                    }),
+                ),
+                with_reported(
+                    3,
+                    api::agent::ReportedStatus::Blocked(api::BlockedStatus {
+                        reason: Some(api::blocked_status::Reason::Known(api::WaitingFor::Auth.into())),
+                        message: Some("Log in".to_owned()),
+                    }),
+                ),
+                with_reported(4, api::agent::ReportedStatus::Stopped(())),
             ],
             ..api::Host::default()
         };
@@ -663,5 +662,6 @@ mod tests {
         );
         assert_eq!(model.inbox[1].status, Status::Done { message: Some("All tests pass".to_owned()) });
         assert_eq!(model.inbox[2].status, Status::Error { message: Some("Token expired".to_owned()) });
+        assert_eq!(model.inbox[3].status, Status::Stopped);
     }
 }

@@ -1,6 +1,8 @@
 use std::env;
 use std::ffi::OsString;
+use std::fmt;
 use std::io;
+use std::num::NonZeroU32;
 
 use rustix::io::Errno;
 use rustix::process::Pid;
@@ -19,6 +21,61 @@ use macos as os;
 compile_error!("luned reads processes on Linux and macOS, and on nothing else yet");
 
 pub use os::{cwd, environ, signalled, start, started, Domain};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentPid(NonZeroU32);
+
+impl AgentPid {
+    #[must_use]
+    pub const fn new(pid: u32) -> Option<Self> {
+        if pid <= 1 {
+            return None;
+        }
+        match NonZeroU32::new(pid) {
+            Some(pid) => Some(Self(pid)),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl fmt::Display for AgentPid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentId {
+    pid: AgentPid,
+    start: Start,
+}
+
+impl AgentId {
+    #[must_use]
+    pub fn new(pid: AgentPid, start: Start) -> Self {
+        Self { pid, start }
+    }
+
+    #[must_use]
+    pub const fn pid(&self) -> AgentPid {
+        self.pid
+    }
+
+    #[must_use]
+    pub fn start(&self) -> &Start {
+        &self.start
+    }
+
+    #[must_use]
+    pub fn to_process_id(&self) -> Id {
+        Id { pid: self.pid.get(), start: self.start.clone() }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id {

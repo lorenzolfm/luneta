@@ -3,9 +3,9 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use lune_protocol::agent_status::{AgentStatus, BlockedReason};
 use lune_protocol::said::Said;
-use luned::api::agent::{Status as Reported, WaitingFor as Waits};
-use luned::api::{Agent, BlockedKind, Status, WaitingFor};
+use luned::api::Agent;
 use luned::transcripts::{on_what, one_line, Reading, SessionId, TranscriptEnd, Turn};
 use serde_json::Value;
 
@@ -32,7 +32,7 @@ pub enum Wait {
     Permission,
     Input,
     Auth,
-    Other(String),
+    Other(Said),
     Unsaid,
 }
 
@@ -49,45 +49,25 @@ pub enum Doing {
 
 impl Doing {
     pub fn of(agent: &Agent) -> Doing {
-        let Some(Reported::KnownStatus(known)) = &agent.status else {
-            return Doing::Quiet;
-        };
-        let message = agent
-            .status_message
-            .as_deref()
-            .and_then(|text| Said::new(text.trim().to_owned()));
-        match Status::try_from(*known) {
-            Ok(Status::Busy) => Doing::Busy,
-            Ok(Status::Idle) => {
-                if agent.is_finished_turn() {
-                    Doing::Idle
-                } else {
-                    Doing::Stopped
-                }
-            },
-            Ok(Status::Done) => Doing::Done { message },
-            Ok(Status::Error) => Doing::Error { message },
-            Ok(Status::Waiting) => {
-                let wait = match &agent.waiting_for {
-                    Some(Waits::KnownWaitingFor(known)) => match WaitingFor::try_from(*known) {
-                        Ok(WaitingFor::PermissionPrompt) => Wait::Permission,
-                        Ok(WaitingFor::InputNeeded) => Wait::Input,
-                        Ok(WaitingFor::Auth) => Wait::Auth,
-                        Ok(WaitingFor::DialogOpen) => return Doing::Quiet,
-                        Ok(WaitingFor::Unspecified) | Err(_) => Wait::Unsaid,
-                    },
-                    Some(Waits::OtherWaitingFor(word)) => Wait::Other(word.clone()),
-                    None => match agent.blocked_kind.and_then(|kind| BlockedKind::try_from(kind).ok()) {
-                        Some(BlockedKind::Permission) => Wait::Permission,
-                        Some(BlockedKind::Question) => Wait::Input,
-                        Some(BlockedKind::Auth) => Wait::Auth,
-                        Some(BlockedKind::Other | BlockedKind::Unspecified) | None => Wait::Unsaid,
-                    },
+        match AgentStatus::of_api(agent) {
+            AgentStatus::Working => Doing::Busy,
+            AgentStatus::Idle => Doing::Idle,
+            AgentStatus::Stopped => Doing::Stopped,
+            AgentStatus::Done { message } => Doing::Done { message },
+            AgentStatus::Error { message } => Doing::Error { message },
+            AgentStatus::Blocked { reason, message } => {
+                let wait = match reason {
+                    BlockedReason::Permission => Wait::Permission,
+                    BlockedReason::Question => Wait::Input,
+                    BlockedReason::Auth => Wait::Auth,
+                    BlockedReason::Dialog => return Doing::Quiet,
+                    BlockedReason::Other(word) => Wait::Other(word),
+                    BlockedReason::Unspecified => Wait::Unsaid,
                 };
                 let since = agent.status_since.and_then(|at| at.try_into().ok());
                 Doing::Waiting { wait, message, since }
             },
-            Ok(Status::Shell | Status::Unspecified) | Err(_) => Doing::Quiet,
+            AgentStatus::Shell | AgentStatus::Other(_) | AgentStatus::Unreported => Doing::Quiet,
         }
     }
 }
@@ -529,7 +509,7 @@ impl Alert {
             (Want::Wait(Wait::Other(_) | Wait::Unsaid), Some(message), _) => {
                 (Kind::Wants, message.to_owned())
             },
-            (Want::Wait(Wait::Other(word)), None, _) => (Kind::Wants, word.clone()),
+            (Want::Wait(Wait::Other(word)), None, _) => (Kind::Wants, word.as_str().to_owned()),
             (Want::Wait(Wait::Unsaid), None, _) => (Kind::Wants, "Waiting on you".to_owned()),
         };
         let headline = match kind {
@@ -586,6 +566,9 @@ mod tests {
 
     use serde_json::json;
 
+    use luned::api::agent::{ReportedStatus, Status as Reported, WaitingFor as Waits};
+    use luned::api::blocked_status::Reason as ApiBlockedReason;
+    use luned::api::{BlockedStatus, DoneStatus, ErrorStatus, Status, WaitingFor};
     use luned::Destination;
 
     use super::*;
@@ -775,8 +758,13 @@ mod tests {
         let dialog = waiting(1, known(WaitingFor::DialogOpen));
         assert_eq!(Doing::of(&dialog), Doing::Quiet);
         let newer = waiting(2, Some(Waits::OtherWaitingFor("sandbox request".to_owned())));
-        let other = Wait::Other("sandbox request".to_owned());
-        assert_eq!(Doing::of(&newer), Doing::Waiting { wait: other, message: None, since: None });
+        let other = Wait::Other(Said::new("sandbox request".to_owned()).unwrap());
+        assert_eq!(Doing::of(&newer), Doing::Waiting { wait: other.clone(), message: None, since: None });
+        let blank_other = waiting(4, Some(Waits::OtherWaitingFor("   ".to_owned())));
+        assert_eq!(
+            Doing::of(&blank_other),
+            Doing::Waiting { wait: Wait::Unsaid, message: None, since: None }
+        );
         let unsaid = waiting(3, Some(Waits::KnownWaitingFor(99)));
         assert_eq!(
             Doing::of(&unsaid),
@@ -791,7 +779,6 @@ mod tests {
         alerts.heard(here(all.map(|(pid, agent)| seated(pid, Doing::of(agent))).into()), now);
         let mut read = reads(&alerts.ticked(now + HELD));
         read.sort_by_key(|(pid, _)| *pid);
-        let other = Wait::Other("sandbox request".to_owned());
         assert_eq!(read, [(2, Want::Wait(other)), (3, Want::Wait(Wait::Unsaid))]);
     }
 
@@ -1017,7 +1004,10 @@ mod tests {
         let blank = json!({"questions": [{"question": "  "}]});
         let blank = claude_end(&[assistant(&json!([call("b", "AskUserQuestion", &blank)]))]);
         assert_eq!(said(Wait::Input, Some(&blank)).2, "Waiting on your answer");
-        assert_eq!(said(Wait::Other("sandbox request".to_owned()), None).2, "sandbox request");
+        assert_eq!(
+            said(Wait::Other(Said::new("sandbox request".to_owned()).unwrap()), None).2,
+            "sandbox request"
+        );
         assert_eq!(said(Wait::Unsaid, None).2, "Waiting on you");
     }
 
@@ -1071,23 +1061,23 @@ mod tests {
     fn osc_7501_done_error_auth_and_interrupted_idle_behave_distinctly() {
         use luned::api::StatusRung;
 
-        let osc_agent = |status: Status, kind: Option<BlockedKind>, message: Option<&str>| Agent {
+        let osc_agent = |reported_status: ReportedStatus| Agent {
             pid: 1,
-            status: Some(Reported::KnownStatus(status.into())),
+            reported_status: Some(reported_status),
             status_rung: Some(StatusRung::Osc7501.into()),
-            blocked_kind: kind.map(Into::into),
-            status_message: message.map(str::to_owned),
             ..Agent::default()
         };
 
-        let stopped = osc_agent(Status::Idle, None, None);
+        let stopped = osc_agent(ReportedStatus::Stopped(()));
         assert_eq!(Doing::of(&stopped), Doing::Stopped);
         let mut alerts = Alerts::default();
         let now = Instant::now();
         alerts.heard(here(vec![seated(1, Doing::Busy)]), now);
         assert_eq!(alerts.heard(here(vec![seated(1, Doing::of(&stopped))]), now), []);
 
-        let done = osc_agent(Status::Done, None, Some("Fixed the bug."));
+        let done = osc_agent(ReportedStatus::Done(DoneStatus {
+            message: Some("Fixed the bug.".to_owned()),
+        }));
         alerts.heard(here(vec![seated(1, Doing::Busy)]), now);
         let acts = alerts.heard(here(vec![seated(1, Doing::of(&done))]), now);
         assert_eq!(reads(&acts), [(1, Want::Done)]);
@@ -1095,7 +1085,9 @@ mod tests {
         let alert = Alert::of(due_done, None);
         assert_eq!((alert.kind, alert.body.as_str()), (Kind::Done, "Fixed the bug."));
 
-        let err = osc_agent(Status::Error, None, Some("API rate limit"));
+        let err = osc_agent(ReportedStatus::Error(ErrorStatus {
+            message: Some("API rate limit".to_owned()),
+        }));
         let acts = alerts.heard(here(vec![seated(1, Doing::of(&err))]), now);
         assert_eq!(reads(&acts), [(1, Want::Error)]);
         let [Act::Close(_), Act::Read(due_err)] = acts.as_slice() else { unreachable!() };
@@ -1105,7 +1097,10 @@ mod tests {
             (Kind::Error, "agent 1 — failed", "API rate limit", Some(Sound::Bell))
         );
 
-        let auth = osc_agent(Status::Waiting, Some(BlockedKind::Auth), Some("Sign in to GitHub"));
+        let auth = osc_agent(ReportedStatus::Blocked(BlockedStatus {
+            reason: Some(ApiBlockedReason::Known(WaitingFor::Auth.into())),
+            message: Some("Sign in to GitHub".to_owned()),
+        }));
         alerts.heard(here(vec![seated(1, Doing::of(&auth))]), now);
         let acts = alerts.ticked(now + HELD);
         assert_eq!(reads(&acts), [(1, Want::Wait(Wait::Auth))]);

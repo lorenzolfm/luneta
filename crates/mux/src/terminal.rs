@@ -594,15 +594,15 @@ impl Thread {
             unread.clear();
         }
         self.read(LAST_WORDS_BYTES_MAX)?;
-        self.screen.program_exited();
-        self.tell_statuses();
+        let ended_statuses = self.screen.program_exited();
+        self.statuses_version = self.screen.program_statuses_version();
         self.program = Program::Gone;
         self.shell.gone();
         self.looks = Looks::default();
         self.told = Told::default();
         self.dirty = true;
         self.frame()?;
-        Ok(self.mux.ended(self.key.id, exit))
+        Ok(self.mux.ended(self.key.id, exit, ended_statuses))
     }
 
     fn tell_statuses(&mut self) {
@@ -612,7 +612,7 @@ impl Thread {
         }
         self.statuses_version = version;
         let statuses = self.screen.program_statuses();
-        assert!(statuses.len() <= crate::program_status::RECORDS_MAX);
+        assert!(statuses.children.len() <= crate::program_status::RECORDS_MAX);
         self.mux.program_statuses(self.key.id, statuses);
     }
 

@@ -144,8 +144,9 @@ impl Topics {
                 kept.went_unread();
                 continue;
             }
-            let moved = agent.is_working() || agent.status_since != kept.status_since;
-            kept.status_since = agent.status_since;
+            let status_since = agent.status_since();
+            let moved = agent.is_working() || status_since != kept.status_since;
+            kept.status_since = status_since;
             kept.read_due |= moved;
             if !kept.read_due {
                 continue;
@@ -350,15 +351,16 @@ mod tests {
     use std::num::NonZeroU32;
     use std::os::unix::fs::PermissionsExt as _;
 
-    use lune_domain::agent::Harness;
+    use lune_domain::agent::{Harness, Rung};
     use lune_domain::mux::TerminalKey;
     use serde_json::json;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::statuses::{BlockedKind, Status};
     use crate::agent::Source;
     use crate::mux::OwnMade;
+    use crate::process::AgentPid;
+    use crate::statuses::{ActiveStatus, BlockedReason, Decided};
     use crate::Directory;
 
     const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
@@ -367,16 +369,18 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_mins(1)
     }
 
-    fn agent(id: &str, status: crate::statuses::Status, since: u64) -> Agent {
+    fn agent(id: &str, status: ActiveStatus, since: u64) -> Agent {
         Agent {
-            pid: 2,
+            pid: AgentPid::new(2).unwrap(),
             harness: Harness::ClaudeCode,
             session_id: Some(Said::new(id.to_owned()).unwrap()),
             cwd: Directory::parse("/w".to_owned()).unwrap(),
-            status,
-            status_since: Some(SystemTime::UNIX_EPOCH + Duration::from_mins(since)),
-            status_rung: None,
-            subagents: Vec::new(),
+            status: Decided::Reported {
+                status,
+                since: Some(SystemTime::UNIX_EPOCH + Duration::from_mins(since)),
+                rung: Rung::Feed,
+                subagents: Vec::new(),
+            },
             started_at: Some(began() + Duration::from_secs(1)),
             name: None,
             entrypoint: Some(Said::new("cli".to_owned()).unwrap()),
@@ -442,7 +446,7 @@ mod tests {
     fn each_new_prompt_costs_one_call() {
         let projects = Projects::new();
         let mut topics = projects.topics();
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         assert_eq!(topics.look(&busy, true), []);
 
         projects.add(ID, &json!({"type": "ai-title", "aiTitle": "The first prompt"}));
@@ -474,7 +478,7 @@ mod tests {
     #[test]
     fn a_prompt_that_names_no_subject_costs_no_call_where_the_row_has_a_topic() {
         let projects = Projects::new();
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         let mut topics = projects.topics();
         projects.prompted(ID, "fold the sessions");
         assert_eq!(topics.look(&busy, true).len(), 1);
@@ -498,7 +502,7 @@ mod tests {
     #[test]
     fn a_row_with_no_topic_coming_is_named_on_any_prompt() {
         let projects = Projects::new();
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         let mut topics = projects.topics();
         projects.prompted(ID, "yes");
         assert_eq!(topics.look(&busy, true).len(), 1);
@@ -512,7 +516,7 @@ mod tests {
     #[test]
     fn a_prompt_that_names_no_subject_takes_no_place_from_a_call_on_its_way() {
         let projects = Projects::new();
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         let mut topics = projects.topics();
         projects.prompted(ID, "fold the sessions");
         assert_eq!(topics.look(&busy, true).len(), 1);
@@ -541,7 +545,7 @@ mod tests {
     #[test]
     fn a_window_back_cannot_tell_what_came_before_the_last_prompt_and_makes_the_call() {
         let projects = Projects::new();
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         let mut topics = projects.topics();
         projects.prompted(ID, "fold the sessions");
         assert_eq!(topics.look(&busy, true).len(), 1);
@@ -556,7 +560,7 @@ mod tests {
 
     #[test]
     fn a_window_back_makes_the_call_though_its_first_look_could_not_read() {
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
 
         let projects = Projects::new();
         let mut topics = with_a_topic(&projects, &busy);
@@ -581,8 +585,8 @@ mod tests {
 
     #[test]
     fn a_prompt_that_names_no_subject_makes_the_call_after_an_agent_was_away() {
-        let busy = [agent(ID, Status::Working, 2)];
-        let unseated = [Agent { terminal: None, ..agent(ID, Status::Working, 2) }];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
+        let unseated = [Agent { terminal: None, ..agent(ID, ActiveStatus::Working, 2) }];
         let projects = Projects::new();
         let mut topics = with_a_topic(&projects, &busy);
         assert_eq!(topics.look(&unseated, true), []);
@@ -594,7 +598,7 @@ mod tests {
 
     #[test]
     fn a_prompt_that_names_no_subject_makes_the_call_after_one_that_failed() {
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         let projects = Projects::new();
         let mut topics = with_a_topic(&projects, &busy);
         projects.prompted(ID, "now the tabs");
@@ -610,7 +614,7 @@ mod tests {
 
     #[test]
     fn a_call_that_fails_leaves_a_prompt_that_waits_to_name_the_topic() {
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         let projects = Projects::new();
         let mut topics = with_a_topic(&projects, &busy);
         projects.prompted(ID, "now the tabs");
@@ -631,7 +635,7 @@ mod tests {
 
     #[test]
     fn a_call_that_fails_does_not_undo_prompts_no_one_read() {
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         let projects = Projects::new();
         let mut topics = with_a_topic(&projects, &busy);
         projects.prompted(ID, "now the tabs");
@@ -655,7 +659,7 @@ mod tests {
         let id = |n: usize| format!("{n:08x}-0000-4000-8000-000000000000");
         let projects = Projects::new();
         let mut agents: Vec<Agent> =
-            (0..CALLS_MAX).map(|n| agent(&id(n), Status::Working, 2)).collect();
+            (0..CALLS_MAX).map(|n| agent(&id(n), ActiveStatus::Working, 2)).collect();
         for n in 0..CALLS_MAX {
             projects.prompted(&id(n), "fold the sessions");
         }
@@ -663,7 +667,7 @@ mod tests {
         let running = topics.look(&agents, true);
         assert_eq!(running.len(), CALLS_MAX);
 
-        agents.push(agent(ID, Status::Working, 2));
+        agents.push(agent(ID, ActiveStatus::Working, 2));
         projects.prompted(ID, "now the tabs");
         assert_eq!(topics.look(&agents, true), []);
         projects.prompted(ID, "yes");
@@ -713,12 +717,12 @@ mod tests {
     fn a_turn_the_thread_did_not_see_at_work_still_counts() {
         let projects = Projects::new();
         let mut topics = projects.topics();
-        assert_eq!(topics.look(&[agent(ID, Status::Idle, 2)], true), []);
+        assert_eq!(topics.look(&[agent(ID, ActiveStatus::Idle, 2)], true), []);
         projects.prompted(ID, "what is left?");
-        assert_eq!(topics.look(&[agent(ID, Status::Idle, 2)], true), []);
-        let finished = [agent(ID, Status::Idle, 3)];
+        assert_eq!(topics.look(&[agent(ID, ActiveStatus::Idle, 2)], true), []);
+        let finished = [agent(ID, ActiveStatus::Idle, 3)];
         assert_eq!(topics.look(&finished, true).len(), 1);
-        assert_eq!(topics.look(&[agent(ID, Status::Blocked { kind: BlockedKind::Other(None), message: None }, 4)], true), []);
+        assert_eq!(topics.look(&[agent(ID, ActiveStatus::Blocked { reason: BlockedReason::Unspecified, message: None }, 4)], true), []);
     }
 
     #[test]
@@ -728,7 +732,7 @@ mod tests {
         projects.prompted(asked, "fold the sessions");
         projects.prompted(quiet, "sort the tabs");
         let mut topics = projects.topics();
-        let agents = [agent(asked, Status::Working, 2), agent(quiet, Status::Idle, 2)];
+        let agents = [agent(asked, ActiveStatus::Working, 2), agent(quiet, ActiveStatus::Idle, 2)];
         let shown = topics.look(&agents, true);
         assert_eq!(shown.len(), 2);
         topics.wrote(said(asked, "Session folds"));
@@ -757,13 +761,13 @@ mod tests {
             started_at: Some(began() - Duration::from_secs(1)),
             ..agent(ID, status, 2)
         };
-        assert_eq!(topics.look(&[before(Status::Working)], false), []);
-        assert_eq!(topics.look(&[before(Status::Working)], true), []);
+        assert_eq!(topics.look(&[before(ActiveStatus::Working)], false), []);
+        assert_eq!(topics.look(&[before(ActiveStatus::Working)], true), []);
         assert_eq!(topics.topics(), HashMap::new());
         projects.add(ID, &json!({"type": "last-prompt", "lastPrompt": "fold the sessions"}));
-        assert_eq!(topics.look(&[before(Status::Working)], true), []);
+        assert_eq!(topics.look(&[before(ActiveStatus::Working)], true), []);
         projects.prompted(ID, "now the tabs");
-        assert_eq!(topics.look(&[before(Status::Working)], true).len(), 1);
+        assert_eq!(topics.look(&[before(ActiveStatus::Working)], true).len(), 1);
     }
 
     #[test]
@@ -771,7 +775,7 @@ mod tests {
         let id = |n: usize| format!("{n:08x}-0000-4000-8000-000000000000");
         let projects = Projects::new();
         let agents: Vec<Agent> =
-            (0..CALLS_MAX + 2).map(|n| agent(&id(n), Status::Working, 2)).collect();
+            (0..CALLS_MAX + 2).map(|n| agent(&id(n), ActiveStatus::Working, 2)).collect();
         for n in 0..CALLS_MAX + 2 {
             projects.prompted(&id(n), "fold the sessions");
         }
@@ -791,7 +795,7 @@ mod tests {
     #[test]
     fn an_agent_has_one_call_at_a_time_and_one_that_fails_is_not_tried_again() {
         let projects = Projects::new();
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         let mut topics = projects.topics();
         projects.prompted(ID, "fold the sessions");
         assert_eq!(topics.look(&busy, true).len(), 1);
@@ -818,16 +822,16 @@ mod tests {
         let projects = Projects::new();
         projects.prompted(ID, "fold the sessions");
         let mut topics = projects.topics();
-        assert_eq!(topics.look(&[agent(ID, Status::Idle, 2)], true).len(), 1);
+        assert_eq!(topics.look(&[agent(ID, ActiveStatus::Idle, 2)], true).len(), 1);
         topics.wrote(said(ID, "Session folds"));
 
         assert_eq!(topics.look(&[], true), []);
         assert_eq!(topics.topics(), HashMap::new());
-        assert_eq!(topics.look(&[agent(ID, Status::Idle, 3)], true), []);
+        assert_eq!(topics.look(&[agent(ID, ActiveStatus::Idle, 3)], true), []);
         assert_eq!(topics.topics(), only(ID, "Session folds"));
 
         projects.prompted(ID, "now the tabs");
-        let due = topics.look(&[agent(ID, Status::Working, 4)], true);
+        let due = topics.look(&[agent(ID, ActiveStatus::Working, 4)], true);
         let [Due { prompt, .. }] = due.as_slice() else {
             panic!("{due:?}");
         };
@@ -839,7 +843,7 @@ mod tests {
         let projects = Projects::new();
         projects.prompted(ID, "fold the sessions");
         let mut topics = projects.topics();
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         assert_eq!(topics.look(&busy, true).len(), 1);
 
         let before = Instant::now();
@@ -864,7 +868,7 @@ mod tests {
         let projects = Projects::new();
         projects.prompted(ID, "fold the sessions");
         let mut topics = projects.topics();
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         assert_eq!(topics.look(&busy, true).len(), 1);
         assert_eq!(topics.look(&[], true), []);
         projects.prompted(ID, "now the tabs");
@@ -884,7 +888,7 @@ mod tests {
         let projects = Projects::new();
         projects.prompted(ID, "fold the sessions");
         let mut topics = projects.topics();
-        let busy = [agent(ID, Status::Working, 2)];
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
         assert_eq!(topics.look(&busy, true).len(), 1);
         projects.prompted(ID, "now the tabs");
         assert_eq!(topics.look(&busy, true), []);
@@ -897,7 +901,7 @@ mod tests {
 
     #[test]
     fn a_read_that_fails_is_tried_again() {
-        for status in [Status::Working, Status::Idle] {
+        for status in [ActiveStatus::Working, ActiveStatus::Idle] {
             let projects = Projects::new();
             projects.prompted(ID, "fold the sessions");
             let path = projects.transcript(ID);
@@ -916,14 +920,14 @@ mod tests {
         let named = |source| Some(Name { text: Said::new("fold".to_owned()).unwrap(), source });
         let word = |word: &str| Some(Said::new(word.to_owned()).unwrap());
         let cases = [
-            (Agent { name: named(Some(Source::User)), ..agent(ID, Status::Working, 2) }, false),
-            (Agent { name: named(Some(Source::Peer)), ..agent(ID, Status::Working, 2) }, false),
-            (Agent { name: named(None), ..agent(ID, Status::Working, 2) }, false),
-            (Agent { terminal: None, ..agent(ID, Status::Working, 2) }, false),
-            (Agent { entrypoint: word("sdk-cli"), ..agent(ID, Status::Working, 2) }, false),
-            (Agent { entrypoint: None, ..agent(ID, Status::Working, 2) }, false),
-            (agent("no-uuid-here", Status::Working, 2), false),
-            (Agent { name: named(Some(Source::Derived)), ..agent(ID, Status::Working, 2) }, true),
+            (Agent { name: named(Some(Source::User)), ..agent(ID, ActiveStatus::Working, 2) }, false),
+            (Agent { name: named(Some(Source::Peer)), ..agent(ID, ActiveStatus::Working, 2) }, false),
+            (Agent { name: named(None), ..agent(ID, ActiveStatus::Working, 2) }, false),
+            (Agent { terminal: None, ..agent(ID, ActiveStatus::Working, 2) }, false),
+            (Agent { entrypoint: word("sdk-cli"), ..agent(ID, ActiveStatus::Working, 2) }, false),
+            (Agent { entrypoint: None, ..agent(ID, ActiveStatus::Working, 2) }, false),
+            (agent("no-uuid-here", ActiveStatus::Working, 2), false),
+            (Agent { name: named(Some(Source::Derived)), ..agent(ID, ActiveStatus::Working, 2) }, true),
         ];
         for (agent, called) in cases {
             let projects = Projects::new();

@@ -17,9 +17,12 @@ use crate::agent::{
     named_pid, terminal_or_trouble, Name, SeenAgent, Source, FILE_BYTES_MAX,
 };
 use crate::mux;
-use crate::statuses::{self, BlockedKind, Report, ReportedAgent, State};
+use crate::process::{self, AgentId};
+use crate::statuses::{
+    self, ActiveStatus, BlockedReason, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
+};
 use crate::watch::{self, Troubles};
-use crate::{log, process, Directory};
+use crate::{log, Directory};
 
 const SCRIPT_BODY: &str = r#"if [ -n "$LUNE_AGY_TITLE_DEPTH" ]; then
     exit 0
@@ -88,7 +91,7 @@ const DATED_LATE: Duration = Duration::from_secs(1);
 
 const TORN: Duration = Duration::from_secs(1);
 
-const AGENT_FILES_MAX: usize = 1024;
+const AGENT_FILES_MAX: usize = SOURCE_AGENTS_MAX;
 
 const SCRIPT_BYTES_MAX: u64 = 64 * 1024;
 
@@ -135,8 +138,7 @@ struct Snapshot {
     cwd: Directory,
     session_id: Option<Said>,
     name: Option<Name>,
-    state: State,
-    kind: Option<BlockedKind>,
+    status: Option<ActiveStatus>,
     modified: SystemTime,
 }
 
@@ -173,7 +175,7 @@ pub struct AgentFiles {
     dir: PathBuf,
     agy: Option<PathBuf>,
     installed: Option<InstalledStamp>,
-    processes: HashMap<process::Id, Process>,
+    processes: HashMap<AgentId, Process>,
     troubles: Troubles,
 }
 
@@ -260,21 +262,27 @@ impl AgentFiles {
             let Some(pid) = named_pid(&path) else {
                 continue;
             };
-            let Some(start) = process::start(pid) else {
+            let Some(start) = process::start(pid.get()) else {
                 self.reap(&path);
                 continue;
             };
-            let id = process::Id { pid, start };
+            let id = AgentId::new(pid, start);
             let cached = self.processes.remove(&id);
             let Some(started) =
-                cached.as_ref().map(|it| it.started).or_else(|| process::started(pid))
+                cached.as_ref().map(|it| it.started).or_else(|| process::started(pid.get()))
             else {
                 continue;
             };
-            match read(&path, id.start.as_str(), started) {
+            match read(&path, id.start().as_str(), started) {
                 Ok(Some(snapshot)) => {
                     let terminal = cached.map_or_else(
-                        || terminal_or_trouble(pid, mux::terminal_of(&id), &mut self.troubles),
+                        || {
+                            terminal_or_trouble(
+                                pid,
+                                mux::terminal_of(&id.to_process_id()),
+                                &mut self.troubles,
+                            )
+                        },
                         |it| it.terminal,
                     );
                     let built = reported(id.clone(), snapshot, started, terminal);
@@ -337,39 +345,37 @@ impl Payload {
     }
 }
 
-fn state_of(state: &Payload) -> (State, Option<BlockedKind>) {
+fn state_of(state: &Payload) -> Option<ActiveStatus> {
     if state.tool_confirmation_pending == Some(true) {
-        return (State::Blocked, Some(BlockedKind::Permission));
+        return Some(ActiveStatus::Blocked { reason: BlockedReason::Permission, message: None });
     }
-    let Some(word) = state.agent_state.as_deref().map(str::trim).filter(|word| !word.is_empty())
-    else {
-        return (State::Unreported, None);
-    };
+    let word = state.agent_state.as_deref().map(str::trim).filter(|word| !word.is_empty())?;
     match word.to_ascii_lowercase().as_str() {
-        "idle" => (State::Idle, None),
-        "working" | "tool_use" | "initializing" => (State::Working, None),
-        "reviewing" => (State::Blocked, Some(BlockedKind::Question)),
-        "authenticating" => (State::Blocked, Some(BlockedKind::Auth)),
+        "idle" => Some(ActiveStatus::Idle),
+        "working" | "tool_use" | "initializing" => Some(ActiveStatus::Working),
+        "reviewing" => {
+            Some(ActiveStatus::Blocked { reason: BlockedReason::Question, message: None })
+        },
+        "authenticating" => {
+            Some(ActiveStatus::Blocked { reason: BlockedReason::Auth, message: None })
+        },
         _ => statuses::parse_word(Some(word), None),
     }
 }
 
 fn reported(
-    id: process::Id,
+    id: AgentId,
     snapshot: Snapshot,
     started: SystemTime,
     terminal: Option<TerminalKey>,
 ) -> ReportedAgent {
-    assert!(id.pid > 1);
-    let report = Report {
-        agent: id.clone(),
-        rung: Rung::Hook,
-        state: snapshot.state,
-        kind: snapshot.kind,
-        message: None,
-        at: Some(snapshot.modified),
-        subagents: Vec::new(),
+    let update = match snapshot.status {
+        Some(status) => {
+            RungUpdate::Active { status, at: Some(snapshot.modified), subagents: Vec::new() }
+        },
+        None => RungUpdate::Clear,
     };
+    let report = Report { agent: id.clone(), rung: Rung::Hook, update };
     let seen = SeenAgent {
         id,
         harness: Harness::Antigravity,
@@ -429,13 +435,12 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
     let Some(cwd) = envelope.state.cwd() else {
         return Err(io::Error::new(ErrorKind::InvalidData, "cwd is missing or relative"));
     };
-    let (state, kind) = state_of(&envelope.state);
+    let status = state_of(&envelope.state);
     Ok(Some(Snapshot {
         cwd,
         session_id: envelope.state.session_id(),
         name: envelope.state.name(),
-        state,
-        kind,
+        status,
         modified,
     }))
 }
@@ -872,24 +877,27 @@ mod tests {
             agent_state: agent_state.map(str::to_owned),
             tool_confirmation_pending: pending,
         };
-        assert_eq!(state_of(&state(Some("idle"), None)), (State::Idle, None));
-        assert_eq!(state_of(&state(Some("working"), None)), (State::Working, None));
-        assert_eq!(state_of(&state(Some("tool_use"), None)), (State::Working, None));
-        assert_eq!(state_of(&state(Some("initializing"), None)), (State::Working, None));
+        assert_eq!(state_of(&state(Some("idle"), None)), Some(ActiveStatus::Idle));
+        assert_eq!(state_of(&state(Some("working"), None)), Some(ActiveStatus::Working));
+        assert_eq!(state_of(&state(Some("tool_use"), None)), Some(ActiveStatus::Working));
+        assert_eq!(state_of(&state(Some("initializing"), None)), Some(ActiveStatus::Working));
         assert_eq!(
             state_of(&state(Some("working"), Some(true))),
-            (State::Blocked, Some(BlockedKind::Permission))
+            Some(ActiveStatus::Blocked { reason: BlockedReason::Permission, message: None })
         );
         assert_eq!(
             state_of(&state(Some("reviewing"), None)),
-            (State::Blocked, Some(BlockedKind::Question))
+            Some(ActiveStatus::Blocked { reason: BlockedReason::Question, message: None })
         );
         assert_eq!(
             state_of(&state(Some("authenticating"), None)),
-            (State::Blocked, Some(BlockedKind::Auth))
+            Some(ActiveStatus::Blocked { reason: BlockedReason::Auth, message: None })
         );
-        assert_eq!(state_of(&state(Some("error"), None)), (State::Error, None));
-        assert_eq!(state_of(&state(None, None)), (State::Unreported, None));
+        assert_eq!(
+            state_of(&state(Some("error"), None)),
+            Some(ActiveStatus::Error { message: None })
+        );
+        assert_eq!(state_of(&state(None, None)), None);
     }
 
     fn chain_of(script_path: &Path) -> Option<String> {
@@ -1154,7 +1162,10 @@ mod tests {
         let first = files.scan();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].seen.session_id, None);
-        assert_eq!(first[0].report.state, State::Idle);
+        assert!(matches!(
+            first[0].report.update,
+            RungUpdate::Active { status: ActiveStatus::Idle, .. }
+        ));
 
         fs::write(&state_file, "{truncated").unwrap();
         let during_torn = files.scan();
