@@ -483,7 +483,18 @@ impl Rebased {
         RebaseResponse { branch: self.branch.clone(), onto: self.onto.clone(), came: Some(came) }
     }
 
-    pub fn of_api(said: RebaseResponse) -> Result<Rebased, String> {
+    pub fn of_api(said: RebaseResponse, asked: Option<&str>) -> Result<Rebased, String> {
+        if said.branch.is_empty() {
+            return Err("luned named no branch it rebased".to_owned());
+        }
+        if said.onto.is_empty() {
+            return Err(format!("luned named nothing it rebased {} onto", said.branch));
+        }
+        if let Some(asked) = asked
+            && asked != said.branch
+        {
+            return Err(format!("luned rebased {}, not {asked}", said.branch));
+        }
         let came = match said.came.ok_or("luned said nothing of how the rebase came out")? {
             Said::Already(()) => Came::Already,
             Said::Clean(rebase_response::Clean { ahead }) => Came::Clean { ahead },
@@ -750,10 +761,26 @@ mod tests {
         let stopped = Stopped { at, conflicted: Conflicted::of(files(30)) };
         for came in [Came::Already, Came::Clean { ahead: 3 }, Came::Stopped(stopped)] {
             let rebased = Rebased { branch: "b".to_owned(), onto: "origin/main".to_owned(), came };
-            assert_eq!(Rebased::of_api(rebased.to_api()), Ok(rebased));
+            assert_eq!(Rebased::of_api(rebased.to_api(), Some("b")), Ok(rebased.clone()));
+            assert_eq!(Rebased::of_api(rebased.to_api(), None), Ok(rebased));
         }
         let unsaid = RebaseResponse { branch: "b".to_owned(), onto: "main".to_owned(), came: None };
-        assert!(Rebased::of_api(unsaid).is_err());
+        assert!(Rebased::of_api(unsaid, None).is_err());
+    }
+
+    #[test]
+    fn a_rebase_said_over_the_wire_names_the_branch_asked_for_and_what_it_went_onto() {
+        let said = |branch: &str, onto: &str| RebaseResponse {
+            branch: branch.to_owned(),
+            onto: onto.to_owned(),
+            came: Some(Said::Already(())),
+        };
+        let unnamed = Rebased::of_api(said("", "main"), None).unwrap_err();
+        assert_eq!(unnamed, "luned named no branch it rebased");
+        let nowhere = Rebased::of_api(said("b", ""), None).unwrap_err();
+        assert_eq!(nowhere, "luned named nothing it rebased b onto");
+        let other = Rebased::of_api(said("b", "main"), Some("fix")).unwrap_err();
+        assert_eq!(other, "luned rebased b, not fix");
     }
 
     #[test]
@@ -771,7 +798,7 @@ mod tests {
             onto: "main".to_owned(),
             came: Some(Said::Stopped(stopped)),
         };
-        let refused = Rebased::of_api(said).unwrap_err();
+        let refused = Rebased::of_api(said, None).unwrap_err();
         let starts = "luned said the rebase stopped, but it names 3 files";
         assert!(refused.starts_with(starts), "{refused}");
     }

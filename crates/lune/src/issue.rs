@@ -11,12 +11,12 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
-use crate::away::{self, Away};
 use crate::brief;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
+use crate::reach::{self, Luned};
 use crate::sidebar::{self, ACCENT, LIT};
 
 const TITLE: &str = "File issue";
@@ -86,7 +86,7 @@ impl Issue {
         let (on, dir) = (repository.on.clone(), repository.dir.clone());
         thread::spawn(move || {
             let remotes =
-                Away::on(&on, away::ANSWER).and_then(|mut luned| luned.issue_remotes(&dir));
+                Luned::on(&on, reach::ANSWER).and_then(|mut luned| luned.issue_remotes(&dir));
             due.pay(Ok(remotes));
         });
         Issue::new(number, repository, kept)
@@ -231,7 +231,7 @@ impl Issue {
             Event::Filed { number, repository, to: sent_to, words, filed }
         });
         let filing = thread::spawn(move || {
-            let filed = match Away::on(&on, away::ANSWER) {
+            let filed = match Luned::on(&on, reach::ANSWER) {
                 Ok(mut luned) => luned.file_issue(&filing),
                 Err(why) => Err(Unfiled::Refused(why)),
             };

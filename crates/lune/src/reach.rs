@@ -36,27 +36,27 @@ pub const ANSWER: Duration = Duration::from_secs(6);
 
 const SLOW: Duration = Duration::from_secs(1);
 
-pub struct Away {
+pub struct Luned {
     tasks: Handle,
     daemon: Daemon,
     on: Machine,
     patience: Duration,
 }
 
-impl Away {
-    pub fn on(on: &Machine, patience: Duration) -> Result<Away, String> {
+impl Luned {
+    pub fn on(on: &Machine, patience: Duration) -> Result<Luned, String> {
         let folder = luned::folder::find().map_err(|unfound| format!("{unfound}, to find luned in"))?;
-        Away::at(&folder, on, patience)
+        Luned::at(&folder, on, patience)
     }
 
-    pub fn at(folder: &Path, on: &Machine, patience: Duration) -> Result<Away, String> {
+    pub fn at(folder: &Path, on: &Machine, patience: Duration) -> Result<Luned, String> {
         let tasks = luned::tasks::shared();
         let reached = daemon::running(folder);
         let daemon = match tasks.block_on(async { tokio::time::timeout(patience, reached).await }) {
             Ok(reached) => reached?,
             Err(_) => return Err(format!("luned did not answer in {}s", patience.as_secs_f32())),
         };
-        Ok(Away { tasks, daemon, on: on.clone(), patience })
+        Ok(Luned { tasks, daemon, on: on.clone(), patience })
     }
 
     pub fn repositories(&mut self) -> Result<Found, String> {
@@ -205,7 +205,7 @@ impl Away {
         });
         let answer = answer.map_err(|(why, code)| Unrebased::of(why, code))?;
         let on = self.on.destination();
-        Rebased::of_api(answer).map_err(|why| Unrebased::InDoubt(told_by(on, &why)))
+        Rebased::of_api(answer, branch).map_err(|why| Unrebased::InDoubt(told_by(on, &why)))
     }
 
     fn answer_of<T>(

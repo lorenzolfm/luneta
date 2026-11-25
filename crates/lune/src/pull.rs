@@ -5,10 +5,10 @@ use luned::links::{self, Pasted, Unready};
 pub use luned::links::{At, Kind, Link, Readied, Wanted, Work};
 use luned::log;
 
-use crate::away::{self, Away};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
+use crate::reach::{self, Luned};
 use crate::sidebar::ViewPlace;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,7 +44,7 @@ pub fn prepare(menu: u64, asking: Asking, events: &Sender<Event>) {
 }
 
 fn asked(on: &Machine, pasted: &Pasted) -> Result<links::Ready<usize>, Unready> {
-    Away::on(on, away::ANSWER).map_err(Unready::Failed)?.paste(pasted)
+    Luned::on(on, reach::ANSWER).map_err(Unready::Failed)?.paste(pasted)
 }
 
 fn first_found(

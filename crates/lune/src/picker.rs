@@ -27,11 +27,11 @@ use luned::{screens, Destination, Directory};
 
 use crate::actions::{self, Action, Pasted, Spec};
 use crate::alerts::Doing;
-use crate::away::{self, Away};
 use crate::close::{self, Act, Plan};
 use crate::fuzzy::{Fuzzy, Score, Typos};
 use crate::host::Event;
 use crate::moonlight;
+use crate::reach::{self, Luned};
 use crate::screen;
 use crate::machines::Machine;
 use crate::menu::{self, Chain, Chained, Done, Hint, Origin, Pull, Target};
@@ -313,11 +313,11 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
             })
         },
         Ask::Repositories { on, ask } => Box::new(move || {
-            let found = Away::on(&on, away::ANSWER).and_then(|mut luned| luned.repositories());
+            let found = Luned::on(&on, reach::ANSWER).and_then(|mut luned| luned.repositories());
             Heard::Repositories { on, ask, found }
         }),
         Ask::List { on, path } => Box::new(move || {
-            let listed = Away::on(&on, away::ANSWER).and_then(|mut luned| luned.contents(&path));
+            let listed = Luned::on(&on, reach::ANSWER).and_then(|mut luned| luned.contents(&path));
             Heard::Listed { on, path, listed }
         }),
     };

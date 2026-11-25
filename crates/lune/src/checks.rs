@@ -4,10 +4,10 @@ use std::thread;
 pub use luned::checks::{Failed, Failing, Log, PullPage};
 use luned::printed::Kept;
 
-use crate::away::{self, Away};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
+use crate::reach::{self, Luned};
 
 
 pub fn prompt(page: &PullPage, failing: &Failing) -> String {
@@ -51,7 +51,7 @@ pub fn fetch(menu: u64, on: &Machine, page: PullPage, events: &Sender<Event>) {
     let on = on.clone();
     let due = Due::new(events, move |checks| Event::Checks { menu, checks });
     thread::spawn(move || {
-        due.pay(Away::on(&on, away::ANSWER).and_then(|mut luned| luned.checks(&page)));
+        due.pay(Luned::on(&on, reach::ANSWER).and_then(|mut luned| luned.checks(&page)));
     });
 }
 

@@ -17,12 +17,12 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
-use crate::away::{self, Away};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::moonlight;
+use crate::reach::{self, Luned};
 use crate::sidebar::{self, ViewKey};
 
 const MODEL: &str = "haiku";
@@ -333,7 +333,7 @@ type Reads<'a> =
     dyn Fn(&Machine, &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> + Sync + 'a;
 
 pub fn read(on: &Machine, reading: &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
-    Away::on(on, away::ANSWER)?.ends(reading)
+    Luned::on(on, reach::ANSWER)?.ends(reading)
 }
 
 fn leaves_out(left_out: &[Note]) -> String {

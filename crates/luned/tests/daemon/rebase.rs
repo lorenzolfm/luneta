@@ -271,7 +271,7 @@ fn a_far_worktree_is_rebased_on_its_own_machine() {
         let mut rebase = async |came: Came| {
             let answer = daemon.rebase(rebases::asked(on(), &dir, Some("fix"))).await.unwrap();
             let answer = answer.into_inner().message().await.unwrap().unwrap();
-            let rebased = Rebased::of_api(answer).unwrap();
+            let rebased = Rebased::of_api(answer, Some("fix")).unwrap();
             assert_eq!((rebased.branch.as_str(), rebased.onto.as_str()), ("fix", "origin/main"));
             assert_eq!(rebased.came, came);
         };
