@@ -9,84 +9,44 @@ use lune_protocol::said::Said;
 use serde::Deserialize as _;
 
 use crate::api;
-use crate::api::agent::Status as Reported;
-use crate::api::agent::WaitingFor as Waits;
+use crate::process::{AgentId, AgentPid};
+use crate::statuses::{ActiveStatus, Decided, Subagent};
 use crate::watch::Troubles;
 use crate::Directory;
 
 pub const FILE_BYTES_MAX: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Agent {
-    pub pid: u32,
+pub struct SeenAgent {
+    pub id: AgentId,
     pub harness: Harness,
     pub session_id: Option<Said>,
     pub cwd: Directory,
-    pub status: Status,
-    pub status_since: Option<SystemTime>,
     pub started_at: Option<SystemTime>,
     pub name: Option<Name>,
     pub entrypoint: Option<Said>,
     pub terminal: Option<TerminalKey>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Status {
-    Busy,
-    Idle,
-    Waiting(Option<WaitingFor>),
-    Shell,
-    Other(Said),
-    Unreported,
-}
-
-impl Status {
+impl SeenAgent {
     #[must_use]
-    pub fn of(word: Option<&str>, waiting_for: Option<&str>) -> Self {
-        let Some(word) = said(word) else {
-            return Status::Unreported;
-        };
-        match word.as_str().to_ascii_lowercase().as_str() {
-            "busy" => Status::Busy,
-            "idle" => Status::Idle,
-            "waiting" => Status::Waiting(said(waiting_for).map(WaitingFor::of)),
-            "shell" => Status::Shell,
-            _ => Status::Other(word),
-        }
+    pub fn at_a_prompt(&self) -> bool {
+        let word = self.harness.to_api().prompt_word();
+        word.is_some_and(|word| self.entrypoint.as_ref().map(Said::as_str) == Some(word))
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WaitingFor {
-    PermissionPrompt,
-    InputNeeded,
-    DialogOpen,
-    Other(Said),
-}
-
-impl WaitingFor {
-    fn of(word: Said) -> Self {
-        match word.as_str().to_ascii_lowercase().as_str() {
-            "permission prompt" => WaitingFor::PermissionPrompt,
-            "input needed" => WaitingFor::InputNeeded,
-            "dialog open" => WaitingFor::DialogOpen,
-            _ => WaitingFor::Other(word),
-        }
-    }
-
-    fn to_api(&self) -> Waits {
-        let known = |waits: api::WaitingFor| Waits::KnownWaitingFor(waits.into());
-        match self {
-            WaitingFor::PermissionPrompt => known(api::WaitingFor::PermissionPrompt),
-            WaitingFor::InputNeeded => known(api::WaitingFor::InputNeeded),
-            WaitingFor::DialogOpen => known(api::WaitingFor::DialogOpen),
-            WaitingFor::Other(word) => Waits::OtherWaitingFor(word.clone().into()),
-        }
-    }
-}
-
-fn said(word: Option<&str>) -> Option<Said> {
-    Said::new(word?.trim().to_owned())
+pub struct Agent {
+    pub pid: AgentPid,
+    pub harness: Harness,
+    pub session_id: Option<Said>,
+    pub cwd: Directory,
+    pub status: Decided,
+    pub started_at: Option<SystemTime>,
+    pub name: Option<Name>,
+    pub entrypoint: Option<Said>,
+    pub terminal: Option<TerminalKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,7 +111,7 @@ pub struct Unread {
     pub terminal: Option<TerminalKey>,
 }
 
-pub fn named_pid(path: &Path) -> Option<u32> {
+pub fn named_pid(path: &Path) -> Option<AgentPid> {
     if path.extension()? != "json" {
         return None;
     }
@@ -160,7 +120,7 @@ pub fn named_pid(path: &Path) -> Option<u32> {
     if pid.to_string() != stem {
         return None;
     }
-    (pid > 1).then_some(pid)
+    AgentPid::new(pid)
 }
 
 pub fn file_text(path: &Path) -> io::Result<Vec<u8>> {
@@ -184,7 +144,7 @@ pub fn absolute<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Directory, 
 }
 
 pub fn terminal_or_trouble(
-    pid: u32,
+    pid: AgentPid,
     read: Result<Option<TerminalKey>, String>,
     troubles: &mut Troubles,
 ) -> Option<TerminalKey> {
@@ -204,32 +164,51 @@ pub fn moment(millis: u64) -> SystemTime {
 
 impl Agent {
     #[must_use]
+    pub fn is_working(&self) -> bool {
+        matches!(self.status, Decided::Reported { status: ActiveStatus::Working, .. })
+    }
+
+    #[must_use]
+    pub fn status_since(&self) -> Option<SystemTime> {
+        match &self.status {
+            Decided::Reported { since, .. } => *since,
+            Decided::Unreported => None,
+        }
+    }
+
+    #[must_use]
     pub fn to_api(&self, topic: Option<Said>) -> api::Agent {
-        assert!(self.pid > 1);
-        let known = |status: api::Status| Some(Reported::KnownStatus(status.into()));
-        let (status, waiting_for) = match &self.status {
-            Status::Busy => (known(api::Status::Busy), None),
-            Status::Idle => (known(api::Status::Idle), None),
-            Status::Waiting(waits) => {
-                (known(api::Status::Waiting), waits.as_ref().map(WaitingFor::to_api))
-            },
-            Status::Shell => (known(api::Status::Shell), None),
-            Status::Other(word) => (Some(Reported::OtherStatus(word.clone().into())), None),
-            Status::Unreported => (None, None),
-        };
+        let (status, waiting_for, reported_status, status_since, status_rung, subagents) =
+            match &self.status {
+                Decided::Unreported => (None, None, None, None, None, Vec::new()),
+                Decided::Reported { status, since, rung, subagents } => {
+                    let (legacy_status, waiting_for, reported) = status.to_api();
+                    (
+                        Some(legacy_status),
+                        waiting_for,
+                        Some(reported),
+                        since.map(Into::into),
+                        Some(rung.to_api().into()),
+                        subagents.iter().map(Subagent::to_api).collect(),
+                    )
+                },
+            };
         api::Agent {
-            pid: self.pid,
+            pid: self.pid.get(),
             harness: Some(self.harness.to_api().into()),
             session_id: self.session_id.clone().map(String::from),
             cwd: self.cwd.clone().into(),
             status,
-            status_since: self.status_since.map(Into::into),
+            status_since,
             started_at: self.started_at.map(Into::into),
             name: self.name.as_ref().map(Name::to_api),
             entrypoint: self.entrypoint.clone().map(String::from),
             waiting_for,
             terminal: self.terminal.map(Into::into),
             topic: topic.map(String::from),
+            reported_status,
+            status_rung,
+            subagents,
         }
     }
 }
@@ -237,7 +216,6 @@ impl Agent {
 impl Unread {
     #[must_use]
     pub fn to_api(&self) -> api::UnreadFile {
-        assert!(self.pid > 1);
         api::UnreadFile { pid: self.pid, terminal: self.terminal.map(Into::into) }
     }
 }

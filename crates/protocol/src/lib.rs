@@ -1,6 +1,8 @@
+pub mod agent_status;
 pub mod git;
 pub mod github;
 pub mod made;
+pub mod program_status;
 pub mod release;
 pub mod process;
 pub mod said;
@@ -14,6 +16,22 @@ pub const TAILNET_PORT: u16 = 7473;
 pub const CONFLICTED_NAMED_MAX: usize = 20;
 
 pub const MUX_STREAMS_MAX: u32 = 256;
+
+pub const MUX_TERMINALS_MAX: usize = 1024;
+
+pub const RPC_MESSAGE_BYTES_MAX: usize = 16 * 1024 * 1024;
+
+pub const LISTING_CHILDREN_BYTES_MAX: usize = 8 * 1024 * 1024;
+
+pub const HOST_SUBAGENTS_BYTES_MAX: usize = 512 * 1024;
+
+pub const PROGRAM_STATUS_RECORDS_MAX: usize = program_status::RECORDS_MAX;
+
+pub const PROGRAM_STATUS_PROGRESS_PERCENT_MAX: u8 = program_status::PROGRESS_PERCENT_MAX;
+
+const _: () = assert!(MUX_TERMINALS_MAX >= 64);
+const _: () = assert!(LISTING_CHILDREN_BYTES_MAX < RPC_MESSAGE_BYTES_MAX);
+const _: () = assert!(HOST_SUBAGENTS_BYTES_MAX * 17 < RPC_MESSAGE_BYTES_MAX);
 
 #[allow(
     clippy::allow_attributes,
@@ -51,6 +69,11 @@ impl v1::Agent {
         let word = self.runs_in().prompt_word();
         word.is_some_and(|word| self.entrypoint.as_deref() == Some(word))
     }
+
+    #[must_use]
+    pub fn is_finished_turn(&self) -> bool {
+        agent_status::AgentStatus::of_api(self).is_finished_turn()
+    }
 }
 
 impl v1::Project {
@@ -87,5 +110,29 @@ impl v1::Name {
         let source = self.source.map(v1::NameSource::try_from);
         let given = matches!(source, None | Some(Ok(v1::NameSource::User | v1::NameSource::Peer)));
         Some(self.text.trim()).filter(|text| given && !text.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::v1::{agent::Status as Reported, Agent, Status, StatusRung};
+
+    fn with_status(status: Status, rung: Option<StatusRung>) -> Agent {
+        Agent {
+            status: Some(Reported::KnownStatus(status.into())),
+            status_rung: rung.map(Into::into),
+            ..Agent::default()
+        }
+    }
+
+    #[test]
+    fn finished_turn_distinguishes_stopped_from_done_and_legacy_idle() {
+        assert!(with_status(Status::Done, Some(StatusRung::Osc7501)).is_finished_turn());
+        assert!(!with_status(Status::Stopped, Some(StatusRung::Osc7501)).is_finished_turn());
+        assert!(!with_status(Status::Idle, Some(StatusRung::Osc7501)).is_finished_turn());
+        assert!(with_status(Status::Idle, Some(StatusRung::Feed)).is_finished_turn());
+        assert!(with_status(Status::Idle, None).is_finished_turn());
+        assert!(!with_status(Status::Busy, Some(StatusRung::Osc7501)).is_finished_turn());
+        assert!(!with_status(Status::Error, Some(StatusRung::Osc7501)).is_finished_turn());
     }
 }

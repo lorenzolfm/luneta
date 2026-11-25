@@ -264,6 +264,7 @@ pub fn start(
                 shell: Shell::default(),
                 looks: Looks::first(),
                 told: Told::default(),
+                statuses_version: 0,
             };
             let failed = match panics::contained(|| thread.run()) {
                 Ok(Ok(())) => None,
@@ -332,6 +333,7 @@ struct Thread {
     shell: Shell,
     looks: Looks,
     told: Told,
+    statuses_version: u64,
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -592,13 +594,26 @@ impl Thread {
             unread.clear();
         }
         self.read(LAST_WORDS_BYTES_MAX)?;
+        let ended_statuses = self.screen.program_exited();
+        self.statuses_version = self.screen.program_statuses_version();
         self.program = Program::Gone;
         self.shell.gone();
         self.looks = Looks::default();
         self.told = Told::default();
         self.dirty = true;
         self.frame()?;
-        Ok(self.mux.ended(self.key.id, exit))
+        Ok(self.mux.ended(self.key.id, exit, ended_statuses))
+    }
+
+    fn tell_statuses(&mut self) {
+        let version = self.screen.program_statuses_version();
+        if version == self.statuses_version {
+            return;
+        }
+        self.statuses_version = version;
+        let statuses = self.screen.program_statuses();
+        assert!(statuses.children.len() <= crate::program_status::RECORDS_MAX);
+        self.mux.program_statuses(self.key.id, statuses);
     }
 
     fn watcher(&mut self, client: ClientId) -> Option<&mut Watcher> {
@@ -753,6 +768,7 @@ impl Thread {
             self.pwd = pwd;
             self.mux.titled(self.key.id, title, cwd);
         }
+        self.tell_statuses();
         Ok(())
     }
 

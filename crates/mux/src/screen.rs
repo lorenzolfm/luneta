@@ -1,7 +1,10 @@
 mod answering;
 mod input;
 
+use std::cell::RefCell;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::rc::Rc;
+use std::time::SystemTime;
 
 use libghostty_vt::effect::{
     ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
@@ -27,6 +30,7 @@ pub use input::{Click, Wheel};
 
 use crate::asked::Size;
 use crate::marks::{Mark, Marks};
+use crate::program_status::{EndedProgramStatuses, ProgramStatuses, Snapshot};
 
 const NAME: &str = concat!("lune-mux ", env!("CARGO_PKG_VERSION"));
 
@@ -168,6 +172,7 @@ pub struct Screen {
     answering: Answering,
     size: Size,
     marks: Marks,
+    statuses: Rc<RefCell<ProgramStatuses>>,
     render: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
@@ -177,10 +182,15 @@ pub struct Screen {
 impl Screen {
     pub fn new(size: Size, scrollback_bytes: usize) -> Result<Screen, Error> {
         let mut answering = Answering::new(size, scrollback_bytes)?;
+        let statuses = Rc::new(RefCell::new(ProgramStatuses::default()));
+        let heard = Rc::clone(&statuses);
         let (made, answers) = answering.drive(|terminal| {
             terminal
                 .on_xtversion(|_| Some(NAME))?
                 .on_device_attributes(|_| Some(ATTRIBUTES))?
+                .on_program_status(move |_, report| {
+                    heard.borrow_mut().apply(report, SystemTime::now());
+                })?
                 .set_mode(Mode::GRAPHEME_CLUSTER, true)
                 .map(|_| ())
         });
@@ -190,6 +200,7 @@ impl Screen {
             answering,
             size,
             marks: Marks::default(),
+            statuses,
             render: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
@@ -200,10 +211,15 @@ impl Screen {
     pub fn write(&mut self, bytes: &[u8]) -> Result<Written, Error> {
         let (columns, rows) = self.size.get();
         let scanner = &mut self.marks;
+        let statuses = &self.statuses;
         let (wrote, answers) = self.answering.drive(|terminal| {
             let end = ScrollbackEnd::of(terminal);
             let mut marks = Vec::new();
-            scanner.write(terminal, bytes, &mut marks)?;
+            scanner.write(terminal, bytes, &mut marks, |mark| match mark {
+                Mark::Prompt => statuses.borrow_mut().prompt_started(),
+                Mark::Command(_) => statuses.borrow_mut().command_started(),
+                Mark::Done(_) => {},
+            })?;
             if (terminal.cols()?, terminal.rows()?) != (columns, rows) {
                 terminal.resize(columns, rows, 0, 0)?;
             }
@@ -213,6 +229,20 @@ impl Screen {
         });
         let (marks, pushed) = wrote?;
         Ok(Written { answers, marks, pushed })
+    }
+
+    #[must_use]
+    pub fn program_statuses(&self) -> Snapshot {
+        self.statuses.borrow().snapshot()
+    }
+
+    #[must_use]
+    pub fn program_statuses_version(&self) -> u64 {
+        self.statuses.borrow().version()
+    }
+
+    pub fn program_exited(&mut self) -> EndedProgramStatuses {
+        self.statuses.borrow_mut().exited()
     }
 
     pub fn resize(&mut self, size: Size) -> Result<Answers, Error> {
@@ -724,5 +754,254 @@ mod tests {
         let mut screen = screen(10, 2);
         assert_eq!(screen.write(b"\x1b]133;A\x07$ \x1b]133;D").unwrap().marks, [Mark::Prompt]);
         assert_eq!(screen.write(b";1\x07").unwrap().marks, [Mark::Done(Some(1))]);
+    }
+
+    #[test]
+    fn an_osc_7501_probe_is_answered_before_da1() {
+        let mut screen = screen(10, 2);
+        let reply = String::from_utf8(answered(&mut screen, b"\x1b]7501;?\x1b\\\x1b[c")).unwrap();
+        let probe = reply.find("\x1b]7501;?").expect("the terminal answers the OSC 7501 probe");
+        let da1 = reply.find("\x1b[?62;").expect("the terminal answers DA1");
+        assert!(probe < da1, "probe reply must precede DA1 reply: {reply:?}");
+    }
+
+    #[test]
+    fn osc_7501_keeps_records_inherits_app_sanitizes_and_clears_subtrees() {
+        use crate::program_status::{OscBlockedKind, ProgramPhase};
+
+        let mut screen = screen(10, 2);
+        let msg = "YWxsb3cg4oCuZGFuZ2Vy";
+        let title = "c3Vi4oCLdGFzaw==";
+        let bytes = format!(
+            "\x1b]7501;state=blocked:kind=permission:app=claude-code:msg={msg}\x1b\\\
+             \x1b]7501;state=working:id=agent-1:title={title}:progress=42\x1b\\\
+             \x1b]7501;state=working:id=agent-1/step\x1b\\\
+             \x1b]7501;state=done:id=agent-10\x1b\\"
+        );
+        assert_eq!(answered(&mut screen, bytes.as_bytes()), b"");
+        let snapshot = screen.program_statuses();
+        let root = snapshot.root.as_ref().unwrap();
+        assert_eq!(
+            root.phase,
+            ProgramPhase::Blocked {
+                kind: Some(OscBlockedKind::Permission),
+                message: Some(crate::program_status::Message::parse("message", "allow danger").unwrap()),
+            }
+        );
+        assert_eq!(root.app.as_ref().map(crate::program_status::AppName::as_str), Some("claude-code"));
+        assert_eq!(snapshot.children.len(), 3);
+        assert_eq!(snapshot.children[0].id.as_str(), "agent-1");
+        assert_eq!(
+            snapshot.children[0].status.app.as_ref().map(crate::program_status::AppName::as_str),
+            Some("claude-code")
+        );
+        assert_eq!(
+            snapshot.children[0].status.title.as_ref().map(crate::program_status::Title::as_str),
+            Some("subtask")
+        );
+        assert_eq!(
+            snapshot.children[0].status.phase,
+            ProgramPhase::Working { progress: crate::program_status::Progress::new(42) }
+        );
+        assert_eq!(snapshot.children[1].id.as_str(), "agent-1/step");
+        assert_eq!(
+            snapshot.children[1].status.app.as_ref().map(crate::program_status::AppName::as_str),
+            Some("claude-code")
+        );
+        assert_eq!(snapshot.children[2].id.as_str(), "agent-10");
+        assert_eq!(
+            snapshot.children[2].status.app.as_ref().map(crate::program_status::AppName::as_str),
+            Some("claude-code")
+        );
+
+        assert_eq!(answered(&mut screen, b"\x1b]7501;state=clear:id=agent-1\x07"), b"");
+        let snapshot = screen.program_statuses();
+        assert!(snapshot.root.is_some());
+        let ids: Vec<&str> = snapshot.children.iter().map(|it| it.id.as_str()).collect();
+        assert_eq!(ids, ["agent-10"]);
+
+        assert_eq!(answered(&mut screen, b"\x1b]7501;state=done\x07"), b"");
+        let snapshot = screen.program_statuses();
+        let root = snapshot.root.as_ref().unwrap();
+        assert_eq!(root.phase, ProgramPhase::Done { message: None });
+        assert_eq!(root.app, None);
+
+        assert_eq!(answered(&mut screen, b"\x1b]7501;state=clear\x07"), b"");
+        assert!(screen.program_statuses().is_empty());
+    }
+
+    #[test]
+    fn osc_133_a_drops_working_and_blocked_in_byte_order_and_keeps_done_and_error() {
+        use crate::program_status::{ProgramPhase, TerminalPhase};
+
+        let mut screen = screen(10, 2);
+        let bytes = concat!(
+            "\x1b]7501;state=working:app=claude-code\x07",
+            "\x1b]7501;state=done:id=finished\x07",
+            "\x1b]7501;state=error:id=failed\x07",
+            "\x1b]133;A\x07",
+            "\x1b]7501;state=working:app=claude-code:id=next\x07",
+        );
+        assert_eq!(answered(&mut screen, bytes.as_bytes()), b"");
+        let snapshot = screen.program_statuses();
+        assert_eq!(snapshot.root, None);
+        let kept: Vec<(&str, &ProgramPhase)> =
+            snapshot.children.iter().map(|it| (it.id.as_str(), &it.status.phase)).collect();
+        assert_eq!(
+            kept,
+            [
+                ("failed", &ProgramPhase::Error { message: None }),
+                ("finished", &ProgramPhase::Done { message: None }),
+                ("next", &ProgramPhase::Working { progress: None }),
+            ]
+        );
+
+        assert_eq!(answered(&mut screen, b"\x1b]133;A\x07"), b"");
+        let kept: Vec<String> =
+            screen.program_statuses().children.into_iter().map(|it| it.id.into()).collect();
+        assert_eq!(kept, ["failed", "finished"]);
+
+        assert_eq!(answered(&mut screen, b"\x1b]7501;state=idle:app=pi\x07"), b"");
+        let ended = screen.program_exited();
+        assert_eq!(ended.root, None);
+        let ended_ids: Vec<(&str, &TerminalPhase)> =
+            ended.children.iter().map(|it| (it.id.as_str(), &it.status.phase)).collect();
+        assert_eq!(
+            ended_ids,
+            [
+                ("failed", &TerminalPhase::Error { message: None }),
+                ("finished", &TerminalPhase::Done { message: None }),
+            ]
+        );
+
+        assert_eq!(answered(&mut screen, b"\x1bc"), b"");
+        assert!(screen.program_statuses().is_empty());
+    }
+
+    #[test]
+    fn osc_7501_evicts_oldest_child_without_evicting_root() {
+        use std::fmt::Write as _;
+
+        let mut screen = screen(10, 2);
+        let mut bytes = String::from("\x1b]7501;state=working:app=claude-code\x07");
+        for i in 0..=crate::program_status::RECORDS_MAX {
+            let _ = write!(bytes, "\x1b]7501;state=working:id=r{i:03}\x07");
+        }
+        assert_eq!(answered(&mut screen, bytes.as_bytes()), b"");
+        let snapshot = screen.program_statuses();
+        assert_eq!(
+            snapshot
+                .root
+                .as_ref()
+                .and_then(|r| r.app.as_ref())
+                .map(crate::program_status::AppName::as_str),
+            Some("claude-code"),
+            "subagent eviction must never evict the root record"
+        );
+        let ids: Vec<String> = snapshot.children.iter().map(|it| it.id.as_str().to_owned()).collect();
+        assert_eq!(ids.len(), crate::program_status::RECORDS_MAX);
+        assert!(!ids.contains(&"r000".to_owned()));
+        assert!(ids.contains(&"r001".to_owned()));
+        assert!(ids.contains(&format!("r{:03}", crate::program_status::RECORDS_MAX)));
+        assert_eq!(
+            snapshot.children[0].status.app.as_ref().map(crate::program_status::AppName::as_str),
+            Some("claude-code"),
+            "children still inherit app from the retained root record"
+        );
+    }
+
+    #[test]
+    fn osc_7501_bounds_id_depth_and_keeps_version_steady_on_plain_output() {
+        let mut screen = screen(10, 2);
+        assert_eq!(screen.program_statuses_version(), 0);
+        assert_eq!(answered(&mut screen, b"plain output\r\n"), b"");
+        assert_eq!(screen.program_statuses_version(), 0);
+
+        let too_deep = (0..=crate::program_status::ID_DEPTH_MAX)
+            .map(|index| format!("s{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let sequence = format!("\x1b]7501;state=working:id={too_deep}\x07");
+        assert_eq!(answered(&mut screen, sequence.as_bytes()), b"");
+        assert!(screen.program_statuses().is_empty());
+        assert_eq!(screen.program_statuses_version(), 0);
+
+        assert_eq!(answered(&mut screen, b"\x1b]7501;state=working:app=pi\x07"), b"");
+        let after_working = screen.program_statuses_version();
+        assert!(after_working > 0);
+        assert_eq!(answered(&mut screen, b"more plain output\r\n"), b"");
+        assert_eq!(screen.program_statuses_version(), after_working);
+    }
+
+    #[test]
+    fn osc_133_a_and_exit_preserve_inherited_app_on_retained_children() {
+        let mut screen = screen(10, 2);
+        let bytes = concat!(
+            "\x1b]7501;state=working:app=claude-code\x07",
+            "\x1b]7501;state=done:id=finished\x07",
+            "\x1b]7501;state=working:id=parent:app=pi\x07",
+            "\x1b]7501;state=error:id=parent/failed\x07",
+            "\x1b]133;A\x07",
+        );
+        assert_eq!(answered(&mut screen, bytes.as_bytes()), b"");
+        let snapshot = screen.program_statuses();
+        assert_eq!(snapshot.root, None);
+        let kept: Vec<(&str, Option<&str>)> = snapshot
+            .children
+            .iter()
+            .map(|it| (it.id.as_str(), it.status.app.as_ref().map(crate::program_status::AppName::as_str)))
+            .collect();
+        assert_eq!(kept, [("finished", Some("claude-code")), ("parent/failed", Some("pi"))]);
+
+        let more = concat!(
+            "\x1b]7501;state=working:app=antigravity\x07",
+            "\x1b]7501;state=done:id=after\x07",
+        );
+        assert_eq!(answered(&mut screen, more.as_bytes()), b"");
+        let ended = screen.program_exited();
+        assert_eq!(ended.root, None);
+        let ended_kept: Vec<(&str, Option<&str>)> = ended
+            .children
+            .iter()
+            .map(|it| (it.id.as_str(), it.status.app.as_ref().map(crate::program_status::AppName::as_str)))
+            .collect();
+        assert_eq!(
+            ended_kept,
+            [
+                ("after", Some("antigravity")),
+                ("finished", Some("claude-code")),
+                ("parent/failed", Some("pi")),
+            ]
+        );
+    }
+
+    #[test]
+    fn osc_133_c_clears_retained_statuses_in_byte_order() {
+        use crate::program_status::ProgramPhase;
+
+        let mut screen = screen(10, 2);
+        let before = concat!(
+            "\x1b]7501;state=done:app=claude-code\x07",
+            "\x1b]7501;state=error:id=failed\x07",
+            "\x1b]133;A\x07",
+        );
+        assert_eq!(answered(&mut screen, before.as_bytes()), b"");
+        assert!(screen.program_statuses().root.is_some());
+        assert_eq!(screen.program_statuses().children.len(), 1);
+
+        let next = "\x1b]133;C\x07\x1b]7501;state=working:app=pi:id=next\x07";
+        assert_eq!(answered(&mut screen, next.as_bytes()), b"");
+        let snapshot = screen.program_statuses();
+        assert_eq!(snapshot.root, None);
+        assert_eq!(snapshot.children.len(), 1);
+        assert_eq!(snapshot.children[0].id.as_str(), "next");
+        assert_eq!(snapshot.children[0].status.phase, ProgramPhase::Working { progress: None });
+        assert_eq!(
+            snapshot.children[0].status.app.as_ref().map(crate::program_status::AppName::as_str),
+            Some("pi")
+        );
+
+        assert_eq!(answered(&mut screen, b"\x1b]133;C\x07"), b"");
+        assert!(screen.program_statuses().is_empty());
     }
 }

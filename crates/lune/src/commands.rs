@@ -7,13 +7,13 @@ use std::time::{Duration, SystemTime};
 
 use clap::Subcommand;
 use lune_domain::mux::TerminalKey;
+use lune_protocol::agent_status::AgentStatus;
 use lune_protocol::unread::Unread;
-use luned::api::agent::Status as Reported;
 use luned::api::projects::Held;
 use luned::api::remote::Reached;
 use luned::api::say::Does;
 use luned::api::{
-    Agent, ListAgentsResponse, Say, SayRequest, Status, Utterance, Version, WatchRequest,
+    Agent, ListAgentsResponse, Say, SayRequest, Utterance, Version, WatchRequest,
 };
 use luned::folder::SOCKET;
 pub use luned::log::causes;
@@ -389,16 +389,17 @@ fn terminal_seat(key: TerminalKey) -> String {
 }
 
 fn line(seat: &str, width: usize, agent: &Agent) -> String {
-    let status = match &agent.status {
-        Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
-            Ok(Status::Busy) => "busy",
-            Ok(Status::Idle) => "idle",
-            Ok(Status::Waiting) => "waiting",
-            Ok(Status::Shell) => "shell",
-            Ok(Status::Unspecified) | Err(_) => "?",
-        },
-        Some(Reported::OtherStatus(word)) => word.as_str(),
-        None => "?",
+    let parsed = AgentStatus::of_api(agent);
+    let status = match &parsed {
+        AgentStatus::Working => "busy",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Stopped => "stopped",
+        AgentStatus::Done { .. } => "done",
+        AgentStatus::Blocked { .. } => "waiting",
+        AgentStatus::Error { .. } => "error",
+        AgentStatus::Shell => "shell",
+        AgentStatus::Other(word) => word.as_str(),
+        AgentStatus::Unreported => "?",
     };
     let label = agent.name.as_ref().map_or(agent.cwd.as_str(), |name| name.text.as_str());
     format!("{seat:<width$}  {status:<7}  {:>7}  {label}", agent.pid)

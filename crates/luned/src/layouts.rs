@@ -24,6 +24,7 @@ use crate::api::{self, show_request, show_response};
 use crate::core::{self, Command as Core, Located, Shown};
 use crate::mux::own::server::{self, Is, Terminals, TerminalsListed};
 use crate::mux::{Failure, Runs as Opened};
+use crate::process::AgentPid;
 use crate::program::{self, Ran as Looked};
 use crate::projects::{self, Changed, Failed, Store};
 use crate::shells::Shell;
@@ -351,7 +352,7 @@ struct Known {
     key: TerminalKey,
     heard: Heard,
     settled: Option<Size>,
-    agent_front: Option<u32>,
+    agent_front: Option<AgentPid>,
     remade: Option<Remade>,
 }
 
@@ -2033,27 +2034,36 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::SystemTime;
 
-    use lune_domain::agent::Harness;
+    use lune_domain::agent::{Harness, Rung};
+    use lune_protocol::program_status::ProgramStatuses;
     use lune_protocol::said::Said;
     use lune_protocol::shell::Front;
 
     use super::*;
-    use crate::agent::Status;
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
+    use crate::statuses::{ActiveStatus, Decided};
 
     fn listed(is: Is) -> server::Terminal {
         let key = TerminalKey { id: 1.try_into().unwrap(), made: OwnMade::from_nanos(5) };
         let (tag, cwd, title) = (Vec::new(), "/w".to_owned(), String::new());
-        server::Terminal { key, tag, size: None, cwd, title, is }
+        server::Terminal {
+            key,
+            tag,
+            size: None,
+            cwd,
+            title,
+            is,
+            statuses: ProgramStatuses::default(),
+        }
     }
 
     fn running(front: Option<(u32, &[&str])>, doing: Option<Doing>) -> server::Terminal {
         let front = front.map(|(pid, argv)| Foreground {
-            pid,
+            pid: AgentPid::new(pid).unwrap(),
             argv: argv.iter().map(|word| (*word).to_owned()).collect(),
         });
-        listed(Is::Running { root: 10, front, doing })
+        listed(Is::Running { root: AgentPid::new(10).unwrap(), front, doing })
     }
 
     fn going(command: Option<&str>) -> Doing {
@@ -2063,12 +2073,16 @@ mod tests {
 
     fn agent(pid: u32) -> Agent {
         Agent {
-            pid,
+            pid: AgentPid::new(pid).unwrap(),
             harness: Harness::ClaudeCode,
             session_id: Some(Said::new("7c22-ab".to_owned()).unwrap()),
             cwd: Directory::parse("/w".to_owned()).unwrap(),
-            status: Status::Idle,
-            status_since: None,
+            status: Decided::Reported {
+                status: ActiveStatus::Idle,
+                since: None,
+                rung: Rung::Feed,
+                subagents: Vec::new(),
+            },
             started_at: Some(SystemTime::UNIX_EPOCH),
             name: None,
             entrypoint: None,

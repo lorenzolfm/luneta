@@ -401,7 +401,12 @@ mod freedesktop {
     async fn notify(proxy: &Proxy<'_>, alert: &Alert) -> zbus::Result<Posted> {
         let urgency: u8 = match alert.kind {
             Kind::Done => 1,
-            Kind::Asked | Kind::Plan | Kind::Permission | Kind::Wants => 2,
+            Kind::Asked
+            | Kind::Plan
+            | Kind::Permission
+            | Kind::Auth
+            | Kind::Wants
+            | Kind::Error => 2,
         };
         post(proxy, &alert.title, &alert.body, "Go to the view", urgency).await
     }

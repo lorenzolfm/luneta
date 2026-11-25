@@ -12,6 +12,7 @@ mod leader;
 mod marks;
 mod mux;
 mod process;
+mod program_status;
 mod pty;
 mod ran;
 mod terminal;

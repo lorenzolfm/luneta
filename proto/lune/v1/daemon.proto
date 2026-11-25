@@ -432,6 +432,18 @@ message Agent {
   }
   optional Harness harness = 13;
   optional string topic = 14;
+  oneof reported_status {
+    google.protobuf.Empty working = 15;
+    google.protobuf.Empty idle = 16;
+    google.protobuf.Empty stopped = 17;
+    DoneStatus done = 18;
+    BlockedStatus blocked = 19;
+    ErrorStatus error = 20;
+    google.protobuf.Empty shell = 21;
+    string other_reported_status = 22;
+  }
+  optional StatusRung status_rung = 23;
+  repeated Subagent subagents = 24;
 }
 
 enum Harness {
@@ -447,6 +459,9 @@ enum Status {
   STATUS_IDLE = 2;
   STATUS_WAITING = 3;
   STATUS_SHELL = 4;
+  STATUS_DONE = 5;
+  STATUS_ERROR = 6;
+  STATUS_STOPPED = 7;
 }
 
 enum WaitingFor {
@@ -454,6 +469,53 @@ enum WaitingFor {
   WAITING_FOR_PERMISSION_PROMPT = 1;
   WAITING_FOR_INPUT_NEEDED = 2;
   WAITING_FOR_DIALOG_OPEN = 3;
+  WAITING_FOR_AUTH = 4;
+}
+
+message WorkingStatus {
+  optional uint32 progress = 1;
+}
+
+message DoneStatus {
+  optional string message = 1;
+}
+
+message BlockedStatus {
+  oneof reason {
+    WaitingFor known = 1;
+    string other = 2;
+  }
+  optional string message = 3;
+}
+
+message ErrorStatus {
+  optional string message = 1;
+}
+
+enum StatusRung {
+  STATUS_RUNG_UNSPECIFIED = 0;
+  STATUS_RUNG_OSC_7501 = 1;
+  STATUS_RUNG_FEED = 2;
+  STATUS_RUNG_EXTENSION = 3;
+  STATUS_RUNG_HOOK = 4;
+  STATUS_RUNG_TRANSCRIPT = 5;
+  STATUS_RUNG_SCREEN = 6;
+}
+
+message Subagent {
+  string id = 1;
+  oneof phase {
+    google.protobuf.Empty idle = 2;
+    google.protobuf.Empty stopped = 3;
+    WorkingStatus working = 4;
+    DoneStatus done = 5;
+    BlockedStatus blocked = 6;
+    ErrorStatus error = 7;
+    google.protobuf.Empty shell = 8;
+    string other = 9;
+  }
+  optional string title = 10;
+  google.protobuf.Timestamp status_since = 11;
 }
 
 message Name {

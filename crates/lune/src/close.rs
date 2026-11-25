@@ -3,9 +3,9 @@ use std::fmt;
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{ProjectId, ViewId, WorktreeId};
+use lune_protocol::agent_status::AgentStatus;
 use lune_protocol::unread::Unplaced;
-use luned::api::agent::Status as Reported;
-use luned::api::{Agent, Status};
+use luned::api::Agent;
 use luned::seats::Unread;
 
 use crate::actions::Action;
@@ -42,15 +42,15 @@ pub enum Doing {
 
 impl From<&Agent> for Doing {
     fn from(agent: &Agent) -> Self {
-        match &agent.status {
-            Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
-                Ok(Status::Busy) => Doing::Busy,
-                Ok(Status::Idle) => Doing::Idle,
-                Ok(Status::Waiting) => Doing::Waiting,
-                Ok(Status::Shell) => Doing::Shell,
-                Ok(Status::Unspecified) | Err(_) => Doing::Unknown,
-            },
-            Some(Reported::OtherStatus(_)) | None => Doing::Unknown,
+        match AgentStatus::of_api(agent) {
+            AgentStatus::Working => Doing::Busy,
+            AgentStatus::Idle
+            | AgentStatus::Stopped
+            | AgentStatus::Done { .. }
+            | AgentStatus::Error { .. } => Doing::Idle,
+            AgentStatus::Blocked { .. } => Doing::Waiting,
+            AgentStatus::Shell => Doing::Shell,
+            AgentStatus::Other(_) | AgentStatus::Unreported => Doing::Unknown,
         }
     }
 }

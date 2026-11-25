@@ -11,14 +11,18 @@ use lune_domain::names::SessionName;
 use lune_domain::projects::{Arranged, ProjectName, WorktreeId};
 use lune_domain::projects::{self, Argv, Dir, Holders, Opens, Plain, ProjectId, Used, ViewId};
 use lune_domain::rows::{self, Told};
+use lune_protocol::agent_status::AgentStatus;
 use lune_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
 use lune_protocol::github::{PullRequest, State, Verdict};
 use lune_protocol::shell::{Doing, Ending, Front};
 use lune_protocol::unread;
+#[cfg(test)]
 use luned::api::agent::Status as Reported;
 use luned::api::remote::unreached::Stopped;
 use luned::api::remote::{self, Reached};
-use luned::api::{self, Agent, Harness, Host, Saying, Status, UnreadFile};
+#[cfg(test)]
+use luned::api::Status;
+use luned::api::{self, Agent, Harness, Host, Saying, UnreadFile};
 use luned::changes::Unchanged;
 use luned::issues::{Filed, Unfiled};
 use luned::links::{self, Branch};
@@ -393,6 +397,7 @@ pub enum Mark {
     Idle,
     Finished,
     Busy,
+    Error,
     Shell,
     Other(char),
     Unreported,
@@ -403,18 +408,14 @@ pub enum Mark {
 
 impl Mark {
     fn of(agent: &Agent) -> Self {
-        match &agent.status {
-            Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
-                Ok(Status::Waiting) => Mark::Waiting,
-                Ok(Status::Idle) => Mark::Idle,
-                Ok(Status::Busy) => Mark::Busy,
-                Ok(Status::Shell) => Mark::Shell,
-                Ok(Status::Unspecified) | Err(_) => Mark::Unreported,
-            },
-            Some(Reported::OtherStatus(word)) => {
-                initial(word).map_or(Mark::Unreported, Mark::Other)
-            },
-            None => Mark::Unreported,
+        match AgentStatus::of_api(agent) {
+            AgentStatus::Blocked { .. } => Mark::Waiting,
+            AgentStatus::Idle | AgentStatus::Stopped | AgentStatus::Done { .. } => Mark::Idle,
+            AgentStatus::Working => Mark::Busy,
+            AgentStatus::Error { .. } => Mark::Error,
+            AgentStatus::Shell => Mark::Shell,
+            AgentStatus::Other(word) => initial(word.as_str()).map_or(Mark::Unreported, Mark::Other),
+            AgentStatus::Unreported => Mark::Unreported,
         }
     }
 
@@ -431,10 +432,12 @@ impl Mark {
                 ("✓".to_owned(), style.fg(moonlight::GREEN).add_modifier(Modifier::BOLD))
             },
             Mark::Busy => (SPINNER[frame].to_owned(), style.fg(TAG)),
+            Mark::Error | Mark::Failed => {
+                ("✗".to_owned(), style.fg(moonlight::RED).add_modifier(Modifier::BOLD))
+            },
             Mark::Shell => ("$".to_owned(), style.add_modifier(Modifier::DIM)),
             Mark::Other(letter) => (letter.to_string(), style.fg(TAG)),
             Mark::Unreported => ("?".to_owned(), style.add_modifier(Modifier::DIM)),
-            Mark::Failed => ("✗".to_owned(), style.fg(moonlight::RED).add_modifier(Modifier::BOLD)),
             Mark::Ran => ("$".to_owned(), style),
         }
     }
@@ -5027,24 +5030,24 @@ fn label(agent: Option<&Agent>, view: &KnownView) -> String {
 
 fn agent_marked(news: &News, agent: &Agent, key: Key, here: bool) -> (Marked, Option<SystemTime>) {
     let mut marked = Marked::of(agent);
-    let done = marked.since.filter(|_| marked.mark == Mark::Idle);
+    let done = marked.since.filter(|_| agent.is_finished_turn() || marked.mark == Mark::Error);
     if !here && news.is_new(key, done) {
-        marked.mark = Mark::Finished;
+        marked.mark = if marked.mark == Mark::Error { Mark::Failed } else { Mark::Finished };
     }
     (marked, done)
 }
 
 fn status_word(agent: &Agent) -> String {
-    match &agent.status {
-        Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
-            Ok(Status::Waiting) => "waiting".to_owned(),
-            Ok(Status::Idle) => "idle".to_owned(),
-            Ok(Status::Busy) => "busy".to_owned(),
-            Ok(Status::Shell) => "shell".to_owned(),
-            Ok(Status::Unspecified) | Err(_) => "unknown".to_owned(),
-        },
-        Some(Reported::OtherStatus(word)) => word.clone(),
-        None => "unreported".to_owned(),
+    match AgentStatus::of_api(agent) {
+        AgentStatus::Blocked { .. } => "waiting".to_owned(),
+        AgentStatus::Idle => "idle".to_owned(),
+        AgentStatus::Stopped => "stopped".to_owned(),
+        AgentStatus::Done { .. } => "done".to_owned(),
+        AgentStatus::Working => "busy".to_owned(),
+        AgentStatus::Error { .. } => "error".to_owned(),
+        AgentStatus::Shell => "shell".to_owned(),
+        AgentStatus::Other(word) => word.into(),
+        AgentStatus::Unreported => "unreported".to_owned(),
     }
 }
 
@@ -5941,6 +5944,7 @@ mod tests {
             terminal: Some(in_named(session, view)),
             waiting_for: None,
             topic: None,
+            ..Agent::default()
         }
     }
 
@@ -12235,4 +12239,27 @@ mod tests {
         host(vec![session("work", 10, work), session("play", 20, play)], vec![fold])
     }
 
+    #[test]
+    fn an_errored_agent_clears_its_unread_dot_when_seen_or_read() {
+        let mut error_host = own_idle_agent();
+        error_host.agents[0].reported_status =
+            Some(api::agent::ReportedStatus::Error(api::ErrorStatus {
+                message: Some("boom".to_owned()),
+            }));
+        let mut sidebar = fresh();
+        sidebar.hear(error_host);
+        let s = |view| own_view_of("s", 1, view);
+        sit(&mut sidebar, &s(3));
+        let unseen = "  •✗ \u{ec82} fold                 1m";
+        assert_eq!(agent_row(&mut sidebar, moment(160_000), true), unseen);
+
+        sit(&mut sidebar, &s(1));
+        let here = "▌  ✗ \u{ec82} fold                 1m";
+        assert_eq!(agent_row(&mut sidebar, moment(161_000), true), here);
+        agent_row(&mut sidebar, moment(162_000), true);
+
+        sit(&mut sidebar, &s(3));
+        let seen = "   ✗ \u{ec82} fold                 1m";
+        assert_eq!(agent_row(&mut sidebar, moment(163_000), true), seen);
+    }
 }

@@ -163,6 +163,7 @@ impl Pty {
         for name in ZELLIJ_VARS.iter().chain(&OWN_VARS) {
             command.env_remove(name);
         }
+        command.env_remove("TERM_PROGRAM");
         command.env("TERM", TERM).env("COLORTERM", "truecolor");
         for (name, value) in vars {
             command.env(name, value);

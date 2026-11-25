@@ -241,7 +241,8 @@ impl Core {
             channel()
         };
         Arc::new(Core {
-            daemon: DaemonClient::new(channel),
+            daemon: DaemonClient::new(channel)
+                .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX),
             handle,
             patience,
             watching: Mutex::new(None),

@@ -645,7 +645,7 @@ async fn watched(
         let api::Host {
             version: _,
             git_statuses,
-            agents,
+            mut agents,
             unread,
             pull_requests,
             unread_files,
@@ -654,6 +654,12 @@ async fn watched(
             sayings,
             projects,
         } = host;
+        lune_protocol::program_status::bound_fair(
+            &mut agents,
+            |agent| Some(&mut agent.subagents),
+            |subagent| prost::Message::encoded_len(subagent).saturating_add(16),
+            lune_protocol::HOST_SUBAGENTS_BYTES_MAX,
+        );
         let host = remote::Host {
             git_statuses,
             agents,

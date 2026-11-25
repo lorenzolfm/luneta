@@ -7,18 +7,22 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use lune_domain::agent::Harness;
+use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::agent::{
-    named_pid, terminal_or_trouble, Agent, Name, Source, Status, WaitingFor, FILE_BYTES_MAX,
+    named_pid, terminal_or_trouble, Name, SeenAgent, Source, FILE_BYTES_MAX,
 };
 use crate::mux;
+use crate::process::{self, AgentId};
+use crate::statuses::{
+    self, ActiveStatus, BlockedReason, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
+};
 use crate::watch::{self, Troubles};
-use crate::{log, process, Directory};
+use crate::{log, Directory};
 
 const SCRIPT_BODY: &str = r#"if [ -n "$LUNE_AGY_TITLE_DEPTH" ]; then
     exit 0
@@ -87,7 +91,7 @@ const DATED_LATE: Duration = Duration::from_secs(1);
 
 const TORN: Duration = Duration::from_secs(1);
 
-const AGENT_FILES_MAX: usize = 1024;
+const AGENT_FILES_MAX: usize = SOURCE_AGENTS_MAX;
 
 const SCRIPT_BYTES_MAX: u64 = 64 * 1024;
 
@@ -134,7 +138,7 @@ struct Snapshot {
     cwd: Directory,
     session_id: Option<Said>,
     name: Option<Name>,
-    status: Status,
+    status: Option<ActiveStatus>,
     modified: SystemTime,
 }
 
@@ -142,7 +146,7 @@ struct Snapshot {
 struct Process {
     started: SystemTime,
     terminal: Option<TerminalKey>,
-    agent: Agent,
+    reported: ReportedAgent,
     torn_since: Option<Instant>,
 }
 
@@ -171,7 +175,7 @@ pub struct AgentFiles {
     dir: PathBuf,
     agy: Option<PathBuf>,
     installed: Option<InstalledStamp>,
-    processes: HashMap<process::Id, Process>,
+    processes: HashMap<AgentId, Process>,
     troubles: Troubles,
 }
 
@@ -226,7 +230,7 @@ impl AgentFiles {
         }
     }
 
-    pub fn scan(&mut self) -> Vec<Agent> {
+    pub fn scan(&mut self) -> Vec<ReportedAgent> {
         self.ensure_installed();
         let mut paths = match watch::listed(&self.dir) {
             Ok(paths) => paths,
@@ -258,34 +262,34 @@ impl AgentFiles {
             let Some(pid) = named_pid(&path) else {
                 continue;
             };
-            let Some(start) = process::start(pid) else {
+            let Some(start) = process::start(pid.get()) else {
                 self.reap(&path);
                 continue;
             };
-            let id = process::Id { pid, start };
+            let id = AgentId::new(pid, start);
             let cached = self.processes.remove(&id);
             let Some(started) =
-                cached.as_ref().map(|it| it.started).or_else(|| process::started(pid))
+                cached.as_ref().map(|it| it.started).or_else(|| process::started(pid.get()))
             else {
                 continue;
             };
-            match read(&path, id.start.as_str(), started) {
+            match read(&path, id.start().as_str(), started) {
                 Ok(Some(snapshot)) => {
-                    let status_since = match cached.as_ref() {
-                        Some(was) if was.agent.status == snapshot.status => {
-                            was.agent.status_since.unwrap_or(snapshot.modified)
-                        },
-                        Some(_) | None => snapshot.modified,
-                    };
                     let terminal = cached.map_or_else(
-                        || terminal_or_trouble(pid, mux::terminal_of(&id), &mut self.troubles),
+                        || {
+                            terminal_or_trouble(
+                                pid,
+                                mux::terminal_of(&id.to_process_id()),
+                                &mut self.troubles,
+                            )
+                        },
                         |it| it.terminal,
                     );
-                    let built = agent(pid, snapshot, started, status_since, terminal);
+                    let built = reported(id.clone(), snapshot, started, terminal);
                     let found = Process {
                         started,
                         terminal,
-                        agent: built.clone(),
+                        reported: built.clone(),
                         torn_since: None,
                     };
                     processes.insert(id, found);
@@ -301,7 +305,7 @@ impl AgentFiles {
                     if let Some(mut was) = cached {
                         let since = *was.torn_since.get_or_insert_with(Instant::now);
                         if since.elapsed() < TORN {
-                            agents.push(was.agent.clone());
+                            agents.push(was.reported.clone());
                             processes.insert(id, was);
                             continue;
                         }
@@ -341,43 +345,48 @@ impl Payload {
     }
 }
 
-fn status_of(state: &Payload) -> Status {
+fn state_of(state: &Payload) -> Option<ActiveStatus> {
     if state.tool_confirmation_pending == Some(true) {
-        return Status::Waiting(Some(WaitingFor::PermissionPrompt));
+        return Some(ActiveStatus::Blocked { reason: BlockedReason::Permission, message: None });
     }
-    let Some(word) = state.agent_state.as_deref().map(str::trim).filter(|word| !word.is_empty())
-    else {
-        return Status::Unreported;
-    };
+    let word = state.agent_state.as_deref().map(str::trim).filter(|word| !word.is_empty())?;
     match word.to_ascii_lowercase().as_str() {
-        "idle" => Status::Idle,
-        "working" | "tool_use" | "initializing" => Status::Busy,
-        "reviewing" => Status::Waiting(Some(WaitingFor::InputNeeded)),
-        "authenticating" => Status::Waiting(Some(WaitingFor::DialogOpen)),
-        _ => Status::of(Some(word), None),
+        "idle" => Some(ActiveStatus::Idle),
+        "working" | "tool_use" | "initializing" => Some(ActiveStatus::Working),
+        "reviewing" => {
+            Some(ActiveStatus::Blocked { reason: BlockedReason::Question, message: None })
+        },
+        "authenticating" => {
+            Some(ActiveStatus::Blocked { reason: BlockedReason::Auth, message: None })
+        },
+        _ => statuses::parse_word(Some(word), None),
     }
 }
 
-fn agent(
-    pid: u32,
+fn reported(
+    id: AgentId,
     snapshot: Snapshot,
     started: SystemTime,
-    status_since: SystemTime,
     terminal: Option<TerminalKey>,
-) -> Agent {
-    assert!(pid > 1);
-    Agent {
-        pid,
+) -> ReportedAgent {
+    let update = match snapshot.status {
+        Some(status) => {
+            RungUpdate::Active { status, at: Some(snapshot.modified), subagents: Vec::new() }
+        },
+        None => RungUpdate::Clear,
+    };
+    let report = Report { agent: id.clone(), rung: Rung::Hook, update };
+    let seen = SeenAgent {
+        id,
         harness: Harness::Antigravity,
         session_id: snapshot.session_id,
         cwd: snapshot.cwd,
-        status: snapshot.status,
-        status_since: Some(status_since),
         started_at: Some(started),
         name: snapshot.name,
         entrypoint: Some(Said::new("tui".to_owned()).expect("tui is not empty")),
         terminal,
-    }
+    };
+    ReportedAgent { seen, report }
 }
 
 fn temp_file_pid(path: &Path) -> Option<u32> {
@@ -426,11 +435,12 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
     let Some(cwd) = envelope.state.cwd() else {
         return Err(io::Error::new(ErrorKind::InvalidData, "cwd is missing or relative"));
     };
+    let status = state_of(&envelope.state);
     Ok(Some(Snapshot {
         cwd,
         session_id: envelope.state.session_id(),
         name: envelope.state.name(),
-        status: status_of(&envelope.state),
+        status,
         modified,
     }))
 }
@@ -867,27 +877,27 @@ mod tests {
             agent_state: agent_state.map(str::to_owned),
             tool_confirmation_pending: pending,
         };
-        assert_eq!(status_of(&state(Some("idle"), None)), Status::Idle);
-        assert_eq!(status_of(&state(Some("working"), None)), Status::Busy);
-        assert_eq!(status_of(&state(Some("tool_use"), None)), Status::Busy);
-        assert_eq!(status_of(&state(Some("initializing"), None)), Status::Busy);
+        assert_eq!(state_of(&state(Some("idle"), None)), Some(ActiveStatus::Idle));
+        assert_eq!(state_of(&state(Some("working"), None)), Some(ActiveStatus::Working));
+        assert_eq!(state_of(&state(Some("tool_use"), None)), Some(ActiveStatus::Working));
+        assert_eq!(state_of(&state(Some("initializing"), None)), Some(ActiveStatus::Working));
         assert_eq!(
-            status_of(&state(Some("working"), Some(true))),
-            Status::Waiting(Some(WaitingFor::PermissionPrompt))
+            state_of(&state(Some("working"), Some(true))),
+            Some(ActiveStatus::Blocked { reason: BlockedReason::Permission, message: None })
         );
         assert_eq!(
-            status_of(&state(Some("reviewing"), None)),
-            Status::Waiting(Some(WaitingFor::InputNeeded))
+            state_of(&state(Some("reviewing"), None)),
+            Some(ActiveStatus::Blocked { reason: BlockedReason::Question, message: None })
         );
         assert_eq!(
-            status_of(&state(Some("authenticating"), None)),
-            Status::Waiting(Some(WaitingFor::DialogOpen))
+            state_of(&state(Some("authenticating"), None)),
+            Some(ActiveStatus::Blocked { reason: BlockedReason::Auth, message: None })
         );
         assert_eq!(
-            status_of(&state(Some("error"), None)),
-            Status::Other(Said::new("error".to_owned()).unwrap())
+            state_of(&state(Some("error"), None)),
+            Some(ActiveStatus::Error { message: None })
         );
-        assert_eq!(status_of(&state(None, None)), Status::Unreported);
+        assert_eq!(state_of(&state(None, None)), None);
     }
 
     fn chain_of(script_path: &Path) -> Option<String> {
@@ -1151,8 +1161,11 @@ mod tests {
 
         let first = files.scan();
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].session_id, None);
-        assert_eq!(first[0].status, Status::Idle);
+        assert_eq!(first[0].seen.session_id, None);
+        assert!(matches!(
+            first[0].report.update,
+            RungUpdate::Active { status: ActiveStatus::Idle, .. }
+        ));
 
         fs::write(&state_file, "{truncated").unwrap();
         let during_torn = files.scan();

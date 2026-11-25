@@ -5,18 +5,19 @@ use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use lune_domain::agent::Harness;
+use lune_domain::agent::{Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Agent, Status,
+    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, SeenAgent,
 };
 use crate::mux;
+use crate::process::{self, AgentId};
+use crate::statuses::{self, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
 use crate::watch::{self, Troubles};
-use crate::{log, process};
-use crate::Directory;
+use crate::{log, Directory};
 
 const EXTENSION: &str = include_str!("pi/lune.ts");
 
@@ -60,7 +61,7 @@ pub struct AgentFiles {
     lune: PathBuf,
     dir: PathBuf,
     pi: Option<PathBuf>,
-    processes: HashMap<process::Id, Process>,
+    processes: HashMap<AgentId, Process>,
     troubles: Troubles,
 }
 
@@ -87,42 +88,60 @@ impl AgentFiles {
         &self.dir
     }
 
-    pub fn scan(&mut self) -> Vec<Agent> {
+    pub fn scan(&mut self) -> Vec<ReportedAgent> {
         if let Some(pi) = self.pi.as_ref().filter(|pi| pi.is_dir())
             && let Err(error) = install(pi, &self.lune)
         {
             self.troubles.say(format!("pi's extension in {}: {error}", pi.display()));
         }
-        let paths = match watch::listed(&self.dir) {
+        let mut paths = match watch::listed(&self.dir) {
             Ok(paths) => paths,
             Err(error) => {
                 self.troubles.say(format!("{}: {error}", self.dir.display()));
                 Vec::new()
             },
         };
+        if paths.len() > SOURCE_AGENTS_MAX {
+            self.troubles.say(format!(
+                "{}: {} files exceed the limit of {SOURCE_AGENTS_MAX}",
+                self.dir.display(),
+                paths.len()
+            ));
+            paths.sort();
+            paths.truncate(SOURCE_AGENTS_MAX);
+        }
         let mut processes = HashMap::with_capacity(paths.len());
         let mut agents = Vec::with_capacity(paths.len());
         for path in paths {
             let Some(pid) = named_pid(&path) else {
                 continue;
             };
-            let Some(start) = process::start(pid) else {
+            let Some(start) = process::start(pid.get()) else {
                 continue;
             };
-            let id = process::Id { pid, start };
+            let id = AgentId::new(pid, start);
             let cached = self.processes.remove(&id);
-            let Some(started) = cached.map(|it| it.started).or_else(|| process::started(pid)) else {
+            let Some(started) =
+                cached.map(|it| it.started).or_else(|| process::started(pid.get()))
+            else {
                 continue;
             };
-            match read(&path, id.start.as_str(), started) {
+            match read(&path, id.start().as_str(), started) {
                 Ok(Some(file)) => {
                     let terminal = cached.map_or_else(
-                        || terminal_or_trouble(pid, mux::terminal_of(&id), &mut self.troubles),
+                        || {
+                            terminal_or_trouble(
+                                pid,
+                                mux::terminal_of(&id.to_process_id()),
+                                &mut self.troubles,
+                            )
+                        },
                         |it| it.terminal,
                     );
                     let found = Process { started, terminal };
+                    let built = reported(id.clone(), file, found);
                     processes.insert(id, found);
-                    agents.push(agent(pid, file, found));
+                    agents.push(built);
                 },
                 Ok(None) => {
                     let why = format!("{}: no process of its pid wrote it", path.display());
@@ -179,19 +198,27 @@ fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
     modified.checked_add(DATED_LATE).is_none_or(|late| started <= late)
 }
 
-fn agent(pid: u32, file: File, process: Process) -> Agent {
-    Agent {
-        pid,
+fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
+    let update = match statuses::parse_word(Some(file.status.as_str()), None) {
+        Some(status) => RungUpdate::Active {
+            status,
+            at: Some(moment(file.status_since)),
+            subagents: Vec::new(),
+        },
+        None => RungUpdate::Clear,
+    };
+    let report = Report { agent: id.clone(), rung: Rung::Extension, update };
+    let seen = SeenAgent {
+        id,
         harness: Harness::Pi,
         session_id: Some(file.session_id),
         cwd: file.cwd,
-        status: Status::of(Some(file.status.as_str()), None),
-        status_since: Some(moment(file.status_since)),
         started_at: Some(process.started),
         name: None,
         entrypoint: file.mode.and_then(|mode| Said::new(mode.trim().to_owned())),
         terminal: process.terminal,
-    }
+    };
+    ReportedAgent { seen, report }
 }
 
 #[cfg(test)]

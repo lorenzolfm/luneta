@@ -129,7 +129,8 @@ pub async fn connect(folder: &Folder, answer: Answer) -> Result<Daemon, Error> {
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, answer.0, unanswered)))
+    Ok(DaemonClient::new(Within::new(channel, answer.0, unanswered))
+        .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX))
 }
 
 pub async fn through(
@@ -149,7 +150,8 @@ pub async fn through(
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, round_trip.answer.0, unanswered)))
+    Ok(DaemonClient::new(Within::new(channel, round_trip.answer.0, unanswered))
+        .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX))
 }
 
 fn went() -> io::Error {
