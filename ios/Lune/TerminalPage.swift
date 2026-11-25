@@ -71,12 +71,9 @@ struct TerminalPage: View {
         case .opening:
             ProgressView("Opening the terminal")
         case .shown(let grid, let view):
-            TerminalScreen(
-                grid: grid, size: $size, typing: $typing, keystrokes: keystrokes,
-                input: input(into: view))
+            TerminalScreen(grid: grid, size: $size, typing: $typing, input: input(into: view))
         case .paused(let grid):
-            TerminalScreen(
-                grid: grid, size: $size, typing: $typing, keystrokes: keystrokes, input: nil)
+            TerminalScreen(grid: grid, size: $size, typing: $typing, input: nil)
         case .closed:
             ContentUnavailableView(
                 "The terminal closed", systemImage: "terminal",
@@ -133,21 +130,21 @@ struct TerminalPage: View {
         TerminalInput(
             typed: { type($0, into: view) },
             deleted: { press(.backspace, into: view) },
-            scroll: { back in said { try view.scroll(back: back) } })
+            scroll: { back in said { try view.scroll(back: back) } },
+            keystrokes: keystrokes)
     }
 
     private func type(_ text: String, into view: TerminalView) {
-        let sent = said { try view.typed(text: text, ctrl: ctrl) }
-        ctrl = false
-        if sent {
-            keystrokes &+= 1
-        }
+        send { try view.typed(text: text, ctrl: ctrl) }
     }
 
     private func press(_ key: KeyName, into view: TerminalView) {
-        let sent = said { try view.pressed(key: key, ctrl: ctrl) }
-        ctrl = false
-        if sent {
+        send { try view.pressed(key: key, ctrl: ctrl) }
+    }
+
+    private func send(_ saying: () throws -> Void) {
+        if said(saying) {
+            ctrl = false
             keystrokes &+= 1
         }
     }

@@ -26,6 +26,7 @@ struct TerminalInput {
     let typed: (String) -> Void
     let deleted: () -> Void
     let scroll: (Int32) -> Void
+    let keystrokes: UInt64
 }
 
 struct Pull: Equatable {
@@ -37,15 +38,14 @@ struct TerminalScreen: View {
     let grid: TerminalGrid
     @Binding var size: CGFloat
     @Binding var typing: Bool
-    let keystrokes: UInt64
     let input: TerminalInput?
     @State private var pinched: CGFloat = 1
     @State private var pulled = false
-    @State private var echoDue: Date?
+    @State private var followUntil: ContinuousClock.Instant?
 
     private static let cursorAt = "cursor"
     private static let pullFar: CGFloat = 48
-    private static let echoWait: TimeInterval = 1
+    private static let echoWait = Duration.seconds(1)
 
     private static func visibleHeight(_ geometry: ScrollGeometry) -> CGFloat {
         geometry.containerSize.height - geometry.contentInsets.top - geometry.contentInsets.bottom
@@ -109,16 +109,12 @@ struct TerminalScreen: View {
                         }
                     }
                 }
-                .onChange(of: keystrokes) {
-                    precondition(input != nil)
-                    echoDue = .now + TerminalScreen.echoWait
+                .onChange(of: input?.keystrokes) {
+                    followUntil = .now + TerminalScreen.echoWait
                 }
                 .onChange(of: grid.cursor) {
-                    if let due = echoDue {
-                        echoDue = nil
-                        if Date.now < due {
-                            reader.scrollTo(TerminalScreen.cursorAt)
-                        }
+                    if let followUntil, ContinuousClock.now < followUntil {
+                        reader.scrollTo(TerminalScreen.cursorAt)
                     }
                 }
                 .onAppear { reader.scrollTo(TerminalScreen.cursorAt, anchor: .center) }
