@@ -28,7 +28,11 @@ async function load() {
   factory({ on: (name, handler) => handlers.set(name, handler) });
 }
 await load();
-const ctx = { cwd: "/home/you/work", mode, sessionManager: { getSessionId: () => session } };
+const ctx = {
+  cwd: "/home/you/work",
+  ...(mode ? { mode } : {}),
+  sessionManager: { getSessionId: () => session },
+};
 for await (const line of createInterface({ input: process.stdin })) {
   const event = JSON.parse(line);
   if (event.load) {
@@ -393,6 +397,24 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     assert_eq!(AgentStatus::of_api(&invisible), AgentStatus::Error { message: None });
     let written: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     assert!(written.get("statusMessage").is_none(), "{written}");
+
+    pi.event("agent_start");
+    as_status(&host, pid, Status::Busy);
+    let full = "b".repeat(MESSAGE_BYTES_MAX);
+    pi.says(&json!({
+        "type": "message_end",
+        "message": {
+            "role": "assistant",
+            "stopReason": "error",
+            "errorMessage": format!("\u{200b}\n\u{200b}   {full}\nmore")
+        }
+    }));
+    pi.says(&json!({ "type": "agent_settled", "aborted": false }));
+    let leading_invisible = as_status(&host, pid, Status::Error);
+    assert_eq!(
+        AgentStatus::of_api(&leading_invisible),
+        AgentStatus::Error { message: Message::parse("message", &full).ok() }
+    );
 }
 
 #[test]
@@ -451,6 +473,17 @@ fn a_pi_at_no_prompt_says_how_it_runs() {
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
     let agent = as_status(&host, pi.process.pid(), Status::Stopped);
     assert_eq!(agent.entrypoint.as_deref(), Some("print"));
+
+    let mut modeless = Pi::start(&host, "");
+    modeless.says(&json!({ "type": "session_start", "reason": "startup" }));
+    let agent = as_status(&host, modeless.process.pid(), Status::Stopped);
+    assert_eq!(agent.entrypoint, None);
+    modeless.event("agent_start");
+    as_status(&host, modeless.process.pid(), Status::Busy);
+    modeless.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    modeless.says(&json!({ "load": "first" }));
+    modeless.says(&json!({ "type": "session_start", "reason": "reload" }));
+    assert_eq!(status_in(&file_of(&host, modeless.process.pid())), "busy");
 }
 
 #[test]

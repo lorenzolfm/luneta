@@ -64,15 +64,17 @@ class ErrorMessage {
   static parse(raw: unknown): ErrorMessage | undefined {
     if (typeof raw !== "string") return undefined;
     const bounded = raw.slice(0, MESSAGE_RAW_CODE_UNITS_MAX).toWellFormed();
-    const trimmed = bounded.trim();
-    if (trimmed.length === 0) return undefined;
     let out = "";
     let bytes = 0;
-    for (const character of trimmed) {
-      if (character === "\r" || character === "\n") break;
+    for (const character of bounded) {
+      if (character === "\r" || character === "\n") {
+        if (out.length > 0) break;
+        continue;
+      }
       const codePoint = character.codePointAt(0);
       invariant(codePoint !== undefined, "iterated character has a code point");
       if (isInvisibleFormatting(codePoint)) continue;
+      if (out.length === 0 && character.trim().length === 0) continue;
       const width = utf8BytesOfCodePoint(codePoint);
       if (bytes + width > MESSAGE_BYTES_MAX) break;
       out += character;
@@ -92,7 +94,7 @@ class ErrorMessage {
 type SessionIdentity = {
   readonly sessionId: string;
   readonly cwd: string;
-  readonly mode: string;
+  readonly mode?: string;
 };
 
 type RestingReport =
@@ -153,7 +155,7 @@ type OutboundFile = OutboundReport & {
   readonly sessionId: string;
   readonly cwd: string;
   readonly statusSince: number;
-  readonly mode: string;
+  readonly mode?: string;
   readonly procStart?: string;
   readonly phase: PersistedPhase;
   readonly promptOpen: boolean;
@@ -177,7 +179,7 @@ type StopOutcome = "error" | "aborted" | "done";
 
 type Context = {
   cwd: string;
-  mode: string;
+  mode?: string;
   sessionManager: { getSessionId(): string };
   isIdle?: () => boolean;
 };
@@ -222,11 +224,13 @@ function procStart(): string | undefined {
 }
 
 function parseIdentity(ctx: Context): SessionIdentity | undefined {
-  const sessionId = ctx.sessionManager.getSessionId();
+  const sessionId = quietly(() => ctx.sessionManager.getSessionId());
   if (typeof sessionId !== "string" || sessionId.trim().length === 0) return undefined;
   if (typeof ctx.cwd !== "string" || !ctx.cwd.startsWith("/")) return undefined;
-  if (typeof ctx.mode !== "string") return undefined;
-  return { sessionId, cwd: ctx.cwd, mode: ctx.mode };
+  if (ctx.mode !== undefined && typeof ctx.mode !== "string") return undefined;
+  return ctx.mode !== undefined
+    ? { sessionId, cwd: ctx.cwd, mode: ctx.mode }
+    : { sessionId, cwd: ctx.cwd };
 }
 
 function sameIdentity(a: SessionIdentity, b: SessionIdentity): boolean {
@@ -298,7 +302,7 @@ function serializeOutbound(
     cwd: identity.cwd,
     ...report,
     statusSince: since,
-    mode: identity.mode,
+    ...(identity.mode !== undefined ? { mode: identity.mode } : {}),
     ...(started !== undefined ? { procStart: started } : {}),
     phase: serializePhase(snapshot.phase),
     promptOpen: snapshot.promptOpen,
@@ -427,7 +431,9 @@ function snapshotInFile(ctx: Context, started: string | undefined): RestoredSnap
   if (!isRecord(parsed)) return undefined;
   if (parsed["sessionId"] !== identity.sessionId) return undefined;
   if (parsed["cwd"] !== identity.cwd) return undefined;
-  if (parsed["mode"] !== identity.mode) return undefined;
+  if (identity.mode !== undefined ? parsed["mode"] !== identity.mode : parsed["mode"] !== undefined) {
+    return undefined;
+  }
   if (started !== undefined ? parsed["procStart"] !== started : parsed["procStart"] !== undefined) {
     return undefined;
   }
