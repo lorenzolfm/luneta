@@ -103,7 +103,7 @@ impl Server {
             }))
             .await
             .unwrap();
-        MuxClient::new(channel)
+        MuxClient::new(channel).max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX)
     }
 
     pub async fn ended(&mut self) -> ExitStatus {

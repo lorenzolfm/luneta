@@ -28,6 +28,14 @@ pub struct SeenAgent {
     pub terminal: Option<TerminalKey>,
 }
 
+impl SeenAgent {
+    #[must_use]
+    pub fn at_a_prompt(&self) -> bool {
+        let word = self.harness.to_api().prompt_word();
+        word.is_some_and(|word| self.entrypoint.as_ref().map(Said::as_str) == Some(word))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub pid: AgentPid,

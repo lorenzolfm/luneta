@@ -30,7 +30,7 @@ impl Marks {
         terminal: &mut Terminal<'_, '_>,
         bytes: &[u8],
         marks: &mut Vec<Mark>,
-        mut on_prompt: impl FnMut(),
+        mut on_mark: impl FnMut(&Mark),
     ) -> Result<(), Error> {
         let mut at = 0;
         while let Some(stop) =
@@ -43,9 +43,7 @@ impl Marks {
                 let mut osc = self.osc.take().expect("an OSC that ends started, as Ghostty said");
                 osc.keep(&bytes[from..at - 1]);
                 if let Some(mark) = osc.end(stop.end == Some(StringEnd::Cancelled)) {
-                    if mark == Mark::Prompt {
-                        on_prompt();
-                    }
+                    on_mark(&mark);
                     marks.push(mark);
                 }
             }
@@ -128,7 +126,7 @@ mod tests {
         let mut scanner = Marks::default();
         let mut marks = Vec::new();
         for chunk in chunks {
-            scanner.write(&mut terminal, chunk, &mut marks, || {}).unwrap();
+            scanner.write(&mut terminal, chunk, &mut marks, |_| {}).unwrap();
         }
         marks
     }

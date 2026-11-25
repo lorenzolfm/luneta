@@ -125,20 +125,58 @@ impl ProgramStatuses {
 
     pub fn prompt_started(&mut self) {
         let mut changed = false;
+        let mut kept_children = BTreeMap::new();
+        for (id, record) in &self.children {
+            if record.phase.is_active() {
+                changed = true;
+            } else {
+                let mut kept = record.clone();
+                kept.app = self.resolved_app_for_child(id);
+                kept_children.insert(id.clone(), kept);
+            }
+        }
         if self.root.as_ref().is_some_and(|record| record.phase.is_active()) {
             self.root = None;
             changed = true;
         }
-        let before = self.children.len();
-        self.children.retain(|_, record| !record.phase.is_active());
-        changed |= self.children.len() != before;
+        self.children = kept_children;
         if changed {
+            self.bump_version();
+        }
+    }
+
+    pub fn command_started(&mut self) {
+        let had_root = self.root.take().is_some();
+        let had_children = !self.children.is_empty();
+        self.children.clear();
+        if had_root || had_children {
             self.bump_version();
         }
     }
 
     pub fn exited(&mut self) -> EndedProgramStatuses {
         let mut changed = false;
+        let mut ended_children = Vec::with_capacity(self.children.len());
+        let mut kept_children = BTreeMap::new();
+        for (id, record) in &self.children {
+            if let Some(phase) = record.phase.clone().into_terminal() {
+                let app = self.resolved_app_for_child(id);
+                ended_children.push(EndedChildProgramStatus {
+                    id: id.clone(),
+                    status: EndedProgramStatus {
+                        phase,
+                        app: app.clone(),
+                        title: record.title.clone(),
+                        at: Some(record.at),
+                    },
+                });
+                let mut kept = record.clone();
+                kept.app = app;
+                kept_children.insert(id.clone(), kept);
+            } else {
+                changed = true;
+            }
+        }
         let ended_root = match self.root.as_ref() {
             Some(record) => {
                 if let Some(phase) = record.phase.clone().into_terminal() {
@@ -156,25 +194,6 @@ impl ProgramStatuses {
             },
             None => None,
         };
-        let mut ended_children = Vec::with_capacity(self.children.len());
-        let mut kept_children = BTreeMap::new();
-        for (id, record) in &self.children {
-            if let Some(phase) = record.phase.clone().into_terminal() {
-                let app = self.resolved_app_for_child(id);
-                ended_children.push(EndedChildProgramStatus {
-                    id: id.clone(),
-                    status: EndedProgramStatus {
-                        phase,
-                        app,
-                        title: record.title.clone(),
-                        at: Some(record.at),
-                    },
-                });
-                kept_children.insert(id.clone(), record.clone());
-            } else {
-                changed = true;
-            }
-        }
         self.children = kept_children;
         if changed {
             self.bump_version();

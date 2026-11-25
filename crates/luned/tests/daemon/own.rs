@@ -288,7 +288,7 @@ async fn mux_client(socket: PathBuf) -> MuxClient<Channel> {
         }))
         .await
         .unwrap();
-    MuxClient::new(channel)
+    MuxClient::new(channel).max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX)
 }
 
 impl Drop for Owned {
@@ -317,7 +317,7 @@ fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
     let step3 = dir.path().join("step3");
     let step4 = dir.path().join("step4");
     let term_program = dir.path().join("term_program");
-    let script_path = dir.path().join("agent.sh");
+    let script_path = dir.path().join("claude.sh");
     let body = format!(
         "printf '%s' \"${{TERM_PROGRAM-unset}}\" > '{}'\n\
          printf '\\033]7501;state=working:app=claude-code\\007'\n\

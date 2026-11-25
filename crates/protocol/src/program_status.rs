@@ -520,6 +520,51 @@ pub fn sanitize(bytes: &[u8], bytes_max: usize) -> String {
     cleaned
 }
 
+pub fn bound_fair<G, I>(
+    groups: &mut [G],
+    mut items: impl FnMut(&mut G) -> Option<&mut Vec<I>>,
+    mut bytes: impl FnMut(&I) -> usize,
+    budget: usize,
+) {
+    let total: usize = groups
+        .iter_mut()
+        .filter_map(&mut items)
+        .map(|list| list.iter().map(&mut bytes).sum::<usize>())
+        .sum();
+    if total <= budget {
+        return;
+    }
+    let mut taken = vec![0usize; groups.len()];
+    let mut used = 0usize;
+    loop {
+        let mut progressed = false;
+        for (index, group) in groups.iter_mut().enumerate() {
+            let Some(list) = items(group) else {
+                continue;
+            };
+            let cursor = taken[index];
+            if cursor >= list.len() {
+                continue;
+            }
+            let cost = bytes(&list[cursor]);
+            if used.saturating_add(cost) <= budget {
+                used += cost;
+                taken[index] = cursor + 1;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    for (group, keep) in groups.iter_mut().zip(taken) {
+        if let Some(list) = items(group) {
+            list.truncate(keep);
+        }
+    }
+    assert!(used <= budget);
+}
+
 #[must_use]
 pub fn is_invisible_formatting(character: char) -> bool {
     character.is_control()
@@ -593,5 +638,33 @@ mod tests {
         assert!(Message::parse("message", "").is_err());
         assert!(Message::parse("message", "bad\u{202e}text").is_err());
         assert!(Message::parse("message", &"x".repeat(MESSAGE_BYTES_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn bound_fair_distributes_across_groups_and_stays_within_budget() {
+        let mut within = vec![Some(vec![10usize, 10]), None, Some(vec![10])];
+        bound_fair(&mut within, Option::as_mut, |cost| *cost, 30);
+        assert_eq!(within, [Some(vec![10, 10]), None, Some(vec![10])]);
+
+        let mut groups = vec![
+            Some(vec![(0, 10usize), (1, 10), (2, 10), (3, 10)]),
+            None,
+            Some(vec![(10, 10), (11, 10)]),
+            Some(vec![(20, 10), (21, 10), (22, 10)]),
+        ];
+        bound_fair(&mut groups, Option::as_mut, |(_, cost)| *cost, 50);
+        assert_eq!(
+            groups,
+            [
+                Some(vec![(0, 10), (1, 10)]),
+                None,
+                Some(vec![(10, 10), (11, 10)]),
+                Some(vec![(20, 10)]),
+            ]
+        );
+
+        let mut skewed = vec![Some(vec![100usize, 10]), Some(vec![10, 10])];
+        bound_fair(&mut skewed, Option::as_mut, |cost| *cost, 20);
+        assert_eq!(skewed, [Some(Vec::new()), Some(vec![10, 10])]);
     }
 }

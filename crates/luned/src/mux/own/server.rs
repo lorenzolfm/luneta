@@ -161,7 +161,11 @@ pub(super) struct Matched {
 
 impl Matched {
     pub(super) fn streams(self, room: Room) -> Streams {
-        Streams { client: MuxClient::new(self.channel), room }
+        Streams {
+            client: MuxClient::new(self.channel)
+                .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX),
+            room,
+        }
     }
 }
 
@@ -335,7 +339,11 @@ struct Server {
 impl Server {
     fn matched(matched: Matched) -> Server {
         let Matched { channel, gone } = matched;
-        Server { client: MuxClient::new(Within::new(channel, ANSWER, unanswered)), gone }
+        Server {
+            client: MuxClient::new(Within::new(channel, ANSWER, unanswered))
+                .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX),
+            gone,
+        }
     }
 
     async fn here() -> Result<Option<Server>, Failure> {

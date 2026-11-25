@@ -19,11 +19,19 @@ pub const MUX_STREAMS_MAX: u32 = 256;
 
 pub const MUX_TERMINALS_MAX: usize = 1024;
 
+pub const RPC_MESSAGE_BYTES_MAX: usize = 16 * 1024 * 1024;
+
+pub const LISTING_CHILDREN_BYTES_MAX: usize = 8 * 1024 * 1024;
+
+pub const HOST_SUBAGENTS_BYTES_MAX: usize = 512 * 1024;
+
 pub const PROGRAM_STATUS_RECORDS_MAX: usize = program_status::RECORDS_MAX;
 
 pub const PROGRAM_STATUS_PROGRESS_PERCENT_MAX: u8 = program_status::PROGRESS_PERCENT_MAX;
 
 const _: () = assert!(MUX_TERMINALS_MAX >= 64);
+const _: () = assert!(LISTING_CHILDREN_BYTES_MAX < RPC_MESSAGE_BYTES_MAX);
+const _: () = assert!(HOST_SUBAGENTS_BYTES_MAX * 17 < RPC_MESSAGE_BYTES_MAX);
 
 #[allow(
     clippy::allow_attributes,

@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use lune_protocol::made::Made;
+use lune_protocol::program_status::bound_fair;
 use lune_protocol::socket::Unreached;
+use lune_protocol::LISTING_CHILDREN_BYTES_MAX;
+use prost::Message as _;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
@@ -545,7 +548,23 @@ impl Holding {
     }
 
     fn listing(&self) -> api::Listing {
-        api::Listing { terminals: self.placed().map(Terminal::said).collect() }
+        let mut terminals: Vec<api::Terminal> = self.placed().map(Terminal::said).collect();
+        bound_fair(
+            &mut terminals,
+            |terminal| terminal.statuses.as_mut().map(|statuses| &mut statuses.children),
+            |child| child.encoded_len().saturating_add(16),
+            LISTING_CHILDREN_BYTES_MAX,
+        );
+        for terminal in &mut terminals {
+            if terminal
+                .statuses
+                .as_ref()
+                .is_some_and(|statuses| statuses.root.is_none() && statuses.children.is_empty())
+            {
+                terminal.statuses = None;
+            }
+        }
+        api::Listing { terminals }
     }
 }
 
