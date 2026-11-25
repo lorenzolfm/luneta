@@ -4,9 +4,10 @@ files:
   - crates/*/tests/**
 message: >-
   A test types into a shell only once it prompts: open it as
-  lune_waits::shell::AT_A_PROMPT, or end a script in shell::SCRIPT, and wait
-  for shell::prompted before the first key. A shell's first frame comes
-  before it reads, and keys sent then land ahead of its prompt.
+  lune_waits::shell::AT_A_PROMPT, or end a script in shell::SCRIPT, wait for
+  the shell::Prompted that shell::prompted gives, and type the line its typed
+  hands back. A shell's first frame comes before it reads, and keys sent then
+  land ahead of its prompt.
 rule:
   any:
     - kind: array_expression
@@ -14,6 +15,9 @@ rule:
       not:
         inside:
           kind: field_expression
+          has:
+            field: field
+            regex: ^into_iter$
     - kind: token_tree
       regex: ^\[\s*"(/bin/)?sh"(\.to_owned\(\)|\.to_string\(\)|\.into\(\))?\s*\]$
       inside:
@@ -22,4 +26,4 @@ rule:
           field: macro
           regex: ^vec$
     - kind: string_literal
-      regex: \bexec\s+(/bin/)?sh\s*(;|"$)
+      regex: (;\s*|&&\s*|\|\|\s*|\bexec\s+)(/bin/)?sh(\s+-i)?\s*(;|"$)

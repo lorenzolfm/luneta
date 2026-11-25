@@ -264,8 +264,15 @@ impl Viewer {
     }
 
     pub async fn until(&mut self, what: &str, test: impl Fn(&Viewer) -> bool) {
+        self.until_found(what, |viewer| test(viewer).then_some(())).await;
+    }
+
+    async fn until_found<T>(&mut self, what: &str, find: impl Fn(&Viewer) -> Option<T>) -> T {
         let patience = Patience::begun();
-        while !test(self) {
+        loop {
+            if let Some(found) = find(self) {
+                return found;
+            }
             let next = self.next(patience, what).await.unwrap();
             assert!(next.is_some(), "the stream ended before {what}");
         }
@@ -278,28 +285,29 @@ impl Viewer {
         .await;
     }
 
-    pub async fn until_prompted(&mut self, terminal: u32) {
-        self.until(&format!("terminal {terminal}'s shell prompts"), |viewer| {
-            shell::prompted(viewer.rows_of(terminal), viewer.cursor_of(terminal))
-        })
-        .await;
+    pub async fn until_prompted(&mut self, terminal: u32) -> shell::Prompted {
+        let what = format!("terminal {terminal}'s shell prompts");
+        self.until_found(&what, |viewer| shell::prompted(&viewer.screen_of(terminal))).await
     }
 
-    pub async fn until_said(&mut self, terminal: u32, line: &str) -> Vec<String> {
-        let what = format!("terminal {terminal} says what {line:?} does, then prompts");
-        self.until(&what, |viewer| viewer.said(terminal, line).is_some()).await;
-        self.said(terminal, line).expect("the line said it once shown").to_vec()
+    pub async fn type_at(&self, terminal: api::TerminalKey, prompted: &shell::Prompted, line: &str) -> shell::Typed {
+        let typed = prompted.typed(line);
+        self.type_line(terminal, typed.line()).await;
+        typed
     }
 
-    fn said(&self, terminal: u32, line: &str) -> Option<&[String]> {
-        shell::said(self.rows_of(terminal), self.cursor_of(terminal), line)
+    pub async fn until_said(&mut self, terminal: u32, typed: &shell::Typed) -> Vec<String> {
+        let what = format!("terminal {terminal} says what {:?} does, then prompts", typed.line());
+        self.until_found(&what, |viewer| typed.said(&viewer.screen_of(terminal)).map(<[String]>::to_vec)).await
     }
 
-    fn cursor_of(&self, terminal: u32) -> Option<shell::Cursor> {
-        let cursor = self.frame_of(terminal)?.cursor.as_ref()?;
-        let row = usize::try_from(cursor.row).unwrap();
-        let column = usize::try_from(cursor.column).unwrap();
-        Some(shell::Cursor { row, column })
+    fn screen_of(&self, terminal: u32) -> shell::Screen {
+        let rows = self.rows_of(terminal).to_vec();
+        let cursor = self.frame_of(terminal).and_then(|frame| frame.cursor.as_ref()).map(|cursor| shell::Cursor {
+            row: usize::try_from(cursor.row).unwrap(),
+            column: usize::try_from(cursor.column).unwrap(),
+        });
+        shell::Screen::new(rows, cursor).unwrap_or_else(|why| panic!("terminal {terminal}'s screen is broken: {why}"))
     }
 
     pub fn rows_of(&self, terminal: u32) -> &[String] {

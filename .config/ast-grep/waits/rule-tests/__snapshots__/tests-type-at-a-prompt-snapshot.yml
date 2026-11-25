@@ -6,6 +6,24 @@ snapshots:
       style: primary
       start: 11
       end: 40
+  fn f() { g("echo far; exec sh -i"); }:
+    labels:
+    - source: '"echo far; exec sh -i"'
+      style: primary
+      start: 11
+      end: 33
+  fn f() { g("echo far; sh"); }:
+    labels:
+    - source: '"echo far; sh"'
+      style: primary
+      start: 11
+      end: 25
+  fn f() { g("true && sh; true"); }:
+    labels:
+    - source: '"true && sh; true"'
+      style: primary
+      start: 11
+      end: 29
   fn f() { let argv = vec!["/bin/sh".to_owned()]; }:
     labels:
     - source: '["/bin/sh".to_owned()]'
@@ -47,6 +65,12 @@ snapshots:
       start: 42
       end: 61
   fn f() { shown.open_running(&["sh"]); }:
+    labels:
+    - source: '["sh"]'
+      style: primary
+      start: 29
+      end: 35
+  fn f() { shown.open_running(&["sh"].to_vec()); }:
     labels:
     - source: '["sh"]'
       style: primary

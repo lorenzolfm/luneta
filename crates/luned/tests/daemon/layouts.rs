@@ -1646,9 +1646,9 @@ fn an_agent_in_a_layout_s_terminal_is_there_by_the_terminal_s_key() {
     assert_eq!(agent.terminal, Some(key));
 }
 
-fn cursor_of(cursor: Option<luned::mux::own::frames::Cursor>) -> Option<shell::Cursor> {
-    let cursor = cursor?;
-    Some(shell::Cursor { row: usize::from(cursor.row), column: usize::from(cursor.column) })
+fn screen_of(lines: &[Line], cursor: Option<luned::mux::own::frames::Cursor>) -> shell::Screen {
+    let cursor = cursor.map(|cursor| shell::Cursor { row: usize::from(cursor.row), column: usize::from(cursor.column) });
+    shell::Screen::new(text_of(lines), cursor).unwrap_or_else(|why| panic!("the terminal's screen is broken: {why}"))
 }
 
 fn text_of(lines: &[Line]) -> Vec<String> {
@@ -1994,33 +1994,36 @@ fn seen_and_typed_into(
     let viewer = viewer::start(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let mut lines = Vec::new();
-    let mut cursor = None;
-    let mut until = |what: &str, shown: &dyn Fn(&[String], Option<shell::Cursor>) -> bool| {
-        let patience = Patience::begun();
-        while !shown(&text_of(&lines), cursor) {
-            let waited = fmt::from_fn(|f| write!(f, "{what}, not only {:?}", text_of(&lines)));
-            let framed = match patience.heard(waited, &seeing) {
-                Seen::Frame(framed) => framed,
-                Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
-            };
-            let frame = framed.frame();
-            assert_eq!(frame.terminal(), key, "the mux shows only the terminal asked for");
-            assert_eq!((frame.size().columns.get(), frame.size().rows.get()), (78, 22));
-            match frame.rows() {
-                Rows::Whole(whole) => lines.clone_from(whole),
-                Rows::Changed(rows) => {
-                    for (row, line) in rows {
-                        lines[usize::from(*row)] = line.clone();
-                    }
-                },
-            }
-            cursor = cursor_of(frame.cursor());
+    let mut screen = shell::Screen::default();
+    let mut seen_next = |patience: Patience, what: &str, last: &shell::Screen| {
+        let waited = fmt::from_fn(|f| write!(f, "{what}, not only {:?}", last.rows()));
+        let framed = match patience.heard(waited, &seeing) {
+            Seen::Frame(framed) => framed,
+            Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
+        };
+        let frame = framed.frame();
+        assert_eq!(frame.terminal(), key, "the mux shows only the terminal asked for");
+        assert_eq!((frame.size().columns.get(), frame.size().rows.get()), (78, 22));
+        match frame.rows() {
+            Rows::Whole(whole) => lines.clone_from(whole),
+            Rows::Changed(rows) => {
+                for (row, line) in rows {
+                    lines[usize::from(*row)] = line.clone();
+                }
+            },
         }
-        text_of(&lines)
+        screen_of(&lines, frame.cursor())
     };
-    until("the shell's prompt", &shell::prompted);
+    let patience = Patience::begun();
+    let prompted = loop {
+        if let Some(prompted) = shell::prompted(&screen) {
+            break prompted;
+        }
+        screen = seen_next(patience, "the shell's prompt", &screen);
+    };
+    let typed_line = prompted.typed("echo seen-$((40 + 2))");
     let paste = |text: &str| typed::Event::Paste(mux_api::Paste { text: text.to_owned() });
-    viewer.typed(key, paste("echo seen-$((40 + 2))"));
+    viewer.typed(key, paste(typed_line.line()));
     let enter = mux_api::Key {
         press: mux_api::Press::Down.into(),
         modifiers: Some(mux_api::Modifiers::default()),
@@ -2028,10 +2031,13 @@ fn seen_and_typed_into(
         text: String::new(),
     };
     viewer.typed(key, typed::Event::Key(enter));
-    let line = "echo seen-$((40 + 2))";
-    let said = |texts: &[String], cursor| shell::said(texts, cursor, line).is_some();
-    let texts = until("the terminal shows seen-42, then the shell's next prompt", &said);
-    let said = shell::said(&texts, cursor, line).expect("the line said it once shown");
+    let patience = Patience::begun();
+    let said = loop {
+        if let Some(said) = typed_line.said(&screen) {
+            break said.to_vec();
+        }
+        screen = seen_next(patience, "the terminal shows seen-42, then the shell's next prompt", &screen);
+    };
     assert_eq!(said, ["seen-42"]);
 }
 

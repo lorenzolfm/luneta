@@ -20,69 +20,142 @@ pub struct Cursor {
     pub column: usize,
 }
 
-#[must_use]
-pub fn prompted(rows: &[String], cursor: Option<Cursor>) -> bool {
-    cursor.is_some_and(|cursor| {
-        let at_the_prompt = rows.get(cursor.row).is_some_and(|row| row.trim_end() == PROMPT.trim_end());
-        at_the_prompt && cursor.column == PROMPT_COLUMNS
-    })
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Screen {
+    rows: Vec<String>,
+    cursor: Option<Cursor>,
 }
 
-#[must_use]
-pub fn said<'a>(rows: &'a [String], cursor: Option<Cursor>, line: &str) -> Option<&'a [String]> {
-    if !prompted(rows, cursor) {
-        return None;
+impl Screen {
+    pub fn new(rows: Vec<String>, cursor: Option<Cursor>) -> Result<Screen, String> {
+        match cursor {
+            Some(cursor) if cursor.row >= rows.len() => {
+                Err(format!("the cursor at {cursor:?} is off the screen's {} rows", rows.len()))
+            },
+            _ => Ok(Screen { rows, cursor }),
+        }
     }
-    let next = cursor?.row;
-    let typed = format!("{PROMPT}{line}");
-    let typed = typed.trim_end();
-    let at = rows[..next].iter().rposition(|row| row.trim_end() == typed)?;
-    Some(&rows[at + 1..next])
+
+    #[must_use]
+    pub fn rows(&self) -> &[String] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub fn cursor(&self) -> Option<Cursor> {
+        self.cursor
+    }
+
+    fn prompt_row(&self) -> Option<usize> {
+        let cursor = self.cursor?;
+        let at_the_prompt = self.rows[cursor.row].trim_end() == PROMPT.trim_end();
+        let after_the_prompt = cursor.column == PROMPT_COLUMNS;
+        (at_the_prompt && after_the_prompt).then_some(cursor.row)
+    }
+
+    fn said(&self, line: &str) -> Option<&[String]> {
+        let next = self.prompt_row()?;
+        let typed = format!("{PROMPT}{line}");
+        let typed = typed.trim_end();
+        let at = self.rows[..next].iter().rposition(|row| row.trim_end() == typed)?;
+        Some(&self.rows[at + 1..next])
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prompted(Screen);
+
+#[must_use]
+pub fn prompted(screen: &Screen) -> Option<Prompted> {
+    screen.prompt_row().map(|_| Prompted(screen.clone()))
+}
+
+impl Prompted {
+    #[must_use]
+    pub fn typed(&self, line: &str) -> Typed {
+        let twice = "a line run twice reads its first run, so wait on what this run prints";
+        assert!(self.0.said(line).is_none(), "the screen at the prompt already says {line:?}: {twice}");
+        Typed { line: line.to_owned() }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Typed {
+    line: String,
+}
+
+impl Typed {
+    #[must_use]
+    pub fn line(&self) -> &str {
+        &self.line
+    }
+
+    #[must_use]
+    pub fn said<'a>(&self, now: &'a Screen) -> Option<&'a [String]> {
+        now.said(&self.line)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn rows(texts: &[&str]) -> Vec<String> {
-        texts.iter().map(|&text| text.to_owned()).collect()
+    fn screen(texts: &[&str], cursor: Option<Cursor>) -> Screen {
+        Screen::new(texts.iter().map(|&text| text.to_owned()).collect(), cursor).unwrap()
     }
 
     const fn at(row: usize, column: usize) -> Cursor {
         Cursor { row, column }
     }
 
+    fn typed(line: &str) -> Typed {
+        prompted(&screen(&["sh-ready>"], Some(at(0, PROMPT_COLUMNS)))).unwrap().typed(line)
+    }
+
     #[test]
     fn a_shell_is_prompted_once_its_prompt_holds_the_cursor_right_after_it() {
-        let started = rows(&["sh-ready>", ""]);
-        assert!(prompted(&started, Some(at(0, PROMPT_COLUMNS))));
-        assert!(!prompted(&started, Some(at(1, 0))), "the cursor is past the prompt");
-        assert!(!prompted(&started, None), "a screen with no cursor reads nothing");
-        assert!(!prompted(&rows(&["", ""]), Some(at(0, 0))), "a blank screen is no prompt");
-        let typing = rows(&["sh-ready> echo", ""]);
-        assert!(!prompted(&typing, Some(at(0, PROMPT_COLUMNS + 4))), "a line typed at the prompt");
+        let started = |cursor| screen(&["sh-ready>", ""], cursor);
+        assert!(prompted(&started(Some(at(0, PROMPT_COLUMNS)))).is_some());
+        assert!(prompted(&started(Some(at(1, 0)))).is_none(), "the cursor is past the prompt");
+        assert!(prompted(&started(None)).is_none(), "a screen with no cursor reads nothing");
+        assert!(prompted(&screen(&["", ""], Some(at(0, 0)))).is_none(), "a blank screen is no prompt");
+        let typing = screen(&["sh-ready> echo", ""], Some(at(0, PROMPT_COLUMNS + 4)));
+        assert!(prompted(&typing).is_none(), "a line typed at the prompt");
+    }
+
+    #[test]
+    fn a_cursor_off_the_screen_is_a_broken_screen_not_a_shell_yet_to_prompt() {
+        let rows = vec!["sh-ready>".to_owned(), String::new()];
+        let off = Screen::new(rows, Some(at(2, PROMPT_COLUMNS)));
+        assert_eq!(off.unwrap_err(), "the cursor at Cursor { row: 2, column: 10 } is off the screen's 2 rows");
     }
 
     #[test]
     fn a_line_says_the_rows_between_it_and_the_next_prompt() {
-        let ran = rows(&["sh-ready>", "sh-ready> echo a; echo b", "a", "b", "sh-ready>", ""]);
-        let said = said(&ran, Some(at(4, PROMPT_COLUMNS)), "echo a; echo b");
-        assert_eq!(said, Some(&ran[2..4]));
-        let quiet = rows(&["sh-ready> true", "sh-ready>"]);
-        assert_eq!(super::said(&quiet, Some(at(1, PROMPT_COLUMNS)), "true"), Some(&[][..]));
+        let ran = screen(&["sh-ready>", "sh-ready> echo a; echo b", "a", "b", "sh-ready>", ""], Some(at(4, 10)));
+        assert_eq!(typed("echo a; echo b").said(&ran), Some(&ran.rows()[2..4]));
+        let quiet = screen(&["sh-ready> true", "sh-ready>"], Some(at(1, PROMPT_COLUMNS)));
+        assert_eq!(typed("true").said(&quiet), Some(&[][..]));
     }
 
     #[test]
     fn a_line_said_before_the_next_prompt_has_said_nothing_yet() {
-        let running = rows(&["sh-ready> echo a", "a", ""]);
-        assert_eq!(said(&running, Some(at(2, 0)), "echo a"), None);
-        let other = rows(&["sh-ready> echo b", "b", "sh-ready>"]);
-        assert_eq!(said(&other, Some(at(2, PROMPT_COLUMNS)), "echo a"), None);
+        let running = screen(&["sh-ready> echo a", "a", ""], Some(at(2, 0)));
+        assert_eq!(typed("echo a").said(&running), None);
+        let other = screen(&["sh-ready> echo b", "b", "sh-ready>"], Some(at(2, PROMPT_COLUMNS)));
+        assert_eq!(typed("echo a").said(&other), None);
     }
 
     #[test]
     fn a_line_typed_before_the_shell_read_it_is_never_said() {
-        let typed_ahead = rows(&["echo right-$((40 + 2))", "sh-ready> right-42", "sh-ready>"]);
-        assert_eq!(said(&typed_ahead, Some(at(2, PROMPT_COLUMNS)), "echo right-$((40 + 2))"), None);
+        let typed_ahead = screen(&["echo right-$((40 + 2))", "sh-ready> right-42", "sh-ready>"], Some(at(2, 10)));
+        assert_eq!(typed("echo right-$((40 + 2))").said(&typed_ahead), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "the screen at the prompt already says \"echo a\"")]
+    fn a_line_typed_again_would_read_its_first_run_so_typing_it_is_refused() {
+        let ran = screen(&["sh-ready> echo a", "a", "sh-ready>"], Some(at(2, PROMPT_COLUMNS)));
+        let _ = prompted(&ran).unwrap().typed("echo a");
     }
 }
