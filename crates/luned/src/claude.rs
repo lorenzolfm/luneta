@@ -213,7 +213,7 @@ fn agent(pid: u32, file: &File, terminal: Option<TerminalKey>) -> Agent {
     Agent {
         pid,
         harness: Harness::ClaudeCode,
-        session_id: file.session_id.clone(),
+        session_id: Some(file.session_id.clone()),
         cwd: file.cwd.clone(),
         status: Status::of(file.status.as_deref(), file.waiting_for.as_deref()),
         status_since: file.status_updated_at.map(moment),

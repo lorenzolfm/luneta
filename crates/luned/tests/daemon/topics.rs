@@ -68,7 +68,7 @@ fn seen(host: &Host) -> api::Host {
 }
 
 fn topic(agents: &[api::Agent]) -> Option<&str> {
-    agents.iter().find(|agent| agent.session_id == ID)?.topic.as_deref()
+    agents.iter().find(|agent| agent.session_id.as_deref() == Some(ID))?.topic.as_deref()
 }
 
 #[test]

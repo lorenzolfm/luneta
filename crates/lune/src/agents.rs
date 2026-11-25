@@ -22,6 +22,7 @@ pub fn named(program: &str) -> Option<Harness> {
     match program {
         "claude" => Some(Harness::ClaudeCode),
         "pi" => Some(Harness::Pi),
+        "agy" => Some(Harness::Antigravity),
         _ => None,
     }
 }
@@ -29,7 +30,8 @@ pub fn named(program: &str) -> Option<Harness> {
 pub const fn next(harness: Harness) -> Harness {
     match harness {
         Harness::ClaudeCode => Harness::Pi,
-        Harness::Pi => Harness::ClaudeCode,
+        Harness::Pi => Harness::Antigravity,
+        Harness::Antigravity => Harness::ClaudeCode,
     }
 }
 
@@ -53,7 +55,7 @@ impl Picked {
 
 pub fn spelled(harness: Harness, skill: &str) -> String {
     match harness {
-        Harness::ClaudeCode => format!("/{skill}"),
+        Harness::ClaudeCode | Harness::Antigravity => format!("/{skill}"),
         Harness::Pi => format!("/skill:{skill}"),
     }
 }
@@ -62,6 +64,7 @@ pub fn of(agent: &api::Agent) -> Option<Harness> {
     match agent.runs_in() {
         api::Harness::ClaudeCode => Some(Harness::ClaudeCode),
         api::Harness::Pi => Some(Harness::Pi),
+        api::Harness::Antigravity => Some(Harness::Antigravity),
         api::Harness::Unspecified => None,
     }
 }
@@ -72,7 +75,11 @@ pub fn on_skill(harness: Harness, skill: &str, given: Option<&str>) -> Result<Ar
         Some(given) => format!("{spelled} {given}"),
         None => spelled,
     };
-    Argv::parse(vec![name(harness).to_owned(), prompt])
+    let words = match harness {
+        Harness::ClaudeCode | Harness::Pi => vec![name(harness).to_owned(), prompt],
+        Harness::Antigravity => vec![name(harness).to_owned(), "-i".to_owned(), prompt],
+    };
+    Argv::parse(words)
 }
 
 #[derive(Debug)]
@@ -176,6 +183,14 @@ mod tests {
             on_skill(Harness::Pi, "code-review", Some("since main")).unwrap().words(),
             ["pi", "/skill:code-review since main"]
         );
+        assert_eq!(
+            on_skill(Harness::Antigravity, "tigerstyle", None).unwrap().words(),
+            ["agy", "-i", "/tigerstyle"]
+        );
+        assert_eq!(
+            on_skill(Harness::Antigravity, "code-review", Some("since main")).unwrap().words(),
+            ["agy", "-i", "/code-review since main"]
+        );
     }
 
     #[test]
@@ -192,7 +207,7 @@ mod tests {
 
     #[test]
     fn a_harness_is_known_by_its_program_s_name() {
-        for harness in [Harness::ClaudeCode, Harness::Pi] {
+        for harness in [Harness::ClaudeCode, Harness::Pi, Harness::Antigravity] {
             assert_eq!(named(name(harness)), Some(harness));
         }
         assert_eq!(named("codex"), None);

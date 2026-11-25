@@ -15,13 +15,16 @@ const CLAUDE: &str = "\u{ec82}";
 
 const PI: &str = "\u{f03ff}";
 
+const AGY: &str = "\u{f0674}";
+
 const PYTHON: &str = "\u{e73c}";
 
 const GIT: &str = "\u{e702}";
 
-const ICONS: [(&str, &str); 12] = [
+const ICONS: [(&str, &str); 13] = [
     ("claude", CLAUDE),
     ("pi", PI),
+    ("agy", AGY),
     ("nvim", NEOVIM),
     ("vim", NEOVIM),
     ("cargo", "\u{e7a8}"),
@@ -38,6 +41,7 @@ pub const fn harness(harness: lune_domain::agent::Harness) -> &'static str {
     match harness {
         lune_domain::agent::Harness::ClaudeCode => CLAUDE,
         lune_domain::agent::Harness::Pi => PI,
+        lune_domain::agent::Harness::Antigravity => AGY,
     }
 }
 
@@ -45,6 +49,7 @@ pub fn agent(harness: Harness) -> Option<&'static str> {
     match harness {
         Harness::ClaudeCode => Some("claude"),
         Harness::Pi => Some("pi"),
+        Harness::Antigravity => Some("agy"),
         Harness::Unspecified => None,
     }
 }

@@ -193,7 +193,7 @@ fn a_pi_agent_is_listed_by_what_its_extension_hears() {
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
     let idle = as_status(&host, pid, Status::Idle);
     assert_eq!(idle.runs_in(), Harness::Pi);
-    assert_eq!((idle.session_id.as_str(), idle.cwd.as_str()), ("first", "/home/you/work"));
+    assert_eq!((idle.session_id.as_deref(), idle.cwd.as_str()), (Some("first"), "/home/you/work"));
     assert_eq!(idle.entrypoint.as_deref(), Some("tui"));
     assert!(idle.at_a_prompt());
     assert_eq!(idle.terminal, Some(terminal(3)));
@@ -236,7 +236,7 @@ fn a_pi_agent_goes_on_through_a_new_session_and_goes_as_it_quits() {
 
     pi.says(&json!({ "type": "session_start", "reason": "reload" }));
     let first = as_status(&host, pid, Status::Idle);
-    assert_eq!(first.session_id, "first");
+    assert_eq!(first.session_id.as_deref(), Some("first"));
 
     let said = fs::read(&file).unwrap();
     pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
@@ -251,7 +251,8 @@ fn a_pi_agent_goes_on_through_a_new_session_and_goes_as_it_quits() {
     pi.says(&json!({ "type": "session_start", "reason": "new" }));
     eventually("the agent is on its new session", || {
         let agents = host.agents();
-        let on_second = matches!(agents.as_slice(), [agent] if agent.session_id == "second");
+        let on_second =
+            matches!(agents.as_slice(), [agent] if agent.session_id.as_deref() == Some("second"));
         on_second.then_some(())
     });
 
@@ -328,10 +329,11 @@ fn a_file_stands_only_for_the_process_that_wrote_it() {
     fs::write(file(running.pid()), says("running").to_string()).unwrap();
     let found = eventually("the agent is listed", || {
         let list = host.list();
-        list.agents.iter().any(|agent| agent.session_id == "running").then_some(list)
+        list.agents.iter().any(|agent| agent.session_id.as_deref() == Some("running")).then_some(list)
     });
-    let ids: Vec<&str> = found.agents.iter().map(|agent| agent.session_id.as_str()).collect();
-    assert_eq!(ids, ["running"]);
+    let ids: Vec<Option<&str>> =
+        found.agents.iter().map(|agent| agent.session_id.as_deref()).collect();
+    assert_eq!(ids, [Some("running")]);
     assert_eq!(found.unread, 0);
 }
 
@@ -366,7 +368,7 @@ fn a_file_that_names_its_process_s_start_stands_however_old_it_looks() {
     fs::write(file_of(&host, running.pid()), says("running").to_string()).unwrap();
     let agents = eventually("the other agent is listed", || {
         let agents = host.agents();
-        agents.iter().any(|agent| agent.session_id == "running").then_some(agents)
+        agents.iter().any(|agent| agent.session_id.as_deref() == Some("running")).then_some(agents)
     });
     assert_eq!(agents.iter().any(|agent| agent.pid == pid), cfg!(target_os = "linux"));
 }

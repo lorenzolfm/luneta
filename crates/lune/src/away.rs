@@ -20,7 +20,7 @@ use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
 use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
 use luned::skills::{Name, Runs, Skill};
-use luned::transcripts::{Reading, SessionId};
+use luned::transcripts::{Reading, SessionId, TranscriptEnd};
 use luned::{said_by, told_by, Daemon, Destination, Directory};
 use tokio::runtime::Handle;
 use tokio::time::error::Elapsed;
@@ -118,10 +118,18 @@ impl Away {
         Ok(Failing { head: answer.head, failed, pending: answer.pending, passed: answer.passed })
     }
 
-    pub fn ends(&mut self, reading: &Reading) -> Result<HashMap<SessionId, String>, String> {
+    pub fn ends(&mut self, reading: &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
         let request = reading.asked(self.asked_on());
         let answer = self.ask(|mut daemon| async move { daemon.transcript_ends(request).await })?;
-        let end = |(id, end): (String, String)| Some((SessionId::parse(&id)?, end));
+        if !answer.typed_ends.is_empty() {
+            let end = |(id, end): (String, _)| {
+                Some((SessionId::parse(&id)?, TranscriptEnd::of_api(end)?))
+            };
+            return Ok(answer.typed_ends.into_iter().filter_map(end).collect());
+        }
+        let end = |(id, end): (String, String)| {
+            Some((SessionId::parse(&id)?, TranscriptEnd::Claude(end)))
+        };
         Ok(answer.ends.into_iter().filter_map(end).collect())
     }
 

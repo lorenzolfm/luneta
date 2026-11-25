@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::api::{On, TranscriptEndsRequest};
+use crate::api::{self, On, TranscriptEndsRequest};
 
 const WINDOW_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -23,6 +23,77 @@ const CUT_CHARS: usize = 100;
 
 const KINDS: [&str; 4] =
     [r#""type":"ai-title""#, r#""type":"last-prompt""#, r#""type":"user""#, r#""type":"assistant""#];
+
+const AGY_KINDS: [&str; 2] = [r#""type":"USER_INPUT""#, r#""type":"PLANNER_RESPONSE""#];
+
+const ALL_KINDS: [&str; 6] = [
+    r#""type":"ai-title""#,
+    r#""type":"last-prompt""#,
+    r#""type":"user""#,
+    r#""type":"assistant""#,
+    r#""type":"USER_INPUT""#,
+    r#""type":"PLANNER_RESPONSE""#,
+];
+
+const ON_WHAT_FIELDS: [&str; 13] = [
+    "description",
+    "command",
+    "file_path",
+    "pattern",
+    "url",
+    "query",
+    "prompt",
+    "toolSummary",
+    "CommandLine",
+    "Path",
+    "Description",
+    "Query",
+    "Url",
+];
+
+const _: () = assert!(ALL_KINDS.len() == KINDS.len() + AGY_KINDS.len());
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Folders {
+    pub claude: Option<PathBuf>,
+    pub agy: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TranscriptEnd {
+    Claude(String),
+    Antigravity(String),
+}
+
+impl TranscriptEnd {
+    #[must_use]
+    pub fn lines(&self) -> &str {
+        match self {
+            TranscriptEnd::Claude(lines) | TranscriptEnd::Antigravity(lines) => lines,
+        }
+    }
+
+    #[must_use]
+    pub fn to_api(&self) -> api::transcript_ends_response::TranscriptEnd {
+        let (harness, lines) = match self {
+            TranscriptEnd::Claude(lines) => (api::Harness::ClaudeCode, lines),
+            TranscriptEnd::Antigravity(lines) => (api::Harness::Antigravity, lines),
+        };
+        api::transcript_ends_response::TranscriptEnd {
+            harness: harness.into(),
+            lines: lines.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn of_api(said: api::transcript_ends_response::TranscriptEnd) -> Option<Self> {
+        match api::Harness::try_from(said.harness) {
+            Ok(api::Harness::ClaudeCode) => Some(TranscriptEnd::Claude(said.lines)),
+            Ok(api::Harness::Antigravity) => Some(TranscriptEnd::Antigravity(said.lines)),
+            Ok(api::Harness::Pi | api::Harness::Unspecified) | Err(_) => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SessionId(String);
@@ -97,19 +168,31 @@ impl Reading {
     }
 
     #[must_use]
-    pub fn ends(&self, projects: &Path) -> HashMap<SessionId, String> {
-        let dirs = project_dirs(projects);
+    pub fn ends(&self, folders: &Folders) -> HashMap<SessionId, TranscriptEnd> {
+        let dirs = folders.claude.as_deref().map(|claude| project_dirs(&claude.join("projects")));
         let mut ends = HashMap::new();
         for id in &self.ids {
-            let Some(path) = found_in(&dirs, id) else {
+            if let Some(path) = dirs.as_deref().and_then(|dirs| found_in(dirs, id))
+                && let Ok(end) = end(&path, self.share, &KINDS)
+            {
+                ends.insert(id.clone(), TranscriptEnd::Claude(end));
                 continue;
-            };
-            if let Ok(end) = end(&path, self.share) {
-                ends.insert(id.clone(), end);
+            }
+            if let Some(path) = folders.agy.as_deref().and_then(|agy| agy_file(agy, id))
+                && let Ok(end) = end(&path, self.share, &AGY_KINDS)
+            {
+                ends.insert(id.clone(), TranscriptEnd::Antigravity(end));
             }
         }
         ends
     }
+}
+
+fn agy_file(agy: &Path, id: &SessionId) -> Option<PathBuf> {
+    assert_ne!(id.as_str(), "");
+    assert!(!id.as_str().contains('/'));
+    let path = agy.join("brain").join(id.as_str()).join(".system_generated/logs/transcript.jsonl");
+    path.is_file().then_some(path)
 }
 
 fn project_dirs(projects: &Path) -> Vec<PathBuf> {
@@ -133,11 +216,11 @@ pub fn find(projects: &Path, id: &SessionId) -> Option<PathBuf> {
 }
 
 pub fn told(path: &Path, share: usize, steps: usize) -> io::Result<Digest> {
-    Ok(digest(&end(path, share)?, steps))
+    Ok(digest(&end(path, share, &ALL_KINDS)?, steps))
 }
 
 pub fn last_said(path: &Path, chars_max: usize) -> io::Result<Option<String>> {
-    Ok(last_said_in(&end(path, TAILS_BYTES)?, chars_max))
+    Ok(last_said_in(&end(path, TAILS_BYTES, &ALL_KINDS)?, chars_max))
 }
 
 fn last_said_in(end: &str, chars_max: usize) -> Option<String> {
@@ -146,7 +229,18 @@ fn last_said_in(end: &str, chars_max: usize) -> Option<String> {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if record["isSidechain"].as_bool() == Some(true) || record["type"] != "assistant" {
+        if record["isSidechain"].as_bool() == Some(true) {
+            continue;
+        }
+        if record["type"] == "PLANNER_RESPONSE" {
+            if let Some(said) =
+                record["content"].as_str().map(str::trim).filter(|text| !text.is_empty())
+            {
+                return Some(cut(said, chars_max));
+            }
+            continue;
+        }
+        if record["type"] != "assistant" {
             continue;
         }
         let blocks = record["message"]["content"].as_array().into_iter().flatten().rev();
@@ -175,14 +269,14 @@ fn too_many(count: usize) -> String {
     format!("ids: {count} transcripts, of {IDS_MAX} at the most")
 }
 
-fn end(path: &Path, share: usize) -> io::Result<String> {
+fn end(path: &Path, share: usize, kinds: &[&str]) -> io::Result<String> {
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
     file.seek(SeekFrom::Start(length.saturating_sub(WINDOW_BYTES)))?;
     let mut window = Vec::new();
     file.take(WINDOW_BYTES).read_to_end(&mut window)?;
     let window = String::from_utf8_lossy(&window);
-    let told_of = |record: &&str| KINDS.iter().any(|kind| record.contains(kind));
+    let told_of = |record: &&str| kinds.iter().any(|kind| record.contains(kind));
     let mut kept: Vec<&str> = Vec::new();
     let mut taken = 0;
     for record in window.lines().rev().filter(told_of) {
@@ -224,6 +318,47 @@ impl Digest {
 }
 
 #[must_use]
+pub fn digest_end(end: &TranscriptEnd, steps: usize) -> Digest {
+    match end {
+        TranscriptEnd::Claude(lines) => digest_claude(lines, steps),
+        TranscriptEnd::Antigravity(lines) => digest_agy(lines, steps),
+    }
+}
+
+fn digest_claude(end: &str, steps: usize) -> Digest {
+    let mut title = None;
+    let mut asked: Option<Asked> = None;
+    let mut last: VecDeque<String> = VecDeque::with_capacity(steps + 1);
+    for line in end.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["isSidechain"].as_bool() == Some(true) {
+            continue;
+        }
+        apply_claude_record(&record, &mut title, &mut asked, &mut last, steps);
+    }
+    assert!(last.len() <= steps);
+    Digest { title: title.map(|title| one_line(&title, TITLE_CHARS)), asked, steps: last.into() }
+}
+
+fn digest_agy(end: &str, steps: usize) -> Digest {
+    let mut asked: Option<Asked> = None;
+    let mut last: VecDeque<String> = VecDeque::with_capacity(steps + 1);
+    for line in end.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["isSidechain"].as_bool() == Some(true) {
+            continue;
+        }
+        apply_agy_record(&record, &mut asked, &mut last, steps);
+    }
+    assert!(last.len() <= steps);
+    Digest { title: None, asked, steps: last.into() }
+}
+
+#[must_use]
 pub fn digest(end: &str, steps: usize) -> Digest {
     let mut title = None;
     let mut asked: Option<Asked> = None;
@@ -235,35 +370,239 @@ pub fn digest(end: &str, steps: usize) -> Digest {
         if record["isSidechain"].as_bool() == Some(true) {
             continue;
         }
+        apply_claude_record(&record, &mut title, &mut asked, &mut last, steps);
+        apply_agy_record(&record, &mut asked, &mut last, steps);
+    }
+    assert!(last.len() <= steps);
+    Digest { title: title.map(|title| one_line(&title, TITLE_CHARS)), asked, steps: last.into() }
+}
+
+fn apply_claude_record(
+    record: &Value,
+    title: &mut Option<String>,
+    asked: &mut Option<Asked>,
+    last: &mut VecDeque<String>,
+    steps: usize,
+) {
+    match record["type"].as_str() {
+        Some("ai-title") => {
+            *title = record["aiTitle"].as_str().map(str::to_owned).or_else(|| title.take());
+        },
+        Some("last-prompt") => {
+            if let Some(prompt) = record["lastPrompt"].as_str().and_then(Asked::recorded)
+                && !asked.as_ref().is_some_and(|typed| prompt.cuts(typed))
+            {
+                *asked = Some(prompt);
+            }
+        },
+        Some("user")
+            if record["isMeta"].as_bool() != Some(true)
+                && record["isCompactSummary"].as_bool() != Some(true) =>
+        {
+            let typed = typed_by_you(&record["message"]["content"]);
+            *asked = typed.as_deref().map(Asked::typed).or_else(|| asked.take());
+        },
+        Some("assistant") => {
+            let blocks = record["message"]["content"].as_array().into_iter().flatten();
+            for step in blocks.filter_map(step) {
+                push_step(last, step, steps);
+            }
+        },
+        _ => {},
+    }
+}
+
+fn apply_agy_record(
+    record: &Value,
+    asked: &mut Option<Asked>,
+    last: &mut VecDeque<String>,
+    steps: usize,
+) {
+    match record["type"].as_str() {
+        Some("USER_INPUT") if record["source"].as_str() != Some("SYSTEM") => {
+            if let Some(typed) = record["content"].as_str().and_then(agy_user_text) {
+                *asked = Some(Asked::typed(typed));
+            }
+        },
+        Some("PLANNER_RESPONSE") => {
+            if let Some(text) =
+                record["content"].as_str().map(str::trim).filter(|text| !text.is_empty())
+            {
+                push_step(last, format!("said: {}", one_line(text, STEP_CHARS)), steps);
+            }
+            for call in record["tool_calls"].as_array().into_iter().flatten() {
+                let Some(name) = call["name"].as_str() else {
+                    continue;
+                };
+                let args = agy_args(&call["args"]);
+                let step = match on_what(&args) {
+                    Some(what) => format!("ran {name}: {}", one_line(what, STEP_CHARS)),
+                    None => format!("ran {name}"),
+                };
+                push_step(last, step, steps);
+            }
+        },
+        _ => {},
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Turn {
+    pub tool: Option<(String, Value)>,
+    pub said: Option<String>,
+}
+
+struct ClaudeCall {
+    id: String,
+    name: String,
+    input: Value,
+}
+
+impl ClaudeCall {
+    fn of(block: &Value) -> Option<Self> {
+        let (id, name) = (block["id"].as_str()?, block["name"].as_str()?);
+        Some(ClaudeCall { id: id.to_owned(), name: name.to_owned(), input: block["input"].clone() })
+    }
+}
+
+impl Turn {
+    #[must_use]
+    pub fn of(end: &TranscriptEnd) -> Turn {
+        match end {
+            TranscriptEnd::Claude(lines) => turn_of_claude(lines),
+            TranscriptEnd::Antigravity(lines) => turn_of_agy(lines),
+        }
+    }
+}
+
+fn turn_of_claude(end: &str) -> Turn {
+    let mut calls: Vec<ClaudeCall> = Vec::new();
+    let mut said = None;
+    for line in end.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["isSidechain"].as_bool() == Some(true) {
+            continue;
+        }
+        let blocks = record["message"]["content"].as_array().into_iter().flatten();
         match record["type"].as_str() {
-            Some("ai-title") => title = record["aiTitle"].as_str().map(str::to_owned).or(title),
-            Some("last-prompt") => {
-                if let Some(last) = record["lastPrompt"].as_str().and_then(Asked::recorded)
-                    && !asked.as_ref().is_some_and(|typed| last.cuts(typed))
-                {
-                    asked = Some(last);
+            Some("assistant") => {
+                for block in blocks {
+                    match block["type"].as_str() {
+                        Some("text") => {
+                            let text = block["text"].as_str().map(str::trim).filter(|t| !t.is_empty());
+                            said = text.map(str::to_owned).or(said);
+                        },
+                        Some("tool_use") => calls.extend(ClaudeCall::of(block)),
+                        _ => {},
+                    }
                 }
             },
-            Some("user")
-                if record["isMeta"].as_bool() != Some(true)
-                    && record["isCompactSummary"].as_bool() != Some(true) =>
-            {
-                let typed = typed_by_you(&record["message"]["content"]);
-                asked = typed.as_deref().map(Asked::typed).or(asked);
-            },
-            Some("assistant") => {
-                let blocks = record["message"]["content"].as_array().into_iter().flatten();
-                for step in blocks.filter_map(step) {
-                    last.push_back(step);
-                    if last.len() > steps {
-                        last.pop_front();
+            Some("user") => {
+                for block in blocks.filter(|block| block["type"] == "tool_result") {
+                    if let Some(answered) = block["tool_use_id"].as_str() {
+                        calls.retain(|call| call.id != answered);
                     }
                 }
             },
             _ => {},
         }
     }
-    Digest { title: title.map(|title| one_line(&title, TITLE_CHARS)), asked, steps: last.into() }
+    let tool = calls.pop().map(|call| (call.name, call.input));
+    Turn { tool, said }
+}
+
+fn turn_of_agy(end: &str) -> Turn {
+    let mut tool = None;
+    let mut said = None;
+    for line in end.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["isSidechain"].as_bool() == Some(true) {
+            continue;
+        }
+        match record["type"].as_str() {
+            Some("USER_INPUT") => {
+                tool = None;
+            },
+            Some("PLANNER_RESPONSE") => {
+                if let Some(text) =
+                    record["content"].as_str().map(str::trim).filter(|text| !text.is_empty())
+                {
+                    said = Some(text.to_owned());
+                }
+                tool = None;
+                for call in record["tool_calls"].as_array().into_iter().flatten() {
+                    if let Some(name) = call["name"].as_str() {
+                        let input = agy_args(&call["args"]);
+                        tool = Some((name.to_owned(), input));
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+    Turn { tool, said }
+}
+
+fn push_step(last: &mut VecDeque<String>, step: String, steps_max: usize) {
+    assert!(last.len() <= steps_max);
+    if steps_max == 0 {
+        return;
+    }
+    if last.len() == steps_max {
+        last.pop_front();
+    }
+    last.push_back(step);
+    assert!(last.len() <= steps_max);
+}
+
+fn agy_user_text(content: &str) -> Option<&str> {
+    let text = if let Some((_, rest)) = content.split_once("<USER_REQUEST>") {
+        rest.split_once("</USER_REQUEST>").map_or(rest, |(inner, _)| inner)
+    } else if content.trim_start().starts_with("<SYSTEM_MESSAGE>") {
+        return None;
+    } else {
+        content
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    assert_ne!(text, "");
+    Some(text)
+}
+
+fn agy_args(raw: &Value) -> Value {
+    let Value::Object(map) = raw else {
+        return Value::Null;
+    };
+    let mut decoded = serde_json::Map::new();
+    for key in ON_WHAT_FIELDS {
+        let Some(value) = map.get(key) else {
+            continue;
+        };
+        let value = match value {
+            Value::String(text) => Value::String(
+                serde_json::from_str::<String>(text).unwrap_or_else(|_| text.clone()),
+            ),
+            other => other.clone(),
+        };
+        decoded.insert(key.to_owned(), value);
+    }
+    if let Some(value) = map.get("questions") {
+        let value = match value {
+            Value::String(text) => {
+                serde_json::from_str::<Value>(text).unwrap_or_else(|_| value.clone())
+            },
+            other => other.clone(),
+        };
+        decoded.insert("questions".to_owned(), value);
+    }
+    assert!(decoded.len() <= ON_WHAT_FIELDS.len() + 1);
+    Value::Object(decoded)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -362,9 +701,7 @@ fn step(block: &Value) -> Option<String> {
 
 #[must_use]
 pub fn on_what(input: &Value) -> Option<&str> {
-    const FIELDS: [&str; 7] =
-        ["description", "command", "file_path", "pattern", "url", "query", "prompt"];
-    FIELDS
+    ON_WHAT_FIELDS
         .iter()
         .find_map(|field| input[field].as_str())
         .or_else(|| input["questions"][0]["question"].as_str())
@@ -527,6 +864,108 @@ mod tests {
         assert_eq!(last_said_in(&end, 100), Some("last".to_owned()));
         assert_eq!(last_said_in(&end, 2), Some("la…".to_owned()));
         assert_eq!(last_said_in("", 100), None);
+    }
+
+    #[test]
+    fn an_antigravity_transcript_digests_user_requests_and_planner_steps() {
+        let user = json!({
+            "step_index": 0,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "content": "<USER_REQUEST>\nfix the sidebar\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nnow\n</ADDITIONAL_METADATA>"
+        });
+        let tool = json!({
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "tool_calls": [
+                {
+                    "name": "run_command",
+                    "args": {
+                        "CommandLine": "\"cargo test\"",
+                        "toolSummary": "\"Run tests\""
+                    }
+                },
+                {
+                    "name": "ask_question",
+                    "args": {
+                        "questions": "[{\"question\":\"Keep or drop?\"}]"
+                    }
+                }
+            ]
+        });
+        let reply = json!({
+            "step_index": 2,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "content": "  Fixed the sidebar.  "
+        });
+        let end = [user, tool, reply].map(|v| v.to_string()).join("\n");
+        let parsed = digest(&end, 4);
+        assert_eq!(parsed.asked, Some(Asked::Whole("fix the sidebar".to_owned())));
+        assert_eq!(parsed.steps, [
+            "ran run_command: Run tests",
+            "ran ask_question: Keep or drop?",
+            "said: Fixed the sidebar.",
+        ]);
+        assert_eq!(last_said_in(&end, 100), Some("Fixed the sidebar.".to_owned()));
+    }
+
+    #[test]
+    fn a_reading_finds_antigravity_transcripts_beside_claude_s() {
+        let scratch = tempfile::tempdir().unwrap();
+        let agy = scratch.path().join("agy");
+        let id = SessionId::parse("9c696c75-660f-4097-934f-e1cc290e4bd1").unwrap();
+        let path = agy.join("brain").join(id.as_str()).join(".system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let line = json!({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "<USER_REQUEST>\nhi\n</USER_REQUEST>"});
+        let generic = json!({"type": "GENERIC", "content": "big output"});
+        fs::write(&path, format!("{line}\n{generic}\n")).unwrap();
+
+        let reading = Reading::new(vec![id.clone()], 4096).unwrap();
+        let folders = Folders { claude: None, agy: Some(agy) };
+        let ends = reading.ends(&folders);
+        assert_eq!(ends.get(&id), Some(&TranscriptEnd::Antigravity(line.to_string())));
+    }
+
+    #[test]
+    fn told_and_last_said_read_antigravity_transcript_files_and_ignore_non_summary_args() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let user = json!({
+            "type": "USER_INPUT",
+            "source": "USER_EXPLICIT",
+            "content": "<USER_REQUEST>\naudit this\n</USER_REQUEST>"
+        });
+        let tool = json!({
+            "type": "PLANNER_RESPONSE",
+            "tool_calls": [{
+                "name": "write_file",
+                "args": {
+                    "Path": "\"/w/a.rs\"",
+                    "Content": "\"huge body that is not parsed\""
+                }
+            }]
+        });
+        let reply = json!({
+            "type": "PLANNER_RESPONSE",
+            "content": "Done auditing."
+        });
+        fs::write(&path, format!("{user}\n{tool}\n{reply}\n")).unwrap();
+
+        let summary = told(&path, 8192, 4).unwrap();
+        assert_eq!(summary.asked, Some(Asked::Whole("audit this".to_owned())));
+        assert_eq!(summary.steps, ["ran write_file: /w/a.rs", "said: Done auditing."]);
+        assert_eq!(last_said(&path, 100).unwrap(), Some("Done auditing.".to_owned()));
+        assert_eq!(digest(&format!("{reply}\n"), 0).steps, Vec::<String>::new());
+
+        let decoded = agy_args(&tool["tool_calls"][0]["args"]);
+        assert_eq!(decoded["Path"], json!("/w/a.rs"));
+        assert!(decoded.get("Content").is_none());
+
+        let literal_args = agy_args(&json!({"Query": "true", "Description": "123"}));
+        assert_eq!(on_what(&literal_args), Some("123"));
+        assert_eq!(literal_args["Query"], json!("true"));
     }
 
 }

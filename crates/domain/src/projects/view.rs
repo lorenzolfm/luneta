@@ -217,14 +217,18 @@ impl Argv {
 
     pub fn on_words(harness: Harness, words: String, files: &[&str]) -> Result<Argv, String> {
         let mut command = vec![harness.program().to_owned()];
-        if harness == Harness::ClaudeCode {
-            let rules: Vec<String> = files.iter().filter_map(|file| read_rule(file)).collect();
-            if !rules.is_empty() {
-                command.push("--allowedTools".to_owned());
-                command.extend(rules);
-            }
+        match harness {
+            Harness::ClaudeCode => {
+                let rules: Vec<String> = files.iter().filter_map(|file| read_rule(file)).collect();
+                if !rules.is_empty() {
+                    command.push("--allowedTools".to_owned());
+                    command.extend(rules);
+                }
+                command.push("--".to_owned());
+            },
+            Harness::Pi => command.push("--".to_owned()),
+            Harness::Antigravity => command.push("-i".to_owned()),
         }
-        command.push("--".to_owned());
         command.push(words);
         Argv::parse(command)
     }
@@ -812,7 +816,12 @@ mod tests {
             );
             assert_eq!(
                 Argv::on_words(Harness::Pi, prompt.clone(), &[file]).unwrap().words(),
-                ["pi".to_owned(), "--".to_owned(), prompt],
+                ["pi".to_owned(), "--".to_owned(), prompt.clone()],
+                "{file}"
+            );
+            assert_eq!(
+                Argv::on_words(Harness::Antigravity, prompt.clone(), &[file]).unwrap().words(),
+                ["agy".to_owned(), "-i".to_owned(), prompt],
                 "{file}"
             );
         }
@@ -839,12 +848,16 @@ mod tests {
                 words: words.to_owned(),
             })),
         };
-        for (said, harness) in [(api::Harness::ClaudeCode, Harness::ClaudeCode), (api::Harness::Pi, Harness::Pi)] {
+        for (said, harness, flag) in [
+            (api::Harness::ClaudeCode, Harness::ClaudeCode, "--"),
+            (api::Harness::Pi, Harness::Pi, "--"),
+            (api::Harness::Antigravity, Harness::Antigravity, "-i"),
+        ] {
             let asked = asked(said, "Tackle #444");
             let opens = Opens::of_api(Some(asked.clone())).unwrap();
             let Opens::Agent(prompted) = &opens else { panic!("an agent opens as an agent, not {opens:?}") };
             assert_eq!(prompted.harness(), harness);
-            assert_eq!(prompted.argv().words(), [harness.program(), "--", "Tackle #444"]);
+            assert_eq!(prompted.argv().words(), [harness.program(), flag, "Tackle #444"]);
             assert_eq!(opens.argv(), Some(prompted.argv()));
             assert_eq!(opens.to_api(), asked, "an agent reads back as the agent asked for");
             assert_eq!(opens.runs(), Runs::Command(prompted.argv().line.clone()));
@@ -862,6 +875,8 @@ mod tests {
             let argv = Argv::on_words(harness, words.clone(), &[]).unwrap();
             assert_eq!(argv.words(), [harness.program(), "--", words.as_str()]);
         }
+        let argv = Argv::on_words(Harness::Antigravity, words.clone(), &[]).unwrap();
+        assert_eq!(argv.words(), ["agy", "-i", words.as_str()]);
     }
 
 }

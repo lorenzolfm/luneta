@@ -363,6 +363,7 @@ mod tests {
             let host = Host {
                 started: SystemTime::now(),
                 claude_folder: None,
+                agy_folder: None,
                 core,
                 watchers: Arc::default(),
                 bridges: Arc::default(),

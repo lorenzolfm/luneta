@@ -60,6 +60,10 @@ impl Host {
         self.home.path().join(".pi/agent")
     }
 
+    pub fn agy_folder(&self) -> PathBuf {
+        self.home.path().join(".gemini/antigravity-cli")
+    }
+
     fn file_of(&self, pid: u32) -> PathBuf {
         self.sessions().join(format!("{pid}.json"))
     }
@@ -83,7 +87,7 @@ impl Host {
     }
 
     pub fn agent(&self, id: &str) -> Option<Agent> {
-        self.agents().into_iter().find(|agent| agent.session_id == id)
+        self.agents().into_iter().find(|agent| agent.session_id.as_deref() == Some(id))
     }
 }
 
@@ -220,14 +224,14 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
         .iter()
         .map(|agent| {
             let status = agent.status.clone();
-            (agent.session_id.as_str(), agent.pid, status, agent.terminal)
+            (agent.session_id.as_deref(), agent.pid, status, agent.terminal)
         })
         .collect();
     assert_eq!(
         seen,
         [
-            ("inside", inside.pid(), Some(known(Status::Busy)), Some(terminal(3))),
-            ("outside", outside.pid(), Some(known(Status::Idle)), None),
+            (Some("inside"), inside.pid(), Some(known(Status::Busy)), Some(terminal(3))),
+            (Some("outside"), outside.pid(), Some(known(Status::Idle)), None),
         ]
     );
     let name = listed[0].name.as_ref().unwrap();
@@ -267,7 +271,7 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
         .map(|agent| {
             let name = agent.name.as_ref();
             let source = name.and_then(|name| name.source.is_some().then(|| name.source()));
-            let (id, dated) = (agent.session_id.as_str(), agent.status_since.is_some());
+            let (id, dated) = (agent.session_id.as_deref(), agent.status_since.is_some());
             let entrypoint = agent.entrypoint.as_deref();
             (id, agent.status.clone(), dated, source, entrypoint, agent.waiting_for.clone())
         })
@@ -279,10 +283,10 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
     assert_eq!(
         seen,
         [
-            ("newer", other("Compacting"), true, newer.0, newer.1, None),
-            ("older", None, false, None, None, None),
-            ("shell", shell, true, Some(NameSource::User), Some("sdk-cli"), None),
-            ("waits", waiting, true, Some(NameSource::Derived), Some("cli"), sandbox),
+            (Some("newer"), other("Compacting"), true, newer.0, newer.1, None),
+            (Some("older"), None, false, None, None, None),
+            (Some("shell"), shell, true, Some(NameSource::User), Some("sdk-cli"), None),
+            (Some("waits"), waiting, true, Some(NameSource::Derived), Some("cli"), sandbox),
         ]
     );
 }
@@ -313,7 +317,11 @@ fn the_daemon_follows_the_files_as_they_change() {
     let works = Some(known(Status::Busy));
     eventually("two works", || host.agent("two").filter(|agent| agent.status == works));
     let listed = host.list();
-    let one_does = listed.agents.into_iter().find(|agent| agent.session_id == "one").map(|agent| agent.status);
+    let one_does = listed
+        .agents
+        .into_iter()
+        .find(|agent| agent.session_id.as_deref() == Some("one"))
+        .map(|agent| agent.status);
     if torn.lasted().is_under(TORN) {
         assert_eq!((one_does, listed.unread), (Some(waits), 0));
     } else {

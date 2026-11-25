@@ -184,6 +184,7 @@ mod tests {
             started_at: None,
             claude_folder: Some(b"/home/you/.claude".to_vec()),
             built: Some(1_793_301_121),
+            agy_folder: None,
         };
         assert_eq!(info.encode_to_vec(), said(None), "an older lune reads this luned's");
         let older = InfoResponse::decode(said(Some(b"/tmp/zellij-1000")).as_slice());

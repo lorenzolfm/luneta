@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -9,7 +9,7 @@ use std::time::Duration;
 use lune_domain::agent::Harness;
 use serde::Deserialize;
 
-use crate::{program, Directory};
+use crate::{log, program, Directory};
 
 const FIND: &str = r#"dir=$(cd "$1" 2>/dev/null && pwd -P) || exit 0
 config=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
@@ -96,14 +96,24 @@ impl std::fmt::Display for Name {
     }
 }
 
+fn env_dir(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
 pub fn found_in(cwd: &Directory, harness: Harness) -> Result<Vec<Skill>, String> {
     match harness {
         Harness::ClaudeCode => claude_found_in(cwd),
         Harness::Pi => {
-            let set = |name: &str| env::var_os(name).map(PathBuf::from);
-            let home = set("HOME");
-            let agent = set("PI_CODING_AGENT_DIR").or_else(|| Some(home.as_ref()?.join(PI_AGENT)));
+            let home = env_dir("HOME");
+            let agent = env_dir("PI_CODING_AGENT_DIR").or_else(|| Some(home.as_ref()?.join(PI_AGENT)));
             Ok(pi_found(Path::new(cwd.as_str()), home.as_deref(), agent.as_deref()))
+        },
+        Harness::Antigravity => {
+            let home = env_dir("HOME");
+            Ok(agy_found(Path::new(cwd.as_str()), home.as_deref()))
         },
     }
 }
@@ -188,7 +198,7 @@ fn pi_found(cwd: &Path, home: Option<&Path>, agent: Option<&Path>) -> Vec<Skill>
         skill_files(root, root, *kept, 0, &mut files);
     }
     let found = files.into_iter().filter_map(|file| {
-        let mut front = Front::read(&frontmatter(&file)?);
+        let mut front = Front::read(&frontmatter(&file).ok().flatten()?);
         if front.description.trim().is_empty() {
             return None;
         }
@@ -197,6 +207,150 @@ fn pi_found(cwd: &Path, home: Option<&Path>, agent: Option<&Path>) -> Vec<Skill>
         Some((name.unwrap_or_else(|| folder.to_owned()), front))
     });
     listed(found)
+}
+
+const AGY_ROOTS: [&str; 4] = [".agents", ".agent", "_agents", "_agent"];
+
+const AGY_PLUGINS_MAX: usize = 256;
+
+const AGY_SKILLS_PER_ROOT_MAX: usize = 512;
+
+const AGY_SKILL_FILES_MAX: usize = 2048;
+
+const AGY_DIR_ENTRIES_MAX: usize = 4096;
+
+const _: () = assert!(AGY_PLUGINS_MAX > 0);
+const _: () = assert!(AGY_SKILLS_PER_ROOT_MAX > 0);
+const _: () = assert!(AGY_SKILLS_PER_ROOT_MAX <= AGY_SKILL_FILES_MAX);
+const _: () = assert!(AGY_SKILLS_PER_ROOT_MAX <= AGY_DIR_ENTRIES_MAX);
+const _: () = assert!(AGY_PLUGINS_MAX <= AGY_DIR_ENTRIES_MAX);
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if seen.insert(path.clone()) {
+        paths.push(path);
+    }
+}
+
+fn sorted_dir_entries(
+    dir: &Path,
+    limit: usize,
+    keep: impl Fn(&str, &Path) -> bool,
+) -> Vec<(String, PathBuf)> {
+    assert!(limit > 0);
+    let listed = match fs::read_dir(dir) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            log::say(&format!("skills in {}: {error}", dir.display()));
+            return Vec::new();
+        },
+    };
+    let mut entries = Vec::new();
+    for (seen, entry) in listed.enumerate() {
+        if seen >= AGY_DIR_ENTRIES_MAX {
+            log::say(&format!(
+                "skills in {}: more than {AGY_DIR_ENTRIES_MAX} directory entries",
+                dir.display()
+            ));
+            break;
+        }
+        match entry {
+            Ok(entry) => {
+                if let Ok(name) = entry.file_name().into_string() {
+                    let path = entry.path();
+                    if keep(&name, &path) {
+                        entries.push((name, path));
+                    }
+                }
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => {},
+            Err(error) => log::say(&format!("skills in {}: {error}", dir.display())),
+        }
+    }
+    entries.sort();
+    entries.truncate(limit);
+    assert!(entries.len() <= limit);
+    entries
+}
+
+fn agy_found(cwd: &Path, home: Option<&Path>) -> Vec<Skill> {
+    assert!(cwd.is_absolute());
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen_roots: HashSet<PathBuf> = HashSet::new();
+    let mut plugin_roots: Vec<PathBuf> = Vec::new();
+    let mut seen_plugins: HashSet<PathBuf> = HashSet::new();
+    if let Some(home) = home {
+        push_unique_path(&mut roots, &mut seen_roots, home.join(".gemini/antigravity-cli/skills"));
+        push_unique_path(&mut roots, &mut seen_roots, home.join(".gemini/skills"));
+    }
+    let top = cwd.ancestors().find(|dir| dir.join(".git").exists());
+    for dir in cwd.ancestors() {
+        for name in AGY_ROOTS {
+            let base = dir.join(name);
+            push_unique_path(&mut roots, &mut seen_roots, base.join("skills"));
+            push_unique_path(&mut plugin_roots, &mut seen_plugins, base.join("plugins"));
+        }
+        if top.is_none() || Some(dir) == top {
+            break;
+        }
+    }
+    if let Some(home) = home {
+        push_unique_path(&mut roots, &mut seen_roots, home.join(".gemini/config/skills"));
+        push_unique_path(&mut roots, &mut seen_roots, home.join(".agents/skills"));
+        push_unique_path(&mut plugin_roots, &mut seen_plugins, home.join(".gemini/config/plugins"));
+    }
+    for plugins in &plugin_roots {
+        for skills in agy_plugin_skills(plugins) {
+            push_unique_path(&mut roots, &mut seen_roots, skills);
+        }
+    }
+    let mut files = Vec::new();
+    for root in &roots {
+        let remaining = AGY_SKILL_FILES_MAX - files.len();
+        if remaining == 0 {
+            break;
+        }
+        files.extend(agy_skill_files(root, remaining.min(AGY_SKILLS_PER_ROOT_MAX)));
+    }
+    assert!(files.len() <= AGY_SKILL_FILES_MAX);
+    let found = files.into_iter().filter_map(|file| {
+        let mut front = match frontmatter(&file) {
+            Ok(Some(text)) => Front::read(&text),
+            Ok(None) => Front::default(),
+            Err(error) => {
+                if error.kind() != ErrorKind::NotFound {
+                    log::say(&format!("skills in {}: {error}", file.display()));
+                }
+                return None;
+            },
+        };
+        let folder = file.parent()?.file_name()?.to_str()?;
+        let name = front.name.take().filter(|name| !name.is_empty());
+        Some((name.unwrap_or_else(|| folder.to_owned()), front))
+    });
+    listed(found.filter(|(_, front)| front.invocable))
+}
+
+fn agy_plugin_skills(plugins_dir: &Path) -> Vec<PathBuf> {
+    let entries = sorted_dir_entries(plugins_dir, AGY_PLUGINS_MAX, |name, path| {
+        !name.starts_with('.') && path.is_dir() && path.join("skills").is_dir()
+    });
+    let roots: Vec<PathBuf> = entries.into_iter().map(|(_, path)| path.join("skills")).collect();
+    assert!(roots.len() <= AGY_PLUGINS_MAX);
+    roots
+}
+
+fn agy_skill_files(dir: &Path, limit: usize) -> Vec<PathBuf> {
+    assert!(limit > 0);
+    let entries = sorted_dir_entries(dir, limit, |name, path| {
+        !name.starts_with('.')
+            && name != "node_modules"
+            && path.is_dir()
+            && path.join("SKILL.md").is_file()
+    });
+    let files: Vec<PathBuf> = entries.into_iter().map(|(_, path)| path.join("SKILL.md")).collect();
+    assert!(files.len() <= limit);
+    files
 }
 
 fn skill_files(dir: &Path, root: &Path, kept: Kept, depth: usize, files: &mut Vec<PathBuf>) {
@@ -227,16 +381,25 @@ fn skill_files(dir: &Path, root: &Path, kept: Kept, depth: usize, files: &mut Ve
     }
 }
 
-fn frontmatter(file: &Path) -> Option<String> {
-    let mut text = String::new();
-    File::open(file).ok()?.take(FRONT_BYTES).read_to_string(&mut text).ok()?;
+fn frontmatter(file: &Path) -> io::Result<Option<String>> {
+    let mut bytes = Vec::new();
+    File::open(file)?.take(FRONT_BYTES).read_to_end(&mut bytes)?;
+    let truncated = u64::try_from(bytes.len()).is_ok_and(|len| len == FRONT_BYTES);
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(error) if truncated && error.error_len().is_none() => {
+            std::str::from_utf8(&bytes[..error.valid_up_to()])
+                .map_err(|utf8| io::Error::new(ErrorKind::InvalidData, utf8))?
+        },
+        Err(error) => return Err(io::Error::new(ErrorKind::InvalidData, error)),
+    };
     let mut lines = text.lines();
-    if lines.next()?.trim_end() != "---" {
-        return None;
+    if lines.next().is_none_or(|line| line.trim_end() != "---") {
+        return Ok(None);
     }
     let front: Vec<&str> =
         lines.take(64).take_while(|line| line.trim_end() != "---").collect();
-    Some(front.join("\n"))
+    Ok(Some(front.join("\n")))
 }
 
 fn own(path: &str, text: &str) -> Option<(String, Front)> {
@@ -328,14 +491,17 @@ struct Front {
     runs: Runs,
 }
 
+impl Default for Front {
+    fn default() -> Self {
+        Front { name: None, description: String::new(), invocable: true, runs: Runs::ForAnyone }
+    }
+}
+
 impl Front {
     fn read(front: &str) -> Self {
-        let mut read = Front {
-            name: None,
-            description: String::new(),
-            invocable: true,
-            runs: Runs::ForAnyone,
-        };
+        let mut read = Front::default();
+        let mut user_invocable: Option<bool> = None;
+        let mut disable_slash = false;
         let mut lines = front.lines().peekable();
         while let Some(line) = lines.next() {
             let Some((key, value)) = line.split_once(':') else {
@@ -354,13 +520,19 @@ impl Front {
             match key {
                 "name" => read.name = Some(unquote(&parts.join(" "))),
                 "description" => read.description = unquote(&parts.join(" ")),
-                "user-invocable" => read.invocable = unquote(&parts.join(" ")) != "false",
+                "user-invocable" => {
+                    user_invocable = Some(!unquote(&parts.join(" ")).eq_ignore_ascii_case("false"));
+                },
+                "disable-slash-command" if truthy(&unquote(&parts.join(" "))) => {
+                    disable_slash = true;
+                },
                 "disable-model-invocation" if truthy(&unquote(&parts.join(" "))) => {
                     read.runs = Runs::OnlyForYou;
                 },
                 _ => {},
             }
         }
+        read.invocable = !disable_slash && user_invocable.unwrap_or(true);
         read
     }
 }
@@ -626,6 +798,79 @@ mod tests {
         put(root, "a/.agents/skills/up/SKILL.md", "---\ndescription: Up.\n---\n");
         let found = pi_found(&root.join("a/b/c"), None, None);
         assert!(found.contains(&skill("up", "Up.")), "{found:?}");
+    }
+
+    #[test]
+    fn the_finder_finds_what_antigravity_runs_where_it_finds_it() {
+        let Ok(scratch) = tempfile::tempdir() else {
+            panic!("no scratch directory");
+        };
+        let root = scratch.path();
+        let home = root.join("home");
+        let front = |description: &str| format!("---\ndescription: {description}\n---\nDo it.\n");
+        put(root, "outside/.agents/skills/far/SKILL.md", &front("Above the repository."));
+        put(root, "outside/repo/.git/HEAD", "");
+        put(root, "outside/repo/.agents/skills/top/SKILL.md", &front("At the top."));
+        put(root, "outside/repo/.agents/skills/deep/nested/SKILL.md", &front("Too deep."));
+        put(root, "outside/repo/inner/.agent/skills/near/SKILL.md", &front("Near."));
+        put(
+            root,
+            "outside/repo/inner/.agents/skills/hidden-cmd/SKILL.md",
+            "---\ndescription: Hidden.\ndisable-slash-command: true\n---\n",
+        );
+        put(root, "home/.gemini/antigravity-cli/skills/near/SKILL.md", &front("CLI wins."));
+        put(root, "home/.gemini/skills/shared/SKILL.md", &front("Shared."));
+        put(root, "home/.gemini/config/skills/global/SKILL.md", &front("Global."));
+        put(root, "home/.agents/skills/user-agent/SKILL.md", &front("Home agents."));
+        put(
+            root,
+            "home/.gemini/config/plugins/review/skills/deep-review/SKILL.md",
+            "---\nname: deep-review\ndescription: Plugin review.\n---\n",
+        );
+        let cwd = root.join("outside/repo/inner");
+        assert_eq!(agy_found(&cwd, Some(&home)), [
+            skill("deep-review", "Plugin review."),
+            skill("global", "Global."),
+            skill("near", "CLI wins."),
+            skill("shared", "Shared."),
+            skill("top", "At the top."),
+            skill("user-agent", "Home agents."),
+        ]);
+        put(root, "plain/parent/.agents/skills/above/SKILL.md", &front("Above."));
+        put(root, "plain/parent/child/.agents/skills/here/SKILL.md", &front("Here."));
+        assert_eq!(agy_found(&root.join("plain/parent/child"), None), [skill("here", "Here.")]);
+
+        put(root, "home/.git/HEAD", "");
+        assert_eq!(agy_found(&home, Some(&home)), [
+            skill("deep-review", "Plugin review."),
+            skill("global", "Global."),
+            skill("near", "CLI wins."),
+            skill("shared", "Shared."),
+            skill("user-agent", "Home agents."),
+        ]);
+
+        let invalid_dir = root.join("plain/parent/child/.agents/skills/corrupt");
+        fs::create_dir_all(&invalid_dir).unwrap();
+        fs::write(invalid_dir.join("SKILL.md"), [0xff, 0xfe, 0x00]).unwrap();
+        put(root, "plain/parent/child/.agents/skills/bare/SKILL.md", "No frontmatter.\n");
+        let header = "---\ndescription: Long UTF-8.\n---\n";
+        let pad = usize::try_from(FRONT_BYTES).unwrap() - header.len() - 1;
+        let long_utf8 = format!("{header}{}é\n", "a".repeat(pad));
+        put(root, "plain/parent/child/.agents/skills/long/SKILL.md", &long_utf8);
+        assert_eq!(agy_found(&root.join("plain/parent/child"), None), [
+            skill("bare", ""),
+            skill("here", "Here."),
+            skill("long", "Long UTF-8."),
+        ]);
+        let filtered = root.join("filtered");
+        put(&filtered, ".DS_Store", "");
+        put(&filtered, ".hidden/SKILL.md", &front("Hidden."));
+        fs::create_dir_all(filtered.join("aaa-empty")).unwrap();
+        put(&filtered, "node_modules/dep/SKILL.md", &front("Dep."));
+        put(&filtered, "real/SKILL.md", &front("Real."));
+        assert_eq!(agy_skill_files(&filtered, 1), [filtered.join("real/SKILL.md")]);
+        assert!(!Front::read("disable-slash-command: true\nuser-invocable: true").invocable);
+        assert!(!Front::read("user-invocable: False").invocable);
     }
 
     #[test]

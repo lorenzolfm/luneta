@@ -1978,7 +1978,8 @@ fn runs_of(listed: &server::Terminal, agents: &[Agent], before: &Runs, shell: &S
     };
     if let Some(front) = front
         && let Some(agent) = agents.iter().find(|agent| agent.pid == front.pid)
-        && let Ok(session) = Session::parse(agent.session_id.as_str())
+        && let Some(session_id) = agent.session_id.as_ref()
+        && let Ok(session) = Session::parse(session_id.as_str())
     {
         return Runs::Agent { harness: agent.harness, session };
     }
@@ -2064,7 +2065,7 @@ mod tests {
         Agent {
             pid,
             harness: Harness::ClaudeCode,
-            session_id: Said::new("7c22-ab".to_owned()).unwrap(),
+            session_id: Some(Said::new("7c22-ab".to_owned()).unwrap()),
             cwd: Directory::parse("/w".to_owned()).unwrap(),
             status: Status::Idle,
             status_since: None,

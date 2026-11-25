@@ -183,7 +183,7 @@ fn agent(pid: u32, file: File, process: Process) -> Agent {
     Agent {
         pid,
         harness: Harness::Pi,
-        session_id: file.session_id,
+        session_id: Some(file.session_id),
         cwd: file.cwd,
         status: Status::of(Some(file.status.as_str()), None),
         status_since: Some(moment(file.status_since)),

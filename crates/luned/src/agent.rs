@@ -14,13 +14,13 @@ use crate::api::agent::WaitingFor as Waits;
 use crate::watch::Troubles;
 use crate::Directory;
 
-const FILE_BYTES_MAX: u64 = 64 * 1024;
+pub const FILE_BYTES_MAX: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub pid: u32,
     pub harness: Harness,
-    pub session_id: Said,
+    pub session_id: Option<Said>,
     pub cwd: Directory,
     pub status: Status,
     pub status_since: Option<SystemTime>,
@@ -220,7 +220,7 @@ impl Agent {
         api::Agent {
             pid: self.pid,
             harness: Some(self.harness.to_api().into()),
-            session_id: self.session_id.clone().into(),
+            session_id: self.session_id.clone().map(String::from),
             cwd: self.cwd.clone().into(),
             status,
             status_since: self.status_since.map(Into::into),

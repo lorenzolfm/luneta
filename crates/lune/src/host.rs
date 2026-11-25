@@ -149,7 +149,7 @@ pub enum Event {
     InputEnded(io::Error),
     Shown(u64, luned::Heard),
     Seen { number: u64, watcher: u64, seen: Seen },
-    Reached { claude_folder: Option<PathBuf> },
+    Reached { transcripts: luned::transcripts::Folders },
     Daemon(Result<Host, String>),
     Notice(String),
     Unclosed { on: Machine, act: Act, ticket: u64, unchanged: Unchanged },
@@ -450,7 +450,7 @@ pub struct App {
     speech: Option<Speech>,
     fetching: Option<Fetch>,
     releases: bool,
-    claude_folder: Option<PathBuf>,
+    transcripts: luned::transcripts::Folders,
     daemon: Option<PathBuf>,
     events: Sender<Event>,
     _watching: Vec<notify::RecommendedWatcher>,
@@ -786,7 +786,7 @@ impl App {
             speech: None,
             fetching: None,
             releases,
-            claude_folder: None,
+            transcripts: luned::transcripts::Folders::default(),
             daemon,
             events,
             _watching: watching,
@@ -1007,7 +1007,7 @@ impl App {
                     home.listed(listed, Instant::now());
                 }
             },
-            Event::Reached { claude_folder } => self.claude_folder = claude_folder,
+            Event::Reached { transcripts } => self.transcripts = transcripts,
             Event::Daemon(Ok(host)) => {
                 self.projected = Projected::adapted(&host).unwrap_or_else(|why| {
                     log::say(&format!("luned's projects: {why}"));
@@ -1237,7 +1237,7 @@ impl App {
         for act in acts {
             match act {
                 alerts::Act::Read(due) => {
-                    alerts::read(due, self.claude_folder.clone(), &self.events);
+                    alerts::read(due, self.transcripts.clone(), &self.events);
                 },
                 alerts::Act::Close(key) => self.desktop.close(key),
             }
@@ -1993,8 +1993,8 @@ impl App {
             Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
             Asked::Brief(brief) => {
                 self.briefs += 1;
-                let folder = self.claude_folder.clone();
-                let briefing = brief::ask(self.briefs, brief, folder, &self.events);
+                let folders = self.transcripts.clone();
+                let briefing = brief::ask(self.briefs, brief, folders, &self.events);
                 self.give(Focus { side: self.focus.side, over: Some(Over::Brief(briefing)) });
             },
             Asked::Ask(target) => {
