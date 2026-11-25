@@ -4,6 +4,8 @@ use tokio::runtime::{self, Handle, Runtime, RuntimeFlavor};
 
 const WORKERS: usize = 2;
 
+const WORKER: &str = "lune tasks";
+
 static SHARED: OnceLock<Runtime> = OnceLock::new();
 
 pub fn start() -> Result<(), String> {
@@ -20,9 +22,8 @@ pub fn start() -> Result<(), String> {
 
 #[must_use]
 pub fn shared() -> Handle {
-    #[cfg(test)]
-    start().expect("a test builds lune's tasks as it first hands one over");
-    let runtime = SHARED.get().expect("a process starts lune's tasks before it hands one over");
+    let building = || built().expect("lune's tasks build as they are first handed over");
+    let runtime = SHARED.get_or_init(building);
     let handle = runtime.handle().clone();
     assert_eq!(handle.runtime_flavor(), RuntimeFlavor::MultiThread, "a task may block in place");
     handle
@@ -31,7 +32,7 @@ pub fn shared() -> Handle {
 fn built() -> std::io::Result<Runtime> {
     runtime::Builder::new_multi_thread()
         .worker_threads(WORKERS)
-        .thread_name("lune tasks")
+        .thread_name(WORKER)
         .enable_all()
         .build()
 }
@@ -41,7 +42,7 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
-    use super::shared;
+    use super::{shared, WORKER};
 
     #[test]
     fn a_task_goes_on_after_the_thread_that_handed_it_over_ends() {
@@ -56,6 +57,6 @@ mod tests {
         handing.join().unwrap();
         started.send(()).unwrap();
         let name = heard.recv().unwrap();
-        assert_eq!(name.as_deref(), Some("lune tasks"));
+        assert_eq!(name.as_deref(), Some(WORKER));
     }
 }

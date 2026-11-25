@@ -1,0 +1,24 @@
+id: mains-start-tasks
+language: rust
+files:
+  - crates/lune/src/main.rs
+  - crates/lune/src/bin/**
+  - crates/luned/src/main.rs
+  - crates/luned/src/bin/**
+message: >-
+  Start lune's tasks in main, with luned::tasks::start(), and tell its error:
+  luned::tasks::shared() builds them on first use otherwise, and a failure to
+  build them there is a panic in whatever first hands one over, not a word at
+  launch.
+rule:
+  kind: function_item
+  has:
+    field: name
+    regex: ^main$
+  not:
+    has:
+      kind: call_expression
+      has:
+        field: function
+        regex: ^(\w+::)*tasks::start$
+      stopBy: end

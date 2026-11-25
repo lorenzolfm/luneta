@@ -1,0 +1,80 @@
+id: runtimes-through-tasks
+snapshots:
+  '#[t::main] async fn main() {}':
+    labels:
+    - source: t::main
+      style: primary
+      start: 2
+      end: 9
+  '#[tokio::main(flavor = "current_thread")] async fn main() {}':
+    labels:
+    - source: tokio::main(flavor = "current_thread")
+      style: primary
+      start: 2
+      end: 40
+  '#[tokio::main] async fn main() {}':
+    labels:
+    - source: tokio::main
+      style: primary
+      start: 2
+      end: 13
+  '#[tokio::test] async fn f() {}':
+    labels:
+    - source: tokio::test
+      style: primary
+      start: 2
+      end: 13
+  fn f() { let runtime = Builder::new_multi_thread().build(); }:
+    labels:
+    - source: new_multi_thread
+      style: primary
+      start: 32
+      end: 48
+  fn f() { let runtime = Runtime::new(); }:
+    labels:
+    - source: Runtime
+      style: primary
+      start: 23
+      end: 30
+  fn f() { let runtime = rt::Runtime::new(); }:
+    labels:
+    - source: Runtime
+      style: primary
+      start: 27
+      end: 34
+  fn f() { let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build(); }:
+    labels:
+    - source: new_current_thread
+      style: primary
+      start: 48
+      end: 66
+  fn f() { let runtime = tokio::runtime::LocalRuntime::new(); }:
+    labels:
+    - source: LocalRuntime
+      style: primary
+      start: 39
+      end: 51
+  fn f() { let runtime = tokio::runtime::Runtime::new(); }:
+    labels:
+    - source: Runtime
+      style: primary
+      start: 39
+      end: 46
+  'fn f(runtime: &Runtime) { runtime.block_on(ask()); }':
+    labels:
+    - source: Runtime
+      style: primary
+      start: 15
+      end: 22
+  use tokio::runtime::Runtime as Rt;:
+    labels:
+    - source: Runtime
+      style: primary
+      start: 20
+      end: 27
+  use tokio::runtime::{Handle, Runtime};:
+    labels:
+    - source: Runtime
+      style: primary
+      start: 29
+      end: 36

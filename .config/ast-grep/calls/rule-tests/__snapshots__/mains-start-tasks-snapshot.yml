@@ -1,0 +1,32 @@
+id: mains-start-tasks
+snapshots:
+  fn main() -> ExitCode { lune::main() }:
+    labels:
+    - source: fn main() -> ExitCode { lune::main() }
+      style: primary
+      start: 0
+      end: 38
+    - source: main
+      style: secondary
+      start: 3
+      end: 7
+  fn main() { let started = restarts::start(); }:
+    labels:
+    - source: fn main() { let started = restarts::start(); }
+      style: primary
+      start: 0
+      end: 46
+    - source: main
+      style: secondary
+      start: 3
+      end: 7
+  fn main() { let tasks = luned::tasks::shared(); }:
+    labels:
+    - source: fn main() { let tasks = luned::tasks::shared(); }
+      style: primary
+      start: 0
+      end: 49
+    - source: main
+      style: secondary
+      start: 3
+      end: 7

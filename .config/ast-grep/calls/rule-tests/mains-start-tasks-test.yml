@@ -1,0 +1,9 @@
+id: mains-start-tasks
+valid:
+  - "fn main() -> ExitCode { if let Err(why) = luned::tasks::start() { return ExitCode::FAILURE; } lune::main() }"
+  - "fn main() -> ExitCode { if let Err(why) = tasks::start() { return ExitCode::FAILURE; } ExitCode::SUCCESS }"
+  - "fn mains() -> ExitCode { lune::main() }"
+invalid:
+  - "fn main() -> ExitCode { lune::main() }"
+  - "fn main() { let tasks = luned::tasks::shared(); }"
+  - "fn main() { let started = restarts::start(); }"

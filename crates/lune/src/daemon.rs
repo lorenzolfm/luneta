@@ -91,6 +91,13 @@ pub async fn of_any_build(path: &Path) -> Result<Daemon, Unreached> {
 }
 
 pub async fn current(path: &Path) -> Result<Current, String> {
+    let (path, tasks) = (path.to_owned(), luned::tasks::shared());
+    let reaching = tasks.clone();
+    let reached = tasks.spawn_blocking(move || reaching.block_on(reach(&path)));
+    reached.await.unwrap_or_else(|ended| std::panic::resume_unwind(ended.into_panic()))
+}
+
+async fn reach(path: &Path) -> Result<Current, String> {
     let folder = match folder::open(path).map_err(|refusal| refusal.to_string())? {
         Some(folder) => folder,
         None => folder::make(path).map_err(|refusal| refusal.to_string())?,
@@ -334,5 +341,19 @@ mod tests {
         assert!(!way("0.2.3+1", "0.2.2+2", "0.2.2+2"));
         assert!(!way("0.2.2+1", "0.2.2+2", "0.2.2+1"));
         assert!(!way("0.2.2+1", "0.2.2+2", "0.0"));
+    }
+
+    #[test]
+    fn a_task_on_lune_s_tasks_reaches_luned_as_a_thread_does() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let open = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(open.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = open.path().to_owned();
+        let tasks = luned::tasks::shared();
+        let reaching = tasks.spawn(async move { current(&path).await.map(|_| ()) });
+        let reached = tasks.block_on(reaching).unwrap();
+        let refused = folder::Refusal::Open(open.path().to_owned()).to_string();
+        assert_eq!(reached, Err(refused), "a worker hands the reach to a thread that may block");
     }
 }

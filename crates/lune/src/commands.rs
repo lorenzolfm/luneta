@@ -217,21 +217,15 @@ where
     F: FnOnce(Daemon) -> Asked,
     Asked: Future<Output = Result<(), Box<dyn Error>>>,
 {
-    let runtime = match runtime() {
-        Ok(runtime) => runtime,
-        Err(why) => {
-            eprintln!("lune: {why}");
-            return ExitCode::FAILURE;
-        },
-    };
-    let daemon = match runtime.block_on(reaching) {
+    let tasks = luned::tasks::shared();
+    let daemon = match tasks.block_on(reaching) {
         Ok(daemon) => daemon,
         Err(unreached) => {
             eprintln!("lune: {unreached}");
             return unreached.exit_code();
         },
     };
-    if let Err(error) = runtime.block_on(asking(daemon)) {
+    if let Err(error) = tasks.block_on(asking(daemon)) {
         eprintln!("lune: {}: {}", folder.join(SOCKET).display(), causes(&*error));
         return ExitCode::FAILURE;
     }
@@ -276,21 +270,15 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         },
     }
-    let runtime = match runtime() {
-        Ok(runtime) => runtime,
-        Err(why) => {
-            eprintln!("lune: {why}");
-            return ExitCode::FAILURE;
-        },
-    };
-    let daemon = match runtime.block_on(daemon::running(folder)) {
+    let tasks = luned::tasks::shared();
+    let daemon = match tasks.block_on(daemon::running(folder)) {
         Ok(daemon) => daemon,
         Err(why) => {
             println!("{destination}: luned reaches it once it runs: {why}");
             return ExitCode::SUCCESS;
         },
     };
-    match runtime.block_on(first_reach(daemon, destination)) {
+    match tasks.block_on(first_reach(daemon, destination)) {
         Ok(Some(Reached::Host(host))) => {
             match host.projects.and_then(|projects| projects.held) {
                 Some(Held::Kept(kept)) => match kept.projects.len() {
@@ -344,14 +332,8 @@ async fn first_reach(
     }
 }
 
-pub fn runtime() -> Result<tokio::runtime::Runtime, String> {
-    let built = tokio::runtime::Builder::new_current_thread().enable_all().build();
-    built.map_err(|error| format!("no runtime: {error}"))
-}
-
 pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
-    let runtime = runtime()?;
-    runtime.block_on(async {
+    luned::tasks::shared().block_on(async {
         let mut daemon = daemon::running(folder).await?;
         let listed = daemon.list_agents(()).await;
         listed.map(tonic::Response::into_inner).map_err(|error| causes(&error))

@@ -21,14 +21,7 @@ const _: () = assert!(MAKING_WAY.as_millis() < AGAIN.as_millis());
 
 pub fn start(folder: PathBuf, events: Sender<Event>) {
     thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = events.send(Event::Daemon(Err(format!("no runtime: {error}"))));
-                return;
-            },
-        };
-        runtime.block_on(watch(folder, events));
+        luned::tasks::shared().block_on(watch(folder, events));
     });
 }
 
