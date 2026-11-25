@@ -1,0 +1,22 @@
+id: tests-type-at-a-prompt
+valid:
+  - "fn f() { shown.open_running(&shell::AT_A_PROMPT); }"
+  - "fn f() { let script = format!(\"echo far; {}\", shell::SCRIPT); }"
+  - "fn f() { shown.open_running(&[\"sh\", \"-c\", &line]); }"
+  - "fn f() { let argv = [\"sh\"].into_iter().chain(argv).collect(); }"
+  - "fn f() { let argv = vec![\"/bin/sh\".to_owned(), \"-c\".to_owned()]; }"
+  - "fn f() { Command::new(\"/bin/sh\").args([\"-c\", script]); }"
+  - "fn f() { g(\"exec sh -c 'true'\"); }"
+  - "fn f() { g(\"echo far; sh -c 'true'\"); }"
+  - "fn f() { g(\"echo far; shasum\"); }"
+invalid:
+  - "fn f() { shown.open_running(&[\"sh\"]); }"
+  - "fn f() { opens(command(&[\"/bin/sh\"])); }"
+  - "fn f() { let argv = vec![\"/bin/sh\".to_owned()]; }"
+  - "fn f() { let argv = vec![\"sh\".into()]; }"
+  - "fn f() { shown.open_running(&[\"sh\", \"-c\", \"echo far; exec sh\"]); }"
+  - "fn f() { g(\"cd /tmp; exec /bin/sh; true\"); }"
+  - "fn f() { shown.open_running(&[\"sh\"].to_vec()); }"
+  - "fn f() { g(\"echo far; sh\"); }"
+  - "fn f() { g(\"true && sh; true\"); }"
+  - "fn f() { g(\"echo far; exec sh -i\"); }"

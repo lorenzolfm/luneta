@@ -8,7 +8,7 @@ use std::thread;
 
 use hyper_util::rt::TokioIo;
 use lune_mux::api::{self, mux_client::MuxClient};
-use lune_waits::Patience;
+use lune_waits::{shell, Patience};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -121,7 +121,7 @@ impl Drop for Server {
 pub fn shell() -> api::Opens {
     api::Opens {
         cwd: "/".to_owned(),
-        program: Some(api::Program { argv: vec!["/bin/sh".to_owned()] }),
+        program: Some(api::Program { argv: shell::AT_A_PROMPT.map(str::to_owned).to_vec() }),
         ends: api::Ends::Closes.into(),
     }
 }
@@ -225,7 +225,11 @@ impl Viewer {
         self.send(api::from_viewer::Event::Showing(showing)).await;
     }
 
-    pub async fn type_line(&self, terminal: api::TerminalKey, text: &str) {
+    pub async fn press_enter(&self, terminal: api::TerminalKey) {
+        self.type_line(terminal, "").await;
+    }
+
+    async fn type_line(&self, terminal: api::TerminalKey, text: &str) {
         for key in line_keys(text) {
             let (terminal, event) = (Some(terminal), Some(api::typed::Event::Key(key)));
             self.send(api::from_viewer::Event::Typed(api::Typed { terminal, event })).await;
@@ -264,8 +268,15 @@ impl Viewer {
     }
 
     pub async fn until(&mut self, what: &str, test: impl Fn(&Viewer) -> bool) {
+        self.until_found(what, |viewer| test(viewer).then_some(())).await;
+    }
+
+    async fn until_found<T>(&mut self, what: &str, find: impl Fn(&Viewer) -> Option<T>) -> T {
         let patience = Patience::begun();
-        while !test(self) {
+        loop {
+            if let Some(found) = find(self) {
+                return found;
+            }
             let next = self.next(patience, what).await.unwrap();
             assert!(next.is_some(), "the stream ended before {what}");
         }
@@ -276,6 +287,31 @@ impl Viewer {
             viewer.rows_of(terminal).iter().any(|row| row == text)
         })
         .await;
+    }
+
+    pub async fn until_prompted(&mut self, terminal: u32) -> shell::Prompted {
+        let what = format!("terminal {terminal}'s shell prompts");
+        self.until_found(&what, |viewer| shell::prompted(&viewer.screen_of(terminal))).await
+    }
+
+    pub async fn type_at(&self, terminal: api::TerminalKey, prompted: &shell::Prompted, line: &str) -> shell::Typed {
+        let typed = prompted.typed(line);
+        self.type_line(terminal, typed.line()).await;
+        typed
+    }
+
+    pub async fn until_said(&mut self, terminal: u32, typed: &shell::Typed) -> Vec<String> {
+        let what = format!("terminal {terminal} says what {:?} does, then prompts", typed.line());
+        self.until_found(&what, |viewer| typed.said(&viewer.screen_of(terminal)).map(<[String]>::to_vec)).await
+    }
+
+    fn screen_of(&self, terminal: u32) -> shell::Screen {
+        let rows = self.rows_of(terminal).to_vec();
+        let cursor = self.frame_of(terminal).and_then(|frame| frame.cursor.as_ref()).map(|cursor| shell::Cursor {
+            row: usize::try_from(cursor.row).unwrap(),
+            column: usize::try_from(cursor.column).unwrap(),
+        });
+        shell::Screen::new(rows, cursor).unwrap_or_else(|why| panic!("terminal {terminal}'s screen is broken: {why}"))
     }
 
     pub fn rows_of(&self, terminal: u32) -> &[String] {
