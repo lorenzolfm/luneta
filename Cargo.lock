@@ -1582,6 +1582,7 @@ dependencies = [
  "prost",
  "prost-types",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

@@ -3,8 +3,8 @@ use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 
 use lune_phone::{
-    Came, Core, Found, Held, Landed, Marked, Model, Observer, Order, Plan, Pruned, Rebase,
-    Refusals, Step, Unanswered, View, Worktree,
+    Appearance, Came, Core, Found, Framed, Grid, Held, KeyName, Landed, Marked, Model, Observer,
+    Order, Plan, Pruned, Rebase, Refusals, Step, TerminalView, Unanswered, View, Worktree,
 };
 use lune_waits::{eventually, Patience, PATIENCE};
 
@@ -98,6 +98,45 @@ fn started_view(model: &Model, worktree: u64) -> Option<View> {
     matches!(view.found, Found::Key { .. }).then(|| view.clone())
 }
 
+fn texts(grid: &Grid) -> Vec<String> {
+    let line = |row: &lune_phone::Row| {
+        let mut line = String::new();
+        for run in &row.runs {
+            let at = usize::from(run.column);
+            let drawn = line.chars().count();
+            line.extend(std::iter::repeat_n(' ', at.saturating_sub(drawn)));
+            line.push_str(&run.text);
+        }
+        line.trim_end().to_owned()
+    };
+    grid.rows.iter().map(line).collect()
+}
+
+fn shows(phone: &Phone, view: &TerminalView, what: &str, shown: impl Fn(&Grid) -> bool) -> Grid {
+    let patience = Patience::begun();
+    let mut last = None;
+    loop {
+        let waited = format!("{what}, not only {:?}", last.as_ref().map(texts));
+        match phone.block_on(patience.awaited(waited, view.next())) {
+            Framed::Shown { grid } if shown(&grid) => return grid,
+            Framed::Shown { grid } => last = Some(grid),
+            ended @ (Framed::Closed | Framed::Lost { .. } | Framed::Refused { .. }) => {
+                panic!("the terminal is not shown: {ended:?}")
+            },
+        }
+    }
+}
+
+fn ends(phone: &Phone, view: &TerminalView, what: &str) -> Framed {
+    let patience = Patience::begun();
+    loop {
+        match phone.block_on(patience.awaited(what, view.next())) {
+            Framed::Shown { .. } => {},
+            ended @ (Framed::Closed | Framed::Lost { .. } | Framed::Refused { .. }) => return ended,
+        }
+    }
+}
+
 fn names(model: &Model) -> Vec<&str> {
     projects_here(model).iter().map(|it| it.name.as_str()).collect()
 }
@@ -176,6 +215,61 @@ fn the_phone_renames_and_reorders_a_clone_s_worktrees_and_closes_a_view_and_a_wo
     assert!(stale.contains("changed since"), "{stale}");
     phone.block_on(phone.core.close_worktree(None, main, vec![view.id])).unwrap();
     phone.sees("the worktree closed", |model| order(model).is_empty());
+}
+
+#[test]
+fn the_phone_shows_a_terminal_types_into_it_scrolls_back_lets_it_go_and_hears_it_close() {
+    let owned = Owned::new();
+    let worktree = crate::layouts::worktree_in_home(&owned);
+    let mut shown = crate::layouts::Shown::new(&owned, worktree, 80, 24);
+    shown.open_running(&["sh"]);
+    shown.open_running(&["sleep", "600"]);
+    let phone = Phone::of(&owned.host);
+    let keyed = |model: &Model| {
+        let views = worktree_of(model, worktree).map_or(&[][..], |it| it.views.as_slice());
+        views.iter().filter(|view| matches!(view.found, Found::Key { .. })).count()
+    };
+    let model = phone.sees("both views run", |model| keyed(model) == 2);
+    let Some(View { found: Found::Key { key: shell }, .. }) = started_view(&model, worktree) else {
+        panic!("the shell's view has its terminal");
+    };
+    let view = phone.core.terminal(&shell, Appearance::Dark);
+    let first = shows(&phone, &view, "the terminal's screen", |_| true);
+    assert_eq!(first.scrolled_back, 0);
+
+    view.typed("echo wr''ong", false).unwrap();
+    view.typed("u", true).unwrap();
+    view.typed("echo right-$((40 + 2))", false).unwrap();
+    view.pressed(KeyName::Enter, false).unwrap();
+    let typed = shows(&phone, &view, "the shell says right-42", |grid| {
+        texts(grid).iter().any(|line| line == "right-42")
+    });
+    assert!(!texts(&typed).iter().any(|line| line == "wrong"), "ctrl-u let the line go: {:?}", texts(&typed));
+
+    view.typed("seq 1 200", false).unwrap();
+    view.pressed(KeyName::Enter, false).unwrap();
+    shows(&phone, &view, "the shell counts to 200", |grid| texts(grid).iter().any(|line| line == "200"));
+    view.scroll(5).unwrap();
+    let back = shows(&phone, &view, "the screen five rows back", |grid| grid.scrolled_back == 5);
+    assert!(back.scrollback >= 5, "{back:?}");
+    view.pressed(KeyName::Left, false).unwrap();
+    shows(&phone, &view, "a key brings the screen back to now", |grid| grid.scrolled_back == 0);
+
+    let again = phone.core.terminal(&shell, Appearance::Light);
+    shows(&phone, &again, "the terminal's screen shown twice", |_| true);
+    again.close();
+    assert!(matches!(phone.block_on(again.next()), Framed::Lost { .. }));
+    let gone = again.typed("x", false);
+    assert!(matches!(gone, Err(Unanswered::Refused { .. })), "{gone:?}");
+
+    phone.block_on(phone.core.close_view(shell.clone())).unwrap();
+    assert_eq!(ends(&phone, &view, "the shown terminal closes"), Framed::Closed);
+    let closed = view.typed("x", false);
+    assert!(matches!(closed, Err(Unanswered::Refused { .. })), "{closed:?}");
+    phone.sees("the shell's view gone", |model| keyed(model) == 1);
+    let unmade = phone.core.terminal(&shell, Appearance::Light);
+    let refused = phone.block_on(Patience::begun().awaited("luned refuses it", unmade.next()));
+    assert!(matches!(refused, Framed::Refused { .. }), "a closed terminal is no one's to show: {refused:?}");
 }
 
 #[test]

@@ -15,6 +15,16 @@ pub enum Machine {
     Remote(Destination),
 }
 
+impl Machine {
+    #[must_use]
+    pub fn destination(&self) -> Option<&Destination> {
+        match self {
+            Machine::Local => None,
+            Machine::Remote(destination) => Some(destination),
+        }
+    }
+}
+
 pub fn local_name() -> String {
     let uname = rustix::system::uname();
     let node = uname.nodename().to_string_lossy();

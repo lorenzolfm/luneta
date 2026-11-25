@@ -195,6 +195,7 @@ type Screens = BTreeMap<u32, (Vec<String>, api::Frame)>;
 
 pub struct Viewer {
     pub refused: Vec<String>,
+    pub closed: Vec<u32>,
     screens: Screens,
     to: mpsc::Sender<api::FromViewer>,
     from: Streaming<api::ToViewer>,
@@ -212,7 +213,7 @@ impl Viewer {
         let (to, said) = mpsc::channel(64);
         to.send(viewer_said(api::from_viewer::Event::Hello(greeting))).await.unwrap();
         let from = mux.show(ReceiverStream::new(said)).await?.into_inner();
-        Ok(Viewer { refused: Vec::new(), screens: BTreeMap::new(), to, from })
+        Ok(Viewer { refused: Vec::new(), closed: Vec::new(), screens: BTreeMap::new(), to, from })
     }
 
     pub async fn send(&self, said: api::from_viewer::Event) {
@@ -247,7 +248,9 @@ impl Viewer {
         patience: Patience,
         what: &str,
     ) -> Result<Option<api::to_viewer::Event>, tonic::Status> {
-        let next = patience.awaited(what, self.from.message()).await;
+        let screens = &self.screens;
+        let awaited_and_seen = fmt::from_fn(|f| write!(f, "{what}, but {}", seen(screens)));
+        let next = patience.awaited(awaited_and_seen, self.from.message()).await;
         let Some(message) = next? else {
             return Ok(None);
         };
@@ -255,6 +258,7 @@ impl Viewer {
         match &event {
             api::to_viewer::Event::Frame(frame) => applied(&mut self.screens, frame),
             api::to_viewer::Event::Refused(refused) => self.refused.push(refused.reason.clone()),
+            api::to_viewer::Event::Closed(closed) => self.closed.push(closed.terminal.unwrap().id),
         }
         Ok(Some(event))
     }
@@ -281,6 +285,23 @@ impl Viewer {
     pub fn frame_of(&self, terminal: u32) -> Option<&api::Frame> {
         self.screens.get(&terminal).map(|(_, frame)| frame)
     }
+}
+
+fn seen(screens: &Screens) -> impl fmt::Display {
+    fmt::from_fn(move |f| {
+        if screens.is_empty() {
+            return write!(f, "no terminal was shown");
+        }
+        let mut separator = "";
+        for (terminal, (rows, _)) in screens {
+            write!(f, "{separator}terminal {terminal} shows:")?;
+            for row in rows.iter().filter(|row| !row.trim().is_empty()) {
+                write!(f, "\n  {row:?}")?;
+            }
+            separator = "\n";
+        }
+        Ok(())
+    })
 }
 
 fn applied(screens: &mut Screens, frame: &api::Frame) {

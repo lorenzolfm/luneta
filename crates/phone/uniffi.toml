@@ -1,2 +1,4 @@
 [bindings.swift.rename]
 View = "LuneView"
+Grid = "TerminalGrid"
+Cursor = "TerminalCursor"

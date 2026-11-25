@@ -18,8 +18,9 @@ use crate::directory::Directory;
 use crate::git::{self, Common, Git};
 use crate::github::{self, Asker, Based, Pulled};
 use crate::panics::{self, Panicked};
+use crate::process::{self, Unread};
 use crate::program::{self, Ran};
-use crate::seats;
+use crate::{seats, terminate};
 
 const MOVED: &str = " but expected ";
 
@@ -28,6 +29,8 @@ const UNSET: &[u8] = b"fatal: no such section: ";
 pub const PLANNING: Duration = Duration::from_mins(5);
 
 pub const DELETING: Duration = Duration::from_mins(30);
+
+pub const UNTOLD: &str = "cannot tell where the views are";
 
 const ASKS_AT_ONCE: usize = 8;
 
@@ -42,7 +45,7 @@ const HOLDS_ANOTHER: &str = "another worktree is in it";
 const CHANGED: &str = "it has modified or untracked files";
 const A_VIEW: &str = "it has a view";
 const AN_AGENT: &str = "an agent works in it";
-const RUNS_HERE: &str = "this runs from it";
+const A_LUNE: &str = "a lune runs from it";
 const DEFAULT: &str = "it is the default branch";
 const PANICKED: &str = "what asked about it panicked";
 
@@ -85,7 +88,7 @@ pub struct Unasked {
 }
 
 #[derive(Debug)]
-pub struct Planned {
+pub(crate) struct Planned {
     plan: Plan,
     common: Directory,
 }
@@ -94,11 +97,6 @@ impl Planned {
     #[must_use]
     pub fn plan(&self) -> &Plan {
         &self.plan
-    }
-
-    #[must_use]
-    pub fn into_plan(self) -> Plan {
-        self.plan
     }
 }
 
@@ -173,10 +171,38 @@ pub fn name_of(path: &str) -> &str {
 pub struct Occupied {
     views: Vec<PathBuf>,
     agents: Vec<PathBuf>,
+    lunes: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lunes(Vec<PathBuf>);
+
+impl Lunes {
+    pub fn running() -> Result<Lunes, String> {
+        let process::Mine { found, unreadable } = process::mine(&[((), terminate::LUNE)]);
+        let pids = found.iter().map(|found| found.id.pid);
+        let pids = pids.chain(unreadable.iter().map(|unreadable| unreadable.id.pid));
+        let mut cwds = Vec::new();
+        for pid in pids {
+            match process::cwd(pid) {
+                Ok(cwd) => cwds.push(cwd),
+                Err(Unread::Gone) => {},
+                Err(Unread::Failed(why)) => {
+                    return Err(format!("luned cannot tell where lune {pid} runs: {why}"));
+                },
+            }
+        }
+        Ok(Lunes(cwds))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn none() -> Lunes {
+        Lunes(Vec::new())
+    }
 }
 
 impl Occupied {
-    pub fn of(host: &api::Host) -> Result<Occupied, String> {
+    pub fn of(host: &api::Host, lunes: Lunes) -> Result<Occupied, String> {
         let unread = seats::unread(host.unread, &host.unread_files);
         let unread = unread.map_err(|unplaced| unplaced.to_string())?;
         let terminals = terminals(host)?;
@@ -199,7 +225,7 @@ impl Occupied {
         }
         let views = terminals.into_iter().map(|(_, folder)| folder).collect();
         let agents = host.agents.iter().map(|agent| PathBuf::from(&agent.cwd)).collect();
-        Ok(Occupied { views, agents })
+        Ok(Occupied { views, agents, lunes: lunes.0 })
     }
 
     fn why_in(&self, folder: &Path) -> Option<&'static str> {
@@ -210,7 +236,10 @@ impl Occupied {
         if self.views.iter().any(holds) {
             return Some(A_VIEW);
         }
-        self.agents.iter().any(holds).then_some(AN_AGENT)
+        if self.agents.iter().any(holds) {
+            return Some(AN_AGENT);
+        }
+        self.lunes.iter().any(holds).then_some(A_LUNE)
     }
 }
 
@@ -315,7 +344,6 @@ fn stays(
     all: &[Listed],
     head: &str,
     occupied: &Occupied,
-    here: Option<&Path>,
 ) -> Result<Option<&'static str>, String> {
     if listed.head != head {
         return Ok(Some(NOT_AT_HEAD));
@@ -336,14 +364,7 @@ fn stays(
     if !clean(&listed.path)? {
         return Ok(Some(CHANGED));
     }
-    if let Some(why) = occupied.why_in(folder) {
-        return Ok(Some(why));
-    }
-    let runs_here = here.is_some_and(|here| {
-        here.starts_with(folder)
-            || fs::canonicalize(folder).is_ok_and(|real| here.starts_with(real))
-    });
-    Ok(runs_here.then_some(RUNS_HERE))
+    Ok(occupied.why_in(folder))
 }
 
 fn at_once<T: Sync, S, R: Send>(
@@ -508,7 +529,15 @@ fn bytes_of(folder: &str) -> Option<u64> {
     kibibytes.checked_mul(1024)
 }
 
-pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result<Planned, String> {
+fn untold(why: &str) -> String {
+    format!("luned {UNTOLD}, so it deletes nothing: {why}")
+}
+
+pub(crate) fn plan(
+    dir: &Directory,
+    occupied: impl FnOnce() -> Result<Occupied, String>,
+) -> Result<Planned, String> {
+    let occupied = occupied().map_err(|why| untold(&why))?;
     let common = common_of(dir)?;
     let repository = git::holder(common.as_str())
         .ok_or_else(|| format!("no directory holds the repository {common}"))?;
@@ -530,7 +559,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
             Err(why) => plan.unasked.push(Unasked { folder: on.listed.path.clone(), why }),
         }
     }
-    let going = sorted_out(&mut plan, merged, &listed, occupied, here, &common)?;
+    let going = sorted_out(&mut plan, merged, &listed, &occupied, &common)?;
     let others = at_once(&going, Asker::default, |asker, (on, pulled, _): &Going<'_>| {
         others_of(asker, &common, on, pulled)
     });
@@ -607,7 +636,6 @@ fn sorted_out<'a>(
     merged: Vec<(OnBranch<'a>, Pulled)>,
     all: &[Listed],
     occupied: &Occupied,
-    here: Option<&Path>,
     common: &Directory,
 ) -> Result<Vec<Going<'a>>, String> {
     let mut default = None;
@@ -615,7 +643,7 @@ fn sorted_out<'a>(
     let mut going = Vec::new();
     for (on, pulled) in merged {
         let (folder, number) = (on.listed.path.clone(), pulled.pull_request.number().get());
-        let why = match stays(on.listed, all, &pulled.head, occupied, here) {
+        let why = match stays(on.listed, all, &pulled.head, occupied) {
             Ok(why) => why,
             Err(why) => {
                 plan.unasked.push(Unasked { folder, why });
@@ -653,14 +681,13 @@ fn sorted_out<'a>(
     Ok(going)
 }
 
-pub fn deleted(
+fn deleted(
     planned: Planned,
     occupied: impl Fn() -> Result<Occupied, String>,
-    here: Option<&Path>,
 ) -> Vec<Outcome> {
     let Planned { plan, common } = planned;
     let outcome = |goes: Goes| {
-        let came = match removed(&common, &goes, &occupied, here) {
+        let came = match removed(&common, &goes, &occupied) {
             Ok(()) => match branch_deleted(&common, &goes) {
                 Ok(()) => Came::Gone,
                 Err(why) => Came::WentBut(why),
@@ -672,32 +699,29 @@ pub fn deleted(
     plan.goes.into_iter().map(outcome).collect()
 }
 
-pub fn deleted_as_agreed(
+pub(crate) fn deleted_as_agreed(
     dir: &Directory,
     agreed: &BTreeSet<Deleting>,
     occupied: impl Fn() -> Result<Occupied, String>,
-    here: Option<&Path>,
 ) -> Result<Pruned, String> {
-    let now = occupied().map_err(|why| format!("lune cannot tell its views: {why}"))?;
-    let planned = plan(dir, &now, here)?;
+    let planned = plan(dir, &occupied)?;
     if planned.plan.deletes() != *agreed {
         return Ok(Pruned::Changed(planned.plan));
     }
-    Ok(Pruned::Went(deleted(planned, occupied, here)))
+    Ok(Pruned::Went(deleted(planned, occupied)))
 }
 
 fn removed(
     common: &Directory,
     goes: &Goes,
     occupied: &impl Fn() -> Result<Occupied, String>,
-    here: Option<&Path>,
 ) -> Result<(), String> {
-    stands_as_planned(common, goes, occupied, here)?;
+    stands_as_planned(common, goes, occupied)?;
     let Pushed::Goes(far) = &goes.pushed else {
         return worktree_removed(common, &goes.folder);
     };
     far_branch_deleted(common, &goes.head, far)?;
-    stands_as_planned(common, goes, occupied, here)
+    stands_as_planned(common, goes, occupied)
         .and_then(|()| worktree_removed(common, &goes.folder))
         .map_err(|why| format!("{why}; its branch on {} has gone", far.remote))
 }
@@ -706,7 +730,6 @@ fn stands_as_planned(
     common: &Directory,
     goes: &Goes,
     occupied: &impl Fn() -> Result<Occupied, String>,
-    here: Option<&Path>,
 ) -> Result<(), String> {
     let occupied = occupied().map_err(|why| format!("lune cannot tell its views: {why}"))?;
     let all = worktrees(common)?;
@@ -717,7 +740,7 @@ fn stands_as_planned(
     if listed.branch.as_deref() != Some(goes.branch.as_str()) {
         return Err(format!("it is no longer on {}", goes.branch));
     }
-    match stays(listed, &all, &goes.head, &occupied, here)? {
+    match stays(listed, &all, &goes.head, &occupied)? {
         Some(why) => Err(why.to_owned()),
         None => Ok(()),
     }
@@ -1014,8 +1037,28 @@ mod tests {
     fn an_agent_in_a_worktree_or_under_it_keeps_it() {
         let agents = vec![api::Agent { cwd: "/w/c/src".to_owned(), ..api::Agent::default() }];
         let host = api::Host { agents, ..api::Host::default() };
-        let occupied = Occupied::of(&host).unwrap();
+        let occupied = Occupied::of(&host, Lunes::none()).unwrap();
         assert_eq!(occupied.why_in(Path::new("/w/c")), Some(AN_AGENT));
+        assert_eq!(occupied.why_in(Path::new("/w/cc")), None);
+    }
+
+    #[test]
+    fn what_cannot_tell_where_the_views_are_plans_and_deletes_nothing() {
+        let dir = Directory::parse("/w/a".to_owned()).unwrap();
+        let untold = || Err("luned cannot tell where lune 9 runs: gone wrong".to_owned());
+        let why = "luned cannot tell where the views are, so it deletes nothing: luned cannot \
+                   tell where lune 9 runs: gone wrong";
+        assert_eq!(plan(&dir, untold).err(), Some(why.to_owned()));
+        let pruned = deleted_as_agreed(&dir, &BTreeSet::new(), untold);
+        assert_eq!(pruned.err(), Some(why.to_owned()));
+    }
+
+    #[test]
+    fn a_lune_in_a_worktree_or_under_it_keeps_it() {
+        let lunes = Lunes(vec![PathBuf::from("/w/c/src"), PathBuf::from("/w/d")]);
+        let occupied = Occupied::of(&api::Host::default(), lunes).unwrap();
+        assert_eq!(occupied.why_in(Path::new("/w/c")), Some(A_LUNE));
+        assert_eq!(occupied.why_in(Path::new("/w/d")), Some(A_LUNE));
         assert_eq!(occupied.why_in(Path::new("/w/cc")), None);
     }
 
@@ -1042,21 +1085,21 @@ mod tests {
             in_layout("/w/b", Found::Lost(())),
             in_layout("/w/c", Found::Looking(())),
         ]));
-        let occupied = Occupied::of(&host).unwrap();
+        let occupied = Occupied::of(&host, Lunes::none()).unwrap();
         for held in ["/w/a", "/w/b", "/w/c"] {
             assert_eq!(occupied.why_in(Path::new(held)), Some(A_VIEW), "{held}");
         }
         assert_eq!(occupied.why_in(Path::new("/w/d")), None);
         let unkept = viewed(api::projects::Held::Unkept("a newer file".to_owned()));
         let why = "luned keeps no layouts, and may leave out a terminal: a newer file";
-        assert_eq!(Occupied::of(&unkept), Err(why.to_owned()));
+        assert_eq!(Occupied::of(&unkept, Lunes::none()), Err(why.to_owned()));
         let mut unsaid = kept(Vec::new());
         let api::projects::Held::Kept(held) = &mut unsaid else {
             panic!("the projects are kept");
         };
         held.projects[0].holds = None;
         let why = "luned says not what project lune holds";
-        assert_eq!(Occupied::of(&viewed(unsaid)), Err(why.to_owned()));
+        assert_eq!(Occupied::of(&viewed(unsaid), Lunes::none()), Err(why.to_owned()));
     }
 
     #[test]
@@ -1075,28 +1118,30 @@ mod tests {
             unread_files: vec![file],
             ..viewed(kept(terminals))
         };
-        assert!(Occupied::of(&host(vec![in_layout("/w/a", Found::Key(terminal_key(4)))])).is_ok());
+        let found = host(vec![in_layout("/w/a", Found::Key(terminal_key(4)))]);
+        assert!(Occupied::of(&found, Lunes::none()).is_ok());
         let unheld = "luned cannot read the session file of agent 9, which runs in a terminal no \
                       layout holds";
         for terminals in [vec![], vec![in_layout("/w/a", Found::Key(terminal_key(5)))]] {
-            assert_eq!(Occupied::of(&host(terminals)), Err(unheld.to_owned()));
+            assert_eq!(Occupied::of(&host(terminals), Lunes::none()), Err(unheld.to_owned()));
         }
     }
 
     #[test]
     fn what_the_daemon_could_not_read_could_be_in_any_worktree() {
-        assert!(Occupied::of(&api::Host::default()).is_ok());
+        assert!(Occupied::of(&api::Host::default(), Lunes::none()).is_ok());
         let files =
             |unread, unread_files| api::Host { unread, unread_files, ..api::Host::default() };
         let file = || api::UnreadFile { pid: 9, terminal: None };
         let unplaced = "luned cannot read 1 of Claude Code's session files, nor tell where its \
                         agent runs";
-        assert_eq!(Occupied::of(&files(1, vec![])), Err(unplaced.to_owned()));
+        assert_eq!(Occupied::of(&files(1, vec![]), Lunes::none()), Err(unplaced.to_owned()));
         let zero = api::TerminalKey { id: 0, made_at: Some(prost_types::Timestamp::default()) };
         let unkeyed = api::UnreadFile { terminal: Some(zero), ..file() };
-        assert_eq!(Occupied::of(&files(1, vec![unkeyed])), Err(unplaced.to_owned()));
+        let unkeyed = Occupied::of(&files(1, vec![unkeyed]), Lunes::none());
+        assert_eq!(unkeyed, Err(unplaced.to_owned()));
         let unseated = "luned cannot read the session file of agent 9, which runs in no terminal";
-        assert_eq!(Occupied::of(&files(1, vec![file()])), Err(unseated.to_owned()));
+        assert_eq!(Occupied::of(&files(1, vec![file()]), Lunes::none()), Err(unseated.to_owned()));
     }
 
     fn pulled(author: Option<&str>, head: &str) -> Pulled {
@@ -1316,14 +1361,14 @@ mod tests {
             } else {
                 vec![folder.clone()]
             };
-            Ok(Occupied { views, agents: Vec::new() })
+            Ok(Occupied { views, agents: Vec::new(), lunes: Vec::new() })
         };
         let goes = Goes {
             head,
             ..goes(at, Pushed::Goes(on_origin("fix")), None)
         };
         let planned = Planned { plan: plan_of(vec![goes]), common: common.clone() };
-        let outcomes = deleted(planned, occupied, None);
+        let outcomes = deleted(planned, occupied);
         let why = "it has a view; its branch on origin has gone";
         assert_eq!(outcomes[0].came, Came::Stays(why.to_owned()));
         assert!(folder.join(".git").is_file());

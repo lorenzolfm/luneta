@@ -15,6 +15,7 @@ lune-protocol = { path = "../protocol" }
 prost = "0.14.4"
 prost-types = "0.14.4"
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-stream = "0.1.19"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tower = { version = "0.5.3", features = ["util"] }

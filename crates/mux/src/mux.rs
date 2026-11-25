@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use lune_protocol::made::Made;
 use lune_protocol::socket::Unreached;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
@@ -483,8 +484,10 @@ impl Holding {
         closed.handle.close();
         let key = closed.key;
         self.terminals.remove(&terminal);
-        for viewing in self.viewing.values_mut() {
-            viewing.shows.remove(&key);
+        for (client, viewing) in &mut self.viewing {
+            if viewing.shows.remove(&key).is_some() {
+                told_closed(*client, &viewing.out, key);
+            }
         }
         true
     }
@@ -579,6 +582,13 @@ fn spawned(
 
 fn unmade(key: TerminalKey) -> Status {
     Status::not_found(format!("no terminal {} made then", key.id))
+}
+
+fn told_closed(client: ClientId, out: &ViewerOut, key: TerminalKey) {
+    let closed = api::to_viewer::Event::Closed(api::Closed { terminal: Some(key.said()) });
+    if let Err(TrySendError::Full(_)) = out.try_send(Ok(api::ToViewer { event: Some(closed) })) {
+        eprintln!("lune-mux: viewer {client} had no room to hear terminal {} closed", key.id);
+    }
 }
 
 fn no_client(client: ClientId) -> Status {

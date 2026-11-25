@@ -380,20 +380,28 @@ fn showing_a_terminal_the_mux_does_not_hold_is_refused_and_the_others_are_shown(
 }
 
 #[test]
-fn a_closed_terminal_leaves_what_its_viewers_show() {
+fn a_closed_terminal_leaves_what_its_viewers_show_and_tells_them_it_closed() {
     run(async {
         let server = Server::start().await;
         let mut mux = server.client().await;
         let one = new_terminal(&mut mux, shell(), b"1", size(40, 10)).await;
         let two = new_terminal(&mut mux, shell(), b"2", size(40, 10)).await;
         let mut viewer = Viewer::new(&mut mux).await;
+        let mut other = Viewer::new(&mut mux).await;
         viewer.show(&[one, two]).await;
+        other.show(&[two]).await;
+        viewer.until("terminal one shown", |viewer| viewer.frame_of(one.id).is_some()).await;
+        other.until("terminal two shown", |other| other.frame_of(two.id).is_some()).await;
         mux.close_terminal(api::CloseTerminalRequest { terminal: Some(one) }).await.unwrap();
+        viewer.until("terminal one closed", |viewer| !viewer.closed.is_empty()).await;
+        assert_eq!(viewer.closed, [one.id]);
         viewer.type_line(one, "").await;
         viewer.until("a refusal", |viewer| !viewer.refused.is_empty()).await;
         assert_eq!(viewer.refused, [format!("terminal {} is not shown", one.id)]);
         viewer.type_line(two, "echo $((6 * 7))").await;
         viewer.until_row(two.id, "42").await;
+        other.until_row(two.id, "42").await;
+        assert!(other.closed.is_empty(), "a viewer hears only of the terminals it shows closing");
     });
 }
 

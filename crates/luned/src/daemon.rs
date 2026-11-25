@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
 use std::mem;
@@ -58,7 +57,7 @@ use crate::projects::{Changed, Lock, Opened, Store};
 use crate::layouts::{self, Root, Unrooted};
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
-use crate::prunes::{self, Occupied};
+use crate::prunes::{self, Lunes, Occupied};
 use crate::rebases;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
@@ -712,12 +711,10 @@ impl Daemon for Host {
             return Ok(Response::new(Box::pin(answer)));
         }
         let host = self.host().await?;
-        let occupied = Occupied::of(&host).map_err(Status::failed_precondition)?;
-        let here = env::current_dir().ok();
         let answer = late(move || {
-            let planned = prunes::plan(&dir, &occupied, here.as_deref());
-            let said = planned.map(|planned| PrunesResponse::from(planned.plan()));
-            said.map_err(Status::failed_precondition)
+            let occupied = || Occupied::of(&host, Lunes::running()?);
+            let planned = prunes::plan(&dir, occupied).map_err(Status::failed_precondition)?;
+            Ok(PrunesResponse::from(planned.plan()))
         });
         Ok(Response::new(Box::pin(answer)))
     }
@@ -737,13 +734,12 @@ impl Daemon for Host {
         }
         let agreed: BTreeSet<prunes::Deleting> = agreed.into_iter().map(Into::into).collect();
         let core = self.core.clone();
-        let here = env::current_dir().ok();
         let answer = late(move || {
             let occupied = || {
                 let host = core::ask(&core, Command::Host).ok_or("luned's core did not say")?;
-                Occupied::of(&host)
+                Occupied::of(&host, Lunes::running()?)
             };
-            let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied, here.as_deref())
+            let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied)
                 .map_err(Status::failed_precondition)?;
             Ok(PruneResponse::from(&pruned))
         });
@@ -872,42 +868,7 @@ impl Daemon for Host {
         &self,
         request: Request<Streaming<FramesRequest>>,
     ) -> Result<Response<Self::FramesStream>, Status> {
-        use crate::api::frames_request::{Event, Hello};
-        use crate::mux::own::api::from_viewer;
-        let mut heard = request.into_inner();
-        let Some(FramesRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
-            heard.message().await?
-        else {
-            return Err(Status::invalid_argument("the first word is no hello"));
-        };
-        let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
-        if on.is_some() && greeting.runs_in.is_some() {
-            return Err(Status::invalid_argument(RUNS_IN_ON));
-        }
-        let (refuse, refused) = oneshot::channel();
-        let mut refuse = Some(refuse);
-        let said = heard.map_while(move |word| {
-            let refusal = match word {
-                Ok(FramesRequest { event: Some(Event::Said(said)) }) => return Some(said),
-                Ok(FramesRequest { event: Some(Event::Hello(_)) }) => "a hello comes only first",
-                Ok(FramesRequest { event: None }) => "a word of the frames says nothing",
-                Err(_) => return None,
-            };
-            let refuse = refuse.take().expect("the words for frames end at the first refused");
-            drop(refuse.send(Status::invalid_argument(refusal)));
-            None
-        });
-        if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
-            let hello = Hello { on: None, greeting: Some(greeting) };
-            let first = FramesRequest { event: Some(Event::Hello(hello)) };
-            let rest = said.map(|said| FramesRequest { event: Some(Event::Said(said)) });
-            let answer = daemon.frames(tokio_stream::once(first).chain(rest)).await?;
-            let stream = ended_by(answer.into_inner(), refused);
-            return Ok(Response::new(Box::pin(Held { stream, _permit: permit })));
-        }
-        let first = FromViewer { event: Some(from_viewer::Event::Hello(greeting)) };
-        let answer = viewer::relayed(tokio_stream::once(first).chain(said)).await?;
-        Ok(Response::new(ended_by(answer, refused)))
+        self.frames_served(request, |_| Ok(())).await
     }
 
     async fn change_projects(
@@ -1233,6 +1194,55 @@ fn unanswered(unanswered: &Unanswered) -> Status {
 }
 
 impl Host {
+    async fn frames_served(
+        &self,
+        request: Request<Streaming<FramesRequest>>,
+        served: fn(&FromViewer) -> Result<(), Status>,
+    ) -> Result<Response<<Host as Daemon>::FramesStream>, Status> {
+        use crate::api::frames_request::{Event, Hello};
+        use crate::mux::own::api::from_viewer;
+        let mut heard = request.into_inner();
+        let Some(FramesRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
+            heard.message().await?
+        else {
+            return Err(Status::invalid_argument("the first word is no hello"));
+        };
+        let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
+        if on.is_some() && greeting.runs_in.is_some() {
+            return Err(Status::invalid_argument(RUNS_IN_ON));
+        }
+        let (refuse, refused) = oneshot::channel();
+        let mut refuse = Some(refuse);
+        let said = heard.map_while(move |word| {
+            let unread = |why: &str| Status::invalid_argument(why);
+            let refusal = match word {
+                Ok(FramesRequest { event: Some(Event::Said(said)) }) => match served(&said) {
+                    Ok(()) => return Some(said),
+                    Err(unserved) => unserved,
+                },
+                Ok(FramesRequest { event: Some(Event::Hello(_)) }) => {
+                    unread("a hello comes only first")
+                },
+                Ok(FramesRequest { event: None }) => unread("a word of the frames says nothing"),
+                Err(_) => return None,
+            };
+            let refuse = refuse.take().expect("the words for frames end at the first refused");
+            drop(refuse.send(refusal));
+            None
+        });
+        if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
+            let hello = Hello { on: None, greeting: Some(greeting) };
+            let first = FramesRequest { event: Some(Event::Hello(hello)) };
+            let rest = said.map(|said| FramesRequest { event: Some(Event::Said(said)) });
+            let answer = daemon.frames(tokio_stream::once(first).chain(rest)).await?;
+            let stream = ended_by(answer.into_inner(), refused);
+            return Ok(Response::new(Box::pin(Held { stream, _permit: permit })));
+        }
+        let first = FromViewer { event: Some(from_viewer::Event::Hello(greeting)) };
+        let answer = viewer::relayed(tokio_stream::once(first).chain(said)).await?;
+        Ok(Response::new(ended_by(answer, refused)))
+    }
+
     async fn runs_in(&self, terminal: &api::TerminalKey) -> Runs {
         let id = terminal.id;
         let ListAgentsResponse { agents, .. } = match self.ask(Command::List).await {

@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::io::Read as _;
+use std::process::{Child, Command, Output, Stdio};
 
 use lune_waits::eventually;
 use luned::api::daemon_client::DaemonClient;
@@ -188,7 +189,7 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     let lines: Vec<&str> = said.lines().collect();
     let wanted = [
         "keep changed #5: it has modified or untracked files",
-        "keep from #8: this runs from it",
+        "keep from #8: a lune runs from it",
         "keep locked #9: it is locked",
         "keep main #10: it is the default branch",
         "keep viewed #6: it has a view",
@@ -553,6 +554,65 @@ fn a_plan_does_not_need_the_directory_it_runs_in() {
         let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
         assert_eq!(goes, ["one"]);
     });
+}
+
+fn a_lune_in(host: &Host, dir: &Path) -> Child {
+    let mut command = host.vars().command(&LUNE);
+    command.current_dir(dir).arg("bridge").stdin(Stdio::piped()).stdout(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut said = [0; 6];
+    child.stdout.as_mut().unwrap().read_exact(&mut said).expect("the lune says luned answers");
+    assert_eq!(&said, b"luned\n");
+    child
+}
+
+#[test]
+fn a_plan_keeps_each_worktree_a_lune_runs_from_and_not_luned_s() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    let head = repository.pushed("one");
+    host.gh.open("one", &merged(1, &head, "me"));
+    let head = repository.pushed("two");
+    host.gh.open("two", &merged(2, &head, "me"));
+    let mut from_one = host.vars().command(LUNED);
+    from_one.current_dir(repository.at("one"));
+    let _serving = serving_as(&host, &repository.at("main"), from_one);
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
+        let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
+        let answer = daemon.prunes(prunes::asked(None, &main)).await;
+        let all: Plan = answer.unwrap().into_inner().message().await.unwrap().unwrap().into();
+        let goes: Vec<&str> = all.goes.iter().map(|goes| goes.branch.as_str()).collect();
+        assert_eq!(goes, ["one", "two"], "luned's own directory keeps nothing");
+
+        let mut lune = a_lune_in(&host, &repository.at("two"));
+        let answer = daemon.prunes(prunes::asked(None, &main)).await;
+        let plan: Plan = answer.unwrap().into_inner().message().await.unwrap().unwrap().into();
+        let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
+        assert_eq!(goes, ["one"]);
+        let kept: Vec<(&str, &str)> =
+            plan.kept.iter().map(|kept| (kept.folder.as_str(), kept.why.as_str())).collect();
+        let two = repository.at("two").display().to_string();
+        assert_eq!(kept, [(two.as_str(), "a lune runs from it")]);
+
+        let told = prunes::told(None, &main, &all.deletes());
+        let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
+        let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
+        lune.kill().unwrap();
+        lune.wait().unwrap();
+        let Pruned::Changed(now) = pruned else {
+            panic!("it deleted the worktree a lune runs from: {pruned:?}");
+        };
+        assert_eq!(now.deletes(), plan.deletes());
+    });
+    assert!(repository.at("one").exists(), "it deleted one");
+    assert!(repository.at("two").exists(), "it deleted two");
 }
 
 #[test]

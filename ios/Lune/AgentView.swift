@@ -65,6 +65,11 @@ struct AgentView: View {
         .navigationTitle(agent?.name ?? "Agent")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            NavigationLink(
+                value: TerminalPlace(terminal: terminal, title: agent?.name ?? "Agent")
+            ) {
+                Label("Terminal", systemImage: "terminal")
+            }
             if let agent, let placed = agent.placed,
                 let worktree = luned.worktree(placed.worktree, on: agent.on)
             {
