@@ -1,4 +1,3 @@
-use std::convert::Infallible;
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::num::NonZeroU32;
@@ -10,7 +9,7 @@ use std::time::Duration;
 use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
 use tokio::runtime::{Handle, Runtime};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep_until, timeout, timeout_at, Instant};
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -63,12 +62,32 @@ impl Drop for Workers {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct Wake(Arc<watch::Sender<()>>);
+
+impl Wake {
+    fn new() -> Wake {
+        let (tell, _) = watch::channel(());
+        Wake(Arc::new(tell))
+    }
+
+    pub(crate) fn wake(&self) {
+        self.0.send_replace(());
+    }
+
+    fn subscribe(&self) -> watch::Receiver<()> {
+        self.0.subscribe()
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct Core {
     daemon: Daemon,
     handle: Handle,
     patience: Duration,
-    watching: Mutex<Option<JoinHandle<Infallible>>>,
+    again: fn(NonZeroU32, u64) -> Duration,
+    watching: Mutex<Option<JoinHandle<()>>>,
+    wake: Wake,
     _workers: Workers,
 }
 
@@ -173,6 +192,10 @@ struct Wait {
     refusals: Refusals,
 }
 
+fn answered<T>(result: &Result<T, Unanswered>) -> bool {
+    matches!(result, Ok(_) | Err(Unanswered::Refused { .. }))
+}
+
 fn held<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -234,7 +257,12 @@ async fn first<T>(
 }
 
 impl Core {
-    fn of(runtime: Runtime, patience: Duration, channel: impl FnOnce() -> Channel) -> Arc<Core> {
+    fn of(
+        runtime: Runtime,
+        patience: Duration,
+        again: fn(NonZeroU32, u64) -> Duration,
+        channel: impl FnOnce() -> Channel,
+    ) -> Arc<Core> {
         let handle = runtime.handle().clone();
         let channel = {
             let _entered = runtime.enter();
@@ -245,7 +273,9 @@ impl Core {
                 .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX),
             handle,
             patience,
+            again,
             watching: Mutex::new(None),
+            wake: Wake::new(),
             _workers: Workers(Some(runtime)),
         })
     }
@@ -259,7 +289,11 @@ impl Core {
             .map_err(|error| Unanswered::refused(format!("no runtime: {error}")))
     }
 
-    pub fn over_socket(socket: PathBuf, patience: Duration) -> Result<Arc<Core>, Unanswered> {
+    pub fn over_socket(
+        socket: PathBuf,
+        patience: Duration,
+        again: fn(NonZeroU32, u64) -> Duration,
+    ) -> Result<Arc<Core>, Unanswered> {
         let connect = move || {
             Endpoint::from_static("http://luned").connect_with_connector_lazy(service_fn(
                 move |_: Uri| {
@@ -268,18 +302,26 @@ impl Core {
                 },
             ))
         };
-        Ok(Core::of(Core::runtime()?, patience, connect))
+        Ok(Core::of(Core::runtime()?, patience, again, connect))
+    }
+
+    fn wait(&self, works: Duration, refusals: Refusals) -> Wait {
+        Wait { answer: self.patience, works, refusals }
     }
 
     async fn on_runtime<T: Send + 'static>(
         &self,
         work: impl Future<Output = Result<T, Unanswered>> + Send + 'static,
     ) -> Result<T, Unanswered> {
-        match self.handle.spawn(work).await {
+        let done = match self.handle.spawn(work).await {
             Ok(done) => done,
             Err(ended) if ended.is_panic() => panic::resume_unwind(ended.into_panic()),
             Err(ended) => Err(Unanswered::InDoubt { why: format!("the core's call ended: {ended}") }),
+        };
+        if answered(&done) {
+            self.wake.wake();
         }
+        done
     }
 
     async fn changed(&self, on: Option<On>, change: Change) -> Result<(), Unanswered> {
@@ -297,7 +339,7 @@ impl Core {
     #[uniffi::constructor]
     pub fn new(host: &str) -> Result<Arc<Core>, Unanswered> {
         let endpoint = tailnet(host)?;
-        Ok(Core::of(Core::runtime()?, waits::ANSWER, move || endpoint.connect_lazy()))
+        Ok(Core::of(Core::runtime()?, waits::ANSWER, waits::again, move || endpoint.connect_lazy()))
     }
 
     pub fn watch(&self, observer: Arc<dyn Observer>) {
@@ -305,7 +347,13 @@ impl Core {
         if let Some(watched) = watching.take() {
             watched.abort();
         }
-        let watched = watched(self.daemon.clone(), self.patience, observer);
+        let watched = watched(
+            self.daemon.clone(),
+            self.patience,
+            observer,
+            self.wake.subscribe(),
+            self.again,
+        );
         *watching = Some(self.handle.spawn(watched));
     }
 
@@ -323,7 +371,14 @@ impl Core {
 
     #[must_use]
     pub fn terminal(&self, terminal: &TerminalKey, appearance: Appearance) -> Arc<TerminalView> {
-        TerminalView::open(self.daemon.clone(), &self.handle, self.patience, terminal, appearance)
+        TerminalView::open(
+            self.daemon.clone(),
+            &self.handle,
+            self.patience,
+            self.wake.clone(),
+            terminal,
+            appearance,
+        )
     }
 
     pub async fn waiting(&self, terminal: Arc<TerminalKey>) -> Result<Waiting, Unanswered> {
@@ -360,11 +415,11 @@ impl Core {
         branch: String,
         words: String,
     ) -> Result<Landed, Unanswered> {
-        let (mut daemon, patience) = (self.daemon.clone(), self.patience);
+        let mut daemon = self.daemon.clone();
         let prompted = api::Prompted { harness: api::Harness::ClaudeCode.into(), words };
         let opens = Some(api::Opens { runs: Some(api::opens::Runs::Agent(prompted)) });
         let request = api::MakeWorktreeRequest { on: self::on(on), project, branch, opens };
-        let wait = Wait { answer: patience, works: waits::MAKING, refusals: Refusals::Others };
+        let wait = self.wait(waits::MAKING, Refusals::Others);
         self.on_runtime(async move {
             Landed::of(first(wait, daemon.make_worktree(request)).await?)
         })
@@ -372,9 +427,9 @@ impl Core {
     }
 
     pub async fn work(&self, on: Option<String>, project: u64) -> Result<Listed, Unanswered> {
-        let (mut daemon, patience) = (self.daemon.clone(), self.patience);
+        let mut daemon = self.daemon.clone();
         let request = api::ListWorkRequest { on: self::on(on), project };
-        let wait = Wait { answer: patience, works: waits::LISTING, refusals: Refusals::Others };
+        let wait = self.wait(waits::LISTING, Refusals::Others);
         self.on_runtime(async move {
             Listed::of(first(wait, daemon.list_work(request)).await?)
         })
@@ -442,9 +497,9 @@ impl Core {
     }
 
     pub async fn prunes(&self, on: Option<String>, dir: String) -> Result<Plan, Unanswered> {
-        let (mut daemon, patience) = (self.daemon.clone(), self.patience);
+        let mut daemon = self.daemon.clone();
         let request = api::PrunesRequest { on: self::on(on), dir };
-        let wait = Wait { answer: patience, works: waits::PLANNING, refusals: Refusals::Others };
+        let wait = self.wait(waits::PLANNING, Refusals::Others);
         self.on_runtime(async move {
             let said = first(wait, daemon.prunes(request)).await?;
             said.map(Plan::of).ok_or_else(|| Unanswered::unread("it ended with no plan"))
@@ -458,10 +513,10 @@ impl Core {
         dir: String,
         agreed: Vec<Goes>,
     ) -> Result<Pruned, Unanswered> {
-        let (mut daemon, patience) = (self.daemon.clone(), self.patience);
+        let mut daemon = self.daemon.clone();
         let agreed = agreed.into_iter().map(Goes::deleting).collect();
         let request = api::PruneRequest { on: self::on(on), dir, agreed };
-        let wait = Wait { answer: patience, works: waits::DELETING, refusals: Refusals::Others };
+        let wait = self.wait(waits::DELETING, Refusals::Others);
         self.on_runtime(async move {
             Pruned::of(first(wait, daemon.prune(request)).await?)
         })
@@ -474,9 +529,9 @@ impl Core {
         dir: String,
         branch: Option<String>,
     ) -> Result<Rebased, Unanswered> {
-        let (mut daemon, patience) = (self.daemon.clone(), self.patience);
+        let mut daemon = self.daemon.clone();
         let request = api::RebaseRequest { on: self::on(on), dir, branch };
-        let wait = Wait { answer: patience, works: waits::REBASING, refusals: Refusals::Others };
+        let wait = self.wait(waits::REBASING, Refusals::Others);
         self.on_runtime(async move {
             Rebased::of(first(wait, daemon.rebase(request)).await?)
         })
@@ -509,9 +564,9 @@ impl Core {
         repository: String,
         words: String,
     ) -> Result<Filed, Unanswered> {
-        let (mut daemon, patience) = (self.daemon.clone(), self.patience);
+        let mut daemon = self.daemon.clone();
         let request = api::FileIssueRequest { on: self::on(on), dir, words, repository };
-        let wait = Wait { answer: patience, works: waits::FILING, refusals: Refusals::Filings };
+        let wait = self.wait(waits::FILING, Refusals::Filings);
         self.on_runtime(async move {
             Filed::of(first(wait, daemon.file_issue(request)).await?)
         })
@@ -519,29 +574,59 @@ impl Core {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Watch {
     Fresh,
     Heard { after: api::Version, shown: Model },
     Lost { why: String, failed: NonZeroU32 },
+    Woken { why: String },
 }
 
-async fn watched(mut daemon: Daemon, patience: Duration, observer: Arc<dyn Observer>) -> Infallible {
+impl Watch {
+    fn after(&self) -> Option<api::Version> {
+        match self {
+            Watch::Heard { after, .. } => Some(*after),
+            Watch::Fresh | Watch::Lost { .. } | Watch::Woken { .. } => None,
+        }
+    }
+
+    fn heard(&mut self, after: api::Version, model: Model) -> Option<Model> {
+        let changed = !matches!(self, Watch::Heard { shown, .. } if *shown == model);
+        let shown = changed.then(|| model.clone());
+        *self = Watch::Heard { after, shown: model };
+        shown
+    }
+
+    fn lost(&self, why: &str) -> (bool, NonZeroU32) {
+        match self {
+            Watch::Lost { why: missed, failed } => (missed != why, failed.saturating_add(1)),
+            Watch::Woken { why: missed } => (missed != why, NonZeroU32::MIN),
+            Watch::Fresh | Watch::Heard { .. } => (true, NonZeroU32::MIN),
+        }
+    }
+}
+
+async fn watched(
+    mut daemon: Daemon,
+    patience: Duration,
+    observer: Arc<dyn Observer>,
+    mut woken: watch::Receiver<()>,
+    again: fn(NonZeroU32, u64) -> Duration,
+) {
     let mut watch = Watch::Fresh;
     loop {
         let asked_at = Instant::now();
-        let after = match &watch {
-            Watch::Heard { after, .. } => Some(*after),
-            Watch::Fresh | Watch::Lost { .. } => None,
-        };
+        let after = watch.after();
+        if after.is_none() {
+            woken.mark_unchanged();
+        }
         let asked = api::WatchRequest { after, kept: None, shown: true };
         let why = match unary(patience, Refusals::Others, daemon.watch(asked)).await {
             Ok(host) => match host.version {
                 Some(version) => {
-                    let model = Model::of(&host);
-                    if !matches!(&watch, Watch::Heard { shown, .. } if *shown == model) {
-                        observer.changed(model.clone());
+                    if let Some(model) = watch.heard(version, Model::of(&host)) {
+                        observer.changed(model);
                     }
-                    watch = Watch::Heard { after: version, shown: model };
                     sleep_until(asked_at + waits::PACE).await;
                     continue;
                 },
@@ -549,20 +634,21 @@ async fn watched(mut daemon: Daemon, patience: Duration, observer: Arc<dyn Obser
             },
             Err(unanswered) => unanswered.why().to_owned(),
         };
-        let failed = match &watch {
-            Watch::Lost { why: missed, failed } => {
-                if *missed != why {
-                    observer.lost(why.clone());
-                }
-                failed.saturating_add(1)
-            },
-            Watch::Fresh | Watch::Heard { .. } => {
-                observer.lost(why.clone());
-                NonZeroU32::MIN
+        if after.is_some() {
+            woken.mark_unchanged();
+        }
+        let (tell, failed) = watch.lost(&why);
+        if tell {
+            observer.lost(why.clone());
+        }
+        let woke = tokio::select! {
+            () = tokio::time::sleep(again(failed, chance())) => false,
+            heard = woken.changed() => match heard {
+                Ok(()) => true,
+                Err(_) => return,
             },
         };
-        watch = Watch::Lost { why, failed };
-        tokio::time::sleep(waits::again(failed, chance())).await;
+        watch = if woke { Watch::Woken { why } } else { Watch::Lost { why, failed } };
     }
 }
 
@@ -593,7 +679,12 @@ impl Conversation {
             marked_pulls: marked.pulls,
         };
         let (tell, told) = mpsc::channel(STEPS_HELD);
-        let talk = Talk { daemon: self.core.daemon.clone(), patience: self.core.patience, tell };
+        let talk = Talk {
+            daemon: self.core.daemon.clone(),
+            patience: self.core.patience,
+            wake: self.core.wake.clone(),
+            tell,
+        };
         self.core.handle.spawn(talk.steps(request));
         let listening = tokio::sync::Mutex::new(Listening { told, over: false });
         Ok(Arc::new(Asking { listening, conversation: self, turn: turn.key() }))
@@ -629,6 +720,7 @@ enum Told {
 struct Talk {
     daemon: Daemon,
     patience: Duration,
+    wake: Wake,
     tell: mpsc::Sender<Told>,
 }
 
@@ -640,6 +732,9 @@ impl Talk {
             () = self.tell.closed() => return,
             asked = unary(self.patience, Refusals::Others, self.daemon.ask(request)) => asked,
         };
+        if answered(&asked) {
+            self.wake.wake();
+        }
         let mut steps = match asked {
             Ok(steps) => steps,
             Err(unanswered) => return self.last(Told::Failed(unanswered)).await,
@@ -800,5 +895,45 @@ mod tests {
         let nothing = conversation.clone().tackle(Marked::none());
         assert!(matches!(nothing, Err(Unanswered::Refused { .. })), "{:?}", nothing.err());
         assert_eq!(*held(&conversation.talked), Talked::At(Rest::Fresh), "and starts no turn");
+    }
+
+    #[test]
+    fn a_woken_watch_starts_its_backoff_over_without_repeating_the_same_loss() {
+        let version = |seq| api::Version { pid: 1, seq };
+        let model = Model { here: crate::model::Held::Untold, far: Vec::new(), inbox: Vec::new() };
+        let mut watch = Watch::Fresh;
+        assert_eq!(watch.after(), None);
+        assert_eq!(watch.heard(version(1), model.clone()), Some(model.clone()));
+        assert_eq!(watch.after(), Some(version(1)));
+        assert_eq!(watch.heard(version(2), model.clone()), None, "an unchanged model is not told twice");
+
+        let (tell, first) = watch.lost("down");
+        assert_eq!((tell, first.get()), (true, 1));
+        watch = Watch::Lost { why: "down".to_owned(), failed: first };
+        assert_eq!(watch.after(), None);
+        let (tell, second) = watch.lost("down");
+        assert_eq!((tell, second.get()), (false, 2));
+        watch = Watch::Lost { why: "down".to_owned(), failed: second };
+        let (tell, third) = watch.lost("gone");
+        assert_eq!((tell, third.get()), (true, 3));
+
+        watch = Watch::Woken { why: "gone".to_owned() };
+        assert_eq!(watch.after(), None);
+        let (tell, reset) = watch.lost("gone");
+        assert_eq!((tell, reset.get()), (false, 1), "same loss is not repeated, backoff starts over");
+        let (tell, reset) = watch.lost("other");
+        assert_eq!((tell, reset.get()), (true, 1));
+        assert_eq!(
+            watch.heard(version(3), model.clone()),
+            Some(model),
+            "even the same model as before brings Tree and Inbox back",
+        );
+    }
+
+    #[test]
+    fn only_an_answer_from_luned_counts_as_having_reached_it() {
+        assert!(answered(&Ok(())));
+        assert!(answered::<()>(&Err(Unanswered::refused("gone"))));
+        assert!(!answered::<()>(&Err(Unanswered::unread("closed"))));
     }
 }

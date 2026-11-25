@@ -3,10 +3,11 @@ use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 
 use lune_phone::{
-    Appearance, Came, Core, Found, Framed, Grid, Held, KeyName, Landed, Marked, Model, Observer,
-    Order, Plan, Pruned, Rebase, Refusals, Step, TerminalView, Unanswered, View, Worktree,
+    waits, Appearance, Came, Core, Found, Framed, Grid, Held, KeyName, Landed, Listed, Marked,
+    Model, Observer, Order, Plan, Pruned, Rebase, Refusals, Step, TerminalView, Unanswered, View,
+    Worktree,
 };
-use lune_waits::{eventually, shell, Patience, PATIENCE};
+use lune_waits::{eventually, never, shell, Patience, OUTLASTING, PATIENCE};
 
 use crate::host::{folder_in, script, start, Host};
 use crate::own::Owned;
@@ -16,6 +17,7 @@ use crate::rebase::{self, commit};
 use crate::remote::{claude_that_takes_turns, claude_that_writes_issues, hosts, reached, told, FakeSsh};
 use crate::worktree::{cloned_as_wt, git};
 
+#[derive(Debug)]
 enum Heard {
     Changed(Model),
     Lost(String),
@@ -42,7 +44,15 @@ struct Phone {
 impl Phone {
     fn of(host: &Host) -> Phone {
         let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
-        let core = Core::over_socket(folder.socket(), PATIENCE).unwrap();
+        Phone::watching(Core::over_socket(folder.socket(), PATIENCE, waits::again).unwrap())
+    }
+
+    fn backing_off(host: &Host) -> Phone {
+        let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
+        Phone::watching(Core::over_socket(folder.socket(), PATIENCE, |_, _| OUTLASTING).unwrap())
+    }
+
+    fn watching(core: Arc<Core>) -> Phone {
         let (tell, heard) = mpsc::channel();
         core.watch(Arc::new(Told(Mutex::new(tell))));
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -526,7 +536,6 @@ fn the_phone_takes_a_code_for_a_refusal_where_luned_s_own_reader_of_that_verb_do
 
 #[test]
 fn the_phone_waits_for_each_verb_as_long_as_luned_may_work_at_it() {
-    use lune_phone::waits;
     assert!(waits::ANSWER > luned::WATCH, "a watch parks for less than the phone waits");
     assert!(waits::TURN >= luned::asks::TURN);
     assert!(waits::MAKING >= luned::links::WORKTREE_PATIENCE);
@@ -535,4 +544,69 @@ fn the_phone_waits_for_each_verb_as_long_as_luned_may_work_at_it() {
     assert!(waits::DELETING >= luned::prunes::PLANNING + luned::prunes::DELETING);
     assert!(waits::REBASING >= luned::rebases::REBASING);
     assert!(waits::FILING >= luned::issues::AT_MOST);
+}
+
+#[test]
+fn a_call_that_gets_through_wakes_a_backed_off_watch() {
+    let mut owned = Owned::new();
+    claude_that_takes_turns(&owned.host);
+    let worktree = crate::layouts::worktree_in_home(&owned);
+    let mut shown = crate::layouts::Shown::new(&owned, worktree, 80, 24);
+    shown.open_running(&["sleep", "600"]);
+    let phone = Phone::backing_off(&owned.host);
+    let model = phone.sees("the view runs", |model| started_view(model, worktree).is_some());
+    let project = projects_here(&model)[0].id;
+    let Some(View { found: Found::Key { key }, .. }) = started_view(&model, worktree) else {
+        panic!("the view has its terminal");
+    };
+    let back = |phone: &Phone| {
+        phone.sees("the watch brings the model back without waiting for its next retry", |model| {
+            started_view(model, worktree).is_some()
+        })
+    };
+
+    phone.block_on(phone.core.waiting(key.clone())).unwrap();
+    owned.stop_daemon();
+    phone.loses("luned ended");
+    let down = phone.block_on(phone.core.waiting(key.clone()));
+    assert!(matches!(down, Err(Unanswered::InDoubt { .. })), "down: {down:?}");
+    owned.start_daemon();
+    never("a healthy call before the loss and a failed call while down do not wake the watch", || {
+        phone.heard.try_recv().ok()
+    });
+
+    phone.block_on(phone.core.waiting(key.clone())).unwrap();
+    back(&phone);
+
+    owned.stop_daemon();
+    phone.loses("luned ended before work");
+    owned.start_daemon();
+    assert_eq!(phone.block_on(phone.core.work(None, project)).unwrap(), Listed::Unhosted);
+    back(&phone);
+
+    owned.stop_daemon();
+    phone.loses("luned ended before refusal");
+    owned.start_daemon();
+    refused(phone.block_on(phone.core.issue_repositories(None, "relative".to_owned())));
+    back(&phone);
+
+    owned.stop_daemon();
+    phone.loses("luned ended before ask");
+    owned.start_daemon();
+    let asking = phone.core.clone().converse(None, None).ask("hi".to_owned()).unwrap();
+    phone.steps(&asking).unwrap();
+    back(&phone);
+
+    owned.stop_daemon();
+    phone.loses("luned ended before terminal");
+    owned.start_daemon();
+    let view = phone.core.terminal(&key, Appearance::Dark);
+    shows(&phone, &view, "the terminal opens", |_| true);
+    back(&phone);
+    view.close();
+
+    phone.core.stop();
+    while phone.heard.try_recv().is_ok() {}
+    phone.block_on(phone.core.waiting(key)).unwrap();
+    never("a call while stopped starts no watch", || phone.heard.try_recv().ok());
 }

@@ -10,7 +10,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
 use crate::api::{self, frames_request};
-use crate::core::Daemon;
+use crate::core::{Daemon, Wake};
 use crate::model::TerminalKey;
 use crate::unanswered::{Refusals, Unanswered};
 
@@ -571,14 +571,24 @@ fn ended(tell: &watch::Sender<Seen>, end: End) {
 async fn read(
     mut daemon: Daemon,
     patience: Duration,
+    wake: Wake,
     painter: Painter,
     words: mpsc::Receiver<api::FramesRequest>,
     tell: &watch::Sender<Seen>,
 ) -> End {
     let opened = timeout(patience, daemon.frames(ReceiverStream::new(words))).await;
     let mut frames = match opened {
-        Ok(Ok(frames)) => frames.into_inner(),
-        Ok(Err(status)) => return End::of(&status),
+        Ok(Ok(frames)) => {
+            wake.wake();
+            frames.into_inner()
+        },
+        Ok(Err(status)) => {
+            let end = End::of(&status);
+            if matches!(end, End::Refused { .. }) {
+                wake.wake();
+            }
+            return end;
+        },
         Err(_) => return End::Lost { why: Unanswered::late(patience).why().to_owned() },
     };
     loop {
@@ -624,6 +634,7 @@ impl TerminalView {
         daemon: Daemon,
         handle: &Handle,
         patience: Duration,
+        wake: Wake,
         key: &TerminalKey,
         appearance: Appearance,
     ) -> Arc<TerminalView> {
@@ -642,7 +653,7 @@ impl TerminalView {
         let tell = Arc::new(tell);
         let telling = Arc::clone(&tell);
         let reading = handle.spawn(async move {
-            let end = read(daemon, patience, painter, heard, &telling).await;
+            let end = read(daemon, patience, wake, painter, heard, &telling).await;
             ended(&telling, end);
         });
         let seen = tokio::sync::Mutex::new(seen);
