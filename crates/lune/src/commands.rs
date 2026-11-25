@@ -17,7 +17,6 @@ use luned::api::{
 };
 use luned::folder::SOCKET;
 pub use luned::log::causes;
-use luned::prunes::Occupied;
 use luned::sayings::BYTES_MAX;
 use luned::{release, Daemon, Destination};
 use prost::Message as _;
@@ -356,19 +355,6 @@ pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
         let mut daemon = daemon::running(folder).await?;
         let listed = daemon.list_agents(()).await;
         listed.map(tonic::Response::into_inner).map_err(|error| causes(&error))
-    })
-}
-
-pub fn occupied(folder: &Path) -> Result<Occupied, String> {
-    Occupied::of(&host(folder)?)
-}
-
-pub fn host(folder: &Path) -> Result<luned::api::Host, String> {
-    let runtime = runtime()?;
-    runtime.block_on(async {
-        let mut daemon = daemon::running(folder).await?;
-        let asked = daemon.watch(WatchRequest { after: None, kept: None, shown: false }).await;
-        Ok(asked.map_err(|error| causes(&error))?.into_inner())
     })
 }
 
