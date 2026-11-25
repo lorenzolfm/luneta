@@ -4,8 +4,8 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use lune_phone::{
     waits, Appearance, Came, Core, Found, Framed, Grid, Held, KeyName, Landed, Listed, Marked,
-    Model, Observer, Order, Plan, Pruned, Rebase, Refusals, Step, TerminalView, Unanswered, View,
-    Worktree,
+    Model, NonZeroDuration, Observer, Order, Plan, Pruned, Rebase, Refusals, Step, TerminalView,
+    Unanswered, View, Worktree,
 };
 use lune_waits::{eventually, never, shell, Patience, OUTLASTING, PATIENCE};
 
@@ -41,15 +41,20 @@ struct Phone {
     runtime: tokio::runtime::Runtime,
 }
 
+const TEST_PATIENCE: NonZeroDuration = NonZeroDuration::new(PATIENCE).unwrap();
+const TEST_OUTLASTING: NonZeroDuration = NonZeroDuration::new(OUTLASTING).unwrap();
+
 impl Phone {
     fn of(host: &Host) -> Phone {
         let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
-        Phone::watching(Core::over_socket(folder.socket(), PATIENCE, waits::again).unwrap())
+        Phone::watching(Core::over_socket(folder.socket(), TEST_PATIENCE, waits::again).unwrap())
     }
 
     fn backing_off(host: &Host) -> Phone {
         let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
-        Phone::watching(Core::over_socket(folder.socket(), PATIENCE, |_, _| OUTLASTING).unwrap())
+        Phone::watching(
+            Core::over_socket(folder.socket(), TEST_PATIENCE, |_, _| TEST_OUTLASTING).unwrap(),
+        )
     }
 
     fn watching(core: Arc<Core>) -> Phone {
@@ -548,6 +553,7 @@ fn the_phone_waits_for_each_verb_as_long_as_luned_may_work_at_it() {
 
 #[test]
 fn a_call_that_gets_through_wakes_a_backed_off_watch() {
+    const DRAIN_MAX: usize = 64;
     let mut owned = Owned::new();
     claude_that_takes_turns(&owned.host);
     let worktree = crate::layouts::worktree_in_home(&owned);
@@ -572,7 +578,11 @@ fn a_call_that_gets_through_wakes_a_backed_off_watch() {
     assert!(matches!(down, Err(Unanswered::InDoubt { .. })), "down: {down:?}");
     owned.start_daemon();
     never("a healthy call before the loss and a failed call while down do not wake the watch", || {
-        phone.heard.try_recv().ok()
+        match phone.heard.try_recv() {
+            Ok(heard) => Some(heard),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => panic!("watch ended while backed off"),
+        }
     });
 
     phone.block_on(phone.core.waiting(key.clone())).unwrap();
@@ -598,6 +608,13 @@ fn a_call_that_gets_through_wakes_a_backed_off_watch() {
     back(&phone);
 
     owned.stop_daemon();
+    phone.loses("luned ended before refused ask");
+    owned.start_daemon();
+    let blank = phone.core.clone().converse(None, None).ask(" ".to_owned()).unwrap();
+    assert!(refused(phone.steps(&blank)).contains("nothing asked"));
+    back(&phone);
+
+    owned.stop_daemon();
     phone.loses("luned ended before terminal");
     owned.start_daemon();
     let view = phone.core.terminal(&key, Appearance::Dark);
@@ -606,7 +623,16 @@ fn a_call_that_gets_through_wakes_a_backed_off_watch() {
     view.close();
 
     phone.core.stop();
-    while phone.heard.try_recv().is_ok() {}
+    eventually("the stopped watch drops its observer", || {
+        for _ in 0..DRAIN_MAX {
+            match phone.heard.try_recv() {
+                Ok(_) => {},
+                Err(mpsc::TryRecvError::Empty) => return None,
+                Err(mpsc::TryRecvError::Disconnected) => return Some(()),
+            }
+        }
+        panic!("stopped watch kept sending past {DRAIN_MAX} messages");
+    });
     phone.block_on(phone.core.waiting(key)).unwrap();
     never("a call while stopped starts no watch", || phone.heard.try_recv().ok());
 }

@@ -1,16 +1,14 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use lune_protocol::mux::v1 as mux;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
 use crate::api::{self, frames_request};
-use crate::core::{Daemon, Wake};
+use crate::core::Rpc;
 use crate::model::TerminalKey;
 use crate::unanswered::{Refusals, Unanswered};
 
@@ -104,11 +102,15 @@ enum End {
 }
 
 impl End {
-    fn of(status: &Status) -> End {
-        match Unanswered::of(status, Refusals::Others) {
+    fn unanswered(unanswered: Unanswered) -> End {
+        match unanswered {
             Unanswered::Refused { why } => End::Refused { why },
             Unanswered::InDoubt { why } => End::Lost { why },
         }
+    }
+
+    fn of(status: &Status) -> End {
+        End::unanswered(Unanswered::of(status, Refusals::Others))
     }
 
     fn unread(why: impl std::fmt::Display) -> End {
@@ -569,27 +571,19 @@ fn ended(tell: &watch::Sender<Seen>, end: End) {
 }
 
 async fn read(
-    mut daemon: Daemon,
-    patience: Duration,
-    wake: Wake,
+    rpc: Rpc,
     painter: Painter,
     words: mpsc::Receiver<api::FramesRequest>,
     tell: &watch::Sender<Seen>,
 ) -> End {
-    let opened = timeout(patience, daemon.frames(ReceiverStream::new(words))).await;
+    let opened = rpc
+        .unary(Refusals::Others, |mut daemon| async move {
+            daemon.frames(ReceiverStream::new(words)).await
+        })
+        .await;
     let mut frames = match opened {
-        Ok(Ok(frames)) => {
-            wake.wake();
-            frames.into_inner()
-        },
-        Ok(Err(status)) => {
-            let end = End::of(&status);
-            if matches!(end, End::Refused { .. }) {
-                wake.wake();
-            }
-            return end;
-        },
-        Err(_) => return End::Lost { why: Unanswered::late(patience).why().to_owned() },
+        Ok(frames) => frames,
+        Err(unanswered) => return End::unanswered(unanswered),
     };
     loop {
         let event = match frames.message().await {
@@ -631,10 +625,8 @@ fn word(event: mux::from_viewer::Event) -> api::FramesRequest {
 
 impl TerminalView {
     pub(crate) fn open(
-        daemon: Daemon,
+        rpc: Rpc,
         handle: &Handle,
-        patience: Duration,
-        wake: Wake,
         key: &TerminalKey,
         appearance: Appearance,
     ) -> Arc<TerminalView> {
@@ -653,7 +645,7 @@ impl TerminalView {
         let tell = Arc::new(tell);
         let telling = Arc::clone(&tell);
         let reading = handle.spawn(async move {
-            let end = read(daemon, patience, wake, painter, heard, &telling).await;
+            let end = read(rpc, painter, heard, &telling).await;
             ended(&telling, end);
         });
         let seen = tokio::sync::Mutex::new(seen);
