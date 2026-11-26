@@ -275,7 +275,7 @@ async fn stream(
 
 #[cfg(test)]
 mod tests {
-    use std::num::{NonZeroU16, NonZeroU32};
+    use std::num::NonZeroU32;
     use std::sync::Arc;
 
     use lune_domain::mux::TerminalKey;
@@ -283,7 +283,7 @@ mod tests {
     use tonic::Code;
 
     use super::{relayed, Framed};
-    use crate::mux::own::frames::{self, Ending, Frame, Glyph, Line, Rows, Shows, Size};
+    use crate::mux::own::frames::{self, Ending, Frame, Glyph, Line, Rows, Shows, Side, Size};
     use crate::mux::own::server::{RELAYED, RELAYED_MAX};
     use crate::mux::own::OwnMade;
 
@@ -291,9 +291,9 @@ mod tests {
     fn a_framed_holds_its_permit_until_take_finishes() {
         let budget = Arc::new(Semaphore::new(1));
         let permit = Arc::clone(&budget).try_acquire_owned().unwrap();
-        let size = Size { columns: NonZeroU16::MIN, rows: NonZeroU16::MIN };
-        let glyph = Glyph { shows: Shows::Blank, style: frames::Style::default() };
-        let line = Line::new(vec![glyph], Ending::Here, NonZeroU16::MIN).unwrap();
+        let size = Size { columns: Side::MIN, rows: Side::MIN };
+        let glyph = Glyph { shows: Shows::Blank, style: frames::Style::PLAIN };
+        let line = Line::new(vec![glyph], Ending::Here, Side::MIN).unwrap();
         let key = TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(0) };
         let frame = Frame::new(key, size, Rows::Whole(vec![line]), None, false).unwrap();
         let framed = Framed { frame, taken: permit };

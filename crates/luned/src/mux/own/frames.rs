@@ -1,38 +1,15 @@
-use std::num::NonZeroU16;
-
 use lune_domain::mux::TerminalKey;
+pub use lune_domain::projects::layout::{Side, Size, SIDE_MAX};
 
 use super::api;
 
-pub const SIDE_MAX: u16 = 1000;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Size {
-    pub columns: NonZeroU16,
-    pub rows: NonZeroU16,
-}
-
-impl Size {
-    #[must_use]
-    pub fn within(columns: NonZeroU16, rows: NonZeroU16) -> Size {
-        let max = NonZeroU16::new(SIDE_MAX).expect("the most is not 0");
-        Size { columns: columns.min(max), rows: rows.min(max) }
-    }
-
-    #[must_use]
-    pub fn said(self) -> api::Size {
-        api::Size { columns: self.columns.get().into(), rows: self.rows.get().into() }
-    }
-
-    fn heard(what: &str, size: Option<api::Size>) -> Result<Size, String> {
-        let size = size.ok_or_else(|| format!("{what} has no size"))?;
-        let cells = |name: &str, count: u32| {
-            let cells = u16::try_from(count).ok().filter(|cells| *cells <= SIDE_MAX);
-            let cells = cells.and_then(NonZeroU16::new);
-            cells.ok_or_else(|| format!("{what}'s {name} are {count}"))
-        };
-        Ok(Size { columns: cells("columns", size.columns)?, rows: cells("rows", size.rows)? })
-    }
+fn size_heard(what: &str, size: Option<api::Size>) -> Result<Size, String> {
+    let size = size.ok_or_else(|| format!("{what} has no size"))?;
+    let cells = |name: &str, count: u32| {
+        let cells = u16::try_from(count).ok().and_then(Side::new);
+        cells.ok_or_else(|| format!("{what}'s {name} are {count}"))
+    };
+    Ok(Size { columns: cells("columns", size.columns)?, rows: cells("rows", size.rows)? })
 }
 
 pub(super) fn colours(foreground: Option<[u8; 3]>, background: Option<[u8; 3]>) -> api::Colours {
@@ -93,7 +70,7 @@ pub enum Colour {
     Rgb([u8; 3]),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each is an attribute a terminal sets apart from the rest, in any combination"
@@ -112,6 +89,28 @@ pub struct Style {
     pub strikethrough: bool,
 }
 
+impl Style {
+    pub const PLAIN: Style = Style {
+        foreground: None,
+        background: None,
+        underline_colour: None,
+        bold: false,
+        faint: false,
+        italic: false,
+        underlined: false,
+        blink: false,
+        inverse: false,
+        invisible: false,
+        strikethrough: false,
+    };
+}
+
+impl Default for Style {
+    fn default() -> Style {
+        Style::PLAIN
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ending {
     Here,
@@ -123,6 +122,7 @@ pub enum Ending {
 pub struct Line {
     glyphs: Vec<Glyph>,
     ending: Ending,
+    columns: Side,
 }
 
 impl Line {
@@ -132,8 +132,13 @@ impl Line {
     }
 
     #[must_use]
-    pub fn into_glyphs(self) -> Vec<Glyph> {
-        self.glyphs
+    pub fn columns(&self) -> Side {
+        self.columns
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<Glyph>, Ending, Side) {
+        (self.glyphs, self.ending, self.columns)
     }
 
     #[must_use]
@@ -146,21 +151,16 @@ impl Line {
         self.ending != Ending::Here
     }
 
-    pub fn new(glyphs: Vec<Glyph>, ending: Ending, columns: NonZeroU16) -> Result<Line, String> {
-        let line = Line { glyphs, ending };
-        let taken = line.columns();
+    pub fn new(glyphs: Vec<Glyph>, ending: Ending, columns: Side) -> Result<Line, String> {
+        let taken: u32 = glyphs.iter().map(|glyph| u32::from(glyph.shows.columns())).sum();
+        let taken = taken + u32::from(ending == Ending::WrapsWide);
         if taken != u32::from(columns.get()) {
             return Err(format!("a row of {columns} columns has glyphs of {taken}"));
         }
-        Ok(line)
+        Ok(Line { glyphs, ending, columns })
     }
 
-    fn columns(&self) -> u32 {
-        let taken: u32 = self.glyphs.iter().map(|glyph| u32::from(glyph.shows.columns())).sum();
-        taken + u32::from(self.wraps_wide())
-    }
-
-    fn heard(line: Option<api::Line>, columns: NonZeroU16) -> Result<Line, String> {
+    fn heard(line: Option<api::Line>, columns: Side) -> Result<Line, String> {
         let line = line.ok_or("a row of a frame has no line")?;
         let ending = match line.ending() {
             api::Ending::Here => Ending::Here,
@@ -188,12 +188,21 @@ fn glyph(glyph: api::Glyph) -> Result<Glyph, String> {
 
 fn style_heard(style: Option<api::Style>) -> Result<Style, String> {
     let Some(style) = style else {
-        return Ok(Style::default());
+        return Ok(Style::PLAIN);
     };
-    let underlined = !matches!(
-        api::Underline::try_from(style.underline),
-        Ok(api::Underline::None | api::Underline::Unspecified) | Err(_)
-    );
+    let underlined = match api::Underline::try_from(style.underline) {
+        Ok(api::Underline::None) => false,
+        Ok(
+            api::Underline::Single
+            | api::Underline::Double
+            | api::Underline::Curly
+            | api::Underline::Dotted
+            | api::Underline::Dashed,
+        ) => true,
+        Ok(api::Underline::Unspecified) | Err(_) => {
+            return Err("a glyph's style does not say its underline".to_owned());
+        },
+    };
     Ok(Style {
         foreground: colour_heard(style.foreground)?,
         background: colour_heard(style.background)?,
@@ -248,6 +257,15 @@ pub struct Cursor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Parts {
+    pub terminal: TerminalKey,
+    pub size: Size,
+    pub rows: Rows,
+    pub cursor: Option<Cursor>,
+    pub tracks_mouse: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     terminal: TerminalKey,
     size: Size,
@@ -264,7 +282,6 @@ impl Frame {
         cursor: Option<Cursor>,
         tracks_mouse: bool,
     ) -> Result<Frame, String> {
-        let columns = u32::from(size.columns.get());
         let lines: Vec<&Line> = match &rows {
             Rows::Whole(lines) => {
                 if lines.len() != usize::from(size.rows.get()) {
@@ -285,9 +302,9 @@ impl Frame {
                 rows.iter().map(|(_, line)| line).collect()
             },
         };
-        if let Some(line) = lines.into_iter().find(|line| line.columns() != columns) {
+        if let Some(line) = lines.into_iter().find(|line| line.columns() != size.columns) {
             let taken = line.columns();
-            return Err(format!("a row of {columns} columns has glyphs of {taken}"));
+            return Err(format!("a row of {} columns has glyphs of {taken}", size.columns));
         }
         if let Some(cursor) = cursor
             && (cursor.row >= size.rows.get() || cursor.column >= size.columns.get())
@@ -314,8 +331,14 @@ impl Frame {
     }
 
     #[must_use]
-    pub fn into_rows(self) -> Rows {
-        self.rows
+    pub fn into_parts(self) -> Parts {
+        Parts {
+            terminal: self.terminal,
+            size: self.size,
+            rows: self.rows,
+            cursor: self.cursor,
+            tracks_mouse: self.tracks_mouse,
+        }
     }
 
     #[must_use]
@@ -330,7 +353,7 @@ impl Frame {
 
     pub(super) fn heard(frame: api::Frame) -> Result<Frame, String> {
         let terminal = TerminalKey::read(frame.terminal)?;
-        let size = Size::heard("a frame", frame.size)?;
+        let size = size_heard("a frame", frame.size)?;
         let rows = match frame.rows.ok_or("a frame has no rows")? {
             api::frame::Rows::Whole(api::Whole { lines }) => {
                 if lines.len() != usize::from(size.rows.get()) {
@@ -358,17 +381,20 @@ fn cursor_heard(cursor: &api::Cursor) -> Result<Cursor, String> {
     let row = u16::try_from(cursor.row).map_err(|_| off())?;
     let column = u16::try_from(cursor.column).map_err(|_| off())?;
     let shape = match api::CursorShape::try_from(cursor.shape) {
+        Ok(api::CursorShape::Block) => CursorShape::Block,
         Ok(api::CursorShape::Bar) => CursorShape::Bar,
         Ok(api::CursorShape::Underline) => CursorShape::Underline,
         Ok(api::CursorShape::BlockHollow) => CursorShape::BlockHollow,
-        Ok(api::CursorShape::Block | api::CursorShape::Unspecified) | Err(_) => CursorShape::Block,
+        Ok(api::CursorShape::Unspecified) | Err(_) => {
+            return Err("the cursor does not say its shape".to_owned());
+        },
     };
     Ok(Cursor { row, column, shape, blinking: cursor.blinking })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::num::{NonZeroU16, NonZeroU32};
 
     use super::*;
     use crate::mux::own::OwnMade;
@@ -454,9 +480,20 @@ mod tests {
             ..frame(1, vec![row.clone()])
         };
         assert_eq!(Frame::heard(again).unwrap_err(), "a frame changes row 0 twice");
-        let cursor = Some(api::Cursor { row: 0, column: 1, ..api::Cursor::default() });
+        let cursor = Some(api::Cursor {
+            row: 0,
+            column: 1,
+            shape: api::CursorShape::Block.into(),
+            blinking: false,
+        });
         let off = api::Frame { cursor, ..frame(1, vec![row.clone()]) };
         assert_eq!(Frame::heard(off).unwrap_err(), "the cursor is off the frame, at 0:1");
+        let unsaid_shape = Some(api::Cursor { row: 0, column: 0, ..api::Cursor::default() });
+        let unsaid = api::Frame { cursor: unsaid_shape, ..frame(1, vec![row.clone()]) };
+        assert_eq!(Frame::heard(unsaid).unwrap_err(), "the cursor does not say its shape");
+        let unknown_shape = Some(api::Cursor { row: 0, column: 0, shape: 99, blinking: false });
+        let unknown = api::Frame { cursor: unknown_shape, ..frame(1, vec![row.clone()]) };
+        assert_eq!(Frame::heard(unknown).unwrap_err(), "the cursor does not say its shape");
         let none =
             api::Frame { size: Some(api::Size { columns: 0, rows: 1 }), ..frame(1, vec![row]) };
         assert_eq!(Frame::heard(none).unwrap_err(), "a frame's columns are 0");
@@ -466,9 +503,10 @@ mod tests {
 
     #[test]
     fn a_glyph_of_a_colour_no_terminal_has_does_not_read() {
+        let no_underline = api::Style { underline: api::Underline::None.into(), ..api::Style::default() };
         let coloured = |is| {
             let foreground = Some(api::Colour { is });
-            let style = Some(api::Style { foreground, ..api::Style::default() });
+            let style = Some(api::Style { foreground, ..no_underline });
             glyph(api::Glyph { style, ..narrow("a") })
         };
         let foreground = |glyph: Result<Glyph, String>| glyph.unwrap().style.foreground;
@@ -479,18 +517,24 @@ mod tests {
         assert!(coloured(Some(api::colour::Is::Palette(256))).unwrap_err().contains("none a"));
         assert!(coloured(rgb(256)).unwrap_err().contains("is of none a terminal has"));
         assert_eq!(coloured(None).unwrap_err(), "a colour is none");
-        let plain = glyph(api::Glyph { style: Some(api::Style::default()), ..narrow("a") });
+        let plain = glyph(api::Glyph { style: Some(no_underline), ..narrow("a") });
         assert_eq!(plain, glyph(narrow("a")));
-        assert_eq!(glyph(narrow("a")).unwrap().style, Style::default());
+        assert_eq!(glyph(narrow("a")).unwrap().style, Style::PLAIN);
+        assert_eq!(Style::PLAIN, Style::default());
+        let unsaid = glyph(api::Glyph { style: Some(api::Style::default()), ..narrow("a") });
+        assert_eq!(unsaid.unwrap_err(), "a glyph's style does not say its underline");
+        let unknown = api::Style { underline: 99, ..api::Style::default() };
+        let unknown = glyph(api::Glyph { style: Some(unknown), ..narrow("a") });
+        assert_eq!(unknown.unwrap_err(), "a glyph's style does not say its underline");
     }
 
     #[test]
     fn a_frame_is_made_only_of_its_size() {
-        let size = Size { columns: NonZeroU16::new(2).unwrap(), rows: NonZeroU16::MIN };
+        let size = Size { columns: Side::new(2).unwrap(), rows: Side::MIN };
         let line = |columns: u16| {
-            let glyph = Glyph { shows: Shows::Blank, style: Style::default() };
+            let glyph = Glyph { shows: Shows::Blank, style: Style::PLAIN };
             let glyphs = vec![glyph; usize::from(columns)];
-            Line::new(glyphs, Ending::Here, NonZeroU16::new(columns).unwrap()).unwrap()
+            Line::new(glyphs, Ending::Here, Side::new(columns).unwrap()).unwrap()
         };
         let two = line(2);
         let cursor = |column| {

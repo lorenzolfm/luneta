@@ -1,11 +1,13 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroU16;
 
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent,
     MouseEventKind,
 };
+use lune_domain::mux::TerminalKey;
 use luned::mux::own::api;
-use luned::mux::own::frames::{self, Cursor, Line, Shows, Size};
+use luned::mux::own::frames::{self, Cursor, Ending, Frame, Line, Parts, Rows, Shows, Side, Size};
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -16,21 +18,7 @@ use unicode_width::UnicodeWidthStr as _;
 use crate::copied::Excerpt;
 use crate::moonlight;
 
-const PLAIN_STYLE: frames::Style = frames::Style {
-    foreground: None,
-    background: None,
-    underline_colour: None,
-    bold: false,
-    faint: false,
-    italic: false,
-    underlined: false,
-    blink: false,
-    inverse: false,
-    invisible: false,
-    strikethrough: false,
-};
-
-const PLAIN: Style = styled(&PLAIN_STYLE);
+const PLAIN: Style = styled(&frames::Style::PLAIN);
 
 const TWO: NonZeroU16 = NonZeroU16::new(2).expect("2 is not 0");
 
@@ -74,6 +62,64 @@ const fn styled(style: &frames::Style) -> Style {
     drawn
 }
 
+pub(crate) struct Clean<'a> {
+    buffer: &'a mut Buffer,
+    area: Rect,
+}
+
+impl<'a> Clean<'a> {
+    pub(crate) fn of_frame(frame: &'a mut ratatui::Frame<'_>) -> Clean<'a> {
+        let area = frame.area();
+        Clean { buffer: frame.buffer_mut(), area }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn of_empty(buffer: &'a mut Buffer, area: Rect) -> Clean<'a> {
+        assert_eq!(buffer.area.intersection(area), area, "a clean region lies inside its buffer");
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                assert_eq!(
+                    buffer[(x, y)],
+                    ratatui::buffer::Cell::EMPTY,
+                    "a clean region starts empty"
+                );
+            }
+        }
+        Clean { buffer, area }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unchecked(buffer: &'a mut Buffer, area: Rect) -> Clean<'a> {
+        assert_eq!(buffer.area.intersection(area), area, "a region lies inside its buffer");
+        Clean { buffer, area }
+    }
+
+    pub(crate) fn area(&self) -> Rect {
+        self.area
+    }
+
+    pub(crate) fn paint_left<R>(
+        self,
+        width: u16,
+        draw: impl FnOnce(&mut Buffer, Rect) -> R,
+    ) -> (R, Clean<'a>) {
+        let width = width.min(self.area.width);
+        let left = Rect::new(self.area.x, self.area.y, width, self.area.height);
+        let right = Rect::new(
+            self.area.x + width,
+            self.area.y,
+            self.area.width - width,
+            self.area.height,
+        );
+        let drawn = draw(self.buffer, left);
+        (drawn, Clean { buffer: self.buffer, area: right })
+    }
+
+    pub(crate) fn into_buffer(self) -> (&'a mut Buffer, Rect) {
+        (self.buffer, self.area)
+    }
+}
+
 pub(crate) struct Glyph {
     pub(crate) shows: Shows,
     style: Style,
@@ -81,7 +127,8 @@ pub(crate) struct Glyph {
 
 pub(crate) struct Row {
     glyphs: Vec<Glyph>,
-    wraps: bool,
+    ending: Ending,
+    columns: Side,
 }
 
 impl Row {
@@ -90,18 +137,17 @@ impl Row {
     }
 
     fn wraps(&self) -> bool {
-        self.wraps
+        self.ending != Ending::Here
     }
 
-    pub(crate) fn replace(&mut self, line: Line) {
-        let wraps = line.wraps();
-        let glyphs = line.into_glyphs();
+    fn replace(&mut self, line: Line) {
+        let (glyphs, ending, columns) = line.into_parts();
+        assert_eq!(columns, self.columns, "a replaced row keeps its width");
         let count = glyphs.len();
-        assert!(u16::try_from(count).is_ok(), "a row's glyphs fit in u16 columns");
         self.glyphs.clear();
         self.glyphs.reserve(count);
         assert!(self.glyphs.capacity() >= count, "a row holds space for every glyph");
-        let mut last = (PLAIN_STYLE, PLAIN);
+        let mut last = (frames::Style::PLAIN, PLAIN);
         for glyph in glyphs {
             let style = if glyph.style == last.0 {
                 last.1
@@ -113,23 +159,80 @@ impl Row {
             self.glyphs.push(Glyph { shows: glyph.shows, style });
         }
         assert_eq!(self.glyphs.len(), count, "every glyph of the line becomes a painted glyph");
-        self.wraps = wraps;
+        self.ending = ending;
     }
 }
 
 impl From<Line> for Row {
     fn from(line: Line) -> Row {
-        let mut row = Row { glyphs: Vec::new(), wraps: false };
+        let mut row = Row { glyphs: Vec::new(), ending: Ending::Here, columns: line.columns() };
         row.replace(line);
         row
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Applied {
+    Resized,
+    Kept,
+    Ignored,
+}
+
 pub(crate) struct Screen {
-    pub(crate) size: Size,
-    pub(crate) lines: Vec<Row>,
-    pub(crate) cursor: Option<Cursor>,
-    pub(crate) tracks_mouse: bool,
+    size: Size,
+    lines: Vec<Row>,
+    cursor: Option<Cursor>,
+    tracks_mouse: bool,
+}
+
+impl Screen {
+    pub(crate) fn size(&self) -> Size {
+        self.size
+    }
+
+    pub(crate) fn cursor(&self) -> Option<Cursor> {
+        self.cursor
+    }
+
+    pub(crate) fn tracks_mouse(&self) -> bool {
+        self.tracks_mouse
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lines(&self) -> &[Row] {
+        &self.lines
+    }
+
+    pub(crate) fn apply(
+        screens: &mut BTreeMap<TerminalKey, Screen>,
+        frame: Frame,
+    ) -> Result<Applied, String> {
+        let Parts { terminal, size, rows, cursor, tracks_mouse } = frame.into_parts();
+        match rows {
+            Rows::Whole(lines) => {
+                let lines: Vec<Row> = lines.into_iter().map(Row::from).collect();
+                let screen = Screen { size, lines, cursor, tracks_mouse };
+                let was = screens.insert(terminal, screen).map(|old| old.size);
+                Ok(if was == Some(size) { Applied::Kept } else { Applied::Resized })
+            },
+            Rows::Changed(rows) => {
+                let Some(screen) = screens.get_mut(&terminal) else {
+                    return Ok(Applied::Ignored);
+                };
+                if screen.size != size {
+                    let sides = |size: Size| format!("{}x{}", size.columns, size.rows);
+                    let (had, sides) = (sides(screen.size), sides(size));
+                    return Err(format!("a frame of {sides} changes the rows of {had}"));
+                }
+                for (index, line) in rows {
+                    screen.lines[usize::from(index)].replace(line);
+                }
+                screen.cursor = cursor;
+                screen.tracks_mouse = tracks_mouse;
+                Ok(Applied::Kept)
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -864,12 +967,12 @@ pub(crate) fn mouse_said(mouse: MouseEvent, at: At) -> Option<api::Mouse> {
 
 #[cfg(test)]
 mod tests {
-    use luned::mux::own::frames::{Ending, Grapheme};
+    use luned::mux::own::frames::Grapheme;
 
     use super::*;
 
     fn glyph(shows: Shows) -> frames::Glyph {
-        frames::Glyph { shows, style: frames::Style::default() }
+        frames::Glyph { shows, style: frames::Style::PLAIN }
     }
 
     fn grapheme(grapheme: &str) -> Grapheme {
@@ -880,8 +983,8 @@ mod tests {
         glyph(Shows::Narrow(grapheme(it)))
     }
 
-    fn side(count: u16) -> NonZeroU16 {
-        NonZeroU16::new(count).unwrap()
+    fn side(count: u16) -> Side {
+        Side::new(count).unwrap()
     }
 
     fn ended(glyphs: Vec<frames::Glyph>, ending: Ending) -> Row {
@@ -1034,7 +1137,7 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
         draw_screen(&mut buffer, Rect::new(1, 0, 5, 1), &screen, None, None);
         assert_eq!(buffer[(2, 0)].symbol(), "👍🏽");
-        assert_eq!(buffer[(2, 0)].diff_option, CellDiffOption::ForcedWidth(side(2)));
+        assert_eq!(buffer[(2, 0)].diff_option, CellDiffOption::ForcedWidth(TWO));
         assert_eq!(buffer[(3, 0)].diff_option, CellDiffOption::Skip);
         assert_eq!(buffer[(4, 0)].symbol(), "b");
         let mut cut = Buffer::empty(Rect::new(0, 0, 2, 1));
@@ -1044,7 +1147,6 @@ mod tests {
 
     #[test]
     fn a_screen_paints_each_glyph_s_style_and_leaves_plain_blanks_alone() {
-        assert_eq!(PLAIN_STYLE, frames::Style::default());
         assert_eq!(styled(&frames::Style::default()), PLAIN);
         let rich = frames::Style {
             foreground: Some(frames::Colour::Palette(12)),
@@ -1156,8 +1258,68 @@ mod tests {
         let blanks = vec![glyph(Shows::Blank); 4];
         row.replace(Line::new(blanks, Ending::Wraps, side(4)).unwrap());
         assert!(row.wraps(), "replacing a non-wrapping row with Ending::Wraps sets wraps");
+        assert_eq!(row.ending, Ending::Wraps);
+        assert_eq!(row.columns, side(4));
         assert_eq!(row.glyphs().len(), 4);
         assert!(row.glyphs().iter().all(|glyph| glyph.style == PLAIN));
+    }
+
+    #[test]
+    fn screen_apply_tracks_resizes_in_place_updates_and_mismatched_deltas() {
+        use std::num::NonZeroU32;
+
+        use luned::mux::own::OwnMade;
+
+        let key = TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(0) };
+        let mut screens = BTreeMap::new();
+        let one = |letter: &str| Line::new(vec![narrow(letter)], Ending::Here, side(1)).unwrap();
+        let size = |columns, rows| Size { columns: side(columns), rows: side(rows) };
+
+        let early = Frame::new(key, size(1, 1), Rows::Changed(vec![(0, one("a"))]), None, false);
+        assert_eq!(Screen::apply(&mut screens, early.unwrap()), Ok(Applied::Ignored));
+        assert!(screens.is_empty());
+
+        let whole = Frame::new(key, size(1, 1), Rows::Whole(vec![one("a")]), None, false).unwrap();
+        assert_eq!(Screen::apply(&mut screens, whole), Ok(Applied::Resized));
+
+        let same_size =
+            Frame::new(key, size(1, 1), Rows::Whole(vec![one("b")]), None, false).unwrap();
+        assert_eq!(Screen::apply(&mut screens, same_size), Ok(Applied::Kept));
+
+        let delta =
+            Frame::new(key, size(1, 1), Rows::Changed(vec![(0, one("c"))]), None, true).unwrap();
+        assert_eq!(Screen::apply(&mut screens, delta), Ok(Applied::Kept));
+        assert!(screens[&key].tracks_mouse());
+        assert_eq!(screens[&key].lines()[0].glyphs()[0].shows, Shows::Narrow(grapheme("c")));
+
+        let wrong_size =
+            Frame::new(key, size(1, 2), Rows::Changed(vec![(0, one("d"))]), None, false).unwrap();
+        assert_eq!(
+            Screen::apply(&mut screens, wrong_size).unwrap_err(),
+            "a frame of 1x2 changes the rows of 1x1"
+        );
+    }
+
+    #[test]
+    fn clean_paint_left_partitions_a_region_into_disjoint_halves() {
+        let whole = Rect::new(2, 1, 10, 4);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 14, 6));
+        let clean = Clean::of_empty(&mut buffer, whole);
+        let (left, right) = clean.paint_left(4, |buffer, left| {
+            buffer.set_string(left.x, left.y, "side", Style::new());
+            left
+        });
+        assert_eq!(left, Rect::new(2, 1, 4, 4));
+        assert_eq!(right.area(), Rect::new(6, 1, 6, 4));
+        assert!(!left.intersects(right.area()));
+        let (_, right_area) = right.into_buffer();
+        assert_eq!(right_area, Rect::new(6, 1, 6, 4));
+
+        let mut narrow = Buffer::empty(Rect::new(0, 0, 3, 2));
+        let (left, right) = Clean::of_empty(&mut narrow, Rect::new(0, 0, 3, 2))
+            .paint_left(10, |_, left| left);
+        assert_eq!(left, Rect::new(0, 0, 3, 2));
+        assert!(right.area().is_empty());
     }
 
     #[test]

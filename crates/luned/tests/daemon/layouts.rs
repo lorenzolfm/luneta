@@ -17,7 +17,7 @@ use luned::api::projects::Held;
 use luned::api::{terminal, ReadDiffRequest, ShowRequest, ShowResponse, Terminal, TerminalKey, Worktree};
 use luned::api::{frames_request, Arrangement, On, FramesRequest};
 use luned::mux::own::api::{self as mux_api, typed, Listing};
-use luned::mux::own::frames::{Line, Rows, Shows};
+use luned::mux::own::frames::{Line, Parts, Rows, Shows};
 use luned::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
 use luned::folder::Folder;
 use luned::Daemon;
@@ -2196,10 +2196,10 @@ fn seen_and_typed_into(
             Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
         };
         framed.take(|frame| {
-            assert_eq!(frame.terminal(), key, "the mux shows only the terminal asked for");
-            assert_eq!((frame.size().columns.get(), frame.size().rows.get()), (78, 22));
-            let cursor = frame.cursor();
-            match frame.into_rows() {
+            let Parts { terminal, size, rows, cursor, .. } = frame.into_parts();
+            assert_eq!(terminal, key, "the mux shows only the terminal asked for");
+            assert_eq!((size.columns.get(), size.rows.get()), (78, 22));
+            match rows {
                 Rows::Whole(whole) => lines = whole,
                 Rows::Changed(rows) => {
                     for (row, line) in rows {

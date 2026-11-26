@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::num::{NonZeroU16, NonZeroU64};
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::process;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -8,13 +8,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::layout::{self, Direction, Order, Sides, Towards, SIDE_MAX};
+use lune_domain::projects::layout::{self, Direction, Order, Sides, Towards};
 use lune_domain::projects::{
     Ask, Browser, BrowserTarget, BrowserUrl, Change, Closing, Dir, Id, Line, Placed,
 };
 use lune_domain::projects::{Holds, ProjectName, Worktree};
 use lune_domain::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
-use lune_domain::projects::{Session, Size, Terminal, TerminalViewId, Used, View, ViewId};
+use lune_domain::projects::{Session, Side, Size, Terminal, TerminalViewId, Used, View, ViewId};
 use lune_domain::projects::{
     WorktreeId, LAYOUT_VIEWS_MAX, LINE_BYTES_MAX, PATH_BYTES_MAX, VIEWS_MAX,
 };
@@ -65,8 +65,10 @@ const TYPING_WAIT_MAX: Duration = Duration::from_secs(30);
 
 const FOLDER_LOOK: LookTimeout = LookTimeout::of(Duration::from_secs(1));
 
-const UNSHOWN_SIZE: Size =
-    Size { columns: NonZeroU16::new(80).unwrap(), rows: NonZeroU16::new(24).unwrap() };
+const UNSHOWN_SIZE: Size = Size {
+    columns: Side::new(80).expect("80 is a side"),
+    rows: Side::new(24).expect("24 is a side"),
+};
 
 const SHELLS: [&str; 9] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh"];
 
@@ -76,8 +78,6 @@ const _: () = assert!(RESTORES_PER_PASS > 0);
 const _: () = assert!(RESTORES_PER_PASS <= VIEWS_MAX);
 const _: () = assert!(RESTORE_SETTLE.as_nanos() > RESTORE_PAUSE.as_nanos());
 const _: () = assert!(TYPING_WAIT.as_nanos() < TYPING_WAIT_MAX.as_nanos());
-const _: () = assert!(UNSHOWN_SIZE.columns.get() <= SIDE_MAX);
-const _: () = assert!(UNSHOWN_SIZE.rows.get() <= SIDE_MAX);
 
 pub type Out = answers::Sender<Result<api::ShowResponse, Status>>;
 
