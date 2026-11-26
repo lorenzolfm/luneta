@@ -37,6 +37,24 @@ impl SeenAgent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sighting {
+    pub session_id: Option<Said>,
+    pub cwd: Directory,
+    pub started_at: Option<SystemTime>,
+    pub name: Option<Name>,
+    pub entrypoint: Option<Said>,
+    pub terminal: Option<TerminalKey>,
+}
+
+impl Sighting {
+    #[must_use]
+    pub fn of(self, id: AgentId, harness: Harness) -> SeenAgent {
+        let Sighting { session_id, cwd, started_at, name, entrypoint, terminal } = self;
+        SeenAgent { id, harness, session_id, cwd, started_at, name, entrypoint, terminal }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub pid: AgentPid,
     pub harness: Harness,

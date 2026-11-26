@@ -4,7 +4,7 @@ use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use lune_domain::agent::{Declared, Harness, Rung, Step, Tells};
+use lune_domain::agent::{Declared, Harness, OscReads, Rung, Step, Tells};
 use lune_mux::screen::{Screen, Size};
 use serde::Deserialize;
 use serde_json::Value;
@@ -27,7 +27,7 @@ struct Reading {
 }
 
 const fn osc_7501(harness: Harness) -> Reading {
-    Reading { reads: Declared::of(harness, Rung::Osc7501), heard: heard_osc_7501 }
+    Reading { reads: OscReads::of(harness).declared(), heard: heard_osc_7501 }
 }
 
 const READINGS: [Reading; 6] = [
@@ -210,8 +210,8 @@ fn told(reads: Declared, step: Step) -> Option<(RungUpdate, ActiveStatus)> {
             panic!("{}: {} has no recording; see {RECORDINGS_TEST}", shown(reads), step.name())
         });
     match heard {
-        Heard::Said(RungUpdate::Active { status, at, subagents }) => {
-            Some((RungUpdate::Active { status: status.clone(), at, subagents }, status))
+        Heard::Said(RungUpdate::Active { status, at }) => {
+            Some((RungUpdate::Active { status: status.clone(), at }, status))
         },
         Heard::Said(RungUpdate::Clear) | Heard::Gone => None,
     }
@@ -340,5 +340,6 @@ fn heard_osc_7501(reads: Declared, step: Step, value: &Value) -> Result<Heard, S
             reads.harness()
         ));
     }
+    let reads = OscReads::of(reads.harness());
     Ok(Heard::Said(osc_7501::report(reads, agent(), &root, Vec::new()).update().clone()))
 }

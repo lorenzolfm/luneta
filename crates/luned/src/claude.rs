@@ -12,12 +12,12 @@ use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Name, SeenAgent,
+    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Name, Sighting,
     Source, Unread, FILE_BYTES_MAX,
 };
 use crate::mux;
 use crate::process::{self, AgentId, AgentPid};
-use crate::statuses::{self, Proof, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
+use crate::statuses::{self, Proof, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
 use crate::{log, program};
 use crate::watch::{self, Troubles};
 use crate::Directory;
@@ -95,10 +95,8 @@ impl Feed {
             Some(entrypoint) if has_sdk_prefix(entrypoint.as_str()) => Feed::Sdk { entrypoint },
             entrypoint => {
                 let update = match statuses::parse_word(status, waiting_for) {
-                    Some(status) => RungUpdate::Active {
-                        status,
-                        at: status_updated_at.map(moment),
-                        subagents: Vec::new(),
+                    Some(status) => {
+                        RungUpdate::Active { status, at: status_updated_at.map(moment) }
                     },
                     None => RungUpdate::Clear,
                 };
@@ -181,7 +179,7 @@ impl Scan {
     #[must_use]
     pub fn pids(&self) -> Vec<u32> {
         let Scan { agents, unread } = self;
-        let agents = agents.iter().map(|agent| agent.seen.id.pid().get());
+        let agents = agents.iter().map(|agent| agent.seen().id.pid().get());
         agents.chain(unread.iter().map(|unread| unread.pid)).collect()
     }
 }
@@ -343,10 +341,7 @@ fn has_sdk_prefix(text: &str) -> bool {
 }
 
 fn reported(id: AgentId, session: &Session, terminal: Option<TerminalKey>) -> ReportedAgent {
-    let report = Report::new(READS, id.clone(), session.feed.update());
-    let seen = SeenAgent {
-        id,
-        harness: READS.harness(),
+    let sighting = Sighting {
         session_id: Some(session.id.clone()),
         cwd: session.cwd.clone(),
         started_at: session.started_at,
@@ -354,7 +349,7 @@ fn reported(id: AgentId, session: &Session, terminal: Option<TerminalKey>) -> Re
         entrypoint: session.feed.entrypoint(),
         terminal,
     };
-    ReportedAgent { seen, report, proof: Proof::Started }
+    ReportedAgent::new(READS, id, sighting, session.feed.update(), Proof::Started)
 }
 
 #[cfg(test)]
@@ -397,11 +392,7 @@ mod tests {
             assert_eq!(parsed.id.as_str(), "s1");
             assert_eq!(
                 parsed.feed.update(),
-                RungUpdate::Active {
-                    status: statuses::ActiveStatus::Idle,
-                    at: None,
-                    subagents: Vec::new(),
-                }
+                RungUpdate::Active { status: statuses::ActiveStatus::Idle, at: None }
             );
         }
         for invalid in [
@@ -442,12 +433,13 @@ mod tests {
         };
         for sdk in ["sdk-cli", "sdk-ts", "  SDK-py  ", "sdk-"] {
             let entry = reported(id.clone(), &session(Some(sdk)), None);
-            assert_eq!(entry.report.update(), &RungUpdate::Clear, "{sdk}");
-            assert_eq!(entry.seen.entrypoint.as_ref().map(Said::as_str), Some(sdk.trim()));
+            assert_eq!(entry.report().update(), &RungUpdate::Clear, "{sdk}");
+            assert_eq!(entry.seen().entrypoint.as_ref().map(Said::as_str), Some(sdk.trim()));
         }
         for interactive in [Some("cli"), Some("claude-vscode"), Some("sdk"), None] {
             let entry = reported(id.clone(), &session(interactive), None);
-            assert!(matches!(entry.report.update(), RungUpdate::Active { .. }), "{interactive:?}");
+            let update = entry.report().update();
+            assert!(matches!(update, RungUpdate::Active { .. }), "{interactive:?}");
         }
     }
 }

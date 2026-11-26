@@ -14,12 +14,12 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::agent::{
-    named_pid, terminal_or_trouble, Name, SeenAgent, Source, FILE_BYTES_MAX,
+    named_pid, terminal_or_trouble, Name, Sighting, Source, FILE_BYTES_MAX,
 };
 use crate::mux;
 use crate::process::{self, AgentId};
 use crate::statuses::{
-    self, ActiveStatus, BlockedReason, Proof, Report, ReportedAgent, RungUpdate,
+    self, ActiveStatus, BlockedReason, Proof, ReportedAgent, RungUpdate,
     SOURCE_AGENTS_MAX,
 };
 use crate::watch::{self, Troubles};
@@ -374,10 +374,7 @@ fn reported(
     terminal: Option<TerminalKey>,
 ) -> ReportedAgent {
     let update = update_of(snapshot.status, snapshot.modified);
-    let report = Report::new(READS, id.clone(), update);
-    let seen = SeenAgent {
-        id,
-        harness: READS.harness(),
+    let sighting = Sighting {
         session_id: snapshot.session_id,
         cwd: snapshot.cwd,
         started_at: Some(started),
@@ -385,12 +382,12 @@ fn reported(
         entrypoint: Some(Said::new("tui".to_owned()).expect("tui is not empty")),
         terminal,
     };
-    ReportedAgent { seen, report, proof: snapshot.proof }
+    ReportedAgent::new(READS, id, sighting, update, snapshot.proof)
 }
 
 fn update_of(status: Option<ActiveStatus>, modified: SystemTime) -> RungUpdate {
     match status {
-        Some(status) => RungUpdate::Active { status, at: Some(modified), subagents: Vec::new() },
+        Some(status) => RungUpdate::Active { status, at: Some(modified) },
         None => RungUpdate::Clear,
     }
 }
@@ -1174,9 +1171,9 @@ mod tests {
 
         let first = files.scan();
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].seen.session_id, None);
+        assert_eq!(first[0].seen().session_id, None);
         assert!(matches!(
-            first[0].report.update(),
+            first[0].report().update(),
             RungUpdate::Active { status: ActiveStatus::Idle, .. }
         ));
 

@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::SystemTime;
 
-use lune_domain::agent::{Declared, Harness, Rung};
+use lune_domain::agent::{Declared, Harness, OscReads, Rung};
 pub use lune_protocol::agent_status::BlockedReason;
 use lune_protocol::program_status::{ChildId, Message, Progress, Title};
 use lune_protocol::said::Said;
 use lune_protocol::PROGRAM_STATUS_RECORDS_MAX;
 
-use crate::agent::{Agent, SeenAgent};
+use crate::agent::{Agent, SeenAgent, Sighting};
 use crate::api;
 use crate::api::agent::{ReportedStatus, Status as LegacyStatus, WaitingFor as Waits};
 use crate::process::AgentId;
@@ -138,11 +138,7 @@ impl Subagent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RungUpdate {
     Clear,
-    Active {
-        status: ActiveStatus,
-        at: Option<SystemTime>,
-        subagents: Vec<Subagent>,
-    },
+    Active { status: ActiveStatus, at: Option<SystemTime> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,22 +146,26 @@ pub struct Report {
     agent: AgentId,
     reads: Declared,
     update: RungUpdate,
+    subagents: Vec<Subagent>,
 }
 
 impl Report {
     #[must_use]
     pub fn new(reads: Declared, agent: AgentId, update: RungUpdate) -> Report {
-        match &update {
-            RungUpdate::Active { subagents, .. } => {
-                assert!(subagents.len() <= SUBAGENTS_MAX);
-                if !subagents.is_empty() {
-                    let rung = reads.rung();
-                    assert_eq!(rung, Rung::Osc7501, "only an OSC 7501 record reports subagents");
-                }
-            },
-            RungUpdate::Clear => {},
-        }
-        Report { agent, reads, update }
+        Report { agent, reads, update, subagents: Vec::new() }
+    }
+
+    #[must_use]
+    pub fn osc_7501(
+        reads: OscReads,
+        agent: AgentId,
+        status: ActiveStatus,
+        at: Option<SystemTime>,
+        subagents: Vec<Subagent>,
+    ) -> Report {
+        assert!(subagents.len() <= SUBAGENTS_MAX);
+        let update = RungUpdate::Active { status, at };
+        Report { agent, reads: reads.declared(), update, subagents }
     }
 
     #[must_use]
@@ -182,13 +182,47 @@ impl Report {
     pub fn update(&self) -> &RungUpdate {
         &self.update
     }
+
+    #[must_use]
+    pub fn subagents(&self) -> &[Subagent] {
+        &self.subagents
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReportedAgent {
-    pub seen: SeenAgent,
-    pub report: Report,
-    pub proof: Proof,
+    seen: SeenAgent,
+    report: Report,
+    proof: Proof,
+}
+
+impl ReportedAgent {
+    #[must_use]
+    pub fn new(
+        reads: Declared,
+        id: AgentId,
+        sighting: Sighting,
+        update: RungUpdate,
+        proof: Proof,
+    ) -> ReportedAgent {
+        let seen = sighting.of(id.clone(), reads.harness());
+        ReportedAgent { seen, report: Report::new(reads, id, update), proof }
+    }
+
+    #[must_use]
+    pub fn seen(&self) -> &SeenAgent {
+        &self.seen
+    }
+
+    #[must_use]
+    pub fn report(&self) -> &Report {
+        &self.report
+    }
+
+    #[must_use]
+    pub fn proof(&self) -> Proof {
+        self.proof
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,18 +307,18 @@ pub struct Statuses {
 
 impl Statuses {
     pub fn record(&mut self, report: Report) {
-        let Report { agent, reads, update } = report;
+        let Report { agent, reads, update, subagents } = report;
         let (harness, rung) = (reads.harness(), reads.rung());
-        if let Some(rungs) = self.agents.get(&agent) {
-            assert_eq!(
-                rungs.harness, harness,
-                "every rung that reports an agent names the agent's own harness"
-            );
-        }
-        let RungUpdate::Active { status, at, subagents } = update else {
-            self.clear_rung(&agent, rung);
+        let held_by_another = self.agents.get(&agent).is_some_and(|rungs| rungs.harness != harness);
+        let RungUpdate::Active { status, at } = update else {
+            if !held_by_another {
+                self.clear_rung(&agent, rung);
+            }
             return;
         };
+        if held_by_another {
+            self.agents.remove(&agent);
+        }
         assert!(subagents.len() <= SUBAGENTS_MAX);
         if !self.agents.contains_key(&agent) && self.agents.len() >= AGENTS_MAX {
             return;
@@ -301,6 +335,7 @@ impl Statuses {
             Rung::Feed | Rung::Extension | Rung::Transcript | Rung::Screen => at,
         };
         rungs.active.insert(rung, Active { status, since, subagents });
+        assert_eq!(rungs.harness, harness);
         assert!(rungs.active.len() <= Rung::ALL.len());
         assert!(self.agents.len() <= AGENTS_MAX);
         assert!(self.agents.contains_key(&agent));
@@ -322,15 +357,6 @@ impl Statuses {
             self.agents.remove(agent);
         }
         assert!(self.agents.get(agent).is_none_or(|rungs| rungs.harness != harness));
-    }
-
-    pub fn claim(&mut self, agent: &AgentId, harness: Harness) {
-        if let Some(held) = self.agents.get(agent).map(|rungs| rungs.harness)
-            && held != harness
-        {
-            self.forget(agent, held);
-        }
-        assert!(self.agents.get(agent).is_none_or(|rungs| rungs.harness == harness));
     }
 
     pub fn replace_rung(&mut self, rung: Rung, reports: Vec<Report>) {
@@ -435,7 +461,7 @@ pub(crate) mod tests {
     }
 
     fn report(id: &AgentId, reads: Declared, status: ActiveStatus, time: u64) -> Report {
-        let update = RungUpdate::Active { status, at: Some(at(time)), subagents: Vec::new() };
+        let update = RungUpdate::Active { status, at: Some(at(time)) };
         Report::new(reads, id.clone(), update)
     }
 
@@ -446,7 +472,7 @@ pub(crate) mod tests {
     ) -> Decided {
         let mut statuses = Statuses::default();
         let id = agent(42);
-        let update = RungUpdate::Active { status, at: since, subagents: Vec::new() };
+        let update = RungUpdate::Active { status, at: since };
         statuses.record(Report::new(reads, id.clone(), update));
         statuses.decide(&id)
     }
@@ -470,61 +496,67 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "names the agent's own harness")]
-    fn an_agent_hears_no_rung_of_another_harness() {
+    fn a_rung_of_another_harness_takes_the_agent_over() {
         let mut statuses = Statuses::default();
         let id = agent(42);
-        let claude = Declared::of(Harness::ClaudeCode, Rung::Feed);
+        let claude = Declared::of(Harness::ClaudeCode, Rung::Osc7501);
+        let claude_feed = Declared::of(Harness::ClaudeCode, Rung::Feed);
         let pi = Declared::of(Harness::Pi, Rung::Extension);
-        statuses.record(report(&id, claude, ActiveStatus::Idle, 1));
+        statuses.record(report(&id, claude, ActiveStatus::Working, 1));
+        statuses.record(report(&id, claude_feed, ActiveStatus::Idle, 1));
+
         statuses.record(report(&id, pi, ActiveStatus::Idle, 2));
+        let decided = statuses.decide(&id);
+        let decided = (decided.rung(), decided.status());
+        assert_eq!(decided, (Some(Rung::Extension), Some(&ActiveStatus::Idle)));
+
+        statuses.record(Report::new(pi, id.clone(), RungUpdate::Clear));
+        assert_eq!(statuses.decide(&id), Decided(None), "the rungs of the harness before are gone");
     }
 
     #[test]
-    #[should_panic(expected = "names the agent's own harness")]
-    fn an_agent_hears_no_clear_of_another_harness() {
+    fn a_clear_of_another_harness_leaves_the_agent_be() {
         let mut statuses = Statuses::default();
         let id = agent(42);
         let claude = Declared::of(Harness::ClaudeCode, Rung::Osc7501);
         let pi = Declared::of(Harness::Pi, Rung::Osc7501);
-        statuses.record(report(&id, claude, ActiveStatus::Idle, 1));
-        statuses.record(Report::new(pi, id, RungUpdate::Clear));
+        statuses.record(report(&id, claude, ActiveStatus::Working, 1));
+
+        statuses.record(Report::new(pi, id.clone(), RungUpdate::Clear));
+        let decided = statuses.decide(&id);
+        let decided = (decided.rung(), decided.status());
+        assert_eq!(decided, (Some(Rung::Osc7501), Some(&ActiveStatus::Working)));
     }
 
     #[test]
-    fn a_claim_of_another_harness_drops_the_rungs_it_held() {
+    fn forgetting_a_harness_drops_only_the_rungs_it_holds() {
         let mut statuses = Statuses::default();
         let id = agent(42);
         let pi = Declared::of(Harness::Pi, Rung::Osc7501);
-        let claude = Declared::of(Harness::ClaudeCode, Rung::Feed);
         statuses.record(report(&id, pi, ActiveStatus::Working, 1));
 
-        statuses.claim(&id, Harness::Pi);
-        assert_eq!(statuses.decide(&id).rung(), Some(Rung::Osc7501));
-
         statuses.forget(&id, Harness::ClaudeCode);
         assert_eq!(statuses.decide(&id).rung(), Some(Rung::Osc7501));
 
-        statuses.claim(&id, Harness::ClaudeCode);
-        assert_eq!(statuses.decide(&id), Decided(None));
-        statuses.record(report(&id, claude, ActiveStatus::Idle, 2));
-        assert_eq!(statuses.decide(&id).rung(), Some(Rung::Feed));
-
-        statuses.forget(&id, Harness::ClaudeCode);
+        statuses.forget(&id, Harness::Pi);
         assert_eq!(statuses.decide(&id), Decided(None));
     }
 
     #[test]
-    #[should_panic(expected = "only an OSC 7501 record reports subagents")]
-    fn only_osc_7501_reports_subagents() {
+    fn an_osc_7501_record_brings_its_subagents() {
+        let mut statuses = Statuses::default();
+        let id = agent(42);
         let subagent = Subagent {
             id: ChildId::parse("sub-1").unwrap(),
             phase: SubagentPhase::Stopped,
             title: None,
             status_since: None,
         };
-        let update =
-            RungUpdate::Active { status: ActiveStatus::Idle, at: None, subagents: vec![subagent] };
-        let _ = Report::new(Declared::of(Harness::ClaudeCode, Rung::Feed), agent(42), update);
+        let reads = OscReads::of(Harness::ClaudeCode);
+        let since = Some(at(1));
+        let told = vec![subagent];
+        let osc = Report::osc_7501(reads, id.clone(), ActiveStatus::Working, since, told.clone());
+        statuses.record(osc);
+        assert_eq!(statuses.decide(&id).subagents(), told.as_slice());
     }
 }

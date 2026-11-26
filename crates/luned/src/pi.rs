@@ -12,12 +12,12 @@ use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble, SeenAgent,
+    absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble, Sighting,
 };
 use crate::mux;
 use crate::process::{self, AgentId};
 use crate::statuses::{
-    ActiveStatus, BlockedReason, Proof, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
+    ActiveStatus, BlockedReason, Proof, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
 };
 use crate::watch::{self, Troubles};
 use crate::{log, Directory};
@@ -351,19 +351,14 @@ pub(crate) fn update_of_file(bytes: &[u8]) -> io::Result<RungUpdate> {
 
 impl File {
     fn update(&self) -> RungUpdate {
-        RungUpdate::Active {
-            status: self.status.clone().into_active(),
-            at: Some(self.status_since),
-            subagents: Vec::new(),
-        }
+        let status = self.status.clone().into_active();
+        RungUpdate::Active { status, at: Some(self.status_since) }
     }
 }
 
 fn reported(id: AgentId, file: File, process: Process, proof: Proof) -> ReportedAgent {
-    let report = Report::new(READS, id.clone(), file.update());
-    let seen = SeenAgent {
-        id,
-        harness: READS.harness(),
+    let update = file.update();
+    let sighting = Sighting {
         session_id: Some(file.session_id),
         cwd: file.cwd,
         started_at: Some(process.started),
@@ -371,7 +366,7 @@ fn reported(id: AgentId, file: File, process: Process, proof: Proof) -> Reported
         entrypoint: file.entrypoint,
         terminal: process.terminal,
     };
-    ReportedAgent { seen, report, proof }
+    ReportedAgent::new(READS, id, sighting, update, proof)
 }
 
 #[cfg(test)]

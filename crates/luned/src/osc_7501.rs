@@ -1,10 +1,10 @@
-use lune_domain::agent::{Declared, Rung};
+use lune_domain::agent::OscReads;
 use lune_protocol::program_status::{
     ChildProgramStatus, OscBlockedKind, ProgramPhase, ProgramStatus,
 };
 
 use crate::process::AgentId;
-use crate::statuses::{ActiveStatus, BlockedReason, Report, RungUpdate, Subagent, SubagentPhase};
+use crate::statuses::{ActiveStatus, BlockedReason, Report, Subagent, SubagentPhase};
 
 fn reason(kind: Option<OscBlockedKind>) -> BlockedReason {
     match kind {
@@ -40,14 +40,12 @@ fn subagent_phase(phase: &ProgramPhase) -> SubagentPhase {
 }
 
 pub(crate) fn report(
-    reads: Declared,
+    reads: OscReads,
     agent: AgentId,
     status: &ProgramStatus,
     subagents: Vec<Subagent>,
 ) -> Report {
-    assert_eq!(reads.rung(), Rung::Osc7501, "an OSC 7501 record reports rung 1");
-    let update = RungUpdate::Active { status: phase(&status.phase), at: status.at, subagents };
-    Report::new(reads, agent, update)
+    Report::osc_7501(reads, agent, phase(&status.phase), status.at, subagents)
 }
 
 pub(crate) fn subagent(child: &ChildProgramStatus) -> Subagent {

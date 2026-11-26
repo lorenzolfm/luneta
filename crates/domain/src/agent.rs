@@ -119,10 +119,10 @@ impl Harness {
     }
 
     #[must_use]
-    pub fn from_osc_7501_app(app: &str) -> Option<Declared> {
+    pub fn from_osc_7501_app(app: &str) -> Option<OscReads> {
         let harness =
             Harness::ALL.into_iter().find(|harness| harness.osc_7501_app() == Some(app))?;
-        Some(Declared::of(harness, Rung::Osc7501))
+        Some(OscReads::of(harness))
     }
 
     #[must_use]
@@ -380,7 +380,26 @@ impl Declared {
     pub const fn steps(self) -> &'static Steps {
         self.harness.ladder().steps(self.rung).expect("a declared rung has its steps")
     }
+}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct OscReads(Declared);
+
+impl OscReads {
+    #[must_use]
+    pub const fn of(harness: Harness) -> OscReads {
+        OscReads(Declared::of(harness, Rung::Osc7501))
+    }
+
+    #[must_use]
+    pub const fn declared(self) -> Declared {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn harness(self) -> Harness {
+        self.0.harness
+    }
 }
 
 const NO_FINISH_IN_SESSIONS: Tells = Tells::No {
@@ -545,7 +564,7 @@ mod tests {
             assert!(rungs.windows(2).all(|pair| pair[0] < pair[1]), "{harness:?}: {rungs:?}");
             if let Some(app) = harness.osc_7501_app() {
                 assert_eq!(rungs[0], Rung::Osc7501, "{harness:?}");
-                let declared = Harness::from_osc_7501_app(app).unwrap();
+                let declared = Harness::from_osc_7501_app(app).unwrap().declared();
                 assert_eq!((declared.harness(), declared.rung()), (harness, Rung::Osc7501));
             } else {
                 assert!(!rungs.contains(&Rung::Osc7501), "{harness:?}");

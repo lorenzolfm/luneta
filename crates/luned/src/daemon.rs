@@ -369,8 +369,9 @@ fn follow(
     };
     let any = |_: &Path| true;
     let mode = RecursiveMode::NonRecursive;
-    let pids =
-        |agents: &Vec<ReportedAgent>| agents.iter().map(|agent| agent.seen.id.pid().get()).collect();
+    let pids = |agents: &Vec<ReportedAgent>| {
+        agents.iter().map(|agent| agent.seen().id.pid().get()).collect()
+    };
     watch::watch_ending("pi", dir, mode, any, SWEEP, read, pids, tell)?;
     let mut files = agy::AgentFiles::new(folder, agy_folder);
     let dir = files.dir().to_owned();
