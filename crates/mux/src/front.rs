@@ -5,7 +5,7 @@ use rustix::fs::{Mode, OFlags};
 use lune_protocol::shell::Front;
 
 use crate::process::{self, Group, Process};
-use crate::pty::{self, Modes, Pty};
+use crate::pty::{self, Modes};
 
 const READING: [&str; 2] = ["wait_woken", "n_tty_read"];
 
@@ -19,15 +19,14 @@ const RELAYS: [&str; 2] = ["sudo", "script"];
 const PROCESSES_MAX: usize = 512;
 
 #[must_use]
-pub fn of_terminal(pty: &Pty, program: u32, group: Group) -> Front {
-    let modes = pty.modes().ok();
+pub fn of_terminal(modes: Option<Modes>, ours: Option<u64>, program: u32, group: Group) -> Front {
     let processes = tree(program);
     let front = in_front(&processes, group);
     let said = of(modes, &front, group.leader() == program);
     if said != Front::Interactive {
         return said;
     }
-    let Ok(ours) = pty.device() else {
+    let Some(ours) = ours else {
         return said;
     };
     let relays = front.iter().filter(|process| RELAYS.contains(&process.name.as_str()));

@@ -20,9 +20,9 @@ use tonic::Status;
 use crate::api;
 use crate::asked::{Colours, Dumped, Input, Size, TerminalKey};
 use crate::frame::{self, Flags};
-use crate::front;
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leader;
+use crate::looker::{Asked, Gone, Looker, Seen};
 use crate::marks::Mark;
 use crate::mux::Mux;
 use crate::panics::{self, Panicked};
@@ -227,6 +227,8 @@ pub fn start(
     let waking = wake.clone();
     let (leader, exits) = Leader::waited(terminal, child, mux.leaders(), move || waking.wake())?;
     let pid = leader.pid();
+    let waking = wake.clone();
+    let looker = Looker::started(terminal, move || waking.wake())?;
     thread::Builder::new().name(format!("terminal {terminal}")).spawn(move || {
         if placed.recv().is_err() {
             return;
@@ -263,6 +265,8 @@ pub fn start(
                 pid,
                 shell: Shell::default(),
                 looks: Looks::first(),
+                looker,
+                marked: 0,
                 told: Told::default(),
                 statuses_version: 0,
             };
@@ -332,6 +336,8 @@ struct Thread {
     pid: u32,
     shell: Shell,
     looks: Looks,
+    looker: Looker,
+    marked: u64,
     told: Told,
     statuses_version: u64,
 }
@@ -347,11 +353,26 @@ struct Looks {
     due: Option<Instant>,
     last: Option<Instant>,
     heard: bool,
+    asking: bool,
 }
 
 impl Looks {
     fn first() -> Looks {
-        Looks { due: Some(Instant::now()), last: None, heard: false }
+        Looks { due: Some(Instant::now()), last: None, heard: false, asking: false }
+    }
+
+    fn waits_until(&self) -> Option<Instant> {
+        self.due.filter(|_| !self.asking)
+    }
+
+    fn asked(&mut self, now: Instant, going: bool) {
+        assert!(!self.asking, "a terminal asks one look at a time");
+        self.looked(now, going);
+        self.asking = true;
+    }
+
+    fn answered(&mut self) -> bool {
+        std::mem::take(&mut self.asking)
     }
 
     fn heard(&mut self, now: Instant) {
@@ -414,29 +435,47 @@ impl Thread {
             if writable || self.program.owed() {
                 self.write()?;
             }
-            if self.looks.due.is_some_and(|due| due <= Instant::now()) {
-                self.look();
+            self.seen()?;
+            if self.looks.waits_until().is_some_and(|due| due <= Instant::now()) {
+                self.look()?;
             }
             self.frame()?;
         }
     }
 
-    fn look(&mut self) {
+    fn look(&mut self) -> io::Result<()> {
         let now = Instant::now();
         let Program::Runs { pty, .. } = &self.program else {
             self.looks = Looks::default();
-            return;
+            return Ok(());
         };
-        let group = pty.front_group();
-        let foreground =
-            group.and_then(|group| foreground(group.leader()).or_else(|| foreground(self.pid)));
-        if self.shell.going()
-            && let Some(group) = group
-        {
-            self.shell.saw(group, self.pid, front::of_terminal(pty, self.pid, group));
+        let going = self.shell.going();
+        let asked = Asked {
+            program: self.pid,
+            group: pty.front_group(),
+            going,
+            modes: pty.modes().ok(),
+            device: pty.device().ok(),
+            marked: self.marked,
+        };
+        self.looker.ask(asked).map_err(looks_gone)?;
+        self.looks.asked(now, going);
+        Ok(())
+    }
+
+    fn seen(&mut self) -> io::Result<()> {
+        let Some(Seen { foreground, front, marked }) = self.looker.seen().map_err(looks_gone)?
+        else {
+            return Ok(());
+        };
+        if !self.looks.answered() || marked != self.marked {
+            return Ok(());
         }
-        self.looks.looked(now, self.shell.going());
+        if let Some((group, front)) = front {
+            self.shell.saw(group, self.pid, front);
+        }
         self.tell(foreground);
+        Ok(())
     }
 
     fn tell(&mut self, foreground: Option<api::Foreground>) {
@@ -448,7 +487,8 @@ impl Thread {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        let look = self.looks.due.map(|due| due.saturating_duration_since(Instant::now()));
+        let now = Instant::now();
+        let look = self.looks.waits_until().map(|due| due.saturating_duration_since(now));
         match (self.framing(), look) {
             (Some(framing), Some(look)) => Some(framing.min(look)),
             (framing, look) => framing.or(look),
@@ -749,6 +789,7 @@ impl Thread {
                 Some(if leader.stopped { Job::Stopped } else { Job::Runs })
             };
             self.shell.read(marks, now, in_front, job);
+            self.marked += 1;
         }
         self.dirty = true;
         let scrollback = self.screen.scrollback();
@@ -923,8 +964,8 @@ fn answers_lost(terminal: TerminalId, kept: Kept) {
     }
 }
 
-fn foreground(pid: u32) -> Option<api::Foreground> {
-    Some(api::Foreground { pid, argv: process::argv(pid)? })
+fn looks_gone(Gone: Gone) -> io::Error {
+    io::Error::other("its looks are gone")
 }
 
 fn host() -> String {
@@ -1019,6 +1060,19 @@ mod tests {
         assert_eq!(looks.due, Some(at(500)));
         looks.looked(at(500), false);
         assert_eq!(looks.due, None);
+    }
+
+    #[test]
+    fn a_look_asked_holds_the_next_until_it_is_answered() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let mut looks = Looks::first();
+        looks.asked(start, true);
+        looks.heard(at(300));
+        assert_eq!(looks.waits_until(), None);
+        assert!(looks.answered());
+        assert_eq!(looks.waits_until(), Some(at(300)));
+        assert!(!looks.answered());
     }
 
     #[test]
