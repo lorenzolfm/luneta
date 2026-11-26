@@ -8,11 +8,13 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::vte::ansi::CursorShape;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{Arranged, BrowserUrl, Opens, ProjectId, Size, ViewId, WorktreeId};
+use lune_domain::projects::{
+    Arranged, BrowserUrl, Opens, ProjectId, Size, ViewId, WorktreeId, LAYOUT_VIEWS_MAX,
+};
 use luned::folder;
 use luned::log;
 use luned::mux::own::api::{self, typed};
-use luned::mux::own::frames::{self, Frame, Rows};
+use luned::mux::own::frames::{self, Frame};
 use luned::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
 use luned::{
     Asked, Beside, Direction, Found, Heard, Laid, View, Rect as Placed, Show, Shows, Where,
@@ -27,7 +29,7 @@ use crate::answers::{CellPixels, Colours};
 use crate::attached::{
     below_bar, border, draw_screen, draw_tab_spans, key_said, link, mouse_said, on_views,
     screen_rect, selects, span_under, spot_in, tab_columns_max, tab_spans, tab_spans_capped,
-    text, within, Pointer, Screen, Selection, Spot, TabSpan, TAB_BAR_ROWS, TAB_PAD,
+    text, within, Applied, Clean, Pointer, Screen, Selection, Spot, TabSpan, TAB_BAR_ROWS, TAB_PAD,
 };
 use crate::copied::Excerpt;
 use crate::desktop;
@@ -41,8 +43,6 @@ use crate::sidebar::colour_of;
 const AGAIN: Duration = Duration::from_secs(1);
 
 const VIEW_DOT: &str = "●";
-
-const SIDE_MAX: u16 = 1000;
 
 const LOST: &str = "lost: lune-mux no longer holds it";
 
@@ -82,9 +82,9 @@ const _: () = assert!(UNSENT_MAX <= viewer::SAID_MAX / 4);
 
 #[must_use]
 pub fn layout_size(columns: NonZeroU16, rows: NonZeroU16) -> Size {
-    let rows = rows.get().saturating_sub(TAB_BAR_ROWS).max(1);
-    let side = |cells: u16| u32::from(cells.min(SIDE_MAX));
-    Size::of(side(columns.get()), side(rows)).expect("a side of 1 to 1000 cells is a size")
+    let rows = NonZeroU16::new(rows.get().saturating_sub(TAB_BAR_ROWS).max(1))
+        .expect("a layout has at least 1 row");
+    Size::within(columns, rows)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -454,42 +454,16 @@ impl Layout {
         keys
     }
 
-    fn framed(&mut self, frame: &Frame) -> Result<(), String> {
+    fn framed(&mut self, frame: Frame) -> Result<(), String> {
         let key = frame.terminal();
         if !self.wanted().contains(&key) {
             return Ok(());
         }
-        let before = self.screens.remove(&key);
-        let size = before.as_ref().map(|screen| screen.size);
-        let lines = match (frame.rows(), before) {
-            (Rows::Whole(lines), _) => lines.clone(),
-            (Rows::Changed(rows), Some(screen)) if screen.size == frame.size() => {
-                let mut lines = screen.lines;
-                let count = usize::from(screen.size.rows.get());
-                assert_eq!(lines.len(), count, "a screen holds a line for each of its rows");
-                for (index, line) in rows {
-                    lines[usize::from(*index)] = line.clone();
-                }
-                lines
-            },
-            (Rows::Changed(_), None) => return Ok(()),
-            (Rows::Changed(_), Some(screen)) => {
-                let sides = |size: frames::Size| format!("{}x{}", size.columns, size.rows);
-                let (had, sides) = (sides(screen.size), sides(frame.size()));
-                self.screens.insert(key, screen);
-                return Err(format!("a frame of {sides} changes the rows of {had}"));
-            },
-        };
-        if self.focused_key() == Some(key) && size != Some(frame.size()) {
+        if Screen::apply(&mut self.screens, frame)? == Applied::Resized
+            && self.focused_key() == Some(key)
+        {
             self.pointer = self.pointer.unselected();
         }
-        let screen = Screen {
-            size: frame.size(),
-            lines,
-            cursor: frame.cursor(),
-            tracks_mouse: frame.tracks_mouse(),
-        };
-        self.screens.insert(key, screen);
         Ok(())
     }
 
@@ -700,7 +674,7 @@ impl Layout {
             return false;
         };
         let inside = on_views(at).is_some_and(|at| inner.contains(at));
-        inside && selects(screen.tracks_mouse, mouse)
+        inside && selects(screen.tracks_mouse(), mouse)
     }
 
     fn select_from(&mut self, at: Spot) {
@@ -709,7 +683,7 @@ impl Layout {
             return;
         };
         let at = spot_in(inner, at);
-        let held = within(at, screen.size);
+        let held = within(at, screen.size());
         self.pointer = if held == at {
             Pointer::Pressed(at)
         } else {
@@ -721,7 +695,7 @@ impl Layout {
         let Some((inner, _, screen)) = self.focused_screen() else {
             return;
         };
-        let at = within(spot_in(inner, below_bar(at)), screen.size);
+        let at = within(spot_in(inner, below_bar(at)), screen.size());
         self.pointer = match self.pointer {
             Pointer::Pressed(from) if from != at => Pointer::Selecting(Selection { from, to: at }),
             Pointer::Selecting(selection) => Pointer::Selecting(Selection { to: at, ..selection }),
@@ -747,11 +721,11 @@ impl Layout {
     fn pointed(&self, at: Spot) -> Option<Selection> {
         let (inner, _, screen) = self.focused_screen()?;
         let at = on_views(at).filter(|at| inner.contains(*at))?;
-        if screen.tracks_mouse {
+        if screen.tracks_mouse() {
             return None;
         }
         let at = spot_in(inner, at);
-        if within(at, screen.size) != at {
+        if within(at, screen.size()) != at {
             return None;
         }
         link(screen, at).map(|(span, _)| span)
@@ -759,18 +733,14 @@ impl Layout {
 
     fn draw(
         &mut self,
-        buffer: &mut Buffer,
-        area: Rect,
+        clean: Clean<'_>,
         hover: Option<Spot>,
         browsers: Option<&Browsers>,
         kitty_cell_px: Option<(NonZeroU16, NonZeroU16)>,
     ) -> (Option<Position>, Vec<RibbonOverlay>) {
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                if let Some(cell) = buffer.cell_mut((x, y)) {
-                    cell.reset();
-                }
-            }
+        let (buffer, area) = clean.into_buffer();
+        if area.is_empty() {
+            return (None, Vec::new());
         }
         let bar = Rect { height: area.height.min(TAB_BAR_ROWS), ..area };
         let views = Rect { y: area.y + bar.height, height: area.height - bar.height, ..area };
@@ -786,6 +756,10 @@ impl Layout {
             .into_iter()
             .map(|(view, placed)| (view.id, view.found.clone(), placed))
             .collect();
+        assert!(
+            drawn_views.len() <= LAYOUT_VIEWS_MAX,
+            "a layout draws at most {LAYOUT_VIEWS_MAX} views"
+        );
         let mut cursor = None;
         let mut overlays = Vec::new();
         let mut review_slot = 0u32;
@@ -868,12 +842,15 @@ impl Layout {
             let style = Style::new().fg(moonlight::MUTE);
             buffer.set_stringn(seen.x, seen.y, said, usize::from(seen.width), style);
         }
+        if let Some(at) = cursor {
+            assert!(views.contains(at), "a drawn cursor lies inside the layout's views");
+        }
         (cursor, overlays)
     }
 
     fn cursor_style(&self) -> (CursorShape, bool) {
         let screen = self.focused_screen().map(|(_, _, screen)| screen);
-        let Some(cursor) = screen.and_then(|screen| screen.cursor) else {
+        let Some(cursor) = screen.and_then(Screen::cursor) else {
             return (CursorShape::HollowBlock, false);
         };
         let shape = match cursor.shape {
@@ -1366,17 +1343,16 @@ impl Viewed {
                 return Heeded::Note(format!("lune's viewer: {why}"));
             },
         };
-        let frame = framed.frame();
-        if !watching.showing.contains(&frame.terminal()) {
+        if !watching.showing.contains(&framed.frame().terminal()) {
             return Heeded::Quiet;
         }
-        match self.layout.framed(frame) {
+        framed.take(|frame| match self.layout.framed(frame) {
             Ok(()) => Heeded::Quiet,
             Err(why) => {
                 self.unwatch();
                 Heeded::Note(format!("lune-mux said what lune cannot follow: {why}"))
             },
-        }
+        })
     }
 
     fn unwatch(&mut self) {
@@ -1668,12 +1644,11 @@ impl Viewed {
     #[must_use]
     pub fn draw(
         &mut self,
-        buffer: &mut Buffer,
-        area: Rect,
+        clean: Clean<'_>,
         hover: Option<Spot>,
         kitty_cell_px: Option<(NonZeroU16, NonZeroU16)>,
     ) -> (Option<Position>, Vec<RibbonOverlay>) {
-        self.layout.draw(buffer, area, hover, Some(&self.browsers), kitty_cell_px)
+        self.layout.draw(clean, hover, Some(&self.browsers), kitty_cell_px)
     }
 
     #[must_use]
@@ -1688,20 +1663,20 @@ mod tests {
 
     use crossterm::event::{KeyModifiers, MouseButton};
     use luned::api::{show_request, show_response};
-    use luned::mux::own::frames::{Cursor, Ending, Glyph, Grapheme, Line, Shows};
+    use luned::mux::own::frames::{Cursor, Ending, Glyph, Grapheme, Line, Rows, Shows, Side};
     use luned::mux::own::OwnMade;
     use ratatui::style::Modifier;
 
     use super::*;
     use crate::attached::At;
 
-    fn side(count: u16) -> NonZeroU16 {
-        NonZeroU16::new(count).unwrap()
+    fn side(count: u16) -> Side {
+        Side::new(count).unwrap()
     }
 
     fn narrow(it: &str) -> Glyph {
         let shows = Shows::Narrow(Grapheme::new(it.to_owned()).unwrap());
-        Glyph { shows, style: frames::Style::default() }
+        Glyph { shows, style: frames::Style::PLAIN }
     }
 
     fn lines(rows: &[&str]) -> Vec<Line> {
@@ -1777,8 +1752,8 @@ mod tests {
         assert!(!layout.laid_out(laid(halves(), 11, false)));
         let cursor =
             Cursor { row: 1, column: 2, shape: frames::CursorShape::Block, blinking: false };
-        layout.framed(&whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
-        layout.framed(&whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
+        layout.framed(whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
+        layout.framed(whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
         layout
     }
 
@@ -1798,7 +1773,8 @@ mod tests {
     fn each_terminal_draws_in_its_frame_under_the_worktrees_and_a_larger_area_keeps_a_margin() {
         let mut layout = split_layout();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
-        let (cursor, _) = layout.draw(&mut buffer, Rect::new(2, 0, 22, 6), None, None, None);
+        let (cursor, _) =
+            layout.draw(Clean::of_empty(&mut buffer, Rect::new(2, 0, 22, 6)), None, None, None);
         assert_eq!(row(&buffer, 0, 2, 17), "\u{e0b6} one \u{e0b4}   two  ");
         assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (moonlight::INK, moonlight::MAUVE));
         assert_eq!((buffer[(2, 0)].fg, buffer[(2, 0)].bg), (moonlight::MAUVE, Color::Reset));
@@ -1811,7 +1787,10 @@ mod tests {
         assert_eq!(row(&buffer, 5, 2, 24), " ".repeat(22));
         assert_eq!(cursor, Some(Position::new(5, 3)));
         let mut small = Buffer::empty(Rect::new(0, 0, 14, 3));
-        assert_eq!(layout.draw(&mut small, Rect::new(0, 0, 14, 3), None, None, None).0, None);
+        assert_eq!(
+            layout.draw(Clean::of_empty(&mut small, Rect::new(0, 0, 14, 3)), None, None, None).0,
+            None
+        );
         assert_eq!(row(&small, 1, 0, 14), "╭ p1 ────╮╭ p2");
         assert_eq!(row(&small, 2, 0, 14), "│abcdefgh││qrs");
     }
@@ -1840,14 +1819,15 @@ mod tests {
         let mut layout = split_layout();
         layout.laid_out(laid(halves(), 12, true));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None, None);
+        layout.draw(Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)), None, None, None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭ p2 ──────────────╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
         let mut here = Layout::new(worktree(1), Some(key(2)));
         let lost = vec![view(11, (0, 0, 10, 4), None), view(12, (10, 0, 10, 4), Some(2))];
         here.laid_out(laid(lost, 11, false));
         assert_eq!(here.wanted(), BTreeSet::new(), "lune never shows the terminal it runs in");
-        here.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None, None);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
+        here.draw(Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)), None, None, None);
         assert_eq!(row(&buffer, 2, 1, 9), "lost: lu");
         assert_eq!(row(&buffer, 2, 11, 19), "lune run");
     }
@@ -1868,7 +1848,7 @@ mod tests {
         };
         layout.laid_out(tabs(12));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None, None);
+        layout.draw(Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)), None, None, None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭  p  ─ ● p ─  t  ─╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
         assert_eq!((buffer[(8, 1)].symbol(), buffer[(8, 1)].fg), (VIEW_DOT, moonlight::MAUVE));
@@ -1900,7 +1880,7 @@ mod tests {
         });
         layout.laid_out(tabs.unwrap());
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None, None);
+        layout.draw(Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)), None, None, None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭  a  ─  a  ─ ● t ─╮");
         let drawn = |columns| {
             let spans = layout.view_tabs(Rect::new(0, 0, columns, 4), None);
@@ -1943,16 +1923,16 @@ mod tests {
         layout.select_to(spot(3, 30));
         assert_eq!(layout.selected().as_deref(), Some("abcdefgh\nijklmnop"));
         assert!(matches!(layout.pointer, Pointer::Shown(_)));
-        layout.framed(&whole(2, &["ab"], None)).unwrap();
+        layout.framed(whole(2, &["ab"], None)).unwrap();
         assert!(matches!(layout.pointer, Pointer::Shown(_)));
-        layout.framed(&whole(1, &["ab"], None)).unwrap();
+        layout.framed(whole(1, &["ab"], None)).unwrap();
         assert_eq!(layout.pointer, Pointer::Free);
     }
 
     #[test]
     fn a_click_on_a_link_copies_it_and_the_pointer_over_one_underlines_it() {
         let mut layout = split_layout();
-        layout.framed(&whole(1, &["a/b.rs x", "ijklmnop"], None)).unwrap();
+        layout.framed(whole(1, &["a/b.rs x", "ijklmnop"], None)).unwrap();
         layout.select_from(spot(2, 3));
         assert_eq!(layout.selected().as_deref(), Some("a/b.rs"));
         let lit = Selection { from: At { row: 0, column: 0 }, to: At { row: 0, column: 5 } };
@@ -1969,17 +1949,22 @@ mod tests {
         assert_eq!(layout.selected(), None, "a click on a word copies nothing");
         assert_eq!(layout.pointer, Pointer::Free);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), Some(spot(2, 2)), None, None);
+        layout.draw(
+            Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)),
+            Some(spot(2, 2)),
+            None,
+            None,
+        );
         let underlined = |x| buffer[(x, 2)].modifier.contains(Modifier::UNDERLINED);
         let line: String = (1..9).map(|x| if underlined(x) { '_' } else { ' ' }).collect();
         assert_eq!(line, "______  ");
         assert_eq!(layout.pointed(spot(2, 13)), None, "only in the focused terminal");
         let size = frames::Size { columns: side(8), rows: side(2) };
         let rows = Rows::Whole(lines(&["a/b.rs x", "ijklmnop"]));
-        layout.framed(&Frame::new(key(1), size, rows, None, true).unwrap()).unwrap();
+        layout.framed(Frame::new(key(1), size, rows, None, true).unwrap()).unwrap();
         let taken = "where the program takes the mouse, none shows";
         assert_eq!(layout.pointed(spot(2, 2)), None, "{taken}");
-        layout.framed(&whole(1, &["x a/b.rs"], None)).unwrap();
+        layout.framed(whole(1, &["x a/b.rs"], None)).unwrap();
         let past = "past a screen shorter than its view, none shows";
         assert_eq!(layout.pointed(spot(3, 8)), None, "{past}");
         layout.select_from(spot(3, 8));
@@ -1996,15 +1981,67 @@ mod tests {
         let changed = Rows::Changed(vec![(0, lines(&["c"]).remove(0))]);
         let size = frames::Size { columns: side(1), rows: side(1) };
         let frame = Frame::new(key(1), size, changed, None, false).unwrap();
-        let why = layout.framed(&frame).unwrap_err();
+        let why = layout.framed(frame).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 8x2");
         layout.laid_out(laid(vec![view(12, (0, 0, 20, 4), Some(2))], 12, false));
         assert_eq!(layout.screens.keys().copied().collect::<Vec<_>>(), [key(2)]);
-        layout.framed(&whole(1, &["no"], None)).unwrap();
+        layout.framed(whole(1, &["no"], None)).unwrap();
         let lacked = "a terminal its layout lacks gets no screen";
         assert!(!layout.screens.contains_key(&key(1)), "{lacked}");
         layout.go(worktree(2));
         assert_eq!(layout.focused(), None, "a layout of another worktree lays out nothing here");
+    }
+
+    #[test]
+    fn a_frame_moves_its_glyphs_into_the_screen_without_cloning_and_replaces_only_changed_rows() {
+        let ptr_of = |shows: &Shows| match shows {
+            Shows::Narrow(grapheme) | Shows::Wide(grapheme) => grapheme.as_str().as_ptr(),
+            Shows::Blank => panic!("expected a grapheme"),
+        };
+        let mut layout = Layout::new(worktree(1), None);
+        assert!(!layout.laid_out(laid(halves(), 11, false)));
+        let first = whole(1, &["abcdefgh", "ijklmnop"], None);
+        let Rows::Whole(initial) = first.rows() else { unreachable!() };
+        let row0_ptr = ptr_of(&initial[0].glyphs()[0].shows);
+        let row1_ptr = ptr_of(&initial[1].glyphs()[0].shows);
+        layout.framed(first).unwrap();
+        let screen = &layout.screens[&key(1)];
+        assert_eq!(ptr_of(&screen.lines()[0].glyphs()[0].shows), row0_ptr);
+        assert_eq!(ptr_of(&screen.lines()[1].glyphs()[0].shows), row1_ptr);
+
+        let updated = lines(&["QRSTUVWX"]).remove(0);
+        let updated_ptr = ptr_of(&updated.glyphs()[0].shows);
+        let cursor =
+            Some(Cursor { row: 1, column: 3, shape: frames::CursorShape::Bar, blinking: true });
+        let size = frames::Size { columns: side(8), rows: side(2) };
+        let changed = Frame::new(key(1), size, Rows::Changed(vec![(1, updated)]), cursor, true);
+        layout.framed(changed.unwrap()).unwrap();
+        let screen = &layout.screens[&key(1)];
+        assert_eq!(ptr_of(&screen.lines()[0].glyphs()[0].shows), row0_ptr, "row 0 stayed in place");
+        assert_eq!(ptr_of(&screen.lines()[1].glyphs()[0].shows), updated_ptr, "row 1 moved in");
+        assert_eq!(screen.cursor(), cursor);
+        assert!(screen.tracks_mouse());
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
+        let (cursor_at, _) =
+            layout.draw(Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)), None, None, None);
+        assert_eq!(row(&buffer, 2, 1, 9), "abcdefgh");
+        assert_eq!(row(&buffer, 3, 1, 9), "QRSTUVWX");
+        assert_eq!(cursor_at, Some(Position::new(4, 3)));
+    }
+
+    #[test]
+    fn drawing_a_layout_leaves_untouched_cells_in_its_area_alone() {
+        let mut layout = split_layout();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
+        for spot in [(2, 5), (22, 2), (19, 0)] {
+            buffer[spot].set_symbol("x");
+        }
+        let _ =
+            layout.draw(Clean::unchecked(&mut buffer, Rect::new(2, 0, 22, 6)), None, None, None);
+        for spot in [(2, 5), (22, 2), (19, 0)] {
+            assert_eq!(buffer[spot].symbol(), "x", "layout draw does not reset untouched cells");
+        }
+        assert_eq!(row(&buffer, 2, 2, 12), "│abcdefgh│");
     }
 
     fn laid_in(id: u64, views: Vec<show_response::View>) -> Heard {
@@ -2075,12 +2112,15 @@ mod tests {
     fn a_worktree_emptied_is_left_and_one_gone_back_to_opens_again() {
         let unserved = tempfile::tempdir().unwrap();
         let (events, _heard) = std::sync::mpsc::channel();
-        let size = layout_size(side(20), side(6));
+        let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
         let greeting = Greeting { foreground: None, background: None };
         let folder = unserved.path().to_owned();
         let browser_config = embedded::Config {
             mode: embedded::Mode::Unsupported,
-            cell: CellPixels { width: side(10), height: side(20) },
+            cell: CellPixels {
+                width: NonZeroU16::new(10).unwrap(),
+                height: NonZeroU16::new(20).unwrap(),
+            },
             colours: Colours::default(),
         };
         let mut viewed = Viewed::start(
@@ -2115,11 +2155,14 @@ mod tests {
         use show_response::view::{Browser, Found as Said};
         let unserved = tempfile::tempdir().unwrap();
         let (events, _heard) = std::sync::mpsc::channel();
-        let size = layout_size(side(20), side(6));
+        let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
         let greeting = Greeting { foreground: None, background: None };
         let browser_config = embedded::Config {
             mode: embedded::Mode::Unsupported,
-            cell: CellPixels { width: side(10), height: side(20) },
+            cell: CellPixels {
+                width: NonZeroU16::new(10).unwrap(),
+                height: NonZeroU16::new(20).unwrap(),
+            },
             colours: Colours::default(),
         };
         let mut viewed = Viewed::start(
@@ -2317,11 +2360,14 @@ mod tests {
         let (events, _rx) = std::sync::mpsc::channel();
         let config = embedded::Config {
             mode: embedded::Mode::Unsupported,
-            cell: crate::answers::CellPixels { width: side(10), height: side(20) },
+            cell: crate::answers::CellPixels {
+                width: NonZeroU16::new(10).unwrap(),
+                height: NonZeroU16::new(20).unwrap(),
+            },
             colours: crate::answers::Colours::default(),
         };
         let browsers = embedded::Browsers::new(1, config, events);
-        let _ = layout.draw(&mut buffer, area, None, Some(&browsers), None);
+        let _ = layout.draw(Clean::of_empty(&mut buffer, area), None, Some(&browsers), None);
         let rendered: String = (0..area.height)
             .map(|y| row(&buffer, y, 0, area.width))
             .collect::<Vec<_>>()
@@ -2376,12 +2422,17 @@ diff --git a/src/lib.rs b/src/lib.rs
 
         let area = Rect::new(0, 0, 112, 15);
         let mut buf = Buffer::empty(area);
-        let (_, overlays_unicode) = layout.draw(&mut buf, area, None, None, None);
+        let (_, overlays_unicode) =
+            layout.draw(Clean::of_empty(&mut buf, area), None, None, None);
         assert!(overlays_unicode.is_empty());
 
         let mut buf_kitty = Buffer::empty(area);
-        let (_, overlays_kitty) =
-            layout.draw(&mut buf_kitty, area, None, None, Some((side(8), side(16))));
+        let (_, overlays_kitty) = layout.draw(
+            Clean::of_empty(&mut buf_kitty, area),
+            None,
+            None,
+            Some((NonZeroU16::new(8).unwrap(), NonZeroU16::new(16).unwrap())),
+        );
         assert_eq!(overlays_kitty.len(), 1);
         assert_eq!(overlays_kitty[0].image_id, review::KITTY_BASE_ID);
 

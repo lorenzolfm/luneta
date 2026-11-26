@@ -3340,19 +3340,23 @@ impl App {
         let collapsed = self.focus.side == Side::Collapsed;
         let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
         let frame_area = frame.area();
-        let (sidebar, right) = areas(frame_area, own);
+        let clean = attached::Clean::of_frame(frame);
+        let width = own.min(clean.area().width / 2);
+        let ((sidebar, beside), right_clean) = clean.paint_left(width, |buffer, sidebar| {
+            let beside = if collapsed {
+                self.sidebar.draw_collapsed(buffer, sidebar, now);
+                Drawn::Nothing
+            } else {
+                self.sidebar.draw(buffer, sidebar, now)
+            };
+            (sidebar, beside)
+        });
+        let right = right_clean.area();
         self.areas = (sidebar, right);
         let size = window(right);
         if let Some(right) = self.viewed_mut() {
             right.resize(size.columns, size.lines);
         }
-        let buffer = frame.buffer_mut();
-        let beside = if collapsed {
-            self.sidebar.draw_collapsed(buffer, sidebar, now);
-            Drawn::Nothing
-        } else {
-            self.sidebar.draw(buffer, sidebar, now)
-        };
         self.settling.drawn(self.sidebar.aloud_buttons(), now.steady);
         let covered = self.covered();
         let uncovered = |at: &Position| !covered && right.contains(*at);
@@ -3360,17 +3364,20 @@ impl App {
         let hover = self.pointer.filter(uncovered).map(spot);
         let kitty_cell_px = self.ribbons.cell_px(frame_area, covered);
         let (cursor, overlays) = match &mut self.right {
-            Some(Right::Worktree(shown)) => shown.draw(buffer, right, hover, kitty_cell_px),
+            Some(Right::Worktree(shown)) => shown.draw(right_clean, hover, kitty_cell_px),
             Some(Right::Home(shown)) => {
+                let (buffer, right) = right_clean.into_buffer();
                 self.homes.shown(shown).draw(buffer, right, now.system);
                 (None, Vec::new())
             },
             None => {
+                let (buffer, right) = right_clean.into_buffer();
                 draw_unshown(buffer, right);
                 (None, Vec::new())
             },
         };
         self.ribbons.set_pending(overlays);
+        let buffer = frame.buffer_mut();
         let drawn = match &self.focus.over {
             Some(Over::Brief(briefing)) => {
                 briefing.draw(buffer, right, now.system);

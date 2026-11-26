@@ -48,13 +48,20 @@ impl Greeting {
 #[derive(Debug)]
 pub struct Framed {
     frame: Frame,
-    _taken: OwnedSemaphorePermit,
+    taken: OwnedSemaphorePermit,
 }
 
 impl Framed {
     #[must_use]
     pub fn frame(&self) -> &Frame {
         &self.frame
+    }
+
+    pub fn take<R>(self, with: impl FnOnce(Frame) -> R) -> R {
+        let Framed { frame, taken } = self;
+        let result = with(frame);
+        drop(taken);
+        result
     }
 }
 
@@ -254,7 +261,7 @@ async fn stream(
         match said.event {
             Some(to_viewer::Event::Frame(frame)) => match Frame::heard(frame) {
                 Ok(frame) => match Arc::clone(frames).acquire_owned().await {
-                    Ok(taken) => told(Seen::Frame(Framed { frame, _taken: taken })),
+                    Ok(taken) => told(Seen::Frame(Framed { frame, taken })),
                     Err(_closed) => return Err(Dropped),
                 },
                 Err(why) => return Ok(format!("lune-mux said what lune cannot read: {why}")),
@@ -268,10 +275,35 @@ async fn stream(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+    use std::sync::Arc;
+
+    use lune_domain::mux::TerminalKey;
+    use tokio::sync::Semaphore;
     use tonic::Code;
 
-    use super::relayed;
+    use super::{relayed, Framed};
+    use crate::mux::own::frames::{self, Ending, Frame, Glyph, Line, Rows, Shows, Side, Size};
     use crate::mux::own::server::{RELAYED, RELAYED_MAX};
+    use crate::mux::own::OwnMade;
+
+    #[test]
+    fn a_framed_holds_its_permit_until_take_finishes() {
+        let budget = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&budget).try_acquire_owned().unwrap();
+        let size = Size { columns: Side::MIN, rows: Side::MIN };
+        let glyph = Glyph { shows: Shows::Blank, style: frames::Style::PLAIN };
+        let line = Line::new(vec![glyph], Ending::Here, Side::MIN).unwrap();
+        let key = TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(0) };
+        let frame = Frame::new(key, size, Rows::Whole(vec![line]), None, false).unwrap();
+        let framed = Framed { frame, taken: permit };
+        let terminal = framed.take(|frame| {
+            assert_eq!(budget.available_permits(), 0, "the permit stays held while take runs");
+            frame.terminal()
+        });
+        assert_eq!(terminal, key);
+        assert_eq!(budget.available_permits(), 1, "the permit returns once take finishes");
+    }
 
     #[test]
     fn luned_refuses_to_relay_a_viewer_past_the_most_it_relays_at_once() {

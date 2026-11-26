@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::fmt;
 use std::num::NonZeroU16;
 
 use super::ViewId;
@@ -15,10 +16,7 @@ pub const SIDE_MAX: u16 = 1000;
 
 pub const SHARES: u32 = 1_000_000;
 
-pub const SIZE_MAX: Size = {
-    let side = NonZeroU16::new(SIDE_MAX).expect("SIDE_MAX is not 0");
-    Size { columns: side, rows: side }
-};
+pub const SIZE_MAX: Size = Size { columns: Side::MAX, rows: Side::MAX };
 
 const STEP_PERCENT: u32 = 5;
 
@@ -31,20 +29,63 @@ const _: () = assert!(ROWS_MIN > 2 * FRAME_CELLS);
 const _: () = assert!(LAYOUT_VIEWS_MAX * COLUMNS_MIN as usize <= SIDE_MAX as usize);
 const _: () = assert!(LAYOUT_VIEWS_MAX * ROWS_MIN as usize <= SIDE_MAX as usize);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Side(NonZeroU16);
+
+impl Side {
+    pub const MIN: Side = Side(NonZeroU16::MIN);
+
+    pub const MAX: Side = Side(NonZeroU16::new(SIDE_MAX).expect("SIDE_MAX is not 0"));
+
+    #[must_use]
+    pub const fn new(cells: u16) -> Option<Side> {
+        if cells > SIDE_MAX {
+            return None;
+        }
+        match NonZeroU16::new(cells) {
+            Some(cells) => Some(Side(cells)),
+            None => None,
+        }
+    }
+
+    pub fn of(name: &str, cells: u32) -> Result<Side, String> {
+        let over = || format!("{name} is over {SIDE_MAX}");
+        let cells = u16::try_from(cells).ok().filter(|cells| *cells <= SIDE_MAX);
+        let cells = cells.ok_or_else(over)?;
+        Side::new(cells).ok_or_else(|| format!("{name} is 0"))
+    }
+
+    #[must_use]
+    pub const fn within(cells: NonZeroU16) -> Side {
+        if cells.get() > SIDE_MAX { Side::MAX } else { Side(cells) }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0.get()
+    }
+}
+
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {
-    pub columns: NonZeroU16,
-    pub rows: NonZeroU16,
+    pub columns: Side,
+    pub rows: Side,
 }
 
 impl Size {
     pub fn of(columns: u32, rows: u32) -> Result<Size, String> {
-        let side = |name: &str, cells: u32| {
-            let over = || format!("{name} is over {SIDE_MAX}");
-            let cells = u16::try_from(cells).ok().filter(|cells| *cells <= SIDE_MAX);
-            NonZeroU16::new(cells.ok_or_else(over)?).ok_or_else(|| format!("{name} is 0"))
-        };
-        Ok(Size { columns: side("columns", columns)?, rows: side("rows", rows)? })
+        Ok(Size { columns: Side::of("columns", columns)?, rows: Side::of("rows", rows)? })
+    }
+
+    #[must_use]
+    pub const fn within(columns: NonZeroU16, rows: NonZeroU16) -> Size {
+        Size { columns: Side::within(columns), rows: Side::within(rows) }
     }
 
     #[must_use]
@@ -86,12 +127,12 @@ impl Direction {
     pub const ALL: [Direction; 4] =
         [Direction::Left, Direction::Right, Direction::Up, Direction::Down];
 
-    fn border(self) -> (Towards, Side) {
+    fn border(self) -> (Towards, Half) {
         match self {
-            Direction::Left => (Towards::Right, Side::Second),
-            Direction::Right => (Towards::Right, Side::First),
-            Direction::Up => (Towards::Down, Side::Second),
-            Direction::Down => (Towards::Down, Side::First),
+            Direction::Left => (Towards::Right, Half::Second),
+            Direction::Right => (Towards::Right, Half::First),
+            Direction::Up => (Towards::Down, Half::Second),
+            Direction::Down => (Towards::Down, Half::First),
         }
     }
 }
@@ -126,7 +167,7 @@ pub enum Growth {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Side {
+enum Half {
     First,
     Second,
 }
@@ -160,7 +201,7 @@ impl Rect {
         assert!(self.columns >= COLUMNS_MIN, "{self:?} is narrower than a view");
         assert!(self.rows >= ROWS_MIN, "{self:?} is shorter than a view");
         let side = |side: u16| {
-            NonZeroU16::new(side - 2 * FRAME_CELLS).expect("a view holds its frame and a cell")
+            Side::new(side - 2 * FRAME_CELLS).expect("a view holds its frame and a cell within SIDE_MAX")
         };
         Size { columns: side(self.columns), rows: side(self.rows) }
     }
@@ -241,8 +282,8 @@ impl Least {
     }
 
     fn raised(self, size: Size) -> Size {
-        let raised = |cells: NonZeroU16, least: u16| {
-            cells.max(NonZeroU16::new(least).expect("a view is a cell or more each way"))
+        let raised = |cells: Side, least: u16| {
+            cells.max(Side::new(least).expect("a view is a cell or more each way within SIDE_MAX"))
         };
         let raised =
             Size { columns: raised(size.columns, self.columns), rows: raised(size.rows, self.rows) };
@@ -620,7 +661,7 @@ impl<L: Leaf> Tree<L> {
             let Node::Split(split) = &mut self.nodes[parent] else {
                 unreachable!("node {parent} is a parent, so a split");
             };
-            let held = if split.first() == node { Side::First } else { Side::Second };
+            let held = if split.first() == node { Half::First } else { Half::Second };
             if (split.towards, held) == (towards, half) {
                 let extent = rects[parent].extent(towards);
                 let bounds = split.bounds(extent, leasts[split.first()], leasts[split.second()]);
@@ -805,7 +846,7 @@ impl Split {
         rect.cut(self.towards, self.first_extent(extent, bounds))
     }
 
-    fn moved(&mut self, extent: u16, bounds: (u16, u16), side: Side, growth: Growth) -> bool {
+    fn moved(&mut self, extent: u16, bounds: (u16, u16), side: Half, growth: Growth) -> bool {
         assert!(extent > 0, "a border moves on a side of some cells");
         let (low, high) = bounds;
         let now = self.first_extent(extent, bounds);
@@ -814,7 +855,7 @@ impl Split {
             .max(1);
         let grows_first = matches!(
             (side, growth),
-            (Side::First, Growth::Grow) | (Side::Second, Growth::Shrink)
+            (Half::First, Growth::Grow) | (Half::Second, Growth::Shrink)
         );
         let wanted = if grows_first { now.saturating_add(step) } else { now.saturating_sub(step) };
         let wanted = wanted.clamp(low, high);
@@ -880,7 +921,7 @@ mod tests {
     }
 
     fn size(columns: u16, rows: u16) -> Size {
-        Size { columns: NonZeroU16::new(columns).unwrap(), rows: NonZeroU16::new(rows).unwrap() }
+        Size { columns: Side::new(columns).unwrap(), rows: Side::new(rows).unwrap() }
     }
 
     fn rect(column: u16, row: u16, columns: u16, rows: u16) -> Rect {
@@ -923,6 +964,9 @@ mod tests {
 
     #[test]
     fn a_size_is_bounded_on_each_side() {
+        assert_eq!(Side::new(0), None);
+        assert_eq!(Side::new(SIDE_MAX + 1), None);
+        assert_eq!(Side::within(NonZeroU16::MAX), Side::MAX);
         assert_eq!(Size::of(80, 24), Ok(size(80, 24)));
         assert_eq!(Size::of(1000, 1), Ok(size(1000, 1)));
         assert_eq!(Size::of(0, 24), Err("columns is 0".to_owned()));

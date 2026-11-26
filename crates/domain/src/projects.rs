@@ -19,7 +19,7 @@ mod spot;
 mod view;
 
 pub use kept::{parse, written, Parsed, FILE_BYTES_MAX};
-pub use layout::{Size, FRAME_CELLS, LAYOUT_VIEWS_MAX};
+pub use layout::{Side, Size, FRAME_CELLS, LAYOUT_VIEWS_MAX};
 pub use spot::{clone_root, porcelain, Bareness, CloneRoot, Listed, Spot, BARE};
 pub use spot::CLONE_WORKTREES_MAX;
 pub use view::{quoted, Argv, Arranged, Layout, Line, Opens, Placed, Prompted, Runs, Session};

@@ -1,11 +1,13 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroU16;
 
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent,
     MouseEventKind,
 };
+use lune_domain::mux::TerminalKey;
 use luned::mux::own::api;
-use luned::mux::own::frames::{self, Cursor, Glyph, Line, Shows, Size};
+use luned::mux::own::frames::{self, Cursor, Ending, Frame, Line, Parts, Rows, Shows, Side, Size};
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -16,11 +18,221 @@ use unicode_width::UnicodeWidthStr as _;
 use crate::copied::Excerpt;
 use crate::moonlight;
 
+const PLAIN: Style = styled(&frames::Style::PLAIN);
+
+const TWO: NonZeroU16 = NonZeroU16::new(2).expect("2 is not 0");
+
+const fn colour(colour: Option<frames::Colour>) -> Color {
+    match colour {
+        Some(frames::Colour::Palette(index)) => Color::Indexed(index),
+        Some(frames::Colour::Rgb([red, green, blue])) => Color::Rgb(red, green, blue),
+        None => Color::Reset,
+    }
+}
+
+const fn styled(style: &frames::Style) -> Style {
+    let mut drawn = Style::new().fg(colour(style.foreground)).bg(colour(style.background));
+    if let Some(underline) = style.underline_colour {
+        drawn = drawn.underline_color(colour(Some(underline)));
+    }
+    if style.bold {
+        drawn = drawn.add_modifier(Modifier::BOLD);
+    }
+    if style.faint {
+        drawn = drawn.add_modifier(Modifier::DIM);
+    }
+    if style.italic {
+        drawn = drawn.add_modifier(Modifier::ITALIC);
+    }
+    if style.underlined {
+        drawn = drawn.add_modifier(Modifier::UNDERLINED);
+    }
+    if style.blink {
+        drawn = drawn.add_modifier(Modifier::SLOW_BLINK);
+    }
+    if style.inverse {
+        drawn = drawn.add_modifier(Modifier::REVERSED);
+    }
+    if style.invisible {
+        drawn = drawn.add_modifier(Modifier::HIDDEN);
+    }
+    if style.strikethrough {
+        drawn = drawn.add_modifier(Modifier::CROSSED_OUT);
+    }
+    drawn
+}
+
+pub(crate) struct Clean<'a> {
+    buffer: &'a mut Buffer,
+    area: Rect,
+}
+
+impl<'a> Clean<'a> {
+    pub(crate) fn of_frame(frame: &'a mut ratatui::Frame<'_>) -> Clean<'a> {
+        let area = frame.area();
+        Clean { buffer: frame.buffer_mut(), area }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn of_empty(buffer: &'a mut Buffer, area: Rect) -> Clean<'a> {
+        assert_eq!(buffer.area.intersection(area), area, "a clean region lies inside its buffer");
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                assert_eq!(
+                    buffer[(x, y)],
+                    ratatui::buffer::Cell::EMPTY,
+                    "a clean region starts empty"
+                );
+            }
+        }
+        Clean { buffer, area }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unchecked(buffer: &'a mut Buffer, area: Rect) -> Clean<'a> {
+        assert_eq!(buffer.area.intersection(area), area, "a region lies inside its buffer");
+        Clean { buffer, area }
+    }
+
+    pub(crate) fn area(&self) -> Rect {
+        self.area
+    }
+
+    pub(crate) fn paint_left<R>(
+        self,
+        width: u16,
+        draw: impl FnOnce(&mut Buffer, Rect) -> R,
+    ) -> (R, Clean<'a>) {
+        let width = width.min(self.area.width);
+        let left = Rect::new(self.area.x, self.area.y, width, self.area.height);
+        let right = Rect::new(
+            self.area.x + width,
+            self.area.y,
+            self.area.width - width,
+            self.area.height,
+        );
+        let drawn = draw(self.buffer, left);
+        (drawn, Clean { buffer: self.buffer, area: right })
+    }
+
+    pub(crate) fn into_buffer(self) -> (&'a mut Buffer, Rect) {
+        (self.buffer, self.area)
+    }
+}
+
+pub(crate) struct Glyph {
+    pub(crate) shows: Shows,
+    style: Style,
+}
+
+pub(crate) struct Row {
+    glyphs: Vec<Glyph>,
+    ending: Ending,
+    columns: Side,
+}
+
+impl Row {
+    pub(crate) fn glyphs(&self) -> &[Glyph] {
+        &self.glyphs
+    }
+
+    fn wraps(&self) -> bool {
+        self.ending != Ending::Here
+    }
+
+    fn replace(&mut self, line: Line) {
+        let (glyphs, ending, columns) = line.into_parts();
+        assert_eq!(columns, self.columns, "a replaced row keeps its width");
+        let count = glyphs.len();
+        self.glyphs.clear();
+        self.glyphs.reserve(count);
+        assert!(self.glyphs.capacity() >= count, "a row holds space for every glyph");
+        let mut last = (frames::Style::PLAIN, PLAIN);
+        for glyph in glyphs {
+            let style = if glyph.style == last.0 {
+                last.1
+            } else {
+                let drawn = styled(&glyph.style);
+                last = (glyph.style, drawn);
+                drawn
+            };
+            self.glyphs.push(Glyph { shows: glyph.shows, style });
+        }
+        assert_eq!(self.glyphs.len(), count, "every glyph of the line becomes a painted glyph");
+        self.ending = ending;
+    }
+}
+
+impl From<Line> for Row {
+    fn from(line: Line) -> Row {
+        let mut row = Row { glyphs: Vec::new(), ending: Ending::Here, columns: line.columns() };
+        row.replace(line);
+        row
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Applied {
+    Resized,
+    Kept,
+    Ignored,
+}
+
 pub(crate) struct Screen {
-    pub(crate) size: Size,
-    pub(crate) lines: Vec<Line>,
-    pub(crate) cursor: Option<Cursor>,
-    pub(crate) tracks_mouse: bool,
+    size: Size,
+    lines: Vec<Row>,
+    cursor: Option<Cursor>,
+    tracks_mouse: bool,
+}
+
+impl Screen {
+    pub(crate) fn size(&self) -> Size {
+        self.size
+    }
+
+    pub(crate) fn cursor(&self) -> Option<Cursor> {
+        self.cursor
+    }
+
+    pub(crate) fn tracks_mouse(&self) -> bool {
+        self.tracks_mouse
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lines(&self) -> &[Row] {
+        &self.lines
+    }
+
+    pub(crate) fn apply(
+        screens: &mut BTreeMap<TerminalKey, Screen>,
+        frame: Frame,
+    ) -> Result<Applied, String> {
+        let Parts { terminal, size, rows, cursor, tracks_mouse } = frame.into_parts();
+        match rows {
+            Rows::Whole(lines) => {
+                let lines: Vec<Row> = lines.into_iter().map(Row::from).collect();
+                let screen = Screen { size, lines, cursor, tracks_mouse };
+                let was = screens.insert(terminal, screen).map(|old| old.size);
+                Ok(if was == Some(size) { Applied::Kept } else { Applied::Resized })
+            },
+            Rows::Changed(rows) => {
+                let Some(screen) = screens.get_mut(&terminal) else {
+                    return Ok(Applied::Ignored);
+                };
+                if screen.size != size {
+                    let sides = |size: Size| format!("{}x{}", size.columns, size.rows);
+                    let (had, sides) = (sides(screen.size), sides(size));
+                    return Err(format!("a frame of {sides} changes the rows of {had}"));
+                }
+                for (index, line) in rows {
+                    screen.lines[usize::from(index)].replace(line);
+                }
+                screen.cursor = cursor;
+                screen.tracks_mouse = tracks_mouse;
+                Ok(Applied::Kept)
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,23 +537,25 @@ pub(crate) fn within(at: At, size: Size) -> At {
 }
 
 fn paint(buffer: &mut Buffer, area: Rect, at: At, glyph: &Glyph, lit: Modifier) {
-    let columns = glyph.shows.columns();
-    let fits = at.column + columns <= area.width;
+    assert!(at.row < area.height, "a glyph is painted within the screen's rows");
+    assert!(at.column < area.width, "a glyph is painted within the screen's columns");
+    let style = glyph.style.add_modifier(lit);
+    if matches!(glyph.shows, Shows::Blank) && style == PLAIN {
+        return;
+    }
     let (x, y) = (area.x + at.column, area.y + at.row);
     let Some(cell) = buffer.cell_mut((x, y)) else {
         return;
     };
-    let style = styled(&glyph.style).add_modifier(lit);
     cell.set_style(style);
     match &glyph.shows {
         Shows::Narrow(grapheme) => {
             cell.set_symbol(grapheme.as_str());
             cell.set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
         },
-        Shows::Wide(grapheme) if fits => {
+        Shows::Wide(grapheme) if area.width - at.column >= 2 => {
             cell.set_symbol(grapheme.as_str());
-            let two = NonZeroU16::new(2).expect("2 is not 0");
-            cell.set_diff_option(CellDiffOption::ForcedWidth(two));
+            cell.set_diff_option(CellDiffOption::ForcedWidth(TWO));
             if let Some(spacer) = buffer.cell_mut((x + 1, y)) {
                 spacer.reset();
                 spacer.set_style(style);
@@ -434,7 +648,7 @@ fn word(screen: &Screen, at: At) -> Option<(Vec<Letter<'_>>, usize)> {
     Some((word, clicked))
 }
 
-fn under(line: &Line, at: At) -> Option<Place> {
+fn under(line: &Row, at: At) -> Option<Place> {
     let mut column = 0;
     for (index, glyph) in line.glyphs().iter().enumerate() {
         let columns = glyph.shows.columns();
@@ -629,34 +843,6 @@ fn path(word: &[Letter], clicked: usize) -> Option<(usize, usize)> {
     (holds_click && folders && named).then_some((first, end))
 }
 
-fn styled(style: &frames::Style) -> Style {
-    let colour = |colour: Option<frames::Colour>| match colour {
-        Some(frames::Colour::Palette(index)) => Color::Indexed(index),
-        Some(frames::Colour::Rgb([red, green, blue])) => Color::Rgb(red, green, blue),
-        None => Color::Reset,
-    };
-    let mut drawn = Style::new().fg(colour(style.foreground)).bg(colour(style.background));
-    if let Some(underline) = style.underline_colour {
-        drawn = drawn.underline_color(colour(Some(underline)));
-    }
-    let modifiers = [
-        (style.bold, Modifier::BOLD),
-        (style.faint, Modifier::DIM),
-        (style.italic, Modifier::ITALIC),
-        (style.underlined, Modifier::UNDERLINED),
-        (style.blink, Modifier::SLOW_BLINK),
-        (style.inverse, Modifier::REVERSED),
-        (style.invisible, Modifier::HIDDEN),
-        (style.strikethrough, Modifier::CROSSED_OUT),
-    ];
-    for (set, modifier) in modifiers {
-        if set {
-            drawn = drawn.add_modifier(modifier);
-        }
-    }
-    drawn
-}
-
 fn modifiers_said(modifiers: KeyModifiers) -> api::Modifiers {
     api::Modifiers {
         shift: modifiers.contains(KeyModifiers::SHIFT),
@@ -781,33 +967,33 @@ pub(crate) fn mouse_said(mouse: MouseEvent, at: At) -> Option<api::Mouse> {
 
 #[cfg(test)]
 mod tests {
-    use luned::mux::own::frames::{Ending, Grapheme};
+    use luned::mux::own::frames::Grapheme;
 
     use super::*;
 
-    fn glyph(shows: Shows) -> Glyph {
-        Glyph { shows, style: frames::Style::default() }
+    fn glyph(shows: Shows) -> frames::Glyph {
+        frames::Glyph { shows, style: frames::Style::PLAIN }
     }
 
     fn grapheme(grapheme: &str) -> Grapheme {
         Grapheme::new(grapheme.to_owned()).unwrap()
     }
 
-    fn narrow(it: &str) -> Glyph {
+    fn narrow(it: &str) -> frames::Glyph {
         glyph(Shows::Narrow(grapheme(it)))
     }
 
-    fn side(count: u16) -> NonZeroU16 {
-        NonZeroU16::new(count).unwrap()
+    fn side(count: u16) -> Side {
+        Side::new(count).unwrap()
     }
 
-    fn ended(glyphs: Vec<Glyph>, ending: Ending) -> Line {
+    fn ended(glyphs: Vec<frames::Glyph>, ending: Ending) -> Row {
         let columns: u16 = glyphs.iter().map(|glyph| glyph.shows.columns()).sum();
         let columns = columns + u16::from(ending == Ending::WrapsWide);
-        Line::new(glyphs, ending, side(columns)).unwrap()
+        Row::from(Line::new(glyphs, ending, side(columns)).unwrap())
     }
 
-    fn line(glyphs: Vec<Glyph>) -> Line {
+    fn line(glyphs: Vec<frames::Glyph>) -> Row {
         ended(glyphs, Ending::Here)
     }
 
@@ -902,7 +1088,7 @@ mod tests {
         assert_eq!(cut, "https://e", "a row the program ended at the edge ends its word");
         let wide = || glyph(Shows::Wide(grapheme("日")));
         let blank = || glyph(Shows::Blank);
-        let screen = |columns: u16, lines: Vec<Line>| {
+        let screen = |columns: u16, lines: Vec<Row>| {
             let size = Size { columns: side(columns), rows: side(2) };
             Screen { size, lines, cursor: None, tracks_mouse: false }
         };
@@ -951,12 +1137,189 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
         draw_screen(&mut buffer, Rect::new(1, 0, 5, 1), &screen, None, None);
         assert_eq!(buffer[(2, 0)].symbol(), "👍🏽");
-        assert_eq!(buffer[(2, 0)].diff_option, CellDiffOption::ForcedWidth(side(2)));
+        assert_eq!(buffer[(2, 0)].diff_option, CellDiffOption::ForcedWidth(TWO));
         assert_eq!(buffer[(3, 0)].diff_option, CellDiffOption::Skip);
         assert_eq!(buffer[(4, 0)].symbol(), "b");
         let mut cut = Buffer::empty(Rect::new(0, 0, 2, 1));
         draw_screen(&mut cut, Rect::new(0, 0, 2, 1), &screen, None, None);
         assert_eq!((cut[(0, 0)].symbol(), cut[(1, 0)].symbol()), ("a", " "));
+    }
+
+    #[test]
+    fn a_screen_paints_each_glyph_s_style_and_leaves_plain_blanks_alone() {
+        assert_eq!(styled(&frames::Style::default()), PLAIN);
+        let rich = frames::Style {
+            foreground: Some(frames::Colour::Palette(12)),
+            background: Some(frames::Colour::Rgb([1, 2, 3])),
+            underline_colour: Some(frames::Colour::Palette(9)),
+            bold: true,
+            faint: true,
+            italic: true,
+            underlined: true,
+            blink: true,
+            inverse: true,
+            invisible: true,
+            strikethrough: true,
+        };
+        let tinted = frames::Style {
+            background: Some(frames::Colour::Palette(4)),
+            ..frames::Style::default()
+        };
+        let red = frames::Style {
+            foreground: Some(frames::Colour::Rgb([9, 8, 7])),
+            ..frames::Style::default()
+        };
+        let glyphs = vec![
+            glyph(Shows::Blank),
+            frames::Glyph { shows: Shows::Blank, style: tinted },
+            glyph(Shows::Blank),
+            frames::Glyph { shows: Shows::Narrow(grapheme("a")), style: rich },
+            frames::Glyph { shows: Shows::Narrow(grapheme("b")), style: rich },
+            frames::Glyph { shows: Shows::Narrow(grapheme("c")), style: red },
+        ];
+        let screen = Screen {
+            size: Size { columns: side(6), rows: side(1) },
+            lines: vec![line(glyphs)],
+            cursor: None,
+            tracks_mouse: false,
+        };
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
+        buffer[(0, 0)].set_symbol("!");
+        let selected = Some(Selection { from: spot(0, 2), to: spot(0, 2) });
+        draw_screen(&mut buffer, Rect::new(0, 0, 6, 1), &screen, selected, None);
+        assert_eq!(buffer[(0, 0)].symbol(), "!", "a plain blank leaves a cleared cell untouched");
+        assert_eq!((buffer[(1, 0)].symbol(), buffer[(1, 0)].bg), (" ", Color::Indexed(4)));
+        assert_eq!(buffer[(2, 0)].symbol(), " ");
+        assert!(buffer[(2, 0)].modifier.contains(Modifier::REVERSED));
+        let all = Modifier::BOLD
+            | Modifier::DIM
+            | Modifier::ITALIC
+            | Modifier::UNDERLINED
+            | Modifier::SLOW_BLINK
+            | Modifier::REVERSED
+            | Modifier::HIDDEN
+            | Modifier::CROSSED_OUT;
+        for column in [3, 4] {
+            let cell = &buffer[(column, 0)];
+            assert_eq!((cell.fg, cell.bg), (Color::Indexed(12), Color::Rgb(1, 2, 3)));
+            assert_eq!(cell.underline_color, Color::Indexed(9));
+            assert_eq!(cell.modifier, all);
+        }
+        assert_eq!(buffer[(5, 0)].fg, Color::Rgb(9, 8, 7));
+        assert_eq!(buffer[(5, 0)].modifier, Modifier::empty());
+    }
+
+    #[test]
+    fn replacing_a_row_updates_its_wrap_length_and_styles() {
+        let bold = frames::Style {
+            foreground: Some(frames::Colour::Palette(3)),
+            bold: true,
+            ..frames::Style::default()
+        };
+        let italic = frames::Style {
+            foreground: Some(frames::Colour::Rgb([4, 5, 6])),
+            italic: true,
+            ..frames::Style::default()
+        };
+        let four_narrow = |style| {
+            ["a", "b", "c", "d"]
+                .into_iter()
+                .map(|letter| frames::Glyph { shows: Shows::Narrow(grapheme(letter)), style })
+                .collect()
+        };
+        let mut row = ended(four_narrow(bold), Ending::Wraps);
+        assert!(row.wraps());
+        assert_eq!(row.glyphs().len(), 4);
+
+        let two_wide = vec![
+            frames::Glyph { shows: Shows::Wide(grapheme("日")), style: italic },
+            frames::Glyph { shows: Shows::Wide(grapheme("本")), style: italic },
+        ];
+        row.replace(Line::new(two_wide, Ending::Here, side(4)).unwrap());
+        assert!(!row.wraps(), "replacing a wrapping row with Ending::Here clears wraps");
+        assert_eq!(row.glyphs().len(), 2, "replacing with fewer glyphs drops stale trailing ones");
+
+        let screen = Screen {
+            size: Size { columns: side(4), rows: side(1) },
+            lines: vec![row],
+            cursor: None,
+            tracks_mouse: false,
+        };
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
+        draw_screen(&mut buffer, Rect::new(0, 0, 4, 1), &screen, None, None);
+        assert_eq!(buffer[(0, 0)].symbol(), "日");
+        assert_eq!(buffer[(0, 0)].fg, Color::Rgb(4, 5, 6));
+        assert_eq!(buffer[(0, 0)].modifier, Modifier::ITALIC);
+        assert_eq!(buffer[(1, 0)].diff_option, CellDiffOption::Skip);
+        assert_eq!(buffer[(2, 0)].symbol(), "本");
+        assert_eq!(buffer[(3, 0)].diff_option, CellDiffOption::Skip);
+
+        let mut row = screen.lines.into_iter().next().unwrap();
+        let blanks = vec![glyph(Shows::Blank); 4];
+        row.replace(Line::new(blanks, Ending::Wraps, side(4)).unwrap());
+        assert!(row.wraps(), "replacing a non-wrapping row with Ending::Wraps sets wraps");
+        assert_eq!(row.ending, Ending::Wraps);
+        assert_eq!(row.columns, side(4));
+        assert_eq!(row.glyphs().len(), 4);
+        assert!(row.glyphs().iter().all(|glyph| glyph.style == PLAIN));
+    }
+
+    #[test]
+    fn screen_apply_tracks_resizes_in_place_updates_and_mismatched_deltas() {
+        use std::num::NonZeroU32;
+
+        use luned::mux::own::OwnMade;
+
+        let key = TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(0) };
+        let mut screens = BTreeMap::new();
+        let one = |letter: &str| Line::new(vec![narrow(letter)], Ending::Here, side(1)).unwrap();
+        let size = |columns, rows| Size { columns: side(columns), rows: side(rows) };
+
+        let early = Frame::new(key, size(1, 1), Rows::Changed(vec![(0, one("a"))]), None, false);
+        assert_eq!(Screen::apply(&mut screens, early.unwrap()), Ok(Applied::Ignored));
+        assert!(screens.is_empty());
+
+        let whole = Frame::new(key, size(1, 1), Rows::Whole(vec![one("a")]), None, false).unwrap();
+        assert_eq!(Screen::apply(&mut screens, whole), Ok(Applied::Resized));
+
+        let same_size =
+            Frame::new(key, size(1, 1), Rows::Whole(vec![one("b")]), None, false).unwrap();
+        assert_eq!(Screen::apply(&mut screens, same_size), Ok(Applied::Kept));
+
+        let delta =
+            Frame::new(key, size(1, 1), Rows::Changed(vec![(0, one("c"))]), None, true).unwrap();
+        assert_eq!(Screen::apply(&mut screens, delta), Ok(Applied::Kept));
+        assert!(screens[&key].tracks_mouse());
+        assert_eq!(screens[&key].lines()[0].glyphs()[0].shows, Shows::Narrow(grapheme("c")));
+
+        let wrong_size =
+            Frame::new(key, size(1, 2), Rows::Changed(vec![(0, one("d"))]), None, false).unwrap();
+        assert_eq!(
+            Screen::apply(&mut screens, wrong_size).unwrap_err(),
+            "a frame of 1x2 changes the rows of 1x1"
+        );
+    }
+
+    #[test]
+    fn clean_paint_left_partitions_a_region_into_disjoint_halves() {
+        let whole = Rect::new(2, 1, 10, 4);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 14, 6));
+        let clean = Clean::of_empty(&mut buffer, whole);
+        let (left, right) = clean.paint_left(4, |buffer, left| {
+            buffer.set_string(left.x, left.y, "side", Style::new());
+            left
+        });
+        assert_eq!(left, Rect::new(2, 1, 4, 4));
+        assert_eq!(right.area(), Rect::new(6, 1, 6, 4));
+        assert!(!left.intersects(right.area()));
+        let (_, right_area) = right.into_buffer();
+        assert_eq!(right_area, Rect::new(6, 1, 6, 4));
+
+        let mut narrow = Buffer::empty(Rect::new(0, 0, 3, 2));
+        let (left, right) = Clean::of_empty(&mut narrow, Rect::new(0, 0, 3, 2))
+            .paint_left(10, |_, left| left);
+        assert_eq!(left, Rect::new(0, 0, 3, 2));
+        assert!(right.area().is_empty());
     }
 
     #[test]
