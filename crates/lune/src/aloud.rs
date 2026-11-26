@@ -154,7 +154,9 @@ struct Waiting {
 
 impl Waiting {
     fn stale(&self, now: Instant) -> bool {
-        self.came.is_some_and(|came| now.saturating_duration_since(came) > STALE)
+        self.came.is_some_and(|came| {
+            now.checked_duration_since(came).expect("steady clock does not move backwards") > STALE
+        })
     }
 }
 
@@ -184,7 +186,7 @@ struct Queue {
 }
 
 impl Queue {
-    fn hear(&mut self, machines: Vec<(Machine, Option<Vec<Saying>>)>, read: bool, at: Instant) {
+    fn hear(&mut self, machines: Vec<(Machine, Option<Vec<Saying>>)>, read: bool, now: Instant) {
         let watched: HashSet<&Machine> = machines.iter().map(|(on, _)| on).collect();
         self.heard.retain(|on, _| watched.contains(on));
         for (on, sayings) in machines {
@@ -203,16 +205,16 @@ impl Queue {
                 continue;
             }
             for saying in sayings.into_iter().filter(|saying| later(saying, seen)) {
-                self.take(&on, saying, at);
+                self.take(&on, saying, now);
             }
         }
     }
 
-    fn take(&mut self, on: &Machine, saying: Saying, at: Instant) {
+    fn take(&mut self, on: &Machine, saying: Saying, now: Instant) {
         let does = saying.say.and_then(|say| say.does);
         let waiting = |utterance: Utterance| {
             let Utterance { text } = utterance;
-            Waiting { whose: Whose::Said { on: on.clone() }, text, came: Some(at) }
+            Waiting { whose: Whose::Said { on: on.clone() }, text, came: Some(now) }
         };
         match does {
             Some(Does::InTurn(utterance)) => self.after(waiting(utterance)),
@@ -244,10 +246,10 @@ impl Queue {
         self.paused = false;
     }
 
-    fn pause(&mut self, at: Instant) {
+    fn pause(&mut self, now: Instant) {
         if !self.paused {
-            self.at_once.take_if(|waiting| waiting.stale(at));
-            self.in_turn.retain(|waiting| !waiting.stale(at));
+            self.at_once.take_if(|waiting| waiting.stale(now));
+            self.in_turn.retain(|waiting| !waiting.stale(now));
             self.paused = self.busy();
         }
     }
@@ -269,6 +271,7 @@ impl Queue {
     }
 
     fn next(&mut self, now: Instant) -> Option<Next> {
+        assert!(self.in_turn.len() <= WAITING, "queued utterances stay within WAITING");
         loop {
             let next = self.at_once.take().or_else(|| self.in_turn.pop_front())?;
             if !self.paused && next.stale(now) {
@@ -501,8 +504,8 @@ mod tests {
         queue
     }
 
-    fn spoken(queue: &mut Queue) -> Vec<String> {
-        std::iter::from_fn(|| queue.next(at(0))).map(|next| next.spoken).collect()
+    fn spoken(queue: &mut Queue, now: Instant) -> Vec<String> {
+        std::iter::from_fn(|| queue.next(now)).map(|next| next.spoken).collect()
     }
 
     fn reading(queue: &mut Queue, number: u64) -> Quiet {
@@ -518,7 +521,7 @@ mod tests {
         queue.hear(here(vec![in_turn(1, "before")]), true, at(0));
         assert!(!queue.busy());
         queue.hear(here(vec![in_turn(1, "before"), in_turn(2, "after")]), true, at(1));
-        assert_eq!(spoken(&mut queue), ["after"]);
+        assert_eq!(spoken(&mut queue, at(1)), ["after"]);
     }
 
     #[test]
@@ -528,7 +531,7 @@ mod tests {
         queue.hear(here(vec![one.clone()]), true, at(1));
         queue.hear(here(vec![one.clone(), in_turn(2, "two")]), true, at(2));
         queue.hear(here(vec![one, in_turn(2, "two")]), true, at(3));
-        assert_eq!(spoken(&mut queue), ["one", "two"]);
+        assert_eq!(spoken(&mut queue, at(3)), ["one", "two"]);
     }
 
     #[test]
@@ -537,7 +540,7 @@ mod tests {
         queue.hear(here(vec![in_turn(5, "old")]), true, at(1));
         let again = Saying { pid: PID + 1, ..in_turn(1, "new") };
         queue.hear(here(vec![again]), true, at(2));
-        assert_eq!(spoken(&mut queue), ["old", "new"]);
+        assert_eq!(spoken(&mut queue, at(2)), ["old", "new"]);
     }
 
     #[test]
@@ -546,7 +549,7 @@ mod tests {
         let far_said = |sayings| vec![(Machine::Local, Some(Vec::new())), (far(), sayings)];
         queue.hear(far_said(None), true, at(1));
         queue.hear(far_said(Some(vec![in_turn(1, "while away")])), true, at(2));
-        assert_eq!(spoken(&mut queue), ["while away"]);
+        assert_eq!(spoken(&mut queue, at(2)), ["while away"]);
         queue.hear(here(Vec::new()), true, at(3));
         queue.hear(far_said(Some(vec![in_turn(2, "gone a while")])), true, at(4));
         assert!(!queue.busy());
@@ -559,7 +562,7 @@ mod tests {
         assert!(!queue.busy());
         let both = vec![in_turn(1, "for the other"), in_turn(2, "for this")];
         queue.hear(here(both), true, at(2));
-        assert_eq!(spoken(&mut queue), ["for this"]);
+        assert_eq!(spoken(&mut queue, at(2)), ["for this"]);
     }
 
     #[test]
@@ -567,7 +570,7 @@ mod tests {
         let mut queue = hearing();
         let many = (1..=WAITING as u64 + 2).map(|n| in_turn(n, &n.to_string())).collect();
         queue.hear(here(many), true, at(1));
-        let read = spoken(&mut queue);
+        let read = spoken(&mut queue, at(1));
         assert_eq!(read.len(), WAITING);
         assert_eq!(read[0], "3");
     }
@@ -580,7 +583,7 @@ mod tests {
         let now = saying(2, Does::Now(utterance("first")));
         queue.hear(here(vec![now]), true, at(2));
         assert!(quiet.cut.load(Ordering::Relaxed));
-        assert_eq!(spoken(&mut queue), ["first", "next"]);
+        assert_eq!(spoken(&mut queue, at(2)), ["first", "next"]);
     }
 
     #[test]
@@ -589,7 +592,7 @@ mod tests {
         let mut said = vec![saying(1, Does::Now(utterance("first")))];
         said.extend((2..=WAITING as u64 + 2).map(|n| in_turn(n, &n.to_string())));
         queue.hear(here(said), true, at(1));
-        let read = spoken(&mut queue);
+        let read = spoken(&mut queue, at(1));
         assert_eq!(read.len(), WAITING + 1);
         assert_eq!(read[0], "first");
         assert_eq!(read[1], "3");
@@ -604,7 +607,7 @@ mod tests {
             saying(3, Does::Now(utterance("first"))),
         ];
         queue.hear(here(said), true, at(1));
-        assert_eq!(spoken(&mut queue), ["first", "next"]);
+        assert_eq!(spoken(&mut queue, at(1)), ["first", "next"]);
     }
 
     #[test]
@@ -635,7 +638,7 @@ mod tests {
         ];
         queue.hear(here(said), true, at(1));
         assert!(quiet.cut.load(Ordering::Relaxed));
-        assert_eq!(spoken(&mut queue), ["after the stop"]);
+        assert_eq!(spoken(&mut queue, at(1)), ["after the stop"]);
     }
 
     #[test]
@@ -646,6 +649,25 @@ mod tests {
         let next = queue.next(at(2) + STALE).unwrap();
         assert_eq!(next.spoken, "late");
         assert_eq!(queue.next(at(2) + STALE), None);
+    }
+
+    #[test]
+    fn what_waits_for_exactly_stale_is_read_and_one_nanosecond_past_is_dropped() {
+        let mut fresh = hearing();
+        fresh.hear(here(vec![in_turn(1, "in time")]), true, at(1));
+        assert_eq!(fresh.next(at(1) + STALE).map(|next| next.spoken).as_deref(), Some("in time"));
+
+        let mut old = hearing();
+        old.hear(here(vec![in_turn(1, "too late")]), true, at(1));
+        assert_eq!(old.next(at(1) + STALE + Duration::from_nanos(1)), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "steady clock does not move backwards")]
+    fn checking_staleness_before_an_utterance_arrived_panics() {
+        let mut queue = hearing();
+        queue.hear(here(vec![in_turn(1, "later")]), true, at(2));
+        let _ = queue.next(at(1));
     }
 
     #[test]
@@ -743,7 +765,7 @@ mod tests {
         let said = vec![saying(1, Does::Stop(())), in_turn(2, "after the stop")];
         queue.hear(here(said), true, at(2));
         assert!(!queue.paused);
-        assert_eq!(spoken(&mut queue), ["after the stop"]);
+        assert_eq!(spoken(&mut queue, at(2)), ["after the stop"]);
     }
 
     #[test]
@@ -754,7 +776,7 @@ mod tests {
         queue.hear(here(vec![saying(1, Does::Now(utterance("first")))]), true, at(2));
         assert!(quiet.cut.load(Ordering::Relaxed));
         assert!(queue.paused);
-        assert_eq!(spoken(&mut queue), ["first"]);
+        assert_eq!(spoken(&mut queue, at(2)), ["first"]);
     }
 
     #[test]

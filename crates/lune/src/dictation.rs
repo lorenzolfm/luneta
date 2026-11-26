@@ -7,7 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::brief;
-use crate::clock::Now;
+use crate::clock::Moment;
 use crate::menu::{self, Hint};
 use crate::named::{self, Written};
 use crate::sidebar::{self, ACCENT};
@@ -275,7 +275,7 @@ impl Dictation {
         matches!(self.stage, Stage::Hearing(_) | Stage::Naming { .. })
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: Now) {
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: Moment) {
         let Some((inner, room)) = brief::room(over) else {
             return;
         };
@@ -294,7 +294,7 @@ impl Dictation {
                 let mut lines = menu::wrap(said.trim(), inner, Style::new());
                 lines.push(Line::default());
                 let dim = Style::new().add_modifier(Modifier::DIM);
-                lines.extend(menu::waiting(WRITING, inner, dim, sidebar::frame(now.wall)));
+                lines.extend(menu::waiting(WRITING, inner, dim, sidebar::frame(now.system)));
                 (lines, vec![(Hint::Esc, "Cancel")], String::new())
             },
         };
@@ -320,9 +320,9 @@ impl Hearing {
         self.listening.finish();
     }
 
-    fn lines(&self, inner: usize, now: Now) -> Shown {
+    fn lines(&self, inner: usize, now: Moment) -> Shown {
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let frame = sidebar::frame(now.wall);
+        let frame = sidebar::frame(now.system);
         let written = written(self.words.trim(), &self.skills);
         let words = written.to_string();
         let mut lines = menu::wrap(&words, inner, Style::new());
@@ -361,7 +361,7 @@ impl Hearing {
             Key::Done(_) => vec![(Hint::Esc, "Cancel")],
         };
         let heard = match self.model {
-            Model::Listening(since) => now.at.saturating_duration_since(since),
+            Model::Listening(since) => now.steady.saturating_duration_since(since),
             Model::Opening | Model::Loading => Duration::ZERO,
         };
         let seconds = heard.as_secs();
@@ -578,7 +578,7 @@ mod tests {
         for row in area.rows() {
             buffer.set_string(row.x, row.y, "z".repeat(usize::from(width)), Style::new());
         }
-        dictation.draw(&mut buffer, area, Now { wall: SystemTime::UNIX_EPOCH, at: now });
+        dictation.draw(&mut buffer, area, Moment { system: SystemTime::UNIX_EPOCH, steady: now });
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
             assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
         }
