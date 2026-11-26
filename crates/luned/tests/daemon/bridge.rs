@@ -55,7 +55,8 @@ fn a_client_asks_the_daemon_of_the_folder_through_lune_bridge() {
         let info = bridged.info(()).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
         let first = WatchRequest { after: None, kept: None, shown: false };
-        let (version, _) = bridged.watch(first).await.unwrap().into_inner().read_host().unwrap();
+        let (version, _) =
+            bridged.watch_changes(first).await.unwrap().into_inner().read_host().unwrap();
         assert_eq!(version.pid, daemon.pid());
     });
 }

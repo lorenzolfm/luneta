@@ -177,8 +177,15 @@ impl Daemon for OverTailnet {
     async fn watch(
         &self,
         request: Request<api::WatchRequest>,
-    ) -> Result<Response<api::WatchResponse>, Status> {
+    ) -> Result<Response<api::Host>, Status> {
         Daemon::watch(&*self.0, request).await
+    }
+
+    async fn watch_changes(
+        &self,
+        request: Request<api::WatchRequest>,
+    ) -> Result<Response<api::WatchResponse>, Status> {
+        Daemon::watch_changes(&*self.0, request).await
     }
 
     async fn info(&self, _: Request<()>) -> Result<Response<InfoResponse>, Status> {
@@ -463,6 +470,9 @@ mod tests {
             let stopped = (Code::Unavailable, "the daemon's core has stopped");
             let watched = device.watch(api::WatchRequest::default()).await.unwrap_err();
             assert_eq!((watched.code(), watched.message()), stopped);
+            let watched_changes =
+                device.watch_changes(api::WatchRequest::default()).await.unwrap_err();
+            assert_eq!((watched_changes.code(), watched_changes.message()), stopped);
             let renamed = change::RenameProject { project: 1, to: "lune".to_owned() };
             let renamed = device.change_projects(changed(Change::RenameProject(renamed))).await.unwrap_err();
             assert_eq!(renamed.code(), Code::Unavailable, "{renamed:?}");

@@ -568,7 +568,15 @@ impl Daemon for StandIn {
         Ok(Response::new(ListAgentsResponse::default()))
     }
 
-    async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<api::WatchResponse>, Status> {
+    async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<api::Host>, Status> {
+        let version = Version { pid: self.pid, seq: 0 };
+        Ok(Response::new(api::Host { version: Some(version), ..api::Host::default() }))
+    }
+
+    async fn watch_changes(
+        &self,
+        _: Request<WatchRequest>,
+    ) -> Result<Response<api::WatchResponse>, Status> {
         let version = Version { pid: self.pid, seq: 0 };
         let host = api::Host { version: Some(version), ..api::Host::default() };
         Ok(Response::new(api::WatchResponse::host(host)))
@@ -812,7 +820,8 @@ fn the_daemon_runs_on_while_a_client_watches_it() {
         let mut after = None;
         let watched = const { Span::of(ALONE.saturating_add(SWEEP.saturating_mul(3))) };
         lune_waits::repeated_through(watched, "the daemon answers a watch", async || {
-            let asked = watching.watch(WatchRequest { after, kept: None, shown: false }).await;
+            let asked =
+                watching.watch_changes(WatchRequest { after, kept: None, shown: false }).await;
             let version = match asked.expect("the daemon ended").into_inner().read(after).unwrap() {
                 Watched::Host(version, _) | Watched::Unchanged(version) => version,
             };

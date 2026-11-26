@@ -43,7 +43,10 @@ pub(crate) const ROUND_TRIP: RoundTrip = RoundTrip::of(Duration::from_secs(5));
 
 const QUIET: Duration = Duration::from_secs(3);
 
+const WATCH_PACE: Duration = Duration::from_millis(250);
+
 const _: () = assert!(QUIET.as_millis() < ANSWER.waits().as_millis());
+const _: () = assert!(WATCH_PACE.as_millis() < crate::WATCH.as_millis());
 
 const KEPT_MAX: usize = 16;
 
@@ -433,14 +436,19 @@ pub struct Watching {
 impl Watching {
     pub async fn next(&mut self) -> Result<WatchedHost, WatchError> {
         loop {
+            let asked_at = Instant::now();
             let request = api::WatchRequest { after: self.after, kept: None, shown: self.shown };
             let response = self.call(request).await.map_err(WatchError::Unasked)?;
             match response.read(self.after).map_err(WatchError::Unread)? {
                 Watched::Host(version, host) => {
+                    assert_eq!(host.version, Some(version));
                     self.after = Some(version);
                     return Ok(WatchedHost { version, host: *host });
                 },
-                Watched::Unchanged(_) => {},
+                Watched::Unchanged(same) => {
+                    assert_eq!(self.after, Some(same));
+                    tokio::time::sleep_until(asked_at + WATCH_PACE).await;
+                },
             }
         }
     }
@@ -455,7 +463,7 @@ impl Watching {
         if self.gone.is() {
             return Err(Unasked::Unsent(Unsent::ChannelGone));
         }
-        match tokio::time::timeout(wait, self.daemon.watch(request)).await {
+        match tokio::time::timeout(wait, self.daemon.watch_changes(request)).await {
             Ok(watched) => watched.map(Response::into_inner).map_err(Unasked::Asked),
             Err(_) => Err(Unasked::Asked(Status::deadline_exceeded(unanswered(wait)))),
         }
@@ -564,7 +572,8 @@ impl Shared {
         shown: bool,
     ) -> Result<api::WatchResponse, Unasked> {
         let request = api::WatchRequest { after: None, kept: None, shown };
-        self.ask_unary(answer, |mut daemon| async move { daemon.watch(request).await }).await
+        self.ask_unary(answer, |mut daemon| async move { daemon.watch_changes(request).await })
+            .await
     }
 
     pub async fn snapshot(&self, answer: Answer, shown: bool) -> Result<api::Host, WatchError> {
@@ -1602,7 +1611,7 @@ mod tests {
         async fn watch(
             &self,
             request: GrpcRequest<WatchRequest>,
-        ) -> Result<GrpcResponse<api::WatchResponse>, Status> {
+        ) -> Result<GrpcResponse<api::Host>, Status> {
             self.watch_afters
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -1611,7 +1620,14 @@ mod tests {
                 let seq = self.watch_seq.fetch_add(1, Ordering::Relaxed) + 1;
                 api::Version { pid: self.pid, seq }
             });
-            let host = api::Host { version, ..api::Host::default() };
+            Ok(GrpcResponse::new(api::Host { version, ..api::Host::default() }))
+        }
+
+        async fn watch_changes(
+            &self,
+            request: GrpcRequest<WatchRequest>,
+        ) -> Result<GrpcResponse<api::WatchResponse>, Status> {
+            let host = self.watch(request).await?.into_inner();
             let response = api::WatchResponse {
                 answer: Some(api::watch_response::Answer::Host(Box::new(host))),
             };

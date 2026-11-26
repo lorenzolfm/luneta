@@ -23,7 +23,7 @@ use tokio::net::UnixListener;
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, OwnedSemaphorePermit};
 use tokio::task;
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at};
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Server;
@@ -108,21 +108,6 @@ const _: () = assert!(WATCH.as_millis() < client::ANSWER.waits().as_millis());
 pub fn parked_watch(version: api::Version) -> String {
     let api::Version { pid, seq } = version;
     format!("a watch waits for a change past {pid}:{seq}")
-}
-
-async fn parked_at(
-    told: oneshot::Receiver<api::Version>,
-    asked: api::Version,
-    aloud: bool,
-) -> Option<api::Version> {
-    let Ok(Ok(version)) = timeout(WATCH, told).await else {
-        return None;
-    };
-    assert_eq!(version, asked, "a watch parks only at the version asked");
-    if aloud {
-        log::say(&parked_watch(version));
-    }
-    Some(version)
 }
 
 pub(crate) const QUESTIONS_MAX: u32 = 16;
@@ -594,27 +579,27 @@ impl Daemon for Host {
     async fn watch(
         &self,
         request: Request<api::WatchRequest>,
+    ) -> Result<Response<api::Host>, Status> {
+        let (scope, answer) = self.watch_state(request.into_inner()).await?;
+        let snapshot = match answer {
+            WatchAnswer::Host(snapshot) => snapshot,
+            WatchAnswer::Unchanged(_) => self.host(scope).await?,
+        };
+        assert_eq!(snapshot.remotes.is_some(), scope == Scope::All);
+        Ok(Response::new(snapshot.to_api()))
+    }
+
+    async fn watch_changes(
+        &self,
+        request: Request<api::WatchRequest>,
     ) -> Result<Response<api::WatchResponse>, Status> {
-        let request = request.into_inner();
-        let waiter = Waiter::of(&request);
-        let scope = waiter.scope();
-        let _waits = self.watchers.waits(waiter);
-        let Some(version) = request.after else {
-            let host = self.host(scope).await?.to_api();
-            return Ok(Response::new(api::WatchResponse::host(host)));
+        let (_, answer) = self.watch_state(request.into_inner()).await?;
+        let response = match answer {
+            WatchAnswer::Host(snapshot) => api::WatchResponse::host(snapshot.to_api()),
+            WatchAnswer::Unchanged(version) => api::WatchResponse::unchanged(version),
         };
-        let (tell, told) = oneshot::channel();
-        let aloud = matches!(waiter, Waiter::Client);
-        let watching = timeout(WATCH, self.watched(scope, After { version, parked: tell }));
-        let (watched, parked) = tokio::join!(watching, parked_at(told, version, aloud));
-        let answer = match watched {
-            Ok(watched) => watched.map(|snapshot| api::WatchResponse::host(snapshot.to_api())),
-            Err(_) => match parked {
-                Some(heard) => Ok(api::WatchResponse::unchanged(heard)),
-                None => Err(Status::deadline_exceeded(client::unanswered(WATCH))),
-            },
-        };
-        answer.map(Response::new)
+        assert!(response.answer.is_some());
+        Ok(Response::new(response))
     }
 
     async fn list_skills(
@@ -816,9 +801,9 @@ impl Daemon for Host {
             let answer = daemon.prunes(prunes::asked(None, &dir)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let host = self.host(Scope::Local).await?.to_api();
+        let local = self.host(Scope::Local).await?.local;
         let answer = late(move || {
-            let occupied = || Occupied::of(&host, Lunes::running()?);
+            let occupied = || Occupied::of(&local, Lunes::running()?);
             let planned = prunes::plan(&dir, occupied).map_err(Status::failed_precondition)?;
             Ok(PrunesResponse::from(planned.plan()))
         });
@@ -842,10 +827,10 @@ impl Daemon for Host {
         let core = self.core.clone();
         let answer = late(move || {
             let occupied = || {
-                let host = core::ask(&core, |answer| Command::Host { scope: Scope::Local, answer })
+                let local = core::ask(&core, |answer| Command::Host { scope: Scope::Local, answer })
                     .ok_or("luned's core did not say")?
-                    .to_api();
-                Occupied::of(&host, Lunes::running()?)
+                    .local;
+                Occupied::of(&local, Lunes::running()?)
             };
             let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied)
                 .map_err(Status::failed_precondition)?;
@@ -1530,19 +1515,25 @@ impl Host {
         Ok(Some((destination, bridging)))
     }
 
+    fn send_question<T>(
+        &self,
+        question: impl FnOnce(oneshot::Sender<T>) -> Command,
+    ) -> Result<oneshot::Receiver<T>, Status> {
+        let (answer, answered) = oneshot::channel();
+        match self.core.try_send(question(answer)) {
+            Ok(()) => Ok(answered),
+            Err(TrySendError::Full(_)) => {
+                Err(Status::resource_exhausted("the daemon has too many questions open"))
+            },
+            Err(TrySendError::Disconnected(_)) => Err(stopped()),
+        }
+    }
+
     async fn ask<T>(
         &self,
         question: impl FnOnce(oneshot::Sender<T>) -> Command,
     ) -> Result<T, Status> {
-        let (answer, answered) = oneshot::channel();
-        let stopped = || Status::unavailable("the daemon's core has stopped");
-        match self.core.try_send(question(answer)) {
-            Ok(()) => {},
-            Err(TrySendError::Full(_)) => {
-                return Err(Status::resource_exhausted("the daemon has too many questions open"));
-            },
-            Err(TrySendError::Disconnected(_)) => return Err(stopped()),
-        }
+        let answered = self.send_question(question)?;
         answered.await.map_err(|_| stopped())
     }
 
@@ -1550,10 +1541,67 @@ impl Host {
         self.ask(|answer| Command::Host { scope, answer }).await
     }
 
-    async fn watched(&self, scope: Scope, after: After) -> Result<Snapshot, Status> {
-        let host = self.ask(|answer| Command::Watch { scope, after, answer }).await?;
-        host.map_err(|Full| Status::resource_exhausted("too many clients wait for the host"))
+    async fn watch_state(
+        &self,
+        request: api::WatchRequest,
+    ) -> Result<(Scope, WatchAnswer), Status> {
+        let waiter = Waiter::of(&request);
+        let scope = waiter.scope();
+        let _waits = self.watchers.waits(waiter);
+        let Some(version) = request.after else {
+            let snapshot = self.host(scope).await?;
+            assert_eq!(snapshot.remotes.is_some(), scope == Scope::All);
+            return Ok((scope, WatchAnswer::Host(snapshot)));
+        };
+        let (tell, told) = oneshot::channel();
+        let answered = self.send_question(|answer| Command::Watch {
+            scope,
+            after: After { version, parked: tell },
+            answer,
+        })?;
+        let deadline = tokio::time::Instant::now() + WATCH;
+        let aloud = matches!(waiter, Waiter::Client);
+        match timeout_at(deadline, told).await {
+            Ok(Ok(heard)) => {
+                assert_eq!(heard, version, "a watch parks only at the version asked");
+                if aloud {
+                    log::say(&parked_watch(heard));
+                }
+                match timeout_at(deadline, answered).await {
+                    Ok(Ok(Ok(snapshot))) => {
+                        assert_eq!(snapshot.remotes.is_some(), scope == Scope::All);
+                        Ok((scope, WatchAnswer::Host(snapshot)))
+                    },
+                    Ok(Ok(Err(Full))) => {
+                        unreachable!("a parked watch cannot also be refused as full")
+                    },
+                    Ok(Err(_)) => Err(stopped()),
+                    Err(_) => Ok((scope, WatchAnswer::Unchanged(heard))),
+                }
+            },
+            Ok(Err(_)) => match timeout_at(deadline, answered).await {
+                Ok(Ok(Ok(snapshot))) => {
+                    assert_eq!(snapshot.remotes.is_some(), scope == Scope::All);
+                    Ok((scope, WatchAnswer::Host(snapshot)))
+                },
+                Ok(Ok(Err(Full))) => {
+                    Err(Status::resource_exhausted("too many clients wait for the host"))
+                },
+                Ok(Err(_)) => Err(stopped()),
+                Err(_) => Err(Status::deadline_exceeded(client::unanswered(WATCH))),
+            },
+            Err(_) => Err(Status::deadline_exceeded(client::unanswered(WATCH))),
+        }
     }
+}
+
+enum WatchAnswer {
+    Host(Snapshot),
+    Unchanged(api::Version),
+}
+
+fn stopped() -> Status {
+    Status::unavailable("the daemon's core has stopped")
 }
 
 #[cfg(test)]
@@ -1666,17 +1714,27 @@ mod tests {
                 core::start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap(),
             );
             let first = host
-                .watch(Request::new(WatchRequest { after: None, kept: None, shown: true }))
+                .watch_changes(Request::new(WatchRequest { after: None, kept: None, shown: true }))
                 .await
                 .unwrap()
                 .into_inner();
             let (version, _) = first.read_host().unwrap();
 
-            let (wedged_tx, _wedged_rx) = mpsc::sync_channel(1);
+            let (wedged_tx, _wedged_rx) = mpsc::sync_channel(2);
             let wedged = host_with(wedged_tx);
             let asked = Version { pid: 1, seq: 0 };
 
-            let (timed_out, stalled) = tokio::join!(
+            let (timed_out, stalled, legacy_timed_out, legacy_stalled) = tokio::join!(
+                host.watch_changes(Request::new(WatchRequest {
+                    after: Some(version),
+                    kept: None,
+                    shown: true,
+                })),
+                wedged.watch_changes(Request::new(WatchRequest {
+                    after: Some(asked),
+                    kept: None,
+                    shown: true,
+                })),
                 host.watch(Request::new(WatchRequest {
                     after: Some(version),
                     kept: None,
@@ -1690,6 +1748,8 @@ mod tests {
             );
             assert_eq!(timed_out.unwrap().into_inner().answer, Some(Answer::Unchanged(version)));
             assert_eq!(stalled.unwrap_err().code(), Code::DeadlineExceeded);
+            assert_eq!(legacy_timed_out.unwrap().into_inner().version, Some(version));
+            assert_eq!(legacy_stalled.unwrap_err().code(), Code::DeadlineExceeded);
         });
     }
 }

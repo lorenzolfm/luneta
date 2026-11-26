@@ -41,6 +41,10 @@ pub const HELD_MAX: usize = 12;
 
 const AGAIN_MAX: Duration = Duration::from_secs(30);
 
+const WATCH_PACE: Duration = Duration::from_millis(250);
+
+const _: () = assert!(WATCH_PACE.as_millis() < crate::daemon::WATCH.as_millis());
+
 const SAID_MAX: u64 = 4096;
 
 const HEARD_BEFORE: Duration = Duration::from_secs(1);
@@ -179,6 +183,7 @@ pub enum Reached {
 
 impl Reached {
     pub fn into_api(self, destination: &Destination) -> api::Remote {
+        assert!(!destination.0.is_empty(), "a remote destination is not blank");
         let reached = match self {
             Reached::Reaching => remote::Reached::Reaching(()),
             Reached::Host(host) => remote::Reached::Host(host),
@@ -193,7 +198,9 @@ impl Reached {
                 })
             },
         };
-        api::Remote { destination: destination.0.clone(), reached: Some(reached) }
+        let remote = api::Remote { destination: destination.0.clone(), reached: Some(reached) };
+        assert!(remote.reached.is_some());
+        remote
     }
 }
 
@@ -607,6 +614,7 @@ async fn watched(
             return;
         }
         bridged.awake();
+        let asked_at = tokio::time::Instant::now();
         let question = standing.borrow().question(seen.after());
         let asked = asked(&bridged, &seen, &mut connected, question, &said, &folder).await;
         let asked = match asked {
@@ -634,10 +642,10 @@ async fn watched(
         };
         let (version, host) = match asked {
             Watched::Unchanged(version) => {
-                assert_eq!(seen.after(), Some(version));
-                let projects = seen.into_projects();
-                seen = Seen::Answered { after: version, at: SystemTime::now(), projects };
+                assert!(connected.is_some(), "an answered watch has a live connection");
+                seen = seen.unchanged(version, SystemTime::now());
                 bridged.agree(&seen, connected.as_ref());
+                tokio::time::sleep_until(asked_at + WATCH_PACE).await;
                 continue;
             },
             Watched::Host(version, host) => (version, *host),
@@ -720,13 +728,15 @@ impl Seen {
         }
     }
 
-    fn into_projects(self) -> Option<api::Projects> {
-        match self {
-            Seen::Answered { projects, .. }
-            | Seen::Broke { projects, .. }
-            | Seen::Unreached { projects, .. } => projects,
-            Seen::Reaching { .. } => None,
-        }
+    fn unchanged(self, version: api::Version, at: SystemTime) -> Seen {
+        assert_eq!(self.after(), Some(version));
+        let projects = match self {
+            Seen::Answered { projects, .. } | Seen::Broke { projects, .. } => projects,
+            Seen::Reaching { .. } | Seen::Unreached { .. } => {
+                unreachable!("an unchanged watch only follows a previously seen version")
+            },
+        };
+        Seen::Answered { after: version, at, projects }
     }
 
     fn unreached(&self) -> Option<Reached> {
@@ -760,7 +770,7 @@ async fn asked(
         daemon
     };
     let after = question.after;
-    let watched = daemon.watch(question).await;
+    let watched = daemon.watch_changes(question).await;
     let answered = watched.map_err(|status| unreached(&status)).and_then(|response| {
         response
             .into_inner()
@@ -1133,8 +1143,14 @@ mod tests {
         assert_eq!(shown(&never), Some(None));
         assert_eq!(shown(&never.failed(refused())), Some(None));
 
-        let recovered = answered_with(heard.clone()).failed(refused());
-        assert_eq!(recovered.into_projects(), heard);
+        let recovered = answered_with(heard.clone())
+            .failed(refused())
+            .unchanged(api::Version { pid: 1, seq: 1 }, SystemTime::now());
+        let Seen::Answered { after, projects, .. } = recovered else {
+            panic!("an unchanged watch recovers a broke watch to answered");
+        };
+        assert_eq!(after, api::Version { pid: 1, seq: 1 });
+        assert_eq!(projects, heard);
     }
 
     #[test]

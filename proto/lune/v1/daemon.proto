@@ -10,7 +10,8 @@ import "lune/mux/v1/mux.proto";
 service Daemon {
   rpc Info(google.protobuf.Empty) returns (InfoResponse);
   rpc ListAgents(google.protobuf.Empty) returns (ListAgentsResponse);
-  rpc Watch(WatchRequest) returns (WatchResponse);
+  rpc Watch(WatchRequest) returns (Host);
+  rpc WatchChanges(WatchRequest) returns (WatchResponse);
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
   rpc KeepChecks(KeepChecksRequest) returns (stream KeepChecksResponse);
   rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);

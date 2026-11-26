@@ -744,7 +744,7 @@ async fn watched(
         }
         let after = poll.after();
         let asked = api::WatchRequest { after, kept: None, shown: true };
-        let why = match watch_unary(patience, daemon.watch(asked)).await {
+        let why = match watch_unary(patience, daemon.watch_changes(asked)).await {
             Ok(response) => match response.read(after) {
                 Ok(Watched::Host(version, host)) => {
                     let (next, model) = watch.heard(version, Model::of(&host));

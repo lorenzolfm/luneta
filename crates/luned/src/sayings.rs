@@ -67,6 +67,7 @@ impl Sayings {
         if self.kept.len() > KEPT {
             self.kept.pop_front();
         }
+        assert!(self.kept.len() <= KEPT);
     }
 
     #[must_use]
@@ -74,11 +75,23 @@ impl Sayings {
         self.kept.is_empty()
     }
 
+    pub fn prune(&mut self, now: SystemTime) {
+        self.kept.retain(|(at, _)| is_fresh(*at, now));
+        assert!(self.kept.len() <= KEPT);
+    }
+
     #[must_use]
     pub fn fresh(&self, now: SystemTime) -> Vec<api::Saying> {
-        let fresh = |at: &SystemTime| now.duration_since(*at).map_or(true, |age| age <= STALE);
-        self.kept.iter().filter(|(at, _)| fresh(at)).map(|(_, saying)| saying.clone()).collect()
+        self.kept
+            .iter()
+            .filter(|(at, _)| is_fresh(*at, now))
+            .map(|(_, saying)| saying.clone())
+            .collect()
     }
+}
+
+fn is_fresh(at: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(at).map_or(true, |age| age <= STALE)
 }
 
 impl Spoken {
@@ -135,6 +148,18 @@ mod tests {
         assert_eq!(texts(&sayings.fresh(at + STALE + Duration::from_secs(1))), ["late"]);
         assert_eq!(texts(&sayings.fresh(at + Duration::from_hours(2))), [""; 0]);
         assert_eq!(texts(&sayings.fresh(SystemTime::UNIX_EPOCH)), ["early", "late"]);
+
+        sayings.prune(SystemTime::UNIX_EPOCH);
+        assert!(!sayings.is_empty());
+        assert_eq!(texts(&sayings.fresh(at + STALE)), ["early", "late"]);
+
+        sayings.prune(at + STALE + Duration::from_secs(1));
+        assert!(!sayings.is_empty());
+        assert_eq!(texts(&sayings.fresh(at + STALE + Duration::from_secs(1))), ["late"]);
+
+        sayings.prune(at + Duration::from_hours(2));
+        assert!(sayings.is_empty());
+        assert_eq!(texts(&sayings.fresh(at + Duration::from_hours(2))), [""; 0]);
     }
 
     #[test]

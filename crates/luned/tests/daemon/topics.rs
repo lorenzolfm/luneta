@@ -63,7 +63,7 @@ fn seen(host: &Host) -> api::Host {
     runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
         let asked = WatchRequest { after: None, kept: None, shown: true };
-        daemon.watch(asked).await.unwrap().into_inner().read_host().unwrap().1
+        daemon.watch_changes(asked).await.unwrap().into_inner().read_host().unwrap().1
     })
 }
 

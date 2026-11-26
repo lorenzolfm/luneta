@@ -363,14 +363,19 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
     }
 }
 
+const FIRST_REACH_WATCHES_MAX: usize = 128;
+
+const _: () = assert!(FIRST_REACH_WATCHES_MAX > 0);
+
 async fn first_reach(
     daemon: Shared,
     destination: &Destination,
 ) -> Result<Option<Reached>, Box<dyn Error>> {
     let deadline = tokio::time::Instant::now() + luned::REACH + Duration::from_secs(5);
     let spelled = destination.to_string();
+    assert!(!spelled.is_empty(), "a destination is not blank");
     let mut watching = daemon.watching(luned::ANSWER, LocalWatch::Client)?;
-    loop {
+    for _ in 0..FIRST_REACH_WATCHES_MAX {
         let Ok(watched) = tokio::time::timeout_at(deadline, watching.next()).await else {
             return Ok(None);
         };
@@ -381,6 +386,7 @@ async fn first_reach(
             reached => return Ok(reached),
         }
     }
+    Ok(None)
 }
 
 pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
@@ -468,8 +474,11 @@ async fn watch(
         None => daemon.snapshot_response(luned::ANSWER, false).await?,
         Some(version) => daemon.watching(luned::ANSWER, LocalWatch::Client)?.once(version).await?,
     };
+    watched.validate(after)?;
+    let encoded = watched.encode_to_vec();
+    assert!(!encoded.is_empty(), "a validated watch response encodes non-empty");
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(&watched.encode_to_vec())?;
+    stdout.write_all(&encoded)?;
     stdout.flush()?;
     Ok(())
 }

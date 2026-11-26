@@ -492,7 +492,8 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
         let mut after = None;
         loop {
             let asked = WatchRequest { after, kept: None, shown: false };
-            let watched = daemon.watch(asked).await.unwrap().into_inner().read(after).unwrap();
+            let watched =
+                daemon.watch_changes(asked).await.unwrap().into_inner().read(after).unwrap();
             match watched {
                 Watched::Unchanged(_) => return,
                 Watched::Host(version, _) => after = Some(version),
@@ -517,7 +518,7 @@ fn a_daemon_watch_carries_no_remotes_and_wakes_only_for_local_changes() {
     let (version, first) = runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
         let asked = WatchRequest { after: None, kept: Some(true), shown: false };
-        daemon.watch(asked).await.unwrap().into_inner().read_host().unwrap()
+        daemon.watch_changes(asked).await.unwrap().into_inner().read_host().unwrap()
     });
     assert_eq!(first.remotes, []);
     assert_eq!(first.unread_hosts, None);
@@ -529,7 +530,7 @@ fn a_daemon_watch_carries_no_remotes_and_wakes_only_for_local_changes() {
             runtime.block_on(async {
                 let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
                 let asked = WatchRequest { after: Some(version), kept: Some(true), shown: false };
-                daemon.watch(asked).await.unwrap().into_inner().read(Some(version)).unwrap()
+                daemon.watch_changes(asked).await.unwrap().into_inner().read(Some(version)).unwrap()
             })
         });
         project_named(&far, "play");
@@ -545,7 +546,7 @@ fn a_daemon_watch_carries_no_remotes_and_wakes_only_for_local_changes() {
             runtime.block_on(async {
                 let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
                 let asked = WatchRequest { after: Some(version), kept: Some(true), shown: false };
-                daemon.watch(asked).await.unwrap().into_inner().read(Some(version)).unwrap()
+                daemon.watch_changes(asked).await.unwrap().into_inner().read(Some(version)).unwrap()
             })
         });
         project_named(&here, "local");
@@ -570,7 +571,8 @@ fn watch_through(host: &Host, span: Span) {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
         let mut after = None;
         lune_waits::repeated_through(span, "the daemon answers a watch", async || {
-            let asked = daemon.watch(WatchRequest { after, kept: None, shown: false }).await;
+            let asked =
+                daemon.watch_changes(WatchRequest { after, kept: None, shown: false }).await;
             let version = match asked.expect("the daemon ended").into_inner().read(after).unwrap() {
                 Watched::Host(version, _) | Watched::Unchanged(version) => version,
             };

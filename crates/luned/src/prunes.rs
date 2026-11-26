@@ -14,6 +14,7 @@ use lune_protocol::github::State;
 use crate::api::projects::Held;
 use crate::api::terminal::Found;
 use crate::api::{self, On, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse};
+use crate::core;
 use crate::directory::Directory;
 use crate::git::{self, Common, Git};
 use crate::github::{self, Asker, Based, Pulled};
@@ -202,10 +203,10 @@ impl Lunes {
 }
 
 impl Occupied {
-    pub fn of(host: &api::Host, lunes: Lunes) -> Result<Occupied, String> {
-        let unread = seats::unread(host.unread, &host.unread_files);
+    pub fn of(local: &core::Local, lunes: Lunes) -> Result<Occupied, String> {
+        let unread = seats::unread(local.unread, &local.unread_files);
         let unread = unread.map_err(|unplaced| unplaced.to_string())?;
-        let terminals = terminals(host)?;
+        let terminals = terminals(&local.projects)?;
         for seats::Unread { pid, terminal } in unread {
             match terminal {
                 None => {
@@ -224,7 +225,7 @@ impl Occupied {
             }
         }
         let views = terminals.into_iter().map(|(_, folder)| folder).collect();
-        let agents = host.agents.iter().map(|agent| PathBuf::from(&agent.cwd)).collect();
+        let agents = local.agents.iter().map(|agent| PathBuf::from(&agent.cwd)).collect();
         Ok(Occupied { views, agents, lunes: lunes.0 })
     }
 
@@ -243,8 +244,8 @@ impl Occupied {
     }
 }
 
-fn terminals(host: &api::Host) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, String> {
-    let kept = match host.projects.as_ref().and_then(|projects| projects.held.as_ref()) {
+fn terminals(projects: &api::Projects) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, String> {
+    let kept = match projects.held.as_ref() {
         None => return Ok(Vec::new()),
         Some(Held::Unkept(why)) => {
             return Err(format!("luned keeps no layouts, and may leave out a terminal: {why}"));
@@ -1036,16 +1037,28 @@ mod tests {
         );
     }
 
-    fn viewed(held: api::projects::Held) -> api::Host {
-        let projects = Some(api::Projects { held: Some(held) });
-        api::Host { projects, ..api::Host::default() }
+    fn empty_local() -> core::Local {
+        core::Local {
+            git_statuses: Vec::new(),
+            agents: Vec::new(),
+            unread: 0,
+            pull_requests: Vec::new(),
+            unread_files: Vec::new(),
+            sayings: Vec::new(),
+            projects: api::Projects::default(),
+        }
+    }
+
+    fn viewed(held: api::projects::Held) -> core::Local {
+        let projects = api::Projects { held: Some(held) };
+        core::Local { projects, ..empty_local() }
     }
 
     #[test]
     fn an_agent_in_a_worktree_or_under_it_keeps_it() {
         let agents = vec![api::Agent { cwd: "/w/c/src".to_owned(), ..api::Agent::default() }];
-        let host = api::Host { agents, ..api::Host::default() };
-        let occupied = Occupied::of(&host, Lunes::none()).unwrap();
+        let local = core::Local { agents, ..empty_local() };
+        let occupied = Occupied::of(&local, Lunes::none()).unwrap();
         assert_eq!(occupied.why_in(Path::new("/w/c")), Some(AN_AGENT));
         assert_eq!(occupied.why_in(Path::new("/w/cc")), None);
     }
@@ -1064,7 +1077,7 @@ mod tests {
     #[test]
     fn a_lune_in_a_worktree_or_under_it_keeps_it() {
         let lunes = Lunes(vec![PathBuf::from("/w/c/src"), PathBuf::from("/w/d")]);
-        let occupied = Occupied::of(&api::Host::default(), lunes).unwrap();
+        let occupied = Occupied::of(&empty_local(), lunes).unwrap();
         assert_eq!(occupied.why_in(Path::new("/w/c")), Some(A_LUNE));
         assert_eq!(occupied.why_in(Path::new("/w/d")), Some(A_LUNE));
         assert_eq!(occupied.why_in(Path::new("/w/cc")), None);
@@ -1121,25 +1134,25 @@ mod tests {
         use api::terminal::Found;
         let terminal = Some(terminal_key(4));
         let file = api::UnreadFile { pid: 9, terminal };
-        let host = |terminals| api::Host {
+        let local = |terminals| core::Local {
             unread: 1,
             unread_files: vec![file],
             ..viewed(kept(terminals))
         };
-        let found = host(vec![in_layout("/w/a", Found::Key(terminal_key(4)))]);
+        let found = local(vec![in_layout("/w/a", Found::Key(terminal_key(4)))]);
         assert!(Occupied::of(&found, Lunes::none()).is_ok());
         let unheld = "luned cannot read the session file of agent 9, which runs in a terminal no \
                       layout holds";
         for terminals in [vec![], vec![in_layout("/w/a", Found::Key(terminal_key(5)))]] {
-            assert_eq!(Occupied::of(&host(terminals), Lunes::none()), Err(unheld.to_owned()));
+            assert_eq!(Occupied::of(&local(terminals), Lunes::none()), Err(unheld.to_owned()));
         }
     }
 
     #[test]
     fn what_the_daemon_could_not_read_could_be_in_any_worktree() {
-        assert!(Occupied::of(&api::Host::default(), Lunes::none()).is_ok());
+        assert!(Occupied::of(&empty_local(), Lunes::none()).is_ok());
         let files =
-            |unread, unread_files| api::Host { unread, unread_files, ..api::Host::default() };
+            |unread, unread_files| core::Local { unread, unread_files, ..empty_local() };
         let file = || api::UnreadFile { pid: 9, terminal: None };
         let unplaced = "luned cannot read 1 of Claude Code's session files, nor tell where its \
                         agent runs";
