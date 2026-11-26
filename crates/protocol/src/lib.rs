@@ -20,6 +20,60 @@ pub const CONFLICTED_NAMED_MAX: usize = 20;
 
 pub const MUX_STREAMS_MAX: u32 = 256;
 
+pub const READY_BYTES_MAX: usize = 4096;
+
+const _: () = assert!(READY_BYTES_MAX >= 64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadyPrefix(&'static str);
+
+impl ReadyPrefix {
+    #[must_use]
+    pub const fn try_new(prefix: &'static str) -> Option<Self> {
+        let bytes = prefix.as_bytes();
+        if bytes.len() < 2 || bytes.len() >= READY_BYTES_MAX {
+            return None;
+        }
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] == b'\n' || bytes[at] == b'\r' {
+                return None;
+            }
+            at += 1;
+        }
+        Some(Self(prefix))
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn as_bytes(self) -> &'static [u8] {
+        self.0.as_bytes()
+    }
+
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.0.len()
+    }
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Display for ReadyPrefix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+pub const MUX_LISTENING: ReadyPrefix =
+    ReadyPrefix::try_new("lune-mux: listening on ").expect("mux readiness prefix is valid");
+
 pub const MUX_TERMINALS_MAX: usize = 1024;
 
 pub const RPC_MESSAGE_BYTES_MAX: usize = 16 * 1024 * 1024;
@@ -148,5 +202,21 @@ mod tests {
         assert!(with_status(Status::Idle, None).is_finished_turn());
         assert!(!with_status(Status::Busy, Some(StatusRung::Osc7501)).is_finished_turn());
         assert!(!with_status(Status::Error, Some(StatusRung::Osc7501)).is_finished_turn());
+    }
+
+    #[test]
+    fn ready_prefix_rejects_empty_single_byte_multiline_and_oversize_values() {
+        use super::{ReadyPrefix, READY_BYTES_MAX};
+
+        const TOO_LONG_BYTES: [u8; READY_BYTES_MAX] = [b'x'; READY_BYTES_MAX];
+
+        assert_eq!(ReadyPrefix::try_new(""), None);
+        assert_eq!(ReadyPrefix::try_new("x"), None);
+        assert_eq!(ReadyPrefix::try_new("ok\n"), None);
+        assert_eq!(ReadyPrefix::try_new("ok\r"), None);
+        let too_long = std::str::from_utf8(&TOO_LONG_BYTES).expect("ascii bytes are utf-8");
+        assert_eq!(ReadyPrefix::try_new(too_long), None);
+        let valid = ReadyPrefix::try_new("luned: listening on ").expect("valid prefix");
+        assert_eq!(valid.as_str(), "luned: listening on ");
     }
 }

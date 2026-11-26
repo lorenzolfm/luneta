@@ -1066,7 +1066,8 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let (git, _git) = mpsc::sync_channel(1);
         let (github, _github) = mpsc::sync_channel(1);
-        let core = core::start(Wakes { git, github }).unwrap();
+        let (projects, _projects) = mpsc::sync_channel(1);
+        let core = core::start(Wakes { git, github, projects }).unwrap();
         let mut store = store_at(Ok(file_in(&scratch)), core.clone());
         let project = store.change(Change::AddProject { spot: alone("/a"), name: None });
         let Some(Made::Project(project)) = project.unwrap() else { panic!("/a is made") };

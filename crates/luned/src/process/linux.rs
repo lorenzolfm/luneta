@@ -15,7 +15,10 @@ use rustix::time::{clock_gettime, ClockId};
 
 use lune_protocol::process::{arguments, entries, EXEC_STRINGS_BYTES_MAX};
 
-use super::{program_named, Found, Id, Mine, Start, Unended, Unread, Unreadable};
+use super::{
+    program_named, readable_fd, Found, Id, Mine, Start, Unended, Unread, Unreadable,
+    SPURIOUS_WAKES_MAX,
+};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -61,6 +64,41 @@ fn start_in(stat: &str) -> Option<String> {
         return None;
     }
     fields.nth(1).map(str::to_owned)
+}
+
+pub struct Exit(OwnedFd);
+
+impl Exit {
+    pub fn watch(pid: Pid) -> io::Result<Option<Exit>> {
+        match pidfd_open(pid, PidfdFlags::empty()) {
+            Ok(process) => Ok(Some(Exit(process))),
+            Err(Errno::SRCH) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn signal(&self, signal: Signal) -> Result<(), Errno> {
+        pidfd_send_signal(&self.0, signal)
+    }
+
+    pub async fn wait(self) -> io::Result<()> {
+        let ready = readable_fd(self.0)?;
+        for _ in 0..SPURIOUS_WAKES_MAX {
+            let mut guard = ready.readable().await?;
+            let mut fds = [PollFd::new(ready.get_ref(), PollFlags::IN)];
+            let zero = Timespec { tv_sec: 0, tv_nsec: 0 };
+            match retry_on_intr(|| poll(&mut fds, Some(&zero))) {
+                Ok(0) => guard.clear_ready(),
+                Ok(count) => {
+                    assert_eq!(count, 1, "poll checked one pidfd");
+                    assert!(!fds[0].revents().is_empty(), "a ready pidfd reported an event");
+                    return Ok(());
+                },
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(io::Error::other("pidfd woke too many times without becoming readable"))
+    }
 }
 
 pub fn ends(pid: Pid) -> io::Result<()> {

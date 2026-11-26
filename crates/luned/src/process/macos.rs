@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -13,7 +14,10 @@ use sysinfo::{
 
 use lune_protocol::process::{laid_in_procargs, EXEC_STRINGS_BYTES_MAX};
 
-use super::{program_named, Found, Id, Mine, Start, Unended, Unread, Unreadable};
+use super::{
+    program_named, readable_fd, Found, Id, Mine, Start, Unended, Unread, Unreadable,
+    SPURIOUS_WAKES_MAX,
+};
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
     let mut system = System::new();
@@ -245,6 +249,74 @@ pub fn signalled(ids: &[Id], signal: Signal, wait: Duration) -> Vec<(Id, Unended
     }
     left.extend(waiting.into_iter().map(|(id, _)| (id.clone(), Unended::Outlived)));
     left
+}
+
+const WATCH_INTR_MAX: usize = 64;
+
+const _: () = assert!(WATCH_INTR_MAX > 0);
+
+pub struct Exit {
+    queue: OwnedFd,
+    pid: Pid,
+}
+
+impl Exit {
+    #[expect(
+        unsafe_code,
+        reason = "rustix's kevent is unsafe for the files an event may name, and this one names none"
+    )]
+    pub fn watch(pid: Pid) -> io::Result<Option<Exit>> {
+        let queue = kqueue()?;
+        let flags = ProcessEvents::EXIT;
+        let end = Event::new(EventFilter::Proc { pid, flags }, EventFlags::ADD, ptr::null_mut());
+        let mut unheard: [Event; 0] = [];
+        for _ in 0..WATCH_INTR_MAX {
+            match unsafe { kevent(&queue, &[end], &mut unheard[..], Some(Duration::ZERO)) } {
+                Ok(_) => return Ok(Some(Exit { queue, pid })),
+                Err(Errno::INTR) => {},
+                Err(Errno::SRCH) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(Errno::INTR.into())
+    }
+
+    pub fn signal(&self, signal: Signal) -> Result<(), Errno> {
+        kill_process(self.pid, signal)
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "rustix's kevent is unsafe for the files an event may name, and this one names none"
+    )]
+    pub async fn wait(self) -> io::Result<()> {
+        let ready = readable_fd(self.queue)?;
+        for _ in 0..SPURIOUS_WAKES_MAX {
+            let mut guard = ready.readable().await?;
+            let blank = Event::new(
+                EventFilter::Proc { pid: Pid::INIT, flags: ProcessEvents::EXIT },
+                EventFlags::empty(),
+                ptr::null_mut(),
+            );
+            let mut heard = [blank];
+            match unsafe { kevent(ready.get_ref(), &[], &mut heard[..], Some(Duration::ZERO)) } {
+                Ok(0) => guard.clear_ready(),
+                Ok(count) => {
+                    assert_eq!(count, 1, "kevent filled at most one event slot");
+                    if !heard[0].flags().contains(EventFlags::ERROR) {
+                        return Ok(());
+                    }
+                    let failure = i32::try_from(heard[0].data())
+                        .map_or(Errno::INVAL, Errno::from_raw_os_error);
+                    return if failure == Errno::SRCH { Ok(()) } else { Err(failure.into()) };
+                },
+                Err(Errno::INTR) => {},
+                Err(Errno::SRCH) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(io::Error::other("kqueue woke too many times without an exit event"))
+    }
 }
 
 #[expect(

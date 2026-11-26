@@ -65,13 +65,15 @@ pub use client::{
     Daemon, Held, LocalWatch, PeerPid, Reached, RoundTrip, Shared, Unasked, Unbridged, Unmatched,
     Unreached, Unsent, WatchError, WatchedHost, Watching, ANSWER, BRIDGED, REACH,
 };
-pub use daemon::{parked_watch, serve, Claim, ALONE, ANSWERING_MAX, SWEEP, WATCH};
+pub use daemon::{parked_watch, serve, Claim, ALONE, ANSWERING_MAX, LISTENING, SWEEP, WATCH};
 pub use keeps::KEPT;
 pub use directory::Directory;
 pub use folder::Refusal;
 pub use lune_protocol::release;
-pub use process::var;
-pub use watch::SETTLE;
+pub use process::{
+    read_ready_line, var, Exit as ProcessExit, ReadyLine, ReadyPrefix, READY_BYTES_MAX,
+};
+pub use watch::{FolderMark, FolderNames, FolderWatch, SETTLE};
 pub use layouts::RESTORE_PAUSE;
 pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
 pub use shows::{

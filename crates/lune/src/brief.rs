@@ -1,15 +1,13 @@
 use std::collections::HashMap;
 use std::io;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::names::SessionName;
-use luned::program::{self, Ran};
+use luned::program::{self, Cancel, Ran, Wanted};
 use luned::transcripts::{
     digest_end, Digest, Reading, SessionId, StepsMax, TranscriptEnd, IDS_MAX,
 };
@@ -410,7 +408,7 @@ pub fn ask(
     let asking = Asking::on_thread(move |wanted| {
         let at = clock();
         let prompt = brief.prompt(&read, SystemTime::now);
-        if !wanted() {
+        if !wanted.still() {
             return;
         }
         let said = match prompt {
@@ -429,26 +427,25 @@ pub fn ask(
 
 #[derive(Debug)]
 pub struct Asking {
-    given_up: Arc<AtomicBool>,
+    cancel: Cancel,
     ended: Receiver<()>,
 }
 
 impl Asking {
-    pub fn on_thread(ask: impl FnOnce(&dyn Fn() -> bool) + Send + 'static) -> Self {
-        let given_up = Arc::new(AtomicBool::new(false));
+    pub fn on_thread(ask: impl FnOnce(&Wanted) + Send + 'static) -> Self {
+        let (cancel, wanted) = program::cancel();
         let (going, ended) = mpsc::channel();
-        let looked_at = Arc::clone(&given_up);
         thread::spawn(move || {
             let _going: Sender<()> = going;
-            ask(&|| !looked_at.load(Ordering::Relaxed));
+            ask(&wanted);
         });
-        Asking { given_up, ended }
+        Asking { cancel, ended }
     }
 }
 
 impl Drop for Asking {
     fn drop(&mut self) {
-        self.given_up.store(true, Ordering::Relaxed);
+        self.cancel.give_up();
         let _ = self.ended.recv_timeout(GIVING_UP);
     }
 }
@@ -461,7 +458,7 @@ fn clock() -> Option<String> {
     (!time.is_empty()).then_some(time)
 }
 
-fn write(prompt: &str, wanted: &dyn Fn() -> bool) -> Option<Result<String, String>> {
+fn write(prompt: &str, wanted: &Wanted) -> Option<Result<String, String>> {
     let ran = one_answer(MODEL, SYSTEM, prompt).and_then(|(mut claude, told)| {
         program::run_while_reading(&mut claude, WRITING, wanted, told)
     });
@@ -993,7 +990,8 @@ Its transcript is unknown: Claude Code names none for it.
     }
 
     fn asked(number: u64, title: &str) -> Briefing {
-        let asking = Asking { given_up: Arc::default(), ended: mpsc::channel().1 };
+        let (cancel, _) = luned::program::cancel();
+        let asking = Asking { cancel, ended: mpsc::channel().1 };
         Briefing { number, title: title.to_owned(), written: None, _asking: asking }
     }
 

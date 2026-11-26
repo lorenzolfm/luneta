@@ -14,7 +14,6 @@ const AGAIN: Duration = Duration::from_secs(1);
 
 const MAKING_WAY: Duration = Duration::from_millis(50);
 
-const _: () = assert!(daemon::LOOK.as_millis() < MAKING_WAY.as_millis());
 const _: () = assert!(MAKING_WAY.as_millis() < AGAIN.as_millis());
 
 pub fn start(folder: PathBuf, events: Sender<Event>) {

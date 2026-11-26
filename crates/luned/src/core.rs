@@ -188,6 +188,7 @@ pub enum Parked {
 pub struct Wakes {
     pub git: SyncSender<()>,
     pub github: SyncSender<()>,
+    pub projects: SyncSender<()>,
 }
 
 const COMMANDS_MAX: usize = 64;
@@ -342,10 +343,14 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             Command::Hosts(now) => known.named(now),
             Command::Projects { projects, revision } => {
                 let before = known.dirs();
+                let before_projects = known.watched_projects();
                 known.projects = projects;
                 known.revision = revision;
                 if !known.dirs().is_subset(&before) {
                     wake(&wakes.git);
+                }
+                if known.watched_projects() != before_projects {
+                    wake(&wakes.projects);
                 }
             },
             Command::Missing(now) if now == known.missing => continue,
@@ -455,6 +460,13 @@ impl Known {
             };
             self.remotes.push(remote);
         }
+    }
+
+    fn watched_projects(&self) -> (BTreeSet<Dir>, BTreeSet<Dir>) {
+        let clones =
+            self.projects.iter().flat_map(Projects::clones).map(|(root, _)| root).collect();
+        let plain = self.projects.iter().flat_map(Projects::plain).collect();
+        (clones, plain)
     }
 
     fn dirs(&self) -> BTreeSet<String> {
@@ -1106,7 +1118,7 @@ mod tests {
     #[test]
     fn osc_7501_overrides_lower_rung_and_yields_when_agent_leaves_foreground() {
         let wake = || mpsc::sync_channel(1).0;
-        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
         let pid = AgentPid::new(std::process::id()).unwrap();
         let start_id = process::start(pid.get()).unwrap();
         let id = AgentId::new(pid, start_id);
@@ -1228,7 +1240,7 @@ mod tests {
     #[test]
     fn a_line_naming_this_machine_takes_no_word_of_a_watch_until_it_names_another() {
         let wake = || mpsc::sync_channel(1).0;
-        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
         let machine = |name: &str| name.parse::<Destination>().unwrap();
         let hosts = |lines| Command::Hosts(Named { lines, unread: 0 });
         let heard = |name: &str| Command::Remote {
@@ -1276,7 +1288,7 @@ mod tests {
         assert!(!osc_dated_since(at(10), at(12)));
 
         let wake = || mpsc::sync_channel(1).0;
-        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
         let pid = AgentPid::new(std::process::id()).unwrap();
         let root_pid = AgentPid::new(if pid.get() == 100 { 101 } else { 100 }).unwrap();
         let app = AppName::parse("claude-code").unwrap();
@@ -1342,7 +1354,7 @@ mod tests {
     #[test]
     fn a_process_that_execs_into_another_harness_is_that_harness() {
         let wake = || mpsc::sync_channel(1).0;
-        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
         let pid = AgentPid::new(std::process::id()).unwrap();
         let root_pid = AgentPid::new(if pid.get() == 100 { 101 } else { 100 }).unwrap();
         let running = |program: &str, app: &str| {
@@ -1386,7 +1398,7 @@ mod tests {
     #[test]
     fn readers_that_claim_one_process_settle_on_the_claim_its_start_proves() {
         let wake = || mpsc::sync_channel(1).0;
-        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
         let start_id = process::start(std::process::id()).unwrap();
         let id = AgentId::new(AgentPid::new(301).unwrap(), start_id);
         let claim = |reads: Declared, proof: Proof| {
@@ -1440,7 +1452,7 @@ mod tests {
     #[test]
     fn osc_7501_attributes_deterministically_when_multiple_agents_share_a_terminal() {
         let wake = || mpsc::sync_channel(1).0;
-        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
         let at = |secs| UNIX_EPOCH + Duration::from_secs(secs);
         let terminal = key(11);
         let start_id = process::start(std::process::id()).unwrap();
@@ -1535,7 +1547,7 @@ mod tests {
     #[test]
     fn known_agents_bounds_total_subagent_bytes() {
         let wake = || mpsc::sync_channel(1).0;
-        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
         let at = UNIX_EPOCH + Duration::from_secs(10);
         let app = AppName::parse("claude-code").unwrap();
         let title = Title::parse("title", &"t".repeat(lune_protocol::program_status::TITLE_BYTES_MAX)).unwrap();
@@ -1617,7 +1629,7 @@ mod tests {
     #[test]
     fn shown_terminal_renders_what_the_core_displays_and_ignores_spinner_frames() {
         let wake = || mpsc::sync_channel(1).0;
-        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
         let mut next = 0u64;
         let mut fresh = || {
             next += 1;

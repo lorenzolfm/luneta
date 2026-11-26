@@ -1,7 +1,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::path::Path;
-use std::pin::pin;
+use std::pin::{pin, Pin};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use lune_domain::mux::TerminalKey;
@@ -19,6 +20,7 @@ use luned::images::{self, Png};
 use luned::issues::{self, Filed, Filing, Remote, Unfiled};
 use luned::links::{Pasted, Ready, Unready};
 use luned::printed::{self, Kept, Printed};
+use luned::program::Wanted;
 use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
 use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
@@ -27,7 +29,7 @@ use luned::transcripts::{Reading, SessionId, TailLines, TranscriptEnd, IDS_MAX, 
 use luned::{log, said_by, told_by, Answer, Destination, Directory, Held, Shared, Unasked};
 use tokio::runtime::Handle;
 use tokio::time::timeout;
-use tokio_stream::{Stream, StreamExt as _};
+use tokio_stream::Stream;
 use tonic::{Code, Status, Streaming};
 
 use crate::agents::Harness;
@@ -158,9 +160,12 @@ impl Luned {
     pub fn talk(
         &mut self,
         asked: &Asked,
-        wanted: &dyn Fn() -> bool,
+        wanted: &Wanted,
         hear: &dyn Fn(Step),
     ) -> Option<Result<(), String>> {
+        if !wanted.still() {
+            return None;
+        }
         let request = asked.asked(self.asked_on());
         let (patience, daemon) = (self.patience, self.daemon.clone());
         let on = self.on.destination();
@@ -319,32 +324,80 @@ impl Luned {
     }
 }
 
+const STEPS_PER_TURN_MAX: usize = 65_536;
+
+const _: () = assert!(STEPS_PER_TURN_MAX > 0);
+const _: () = assert!(asks::TURN.as_secs().is_multiple_of(60));
+
 async fn heard(
     on: Option<&Destination>,
     mut steps: impl Stream<Item = Result<AskResponse, Status>> + Unpin,
     deadline: Instant,
-    wanted: &dyn Fn() -> bool,
+    wanted: &Wanted,
     hear: &dyn Fn(Step),
 ) -> Option<Result<(), String>> {
+    heard_up_to(on, &mut steps, deadline, wanted, STEPS_PER_TURN_MAX, hear).await
+}
+
+async fn heard_up_to(
+    on: Option<&Destination>,
+    mut steps: impl Stream<Item = Result<AskResponse, Status>> + Unpin,
+    deadline: Instant,
+    wanted: &Wanted,
+    steps_max: usize,
+    hear: &dyn Fn(Step),
+) -> Option<Result<(), String>> {
+    enum Next {
+        GivenUp,
+        Late,
+        Step(Option<Result<AskResponse, Status>>),
+    }
+
+    assert!(steps_max > 0, "a turn allows at least one step");
+    if !wanted.still() {
+        return None;
+    }
     let minutes = asks::TURN.as_secs() / 60;
-    loop {
-        if !wanted() {
+    let mut given_up = pin!(wanted.given_up());
+    let mut until = pin!(tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)));
+    for steps_read in 0..=steps_max {
+        if !wanted.still() {
             return None;
         }
         if Instant::now() >= deadline {
             let why = format!("the turn had not ended after {minutes} minutes");
             return Some(Err(told_by(on, &why)));
         }
-        match tokio::time::timeout(asks::LOOK, steps.next()).await {
-            Err(_) => {},
-            Ok(Some(Ok(step))) => match Step::of(step) {
+        let next = std::future::poll_fn(|cx| {
+            if given_up.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Next::GivenUp);
+            }
+            if until.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Next::Late);
+            }
+            if let Poll::Ready(step) = Pin::new(&mut steps).poll_next(cx) {
+                return Poll::Ready(Next::Step(step));
+            }
+            Poll::Pending
+        })
+        .await;
+        match next {
+            Next::GivenUp => return None,
+            Next::Late => {
+                let why = format!("the turn had not ended after {minutes} minutes");
+                return Some(Err(told_by(on, &why)));
+            },
+            Next::Step(Some(Ok(_))) if steps_read == steps_max => break,
+            Next::Step(Some(Ok(step))) => match Step::of(step) {
                 Ok(step) => step.into_iter().for_each(hear),
                 Err(why) => return Some(Err(told_by(on, &why))),
             },
-            Ok(Some(Err(status))) => return Some(Err(said_by(on, &status))),
-            Ok(None) => return Some(Ok(())),
+            Next::Step(Some(Err(status))) => return Some(Err(said_by(on, &status))),
+            Next::Step(None) => return Some(Ok(())),
         }
     }
+    let why = format!("the turn sent more than {steps_max} steps");
+    Some(Err(told_by(on, &why)))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -455,6 +508,7 @@ mod tests {
 
     use lune_waits::Began;
     use luned::api::ask_response;
+    use tokio_stream::StreamExt as _;
 
     use super::*;
 
@@ -476,7 +530,11 @@ mod tests {
         let told = RefCell::new(Vec::new());
         let hear = |step: Step| told.borrow_mut().push(step);
         let deadline = Instant::now() + DEADLINE;
-        let ended = runtime.block_on(heard(Some(&on), steps, deadline, &|| wanted, &hear));
+        let (cancel, still) = luned::program::cancel();
+        if !wanted {
+            cancel.give_up();
+        }
+        let ended = runtime.block_on(heard(Some(&on), steps, deadline, &still, &hear));
         (told.into_inner(), ended)
     }
 
@@ -502,6 +560,68 @@ mod tests {
         assert_eq!(none, (Vec::new(), Some(Err(why))));
 
         assert_eq!(heard_of(stuck(Vec::new()), false), (Vec::new(), None));
+    }
+
+    #[test]
+    fn a_turn_flooding_steps_respects_its_deadline_and_step_bound() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let on: Destination = "nixos".parse().unwrap();
+        let said = Step::Said("Looking.".to_owned());
+        let always = Wanted::always();
+
+        let flood_for_deadline = {
+            let said = said.clone();
+            Box::pin(tokio_stream::iter(std::iter::repeat_with(move || Ok(said.clone().answer()))))
+        };
+        let seen = RefCell::new(Vec::new());
+        let late = runtime.block_on(heard(
+            Some(&on),
+            flood_for_deadline,
+            Instant::now(),
+            &always,
+            &|step| seen.borrow_mut().push(step),
+        ));
+        assert_eq!(seen.into_inner(), Vec::new());
+        let why = "nixos: the turn had not ended after 10 minutes".to_owned();
+        assert_eq!(late, Some(Err(why)));
+
+        let flood_for_cap = {
+            let said = said.clone();
+            Box::pin(tokio_stream::iter(std::iter::repeat_with(move || Ok(said.clone().answer()))))
+        };
+        let capped = runtime.block_on(heard(
+            Some(&on),
+            flood_for_cap,
+            Instant::now() + lune_waits::OUTLASTING,
+            &always,
+            &|_| {},
+        ));
+        let why = format!("nixos: the turn sent more than {STEPS_PER_TURN_MAX} steps");
+        assert_eq!(capped, Some(Err(why)));
+
+        let exact = ending(vec![Ok(said.clone().answer()); 3]);
+        let seen = RefCell::new(Vec::new());
+        let accepted = runtime.block_on(heard_up_to(
+            Some(&on),
+            exact,
+            Instant::now() + lune_waits::OUTLASTING,
+            &always,
+            3,
+            &|step| seen.borrow_mut().push(step),
+        ));
+        assert_eq!(accepted, Some(Ok(())));
+        assert_eq!(seen.into_inner().len(), 3);
+
+        let over = ending(vec![Ok(said.answer()); 4]);
+        let refused = runtime.block_on(heard_up_to(
+            Some(&on),
+            over,
+            Instant::now() + lune_waits::OUTLASTING,
+            &always,
+            3,
+            &|_| {},
+        ));
+        assert_eq!(refused, Some(Err("nixos: the turn sent more than 3 steps".to_owned())));
     }
 
     #[test]
