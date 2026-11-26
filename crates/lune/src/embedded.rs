@@ -6,8 +6,9 @@ use std::net::Shutdown;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::os::unix::fs::symlink;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -42,9 +43,15 @@ const SHM_NAME_BYTES_MAX: usize = 256;
 
 const POINTER_SHAPE_BYTES_MAX: usize = 32;
 
-const LINE_BYTES_MAX: usize = 16 * 1024;
+const CONTROL_LINE_BYTES_MAX: usize = 16 * 1024;
+
+const GUEST_LINE_BYTES_MAX: usize = 1024 * 1024;
+
+const GUEST_LINE_DRAIN_MAX: usize = 8 * 1024 * 1024;
 
 const STDERR_BYTES_MAX: usize = 2048;
+
+const STDERR_JOIN_WAIT: Duration = Duration::from_millis(500);
 
 const TO_GUEST_QUEUE_MAX: usize = 256;
 
@@ -53,6 +60,16 @@ const ACCEPT_POLL: Duration = Duration::from_millis(50);
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(15);
 
 const ACCEPT_POLLS_MAX: u32 = 300;
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+const HANDSHAKE_POLLS_MAX: u32 = 100;
+
+const EXIT_WAIT: Duration = Duration::from_secs(2);
+
+const EXIT_POLLS_MAX: u32 = 40;
+
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(300);
 
@@ -123,12 +140,19 @@ const _: () = assert!(EMBEDDED_MAX < IMAGE_ID_SPAN as usize);
 const _: () = assert!(IMAGE_PIXELS_MAX > 0);
 const _: () = assert!(SHM_NAME_BYTES_MAX > 0);
 const _: () = assert!(POINTER_SHAPE_BYTES_MAX > 0);
-const _: () = assert!(LINE_BYTES_MAX > 0);
+const _: () = assert!(CONTROL_LINE_BYTES_MAX > 0);
+const _: () = assert!(GUEST_LINE_BYTES_MAX >= CONTROL_LINE_BYTES_MAX);
+const _: () = assert!(GUEST_LINE_DRAIN_MAX >= GUEST_LINE_BYTES_MAX);
 const _: () = assert!(STDERR_BYTES_MAX > 0);
+const _: () = assert!(STDERR_JOIN_WAIT.as_millis() > 0);
 const _: () = assert!(TO_GUEST_QUEUE_MAX > 0);
 const _: () = assert!(CONTROL_SOCKETS_MAX > 0 && CONTROL_SOCKETS_MAX <= DIR_ENTRIES_MAX);
 const _: () =
     assert!(ACCEPT_POLLS_MAX as u128 * ACCEPT_POLL.as_millis() == ACCEPT_TIMEOUT.as_millis());
+const _: () =
+    assert!(HANDSHAKE_POLLS_MAX as u128 * ACCEPT_POLL.as_millis() == HANDSHAKE_TIMEOUT.as_millis());
+const _: () = assert!(EXIT_POLLS_MAX as u128 * ACCEPT_POLL.as_millis() == EXIT_WAIT.as_millis());
+const _: () = assert!(WRITE_TIMEOUT.as_millis() > 0);
 
 fn div_floor_nonzero(pixels: u16, cells: u16) -> Option<NonZeroU16> {
     if pixels == 0 || cells == 0 {
@@ -659,24 +683,8 @@ impl SupportedState {
             self.insert_failed(spec.view, format!("browser tty setup failed: {error}"));
             return;
         }
-        let mut command = Command::new("terminal-browser");
-        command.arg("open");
-        if let Machine::Remote(destination) = spec.machine {
-            command.arg(format!("--ssh={destination}"));
-        }
-        if let Some(url) = spec.url {
-            command.arg(url.as_str());
-        }
-        command
-            .env_remove("PIXEL_PANE")
-            .env("PIXEL_EMBED", &socket)
-            .env("PIXEL_TTY", &tty)
-            .env("TERMINAL_BROWSER_START_PAGE", "1")
-            .env("TERMINAL_BROWSER_COPY_ON_SELECT", "1")
-            .env("TERMINAL_BROWSER_TERMINAL_SOCKET", &self.folder.terminal_socket)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+        let mut command =
+            configure_spawn_command(spec, &socket, &tty, &self.folder.terminal_socket);
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -1255,6 +1263,74 @@ impl Drop for Browsers {
     }
 }
 
+fn configure_spawn_command(
+    spec: &SpawnSpec<'_>,
+    socket: &Path,
+    tty: &Path,
+    terminal_socket: &Path,
+) -> Command {
+    let mut command = Command::new("terminal-browser");
+    command.arg("open");
+    if let Machine::Remote(destination) = spec.machine {
+        command.arg(format!("--ssh={destination}"));
+    }
+    if let Some(url) = spec.url {
+        command.arg(url.as_str());
+    }
+    command
+        .env_remove("PIXEL_PANE")
+        .env("PIXEL_EMBED", socket)
+        .env("PIXEL_TTY", tty)
+        .env("TERMINAL_BROWSER_START_PAGE", "1")
+        .env("TERMINAL_BROWSER_COPY_ON_SELECT", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    match spec.machine {
+        Machine::Local => {
+            command.env("TERMINAL_BROWSER_TERMINAL_SOCKET", terminal_socket);
+        },
+        Machine::Remote(_) => {
+            command.env_remove("TERMINAL_BROWSER_TERMINAL_SOCKET");
+        },
+    }
+    command
+}
+
+#[derive(Clone, Copy)]
+struct PeerTimeouts {
+    accept_polls_max: u32,
+    accept_timeout: Duration,
+    handshake_polls_max: u32,
+    handshake_timeout: Duration,
+    exit_polls_max: u32,
+}
+
+impl PeerTimeouts {
+    const DEFAULT: PeerTimeouts = PeerTimeouts {
+        accept_polls_max: ACCEPT_POLLS_MAX,
+        accept_timeout: ACCEPT_TIMEOUT,
+        handshake_polls_max: HANDSHAKE_POLLS_MAX,
+        handshake_timeout: HANDSHAKE_TIMEOUT,
+        exit_polls_max: EXIT_POLLS_MAX,
+    };
+}
+
+enum Accepted {
+    Connected(UnixStream),
+    Stopped,
+    Exited(ExitStatus),
+    Failed(String),
+}
+
+#[derive(Debug)]
+enum BoundedLine {
+    Eof,
+    Line(String),
+    Oversized,
+}
+
 struct Peer {
     number: u64,
     view: ViewId,
@@ -1266,6 +1342,19 @@ struct Peer {
 }
 
 fn kill_and_wait(child: &mut Child) {
+    match child.try_wait() {
+        Ok(Some(_)) => return,
+        Ok(None) => {},
+        Err(error) => {
+            log::say(&format!("terminal-browser status check failed: {error}"));
+        },
+    }
+    if let Some(pid) = i32::try_from(child.id()).ok().and_then(rustix::process::Pid::from_raw)
+        && let Err(error) = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
+        && error != rustix::io::Errno::SRCH
+    {
+        log::say(&format!("terminal-browser process group kill failed: {error}"));
+    }
     if let Err(error) = child.kill()
         && error.kind() != ErrorKind::InvalidInput
     {
@@ -1276,9 +1365,38 @@ fn kill_and_wait(child: &mut Child) {
     }
 }
 
-fn run_peer(peer: Peer, mut child: Option<Child>) {
+fn collect_stderr(stderr: Option<mpsc::Receiver<String>>) -> String {
+    stderr.and_then(|rx| rx.recv_timeout(STDERR_JOIN_WAIT).ok()).unwrap_or_default()
+}
+
+fn wait_for_child(
+    child: &mut Child,
+    stop: &AtomicBool,
+    exit_polls_max: u32,
+) -> io::Result<Option<ExitStatus>> {
+    for poll in 0..exit_polls_max {
+        assert!(poll < exit_polls_max);
+        if stop.load(Ordering::Relaxed) {
+            kill_and_wait(child);
+            return Ok(None);
+        }
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        thread::sleep(ACCEPT_POLL);
+    }
+    kill_and_wait(child);
+    Ok(None)
+}
+
+fn run_peer(peer: Peer, child: Option<Child>) {
+    run_peer_with_timeouts(peer, child, PeerTimeouts::DEFAULT);
+}
+
+fn run_peer_with_timeouts(peer: Peer, mut child: Option<Child>, timeouts: PeerTimeouts) {
     let Peer { number, view, listener, init, receiver, events, stop } = peer;
     let stderr = child.as_mut().and_then(|child| child.stderr.take()).map(|mut err| {
+        let (tx, rx) = mpsc::sync_channel(1);
         thread::spawn(move || {
             let mut buffer = Vec::new();
             if let Err(error) = err.by_ref().take(STDERR_BYTES_MAX as u64).read_to_end(&mut buffer)
@@ -1286,17 +1404,45 @@ fn run_peer(peer: Peer, mut child: Option<Child>) {
                 log::say(&format!("terminal-browser stderr read failed: {error}"));
             }
             assert!(buffer.len() <= STDERR_BYTES_MAX);
-            String::from_utf8_lossy(&buffer).trim().to_owned()
-        })
+            let _ = tx.send(String::from_utf8_lossy(&buffer).trim().to_owned());
+        });
+        rx
     });
-    let accepted = accept_peer(&listener, &stop, child.as_mut());
-    match accepted {
-        Ok(Some(stream)) => {
-            serve_stream(stream, number, view, &init, receiver, &events, &stop);
+    match accept_peer(&listener, &stop, child.as_mut(), timeouts) {
+        Accepted::Connected(stream) => {
+            serve_stream(stream, number, view, &init, receiver, &events, &stop, timeouts);
         },
-        Ok(None) => {},
-        Err(why) => {
-            let stderr_text = stderr.and_then(|handle| handle.join().ok()).unwrap_or_default();
+        Accepted::Stopped => {
+            if let Some(mut child) = child {
+                kill_and_wait(&mut child);
+            }
+            return;
+        },
+        Accepted::Exited(status) => {
+            let stderr_text = collect_stderr(stderr);
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let exit = if status.success() {
+                Exit::Clean
+            } else {
+                let message = if stderr_text.is_empty() {
+                    format!("terminal-browser exited before connecting ({status})")
+                } else {
+                    stderr_text
+                };
+                Exit::Failed(message)
+            };
+            if events.send(Event::Browser { number, view, heard: Heard::Exited(exit) }).is_err() {
+                log::say("embedded browser exit event dropped on closed channel");
+            }
+            return;
+        },
+        Accepted::Failed(why) => {
+            if let Some(mut child) = child {
+                kill_and_wait(&mut child);
+            }
+            let stderr_text = collect_stderr(stderr);
             let detail = if stderr_text.is_empty() { why } else { stderr_text };
             if !stop.load(Ordering::Relaxed)
                 && events
@@ -1304,9 +1450,6 @@ fn run_peer(peer: Peer, mut child: Option<Child>) {
                     .is_err()
             {
                 log::say("embedded browser exit event dropped on closed channel");
-            }
-            if let Some(mut child) = child {
-                kill_and_wait(&mut child);
             }
             return;
         },
@@ -1316,14 +1459,17 @@ fn run_peer(peer: Peer, mut child: Option<Child>) {
             kill_and_wait(&mut child);
             return;
         }
-        let status = child.wait();
-        let stderr_text = stderr.and_then(|handle| handle.join().ok()).unwrap_or_default();
+        let status = wait_for_child(&mut child, &stop, timeouts.exit_polls_max);
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let stderr_text = collect_stderr(stderr);
         if stop.load(Ordering::Relaxed) {
             return;
         }
         let exit = match status {
-            Ok(status) if status.success() => Exit::Clean,
-            Ok(status) => {
+            Ok(Some(status)) if status.success() => Exit::Clean,
+            Ok(Some(status)) => {
                 let message = if stderr_text.is_empty() {
                     format!("terminal-browser exited ({status})")
                 } else {
@@ -1331,7 +1477,18 @@ fn run_peer(peer: Peer, mut child: Option<Child>) {
                 };
                 Exit::Failed(message)
             },
-            Err(error) => Exit::Failed(format!("terminal-browser wait failed: {error}")),
+            Ok(None) => {
+                let message = if stderr_text.is_empty() {
+                    "terminal-browser stopped responding".to_owned()
+                } else {
+                    stderr_text
+                };
+                Exit::Failed(message)
+            },
+            Err(error) => {
+                kill_and_wait(&mut child);
+                Exit::Failed(format!("terminal-browser wait failed: {error}"))
+            },
         };
         if events.send(Event::Browser { number, view, heard: Heard::Exited(exit) }).is_err() {
             log::say("embedded browser exit event dropped on closed channel");
@@ -1349,39 +1506,39 @@ fn accept_peer(
     listener: &UnixListener,
     stop: &AtomicBool,
     mut child: Option<&mut Child>,
-) -> Result<Option<UnixStream>, String> {
-    let deadline = Instant::now() + ACCEPT_TIMEOUT;
-    for poll in 0..ACCEPT_POLLS_MAX {
-        assert!(poll < ACCEPT_POLLS_MAX);
+    timeouts: PeerTimeouts,
+) -> Accepted {
+    let deadline = Instant::now() + timeouts.accept_timeout;
+    for poll in 0..timeouts.accept_polls_max {
+        assert!(poll < timeouts.accept_polls_max);
         if stop.load(Ordering::Relaxed) {
-            return Ok(None);
+            return Accepted::Stopped;
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                stream
-                    .set_nonblocking(false)
-                    .map_err(|error| format!("embed stream setup failed: {error}"))?;
-                return Ok(Some(stream));
+                if let Err(error) = stream.set_nonblocking(false) {
+                    return Accepted::Failed(format!("embed stream setup failed: {error}"));
+                }
+                return Accepted::Connected(stream);
             },
             Err(error) if error.kind() == ErrorKind::WouldBlock => {},
-            Err(error) => return Err(format!("embed accept failed: {error}")),
+            Err(error) => return Accepted::Failed(format!("embed accept failed: {error}")),
         }
         if let Some(child) = child.as_deref_mut() {
             match child.try_wait() {
-                Ok(Some(status)) if status.success() => return Ok(None),
-                Ok(Some(status)) => {
-                    return Err(format!("terminal-browser exited before connecting ({status})"));
-                },
+                Ok(Some(status)) => return Accepted::Exited(status),
                 Ok(None) => {},
-                Err(error) => return Err(format!("terminal-browser wait check failed: {error}")),
+                Err(error) => {
+                    return Accepted::Failed(format!("terminal-browser wait check failed: {error}"));
+                },
             }
         }
         if Instant::now() >= deadline {
-            return Err("terminal-browser did not connect in time".to_owned());
+            return Accepted::Failed("terminal-browser did not connect in time".to_owned());
         }
         thread::sleep(ACCEPT_POLL);
     }
-    Err("terminal-browser did not connect in time".to_owned())
+    Accepted::Failed("terminal-browser did not connect in time".to_owned())
 }
 
 fn serve_stream(
@@ -1392,7 +1549,16 @@ fn serve_stream(
     receiver: mpsc::Receiver<ToGuest>,
     events: &Sender<Event>,
     stop: &Arc<AtomicBool>,
+    timeouts: PeerTimeouts,
 ) {
+    if let Err(error) = stream.set_read_timeout(Some(ACCEPT_POLL)) {
+        log::say(&format!("embedded browser handshake read timeout failed: {error}"));
+        return;
+    }
+    if let Err(error) = stream.set_write_timeout(Some(WRITE_TIMEOUT)) {
+        log::say(&format!("embedded browser write timeout failed: {error}"));
+        return;
+    }
     let mut writer = match stream.try_clone() {
         Ok(writer) => writer,
         Err(error) => {
@@ -1401,7 +1567,12 @@ fn serve_stream(
         },
     };
     let mut reader = BufReader::new(stream);
-    let first = match read_bounded_line(&mut reader) {
+    let first = match read_handshake_line(
+        &mut reader,
+        stop,
+        timeouts.handshake_polls_max,
+        timeouts.handshake_timeout,
+    ) {
         Ok(Some(line)) => line,
         Ok(None) => return,
         Err(error) => {
@@ -1415,6 +1586,10 @@ fn serve_stream(
     }
     if let Err(error) = write_json_line(&mut writer, init) {
         log::say(&format!("embedded browser init write failed: {error}"));
+        return;
+    }
+    if let Err(error) = reader.get_ref().set_read_timeout(None) {
+        log::say(&format!("embedded browser read timeout clear failed: {error}"));
         return;
     }
     let write_stop = Arc::clone(stop);
@@ -1431,7 +1606,6 @@ fn serve_stream(
                 if write_stop.load(Ordering::Relaxed) {
                     break;
                 }
-                assert!(!write_stop.load(Ordering::Relaxed));
                 if let Err(error) = write_json_line(&mut writer, &message) {
                     log::say(&format!("embedded browser write failed: {error}"));
                     break;
@@ -1444,9 +1618,19 @@ fn serve_stream(
             }
         });
         loop {
-            let line = match read_bounded_line(&mut reader) {
-                Ok(Some(line)) => line,
-                Ok(None) => break,
+            let line = match read_bounded_line(
+                &mut reader,
+                GUEST_LINE_BYTES_MAX,
+                GUEST_LINE_DRAIN_MAX,
+            ) {
+                Ok(BoundedLine::Line(line)) => line,
+                Ok(BoundedLine::Oversized) => {
+                    log::say(&format!(
+                        "embedded browser message exceeded {GUEST_LINE_BYTES_MAX} bytes; skipping"
+                    ));
+                    continue;
+                },
+                Ok(BoundedLine::Eof) => break,
                 Err(error) => {
                     if !stop.load(Ordering::Relaxed) {
                         log::say(&format!("embedded browser read failed: {error}"));
@@ -1457,8 +1641,7 @@ fn serve_stream(
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            assert!(!stop.load(Ordering::Relaxed));
-            assert!(line.len() <= LINE_BYTES_MAX);
+            assert!(line.len() <= GUEST_LINE_BYTES_MAX);
             let message = match serde_json::from_str::<FromGuest>(&line) {
                 Ok(message) => message,
                 Err(error) => {
@@ -1493,46 +1676,130 @@ fn serve_stream(
     });
 }
 
-fn read_bounded_line(reader: &mut BufReader<UnixStream>) -> io::Result<Option<String>> {
+fn read_handshake_line(
+    reader: &mut BufReader<UnixStream>,
+    stop: &AtomicBool,
+    polls_max: u32,
+    timeout: Duration,
+) -> io::Result<Option<String>> {
     let mut buffer = Vec::new();
-    let mut total_read = 0usize;
-    while total_read <= LINE_BYTES_MAX {
-        let available = reader.fill_buf()?;
+    let deadline = Instant::now() + timeout;
+    let mut polls = 0u32;
+    let iterations_max = polls_max.saturating_add(CONTROL_LINE_BYTES_MAX as u32);
+    for _ in 0..iterations_max {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                polls += 1;
+                if polls >= polls_max || Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        ErrorKind::TimedOut,
+                        "embedded browser handshake timed out",
+                    ));
+                }
+                continue;
+            },
+            Err(error) => return Err(error),
+        };
         if available.is_empty() {
             if buffer.is_empty() {
                 return Ok(None);
             }
-            assert!(buffer.len() <= LINE_BYTES_MAX);
+            assert!(buffer.len() <= CONTROL_LINE_BYTES_MAX);
             return Ok(Some(String::from_utf8_lossy(&buffer).into_owned()));
         }
         if let Some(newline) = available.iter().position(|&byte| byte == b'\n') {
-            if total_read.saturating_add(newline) > LINE_BYTES_MAX {
+            if buffer.len().saturating_add(newline) > CONTROL_LINE_BYTES_MAX {
                 reader.consume(newline + 1);
                 return Err(io::Error::new(
                     ErrorKind::InvalidData,
-                    format!("embedded browser line exceeded {LINE_BYTES_MAX} bytes"),
+                    format!("embedded browser line exceeded {CONTROL_LINE_BYTES_MAX} bytes"),
                 ));
             }
             buffer.extend_from_slice(&available[..newline]);
             reader.consume(newline + 1);
-            assert!(buffer.len() <= LINE_BYTES_MAX);
+            assert!(buffer.len() <= CONTROL_LINE_BYTES_MAX);
             return Ok(Some(String::from_utf8_lossy(&buffer).into_owned()));
         }
         let chunk_len = available.len();
-        total_read = total_read.saturating_add(chunk_len);
-        if total_read > LINE_BYTES_MAX {
+        if buffer.len().saturating_add(chunk_len) > CONTROL_LINE_BYTES_MAX {
             reader.consume(chunk_len);
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
-                format!("embedded browser line exceeded {LINE_BYTES_MAX} bytes"),
+                format!("embedded browser line exceeded {CONTROL_LINE_BYTES_MAX} bytes"),
             ));
         }
         buffer.extend_from_slice(available);
         reader.consume(chunk_len);
     }
+    Err(io::Error::new(ErrorKind::TimedOut, "embedded browser handshake timed out"))
+}
+
+fn read_bounded_line(
+    reader: &mut BufReader<UnixStream>,
+    max_bytes: usize,
+    drain_max: usize,
+) -> io::Result<BoundedLine> {
+    assert!(max_bytes > 0, "line byte limit is positive");
+    assert!(drain_max >= max_bytes, "drain limit is at least line byte limit");
+    let mut buffer = Vec::new();
+    let mut total_read = 0usize;
+    let mut oversized = false;
+    while total_read <= drain_max {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if oversized {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("embedded browser line exceeded {max_bytes} bytes"),
+                ));
+            }
+            if buffer.is_empty() {
+                return Ok(BoundedLine::Eof);
+            }
+            assert!(buffer.len() <= max_bytes);
+            return Ok(BoundedLine::Line(String::from_utf8_lossy(&buffer).into_owned()));
+        }
+        if let Some(newline) = available.iter().position(|&byte| byte == b'\n') {
+            let line_len = total_read.saturating_add(newline);
+            if !oversized && line_len <= max_bytes {
+                buffer.extend_from_slice(&available[..newline]);
+                reader.consume(newline + 1);
+                assert!(buffer.len() <= max_bytes);
+                return Ok(BoundedLine::Line(String::from_utf8_lossy(&buffer).into_owned()));
+            }
+            reader.consume(newline + 1);
+            if line_len > drain_max {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("embedded browser line exceeded {drain_max} bytes"),
+                ));
+            }
+            return Ok(BoundedLine::Oversized);
+        }
+        let chunk_len = available.len();
+        total_read = total_read.saturating_add(chunk_len);
+        if total_read > drain_max {
+            reader.consume(chunk_len);
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!("embedded browser line exceeded {drain_max} bytes"),
+            ));
+        }
+        if total_read > max_bytes {
+            oversized = true;
+            buffer.clear();
+        } else if !oversized {
+            buffer.extend_from_slice(available);
+        }
+        reader.consume(chunk_len);
+    }
     Err(io::Error::new(
         ErrorKind::InvalidData,
-        format!("embedded browser line exceeded {LINE_BYTES_MAX} bytes"),
+        format!("embedded browser line exceeded {drain_max} bytes"),
     ))
 }
 
@@ -1767,8 +2034,12 @@ fn ask_control_state(socket: &Path) -> Option<ControlData> {
     stream.write_all(b"{\"id\":\"1\",\"cmd\":\"state\"}\n").ok()?;
     stream.flush().ok()?;
     let mut reader = BufReader::new(stream);
-    let line = read_bounded_line(&mut reader).ok()??;
-    assert!(line.len() <= LINE_BYTES_MAX);
+    let BoundedLine::Line(line) =
+        read_bounded_line(&mut reader, CONTROL_LINE_BYTES_MAX, CONTROL_LINE_BYTES_MAX).ok()?
+    else {
+        return None;
+    };
+    assert!(line.len() <= CONTROL_LINE_BYTES_MAX);
     let reply: ControlReply = serde_json::from_str(&line).ok()?;
     reply.ok.then_some(reply.data).flatten()
 }
@@ -1839,19 +2110,34 @@ mod tests {
     }
 
     #[test]
-    fn read_bounded_line_rejects_oversized_lines_without_spinning() {
+    fn read_bounded_line_skips_oversized_newlines_and_rejects_runaway_streams() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("line.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let mut client = UnixStream::connect(&socket).unwrap();
         let (server, _) = listener.accept().unwrap();
 
-        let junk = vec![b'x'; LINE_BYTES_MAX + 128];
+        let oversized_with_newline = format!("{}\nafter\n", "x".repeat(CONTROL_LINE_BYTES_MAX + 64));
+        let runaway = vec![b'y'; CONTROL_LINE_BYTES_MAX * 2 + 128];
         let writer = thread::spawn(move || {
-            let _ = client.write_all(&junk);
+            client.write_all(oversized_with_newline.as_bytes()).unwrap();
+            let _ = client.write_all(&runaway);
         });
         let mut reader = BufReader::new(server);
-        let err = read_bounded_line(&mut reader).unwrap_err();
+        assert!(matches!(
+            read_bounded_line(&mut reader, CONTROL_LINE_BYTES_MAX, CONTROL_LINE_BYTES_MAX * 2),
+            Ok(BoundedLine::Oversized)
+        ));
+        assert!(matches!(
+            read_bounded_line(&mut reader, CONTROL_LINE_BYTES_MAX, CONTROL_LINE_BYTES_MAX * 2),
+            Ok(BoundedLine::Line(ref line)) if line == "after"
+        ));
+        let err = read_bounded_line(
+            &mut reader,
+            CONTROL_LINE_BYTES_MAX,
+            CONTROL_LINE_BYTES_MAX * 2,
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         writer.join().unwrap();
     }
@@ -2032,17 +2318,22 @@ mod tests {
         client.write_all(b"{\"type\":\"pointer\",\"shape\":\"bad\\u001b]52;c;\"}\n").unwrap();
         client.write_all(b"{\"type\":\"clipboard\",\"text\":\"copied\"}\n").unwrap();
 
+        let large_clip = "c".repeat(32 * 1024);
+        let clip_payload = format!("{{\"type\":\"clipboard\",\"text\":\"{large_clip}\"}}\n");
+        client.write_all(clip_payload.as_bytes()).unwrap();
+
         let mut received = Vec::new();
-        lune_waits::eventually("four browser events arrive", || {
+        lune_waits::eventually("five browser events arrive", || {
             while let Ok(Event::Browser { heard, .. }) = events_rx.try_recv() {
                 received.push(heard);
             }
-            (received.len() >= 4).then_some(())
+            (received.len() >= 5).then_some(())
         });
         assert!(matches!(received[0], Heard::Frame(ref frame) if frame.shm() == "/px-1"));
         assert_eq!(received[1], Heard::Title(Some("GitHub".to_owned())));
         assert_eq!(received[2], Heard::Pointer(PointerShape::parse("pointer").unwrap()));
         assert_eq!(received[3], Heard::Clipboard("copied".to_owned()));
+        assert_eq!(received[4], Heard::Clipboard(large_clip));
 
         to_guest_tx.send(ToGuest::Paste { text: "hello".to_owned() }).unwrap();
         let mut pasted_line = String::new();
@@ -2054,6 +2345,126 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         drop(to_guest_tx);
         drop(client);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn spawn_command_only_passes_terminal_socket_for_local_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("b.sock");
+        let tty = dir.path().join("b.tty");
+        let terminal_socket = dir.path().join("terminal-browser.sock");
+        let view = ViewId::of(1).unwrap();
+        let local_spec = SpawnSpec {
+            view,
+            machine: &Machine::Local,
+            url: None,
+            columns: NonZeroU16::new(80).unwrap(),
+            rows: NonZeroU16::new(24).unwrap(),
+            presence: Presence::Visible { focused: true },
+        };
+        let local_cmd = configure_spawn_command(&local_spec, &socket, &tty, &terminal_socket);
+        let local_envs: BTreeMap<_, _> = local_cmd.get_envs().collect();
+        assert_eq!(
+            local_envs.get(std::ffi::OsStr::new("TERMINAL_BROWSER_TERMINAL_SOCKET")),
+            Some(&Some(terminal_socket.as_os_str()))
+        );
+
+        let remote_machine = Machine::Remote("box".parse().unwrap());
+        let remote_spec = SpawnSpec { machine: &remote_machine, ..local_spec };
+        let remote_cmd = configure_spawn_command(&remote_spec, &socket, &tty, &terminal_socket);
+        let remote_envs: BTreeMap<_, _> = remote_cmd.get_envs().collect();
+        assert_eq!(
+            remote_envs.get(std::ffi::OsStr::new("TERMINAL_BROWSER_TERMINAL_SOCKET")),
+            Some(&None),
+            "remote browsers must remove inherited local terminal socket env var"
+        );
+        let args: Vec<_> = remote_cmd.get_args().collect();
+        assert!(args.iter().any(|arg| *arg == std::ffi::OsStr::new("--ssh=box")));
+    }
+
+    #[test]
+    fn run_peer_kills_hanging_child_on_accept_timeout_and_unblocks_stalled_handshake() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("timeout.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (events_tx, events_rx) = mpsc::channel();
+        let (_to_guest_tx, to_guest_rx) = mpsc::sync_channel(TO_GUEST_QUEUE_MAX);
+        let stop = Arc::new(AtomicBool::new(false));
+        let view = ViewId::of(8).unwrap();
+        let mut child_cmd = Command::new("/bin/sh");
+        child_cmd
+            .args(["-c", "exec sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let child = child_cmd.spawn().unwrap();
+        let peer = Peer {
+            number: 1,
+            view,
+            listener,
+            init: ToGuest::Init {
+                columns: 40,
+                rows: 12,
+                width: 400,
+                height: 240,
+                cell: [10, 20],
+                image_id: IMAGE_ID_BASE,
+                transport: "host",
+                focused: true,
+                colors: None,
+            },
+            receiver: to_guest_rx,
+            events: events_tx,
+            stop: Arc::clone(&stop),
+        };
+        let short = PeerTimeouts {
+            accept_polls_max: 2,
+            accept_timeout: Duration::from_millis(100),
+            handshake_polls_max: 2,
+            handshake_timeout: Duration::from_millis(100),
+            exit_polls_max: 2,
+        };
+        let handle = thread::spawn(move || run_peer_with_timeouts(peer, Some(child), short));
+        let event = lune_waits::eventually("browser exit event arrives after accept timeout", || {
+            events_rx.try_recv().ok()
+        });
+        let Event::Browser { heard: Heard::Exited(Exit::Failed(reason)), .. } = event else {
+            panic!("expected failed exit on accept timeout");
+        };
+        assert!(reason.contains("did not connect in time"), "{reason}");
+        handle.join().unwrap();
+
+        let handshake_socket = dir.path().join("handshake.sock");
+        let listener = UnixListener::bind(&handshake_socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (events_tx, _events_rx) = mpsc::channel();
+        let (_to_guest_tx, to_guest_rx) = mpsc::sync_channel(TO_GUEST_QUEUE_MAX);
+        let stop = Arc::new(AtomicBool::new(false));
+        let peer = Peer {
+            number: 2,
+            view,
+            listener,
+            init: ToGuest::Init {
+                columns: 40,
+                rows: 12,
+                width: 400,
+                height: 240,
+                cell: [10, 20],
+                image_id: IMAGE_ID_BASE,
+                transport: "host",
+                focused: true,
+                colors: None,
+            },
+            receiver: to_guest_rx,
+            events: events_tx,
+            stop: Arc::clone(&stop),
+        };
+        let handle = thread::spawn(move || run_peer_with_timeouts(peer, None, PeerTimeouts::DEFAULT));
+        let _stalled = UnixStream::connect(&handshake_socket).unwrap();
+        stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
     }
 }

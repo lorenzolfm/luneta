@@ -252,6 +252,11 @@ fn parse_browser_client_tty_name(name: &str) -> Option<ViewId> {
     id.parse().ok()
 }
 
+enum BrowserOpen {
+    NotOpen,
+    Open(Option<BrowserUrl>),
+}
+
 pub fn parse_split_action(command: Vec<String>) -> Result<SplitAction, String> {
     if command.len() > SPLIT_ARGS_MAX {
         return Err(format!("split command exceeds {SPLIT_ARGS_MAX} arguments"));
@@ -260,8 +265,10 @@ pub fn parse_split_action(command: Vec<String>) -> Result<SplitAction, String> {
         return Err("split command is empty".to_owned());
     };
     let basename = Path::new(first).file_name().and_then(|name| name.to_str()).unwrap_or(first);
-    if basename == "terminal-browser" {
-        return extract_url_from_args(&command[1..]).map(SplitAction::Browser);
+    if basename == "terminal-browser"
+        && let BrowserOpen::Open(url) = extract_browser_open_url(&command[1..])?
+    {
+        return Ok(SplitAction::Browser(url));
     }
     if matches!(basename, "sh" | "bash" | "zsh")
         && command.get(1).is_some_and(|arg| arg == "-c")
@@ -273,41 +280,96 @@ pub fn parse_split_action(command: Vec<String>) -> Result<SplitAction, String> {
             .map(|token| token.trim_matches(|ch| matches!(ch, '\'' | '"' | ';')).to_owned())
             .collect();
         assert!(tokens.len() <= SPLIT_ARGS_MAX, "shell tokens stay within split arg bound");
+        let compound = tokens.iter().any(|token| matches!(token.as_str(), "&&" | "||" | "|"));
         let program_index = usize::from(tokens.first().is_some_and(|token| token == "exec"));
-        if let Some(program) = tokens.get(program_index) {
+        if !compound
+            && let Some(program) = tokens.get(program_index)
+        {
             let invoked =
                 Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or(program);
-            if invoked == "terminal-browser" {
-                return extract_url_from_args(&tokens[program_index + 1..]).map(SplitAction::Browser);
+            if invoked == "terminal-browser"
+                && let BrowserOpen::Open(url) = extract_browser_open_url(&tokens[program_index + 1..])?
+            {
+                return Ok(SplitAction::Browser(url));
             }
         }
     }
     Argv::parse(command).map(SplitAction::Command)
 }
 
-fn extract_url_from_args(args: &[String]) -> Result<Option<BrowserUrl>, String> {
-    assert!(args.len() <= SPLIT_ARGS_MAX, "split args stay within bound");
-    let mut after_open = false;
-    for arg in args {
-        if arg == "open" && !after_open {
-            after_open = true;
-            continue;
-        }
-        if arg.starts_with('-') {
-            continue;
-        }
-        if arg.eq_ignore_ascii_case("about:blank") {
-            return Ok(None);
-        }
-        let has_about = arg.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("about:"));
-        if arg.contains("://") || has_about {
-            return BrowserUrl::parse(arg).map(Some);
-        }
-        if after_open {
-            return BrowserUrl::from_user(arg);
-        }
+fn takes_separate_value(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--ssh"
+            | "--profile"
+            | "--session"
+            | "--socket"
+            | "--title"
+            | "--cwd"
+            | "--dir"
+            | "--width"
+            | "--height"
+            | "--cols"
+            | "--rows"
+            | "--port"
+            | "-p"
+    )
+}
+
+fn parse_browser_url_arg(arg: &str) -> Result<Option<BrowserUrl>, String> {
+    if arg.eq_ignore_ascii_case("about:blank") {
+        return Ok(None);
     }
-    Ok(None)
+    let has_about = arg.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("about:"));
+    if arg.contains("://") || has_about {
+        return BrowserUrl::parse(arg).map(Some);
+    }
+    BrowserUrl::from_user(arg)
+}
+
+fn extract_browser_open_url(args: &[String]) -> Result<BrowserOpen, String> {
+    assert!(args.len() <= SPLIT_ARGS_MAX, "split args stay within bound");
+    let mut index = 0usize;
+    let mut after_open = false;
+    let mut positionals: Vec<&str> = Vec::new();
+    let mut after_double_dash = false;
+    while let Some(arg) = args.get(index) {
+        index += 1;
+        if !after_open {
+            if arg == "open" {
+                after_open = true;
+                continue;
+            }
+            if arg.starts_with('-') {
+                return Ok(BrowserOpen::NotOpen);
+            }
+            let has_about = arg.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("about:"));
+            if arg.contains("://") || has_about {
+                return parse_browser_url_arg(arg).map(BrowserOpen::Open);
+            }
+            return Ok(BrowserOpen::NotOpen);
+        }
+        if !after_double_dash {
+            if arg == "--" {
+                after_double_dash = true;
+                continue;
+            }
+            if arg.starts_with('-') {
+                if !arg.contains('=') && takes_separate_value(arg) && index < args.len() {
+                    index += 1;
+                }
+                continue;
+            }
+        }
+        positionals.push(arg);
+    }
+    if !after_open {
+        return Ok(BrowserOpen::NotOpen);
+    }
+    match positionals.last() {
+        None => Ok(BrowserOpen::Open(None)),
+        Some(target) => parse_browser_url_arg(target).map(BrowserOpen::Open),
+    }
 }
 
 pub struct Bound {
@@ -670,6 +732,42 @@ mod tests {
         assert_eq!(
             parse_split_action(shell_mention.clone()),
             Ok(SplitAction::Command(Argv::parse(shell_mention).unwrap()))
+        );
+
+        let with_profile = vec![
+            "terminal-browser".to_owned(),
+            "open".to_owned(),
+            "--profile".to_owned(),
+            "work".to_owned(),
+            "https://example.com".to_owned(),
+        ];
+        assert_eq!(
+            parse_split_action(with_profile),
+            Ok(SplitAction::Browser(Some(BrowserUrl::parse("https://example.com").unwrap())))
+        );
+
+        let profile_only = vec![
+            "terminal-browser".to_owned(),
+            "open".to_owned(),
+            "--profile".to_owned(),
+            "work".to_owned(),
+        ];
+        assert_eq!(parse_split_action(profile_only), Ok(SplitAction::Browser(None)));
+
+        let subcommand = vec!["terminal-browser".to_owned(), "status".to_owned()];
+        assert_eq!(
+            parse_split_action(subcommand.clone()),
+            Ok(SplitAction::Command(Argv::parse(subcommand).unwrap()))
+        );
+
+        let compound = vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "terminal-browser open https://example.com && echo done".to_owned(),
+        ];
+        assert_eq!(
+            parse_split_action(compound.clone()),
+            Ok(SplitAction::Command(Argv::parse(compound).unwrap()))
         );
 
         assert!(parse_split_action(Vec::new()).is_err());

@@ -2071,6 +2071,7 @@ impl Layouts {
         };
         for client in self.clients.values_mut().filter(|client| follows(client)) {
             client.worktree = to;
+            client.browser_ttys.clear();
         }
         if followed {
             self.went(to);

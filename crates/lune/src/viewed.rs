@@ -922,6 +922,12 @@ fn where_on(machine: &Machine, runs_in_here: Option<TerminalKey>) -> Where {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorktreeOpen {
+    Requested,
+    Ready,
+}
+
 pub struct Viewed {
     number: u64,
     folder: PathBuf,
@@ -938,7 +944,7 @@ pub struct Viewed {
     watcher: Option<Watcher>,
     watchers: u64,
     watched_at: Option<Instant>,
-    opened: BTreeSet<WorktreeId>,
+    opened: BTreeMap<WorktreeId, WorktreeOpen>,
     steps: u64,
     awaited: Option<NonZeroU64>,
     events: Sender<Event>,
@@ -974,7 +980,7 @@ impl Viewed {
             watcher: None,
             watchers: 0,
             watched_at: None,
-            opened: BTreeSet::new(),
+            opened: BTreeMap::new(),
             steps: 0,
             awaited: None,
             events: events.clone(),
@@ -1139,15 +1145,20 @@ impl Viewed {
                 self.laid_in = Some(laid.worktree());
                 let followed = self.layout.followed(&laid);
                 if followed {
-                    self.opened.insert(self.layout.worktree);
+                    self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
                 }
                 let mut emptied = false;
                 if self.layout.laid_out(laid) {
-                    if self.opened.insert(self.layout.worktree) {
-                        self.ask(Asked::Open { beside: Beside::Alone, opens: Opens::Shell });
-                    } else {
-                        emptied = true;
+                    match self.opened.get(&self.layout.worktree) {
+                        None => {
+                            self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
+                            self.ask(Asked::Open { beside: Beside::Alone, opens: Opens::Shell });
+                        },
+                        Some(WorktreeOpen::Requested) => {},
+                        Some(WorktreeOpen::Ready) => emptied = true,
                     }
+                } else if self.opened.get(&self.layout.worktree) == Some(&WorktreeOpen::Requested) {
+                    self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
                 }
                 self.watch();
                 self.sync_browsers();
@@ -1324,13 +1335,22 @@ impl Viewed {
         self.browsers.drain_all_deletes()
     }
 
+    fn mark_opening(&mut self) {
+        let state = if self.layout.laid().is_some_and(|laid| !laid.is_empty()) {
+            WorktreeOpen::Ready
+        } else {
+            WorktreeOpen::Requested
+        };
+        self.opened.entry(self.layout.worktree).or_insert(state);
+    }
+
     pub fn welcome(&mut self) {
-        self.opened.insert(self.layout.worktree);
+        self.mark_opening();
         self.ask(Asked::Welcome);
     }
 
     pub fn open_browser(&mut self, url: Option<BrowserUrl>) {
-        self.opened.insert(self.layout.worktree);
+        self.mark_opening();
         self.ask(Asked::Browser(url));
     }
 
@@ -1339,7 +1359,7 @@ impl Viewed {
     }
 
     pub fn open_beside_focused(&mut self, opens: Opens) {
-        self.opened.insert(self.layout.worktree);
+        self.mark_opening();
         self.ask(Asked::Open { beside: Beside::Focused, opens });
     }
 
@@ -1931,6 +1951,46 @@ mod tests {
         assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Quiet));
         let again = viewed.heard(laid_in(1, Vec::new()));
         assert!(matches!(again, Heeded::Emptied), "emptied again, lune leaves it again");
+    }
+
+    #[test]
+    fn opening_browser_on_empty_worktree_waits_for_browser_before_allowing_emptied() {
+        use show_response::view::{Browser, Found as Said};
+        let unserved = tempfile::tempdir().unwrap();
+        let (events, _heard) = std::sync::mpsc::channel();
+        let size = layout_size(side(20), side(6));
+        let greeting = Greeting { foreground: None, background: None };
+        let browser_config = embedded::Config {
+            mode: embedded::Mode::Unsupported,
+            cell: CellPixels { width: side(10), height: side(20) },
+            colours: Colours::default(),
+        };
+        let mut viewed = Viewed::start(
+            1,
+            unserved.path().to_owned(),
+            Machine::Local,
+            worktree(1),
+            size,
+            greeting,
+            None,
+            browser_config,
+            &events,
+        );
+        viewed.open_browser(None);
+        assert!(
+            matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Quiet),
+            "initial empty Laid before Asked::Browser settles must not bounce user out"
+        );
+        let browser_view = show_response::View {
+            id: 31,
+            rect: Some(show_response::Rect { column: 0, row: 0, columns: 20, rows: 4 }),
+            found: Some(Said::Browser(Browser { url: None })),
+        };
+        assert!(matches!(viewed.heard(laid_in(1, vec![browser_view])), Heeded::Quiet));
+        assert!(
+            matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Emptied),
+            "closing the browser later leaves the emptied worktree"
+        );
     }
 
     fn pasted(text: &str) -> typed::Event {

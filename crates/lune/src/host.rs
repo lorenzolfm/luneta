@@ -456,6 +456,7 @@ pub struct App {
     pointer_shape: Option<embedded::PointerShape>,
     pending_graphics: Vec<u8>,
     graphics: Graphics,
+    exact_cell: Option<CellPixels>,
     cell: CellPixels,
     window_pixels: Option<WindowPixels>,
     cursor: Option<(CursorShape, bool)>,
@@ -790,16 +791,10 @@ impl App {
         };
         let areas = areas(Rect::new(0, 0, columns, rows), width.columns());
         let luned = daemon.clone().unwrap_or_default();
-        let cell = embedded::cell_pixels(cell, window_pixels, columns, rows);
-        let browser_mode = if graphics.supported() && !desktop::elsewhere() {
-            daemon
-                .clone()
-                .and_then(embedded::Folder::new)
-                .map_or(embedded::Mode::Unsupported, embedded::Mode::Supported)
-        } else {
-            embedded::Mode::Unsupported
-        };
-        let browser_config = embedded::Config { mode: browser_mode, cell, colours };
+        let exact_cell = cell;
+        let cell = embedded::cell_pixels(exact_cell, window_pixels, columns, rows);
+        let browser_config =
+            embedded::Config { mode: browser_mode(graphics, &luned), cell, colours };
         let (size, greeting, here) = (layout_size(areas.1), greeting(colours), Machine::Local);
         let (start, root) = match start {
             Some(Arrival::Worktree(start)) => (Some(start), None),
@@ -847,6 +842,7 @@ impl App {
             pointer_shape: None,
             pending_graphics: Vec::new(),
             graphics,
+            exact_cell,
             cell,
             window_pixels,
             cursor: None,
@@ -886,6 +882,15 @@ impl App {
             app.give(Focus::on(Side::Session));
         }
         app
+    }
+}
+
+fn browser_mode(graphics: Graphics, luned: &Path) -> embedded::Mode {
+    if graphics.supported() && !desktop::elsewhere() {
+        embedded::Folder::new(luned.to_path_buf())
+            .map_or(embedded::Mode::Unsupported, embedded::Mode::Supported)
+    } else {
+        embedded::Mode::Unsupported
     }
 }
 
@@ -2223,21 +2228,15 @@ impl App {
     }
 
     fn can_embed_browser(&self) -> bool {
-        self.daemon.as_ref().is_some_and(|dir| !dir.as_os_str().is_empty())
-            && self.graphics.supported()
-            && !desktop::elsewhere()
+        matches!(browser_mode(self.graphics, &self.luned), embedded::Mode::Supported(_))
     }
 
     fn browser_config(&self) -> embedded::Config {
-        let mode = if self.graphics.supported() && !desktop::elsewhere() {
-            self.daemon
-                .clone()
-                .and_then(embedded::Folder::new)
-                .map_or(embedded::Mode::Unsupported, embedded::Mode::Supported)
-        } else {
-            embedded::Mode::Unsupported
-        };
-        embedded::Config { mode, cell: self.cell, colours: self.colours }
+        embedded::Config {
+            mode: browser_mode(self.graphics, &self.luned),
+            cell: self.cell,
+            colours: self.colours,
+        }
     }
 
     fn browse_link(&mut self, link: &crate::pull::Link) {
@@ -2939,7 +2938,11 @@ impl App {
         }
     }
 
-    fn answered(&mut self, answer: Answer, terminal: &mut DefaultTerminal) -> io::Result<()> {
+    fn answered<W: io::Write>(
+        &mut self,
+        answer: Answer,
+        terminal: &mut Terminal<CrosstermBackend<W>>,
+    ) -> io::Result<()> {
         match answer {
             Answer::Foreground(_) | Answer::Background(_) => {
                 self.colours.hear(answer);
@@ -2954,6 +2957,7 @@ impl App {
                 backend.flush()?;
             },
             Answer::CellSize(cell) => {
+                self.exact_cell = Some(cell);
                 self.cell = cell;
                 if let Some(right) = self.viewed_mut() {
                     right.cell_resized(cell);
@@ -2963,7 +2967,7 @@ impl App {
                 self.window_pixels = Some(window_pixels);
                 let cols = self.areas.0.width + self.areas.1.width;
                 let rows = self.areas.1.height;
-                let cell = embedded::cell_pixels(None, Some(window_pixels), cols, rows);
+                let cell = embedded::cell_pixels(self.exact_cell, Some(window_pixels), cols, rows);
                 self.cell = cell;
                 if let Some(right) = self.viewed_mut() {
                     right.cell_resized(cell);
@@ -3366,5 +3370,39 @@ mod tests {
         }
         assert!(!stopped.holds(1), "the oldest goes once the most are held");
         assert!((2..=last).all(|ticket| stopped.holds(ticket)));
+    }
+
+    #[test]
+    fn embedded_browser_config_survives_watch_and_late_window_pixels_keep_exact_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let launch = Launch {
+            folder: Ok(dir.path().to_owned()),
+            dir: dir.path().to_owned(),
+            columns: 120,
+            rows: 40,
+        };
+        let (mut app, _inbox) = App::open(launch, state.path());
+        app.graphics = Graphics::Kitty;
+        assert!(app.daemon.is_none(), "App::watch already consumed self.daemon");
+        assert_eq!(app.can_embed_browser(), !desktop::elsewhere());
+        assert_eq!(app.browser_config().mode, browser_mode(Graphics::Kitty, &app.luned));
+        if !desktop::elsewhere() {
+            assert!(matches!(app.browser_config().mode, embedded::Mode::Supported(_)));
+        }
+
+        let nz = |value| NonZeroU16::new(value).unwrap();
+        let exact = CellPixels { width: nz(11), height: nz(23) };
+        let viewport = Viewport::Fixed(Rect::new(0, 0, 120, 40));
+        let backend = CrosstermBackend::new(Writes::default());
+        let mut terminal = Terminal::with_options(backend, TerminalOptions { viewport }).unwrap();
+        app.answered(Answer::CellSize(exact), &mut terminal).unwrap();
+        assert_eq!(app.cell, exact);
+        app.answered(
+            Answer::WindowPixels(WindowPixels { width: nz(1200), height: nz(800) }),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(app.cell, exact, "late WindowPixels must not clobber exact CellSize");
     }
 }

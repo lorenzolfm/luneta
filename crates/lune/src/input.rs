@@ -639,7 +639,9 @@ fn apc(bytes: &[u8]) -> Parsed {
         },
         [.., ESC] => Parsed::Partial,
         [.., ESC, _] => typed(),
-        [.., last] if !last.is_ascii_graphic() || body.len() > APC_LONGEST => typed(),
+        [.., last] if !(last.is_ascii_graphic() || last == b' ') || body.len() > APC_LONGEST => {
+            typed()
+        },
         _ => Parsed::Partial,
     }
 }
@@ -740,6 +742,7 @@ mod tests {
         let all = sent(&[
             b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1b[4;1000;1600tx",
             b"\x1b_Gi=31;ENOTSUP\x1b\\y",
+            b"\x1b_Gi=31;EINVAL: invalid data\x1b\\w",
         ]);
         let nz = |value| NonZeroU16::new(value).unwrap();
         assert_eq!(all, [
@@ -748,6 +751,7 @@ mod tests {
             Sent::Answer(Answer::WindowPixels(WindowPixels { width: nz(1600), height: nz(1000) })),
             typed('x'),
             typed('y'),
+            typed('w'),
         ]);
         assert_eq!(sent(&[b"\x1b[6;0;10tz"]), [typed('z')]);
         let alt_underscore = pressed(KeyCode::Char('_'), KeyModifiers::ALT);
