@@ -3376,6 +3376,48 @@ mod tests {
         scratch(dir, args).is_ok()
     }
 
+    fn clear_heard(watches: &Watches, woken: &mpsc::Receiver<()>) {
+        while woken.try_recv().is_ok() {}
+        let _ = watches.take_heard();
+    }
+
+    fn wait_heard_tree(
+        what: &str,
+        watches: &Watches,
+        woken: &mpsc::Receiver<()>,
+        tree: &TreeWatch,
+    ) {
+        if watches.take_heard().contains_tree(tree) {
+            return;
+        }
+        let () = lune_waits::Patience::begun().heard_first(what, woken, |()| {
+            watches.take_heard().contains_tree(tree).then_some(())
+        });
+    }
+
+    fn wait_dir_tree(
+        what: &str,
+        watches: &Watches,
+        woken: &mpsc::Receiver<()>,
+        tree: &TreeWatch,
+        dir: &AbsPath,
+    ) {
+        let target = NonEmptyPathBuf::new(dir.as_path().to_path_buf()).unwrap();
+        let saw = || match watches.take_dirs(tree) {
+            Dirs::All => true,
+            Dirs::Under(paths) => paths.paths().contains(&target),
+            Dirs::None => false,
+        };
+        if saw() {
+            let _ = watches.take_heard();
+            return;
+        }
+        let () = lune_waits::Patience::begun().heard_first(what, woken, |()| {
+            let _ = watches.take_heard();
+            saw().then_some(())
+        });
+    }
+
     #[test]
     fn a_default_branch_is_a_named_branch_of_a_known_remote_or_of_its_own() {
         let remote = |branch: &str| {
@@ -3830,12 +3872,15 @@ mod tests {
         watches.remove_tree(recursive).unwrap();
         assert!(!watches.active().unwrap().contains_key(shared.as_path()));
         assert_eq!(watches.active().unwrap().get(child.as_path()), Some(&RecursiveMode::NonRecursive));
-        while woken.try_recv().is_ok() {}
-        let _ = watches.take_heard();
+        clear_heard(&watches, &woken);
 
         fs::write(child.join("probe").as_path(), "changed\n").unwrap();
-        let () = lune_waits::heard("the restored descendant watch hears an edit", &woken);
-        assert!(watches.take_heard().contains_tree(&survivor));
+        wait_heard_tree(
+            "the restored descendant watch hears an edit",
+            &watches,
+            &woken,
+            &survivor,
+        );
 
         watches.remove_tree(survivor).unwrap();
         assert!(watches.active().unwrap().is_empty());
@@ -4020,12 +4065,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(watches.active().unwrap().get(child.as_path()), Some(&RecursiveMode::NonRecursive));
-        while woken.try_recv().is_ok() {}
-        let _ = watches.take_heard();
+        clear_heard(&watches, &woken);
 
         fs::write(child.join("probe").as_path(), "after\n").unwrap();
-        let () = lune_waits::heard("rescanned survivor hears edits after recovery", &woken);
-        assert!(watches.take_heard().contains_tree(&survivor));
+        wait_heard_tree(
+            "rescanned survivor hears edits after recovery",
+            &watches,
+            &woken,
+            &survivor,
+        );
 
         watches.remove_tree(caller).unwrap();
         watches.remove_tree(survivor).unwrap();
@@ -4067,16 +4115,14 @@ mod tests {
             watches.active().unwrap().get(third_dir.as_path()),
             Some(&RecursiveMode::NonRecursive)
         );
-        while woken.try_recv().is_ok() {}
-        let _ = watches.take_heard();
+        clear_heard(&watches, &woken);
 
         fs::write(first_dir.join("probe").as_path(), "a\n").unwrap();
-        let () = lune_waits::heard("first survivor hears edit after rebuild", &woken);
-        assert!(watches.take_heard().contains_tree(&first));
+        wait_heard_tree("first survivor hears edit after rebuild", &watches, &woken, &first);
 
+        clear_heard(&watches, &woken);
         fs::write(second_dir.join("probe").as_path(), "b\n").unwrap();
-        let () = lune_waits::heard("second survivor hears edit after rebuild", &woken);
-        assert!(watches.take_heard().contains_tree(&second));
+        wait_heard_tree("second survivor hears edit after rebuild", &watches, &woken, &second);
 
         watches.remove_tree(third).unwrap();
         watches.remove_tree(second).unwrap();
@@ -4338,36 +4384,59 @@ mod tests {
         let outside = watches.add_outside(&ground, false).unwrap();
         assert_eq!(watches.active().unwrap().get(refs.as_path()), Some(&RecursiveMode::Recursive));
         assert!(!watches.active().unwrap().contains_key(heads.as_path()));
-        while woken.try_recv().is_ok() {}
-        let _ = watches.take_heard();
+        clear_heard(&watches, &woken);
+        let _ = watches.take_dirs(&tree);
 
         let feat = heads.join("feat");
         fs::create_dir(feat.as_path()).unwrap();
-        let () = lune_waits::heard("recursive parent hears nested dir while child is watched", &woken);
-        assert!(watches.take_heard().contains_tree(&tree));
-        while woken.try_recv().is_ok() {}
+        wait_dir_tree(
+            "recursive parent hears nested dir while child is watched",
+            &watches,
+            &woken,
+            &tree,
+            &feat,
+        );
+        clear_heard(&watches, &woken);
 
         fs::write(feat.join("branch").as_path(), "abc\n").unwrap();
-        let () = lune_waits::heard("recursive parent watches newly created nested dir", &woken);
-        assert!(watches.take_heard().contains_tree(&tree));
+        wait_heard_tree(
+            "recursive parent watches newly created nested dir",
+            &watches,
+            &woken,
+            &tree,
+        );
 
         watches.remove_outside(outside).synced.unwrap();
         assert_eq!(watches.active().unwrap().get(refs.as_path()), Some(&RecursiveMode::Recursive));
-        while woken.try_recv().is_ok() {}
-        let _ = watches.take_heard();
+        clear_heard(&watches, &woken);
 
         fs::write(heads.join("main").as_path(), "def\n").unwrap();
-        let () = lune_waits::heard("recursive parent still hears heads after child removed", &woken);
-        assert!(watches.take_heard().contains_tree(&tree));
+        wait_heard_tree(
+            "recursive parent still hears heads after child removed",
+            &watches,
+            &woken,
+            &tree,
+        );
 
+        let _ = watches.take_dirs(&tree);
         let other = heads.join("other");
         fs::create_dir(other.as_path()).unwrap();
-        let () = lune_waits::heard("recursive parent hears new dir after child removed", &woken);
-        assert!(watches.take_heard().contains_tree(&tree));
-        while woken.try_recv().is_ok() {}
+        wait_dir_tree(
+            "recursive parent hears new dir after child removed",
+            &watches,
+            &woken,
+            &tree,
+            &other,
+        );
+        clear_heard(&watches, &woken);
+
         fs::write(other.join("tip").as_path(), "123\n").unwrap();
-        let () = lune_waits::heard("recursive parent hears write inside new nested dir", &woken);
-        assert!(watches.take_heard().contains_tree(&tree));
+        wait_heard_tree(
+            "recursive parent hears write inside new nested dir",
+            &watches,
+            &woken,
+            &tree,
+        );
 
         watches.remove_tree(tree).unwrap();
         assert!(watches.active().unwrap().is_empty());
@@ -4380,12 +4449,15 @@ mod tests {
         assert_eq!(watches.active().unwrap().get(refs.as_path()), Some(&RecursiveMode::Recursive));
         assert!(!watches.active().unwrap().contains_key(heads.as_path()));
         watches.remove_outside(first_outside).synced.unwrap();
-        while woken.try_recv().is_ok() {}
-        let _ = watches.take_heard();
+        clear_heard(&watches, &woken);
 
         fs::write(heads.join("after").as_path(), "xyz\n").unwrap();
-        let () = lune_waits::heard("recursive parent survives pre-existing child removal", &woken);
-        assert!(watches.take_heard().contains_tree(&second_tree));
+        wait_heard_tree(
+            "recursive parent survives pre-existing child removal",
+            &watches,
+            &woken,
+            &second_tree,
+        );
 
         watches.remove_tree(second_tree).unwrap();
         assert!(watches.active().unwrap().is_empty());
@@ -4436,17 +4508,25 @@ mod tests {
         let replacement = root.join("replacement");
         fs::create_dir_all(replacement.join("inner").as_path()).unwrap();
         fs::create_dir_all(replacement.join("plain").as_path()).unwrap();
-        while woken.try_recv().is_ok() {}
-        let _ = watches.take_heard();
+        clear_heard(&watches, &woken);
         let _ = watches.take_dirs(&outer_tree);
         let _ = watches.take_dirs(&inner_tree);
 
         fs::rename(sub.as_path(), moved_out.as_path()).unwrap();
         fs::rename(replacement.as_path(), sub.as_path()).unwrap();
-        let () = lune_waits::heard("swapping parent folder notifies nested watchers", &woken);
-        let heard = watches.take_heard();
-        assert!(heard.contains_tree(&inner_tree));
-        assert!(matches!(watches.take_dirs(&inner_tree), Dirs::Under(_) | Dirs::All));
+        let mut heard_inner = watches.take_heard().contains_tree(&inner_tree);
+        let mut recorded_dirs = !matches!(watches.take_dirs(&inner_tree), Dirs::None);
+        if !(heard_inner && recorded_dirs) {
+            let () = lune_waits::Patience::begun().heard_first(
+                "swapping parent folder notifies nested watchers",
+                &woken,
+                |()| {
+                    heard_inner |= watches.take_heard().contains_tree(&inner_tree);
+                    recorded_dirs |= !matches!(watches.take_dirs(&inner_tree), Dirs::None);
+                    (heard_inner && recorded_dirs).then_some(())
+                },
+            );
+        }
 
         let inner_tree = watches
             .update_tree(
@@ -4455,12 +4535,15 @@ mod tests {
                 &BTreeSet::from([inner.clone()]),
             )
             .unwrap();
-        while woken.try_recv().is_ok() {}
-        let _ = watches.take_heard();
+        clear_heard(&watches, &woken);
 
         fs::write(inner.join("probe").as_path(), "after swap\n").unwrap();
-        let () = lune_waits::heard("refreshed nested tree hears edits on new inode", &woken);
-        assert!(watches.take_heard().contains_tree(&inner_tree));
+        wait_heard_tree(
+            "refreshed nested tree hears edits on new inode",
+            &watches,
+            &woken,
+            &inner_tree,
+        );
 
         watches.remove_outside(plain_outside).synced.unwrap();
         watches.remove_tree(inner_tree).unwrap();
