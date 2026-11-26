@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
+use lune_protocol::watch::Watched;
 use lune_waits::{eventually, Began, Span};
 use luned::api::daemon_server::{Daemon, DaemonServer};
 use luned::api::{
@@ -63,7 +64,7 @@ fn written(command: &mut Command) -> api::Host {
     let output = answered(command);
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "lune watch failed: {said}");
-    api::Host::decode(output.stdout.as_slice()).unwrap()
+    api::WatchResponse::decode(output.stdout.as_slice()).unwrap().read_host().unwrap().1
 }
 
 fn pid(host: &api::Host) -> u32 {
@@ -567,9 +568,10 @@ impl Daemon for StandIn {
         Ok(Response::new(ListAgentsResponse::default()))
     }
 
-    async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<api::Host>, Status> {
+    async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<api::WatchResponse>, Status> {
         let version = Version { pid: self.pid, seq: 0 };
-        Ok(Response::new(api::Host { version: Some(version), ..api::Host::default() }))
+        let host = api::Host { version: Some(version), ..api::Host::default() };
+        Ok(Response::new(api::WatchResponse::host(host)))
     }
 
     type KeepChecksStream = tokio_stream::Empty<Result<KeepChecksResponse, Status>>;
@@ -811,7 +813,10 @@ fn the_daemon_runs_on_while_a_client_watches_it() {
         let watched = const { Span::of(ALONE.saturating_add(SWEEP.saturating_mul(3))) };
         lune_waits::repeated_through(watched, "the daemon answers a watch", async || {
             let asked = watching.watch(WatchRequest { after, kept: None, shown: false }).await;
-            after = asked.expect("the daemon ended").into_inner().version;
+            let version = match asked.expect("the daemon ended").into_inner().read(after).unwrap() {
+                Watched::Host(version, _) | Watched::Unchanged(version) => version,
+            };
+            after = Some(version);
         })
         .await;
     });

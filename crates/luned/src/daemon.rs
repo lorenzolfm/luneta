@@ -56,7 +56,7 @@ use crate::answers::{self, Answer, Runs, Unanswered};
 use crate::mux::Failure;
 use crate::panics::Hooked;
 use crate::asks::{Asked, Step};
-use crate::core::{self, After, Command, Full, Parked, Wakes};
+use crate::core::{self, After, Command, Full, Scope, Snapshot, Wakes};
 use crate::directory::Directory;
 use crate::projects::{Changed, Lock, Opened, Store};
 use crate::layouts::{self, Root, Unrooted};
@@ -110,13 +110,19 @@ pub fn parked_watch(version: api::Version) -> String {
     format!("a watch waits for a change past {pid}:{seq}")
 }
 
-async fn says_parked(told: Option<oneshot::Receiver<api::Version>>) {
-    let Some(told) = told else {
-        return;
+async fn parked_at(
+    told: oneshot::Receiver<api::Version>,
+    asked: api::Version,
+    aloud: bool,
+) -> Option<api::Version> {
+    let Ok(Ok(version)) = timeout(WATCH, told).await else {
+        return None;
     };
-    if let Ok(Ok(version)) = timeout(WATCH, told).await {
+    assert_eq!(version, asked, "a watch parks only at the version asked");
+    if aloud {
         log::say(&parked_watch(version));
     }
+    Some(version)
 }
 
 pub(crate) const QUESTIONS_MAX: u32 = 16;
@@ -519,6 +525,13 @@ impl Waiter {
             (Some(kept), shown) => Waiter::Daemon(Standing::of(kept, shown)),
         }
     }
+
+    fn scope(self) -> Scope {
+        match self {
+            Waiter::Client | Waiter::Window => Scope::All,
+            Waiter::Daemon(_) => Scope::Local,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -581,27 +594,27 @@ impl Daemon for Host {
     async fn watch(
         &self,
         request: Request<api::WatchRequest>,
-    ) -> Result<Response<api::Host>, Status> {
+    ) -> Result<Response<api::WatchResponse>, Status> {
         let request = request.into_inner();
         let waiter = Waiter::of(&request);
+        let scope = waiter.scope();
         let _waits = self.watchers.waits(waiter);
         let Some(version) = request.after else {
-            return self.host().await.map(Response::new);
+            let host = self.host(scope).await?.to_api();
+            return Ok(Response::new(api::WatchResponse::host(host)));
         };
-        let (parked, told) = match waiter {
-            Waiter::Client => {
-                let (tell, told) = oneshot::channel();
-                (Parked::Aloud(tell), Some(told))
+        let (tell, told) = oneshot::channel();
+        let aloud = matches!(waiter, Waiter::Client);
+        let watching = timeout(WATCH, self.watched(scope, After { version, parked: tell }));
+        let (watched, parked) = tokio::join!(watching, parked_at(told, version, aloud));
+        let answer = match watched {
+            Ok(watched) => watched.map(|snapshot| api::WatchResponse::host(snapshot.to_api())),
+            Err(_) => match parked {
+                Some(heard) => Ok(api::WatchResponse::unchanged(heard)),
+                None => Err(Status::deadline_exceeded(client::unanswered(WATCH))),
             },
-            Waiter::Window | Waiter::Daemon(_) => (Parked::Quietly, None),
         };
-        let watching = timeout(WATCH, self.watched(After { version, parked }));
-        let (watched, ()) = tokio::join!(watching, says_parked(told));
-        let watched = match watched {
-            Ok(watched) => watched,
-            Err(_) => self.host().await,
-        };
-        watched.map(Response::new)
+        answer.map(Response::new)
     }
 
     async fn list_skills(
@@ -786,7 +799,7 @@ impl Daemon for Host {
             let answer = daemon.paste(pasted.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let holders = holders(&self.host().await?)?;
+        let holders = holders(&self.host(Scope::Local).await?.local.projects)?;
         let answer = late(move || pasted.answer(&holders).map_err(unready));
         Ok(Response::new(Box::pin(answer)))
     }
@@ -803,7 +816,7 @@ impl Daemon for Host {
             let answer = daemon.prunes(prunes::asked(None, &dir)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let host = self.host().await?;
+        let host = self.host(Scope::Local).await?.to_api();
         let answer = late(move || {
             let occupied = || Occupied::of(&host, Lunes::running()?);
             let planned = prunes::plan(&dir, occupied).map_err(Status::failed_precondition)?;
@@ -829,7 +842,9 @@ impl Daemon for Host {
         let core = self.core.clone();
         let answer = late(move || {
             let occupied = || {
-                let host = core::ask(&core, Command::Host).ok_or("luned's core did not say")?;
+                let host = core::ask(&core, |answer| Command::Host { scope: Scope::Local, answer })
+                    .ok_or("luned's core did not say")?
+                    .to_api();
                 Occupied::of(&host, Lunes::running()?)
             };
             let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied)
@@ -1238,9 +1253,8 @@ where
     ReceiverStream::new(answered)
 }
 
-fn holders(host: &api::Host) -> Result<Holders, Status> {
-    let held = host.projects.as_ref().and_then(|projects| projects.held.as_ref());
-    match held.expect("luned's own host says whether it keeps its projects") {
+fn holders(projects: &api::Projects) -> Result<Holders, Status> {
+    match projects.held.as_ref().expect("luned's own host says whether it keeps its projects") {
         api::projects::Held::Kept(kept) => {
             Holders::of_api(&kept.projects).map_err(Status::internal)
         },
@@ -1532,39 +1546,48 @@ impl Host {
         answered.await.map_err(|_| stopped())
     }
 
-    async fn host(&self) -> Result<api::Host, Status> {
-        self.ask(Command::Host).await
+    async fn host(&self, scope: Scope) -> Result<Snapshot, Status> {
+        self.ask(|answer| Command::Host { scope, answer }).await
     }
 
-    async fn watched(&self, after: After) -> Result<api::Host, Status> {
-        let host = self.ask(|answer| Command::Watch { after, answer }).await?;
+    async fn watched(&self, scope: Scope, after: After) -> Result<Snapshot, Status> {
+        let host = self.ask(|answer| Command::Watch { scope, after, answer }).await?;
         host.map_err(|Full| Status::resource_exhausted("too many clients wait for the host"))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant, SystemTime};
 
     use tokio_stream::StreamExt as _;
-    use tonic::Code;
+    use tonic::{Code, Request};
 
-    use super::{talked, Alone, Waiter, Watchers, UNTALKED};
-    use crate::api::WatchRequest;
+    use super::{talked, Alone, Host, Waiter, Watchers, UNTALKED};
+    use crate::api::daemon_server::Daemon as _;
+    use crate::api::watch_response::Answer;
+    use crate::api::{Version, WatchRequest};
     use crate::asks::Step;
+    use crate::core::{self, Scope, Wakes};
     use crate::remote::Standing;
 
     #[test]
     fn a_watch_request_says_who_waits() {
         let asked = |kept, shown| Waiter::of(&WatchRequest { after: None, kept, shown });
         assert_eq!(asked(None, false), Waiter::Client);
+        assert_eq!(asked(None, false).scope(), Scope::All);
         assert_eq!(asked(None, true), Waiter::Window);
+        assert_eq!(asked(None, true).scope(), Scope::All);
         assert_eq!(asked(Some(false), false), Waiter::Daemon(Standing::Idle));
         assert_eq!(asked(Some(false), true), Waiter::Daemon(Standing::Idle));
         assert_eq!(asked(Some(true), false), Waiter::Daemon(Standing::Kept));
         assert_eq!(asked(Some(true), true), Waiter::Daemon(Standing::Window));
         for standing in [Standing::Idle, Standing::Kept, Standing::Window] {
-            assert_eq!(Waiter::of(&standing.question(None)), Waiter::Daemon(standing));
+            let waiter = Waiter::of(&standing.question(None));
+            assert_eq!(waiter, Waiter::Daemon(standing));
+            assert_eq!(waiter.scope(), Scope::Local);
         }
     }
 
@@ -1619,5 +1642,54 @@ mod tests {
         };
         assert_eq!(*heard, Step::Said("Looking.".to_owned()).answer());
         assert_eq!((failed.code(), failed.message()), (Code::Internal, UNTALKED));
+    }
+
+    #[test]
+    fn a_watch_timeout_answers_unchanged_only_after_the_core_parked_it() {
+        let host_with = |core| {
+            let (layouts, _laid) = mpsc::sync_channel(1);
+            Host {
+                started: SystemTime::now(),
+                claude_folder: None,
+                agy_folder: None,
+                core,
+                watchers: Arc::default(),
+                bridges: Arc::default(),
+                layouts,
+                listings: Arc::default(),
+            }
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let wake = || mpsc::sync_channel(1).0;
+            let host = host_with(
+                core::start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap(),
+            );
+            let first = host
+                .watch(Request::new(WatchRequest { after: None, kept: None, shown: true }))
+                .await
+                .unwrap()
+                .into_inner();
+            let (version, _) = first.read_host().unwrap();
+
+            let (wedged_tx, _wedged_rx) = mpsc::sync_channel(1);
+            let wedged = host_with(wedged_tx);
+            let asked = Version { pid: 1, seq: 0 };
+
+            let (timed_out, stalled) = tokio::join!(
+                host.watch(Request::new(WatchRequest {
+                    after: Some(version),
+                    kept: None,
+                    shown: true,
+                })),
+                wedged.watch(Request::new(WatchRequest {
+                    after: Some(asked),
+                    kept: None,
+                    shown: true,
+                })),
+            );
+            assert_eq!(timed_out.unwrap().into_inner().answer, Some(Answer::Unchanged(version)));
+            assert_eq!(stalled.unwrap_err().code(), Code::DeadlineExceeded);
+        });
     }
 }

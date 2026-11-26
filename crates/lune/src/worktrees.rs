@@ -160,7 +160,7 @@ pub fn holders(path: &Path) -> Result<Holders, String> {
 
 fn kept_as_said(path: &Path) -> Result<Vec<api::Project>, String> {
     on_current(path, async |daemon| {
-        let host = daemon.snapshot(ASKING, false).await.map_err(|unasked| unasked.said(None))?;
+        let host = daemon.snapshot(ASKING, false).await.map_err(|error| error.said(None))?;
         match host.projects.and_then(|projects| projects.held) {
             Some(Held::Kept(kept)) => Ok(kept.projects),
             Some(Held::Unkept(why)) => Err(format!("luned keeps no projects: {why}")),

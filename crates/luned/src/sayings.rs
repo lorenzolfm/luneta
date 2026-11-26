@@ -70,6 +70,11 @@ impl Sayings {
     }
 
     #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.kept.is_empty()
+    }
+
+    #[must_use]
     pub fn fresh(&self, now: SystemTime) -> Vec<api::Saying> {
         let fresh = |at: &SystemTime| now.duration_since(*at).map_or(true, |age| age <= STALE);
         self.kept.iter().filter(|(at, _)| fresh(at)).map(|(_, saying)| saying.clone()).collect()

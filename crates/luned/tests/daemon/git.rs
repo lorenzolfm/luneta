@@ -25,7 +25,7 @@ fn number(pull_request: &api::PullRequest) -> u32 {
 }
 
 impl Host {
-    fn watch(&self, after: Option<Version>) -> (api::Host, Lasted) {
+    fn watch(&self, after: Option<Version>) -> (api::WatchResponse, Lasted) {
         let mut command = self.vars().command(&LUNE);
         command.arg("watch");
         if let Some(after) = after {
@@ -35,7 +35,7 @@ impl Host {
         let output = command.stderr(Stdio::inherit()).output().unwrap();
         let lasted = asked.lasted();
         assert!(output.status.success(), "lune watch failed");
-        (api::Host::decode(output.stdout.as_slice()).unwrap(), lasted)
+        (api::WatchResponse::decode(output.stdout.as_slice()).unwrap(), lasted)
     }
 }
 
@@ -1307,17 +1307,22 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
 
 #[test]
 fn lune_watch_waits_for_the_host_to_change_but_not_for_long() {
+    use luned::api::watch_response::Answer;
+
     let host = Host::new();
     let mut daemon = start(host.vars()).unwrap();
 
     let (first, _) = host.watch(None);
+    let Some(Answer::Host(first)) = first.answer else {
+        panic!("a watch with no --after gives a host: {first:?}");
+    };
     let version = first.version.unwrap();
     assert_eq!(version.pid, daemon.pid());
     let parked = format!("luned: {}", parked_watch(version));
     let parked = |line: &str| line == parked;
 
     let (same, lasted) = host.watch(Some(version));
-    assert_eq!(same.version, Some(version));
+    assert_eq!(same.answer, Some(Answer::Unchanged(version)));
     lasted.at_least(WATCH, "lune watch waits a whole watch for a change");
     daemon.says_at_least("the watch says it waits", 1, parked);
 
@@ -1330,6 +1335,9 @@ fn lune_watch_waits_for_the_host_to_change_but_not_for_long() {
         watched(&host, &play.display().to_string());
         waiting.join().unwrap()
     });
+    let Some(Answer::Host(changed)) = changed.answer else {
+        panic!("a changed watch gives a host: {changed:?}");
+    };
     assert!(changed.version.unwrap().seq > version.seq);
     let kept = changed.projects.and_then(|projects| projects.held);
     let Some(Held::Kept(kept)) = kept else { panic!("luned keeps no projects: {kept:?}") };
@@ -1337,6 +1345,9 @@ fn lune_watch_waits_for_the_host_to_change_but_not_for_long() {
 
     let another = Version { pid: version.pid + 1, ..changed.version.unwrap() };
     let (answered, _) = host.watch(Some(another));
+    let Some(Answer::Host(answered)) = answered.answer else {
+        panic!("a watch for another pid gives a host: {answered:?}");
+    };
     assert_eq!(answered.version.unwrap().pid, version.pid);
 }
 

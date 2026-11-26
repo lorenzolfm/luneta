@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::mem;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -200,8 +201,75 @@ pub enum Command {
     Claudes(oneshot::Sender<Vec<Agent>>),
     AllAgents(oneshot::Sender<Vec<Agent>>),
     List(oneshot::Sender<api::ListAgentsResponse>),
-    Host(oneshot::Sender<api::Host>),
-    Watch { after: After, answer: oneshot::Sender<Result<api::Host, Full>> },
+    Host { scope: Scope, answer: oneshot::Sender<Snapshot> },
+    Watch { scope: Scope, after: After, answer: oneshot::Sender<Result<Snapshot, Full>> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    All,
+    Local,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Local {
+    pub git_statuses: Vec<api::GitStatus>,
+    pub agents: Vec<api::Agent>,
+    pub unread: u32,
+    pub pull_requests: Vec<api::PullRequest>,
+    pub unread_files: Vec<api::UnreadFile>,
+    pub sayings: Vec<api::Saying>,
+    pub projects: api::Projects,
+}
+
+impl Local {
+    #[must_use]
+    pub fn to_api(
+        &self,
+        version: api::Version,
+        remotes: Vec<api::Remote>,
+        unread_hosts: Option<u32>,
+    ) -> api::Host {
+        api::Host {
+            version: Some(version),
+            git_statuses: self.git_statuses.clone(),
+            agents: self.agents.clone(),
+            unread: self.unread,
+            pull_requests: self.pull_requests.clone(),
+            unread_files: self.unread_files.clone(),
+            remotes,
+            unread_hosts,
+            sayings: self.sayings.clone(),
+            projects: Some(self.projects.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Remotes {
+    pub list: Arc<[Arc<api::Remote>]>,
+    pub unread: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct Snapshot {
+    pub version: api::Version,
+    pub local: Arc<Local>,
+    pub remotes: Option<Remotes>,
+}
+
+impl Snapshot {
+    #[must_use]
+    pub fn to_api(&self) -> api::Host {
+        let (remotes, unread_hosts) = match &self.remotes {
+            Some(remotes) => (
+                remotes.list.iter().map(|remote| (**remote).clone()).collect(),
+                Some(remotes.unread),
+            ),
+            None => (Vec::new(), None),
+        };
+        self.local.to_api(self.version, remotes, unread_hosts)
+    }
 }
 
 #[derive(Debug)]
@@ -210,13 +278,7 @@ pub struct Full;
 #[derive(Debug)]
 pub struct After {
     pub version: api::Version,
-    pub parked: Parked,
-}
-
-#[derive(Debug)]
-pub enum Parked {
-    Quietly,
-    Aloud(oneshot::Sender<api::Version>),
+    pub parked: oneshot::Sender<api::Version>,
 }
 
 pub struct Wakes {
@@ -245,20 +307,28 @@ pub fn start(wakes: Wakes) -> io::Result<SyncSender<Command>> {
 }
 
 enum Remote {
-    Far(Destination, Reached),
-    Here(Destination),
+    Far { destination: Destination, api: Arc<api::Remote> },
+    Here { destination: Destination, api: Arc<api::Remote> },
 }
 
 impl Remote {
-    fn to_api(&self) -> api::Remote {
+    fn api(&self) -> &Arc<api::Remote> {
         match self {
-            Remote::Far(destination, reached) => reached.to_api(destination),
-            Remote::Here(destination) => api::Remote {
-                destination: destination.to_string(),
-                reached: Some(api::remote::Reached::Here(())),
-            },
+            Remote::Far { api, .. } | Remote::Here { api, .. } => api,
         }
     }
+}
+
+fn here_api(destination: &Destination) -> api::Remote {
+    api::Remote {
+        destination: destination.to_string(),
+        reached: Some(api::remote::Reached::Here(())),
+    }
+}
+
+struct Waiting {
+    scope: Scope,
+    answer: oneshot::Sender<Result<Snapshot, Full>>,
 }
 
 struct CachedProcess {
@@ -283,13 +353,15 @@ struct Known {
     topics: HashMap<SessionId, Said>,
     remotes: Vec<Remote>,
     unread_hosts: u32,
+    remotes_api: Arc<[Arc<api::Remote>]>,
     projects: Result<Projects, String>,
     revision: Revision,
     missing: BTreeSet<Dir>,
     listed: BTreeMap<Dir, Listing>,
-    host: api::Host,
+    local: Arc<Local>,
     seq: u64,
-    waiting: Vec<oneshot::Sender<Result<api::Host, Full>>>,
+    local_seq: u64,
+    waiting: Vec<Waiting>,
     sayings: Sayings,
 }
 
@@ -310,16 +382,18 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         topics: HashMap::new(),
         remotes: Vec::new(),
         unread_hosts: 0,
+        remotes_api: Arc::from([]),
         projects: Err("luned has read no projects yet".to_owned()),
         revision: Revision::default(),
         missing: BTreeSet::new(),
         listed: BTreeMap::new(),
-        host: api::Host::default(),
+        local: Arc::new(Local::default()),
         seq: 0,
+        local_seq: 0,
         waiting: Vec::with_capacity(WAITING_MAX),
         sayings: Sayings::default(),
     };
-    known.host = api::Host { version: Some(known.version()), ..known.built() };
+    known.local = Arc::new(known.built_local());
     for command in commands {
         match command {
             Command::Agents(now) => {
@@ -375,7 +449,12 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::PullRequests(now) => known.pull_requests = now,
             Command::Topics(now) => known.topics = now,
-            Command::Hosts(now) => known.named(now),
+            Command::Hosts(now) => {
+                if known.named(now) {
+                    known.remotes_changed();
+                }
+                continue;
+            },
             Command::Projects { projects, revision } => {
                 let before = known.dirs();
                 let before_projects = known.watched_projects();
@@ -399,14 +478,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             Command::Listed(now) if now == known.listed => continue,
             Command::Listed(now) => known.listed = now,
             Command::Remote { destination, reached } => {
-                let far = known.remotes.iter_mut().find_map(|remote| match remote {
-                    Remote::Far(far, was) if *far == destination => Some(was),
-                    Remote::Far(..) | Remote::Here(_) => None,
-                });
-                let Some(was) = far else {
-                    continue;
-                };
-                *was = reached;
+                if known.remote(&destination, reached) {
+                    known.remotes_changed();
+                }
+                continue;
             },
             Command::Say { said, at, answer } => {
                 known.sayings.take(said, at);
@@ -456,16 +531,16 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let _ = answer.send(api::ListAgentsResponse { agents, unread, unread_files });
                 continue;
             },
-            Command::Host(answer) => {
-                let _ = answer.send(known.now());
+            Command::Host { scope, answer } => {
+                let _ = answer.send(known.now(scope));
                 continue;
             },
-            Command::Watch { after, answer } => {
-                known.watch(after, answer);
+            Command::Watch { scope, after, answer } => {
+                known.watch(scope, after, answer);
                 continue;
             },
         }
-        known.update();
+        known.update_local();
     }
 }
 
@@ -476,25 +551,71 @@ fn wake(thread: &SyncSender<()>) {
 }
 
 impl Known {
-    fn named(&mut self, now: Named) {
+    fn named(&mut self, now: Named) -> bool {
         let unique: HashSet<&Destination> = now.lines.iter().map(Line::destination).collect();
         assert_eq!(unique.len(), now.lines.len(), "a machine is named twice");
-        self.unread_hosts = now.unread;
-        let before = mem::take(&mut self.remotes).into_iter().filter_map(|remote| match remote {
-            Remote::Far(destination, reached) => Some((destination, reached)),
-            Remote::Here(_) => None,
-        });
-        let mut before: HashMap<Destination, Reached> = before.collect();
+        let old_unread = self.unread_hosts;
+        let old_remotes = mem::take(&mut self.remotes);
+        let old_order: Vec<Arc<api::Remote>> =
+            old_remotes.iter().map(|remote| Arc::clone(remote.api())).collect();
+        let mut before_far = HashMap::with_capacity(old_remotes.len());
+        let mut before_here = HashMap::with_capacity(old_remotes.len());
+        for remote in old_remotes {
+            match remote {
+                Remote::Far { destination, api } => {
+                    before_far.insert(destination, api);
+                },
+                Remote::Here { destination, api } => {
+                    before_here.insert(destination, api);
+                },
+            }
+        }
         for line in now.lines {
             let remote = match line {
                 Line::Far(destination) => {
-                    let reached = before.remove(&destination).unwrap_or(Reached::Reaching);
-                    Remote::Far(destination, reached)
+                    let api = before_far
+                        .remove(&destination)
+                        .unwrap_or_else(|| Arc::new(Reached::Reaching.into_api(&destination)));
+                    Remote::Far { destination, api }
                 },
-                Line::Here(destination) => Remote::Here(destination),
+                Line::Here(destination) => {
+                    let api = before_here
+                        .remove(&destination)
+                        .unwrap_or_else(|| Arc::new(here_api(&destination)));
+                    Remote::Here { destination, api }
+                },
             };
             self.remotes.push(remote);
         }
+        self.unread_hosts = now.unread;
+        let same_list = old_order.len() == self.remotes.len()
+            && old_order
+                .iter()
+                .zip(&self.remotes)
+                .all(|(was, now)| Arc::ptr_eq(was, now.api()));
+        if same_list && old_unread == self.unread_hosts {
+            return false;
+        }
+        self.remotes_api = self.remotes.iter().map(|remote| Arc::clone(remote.api())).collect();
+        assert_eq!(self.remotes_api.len(), self.remotes.len());
+        true
+    }
+
+    fn remote(&mut self, destination: &Destination, reached: Reached) -> bool {
+        let Some(slot) = self.remotes.iter_mut().find_map(|remote| match remote {
+            Remote::Far { destination: far, api } if far == destination => Some(api),
+            Remote::Far { .. } | Remote::Here { .. } => None,
+        }) else {
+            return false;
+        };
+        let next = reached.into_api(destination);
+        if **slot == next {
+            return false;
+        }
+        *slot = Arc::new(next);
+        self.remotes_api = self.remotes.iter().map(|remote| Arc::clone(remote.api())).collect();
+        assert_eq!(self.remotes_api.len(), self.remotes.len());
+        true
     }
 
     fn watched_projects(&self) -> (BTreeSet<Dir>, BTreeSet<Dir>) {
@@ -730,7 +851,7 @@ impl Known {
         (count, files)
     }
 
-    fn built(&self) -> api::Host {
+    fn built_local(&self) -> Local {
         let mut agents = self.agents();
         agents.sort_by_key(|agent| agent.pid);
         let (unread, unread_files) = self.unread();
@@ -742,9 +863,7 @@ impl Known {
                 Some(self.pull_request(&parsed)?.to_api(dir))
             })
             .collect();
-        let remotes = self.remotes.iter().map(Remote::to_api).collect();
-        api::Host {
-            version: None,
+        Local {
             git_statuses: self
                 .statuses
                 .iter()
@@ -754,10 +873,8 @@ impl Known {
             unread,
             pull_requests,
             unread_files,
-            remotes,
-            unread_hosts: Some(self.unread_hosts),
             sayings: self.sayings.fresh(SystemTime::now()),
-            projects: Some(self.built_projects()),
+            projects: self.built_projects(),
         }
     }
 
@@ -905,41 +1022,101 @@ impl Known {
         Seen::Read(Stage::of(self.branch(folder), self.pull_request(folder)))
     }
 
-    fn version(&self) -> api::Version {
-        api::Version { pid: std::process::id(), seq: self.seq }
+    fn version(&self, scope: Scope) -> api::Version {
+        let seq = match scope {
+            Scope::All => self.seq,
+            Scope::Local => self.local_seq,
+        };
+        api::Version { pid: std::process::id(), seq }
     }
 
-    fn update(&mut self) {
+    fn snapshot(&self, scope: Scope) -> Snapshot {
+        assert!(self.local_seq <= self.seq);
+        let remotes = match scope {
+            Scope::All => {
+                Some(Remotes { list: Arc::clone(&self.remotes_api), unread: self.unread_hosts })
+            },
+            Scope::Local => None,
+        };
+        Snapshot { version: self.version(scope), local: Arc::clone(&self.local), remotes }
+    }
+
+    fn update_local(&mut self) {
         self.forget_dirs();
-        let mut host = self.built();
-        host.version = self.host.version;
-        if host == self.host {
+        let local = self.built_local();
+        if local == *self.local {
             return;
         }
-        self.seq = self.seq.checked_add(1).expect("a host changes fewer than 2^64 times");
-        host.version = Some(self.version());
-        self.host = host;
-        for waiting in self.waiting.drain(..) {
-            let _ = waiting.send(Ok(self.host.clone()));
+        self.publish_local(local);
+    }
+
+    fn refresh_sayings(&mut self) {
+        if self.sayings.is_empty() {
+            assert_eq!(self.local.sayings, []);
+            return;
         }
+        let fresh = self.sayings.fresh(SystemTime::now());
+        if fresh == self.local.sayings {
+            return;
+        }
+        let mut next = (*self.local).clone();
+        next.sayings = fresh;
+        self.publish_local(next);
     }
 
-    fn now(&mut self) -> api::Host {
-        self.update();
-        assert_eq!(self.host.version, Some(self.version()));
-        self.host.clone()
+    fn publish_local(&mut self, local: Local) {
+        self.local_seq =
+            self.local_seq.checked_add(1).expect("a host changes fewer than 2^64 times");
+        self.seq = self.seq.checked_add(1).expect("a host changes fewer than 2^64 times");
+        assert!(self.local_seq <= self.seq);
+        self.local = Arc::new(local);
+        let all = self.snapshot(Scope::All);
+        let only_local = self.snapshot(Scope::Local);
+        for Waiting { scope, answer } in self.waiting.drain(..) {
+            let snapshot = match scope {
+                Scope::All => all.clone(),
+                Scope::Local => only_local.clone(),
+            };
+            let _ = answer.send(Ok(snapshot));
+        }
+        assert!(self.waiting.is_empty());
     }
 
-    fn watch(&mut self, after: After, answer: oneshot::Sender<Result<api::Host, Full>>) {
-        self.update();
-        let version = self.version();
-        assert_eq!(self.host.version, Some(version));
+    fn remotes_changed(&mut self) {
+        self.seq = self.seq.checked_add(1).expect("a host changes fewer than 2^64 times");
+        assert!(self.local_seq <= self.seq);
+        let all = self.snapshot(Scope::All);
+        let mut index = 0;
+        while index < self.waiting.len() {
+            if self.waiting[index].scope == Scope::All {
+                let Waiting { answer, .. } = self.waiting.swap_remove(index);
+                let _ = answer.send(Ok(all.clone()));
+            } else {
+                index += 1;
+            }
+        }
+        assert!(self.waiting.len() <= WAITING_MAX);
+    }
+
+    fn now(&mut self, scope: Scope) -> Snapshot {
+        self.refresh_sayings();
+        self.snapshot(scope)
+    }
+
+    fn watch(
+        &mut self,
+        scope: Scope,
+        after: After,
+        answer: oneshot::Sender<Result<Snapshot, Full>>,
+    ) {
+        self.refresh_sayings();
+        let version = self.version(scope);
         let After { version: asked, parked } = after;
         if asked != version {
-            let _ = answer.send(Ok(self.host.clone()));
+            let _ = answer.send(Ok(self.snapshot(scope)));
             return;
         }
-        self.waiting.retain(|waiting| !waiting.is_closed());
+        self.waiting.retain(|waiting| !waiting.answer.is_closed());
         assert!(self.waiting.len() <= WAITING_MAX);
         if answer.is_closed() {
             return;
@@ -948,14 +1125,9 @@ impl Known {
             let _ = answer.send(Err(Full));
             return;
         }
-        self.waiting.push(answer);
+        self.waiting.push(Waiting { scope, answer });
         assert!(self.waiting.len() <= WAITING_MAX);
-        match parked {
-            Parked::Quietly => {},
-            Parked::Aloud(tell) => {
-                let _ = tell.send(version);
-            },
-        }
+        let _ = parked.send(version);
     }
 }
 
@@ -1293,8 +1465,12 @@ mod tests {
             reached: Reached::Host(api::remote::Host::default()),
         };
         let told = || {
-            let remotes = ask(&core, Command::Host).unwrap().remotes.into_iter();
-            remotes.map(|remote| (remote.destination, remote.reached.unwrap())).collect::<Vec<_>>()
+            let snapshot = ask(&core, |answer| Command::Host { scope: Scope::All, answer }).unwrap();
+            let remotes = snapshot.remotes.unwrap().list;
+            remotes
+                .iter()
+                .map(|remote| (remote.destination.clone(), remote.reached.clone().unwrap()))
+                .collect::<Vec<_>>()
         };
         let said = |name: &str, reached| (name.to_owned(), reached);
         let host = || api::remote::Reached::Host(api::remote::Host::default());
@@ -1716,7 +1892,7 @@ mod tests {
         .unwrap();
         assert_eq!(stored, None);
 
-        let host = ask(&core, Command::Host).unwrap();
+        let host = ask(&core, |answer| Command::Host { scope: Scope::All, answer }).unwrap().to_api();
         assert_eq!(host.git_statuses.len(), 1);
         assert_eq!(host.git_statuses[0].dir, expected.as_str());
     }
@@ -1790,7 +1966,7 @@ mod tests {
         assert_ne!(unlisted, first);
 
         core.send(Command::Terminals(BTreeMap::from([(view, Located::Shown(unlisted))]))).unwrap();
-        let host = ask(&core, Command::Host).unwrap();
+        let host = ask(&core, |answer| Command::Host { scope: Scope::All, answer }).unwrap().to_api();
         let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
             panic!("projects kept");
         };
@@ -1801,7 +1977,7 @@ mod tests {
         assert!(!terminal.held);
 
         core.send(Command::Terminals(BTreeMap::from([(view, Located::Shown(first))]))).unwrap();
-        let host = ask(&core, Command::Host).unwrap();
+        let host = ask(&core, |answer| Command::Host { scope: Scope::All, answer }).unwrap().to_api();
         let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
             panic!("projects kept");
         };
@@ -1831,7 +2007,7 @@ mod tests {
         let ended =
             Shown::listed(term_key, &frame("✳ Fixing the tests", "/w/lune/main/src", Is::Ended));
         core.send(Command::Terminals(BTreeMap::from([(view, Located::Shown(ended))]))).unwrap();
-        let host = ask(&core, Command::Host).unwrap();
+        let host = ask(&core, |answer| Command::Host { scope: Scope::All, answer }).unwrap().to_api();
         let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
             panic!("projects kept");
         };
@@ -1850,5 +2026,161 @@ mod tests {
                 titled: Some(titled),
             })) if *k == term_key.into() && titled.topic.as_deref() == Some("Fixing the tests")
         ));
+    }
+
+    #[test]
+    fn a_local_change_reuses_remote_hosts_without_cloning_and_remote_changes_reuse_the_rest() {
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let wake = || mpsc::sync_channel(1).0;
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
+        let machine = |name: &str| name.parse::<Destination>().unwrap();
+        let remote_host = |unread| api::remote::Host { unread, ..api::remote::Host::default() };
+        let say = |text: &str| {
+            let said = ToSay::parse(api::say::Does::InTurn(api::Utterance {
+                text: text.to_owned(),
+            }))
+            .unwrap();
+            let (answer, answered) = oneshot::channel();
+            core.send(Command::Say { said, at: SystemTime::now(), answer }).unwrap();
+            answered.blocking_recv().unwrap();
+        };
+
+        let lines = vec![Line::Far(machine("vps-1")), Line::Far(machine("vps-2"))];
+        core.send(Command::Hosts(Named { lines: lines.clone(), unread: 0 })).unwrap();
+        core.send(Command::Remote {
+            destination: machine("vps-1"),
+            reached: Reached::Host(remote_host(1)),
+        })
+        .unwrap();
+        core.send(Command::Remote {
+            destination: machine("vps-2"),
+            reached: Reached::Host(remote_host(2)),
+        })
+        .unwrap();
+
+        let before = ask(&core, |answer| Command::Host { scope: Scope::All, answer }).unwrap();
+        let before_remotes = before.remotes.as_ref().unwrap();
+        assert_eq!(before_remotes.list.len(), 2);
+
+        let (parked_tx, parked_rx) = oneshot::channel();
+        let (watch_tx, mut watch_rx) = oneshot::channel();
+        let after = After { version: before.version, parked: parked_tx };
+        core.send(Command::Watch { scope: Scope::All, after, answer: watch_tx }).unwrap();
+        assert_eq!(parked_rx.blocking_recv().unwrap(), before.version);
+        assert!(matches!(watch_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        say("local change");
+        let after_local = watch_rx.blocking_recv().unwrap().unwrap();
+        assert!(after_local.version.seq > before.version.seq);
+        assert!(!Arc::ptr_eq(&before.local, &after_local.local));
+        let after_local_remotes = after_local.remotes.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&before_remotes.list, &after_local_remotes.list));
+        assert!(Arc::ptr_eq(&before_remotes.list[0], &after_local_remotes.list[0]));
+        assert!(Arc::ptr_eq(&before_remotes.list[1], &after_local_remotes.list[1]));
+
+        core.send(Command::Remote {
+            destination: machine("vps-1"),
+            reached: Reached::Host(remote_host(1)),
+        })
+        .unwrap();
+        let same_remote = ask(&core, |answer| Command::Host { scope: Scope::All, answer }).unwrap();
+        assert_eq!(same_remote.version, after_local.version);
+        assert!(Arc::ptr_eq(
+            &after_local_remotes.list,
+            &same_remote.remotes.as_ref().unwrap().list
+        ));
+
+        core.send(Command::Remote {
+            destination: machine("vps-1"),
+            reached: Reached::Host(remote_host(3)),
+        })
+        .unwrap();
+        let after_remote = ask(&core, |answer| Command::Host { scope: Scope::All, answer }).unwrap();
+        assert!(after_remote.version.seq > after_local.version.seq);
+        assert!(Arc::ptr_eq(&after_local.local, &after_remote.local));
+        let after_remote_remotes = after_remote.remotes.as_ref().unwrap();
+        assert!(!Arc::ptr_eq(&after_local_remotes.list[0], &after_remote_remotes.list[0]));
+        assert!(Arc::ptr_eq(&after_local_remotes.list[1], &after_remote_remotes.list[1]));
+
+        core.send(Command::Hosts(Named { lines, unread: 0 })).unwrap();
+        let same_hosts = ask(&core, |answer| Command::Host { scope: Scope::All, answer }).unwrap();
+        assert_eq!(same_hosts.version, after_remote.version);
+        assert!(Arc::ptr_eq(
+            &after_remote_remotes.list,
+            &same_hosts.remotes.as_ref().unwrap().list
+        ));
+    }
+
+    #[test]
+    fn a_local_scope_watch_wakes_only_on_local_changes_and_carries_no_remotes() {
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let wake = || mpsc::sync_channel(1).0;
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
+        let machine = |name: &str| name.parse::<Destination>().unwrap();
+        let remote_host = |unread| api::remote::Host { unread, ..api::remote::Host::default() };
+
+        core.send(Command::Hosts(Named { lines: vec![Line::Far(machine("vps"))], unread: 0 }))
+            .unwrap();
+        core.send(Command::Remote {
+            destination: machine("vps"),
+            reached: Reached::Host(remote_host(1)),
+        })
+        .unwrap();
+
+        let all_before = ask(&core, |answer| Command::Host { scope: Scope::All, answer }).unwrap();
+        let local_before =
+            ask(&core, |answer| Command::Host { scope: Scope::Local, answer }).unwrap();
+        assert!(local_before.remotes.is_none());
+        let local_api = local_before.to_api();
+        assert_eq!(local_api.remotes, []);
+        assert_eq!(local_api.unread_hosts, None);
+
+        let (all_parked_tx, all_parked_rx) = oneshot::channel();
+        let (all_watch_tx, all_watch_rx) = oneshot::channel();
+        core.send(Command::Watch {
+            scope: Scope::All,
+            after: After { version: all_before.version, parked: all_parked_tx },
+            answer: all_watch_tx,
+        })
+        .unwrap();
+        let (local_parked_tx, local_parked_rx) = oneshot::channel();
+        let (local_watch_tx, mut local_watch_rx) = oneshot::channel();
+        core.send(Command::Watch {
+            scope: Scope::Local,
+            after: After { version: local_before.version, parked: local_parked_tx },
+            answer: local_watch_tx,
+        })
+        .unwrap();
+        assert_eq!(all_parked_rx.blocking_recv().unwrap(), all_before.version);
+        assert_eq!(local_parked_rx.blocking_recv().unwrap(), local_before.version);
+
+        core.send(Command::Remote {
+            destination: machine("vps"),
+            reached: Reached::Host(remote_host(9)),
+        })
+        .unwrap();
+        let all_after = all_watch_rx.blocking_recv().unwrap().unwrap();
+        assert!(all_after.version.seq > all_before.version.seq);
+        assert!(matches!(local_watch_rx.try_recv(), Err(TryRecvError::Empty)));
+        let local_still =
+            ask(&core, |answer| Command::Host { scope: Scope::Local, answer }).unwrap();
+        assert_eq!(local_still.version, local_before.version);
+
+        let said =
+            ToSay::parse(api::say::Does::InTurn(api::Utterance { text: "here".to_owned() }))
+                .unwrap();
+        let (answer, answered) = oneshot::channel();
+        core.send(Command::Say { said, at: SystemTime::now(), answer }).unwrap();
+        answered.blocking_recv().unwrap();
+
+        let local_after = local_watch_rx.blocking_recv().unwrap().unwrap();
+        assert!(local_after.version.seq > local_before.version.seq);
+        assert!(local_after.remotes.is_none());
+        let local_after_api = local_after.to_api();
+        assert_eq!(local_after_api.remotes, []);
+        assert_eq!(local_after_api.unread_hosts, None);
+        assert_eq!(local_after_api.sayings.len(), 1);
     }
 }

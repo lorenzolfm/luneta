@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
 use lune_protocol::socket::SocketId;
+use lune_protocol::watch::Watched;
 use rustix::process::Pid;
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, BufReader, ReadBuf};
 use tokio::net::UnixStream;
@@ -314,16 +315,24 @@ impl std::error::Error for Unasked {
 #[derive(Debug)]
 pub enum WatchError {
     Unasked(Unasked),
-    Unversioned,
+    Unread(&'static str),
+}
+
+impl WatchError {
+    #[must_use]
+    pub fn said(&self, on: Option<&remote::Destination>) -> String {
+        match self {
+            WatchError::Unasked(unasked) => unasked.said(on),
+            WatchError::Unread(why) => format!("{why}, which this lune does not read"),
+        }
+    }
 }
 
 impl fmt::Display for WatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WatchError::Unasked(unasked) => unasked.fmt(f),
-            WatchError::Unversioned => {
-                f.write_str("an answer with no version, which this lune does not read")
-            },
+            WatchError::Unread(why) => write!(f, "{why}, which this lune does not read"),
         }
     }
 }
@@ -332,7 +341,7 @@ impl std::error::Error for WatchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             WatchError::Unasked(unasked) => unasked.source(),
-            WatchError::Unversioned => None,
+            WatchError::Unread(_) => None,
         }
     }
 }
@@ -423,18 +432,24 @@ pub struct Watching {
 
 impl Watching {
     pub async fn next(&mut self) -> Result<WatchedHost, WatchError> {
-        let request = api::WatchRequest { after: self.after, kept: None, shown: self.shown };
-        let host = self.call(request).await.map_err(WatchError::Unasked)?;
-        let version = host.version.ok_or(WatchError::Unversioned)?;
-        self.after = Some(version);
-        Ok(WatchedHost { version, host })
+        loop {
+            let request = api::WatchRequest { after: self.after, kept: None, shown: self.shown };
+            let response = self.call(request).await.map_err(WatchError::Unasked)?;
+            match response.read(self.after).map_err(WatchError::Unread)? {
+                Watched::Host(version, host) => {
+                    self.after = Some(version);
+                    return Ok(WatchedHost { version, host: *host });
+                },
+                Watched::Unchanged(_) => {},
+            }
+        }
     }
 
-    pub async fn once(mut self, after: api::Version) -> Result<api::Host, Unasked> {
+    pub async fn once(mut self, after: api::Version) -> Result<api::WatchResponse, Unasked> {
         self.call(api::WatchRequest { after: Some(after), kept: None, shown: self.shown }).await
     }
 
-    async fn call(&mut self, request: api::WatchRequest) -> Result<api::Host, Unasked> {
+    async fn call(&mut self, request: api::WatchRequest) -> Result<api::WatchResponse, Unasked> {
         let wait = self.answer.waits();
         assert!(!wait.is_zero(), "a watch waits some time for its answer");
         if self.gone.is() {
@@ -543,9 +558,20 @@ impl Shared {
         })
     }
 
-    pub async fn snapshot(&self, answer: Answer, shown: bool) -> Result<api::Host, Unasked> {
+    pub async fn snapshot_response(
+        &self,
+        answer: Answer,
+        shown: bool,
+    ) -> Result<api::WatchResponse, Unasked> {
         let request = api::WatchRequest { after: None, kept: None, shown };
         self.ask_unary(answer, |mut daemon| async move { daemon.watch(request).await }).await
+    }
+
+    pub async fn snapshot(&self, answer: Answer, shown: bool) -> Result<api::Host, WatchError> {
+        let response =
+            self.snapshot_response(answer, shown).await.map_err(WatchError::Unasked)?;
+        let (_, host) = response.read_host().map_err(WatchError::Unread)?;
+        Ok(host)
     }
 
     pub async fn list_agents(&self, answer: Answer) -> Result<api::ListAgentsResponse, Unasked> {
@@ -1576,7 +1602,7 @@ mod tests {
         async fn watch(
             &self,
             request: GrpcRequest<WatchRequest>,
-        ) -> Result<GrpcResponse<api::Host>, Status> {
+        ) -> Result<GrpcResponse<api::WatchResponse>, Status> {
             self.watch_afters
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -1585,7 +1611,11 @@ mod tests {
                 let seq = self.watch_seq.fetch_add(1, Ordering::Relaxed) + 1;
                 api::Version { pid: self.pid, seq }
             });
-            Ok(GrpcResponse::new(api::Host { version, ..api::Host::default() }))
+            let host = api::Host { version, ..api::Host::default() };
+            let response = api::WatchResponse {
+                answer: Some(api::watch_response::Answer::Host(Box::new(host))),
+            };
+            Ok(GrpcResponse::new(response))
         }
 
         async fn list_contents(
@@ -2016,7 +2046,7 @@ mod tests {
             stub.watch_versioned.store(false, Ordering::Relaxed);
             let mut unversioned = shared.watching(ANSWER, LocalWatch::Window).unwrap();
             assert!(
-                matches!(unversioned.next().await, Err(WatchError::Unversioned)),
+                matches!(unversioned.next().await, Err(WatchError::Unread(_))),
                 "Watching::next rejects an answer with no version"
             );
         });

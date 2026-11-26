@@ -10,7 +10,7 @@ import "lune/mux/v1/mux.proto";
 service Daemon {
   rpc Info(google.protobuf.Empty) returns (InfoResponse);
   rpc ListAgents(google.protobuf.Empty) returns (ListAgentsResponse);
-  rpc Watch(WatchRequest) returns (Host);
+  rpc Watch(WatchRequest) returns (WatchResponse);
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
   rpc KeepChecks(KeepChecksRequest) returns (stream KeepChecksResponse);
   rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);
@@ -224,6 +224,13 @@ message WatchRequest {
   Version after = 1;
   optional bool kept = 2;
   bool shown = 3;
+}
+
+message WatchResponse {
+  oneof answer {
+    Host host = 1;
+    Version unchanged = 2;
+  }
 }
 
 message Version {

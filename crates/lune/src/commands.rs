@@ -464,12 +464,12 @@ async fn watch(
     daemon: Shared,
     after: Option<Version>,
 ) -> Result<(), Box<dyn Error>> {
-    let host = match after {
-        None => daemon.snapshot(luned::ANSWER, false).await?,
+    let watched = match after {
+        None => daemon.snapshot_response(luned::ANSWER, false).await?,
         Some(version) => daemon.watching(luned::ANSWER, LocalWatch::Client)?.once(version).await?,
     };
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(&host.encode_to_vec())?;
+    stdout.write_all(&watched.encode_to_vec())?;
     stdout.flush()?;
     Ok(())
 }

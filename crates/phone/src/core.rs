@@ -9,6 +9,7 @@ use std::time::Duration;
 use hyper_util::rt::TokioIo;
 use lune_protocol::said::Said;
 use lune_protocol::turn::Turn;
+use lune_protocol::watch::Watched;
 use tokio::net::UnixStream;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{mpsc, watch};
@@ -741,10 +742,11 @@ async fn watched(
         if matches!(poll, Poll::Immediate) {
             woken.mark_unchanged();
         }
-        let asked = api::WatchRequest { after: poll.after(), kept: None, shown: true };
+        let after = poll.after();
+        let asked = api::WatchRequest { after, kept: None, shown: true };
         let why = match watch_unary(patience, daemon.watch(asked)).await {
-            Ok(host) => match host.version {
-                Some(version) => {
+            Ok(response) => match response.read(after) {
+                Ok(Watched::Host(version, host)) => {
                     let (next, model) = watch.heard(version, Model::of(&host));
                     watch = next;
                     if let Some(model) = model {
@@ -753,7 +755,11 @@ async fn watched(
                     sleep_until(asked_at + waits::PACE).await;
                     continue;
                 },
-                None => Said::new("luned answered with no version, which the core does not read".to_owned())
+                Ok(Watched::Unchanged(_)) => {
+                    sleep_until(asked_at + waits::PACE).await;
+                    continue;
+                },
+                Err(why) => Said::new(format!("{why}, which the core does not read"))
                     .expect("loss literal is non-empty"),
             },
             Err(why) => why,

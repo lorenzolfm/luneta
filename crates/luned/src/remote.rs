@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use lune_protocol::watch::Watched;
 use notify::RecursiveMode;
 use tokio::sync::mpsc as wakes;
 use tokio::sync::oneshot;
@@ -177,17 +178,17 @@ pub enum Reached {
 }
 
 impl Reached {
-    pub fn to_api(&self, destination: &Destination) -> api::Remote {
+    pub fn into_api(self, destination: &Destination) -> api::Remote {
         let reached = match self {
             Reached::Reaching => remote::Reached::Reaching(()),
-            Reached::Host(host) => remote::Reached::Host(host.clone()),
+            Reached::Host(host) => remote::Reached::Host(host),
             Reached::Unreached { since, failed, projects } => {
                 let (stopped, ssh_said) = failed.stopped.to_api();
                 remote::Reached::Unreached(remote::Unreached {
-                    since: Some((*since).into()),
-                    why: failed.why.clone(),
+                    since: Some(since.into()),
+                    why: failed.why,
                     stopped: Some(stopped),
-                    projects: projects.clone(),
+                    projects,
                     ssh_said,
                 })
             },
@@ -608,7 +609,7 @@ async fn watched(
         bridged.awake();
         let question = standing.borrow().question(seen.after());
         let asked = asked(&bridged, &seen, &mut connected, question, &said, &folder).await;
-        let (version, host) = match asked {
+        let asked = match asked {
             Ok(answered) => answered,
             Err(failed) => {
                 let logged = match &seen {
@@ -630,6 +631,16 @@ async fn watched(
                 bridged.waits(again(seen.failures())).await;
                 continue;
             },
+        };
+        let (version, host) = match asked {
+            Watched::Unchanged(version) => {
+                assert_eq!(seen.after(), Some(version));
+                let projects = seen.into_projects();
+                seen = Seen::Answered { after: version, at: SystemTime::now(), projects };
+                bridged.agree(&seen, connected.as_ref());
+                continue;
+            },
+            Watched::Host(version, host) => (version, *host),
         };
         if let Seen::Unreached { since, .. } = &seen {
             let unreached_for = since.elapsed().unwrap_or_default().as_secs();
@@ -709,6 +720,15 @@ impl Seen {
         }
     }
 
+    fn into_projects(self) -> Option<api::Projects> {
+        match self {
+            Seen::Answered { projects, .. }
+            | Seen::Broke { projects, .. }
+            | Seen::Unreached { projects, .. } => projects,
+            Seen::Reaching { .. } => None,
+        }
+    }
+
     fn unreached(&self) -> Option<Reached> {
         let Seen::Unreached { since, failed, projects, .. } = self else {
             return None;
@@ -730,7 +750,7 @@ async fn asked(
     question: api::WatchRequest,
     said: &Arc<Mutex<Said>>,
     folder: &Path,
-) -> Result<(api::Version, api::Host), Failed> {
+) -> Result<Watched, Failed> {
     let daemon = if let Some(daemon) = connected {
         daemon
     } else {
@@ -739,13 +759,13 @@ async fn asked(
         bridged.agree(seen, Some(&*daemon));
         daemon
     };
+    let after = question.after;
     let watched = daemon.watch(question).await;
-    let answered = watched.map_err(|status| unreached(&status)).and_then(|host| {
-        let host = host.into_inner();
-        let unversioned = "an answer with no version, which this luned does not read";
-        let version =
-            host.version.ok_or_else(|| Failed::of(unversioned.to_owned(), Stopped::Lost))?;
-        Ok((version, host))
+    let answered = watched.map_err(|status| unreached(&status)).and_then(|response| {
+        response
+            .into_inner()
+            .read(after)
+            .map_err(|why| Failed::of(format!("{why}, which this luned does not read"), Stopped::Lost))
     });
     if answered.is_err() {
         *connected = None;
@@ -1093,7 +1113,7 @@ mod tests {
     #[test]
     fn a_machine_lost_keeps_the_projects_last_heard_and_one_never_reached_has_none() {
         let shown = |seen: &Seen| {
-            let reached = seen.unreached()?.to_api(&"nixos".parse().unwrap()).reached;
+            let reached = seen.unreached()?.into_api(&"nixos".parse().unwrap()).reached;
             let Some(remote::Reached::Unreached(unreached)) = reached else {
                 panic!("{reached:?} is not unreached");
             };
@@ -1107,11 +1127,14 @@ mod tests {
         assert_eq!(shown(&broke), None);
         let unreached = broke.failed(refused());
         assert_eq!(shown(&unreached), Some(heard.clone()));
-        assert_eq!(shown(&unreached.failed(refused())), Some(heard));
+        assert_eq!(shown(&unreached.failed(refused())), Some(heard.clone()));
 
         let never = Seen::Reaching { since: SystemTime::now() }.failed(refused());
         assert_eq!(shown(&never), Some(None));
         assert_eq!(shown(&never.failed(refused())), Some(None));
+
+        let recovered = answered_with(heard.clone()).failed(refused());
+        assert_eq!(recovered.into_projects(), heard);
     }
 
     #[test]

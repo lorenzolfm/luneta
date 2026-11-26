@@ -177,7 +177,7 @@ impl Daemon for OverTailnet {
     async fn watch(
         &self,
         request: Request<api::WatchRequest>,
-    ) -> Result<Response<api::Host>, Status> {
+    ) -> Result<Response<api::WatchResponse>, Status> {
         Daemon::watch(&*self.0, request).await
     }
 
