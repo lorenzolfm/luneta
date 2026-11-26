@@ -79,7 +79,7 @@ impl Homes {
         for project in projects.all() {
             for (worktree_dir, worktree) in project.placed() {
                 for terminal in worktree.layout().terminals() {
-                    if worktree_dir.below(terminal.folder()).is_none() {
+                    if *terminal.folder() != worktree_dir {
                         self.mark(terminal.id());
                     }
                 }
@@ -284,9 +284,7 @@ mod tests {
         assert_eq!(looked, ids[..LOOKS_MAX], "at most LOOKS_MAX looks are dispatched at once");
         assert!(looks.try_recv().is_err(), "excess queued terminals wait for a free slot");
 
-        // Mark ids[0] again while in flight (e.g. A -> B -> A bounce or Command::Rooted).
         homes.mark(ids[0]);
-        // Forget ids[1] while in flight (terminal closed while looking).
         homes.forget(ids[1]);
 
         let dir_of = |i: usize| dir(folders[i]);
@@ -301,19 +299,15 @@ mod tests {
             .send(Spotted { terminal: ids[2], folder: dir_of(2), spot: Ok(spot_of(2)) })
             .unwrap();
 
-        // ids[0] (Relook) and ids[1] (Abandon) are absorbed; ids[2] (Deliver) is yielded.
         let delivered = homes.spotted().unwrap();
         assert_eq!(delivered.into_parts(), (ids[2], dir_of(2), Ok(spot_of(2))));
         assert!(homes.spotted().is_none());
 
-        // Next dispatch re-sends ids[0] (even with the same folder!) and sends waiting ids[4].
-        // ids[1] is abandoned and ids[2] was delivered, so neither is re-sent.
         homes.dispatch(&projects);
         let next: Vec<TerminalViewId> = (0..2).map(|_| looks.recv().unwrap().terminal).collect();
         assert_eq!(next, [ids[0], ids[4]]);
         assert!(looks.try_recv().is_err());
 
-        // Update ids[0]'s folder in projects and verify fresh delivery settles cleanly.
         let ran = Ran { terminal: ids[0], folder: dir("/work/again"), runs: Runs::Shell };
         (projects, _) = projects.changed(Change::Ran(vec![ran]), None, counting()).unwrap();
         found
@@ -324,7 +318,6 @@ mod tests {
         homes.dispatch(&projects);
         assert!(looks.try_recv().is_err(), "a delivered terminal leaves no duplicate queued");
 
-        // Drain ids[3] and ids[4], then check unmatched spotted panics.
         found.send(Spotted { terminal: ids[3], folder: dir_of(3), spot: Ok(spot_of(3)) }).unwrap();
         found.send(Spotted { terminal: ids[4], folder: dir_of(4), spot: Ok(spot_of(4)) }).unwrap();
         assert!(homes.spotted().is_some());
@@ -339,17 +332,39 @@ mod tests {
     }
 
     #[test]
-    fn homes_forget_prunes_queued_and_seed_marks_only_terminals_outside_their_worktree() {
+    fn homes_forget_prunes_queued_and_seed_marks_terminals_away_from_worktree_root() {
         let (projects, _, ids) = projects_with_terminals(&["/work", "/work/sub", "/other/dir"]);
-        let (mut homes, looks, _) = manual_homes();
+        let (mut homes, looks, found) = manual_homes();
 
         homes.seed(&projects);
         homes.dispatch(&projects);
-        let look = looks.recv().unwrap();
-        assert_eq!((look.terminal, look.folder), (ids[2], dir("/other/dir")));
-        assert!(looks.try_recv().is_err(), "terminals inside their worktree are not seeded");
+        let first = looks.recv().unwrap();
+        let second = looks.recv().unwrap();
+        assert_eq!(
+            [(first.terminal, first.folder), (second.terminal, second.folder)],
+            [(ids[1], dir("/work/sub")), (ids[2], dir("/other/dir"))]
+        );
+        assert!(looks.try_recv().is_err(), "terminals at their worktree root are not seeded");
 
-        // Queued terminal forgotten before dispatch is never sent.
+        homes.forget(ids[1]);
+        homes.mark(ids[1]);
+        homes.forget(ids[2]);
+        let sub = dir("/work/sub");
+        let other = dir("/other/dir");
+        found
+            .send(Spotted { terminal: ids[1], folder: sub.clone(), spot: Err("stale".to_owned()) })
+            .unwrap();
+        found
+            .send(Spotted { terminal: ids[2], folder: other, spot: Err("stale".to_owned()) })
+            .unwrap();
+        assert!(homes.spotted().is_none(), "abandoned and relooked slots are not delivered");
+        assert!(homes.is_idle());
+
+        homes.dispatch(&projects);
+        let relooked = looks.recv().unwrap();
+        assert_eq!((relooked.terminal, relooked.folder), (ids[1], sub));
+        assert!(looks.try_recv().is_err(), "abandoned terminal is not re-dispatched");
+
         homes.mark(ids[0]);
         homes.forget(ids[0]);
         homes.dispatch(&projects);
@@ -367,8 +382,8 @@ mod tests {
 
         let (projects, _, ids) = projects_with_terminals(&[here.as_str(), gone.as_str()]);
         let (first, second) = (ids[0], ids[1]);
-        let timeout = LookTimeout::of(Duration::from_secs(5));
-        let mut homes = Homes::start(timeout).unwrap();
+        let limit = LookTimeout::of(Duration::from_secs(5));
+        let mut homes = Homes::start(limit).unwrap();
         homes.mark(first);
         homes.mark(second);
         homes.dispatch(&projects);
@@ -384,7 +399,7 @@ mod tests {
 
         let (sent, looks) = mpsc::sync_channel(LOOKS_MAX);
         let (found, spotted) = mpsc::sync_channel(LOOKS_MAX);
-        let worker = thread::spawn(move || run(&looks, &found, timeout));
+        let worker = thread::spawn(move || run(&looks, &found, limit));
         drop(sent);
         assert!(worker.join().is_ok(), "dropping sent ends the homes thread");
         drop(spotted);
@@ -392,7 +407,7 @@ mod tests {
         let (sent, looks) = mpsc::sync_channel(LOOKS_MAX);
         let (found, spotted) = mpsc::sync_channel(LOOKS_MAX);
         drop(spotted);
-        let worker = thread::spawn(move || run(&looks, &found, timeout));
+        let worker = thread::spawn(move || run(&looks, &found, limit));
         sent.send(Look { terminal: first, folder: here }).unwrap();
         assert!(worker.join().is_ok(), "dropping spotted ends the homes thread");
     }

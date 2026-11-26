@@ -1282,12 +1282,13 @@ impl Layouts {
         let remade = Remade { at: Instant::now(), restored: restore };
         self.made(terminal, key, Some(inner), Some(remade));
         assert_eq!(self.known.get(&terminal).map(|it| it.key), Some(key), "a remade one is known");
+        if changed_folder {
+            self.homes.forget(terminal);
+        }
         if let Runs::Command(line) = runs {
             let unrun = Ran { terminal, folder, runs: Runs::Unrun(line) };
             if let Err(why) = self.changed(Change::Ran(vec![unrun])) {
                 self.troubles.say(format!("terminal {terminal}'s line is not kept as unrun: {why}"));
-            } else if changed_folder {
-                self.homes.mark(terminal);
             }
         }
         Ok(())
