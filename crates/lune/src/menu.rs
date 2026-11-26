@@ -24,6 +24,7 @@ use crate::actions::{
 };
 use crate::agents::{self, Harness, Picked};
 use crate::brief;
+use crate::cadence::Cadence;
 use crate::checks::{self, Failing, PullPage};
 use crate::close::{Act, Plan, Scope};
 use crate::icons;
@@ -1896,7 +1897,7 @@ impl Menu {
         width: usize,
         room: usize,
         frame: usize,
-    ) -> (Vec<Line<'static>>, Spots<Choice>) {
+    ) -> (Vec<Line<'static>>, Spots<Choice>, Option<usize>) {
         let body = room.saturating_sub(2);
         let mut shown = self.shown(width, body, frame);
         if self.lists() && shown.body.len() > body && body > 0 {
@@ -1922,12 +1923,17 @@ impl Menu {
         matches!(&self.stage, Stage::Choosing(keys) if keys.search.is_none())
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) -> Drawn {
-        let frame = sidebar::frame(now);
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, wall: SystemTime) -> (Drawn, Cadence) {
+        let frame = sidebar::frame(wall);
         let shown = |width, body_room| self.shown(width, body_room, frame);
-        let floated = float(buffer, over, self.searching(), shown);
-        let drawn = |(area, spots)| Drawn::Menu { number: self.number, area: Some(area), spots };
-        floated.map_or(Drawn::Nothing, drawn)
+        let mut cadence = Cadence::default();
+        let Some((area, spots, spins)) = float(buffer, over, self.searching(), shown) else {
+            return (Drawn::Nothing, cadence);
+        };
+        if spins {
+            cadence.spin();
+        }
+        (Drawn::Menu { number: self.number, area, spots }, cadence)
     }
 
     pub fn turning(&self) -> bool {
@@ -1935,6 +1941,8 @@ impl Menu {
             self.stage,
             Stage::Pull { step: Step::Waiting(_), .. }
                 | Stage::Sweeping { .. }
+                | Stage::Fetching { .. }
+                | Stage::Rebasing { .. }
                 | Stage::Pruning { .. }
         )
     }
@@ -2076,7 +2084,8 @@ impl Menu {
                 (chain.title().to_owned(), String::new(), body, keyed(width, &keys))
             },
         };
-        Shown { title, right, body, spots, footer, keys }
+        let spinner = (self.turning() && !body.is_empty()).then_some(0);
+        Shown { title, right, body, spinner, spots, footer, keys }
     }
 }
 
@@ -2092,6 +2101,7 @@ struct Shown {
     title: String,
     right: String,
     body: Vec<Line<'static>>,
+    spinner: Option<usize>,
     spots: Spots<Choice>,
     footer: Line<'static>,
     keys: Spots<KeyEvent>,
@@ -2105,20 +2115,22 @@ impl Shown {
         widest.max(4 + self.title.width() + tail)
     }
 
-    fn lines(self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<Choice>) {
-        let Shown { title, right, body, spots, footer, keys } = self;
+    fn lines(self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<Choice>, Option<usize>) {
+        let Shown { title, right, body, spinner, spots, footer, keys } = self;
         let mut lines = Vec::with_capacity(room);
         if room >= 2 {
             lines.push(rule(&title, &right, width));
         }
         let ruled = lines.len();
         lines.extend(body.into_iter().take(room.saturating_sub(2)));
-        let mut spots = spots.first(lines.len() - ruled).down(ruled);
+        let shown_body = lines.len() - ruled;
+        let spinner = spinner.filter(|at| width > 0 && *at < shown_body).map(|at| ruled + at);
+        let mut spots = spots.first(shown_body).down(ruled);
         if room >= 1 {
             spots.extend(keys.map(Choice::Key).down(lines.len()));
             lines.push(footer);
         }
-        (lines, spots)
+        (lines, spots, spinner)
     }
 }
 
@@ -2127,7 +2139,7 @@ fn float(
     over: Rect,
     widest: bool,
     shown: impl Fn(usize, usize) -> Shown,
-) -> Option<(Rect, Spots<Choice>)> {
+) -> Option<(Rect, Spots<Choice>, bool)> {
     let (fewest, most) = FLOATING;
     let most = most.min(usize::from(over.width.saturating_sub(2)));
     let room = usize::from(over.height.saturating_sub(1));
@@ -2136,14 +2148,14 @@ fn float(
     }
     let inner =
         if widest { most } else { shown(most, room - 2).takes().clamp(fewest.min(most), most) };
-    let (lines, spots) = shown(inner, room - 2).lines(inner, room);
+    let (lines, spots, spinner) = shown(inner, room - 2).lines(inner, room);
     let (rule, rest) = lines.split_first()?;
     let width = u16::try_from(inner + 2).unwrap_or(over.width);
     let height = u16::try_from(lines.len() + 1).unwrap_or(over.height);
     let area = Rect::new(over.right() - width, over.bottom() - height, width, height);
     boxed(buffer, area, rule, rest);
     let inside = Rect::new(area.x + 1, area.y, width - 2, height - 1);
-    Some((area, spots.placed(inside)))
+    Some((area, spots.placed(inside), spinner.is_some()))
 }
 
 pub fn draw_note(buffer: &mut Buffer, over: Rect, note: &str) {
@@ -2151,6 +2163,7 @@ pub fn draw_note(buffer: &mut Buffer, over: Rect, note: &str) {
         title: TITLE.to_owned(),
         right: String::new(),
         body: wrap(note, width, Style::new().fg(sidebar::ERROR)),
+        spinner: None,
         spots: Spots::default(),
         footer: keys_line(width, &[(Hint::AnyKey, "Close")]),
         keys: Spots::default(),
@@ -2499,11 +2512,18 @@ fn entry_spots(entries: &[Entry], width: usize) -> Spots<KeyEvent> {
     spots
 }
 
+#[must_use]
+pub fn rule_fits(title: &str, right: &str, width: usize) -> bool {
+    let head = 2 + 1 + 1;
+    let tail = right.width() + 3;
+    !right.is_empty() && head + title.width() + tail <= width
+}
+
 pub fn rule(title: &str, right: &str, width: usize) -> Line<'static> {
     let dim = Style::new().fg(moonlight::LIFTED);
     let head = 2 + 1 + 1;
     let tail = right.width() + 3;
-    let fits = !right.is_empty() && head + title.width() + tail <= width;
+    let fits = rule_fits(title, right, width);
     let tail = if fits { tail } else { 0 };
     let title = sidebar::cut(title, width.saturating_sub(head + tail));
     let stretch = width.saturating_sub(head - 1 + title.width() + tail);
@@ -4028,7 +4048,7 @@ mod tests {
         let (mut menu, _) = stays(opened(view_row(), Some('/')));
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         let skill = |name: &str| Name::new(name.to_owned()).expect("a name");
-        let (_, spots) = menu.lines(31, 6, 0);
+        let (_, spots, _) = menu.lines(31, 6, 0);
         assert_eq!(spots.at(Position::new(4, 1)), None);
         assert_eq!(spots.at(Position::new(4, 2)), Some(&Choice::Skill(skill("code-review"))));
         assert_eq!(spots.at(Position::new(30, 3)), Some(&Choice::Skill(skill("tigerstyle"))));
@@ -4220,7 +4240,7 @@ mod tests {
     }
 
     fn drawing(menu: &Menu) -> impl FnOnce(&mut Buffer, Rect) -> Drawn + '_ {
-        move |buffer, over| menu.draw(buffer, over, UNIX_EPOCH)
+        move |buffer, over| menu.draw(buffer, over, UNIX_EPOCH).0
     }
 
     #[test]
@@ -4276,7 +4296,7 @@ mod tests {
 
     fn clicked(menu: &Menu, text: &str) -> Option<Choice> {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 10));
-        let drawn = menu.draw(&mut buffer, Rect::new(10, 0, 50, 10), UNIX_EPOCH);
+        let (drawn, _) = menu.draw(&mut buffer, Rect::new(10, 0, 50, 10), UNIX_EPOCH);
         let at = drawn_at(&buffer, text).expect("drawn");
         assert!(drawn.boxed().is_some_and(|area| area.contains(at)), "{text:?} is in the box");
         drawn.at(at).map(|hit| match hit {
@@ -4521,7 +4541,7 @@ mod tests {
             " opens it",
             " <ESC> - Close",
         ];
-        let (lines, spots) = menu.lines(31, 9, 0);
+        let (lines, spots, _) = menu.lines(31, 9, 0);
         assert_eq!(text(&lines), refused);
         assert_eq!(spots.at(Position::new(4, 2)), Some(&pressed(KeyCode::Char('w'))));
 

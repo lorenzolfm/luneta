@@ -7,6 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::brief;
+use crate::cadence::Cadence;
 use crate::clock::Moment;
 use crate::menu::{self, Hint};
 use crate::named::{self, Written};
@@ -81,6 +82,7 @@ impl Repeats {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Keyed {
     Nothing,
+    Changed,
     Close,
     Dictate,
 }
@@ -192,27 +194,32 @@ impl Dictation {
                 } else {
                     hearing.finish(Ending::Writes);
                 }
+                Keyed::Changed
             },
             (Key::Down(_) | Key::Tapped, KeyEventKind::Press) if chord == KEY => {
                 hearing.finish(Ending::Writes);
+                Keyed::Changed
             },
             (Key::Down(_) | Key::Tapped, KeyEventKind::Press)
                 if chord == (KeyCode::Enter, KeyModifiers::NONE) =>
             {
                 let showed = written(hearing.words.trim(), &hearing.skills).command;
                 hearing.finish(Ending::Sends { showed });
+                Keyed::Changed
             },
-            _ => {},
+            _ => Keyed::Nothing,
         }
-        Keyed::Nothing
     }
 
-    pub fn unfocused(&mut self) {
+    #[must_use]
+    pub fn unfocused(&mut self) -> bool {
         if let Stage::Hearing(hearing) = &mut self.stage
             && matches!(hearing.key, Key::Down(_))
         {
             hearing.finish(Ending::Writes);
+            return true;
         }
+        false
     }
 
     pub fn spoken(&mut self, spoken: Spoken, now: Instant) -> Option<Dictated> {
@@ -271,38 +278,52 @@ impl Dictation {
         }
     }
 
+    #[cfg(test)]
     pub fn turning(&self) -> bool {
         matches!(self.stage, Stage::Hearing(_) | Stage::Naming { .. })
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: Moment) {
-        let Some((inner, room)) = brief::room(over) else {
-            return;
+    fn listening_since(&self) -> Option<Instant> {
+        let Stage::Hearing(hearing) = &self.stage else {
+            return None;
         };
-        let (lines, keys, right) = match &self.stage {
-            Stage::Fetching(got) => fetching(*got, inner),
+        let Model::Listening(since) = hearing.model else {
+            return None;
+        };
+        Some(since)
+    }
+
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: Moment) -> Cadence {
+        let mut cadence = Cadence::default();
+        let Some((inner, room)) = brief::room(over) else {
+            return cadence;
+        };
+        let ((mut lines, keys, right), spinner) = match &self.stage {
+            Stage::Fetching(got) => (fetching(*got, inner), None),
             Stage::Fetched => {
                 let said = "The speech model is in. Hold Alt r and talk, or tap it to talk \
                     with your hands free.";
                 let lines = menu::wrap(said, inner, Style::new());
                 let keys = vec![(Hint::Alt('r'), "Dictate"), (Hint::AnyOtherKey, "Close")];
-                (lines, keys, String::new())
+                ((lines, keys, String::new()), None)
             },
-            Stage::Wrong(why) => wrong(why, inner),
+            Stage::Wrong(why) => (wrong(why, inner), None),
             Stage::Hearing(hearing) => hearing.lines(inner, now),
             Stage::Naming { said, .. } => {
                 let mut lines = menu::wrap(said.trim(), inner, Style::new());
                 lines.push(Line::default());
                 let dim = Style::new().add_modifier(Modifier::DIM);
+                let start = lines.len();
                 lines.extend(menu::waiting(WRITING, inner, dim, sidebar::frame(now.system)));
-                (lines, vec![(Hint::Esc, "Cancel")], String::new())
+                let spinner = (lines.len() > start).then_some(start);
+                ((lines, vec![(Hint::Esc, "Cancel")], String::new()), spinner)
             },
         };
-        let mut lines = lines;
         let footer = [Line::default(), menu::keys_line(inner, &keys)];
-        let room = room.saturating_sub(footer.len());
-        if lines.len() > room {
-            lines.drain(..lines.len() - room);
+        let lines_room = room.saturating_sub(footer.len());
+        let drained = lines.len().saturating_sub(lines_room);
+        if drained > 0 {
+            lines.drain(..drained);
         }
         lines.extend(footer);
         let width = u16::try_from(inner + 2).unwrap_or(over.width).min(over.width);
@@ -311,6 +332,15 @@ impl Dictation {
         let y = (over.bottom().saturating_sub(height + 1)).max(over.y);
         let area = Rect::new(x, y, width, height);
         menu::boxed(buffer, area, &menu::rule(TITLE, &right, inner), &lines);
+        if inner > 0 && lines_room > 0 && spinner.is_some_and(|at| at >= drained) {
+            cadence.spin();
+        }
+        if menu::rule_fits(TITLE, &right, inner)
+            && let Some(since) = self.listening_since()
+        {
+            cadence.every_second(since, now.steady);
+        }
+        cadence
     }
 }
 
@@ -320,7 +350,7 @@ impl Hearing {
         self.listening.finish();
     }
 
-    fn lines(&self, inner: usize, now: Moment) -> Shown {
+    fn lines(&self, inner: usize, now: Moment) -> (Shown, Option<usize>) {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let frame = sidebar::frame(now.system);
         let written = written(self.words.trim(), &self.skills);
@@ -345,11 +375,16 @@ impl Hearing {
             },
             Model::Listening(_) => None,
         };
+        let mut spinner = None;
         if let Some(doing) = doing {
             if !lines.is_empty() {
                 lines.push(Line::default());
             }
+            let start = lines.len();
             lines.extend(menu::waiting(doing, inner, dim, frame));
+            if lines.len() > start {
+                spinner = Some(start);
+            }
         }
         let keys = match self.key {
             Key::Down(_) => vec![(Hint::Alt('r'), "Let go to write"), (Hint::Esc, "Cancel")],
@@ -366,7 +401,7 @@ impl Hearing {
         };
         let seconds = heard.as_secs();
         let bars: String = self.levels.iter().map(|level| bar(*level)).collect();
-        (lines, keys, format!("● {}:{:02} {bars}", seconds / 60, seconds % 60))
+        ((lines, keys, format!("● {}:{:02} {bars}", seconds / 60, seconds % 60)), spinner)
     }
 }
 
@@ -471,7 +506,7 @@ mod tests {
         assert_eq!(stop.try_recv(), Err(TryRecvError::Empty));
         let let_go =
             KeyEvent::new_with_kind(KeyCode::Char('r'), KeyModifiers::NONE, KeyEventKind::Release);
-        assert_eq!(dictation.key(&let_go, at + Duration::from_secs(2)), Keyed::Nothing);
+        assert_eq!(dictation.key(&let_go, at + Duration::from_secs(2)), Keyed::Changed);
         assert_eq!(stop.try_recv(), Ok(()));
         assert_eq!(ended(&mut dictation, "Open a tab."), Some(written("Open a tab.", false)));
     }
@@ -481,12 +516,12 @@ mod tests {
         let at = Instant::now();
         let (mut dictation, stop) = hearing(true, at);
         let tapped = at + Duration::from_millis(150);
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Release), tapped), Keyed::Nothing);
+        assert_eq!(dictation.key(&alt_r(KeyEventKind::Release), tapped), Keyed::Changed);
         let typed = pressed(KeyCode::Char('x'), KeyModifiers::NONE);
         assert_eq!(dictation.key(&typed, at + Duration::from_secs(1)), Keyed::Nothing);
         assert_eq!(stop.try_recv(), Err(TryRecvError::Empty));
         let again = at + Duration::from_secs(9);
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Press), again), Keyed::Nothing);
+        assert_eq!(dictation.key(&alt_r(KeyEventKind::Press), again), Keyed::Changed);
         assert_eq!(stop.try_recv(), Ok(()));
     }
 
@@ -494,9 +529,9 @@ mod tests {
     fn where_no_key_is_told_let_go_the_key_taps() {
         let at = Instant::now();
         let (mut dictation, stop) = hearing(false, at);
-        dictation.unfocused();
+        assert!(!dictation.unfocused());
         assert_eq!(stop.try_recv(), Err(TryRecvError::Empty));
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Press), at), Keyed::Nothing);
+        assert_eq!(dictation.key(&alt_r(KeyEventKind::Press), at), Keyed::Changed);
         assert_eq!(stop.try_recv(), Ok(()));
     }
 
@@ -524,7 +559,7 @@ mod tests {
         let at = Instant::now();
         let (mut dictation, stop) = hearing(false, at);
         let enter = pressed(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(dictation.key(&enter, at), Keyed::Nothing);
+        assert_eq!(dictation.key(&enter, at), Keyed::Changed);
         assert_eq!(stop.try_recv(), Ok(()));
         assert_eq!(ended(&mut dictation, "Run the tests."), Some(written("Run the tests.", true)));
     }
@@ -546,7 +581,7 @@ mod tests {
     fn a_key_held_as_the_window_loses_the_focus_writes_what_you_said() {
         let at = Instant::now();
         let (mut dictation, stop) = hearing(true, at);
-        dictation.unfocused();
+        let _ = dictation.unfocused();
         assert_eq!(stop.try_recv(), Ok(()));
     }
 
@@ -624,7 +659,7 @@ mod tests {
         let lines = shown(&dictation, 60, 7, at);
         assert_eq!(lines[2], "│ /thermo-nuclear-review review this                       │");
         let enter = pressed(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(dictation.key(&enter, at), Keyed::Nothing);
+        assert_eq!(dictation.key(&enter, at), Keyed::Changed);
         assert_eq!(stop.try_recv(), Ok(()));
         let said = "Review this with the thermonuclear review skill.";
         assert_eq!(

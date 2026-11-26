@@ -14,6 +14,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
 use crate::brief::{self, Asking};
+use crate::cadence::Cadence;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
@@ -305,24 +306,28 @@ impl Ask {
         self.number = number;
     }
 
-    pub fn talked(&self, inner: usize, now: SystemTime) -> Vec<Line<'static>> {
-        self.lines(inner, sidebar::frame(now))
+    pub fn talked(&self, inner: usize, wall: SystemTime) -> (Vec<Line<'static>>, Option<usize>) {
+        self.lines(inner, sidebar::frame(wall))
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, wall: SystemTime) -> Cadence {
+        let mut cadence = Cadence::default();
         let Some((inner, room)) = brief::room(over) else {
-            return;
+            return cadence;
         };
-        let mut lines = self.lines(inner, sidebar::frame(now));
+        let (mut lines, spinner) = self.lines(inner, sidebar::frame(wall));
         let keys: &[(Hint, &str)] = match self.turn {
             Some(_) => &[(Hint::Esc, "Close")],
             None => &[(Hint::Enter, "Send"), (Hint::Alt('r'), "Dictate"), (Hint::Esc, "Close")],
         };
         let footer = [Line::default(), menu::keys_line(inner, keys)];
         let lines_room = room.saturating_sub(footer.len());
+        let mut kept_spinner = inner > 0 && spinner.is_some_and(|at| at < lines_room);
         if lines.len() > lines_room {
             let kept = lines_room.saturating_sub(1);
-            lines.drain(..lines.len() - kept);
+            let drained = lines.len() - kept;
+            kept_spinner = inner > 0 && spinner.is_some_and(|at| at >= drained);
+            lines.drain(..drained);
             if lines_room > 0 {
                 lines.insert(0, Line::styled(" …", Style::new().add_modifier(Modifier::DIM)));
             }
@@ -336,9 +341,13 @@ impl Ask {
             Works::There { on, cwd: None } => format!("~ on {on}"),
         };
         brief::boxed(buffer, over, TITLE, &right, &lines);
+        if kept_spinner {
+            cadence.spin();
+        }
+        cadence
     }
 
-    fn lines(&self, inner: usize, frame: usize) -> Vec<Line<'static>> {
+    fn lines(&self, inner: usize, frame: usize) -> (Vec<Line<'static>>, Option<usize>) {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let yours = Style::new().fg(ACCENT);
         let mut lines = Vec::new();
@@ -364,14 +373,16 @@ impl Ask {
             }
         }
         if self.turn.is_some() {
+            let start = lines.len();
             lines.extend(menu::waiting(&format!("Asking {}…", asks::MODEL), inner, dim, frame));
-            return lines;
+            let spinner = (lines.len() > start).then_some(start);
+            return (lines, spinner);
         }
         if !self.talk.is_empty() {
             lines.push(Line::default());
         }
         lines.extend(menu::wrap(&format!("› {}_", self.typed), inner, yours));
-        lines
+        (lines, None)
     }
 }
 
@@ -696,5 +707,24 @@ mod tests {
         assert!(context.contains("````patch\n"), "{context}");
         assert!(context.contains("\n````\n"), "{context}");
         assert!(!context.contains('\0'), "NUL bytes are stripped from excerpt");
+    }
+
+    #[test]
+    fn a_turning_ask_spins_only_when_its_waiting_line_survives_truncation() {
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        ask.talk.push(Said::You("check this".to_owned()));
+        ask.turn = Some(at_a_turn());
+        let drawn = crate::clock::Moment {
+            steady: std::time::Instant::now(),
+            system: SystemTime::UNIX_EPOCH,
+        };
+        let paint = |width: u16, height: u16| {
+            let area = Rect::new(0, 0, width, height);
+            let mut buffer = Buffer::empty(area);
+            ask.draw(&mut buffer, area, drawn.system)
+        };
+        assert_eq!(paint(50, 4).wait(drawn, drawn), None, "height 4 leaves zero body lines");
+        assert_eq!(paint(50, 5).wait(drawn, drawn), None, "height 5 drains the spinner to show ellipsis");
+        assert_eq!(paint(50, 6).wait(drawn, drawn), Some(sidebar::SPIN), "height 6 keeps the spinner on screen");
     }
 }

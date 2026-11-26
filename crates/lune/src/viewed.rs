@@ -116,6 +116,7 @@ pub enum Across {
 
 pub enum Heeded {
     Quiet,
+    Changed,
     Followed,
     Edged(Across),
     Sent(WorktreeId),
@@ -454,17 +455,16 @@ impl Layout {
         keys
     }
 
-    fn framed(&mut self, frame: Frame) -> Result<(), String> {
+    fn framed(&mut self, frame: Frame) -> Result<bool, String> {
         let key = frame.terminal();
         if !self.wanted().contains(&key) {
-            return Ok(());
+            return Ok(false);
         }
-        if Screen::apply(&mut self.screens, frame)? == Applied::Resized
-            && self.focused_key() == Some(key)
-        {
+        let applied = Screen::apply(&mut self.screens, frame)?;
+        if applied == Applied::Resized && self.focused_key() == Some(key) {
             self.pointer = self.pointer.unselected();
         }
-        Ok(())
+        Ok(applied.changed())
     }
 
     fn drawn(&self) -> Vec<(&View, Placed)> {
@@ -1128,6 +1128,9 @@ impl Viewed {
     }
 
     pub fn browser(&mut self, view: ViewId, heard: embedded::Heard) -> Heeded {
+        let failed = matches!(heard, embedded::Heard::Exited(embedded::Exit::Failed(_)));
+        let title_before = self.browsers.title(view).map(str::to_owned);
+        let pointer_before = self.browsers.pointer(view).cloned();
         let outcome = self.browsers.heard(view, heard);
         self.flush_browser_ttys();
         match outcome {
@@ -1138,9 +1141,15 @@ impl Viewed {
             },
             Some(Outcome::Close(view)) => {
                 self.ask(Asked::Close(view));
-                Heeded::Quiet
+                Heeded::Changed
             },
-            None => Heeded::Quiet,
+            None => {
+                let changed = failed
+                    || self.browsers.has_pending_graphics()
+                    || self.browsers.title(view) != title_before.as_deref()
+                    || self.browsers.pointer(view) != pointer_before.as_ref();
+                if changed { Heeded::Changed } else { Heeded::Quiet }
+            },
         }
     }
 
@@ -1154,6 +1163,11 @@ impl Viewed {
         self.browsers.cell_resized(cell);
         self.flush_browser_ttys();
         assert_eq!(self.browsers.config().cell, cell);
+    }
+
+    #[must_use]
+    pub fn has_pending_graphics(&self) -> bool {
+        self.browsers.has_pending_graphics()
     }
 
     pub fn drain_graphics(&mut self) -> Vec<u8> {
@@ -1234,6 +1248,8 @@ impl Viewed {
                 if followed {
                     self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
                 }
+                let changed = laid.worktree() == self.layout.worktree
+                    && self.layout.laid.as_ref() != Some(&laid);
                 let mut emptied = false;
                 if self.layout.laid_out(laid) {
                     match self.opened.get(&self.layout.worktree) {
@@ -1250,10 +1266,11 @@ impl Viewed {
                 self.watch();
                 self.sync_browsers();
                 self.send_unsent();
-                match (emptied, followed) {
-                    (true, _) => Heeded::Emptied,
-                    (false, true) => Heeded::Followed,
-                    (false, false) => Heeded::Quiet,
+                match (emptied, followed, changed) {
+                    (true, ..) => Heeded::Emptied,
+                    (false, true, _) => Heeded::Followed,
+                    (false, false, true) => Heeded::Changed,
+                    (false, false, false) => Heeded::Quiet,
                 }
             },
             Heard::Edged { worktree, direction, step } => {
@@ -1347,7 +1364,8 @@ impl Viewed {
             return Heeded::Quiet;
         }
         framed.take(|frame| match self.layout.framed(frame) {
-            Ok(()) => Heeded::Quiet,
+            Ok(true) => Heeded::Changed,
+            Ok(false) => Heeded::Quiet,
             Err(why) => {
                 self.unwatch();
                 Heeded::Note(format!("lune-mux said what lune cannot follow: {why}"))
@@ -1445,18 +1463,21 @@ impl Viewed {
         self.ask(Asked::Review);
     }
 
+    #[must_use]
     pub fn diff_loaded(
         &mut self,
         worktree: WorktreeId,
         loaded: &Result<Arc<LoadedDiff>, String>,
         revision: NonZeroU64,
-    ) {
+    ) -> bool {
         if self.layout.worktree != worktree {
-            return;
+            return false;
         }
+        let mut changed = false;
         for pane in self.layout.reviews.values_mut() {
-            pane.loaded(loaded.clone(), revision);
+            changed |= pane.loaded(loaded.clone(), revision);
         }
+        changed
     }
 
     pub fn arrange(&mut self, arranged: Arranged) {
@@ -1468,9 +1489,16 @@ impl Viewed {
         self.ask(Asked::Open { beside: Beside::Focused, opens });
     }
 
-    pub fn tabs(&mut self, worktree_tabs: Option<WorktreeTabs>, titles: BTreeMap<ViewId, String>) {
+    #[must_use]
+    pub fn tabs(
+        &mut self,
+        worktree_tabs: Option<WorktreeTabs>,
+        titles: BTreeMap<ViewId, String>,
+    ) -> bool {
+        let changed = self.layout.worktree_tabs != worktree_tabs || self.layout.titles != titles;
         self.layout.worktree_tabs = worktree_tabs;
         self.layout.titles = titles;
+        changed
     }
 
     pub fn resize(&mut self, columns: NonZeroU16, rows: NonZeroU16) {
@@ -1506,27 +1534,29 @@ impl Viewed {
         }
     }
 
+    #[must_use]
     pub fn key(&mut self, key: &KeyEvent, input: u64) -> (Heeded, ReviewAction) {
-        self.unselect();
+        let unselected = self.unselect();
+        let plain = if unselected { Heeded::Changed } else { Heeded::Quiet };
         if self.layout.held_after_close(key) {
-            return (Heeded::Quiet, ReviewAction::None);
+            return (plain, ReviewAction::None);
         }
         if self.layout.welcomes() {
             if let Some(view) = self.layout.closes(key, input) {
                 self.ask(Asked::Close(view));
             }
-            return (Heeded::Quiet, ReviewAction::None);
+            return (plain, ReviewAction::None);
         }
         if let Some((view, url, inner)) = self.layout.focused_browser() {
             let url = url.cloned();
             let handled = self.browsers.key(view, key);
             self.flush_browser_ttys();
             if handled {
-                return (Heeded::Quiet, ReviewAction::None);
+                return (plain, ReviewAction::None);
             }
             if let Some(closed) = self.layout.closes(key, input) {
                 self.ask(Asked::Close(closed));
-                return (Heeded::Quiet, ReviewAction::None);
+                return (plain, ReviewAction::None);
             }
             let pressed = key.kind == KeyEventKind::Press && key.modifiers.is_empty();
             if pressed {
@@ -1550,15 +1580,16 @@ impl Viewed {
                             self.window_focused,
                         );
                         self.flush_browser_ttys();
+                        return (Heeded::Changed, ReviewAction::None);
                     },
                     _ => {},
                 }
             }
-            return (Heeded::Quiet, ReviewAction::None);
+            return (plain, ReviewAction::None);
         }
         if self.layout.reviews() {
             let Some(view) = self.layout.focused() else {
-                return (Heeded::Quiet, ReviewAction::None);
+                return (plain, ReviewAction::None);
             };
             let searching = self
                 .layout
@@ -1569,29 +1600,36 @@ impl Viewed {
                 self.layout.disarm_close();
             } else if let Some(closed) = self.layout.closes(key, input) {
                 self.ask(Asked::Close(closed));
-                return (Heeded::Quiet, ReviewAction::None);
+                return (plain, ReviewAction::None);
             }
             let action = self
                 .layout
                 .reviews
                 .get_mut(&view)
                 .map_or(ReviewAction::None, |pane| pane.key(key));
-            return (Heeded::Quiet, action);
+            let heeded = if key.kind != KeyEventKind::Release || unselected {
+                Heeded::Changed
+            } else {
+                Heeded::Quiet
+            };
+            return (heeded, action);
         }
         if let Some(key) = key_said(key) {
             self.type_focused(typed::Event::Key(key));
         }
-        (Heeded::Quiet, ReviewAction::None)
+        (plain, ReviewAction::None)
     }
 
-    pub fn paste(&mut self, text: &str) {
-        self.unselect();
+    #[must_use]
+    pub fn paste(&mut self, text: &str) -> bool {
+        let unselected = self.unselect();
         if let Some((view, _, _)) = self.layout.focused_browser() {
             let _ = self.browsers.paste(view, text);
             self.flush_browser_ttys();
-            return;
+            return unselected;
         }
         self.type_focused(typed::Event::Paste(api::Paste { text: text.to_owned() }));
+        unselected
     }
 
     pub fn focus(&mut self, focused: bool) {
@@ -1637,8 +1675,16 @@ impl Viewed {
         self.layout.selected()
     }
 
-    pub fn unselect(&mut self) {
-        self.layout.pointer = self.layout.pointer.unselected();
+    #[must_use]
+    pub fn unselect(&mut self) -> bool {
+        let before = self.layout.pointer;
+        self.layout.pointer = before.unselected();
+        self.layout.pointer != before
+    }
+
+    #[must_use]
+    pub(crate) fn pointed(&self, at: Spot) -> Option<Selection> {
+        self.layout.pointed(at)
     }
 
     #[must_use]
@@ -2135,17 +2181,17 @@ mod tests {
             &events,
         );
         let one = || vec![view(11, (0, 0, 20, 4), Some(1))];
-        assert!(matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Quiet), "first, it opens");
-        assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Quiet));
+        assert!(matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Changed), "first, it opens");
+        assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Changed));
         let emptied = viewed.heard(laid_in(1, Vec::new()));
         assert!(matches!(emptied, Heeded::Emptied), "its last terminal closed, lune leaves it");
         viewed.go(&Machine::Local, worktree(2));
         let two = vec![view(21, (0, 0, 20, 4), Some(2))];
-        assert!(matches!(viewed.heard(laid_in(2, two)), Heeded::Quiet));
+        assert!(matches!(viewed.heard(laid_in(2, two)), Heeded::Changed));
         viewed.go(&Machine::Local, worktree(1));
         let back = viewed.heard(laid_in(1, Vec::new()));
-        assert!(matches!(back, Heeded::Quiet), "gone back to, it opens as it did first");
-        assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Quiet));
+        assert!(matches!(back, Heeded::Changed), "gone back to, it opens as it did first");
+        assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Changed));
         let again = viewed.heard(laid_in(1, Vec::new()));
         assert!(matches!(again, Heeded::Emptied), "emptied again, lune leaves it again");
     }
@@ -2178,7 +2224,7 @@ mod tests {
         );
         viewed.open_browser(None);
         assert!(
-            matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Quiet),
+            matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Changed),
             "initial empty Laid before Asked::Browser settles must not bounce user out"
         );
         let browser_view = show_response::View {
@@ -2186,7 +2232,7 @@ mod tests {
             rect: Some(show_response::Rect { column: 0, row: 0, columns: 20, rows: 4 }),
             found: Some(Said::Browser(Browser { url: None })),
         };
-        assert!(matches!(viewed.heard(laid_in(1, vec![browser_view])), Heeded::Quiet));
+        assert!(matches!(viewed.heard(laid_in(1, vec![browser_view])), Heeded::Changed));
         assert!(
             matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Emptied),
             "closing the browser later leaves the emptied worktree"
@@ -2416,7 +2462,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             .unwrap(),
         );
         for pane in layout.reviews.values_mut() {
-            pane.loaded(Ok(Arc::clone(&response)), NonZeroU64::MIN);
+            assert!(pane.loaded(Ok(Arc::clone(&response)), NonZeroU64::MIN));
         }
         assert!(!layout.review_needs_load());
 
@@ -2449,5 +2495,40 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert_eq!(layout.closes(&d, 3), None);
         assert_eq!(layout.closes(&d, 4), Some(terminal(12)), "d d closes the review pane");
         assert!(layout.held_after_close(&held), "trailing repeat d is swallowed after close");
+    }
+
+    #[test]
+    fn framed_reports_whether_the_screen_changed() {
+        let mut layout = Layout::new(worktree(1), None);
+        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
+        assert_eq!(layout.framed(whole(1, &["ab"], None)), Ok(true));
+        assert_eq!(layout.framed(whole(1, &["ab"], None)), Ok(false));
+        let size = frames::Size { columns: side(2), rows: side(1) };
+        let same_row = Frame::new(
+            key(1),
+            size,
+            Rows::Changed(vec![(0, lines(&["ab"]).pop().unwrap())]),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(layout.framed(same_row), Ok(false));
+        let different_row = Frame::new(
+            key(1),
+            size,
+            Rows::Changed(vec![(0, lines(&["cd"]).pop().unwrap())]),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(layout.framed(different_row), Ok(true));
+        let cursor =
+            Some(Cursor { row: 0, column: 1, shape: frames::CursorShape::Bar, blinking: false });
+        let moved_cursor =
+            Frame::new(key(1), size, Rows::Changed(Vec::new()), cursor, false).unwrap();
+        assert_eq!(layout.framed(moved_cursor), Ok(true));
+        let same_cursor =
+            Frame::new(key(1), size, Rows::Changed(Vec::new()), cursor, false).unwrap();
+        assert_eq!(layout.framed(same_cursor), Ok(false));
     }
 }

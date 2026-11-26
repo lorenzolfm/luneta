@@ -71,6 +71,10 @@ impl<S> Spots<S> {
         self.0.iter().find(|(area, _)| area.contains(at)).map(|(_, spot)| spot)
     }
 
+    pub fn hovered(&self, pointer: Position) -> Option<Rect> {
+        self.0.iter().find(|(area, _)| area.contains(pointer)).map(|(area, _)| *area)
+    }
+
     pub fn light(&self, buffer: &mut Buffer, pointer: Position) {
         let Some((area, _)) = self.0.iter().find(|(area, _)| area.contains(pointer)) else {
             return;
@@ -102,13 +106,27 @@ impl<S> Spots<S> {
 }
 
 #[derive(Debug, Default)]
-pub enum Drawn {
+pub enum SidebarBottom {
     #[default]
     Nothing,
     Keys(Keyed, Spots<KeyEvent>),
-    Menu { number: u64, area: Option<Rect>, spots: Spots<Choice> },
+    Menu { number: u64, spots: Spots<Choice> },
+}
+
+#[derive(Debug, Default)]
+pub enum Drawn {
+    #[default]
+    Nothing,
+    Menu { number: u64, area: Rect, spots: Spots<Choice> },
     Picker { number: u64, area: Rect, spots: Spots<Pick> },
-    Sidebar { numbers: Spots<Link>, bottom: Box<Drawn> },
+    Sidebar { numbers: Spots<Link>, bottom: SidebarBottom },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawnHover {
+    None,
+    Spot(Rect),
+    Sidebar { number: Option<Rect>, bottom: Option<Rect> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,19 +144,58 @@ pub enum Hit {
     Aloud(Button),
 }
 
+impl SidebarBottom {
+    pub fn at(&self, at: Position) -> Option<Hit> {
+        match self {
+            SidebarBottom::Nothing => None,
+            SidebarBottom::Keys(keyed, spots) => spots.at(at).map(|key| Hit::Keys(*keyed, *key)),
+            SidebarBottom::Menu { number, spots } => {
+                spots.at(at).cloned().map(|choice| Hit::Menu(*number, choice))
+            },
+        }
+    }
+
+    pub fn light(&self, buffer: &mut Buffer, pointer: Position) {
+        match self {
+            SidebarBottom::Nothing => {},
+            SidebarBottom::Keys(_, spots) => spots.light(buffer, pointer),
+            SidebarBottom::Menu { spots, .. } => spots.light(buffer, pointer),
+        }
+    }
+
+    #[must_use]
+    pub fn hovered(&self, pointer: Position) -> Option<Rect> {
+        match self {
+            SidebarBottom::Nothing => None,
+            SidebarBottom::Keys(_, spots) => spots.hovered(pointer),
+            SidebarBottom::Menu { spots, .. } => spots.hovered(pointer),
+        }
+    }
+
+    pub fn placed(self, lines: usize, area: Rect) -> SidebarBottom {
+        match self {
+            SidebarBottom::Nothing => SidebarBottom::Nothing,
+            SidebarBottom::Keys(keyed, spots) => {
+                SidebarBottom::Keys(keyed, spots.down(lines).placed(area))
+            },
+            SidebarBottom::Menu { number, spots } => {
+                SidebarBottom::Menu { number, spots: spots.down(lines).placed(area) }
+            },
+        }
+    }
+}
+
 impl Drawn {
     pub fn boxed(&self) -> Option<Rect> {
         match self {
-            Drawn::Menu { area, .. } => *area,
-            Drawn::Picker { area, .. } => Some(*area),
-            Drawn::Nothing | Drawn::Keys(..) | Drawn::Sidebar { .. } => None,
+            Drawn::Menu { area, .. } | Drawn::Picker { area, .. } => Some(*area),
+            Drawn::Nothing | Drawn::Sidebar { .. } => None,
         }
     }
 
     pub fn at(&self, at: Position) -> Option<Hit> {
         match self {
             Drawn::Nothing => None,
-            Drawn::Keys(keyed, spots) => spots.at(at).map(|key| Hit::Keys(*keyed, *key)),
             Drawn::Menu { number, spots, .. } => {
                 spots.at(at).cloned().map(|choice| Hit::Menu(*number, choice))
             },
@@ -154,7 +211,6 @@ impl Drawn {
     pub fn light(&self, buffer: &mut Buffer, pointer: Position) {
         match self {
             Drawn::Nothing => {},
-            Drawn::Keys(_, spots) => spots.light(buffer, pointer),
             Drawn::Menu { spots, .. } => spots.light(buffer, pointer),
             Drawn::Picker { spots, .. } => spots.light(buffer, pointer),
             Drawn::Sidebar { numbers, bottom } => {
@@ -164,19 +220,21 @@ impl Drawn {
         }
     }
 
-    pub fn placed(self, lines: usize, area: Rect) -> Drawn {
+    #[must_use]
+    pub fn hovered(&self, pointer: Position) -> DrawnHover {
         match self {
-            Drawn::Nothing => Drawn::Nothing,
-            Drawn::Keys(keyed, spots) => Drawn::Keys(keyed, spots.down(lines).placed(area)),
-            Drawn::Menu { number, area: boxed, spots } => {
-                Drawn::Menu { number, area: boxed, spots: spots.down(lines).placed(area) }
+            Drawn::Nothing => DrawnHover::None,
+            Drawn::Menu { spots, .. } => {
+                spots.hovered(pointer).map_or(DrawnHover::None, DrawnHover::Spot)
             },
-            Drawn::Picker { number, area: boxed, spots } => {
-                Drawn::Picker { number, area: boxed, spots: spots.down(lines).placed(area) }
+            Drawn::Picker { spots, .. } => {
+                spots.hovered(pointer).map_or(DrawnHover::None, DrawnHover::Spot)
             },
-            Drawn::Sidebar { numbers, bottom } => Drawn::Sidebar {
-                numbers: numbers.down(lines).placed(area),
-                bottom: Box::new(bottom.placed(lines, area)),
+            Drawn::Sidebar { numbers, bottom } => {
+                match (numbers.hovered(pointer), bottom.hovered(pointer)) {
+                    (None, None) => DrawnHover::None,
+                    (number, bottom) => DrawnHover::Sidebar { number, bottom },
+                }
             },
         }
     }
@@ -294,13 +352,21 @@ mod tests {
         spots.add(0, 0..4, key('d'));
         let area = Rect::new(0, 0, 4, 1);
         let at = Position::new(1, 0);
-        let legend = Drawn::Keys(Keyed::Legend, spots.clone());
+        let legend = Drawn::Sidebar {
+            numbers: Spots::default(),
+            bottom: SidebarBottom::Keys(Keyed::Legend, spots.clone()),
+        };
         assert_eq!(legend.at(at), Some(Hit::Keys(Keyed::Legend, key('d'))));
         assert_eq!(legend.boxed(), None);
-        let menu = |area| Drawn::Menu { number: 3, area, spots: spots.clone().map(Choice::Key) };
-        assert_eq!(menu(None).at(at), Some(Hit::Menu(3, Choice::Key(key('d')))));
-        assert_eq!(menu(None).boxed(), None);
-        assert_eq!(menu(Some(area)).boxed(), Some(area));
+        let docked = Drawn::Sidebar {
+            numbers: Spots::default(),
+            bottom: SidebarBottom::Menu { number: 3, spots: spots.clone().map(Choice::Key) },
+        };
+        assert_eq!(docked.at(at), Some(Hit::Menu(3, Choice::Key(key('d')))));
+        assert_eq!(docked.boxed(), None);
+        let floating = Drawn::Menu { number: 3, area, spots: spots.clone().map(Choice::Key) };
+        assert_eq!(floating.at(at), Some(Hit::Menu(3, Choice::Key(key('d')))));
+        assert_eq!(floating.boxed(), Some(area));
         assert_eq!(Drawn::Nothing.at(at), None);
     }
 
@@ -383,5 +449,26 @@ mod tests {
         settling.drawn(&at_line(5, 'a'), later);
         settling.drawn(&at_line(5, 'b'), later);
         assert!(!settling.takes(Position::new(11, 5), later));
+    }
+
+    #[test]
+    fn hovered_reports_sidebar_numbers_and_bottom_spots_without_recursion() {
+        let mut numbers = Spots::default();
+        numbers.add(1, 2..6, Link::parse("https://github.com/o/r/pull/1").unwrap());
+        let mut keys = Spots::default();
+        keys.add(4, 1..5, KeyEvent::from(crossterm::event::KeyCode::Char('g')));
+        let drawn = Drawn::Sidebar {
+            numbers,
+            bottom: SidebarBottom::Keys(Keyed::Legend, keys),
+        };
+        assert_eq!(
+            drawn.hovered(Position::new(3, 1)),
+            DrawnHover::Sidebar { number: Some(Rect::new(2, 1, 4, 1)), bottom: None }
+        );
+        assert_eq!(
+            drawn.hovered(Position::new(2, 4)),
+            DrawnHover::Sidebar { number: None, bottom: Some(Rect::new(1, 4, 4, 1)) }
+        );
+        assert_eq!(drawn.hovered(Position::new(0, 0)), DrawnHover::None);
     }
 }

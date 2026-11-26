@@ -1,18 +1,15 @@
 use std::time::{Instant, SystemTime};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Moment {
     pub system: SystemTime,
     pub steady: Instant,
 }
 
 impl Moment {
+    #[must_use]
     pub fn now() -> Moment {
         Moment { system: SystemTime::now(), steady: Instant::now() }
-    }
-
-    pub fn at(steady: Instant) -> Moment {
-        Moment { system: SystemTime::now(), steady }
     }
 }
 

@@ -27,6 +27,7 @@ use luned::{screens, Destination, Directory};
 
 use crate::actions::{self, Action, Pasted, Spec};
 use crate::alerts::Doing;
+use crate::cadence::Cadence;
 use crate::close::{self, Act, Plan};
 use crate::fuzzy::{Fuzzy, Score, Typos};
 use crate::host::Event;
@@ -985,12 +986,18 @@ impl Picker {
         area
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) -> Drawn {
+    pub fn draw(
+        &self,
+        buffer: &mut Buffer,
+        over: Rect,
+        wall: SystemTime,
+    ) -> (Drawn, Cadence) {
+        let mut cadence = Cadence::default();
         let palette = self.list == List::Actions;
         let area = if palette { Picker::compact(over) } else { Picker::area(over) };
         let (Some(width), Some(height)) = (area.width.checked_sub(2), area.height.checked_sub(2))
         else {
-            return Drawn::Picker { number: self.number, area, spots: Spots::default() };
+            return (Drawn::Picker { number: self.number, area, spots: Spots::default() }, cadence);
         };
         framed(buffer, area, TITLE, "", Vec::new());
         let layout = Layout::of(Rect::new(area.x + 1, area.y + 1, width, height));
@@ -1012,27 +1019,28 @@ impl Picker {
                 },
             };
             let spots = self.draw_chain(buffer, &layout, chain, &aimed);
-            return Drawn::Picker { number: self.number, area, spots };
+            return (Drawn::Picker { number: self.number, area, spots }, cadence);
         }
         let mut spots = Spots::default();
         if let Some(results) = layout.results {
             let inner = usize::from(results.width.saturating_sub(2));
             let rows = usize::from(results.height.saturating_sub(2));
             let notes = self.notes(inner);
-            let (body, picks) = self.body(inner, rows.saturating_sub(notes.len()), now);
+            let (body, picks, body_cadence) = self.body(inner, rows.saturating_sub(notes.len()), wall);
+            cadence.merge(body_cadence);
             let count = count(self.rows().at, self.rows().rows.len());
             let (lines, body_at) = anchored(notes, body, rows);
             framed(buffer, results, self.list.title(), &count, lines);
             spots.extend(picks.down(body_at).placed(results.inner(Margin::new(1, 1))));
         }
         if let Some(preview) = layout.preview {
-            self.draw_preview(buffer, preview, now);
+            cadence.merge(self.draw_preview(buffer, preview, wall));
         }
         let prompt = self.prompt(usize::from(layout.input.width.saturating_sub(2)));
         let title = if palette { self.aimed_at() } else { self.list.title().to_owned() };
         draw_input(buffer, &layout, &title, prompt);
         spots.extend(self.draw_help(buffer, layout.help));
-        Drawn::Picker { number: self.number, area, spots }
+        (Drawn::Picker { number: self.number, area, spots }, cadence)
     }
 
     fn draw_chain(
@@ -1757,27 +1765,28 @@ impl Picker {
         &self,
         width: usize,
         room: usize,
-        now: SystemTime,
-    ) -> (Vec<Line<'static>>, Spots<Pick>) {
+        wall: SystemTime,
+    ) -> (Vec<Line<'static>>, Spots<Pick>, Cadence) {
         let mut lines = Vec::new();
         let mut spots = Spots::default();
+        let mut cadence = Cadence::default();
         let mut room = room;
         if self.list == List::Agents
             && let Some((yours, agents)) = self.yours()
         {
             if room == 0 {
-                return (lines, spots);
+                return (lines, spots, cadence);
             }
             lines.push(here_line(&agent_name(agents, yours), width));
             room -= 1;
         }
         if room == 0 {
-            return (lines, spots);
+            return (lines, spots, cadence);
         }
         let rows = self.rows();
         if rows.rows.is_empty() {
             lines.extend(menu::wrap(&self.empty(), width, Style::new().fg(moonlight::MUTE)));
-            return (lines, spots);
+            return (lines, spots, cadence);
         }
         let mut items = Vec::new();
         let mut lit_at = 0;
@@ -1789,7 +1798,7 @@ impl Picker {
             items.push(Item::Row(at));
         }
         let (start, end) = viewport(lit_at, items.len(), room);
-        let frame = sidebar::frame(now);
+        let frame = sidebar::frame(wall);
         for item in &items[start..end] {
             let row = match item {
                 Item::Machine(name) => {
@@ -1799,13 +1808,25 @@ impl Picker {
                 Item::Row(row) => *row,
             };
             let lit = rows.at == Some(row);
-            let line = self.row_line(&rows.rows[row], width, frame, now);
+            let shown = &rows.rows[row];
+            if width > 0
+                && let Key::Agent { on, place } = &shown.key
+                && let Some(seated) = self.seated(on, place)
+            {
+                if seated.mark == Mark::Busy {
+                    cadence.spin();
+                }
+                if let Some(since) = seated.since {
+                    cadence.age(since, wall);
+                }
+            }
+            let line = self.row_line(shown, width, frame, wall);
             if self.picks() {
-                spots.add(lines.len(), 0..width, Pick::Row(rows.rows[row].key.clone()));
+                spots.add(lines.len(), 0..width, Pick::Row(shown.key.clone()));
             }
             lines.push(if lit { line.patch_style(Style::new().bg(LIT)) } else { line });
         }
-        (lines, spots)
+        (lines, spots, cadence)
     }
 
     fn here_session(&self, on: &Machine) -> Option<&str> {
@@ -1992,7 +2013,8 @@ impl Picker {
         }
     }
 
-    fn draw_preview(&self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
+    fn draw_preview(&self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Cadence {
+        let mut cadence = Cadence::default();
         let inner = usize::from(area.width.saturating_sub(2));
         let grey = Style::new().fg(moonlight::MUTE);
         let dim = Style::new().add_modifier(Modifier::DIM);
@@ -2007,7 +2029,7 @@ impl Picker {
                 lines.push(Line::styled(" type a branch to make its worktree", grey));
             }
             framed(buffer, area, "Preview", "", lines);
-            return;
+            return cadence;
         };
         let said = |caption: Vec<Span<'static>>, said: &str| {
             let mut lines = vec![Line::from(caption), Line::default()];
@@ -2017,15 +2039,15 @@ impl Picker {
         let (title, right, caption, looked) = match &row.key {
             Key::Housed { on, dir, .. } => {
                 self.draw_contents(buffer, area, &row.name, on, &dir.into());
-                return;
+                return cadence;
             },
             Key::Repository { on, repository, .. } => {
                 self.draw_contents(buffer, area, &row.name, on, &repository.path().into());
-                return;
+                return cadence;
             },
             Key::Unopened { on, folder: path, .. } => {
                 self.draw_contents(buffer, area, &row.name, on, path);
-                return;
+                return cadence;
             },
             Key::Folder { on, folder } => {
                 let mut caption = vec![Span::raw(" ")];
@@ -2037,7 +2059,7 @@ impl Picker {
                      project",
                 );
                 framed(buffer, area, &row.name, "", said(caption, &words));
-                return;
+                return cadence;
             },
             Key::New { project, branch, .. } => {
                 let project = project.listed().name();
@@ -2048,7 +2070,7 @@ impl Picker {
                 );
                 let lines = said(vec![Span::styled(" new", grey)], &words);
                 framed(buffer, area, &row.name, "", lines);
-                return;
+                return cadence;
             },
             Key::Project { on, project, lone } => {
                 let mut caption = vec![Span::raw(" ")];
@@ -2068,7 +2090,7 @@ impl Picker {
                     Lone::Unlisted(why) => unlisted(name, why),
                 };
                 framed(buffer, area, &row.name, "", said(caption, &words));
-                return;
+                return cadence;
             },
             Key::Machine { on } => {
                 let words = match self.out_of_reach(on) {
@@ -2076,7 +2098,7 @@ impl Picker {
                     None => format!("luned on {} keeps no project", self.machine_name(on)),
                 };
                 framed(buffer, area, &row.name, "", said(Vec::new(), &words));
-                return;
+                return cadence;
             },
             Key::Worktree { on, place } => {
                 let worktree = self.row_worktree(on, place);
@@ -2091,7 +2113,7 @@ impl Picker {
                 let Some(focus) = self.focus(on, worktree) else {
                     let lines = said(caption, "it holds no terminal to look at");
                     framed(buffer, area, &title, &right, lines);
-                    return;
+                    return cadence;
                 };
                 let looked = (on.clone(), place.project.listed().clone(), Some(focus));
                 (title, right, Line::from(caption), looked)
@@ -2108,7 +2130,12 @@ impl Picker {
                     } else {
                         Style::new().fg(moonlight::TEXT)
                     };
-                    let age = seated.since.map(|since| sidebar::age(since, now));
+                    if inner > 0
+                        && let Some(since) = seated.since
+                    {
+                        cadence.age(since, wall);
+                    }
+                    let age = seated.since.map(|since| sidebar::age(since, wall));
                     caption.extend([
                         Span::styled(seated.status.clone(), status),
                         Span::styled(" · ", dim),
@@ -2141,6 +2168,7 @@ impl Picker {
             let top = shot.end.saturating_sub(usize::from(shown.height)).max(shot.first);
             shot.show(buffer, shown, top);
         }
+        cadence
     }
 
     fn draw_contents(
@@ -3227,7 +3255,7 @@ mod tests {
     fn clicks(picker: &Picker, key: &str) -> (Vec<(String, Option<Pick>)>, Option<Pick>) {
         let over = Rect::new(0, 0, 200, 50);
         let mut buffer = Buffer::empty(over);
-        let drawn = picker.draw(&mut buffer, over, now());
+        let (drawn, _) = picker.draw(&mut buffer, over, now());
         assert_eq!(drawn.boxed(), Some(Picker::area(over)));
         let pick = |at| {
             drawn.at(at).map(|hit| match hit {
