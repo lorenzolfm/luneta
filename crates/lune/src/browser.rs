@@ -36,11 +36,11 @@ impl Browser {
         events: &Sender<Event>,
         now: Instant,
     ) -> Result<(), String> {
-        let raw = url.as_str();
-        if !raw.starts_with("http://") && !raw.starts_with("https://") {
+        if !url.is_http() {
             return Err("only http and https URLs open in the OS browser".to_owned());
         }
-        self.open_str(raw, events, now)
+        assert!(url.is_http(), "only http or https URLs reach the OS opener");
+        self.open_str(url.as_str(), events, now)
     }
 
     fn open_str(

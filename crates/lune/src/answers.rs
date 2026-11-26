@@ -21,13 +21,19 @@ pub struct CellPixels {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowPixels {
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
     Foreground(Rgb),
     Background(Rgb),
     Kitty,
     Graphics,
     CellSize(CellPixels),
-    WindowPixels(CellPixels),
+    WindowPixels(WindowPixels),
     Device,
     Turned(Theme),
 }
@@ -43,7 +49,7 @@ pub struct Answers {
     pub kitty: bool,
     pub graphics: bool,
     pub cell: Option<CellPixels>,
-    pub window_pixels: Option<CellPixels>,
+    pub window_pixels: Option<WindowPixels>,
     pub colours: Colours,
 }
 

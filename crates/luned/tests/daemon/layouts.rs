@@ -2209,17 +2209,26 @@ fn open_browser_and_terminal_socket_manage_views_and_panes() {
     let mut shown = Shown::new(&owned, worktree, 120, 40);
     shown.open_panes();
     let terminal_id = shown.open();
-    let opened = asked(
+    let with_key = shown.until("terminal key is ready", |laid| {
+        laid.views.iter().find(|view| view.id == terminal_id).and_then(key).is_some()
+    });
+    let terminal_key = with_key
+        .views
+        .iter()
+        .find(|view| view.id == terminal_id)
+        .and_then(key)
+        .unwrap();
+    let opened = projects::made(
         &owned.host,
         Change::OpenBrowser(OpenBrowser {
-            worktree: Some(worktree),
+            worktree: None,
             folder: None,
             url: Some("https://example.com/start".to_owned()),
-            from: None,
+            from: Some(terminal_key),
         }),
     )
     .unwrap();
-    assert!(opened.is_some());
+    assert_eq!(opened, Some(Made::Taken(worktree)));
     let laid = shown.until("open_browser adds a browser view", |laid| {
         laid.views.iter().any(|view| {
             matches!(

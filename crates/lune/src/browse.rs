@@ -11,6 +11,7 @@ use crate::daemon;
 use crate::worktrees;
 
 pub fn run(url: Option<&str>, folder: &Path) -> ExitCode {
+    assert_ne!(folder.as_os_str(), "", "luned folder is non-empty");
     let url = match url.map(BrowserUrl::from_user).transpose() {
         Ok(url) => url.flatten(),
         Err(why) => {
@@ -25,10 +26,18 @@ pub fn run(url: Option<&str>, folder: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    let cwd = env::current_dir()
-        .ok()
-        .and_then(|dir| worktrees::real(&dir).ok())
-        .and_then(|dir| dir.to_str().map(ToOwned::to_owned));
+    let cwd = match current_folder() {
+        Ok(dir) => Some(dir),
+        Err(why) if from.is_none() => {
+            eprintln!("lune: {why}");
+            return ExitCode::FAILURE;
+        },
+        Err(_) => None,
+    };
+    assert!(
+        cwd.is_some() || from.is_some(),
+        "open_browser always names a folder or terminal"
+    );
     let request = ChangeProjectsRequest {
         on: None,
         change: Some(Change::OpenBrowser(OpenBrowser {
@@ -53,4 +62,12 @@ pub fn run(url: Option<&str>, folder: &Path) -> ExitCode {
             ExitCode::FAILURE
         },
     }
+}
+
+fn current_folder() -> Result<String, String> {
+    let dir = env::current_dir().map_err(|error| format!("current directory is unread: {error}"))?;
+    let real = worktrees::real(&dir)?;
+    let text = real.to_str().ok_or_else(|| "current directory is not UTF-8".to_owned())?;
+    assert_ne!(text, "", "resolved current directory is non-empty");
+    Ok(text.to_owned())
 }

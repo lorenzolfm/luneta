@@ -9,21 +9,24 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use lune_domain::projects::{BrowserUrl, ViewId};
 use luned::log;
+use luned::terminal_socket;
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
-use crate::answers::{CellPixels, Colours};
+use crate::answers::{CellPixels, Colours, WindowPixels};
 use crate::host::Event;
 use crate::machines::Machine;
 
@@ -33,21 +36,33 @@ const IMAGE_ID_BASE: u32 = 0x004c_0001;
 
 const IMAGE_ID_SPAN: u32 = 0x0000_ffff;
 
-const MAX_IMAGE_PX: u32 = 4096;
+const IMAGE_PIXELS_MAX: u32 = 4096;
+
+const SHM_NAME_BYTES_MAX: usize = 256;
+
+const POINTER_SHAPE_BYTES_MAX: usize = 32;
 
 const LINE_BYTES_MAX: usize = 16 * 1024;
 
 const STDERR_BYTES_MAX: usize = 2048;
 
+const TO_GUEST_QUEUE_MAX: usize = 256;
+
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(15);
+
+const ACCEPT_POLLS_MAX: u32 = 300;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(300);
 
 const CONTROL_SOCKETS_MAX: usize = 64;
 
-const URL_POLL_MIN_GAP: Duration = Duration::from_millis(350);
+const DIR_ENTRIES_MAX: usize = 1024;
+
+const URL_POLL_GAP_MIN: Duration = Duration::from_millis(350);
+
+const DIACRITICS_MAX: u16 = 297;
 
 const PLACEHOLDER: char = '\u{10EEEE}';
 
@@ -97,50 +112,95 @@ const ROW_COLUMN_DIACRITICS: [char; 297] = [
     '\u{1D242}', '\u{1D243}', '\u{1D244}',
 ];
 
-const _: () = assert!(ROW_COLUMN_DIACRITICS.len() == 297);
+const _: () = assert!(ROW_COLUMN_DIACRITICS.len() == DIACRITICS_MAX as usize);
+const _: () = assert!(IMAGE_ID_BASE > 0);
 const _: () = assert!(IMAGE_ID_BASE + IMAGE_ID_SPAN <= 0x00ff_ffff);
+const _: () = assert!(EMBEDDED_MAX > 0);
+const _: () = assert!(EMBEDDED_MAX < IMAGE_ID_SPAN as usize);
+const _: () = assert!(IMAGE_PIXELS_MAX > 0);
+const _: () = assert!(SHM_NAME_BYTES_MAX > 0);
+const _: () = assert!(POINTER_SHAPE_BYTES_MAX > 0);
+const _: () = assert!(LINE_BYTES_MAX > 0);
+const _: () = assert!(STDERR_BYTES_MAX > 0);
+const _: () = assert!(TO_GUEST_QUEUE_MAX > 0);
+const _: () = assert!(CONTROL_SOCKETS_MAX > 0 && CONTROL_SOCKETS_MAX <= DIR_ENTRIES_MAX);
+const _: () =
+    assert!(ACCEPT_POLLS_MAX as u128 * ACCEPT_POLL.as_millis() == ACCEPT_TIMEOUT.as_millis());
+const _: () = assert!(DEFAULT_CELL.width > 0 && DEFAULT_CELL.height > 0);
+
+fn div_floor_nonzero(pixels: u16, cells: u16) -> Option<u16> {
+    if pixels == 0 || cells == 0 {
+        return None;
+    }
+    let quotient = pixels / cells;
+    if quotient == 0 {
+        return None;
+    }
+    assert!(u32::from(quotient) * u32::from(cells) <= u32::from(pixels));
+    Some(quotient)
+}
 
 #[must_use]
 pub fn cell_pixels(
     cell: Option<CellPixels>,
-    window_pixels: Option<CellPixels>,
+    window_pixels: Option<WindowPixels>,
     columns: u16,
     rows: u16,
 ) -> CellPixels {
-    if let Some(cell) = cell
+    let resolved = if let Some(cell) = cell
         && cell.width > 0
         && cell.height > 0
     {
-        return cell;
-    }
-    if let Some(window) = window_pixels
-        && columns > 0
-        && rows > 0
+        cell
+    } else if let Some(window) = window_pixels
+        && let Some(width) = div_floor_nonzero(window.width, columns)
+        && let Some(height) = div_floor_nonzero(window.height, rows)
     {
-        let width = window.width / columns;
-        let height = window.height / rows;
-        if width > 0 && height > 0 {
-            return CellPixels { width, height };
-        }
-    }
-    if let Ok(win) = rustix::termios::tcgetwinsize(io::stdout())
-        && win.ws_xpixel > 0
-        && win.ws_ypixel > 0
-        && win.ws_col > 0
-        && win.ws_row > 0
+        CellPixels { width, height }
+    } else if let Ok(window) = rustix::termios::tcgetwinsize(io::stdout())
+        && let Some(width) = div_floor_nonzero(window.ws_xpixel, window.ws_col)
+        && let Some(height) = div_floor_nonzero(window.ws_ypixel, window.ws_row)
     {
-        let width = win.ws_xpixel / win.ws_col;
-        let height = win.ws_ypixel / win.ws_row;
-        if width > 0 && height > 0 {
-            return CellPixels { width, height };
-        }
-    }
-    DEFAULT_CELL
+        CellPixels { width, height }
+    } else {
+        DEFAULT_CELL
+    };
+    assert!(resolved.width > 0, "resolved cell width is positive");
+    assert!(resolved.height > 0, "resolved cell height is positive");
+    resolved
 }
 
-#[must_use]
-pub fn tty_path(runtime: &Path, view: ViewId) -> PathBuf {
-    runtime.join(format!("b-{view}.tty"))
+fn is_pointer_shape_byte(byte: u8) -> bool {
+    matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_')
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PointerShape(String);
+
+impl PointerShape {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<PointerShape> {
+        if raw.is_empty() || raw.len() > POINTER_SHAPE_BYTES_MAX {
+            return None;
+        }
+        if !raw.bytes().all(is_pointer_shape_byte) {
+            return None;
+        }
+        let shape = PointerShape(raw.to_owned());
+        assert_ne!(shape.0, "", "pointer shape is non-empty");
+        assert!(shape.0.len() <= POINTER_SHAPE_BYTES_MAX, "pointer shape fits bound");
+        Some(shape)
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        assert_ne!(self.0, "", "pointer shape is non-empty");
+        assert!(
+            self.0.bytes().all(is_pointer_shape_byte),
+            "pointer shape holds only safe OSC 22 token bytes"
+        );
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -157,9 +217,37 @@ pub struct Frame {
     pub shm: String,
     pub width: u32,
     pub height: u32,
-    pub cols: u16,
+    pub columns: u16,
     pub rows: u16,
     pub generation: u64,
+}
+
+impl Frame {
+    fn parse(
+        shm: String,
+        width: u32,
+        height: u32,
+        columns: u16,
+        rows: u16,
+        generation: u64,
+    ) -> Option<Frame> {
+        if shm.is_empty() || shm.len() > SHM_NAME_BYTES_MAX || !shm.starts_with('/') {
+            return None;
+        }
+        if shm.bytes().any(|byte| byte == 0 || byte.is_ascii_control() || byte.is_ascii_whitespace())
+        {
+            return None;
+        }
+        if width == 0 || width > IMAGE_PIXELS_MAX || height == 0 || height > IMAGE_PIXELS_MAX {
+            return None;
+        }
+        if columns == 0 || rows == 0 {
+            return None;
+        }
+        assert!(width <= IMAGE_PIXELS_MAX && height <= IMAGE_PIXELS_MAX);
+        assert!(columns > 0 && rows > 0);
+        Some(Frame { shm, width, height, columns, rows, generation })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,7 +260,7 @@ pub enum Exit {
 pub enum Heard {
     Frame(Frame),
     Title(String),
-    Pointer(String),
+    Pointer(PointerShape),
     Clipboard(String),
     Url(Option<BrowserUrl>),
     Exited(Exit),
@@ -204,7 +292,8 @@ pub struct Desired<'a> {
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ToGuest {
     Init {
-        cols: u16,
+        #[serde(rename = "cols")]
+        columns: u16,
         rows: u16,
         width: u32,
         height: u32,
@@ -217,7 +306,8 @@ enum ToGuest {
         colors: Option<GuestColours>,
     },
     Size {
-        cols: u16,
+        #[serde(rename = "cols")]
+        columns: u16,
         rows: u16,
         width: u32,
         height: u32,
@@ -258,13 +348,19 @@ struct GuestColours {
 
 impl GuestColours {
     fn of(colours: Colours) -> Option<GuestColours> {
-        let (fg, bg) = colours.both();
-        let [fr, fg_g, fb] = fg.unwrap_or([220, 224, 232]);
-        let [br, bg_g, bb] = bg.unwrap_or([24, 24, 34]);
-        (fg.is_some() || bg.is_some()).then_some(GuestColours {
-            foreground: [fr, fg_g, fb, 255],
-            background: [br, bg_g, bb, 255],
-        })
+        let (foreground, background) = colours.both();
+        if foreground.is_none() && background.is_none() {
+            return None;
+        }
+        let [fg_red, fg_green, fg_blue] = foreground.unwrap_or([220, 224, 232]);
+        let [bg_red, bg_green, bg_blue] = background.unwrap_or([24, 24, 34]);
+        let guest = GuestColours {
+            foreground: [fg_red, fg_green, fg_blue, 255],
+            background: [bg_red, bg_green, bg_blue, 255],
+        };
+        assert_eq!(guest.foreground[3], 255);
+        assert_eq!(guest.background[3], 255);
+        Some(guest)
     }
 }
 
@@ -283,12 +379,15 @@ struct GuestMods {
 
 impl GuestMods {
     fn of(modifiers: KeyModifiers) -> GuestMods {
-        GuestMods {
+        let mods = GuestMods {
             shift: modifiers.contains(KeyModifiers::SHIFT),
             alt: modifiers.contains(KeyModifiers::ALT),
             ctrl: modifiers.contains(KeyModifiers::CONTROL),
             super_key: modifiers.contains(KeyModifiers::SUPER),
-        }
+        };
+        assert_eq!(mods.shift, modifiers.contains(KeyModifiers::SHIFT));
+        assert_eq!(mods.ctrl, modifiers.contains(KeyModifiers::CONTROL));
+        mods
     }
 }
 
@@ -300,7 +399,8 @@ enum FromGuest {
         shm: String,
         width: u32,
         height: u32,
-        cols: u16,
+        #[serde(rename = "cols")]
+        columns: u16,
         rows: u16,
         #[serde(default)]
         generation: u64,
@@ -318,27 +418,63 @@ enum FromGuest {
     Other,
 }
 
+struct SpawnSpec<'a> {
+    view: ViewId,
+    machine: &'a Machine,
+    url: Option<&'a BrowserUrl>,
+    columns: u16,
+    rows: u16,
+    visible: bool,
+    focused: bool,
+}
+
+struct InstanceMeta {
+    image_id: u32,
+    columns: u16,
+    rows: u16,
+    visible: bool,
+    focused: bool,
+    socket: PathBuf,
+    tty: PathBuf,
+    stop: Arc<AtomicBool>,
+}
+
 struct Instance {
     image_id: u32,
-    cols: u16,
+    columns: u16,
     rows: u16,
     visible: bool,
     focused: bool,
     frame: Option<Frame>,
     title: Option<String>,
-    pointer: Option<String>,
+    pointer: Option<PointerShape>,
     error: Option<String>,
     tty: PathBuf,
     socket: PathBuf,
     last_url_poll: Option<Instant>,
+    url_poll_in_flight: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
-    tx: Option<Sender<ToGuest>>,
+    sender: Option<SyncSender<ToGuest>>,
 }
 
 impl Instance {
-    fn send(&self, message: ToGuest) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(message);
+    fn send(&mut self, message: ToGuest) -> bool {
+        let Some(sender) = &self.sender else {
+            return false;
+        };
+        let is_mouse = matches!(message, ToGuest::Mouse { .. });
+        match sender.try_send(message) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                if !is_mouse {
+                    log::say("embedded browser outbound queue full; dropping message");
+                }
+                true
+            },
+            Err(TrySendError::Disconnected(_)) => {
+                self.sender = None;
+                false
+            },
         }
     }
 }
@@ -346,9 +482,28 @@ impl Instance {
 impl Drop for Instance {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.tx = None;
-        let _ = fs::remove_file(&self.socket);
-        let _ = fs::remove_file(&self.tty);
+        self.sender = None;
+        remove_if_present(&self.socket);
+        remove_if_present(&self.tty);
+    }
+}
+
+struct FlagGuard(Arc<AtomicBool>);
+
+impl Drop for FlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn remove_if_present(path: &Path) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != ErrorKind::NotFound
+    {
+        log::say(&format!("{}: embedded browser file not removed: {error}", path.display()));
     }
 }
 
@@ -359,13 +514,16 @@ pub struct Browsers {
     views: BTreeMap<ViewId, Instance>,
     next_id: u32,
     next_socket: u64,
-    pending_graphics: Vec<u8>,
+    pending_transmits: BTreeMap<u32, Frame>,
+    pending_deletes: BTreeSet<u32>,
     owned_ids: BTreeSet<u32>,
 }
 
 impl Browsers {
     #[must_use]
     pub fn new(number: u64, config: Config, events: Sender<Event>) -> Browsers {
+        assert!(config.cell.width > 0, "browser config cell width is positive");
+        assert!(config.cell.height > 0, "browser config cell height is positive");
         Browsers {
             number,
             config,
@@ -373,7 +531,8 @@ impl Browsers {
             views: BTreeMap::new(),
             next_id: IMAGE_ID_BASE,
             next_socket: 0,
-            pending_graphics: Vec::new(),
+            pending_transmits: BTreeMap::new(),
+            pending_deletes: BTreeSet::new(),
             owned_ids: BTreeSet::new(),
         }
     }
@@ -383,6 +542,12 @@ impl Browsers {
         self.config.supported
     }
 
+    #[must_use]
+    pub fn config(&self) -> &Config {
+        assert!(self.config.cell.width > 0 && self.config.cell.height > 0);
+        &self.config
+    }
+
     pub fn sync(
         &mut self,
         machine: &Machine,
@@ -390,27 +555,29 @@ impl Browsers {
         focused: Option<ViewId>,
         window_focused: bool,
     ) {
+        assert!(self.views.len() <= EMBEDDED_MAX, "embedded browsers stay within EMBEDDED_MAX");
         if !self.config.supported {
             self.clear();
+            assert!(self.views.is_empty(), "unsupported browsers hold no instances");
             return;
         }
-        let wanted: BTreeSet<ViewId> = desired.iter().map(|it| it.view).collect();
+        let wanted: BTreeSet<ViewId> = desired.iter().map(|item| item.view).collect();
         let removed: Vec<ViewId> =
             self.views.keys().copied().filter(|id| !wanted.contains(id)).collect();
         for view in removed {
             self.remove(view);
         }
         for item in desired {
-            let cols = item.inner.width.max(1);
+            let columns = item.inner.width.max(1);
             let rows = item.inner.height.max(1);
             let is_focused = window_focused && item.visible && focused == Some(item.view);
             if let Some(instance) = self.views.get_mut(&item.view) {
-                if instance.cols != cols || instance.rows != rows {
-                    instance.cols = cols;
+                if instance.columns != columns || instance.rows != rows {
+                    instance.columns = columns;
                     instance.rows = rows;
-                    let (width, height) = pixel_size(cols, rows, self.config.cell);
-                    instance.send(ToGuest::Size {
-                        cols,
+                    let (width, height) = pixel_size(columns, rows, self.config.cell);
+                    let _ = instance.send(ToGuest::Size {
+                        columns,
                         rows,
                         width,
                         height,
@@ -419,19 +586,28 @@ impl Browsers {
                 }
                 if instance.visible != item.visible {
                     instance.visible = item.visible;
-                    instance.send(ToGuest::Visible { value: item.visible });
+                    let _ = instance.send(ToGuest::Visible { value: item.visible });
                 }
                 if instance.focused != is_focused {
                     instance.focused = is_focused;
-                    instance.send(ToGuest::Focus { focused: is_focused });
+                    let _ = instance.send(ToGuest::Focus { focused: is_focused });
                 }
                 continue;
             }
             if self.views.len() >= EMBEDDED_MAX {
                 continue;
             }
-            self.spawn(item.view, machine, item.url, cols, rows, item.visible, is_focused);
+            self.spawn(&SpawnSpec {
+                view: item.view,
+                machine,
+                url: item.url,
+                columns,
+                rows,
+                visible: item.visible,
+                focused: is_focused,
+            });
         }
+        assert!(self.views.len() <= EMBEDDED_MAX, "embedded browsers stay within EMBEDDED_MAX");
     }
 
     pub fn retry(
@@ -445,50 +621,74 @@ impl Browsers {
         if !self.config.supported {
             return;
         }
+        let already_held = self.views.contains_key(&view);
+        if !already_held && self.views.len() >= EMBEDDED_MAX {
+            return;
+        }
         self.remove(view);
-        self.spawn(view, machine, url, inner.width.max(1), inner.height.max(1), true, focused);
+        assert!(!self.views.contains_key(&view), "retried view was removed first");
+        self.spawn(&SpawnSpec {
+            view,
+            machine,
+            url,
+            columns: inner.width.max(1),
+            rows: inner.height.max(1),
+            visible: true,
+            focused,
+        });
+        assert!(self.views.len() <= EMBEDDED_MAX, "embedded browsers stay within EMBEDDED_MAX");
     }
 
-    fn spawn(
-        &mut self,
-        view: ViewId,
-        machine: &Machine,
-        url: Option<&BrowserUrl>,
-        cols: u16,
-        rows: u16,
-        visible: bool,
-        focused: bool,
-    ) {
+    fn spawn(&mut self, spec: &SpawnSpec<'_>) {
+        assert!(!self.views.contains_key(&spec.view), "spawn does not overwrite an active view");
+        assert!(self.views.len() < EMBEDDED_MAX, "spawn stays within EMBEDDED_MAX");
+        assert!(spec.columns > 0 && spec.rows > 0, "spawn dimensions are positive");
         let image_id = self.alloc_image_id();
         self.next_socket = self.next_socket.wrapping_add(1);
-        let socket = self.config.runtime.join(format!("b-{}-{}.sock", std::process::id(), self.next_socket));
-        let tty = tty_path(&self.config.runtime, view);
+        let pid = std::process::id();
+        let socket = self.config.runtime.join(format!("b-{pid}-{}.sock", self.next_socket));
+        let tty = terminal_socket::browser_client_tty_path(
+            &self.config.runtime,
+            spec.view,
+            pid,
+            self.next_socket,
+        );
         let stop = Arc::new(AtomicBool::new(false));
-        let _ = fs::remove_file(&socket);
-        let _ = fs::remove_file(&tty);
+        let meta = InstanceMeta {
+            image_id,
+            columns: spec.columns,
+            rows: spec.rows,
+            visible: spec.visible,
+            focused: spec.focused,
+            socket: socket.clone(),
+            tty: tty.clone(),
+            stop: Arc::clone(&stop),
+        };
+        remove_if_present(&socket);
+        remove_if_present(&tty);
         let listener = match UnixListener::bind(&socket) {
             Ok(listener) => listener,
             Err(error) => {
-                self.insert_failed(view, image_id, cols, rows, visible, focused, socket, tty, stop, format!("embed socket failed: {error}"));
+                self.insert_failed(spec.view, meta, format!("embed socket failed: {error}"));
                 return;
             },
         };
         if let Err(error) = listener.set_nonblocking(true) {
-            let _ = fs::remove_file(&socket);
-            self.insert_failed(view, image_id, cols, rows, visible, focused, socket, tty, stop, format!("embed socket setup failed: {error}"));
+            remove_if_present(&socket);
+            self.insert_failed(spec.view, meta, format!("embed socket setup failed: {error}"));
             return;
         }
         if let Err(error) = symlink("/dev/null", &tty) {
-            let _ = fs::remove_file(&socket);
-            self.insert_failed(view, image_id, cols, rows, visible, focused, socket, tty, stop, format!("browser tty setup failed: {error}"));
+            remove_if_present(&socket);
+            self.insert_failed(spec.view, meta, format!("browser tty setup failed: {error}"));
             return;
         }
         let mut command = Command::new("terminal-browser");
         command.arg("open");
-        if let Machine::Remote(destination) = machine {
+        if let Machine::Remote(destination) = spec.machine {
             command.arg(format!("--ssh={destination}"));
         }
-        if let Some(url) = url {
+        if let Some(url) = spec.url {
             command.arg(url.as_str());
         }
         command
@@ -504,134 +704,116 @@ impl Browsers {
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                let _ = fs::remove_file(&socket);
-                let _ = fs::remove_file(&tty);
-                self.insert_failed(
-                    view,
-                    image_id,
-                    cols,
-                    rows,
-                    visible,
-                    focused,
-                    socket,
-                    tty,
-                    stop,
-                    MISSING_GUIDANCE.to_owned(),
-                );
+                remove_if_present(&socket);
+                remove_if_present(&tty);
+                self.insert_failed(spec.view, meta, MISSING_GUIDANCE.to_owned());
                 return;
             },
             Err(error) => {
-                let _ = fs::remove_file(&socket);
-                let _ = fs::remove_file(&tty);
+                remove_if_present(&socket);
+                remove_if_present(&tty);
                 self.insert_failed(
-                    view,
-                    image_id,
-                    cols,
-                    rows,
-                    visible,
-                    focused,
-                    socket,
-                    tty,
-                    stop,
+                    spec.view,
+                    meta,
                     format!("terminal-browser did not start: {error}"),
                 );
                 return;
             },
         };
-        let (tx, rx) = mpsc::channel();
-        let (width, height) = pixel_size(cols, rows, self.config.cell);
+        let (sender, receiver) = mpsc::sync_channel(TO_GUEST_QUEUE_MAX);
+        let (width, height) = pixel_size(spec.columns, spec.rows, self.config.cell);
         let init = ToGuest::Init {
-            cols,
-            rows,
+            columns: spec.columns,
+            rows: spec.rows,
             width,
             height,
             cell: [self.config.cell.width, self.config.cell.height],
             image_id,
             transport: "host",
-            focused,
+            focused: spec.focused,
             colors: GuestColours::of(self.config.colours),
         };
         let peer = Peer {
             number: self.number,
-            view,
+            view: spec.view,
             listener,
             init,
-            rx,
+            receiver,
             events: self.events.clone(),
             stop: Arc::clone(&stop),
         };
         thread::spawn(move || run_peer(peer, Some(child)));
-        self.views.insert(view, Instance {
-            image_id,
-            cols,
-            rows,
-            visible,
-            focused,
+        let previous = self.views.insert(spec.view, Instance {
+            image_id: meta.image_id,
+            columns: meta.columns,
+            rows: meta.rows,
+            visible: meta.visible,
+            focused: meta.focused,
             frame: None,
             title: None,
             pointer: None,
             error: None,
-            tty,
-            socket,
+            tty: meta.tty,
+            socket: meta.socket,
             last_url_poll: None,
-            stop,
-            tx: Some(tx),
+            url_poll_in_flight: Arc::new(AtomicBool::new(false)),
+            stop: meta.stop,
+            sender: Some(sender),
         });
+        assert!(previous.is_none(), "spawned view was not already present");
     }
 
-    #[expect(clippy::too_many_arguments, reason = "internal helper constructing a failed instance")]
-    fn insert_failed(
-        &mut self,
-        view: ViewId,
-        image_id: u32,
-        cols: u16,
-        rows: u16,
-        visible: bool,
-        focused: bool,
-        socket: PathBuf,
-        tty: PathBuf,
-        stop: Arc<AtomicBool>,
-        error: String,
-    ) {
-        self.views.insert(view, Instance {
-            image_id,
-            cols,
-            rows,
-            visible,
-            focused,
+    fn insert_failed(&mut self, view: ViewId, meta: InstanceMeta, error: String) {
+        assert_ne!(error, "", "failure message is non-empty");
+        assert!(self.views.len() < EMBEDDED_MAX, "failed instance stays within EMBEDDED_MAX");
+        let previous = self.views.insert(view, Instance {
+            image_id: meta.image_id,
+            columns: meta.columns,
+            rows: meta.rows,
+            visible: meta.visible,
+            focused: meta.focused,
             frame: None,
             title: None,
             pointer: None,
             error: Some(error),
-            tty,
-            socket,
+            tty: meta.tty,
+            socket: meta.socket,
             last_url_poll: None,
-            stop,
-            tx: None,
+            url_poll_in_flight: Arc::new(AtomicBool::new(false)),
+            stop: meta.stop,
+            sender: None,
         });
+        assert!(previous.is_none(), "failed view did not overwrite an active view");
     }
 
     fn alloc_image_id(&mut self) -> u32 {
-        for _ in 0..IMAGE_ID_SPAN {
+        assert!(
+            (IMAGE_ID_BASE..=IMAGE_ID_BASE + IMAGE_ID_SPAN).contains(&self.next_id),
+            "next image id stays in range"
+        );
+        for _ in 0..=IMAGE_ID_SPAN {
             let id = self.next_id;
             self.next_id = if self.next_id >= IMAGE_ID_BASE + IMAGE_ID_SPAN {
                 IMAGE_ID_BASE
             } else {
                 self.next_id + 1
             };
-            if !self.owned_ids.contains(&id)
-                && !self.views.values().any(|instance| instance.image_id == id)
-            {
+            let free = !self.owned_ids.contains(&id)
+                && !self.pending_deletes.contains(&id)
+                && !self.views.values().any(|instance| instance.image_id == id);
+            if free {
+                assert!((IMAGE_ID_BASE..=IMAGE_ID_BASE + IMAGE_ID_SPAN).contains(&id));
                 return id;
             }
         }
-        IMAGE_ID_BASE
+        unreachable!("at most EMBEDDED_MAX views share IMAGE_ID_SPAN + 1 image ids")
     }
 
     fn remove(&mut self, view: ViewId) {
         if let Some(instance) = self.views.remove(&view) {
             self.delete_image(instance.image_id);
         }
+        assert!(!self.views.contains_key(&view), "removed view is gone");
     }
 
     pub fn clear(&mut self) {
@@ -639,12 +821,17 @@ impl Browsers {
         for view in ids {
             self.remove(view);
         }
+        assert!(self.views.is_empty(), "cleared browsers hold no views");
+        assert!(self.owned_ids.is_empty(), "cleared browsers own no live images");
     }
 
     fn delete_image(&mut self, image_id: u32) {
+        assert!((IMAGE_ID_BASE..=IMAGE_ID_BASE + IMAGE_ID_SPAN).contains(&image_id));
+        self.pending_transmits.remove(&image_id);
         if self.owned_ids.remove(&image_id) {
-            append_kitty_delete(&mut self.pending_graphics, image_id);
+            self.pending_deletes.insert(image_id);
         }
+        assert!(!self.pending_transmits.contains_key(&image_id));
     }
 
     pub fn heard(&mut self, view: ViewId, heard: Heard) -> Option<Outcome> {
@@ -653,11 +840,24 @@ impl Browsers {
         let instance = self.views.get_mut(&view)?;
         match heard {
             Heard::Frame(frame) => {
+                if instance
+                    .frame
+                    .as_ref()
+                    .is_some_and(|previous| frame.generation < previous.generation)
+                {
+                    return None;
+                }
                 let image_id = instance.image_id;
-                append_kitty_transmit(&mut self.pending_graphics, image_id, &frame);
+                assert!(
+                    !self.pending_deletes.contains(&image_id),
+                    "active browser image id is not queued for deletion"
+                );
+                self.pending_transmits.insert(image_id, frame.clone());
                 self.owned_ids.insert(image_id);
                 instance.frame = Some(frame);
                 instance.error = None;
+                assert!(self.owned_ids.len() <= EMBEDDED_MAX);
+                assert!(self.pending_transmits.len() <= EMBEDDED_MAX);
                 None
             },
             Heard::Title(title) => {
@@ -665,19 +865,26 @@ impl Browsers {
                 instance.title = (!title.is_empty()).then_some(title);
                 if changed {
                     let now = Instant::now();
-                    let due = instance
-                        .last_url_poll
-                        .is_none_or(|last| now.saturating_duration_since(last) >= URL_POLL_MIN_GAP);
-                    if due {
+                    let due = instance.last_url_poll.is_none_or(|last| {
+                        now.saturating_duration_since(last) >= URL_POLL_GAP_MIN
+                    });
+                    if due
+                        && instance
+                            .url_poll_in_flight
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                    {
                         instance.last_url_poll = Some(now);
                         let tty = instance.tty.clone();
+                        let in_flight = Arc::clone(&instance.url_poll_in_flight);
                         thread::spawn(move || {
-                            if let QueriedUrl::Found(url) = query_url_for_tty(&tty) {
-                                let _ = events.send(Event::Browser {
-                                    number,
-                                    view,
-                                    heard: Heard::Url(url),
-                                });
+                            let _guard = FlagGuard(in_flight);
+                            if let QueriedUrl::Found(url) = query_url_for_tty(&tty)
+                                && events
+                                    .send(Event::Browser { number, view, heard: Heard::Url(url) })
+                                    .is_err()
+                            {
+                                log::say("embedded browser URL reply dropped on closed channel");
                             }
                         });
                     }
@@ -698,7 +905,7 @@ impl Browsers {
                 let image_id = instance.image_id;
                 instance.frame = None;
                 instance.pointer = None;
-                instance.tx = None;
+                instance.sender = None;
                 instance.error = Some(why);
                 self.delete_image(image_id);
                 None
@@ -706,39 +913,37 @@ impl Browsers {
         }
     }
 
-    pub fn key(&self, view: ViewId, key: &KeyEvent) -> bool {
-        let Some(instance) = self.views.get(&view) else {
+    pub fn key(&mut self, view: ViewId, key: &KeyEvent) -> bool {
+        let Some(instance) = self.views.get_mut(&view) else {
             return false;
         };
-        if instance.tx.is_none() {
+        if instance.sender.is_none() {
             return false;
         }
         if let Some(message) = encode_key(key) {
-            instance.send(message);
+            return instance.send(message);
         }
         true
     }
 
-    pub fn paste(&self, view: ViewId, text: &str) -> bool {
-        let Some(instance) = self.views.get(&view) else {
+    pub fn paste(&mut self, view: ViewId, text: &str) -> bool {
+        let Some(instance) = self.views.get_mut(&view) else {
             return false;
         };
-        if instance.tx.is_none() {
+        if instance.sender.is_none() {
             return false;
         }
-        instance.send(ToGuest::Paste { text: text.to_owned() });
-        true
+        instance.send(ToGuest::Paste { text: text.to_owned() })
     }
 
-    pub fn mouse(&self, view: ViewId, mouse: MouseEvent, rel_col: u16, rel_row: u16) -> bool {
-        let Some(instance) = self.views.get(&view) else {
+    pub fn mouse(&mut self, view: ViewId, mouse: MouseEvent, column: u16, row: u16) -> bool {
+        let Some(instance) = self.views.get_mut(&view) else {
             return false;
         };
-        if instance.tx.is_none() {
+        if instance.sender.is_none() {
             return false;
         }
-        instance.send(encode_mouse(mouse, rel_col, rel_row, self.config.cell));
-        true
+        instance.send(encode_mouse(mouse, column, row, self.config.cell))
     }
 
     pub fn colours(&mut self, colours: Colours) {
@@ -746,20 +951,21 @@ impl Browsers {
         let Some(guest) = GuestColours::of(colours) else {
             return;
         };
-        for instance in self.views.values() {
-            instance.send(ToGuest::Colors { colors: guest });
+        for instance in self.views.values_mut() {
+            let _ = instance.send(ToGuest::Colors { colors: guest });
         }
     }
 
     pub fn cell_resized(&mut self, cell: CellPixels) {
+        assert!(cell.width > 0 && cell.height > 0, "resized cell dimensions are positive");
         if self.config.cell == cell {
             return;
         }
         self.config.cell = cell;
-        for instance in self.views.values() {
-            let (width, height) = pixel_size(instance.cols, instance.rows, cell);
-            instance.send(ToGuest::Size {
-                cols: instance.cols,
+        for instance in self.views.values_mut() {
+            let (width, height) = pixel_size(instance.columns, instance.rows, cell);
+            let _ = instance.send(ToGuest::Size {
+                columns: instance.columns,
                 rows: instance.rows,
                 width,
                 height,
@@ -774,10 +980,10 @@ impl Browsers {
     }
 
     #[must_use]
-    pub fn pointer(&self, view: ViewId) -> Option<&str> {
+    pub fn pointer(&self, view: ViewId) -> Option<&PointerShape> {
         let instance = self.views.get(&view)?;
         instance.frame.as_ref()?;
-        instance.pointer.as_deref()
+        instance.pointer.as_ref()
     }
 
     #[must_use]
@@ -791,20 +997,32 @@ impl Browsers {
         let Some(frame) = &instance.frame else {
             return Shown::Starting;
         };
-        paint_placeholders(buffer, seen, instance.image_id, frame.cols, frame.rows);
+        paint_placeholders(buffer, seen, instance.image_id, frame.columns, frame.rows);
         Shown::Live
     }
 
     pub fn drain_graphics(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.pending_graphics)
+        assert!(self.pending_transmits.len() <= EMBEDDED_MAX);
+        let mut out = Vec::new();
+        for id in std::mem::take(&mut self.pending_deletes) {
+            append_kitty_delete(&mut out, id);
+        }
+        for (id, frame) in std::mem::take(&mut self.pending_transmits) {
+            append_kitty_transmit(&mut out, id, &frame);
+        }
+        assert!(self.pending_deletes.is_empty() && self.pending_transmits.is_empty());
+        out
     }
 
     pub fn drain_all_deletes(&mut self) -> Vec<u8> {
-        let mut out = std::mem::take(&mut self.pending_graphics);
-        let ids: Vec<u32> = std::mem::take(&mut self.owned_ids).into_iter().collect();
+        self.pending_transmits.clear();
+        let mut ids = std::mem::take(&mut self.pending_deletes);
+        ids.extend(std::mem::take(&mut self.owned_ids));
+        let mut out = Vec::new();
         for id in ids {
             append_kitty_delete(&mut out, id);
         }
+        assert!(self.pending_deletes.is_empty() && self.owned_ids.is_empty());
         out
     }
 }
@@ -820,48 +1038,60 @@ struct Peer {
     view: ViewId,
     listener: UnixListener,
     init: ToGuest,
-    rx: mpsc::Receiver<ToGuest>,
+    receiver: mpsc::Receiver<ToGuest>,
     events: Sender<Event>,
     stop: Arc<AtomicBool>,
 }
 
+fn kill_and_wait(child: &mut Child) {
+    if let Err(error) = child.kill()
+        && error.kind() != ErrorKind::InvalidInput
+    {
+        log::say(&format!("terminal-browser kill failed: {error}"));
+    }
+    if let Err(error) = child.wait() {
+        log::say(&format!("terminal-browser wait failed: {error}"));
+    }
+}
+
 fn run_peer(peer: Peer, mut child: Option<Child>) {
-    let Peer { number, view, listener, init, rx, events, stop } = peer;
+    let Peer { number, view, listener, init, receiver, events, stop } = peer;
     let stderr = child.as_mut().and_then(|child| child.stderr.take()).map(|mut err| {
         thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = err.by_ref().take(STDERR_BYTES_MAX as u64).read_to_end(&mut buf);
-            String::from_utf8_lossy(&buf).trim().to_owned()
+            let mut buffer = Vec::new();
+            if let Err(error) = err.by_ref().take(STDERR_BYTES_MAX as u64).read_to_end(&mut buffer)
+            {
+                log::say(&format!("terminal-browser stderr read failed: {error}"));
+            }
+            assert!(buffer.len() <= STDERR_BYTES_MAX);
+            String::from_utf8_lossy(&buffer).trim().to_owned()
         })
     });
     let accepted = accept_peer(&listener, &stop, child.as_mut());
     match accepted {
         Ok(Some(stream)) => {
-            serve_stream(stream, number, view, &init, rx, &events, &stop);
+            serve_stream(stream, number, view, &init, receiver, &events, &stop);
         },
         Ok(None) => {},
         Err(why) => {
             let stderr_text = stderr.and_then(|handle| handle.join().ok()).unwrap_or_default();
             let detail = if stderr_text.is_empty() { why } else { stderr_text };
-            if !stop.load(Ordering::Relaxed) {
-                let _ = events.send(Event::Browser {
-                    number,
-                    view,
-                    heard: Heard::Exited(Exit::Failed(detail)),
-                });
+            if !stop.load(Ordering::Relaxed)
+                && events
+                    .send(Event::Browser { number, view, heard: Heard::Exited(Exit::Failed(detail)) })
+                    .is_err()
+            {
+                log::say("embedded browser exit event dropped on closed channel");
             }
             if let Some(mut child) = child {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_wait(&mut child);
             }
             return;
         },
     }
     if let Some(mut child) = child {
-        let stopped = stop.load(Ordering::Relaxed);
-        if stopped {
-            let _ = child.kill();
-            let _ = child.wait();
+        if stop.load(Ordering::Relaxed) {
+            kill_and_wait(&mut child);
             return;
         }
         let status = child.wait();
@@ -872,18 +1102,24 @@ fn run_peer(peer: Peer, mut child: Option<Child>) {
         let exit = match status {
             Ok(status) if status.success() => Exit::Clean,
             Ok(status) => {
-                let msg = if stderr_text.is_empty() {
+                let message = if stderr_text.is_empty() {
                     format!("terminal-browser exited ({status})")
                 } else {
                     stderr_text
                 };
-                Exit::Failed(msg)
+                Exit::Failed(message)
             },
             Err(error) => Exit::Failed(format!("terminal-browser wait failed: {error}")),
         };
-        let _ = events.send(Event::Browser { number, view, heard: Heard::Exited(exit) });
-    } else if !stop.load(Ordering::Relaxed) {
-        let _ = events.send(Event::Browser { number, view, heard: Heard::Exited(Exit::Clean) });
+        if events.send(Event::Browser { number, view, heard: Heard::Exited(exit) }).is_err() {
+            log::say("embedded browser exit event dropped on closed channel");
+        }
+    } else if !stop.load(Ordering::Relaxed)
+        && events
+            .send(Event::Browser { number, view, heard: Heard::Exited(Exit::Clean) })
+            .is_err()
+    {
+        log::say("embedded browser exit event dropped on closed channel");
     }
 }
 
@@ -893,31 +1129,37 @@ fn accept_peer(
     mut child: Option<&mut Child>,
 ) -> Result<Option<UnixStream>, String> {
     let deadline = Instant::now() + ACCEPT_TIMEOUT;
-    loop {
+    for poll in 0..ACCEPT_POLLS_MAX {
+        assert!(poll < ACCEPT_POLLS_MAX);
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                let _ = stream.set_nonblocking(false);
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| format!("embed stream setup failed: {error}"))?;
                 return Ok(Some(stream));
             },
             Err(error) if error.kind() == ErrorKind::WouldBlock => {},
             Err(error) => return Err(format!("embed accept failed: {error}")),
         }
-        if let Some(child) = child.as_deref_mut()
-            && let Ok(Some(status)) = child.try_wait()
-        {
-            if status.success() {
-                return Ok(None);
+        if let Some(child) = child.as_deref_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => return Ok(None),
+                Ok(Some(status)) => {
+                    return Err(format!("terminal-browser exited before connecting ({status})"));
+                },
+                Ok(None) => {},
+                Err(error) => return Err(format!("terminal-browser wait check failed: {error}")),
             }
-            return Err(format!("terminal-browser exited before connecting ({status})"));
         }
         if Instant::now() >= deadline {
             return Err("terminal-browser did not connect in time".to_owned());
         }
         thread::sleep(ACCEPT_POLL);
     }
+    Err("terminal-browser did not connect in time".to_owned())
 }
 
 fn serve_stream(
@@ -925,53 +1167,100 @@ fn serve_stream(
     number: u64,
     view: ViewId,
     init: &ToGuest,
-    rx: mpsc::Receiver<ToGuest>,
+    receiver: mpsc::Receiver<ToGuest>,
     events: &Sender<Event>,
     stop: &Arc<AtomicBool>,
 ) {
-    let Ok(mut writer) = stream.try_clone() else {
-        return;
+    let mut writer = match stream.try_clone() {
+        Ok(writer) => writer,
+        Err(error) => {
+            log::say(&format!("embedded browser stream clone failed: {error}"));
+            return;
+        },
     };
     let mut reader = BufReader::new(stream);
-    let Ok(Some(first)) = read_bounded_line(&mut reader) else {
-        return;
+    let first = match read_bounded_line(&mut reader) {
+        Ok(Some(line)) => line,
+        Ok(None) => return,
+        Err(error) => {
+            log::say(&format!("embedded browser handshake read failed: {error}"));
+            return;
+        },
     };
     if !matches!(serde_json::from_str::<FromGuest>(&first), Ok(FromGuest::Join {})) {
         log::say("embedded browser sent unexpected handshake");
         return;
     }
-    if write_json_line(&mut writer, init).is_err() {
+    if let Err(error) = write_json_line(&mut writer, init) {
+        log::say(&format!("embedded browser init write failed: {error}"));
         return;
     }
     let write_stop = Arc::clone(stop);
-    let Ok(shutdown_stream) = writer.try_clone() else {
-        return;
+    let shutdown_stream = match writer.try_clone() {
+        Ok(stream) => stream,
+        Err(error) => {
+            log::say(&format!("embedded browser shutdown handle clone failed: {error}"));
+            return;
+        },
     };
     thread::scope(|scope| {
         scope.spawn(move || {
-            for message in rx {
+            for message in receiver {
                 if write_stop.load(Ordering::Relaxed) {
                     break;
                 }
-                if write_json_line(&mut writer, &message).is_err() {
+                assert!(!write_stop.load(Ordering::Relaxed));
+                if let Err(error) = write_json_line(&mut writer, &message) {
+                    log::say(&format!("embedded browser write failed: {error}"));
                     break;
                 }
             }
-            let _ = shutdown_stream.shutdown(Shutdown::Both);
+            if let Err(error) = shutdown_stream.shutdown(Shutdown::Both)
+                && error.kind() != ErrorKind::NotConnected
+            {
+                log::say(&format!("embedded browser stream shutdown failed: {error}"));
+            }
         });
-        while let Ok(Some(line)) = read_bounded_line(&mut reader) {
+        loop {
+            let line = match read_bounded_line(&mut reader) {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(error) => {
+                    if !stop.load(Ordering::Relaxed) {
+                        log::say(&format!("embedded browser read failed: {error}"));
+                    }
+                    break;
+                },
+            };
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            let Ok(message) = serde_json::from_str::<FromGuest>(&line) else {
-                continue;
+            assert!(!stop.load(Ordering::Relaxed));
+            assert!(line.len() <= LINE_BYTES_MAX);
+            let message = match serde_json::from_str::<FromGuest>(&line) {
+                Ok(message) => message,
+                Err(error) => {
+                    log::say(&format!("embedded browser sent invalid message: {error}"));
+                    continue;
+                },
             };
             let heard = match message {
-                FromGuest::Frame { shm, width, height, cols, rows, generation } => {
-                    Heard::Frame(Frame { shm, width, height, cols, rows, generation })
+                FromGuest::Frame { shm, width, height, columns, rows, generation } => {
+                    let Some(frame) = Frame::parse(shm, width, height, columns, rows, generation)
+                    else {
+                        log::say("embedded browser sent invalid frame dimensions or shm");
+                        continue;
+                    };
+                    Heard::Frame(frame)
                 },
                 FromGuest::Title { text } => Heard::Title(text),
-                FromGuest::Pointer { shape } => Heard::Pointer(shape),
+                FromGuest::Pointer { shape } => {
+                    let Some(shape) = PointerShape::parse(&shape) else {
+                        log::say("embedded browser sent invalid pointer shape");
+                        continue;
+                    };
+                    Heard::Pointer(shape)
+                },
                 FromGuest::Clipboard { text } => Heard::Clipboard(text),
                 FromGuest::Join {} | FromGuest::Other => continue,
             };
@@ -983,77 +1272,106 @@ fn serve_stream(
 }
 
 fn read_bounded_line(reader: &mut BufReader<UnixStream>) -> io::Result<Option<String>> {
-    let mut buf = Vec::new();
-    loop {
+    let mut buffer = Vec::new();
+    let mut total_read = 0usize;
+    while total_read <= LINE_BYTES_MAX {
         let available = reader.fill_buf()?;
         if available.is_empty() {
-            if buf.is_empty() {
+            if buffer.is_empty() {
                 return Ok(None);
             }
-            return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+            assert!(buffer.len() <= LINE_BYTES_MAX);
+            return Ok(Some(String::from_utf8_lossy(&buffer).into_owned()));
         }
-        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
-            let take = pos.min(LINE_BYTES_MAX.saturating_sub(buf.len()));
-            buf.extend_from_slice(&available[..take]);
-            reader.consume(pos + 1);
-            return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+        if let Some(newline) = available.iter().position(|&byte| byte == b'\n') {
+            if total_read.saturating_add(newline) > LINE_BYTES_MAX {
+                reader.consume(newline + 1);
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("embedded browser line exceeded {LINE_BYTES_MAX} bytes"),
+                ));
+            }
+            buffer.extend_from_slice(&available[..newline]);
+            reader.consume(newline + 1);
+            assert!(buffer.len() <= LINE_BYTES_MAX);
+            return Ok(Some(String::from_utf8_lossy(&buffer).into_owned()));
         }
-        let len = available.len();
-        let take = len.min(LINE_BYTES_MAX.saturating_sub(buf.len()));
-        buf.extend_from_slice(&available[..take]);
-        reader.consume(len);
+        let chunk_len = available.len();
+        total_read = total_read.saturating_add(chunk_len);
+        if total_read > LINE_BYTES_MAX {
+            reader.consume(chunk_len);
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!("embedded browser line exceeded {LINE_BYTES_MAX} bytes"),
+            ));
+        }
+        buffer.extend_from_slice(available);
+        reader.consume(chunk_len);
     }
+    Err(io::Error::new(
+        ErrorKind::InvalidData,
+        format!("embedded browser line exceeded {LINE_BYTES_MAX} bytes"),
+    ))
 }
 
 fn write_json_line(writer: &mut impl io::Write, message: &impl Serialize) -> io::Result<()> {
     let mut line = serde_json::to_string(message).map_err(io::Error::other)?;
+    assert!(!line.contains('\n'), "serialized JSON line holds no embedded newline");
     line.push('\n');
     writer.write_all(line.as_bytes())?;
     writer.flush()
 }
 
-fn pixel_size(cols: u16, rows: u16, cell: CellPixels) -> (u32, u32) {
-    let width = (u32::from(cols.max(1)) * u32::from(cell.width.max(1))).min(MAX_IMAGE_PX);
-    let height = (u32::from(rows.max(1)) * u32::from(cell.height.max(1))).min(MAX_IMAGE_PX);
+fn pixel_size(columns: u16, rows: u16, cell: CellPixels) -> (u32, u32) {
+    assert!(cell.width > 0 && cell.height > 0, "cell pixel dimensions are positive");
+    let width = (u32::from(columns.max(1)) * u32::from(cell.width)).min(IMAGE_PIXELS_MAX);
+    let height = (u32::from(rows.max(1)) * u32::from(cell.height)).min(IMAGE_PIXELS_MAX);
+    assert!((1..=IMAGE_PIXELS_MAX).contains(&width));
+    assert!((1..=IMAGE_PIXELS_MAX).contains(&height));
     (width, height)
 }
 
 fn append_kitty_transmit(out: &mut Vec<u8>, image_id: u32, frame: &Frame) {
+    assert!((IMAGE_ID_BASE..=IMAGE_ID_BASE + IMAGE_ID_SPAN).contains(&image_id));
+    assert!((1..=IMAGE_PIXELS_MAX).contains(&frame.width));
+    assert!((1..=IMAGE_PIXELS_MAX).contains(&frame.height));
     let payload = base64::engine::general_purpose::STANDARD.encode(frame.shm.as_bytes());
-    let _ = write!(
+    write!(
         out,
         "\x1b_Ga=T,f=32,s={},v={},t=s,i={},U=1,c={},r={},q=2;{}\x1b\\",
-        frame.width, frame.height, image_id, frame.cols, frame.rows, payload
-    );
+        frame.width, frame.height, image_id, frame.columns, frame.rows, payload
+    )
+    .expect("writing to Vec<u8> is infallible");
 }
 
 fn append_kitty_delete(out: &mut Vec<u8>, image_id: u32) {
-    let _ = write!(out, "\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\");
+    assert!((IMAGE_ID_BASE..=IMAGE_ID_BASE + IMAGE_ID_SPAN).contains(&image_id));
+    write!(out, "\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\").expect("writing to Vec<u8> is infallible");
 }
 
-fn paint_placeholders(buffer: &mut Buffer, seen: Rect, image_id: u32, cols: u16, rows: u16) {
-    let max_dim = u16::try_from(ROW_COLUMN_DIACRITICS.len()).unwrap_or(u16::MAX);
-    let draw_cols = cols.min(seen.width).min(max_dim);
-    let draw_rows = rows.min(seen.height).min(max_dim);
-    let fg = Color::Rgb(
-        ((image_id >> 16) & 0xff) as u8,
-        ((image_id >> 8) & 0xff) as u8,
-        (image_id & 0xff) as u8,
-    );
+fn paint_placeholders(buffer: &mut Buffer, seen: Rect, image_id: u32, columns: u16, rows: u16) {
+    assert!((IMAGE_ID_BASE..=IMAGE_ID_BASE + IMAGE_ID_SPAN).contains(&image_id));
+    let [top, red, green, blue] = image_id.to_be_bytes();
+    assert_eq!(top, 0, "Kitty virtual placement image id fits 24-bit RGB");
+    let draw_columns = columns.min(seen.width).min(DIACRITICS_MAX);
+    let draw_rows = rows.min(seen.height).min(DIACRITICS_MAX);
+    assert!(usize::from(draw_columns) <= ROW_COLUMN_DIACRITICS.len());
+    assert!(usize::from(draw_rows) <= ROW_COLUMN_DIACRITICS.len());
+    let foreground = Color::Rgb(red, green, blue);
     let mut glyph = String::with_capacity(12);
     for row in 0..draw_rows {
         let row_diacritic = ROW_COLUMN_DIACRITICS[usize::from(row)];
-        for col in 0..draw_cols {
-            let Some(cell) = buffer.cell_mut((seen.x + col, seen.y + row)) else {
+        for column in 0..draw_columns {
+            let Some(cell) = buffer.cell_mut((seen.x + column, seen.y + row)) else {
                 continue;
             };
             glyph.clear();
             glyph.push(PLACEHOLDER);
             glyph.push(row_diacritic);
-            glyph.push(ROW_COLUMN_DIACRITICS[usize::from(col)]);
+            glyph.push(ROW_COLUMN_DIACRITICS[usize::from(column)]);
             cell.reset();
             cell.set_symbol(&glyph);
-            cell.set_fg(fg);
+            cell.set_fg(foreground);
             cell.set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
         }
     }
@@ -1067,14 +1385,14 @@ fn encode_key(key: &KeyEvent) -> Option<ToGuest> {
     };
     let mut mods = GuestMods::of(key.modifiers);
     let (name, text) = match key.code {
-        KeyCode::Char(c) => {
-            let s = c.to_string();
+        KeyCode::Char(character) => {
+            let spelled = character.to_string();
             let text = if mods.ctrl || mods.alt || mods.super_key {
                 String::new()
             } else {
-                s.clone()
+                spelled.clone()
             };
-            (s, text)
+            (spelled, text)
         },
         KeyCode::Up => ("up".to_owned(), String::new()),
         KeyCode::Down => ("down".to_owned(), String::new()),
@@ -1094,13 +1412,15 @@ fn encode_key(key: &KeyEvent) -> Option<ToGuest> {
             mods.shift = true;
             ("tab".to_owned(), String::new())
         },
-        KeyCode::F(n @ 1..=12) => (format!("f{n}"), String::new()),
+        KeyCode::F(number @ 1..=12) => (format!("f{number}"), String::new()),
         _ => return None,
     };
+    assert_ne!(name, "", "encoded key carries a non-empty key name");
     Some(ToGuest::Key { key: name, kind, text, mods })
 }
 
-fn encode_mouse(mouse: MouseEvent, rel_col: u16, rel_row: u16, cell: CellPixels) -> ToGuest {
+fn encode_mouse(mouse: MouseEvent, column: u16, row: u16, cell: CellPixels) -> ToGuest {
+    assert!(cell.width > 0 && cell.height > 0, "mouse cell dimensions are positive");
     let button_name = |button: MouseButton| match button {
         MouseButton::Left => "left",
         MouseButton::Middle => "middle",
@@ -1116,10 +1436,12 @@ fn encode_mouse(mouse: MouseEvent, rel_col: u16, rel_row: u16, cell: CellPixels)
         MouseEventKind::ScrollLeft => ("scrollleft", "none"),
         MouseEventKind::ScrollRight => ("scrollright", "none"),
     };
-    let cw = u32::from(cell.width.max(1));
-    let ch = u32::from(cell.height.max(1));
-    let x = u32::from(rel_col) * cw + cw / 2;
-    let y = u32::from(rel_row) * ch + ch / 2;
+    let cell_width = u32::from(cell.width);
+    let cell_height = u32::from(cell.height);
+    let x = u32::from(column) * cell_width + cell_width / 2;
+    let y = u32::from(row) * cell_height + cell_height / 2;
+    assert!(x >= u32::from(column) * cell_width);
+    assert!(y >= u32::from(row) * cell_height);
     ToGuest::Mouse { kind, button, mods: GuestMods::of(mouse.modifiers), x, y }
 }
 
@@ -1141,6 +1463,7 @@ struct ControlData {
 }
 
 fn query_url_for_tty(tty: &Path) -> QueriedUrl {
+    assert_ne!(tty.as_os_str(), "", "queried tty path is non-empty");
     let want = tty.to_string_lossy();
     let Some(runtime) = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -1149,11 +1472,18 @@ fn query_url_for_tty(tty: &Path) -> QueriedUrl {
     else {
         return QueriedUrl::Missing;
     };
-    let Ok(dirs) = fs::read_dir(runtime) else {
-        return QueriedUrl::Missing;
+    let dirs = match fs::read_dir(&runtime) {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            log::say(&format!("{}: browser runtime dir unread: {error}", runtime.display()));
+            return QueriedUrl::Missing;
+        },
     };
     let mut probed = 0usize;
-    for entry in dirs.flatten() {
+    for entry in dirs.take(DIR_ENTRIES_MAX) {
+        let Ok(entry) = entry else {
+            continue;
+        };
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -1165,10 +1495,14 @@ fn query_url_for_tty(tty: &Path) -> QueriedUrl {
         let Ok(sockets) = fs::read_dir(instances) else {
             continue;
         };
-        for socket in sockets.flatten() {
+        for socket in sockets.take(DIR_ENTRIES_MAX) {
             if probed >= CONTROL_SOCKETS_MAX {
+                assert!(probed <= CONTROL_SOCKETS_MAX);
                 return QueriedUrl::Missing;
             }
+            let Ok(socket) = socket else {
+                continue;
+            };
             let path = socket.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("sock") {
                 continue;
@@ -1179,7 +1513,7 @@ fn query_url_for_tty(tty: &Path) -> QueriedUrl {
             {
                 let url = data.url.as_deref().and_then(|raw| {
                     let trimmed = raw.trim();
-                    if trimmed.is_empty() || trimmed == "about:blank" {
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("about:blank") {
                         None
                     } else {
                         BrowserUrl::parse(trimmed).ok()
@@ -1189,17 +1523,20 @@ fn query_url_for_tty(tty: &Path) -> QueriedUrl {
             }
         }
     }
+    assert!(probed <= CONTROL_SOCKETS_MAX);
     QueriedUrl::Missing
 }
 
 fn ask_control_state(socket: &Path) -> Option<ControlData> {
+    assert_ne!(socket.as_os_str(), "", "control socket path is non-empty");
     let mut stream = UnixStream::connect(socket).ok()?;
-    let _ = stream.set_read_timeout(Some(CONTROL_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(CONTROL_TIMEOUT));
+    stream.set_read_timeout(Some(CONTROL_TIMEOUT)).ok()?;
+    stream.set_write_timeout(Some(CONTROL_TIMEOUT)).ok()?;
     stream.write_all(b"{\"id\":\"1\",\"cmd\":\"state\"}\n").ok()?;
     stream.flush().ok()?;
     let mut reader = BufReader::new(stream);
     let line = read_bounded_line(&mut reader).ok()??;
+    assert!(line.len() <= LINE_BYTES_MAX);
     let reply: ControlReply = serde_json::from_str(&line).ok()?;
     reply.ok.then_some(reply.data).flatten()
 }
@@ -1245,12 +1582,55 @@ mod tests {
     }
 
     #[test]
+    fn pointer_shape_and_frame_reject_invalid_guest_values() {
+        assert_eq!(PointerShape::parse("pointer").unwrap().as_str(), "pointer");
+        assert_eq!(PointerShape::parse("ew-resize").unwrap().as_str(), "ew-resize");
+        for bad in [
+            "",
+            "pointer\x1b\\injected",
+            "pointer\x07",
+            "pointer;extra",
+            "UPPER",
+            "a b",
+            &"a".repeat(POINTER_SHAPE_BYTES_MAX + 1),
+        ] {
+            assert_eq!(PointerShape::parse(bad), None, "{bad:?}");
+        }
+
+        assert!(Frame::parse("/px-1".to_owned(), 800, 600, 80, 24, 1).is_some());
+        assert!(Frame::parse(String::new(), 800, 600, 80, 24, 1).is_none());
+        assert!(Frame::parse("px-1".to_owned(), 800, 600, 80, 24, 1).is_none());
+        assert!(Frame::parse("/px\x001".to_owned(), 800, 600, 80, 24, 1).is_none());
+        assert!(Frame::parse("/px-1".to_owned(), 0, 600, 80, 24, 1).is_none());
+        assert!(Frame::parse("/px-1".to_owned(), IMAGE_PIXELS_MAX + 1, 600, 80, 24, 1).is_none());
+        assert!(Frame::parse("/px-1".to_owned(), 800, 600, 0, 24, 1).is_none());
+    }
+
+    #[test]
+    fn read_bounded_line_rejects_oversized_lines_without_spinning() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("line.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let mut client = UnixStream::connect(&socket).unwrap();
+        let (server, _) = listener.accept().unwrap();
+
+        let junk = vec![b'x'; LINE_BYTES_MAX + 128];
+        let writer = thread::spawn(move || {
+            let _ = client.write_all(&junk);
+        });
+        let mut reader = BufReader::new(server);
+        let err = read_bounded_line(&mut reader).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        writer.join().unwrap();
+    }
+
+    #[test]
     fn kitty_graphics_and_placeholder_cells_encode_properly() {
         let frame = Frame {
             shm: "/px-12345".to_owned(),
             width: 800,
             height: 480,
-            cols: 80,
+            columns: 80,
             rows: 24,
             generation: 1,
         };
@@ -1267,10 +1647,16 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 10, 10));
         paint_placeholders(&mut buffer, area, 0x004c_0001, 4, 2);
         let cell = &buffer[(2, 3)];
-        assert_eq!(cell.symbol(), format!("{PLACEHOLDER}{}{}", ROW_COLUMN_DIACRITICS[0], ROW_COLUMN_DIACRITICS[0]));
+        assert_eq!(
+            cell.symbol(),
+            format!("{PLACEHOLDER}{}{}", ROW_COLUMN_DIACRITICS[0], ROW_COLUMN_DIACRITICS[0])
+        );
         assert_eq!(cell.fg, Color::Rgb(0x4c, 0x00, 0x01));
         let corner = &buffer[(5, 4)];
-        assert_eq!(corner.symbol(), format!("{PLACEHOLDER}{}{}", ROW_COLUMN_DIACRITICS[1], ROW_COLUMN_DIACRITICS[3]));
+        assert_eq!(
+            corner.symbol(),
+            format!("{PLACEHOLDER}{}{}", ROW_COLUMN_DIACRITICS[1], ROW_COLUMN_DIACRITICS[3])
+        );
     }
 
     #[test]
@@ -1280,7 +1666,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         listener.set_nonblocking(true).unwrap();
         let (events_tx, events_rx) = mpsc::channel();
-        let (to_guest_tx, to_guest_rx) = mpsc::channel();
+        let (to_guest_tx, to_guest_rx) = mpsc::sync_channel(TO_GUEST_QUEUE_MAX);
         let stop = Arc::new(AtomicBool::new(false));
         let view = ViewId::of(7).unwrap();
         let peer = Peer {
@@ -1288,7 +1674,7 @@ mod tests {
             view,
             listener,
             init: ToGuest::Init {
-                cols: 40,
+                columns: 40,
                 rows: 12,
                 width: 400,
                 height: 240,
@@ -1298,7 +1684,7 @@ mod tests {
                 focused: true,
                 colors: None,
             },
-            rx: to_guest_rx,
+            receiver: to_guest_rx,
             events: events_tx,
             stop: Arc::clone(&stop),
         };
@@ -1324,6 +1710,7 @@ mod tests {
             .unwrap();
         client.write_all(b"{\"type\":\"title\",\"text\":\"GitHub\"}\n").unwrap();
         client.write_all(b"{\"type\":\"pointer\",\"shape\":\"pointer\"}\n").unwrap();
+        client.write_all(b"{\"type\":\"pointer\",\"shape\":\"bad\\u001b]52;c;\"}\n").unwrap();
         client.write_all(b"{\"type\":\"clipboard\",\"text\":\"copied\"}\n").unwrap();
 
         let mut received = Vec::new();
@@ -1333,9 +1720,9 @@ mod tests {
             }
             (received.len() >= 4).then_some(())
         });
-        assert!(matches!(received[0], Heard::Frame(ref f) if f.shm == "/px-1"));
+        assert!(matches!(received[0], Heard::Frame(ref frame) if frame.shm == "/px-1"));
         assert_eq!(received[1], Heard::Title("GitHub".to_owned()));
-        assert_eq!(received[2], Heard::Pointer("pointer".to_owned()));
+        assert_eq!(received[2], Heard::Pointer(PointerShape::parse("pointer").unwrap()));
         assert_eq!(received[3], Heard::Clipboard("copied".to_owned()));
 
         to_guest_tx.send(ToGuest::Paste { text: "hello".to_owned() }).unwrap();

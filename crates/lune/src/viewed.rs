@@ -30,7 +30,7 @@ use crate::attached::{
 };
 use crate::copied::Excerpt;
 use crate::desktop;
-use crate::embedded::{self, Browsers, Desired, Outcome, Shown};
+use crate::embedded::{self, Browsers, Desired, Outcome, PointerShape, Shown};
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::moonlight;
@@ -513,7 +513,7 @@ impl Layout {
             Found::Browser { url } => browsers
                 .and_then(|browsers| browsers.title(view.id))
                 .filter(|title| !title.is_empty())
-                .or_else(|| url.as_ref().map(|url| short_url(url.as_str())))
+                .or_else(|| url.as_ref().map(BrowserUrl::short))
                 .unwrap_or(BROWSER_TAB),
             Found::Welcome => WELCOME_TAB,
             Found::Key(_) | Found::Lost | Found::Looking => self
@@ -825,12 +825,11 @@ fn draw_view_tabs(
     }
 }
 
-fn short_url(url: &str) -> &str {
-    let stripped = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    stripped.trim_end_matches('/')
+fn paint_lines(buffer: &mut Buffer, seen: Rect, lines: &[(&str, Style)]) {
+    assert!((1..=8).contains(&lines.len()), "browser status panel paints 1 to 8 lines");
+    for (&(line, style), y) in lines.iter().zip(seen.top()..seen.bottom()) {
+        buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
+    }
 }
 
 fn draw_browser(
@@ -842,6 +841,7 @@ fn draw_browser(
     colour: Color,
     browsers: Option<&Browsers>,
 ) {
+    assert!(!seen.is_empty(), "drawn browser rect is non-empty");
     let url_line = url.map_or("Start page", BrowserUrl::as_str);
     let accent = Style::new().fg(if mine { colour } else { moonlight::MUTE });
     let text_style = Style::new().fg(moonlight::TEXT);
@@ -852,18 +852,15 @@ fn draw_browser(
         match browsers.draw(view, buffer, seen) {
             Shown::Live => return,
             Shown::Starting => {
-                let lines = [
+                paint_lines(buffer, seen, &[
                     ("Starting browser…", accent),
                     ("", dim),
                     (url_line, text_style),
-                ];
-                for ((line, style), y) in lines.into_iter().zip(seen.top()..seen.bottom()) {
-                    buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
-                }
+                ]);
                 return;
             },
             Shown::Failed(why) => {
-                let lines = [
+                paint_lines(buffer, seen, &[
                     ("Browser", accent),
                     ("", dim),
                     (url_line, text_style),
@@ -871,10 +868,7 @@ fn draw_browser(
                     (why, dim),
                     ("", dim),
                     (BROWSER_RETRY_HELP, dim),
-                ];
-                for ((line, style), y) in lines.into_iter().zip(seen.top()..seen.bottom()) {
-                    buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
-                }
+                ]);
                 return;
             },
         }
@@ -884,7 +878,7 @@ fn draw_browser(
     } else {
         BROWSER_UNSUPPORTED_TERMINAL
     };
-    let lines = [
+    paint_lines(buffer, seen, &[
         ("Browser", accent),
         ("", dim),
         (url_line, text_style),
@@ -892,10 +886,7 @@ fn draw_browser(
         (why, dim),
         ("", dim),
         (BROWSER_FALLBACK_HELP, dim),
-    ];
-    for ((line, style), y) in lines.into_iter().zip(seen.top()..seen.bottom()) {
-        buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
-    }
+    ]);
 }
 
 fn view_rect(views: Rect, rect: Placed) -> Rect {
@@ -929,7 +920,6 @@ pub struct Viewed {
     runs_in_here: Option<TerminalKey>,
     layout: Layout,
     browsers: Browsers,
-    browser_config: embedded::Config,
     window_focused: bool,
     watcher: Option<Watcher>,
     watchers: u64,
@@ -941,7 +931,6 @@ pub struct Viewed {
 }
 
 impl Viewed {
-    #[expect(clippy::too_many_arguments, reason = "constructor wires all startup dependencies")]
     pub fn start(
         number: u64,
         folder: PathBuf,
@@ -954,7 +943,7 @@ impl Viewed {
         events: &Sender<Event>,
     ) -> Viewed {
         let runs_in = where_on(&machine, runs_in_here).runs_in();
-        let browsers = Browsers::new(number, browser_config.clone(), events.clone());
+        let browsers = Browsers::new(number, browser_config, events.clone());
         let mut viewed = Viewed {
             number,
             folder,
@@ -967,7 +956,6 @@ impl Viewed {
             runs_in_here,
             layout: Layout::new(worktree, runs_in),
             browsers,
-            browser_config,
             window_focused: true,
             watcher: None,
             watchers: 0,
@@ -1045,13 +1033,14 @@ impl Viewed {
     }
 
     pub fn colours(&mut self, colours: Colours) {
-        self.browser_config.colours = colours;
         self.browsers.colours(colours);
+        assert_eq!(self.browsers.config().colours, colours);
     }
 
     pub fn cell_resized(&mut self, cell: CellPixels) {
-        self.browser_config.cell = cell;
+        assert!(cell.width > 0 && cell.height > 0, "cell dimensions are positive");
         self.browsers.cell_resized(cell);
+        assert_eq!(self.browsers.config().cell, cell);
     }
 
     pub fn drain_graphics(&mut self) -> Vec<u8> {
@@ -1063,7 +1052,7 @@ impl Viewed {
     }
 
     #[must_use]
-    pub fn pointer_shape(&self, hover: Option<Spot>) -> Option<&str> {
+    pub fn pointer_shape(&self, hover: Option<Spot>) -> Option<&PointerShape> {
         let at = on_views(hover?)?;
         for (view, placed) in self.layout.drawn() {
             if !matches!(view.found, Found::Browser { .. }) {
@@ -1098,7 +1087,16 @@ impl Viewed {
                 Some(Desired { view: view.id, url: url.as_ref(), inner, visible })
             })
             .collect();
-        self.browsers.sync(&self.machine, &desired, laid.focused().map(|v| v.id), self.window_focused);
+        assert!(
+            desired.len() <= lune_domain::projects::LAYOUT_VIEWS_MAX,
+            "desired browsers stay within LAYOUT_VIEWS_MAX"
+        );
+        self.browsers.sync(
+            &self.machine,
+            &desired,
+            laid.focused().map(|view| view.id),
+            self.window_focused,
+        );
     }
 
     pub fn heard(&mut self, heard: Heard) -> Heeded {
@@ -1266,7 +1264,7 @@ impl Viewed {
             let deletes = self.browsers.drain_all_deletes();
             let (number, folder, on) = (self.number + 1, self.folder.clone(), on.clone());
             let (size, greeting, here) = (self.size, self.greeting, self.runs_in_here);
-            let (browser_config, events) = (self.browser_config.clone(), self.events.clone());
+            let (browser_config, events) = (self.browsers.config().clone(), self.events.clone());
             *self = Viewed::start(
                 number,
                 folder,
@@ -1859,7 +1857,7 @@ mod tests {
         let folder = unserved.path().to_owned();
         let browser_config = embedded::Config {
             runtime: folder.clone(),
-            terminal_socket: folder.join("terminal-browser.sock"),
+            terminal_socket: folder.join(luned::terminal_socket::SOCKET),
             cell: CellPixels { width: 10, height: 20 },
             colours: Colours::default(),
             supported: false,
@@ -2058,7 +2056,7 @@ mod tests {
         let (events, _rx) = std::sync::mpsc::channel();
         let config = embedded::Config {
             runtime: PathBuf::from("/tmp"),
-            terminal_socket: PathBuf::from("/tmp/terminal-browser.sock"),
+            terminal_socket: PathBuf::from("/tmp").join(luned::terminal_socket::SOCKET),
             cell: crate::answers::CellPixels { width: 10, height: 20 },
             colours: crate::answers::Colours::default(),
             supported: false,

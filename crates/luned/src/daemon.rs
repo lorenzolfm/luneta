@@ -301,8 +301,10 @@ pub async fn serve(
         if let Err(error) = tailnet_ended {
             log::say(&format!("the tailnet's server did not end: {error}"));
         }
-        if let Some(browser_socket) = browser_socket {
-            let _ = browser_socket.await;
+        if let Some(browser_socket) = browser_socket
+            && let Err(error) = browser_socket.await
+        {
+            log::say(&format!("the terminal browser socket did not end: {error}"));
         }
         served.await
     };

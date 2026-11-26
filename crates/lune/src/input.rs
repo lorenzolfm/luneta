@@ -16,7 +16,7 @@ use signal_hook::consts::{SIGHUP, SIGTERM, SIGWINCH};
 use signal_hook::flag;
 use signal_hook::iterator::Signals;
 
-use crate::answers::{self, Answer, CellPixels, Theme};
+use crate::answers::{self, Answer, CellPixels, Theme, WindowPixels};
 use crate::host::Event;
 
 const ESC: u8 = 0x1b;
@@ -352,10 +352,11 @@ fn window_report(parameters: &str) -> Parsed {
     if width == 0 || height == 0 {
         return Parsed::Unknown;
     }
-    let pixels = CellPixels { width, height };
+    assert!(width > 0, "window report width is positive");
+    assert!(height > 0, "window report height is positive");
     let answer = match kind {
-        "6" => Answer::CellSize(pixels),
-        "4" => Answer::WindowPixels(pixels),
+        "6" => Answer::CellSize(CellPixels { width, height }),
+        "4" => Answer::WindowPixels(WindowPixels { width, height }),
         _ => return Parsed::Unknown,
     };
     Parsed::Whole(Sent::Answer(answer))
@@ -619,6 +620,8 @@ fn osc(bytes: &[u8]) -> Parsed {
 }
 
 fn apc(bytes: &[u8]) -> Parsed {
+    assert!(bytes.len() >= 2, "apc starts with ESC _");
+    assert_eq!(bytes[..2], [ESC, b'_'], "apc prefix matches ESC _");
     let typed = || {
         let alt = KeyEvent::new(KeyCode::Char('_'), KeyModifiers::ALT);
         Parsed::Split(Sent::Input(Input::Key(alt)), 2)
@@ -745,7 +748,7 @@ mod tests {
         assert_eq!(all, [
             Sent::Answer(Answer::Graphics),
             Sent::Answer(Answer::CellSize(CellPixels { width: 10, height: 20 })),
-            Sent::Answer(Answer::WindowPixels(CellPixels { width: 1600, height: 1000 })),
+            Sent::Answer(Answer::WindowPixels(WindowPixels { width: 1600, height: 1000 })),
             typed('x'),
             typed('y'),
         ]);

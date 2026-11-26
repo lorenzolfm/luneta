@@ -43,7 +43,9 @@ use ratatui::{DefaultTerminal, Frame, Terminal};
 use crate::actions::{Chord, COLLAPSE, DOWN, GROW, LEFT, MENU, RIGHT, SHRINK, SWAP, UP};
 use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
-use crate::answers::{self, Answer, CellPixels, Colours, DisableThemeChange, EnableThemeChange};
+use crate::answers::{
+    self, Answer, CellPixels, Colours, DisableThemeChange, EnableThemeChange, WindowPixels,
+};
 use crate::ask::{self, Ask, Keyed};
 use crate::home::{self, Home};
 use crate::attached;
@@ -451,11 +453,11 @@ pub struct App {
     settling: Settling,
     drawn: Drawn,
     pointer: Option<Position>,
-    pointer_shape: Option<String>,
+    pointer_shape: Option<embedded::PointerShape>,
     pending_graphics: Vec<u8>,
     graphics: Graphics,
     cell: CellPixels,
-    window_pixels: Option<CellPixels>,
+    window_pixels: Option<WindowPixels>,
     cursor: Option<(CursorShape, bool)>,
     title: Option<String>,
     colours: Colours,
@@ -635,7 +637,7 @@ fn give_back(mut terminal: DefaultTerminal) -> io::Result<()> {
 }
 
 fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
-    let _ = terminal.write_all(b"\x1b]22;\x1b\\");
+    terminal.write_all(b"\x1b]22;\x1b\\")?;
     execute!(
         terminal,
         EndSynchronizedUpdate,
@@ -664,12 +666,14 @@ fn run_in(
     if let Some(right) = app.viewed_mut() {
         deletes.extend(right.drain_all_deletes());
     }
-    if !deletes.is_empty() {
-        let _ = terminal.backend_mut().write_all(&deletes);
-        let _ = terminal.backend_mut().flush();
-    }
+    let flushed = if deletes.is_empty() {
+        Ok(())
+    } else {
+        terminal.backend_mut().write_all(&deletes).and_then(|()| terminal.backend_mut().flush())
+    };
     sent.extend(app.sent());
     ran?;
+    flushed?;
     Ok(app.failure())
 }
 
@@ -689,7 +693,7 @@ struct Arriving {
     releases: bool,
     graphics: Graphics,
     cell: Option<CellPixels>,
-    window_pixels: Option<CellPixels>,
+    window_pixels: Option<WindowPixels>,
     desktop: Desktop,
 }
 
@@ -789,7 +793,7 @@ impl App {
         let cell = embedded::cell_pixels(cell, window_pixels, columns, rows);
         let browser_config = embedded::Config {
             runtime: luned.clone(),
-            terminal_socket: luned.join("terminal-browser.sock"),
+            terminal_socket: luned.join(luned::terminal_socket::SOCKET),
             cell,
             colours,
             supported: graphics.supported() && !desktop::elsewhere(),
@@ -2221,9 +2225,10 @@ impl App {
     }
 
     fn browser_config(&self) -> embedded::Config {
+        assert!(self.cell.width > 0 && self.cell.height > 0);
         embedded::Config {
             runtime: self.luned.clone(),
-            terminal_socket: self.luned.join("terminal-browser.sock"),
+            terminal_socket: self.luned.join(luned::terminal_socket::SOCKET),
             cell: self.cell,
             colours: self.colours,
             supported: self.can_embed_browser(),
@@ -2231,13 +2236,17 @@ impl App {
     }
 
     fn browse_link(&mut self, link: &crate::pull::Link) {
-        if self.can_embed_browser()
-            && self.viewed().is_some()
-            && let Ok(url) = BrowserUrl::parse(&link.url())
-        {
-            self.shown().open_browser(Some(url));
-            self.leave();
-            return;
+        if self.can_embed_browser() && self.viewed().is_some() {
+            match BrowserUrl::parse(&link.url()) {
+                Ok(url) => {
+                    self.shown().open_browser(Some(url));
+                    self.leave();
+                    return;
+                },
+                Err(why) => {
+                    log::say(&format!("pull link did not parse as browser URL: {why}"));
+                },
+            }
         }
         if let Err(why) = self.browser.open(link, &self.events, Instant::now()) {
             self.sidebar.notify(why);
@@ -2989,11 +2998,11 @@ impl App {
             .pointer
             .filter(|at| !covered && right_area.contains(*at))
             .map(|at| attached::Spot { row: at.y - right_area.y, column: at.x - right_area.x });
-        let shape = self.viewed().and_then(|right| right.pointer_shape(hover)).map(str::to_owned);
+        let shape = self.viewed().and_then(|right| right.pointer_shape(hover)).cloned();
         if self.pointer_shape != shape {
             self.pointer_shape.clone_from(&shape);
             let seq = match &shape {
-                Some(shape) => format!("\x1b]22;{shape}\x1b\\"),
+                Some(shape) => format!("\x1b]22;{}\x1b\\", shape.as_str()),
                 None => "\x1b]22;\x1b\\".to_owned(),
             };
             terminal.backend_mut().write_all(seq.as_bytes())?;
