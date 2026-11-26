@@ -9,7 +9,8 @@ use crate::api::daemon_server::Daemon;
 use crate::api::{
     self, AnswerRequest, AskRequest, ChangeProjectsRequest, ChangeProjectsResponse,
     FileIssueRequest, FramesRequest, InfoResponse, IssueRepositoriesRequest,
-    IssueRepositoriesResponse, KeepChecksRequest, KeepImageRequest, ListAgentsResponse,
+    IssueRepositoriesResponse, KeepChecksRequest, KeepImageRequest, KeepPrintedRequest,
+    KeepPrintedResponse, ListAgentsResponse,
     ListContentsRequest, ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse,
     ListSkillsRequest, ListSkillsResponse, ListWorkRequest, MakeWorktreeRequest, PasteRequest,
     PruneRequest, PrunesRequest, RebaseRequest, SayRequest, ShowRequest, TranscriptEndsRequest,
@@ -191,6 +192,13 @@ impl Daemon for OverTailnet {
         _: Request<KeepChecksRequest>,
     ) -> Result<Response<Self::KeepChecksStream>, Status> {
         Err(unserved("KeepChecks"))
+    }
+
+    async fn keep_printed(
+        &self,
+        _: Request<KeepPrintedRequest>,
+    ) -> Result<Response<KeepPrintedResponse>, Status> {
+        Err(unserved("KeepPrinted"))
     }
 
     async fn list_repositories(
@@ -388,6 +396,7 @@ mod tests {
                 ("ListAgents", device.list_agents(()).await.map(drop)),
                 ("ListSkills", device.list_skills(api::ListSkillsRequest::default()).await.map(drop)),
                 ("KeepChecks", device.keep_checks(api::KeepChecksRequest::default()).await.map(drop)),
+                ("KeepPrinted", device.keep_printed(api::KeepPrintedRequest::default()).await.map(drop)),
                 ("ListRepositories", device.list_repositories(api::ListRepositoriesRequest::default()).await.map(drop)),
                 ("ListContents", device.list_contents(api::ListContentsRequest::default()).await.map(drop)),
                 ("TranscriptEnds", device.transcript_ends(api::TranscriptEndsRequest::default()).await.map(drop)),

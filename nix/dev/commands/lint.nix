@@ -7,18 +7,31 @@ in
 {
   name = "lint";
   usage = "[--breaking]";
-  help = "statix, deadnix, no comments, swift-format and swiftlint over the app, typescript over extensions, no clock waits in tests, no call past its wrapper, no shell script files and buf breaking; --breaking runs that one alone";
+  help = "statix, deadnix, no comments, matching dev and release crate profiles, swift-format and swiftlint over the app, typescript over extensions, no clock waits in tests, no call past its wrapper, no shell script files and buf breaking; --breaking runs that one alone";
   tools = [
     pkgs.buf
     pkgs.deadnix
     pkgs.findutils
     pkgs.git
+    pkgs.nix
     pkgs.statix
     comments
     swift.check
     typescript
   ];
   text = ''
+    profiles() {
+      local failures
+      failures="$(
+        nix eval --impure --raw --expr \
+          'builtins.concatStringsSep "\n" (import ${../../profiles.nix} { root = /. + builtins.getEnv "PWD"; })'
+      )" || return 1
+      [ -z "$failures" ] || {
+        printf '%s\n' "$failures" >&2
+        return 1
+      }
+    }
+
     breaking() {
       local base
       base="$(git merge-base HEAD origin/main)" || {
@@ -40,6 +53,7 @@ in
         git ls-files -z --cached --others --exclude-standard '*.nix' |
           xargs -0 deadnix --fail || status=1
         git ls-files -z --cached --others --exclude-standard | lune-comments || status=1
+        profiles || status=1
         git ls-files -z --cached --others --exclude-standard '*.swift' |
           xargs -0 -r swift-check || status=1
         git ls-files -z --cached --others --exclude-standard 'crates/*.ts' |

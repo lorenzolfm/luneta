@@ -688,17 +688,16 @@ pub fn followed(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalsListed {
-    pub terminals: Vec<Terminal>,
+    pub terminals: BTreeMap<TerminalKey, Terminal>,
     pub whole: bool,
     pub since: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Terminal {
-    pub key: TerminalKey,
     pub tag: Vec<u8>,
     pub size: Option<Size>,
-    pub cwd: String,
+    pub cwd: Option<Directory>,
     pub title: String,
     pub tty: Option<String>,
     pub is: Is,
@@ -717,7 +716,9 @@ pub struct Foreground {
     pub argv: Vec<String>,
 }
 
-fn terminals(mut listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>, Vec<String>) {
+fn terminals(
+    mut listed: Vec<api::Terminal>,
+) -> (BTreeMap<TerminalKey, Terminal>, Vec<String>, Vec<String>) {
     let (mut unread, mut unsaid) = (Vec::new(), Vec::new());
     if listed.len() > lune_protocol::MUX_TERMINALS_MAX {
         unread.push(format!(
@@ -727,16 +728,16 @@ fn terminals(mut listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>, Vec
         ));
         listed.truncate(lune_protocol::MUX_TERMINALS_MAX);
     }
-    let mut terminals: Vec<Terminal> = Vec::with_capacity(listed.len());
+    let mut terminals: BTreeMap<TerminalKey, Terminal> = BTreeMap::new();
     let mut ids = HashSet::with_capacity(listed.len());
     for terminal in listed {
         match terminal_of(terminal) {
-            Ok((read, _)) if !ids.insert(read.key.id) => {
-                unread.push(format!("terminal {} is listed twice", read.key.id));
+            Ok((key, _, _)) if !ids.insert(key.id) => {
+                unread.push(format!("terminal {} is listed twice", key.id));
             },
-            Ok((read, warnings)) => {
+            Ok((key, read, warnings)) => {
                 unsaid.extend(warnings);
-                terminals.push(read);
+                assert!(terminals.insert(key, read).is_none(), "unique id implies unique key");
             },
             Err(why) => unread.push(why),
         }
@@ -745,11 +746,18 @@ fn terminals(mut listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>, Vec
     (terminals, unread, unsaid)
 }
 
-fn terminal_of(terminal: api::Terminal) -> Result<(Terminal, Vec<String>), String> {
+fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<String>), String> {
     let key = TerminalKey::read(terminal.key)?;
     let size = terminal.size.map(|size| Size::of(size.columns, size.rows));
     let size = size.transpose().map_err(|why| format!("terminal {}'s size: {why}", key.id))?;
     let mut warnings = Vec::new();
+    let cwd = match Directory::parse(terminal.cwd) {
+        Ok(cwd) => Some(cwd),
+        Err(why) => {
+            warnings.push(format!("terminal {}'s cwd: {why}", key.id));
+            None
+        },
+    };
     let is = match terminal.program {
         None => return Err(format!("terminal {} runs nothing it says", key.id)),
         Some(api::terminal::Program::Ended(_)) => Is::Ended,
@@ -785,8 +793,8 @@ fn terminal_of(terminal: api::Terminal) -> Result<(Terminal, Vec<String>), Strin
         ProgramStatuses::of_mux(terminal.statuses, key.id.get(), ended)?;
     warnings.extend(status_warnings);
     assert!(statuses.children.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
-    let (tag, cwd, title, tty) = (terminal.tag, terminal.cwd, terminal.title, terminal.tty);
-    Ok((Terminal { key, tag, size, cwd, title, tty, is, statuses }, warnings))
+    let (tag, title, tty) = (terminal.tag, terminal.title, terminal.tty);
+    Ok((key, Terminal { tag, size, cwd, title, tty, is, statuses }, warnings))
 }
 
 pub struct Terminals;
@@ -1240,6 +1248,7 @@ mod tests {
         let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
         let listed = (1..).zip(shells).map(|(id, ran)| api::Terminal {
             key: Some(api::TerminalKey { id, made_at }),
+            cwd: "/w".to_owned(),
             program: Some(api::terminal::Program::Runs(api::Running {
                 pid: 70,
                 foreground: None,
@@ -1251,9 +1260,9 @@ mod tests {
         assert_eq!((terminals.len(), unread.len(), unsaid.len()), (7, 0, 4), "{unsaid:?}");
         let doings: Vec<(u32, Option<&Doing>)> = terminals
             .iter()
-            .map(|terminal| match &terminal.is {
-                Is::Running { doing, .. } => (terminal.key.id.get(), doing.as_ref()),
-                Is::Ended => panic!("terminal {} runs", terminal.key.id),
+            .map(|(key, terminal)| match &terminal.is {
+                Is::Running { doing, .. } => (key.id.get(), doing.as_ref()),
+                Is::Ended => panic!("terminal {} runs", key.id),
             })
             .collect();
         let going = Doing::Going {
@@ -1272,6 +1281,7 @@ mod tests {
         let ended = Some(api::terminal::Program::Ended(api::Exit::default()));
         let terminal = |id| api::Terminal {
             key: Some(api::TerminalKey { id, made_at }),
+            cwd: "/w".to_owned(),
             program: ended.clone(),
             ..api::Terminal::default()
         };
@@ -1283,9 +1293,34 @@ mod tests {
             terminal(4),
         ];
         let (terminals, unread, unsaid) = super::terminals(listed);
-        let ids: Vec<u32> = terminals.iter().map(|terminal| terminal.key.id.get()).collect();
+        let ids: Vec<u32> = terminals.keys().map(|key| key.id.get()).collect();
         assert_eq!(ids, [1, 4]);
         assert_eq!((unread.len(), unsaid.len()), (3, 0), "{unread:?}");
+    }
+
+    #[test]
+    fn malformed_cwd_warns_and_parses_to_none() {
+        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let ended = Some(api::terminal::Program::Ended(api::Exit::default()));
+        let terminal = |id, cwd: &str| api::Terminal {
+            key: Some(api::TerminalKey { id, made_at }),
+            cwd: cwd.to_owned(),
+            program: ended.clone(),
+            ..api::Terminal::default()
+        };
+        let (terminals, unread, unsaid) = super::terminals(vec![
+            terminal(1, "/"),
+            terminal(2, ""),
+            terminal(3, "relative"),
+            terminal(4, "/bad\0cwd"),
+        ]);
+        assert_eq!(unread, Vec::<String>::new());
+        assert_eq!(unsaid.len(), 3, "{unsaid:?}");
+        let cwds: Vec<(u32, Option<&str>)> = terminals
+            .iter()
+            .map(|(key, terminal)| (key.id.get(), terminal.cwd.as_ref().map(Directory::as_str)))
+            .collect();
+        assert_eq!(cwds, [(1, Some("/")), (2, None), (3, None), (4, None)]);
     }
 
     #[test]
@@ -1308,6 +1343,7 @@ mod tests {
         };
         let bad_terminal = api::Terminal {
             key: Some(api::TerminalKey { id: 1, made_at }),
+            cwd: "/w".to_owned(),
             program: running.clone(),
             statuses: Some(api::ProgramStatuses {
                 root: Some(working(Some(50))),
@@ -1345,12 +1381,14 @@ mod tests {
             .collect();
         let excess_terminal = api::Terminal {
             key: Some(api::TerminalKey { id: 2, made_at }),
+            cwd: "/w".to_owned(),
             program: running,
             statuses: Some(api::ProgramStatuses { root: None, children: excess_children }),
             ..api::Terminal::default()
         };
         let ended_non_terminal = api::Terminal {
             key: Some(api::TerminalKey { id: 3, made_at }),
+            cwd: "/w".to_owned(),
             program: Some(api::terminal::Program::Ended(api::Exit::default())),
             statuses: Some(api::ProgramStatuses {
                 root: Some(working(None)),
@@ -1360,6 +1398,7 @@ mod tests {
         };
         let (terminals, unread, unsaid) =
             super::terminals(vec![bad_terminal, excess_terminal, ended_non_terminal]);
+        let terminals: Vec<&Terminal> = terminals.values().collect();
         assert_eq!(terminals.len(), 2);
         assert!(terminals[0].statuses.root.is_some());
         assert_eq!(terminals[0].statuses.children.len(), 1);

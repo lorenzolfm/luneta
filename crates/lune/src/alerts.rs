@@ -7,7 +7,8 @@ use lune_protocol::agent_status::{AgentStatus, BlockedReason};
 use lune_protocol::program_status::Message;
 use lune_protocol::said::Said;
 use luned::api::Agent;
-use luned::transcripts::{on_what, one_line, Reading, SessionId, TranscriptEnd, Turn};
+use luned::log;
+use luned::transcripts::{on_what, one_line, Reading, SessionId, TranscriptEnd, Turn, TAILS_BYTES};
 use serde_json::Value;
 
 use crate::brief;
@@ -19,6 +20,9 @@ use crate::sidebar::{Listed, ViewPlace};
 pub const HELD: Duration = Duration::from_secs(6);
 
 const SHARE_BYTES: usize = 256 * 1024;
+
+const _: () = assert!(SHARE_BYTES > 0);
+const _: () = assert!(SHARE_BYTES <= TAILS_BYTES);
 
 const BODY_CHARS: usize = 150;
 
@@ -548,13 +552,18 @@ pub struct Read {
     pub alert: Alert,
 }
 
-pub fn read(due: Due, folders: luned::transcripts::Folders, events: &Sender<Event>) {
+pub fn read(due: Due, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || {
         let end = due.transcript.clone().and_then(|id| {
-            let reading = Reading::new(vec![id], SHARE_BYTES).ok()?;
-            let ends = brief::read(&due.key.on, &reading, &folders).ok()?;
-            ends.into_values().next()
+            let reading = Reading::new(vec![id], SHARE_BYTES).expect("one share fits the tails");
+            match brief::read(&due.key.on, &reading) {
+                Ok(ends) => ends.into_values().next(),
+                Err(why) => {
+                    log::say(&format!("an alert's transcript was not read: {why}"));
+                    None
+                },
+            }
         });
         let alert = Alert::of(&due, end.as_ref());
         let _ = events.send(Event::Alerted(Read { number: due.number, alert }));

@@ -4,6 +4,7 @@ resolver = "2"
 
 [workspace.package]
 version = "0.3.0"
+rust-version = "1.99.1"
 license = "MIT"
 
 [profile.release]
@@ -20,6 +21,17 @@ opt-level = 3
 [profile.dev.package.xn-gemm-common]
 opt-level = 3
 [profile.dev.package.xn-gemm-f32]
+opt-level = 3
+
+[profile.release.package.ptts]
+opt-level = 3
+[profile.release.package.xn]
+opt-level = 3
+[profile.release.package.xn-gemm]
+opt-level = 3
+[profile.release.package.xn-gemm-common]
+opt-level = 3
+[profile.release.package.xn-gemm-f32]
 opt-level = 3
 
 [workspace.lints.clippy]

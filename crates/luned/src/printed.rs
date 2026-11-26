@@ -4,6 +4,8 @@ use std::time::SystemTime;
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 
+use crate::api::keep_printed_response::{self, Printed as Told};
+use crate::api::{KeepPrintedRequest, KeepPrintedResponse, On, PrintedFile};
 use crate::mux::own::api::Dumped;
 use crate::mux::own::server::Terminals;
 use crate::{folder, keeps};
@@ -38,7 +40,56 @@ impl<T> Printed<T> {
     }
 }
 
+impl Kept {
+    #[must_use]
+    pub fn to_api(&self) -> PrintedFile {
+        let (lines, left_out) = (self.lines as u64, self.left_out as u64);
+        PrintedFile { path: self.file.clone(), lines, left_out }
+    }
+
+    pub fn of_api(said: PrintedFile) -> Result<Kept, String> {
+        let PrintedFile { path, lines, left_out } = said;
+        if !path.starts_with('/') {
+            return Err(format!("luned kept the lines at \"{path}\""));
+        }
+        let count = |count: u64| {
+            let more = |_| format!("{count} lines are more than this lune counts");
+            usize::try_from(count).map_err(more)
+        };
+        Ok(Kept { file: path, lines: count(lines)?, left_out: count(left_out)? })
+    }
+}
+
+#[must_use]
+pub fn asked(on: Option<On>, terminal: TerminalKey, typed: &Said) -> KeepPrintedRequest {
+    KeepPrintedRequest { on, terminal: Some(terminal.into()), typed: typed.as_str().to_owned() }
+}
+
 impl Printed {
+    #[must_use]
+    pub fn to_api(&self) -> KeepPrintedResponse {
+        let printed = match self {
+            Printed::After(kept) => Told::After(kept.to_api()),
+            Printed::Nothing => Told::Nothing(()),
+            Printed::Unsure(kept) => Told::Unsure(kept.to_api()),
+            Printed::Top(kept) => {
+                Told::Top(keep_printed_response::Top { kept: kept.as_ref().map(Kept::to_api) })
+            },
+        };
+        KeepPrintedResponse { printed: Some(printed) }
+    }
+
+    pub fn of_api(said: KeepPrintedResponse) -> Result<Printed, String> {
+        Ok(match said.printed.ok_or("luned said nothing of what was printed")? {
+            Told::After(kept) => Printed::After(Kept::of_api(kept)?),
+            Told::Nothing(()) => Printed::Nothing,
+            Told::Unsure(kept) => Printed::Unsure(Kept::of_api(kept)?),
+            Told::Top(keep_printed_response::Top { kept }) => {
+                Printed::Top(kept.map(Kept::of_api).transpose()?)
+            },
+        })
+    }
+
     #[must_use]
     pub fn file(&self) -> Option<&str> {
         match self {
@@ -50,7 +101,7 @@ impl Printed {
     }
 }
 
-pub fn kept_in(terminal: TerminalKey, typed: &Said) -> Result<Printed, String> {
+pub(crate) fn kept_in(terminal: TerminalKey, typed: &Said) -> Result<Printed, String> {
     kept(&Terminals.dumped(terminal, Dumped::Text)?, typed)
 }
 
@@ -155,6 +206,27 @@ mod tests {
             Ok::<_, ()>(tail.lines)
         });
         kept.unwrap()
+    }
+
+    #[test]
+    fn what_was_printed_is_said_over_the_wire_as_it_was_kept() {
+        let kept = || Kept { file: "/run/printed/a.txt".to_owned(), lines: 3, left_out: 1 };
+        let all = [
+            Printed::After(kept()),
+            Printed::Nothing,
+            Printed::Unsure(kept()),
+            Printed::Top(Some(kept())),
+            Printed::Top(None),
+        ];
+        for printed in all {
+            assert_eq!(Printed::of_api(printed.to_api()), Ok(printed));
+        }
+        let unsaid = KeepPrintedResponse { printed: None };
+        let unsaid = Printed::of_api(unsaid);
+        assert_eq!(unsaid, Err("luned said nothing of what was printed".to_owned()));
+        let relative = Kept { file: "a.txt".to_owned(), ..kept() };
+        let said = Printed::After(relative).to_api();
+        assert_eq!(Printed::of_api(said), Err("luned kept the lines at \"a.txt\"".to_owned()));
     }
 
     #[test]

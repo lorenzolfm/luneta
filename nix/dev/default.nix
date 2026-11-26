@@ -103,6 +103,12 @@ pkgs.writeShellApplication {
         error "run this inside the lune checkout"
         exit 2
       fi
+      for config in "$root/.cargo/config.toml" "$root/.cargo/config"; do
+        if [ -e "$config" ] || [ -L "$config" ]; then
+          error "$config exists, which flake.nix's cargoFiles ignores while dev and plain cargo read; remove it or wire it into flake.nix and ci.yml"
+          exit 2
+        fi
+      done
       export DEV_HERE="$PWD"
       export DEV_PATH="$PATH"
       cd "$root"

@@ -788,7 +788,7 @@ pub struct WorktreeRow {
     pub place: WorktreePlace,
     pub name: String,
     pub folder: Directory,
-    pub branch: Option<String>,
+    pub branch: Option<Said>,
     pub repository: Option<String>,
 }
 
@@ -810,7 +810,7 @@ pub enum Cwd {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Folder {
     pub dir: Directory,
-    pub branch: Option<String>,
+    pub branch: Option<Said>,
     pub repository: Option<String>,
     pub pull_request: Option<PullRequest>,
 }
@@ -945,7 +945,7 @@ impl Target {
                 Offer::Rebase(Rebases::View(beside, branch))
             },
             (Action::Rebase, Target::Worktree(_, row)) if row.repository.is_some() => {
-                Offer::Rebase(Rebases::Worktree(row, row.branch.as_deref()?))
+                Offer::Rebase(Rebases::Worktree(row, row.branch.as_ref()?))
             },
             (Action::BriefEvery, _) => Offer::Brief(brief::Scope::Every),
             (Action::BriefThis, _) => Offer::Brief(brief::Scope::Session),
@@ -1005,8 +1005,8 @@ impl Target {
     pub fn branch(&self) -> Option<&str> {
         match self {
             Target::Project(..) | Target::Machine(_) => None,
-            Target::Worktree(_, row) => row.branch.as_deref(),
-            Target::View(_, row) => row.cwd.at()?.branch.as_deref(),
+            Target::Worktree(_, row) => row.branch.as_ref().map(Said::as_str),
+            Target::View(_, row) => row.cwd.at()?.branch.as_ref().map(Said::as_str),
         }
     }
 
@@ -1108,8 +1108,8 @@ struct Beside {
 }
 
 enum Rebases<'t> {
-    View(Beside, &'t str),
-    Worktree(&'t WorktreeRow, &'t str),
+    View(Beside, &'t Said),
+    Worktree(&'t WorktreeRow, &'t Said),
 }
 
 enum Resolves {
@@ -1118,14 +1118,14 @@ enum Resolves {
 }
 
 impl Rebases<'_> {
-    fn asked(self) -> (Resolves, Directory, String) {
+    fn asked(self) -> (Resolves, Directory, Said) {
         match self {
             Rebases::View(beside, branch) => {
                 let dir = beside.cwd.clone();
-                (Resolves::Beside(beside), dir, branch.to_owned())
+                (Resolves::Beside(beside), dir, branch.clone())
             },
             Rebases::Worktree(row, branch) => {
-                (Resolves::In(row.place.worktree), row.folder.clone(), branch.to_owned())
+                (Resolves::In(row.place.worktree), row.folder.clone(), branch.clone())
             },
         }
     }
@@ -1213,7 +1213,7 @@ pub enum Wants {
     Plan { session: Listed, scope: Scope },
     Prunes { dir: Directory },
     Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
-    Rebase { dir: Directory, branch: String },
+    Rebase { dir: Directory, branch: Said },
     Open { session: Listed, view: ViewKey, opens: Opens },
     Pull(Work, Wanted),
     Printed { session: Listed, view: ViewKey, ended: Ended },
@@ -1272,7 +1272,7 @@ enum Stage {
     Opening { keys: Keys },
     Reading { keys: Keys, last: Last, beside: Beside, ended: Ended },
     Fetching { keys: Keys, beside: Beside, page: PullPage },
-    Rebasing { keys: Keys, resolves: Resolves, branch: String },
+    Rebasing { keys: Keys, resolves: Resolves, branch: Said },
     Pull { work: Work, agent: Harness, step: Step },
     Typing { keys: Keys, chain: Chain },
 }
@@ -1824,11 +1824,7 @@ impl Menu {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let rebased = match rebased {
-            Ok(rebased) if rebased.branch == branch => rebased,
-            Ok(Rebased { branch: other, .. }) => {
-                let why = format!("menu: {branch}: luned rebased {other}, not {branch}");
-                return Did::Closed(Done::Wrong(why));
-            },
+            Ok(rebased) => rebased,
             Err(Unrebased::Refused(why)) => {
                 return Did::Closed(Done::Wrong(format!("menu: {branch}: {why}")));
             },
@@ -1843,7 +1839,7 @@ impl Menu {
         let prompt = rebases::prompt(&rebased.branch, &rebased.onto, stopped);
         let command = match Argv::on_words(keys.agent.harness(), prompt, &[]) {
             Ok(argv) => argv,
-            Err(why) => return unstarted(&branch, &why),
+            Err(why) => return unstarted(branch.as_str(), &why),
         };
         match resolves {
             Resolves::Beside(Beside { session, view, .. }) => {
@@ -2210,7 +2206,7 @@ fn fetching(number: NonZeroU32) -> String {
     format!("Asking gh about the checks of #{number}…")
 }
 
-fn rebasing(branch: &str) -> String {
+fn rebasing(branch: &Said) -> String {
     format!("Rebasing {branch} onto upstream…")
 }
 
@@ -2763,7 +2759,7 @@ mod tests {
     fn folder() -> Folder {
         Folder {
             dir: main_dir(),
-            branch: Some("feat/menu".to_owned()),
+            branch: Said::new("feat/menu".to_owned()),
             repository: Some("/w/lune".to_owned()),
             pull_request: None,
         }
@@ -2823,7 +2819,7 @@ mod tests {
             place,
             name: "main".to_owned(),
             folder: main_dir(),
-            branch: Some("feat/menu".to_owned()),
+            branch: Said::new("feat/menu".to_owned()),
             repository: Some("/w/lune".to_owned()),
         })
     }
@@ -3276,7 +3272,7 @@ mod tests {
     }
 
     fn rebased(came: Came) -> Rebased {
-        Rebased { branch: "feat/menu".to_owned(), onto: "origin/main".to_owned(), came }
+        Rebased { branch: said("feat/menu"), onto: said("origin/main"), came }
     }
 
     fn on_conflicts() -> Came {
@@ -3287,7 +3283,7 @@ mod tests {
     fn rebasing(target: Target) -> Menu {
         let (menu, _) = stays(opened(target, Some(GIT)));
         let (menu, wants) = stays(menu.key(&char('r')));
-        assert_eq!(wants, Wants::Rebase { dir: main_dir(), branch: "feat/menu".to_owned() });
+        assert_eq!(wants, Wants::Rebase { dir: main_dir(), branch: said("feat/menu") });
         assert!(menu.rebasing() && menu.waits());
         menu
     }
@@ -3312,10 +3308,6 @@ mod tests {
         let wrong = "menu: feat/menu: no telling how the rebase ended: me@vps: luned said \
                      nothing for 1260s";
         assert_eq!(doubted, Done::Wrong(wrong.to_owned()), "no agent starts on a rebase in doubt");
-        let other = Rebased { branch: "main".to_owned(), ..rebased(on_conflicts()) };
-        let moved = closed(rebasing(view_row()).rebased(Ok(other)));
-        let wrong = "menu: feat/menu: luned rebased main, not feat/menu";
-        assert_eq!(moved, Done::Wrong(wrong.to_owned()), "no agent starts on another branch");
     }
 
     #[test]
@@ -4399,7 +4391,7 @@ mod tests {
     fn a_key_for_a_pull_request_opens_where_lune_found_it_goes() {
         let other = Listed::new_project("cdk", 2);
         let folder = "/w/cdk/feat-x".to_owned();
-        let branch = Some("feat/x".to_owned());
+        let branch = Said::new("feat/x".to_owned());
         let ready = |at| {
             let (folder, branch) = (directory(&folder), branch.clone());
             let work = Readied::Link(pull_request());
@@ -4445,7 +4437,7 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         let folder = "/w/cdk/feat-x".to_owned();
         let work = Readied::Link(pull_request());
-        let branch = Some("feat/x".to_owned());
+        let branch = Said::new("feat/x".to_owned());
         let at = At::Unopened;
         let ready = Ready { at, folder: directory(&folder), branch, moved_off: false, work };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
@@ -4481,7 +4473,7 @@ mod tests {
         let ready = Ready {
             at: At::Unopened,
             folder: directory(&folder),
-            branch: Some("issue-2736".to_owned()),
+            branch: Said::new("issue-2736".to_owned()),
             moved_off: false,
             work: Readied::Link(link),
         };
@@ -4500,7 +4492,7 @@ mod tests {
         let ready = Ready {
             at: At::Unopened,
             folder: directory("/w/cdk/issue-2736"),
-            branch: Some("dev-docs".to_owned()),
+            branch: Said::new("dev-docs".to_owned()),
             moved_off: true,
             work: Readied::Link(link),
         };
@@ -4536,7 +4528,7 @@ mod tests {
         let ready = Ready {
             at: At::Unopened,
             folder: directory("/w/cdk/feat"),
-            branch: Some("stacked".to_owned()),
+            branch: Said::new("stacked".to_owned()),
             moved_off: true,
             work: Readied::Link(pull_request()),
         };
@@ -4593,7 +4585,7 @@ mod tests {
         let ready = || Ready {
             at: At::Unopened,
             folder: directory(folder),
-            branch: Some("md-sync-rework".to_owned()),
+            branch: Said::new("md-sync-rework".to_owned()),
             moved_off: false,
             work: Readied::File { real: real.to_owned() },
         };

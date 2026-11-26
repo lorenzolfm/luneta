@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use lune_protocol::said::Said;
 use lune_waits::{eventually, Began, Span, QUIET};
 use luned::api::remote::unreached::{self, Stopped};
 use luned::api::remote::{self, Reached};
@@ -1231,7 +1232,9 @@ fn an_image_is_kept_on_another_machine_through_the_bridge() {
         let asked = Png::new(small.clone()).unwrap().asked(None);
         let mut answer = daemon.keep_image(asked).await.unwrap().into_inner();
         let path = answer.message().await.unwrap().expect("an answer").path;
-        assert!(fs::read(&path).unwrap() == small);
+        let kept = fs::read(&path).unwrap();
+        assert_eq!(kept.len(), small.len(), "the small image's byte count");
+        assert_eq!(kept, small, "the small image came as it went");
         assert_eq!((images_in(&here), images_in(&far)), (1, 1));
 
         let refused = |status: Result<String, Status>, code: Code| {
@@ -1390,7 +1393,7 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
         let session = Pasted::new(link.clone(), vec![worked("/nowhere/at/all"), worked(&main)]);
         let ready = pasted_on(&mut daemon, "far", &session).await.unwrap();
         let folder = clone.join("issue-7").display().to_string();
-        let branch = Some("issue-7".to_owned());
+        let branch = Said::new("issue-7".to_owned());
         let work = Readied::Link(issue);
         let answer = Ready {
             at: At::Unopened,
@@ -2148,7 +2151,7 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         let asked = Pasted::new(file(&plan, Some("/nowhere/at/all")), views.clone());
         let ready = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         let folder = clone.join("md-sync-rework").display().to_string();
-        let branch = Some("md-sync-rework".to_owned());
+        let branch = Said::new("md-sync-rework".to_owned());
         let of_plan = || Readied::File { real: plan.clone() };
         let answer = Ready {
             at: At::Unopened,
@@ -2266,7 +2269,7 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
 
         let opened = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         let (at, work) = (At::Unopened, Readied::Link(issue));
-        let branch = Some("feat".to_owned());
+        let branch = Said::new("feat".to_owned());
         let answer = Ready { at, folder: absolute(&folder), branch, moved_off: true, work };
         assert_eq!(opened, answer);
         assert_eq!(rev_parse_verify(&main, "refs/heads/issue-7"), None);
@@ -2317,7 +2320,7 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
         let asked = Pasted::new(file, views.clone());
         let opened = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         let (at, work) = (At::Unopened, Readied::File { real: plan.clone() });
-        let branch = Some("other".to_owned());
+        let branch = Said::new("other".to_owned());
         assert_eq!(opened, Ready { at, folder: absolute(&moved), branch, moved_off: true, work });
         assert_eq!(rev_parse_verify(&main, "refs/heads/md-plan"), None);
 
@@ -2364,7 +2367,7 @@ fn a_worktree_where_a_pull_request_s_would_go_is_taken_off_its_head_branch() {
         let w = Pasted::new(Work::Link(pull.clone()), views.clone());
         let folder = absolute(&feat.display().to_string());
         let (at, work) = (At::Unopened, Readied::Link(pull.clone()));
-        let branch = Some("stacked".to_owned());
+        let branch = Said::new("stacked".to_owned());
         let answer = Ready { at, folder: folder.clone(), branch, moved_off: true, work };
         assert_eq!(pasted_on(&mut daemon, "far", &w).await.unwrap(), answer);
         assert_eq!(rev_parse_verify(&main, "refs/heads/feat"), None, "no branch is made");
@@ -2382,7 +2385,8 @@ fn a_worktree_where_a_pull_request_s_would_go_is_taken_off_its_head_branch() {
         let slashed = Pasted::new(Work::Link(eight), views.clone());
         let lower = pasted_on(&mut daemon, "far", &slashed).await.unwrap();
         let stack_top = clone.join("stack-top").display().to_string();
-        assert_eq!((lower.folder, lower.branch), (absolute(&stack_top), Some("lower".to_owned())));
+        let lowered = (absolute(&stack_top), Said::new("lower".to_owned()));
+        assert_eq!((lower.folder, lower.branch), lowered);
         assert!(lower.moved_off);
 
         git(&feat, &["switch", "-q", "--detach"]);
@@ -2406,7 +2410,7 @@ fn a_worktree_where_a_pull_request_s_would_go_is_taken_off_its_head_branch() {
 
         git(&feat, &["switch", "-q", "--track", "-c", "feat", "origin/feat"]);
         let on_it = pasted_on(&mut daemon, "far", &w).await.unwrap();
-        assert_eq!((on_it.folder, on_it.branch), (folder, Some("feat".to_owned())));
+        assert_eq!((on_it.folder, on_it.branch), (folder, Said::new("feat".to_owned())));
         assert!(!on_it.moved_off);
 
         git(&bare, &["worktree", "remove", "--force", "../feat"]);

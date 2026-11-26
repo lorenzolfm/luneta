@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use lune_protocol::said::Said;
 use lune_protocol::shell::Doing;
 use lune_protocol::v1::{self as api, terminal};
 
@@ -20,13 +21,45 @@ pub struct Worktree {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Titled {
+    pub topic: Option<Said>,
+}
+
+impl Titled {
+    pub fn of_api(titled: &api::Titled) -> Result<Self, String> {
+        let topic = match &titled.topic {
+            None => None,
+            Some(topic) => {
+                let topic = Said::new(topic.clone()).ok_or("titled: an empty topic")?;
+                Some(topic)
+            },
+        };
+        Ok(Titled { topic })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Found {
+    Running {
+        key: TerminalKey,
+        command: Option<Said>,
+        titled: Option<Titled>,
+        told: Told,
+    },
+    Ended {
+        key: TerminalKey,
+        titled: Option<Titled>,
+    },
+    Unlisted(TerminalKey),
+    Lost,
+    Looking,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Terminal {
     pub id: ViewId,
-    pub key: Option<TerminalKey>,
     pub cwd: Dir,
-    pub command: Option<String>,
-    pub titled: Option<api::Titled>,
-    pub told: Told,
+    pub found: Found,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,9 +100,28 @@ pub struct Project {
 }
 
 impl Terminal {
+    #[must_use]
+    pub fn key(&self) -> Option<TerminalKey> {
+        match &self.found {
+            Found::Running { key, .. } | Found::Ended { key, .. } | Found::Unlisted(key) => {
+                Some(*key)
+            },
+            Found::Lost | Found::Looking => None,
+        }
+    }
+
     fn title(&self) -> Option<String> {
-        let topic = self.titled.as_ref().and_then(|titled| titled.topic.clone());
-        topic.or_else(|| self.command.clone())
+        match &self.found {
+            Found::Running { titled, command, .. } => titled
+                .as_ref()
+                .and_then(|titled| titled.topic.as_ref())
+                .or(command.as_ref())
+                .map(|said| said.as_str().to_owned()),
+            Found::Ended { titled, .. } => {
+                titled.as_ref().and_then(|titled| titled.topic.as_ref()).map(|s| s.as_str().to_owned())
+            },
+            Found::Unlisted(_) | Found::Lost | Found::Looking => None,
+        }
     }
 }
 
@@ -97,19 +149,19 @@ impl Project {
     #[must_use]
     pub fn terminal_key(&self, view: ViewId) -> Option<TerminalKey> {
         let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
-        held.find(|it| it.id == view)?.key
+        held.find(|it| it.id == view)?.key()
     }
 
     #[must_use]
     pub fn first_keyed(&self) -> Option<TerminalKey> {
         let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
-        held.find_map(|it| it.key)
+        held.find_map(Terminal::key)
     }
 
     #[must_use]
     pub fn view_of(&self, terminal: TerminalKey) -> Option<(WorktreeId, ViewId)> {
         self.worktrees().iter().find_map(|worktree| {
-            let held = worktree.terminals.iter().find(|it| it.key == Some(terminal))?;
+            let held = worktree.terminals.iter().find(|it| it.key() == Some(terminal))?;
             Some((worktree.id, held.id))
         })
     }
@@ -127,7 +179,7 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
         return Err(format!("they hold {views} views, over the {VIEWS_MAX} kept"));
     }
     let mut keyed = BTreeSet::new();
-    for key in worktrees.iter().flat_map(|it| &it.terminals).filter_map(|it| it.key) {
+    for key in worktrees.iter().flat_map(|it| &it.terminals).filter_map(Terminal::key) {
         if !keyed.insert(key) {
             return Err(format!("two views hold terminal {}", key.id));
         }
@@ -136,10 +188,70 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
     Ok(projects)
 }
 
-fn found_key(terminal: &api::Terminal) -> Result<Option<TerminalKey>, String> {
+fn command_of(command: Option<&String>) -> Result<Option<Said>, String> {
+    match command {
+        None => Ok(None),
+        Some(command) => Said::new(command.clone()).map(Some).ok_or_else(|| "an empty command".to_owned()),
+    }
+}
+
+fn found_of(terminal: &api::Terminal) -> Result<Found, String> {
+    if let Some(state) = &terminal.state {
+        return match state {
+            terminal::State::Running(running) => {
+                let key = running.key.as_ref().ok_or("running terminal has no key")?;
+                let key = TerminalKey::of(key)?;
+                let command = command_of(running.command.as_ref())?;
+                let titled = running.titled.as_ref().map(Titled::of_api).transpose()?;
+                let told = Told::of(running.shell.as_ref());
+                Ok(Found::Running { key, command, titled, told })
+            },
+            terminal::State::Ended(ended) => {
+                let key = ended.key.as_ref().ok_or("ended terminal has no key")?;
+                let key = TerminalKey::of(key)?;
+                let titled = ended.titled.as_ref().map(Titled::of_api).transpose()?;
+                Ok(Found::Ended { key, titled })
+            },
+            terminal::State::Unlisted(key) => Ok(Found::Unlisted(TerminalKey::of(key)?)),
+            terminal::State::StateLost(()) => Ok(Found::Lost),
+            terminal::State::StateLooking(()) => Ok(Found::Looking),
+        };
+    }
+    let reject_unfound_fields = |what: &str| {
+        if terminal.held
+            || terminal.command.is_some()
+            || terminal.titled.is_some()
+            || terminal.shell.is_some()
+        {
+            Err(format!("a {what} terminal carries live fields"))
+        } else {
+            Ok(())
+        }
+    };
     match &terminal.found {
-        Some(terminal::Found::Key(key)) => TerminalKey::of(key).map(Some),
-        Some(terminal::Found::Lost(()) | terminal::Found::Looking(())) | None => Ok(None),
+        Some(terminal::Found::Key(key)) => {
+            let key = TerminalKey::of(key)?;
+            let titled = terminal.titled.as_ref().map(Titled::of_api).transpose()?;
+            if terminal.held {
+                if terminal.command.is_some() || terminal.shell.is_some() {
+                    return Err("an ended terminal carries a command or shell".to_owned());
+                }
+                Ok(Found::Ended { key, titled })
+            } else {
+                let command = command_of(terminal.command.as_ref())?;
+                let told = Told::of(terminal.shell.as_ref());
+                Ok(Found::Running { key, command, titled, told })
+            }
+        },
+        Some(terminal::Found::Lost(())) => {
+            reject_unfound_fields("lost")?;
+            Ok(Found::Lost)
+        },
+        Some(terminal::Found::Looking(())) => {
+            reject_unfound_fields("looking")?;
+            Ok(Found::Looking)
+        },
+        None => Err("says not whether it is found".to_owned()),
     }
 }
 
@@ -151,17 +263,10 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
     for terminal in &worktree.terminals {
         let held = ViewId::of(terminal.id);
         let id = held.ok_or_else(|| format!("a terminal of worktree {named} has id 0"))?;
-        let key = found_key(terminal).map_err(|why| format!("terminal {id}: {why}"))?;
+        let found = found_of(terminal).map_err(|why| format!("terminal {id}: {why}"))?;
         let cwd = Dir::parse(&terminal.folder);
         let cwd = cwd.map_err(|why| format!("terminal {id}'s folder: {why}"))?;
-        terminals.push(Terminal {
-            id,
-            key,
-            cwd,
-            command: terminal.command.clone(),
-            titled: terminal.titled.clone(),
-            told: Told::of(terminal.shell.as_ref()),
-        });
+        terminals.push(Terminal { id, cwd, found });
     }
     assert_eq!(terminals.len(), worktree.terminals.len(), "every terminal said is read");
     let folder = Dir::parse(&worktree.folder);
@@ -237,12 +342,13 @@ mod tests {
     }
 
     fn terminal(id: u64, found: terminal::Found, topic: Option<&str>) -> api::Terminal {
+        let keyed = matches!(found, terminal::Found::Key(_));
         let titled = topic.map(|topic| api::Titled { topic: Some(topic.to_owned()) });
         api::Terminal {
             id,
             found: Some(found),
             folder: "/w/a".to_owned(),
-            command: Some("sleep 600".to_owned()),
+            command: keyed.then(|| "sleep 600".to_owned()),
             titled,
             ..api::Terminal::default()
         }
@@ -372,6 +478,108 @@ mod tests {
         assert!(listing(most).is_ok(), "{VIEWS_MAX} views, with the second worktree's one");
         let over = format!("they hold {} views, over the {VIEWS_MAX} kept", VIEWS_MAX + 1);
         assert_eq!(listing(most + 1), Err(over));
+    }
+
+    #[test]
+    fn a_terminal_reads_its_state_sum_type_and_refuses_illegal_legacy_shapes() {
+        let mut typed = kept();
+        rows(&mut typed)[0].terminals = vec![
+            api::Terminal {
+                id: 30,
+                folder: "/w/a".to_owned(),
+                state: Some(terminal::State::Running(terminal::Running {
+                    key: Some(key(8)),
+                    command: Some("claude".to_owned()),
+                    titled: Some(api::Titled { topic: Some("Fixing".to_owned()) }),
+                    shell: Some(Doing::Ready.to_api()),
+                })),
+                ..api::Terminal::default()
+            },
+            api::Terminal {
+                id: 31,
+                folder: "/w/a".to_owned(),
+                state: Some(terminal::State::Ended(terminal::Ended {
+                    key: Some(key(9)),
+                    titled: Some(api::Titled { topic: Some("Done".to_owned()) }),
+                })),
+                ..api::Terminal::default()
+            },
+            api::Terminal {
+                id: 32,
+                folder: "/w/a".to_owned(),
+                state: Some(terminal::State::Unlisted(key(10))),
+                ..api::Terminal::default()
+            },
+            api::Terminal {
+                id: 33,
+                folder: "/w/a".to_owned(),
+                state: Some(terminal::State::StateLost(())),
+                ..api::Terminal::default()
+            },
+            api::Terminal {
+                id: 34,
+                folder: "/w/a".to_owned(),
+                state: Some(terminal::State::StateLooking(())),
+                ..api::Terminal::default()
+            },
+        ];
+        let project = read(&typed).unwrap();
+        let terminals = &project.worktrees()[0].terminals;
+        assert!(matches!(
+            &terminals[0].found,
+            Found::Running {
+                key,
+                command: Some(cmd),
+                titled: Some(Titled { topic: Some(topic) }),
+                told: Told::Doing(Doing::Ready),
+            } if *key == keyed(8) && cmd.as_str() == "claude" && topic.as_str() == "Fixing"
+        ));
+        assert!(matches!(
+            &terminals[1].found,
+            Found::Ended { key, titled: Some(Titled { topic: Some(topic) }) }
+                if *key == keyed(9) && topic.as_str() == "Done"
+        ));
+        assert_eq!(terminals[2].found, Found::Unlisted(keyed(10)));
+        assert_eq!(terminals[3].found, Found::Lost);
+        assert_eq!(terminals[4].found, Found::Looking);
+
+        let refused = [
+            api::Terminal { id: 40, folder: "/w/a".to_owned(), ..api::Terminal::default() },
+            api::Terminal {
+                id: 40,
+                found: Some(terminal::Found::Lost(())),
+                folder: "/w/a".to_owned(),
+                command: Some("sleep 600".to_owned()),
+                ..api::Terminal::default()
+            },
+            api::Terminal {
+                id: 40,
+                found: Some(terminal::Found::Key(key(11))),
+                folder: "/w/a".to_owned(),
+                command: Some("sleep 600".to_owned()),
+                held: true,
+                ..api::Terminal::default()
+            },
+            api::Terminal {
+                id: 40,
+                found: Some(terminal::Found::Key(key(11))),
+                folder: "/w/a".to_owned(),
+                command: Some(String::new()),
+                ..api::Terminal::default()
+            },
+            api::Terminal {
+                id: 40,
+                found: Some(terminal::Found::Key(key(11))),
+                folder: "/w/a".to_owned(),
+                titled: Some(api::Titled { topic: Some(String::new()) }),
+                ..api::Terminal::default()
+            },
+        ];
+        for bad in refused {
+            let mut project = kept();
+            rows(&mut project)[0].terminals = vec![bad.clone()];
+            assert!(read(&project).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
