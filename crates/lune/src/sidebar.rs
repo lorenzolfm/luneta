@@ -865,17 +865,39 @@ enum KnownTerminal {
 
 impl KnownTerminal {
     fn of(terminal: &rows::Terminal) -> Self {
-        let Some(key) = terminal.key else {
-            return KnownTerminal::Unfound(terminal.id);
-        };
-        KnownTerminal::Found(KnownView {
-            id: terminal.id,
-            key,
-            cwd: terminal.cwd.clone(),
-            command: terminal.command.clone(),
-            topic: terminal.titled.as_ref().and_then(|titled| titled.topic.clone()),
-            told: terminal.told.clone(),
-        })
+        match &terminal.found {
+            rows::Found::Running { key, command, titled, told } => KnownTerminal::Found(KnownView {
+                id: terminal.id,
+                key: *key,
+                cwd: terminal.cwd.clone(),
+                command: command.as_ref().map(|said| said.as_str().to_owned()),
+                topic: titled
+                    .as_ref()
+                    .and_then(|titled| titled.topic.as_ref())
+                    .map(|said| said.as_str().to_owned()),
+                told: told.clone(),
+            }),
+            rows::Found::Ended { key, titled } => KnownTerminal::Found(KnownView {
+                id: terminal.id,
+                key: *key,
+                cwd: terminal.cwd.clone(),
+                command: None,
+                topic: titled
+                    .as_ref()
+                    .and_then(|titled| titled.topic.as_ref())
+                    .map(|said| said.as_str().to_owned()),
+                told: Told::Unhooked,
+            }),
+            rows::Found::Unlisted(key) => KnownTerminal::Found(KnownView {
+                id: terminal.id,
+                key: *key,
+                cwd: terminal.cwd.clone(),
+                command: None,
+                topic: None,
+                told: Told::Unhooked,
+            }),
+            rows::Found::Lost | rows::Found::Looking => KnownTerminal::Unfound(terminal.id),
+        }
     }
 
     fn id(&self) -> ViewId {
@@ -5988,6 +6010,7 @@ mod tests {
                     shell: view.shell.clone(),
                     held: view.held,
                     name: None,
+                    state: None,
                 };
                 let id = tab_of(session.id, view.tab).get();
                 match worktrees.iter_mut().find(|it| it.id == id) {

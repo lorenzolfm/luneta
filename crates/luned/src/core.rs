@@ -40,39 +40,45 @@ use crate::watch::Troubles;
 use crate::Directory;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Shown {
-    pub key: TerminalKey,
-    cwd: Option<Dir>,
-    titled: Option<Titled>,
-    program: Program,
+pub enum Shown {
+    Unlisted(TerminalKey),
+    Listed {
+        key: TerminalKey,
+        cwd: Option<Dir>,
+        titled: Option<Titled>,
+        program: Program,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Program {
+pub enum Program {
     Running { command: Option<Said>, doing: Option<Doing> },
     Ended,
 }
 
 impl Shown {
     #[must_use]
-    pub fn of(key: TerminalKey, listed: Option<&server::Terminal>) -> Shown {
-        let cwd = listed.and_then(|listed| Dir::parse(&listed.cwd).ok());
-        let titled = listed.and_then(|listed| titles::titled(&listed.title));
-        let program = match listed.map(|listed| &listed.is) {
-            Some(Is::Running { front, doing, .. }) => Program::Running {
+    pub fn unlisted(key: TerminalKey) -> Shown {
+        Shown::Unlisted(key)
+    }
+
+    #[must_use]
+    pub fn listed(key: TerminalKey, listed: &server::Terminal) -> Shown {
+        let cwd = listed.cwd.as_ref().and_then(|cwd| Dir::parse(cwd.as_str()).ok());
+        let titled = titles::titled(&listed.title);
+        let program = match &listed.is {
+            Is::Running { front, doing, .. } => Program::Running {
                 command: front.as_ref().and_then(|front| Said::new(front.argv.join(" "))),
                 doing: doing.clone(),
             },
-            Some(Is::Ended) => Program::Ended,
-            None => Program::Running { command: None, doing: None },
+            Is::Ended => Program::Ended,
         };
-        Shown { key, cwd, titled, program }
+        Shown::Listed { key, cwd, titled, program }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MuxTerminal {
-    pub key: TerminalKey,
     cwd: Option<Directory>,
     root: AgentPid,
     front: Option<server::Foreground>,
@@ -104,8 +110,7 @@ impl MuxTerminal {
         let shell_idle =
             matches!(doing, Some(Doing::Ready | Doing::Ended { .. } | Doing::Stopped { .. }));
         Some(MuxTerminal {
-            key: terminal.key,
-            cwd: Directory::parse(terminal.cwd.clone()).ok(),
+            cwd: terminal.cwd.clone(),
             root: *root,
             front: front.clone(),
             shell_idle,
@@ -457,8 +462,10 @@ impl Known {
 
     fn dirs(&self) -> BTreeSet<String> {
         let cwds = self.terminals.values().filter_map(|found| match found {
-            Located::Shown(Shown { cwd: Some(cwd), .. }) => Some(cwd.as_str().to_owned()),
-            Located::Shown(Shown { cwd: None, .. }) | Located::Lost | Located::Looking => None,
+            Located::Shown(Shown::Listed { cwd: Some(cwd), .. }) => Some(cwd.as_str().to_owned()),
+            Located::Shown(Shown::Listed { cwd: None, .. } | Shown::Unlisted(_))
+            | Located::Lost
+            | Located::Looking => None,
         });
         let present = |folder: &Dir| !self.missing.contains(folder);
         let folders = self.projects.iter().flat_map(Projects::worktree_folders).filter(present);
@@ -521,9 +528,9 @@ impl Known {
         let mut osc_reports = Vec::new();
         let mut osc_agents = Vec::new();
         let mut active_processes = HashSet::new();
-        for terminal in self.mux_terminals.values() {
+        for (&key, terminal) in &self.mux_terminals {
             assert!(terminal.subagents.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
-            if let Some(candidates) = by_terminal.get(&(terminal.key, terminal.harness)) {
+            if let Some(candidates) = by_terminal.get(&(key, terminal.harness)) {
                 let matched = terminal
                     .front
                     .as_ref()
@@ -564,6 +571,7 @@ impl Known {
             let Some((id, started_at, cwd)) = resolve_osc_process(
                 &mut self.osc_processes,
                 &mut self.osc_troubles,
+                key,
                 terminal,
                 pid,
             ) else {
@@ -575,7 +583,7 @@ impl Known {
                 continue;
             }
             known_pids.insert(pid);
-            active_processes.insert((terminal.key, pid));
+            active_processes.insert((key, pid));
             let entrypoint = terminal
                 .harness
                 .to_api()
@@ -589,7 +597,7 @@ impl Known {
                 started_at,
                 name: None,
                 entrypoint,
-                terminal: Some(terminal.key),
+                terminal: Some(key),
             });
             osc_reports.push(osc_report(id, terminal));
         }
@@ -750,35 +758,68 @@ impl Known {
     }
 
     fn built_terminals(&self, worktree: &Worktree) -> Vec<api::Terminal> {
-        use api::terminal::Found as Told;
+        use api::terminal::{Ended, Found as Told, Running, State};
         let built = worktree.layout().terminals().map(|terminal| {
             let id = terminal.id().view();
             let found = self.terminals.get(&id).unwrap_or(&Located::Looking);
-            let (told, shown) = match found {
-                Located::Shown(shown) => (Told::Key(shown.key.into()), Some(shown)),
-                Located::Lost => (Told::Lost(()), None),
-                Located::Looking => (Told::Looking(()), None),
-            };
-            let folder = shown
-                .and_then(|shown| shown.cwd.as_ref())
-                .unwrap_or_else(|| terminal.folder());
-            let (command, doing, held) = match shown.map(|shown| &shown.program) {
-                Some(Program::Running { command, doing }) => {
-                    (command.as_ref(), doing.as_ref(), false)
+            let (told, state, folder, command, titled, shell, held) = match found {
+                Located::Shown(Shown::Listed { key, cwd, titled, program }) => {
+                    let api_key: api::TerminalKey = (*key).into();
+                    let folder = cwd.as_ref().unwrap_or_else(|| terminal.folder());
+                    let titled = titled.as_ref().map(Titled::to_api);
+                    match program {
+                        Program::Running { command, doing } => {
+                            let command = command.as_ref().map(|it| it.as_str().to_owned());
+                            let shell = doing.as_ref().map(Doing::to_api);
+                            let state = State::Running(Running {
+                                key: Some(api_key),
+                                command: command.clone(),
+                                titled: titled.clone(),
+                                shell: shell.clone(),
+                            });
+                            (Told::Key(api_key), state, folder, command, titled, shell, false)
+                        },
+                        Program::Ended => {
+                            let state =
+                                State::Ended(Ended { key: Some(api_key), titled: titled.clone() });
+                            (Told::Key(api_key), state, folder, None, titled, None, true)
+                        },
+                    }
                 },
-                Some(Program::Ended) => (None, None, true),
-                None => (None, None, false),
+                Located::Shown(Shown::Unlisted(key)) => {
+                    let api_key: api::TerminalKey = (*key).into();
+                    let state = State::Unlisted(api_key);
+                    (Told::Key(api_key), state, terminal.folder(), None, None, None, false)
+                },
+                Located::Lost => (
+                    Told::Lost(()),
+                    State::StateLost(()),
+                    terminal.folder(),
+                    None,
+                    None,
+                    None,
+                    false,
+                ),
+                Located::Looking => (
+                    Told::Looking(()),
+                    State::StateLooking(()),
+                    terminal.folder(),
+                    None,
+                    None,
+                    None,
+                    false,
+                ),
             };
-            let titled = shown.and_then(|shown| shown.titled.as_ref());
             api::Terminal {
                 id: id.get(),
                 found: Some(told),
                 folder: folder.as_str().to_owned(),
-                command: command.map(|command| command.as_str().to_owned()),
-                titled: titled.map(Titled::to_api),
-                shell: doing.map(Doing::to_api),
+                command,
+                titled,
+                shell,
                 held,
                 name: terminal.name().map(|name| name.as_str().to_owned()),
+                state: Some(state),
             }
         });
         built.collect()
@@ -967,11 +1008,12 @@ fn arg_matches_harness(arg: &str, harness: Harness) -> bool {
 fn resolve_osc_process(
     cache: &mut HashMap<(TerminalKey, AgentPid), CachedProcess>,
     troubles: &mut Troubles,
+    key: TerminalKey,
     terminal: &MuxTerminal,
     pid: AgentPid,
 ) -> Option<(AgentId, Option<SystemTime>, Directory)> {
     let parsed_cwd = terminal.cwd.clone();
-    if let Some(cached) = cache.get(&(terminal.key, pid)) {
+    if let Some(cached) = cache.get(&(key, pid)) {
         let cwd = parsed_cwd.or_else(|| cached.cwd.clone())?;
         return Some((cached.id.clone(), cached.started_at, cwd));
     }
@@ -984,10 +1026,7 @@ fn resolve_osc_process(
         process_cwd_or_trouble(pid, troubles)
     };
     let cwd = parsed_cwd.or_else(|| process_cwd.clone())?;
-    cache.insert(
-        (terminal.key, pid),
-        CachedProcess { id: id.clone(), started_at, cwd: process_cwd },
-    );
+    cache.insert((key, pid), CachedProcess { id: id.clone(), started_at, cwd: process_cwd });
     Some((id, started_at, cwd))
 }
 
@@ -1021,13 +1060,16 @@ mod tests {
     }
 
     fn mux_terminals(
-        terminals: impl IntoIterator<Item = server::Terminal>,
+        terminals: impl IntoIterator<Item = (TerminalKey, server::Terminal)>,
     ) -> BTreeMap<TerminalKey, MuxTerminal> {
         terminals
             .into_iter()
-            .filter_map(|terminal| MuxTerminal::of(&terminal))
-            .map(|terminal| (terminal.key, terminal))
+            .filter_map(|(key, terminal)| Some((key, MuxTerminal::of(&terminal)?)))
             .collect()
+    }
+
+    fn dir(path: &str) -> Directory {
+        Directory::parse(path.to_owned()).unwrap()
     }
 
     #[test]
@@ -1090,21 +1132,25 @@ mod tests {
                 at: Some(at(21)),
             },
         };
-        let mux_terminal = |front_pid: AgentPid, statuses: ProgramStatuses| server::Terminal {
-            key: terminal,
-            tag: Vec::new(),
-            size: None,
-            cwd: "/w".to_owned(),
-            title: String::new(),
-            is: Is::Running {
-                root: AgentPid::new(100).unwrap(),
-                front: Some(server::Foreground {
-                    pid: front_pid,
-                    argv: vec!["claude".to_owned()],
-                }),
-                doing: None,
-            },
-            statuses,
+        let mux_terminal = |front_pid: AgentPid, statuses: ProgramStatuses| {
+            (
+                terminal,
+                server::Terminal {
+                    tag: Vec::new(),
+                    size: None,
+                    cwd: Some(dir("/w")),
+                    title: String::new(),
+                    is: Is::Running {
+                        root: AgentPid::new(100).unwrap(),
+                        front: Some(server::Foreground {
+                            pid: front_pid,
+                            argv: vec!["claude".to_owned()],
+                        }),
+                        doing: None,
+                    },
+                    statuses,
+                },
+            )
         };
 
         let statuses =
@@ -1210,28 +1256,31 @@ mod tests {
         let pid = AgentPid::new(std::process::id()).unwrap();
         let root_pid = AgentPid::new(if pid.get() == 100 { 101 } else { 100 }).unwrap();
         let app = AppName::parse("claude-code").unwrap();
-        let make_terminal =
-            |argv: &[&str], doing: Option<Doing>, recorded_at: SystemTime| server::Terminal {
-                key: key(9),
-                tag: Vec::new(),
-                size: None,
-                cwd: "/w".to_owned(),
-                title: String::new(),
-                is: Is::Running {
-                    root: root_pid,
-                    front: Some(server::Foreground { pid, argv: words(argv) }),
-                    doing,
+        let make_terminal = |argv: &[&str], doing: Option<Doing>, recorded_at: SystemTime| {
+            (
+                key(9),
+                server::Terminal {
+                    tag: Vec::new(),
+                    size: None,
+                    cwd: Some(dir("/w")),
+                    title: String::new(),
+                    is: Is::Running {
+                        root: root_pid,
+                        front: Some(server::Foreground { pid, argv: words(argv) }),
+                        doing,
+                    },
+                    statuses: ProgramStatuses {
+                        root: Some(ProgramStatus {
+                            phase: ProgramPhase::Working { progress: None },
+                            app: Some(app.clone()),
+                            title: None,
+                            at: Some(recorded_at),
+                        }),
+                        children: Vec::new(),
+                    },
                 },
-                statuses: ProgramStatuses {
-                    root: Some(ProgramStatus {
-                        phase: ProgramPhase::Working { progress: None },
-                        app: Some(app.clone()),
-                        title: None,
-                        at: Some(recorded_at),
-                    }),
-                    children: Vec::new(),
-                },
-            };
+            )
+        };
         let listed = || ask(&core, Command::List).unwrap().agents;
 
         core.send(Command::MuxTerminals(mux_terminals([make_terminal(
@@ -1314,29 +1363,34 @@ mod tests {
         }))
         .unwrap();
 
-        let osc_terminal = |front: Option<AgentPid>| server::Terminal {
-            key: terminal,
-            tag: Vec::new(),
-            size: None,
-            cwd: "/w".to_owned(),
-            title: String::new(),
-            is: Is::Running {
-                root: AgentPid::new(100).unwrap(),
-                front: front.map(|pid| server::Foreground { pid, argv: vec!["claude".to_owned()] }),
-                doing: None,
-            },
-            statuses: ProgramStatuses {
-                root: Some(ProgramStatus {
-                    phase: ProgramPhase::Blocked {
-                        kind: Some(OscBlockedKind::Permission),
-                        message: None,
+        let osc_terminal = |front: Option<AgentPid>| {
+            (
+                terminal,
+                server::Terminal {
+                    tag: Vec::new(),
+                    size: None,
+                    cwd: Some(dir("/w")),
+                    title: String::new(),
+                    is: Is::Running {
+                        root: AgentPid::new(100).unwrap(),
+                        front: front
+                            .map(|pid| server::Foreground { pid, argv: vec!["claude".to_owned()] }),
+                        doing: None,
                     },
-                    app: Some(AppName::parse("claude-code").unwrap()),
-                    title: None,
-                    at: Some(at(20)),
-                }),
-                children: Vec::new(),
-            },
+                    statuses: ProgramStatuses {
+                        root: Some(ProgramStatus {
+                            phase: ProgramPhase::Blocked {
+                                kind: Some(OscBlockedKind::Permission),
+                                message: None,
+                            },
+                            app: Some(AppName::parse("claude-code").unwrap()),
+                            title: None,
+                            at: Some(at(20)),
+                        }),
+                        children: Vec::new(),
+                    },
+                },
+            )
         };
 
         let osc_pids = || {
@@ -1412,27 +1466,29 @@ mod tests {
                     },
                 })
                 .collect();
-            terminals.push(server::Terminal {
-                key: term,
-                tag: Vec::new(),
-                size: None,
-                cwd: "/w".to_owned(),
-                title: String::new(),
-                is: Is::Running {
-                    root: AgentPid::new(100).unwrap(),
-                    front: Some(server::Foreground { pid, argv: vec!["claude".to_owned()] }),
-                    doing: None,
+            terminals.push((
+                term,
+                server::Terminal {
+                    tag: Vec::new(),
+                    size: None,
+                    cwd: Some(dir("/w")),
+                    title: String::new(),
+                    is: Is::Running {
+                        root: AgentPid::new(100).unwrap(),
+                        front: Some(server::Foreground { pid, argv: vec!["claude".to_owned()] }),
+                        doing: None,
+                    },
+                    statuses: ProgramStatuses {
+                        root: Some(ProgramStatus {
+                            phase: ProgramPhase::Working { progress: None },
+                            app: Some(app.clone()),
+                            title: None,
+                            at: Some(at),
+                        }),
+                        children,
+                    },
                 },
-                statuses: ProgramStatuses {
-                    root: Some(ProgramStatus {
-                        phase: ProgramPhase::Working { progress: None },
-                        app: Some(app.clone()),
-                        title: None,
-                        at: Some(at),
-                    }),
-                    children,
-                },
-            });
+            ));
         }
         core.send(Command::Agents(Scan { agents, unread: Vec::new() })).unwrap();
         core.send(Command::MuxTerminals(mux_terminals(terminals))).unwrap();
@@ -1457,13 +1513,13 @@ mod tests {
             next += 1;
             Ok(Id::of(next).unwrap())
         };
-        let dir = Dir::parse("/w/lune").unwrap();
+        let root = Dir::parse("/w/lune").unwrap();
         let main = Subfolder::parse("main").unwrap();
         let listed = Listed::of(BTreeSet::from([main.clone()])).unwrap();
         let (projects, made) = Projects::default()
             .changed(
                 Change::AddProject {
-                    spot: Spot::in_clone(dir.clone(), listed.clone(), None),
+                    spot: Spot::in_clone(root.clone(), listed.clone(), None),
                     name: None,
                 },
                 None,
@@ -1475,7 +1531,7 @@ mod tests {
             .changed(
                 Change::AddWorktree {
                     project,
-                    spot: Spot::in_clone(dir, listed, Some(main)),
+                    spot: Spot::in_clone(root, listed, Some(main)),
                     name: None,
                     opens: Opens::Shell,
                 },
@@ -1489,10 +1545,9 @@ mod tests {
 
         let term_key = key(5);
         let frame = |title: &str, cwd: &str, is: Is| server::Terminal {
-            key: term_key,
             tag: b"t".to_vec(),
             size: None,
-            cwd: cwd.to_owned(),
+            cwd: Some(dir(cwd)),
             title: title.to_owned(),
             is,
             statuses: ProgramStatuses::default(),
@@ -1505,9 +1560,26 @@ mod tests {
             }),
             doing: Some(Doing::Ready),
         };
-        let first = Shown::of(term_key, Some(&frame("⠋ Fixing the tests", "/w/lune/main/src", running.clone())));
-        let second = Shown::of(term_key, Some(&frame("⠙ Fixing the tests", "/w/lune/main/src", running)));
+        let unlisted = Shown::unlisted(term_key);
+        let first = Shown::listed(
+            term_key,
+            &frame("⠋ Fixing the tests", "/w/lune/main/src", running.clone()),
+        );
+        let second =
+            Shown::listed(term_key, &frame("⠙ Fixing the tests", "/w/lune/main/src", running));
         assert_eq!(first, second);
+        assert_ne!(unlisted, first);
+
+        core.send(Command::Terminals(BTreeMap::from([(view, Located::Shown(unlisted))]))).unwrap();
+        let host = ask(&core, Command::Host).unwrap();
+        let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
+            panic!("projects kept");
+        };
+        let terminal = &kept.projects[0].worktrees().unwrap()[0].terminals[0];
+        assert_eq!(terminal.state, Some(api::terminal::State::Unlisted(term_key.into())));
+        assert_eq!(terminal.command, None);
+        assert_eq!(terminal.shell, None);
+        assert!(!terminal.held);
 
         core.send(Command::Terminals(BTreeMap::from([(view, Located::Shown(first))]))).unwrap();
         let host = ask(&core, Command::Host).unwrap();
@@ -1523,9 +1595,22 @@ mod tests {
         );
         assert_eq!(terminal.shell, Some(Doing::Ready.to_api()));
         assert!(!terminal.held);
+        assert!(matches!(
+            &terminal.state,
+            Some(api::terminal::State::Running(api::terminal::Running {
+                key: Some(k),
+                command: Some(cmd),
+                titled: Some(titled),
+                shell: Some(shell),
+            })) if *k == term_key.into()
+                && cmd == "claude --resume"
+                && titled.topic.as_deref() == Some("Fixing the tests")
+                && *shell == Doing::Ready.to_api()
+        ));
         assert!(ask(&core, Command::Dirs).unwrap().contains("/w/lune/main/src"));
 
-        let ended = Shown::of(term_key, Some(&frame("✳ Fixing the tests", "/w/lune/main/src", Is::Ended)));
+        let ended =
+            Shown::listed(term_key, &frame("✳ Fixing the tests", "/w/lune/main/src", Is::Ended));
         core.send(Command::Terminals(BTreeMap::from([(view, Located::Shown(ended))]))).unwrap();
         let host = ask(&core, Command::Host).unwrap();
         let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
@@ -1539,5 +1624,12 @@ mod tests {
             terminal.titled.as_ref().and_then(|it| it.topic.as_deref()),
             Some("Fixing the tests")
         );
+        assert!(matches!(
+            &terminal.state,
+            Some(api::terminal::State::Ended(api::terminal::Ended {
+                key: Some(k),
+                titled: Some(titled),
+            })) if *k == term_key.into() && titled.topic.as_deref() == Some("Fixing the tests")
+        ));
     }
 }

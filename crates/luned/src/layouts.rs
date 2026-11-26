@@ -513,7 +513,7 @@ impl Layouts {
             },
             Command::Listed(listed) => self.heard_listed(listed),
             Command::Emptied { since } => {
-                let none = TerminalsListed { terminals: Vec::new(), whole: true, since };
+                let none = TerminalsListed { terminals: BTreeMap::new(), whole: true, since };
                 self.heard_listed(none);
                 self.known.clear();
                 self.listed.clear();
@@ -1070,7 +1070,8 @@ impl Layouts {
             .and_then(|focus| projects.holding_terminal(focus))
             .and_then(|(_, focused)| self.known.get(&focused.id()))
             .and_then(|known| self.listed.get(&known.key))
-            .and_then(|listed| Dir::parse(&listed.cwd).ok())
+            .and_then(|listed| listed.cwd.as_ref())
+            .and_then(|cwd| Dir::parse(cwd.as_str()).ok())
             .filter(|cwd| home.below(cwd).is_some());
         let folder = listed_cwd.unwrap_or(home);
         let cwd = Directory::from(&folder);
@@ -1411,17 +1412,16 @@ impl Layouts {
             }
         }
         let Some(projects) = self.store.projects() else {
-            self.listed = by_key(terminals);
+            self.listed = terminals;
             return;
         };
         let mut found: BTreeMap<TerminalViewId, (TerminalKey, Option<Size>)> = BTreeMap::new();
-        let mut keys: BTreeSet<TerminalKey> = BTreeSet::new();
-        for listed in &terminals {
+        for (&key, listed) in &terminals {
             let Some(view) = tagged(&listed.tag) else {
                 continue;
             };
             let Some((_, held)) = projects.holding_terminal(view) else {
-                let id = listed.key.id;
+                let id = key.id;
                 let unheld = format!("terminal {id} is tagged {view}, no terminal of a layout");
                 self.troubles.say(unheld);
                 continue;
@@ -1432,12 +1432,7 @@ impl Layouts {
                 self.troubles.say(why);
                 continue;
             }
-            if !keys.insert(listed.key) {
-                let why = format!("two terminals share key {}; the first is kept", listed.key.id);
-                self.troubles.say(why);
-                continue;
-            }
-            found.insert(terminal, (listed.key, listed.size));
+            found.insert(terminal, (key, listed.size));
         }
         let ended: Vec<TerminalViewId> = if whole {
             let gone = |(terminal, known): &(&TerminalViewId, &Known)| {
@@ -1474,7 +1469,7 @@ impl Layouts {
         }
         let keys: BTreeSet<TerminalKey> = self.known.values().map(|known| known.key).collect();
         assert_eq!(keys.len(), self.known.len(), "no two terminals share a key of lune-mux");
-        let before = std::mem::replace(&mut self.listed, by_key(terminals));
+        let before = std::mem::replace(&mut self.listed, terminals);
         for terminal in ended {
             if let Err(failed) = self.closed(terminal.view()) {
                 let stays = format!("terminal {terminal} ended, and stays in its layout");
@@ -1504,7 +1499,11 @@ impl Layouts {
             let Some((_, held)) = projects.holding_terminal(terminal.view()) else {
                 continue;
             };
-            let folder = Dir::parse(&listed.cwd).unwrap_or_else(|_| held.folder().clone());
+            let folder = listed
+                .cwd
+                .as_ref()
+                .and_then(|cwd| Dir::parse(cwd.as_str()).ok())
+                .unwrap_or_else(|| held.folder().clone());
             let mut runs = runs_of(listed, &agents, held.runs(), shell);
             let front = match &listed.is {
                 Is::Running { front: Some(front), .. } => Some(front.pid),
@@ -1754,7 +1753,10 @@ fn tell_core_terminals(
     let located = |(_, terminal): (&Worktree, &Terminal)| {
         let id = terminal.id();
         let located = match known.get(&id) {
-            Some(known) => Located::Shown(Shown::of(known.key, listed.get(&known.key))),
+            Some(known) => Located::Shown(match listed.get_key_value(&known.key) {
+                Some((&key, listed)) => Shown::listed(key, listed),
+                None => Shown::unlisted(known.key),
+            }),
             None if looked => Located::Lost,
             None => Located::Looking,
         };
@@ -1878,14 +1880,6 @@ fn told(out: &Out, word: api::ShowResponse) -> bool {
 
 fn half_closed(closed: String) -> impl FnOnce(Failed) -> Failed {
     move |failed| Failed::Unclosed(format!("{closed} closed, and {}", failed.said()))
-}
-
-fn by_key(terminals: Vec<server::Terminal>) -> BTreeMap<TerminalKey, server::Terminal> {
-    let count = terminals.len();
-    let listed: BTreeMap<_, _> =
-        terminals.into_iter().map(|terminal| (terminal.key, terminal)).collect();
-    assert_eq!(listed.len(), count, "a listing holds each terminal once");
-    listed
 }
 
 fn placement(
@@ -2083,14 +2077,11 @@ mod tests {
     use crate::statuses::{ActiveStatus, Decided};
 
     fn listed(is: Is) -> server::Terminal {
-        let key = TerminalKey { id: 1.try_into().unwrap(), made: OwnMade::from_nanos(5) };
-        let (tag, cwd, title) = (Vec::new(), "/w".to_owned(), String::new());
         server::Terminal {
-            key,
-            tag,
+            tag: Vec::new(),
             size: None,
-            cwd,
-            title,
+            cwd: Some(Directory::parse("/w".to_owned()).unwrap()),
+            title: String::new(),
             is,
             statuses: ProgramStatuses::default(),
         }
@@ -2430,10 +2421,9 @@ mod tests {
             BTreeMap::from([(
                 key,
                 server::Terminal {
-                    key,
                     tag: tag(terminal.view()),
                     size,
-                    cwd: cwd.to_owned(),
+                    cwd: Directory::parse(cwd.to_owned()).ok(),
                     title: title.to_owned(),
                     is,
                     statuses,

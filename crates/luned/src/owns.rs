@@ -90,7 +90,7 @@ pub fn follow(
                 unreached = 0;
             }
             if let Some(unlisted) = unlisted {
-                if !tell_mux(&core, &mut told_mux, &[]) {
+                if !tell_mux(&core, &mut told_mux, &BTreeMap::new()) {
                     return;
                 }
                 if layouts.send(unlisted).is_err() {
@@ -118,15 +118,12 @@ pub fn follow(
 fn tell_mux(
     core: &SyncSender<core::Command>,
     told: &mut BTreeMap<TerminalKey, core::MuxTerminal>,
-    terminals: &[server::Terminal],
+    terminals: &BTreeMap<TerminalKey, server::Terminal>,
 ) -> bool {
-    let mut now = BTreeMap::new();
-    for terminal in terminals {
-        if let Some(reduced) = core::MuxTerminal::of(terminal) {
-            let previous = now.insert(reduced.key, reduced);
-            assert!(previous.is_none(), "a mux terminal's key comes twice");
-        }
-    }
+    let now: BTreeMap<TerminalKey, core::MuxTerminal> = terminals
+        .iter()
+        .filter_map(|(&key, terminal)| Some((key, core::MuxTerminal::of(terminal)?)))
+        .collect();
     if now == *told {
         return true;
     }
@@ -153,13 +150,18 @@ mod tests {
     use super::*;
     use crate::mux::own::server::{Foreground, Is};
     use crate::process::AgentPid;
+    use crate::Directory;
 
-    fn terminal(title: &str, size: Option<Size>, statuses: ProgramStatuses) -> server::Terminal {
-        server::Terminal {
-            key: TerminalKey { id: NonZeroU32::new(1).unwrap(), made: OwnMade::from_nanos(5) },
+    fn listed(
+        title: &str,
+        size: Option<Size>,
+        statuses: ProgramStatuses,
+    ) -> BTreeMap<TerminalKey, server::Terminal> {
+        let key = TerminalKey { id: NonZeroU32::new(1).unwrap(), made: OwnMade::from_nanos(5) };
+        let terminal = server::Terminal {
             tag: b"t".to_vec(),
             size,
-            cwd: "/w".to_owned(),
+            cwd: Some(Directory::parse("/w".to_owned()).unwrap()),
             title: title.to_owned(),
             is: Is::Running {
                 root: AgentPid::new(10).unwrap(),
@@ -170,7 +172,8 @@ mod tests {
                 doing: None,
             },
             statuses,
-        }
+        };
+        BTreeMap::from([(key, terminal)])
     }
 
     fn osc(phase: ProgramPhase) -> ProgramStatuses {
@@ -191,28 +194,28 @@ mod tests {
         let mut told = BTreeMap::new();
 
         for title in ["⠋ Working", "⠙ Working", "✳ Working"] {
-            assert!(tell_mux(&core, &mut told, &[terminal(title, None, ProgramStatuses::default())]));
+            assert!(tell_mux(&core, &mut told, &listed(title, None, ProgramStatuses::default())));
             assert!(commands.try_recv().is_err(), "{title}");
         }
 
         let working = osc(ProgramPhase::Working { progress: None });
-        assert!(tell_mux(&core, &mut told, &[terminal("⠋ Working", None, working.clone())]));
+        assert!(tell_mux(&core, &mut told, &listed("⠋ Working", None, working.clone())));
         assert!(matches!(commands.try_recv(), Ok(core::Command::MuxTerminals(sent)) if sent.len() == 1));
 
         let resized = Size::of(120, 40).unwrap();
         for title in ["⠙ Working", "⠹ Working", "✳ Working"] {
-            assert!(tell_mux(&core, &mut told, &[terminal(title, Some(resized), working.clone())]));
+            assert!(tell_mux(&core, &mut told, &listed(title, Some(resized), working.clone())));
             assert!(commands.try_recv().is_err(), "{title}");
         }
 
         let done = osc(ProgramPhase::Done { message: None });
-        assert!(tell_mux(&core, &mut told, &[terminal("✳ Working", Some(resized), done)]));
+        assert!(tell_mux(&core, &mut told, &listed("✳ Working", Some(resized), done)));
         assert!(matches!(commands.try_recv(), Ok(core::Command::MuxTerminals(sent)) if sent.len() == 1));
 
-        assert!(tell_mux(&core, &mut told, &[]));
+        assert!(tell_mux(&core, &mut told, &BTreeMap::new()));
         assert!(matches!(commands.try_recv(), Ok(core::Command::MuxTerminals(sent)) if sent.is_empty()));
 
-        assert!(tell_mux(&core, &mut told, &[]));
+        assert!(tell_mux(&core, &mut told, &BTreeMap::new()));
         assert!(commands.try_recv().is_err());
     }
 }

@@ -2,7 +2,6 @@ use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::Path;
 use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,13 +23,15 @@ use crate::front;
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leader;
 use crate::marks::Mark;
-use crate::mux::Mux;
+use crate::mux::{MetaUpdate, Mux};
 use crate::panics::{self, Panicked};
 use crate::process::{self, Group};
 use crate::pty::{Led, Pty, Queue, Raise, SignalKey};
 use crate::ran::{Job, Now, Shell};
 use crate::screen::{Answers, Looked, Pushed, Screen, View, Wheel};
 use crate::unread::{Kept, Oldest, Refused, TYPED_BYTES_MAX, Unread};
+
+use titles::Titles;
 
 const SCROLLBACK_BYTES: usize = 10_000_000;
 
@@ -51,8 +52,6 @@ const MESSAGES_PER_TURN: usize = 64;
 const LAST_WORDS_BYTES_MAX: usize = 1024 * 1024;
 
 const LOOK_AGAIN: Duration = Duration::from_millis(100);
-
-const TITLE_AGAIN: Duration = Duration::from_millis(100);
 
 const LOOK_WHILE_GOING: Duration = Duration::from_secs(1);
 
@@ -342,91 +341,146 @@ struct Told {
     ran: Option<api::Ran>,
 }
 
-#[derive(Default)]
-struct Titles {
-    told: String,
-    title: String,
-    pwd: String,
-    due: Option<Instant>,
-    last: Option<Instant>,
-}
+mod titles {
+    use std::time::{Duration, Instant};
 
-impl Titles {
-    fn observed(
-        &mut self,
-        title: Option<String>,
+    use crate::asked::AbsoluteCwd;
+    use crate::mux::{FinalMeta, MetaUpdate};
+
+    const TITLE_AGAIN: Duration = Duration::from_millis(100);
+
+    #[derive(Default)]
+    pub(super) struct Titles {
+        told: String,
+        pace: TitlePace,
         pwd: Option<String>,
-        host: &str,
-        now: Instant,
-    ) -> Option<(String, Option<String>)> {
-        if let Some(title) = title {
-            self.title = title;
-        }
-        let cwd = match pwd {
-            Some(pwd) if pwd != self.pwd => {
-                let cwd = local_cwd(&pwd, host);
-                self.pwd = pwd;
-                cwd
-            },
-            Some(_) | None => None,
-        };
-        let title_changed = self.title != self.told;
-        if let Some(cwd) = cwd {
-            self.due = None;
-            if title_changed {
-                self.told.clone_from(&self.title);
-                self.last = Some(now);
+    }
+
+    #[derive(Default)]
+    enum TitlePace {
+        #[default]
+        Fresh,
+        Sent { at: Instant },
+        Pending { next: String, last: Instant },
+    }
+
+    impl Titles {
+        pub(super) fn due(&self) -> Option<Instant> {
+            match self.pace {
+                TitlePace::Pending { last, .. } => Some(last + TITLE_AGAIN),
+                TitlePace::Fresh | TitlePace::Sent { .. } => None,
             }
-            self.assert_paced();
-            return Some((self.title.clone(), Some(cwd)));
         }
-        if !title_changed {
-            self.due = None;
-            self.assert_paced();
-            return None;
+
+        pub(super) fn observed(
+            &mut self,
+            title: Option<String>,
+            pwd: Option<String>,
+            host: &str,
+            now: Instant,
+        ) -> Option<MetaUpdate> {
+            let cwd = self.take_cwd(pwd, host);
+            let pending_title = match title {
+                Some(title) if title != self.told => Some(title),
+                Some(_) => {
+                    if let TitlePace::Pending { last, .. } = self.pace {
+                        self.pace = TitlePace::Sent { at: last };
+                    }
+                    None
+                },
+                None => match &self.pace {
+                    TitlePace::Pending { next, .. } => Some(next.clone()),
+                    TitlePace::Fresh | TitlePace::Sent { .. } => None,
+                },
+            };
+            if let Some(cwd) = cwd {
+                if let Some(next) = pending_title {
+                    self.told.clone_from(&next);
+                    self.pace = TitlePace::Sent { at: now };
+                    return Some(MetaUpdate::Both { title: next, cwd });
+                }
+                return Some(MetaUpdate::Cwd(cwd));
+            }
+            let next = pending_title?;
+            assert_ne!(next, self.told);
+            let last = match self.pace {
+                TitlePace::Fresh => None,
+                TitlePace::Sent { at } => Some(at),
+                TitlePace::Pending { last, .. } => Some(last),
+            };
+            let Some(last) = last else {
+                self.told.clone_from(&next);
+                self.pace = TitlePace::Sent { at: now };
+                return Some(MetaUpdate::Title(next));
+            };
+            if last + TITLE_AGAIN <= now {
+                self.told.clone_from(&next);
+                self.pace = TitlePace::Sent { at: now };
+                return Some(MetaUpdate::Title(next));
+            }
+            self.pace = TitlePace::Pending { next, last };
+            None
         }
-        let soonest = self.last.map_or(now, |last| (last + TITLE_AGAIN).max(now));
-        if soonest <= now {
-            self.told.clone_from(&self.title);
-            self.due = None;
-            self.last = Some(now);
-            self.assert_paced();
-            return Some((self.title.clone(), None));
+
+        pub(super) fn take_due(&mut self, now: Instant) -> Option<String> {
+            match std::mem::replace(&mut self.pace, TitlePace::Fresh) {
+                TitlePace::Pending { next, last } if last + TITLE_AGAIN <= now => {
+                    self.told.clone_from(&next);
+                    self.pace = TitlePace::Sent { at: now };
+                    Some(next)
+                },
+                other => {
+                    self.pace = other;
+                    None
+                },
+            }
         }
-        self.due = Some(soonest);
-        self.assert_paced();
-        None
+
+        pub(super) fn finish(
+            &mut self,
+            title: Option<String>,
+            pwd: Option<String>,
+            host: &str,
+        ) -> FinalMeta {
+            let cwd = self.take_cwd(pwd, host);
+            let pending = match std::mem::replace(&mut self.pace, TitlePace::Fresh) {
+                TitlePace::Pending { next, .. } => Some(next),
+                TitlePace::Fresh | TitlePace::Sent { .. } => None,
+            };
+            let title = match title {
+                Some(title) if title != self.told => Some(title),
+                Some(_) => None,
+                None => pending,
+            };
+            if let Some(title) = &title {
+                self.told.clone_from(title);
+            }
+            FinalMeta { title, cwd }
+        }
+
+        fn take_cwd(&mut self, pwd: Option<String>, host: &str) -> Option<AbsoluteCwd> {
+            match pwd {
+                Some(pwd) if self.pwd.as_deref() != Some(pwd.as_str()) => {
+                    let cwd = local_cwd(&pwd, host);
+                    self.pwd = Some(pwd);
+                    cwd
+                },
+                Some(_) | None => None,
+            }
+        }
     }
 
-    fn take_due(&mut self, now: Instant) -> Option<String> {
-        let due = self.due?;
-        if due > now {
+    pub(super) fn local_cwd(said: &str, host: &str) -> Option<AbsoluteCwd> {
+        let after = said.strip_prefix("file://")?;
+        let (named, path) = after.split_at(after.find('/')?);
+        let local = named.is_empty()
+            || named.eq_ignore_ascii_case("localhost")
+            || named.eq_ignore_ascii_case(host);
+        if !local {
             return None;
         }
-        self.due = None;
-        if self.title == self.told {
-            return None;
-        }
-        self.told.clone_from(&self.title);
-        self.last = Some(now);
-        self.assert_paced();
-        Some(self.title.clone())
-    }
-
-    fn flush(&mut self) -> Option<String> {
-        self.due = None;
-        if self.title == self.told {
-            return None;
-        }
-        self.told.clone_from(&self.title);
-        Some(self.title.clone())
-    }
-
-    fn assert_paced(&self) {
-        assert!(self.due.is_none() || self.title != self.told, "a title waits only when it differs");
-        if let (Some(due), Some(last)) = (self.due, self.last) {
-            assert!(due >= last + TITLE_AGAIN, "{:?} after the last", due.duration_since(last));
-        }
+        let path = percent_encoding::percent_decode_str(path).decode_utf8().ok()?;
+        AbsoluteCwd::of_path(path.into_owned())
     }
 }
 
@@ -506,7 +560,7 @@ impl Thread {
                 self.look();
             }
             if let Some(title) = self.titles.take_due(Instant::now()) {
-                self.mux.titled(self.key.id, title, None);
+                self.mux.titled(self.key.id, MetaUpdate::Title(title));
             }
             self.frame()?;
         }
@@ -541,7 +595,7 @@ impl Thread {
     fn timeout(&self) -> Option<Duration> {
         let now = Instant::now();
         let due = |at: Option<Instant>| at.map(|at| at.saturating_duration_since(now));
-        [self.framing(), due(self.looks.due), due(self.titles.due)].into_iter().flatten().min()
+        [self.framing(), due(self.looks.due), due(self.titles.due())].into_iter().flatten().min()
     }
 
     fn framing(&self) -> Option<Duration> {
@@ -682,10 +736,9 @@ impl Thread {
         if let Program::Runs { unread, .. } = &mut self.program {
             unread.clear();
         }
-        self.read(LAST_WORDS_BYTES_MAX)?;
-        if let Some(title) = self.titles.flush() {
-            self.mux.titled(self.key.id, title, None);
-        }
+        self.drain_pty(LAST_WORDS_BYTES_MAX)?;
+        let final_meta =
+            self.titles.finish(self.screen.title(), self.screen.pwd(), &self.host);
         let ended_statuses = self.screen.program_exited();
         self.statuses_version = self.screen.program_statuses_version();
         self.program = Program::Gone;
@@ -694,7 +747,7 @@ impl Thread {
         self.told = Told::default();
         self.dirty = true;
         self.frame()?;
-        Ok(self.mux.ended(self.key.id, exit, ended_statuses))
+        Ok(self.mux.ended(self.key.id, exit, ended_statuses, final_meta))
     }
 
     fn tell_statuses(&mut self) {
@@ -795,8 +848,21 @@ impl Thread {
     }
 
     fn read(&mut self, most: usize) -> io::Result<()> {
-        let Program::Runs { pty, unread } = &mut self.program else {
+        if !self.drain_pty(most)? {
             return Ok(());
+        }
+        if let Some(update) =
+            self.titles.observed(self.screen.title(), self.screen.pwd(), &self.host, Instant::now())
+        {
+            self.mux.titled(self.key.id, update);
+        }
+        self.tell_statuses();
+        Ok(())
+    }
+
+    fn drain_pty(&mut self, most: usize) -> io::Result<bool> {
+        let Program::Runs { pty, unread } = &mut self.program else {
+            return Ok(false);
         };
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
@@ -830,7 +896,7 @@ impl Thread {
         }
         answers_lost(self.key.id, Kept { too_long, oldest });
         if total == 0 {
-            return Ok(());
+            return Ok(false);
         }
         self.looks.heard(Instant::now());
         if !marks.is_empty() {
@@ -852,13 +918,7 @@ impl Thread {
             (true, since) => since,
             (false, _) => None,
         };
-        if let Some((title, cwd)) =
-            self.titles.observed(self.screen.title(), self.screen.pwd(), &self.host, Instant::now())
-        {
-            self.mux.titled(self.key.id, title, cwd);
-        }
-        self.tell_statuses();
-        Ok(())
+        Ok(true)
     }
 
     fn write(&mut self) -> io::Result<()> {
@@ -1020,22 +1080,6 @@ fn host() -> String {
     rustix::system::uname().nodename().to_string_lossy().into_owned()
 }
 
-fn local_cwd(said: &str, host: &str) -> Option<String> {
-    let after = said.strip_prefix("file://")?;
-    let (named, path) = after.split_at(after.find('/')?);
-    let local = named.is_empty()
-        || named.eq_ignore_ascii_case("localhost")
-        || named.eq_ignore_ascii_case(host);
-    if !local {
-        return None;
-    }
-    let path = percent_encoding::percent_decode_str(path).decode_utf8().ok()?;
-    if path.contains('\0') {
-        return None;
-    }
-    Some(path.into_owned()).filter(|path| Path::new(path).is_absolute())
-}
-
 fn wheeled(
     screen: &mut Screen,
     wheel: Wheel,
@@ -1112,33 +1156,37 @@ mod tests {
 
     #[test]
     fn title_updates_coalesce_within_the_window_while_cwd_goes_at_once() {
+        use crate::asked::AbsoluteCwd;
+        use crate::mux::FinalMeta;
+
         let start = Instant::now();
         let at = |millis| start + Duration::from_millis(millis);
+        let cwd = |path: &str| AbsoluteCwd::of_path(path.to_owned()).unwrap();
         let mut titles = Titles::default();
 
         assert_eq!(titles.observed(Some(String::new()), None, "here", start), None);
-        assert_eq!(titles.due, None);
+        assert_eq!(titles.due(), None);
 
         assert_eq!(
             titles.observed(Some("⠋ Task".to_owned()), None, "here", start),
-            Some(("⠋ Task".to_owned(), None)),
+            Some(MetaUpdate::Title("⠋ Task".to_owned())),
         );
-        assert_eq!(titles.due, None);
+        assert_eq!(titles.due(), None);
 
         assert_eq!(titles.observed(Some("⠙ Task".to_owned()), None, "here", at(20)), None);
-        assert_eq!(titles.due, Some(at(100)));
+        assert_eq!(titles.due(), Some(at(100)));
         assert_eq!(titles.take_due(at(99)), None);
 
         assert_eq!(titles.observed(Some("⠹ Task".to_owned()), None, "here", at(50)), None);
-        assert_eq!(titles.due, Some(at(100)));
+        assert_eq!(titles.due(), Some(at(100)));
 
         assert_eq!(titles.observed(Some("⠋ Task".to_owned()), None, "here", at(60)), None);
-        assert_eq!(titles.due, None);
+        assert_eq!(titles.due(), None);
 
         assert_eq!(titles.observed(Some("⠸ Task".to_owned()), None, "here", at(70)), None);
-        assert_eq!(titles.due, Some(at(100)));
+        assert_eq!(titles.due(), Some(at(100)));
         assert_eq!(titles.take_due(at(100)), Some("⠸ Task".to_owned()));
-        assert_eq!(titles.due, None);
+        assert_eq!(titles.due(), None);
 
         assert_eq!(
             titles.observed(None, Some("file://there/tmp".to_owned()), "here", at(110)),
@@ -1146,27 +1194,30 @@ mod tests {
         );
         assert_eq!(
             titles.observed(None, Some("file://here/tmp".to_owned()), "here", at(115)),
-            Some(("⠸ Task".to_owned(), Some("/tmp".to_owned()))),
+            Some(MetaUpdate::Cwd(cwd("/tmp"))),
         );
 
         assert_eq!(titles.observed(Some("⠼ Task".to_owned()), None, "here", at(120)), None);
-        assert_eq!(titles.due, Some(at(200)));
+        assert_eq!(titles.due(), Some(at(200)));
         assert_eq!(
             titles.observed(None, Some("file://here/var".to_owned()), "here", at(130)),
-            Some(("⠼ Task".to_owned(), Some("/var".to_owned()))),
+            Some(MetaUpdate::Both { title: "⠼ Task".to_owned(), cwd: cwd("/var") }),
         );
-        assert_eq!(titles.due, None);
+        assert_eq!(titles.due(), None);
 
         assert_eq!(titles.observed(Some("⠴ Task".to_owned()), None, "here", at(150)), None);
-        assert_eq!(titles.due, Some(at(230)));
-        assert_eq!(titles.flush(), Some("⠴ Task".to_owned()));
-        assert_eq!(titles.due, None);
-        assert_eq!(titles.flush(), None);
+        assert_eq!(titles.due(), Some(at(230)));
+        assert_eq!(
+            titles.finish(None, Some("file://here/opt".to_owned()), "here"),
+            FinalMeta { title: Some("⠴ Task".to_owned()), cwd: Some(cwd("/opt")) },
+        );
+        assert_eq!(titles.due(), None);
+        assert_eq!(titles.finish(None, None, "here"), FinalMeta::default());
     }
 
     #[test]
     fn a_cwd_is_one_this_machine_has() {
-        let cwd = |said: &str| local_cwd(said, "here");
+        let cwd = |said: &str| titles::local_cwd(said, "here").map(|cwd| cwd.as_str().to_owned());
         assert_eq!(cwd("file://here/home/a%20b"), Some("/home/a b".to_owned()));
         assert_eq!(cwd("file://HERE/tmp"), Some("/tmp".to_owned()));
         assert_eq!(cwd("file:///tmp"), Some("/tmp".to_owned()));
