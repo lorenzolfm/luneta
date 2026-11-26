@@ -28,7 +28,7 @@ use luned::links::{self, Branch, Unready};
 use luned::projects::Opened;
 use luned::repositories::OWNED_FOLDER;
 use luned::work::{self, Listed};
-use luned::{Asked, Beside, Daemon, Heard};
+use luned::{Asked, Beside, Heard, Shared};
 use tonic::{Code, Status};
 
 use luned::Directory;
@@ -134,7 +134,7 @@ fn in_kept<T>(path: &Path, project: ProjectId, made: Result<T, String>) -> Resul
 
 fn asked<T, E: From<String>>(
     path: &Path,
-    asking: impl AsyncFnOnce(&mut Daemon) -> Result<T, E>,
+    asking: impl AsyncFnOnce(&Shared) -> Result<T, E>,
 ) -> Result<T, E> {
     asked_or(path, ASKING, asking, E::from).unwrap_or_else(|unasked| Err(E::from(unasked)))
 }
@@ -142,12 +142,12 @@ fn asked<T, E: From<String>>(
 fn asked_or<T, E>(
     path: &Path,
     within: Duration,
-    asking: impl AsyncFnOnce(&mut Daemon) -> Result<T, E>,
+    asking: impl AsyncFnOnce(&Shared) -> Result<T, E>,
     late: impl FnOnce(String) -> E,
 ) -> Result<Result<T, E>, String> {
     luned::tasks::shared().block_on(async {
-        let mut daemon = daemon::current(path).await?.daemon;
-        Ok(answered_within(within, asking(&mut daemon), late).await)
+        let daemon = daemon::current(path).await?.daemon;
+        Ok(answered_within(within, asking(&daemon), late).await)
     })
 }
 
@@ -171,8 +171,11 @@ pub fn holders(path: &Path) -> Result<Holders, String> {
 fn kept_as_said(path: &Path) -> Result<Vec<api::Project>, String> {
     asked(path, async |daemon| {
         let request = WatchRequest { after: None, kept: None, shown: false };
-        let host = daemon.watch(request).await.map_err(|status| status.message().to_owned())?;
-        match host.into_inner().projects.and_then(|projects| projects.held) {
+        let host = daemon
+            .ask(luned::ANSWER, |mut daemon| async move { daemon.watch(request).await })
+            .await
+            .map_err(|status| status.message().to_owned())?;
+        match host.projects.and_then(|projects| projects.held) {
             Some(Held::Kept(kept)) => Ok(kept.projects),
             Some(Held::Unkept(why)) => Err(format!("luned keeps no projects: {why}")),
             None => Err("luned is older than its projects".to_owned()),
@@ -187,9 +190,10 @@ fn change_answered<E: From<Unchanged>>(
     read: fn(&Status) -> E,
 ) -> Result<ChangeProjectsResponse, E> {
     let request = ChangeProjectsRequest { on, change: Some(change) };
-    let asking = async |daemon: &mut Daemon| match daemon.change_projects(request).await {
-        Ok(answered) => Ok(answered.into_inner()),
-        Err(status) => Err(read(&status)),
+    let asking = async |daemon: &Shared| {
+        let asked = daemon
+            .ask(luned::ANSWER, |mut daemon| async move { daemon.change_projects(request).await });
+        asked.await.map_err(|status| read(&status))
     };
     let late = |late| E::from(Unchanged::InDoubt(late));
     let answered = asked_or(path, ASKING, asking, late);
@@ -253,9 +257,12 @@ pub fn branched(
 ) -> Result<Landed, String> {
     let (on, project, branch) = (on(machine), project.get(), branch.as_str().to_owned());
     let request = MakeWorktreeRequest { on, project, branch, opens: None };
-    let asking = async |daemon: &mut Daemon| {
+    let asking = async |daemon: &Shared| {
         let unready = |status: Status| unbranched(&status);
-        let mut answer = daemon.make_worktree(request).await.map_err(unready)?.into_inner();
+        let mut answer = daemon
+            .hold(luned::ANSWER, |mut daemon| async move { daemon.make_worktree(request).await })
+            .await
+            .map_err(unready)?;
         let answered = answer.message().await.map_err(unready)?;
         let unsaid = || Unready::InDoubt("luned ended its answer with no worktree".to_owned());
         let id = |id| WorktreeId::of(id).ok_or_else(|| Unready::InDoubt(zero("worktree")));
@@ -275,9 +282,12 @@ pub fn branched(
 
 pub fn work(path: &Path, machine: &Machine, project: ProjectId) -> Result<Listed, String> {
     let request = ListWorkRequest { on: on(machine), project: project.get() };
-    let asking = async |daemon: &mut Daemon| {
+    let asking = async |daemon: &Shared| {
         let said = |status: Status| status.message().to_owned();
-        let mut answer = daemon.list_work(request).await.map_err(said)?.into_inner();
+        let mut answer = daemon
+            .hold(luned::ANSWER, |mut daemon| async move { daemon.list_work(request).await })
+            .await
+            .map_err(said)?;
         let listed = answer.message().await.map_err(said)?;
         let listed = listed.ok_or("luned ended its answer with no list")?;
         Listed::of(listed)

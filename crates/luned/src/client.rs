@@ -1,8 +1,14 @@
+use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
 use std::future::Future;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, IoSlice};
+use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -10,14 +16,18 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, BufReader, ReadBuf};
 use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{timeout_at, Instant};
+use tokio_stream::Stream;
 use tonic::transport::{Channel, Endpoint, Error, Uri};
-use tonic::Status;
+use tonic::{Response, Status, Streaming};
 use tower::{service_fn, BoxError, Service};
 
+use crate::api;
 use crate::api::daemon_client::DaemonClient;
-use crate::daemon::ANSWERING_MAX;
+use crate::daemon::{ANSWERING_MAX, QUESTIONS_MAX};
 use crate::folder::Folder;
+use crate::{release, remote, tasks};
 
 const CONNECT: Duration = Duration::from_secs(1);
 
@@ -32,6 +42,33 @@ pub(crate) const ROUND_TRIP: RoundTrip = RoundTrip::of(Duration::from_secs(5));
 const QUIET: Duration = Duration::from_secs(3);
 
 const _: () = assert!(QUIET.as_millis() < ANSWER.waits().as_millis());
+
+const KEPT_MAX: usize = 16;
+
+pub const HELD_MAX: usize = remote::HELD_MAX;
+
+pub const ASKED_MAX: usize = QUESTIONS_MAX as usize - HELD_MAX;
+
+pub const ASKED_WAITING_MAX: usize = 32;
+
+const STREAM_WINDOW: u32 = 64 * 1024;
+
+const CONNECTION_WINDOW: u32 = QUESTIONS_MAX * STREAM_WINDOW;
+
+const _: () = assert!(KEPT_MAX > 0, "lune keeps at least one channel to luned");
+const _: () = assert!(HELD_MAX > 0, "lune holds at least one stream to luned");
+const _: () = assert!(ASKED_MAX > 0, "lune keeps room for questions to luned");
+const _: () = assert!(ASKED_WAITING_MAX > 0, "short bursts of questions wait their turn");
+const _: () = assert!(
+    HELD_MAX + ASKED_MAX <= QUESTIONS_MAX as usize,
+    "the one connection to luned holds every stream and question lune puts on it"
+);
+const _: () = assert!(
+    CONNECTION_WINDOW as u64 <= i32::MAX as u64,
+    "a window of every stream lune does not read fits in what HTTP/2 lets a connection hold"
+);
+
+static KEPT: Mutex<BTreeMap<PathBuf, Kept>> = Mutex::new(BTreeMap::new());
 
 #[derive(Clone, Copy, Debug)]
 pub struct Answer(Duration);
@@ -71,7 +108,473 @@ impl RoundTrip {
 
 const SAID_MAX: u64 = 4096;
 
-pub type Daemon = DaemonClient<Within<Channel>>;
+pub type Daemon = DaemonClient<Within<Watched<Channel>>>;
+
+#[derive(Clone, Debug, Default)]
+struct Gone(Arc<AtomicBool>);
+
+impl Gone {
+    fn mark(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn is(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Watched<S> {
+    inner: S,
+    gone: Gone,
+}
+
+impl<S: Service<R>, R> Service<R> for Watched<S>
+where
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<S::Response, S::Error>> + Send>>;
+
+    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), S::Error>> {
+        let polled = self.inner.poll_ready(context);
+        if let Poll::Ready(Err(_)) = &polled {
+            self.gone.mark();
+        }
+        polled
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        let gone = self.gone.clone();
+        let asked = self.inner.call(request);
+        Box::pin(async move {
+            let heard = asked.await;
+            if heard.is_err() {
+                gone.mark();
+            }
+            heard
+        })
+    }
+}
+
+fn daemon(channel: Channel, gone: Gone, answer: Answer) -> Daemon {
+    DaemonClient::new(Within::new(Watched { inner: channel, gone }, answer.0, unanswered))
+        .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX)
+}
+
+#[cfg(test)]
+pub(crate) fn unwatched(channel: Channel, answer: Answer) -> Daemon {
+    daemon(channel, Gone::default(), answer)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SocketId {
+    device: u64,
+    inode: u64,
+}
+
+fn socket_id(socket: &Path) -> Option<SocketId> {
+    let found = fs::symlink_metadata(socket).ok()?;
+    found.file_type().is_socket().then_some(SocketId { device: found.dev(), inode: found.ino() })
+}
+
+struct Budget {
+    held: Arc<Semaphore>,
+    asked: Arc<Semaphore>,
+    waiting: Semaphore,
+}
+
+impl Budget {
+    fn new() -> Budget {
+        Budget {
+            held: Arc::new(Semaphore::new(HELD_MAX)),
+            asked: Arc::new(Semaphore::new(ASKED_MAX)),
+            waiting: Semaphore::new(ASKED_WAITING_MAX),
+        }
+    }
+
+    fn hold(&self) -> Result<OwnedSemaphorePermit, Status> {
+        assert!(
+            self.held.available_permits() <= HELD_MAX,
+            "the stream budget holds at most {HELD_MAX} places"
+        );
+        Arc::clone(&self.held).try_acquire_owned().map_err(|_| {
+            Status::failed_precondition(format!(
+                "lune holds at most {HELD_MAX} streams to luned at once"
+            ))
+        })
+    }
+
+    async fn ask(&self, deadline: Instant, answer: Duration) -> Result<OwnedSemaphorePermit, Status> {
+        assert!(!answer.is_zero(), "a question waits some time for its answer");
+        assert!(
+            self.asked.available_permits() <= ASKED_MAX,
+            "the question budget holds at most {ASKED_MAX} places"
+        );
+        if let Ok(permit) = Arc::clone(&self.asked).try_acquire_owned() {
+            return Ok(permit);
+        }
+        let _waiting = self.waiting.try_acquire().map_err(|_| {
+            Status::failed_precondition(format!(
+                "lune has at most {ASKED_WAITING_MAX} questions waiting on luned at once"
+            ))
+        })?;
+        let acquired = timeout_at(deadline, Arc::clone(&self.asked).acquire_owned()).await;
+        let permit = acquired.map_err(|_| Status::failed_precondition(unanswered(answer)))?;
+        Ok(permit.expect("the channel's question budget is never closed"))
+    }
+}
+
+pub struct Held<S> {
+    heard: S,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl<T> Held<Streaming<T>> {
+    pub async fn message(&mut self) -> Result<Option<T>, Status> {
+        self.heard.message().await
+    }
+}
+
+impl<S: Stream + Unpin> Stream for Held<S> {
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.heard).poll_next(context)
+    }
+}
+
+pub struct Watching {
+    daemon: Daemon,
+    answer: Answer,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Watching {
+    pub async fn watch(&mut self, request: api::WatchRequest) -> Result<api::Host, Status> {
+        let wait = self.answer.waits();
+        match tokio::time::timeout(wait, self.daemon.watch(request)).await {
+            Ok(watched) => watched.map(Response::into_inner),
+            Err(_) => Err(Status::deadline_exceeded(unanswered(wait))),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Shared {
+    channel: Channel,
+    gone: Gone,
+    budget: Arc<Budget>,
+}
+
+impl Shared {
+    fn new(channel: Channel, gone: Gone) -> Shared {
+        Shared { channel, gone, budget: Arc::new(Budget::new()) }
+    }
+
+    fn daemon(&self, answer: Answer) -> Daemon {
+        daemon(self.channel.clone(), self.gone.clone(), answer)
+    }
+
+    pub async fn ask<T, F>(
+        &self,
+        answer: Answer,
+        asking: impl FnOnce(Daemon) -> F,
+    ) -> Result<T, Status>
+    where
+        F: Future<Output = Result<Response<T>, Status>>,
+    {
+        let wait = answer.waits();
+        let deadline = Instant::now() + wait;
+        let _permit = self.budget.ask(deadline, wait).await?;
+        let daemon = self.daemon(answer);
+        match timeout_at(deadline, asking(daemon)).await {
+            Ok(answered) => answered.map(Response::into_inner),
+            Err(_) => Err(Status::deadline_exceeded(unanswered(wait))),
+        }
+    }
+
+    pub async fn hold<T, F>(
+        &self,
+        answer: Answer,
+        asking: impl FnOnce(Daemon) -> F,
+    ) -> Result<Held<T>, Status>
+    where
+        F: Future<Output = Result<Response<T>, Status>>,
+    {
+        let wait = answer.waits();
+        let permit = self.budget.hold()?;
+        let daemon = self.daemon(answer);
+        let heard = match tokio::time::timeout(wait, asking(daemon)).await {
+            Ok(heard) => heard?.into_inner(),
+            Err(_) => return Err(Status::deadline_exceeded(unanswered(wait))),
+        };
+        Ok(Held { heard, _permit: permit })
+    }
+
+    pub fn watching(&self, answer: Answer) -> Result<Watching, Status> {
+        let permit = self.budget.hold()?;
+        Ok(Watching { daemon: self.daemon(answer), answer, _permit: permit })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unmatched {
+    other: release::Other,
+    pid: u32,
+}
+
+impl Unmatched {
+    #[must_use]
+    pub fn of(other: release::Other, pid: u32) -> Unmatched {
+        Unmatched { other, pid }
+    }
+
+    #[must_use]
+    pub fn other(&self) -> &release::Other {
+        &self.other
+    }
+
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+impl fmt::Display for Unmatched {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (daemon, own) = (format!("luned {} (pid {})", self.other, self.pid), release::SAID.as_str());
+        if self.other.is_newer() {
+            write!(f, "{daemon} is newer than this lune, {own}: run a lune of its build")
+        } else {
+            write!(
+                f,
+                "{daemon} is another build than this lune, {own}: open lune to have it replaced"
+            )
+        }
+    }
+}
+
+pub enum Reached {
+    Matched(Shared),
+    Unmatched(Unmatched),
+}
+
+#[derive(Debug)]
+pub enum Unreached {
+    Connect(Error),
+    Asked(Status),
+}
+
+impl fmt::Display for Unreached {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unreached::Connect(error) => write!(f, "{error}"),
+            Unreached::Asked(status) => write!(f, "{status}"),
+        }
+    }
+}
+
+impl std::error::Error for Unreached {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Unreached::Connect(error) => Some(error),
+            Unreached::Asked(status) => Some(status),
+        }
+    }
+}
+
+struct Kept {
+    shared: Shared,
+    socket_id: SocketId,
+}
+
+#[must_use]
+pub fn kept(folder: &Folder) -> Option<Shared> {
+    kept_at(&folder.socket())
+}
+
+fn kept_at(socket: &Path) -> Option<Shared> {
+    let current = socket_id(socket);
+    let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
+    kept.retain(|_, held| !held.shared.gone.is());
+    let found = if let Some(held) = kept.get(socket) {
+        if current == Some(held.socket_id) {
+            Some(held.shared.clone())
+        } else {
+            held.shared.gone.mark();
+            kept.remove(socket);
+            None
+        }
+    } else {
+        None
+    };
+    assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
+    found
+}
+
+fn keep(socket: &Path, fresh: Kept) -> Shared {
+    if fresh.shared.gone.is() {
+        return fresh.shared;
+    }
+    let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
+    kept.retain(|_, held| !held.shared.gone.is());
+    if socket_id(socket) != Some(fresh.socket_id) {
+        fresh.shared.gone.mark();
+        return fresh.shared;
+    }
+    if let Some(existing) = kept.get(socket) {
+        if existing.socket_id == fresh.socket_id {
+            return existing.shared.clone();
+        }
+        existing.shared.gone.mark();
+    }
+    if kept.len() == KEPT_MAX && !kept.contains_key(socket) {
+        kept.pop_first();
+    }
+    let shared = fresh.shared.clone();
+    kept.insert(socket.to_owned(), fresh);
+    assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
+    shared
+}
+
+enum Connected {
+    Matched { channel: Channel, gone: Gone, id: Option<SocketId> },
+    Unmatched(Unmatched),
+}
+
+pub async fn reach(folder: &Folder) -> Result<Reached, Unreached> {
+    let socket = folder.socket();
+    if let Some(shared) = kept_at(&socket) {
+        return Ok(Reached::Matched(shared));
+    }
+    let at = socket.clone();
+    let connected = tasks::shared().spawn(async move { connect_matched(at).await });
+    let connected =
+        connected.await.unwrap_or_else(|ended| std::panic::resume_unwind(ended.into_panic()))?;
+    match connected {
+        Connected::Matched { channel, gone, id: Some(socket_id) } => {
+            let kept = Kept { shared: Shared::new(channel, gone), socket_id };
+            Ok(Reached::Matched(keep(&socket, kept)))
+        },
+        Connected::Matched { channel, gone, id: None } => {
+            Ok(Reached::Matched(Shared::new(channel, gone)))
+        },
+        Connected::Unmatched(unmatched) => Ok(Reached::Unmatched(unmatched)),
+    }
+}
+
+async fn connect_matched(socket: PathBuf) -> Result<Connected, Unreached> {
+    let (channel, gone, id) = open(socket).await.map_err(Unreached::Connect)?;
+    let mut verified = daemon(channel.clone(), gone.clone(), ANSWER);
+    let info = verified.info(()).await.map_err(Unreached::Asked)?.into_inner();
+    match release::of(&info.version, info.built) {
+        release::Of::Own => Ok(Connected::Matched { channel, gone, id }),
+        release::Of::Other(other) => {
+            gone.mark();
+            Ok(Connected::Unmatched(Unmatched { other, pid: info.pid }))
+        },
+    }
+}
+
+fn endpoint() -> Endpoint {
+    Endpoint::from_static("http://luned")
+        .connect_timeout(CONNECT)
+        .initial_stream_window_size(STREAM_WINDOW)
+        .initial_connection_window_size(CONNECTION_WINDOW)
+}
+
+async fn open(socket: PathBuf) -> Result<(Channel, Gone, Option<SocketId>), Error> {
+    let before = socket_id(&socket);
+    let gone = Gone::default();
+    let tracked = gone.clone();
+    let mut at = Some(socket.clone());
+    let channel = endpoint()
+        .connect_with_connector(service_fn(move |_: Uri| {
+            let at = at.take();
+            let gone = tracked.clone();
+            async move {
+                let at = at.ok_or_else(went)?;
+                let stream = mine(UnixStream::connect(at).await?)?;
+                io::Result::Ok(TokioIo::new(Tracked { stream, gone }))
+            }
+        }))
+        .await?;
+    let after = socket_id(&socket);
+    let id = before.filter(|before| Some(*before) == after);
+    Ok((channel, gone, id))
+}
+
+struct Tracked {
+    stream: UnixStream,
+    gone: Gone,
+}
+
+impl Tracked {
+    fn marked<T>(&self, polled: Poll<io::Result<T>>) -> Poll<io::Result<T>> {
+        if let Poll::Ready(Err(_)) = &polled {
+            self.gone.mark();
+        }
+        polled
+    }
+}
+
+impl AsyncRead for Tracked {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let (before, room) = (buf.filled().len(), buf.remaining());
+        let polled = Pin::new(&mut self.stream).poll_read(cx, buf);
+        let ended = matches!(polled, Poll::Ready(Ok(()))) && room > 0;
+        if ended && buf.filled().len() == before {
+            self.gone.mark();
+        }
+        self.marked(polled)
+    }
+}
+
+impl AsyncWrite for Tracked {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let polled = Pin::new(&mut self.stream).poll_write(cx, buf);
+        self.marked(polled)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let polled = Pin::new(&mut self.stream).poll_write_vectored(cx, bufs);
+        self.marked(polled)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let polled = Pin::new(&mut self.stream).poll_flush(cx);
+        self.marked(polled)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.gone.mark();
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        self.gone.mark();
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Within<S> {
@@ -119,8 +622,7 @@ pub fn unanswered(within: Duration) -> String {
 
 pub async fn connect(folder: &Folder, answer: Answer) -> Result<Daemon, Error> {
     let mut socket = Some(folder.socket());
-    let channel = Endpoint::from_static("http://luned")
-        .connect_timeout(CONNECT)
+    let channel = endpoint()
         .connect_with_connector(service_fn(move |_: Uri| {
             let socket = socket.take();
             async move {
@@ -129,8 +631,7 @@ pub async fn connect(folder: &Folder, answer: Answer) -> Result<Daemon, Error> {
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, answer.0, unanswered))
-        .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX))
+    Ok(daemon(channel, Gone::default(), answer))
 }
 
 pub async fn through(
@@ -150,8 +651,7 @@ pub async fn through(
             }
         }))
         .await?;
-    Ok(DaemonClient::new(Within::new(channel, round_trip.answer.0, unanswered))
-        .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX))
+    Ok(daemon(channel, Gone::default(), round_trip.answer))
 }
 
 fn went() -> io::Error {
@@ -271,17 +771,690 @@ mod tests {
     use std::error::Error;
     use std::future::pending;
     use std::io::ErrorKind;
+    use std::pin::Pin;
     use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::time::Duration;
 
-    use lune_waits::Began;
+    use lune_waits::{eventually_async, Began, Patience};
+    use tokio::net::{UnixListener, UnixStream};
+    use tokio::sync::{mpsc, oneshot, Notify};
+    use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
+    use tokio_stream::{Stream, StreamExt as _};
     use tonic::body::Body;
     use tonic::codegen::http::{Request, Response};
-    use tonic::Code;
-    use tower::{service_fn, BoxError};
+    use tonic::transport::Server;
+    use tonic::{Code, Request as GrpcRequest, Response as GrpcResponse, Status, Streaming};
+    use tower::{service_fn, BoxError, ServiceExt as _};
 
-    use super::{through, unanswered, RoundTrip, Unbridged, Within};
+    use super::{
+        keep, kept, reach, socket_id, through, unanswered, Answer, Gone, Kept, Reached, RoundTrip,
+        Tracked, Unbridged, Watched, Within, ANSWER, ASKED_MAX, ASKED_WAITING_MAX, HELD_MAX,
+        QUESTIONS_MAX, STREAM_WINDOW,
+    };
+    use crate::changes::Unchanged;
     use crate::api::daemon_client::DaemonClient;
+    use crate::api::daemon_server::{Daemon as DaemonService, DaemonServer};
+    use crate::api::{
+        self, AnswerRequest, AskRequest, AskResponse, ChangeProjectsRequest,
+        ChangeProjectsResponse, FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse,
+        IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest,
+        KeepChecksResponse, KeepImageRequest, KeepImageResponse, KeepPrintedRequest,
+        KeepPrintedResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
+        ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, ListSkillsResponse,
+        ListWorkRequest, ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse,
+        PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
+        RebaseRequest, RebaseResponse, SayRequest, ShowRequest, ShowResponse,
+        TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest, WaitingResponse,
+        WatchRequest,
+    };
+    use crate::folder::{self, Folder};
+    use crate::mux::own::api::ToViewer;
+    use crate::{release, tasks};
+
+    #[derive(Clone)]
+    enum AgentsAnswer {
+        Ok,
+        Unavailable(String),
+        Park { arrived: Arc<AtomicUsize>, release: Arc<Notify> },
+    }
+
+    #[derive(Clone)]
+    struct Stub {
+        version: String,
+        built: Option<u64>,
+        pid: u32,
+        infos: Arc<AtomicUsize>,
+        agents: Arc<Mutex<AgentsAnswer>>,
+        flooded: Arc<AtomicUsize>,
+        contents: String,
+    }
+
+    impl Stub {
+        fn own() -> Stub {
+            Stub {
+                version: release::VERSION.to_owned(),
+                built: release::BUILT,
+                pid: std::process::id(),
+                infos: Arc::new(AtomicUsize::new(0)),
+                agents: Arc::new(Mutex::new(AgentsAnswer::Ok)),
+                flooded: Arc::new(AtomicUsize::new(0)),
+                contents: "x".repeat(32 * 1024),
+            }
+        }
+
+        fn serve(&self, folder: &Folder) -> Served {
+            let tasks = tasks::shared();
+            let socket = folder.socket();
+            let _ = std::fs::remove_file(&socket);
+            let std_listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            std_listener.set_nonblocking(true).unwrap();
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&accepted);
+            let (stop, stopping) = oneshot::channel::<()>();
+            let stub = self.clone();
+            let handle = tasks.spawn(async move {
+                let listener = UnixListener::from_std(std_listener).unwrap();
+                let incoming = UnixListenerStream::new(listener).map(move |stream| {
+                    if stream.is_ok() {
+                        counted.fetch_add(1, Ordering::Relaxed);
+                    }
+                    stream
+                });
+                let shutdown = async move {
+                    let _ = stopping.await;
+                };
+                let _ = Server::builder()
+                    .max_concurrent_streams(QUESTIONS_MAX)
+                    .add_service(DaemonServer::new(stub))
+                    .serve_with_incoming_shutdown(incoming, shutdown)
+                    .await;
+            });
+            Served { accepted, stop: Some(stop), handle }
+        }
+    }
+
+    struct Served {
+        accepted: Arc<AtomicUsize>,
+        stop: Option<oneshot::Sender<()>>,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl Served {
+        fn accepted(&self) -> usize {
+            self.accepted.load(Ordering::Relaxed)
+        }
+
+        async fn stop(mut self) {
+            if let Some(stop) = self.stop.take() {
+                let _ = stop.send(());
+            }
+            let _ = (&mut self.handle).await;
+        }
+    }
+
+    impl Drop for Served {
+        fn drop(&mut self) {
+            if let Some(stop) = self.stop.take() {
+                let _ = stop.send(());
+            }
+            self.handle.abort();
+        }
+    }
+
+    fn unserved() -> Status {
+        Status::unimplemented("unneeded in this test")
+    }
+
+    #[tonic::async_trait]
+    impl DaemonService for Stub {
+        type AskStream = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>> + Send>>;
+        type FileIssueStream = Pin<Box<dyn Stream<Item = Result<FileIssueResponse, Status>> + Send>>;
+        type FramesStream = Pin<Box<dyn Stream<Item = Result<ToViewer, Status>> + Send>>;
+        type KeepChecksStream =
+            Pin<Box<dyn Stream<Item = Result<KeepChecksResponse, Status>> + Send>>;
+        type KeepImageStream = Pin<Box<dyn Stream<Item = Result<KeepImageResponse, Status>> + Send>>;
+        type ListWorkStream = Pin<Box<dyn Stream<Item = Result<ListWorkResponse, Status>> + Send>>;
+        type MakeWorktreeStream =
+            Pin<Box<dyn Stream<Item = Result<MakeWorktreeResponse, Status>> + Send>>;
+        type PasteStream = Pin<Box<dyn Stream<Item = Result<PasteResponse, Status>> + Send>>;
+        type PruneStream = Pin<Box<dyn Stream<Item = Result<PruneResponse, Status>> + Send>>;
+        type PrunesStream = Pin<Box<dyn Stream<Item = Result<PrunesResponse, Status>> + Send>>;
+        type RebaseStream = Pin<Box<dyn Stream<Item = Result<RebaseResponse, Status>> + Send>>;
+        type ShowStream = Pin<Box<dyn Stream<Item = Result<ShowResponse, Status>> + Send>>;
+
+        async fn info(&self, _: GrpcRequest<()>) -> Result<GrpcResponse<InfoResponse>, Status> {
+            self.infos.fetch_add(1, Ordering::Relaxed);
+            Ok(GrpcResponse::new(InfoResponse {
+                version: self.version.clone(),
+                pid: self.pid,
+                started_at: None,
+                claude_folder: None,
+                built: self.built,
+                agy_folder: None,
+            }))
+        }
+
+        async fn list_agents(
+            &self,
+            _: GrpcRequest<()>,
+        ) -> Result<GrpcResponse<ListAgentsResponse>, Status> {
+            let answer = self.agents.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            match answer {
+                AgentsAnswer::Ok => Ok(GrpcResponse::new(ListAgentsResponse::default())),
+                AgentsAnswer::Unavailable(why) => Err(Status::unavailable(why)),
+                AgentsAnswer::Park { arrived, release } => {
+                    let notified = release.notified();
+                    arrived.fetch_add(1, Ordering::Relaxed);
+                    notified.await;
+                    Ok(GrpcResponse::new(ListAgentsResponse::default()))
+                },
+            }
+        }
+
+        async fn watch(
+            &self,
+            _: GrpcRequest<WatchRequest>,
+        ) -> Result<GrpcResponse<api::Host>, Status> {
+            Ok(GrpcResponse::new(api::Host::default()))
+        }
+
+        async fn list_contents(
+            &self,
+            _: GrpcRequest<ListContentsRequest>,
+        ) -> Result<GrpcResponse<ListContentsResponse>, Status> {
+            Ok(GrpcResponse::new(ListContentsResponse { listed: self.contents.clone() }))
+        }
+
+        async fn ask(
+            &self,
+            request: GrpcRequest<AskRequest>,
+        ) -> Result<GrpcResponse<Self::AskStream>, Status> {
+            let words = request.into_inner().words;
+            if words == "flood" {
+                let (sent, heard) = mpsc::channel(1);
+                let flooded = Arc::clone(&self.flooded);
+                tokio::spawn(async move {
+                    let chunk = "x".repeat(16 * 1024);
+                    for _ in 0..256 {
+                        let step = Some(api::ask_response::Step::Said(chunk.clone()));
+                        if sent.send(Ok(AskResponse { step })).await.is_err() {
+                            return;
+                        }
+                        flooded.fetch_add(chunk.len(), Ordering::Relaxed);
+                    }
+                });
+                return Ok(GrpcResponse::new(Box::pin(ReceiverStream::new(heard))));
+            }
+            let (sent, heard) = mpsc::channel(1);
+            let step = Some(api::ask_response::Step::Said("held".to_owned()));
+            let _ = sent.send(Ok(AskResponse { step })).await;
+            let hold = ReceiverStream::new(heard).chain(tokio_stream::pending());
+            Ok(GrpcResponse::new(Box::pin(hold)))
+        }
+
+        async fn list_skills(
+            &self,
+            _: GrpcRequest<ListSkillsRequest>,
+        ) -> Result<GrpcResponse<ListSkillsResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn keep_checks(
+            &self,
+            _: GrpcRequest<KeepChecksRequest>,
+        ) -> Result<GrpcResponse<Self::KeepChecksStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn keep_printed(
+            &self,
+            _: GrpcRequest<KeepPrintedRequest>,
+        ) -> Result<GrpcResponse<KeepPrintedResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn list_repositories(
+            &self,
+            _: GrpcRequest<ListRepositoriesRequest>,
+        ) -> Result<GrpcResponse<ListRepositoriesResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn waiting(
+            &self,
+            _: GrpcRequest<WaitingRequest>,
+        ) -> Result<GrpcResponse<WaitingResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn answer(&self, _: GrpcRequest<AnswerRequest>) -> Result<GrpcResponse<()>, Status> {
+            Err(unserved())
+        }
+
+        async fn transcript_ends(
+            &self,
+            _: GrpcRequest<TranscriptEndsRequest>,
+        ) -> Result<GrpcResponse<TranscriptEndsResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn say(&self, _: GrpcRequest<SayRequest>) -> Result<GrpcResponse<()>, Status> {
+            Err(unserved())
+        }
+
+        async fn paste(
+            &self,
+            _: GrpcRequest<PasteRequest>,
+        ) -> Result<GrpcResponse<Self::PasteStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn prunes(
+            &self,
+            _: GrpcRequest<PrunesRequest>,
+        ) -> Result<GrpcResponse<Self::PrunesStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn prune(
+            &self,
+            _: GrpcRequest<PruneRequest>,
+        ) -> Result<GrpcResponse<Self::PruneStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn rebase(
+            &self,
+            _: GrpcRequest<RebaseRequest>,
+        ) -> Result<GrpcResponse<Self::RebaseStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn file_issue(
+            &self,
+            _: GrpcRequest<FileIssueRequest>,
+        ) -> Result<GrpcResponse<Self::FileIssueStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn issue_repositories(
+            &self,
+            _: GrpcRequest<IssueRepositoriesRequest>,
+        ) -> Result<GrpcResponse<IssueRepositoriesResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn keep_image(
+            &self,
+            _: GrpcRequest<Streaming<KeepImageRequest>>,
+        ) -> Result<GrpcResponse<Self::KeepImageStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn show(
+            &self,
+            _: GrpcRequest<Streaming<ShowRequest>>,
+        ) -> Result<GrpcResponse<Self::ShowStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn frames(
+            &self,
+            _: GrpcRequest<Streaming<FramesRequest>>,
+        ) -> Result<GrpcResponse<Self::FramesStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn change_projects(
+            &self,
+            _: GrpcRequest<ChangeProjectsRequest>,
+        ) -> Result<GrpcResponse<ChangeProjectsResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn make_worktree(
+            &self,
+            _: GrpcRequest<MakeWorktreeRequest>,
+        ) -> Result<GrpcResponse<Self::MakeWorktreeStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn list_work(
+            &self,
+            _: GrpcRequest<ListWorkRequest>,
+        ) -> Result<GrpcResponse<Self::ListWorkStream>, Status> {
+            Err(unserved())
+        }
+    }
+
+    fn temp_folder() -> (tempfile::TempDir, Folder) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lune");
+        let folder = folder::make(&path).unwrap();
+        (dir, folder)
+    }
+
+    #[test]
+    fn lune_keeps_one_connection_to_luned_and_checks_its_build_once_until_it_goes() {
+        let (_dir, folder) = temp_folder();
+        let stub = Stub::own();
+        let served = stub.serve(&folder);
+
+        let transient = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let Reached::Matched(first) = transient.block_on(reach(&folder)).unwrap() else {
+            panic!("the own build did not match");
+        };
+        drop(transient);
+
+        let tasks = tasks::shared();
+        tasks.block_on(async {
+            let Reached::Matched(second) = reach(&folder).await.unwrap() else {
+                panic!("the cached channel did not match");
+            };
+            second.ask(ANSWER, |mut d| async move { d.list_agents(()).await }).await.unwrap();
+            assert_eq!(served.accepted(), 1, "a kept channel opens no second connection");
+            assert_eq!(stub.infos.load(Ordering::Relaxed), 1, "build is checked once per channel");
+
+            *stub.agents.lock().unwrap() =
+                AgentsAnswer::Unavailable("luned does not reach far now".to_owned());
+            let far = second.ask(ANSWER, |mut d| async move { d.list_agents(()).await }).await;
+            assert_eq!(far.unwrap_err().code(), Code::Unavailable);
+            assert!(
+                !first.gone.is(),
+                "a server-returned Unavailable leaves the local channel kept"
+            );
+            *stub.agents.lock().unwrap() = AgentsAnswer::Ok;
+            let Reached::Matched(third) = reach(&folder).await.unwrap() else {
+                panic!("the kept channel vanished after a server-returned Unavailable");
+            };
+            third.ask(ANSWER, |mut d| async move { d.list_agents(()).await }).await.unwrap();
+            assert_eq!(served.accepted(), 1, "the same connection serves calls after Unavailable");
+            assert_eq!(stub.infos.load(Ordering::Relaxed), 1);
+        });
+
+        tasks.block_on(async {
+            served.stop().await;
+            eventually_async("lune sees its closed connection go", async || {
+                first.gone.is().then_some(())
+            })
+            .await;
+            assert!(kept(&folder).is_none(), "a closed connection evicts its kept channel");
+        });
+
+        let fresh = stub.serve(&folder);
+        tasks.block_on(async {
+            let Reached::Matched(again) = reach(&folder).await.unwrap() else {
+                panic!("a fresh luned did not match");
+            };
+            again.ask(ANSWER, |mut d| async move { d.list_agents(()).await }).await.unwrap();
+            assert_eq!(fresh.accepted(), 1);
+            assert_eq!(stub.infos.load(Ordering::Relaxed), 2);
+        });
+    }
+
+    #[test]
+    fn a_replaced_socket_rechecks_luned_s_build_and_never_caches_another_build() {
+        let (_dir, folder) = temp_folder();
+        let own = Stub::own();
+        let _old = own.serve(&folder);
+
+        let tasks = tasks::shared();
+        tasks.block_on(async {
+            let Reached::Matched(first) = reach(&folder).await.unwrap() else {
+                panic!("the own build did not match");
+            };
+            let old_id = socket_id(&folder.socket()).unwrap();
+            first.ask(ANSWER, |mut d| async move { d.list_agents(()).await }).await.unwrap();
+            assert!(kept(&folder).is_some());
+
+            let next_own = Stub::own();
+            let next_served = next_own.serve(&folder);
+            let Reached::Matched(second) = reach(&folder).await.unwrap() else {
+                panic!("a replaced own build did not match");
+            };
+            let stale = Kept { shared: super::Shared::new(first.channel.clone(), Gone::default()), socket_id: old_id };
+            let returned = keep(&folder.socket(), stale);
+            assert!(returned.gone.is(), "a stale channel arriving after restart is marked gone");
+            assert!(!second.gone.is(), "a stale keep leaves the live channel untouched");
+            let Reached::Matched(still) = reach(&folder).await.unwrap() else {
+                panic!("the live channel did not stay kept after a stale keep");
+            };
+            still.ask(ANSWER, |mut d| async move { d.list_agents(()).await }).await.unwrap();
+            assert_eq!(next_served.accepted(), 1);
+
+            let mut newer = Stub::own();
+            newer.version = "99.0.0".to_owned();
+            newer.built = None;
+            newer.pid = 4242;
+            let replaced = newer.serve(&folder);
+
+            let Reached::Unmatched(unmatched) = reach(&folder).await.unwrap() else {
+                panic!("a replaced luned of a newer build was not refused");
+            };
+            assert!(unmatched.other().is_newer());
+            assert_eq!(unmatched.pid(), 4242);
+            assert!(second.gone.is(), "replacing the socket marks the old channel gone");
+            assert!(kept(&folder).is_none(), "another build is never kept in the cache");
+
+            let Reached::Unmatched(_) = reach(&folder).await.unwrap() else {
+                panic!("a second reach to another build was not refused");
+            };
+            assert_eq!(replaced.accepted(), 2, "unmatched builds connect afresh each time");
+            assert_eq!(newer.infos.load(Ordering::Relaxed), 2);
+        });
+    }
+
+    #[test]
+    fn a_connection_hyper_lets_go_of_or_errors_on_marks_its_channel_gone() {
+        let tasks = tasks::shared();
+        let _entered = tasks.enter();
+        let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let gone = Gone::default();
+        let stream = UnixStream::from_std(ours).unwrap();
+        let tracked = Tracked { stream, gone: gone.clone() };
+        assert!(!gone.is(), "a connection held is not gone");
+        drop(tracked);
+        assert!(gone.is(), "a connection let go of without a word is gone");
+
+        tasks.block_on(async {
+            let gone = Gone::default();
+            let ok = service_fn(|()| async { Ok::<_, &'static str>(()) });
+            let mut watched = Watched { inner: ok, gone: gone.clone() };
+            watched.ready().await.unwrap();
+            watched.oneshot(()).await.unwrap();
+            assert!(!gone.is(), "an Ok transport response leaves the channel alive");
+
+            let broken = service_fn(|()| async { Err::<(), _>("goaway") });
+            let watched = Watched { inner: broken, gone: gone.clone() };
+            assert!(watched.oneshot(()).await.is_err());
+            assert!(gone.is(), "a transport error marks the channel gone");
+        });
+    }
+
+    #[test]
+    fn lune_bounds_held_streams_and_keeps_room_for_questions_on_one_channel() {
+        let (_dir, folder) = temp_folder();
+        let stub = Stub::own();
+        let served = stub.serve(&folder);
+
+        let tasks = tasks::shared();
+        tasks.block_on(async {
+            let Reached::Matched(shared) = reach(&folder).await.unwrap() else {
+                panic!("the own build did not match");
+            };
+            let mut watching = shared.watching(ANSWER).unwrap();
+            watching.watch(WatchRequest::default()).await.unwrap();
+
+            let mut held = Vec::new();
+            for _ in 0..(HELD_MAX - 1) {
+                let mut stream = shared
+                    .hold(ANSWER, |mut d| async move { d.ask(AskRequest::default()).await })
+                    .await
+                    .expect("a stream within HELD_MAX opens");
+                assert!(stream.message().await.unwrap().is_some());
+                held.push(stream);
+            }
+            let refused = shared
+                .hold(ANSWER, |mut d| async move { d.ask(AskRequest::default()).await })
+                .await
+                .err()
+                .expect("a stream past HELD_MAX is refused");
+            assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+            assert!(matches!(Unchanged::of(&refused), Unchanged::Refused(_)));
+            assert!(refused.message().contains(&format!("at most {HELD_MAX} streams")));
+            let refused_watch = shared.watching(ANSWER).err().expect("watch shares HELD_MAX");
+            assert_eq!(refused_watch.code(), Code::FailedPrecondition, "{refused_watch:?}");
+            assert!(!shared.gone.is(), "refusing past HELD_MAX leaves the channel kept");
+
+            shared.ask(ANSWER, |mut d| async move { d.list_agents(()).await }).await.unwrap();
+            assert_eq!(served.accepted(), 1, "questions share the same connection while HELD is full");
+
+            drop(held.pop());
+            let mut freed = shared
+                .hold(ANSWER, |mut d| async move { d.ask(AskRequest::default()).await })
+                .await
+                .expect("dropping a held stream makes room for another");
+            assert!(freed.message().await.unwrap().is_some());
+            drop(watching);
+            drop(held);
+            drop(freed);
+        });
+    }
+
+    #[test]
+    fn short_question_bursts_wait_their_turn_up_to_the_bound_and_timeout_cleanly() {
+        const IMPATIENT: Answer = Answer::of(Duration::from_millis(50));
+        let (_dir, folder) = temp_folder();
+        let stub = Stub::own();
+        let arrived = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        *stub.agents.lock().unwrap() =
+            AgentsAnswer::Park { arrived: Arc::clone(&arrived), release: Arc::clone(&release) };
+        let served = stub.serve(&folder);
+
+        let tasks = tasks::shared();
+        tasks.block_on(async {
+            let Reached::Matched(shared) = reach(&folder).await.unwrap() else {
+                panic!("the own build did not match");
+            };
+            let mut active = Vec::new();
+            for _ in 0..ASKED_MAX {
+                let client = shared.clone();
+                active.push(tasks.spawn(async move {
+                    client.ask(ANSWER, |mut d| async move { d.list_agents(()).await }).await
+                }));
+            }
+            eventually_async("all ASKED_MAX questions reach the server", async || {
+                (arrived.load(Ordering::Relaxed) == ASKED_MAX).then_some(())
+            })
+            .await;
+
+            let mut waiting = Vec::new();
+            for _ in 0..ASKED_WAITING_MAX {
+                let client = shared.clone();
+                waiting.push(tasks.spawn(async move {
+                    client.ask(ANSWER, |mut d| async move { d.list_agents(()).await }).await
+                }));
+            }
+            eventually_async("all ASKED_WAITING_MAX waiters queue up", async || {
+                (shared.budget.waiting.available_permits() == 0).then_some(())
+            })
+            .await;
+
+            let overflow = shared
+                .ask(ANSWER, |mut d| async move { d.list_agents(()).await })
+                .await
+                .expect_err("a question past ASKED_WAITING_MAX is refused");
+            assert_eq!(overflow.code(), Code::FailedPrecondition, "{overflow:?}");
+            assert!(matches!(Unchanged::of(&overflow), Unchanged::Refused(_)));
+            assert!(overflow.message().contains(&format!("at most {ASKED_WAITING_MAX} questions")));
+            assert!(!shared.gone.is(), "queue overflow leaves the channel kept");
+
+            *stub.agents.lock().unwrap() = AgentsAnswer::Ok;
+            release.notify_waiters();
+            let patience = Patience::begun();
+            for handle in active.into_iter().chain(waiting) {
+                let answered = patience.awaited("a queued question completes", handle).await;
+                answered.unwrap().unwrap();
+            }
+            assert_eq!(served.accepted(), 1, "the whole burst rides one connection");
+
+            let stuck_arrived = Arc::new(AtomicUsize::new(0));
+            let stuck_release = Arc::new(Notify::new());
+            *stub.agents.lock().unwrap() = AgentsAnswer::Park {
+                arrived: Arc::clone(&stuck_arrived),
+                release: Arc::clone(&stuck_release),
+            };
+            let mut stuck = Vec::new();
+            for _ in 0..ASKED_MAX {
+                let client = shared.clone();
+                stuck.push(tasks.spawn(async move {
+                    client.ask(ANSWER, |mut d| async move { d.list_agents(()).await }).await
+                }));
+            }
+            eventually_async("stuck questions fill ASKED_MAX", async || {
+                (stuck_arrived.load(Ordering::Relaxed) == ASKED_MAX).then_some(())
+            })
+            .await;
+
+            let began = Began::now();
+            let late = shared
+                .ask(IMPATIENT, |mut d| async move { d.list_agents(()).await })
+                .await
+                .expect_err("a queued question times out when ASKED_MAX stay stuck");
+            began.lasted().at_least(IMPATIENT.waits(), "a waiting question");
+            assert_eq!(late.code(), Code::FailedPrecondition, "{late:?}");
+            assert!(matches!(Unchanged::of(&late), Unchanged::Refused(_)));
+            assert_eq!(late.message(), "luned did not answer in 0.05s");
+            stuck_release.notify_waiters();
+            let patience = Patience::begun();
+            for handle in stuck {
+                let _ = patience.awaited("stuck question released", handle).await;
+            }
+        });
+    }
+
+    #[test]
+    fn a_question_is_answered_while_unread_streams_fill_their_windows_on_the_same_channel() {
+        const FLOODERS: usize = 3;
+        let (_dir, folder) = temp_folder();
+        let stub = Stub::own();
+        let served = stub.serve(&folder);
+
+        let tasks = tasks::shared();
+        tasks.block_on(async {
+            let Reached::Matched(shared) = reach(&folder).await.unwrap() else {
+                panic!("the own build did not match");
+            };
+            let mut flooders = Vec::new();
+            for _ in 0..FLOODERS {
+                let request = AskRequest { words: "flood".to_owned(), ..AskRequest::default() };
+                let stream = shared
+                    .hold(ANSWER, |mut d| async move { d.ask(request).await })
+                    .await
+                    .unwrap();
+                flooders.push(stream);
+            }
+            let filled = FLOODERS * (STREAM_WINDOW as usize);
+            eventually_async("unread streams fill their stream windows", async || {
+                (stub.flooded.load(Ordering::Relaxed) >= filled).then_some(())
+            })
+            .await;
+
+            let listed = shared
+                .ask(ANSWER, |mut d| async move {
+                    d.list_contents(ListContentsRequest::default()).await
+                })
+                .await
+                .expect("a question gets its answer while unread streams fill their windows");
+            assert_eq!(listed.listed.len(), stub.contents.len());
+            assert_eq!(served.accepted(), 1);
+            drop(flooders);
+        });
+    }
 
     #[test]
     fn a_call_past_its_answer_says_luned_did_not_answer_in_time() {

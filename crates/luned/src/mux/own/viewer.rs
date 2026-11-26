@@ -170,7 +170,7 @@ fn untaken() -> String {
 
 enum Hearing {
     Mux(Roomed<Streaming<api::ToViewer>>),
-    On(Streaming<api::ToViewer>),
+    On(crate::Held<Streaming<api::ToViewer>>),
 }
 
 impl Stream for Hearing {
@@ -205,15 +205,21 @@ async fn hearing(
             heard.map(Hearing::Mux).map_err(|status| refused(&status).to_string())
         },
         Reach::On { luned, destination } => {
-            let reached = crate::connect(luned, crate::ANSWER).await;
-            let mut daemon = reached.map_err(|error| format!("luned is not reached: {error}"))?;
+            let daemon = match crate::reach(luned).await {
+                Ok(crate::Reached::Matched(daemon)) => daemon,
+                Ok(crate::Reached::Unmatched(unmatched)) => return Err(unmatched.to_string()),
+                Err(error) => return Err(format!("luned is not reached: {error}")),
+            };
             let on = Some(On { destination: destination.to_string() });
             let hello = frames_request::Hello { on, greeting: Some(greeting.greeted(None)) };
             let first = FramesRequest { event: Some(frames_request::Event::Hello(hello)) };
             let said = |said| FramesRequest { event: Some(frames_request::Event::Said(said)) };
-            let heard = daemon.frames(tokio_stream::once(first).chain(sent.map(said))).await;
+            let words = tokio_stream::once(first).chain(sent.map(said));
+            let heard = daemon
+                .hold(crate::ANSWER, |mut daemon| async move { daemon.frames(words).await })
+                .await;
             let heard = heard.map_err(|status| said_by_luned(&status))?;
-            Ok(Hearing::On(heard.into_inner()))
+            Ok(Hearing::On(heard))
         },
     }
 }

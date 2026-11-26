@@ -112,7 +112,7 @@ async fn says_parked(told: Option<oneshot::Receiver<api::Version>>) {
     }
 }
 
-const QUESTIONS_MAX: u32 = 16;
+pub(crate) const QUESTIONS_MAX: u32 = 16;
 
 pub const ANSWERING_MAX: Duration = Duration::from_mins(2);
 

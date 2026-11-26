@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use luned::folder::{self, Folder, ANOTHER_RUNS, LOG};
-use luned::{program, Daemon};
-use luned::release::{self, Build, Of, Other, OWN};
+use luned::{program, Daemon, Shared};
+use luned::release::{self, Build, Other, OWN};
 use luned::terminate::LUNED;
 use rustix::process::{Pid, Signal};
 
@@ -31,7 +31,7 @@ pub const NONE_RUNS: u8 = 5;
 
 pub struct Current {
     pub folder: Folder,
-    pub daemon: Daemon,
+    pub daemon: Shared,
 }
 
 pub enum Unreached {
@@ -63,13 +63,21 @@ impl From<Unreached> for String {
     }
 }
 
-pub async fn running(path: &Path) -> Result<Daemon, Unreached> {
-    let mut daemon = of_any_build(path).await?;
-    let info = daemon.info(()).await;
-    let info = info.map_err(|status| Unreached::Failed(causes(&status)))?.into_inner();
-    match release::of(&info.version, info.built) {
-        Of::Own => Ok(daemon),
-        Of::Other(other) => Err(Unreached::Failed(unmatched(&other, info.pid))),
+pub async fn running(path: &Path) -> Result<Shared, Unreached> {
+    let refused = |refusal: folder::Refusal| Unreached::Failed(refusal.to_string());
+    let folder = folder::open(path).map_err(refused)?;
+    let folder = folder.ok_or_else(|| Unreached::NoneRuns(path.to_owned()))?;
+    match luned::reach(&folder).await {
+        Ok(luned::Reached::Matched(daemon)) => Ok(daemon),
+        Ok(luned::Reached::Unmatched(unmatched)) => Err(Unreached::Failed(unmatched.to_string())),
+        Err(luned::Unreached::Connect(error)) => {
+            if folder::held(&folder).map_err(refused)? {
+                Err(Unreached::Failed(format!("{}: {}", folder.socket().display(), causes(&error))))
+            } else {
+                Err(Unreached::NoneRuns(path.to_owned()))
+            }
+        },
+        Err(luned::Unreached::Asked(status)) => Err(Unreached::Failed(causes(&status))),
     }
 }
 
@@ -89,6 +97,11 @@ pub async fn of_any_build(path: &Path) -> Result<Daemon, Unreached> {
 }
 
 pub async fn current(path: &Path) -> Result<Current, String> {
+    if let Ok(Some(folder)) = folder::open(path)
+        && let Some(daemon) = luned::kept(&folder)
+    {
+        return Ok(Current { folder, daemon });
+    }
     let (path, tasks) = (path.to_owned(), luned::tasks::shared());
     let reaching = tasks.clone();
     let reached = tasks.spawn_blocking(move || reaching.block_on(reach(&path)));
@@ -107,52 +120,51 @@ async fn reach(path: &Path) -> Result<Current, String> {
     let mut doubted: Option<u32> = None;
     let starting = OnceCell::new();
     loop {
-        let why = match luned::connect(&folder, luned::ANSWER).await {
-            Ok(mut daemon) => match daemon.info(()).await {
-                Ok(info) => {
-                    let info = info.into_inner();
-                    let of = release::of(&info.version, info.built);
-                    let (version, pid) = (release::spelled(&info.version, info.built), info.pid);
-                    if stopped == Some(pid) {
-                        format!("luned {version} (pid {pid}) was stopped, and has not ended")
-                    } else if of == Of::Own {
-                        reap(started);
-                        return Ok(Current { folder, daemon });
-                    } else if let Of::Other(other) = &of
-                        && !makes_way(other.build(), OWN, || *starting.get_or_init(build))
-                    {
-                        reap(started);
-                        return Err(kept(other, pid, starting.get().copied().flatten()));
-                    } else {
-                        match listener(&folder, pid).await {
-                            Listener::Other if doubted == Some(pid) => {
-                                reap(started);
-                                return Err(format!(
-                                    "luned {version} (pid {pid}) is older than this lune, {}, \
-                                     but the kernel says another process listens on its socket, \
-                                     so lune stops none",
-                                    *release::SAID
-                                ));
-                            },
-                            Listener::Other => {
-                                doubted = Some(pid);
-                                format!("luned {version} (pid {pid}) is not the one that listens")
-                            },
-                            Listener::Gone => {
-                                format!("luned {version} (pid {pid}) has ended since it answered")
-                            },
-                            Listener::It => {
-                                stop(pid)?;
-                                stopped = Some(pid);
-                                let older = format!("luned {version} (pid {pid})");
-                                format!("{older} is older than lune, and ends")
-                            },
-                        }
-                    }
-                },
-                Err(status) => format!("{}: {}", socket.display(), causes(&status)),
+        let why = match luned::reach(&folder).await {
+            Ok(luned::Reached::Matched(daemon)) => {
+                reap(started);
+                return Ok(Current { folder, daemon });
             },
-            Err(error) => format!("{}: {}", socket.display(), causes(&error)),
+            Ok(luned::Reached::Unmatched(unmatched)) => {
+                let (other, pid) = (unmatched.other(), unmatched.pid());
+                if stopped == Some(pid) {
+                    format!("luned {other} (pid {pid}) was stopped, and has not ended")
+                } else if !makes_way(other.build(), OWN, || *starting.get_or_init(build)) {
+                    reap(started);
+                    return Err(kept(other, pid, starting.get().copied().flatten()));
+                } else {
+                    match listener(&folder, pid).await {
+                        Listener::Other if doubted == Some(pid) => {
+                            reap(started);
+                            return Err(format!(
+                                "luned {other} (pid {pid}) is older than this lune, {}, \
+                                 but the kernel says another process listens on its socket, \
+                                 so lune stops none",
+                                *release::SAID
+                            ));
+                        },
+                        Listener::Other => {
+                            doubted = Some(pid);
+                            format!("luned {other} (pid {pid}) is not the one that listens")
+                        },
+                        Listener::Gone => {
+                            format!("luned {other} (pid {pid}) has ended since it answered")
+                        },
+                        Listener::It => {
+                            stop(pid)?;
+                            stopped = Some(pid);
+                            let older = format!("luned {other} (pid {pid})");
+                            format!("{older} is older than lune, and ends")
+                        },
+                    }
+                }
+            },
+            Err(luned::Unreached::Asked(status)) => {
+                format!("{}: {}", socket.display(), causes(&status))
+            },
+            Err(luned::Unreached::Connect(error)) => {
+                format!("{}: {}", socket.display(), causes(&error))
+            },
         };
         match &mut started {
             Starting::NotYet => {
@@ -195,13 +207,7 @@ async fn reach(path: &Path) -> Result<Current, String> {
 }
 
 pub fn unmatched(other: &Other, pid: u32) -> String {
-    let (daemon, own) = (format!("luned {other} (pid {pid})"), release::SAID.as_str());
-    if other.is_newer() {
-        format!("{daemon} is newer than this lune, {own}: run a lune of its build")
-    } else {
-        let replaced = "open lune to have it replaced";
-        format!("{daemon} is another build than this lune, {own}: {replaced}")
-    }
+    luned::Unmatched::of(other.clone(), pid).to_string()
 }
 
 fn kept(other: &Other, pid: u32, starting: Option<Build>) -> String {

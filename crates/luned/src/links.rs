@@ -727,18 +727,44 @@ impl Pasted {
         patience: Duration,
     ) -> Result<Ready<usize>, Unready> {
         let request = self.asked(on.map(|on| On { destination: on.to_string() }));
+        let answer = timeout(patience, daemon.paste(request)).await;
+        let answer = answer.map(|got| got.map(tonic::Response::into_inner));
+        self.ready_from(answer, on, patience).await
+    }
+
+    pub async fn ready_through(
+        &self,
+        daemon: &crate::Shared,
+        on: Option<&Destination>,
+        patience: Duration,
+    ) -> Result<Ready<usize>, Unready> {
+        let request = self.asked(on.map(|on| On { destination: on.to_string() }));
+        let asked = daemon.hold(crate::ANSWER, |mut daemon| async move { daemon.paste(request).await });
+        self.ready_from(timeout(patience, asked).await, on, patience).await
+    }
+
+    async fn ready_from<S>(
+        &self,
+        answer: Result<Result<S, Status>, tokio::time::error::Elapsed>,
+        on: Option<&Destination>,
+        patience: Duration,
+    ) -> Result<Ready<usize>, Unready>
+    where
+        S: tokio_stream::Stream<Item = Result<PasteResponse, Status>> + Unpin,
+    {
+        use tokio_stream::StreamExt as _;
         let secs = patience.as_secs_f32();
         let minutes = PATIENCE.as_secs() / 60;
         let in_doubt = |why: String| Err(Unready::InDoubt(remote::told_by(on, &why)));
-        let mut answer = match timeout(patience, daemon.paste(request)).await {
-            Ok(Ok(answer)) => answer.into_inner(),
+        let mut answer = match answer {
+            Ok(Ok(answer)) => answer,
             Ok(Err(status)) => return Err(Unready::of(on, &status)),
             Err(_) => return in_doubt(format!("luned did not answer in {secs}s")),
         };
-        match timeout(PATIENCE + patience, answer.message()).await {
-            Ok(Ok(Some(ready))) => self.answered(ready).or_else(in_doubt),
-            Ok(Ok(None)) => in_doubt("luned's answer ended with nothing in it".to_owned()),
-            Ok(Err(status)) => Err(Unready::of(on, &status)),
+        match timeout(PATIENCE + patience, answer.next()).await {
+            Ok(Some(Ok(ready))) => self.answered(ready).or_else(in_doubt),
+            Ok(None) => in_doubt("luned's answer ended with nothing in it".to_owned()),
+            Ok(Some(Err(status))) => Err(Unready::of(on, &status)),
             Err(_) => in_doubt(format!("luned had found nothing after {minutes} minutes")),
         }
     }

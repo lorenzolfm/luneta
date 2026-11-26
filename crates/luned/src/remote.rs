@@ -880,11 +880,10 @@ mod tests {
     use tonic::transport::Channel;
 
     use super::*;
-    use crate::api::daemon_client::DaemonClient;
 
     fn unreached_daemon() -> client::Daemon {
         let channel = Channel::from_static("http://[::1]:1").connect_lazy();
-        DaemonClient::new(client::Within::new(channel, client::ANSWER.waits(), client::unanswered))
+        client::unwatched(channel, client::ANSWER)
     }
 
     fn answered() -> Seen {

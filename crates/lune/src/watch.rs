@@ -28,11 +28,10 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
         let reaching = Instant::now();
         let mut after: Option<Version> = None;
         let failure = match daemon::current(&folder).await {
-            Ok(Current { mut daemon, .. }) => {
-                loop {
-                    match daemon.watch(WatchRequest { after, kept: None, shown: true }).await {
+            Ok(Current { daemon, .. }) => match daemon.watching(luned::ANSWER) {
+                Ok(mut watching) => loop {
+                    match watching.watch(WatchRequest { after, kept: None, shown: true }).await {
                         Ok(host) => {
-                            let host = host.into_inner();
                             let Some(version) = host.version else {
                                 break "an answer with no version, which this lune does not read"
                                     .to_owned();
@@ -44,7 +43,8 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
                         },
                         Err(status) => break causes(&status),
                     }
-                }
+                },
+                Err(status) => causes(&status),
             },
             Err(why) => why,
         };
