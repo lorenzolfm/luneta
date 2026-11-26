@@ -23,6 +23,7 @@ use prost::Message as _;
 
 use crate::agreed::{self, Agreed};
 use crate::bridge;
+use crate::browse;
 use crate::daemon::{self, Unreached};
 use crate::machines::{self, Added};
 use crate::prune;
@@ -94,6 +95,18 @@ pub enum Command {
                     name goes before a branch of it"
         )]
         what: String,
+    },
+    #[command(
+        about = "Open a browser view in the current worktree, or the start page when no URL is \
+                 given. Run in a terminal of lune's, it opens beside it and brings the lune on \
+                 that terminal to the browser view"
+    )]
+    Browse {
+        #[arg(
+            value_name = "URL",
+            help = "A URL to open, with or without its `https://`. Without one, the start page"
+        )]
+        url: Option<String>,
     },
     #[command(
         about = "Delete the worktrees of a repository whose pull requests are merged, with their \
@@ -208,6 +221,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
         Command::Terminate { yes, here, ending } => terminate::run(*yes, *here, *ending, folder),
         Command::Start { what } => start::run(what, folder),
+        Command::Browse { url } => browse::run(url.as_deref(), folder),
     }
 }
 

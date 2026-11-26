@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -30,6 +31,7 @@ pub struct Mux {
     model: Shared<Model>,
     listing: watch::Sender<Listed>,
     leaders: Leaders,
+    browser_socket: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -119,6 +121,7 @@ struct Terminal {
     size: Size,
     title: String,
     cwd: String,
+    tty: String,
     program: Program,
     handle: Handle,
 }
@@ -146,11 +149,17 @@ struct Viewing {
 }
 
 impl Mux {
+    #[cfg(test)]
     #[must_use]
     pub fn new() -> Arc<Mux> {
+        Mux::with_browser_socket(None)
+    }
+
+    #[must_use]
+    pub fn with_browser_socket(browser_socket: Option<PathBuf>) -> Arc<Mux> {
         let (listing, _) = watch::channel(Listed::Holds(api::Listing::default()));
         let model = Shared::new(Model::Holds(Holding::default()));
-        Arc::new(Mux { model, listing, leaders: Leaders::new() })
+        Arc::new(Mux { model, listing, leaders: Leaders::new(), browser_socket })
     }
 
     pub fn watched(&self) -> watch::Receiver<Listed> {
@@ -589,6 +598,7 @@ impl Terminal {
             cwd: self.cwd.clone(),
             program: Some(program),
             statuses,
+            tty: Some(self.tty.clone()),
         }
     }
 }
@@ -606,13 +616,17 @@ fn spawned(
     opens: &Opens,
     size: Size,
 ) -> Result<(Terminal, Placing), Status> {
-    let vars = [
+    let mut vars = vec![
         (pty::TERMINAL_VAR, key.id.to_string()),
         (pty::TERMINAL_MADE_VAR, key.made.nanos().to_string()),
     ];
+    if let Some(socket) = &mux.browser_socket {
+        vars.push((pty::TERMINAL_BROWSER_SOCKET_VAR, socket.to_string_lossy().into_owned()));
+    }
     let failed =
         |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));
     let pty = Pty::opened(size).map_err(|error| failed("no pseudoterminal opened", error))?;
+    let tty = pty.tty().to_owned();
     let child = pty.spawned(opens, &vars).map_err(|error| {
         Status::failed_precondition(format!("opens did not start: {error}"))
     })?;
@@ -624,6 +638,7 @@ fn spawned(
         size,
         title: String::new(),
         cwd: opens.cwd.clone(),
+        tty,
         program: Program::Runs {
             pid: started.pid,
             ends: opens.ends,

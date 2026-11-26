@@ -155,6 +155,7 @@ message Terminal {
     Exit ended = 7;
   }
   ProgramStatuses statuses = 8;
+  optional string tty = 9;
 }
 
 message ProgramStatuses {

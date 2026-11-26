@@ -11,6 +11,123 @@ pub const LINE_BYTES_MAX: usize = 1024;
 
 pub const SESSION_BYTES_MAX: usize = 128;
 
+pub const URL_BYTES_MAX: usize = 2048;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserUrl(String);
+
+impl BrowserUrl {
+    pub fn parse(text: &str) -> Result<BrowserUrl, String> {
+        if text.is_empty() {
+            return Err("a URL is empty".to_owned());
+        }
+        if text.trim() != text {
+            return Err(format!("the URL {text:?} begins or ends with a space"));
+        }
+        if text.len() > URL_BYTES_MAX {
+            return Err(format!("a URL is longer than {URL_BYTES_MAX} bytes"));
+        }
+        if text.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+            return Err(format!("the URL {text:?} holds a space or control character"));
+        }
+        let Some((scheme, rest)) = text.split_once(':') else {
+            return Err(format!("the URL {text:?} names no scheme"));
+        };
+        let allowed_scheme = scheme.eq_ignore_ascii_case("http")
+            || scheme.eq_ignore_ascii_case("https")
+            || scheme.eq_ignore_ascii_case("about");
+        if !allowed_scheme || rest.is_empty() {
+            return Err(format!("the URL {text:?} uses an unsupported scheme"));
+        }
+        if (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            && (!rest.starts_with("//") || rest.len() <= 2)
+        {
+            return Err(format!("{text:?} names no host"));
+        }
+        Ok(BrowserUrl(text.to_owned()))
+    }
+
+    pub fn from_user(text: &str) -> Result<Option<BrowserUrl>, String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        if trimmed.contains("://") || trimmed.starts_with("about:") {
+            return BrowserUrl::parse(trimmed).map(Some);
+        }
+        let host = trimmed.split('/').next().unwrap_or(trimmed);
+        let (name, port) = if let Some(rest) = host.strip_prefix('[') {
+            match rest.split_once(']') {
+                Some((addr, "")) => (addr, None),
+                Some((addr, tail)) => match tail.strip_prefix(':') {
+                    Some(port) => (addr, Some(port)),
+                    None => return Err(format!("{trimmed:?} is no URL")),
+                },
+                None => return Err(format!("{trimmed:?} is no URL")),
+            }
+        } else if let Some((name, port)) = host.split_once(':') {
+            (name, Some(port))
+        } else {
+            (host, None)
+        };
+        if name.is_empty() {
+            return Err(format!("{trimmed:?} is no URL"));
+        }
+        if let Some(port) = port
+            && (port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return Err(format!("{trimmed:?} is no URL"));
+        }
+        let local =
+            name == "localhost" || name == "127.0.0.1" || name == "0.0.0.0" || name == "::1";
+        if local {
+            return BrowserUrl::parse(&format!("http://{trimmed}")).map(Some);
+        }
+        if name.contains('.') || port.is_some() {
+            return BrowserUrl::parse(&format!("https://{trimmed}")).map(Some);
+        }
+        Err(format!("{trimmed:?} is no URL"))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for BrowserUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Browser {
+    id: ViewId,
+    url: Option<BrowserUrl>,
+}
+
+impl Browser {
+    #[must_use]
+    pub fn new(id: ViewId, url: Option<BrowserUrl>) -> Browser {
+        Browser { id, url }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> ViewId {
+        self.id
+    }
+
+    #[must_use]
+    pub fn url(&self) -> Option<&BrowserUrl> {
+        self.url.as_ref()
+    }
+
+    pub(super) fn navigated(&mut self, url: Option<BrowserUrl>) {
+        self.url = url;
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalViewId(ViewId);
 
@@ -84,6 +201,7 @@ impl Terminal {
 pub enum View {
     Terminal(Terminal),
     Welcome(ViewId),
+    Browser(Browser),
 }
 
 impl View {
@@ -91,7 +209,15 @@ impl View {
     pub fn terminal(&self) -> Option<&Terminal> {
         match self {
             View::Terminal(terminal) => Some(terminal),
-            View::Welcome(_) => None,
+            View::Welcome(_) | View::Browser(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn browser(&self) -> Option<&Browser> {
+        match self {
+            View::Browser(browser) => Some(browser),
+            View::Terminal(_) | View::Welcome(_) => None,
         }
     }
 }
@@ -101,6 +227,7 @@ impl Leaf for View {
         match self {
             View::Terminal(terminal) => terminal.id.view(),
             View::Welcome(id) => *id,
+            View::Browser(browser) => browser.id,
         }
     }
 }
@@ -499,6 +626,10 @@ impl Layout {
         self.views().filter_map(View::terminal)
     }
 
+    pub fn browsers(&self) -> impl Iterator<Item = &Browser> {
+        self.views().filter_map(View::browser)
+    }
+
     #[must_use]
     pub fn holds(&self, terminal: ViewId) -> bool {
         self.tree().is_some_and(|tree| tree.holds(terminal))
@@ -577,7 +708,19 @@ impl Layout {
         let laid = self.0.as_mut().expect("a layout asked for its terminal is laid");
         match laid.tree.get_mut(terminal.view()).expect("its layout holds the terminal") {
             View::Terminal(held) => held,
-            View::Welcome(_) => unreachable!("terminal {terminal} is made only as a terminal"),
+            View::Welcome(_) | View::Browser(_) => {
+                unreachable!("terminal {terminal} is made only as a terminal")
+            },
+        }
+    }
+
+    pub(super) fn browser_mut(&mut self, view: ViewId) -> Result<&mut Browser, String> {
+        let laid = self.0.as_mut().expect("a layout asked for its browser is laid");
+        match laid.tree.get_mut(view).expect("its layout holds the browser") {
+            View::Browser(held) => Ok(held),
+            View::Terminal(_) | View::Welcome(_) => {
+                Err(format!("view {view} runs no browser"))
+            },
         }
     }
 
@@ -879,4 +1022,48 @@ mod tests {
         assert_eq!(argv.words(), ["agy", "-i", words.as_str()]);
     }
 
+    #[test]
+    fn browser_urls_validate_schemes_and_normalize_user_input() {
+        assert_eq!(
+            BrowserUrl::parse("https://github.com/lorenzolfm/lune/issues/809").unwrap().as_str(),
+            "https://github.com/lorenzolfm/lune/issues/809"
+        );
+        assert_eq!(
+            BrowserUrl::parse("http://localhost:3000/app").unwrap().as_str(),
+            "http://localhost:3000/app"
+        );
+        assert_eq!(BrowserUrl::parse("about:blank").unwrap().as_str(), "about:blank");
+
+        for bad in [
+            "",
+            " https://example.com",
+            "https://example.com/a b",
+            "https://example.com/\x07",
+            "example.com",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "https://",
+            "http:example.com",
+        ] {
+            assert!(BrowserUrl::parse(bad).is_err(), "{bad:?}");
+        }
+        let oversized = format!("https://example.com/{}", "a".repeat(URL_BYTES_MAX));
+        assert!(BrowserUrl::parse(&oversized).is_err());
+
+        assert_eq!(BrowserUrl::from_user("   "), Ok(None));
+        assert_eq!(
+            BrowserUrl::from_user("example.com/docs").unwrap().unwrap().as_str(),
+            "https://example.com/docs"
+        );
+        assert_eq!(
+            BrowserUrl::from_user("localhost:5173").unwrap().unwrap().as_str(),
+            "http://localhost:5173"
+        );
+        assert_eq!(
+            BrowserUrl::from_user("127.0.0.1:8080/health").unwrap().unwrap().as_str(),
+            "http://127.0.0.1:8080/health"
+        );
+        assert!(BrowserUrl::from_user("not a url").is_err());
+        assert!(BrowserUrl::from_user("javascript:alert(1)").is_err());
+    }
 }

@@ -1235,6 +1235,12 @@ pub enum Asked {
     Open { asking: Held, on: Machine, project: ProjectId, beside: ViewKey, opens: Opens },
     NewWorktree { on: Machine, project: ProjectId, branch: Branch },
     Welcome { asking: Held, on: Machine, session: Listed, view: ViewKey },
+    Browser {
+        asking: Held,
+        on: Machine,
+        place: menu::BrowserPlace,
+        url: Option<lune_domain::projects::BrowserUrl>,
+    },
     Arrange { asking: Held, on: Machine, session: Listed, view: ViewKey, arranged: Arranged },
     OpenIn { asking: Held, on: Machine, worktree: WorktreeId, command: Argv },
     Rename { on: Machine, rename: Rename },
@@ -1289,6 +1295,7 @@ impl Asked {
             | Asked::Open { .. }
             | Asked::NewWorktree { .. }
             | Asked::Welcome { .. }
+            | Asked::Browser { .. }
             | Asked::Arrange { .. }
             | Asked::OpenIn { .. }
             | Asked::Rename { .. }
@@ -3803,6 +3810,9 @@ impl Sidebar {
                     },
                     Done::Welcome { on, session, view } => {
                         Asked::Welcome { asking: taken.held(), on, session, view }
+                    },
+                    Done::Browser { on, place, url } => {
+                        Asked::Browser { asking: taken.held(), on, place, url }
                     },
                     Done::Arrange { on, session, view, arranged } => {
                         Asked::Arrange { asking: taken.held(), on, session, view, arranged }
@@ -8776,10 +8786,11 @@ mod tests {
         let clicked = clicks(&mut sidebar, 13);
         let menu: Vec<(&str, Option<Hit>)> =
             clicked.iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
-        assert_eq!(menu[1..], [
+        assert_eq!(menu, [
             ("─ New ───────────── lune/main ─", None),
             (" v  new view", Some(on_menu(KeyCode::Char('v')))),
             (" h  new welcome view", Some(on_menu(KeyCode::Char('h')))),
+            (" b  new browser view…", Some(on_menu(KeyCode::Char('b')))),
             (" w  new worktree…", Some(on_menu(KeyCode::Char('w')))),
             (" m  new machine…", Some(on_menu(KeyCode::Char('m')))),
             (" <BS> - Back, <ESC> - Close", Some(on_menu(KeyCode::Backspace))),
@@ -9141,10 +9152,11 @@ mod tests {
         step_onto_its_first_view(&mut sidebar);
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 17, moment(160_000) + PAUSE);
-        assert_eq!(lines[11..], [
+        assert_eq!(lines[10..], [
             "─ New ───────────── lune/main ─",
             " v  new view",
             " h  new welcome view",
+            " b  new browser view…",
             " w  new worktree…",
             " m  new machine…",
             " <BS> - Back, <ESC> - Close",
@@ -9636,7 +9648,7 @@ mod tests {
         assert_eq!(lit_place(&sidebar), Some(view_of("s", 10, 1)));
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 13, moment(160_000) + PAUSE);
-        assert_eq!(lines[7], "─ New ───────────── lune/main ─", "{lines:?}");
+        assert_eq!(lines[6], "─ New ───────────── lune/main ─", "{lines:?}");
         let (project, beside) = (listed("s", 10).project(), view_key(10, 1));
         let opens = Opens::Shell;
         let view = Asked::Open { asking: Held::Open, on: Machine::Local, project, beside, opens };

@@ -22,6 +22,8 @@ pub const TERMINAL_VAR: &str = "LUNE_MUX_TERMINAL";
 
 pub const TERMINAL_MADE_VAR: &str = "LUNE_MUX_TERMINAL_MADE";
 
+pub const TERMINAL_BROWSER_SOCKET_VAR: &str = "TERMINAL_BROWSER_TERMINAL_SOCKET";
+
 const OWN_VARS: [&str; 2] = [TERMINAL_VAR, TERMINAL_MADE_VAR];
 
 pub const ZELLIJ_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
@@ -67,6 +69,7 @@ pub fn raise_files_limit() -> io::Result<()> {
 pub struct Pty {
     pub near: File,
     far: OwnedFd,
+    tty: String,
 }
 
 impl Pty {
@@ -75,6 +78,7 @@ impl Pty {
         rustix::pty::grantpt(&near)?;
         rustix::pty::unlockpt(&near)?;
         let path = rustix::pty::ptsname(&near, Vec::new())?;
+        let tty = String::from_utf8_lossy(path.as_bytes()).into_owned();
         let path = Path::new(OsStr::from_bytes(path.as_bytes()));
         let flags = OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC;
         let far = rustix::fs::open(path, flags, Mode::empty())?;
@@ -82,11 +86,16 @@ impl Pty {
         let mut modes = termios::tcgetattr(&far)?;
         modes.input_modes.set(InputModes::IUTF8, true);
         termios::tcsetattr(&far, OptionalActions::Now, &modes)?;
-        let pty = Pty { near: File::from(near), far };
+        let pty = Pty { near: File::from(near), far, tty };
         pty.resize(size)?;
         let flags = rustix::fs::fcntl_getfl(&pty.near)?;
         rustix::fs::fcntl_setfl(&pty.near, flags | OFlags::NONBLOCK)?;
         Ok(pty)
+    }
+
+    #[must_use]
+    pub fn tty(&self) -> &str {
+        &self.tty
     }
 
     pub fn resize(&self, size: Size) -> io::Result<()> {

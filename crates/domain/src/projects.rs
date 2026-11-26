@@ -24,9 +24,9 @@ pub use spot::{clone_root, porcelain, Bareness, CloneRoot, Listed, Spot, BARE};
 pub use spot::CLONE_WORKTREES_MAX;
 pub use view::{quoted, Argv, Arranged, Layout, Line, Opens, Placed, Prompted, Runs, Session};
 pub use view::{Focus, Shape};
-pub use view::{Terminal, TerminalViewId};
+pub use view::{Browser, BrowserUrl, Terminal, TerminalViewId};
 pub use view::View;
-pub use view::{LINE_BYTES_MAX, SESSION_BYTES_MAX};
+pub use view::{LINE_BYTES_MAX, SESSION_BYTES_MAX, URL_BYTES_MAX};
 
 pub const PROJECTS_MAX: usize = 64;
 
@@ -649,6 +649,7 @@ pub enum Change {
     Swap { one: ViewId, other: ViewId },
     Arrange { worktree: WorktreeId, arranged: Arranged },
     Ran(Vec<Ran>),
+    Navigate { view: ViewId, url: Option<BrowserUrl> },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -702,6 +703,12 @@ pub enum Ask {
     },
     Bring { worktree: WorktreeId, from: TerminalKey },
     CloseView(TerminalKey),
+    OpenBrowser {
+        worktree: Option<WorktreeId>,
+        spot: Option<Spot>,
+        url: Option<BrowserUrl>,
+        from: Option<TerminalKey>,
+    },
 }
 
 impl Ask {
@@ -799,6 +806,20 @@ impl Ask {
                     to: name(to).map_err(field("to"))?,
                 }
             },
+            Asked::OpenBrowser(asked::OpenBrowser { worktree, folder, url, from }) => {
+                let worktree = worktree.map(|it| id("worktree", it).map(WorktreeId)).transpose()?;
+                let spot = folder.as_deref().map(spot).transpose().map_err(field("folder"))?;
+                let url = url.as_deref().map(BrowserUrl::parse).transpose().map_err(field("url"))?;
+                let from = from
+                    .as_ref()
+                    .map(TerminalKey::of)
+                    .transpose()
+                    .map_err(field("from"))?;
+                if worktree.is_none() && spot.is_none() && from.is_none() {
+                    return Err("open_browser: it names no worktree, folder or terminal".to_owned());
+                }
+                return Ok(Ask::OpenBrowser { worktree, spot, url, from });
+            },
         };
         Ok(Ask::Change(change))
     }
@@ -835,9 +856,11 @@ impl Change {
             | Change::Close { .. }
             | Change::Unopen { .. }
             | Change::Move { .. } => true,
-            Change::Went { .. } | Change::Swap { .. } | Change::Arrange { .. } | Change::Ran(_) => {
-                false
-            },
+            Change::Went { .. }
+            | Change::Swap { .. }
+            | Change::Arrange { .. }
+            | Change::Ran(_)
+            | Change::Navigate { .. } => false,
         }
     }
 }
@@ -1270,6 +1293,10 @@ impl Projects {
                 }
                 None
             },
+            Change::Navigate { view, url } => {
+                changed.layout_of(view)?.browser_mut(view)?.navigated(url);
+                None
+            },
         };
         Projects::kept_as(&changed);
         Ok((changed, made))
@@ -1592,6 +1619,12 @@ impl Projects {
     pub fn holding_terminal(&self, terminal: ViewId) -> Option<(&Worktree, &Terminal)> {
         let (worktree, view) = self.holding_view(terminal)?;
         Some((worktree, view.terminal()?))
+    }
+
+    #[must_use]
+    pub fn holding_browser(&self, view: ViewId) -> Option<(&Worktree, &Browser)> {
+        let (worktree, found) = self.holding_view(view)?;
+        Some((worktree, found.browser()?))
     }
 
     pub fn terminals(&self) -> impl Iterator<Item = (&Worktree, &Terminal)> {

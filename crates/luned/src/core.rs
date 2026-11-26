@@ -1026,6 +1026,7 @@ mod tests {
             size: None,
             cwd: "/w".to_owned(),
             title: String::new(),
+            tty: None,
             is: Is::Running {
                 root: AgentPid::new(100).unwrap(),
                 front: Some(server::Foreground {
@@ -1146,6 +1147,7 @@ mod tests {
                 size: None,
                 cwd: "/w".to_owned(),
                 title: String::new(),
+                tty: None,
                 is: Is::Running {
                     root: root_pid,
                     front: Some(server::Foreground { pid, argv: words(argv) }),
@@ -1244,6 +1246,7 @@ mod tests {
             size: None,
             cwd: "/w".to_owned(),
             title: String::new(),
+            tty: None,
             is: Is::Running {
                 root: AgentPid::new(100).unwrap(),
                 front: front.map(|pid| server::Foreground { pid, argv: vec!["claude".to_owned()] }),
@@ -1342,6 +1345,7 @@ mod tests {
                 size: None,
                 cwd: "/w".to_owned(),
                 title: String::new(),
+                tty: None,
                 is: Is::Running {
                     root: AgentPid::new(100).unwrap(),
                     front: Some(server::Foreground { pid, argv: vec!["claude".to_owned()] }),

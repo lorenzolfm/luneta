@@ -231,6 +231,7 @@ pub async fn serve(
         topics::follow(core.clone(), watchers.shown.subscribe(), projects, started, SWEEP)?;
     }
     tokio::spawn(sweep_keeps(claim.folder.clone()));
+    let browser_bound = crate::terminal_socket::bind(&claim.folder);
     log::say(&format!("listening on {}", claim.socket.display()));
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
@@ -248,6 +249,9 @@ pub async fn serve(
     });
     let (begun, beginning) = oneshot::channel();
     let (closing, closed) = tokio::sync::watch::channel(false);
+    let browser_socket = browser_bound.map(|bound| {
+        tokio::spawn(crate::terminal_socket::serve(bound, host.layouts.clone(), closed.clone()))
+    });
     let ended = async move {
         if ending.await.is_err() {
             log::say("luned no longer follows what keeps it, and so it ends");
@@ -296,6 +300,9 @@ pub async fn serve(
         };
         if let Err(error) = tailnet_ended {
             log::say(&format!("the tailnet's server did not end: {error}"));
+        }
+        if let Some(browser_socket) = browser_socket {
+            let _ = browser_socket.await;
         }
         served.await
     };

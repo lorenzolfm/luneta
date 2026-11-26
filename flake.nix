@@ -266,9 +266,11 @@
               ${pkgs.lib.getExe tool} ${args}
               touch "$out"
             '';
+
+          terminal-browser = import ./nix/terminal-browser.nix { inherit pkgs; };
         in
         {
-          inherit dev luned;
+          inherit dev luned terminal-browser;
 
           checks = {
             inherit clippy deny;
@@ -344,7 +346,7 @@
       devShells = nixpkgs.lib.mapAttrs (_: built: { default = built.shell; }) bySystem;
 
       packages = nixpkgs.lib.mapAttrs (_: built: {
-        inherit (built) dev luned;
+        inherit (built) dev luned terminal-browser;
         default = built.luned;
       }) bySystem;
 

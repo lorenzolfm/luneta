@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::names::SessionName;
-use lune_domain::projects::{self, Argv, Arranged, Opens, ProjectId, ViewId, WorktreeId};
+use lune_domain::projects::{self, Argv, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId};
 use lune_protocol::github::{PullRequest, State};
 use lune_protocol::said::Said;
 use luned::links::Branch;
@@ -120,6 +120,7 @@ const SEARCH_TITLE: &str = "Skills";
 const SSH_TITLE: &str = "ssh";
 const WORKTREE_TITLE: &str = "New worktree";
 const RENAME_TITLE: &str = "Rename";
+const BROWSER_TITLE: &str = "Browser";
 
 const NEXT_DOES: [&str; 2] = ["another agent", "another"];
 
@@ -447,11 +448,20 @@ const RENAME_HINT: &str = "its new name";
 const BRANCH_HINT: &str = "its branch: one git has is checked out, and any other is made from the \
                            default branch";
 
+const BROWSER_HINT: &str = "a URL, or Enter for the start page";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BrowserPlace {
+    View { session: Listed, view: ViewKey },
+    Worktree(WorktreeId),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Typing {
     Machine,
     Branch(ProjectId),
     Rename(Renames),
+    Browser(BrowserPlace),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -491,6 +501,7 @@ impl Typing {
             Typing::Machine => SSH_TITLE,
             Typing::Branch(_) => WORKTREE_TITLE,
             Typing::Rename(_) => RENAME_TITLE,
+            Typing::Browser(_) => BROWSER_TITLE,
         }
     }
 
@@ -500,6 +511,7 @@ impl Typing {
             Typing::Branch(_) => BRANCH_HINT,
             Typing::Rename(Renames::Terminal(_) | Renames::Worktree(_)) => UNRENAME_HINT,
             Typing::Rename(Renames::Project(_)) => RENAME_HINT,
+            Typing::Browser(_) => BROWSER_HINT,
         }
     }
 
@@ -508,6 +520,7 @@ impl Typing {
             Typing::Machine => "Add",
             Typing::Branch(_) => "Make",
             Typing::Rename(_) => "Rename",
+            Typing::Browser(_) => "Open",
         }
     }
 
@@ -540,6 +553,10 @@ impl Typing {
                     Err(why) => Entered::Wrong(why),
                 }
             },
+            Typing::Browser(place) => match BrowserUrl::from_user(typed) {
+                Ok(url) => Entered::Done(Done::Browser { on: on.clone(), place, url }),
+                Err(why) => Entered::Wrong(why),
+            },
         }
     }
 }
@@ -556,7 +573,6 @@ pub struct Chain {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-#[expect(clippy::large_enum_variant, reason = "it lasts a key; a box would allocate on each")]
 pub enum Chained {
     Typing(Chain),
     Back,
@@ -595,6 +611,7 @@ impl Chain {
             Offer::NewWorktree(project) => return Some(Chain::branch(*project)),
             Offer::NewMachine => Typing::Machine,
             Offer::Rename(renames) => return Some(Chain::rename(*renames)),
+            Offer::NewBrowser(place) => Typing::Browser(place.clone()),
             Offer::SearchSkills(_)
             | Offer::Skill(..)
             | Offer::Last(..)
@@ -749,6 +766,7 @@ enum Offer<'t> {
     FixChecks(&'t ViewRow),
     NewView(&'t ViewRow),
     NewWelcome(&'t ViewRow),
+    NewBrowser(BrowserPlace),
     Arrange(&'t ViewRow, Arranged),
     NewWorktree(ProjectId),
     NewMachine,
@@ -886,6 +904,13 @@ impl Target {
             (Action::FixChecks, Target::View(_, row)) => Offer::FixChecks(row),
             (Action::NewView, Target::View(_, row)) => Offer::NewView(row),
             (Action::NewWelcome, Target::View(_, row)) => Offer::NewWelcome(row),
+            (Action::NewBrowser, Target::View(_, row)) => Offer::NewBrowser(BrowserPlace::View {
+                session: row.place.listed().clone(),
+                view: row.place.view(),
+            }),
+            (Action::NewBrowser, Target::Worktree(_, row)) => {
+                Offer::NewBrowser(BrowserPlace::Worktree(row.place.worktree))
+            },
             (Action::ShowTabs, Target::View(_, row)) if row.arranged == Some(Arranged::Panes) => {
                 Offer::Arrange(row, Arranged::Tabs)
             },
@@ -1209,6 +1234,7 @@ pub enum Done {
     Forget(Destination),
     Worktree(Machine, ProjectId, Branch),
     Welcome { on: Machine, session: Listed, view: ViewKey },
+    Browser { on: Machine, place: BrowserPlace, url: Option<BrowserUrl> },
     Arrange { on: Machine, session: Listed, view: ViewKey, arranged: Arranged },
     OpenIn { on: Machine, worktree: WorktreeId, command: Argv },
     Said(String),
@@ -1489,8 +1515,8 @@ impl Menu {
                 let chain = chained.expect("a new worktree is typed in a chain");
                 stays(Stage::Typing { keys, chain }, Wants::Cloned(project))
             },
-            Offer::NewMachine | Offer::Rename(_) => {
-                let chain = chained.expect("a machine and a name are typed in a chain");
+            Offer::NewMachine | Offer::Rename(_) | Offer::NewBrowser(_) => {
+                let chain = chained.expect("a machine, name or browser is typed in a chain");
                 stays(Stage::Typing { keys, chain }, Wants::Nothing)
             },
             Offer::CloseView(row) => {
@@ -2861,6 +2887,7 @@ mod tests {
                 "─ New ───────────── lune/main ─",
                 " v  new view",
                 " h  new welcome view",
+                " b  new browser view…",
                 " w  new worktree…",
                 " m  new machine…",
                 " <BS> - Back, <ESC> - Close",
@@ -3581,9 +3608,10 @@ mod tests {
         let (session, at) = (project().listed().clone(), ViewKey::terminal(4));
         assert_eq!(wants, Wants::Open { session, view: at, opens });
         let (menu, _) = stays(opened(view.clone(), Some('n')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..5], [
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..6], [
             " v  new view",
             " h  new welcome view",
+            " b  new browser view…",
             " w  new worktree…",
             " m  new machine…",
         ]);

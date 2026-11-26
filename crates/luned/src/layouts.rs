@@ -9,8 +9,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::layout::{self, Direction, Order, Sides, Towards, SIDE_MAX};
-use lune_domain::projects::{Ask, Change, Closing, Dir, Home, Id, Line, Placed};
-use lune_domain::projects::{Holds, ProjectName, Worktree};
+use lune_domain::projects::{Ask, Browser, BrowserUrl, Change, Closing, Dir, Home, Id, Line, Placed};
+use lune_domain::projects::{Holds, ProjectName, Spot, Worktree};
 use lune_domain::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
 use lune_domain::projects::{Session, Size, Terminal, TerminalViewId, Used, View, ViewId};
 use lune_domain::projects::{WorktreeId, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
@@ -29,8 +29,9 @@ use crate::program::{self, Ran as Looked};
 use crate::projects::{self, Changed, Failed, Store};
 use crate::shells::Shell;
 use crate::shows::direction_said;
+use crate::terminal_socket::{self, PaneInfo, PaneRef, SocketCommand};
 use crate::watch::Troubles;
-use crate::{shells, Directory};
+use crate::{shells, tasks, Directory};
 
 use errands::{Errands, Unrun};
 
@@ -100,6 +101,7 @@ pub enum Command {
     Worktrees { root: Dir, listed: Listed, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, listed: Listed },
     Root { project: ProjectId, answer: oneshot::Sender<Result<Root, Unrooted>> },
+    Socket(SocketCommand),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,6 +131,8 @@ pub enum Asked {
     Go(WorktreeId),
     Open { beside: Beside, opens: Opens },
     Welcome,
+    Browser(Option<BrowserUrl>),
+    Navigate { view: ViewId, url: Option<BrowserUrl> },
     Close(ViewId),
     Focus(Focus),
     Resize { sides: Sides, growth: layout::Growth },
@@ -183,6 +187,23 @@ impl Asked {
                 Asked::Open { beside, opens }
             },
             Event::Welcome(()) => Asked::Welcome,
+            Event::Browser(show_request::Browser { url }) => {
+                let url = url
+                    .as_deref()
+                    .map(BrowserUrl::parse)
+                    .transpose()
+                    .map_err(|why| format!("browser: {why}"))?;
+                Asked::Browser(url)
+            },
+            Event::Navigate(show_request::Navigate { view, url }) => {
+                let view = id("navigate", view).map(ViewId::new)?;
+                let url = url
+                    .as_deref()
+                    .map(BrowserUrl::parse)
+                    .transpose()
+                    .map_err(|why| format!("navigate: {why}"))?;
+                Asked::Navigate { view, url }
+            },
             Event::Close(view) => Asked::Close(id("close", view).map(ViewId::new)?),
             Event::Focus(show_request::Focus { to, step }) => {
                 use show_request::focus::To;
@@ -476,6 +497,9 @@ impl Layouts {
                         self.bring(worktree, from).map(|made| alone(Some(made)))
                     },
                     Ask::CloseView(terminal) => self.close_view(terminal).map(alone),
+                    Ask::OpenBrowser { worktree, spot, url, from } => {
+                        self.open_browser(worktree, spot, url, from)
+                    },
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|(made, opened)| Changed { made, opened, kept }));
@@ -561,7 +585,215 @@ impl Layouts {
                 self.known.retain(|_, known| !gone(known));
                 self.listed.clear();
             },
+            Command::Socket(command) => self.socket_command(command),
         }
+    }
+
+    fn socket_command(&mut self, command: SocketCommand) {
+        match command {
+            SocketCommand::CurrentPane { tty, cwd, answer } => {
+                let _ = answer.send(self.socket_current_pane(tty.as_deref(), cwd.as_deref()));
+            },
+            SocketCommand::ListPanes { tty, runtime, answer } => {
+                let _ = answer.send(self.socket_list_panes(tty.as_deref(), &runtime));
+            },
+            SocketCommand::Neighbor { from, direction, answer } => {
+                let _ = answer.send(self.socket_neighbor(from, direction));
+            },
+            SocketCommand::Split { from, direction, command, answer } => {
+                let _ = answer.send(self.socket_split(from, direction, command));
+            },
+            SocketCommand::SendText { pane, text, answer } => {
+                let _ = answer.send(self.socket_send_text(pane, &text));
+            },
+            SocketCommand::FocusPane { pane, answer } => {
+                let _ = answer.send(self.socket_focus_pane(pane));
+            },
+        }
+    }
+
+    fn socket_current_pane(
+        &self,
+        tty: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<Option<PaneRef>, String> {
+        let projects = self.kept()?;
+        if let Some(tty) = tty {
+            if let Some(view) = terminal_socket::view_from_browser_tty(tty)
+                && let Some((worktree, _)) = projects.holding_view(view)
+            {
+                return Ok(Some(PaneRef {
+                    id: view.to_string(),
+                    tab: worktree.id().to_string(),
+                }));
+            }
+            for (terminal, known) in &self.known {
+                if self.listed.get(&known.key).and_then(|listed| listed.tty.as_deref()) == Some(tty)
+                    && let Some((worktree, _)) = projects.holding_view(terminal.view())
+                {
+                    return Ok(Some(PaneRef {
+                        id: terminal.view().to_string(),
+                        tab: worktree.id().to_string(),
+                    }));
+                }
+            }
+        }
+        if let Some(cwd) = cwd {
+            for (terminal, known) in &self.known {
+                if self.listed.get(&known.key).is_some_and(|listed| listed.cwd == cwd)
+                    && let Some((worktree, _)) = projects.holding_view(terminal.view())
+                {
+                    return Ok(Some(PaneRef {
+                        id: terminal.view().to_string(),
+                        tab: worktree.id().to_string(),
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn socket_list_panes(
+        &self,
+        tty: Option<&str>,
+        runtime: &Path,
+    ) -> Result<Vec<PaneInfo>, String> {
+        let projects = self.kept()?;
+        let scoped = self
+            .socket_current_pane(tty, None)?
+            .and_then(|pane| pane.tab.parse::<WorktreeId>().ok());
+        let mut panes = Vec::new();
+        for (_, worktree) in projects.worktrees() {
+            if scoped.is_some_and(|tab| tab != worktree.id()) {
+                continue;
+            }
+            for view in worktree.layout().views() {
+                let (id, tty, command) = match view {
+                    View::Terminal(terminal) => {
+                        let listed = self
+                            .known
+                            .get(&terminal.id())
+                            .and_then(|known| self.listed.get(&known.key));
+                        let tty = listed.and_then(|it| it.tty.clone());
+                        let command = listed.and_then(|it| match &it.is {
+                            Is::Running { front: Some(front), .. } => front.argv.first().cloned(),
+                            Is::Running { front: None, .. } | Is::Ended => None,
+                        });
+                        (terminal.id().view(), tty, command)
+                    },
+                    View::Browser(browser) => (
+                        browser.id(),
+                        Some(runtime.join(format!("b-{}.tty", browser.id())).to_string_lossy().into_owned()),
+                        Some("terminal-browser".to_owned()),
+                    ),
+                    View::Welcome(id) => (*id, None, None),
+                };
+                panes.push(PaneInfo {
+                    id: id.to_string(),
+                    tab: worktree.id().to_string(),
+                    tty,
+                    command,
+                });
+            }
+        }
+        Ok(panes)
+    }
+
+    fn socket_neighbor(
+        &self,
+        from: ViewId,
+        direction: Direction,
+    ) -> Result<Option<PaneRef>, String> {
+        let projects = self.kept()?;
+        let Some((worktree, _)) = projects.holding_view(from) else {
+            return Ok(None);
+        };
+        let shown = self.clients.values().filter(|it| it.worktree == worktree.id());
+        let size = fit(shown, worktree.layout(), &self.known)
+            .map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let Some(neighbor) = worktree.layout().beside(from, direction, size) else {
+            return Ok(None);
+        };
+        Ok(Some(PaneRef { id: neighbor.to_string(), tab: worktree.id().to_string() }))
+    }
+
+    fn socket_split(
+        &mut self,
+        from: ViewId,
+        direction: Option<Direction>,
+        command: Vec<String>,
+    ) -> Result<(), String> {
+        let projects = self.kept()?;
+        let Some((worktree_ref, _)) = projects.holding_view(from) else {
+            return Err(format!("no layout holds view {from}"));
+        };
+        let worktree = worktree_ref.id();
+        let shown = self.clients.values().filter(|it| it.worktree == worktree);
+        let size = fit(shown, worktree_ref.layout(), &self.known)
+            .map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let preferred = match direction {
+            Some(Direction::Left | Direction::Right) => Beside::Towards(Towards::Right),
+            Some(Direction::Up | Direction::Down) => Beside::Towards(Towards::Down),
+            None => Beside::Focused,
+        };
+        if let Some(url) = terminal_socket::browser_url_from_command(&command) {
+            let view = self.store.fresh().map_err(Failed::said)?;
+            let projects = self.kept()?;
+            let (_, found) = projects.find(worktree).ok_or("the worktree is gone")?;
+            let (placed, _) = placement(found.layout(), Some(from), preferred, view, size)
+                .or_else(|_| placement(found.layout(), Some(from), Beside::Focused, view, size))?;
+            let browser = View::Browser(Browser::new(view, url));
+            self.changed(Change::Open { worktree, view: browser, placed, size })?;
+            for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
+                client.focus = Some(view);
+            }
+            return Ok(());
+        }
+        let argv = Argv::parse(command)?;
+        let opens = Opens::Command(argv);
+        let terminal = self.store.fresh_terminal().map_err(Failed::said)?;
+        let projects = self.kept()?;
+        let (project, found) = projects.find(worktree).ok_or("the worktree is gone")?;
+        let (placed, inner) =
+            placement(found.layout(), Some(from), preferred, terminal.view(), size).or_else(
+                |_| placement(found.layout(), Some(from), Beside::Focused, terminal.view(), size),
+            )?;
+        let folder = project.folder(worktree).ok_or("its project holds it not")?;
+        let cwd = Directory::from(&folder);
+        let made = Terminal::new(terminal, folder, opens.runs());
+        self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
+        self.spawned(terminal, &cwd, &opens, inner)?;
+        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
+            client.focus = Some(terminal.view());
+        }
+        Ok(())
+    }
+
+    fn socket_send_text(&self, pane: ViewId, text: &str) -> Result<(), String> {
+        let projects = self.kept()?;
+        let Some((_, terminal)) = projects.holding_terminal(pane) else {
+            return Err(format!("view {pane} runs no terminal"));
+        };
+        let Some(known) = self.known.get(&terminal.id()) else {
+            return Err(format!("terminal {pane} is not running"));
+        };
+        let key = known.key;
+        tasks::shared()
+            .block_on(self.mux.paste_text(key, text))
+            .map_err(|failure| failure.to_string())
+    }
+
+    fn socket_focus_pane(&mut self, pane: ViewId) -> Result<(), String> {
+        let projects = self.kept()?;
+        let Some((worktree_ref, _)) = projects.holding_view(pane) else {
+            return Err(format!("no layout holds view {pane}"));
+        };
+        let worktree = worktree_ref.id();
+        self.relaid(Relaid::Focus { view: pane })?;
+        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
+            client.focus = Some(pane);
+        }
+        Ok(())
     }
 
     fn came(
@@ -950,6 +1182,16 @@ impl Layouts {
             },
             Asked::Open { beside, opens } => self.open(client, beside, &opens)?,
             Asked::Welcome => self.welcome(client)?,
+            Asked::Browser(url) => self.browser(client, url)?,
+            Asked::Navigate { view, url } => {
+                if !self.layout(worktree)?.holds(view) {
+                    return Ok(Done::Quiet);
+                }
+                if self.kept()?.holding_browser(view).is_none() {
+                    return Err(format!("view {view} runs no browser"));
+                }
+                self.changed(Change::Navigate { view, url })?;
+            },
             Asked::Close(view) => {
                 if !self.layout(worktree)?.holds(view) {
                     return Ok(Done::Quiet);
@@ -1100,6 +1342,96 @@ impl Layouts {
         let last_focus = self.layout(worktree).map(Layout::last_focus);
         assert_eq!(last_focus, Ok(Some(view)), "welcome view {view} opens focused");
         Ok(())
+    }
+
+    fn browser(&mut self, client: ClientId, url: Option<BrowserUrl>) -> Result<(), String> {
+        let Client { worktree, focus, .. } = self.clients[&client];
+        let size = self.size_of(client);
+        let view = self.store.fresh().map_err(Failed::said)?;
+        let projects = self.kept()?;
+        let (_, shown) = projects.find(worktree).ok_or("the worktree is gone")?;
+        let beside = if focus.is_some() { Beside::Focused } else { Beside::Largest };
+        let (placed, _) = placement(shown.layout(), focus, beside, view, size)?;
+        let browser = View::Browser(Browser::new(view, url));
+        self.changed(Change::Open { worktree, view: browser, placed, size })?;
+        let projects = self.kept()?;
+        let held_in = projects.holding_browser(view).map(|(it, _)| it.id());
+        assert_eq!(held_in, Some(worktree), "browser view {view} opened in its worktree");
+        self.client(client).focus = Some(view);
+        let last_focus = self.layout(worktree).map(Layout::last_focus);
+        assert_eq!(last_focus, Ok(Some(view)), "browser view {view} opens focused");
+        Ok(())
+    }
+
+    fn open_browser(
+        &mut self,
+        worktree: Option<WorktreeId>,
+        spot: Option<Spot>,
+        url: Option<BrowserUrl>,
+        from: Option<TerminalKey>,
+    ) -> Result<(Option<Made>, Option<projects::Opened>), Failed> {
+        let from_view = from.and_then(|key| {
+            self.known.iter().find(|(_, known)| known.key == key).map(|(it, _)| it.view())
+        });
+        let (worktree, beside_view) = if let Some(worktree) = worktree {
+            let in_same = from_view.filter(|view| {
+                self.store
+                    .projects()
+                    .and_then(|projects| projects.holding_view(*view))
+                    .is_some_and(|(held, _)| held.id() == worktree)
+            });
+            (worktree, in_same)
+        } else {
+            let from_worktree = from_view.and_then(|view| {
+                self.store
+                    .projects()
+                    .and_then(|projects| projects.holding_view(view))
+                    .map(|(held, _)| (held.id(), Some(view)))
+            });
+            if let Some(found) = from_worktree {
+                found
+            } else {
+                let Some(spot) = spot else {
+                    return Err(Failed::Refused("no worktree holds that terminal".to_owned()));
+                };
+                let (made, _) = self.changed_opening(Change::Start { spot, name: None })?;
+                match made {
+                    Some(Made::Worktree(id) | Made::Found(id)) => (id, None),
+                    Some(Made::Project(_)) => {
+                        return Err(Failed::Refused(
+                            "that project has no open worktree".to_owned(),
+                        ));
+                    },
+                    other => {
+                        return Err(Failed::Refused(format!(
+                            "no worktree to open a browser view in: {other:?}"
+                        )));
+                    },
+                }
+            }
+        };
+        let view = self.store.fresh()?;
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        let (_, shown) = projects
+            .find(worktree)
+            .ok_or_else(|| Failed::Refused(format!("no worktree has the id {worktree}")))?;
+        let shown_clients = self.clients.values().filter(|it| it.worktree == worktree);
+        let size = fit(shown_clients, shown.layout(), &self.known)
+            .map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let focus = beside_view.or_else(|| shown.layout().last_focus());
+        let beside = if focus.is_some() { Beside::Focused } else { Beside::Largest };
+        let (placed, _) =
+            placement(shown.layout(), focus, beside, view, size).map_err(Failed::Refused)?;
+        let browser = View::Browser(Browser::new(view, url));
+        self.store.change(Change::Open { worktree, view: browser, placed, size })?;
+        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
+            client.focus = Some(view);
+        }
+        let made = match from {
+            Some(from_key) => self.bring(worktree, from_key)?,
+            None => Made::Found(worktree),
+        };
+        Ok((Some(made), Some(projects::Opened::View(view))))
     }
 
     fn made(
@@ -1931,6 +2263,9 @@ fn laid(
         let id = layout::Leaf::id(view);
         let found = match view {
             View::Welcome(_) => Found::Welcome(()),
+            View::Browser(browser) => Found::Browser(show_response::view::Browser {
+                url: browser.url().map(|url| url.as_str().to_owned()),
+            }),
             View::Terminal(terminal) => match known.get(&terminal.id()) {
                 Some(known) => Found::Key(api::TerminalKey {
                     id: known.key.id.get(),
@@ -2053,6 +2388,7 @@ mod tests {
             size: None,
             cwd,
             title,
+            tty: None,
             is,
             statuses: ProgramStatuses::default(),
         }

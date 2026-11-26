@@ -7,17 +7,27 @@ use alacritty_terminal::vte::ansi::Rgb;
 
 use crate::host::Inbox;
 
-const QUESTIONS: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c";
+const QUESTIONS: &[u8] =
+    b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[14t\x1b[c";
 
 pub const TURNED: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[c";
 
 const WAIT_MAX: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellPixels {
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
     Foreground(Rgb),
     Background(Rgb),
     Kitty,
+    Graphics,
+    CellSize(CellPixels),
+    WindowPixels(CellPixels),
     Device,
     Turned(Theme),
 }
@@ -31,6 +41,9 @@ pub enum Theme {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Answers {
     pub kitty: bool,
+    pub graphics: bool,
+    pub cell: Option<CellPixels>,
+    pub window_pixels: Option<CellPixels>,
     pub colours: Colours,
 }
 
@@ -45,7 +58,12 @@ impl Colours {
         match answer {
             Answer::Foreground(colour) => self.foreground = Some(colour),
             Answer::Background(colour) => self.background = Some(colour),
-            Answer::Kitty | Answer::Device | Answer::Turned(_) => {},
+            Answer::Kitty
+            | Answer::Graphics
+            | Answer::CellSize(_)
+            | Answer::WindowPixels(_)
+            | Answer::Device
+            | Answer::Turned(_) => {},
         }
     }
 
@@ -70,6 +88,9 @@ fn hear(inbox: &mut Inbox, deadline: Instant) -> Answers {
         match answer {
             Answer::Device => break,
             Answer::Kitty => answers.kitty = true,
+            Answer::Graphics => answers.graphics = true,
+            Answer::CellSize(cell) => answers.cell = Some(cell),
+            Answer::WindowPixels(pixels) => answers.window_pixels = Some(pixels),
             Answer::Foreground(_) | Answer::Background(_) => answers.colours.hear(answer),
             Answer::Turned(_) => {},
         }
@@ -138,6 +159,8 @@ mod tests {
             Event::Answered(Answer::Background(background)),
             typed('s'),
             Event::Answered(Answer::Kitty),
+            Event::Answered(Answer::Graphics),
+            Event::Answered(Answer::CellSize(CellPixels { width: 10, height: 20 })),
             Event::Answered(Answer::Device),
             Event::Answered(Answer::Foreground(background)),
         ] {
@@ -147,7 +170,13 @@ mod tests {
         let heard = hear(&mut inbox, Instant::now() + Duration::from_secs(10));
         let mut colours = Colours::default();
         colours.hear(Answer::Background(background));
-        assert_eq!(heard, Answers { kitty: true, colours });
+        assert_eq!(heard, Answers {
+            kitty: true,
+            graphics: true,
+            cell: Some(CellPixels { width: 10, height: 20 }),
+            window_pixels: None,
+            colours,
+        });
         assert!(is_typed(inbox.try_next().as_ref(), 'l'));
         assert!(is_typed(inbox.try_next().as_ref(), 's'));
         assert!(matches!(inbox.try_next(), Some(Event::Answered(Answer::Foreground(_)))));

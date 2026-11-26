@@ -16,7 +16,7 @@ use signal_hook::consts::{SIGHUP, SIGTERM, SIGWINCH};
 use signal_hook::flag;
 use signal_hook::iterator::Signals;
 
-use crate::answers::{self, Answer, Theme};
+use crate::answers::{self, Answer, CellPixels, Theme};
 use crate::host::Event;
 
 const ESC: u8 = 0x1b;
@@ -25,6 +25,8 @@ const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
 const COLOUR_LONGEST: usize = 32;
+
+const APC_LONGEST: usize = 128;
 
 const END_SIGNALS: [i32; 2] = [SIGHUP, SIGTERM];
 
@@ -193,10 +195,11 @@ fn parse(bytes: &[u8], more: bool) -> Parsed {
         [] => Parsed::Partial,
         [ESC] if more => Parsed::Partial,
         [ESC] | [ESC, ESC] => key(KeyCode::Esc, KeyModifiers::NONE),
-        [ESC, b']'] if !more => alt(parse(&bytes[1..], more)),
+        [ESC, b']' | b'_'] if !more => alt(parse(&bytes[1..], more)),
         [ESC, b'[', ..] => csi(bytes),
         [ESC, b'O', ..] => ss3(bytes),
         [ESC, b']', ..] => osc(bytes),
+        [ESC, b'_', ..] => apc(bytes),
         [ESC, ..] => alt(parse(&bytes[1..], more)),
         [b'\r'] => key(KeyCode::Enter, KeyModifiers::NONE),
         [b'\t'] => key(KeyCode::Tab, KeyModifiers::NONE),
@@ -331,8 +334,31 @@ fn numbered(parameters: &[u8], last: u8) -> Parsed {
         b'~' => special_key(parameters),
         b'u' => kitty_key(parameters),
         b'M' => rxvt_mouse(parameters),
+        b't' => window_report(parameters),
         _ => modified_key(parameters, last),
     }
+}
+
+fn window_report(parameters: &str) -> Parsed {
+    let mut parts = parameters.split(';');
+    let (Some(kind), Some(Ok(height)), Some(Ok(width)), None) = (
+        parts.next(),
+        parts.next().map(str::parse::<u16>),
+        parts.next().map(str::parse::<u16>),
+        parts.next(),
+    ) else {
+        return Parsed::Unknown;
+    };
+    if width == 0 || height == 0 {
+        return Parsed::Unknown;
+    }
+    let pixels = CellPixels { width, height };
+    let answer = match kind {
+        "6" => Answer::CellSize(pixels),
+        "4" => Answer::WindowPixels(pixels),
+        _ => return Parsed::Unknown,
+    };
+    Parsed::Whole(Sent::Answer(answer))
 }
 
 fn held(field: &str) -> Option<(KeyModifiers, KeyEventState, KeyEventKind)> {
@@ -592,6 +618,33 @@ fn osc(bytes: &[u8]) -> Parsed {
     }
 }
 
+fn apc(bytes: &[u8]) -> Parsed {
+    let typed = || {
+        let alt = KeyEvent::new(KeyCode::Char('_'), KeyModifiers::ALT);
+        Parsed::Split(Sent::Input(Input::Key(alt)), 2)
+    };
+    let body = match bytes[2..] {
+        [] => return Parsed::Partial,
+        [b'G', ref body @ ..] => body,
+        _ => return typed(),
+    };
+    match *body {
+        [ref payload @ .., ESC, b'\\'] => {
+            let ok = payload == b"i=31;OK"
+                || (payload.starts_with(b"i=31,") && payload.ends_with(b";OK"));
+            if ok {
+                Parsed::Whole(Sent::Answer(Answer::Graphics))
+            } else {
+                Parsed::Unknown
+            }
+        },
+        [.., ESC] => Parsed::Partial,
+        [.., ESC, _] => typed(),
+        [.., last] if !last.is_ascii_graphic() || body.len() > APC_LONGEST => typed(),
+        _ => Parsed::Partial,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alacritty_terminal::vte::ansi::Rgb;
@@ -681,6 +734,24 @@ mod tests {
         assert_eq!(sent(&[b"\x1b[?997;1n"]), [Sent::Answer(Answer::Turned(Theme::Dark))]);
         assert_eq!(sent(&[b"\x1b[?997;2n"]), [Sent::Answer(Answer::Turned(Theme::Light))]);
         assert_eq!(sent(&[b"\x1b[?2026;2$yx"]), [typed('x')]);
+    }
+
+    #[test]
+    fn kitty_graphics_and_cell_size_replies_are_heard() {
+        let all = sent(&[
+            b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1b[4;1000;1600tx",
+            b"\x1b_Gi=31;ENOTSUP\x1b\\y",
+        ]);
+        assert_eq!(all, [
+            Sent::Answer(Answer::Graphics),
+            Sent::Answer(Answer::CellSize(CellPixels { width: 10, height: 20 })),
+            Sent::Answer(Answer::WindowPixels(CellPixels { width: 1600, height: 1000 })),
+            typed('x'),
+            typed('y'),
+        ]);
+        let alt_underscore = pressed(KeyCode::Char('_'), KeyModifiers::ALT);
+        assert_eq!(sent(&[b"\x1b_"]), std::slice::from_ref(&alt_underscore));
+        assert_eq!(sent(&[b"\x1b_x"]), [alt_underscore, typed('x')]);
     }
 
     #[test]
