@@ -1,17 +1,17 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
+use std::mem;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -22,7 +22,7 @@ use lune_protocol::said::Said;
 pub use lune_protocol::PATCH_BYTES_MAX;
 use lune_protocol::{UNTRACKED_BYTES_MAX, UNTRACKED_FILES_MAX, UNTRACKED_TOTAL_BYTES_MAX};
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::{Event, EventKind, PathsMut, RecommendedWatcher, RecursiveMode, Watcher as _};
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 
@@ -829,7 +829,15 @@ fn tracked(top: &Path, listed: &[u8]) -> Option<BTreeSet<PathBuf>> {
     Some(dirs)
 }
 
-fn watched(place: &Place, tracked: Option<&BTreeSet<PathBuf>>) -> BTreeMap<PathBuf, RecursiveMode> {
+const DIRS_EVENT_MAX: usize = 256;
+
+static NO_PATHS: BTreeMap<PathBuf, RecursiveMode> = BTreeMap::new();
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn git_folders(place: &Place) -> BTreeMap<PathBuf, RecursiveMode> {
     use RecursiveMode::{NonRecursive, Recursive};
     let folders = [&place.own, &place.common].map(|folder| (folder.clone(), NonRecursive));
     let refs = place.common.join("refs");
@@ -838,38 +846,25 @@ fn watched(place: &Place, tracked: Option<&BTreeSet<PathBuf>>) -> BTreeMap<PathB
         (place.common.join("reftable"), NonRecursive),
         (place.own.join("reftable"), NonRecursive),
     ];
-    let dirs = tracked.into_iter().flatten();
-    let dirs = dirs.flat_map(|dir| [(dir.clone(), NonRecursive), (dir.join(".git"), NonRecursive)]);
-    let all = folders.into_iter().chain(refs).chain(dirs);
-    all.filter(|(path, _)| path.is_dir()).collect()
+    folders.into_iter().chain(refs).filter(|(path, _)| path.is_dir()).collect()
+}
+
+fn watched(place: &Place, tracked: Option<&BTreeSet<PathBuf>>) -> BTreeMap<PathBuf, RecursiveMode> {
+    let mut paths = BTreeMap::new();
+    for dir in tracked.into_iter().flatten() {
+        for candidate in [dir.clone(), dir.join(".git")] {
+            if candidate.is_dir() {
+                paths.insert(candidate, RecursiveMode::NonRecursive);
+            }
+        }
+    }
+    paths.extend(git_folders(place));
+    paths
 }
 
 fn stamp(path: &Path) -> Option<(u64, u64, SystemTime)> {
     let index = fs::metadata(path).ok()?;
     Some((index.ino(), index.len(), index.modified().ok()?))
-}
-
-enum Word {
-    Read,
-    Change,
-    Dirs,
-}
-
-fn word(event: &notify::Result<Event>, watched: &BTreeMap<PathBuf, RecursiveMode>) -> Word {
-    let Ok(event) = event else {
-        return Word::Dirs;
-    };
-    match event.kind {
-        _ if event.need_rescan() => Word::Dirs,
-        kind if kind.is_access() => Word::Read,
-        EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder) => Word::Dirs,
-        EventKind::Modify(ModifyKind::Name(_))
-            if event.paths.iter().any(|path| watched.contains_key(path) || path.is_dir()) =>
-        {
-            Word::Dirs
-        },
-        _ => Word::Change,
-    }
 }
 
 fn denied(error: &notify::Error) -> bool {
@@ -879,103 +874,810 @@ fn denied(error: &notify::Error) -> bool {
     }
 }
 
-fn watcher(
-    paths: &BTreeMap<PathBuf, RecursiveMode>,
-    heard: Arc<AtomicBool>,
-    came_or_went: Arc<AtomicBool>,
-    wake: SyncSender<()>,
-) -> notify::Result<RecommendedWatcher> {
-    let watched_paths = paths.clone();
-    let handler = move |event: notify::Result<Event>| {
-        match word(&event, &watched_paths) {
-            Word::Read => return,
-            Word::Dirs => came_or_went.store(true, Ordering::SeqCst),
-            Word::Change => {},
-        }
-        hear(&heard, &wake);
-    };
-    let config = notify::Config::default().with_follow_symlinks(false);
-    let mut watcher = RecommendedWatcher::new(handler, config)?;
-    add(&mut watcher, paths)?;
-    Ok(watcher)
-}
-
-fn beginning(
-    ground: &Ground,
-    heard: Arc<AtomicBool>,
-    went: Arc<AtomicBool>,
-    wake: SyncSender<()>,
-) -> notify::Result<RecommendedWatcher> {
-    let (dir, git) = (ground.real.clone(), ground.real.join(".git"));
-    let of_git = {
-        let git = git.clone();
-        move |path: &Path| path == git || path.parent() == Some(git.as_path())
-    };
-    let left = |kind: EventKind| {
-        matches!(kind, EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)))
-    };
-    let itself = dir.clone();
-    let handler = move |event: notify::Result<Event>| {
-        let gone = match &event {
-            Ok(event) => {
-                event.need_rescan() || (left(event.kind) && event.paths.contains(&itself))
-            },
-            Err(_) => true,
-        };
-        if gone {
-            went.store(true, Ordering::SeqCst);
-        } else if event.is_ok_and(|event| !watch::worth_a_read(&event, &of_git)) {
-            return;
-        }
-        hear(&heard, &wake);
-    };
-    let mut watcher = notify::recommended_watcher(handler)?;
-    let mut paths = BTreeMap::from([(dir, RecursiveMode::NonRecursive)]);
-    if ground.git {
-        paths.insert(git, RecursiveMode::NonRecursive);
-    }
-    add(&mut watcher, &paths)?;
-    Ok(watcher)
-}
-
-fn add(
-    watcher: &mut RecommendedWatcher,
-    paths: &BTreeMap<PathBuf, RecursiveMode>,
-) -> notify::Result<()> {
-    let mut adding = watcher.paths_mut();
-    for (path, mode) in paths {
-        match adding.add(path, *mode) {
-            Ok(()) => {},
-            Err(error) if watch::missing(&error) => {},
-            Err(error) if path.ends_with(".git") && denied(&error) => {},
-            Err(error) => return Err(error),
-        }
-    }
-    adding.commit()
-}
-
-fn hear(heard: &AtomicBool, wake: &SyncSender<()>) {
-    heard.store(true, Ordering::SeqCst);
+fn wake_up(wake: &SyncSender<()>) {
     match wake.try_send(()) {
         Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct WatchId(u64);
+
+enum Dirs {
+    None,
+    Under(BTreeSet<PathBuf>),
+    All,
+}
+
+impl Dirs {
+    fn record(&mut self, path: PathBuf) {
+        match self {
+            Dirs::All => {},
+            Dirs::None => *self = Dirs::Under(BTreeSet::from([path])),
+            Dirs::Under(paths) => {
+                if paths.len() >= DIRS_EVENT_MAX {
+                    *self = Dirs::All;
+                } else {
+                    paths.insert(path);
+                }
+            },
+        }
+    }
+
+    fn all(&mut self) {
+        *self = Dirs::All;
+    }
+
+    fn take(&mut self) -> Dirs {
+        mem::replace(self, Dirs::None)
+    }
+}
+
+enum Target {
+    Tree { heard: bool, dirs: Dirs },
+    Outside { real: PathBuf, git: PathBuf, heard: bool, went: bool },
+}
+
+#[derive(Default)]
+struct Routing {
+    targets: HashMap<WatchId, Target>,
+    direct: HashMap<PathBuf, BTreeSet<WatchId>>,
+    recursive: HashMap<PathBuf, BTreeSet<WatchId>>,
+}
+
+impl Routing {
+    fn add_path(&mut self, id: WatchId, path: &Path, mode: RecursiveMode) {
+        let index = match mode {
+            RecursiveMode::NonRecursive => &mut self.direct,
+            RecursiveMode::Recursive => &mut self.recursive,
+        };
+        index.entry(path.to_path_buf()).or_default().insert(id);
+    }
+
+    fn remove_path(&mut self, id: WatchId, path: &Path, mode: RecursiveMode) {
+        let index = match mode {
+            RecursiveMode::NonRecursive => &mut self.direct,
+            RecursiveMode::Recursive => &mut self.recursive,
+        };
+        if let Some(ids) = index.get_mut(path) {
+            ids.remove(&id);
+            if ids.is_empty() {
+                index.remove(path);
+            }
+        }
+    }
+
+    fn watches_exact(&self, id: WatchId, path: &Path) -> bool {
+        self.direct.get(path).is_some_and(|ids| ids.contains(&id))
+            || self.recursive.get(path).is_some_and(|ids| ids.contains(&id))
+    }
+
+    fn collect_matches(&self, path: &Path, out: &mut Vec<WatchId>) {
+        out.clear();
+        if let Some(ids) = self.direct.get(path) {
+            out.extend(ids.iter().copied());
+        }
+        if let Some(parent) = path.parent()
+            && let Some(ids) = self.direct.get(parent)
+        {
+            out.extend(ids.iter().copied());
+        }
+        if !self.recursive.is_empty() {
+            for ancestor in path.ancestors() {
+                if let Some(ids) = self.recursive.get(ancestor) {
+                    out.extend(ids.iter().copied());
+                }
+            }
+        }
+    }
+
+    fn rescan_all(&mut self) -> bool {
+        for target in self.targets.values_mut() {
+            match target {
+                Target::Tree { heard, dirs } => {
+                    *heard = true;
+                    dirs.all();
+                },
+                Target::Outside { heard, went, .. } => {
+                    *heard = true;
+                    *went = true;
+                },
+            }
+        }
+        !self.targets.is_empty()
+    }
+
+    fn hear_all(&mut self, dir_changed: bool) -> bool {
+        for target in self.targets.values_mut() {
+            match target {
+                Target::Tree { heard, dirs } => {
+                    *heard = true;
+                    if dir_changed {
+                        dirs.all();
+                    }
+                },
+                Target::Outside { heard, .. } => *heard = true,
+            }
+        }
+        !self.targets.is_empty()
+    }
+}
+
+fn handle_event(event: notify::Result<Event>, routing: &Mutex<Routing>, wake: &SyncSender<()>) {
+    let Ok(event) = event else {
+        if locked(routing).rescan_all() {
+            wake_up(wake);
+        }
+        return;
+    };
+    if event.need_rescan() {
+        if locked(routing).rescan_all() {
+            wake_up(wake);
+        }
+        return;
+    }
+    if event.kind.is_access() {
+        return;
+    }
+    if event.paths.is_empty() {
+        let dir_changed = matches!(
+            event.kind,
+            EventKind::Create(CreateKind::Folder)
+                | EventKind::Remove(RemoveKind::Folder)
+                | EventKind::Modify(ModifyKind::Name(_))
+        );
+        if locked(routing).hear_all(dir_changed) {
+            wake_up(wake);
+        }
+        return;
+    }
+    let folder_event = matches!(
+        event.kind,
+        EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder)
+    );
+    let rename = matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)));
+    let outside_left =
+        matches!(event.kind, EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)));
+    let renamed_dirs: Vec<bool> =
+        if rename { event.paths.iter().map(|path| path.is_dir()).collect() } else { Vec::new() };
+    let mut notified = false;
+    let mut matched = Vec::new();
+    {
+        let mut routing = locked(routing);
+        for (index, path) in event.paths.iter().enumerate() {
+            routing.collect_matches(path, &mut matched);
+            let renamed_dir = rename && renamed_dirs[index];
+            for &id in &matched {
+                let exact = rename && !renamed_dir && routing.watches_exact(id, path);
+                let Some(target) = routing.targets.get_mut(&id) else {
+                    continue;
+                };
+                match target {
+                    Target::Tree { heard, dirs } => {
+                        *heard = true;
+                        if folder_event || renamed_dir || exact {
+                            dirs.record(path.clone());
+                        }
+                        notified = true;
+                    },
+                    Target::Outside { real, git, heard, went } => {
+                        if outside_left && path == real {
+                            *went = true;
+                            *heard = true;
+                            notified = true;
+                        } else if path == git || path.parent() == Some(git.as_path()) {
+                            *heard = true;
+                            notified = true;
+                        }
+                    },
+                }
+            }
+        }
+    }
+    if notified {
+        wake_up(wake);
+    }
+}
+
+#[derive(Default)]
+struct Counts {
+    non_recursive: usize,
+    recursive: usize,
+}
+
+impl Counts {
+    fn mode(&self) -> Option<RecursiveMode> {
+        if self.recursive > 0 {
+            Some(RecursiveMode::Recursive)
+        } else if self.non_recursive > 0 {
+            Some(RecursiveMode::NonRecursive)
+        } else {
+            None
+        }
+    }
+
+    fn add(&mut self, mode: RecursiveMode) {
+        match mode {
+            RecursiveMode::NonRecursive => self.non_recursive += 1,
+            RecursiveMode::Recursive => self.recursive += 1,
+        }
+    }
+
+    fn remove(&mut self, mode: RecursiveMode) {
+        match mode {
+            RecursiveMode::NonRecursive => self.non_recursive -= 1,
+            RecursiveMode::Recursive => self.recursive -= 1,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.non_recursive == 0 && self.recursive == 0
+    }
+}
+
+fn make_watcher(
+    routing: &Arc<Mutex<Routing>>,
+    wake: &SyncSender<()>,
+) -> notify::Result<RecommendedWatcher> {
+    let routing = routing.clone();
+    let wake = wake.clone();
+    let handler = move |event: notify::Result<Event>| {
+        handle_event(event, &routing, &wake);
+    };
+    let config = notify::Config::default().with_follow_symlinks(false);
+    RecommendedWatcher::new(handler, config)
+}
+
+fn add_one(
+    edits: &mut dyn PathsMut,
+    active: &mut BTreeMap<PathBuf, RecursiveMode>,
+    path: &Path,
+    mode: RecursiveMode,
+) -> notify::Result<()> {
+    match edits.add(path, mode) {
+        Ok(()) => {
+            active.insert(path.to_path_buf(), mode);
+            Ok(())
+        },
+        Err(error) if watch::missing(&error) => Ok(()),
+        Err(error) if path.ends_with(".git") && denied(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+struct Watches {
+    watcher: Option<RecommendedWatcher>,
+    routing: Arc<Mutex<Routing>>,
+    wake: SyncSender<()>,
+    next: u64,
+    watched: HashMap<WatchId, BTreeMap<PathBuf, RecursiveMode>>,
+    counts: HashMap<PathBuf, Counts>,
+    active: BTreeMap<PathBuf, RecursiveMode>,
+}
+
+impl Watches {
+    fn new(wake: SyncSender<()>) -> Self {
+        Watches {
+            watcher: None,
+            routing: Arc::new(Mutex::new(Routing::default())),
+            wake,
+            next: 0,
+            watched: HashMap::new(),
+            counts: HashMap::new(),
+            active: BTreeMap::new(),
+        }
+    }
+
+    fn next_id(&mut self) -> WatchId {
+        let id = WatchId(self.next);
+        self.next += 1;
+        id
+    }
+
+    fn ensure_watcher(&mut self) -> notify::Result<()> {
+        if self.watcher.is_none() {
+            self.watcher = Some(make_watcher(&self.routing, &self.wake)?);
+        }
+        Ok(())
+    }
+
+    fn paths(&self, id: WatchId) -> &BTreeMap<PathBuf, RecursiveMode> {
+        self.watched.get(&id).unwrap_or(&NO_PATHS)
+    }
+
+    fn take_heard(&self) -> HashSet<WatchId> {
+        let mut routing = locked(&self.routing);
+        let mut heard_ids = HashSet::new();
+        for (&id, target) in &mut routing.targets {
+            let heard = match target {
+                Target::Tree { heard, .. } | Target::Outside { heard, .. } => heard,
+            };
+            if mem::take(heard) {
+                heard_ids.insert(id);
+            }
+        }
+        heard_ids
+    }
+
+    fn take_dirs(&self, id: WatchId) -> Dirs {
+        let mut routing = locked(&self.routing);
+        match routing.targets.get_mut(&id) {
+            Some(Target::Tree { dirs, .. }) => dirs.take(),
+            Some(Target::Outside { .. }) | None => Dirs::None,
+        }
+    }
+
+    fn went(&self, id: WatchId) -> bool {
+        let routing = locked(&self.routing);
+        match routing.targets.get(&id) {
+            Some(Target::Outside { went, .. }) => *went,
+            Some(Target::Tree { .. }) | None => false,
+        }
+    }
+
+    fn increment(&mut self, path: &Path, mode: RecursiveMode) {
+        self.counts.entry(path.to_path_buf()).or_default().add(mode);
+    }
+
+    fn decrement(&mut self, path: &Path, mode: RecursiveMode) {
+        if let Some(count) = self.counts.get_mut(path) {
+            count.remove(mode);
+            if count.is_empty() {
+                self.counts.remove(path);
+            }
+        }
+    }
+
+    fn add_tree(&mut self, paths: BTreeMap<PathBuf, RecursiveMode>) -> notify::Result<WatchId> {
+        let id = self.next_id();
+        let target = Target::Tree { heard: false, dirs: Dirs::None };
+        self.insert(id, target, paths, &BTreeSet::new())
+    }
+
+    fn add_outside(&mut self, ground: &Ground, refresh: bool) -> notify::Result<WatchId> {
+        let id = self.next_id();
+        let git = ground.real.join(".git");
+        let mut paths = BTreeMap::from([(ground.real.clone(), RecursiveMode::NonRecursive)]);
+        if ground.git {
+            paths.insert(git.clone(), RecursiveMode::NonRecursive);
+        }
+        let refreshed = if refresh { paths.keys().cloned().collect() } else { BTreeSet::new() };
+        let target = Target::Outside { real: ground.real.clone(), git, heard: false, went: false };
+        self.insert(id, target, paths, &refreshed)
+    }
+
+    fn insert(
+        &mut self,
+        id: WatchId,
+        target: Target,
+        paths: BTreeMap<PathBuf, RecursiveMode>,
+        refresh: &BTreeSet<PathBuf>,
+    ) -> notify::Result<WatchId> {
+        self.ensure_watcher()?;
+        {
+            let mut routing = locked(&self.routing);
+            for (path, &mode) in &paths {
+                routing.add_path(id, path, mode);
+            }
+            routing.targets.insert(id, target);
+        }
+        let mut touched = BTreeSet::new();
+        for (path, &mode) in &paths {
+            self.increment(path, mode);
+            touched.insert(path.clone());
+        }
+        self.watched.insert(id, paths);
+        if let Err(error) = self.sync(&touched, refresh) {
+            self.remove(id);
+            return Err(error);
+        }
+        Ok(id)
+    }
+
+    fn update_tree(
+        &mut self,
+        id: WatchId,
+        new_paths: BTreeMap<PathBuf, RecursiveMode>,
+        refresh: &BTreeSet<PathBuf>,
+    ) -> notify::Result<()> {
+        let Some(old_paths) = self.watched.insert(id, new_paths) else {
+            return Ok(());
+        };
+        let Some(new_paths) = self.watched.get(&id) else {
+            return Ok(());
+        };
+        let mut removed = Vec::new();
+        let mut added = Vec::new();
+        for (path, &old_mode) in &old_paths {
+            if new_paths.get(path) != Some(&old_mode) {
+                removed.push((path.clone(), old_mode));
+            }
+        }
+        for (path, &new_mode) in new_paths {
+            if old_paths.get(path) != Some(&new_mode) {
+                added.push((path.clone(), new_mode));
+            }
+        }
+        if !removed.is_empty() || !added.is_empty() {
+            let mut routing = locked(&self.routing);
+            for (path, mode) in &removed {
+                routing.remove_path(id, path, *mode);
+            }
+            for (path, mode) in &added {
+                routing.add_path(id, path, *mode);
+            }
+        }
+        let mut touched = BTreeSet::new();
+        for (path, mode) in removed {
+            self.decrement(&path, mode);
+            touched.insert(path);
+        }
+        for (path, mode) in added {
+            self.increment(&path, mode);
+            touched.insert(path);
+        }
+        for path in refresh {
+            touched.insert(path.clone());
+        }
+        if let Err(error) = self.sync(&touched, refresh) {
+            self.remove(id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn remove(&mut self, id: WatchId) -> bool {
+        let went = {
+            let mut routing = locked(&self.routing);
+            if let Some(paths) = self.watched.get(&id) {
+                for (path, &mode) in paths {
+                    routing.remove_path(id, path, mode);
+                }
+            }
+            match routing.targets.remove(&id) {
+                Some(Target::Outside { went, .. }) => went,
+                Some(Target::Tree { .. }) | None => false,
+            }
+        };
+        let Some(paths) = self.watched.remove(&id) else {
+            return went;
+        };
+        let mut touched = BTreeSet::new();
+        for (path, mode) in paths {
+            self.decrement(&path, mode);
+            touched.insert(path);
+        }
+        let _ = self.sync(&touched, &BTreeSet::new());
+        went
+    }
+
+    fn remove_tree(&mut self, tree: &Tree) {
+        if let Some(id) = tree.watching.id() {
+            self.remove(id);
+        }
+    }
+
+    fn remove_outside(&mut self, outside: &Outside) -> bool {
+        outside.watching.id().is_some_and(|id| self.remove(id))
+    }
+
+    fn sync(
+        &mut self,
+        touched: &BTreeSet<PathBuf>,
+        refresh: &BTreeSet<PathBuf>,
+    ) -> notify::Result<()> {
+        let mut pure_remove = Vec::new();
+        let mut replace = Vec::new();
+        let mut pure_add = Vec::new();
+        for path in touched {
+            let was = self.active.get(path).copied();
+            let want = self.counts.get(path).and_then(Counts::mode);
+            match (was, want) {
+                (Some(old_mode), None) => pure_remove.push((path.clone(), old_mode)),
+                (Some(old_mode), Some(new_mode))
+                    if old_mode != new_mode || refresh.contains(path) =>
+                {
+                    replace.push((path.clone(), old_mode, new_mode));
+                },
+                (None, Some(new_mode)) => pure_add.push((path.clone(), new_mode)),
+                (None, None) | (Some(_), Some(_)) => {},
+            }
+        }
+        if pure_remove.is_empty() && replace.is_empty() && pure_add.is_empty() {
+            return Ok(());
+        }
+        let mut restore = BTreeMap::new();
+        let removed_recursive = pure_remove
+            .iter()
+            .filter(|(_, mode)| *mode == RecursiveMode::Recursive)
+            .map(|(path, _)| path)
+            .chain(
+                replace
+                    .iter()
+                    .filter(|(_, old_mode, _)| *old_mode == RecursiveMode::Recursive)
+                    .map(|(path, _, _)| path),
+            );
+        for root in removed_recursive {
+            for (descendant, _) in self
+                .active
+                .range::<PathBuf, _>(root..)
+                .take_while(|(path, _)| path.starts_with(root))
+                .filter(|(path, _)| *path != root)
+            {
+                if touched.contains(descendant) {
+                    continue;
+                }
+                if let Some(mode) = self.counts.get(descendant).and_then(Counts::mode) {
+                    restore.insert(descendant.clone(), mode);
+                }
+            }
+        }
+        self.ensure_watcher()?;
+        let Some(watcher) = &mut self.watcher else {
+            return Ok(());
+        };
+        let mut edits = watcher.paths_mut();
+        for (path, _) in &pure_remove {
+            let _ = edits.remove(path);
+            self.active.remove(path);
+        }
+        let mut failed = None;
+        for (path, _, new_mode) in &replace {
+            let _ = edits.remove(path);
+            self.active.remove(path);
+            if let Err(error) = add_one(&mut *edits, &mut self.active, path, *new_mode) {
+                failed = Some(error);
+                break;
+            }
+        }
+        for (path, mode) in &restore {
+            self.active.remove(path);
+            if let Err(error) = add_one(&mut *edits, &mut self.active, path, *mode) {
+                failed.get_or_insert(error);
+            }
+        }
+        if failed.is_none() {
+            for (path, mode) in &pure_add {
+                if let Err(error) = add_one(&mut *edits, &mut self.active, path, *mode) {
+                    failed = Some(error);
+                    break;
+                }
+            }
+        }
+        let committed = edits.commit();
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        committed
+    }
+}
+
+fn is_tracked(path: &Path, tracked: Option<&BTreeSet<PathBuf>>) -> bool {
+    let Some(tracked) = tracked else {
+        return false;
+    };
+    if tracked.contains(path) {
+        return true;
+    }
+    path.file_name() == Some(OsStr::new(".git"))
+        && path.parent().is_some_and(|parent| tracked.contains(parent))
+}
+
+fn apply_tracked_diff(
+    new_paths: &mut BTreeMap<PathBuf, RecursiveMode>,
+    meta: &BTreeMap<PathBuf, RecursiveMode>,
+    old_tracked: Option<&BTreeSet<PathBuf>>,
+    new_tracked: Option<&BTreeSet<PathBuf>>,
+) {
+    if old_tracked == new_tracked {
+        return;
+    }
+    for removed in old_tracked
+        .into_iter()
+        .flatten()
+        .filter(|dir| new_tracked.is_none_or(|now| !now.contains(*dir)))
+    {
+        for candidate in [removed.clone(), removed.join(".git")] {
+            if !meta.contains_key(&candidate) && !is_tracked(&candidate, new_tracked) {
+                new_paths.remove(&candidate);
+            }
+        }
+    }
+    for added in new_tracked
+        .into_iter()
+        .flatten()
+        .filter(|dir| old_tracked.is_none_or(|was| !was.contains(*dir)))
+    {
+        for candidate in [added.clone(), added.join(".git")] {
+            if !new_paths.contains_key(&candidate) && candidate.is_dir() {
+                new_paths.insert(candidate, RecursiveMode::NonRecursive);
+            }
+        }
+    }
+}
+
+fn apply_meta_refresh(
+    place: &Place,
+    old_paths: &BTreeMap<PathBuf, RecursiveMode>,
+    meta: &BTreeMap<PathBuf, RecursiveMode>,
+    new_tracked: Option<&BTreeSet<PathBuf>>,
+    affected: &BTreeSet<PathBuf>,
+    new_paths: &mut BTreeMap<PathBuf, RecursiveMode>,
+    refresh: &mut BTreeSet<PathBuf>,
+) {
+    let stale_recursive: Vec<PathBuf> = new_paths
+        .iter()
+        .filter(|(path, mode)| **mode == RecursiveMode::Recursive && !meta.contains_key(*path))
+        .map(|(path, _)| path.clone())
+        .collect();
+    for path in stale_recursive {
+        if is_tracked(&path, new_tracked) && path.is_dir() {
+            new_paths.insert(path, RecursiveMode::NonRecursive);
+        } else {
+            new_paths.remove(&path);
+        }
+    }
+    let known = [
+        place.own.clone(),
+        place.common.clone(),
+        place.common.join("reftable"),
+        place.own.join("reftable"),
+    ];
+    for path in known {
+        if !meta.contains_key(&path) && !is_tracked(&path, new_tracked) {
+            new_paths.remove(&path);
+        }
+    }
+    let refs_link = place.common.join("refs");
+    let refs_touched = affected.iter().any(|dir| refs_link.starts_with(dir));
+    for (path, &mode) in meta {
+        let was_present = old_paths.contains_key(path);
+        new_paths.insert(path.clone(), mode);
+        let touched = affected.iter().any(|dir| path.starts_with(dir))
+            || (mode == RecursiveMode::Recursive && refs_touched);
+        if was_present && touched {
+            refresh.insert(path.clone());
+        }
+    }
+}
+
+fn apply_dir_refresh(
+    old_paths: &BTreeMap<PathBuf, RecursiveMode>,
+    meta: &BTreeMap<PathBuf, RecursiveMode>,
+    new_tracked: Option<&BTreeSet<PathBuf>>,
+    affected: &BTreeSet<PathBuf>,
+    new_paths: &mut BTreeMap<PathBuf, RecursiveMode>,
+    refresh: &mut BTreeSet<PathBuf>,
+) {
+    for changed in affected {
+        let under: Vec<PathBuf> = new_paths
+            .range::<PathBuf, _>(changed..)
+            .take_while(|(path, _)| path.starts_with(changed))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in under {
+            if meta.contains_key(&path) {
+                continue;
+            }
+            if path.is_dir() {
+                if old_paths.contains_key(&path) {
+                    refresh.insert(path);
+                }
+            } else {
+                new_paths.remove(&path);
+            }
+        }
+        let Some(tracked) = new_tracked else {
+            continue;
+        };
+        for dir in tracked.range::<PathBuf, _>(changed..).take_while(|dir| dir.starts_with(changed))
+        {
+            for candidate in [dir.clone(), dir.join(".git")] {
+                if meta.contains_key(&candidate) {
+                    continue;
+                }
+                if candidate.is_dir() {
+                    if old_paths.contains_key(&candidate) {
+                        refresh.insert(candidate.clone());
+                    }
+                    new_paths.insert(candidate, RecursiveMode::NonRecursive);
+                } else {
+                    new_paths.remove(&candidate);
+                }
+            }
+        }
+        if changed.file_name() == Some(OsStr::new(".git"))
+            && let Some(parent) = changed.parent()
+            && tracked.contains(parent)
+            && !meta.contains_key(changed)
+        {
+            if changed.is_dir() {
+                if old_paths.contains_key(changed) {
+                    refresh.insert(changed.clone());
+                }
+                new_paths.insert(changed.clone(), RecursiveMode::NonRecursive);
+            } else {
+                new_paths.remove(changed);
+            }
+        }
+    }
+}
+
+fn reconcile(
+    place: &Place,
+    old_tracked: Option<&BTreeSet<PathBuf>>,
+    old_paths: &BTreeMap<PathBuf, RecursiveMode>,
+    new_tracked: Option<&BTreeSet<PathBuf>>,
+    dirs: Dirs,
+) -> Option<(BTreeMap<PathBuf, RecursiveMode>, BTreeSet<PathBuf>)> {
+    match dirs {
+        Dirs::None => {
+            if old_tracked == new_tracked {
+                return None;
+            }
+            let meta = git_folders(place);
+            let mut new_paths = old_paths.clone();
+            apply_tracked_diff(&mut new_paths, &meta, old_tracked, new_tracked);
+            new_paths.extend(meta);
+            Some((new_paths, BTreeSet::new()))
+        },
+        Dirs::All => {
+            let new_paths = watched(place, new_tracked);
+            let refresh =
+                new_paths.keys().filter(|path| old_paths.contains_key(*path)).cloned().collect();
+            Some((new_paths, refresh))
+        },
+        Dirs::Under(affected) => {
+            let meta = git_folders(place);
+            let mut new_paths = old_paths.clone();
+            let mut refresh = BTreeSet::new();
+            apply_tracked_diff(&mut new_paths, &meta, old_tracked, new_tracked);
+            apply_meta_refresh(
+                place,
+                old_paths,
+                &meta,
+                new_tracked,
+                &affected,
+                &mut new_paths,
+                &mut refresh,
+            );
+            apply_dir_refresh(
+                old_paths,
+                &meta,
+                new_tracked,
+                &affected,
+                &mut new_paths,
+                &mut refresh,
+            );
+            if new_paths == *old_paths && refresh.is_empty() {
+                None
+            } else {
+                Some((new_paths, refresh))
+            }
+        },
+    }
+}
+
 struct Tree {
-    heard: Arc<AtomicBool>,
-    came_or_went: Arc<AtomicBool>,
     place: Place,
     index: Option<(u64, u64, SystemTime)>,
     watching: Watching,
 }
 
 enum Watching {
-    Whole { _watcher: RecommendedWatcher },
-    Folders { _watcher: RecommendedWatcher, why: String },
+    Whole { id: WatchId, tracked: BTreeSet<PathBuf> },
+    Folders { id: WatchId, why: String },
     Sweep { why: String },
 }
 
 impl Watching {
+    fn id(&self) -> Option<WatchId> {
+        match self {
+            Watching::Whole { id, .. } | Watching::Folders { id, .. } => Some(*id),
+            Watching::Sweep { .. } => None,
+        }
+    }
+
     fn trouble(&self) -> Option<&String> {
         match self {
             Watching::Whole { .. } => None,
@@ -988,39 +1690,76 @@ impl Tree {
     fn watch(
         before: Option<Tree>,
         place: Place,
-        wake: &SyncSender<()>,
+        watches: &mut Watches,
         troubles: &mut Troubles,
     ) -> (Tree, bool) {
         let index = stamp(&place.own.join("index"));
-        let (heard, came_or_went) = match before {
-            Some(tree)
-                if !tree.came_or_went.swap(false, Ordering::SeqCst)
-                    && tree.place == place
-                    && tree.index == index =>
-            {
-                return (tree, false);
+        let reusing = match before {
+            Some(tree) => {
+                let dirs = tree.watching.id().map_or(Dirs::None, |id| watches.take_dirs(id));
+                if matches!(dirs, Dirs::None) && tree.place == place && tree.index == index {
+                    return (tree, false);
+                }
+                let index_unchanged = tree.index == index;
+                match tree.watching {
+                    Watching::Whole { id, tracked } if tree.place == place => {
+                        Some((id, Some(tracked), dirs, index_unchanged))
+                    },
+                    Watching::Folders { id, .. } if tree.place == place => {
+                        Some((id, None, dirs, index_unchanged))
+                    },
+                    Watching::Whole { id, .. } | Watching::Folders { id, .. } => {
+                        watches.remove(id);
+                        None
+                    },
+                    Watching::Sweep { .. } => None,
+                }
             },
-            Some(Tree { heard, came_or_went, watching, .. }) => {
-                drop(watching);
-                (heard, came_or_went)
-            },
-            None => (Arc::default(), Arc::default()),
+            None => None,
         };
         let top = place.top.display();
-        let tracked = listed(&place.top).and_then(|listed| {
-            let many = || {
-                format!(
-                    "{top} has more than {TREE_DIRS_MAX} directories that git tracks a path \
-                     in, and only git's folders are watched"
-                )
+        let tracked = match &reusing {
+            Some((_, Some(old_tracked), Dirs::Under(_), true)) => Ok(old_tracked.clone()),
+            _ => listed(&place.top).and_then(|listed| {
+                let many = || {
+                    format!(
+                        "{top} has more than {TREE_DIRS_MAX} directories that git tracks a path \
+                         in, and only git's folders are watched"
+                    )
+                };
+                tracked(&place.top, &listed).ok_or_else(many)
+            }),
+        };
+        if let Some((id, old_tracked, dirs, _)) = reusing {
+            let update = reconcile(
+                &place,
+                old_tracked.as_ref(),
+                watches.paths(id),
+                tracked.as_ref().ok(),
+                dirs,
+            );
+            let (updated, anew) = match update {
+                Some((new_paths, refresh)) => {
+                    (watches.update_tree(id, new_paths, &refresh), true)
+                },
+                None => (Ok(()), false),
             };
-            tracked(&place.top, &listed).ok_or_else(many)
-        });
+            let watching = match (updated, tracked) {
+                (Ok(()), Ok(tracked)) => Watching::Whole { id, tracked },
+                (Ok(()), Err(why)) => Watching::Folders { id, why },
+                (Err(error), _) => {
+                    Watching::Sweep { why: format!("{top} is read on the sweep alone: {error}") }
+                },
+            };
+            if let Some(trouble) = watching.trouble() {
+                troubles.say(trouble.clone());
+            }
+            return (Tree { place, index, watching }, anew);
+        }
         let paths = watched(&place, tracked.as_ref().ok());
-        let watcher = watcher(&paths, heard.clone(), came_or_went.clone(), wake.clone());
-        let watching = match (watcher, tracked) {
-            (Ok(watcher), Ok(_)) => Watching::Whole { _watcher: watcher },
-            (Ok(watcher), Err(why)) => Watching::Folders { _watcher: watcher, why },
+        let watching = match (watches.add_tree(paths), tracked) {
+            (Ok(id), Ok(tracked)) => Watching::Whole { id, tracked },
+            (Ok(id), Err(why)) => Watching::Folders { id, why },
             (Err(error), _) => {
                 Watching::Sweep { why: format!("{top} is read on the sweep alone: {error}") }
             },
@@ -1028,12 +1767,11 @@ impl Tree {
         if let Some(trouble) = watching.trouble() {
             troubles.say(trouble.clone());
         }
-        (Tree { heard, came_or_went, place, index, watching }, true)
+        (Tree { place, index, watching }, true)
     }
 }
 
 struct Outside {
-    heard: Arc<AtomicBool>,
     watching: Beginning,
 }
 
@@ -1055,16 +1793,23 @@ impl Ground {
 }
 
 enum Beginning {
-    Watched { ground: Ground, went: Arc<AtomicBool>, _watcher: RecommendedWatcher },
+    Watched { id: WatchId, ground: Ground },
     Gone,
     Sweep { ground: Option<Ground>, why: String },
 }
 
 impl Beginning {
-    fn covers(&self, now: &io::Result<Option<Ground>>) -> bool {
+    fn id(&self) -> Option<WatchId> {
+        match self {
+            Beginning::Watched { id, .. } => Some(*id),
+            Beginning::Gone | Beginning::Sweep { .. } => None,
+        }
+    }
+
+    fn covers(&self, now: &io::Result<Option<Ground>>, watches: &Watches) -> bool {
         match (self, now) {
-            (Beginning::Watched { ground, went, .. }, Ok(Some(now))) => {
-                !went.load(Ordering::SeqCst) && ground == now
+            (Beginning::Watched { id, ground }, Ok(Some(now))) => {
+                !watches.went(*id) && ground == now
             },
             (Beginning::Sweep { ground: Some(ground), .. }, Ok(Some(now))) => ground == now,
             (Beginning::Gone, Ok(None)) => true,
@@ -1084,29 +1829,23 @@ impl Outside {
     fn watch(
         dir: &Path,
         before: Option<Outside>,
-        wake: &SyncSender<()>,
+        watches: &mut Watches,
         troubles: &mut Troubles,
     ) -> (Outside, bool) {
         let now = Ground::of(dir);
-        let heard = match before {
-            Some(outside) if outside.watching.covers(&now) => return (outside, false),
-            Some(Outside { heard, watching }) => {
-                drop(watching);
-                heard
-            },
-            None => Arc::default(),
+        let went = match before {
+            Some(outside) if outside.watching.covers(&now, watches) => return (outside, false),
+            Some(outside) => watches.remove_outside(&outside),
+            None => false,
         };
         let sweep = |ground: Option<Ground>, error: &dyn fmt::Display| Beginning::Sweep {
             ground,
             why: format!("{} is read on the sweep alone: {error}", dir.display()),
         };
         let watching = match now {
-            Ok(Some(ground)) => {
-                let went = Arc::new(AtomicBool::new(false));
-                match beginning(&ground, heard.clone(), went.clone(), wake.clone()) {
-                    Ok(watcher) => Beginning::Watched { ground, went, _watcher: watcher },
-                    Err(error) => sweep(Some(ground), &error),
-                }
+            Ok(Some(ground)) => match watches.add_outside(&ground, went) {
+                Ok(id) => Beginning::Watched { id, ground },
+                Err(error) => sweep(Some(ground), &error),
             },
             Ok(None) => Beginning::Gone,
             Err(error) => sweep(None, &error),
@@ -1115,7 +1854,7 @@ impl Outside {
             troubles.say(trouble.clone());
         }
         let anew = matches!(watching, Beginning::Watched { .. });
-        (Outside { heard, watching }, anew)
+        (Outside { watching }, anew)
     }
 }
 
@@ -1173,17 +1912,34 @@ impl Asked {
     }
 }
 
+fn prune_trees(
+    asked: &HashMap<String, Asked>,
+    trees: &mut HashMap<PathBuf, Tree>,
+    watches: &mut Watches,
+) {
+    trees.retain(|top, tree| {
+        let keep = asked.values().any(|was| was.within(top));
+        if !keep {
+            watches.remove_tree(tree);
+        }
+        keep
+    });
+}
+
 fn ask(
     dir: &str,
     before: Option<Placed>,
     trees: &mut HashMap<PathBuf, Tree>,
-    wake: &SyncSender<()>,
+    watches: &mut Watches,
     troubles: &mut Troubles,
 ) -> (Placed, Stood, bool) {
     let (placed, anew, common) = match place(dir) {
         Ok(Some(place)) => {
+            if let Some(Placed::Outside(outside)) = before {
+                watches.remove_outside(&outside);
+            }
             let (top, common) = (place.top.clone(), place.common.clone());
-            let (tree, anew) = Tree::watch(trees.remove(&top), place, wake, troubles);
+            let (tree, anew) = Tree::watch(trees.remove(&top), place, watches, troubles);
             trees.insert(top.clone(), tree);
             (Placed::In(top), anew, Some(common))
         },
@@ -1192,7 +1948,7 @@ fn ask(
                 Some(Placed::Outside(outside)) => Some(outside),
                 Some(Placed::In(_) | Placed::Unsaid) | None => None,
             };
-            let (outside, anew) = Outside::watch(Path::new(dir), before, wake, troubles);
+            let (outside, anew) = Outside::watch(Path::new(dir), before, watches, troubles);
             (Placed::Outside(outside), anew, None)
         },
         Err(Unanswered) => (before.unwrap_or(Placed::Unsaid), false, None),
@@ -1212,24 +1968,34 @@ pub fn follow(
     thread::Builder::new().name("git".to_owned()).spawn(move || {
         let mut asked: HashMap<String, Asked> = HashMap::new();
         let mut trees: HashMap<PathBuf, Tree> = HashMap::new();
+        let mut watches = Watches::new(wake);
         let mut troubles = Troubles::default();
         'sweep: loop {
             let Some(dirs) = core::ask(&core, core::Command::Dirs) else {
                 return;
             };
-            asked.retain(|dir, _| dirs.contains(dir));
-            trees.retain(|top, _| asked.values().any(|was| was.within(top)));
-            for (top, tree) in &trees {
-                if tree.heard.swap(false, Ordering::SeqCst) {
-                    let within = asked.values_mut().filter(|was| was.within(top));
-                    within.for_each(|was| was.next = Why::Heard);
+            asked.retain(|dir, was| {
+                let keep = dirs.contains(dir);
+                if !keep && let Placed::Outside(outside) = &was.placed {
+                    watches.remove_outside(outside);
                 }
-            }
-            for was in asked.values_mut() {
-                if let Placed::Outside(outside) = &was.placed
-                    && outside.heard.swap(false, Ordering::SeqCst)
-                {
-                    was.next = Why::Heard;
+                keep
+            });
+            prune_trees(&asked, &mut trees, &mut watches);
+            let heard = watches.take_heard();
+            if !heard.is_empty() {
+                for (top, tree) in &trees {
+                    if tree.watching.id().is_some_and(|id| heard.contains(&id)) {
+                        let within = asked.values_mut().filter(|was| was.within(top));
+                        within.for_each(|was| was.next = Why::Heard);
+                    }
+                }
+                for was in asked.values_mut() {
+                    if let Placed::Outside(outside) = &was.placed
+                        && outside.watching.id().is_some_and(|id| heard.contains(&id))
+                    {
+                        was.next = Why::Heard;
+                    }
                 }
             }
             let now = Instant::now();
@@ -1241,7 +2007,8 @@ pub fn follow(
                 let was = asked.remove(&dir);
                 let why = was.as_ref().map(|was| was.next);
                 let before = was.map(|was| was.placed);
-                let (placed, said, moved) = ask(&dir, before, &mut trees, &wake, &mut troubles);
+                let (placed, said, moved) =
+                    ask(&dir, before, &mut trees, &mut watches, &mut troubles);
                 let (took, ended) = (started.elapsed(), Instant::now());
                 let trouble = match &said {
                     Ok((_, uncounted)) => uncounted.clone(),
@@ -1264,6 +2031,7 @@ pub fn follow(
                     continue 'sweep;
                 }
             }
+            prune_trees(&asked, &mut trees, &mut watches);
             let asking = asked.values().filter_map(|was| was.trouble.clone());
             let outside = asked.values().filter_map(|was| match &was.placed {
                 Placed::Outside(outside) => outside.watching.trouble().cloned(),
@@ -1288,15 +2056,19 @@ pub fn follow(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::ffi::OsStr;
     use std::fs::{self, File};
     use std::path::Path;
+    use std::sync::mpsc;
     use std::time::{Duration, SystemTime};
 
-    use std::ffi::OsStr;
+    use notify::RecursiveMode;
 
     use super::{
-        BARE_UNREAD, Changed, Common, DefaultBranch, Directory, Git, LIMIT,
-        REPOSITORY_VARS, Symbolic, branch, changed, config_count, pointed, scratch, stamp,
+        BARE_UNREAD, Changed, Common, DefaultBranch, Directory, Git, LIMIT, REPOSITORY_VARS,
+        Symbolic, Tree, Troubles, Watches, Watching, branch, changed, config_count, locked, place,
+        pointed, scratch, stamp,
     };
 
     fn git(dir: &Path, args: &[&str]) -> bool {
@@ -1599,5 +2371,133 @@ mod tests {
         if let Ok(fd) = super::open_untracked_at(&root_fd, &fifo) {
             assert!(!fs::File::from(fd).metadata().unwrap().file_type().is_file());
         }
+    }
+
+    #[test]
+    fn a_commit_with_no_new_folder_keeps_the_tree_watch_and_a_new_folder_updates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let src = root.join("src");
+        fs::create_dir(&src).unwrap();
+        assert!(git(&root, &["init", "-q", "-b", "main"]));
+        fs::write(src.join("lib.rs"), "start\n").unwrap();
+        assert!(git(&root, &["add", "src/lib.rs"]));
+        assert!(git(&root, &["commit", "-q", "-m", "start"]));
+
+        let (wake, _woken) = mpsc::sync_channel(1);
+        let mut watches = Watches::new(wake);
+        let mut troubles = Troubles::default();
+        let at = root.to_str().unwrap();
+        let first = place(at).ok().flatten().unwrap();
+        let (tree, anew) = Tree::watch(None, first, &mut watches, &mut troubles);
+        assert!(anew);
+        let Watching::Whole { id, .. } = &tree.watching else {
+            panic!("expected whole tree watch");
+        };
+        let id = *id;
+        assert!(watches.active.contains_key(&src));
+
+        fs::write(src.join("lib.rs"), "edited\n").unwrap();
+        assert!(git(&root, &["add", "src/lib.rs"]));
+        assert!(git(&root, &["commit", "-q", "-m", "edit"]));
+        assert_ne!(stamp(&tree.place.own.join("index")), tree.index);
+        let next = place(at).ok().flatten().unwrap();
+        let (tree, anew) = Tree::watch(Some(tree), next, &mut watches, &mut troubles);
+        assert!(!anew);
+        assert_eq!(tree.watching.id(), Some(id));
+
+        let extra = root.join("extra");
+        fs::create_dir(&extra).unwrap();
+        fs::write(extra.join("mod.rs"), "extra\n").unwrap();
+        assert!(git(&root, &["add", "extra/mod.rs"]));
+        assert!(git(&root, &["commit", "-q", "-m", "extra"]));
+        let next = place(at).ok().flatten().unwrap();
+        let (tree, anew) = Tree::watch(Some(tree), next, &mut watches, &mut troubles);
+        assert!(anew);
+        assert_eq!(tree.watching.id(), Some(id));
+        assert!(watches.active.contains_key(&extra));
+
+        assert!(git(&root, &["rm", "-q", "-r", "extra"]));
+        assert!(git(&root, &["commit", "-q", "-m", "drop"]));
+        let next = place(at).ok().flatten().unwrap();
+        let (tree, anew) = Tree::watch(Some(tree), next, &mut watches, &mut troubles);
+        assert!(anew);
+        assert_eq!(tree.watching.id(), Some(id));
+        assert!(!watches.active.contains_key(&extra));
+        assert!(watches.active.contains_key(&src));
+
+        watches.remove_tree(&tree);
+        assert!(watches.active.is_empty());
+        assert!(watches.counts.is_empty());
+        assert!(watches.watched.is_empty());
+        let routing = locked(&watches.routing);
+        assert!(routing.targets.is_empty());
+        assert!(routing.direct.is_empty());
+        assert!(routing.recursive.is_empty());
+    }
+
+    #[test]
+    fn shared_watches_reference_count_modes_and_clean_up_on_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let shared = root.join("shared");
+        let child = shared.join("child");
+        let other = root.join("other");
+        for path in [&child, &other] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let (wake, _woken) = mpsc::sync_channel(1);
+        let mut watches = Watches::new(wake);
+        let first = watches
+            .add_tree(BTreeMap::from([
+                (shared.clone(), RecursiveMode::NonRecursive),
+                (child.clone(), RecursiveMode::NonRecursive),
+            ]))
+            .unwrap();
+        assert_eq!(watches.active.get(&shared), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(watches.active.get(&child), Some(&RecursiveMode::NonRecursive));
+
+        let second = watches
+            .add_tree(BTreeMap::from([
+                (shared.clone(), RecursiveMode::Recursive),
+                (other.clone(), RecursiveMode::NonRecursive),
+            ]))
+            .unwrap();
+        assert_eq!(watches.active.get(&shared), Some(&RecursiveMode::Recursive));
+        assert_eq!(watches.active.get(&other), Some(&RecursiveMode::NonRecursive));
+
+        watches.remove(second);
+        assert_eq!(watches.active.get(&shared), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(watches.active.get(&child), Some(&RecursiveMode::NonRecursive));
+        assert!(!watches.active.contains_key(&other));
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let unread = root.join("unread");
+            fs::create_dir(&unread).unwrap();
+            fs::set_permissions(&unread, Permissions::from_mode(0o000)).unwrap();
+            let failed = watches.add_tree(BTreeMap::from([
+                (shared.clone(), RecursiveMode::Recursive),
+                (unread.clone(), RecursiveMode::NonRecursive),
+            ]));
+            fs::set_permissions(&unread, Permissions::from_mode(0o755)).unwrap();
+            assert!(failed.is_err());
+            assert_eq!(watches.active.get(&shared), Some(&RecursiveMode::NonRecursive));
+            assert_eq!(watches.active.get(&child), Some(&RecursiveMode::NonRecursive));
+            assert!(!watches.active.contains_key(&unread));
+            assert_eq!(watches.watched.len(), 1);
+        }
+
+        watches.remove(first);
+        assert!(watches.active.is_empty());
+        assert!(watches.counts.is_empty());
+        assert!(watches.watched.is_empty());
+        let routing = locked(&watches.routing);
+        assert!(routing.targets.is_empty());
+        assert!(routing.direct.is_empty());
+        assert!(routing.recursive.is_empty());
     }
 }
