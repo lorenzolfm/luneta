@@ -1957,7 +1957,9 @@ impl App {
         }
         if let Some(change) = resized(chord) {
             self.leave();
-            self.ask_right(luned::Asked::Resize(change));
+            if let Some(right) = self.viewed_mut() {
+                right.grow(change);
+            }
             return true;
         }
         false
@@ -2021,12 +2023,6 @@ impl App {
     fn tell_focus(&mut self, has: bool) {
         if let Some(right) = self.viewed_mut() {
             right.focus(has);
-        }
-    }
-
-    fn ask_right(&mut self, asked: luned::Asked) {
-        if let Some(right) = self.viewed_mut() {
-            right.ask(asked);
         }
     }
 

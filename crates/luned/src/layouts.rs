@@ -40,7 +40,7 @@ use crate::resume::store::{RecordSource, ResumeAttempt, ResumeStore, StoredResum
 use crate::resume::synthesize::{LiveTerminal, Synthesizer};
 use crate::resume::{self, trust};
 use crate::shells::Shell;
-use crate::shows::direction_said;
+use crate::shows::{direction_said, AskNumber};
 use crate::terminal_socket::{self, PaneInfo, PaneRef, SocketCommand, SplitAction};
 use crate::watch::Troubles;
 use crate::{log, shells, Directory};
@@ -99,11 +99,11 @@ pub enum Command {
         size: Size,
         runs_in: Option<TerminalKey>,
         again: bool,
-        asked: u64,
+        asked_number: Option<AskNumber>,
         out: Out,
         answer: oneshot::Sender<Result<ClientId, Status>>,
     },
-    Asked { client: ClientId, seq: u64, asked: Result<Asked, String> },
+    Asked { client: ClientId, asked_number: Option<AskNumber>, asked: Result<Asked, String> },
     Left(ClientId),
     Listed(TerminalsListed),
     Emptied { since: Instant },
@@ -420,7 +420,7 @@ struct Client {
     browser_ttys: BTreeMap<ViewId, String>,
     out: Out,
     said: Option<api::ShowResponse>,
-    heard: u64,
+    heard: Option<AskNumber>,
 }
 
 struct Stranded {
@@ -428,7 +428,7 @@ struct Stranded {
     size: Size,
     runs_in: Option<TerminalKey>,
     out: Out,
-    heard: u64,
+    heard: Option<AskNumber>,
 }
 
 struct Known {
@@ -565,21 +565,25 @@ impl Layouts {
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|(made, opened)| Changed { made, opened, kept }));
             },
-            Command::Came { worktree, size, runs_in, again, asked, out, answer } => {
-                let _ = answer.send(self.came(worktree, size, runs_in, again, asked, out));
+            Command::Came { worktree, size, runs_in, again, asked_number, out, answer } => {
+                let _ = answer.send(self.came(worktree, size, runs_in, again, asked_number, out));
             },
-            Command::Asked { client, seq, asked } if self.stranded.contains_key(&client) => {
-                self.asked_stranded(client, seq, asked);
+            Command::Asked { client, asked_number, asked }
+                if self.stranded.contains_key(&client) =>
+            {
+                self.asked_stranded(client, asked_number, asked);
             },
-            Command::Asked { client, seq, asked } => {
+            Command::Asked { client, asked_number, asked } => {
                 if !self.clients.contains_key(&client) {
                     return;
                 }
-                let heard = {
+                let before = self.clients[&client].heard;
+                {
                     let held = self.client(client);
-                    held.heard = held.heard.max(seq);
-                    held.heard
-                };
+                    held.heard = held.heard.max(asked_number);
+                    assert!(held.heard >= before, "heard sequence never goes backward");
+                    assert!(held.heard >= asked_number, "heard sequence covers what was asked");
+                }
                 let event = match asked.and_then(|asked| self.asked(client, asked)) {
                     Ok(Done::Quiet) => return,
                     Ok(Done::Edged { direction, step }) => {
@@ -591,11 +595,16 @@ impl Layouts {
                     },
                     Err(why) => show_response::Event::Refused(why),
                 };
-                let word = api::ShowResponse { event: Some(event), heard };
                 let held = self.client(client);
+                let heard = AskNumber::wire(held.heard);
+                let word = api::ShowResponse { event: Some(event), heard };
                 if let Some(said) = &mut held.said {
                     said.heard = heard;
                 }
+                assert!(
+                    held.said.as_ref().is_none_or(|said| said.heard == heard),
+                    "a refusal or edge advances said.heard so settle sends no extra layout",
+                );
                 if !told(&held.out, word) {
                     self.clients.remove(&client);
                 }
@@ -919,7 +928,7 @@ impl Layouts {
         size: Size,
         runs_in: Option<TerminalKey>,
         again: bool,
-        asked: u64,
+        asked_number: Option<AskNumber>,
         out: Out,
     ) -> Result<ClientId, Status> {
         if self.clients.len() + self.stranded.len() >= CLIENTS_MAX {
@@ -933,6 +942,7 @@ impl Layouts {
         let focus = arrival(shown);
         self.arrivals += 1;
         let id = ClientId(self.arrivals);
+        assert!(!self.stranded.contains_key(&id), "a new client is not stranded");
         let client = Client {
             worktree,
             size,
@@ -941,7 +951,7 @@ impl Layouts {
             browser_ttys: BTreeMap::new(),
             out,
             said: None,
-            heard: asked,
+            heard: asked_number,
         };
         assert!(self.clients.insert(id, client).is_none(), "a client comes once");
         if !again {
@@ -950,9 +960,17 @@ impl Layouts {
         Ok(id)
     }
 
-    fn asked_stranded(&mut self, client: ClientId, seq: u64, asked: Result<Asked, String>) {
+    fn asked_stranded(
+        &mut self,
+        client: ClientId,
+        asked_number: Option<AskNumber>,
+        asked: Result<Asked, String>,
+    ) {
         let stranded = self.stranded.get_mut(&client).expect("a stranded client asked");
-        stranded.heard = stranded.heard.max(seq);
+        let before = stranded.heard;
+        stranded.heard = stranded.heard.max(asked_number);
+        assert!(stranded.heard >= before, "stranded heard sequence never goes backward");
+        assert!(stranded.heard >= asked_number, "stranded heard sequence covers what was asked");
         let left = stranded.left;
         let refused = match asked {
             Ok(Asked::Size(size)) => {
@@ -988,10 +1006,10 @@ impl Layouts {
     }
 
     fn refuse_stranded(&mut self, client: ClientId, refused: String) {
-        let stranded = &self.stranded[&client];
+        let stranded = self.stranded.get(&client).expect("a stranded client refused");
         let word = api::ShowResponse {
             event: Some(show_response::Event::Refused(refused)),
-            heard: stranded.heard,
+            heard: AskNumber::wire(stranded.heard),
         };
         if !told(&stranded.out, word) {
             self.stranded.remove(&client);
@@ -1267,7 +1285,7 @@ impl Layouts {
             let it = &self.clients[&client];
             let sent = api::ShowResponse {
                 event: Some(show_response::Event::Sent(worktree.get())),
-                heard: it.heard,
+                heard: AskNumber::wire(it.heard),
             };
             if it.worktree == worktree || told(&it.out, sent) {
                 taken = true;
@@ -2592,8 +2610,10 @@ impl Layouts {
         for id in gone {
             let Client { worktree: left, size, runs_in, out, heard, .. } =
                 clients.remove(&id).expect("a client whose worktree went is held");
-            let word =
-                api::ShowResponse { event: Some(show_response::Event::Left(left.get())), heard };
+            let word = api::ShowResponse {
+                event: Some(show_response::Event::Left(left.get())),
+                heard: AskNumber::wire(heard),
+            };
             if told(&out, word) {
                 let strands = Stranded { left, size, runs_in, out, heard };
                 assert!(stranded.insert(id, strands).is_none(), "a client is stranded once");
@@ -3004,7 +3024,7 @@ fn laid(
     focus: Option<ViewId>,
     known: &BTreeMap<TerminalViewId, Known>,
     looked: bool,
-    heard: u64,
+    heard: Option<AskNumber>,
 ) -> api::ShowResponse {
     let layout = worktree.layout();
     if let Some(focus) = focus {
@@ -3059,7 +3079,7 @@ fn laid(
             (None, None) => None,
         },
     };
-    api::ShowResponse { event: Some(show_response::Event::Laid(laid)), heard }
+    api::ShowResponse { event: Some(show_response::Event::Laid(laid)), heard: AskNumber::wire(heard) }
 }
 
 fn runs_of(listed: &server::Terminal, before: &Runs, shell: &Shell) -> Runs {

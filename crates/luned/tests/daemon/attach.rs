@@ -227,6 +227,27 @@ fn keys_typed_right_after_opening_a_tab_reach_the_tab_opened() {
 }
 
 #[test]
+fn keys_typed_right_after_stepping_to_a_tab_reach_the_tab_stepped_to() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("lune shows work", || shown(&owned, &dir.path));
+    seated(&window, "work/main");
+    window.send(SPLIT);
+    eventually("a second terminal opens as a tab of the first", || {
+        let terminals = shown(&owned, &dir.path)?.terminals;
+        let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
+        (found.count() == 2 && frames(&window) == Some(1)).then_some(())
+    });
+    window.send(&format!("{LEFT}{TYPED}"));
+    eventually("the tab stepped to has the keys", || window.shows(PRINTED).then_some(()));
+    window.send(RIGHT);
+    eventually("the tab stepped away from got none of them", || {
+        (!window.shows(PRINTED)).then_some(())
+    });
+}
+
+#[test]
 fn the_menu_opens_a_welcome_view_beside_the_terminal_and_d_d_in_it_closes_it() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");

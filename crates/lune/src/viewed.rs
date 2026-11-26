@@ -17,7 +17,8 @@ use luned::mux::own::api::{self, typed};
 use luned::mux::own::frames::{self, Frame};
 use luned::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
 use luned::{
-    Asked, Beside, Direction, Found, Heard, Laid, View, Rect as Placed, Show, Shows, Where,
+    AskNumber, Asked, Beside, Direction, Found, Growth, Heard, Laid, View, Rect as Placed, Show,
+    Shows, Where,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -132,7 +133,7 @@ struct Layout {
     worktree: WorktreeId,
     runs_in: Option<TerminalKey>,
     laid: Option<Laid>,
-    awaiting: Option<NonZeroU64>,
+    awaiting: Option<AskNumber>,
     screens: BTreeMap<TerminalKey, Screen>,
     reviews: BTreeMap<ViewId, ReviewPane>,
     pointer: Pointer,
@@ -143,8 +144,15 @@ struct Layout {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaidOut {
+    Ignored,
+    Shown,
+    Emptied,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AimFocus {
-    Awaiting(NonZeroU64),
+    Awaiting(AskNumber),
     Laid { view: Option<ViewId>, key: Option<TerminalKey> },
 }
 
@@ -244,6 +252,17 @@ impl Unsent {
         kept.dropped = true;
     }
 
+    fn drop_kept(&mut self, aim: Aim, why: &str, now: Instant) {
+        if let Held::Kept(kept) = std::mem::replace(&mut self.held, Held::Nothing) {
+            let count = kept.events.len();
+            let dropped = format!("lune drops {count} events kept for a terminal yet to come");
+            log::say(&format!("{dropped}: {why}"));
+        }
+        self.aim_at(aim, now);
+        assert_eq!(self.aim, aim, "dropped wait aims at the current layout");
+        assert!(matches!(self.held, Held::Nothing), "dropped wait keeps no events");
+    }
+
     fn clear(&mut self) {
         self.held = Held::Nothing;
     }
@@ -268,6 +287,34 @@ enum Closing {
     Unarmed,
     Armed { view: ViewId, input: u64 },
     Closed,
+}
+
+fn awaited_reached(awaiting: Option<AskNumber>, heard: Option<AskNumber>) -> bool {
+    match (awaiting, heard) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(asked), Some(heard)) => heard >= asked,
+    }
+}
+
+fn awaits_focus(asked: &Asked) -> bool {
+    match asked {
+        Asked::Go(_)
+        | Asked::Open { beside: Beside::Focused | Beside::Largest, .. }
+        | Asked::Welcome
+        | Asked::Browser(_)
+        | Asked::Review
+        | Asked::Close(_)
+        | Asked::Focus(_)
+        | Asked::Step { .. } => true,
+        Asked::Size(_)
+        | Asked::Open { beside: Beside::Alone, .. }
+        | Asked::Navigate { .. }
+        | Asked::BrowserTty { .. }
+        | Asked::Resize(_)
+        | Asked::Fullscreen
+        | Asked::Arrange(_) => false,
+    }
 }
 
 impl Layout {
@@ -417,37 +464,58 @@ impl Layout {
         Aim { worktree: self.worktree, focus }
     }
 
-    fn await_focus(&mut self, asked: NonZeroU64, now: Instant) {
+    fn await_focus(&mut self, asked: AskNumber, now: Instant) {
+        assert!(asked > AskNumber::HELLO, "awaited focus asks come after hello");
+        if let Some(before) = self.awaiting {
+            assert!(asked > before, "awaited focus asks climb strictly on one stream");
+        }
         self.awaiting = Some(asked);
-        self.unsent.aim_at(self.aim(), now);
+        let aim = self.aim();
+        self.unsent.aim_at(aim, now);
+        assert_eq!(self.unsent.aim, aim, "unsent input aims at the awaited focus");
     }
 
-    fn heard_laid(&mut self, heard: Option<NonZeroU64>) {
-        if self.awaiting.is_some_and(|asked| heard.is_none_or(|heard| heard >= asked)) {
+    fn heard_laid(&mut self, heard: Option<AskNumber>, now: Instant) {
+        if awaited_reached(self.awaiting, heard) {
             self.awaiting = None;
+            let aim = self.aim();
+            self.unsent.aim_at(aim, now);
+            assert!(self.awaiting.is_none(), "reached layout clears focus wait");
+            assert_eq!(self.unsent.aim, aim, "reached layout syncs unsent aim");
         }
     }
 
-    fn heard_refused(&mut self, heard: Option<NonZeroU64>, now: Instant) {
-        if self.awaiting.is_some_and(|asked| heard.is_none_or(|heard| heard >= asked)) {
+    fn heard_refused(&mut self, heard: Option<AskNumber>, now: Instant) {
+        if awaited_reached(self.awaiting, heard) {
             self.awaiting = None;
-            self.drop_awaiting(now);
+            self.drop_awaiting("luned refused the focus change", now);
+        }
+    }
+
+    fn heard_edged(&mut self, heard: Option<AskNumber>, crosses: bool, now: Instant) {
+        if !awaited_reached(self.awaiting, heard) {
+            return;
+        }
+        self.awaiting = None;
+        if crosses {
+            self.drop_awaiting("the focus step crossed out of the layout", now);
+        } else {
+            let aim = self.aim();
+            self.unsent.aim_at(aim, now);
+            assert_eq!(self.unsent.aim, aim, "staying edge syncs unsent aim");
         }
     }
 
     fn stream_lost(&mut self, now: Instant) {
         if self.awaiting.take().is_some() {
-            self.drop_awaiting(now);
+            self.drop_awaiting("luned's layout stream was lost", now);
         }
     }
 
-    fn drop_awaiting(&mut self, now: Instant) {
-        if let Held::Kept(kept) = std::mem::replace(&mut self.unsent.held, Held::Nothing) {
-            let count = kept.events.len();
-            let dropped = format!("lune drops {count} events kept for a terminal yet to come");
-            log::say(&format!("{dropped}: the view it waited for did not open"));
-        }
-        self.unsent.aim_at(self.aim(), now);
+    fn drop_awaiting(&mut self, why: &str, now: Instant) {
+        assert!(self.awaiting.is_none(), "only a finished wait drops kept events");
+        let aim = self.aim();
+        self.unsent.drop_kept(aim, why, now);
     }
 
     fn keep_unsent(&mut self, event: typed::Event, now: Instant) {
@@ -475,20 +543,21 @@ impl Layout {
         Some((viewer, key, self.unsent.take()))
     }
 
-    fn go(&mut self, worktree: WorktreeId) {
+    fn go(&mut self, worktree: WorktreeId, now: Instant) {
         self.worktree = worktree;
         self.laid = None;
         self.awaiting = None;
         self.screens.clear();
         self.reviews.clear();
         self.pointer = Pointer::Free;
+        self.unsent.drop_kept(self.aim(), "lune left the worktree it typed into", now);
     }
 
-    fn left(&mut self, worktree: WorktreeId) -> bool {
+    fn left(&mut self, worktree: WorktreeId, now: Instant) -> bool {
         if worktree != self.worktree {
             return false;
         }
-        self.go(worktree);
+        self.go(worktree, now);
         assert!(self.wanted().is_empty(), "a worktree gone shows no terminal");
         true
     }
@@ -503,9 +572,9 @@ impl Layout {
         follows
     }
 
-    fn laid_out(&mut self, laid: Laid) -> bool {
+    fn laid_out(&mut self, laid: Laid) -> LaidOut {
         if laid.worktree() != self.worktree {
-            return false;
+            return LaidOut::Ignored;
         }
         if self.focused() != laid.focused().map(|view| view.id) {
             self.pointer = Pointer::Free;
@@ -526,7 +595,7 @@ impl Layout {
         self.laid = Some(laid);
         let wanted = self.wanted();
         self.screens.retain(|key, _| wanted.contains(key));
-        empty
+        if empty { LaidOut::Emptied } else { LaidOut::Shown }
     }
 
     fn wanted(&self) -> BTreeSet<TerminalKey> {
@@ -1227,7 +1296,7 @@ impl Viewed {
                 Heeded::Quiet
             },
             Some(Outcome::Close(view)) => {
-                self.ask(Asked::Close(view));
+                self.ask_focus(Asked::Close(view));
                 Heeded::Changed
             },
             None => {
@@ -1327,31 +1396,38 @@ impl Viewed {
         self.layout.review_needs_load()
     }
 
-    pub fn heard(&mut self, heard: Heard) -> Heeded {
-        match heard {
+    pub fn heard(&mut self, event: Heard) -> Heeded {
+        match event {
             Heard::Laid { laid, heard } => {
                 self.laid_in = Some(laid.worktree());
                 let followed = self.layout.followed(&laid);
                 if followed {
                     self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
                 }
-                let same = laid.worktree() == self.layout.worktree;
-                let changed = same && self.layout.laid.as_ref() != Some(&laid);
+                let now = Instant::now();
+                let changed = laid.worktree() == self.layout.worktree
+                    && self.layout.laid.as_ref() != Some(&laid);
                 let mut emptied = false;
-                if self.layout.laid_out(laid) {
-                    match self.opened.get(&self.layout.worktree) {
-                        None => {
+                match self.layout.laid_out(laid) {
+                    LaidOut::Ignored => {},
+                    LaidOut::Shown => {
+                        if self.opened.get(&self.layout.worktree) == Some(&WorktreeOpen::Requested)
+                        {
                             self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
-                            self.ask(Asked::Open { beside: Beside::Alone, opens: Opens::Shell });
-                        },
-                        Some(WorktreeOpen::Requested) => {},
-                        Some(WorktreeOpen::Ready) => emptied = true,
-                    }
-                } else if self.opened.get(&self.layout.worktree) == Some(&WorktreeOpen::Requested) {
-                    self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
-                }
-                if same {
-                    self.layout.heard_laid(heard);
+                        }
+                        self.layout.heard_laid(heard, now);
+                    },
+                    LaidOut::Emptied => {
+                        self.layout.heard_laid(heard, now);
+                        match self.opened.get(&self.layout.worktree) {
+                            None => {
+                                self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
+                                self.ask(Asked::Open { beside: Beside::Alone, opens: Opens::Shell });
+                            },
+                            Some(WorktreeOpen::Requested) => {},
+                            Some(WorktreeOpen::Ready) => emptied = true,
+                        }
+                    },
                 }
                 self.watch();
                 self.sync_browsers();
@@ -1363,17 +1439,23 @@ impl Viewed {
                     (false, false, false) => Heeded::Quiet,
                 }
             },
-            Heard::Edged { worktree, direction, step } => {
+            Heard::Edged { worktree, direction, step, heard } => {
                 let awaited = self.awaited.take_if(|awaited| *awaited == step).is_some();
-                match self.layout.edged(worktree, direction) {
-                    Some(across) if awaited => Heeded::Edged(across),
-                    Some(_) | None => Heeded::Quiet,
+                let across = self.layout.edged(worktree, direction).filter(|_| awaited);
+                if worktree == self.layout.worktree {
+                    self.layout.heard_edged(heard, across.is_some(), Instant::now());
+                }
+                if let Some(across) = across {
+                    Heeded::Edged(across)
+                } else {
+                    self.send_unsent();
+                    Heeded::Quiet
                 }
             },
             Heard::Sent(worktree) => Heeded::Sent(worktree),
             Heard::Left(worktree) => {
                 self.opened.remove(&worktree);
-                if !self.layout.left(worktree) {
+                if !self.layout.left(worktree, Instant::now()) {
                     return Heeded::Quiet;
                 }
                 self.watch();
@@ -1483,22 +1565,19 @@ impl Viewed {
         }
     }
 
-    pub fn ask(&mut self, asked: Asked) {
-        if matches!(asked, Asked::Focus(_) | Asked::Go(_)) {
-            self.awaited = None;
-        }
+    fn ask(&mut self, asked: Asked) {
+        assert!(!awaits_focus(&asked), "focus-changing ask {asked:?} must go through ask_focus");
         if let Some(show) = &self.show {
             show.ask(asked);
         }
     }
 
     fn ask_focus(&mut self, asked: Asked) {
-        if matches!(asked, Asked::Focus(_) | Asked::Go(_)) {
-            self.awaited = None;
-        }
+        assert!(awaits_focus(&asked), "non-focus ask {asked:?} must not await focus");
+        self.awaited = None;
         if let Some(show) = &mut self.show {
-            let at = show.ask_awaited(asked);
-            self.layout.await_focus(at, Instant::now());
+            let asked_number = show.ask_awaited(asked);
+            self.layout.await_focus(asked_number, Instant::now());
         }
     }
 
@@ -1506,11 +1585,17 @@ impl Viewed {
         self.ask_focus(Asked::Focus(view));
     }
 
+    pub fn grow(&mut self, growth: Growth) {
+        self.ask(Asked::Resize(growth));
+    }
+
     pub fn step(&mut self, direction: Direction) {
-        self.steps += 1;
+        self.steps = self.steps.checked_add(1).expect("steps fit in u64");
         let step = NonZeroU64::new(self.steps).expect("steps count up from 1");
-        self.ask(Asked::Step { direction, step });
-        self.awaited = Some(step);
+        self.ask_focus(Asked::Step { direction, step });
+        if self.show.is_some() {
+            self.awaited = Some(step);
+        }
     }
 
     pub fn forget_step(&mut self) {
@@ -1540,7 +1625,7 @@ impl Viewed {
             return Vec::new();
         }
         self.opened.remove(&worktree);
-        self.layout.go(worktree);
+        self.layout.go(worktree, Instant::now());
         self.browsers.clear();
         let _ = self.browsers.drain_tty_changes();
         self.ask_focus(Asked::Go(worktree));
@@ -1652,7 +1737,7 @@ impl Viewed {
         }
         if self.layout.welcomes() {
             if let Some(view) = self.layout.closes(key, input) {
-                self.ask(Asked::Close(view));
+                self.ask_focus(Asked::Close(view));
             }
             return (plain, ReviewAction::None);
         }
@@ -1664,7 +1749,7 @@ impl Viewed {
                 return (plain, ReviewAction::None);
             }
             if let Some(closed) = self.layout.closes(key, input) {
-                self.ask(Asked::Close(closed));
+                self.ask_focus(Asked::Close(closed));
                 return (plain, ReviewAction::None);
             }
             let pressed = key.kind == KeyEventKind::Press && key.modifiers.is_empty();
@@ -1708,7 +1793,7 @@ impl Viewed {
             if searching {
                 self.layout.disarm_close();
             } else if let Some(closed) = self.layout.closes(key, input) {
-                self.ask(Asked::Close(closed));
+                self.ask_focus(Asked::Close(closed));
                 return (plain, ReviewAction::None);
             }
             let action = self
@@ -1904,7 +1989,7 @@ mod tests {
         assert_eq!(colour_of(project), moonlight::MAUVE);
         layout.worktree_tabs = Some(WorktreeTabs { project, tabs });
         layout.titles = [(terminal(11), "p1".to_owned()), (terminal(12), "p2".to_owned())].into();
-        assert!(!layout.laid_out(laid(halves(), 11, false)));
+        assert_eq!(layout.laid_out(laid(halves(), 11, false)), LaidOut::Shown);
         let cursor =
             Cursor { row: 1, column: 2, shape: frames::CursorShape::Block, blinking: false };
         layout.framed(whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
@@ -1953,10 +2038,10 @@ mod tests {
     #[test]
     fn a_view_of_the_worktree_left_is_not_drawn_in_the_one_gone_to() {
         let mut layout = split_layout();
-        layout.go(worktree(2));
+        layout.go(worktree(2), Instant::now());
         let drawn = layout.drawn().is_empty() && layout.wanted().is_empty();
         assert!(drawn && layout.screens.is_empty());
-        assert!(!layout.laid_out(laid(halves(), 11, false)));
+        assert_eq!(layout.laid_out(laid(halves(), 11, false)), LaidOut::Ignored);
         assert!(layout.drawn().is_empty() && layout.focused().is_none());
     }
 
@@ -1964,7 +2049,7 @@ mod tests {
     fn an_edge_is_heeded_only_from_the_worktree_the_view_is_on() {
         let mut layout = split_layout();
         assert_eq!(layout.edged(worktree(1), Direction::Right), Some(Across::After));
-        layout.go(worktree(2));
+        layout.go(worktree(2), Instant::now());
         assert_eq!(layout.edged(worktree(1), Direction::Right), None, "an edge of the one left");
         assert_eq!(layout.edged(worktree(2), Direction::Left), Some(Across::Before));
     }
@@ -2143,7 +2228,7 @@ mod tests {
         layout.framed(whole(1, &["no"], None)).unwrap();
         let lacked = "a terminal its layout lacks gets no screen";
         assert!(!layout.screens.contains_key(&key(1)), "{lacked}");
-        layout.go(worktree(2));
+        layout.go(worktree(2), Instant::now());
         assert_eq!(layout.focused(), None, "a layout of another worktree lays out nothing here");
     }
 
@@ -2154,7 +2239,7 @@ mod tests {
             Shows::Blank => panic!("expected a grapheme"),
         };
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid(halves(), 11, false)));
+        assert_eq!(layout.laid_out(laid(halves(), 11, false)), LaidOut::Shown);
         let first = whole(1, &["abcdefgh", "ijklmnop"], None);
         let Rows::Whole(initial) = first.rows() else { unreachable!() };
         let row0_ptr = ptr_of(&initial[0].glyphs()[0].shows);
@@ -2204,7 +2289,7 @@ mod tests {
         let shown = views.first().map(|view| Said::Tiled(view.id));
         let size = Some(show_request::Size { columns: 20, rows: 4 });
         let said = show_response::Laid { worktree: id, size, views, shown };
-        Heard::Laid { laid: Laid::heard(said).unwrap(), heard: NonZeroU64::new(1) }
+        Heard::Laid { laid: Laid::heard(said).unwrap(), heard: Some(AskNumber::HELLO) }
     }
 
     #[test]
@@ -2217,7 +2302,7 @@ mod tests {
         };
         let views = || vec![view(11, (0, 0, 10, 4), Some(1)), welcome((10, 0, 10, 4))];
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid(views(), 12, false)));
+        assert_eq!(layout.laid_out(laid(views(), 12, false)), LaidOut::Shown);
         let typed = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let d = typed(KeyCode::Char(CLOSE));
         let welcome = Some(ViewId::of(12).unwrap());
@@ -2229,8 +2314,8 @@ mod tests {
         let ctrl_d = KeyEvent::new(KeyCode::Char(CLOSE), KeyModifiers::CONTROL);
         assert_eq!(layout.closes(&ctrl_d, 6), None);
         assert_eq!(layout.closes(&d, 7), None, "Ctrl d is no d");
-        assert!(!layout.laid_out(laid(views(), 11, false)));
-        assert!(!layout.laid_out(laid(views(), 12, false)));
+        assert_eq!(layout.laid_out(laid(views(), 11, false)), LaidOut::Shown);
+        assert_eq!(layout.laid_out(laid(views(), 12, false)), LaidOut::Shown);
         assert_eq!(layout.closes(&d, 8), None, "a focus gone elsewhere and back starts over");
         assert_eq!(layout.closes(&d, 9), welcome);
         assert_eq!(layout.closes(&d, 10), None);
@@ -2256,7 +2341,10 @@ mod tests {
         }
         assert_eq!(layout.closes(&d, 6), None);
         assert_eq!(layout.closes(&d, 7), Some(ViewId::of(12).unwrap()));
-        assert!(!layout.laid_out(laid(vec![view(11, (0, 0, 20, 4), Some(1))], 11, false)));
+        assert_eq!(
+            layout.laid_out(laid(vec![view(11, (0, 0, 20, 4), Some(1))], 11, false)),
+            LaidOut::Shown,
+        );
         assert!(layout.held_after_close(&held), "the d held after the close is dropped");
         assert!(layout.held_after_close(&held));
         assert!(!layout.held_after_close(&d), "a d pressed again reaches the terminal");
@@ -2375,9 +2463,9 @@ mod tests {
         layout.keep_unsent(pasted("a"), now);
         layout.keep_unsent(pasted("b"), now);
         assert_eq!(sent(&mut layout, now), None, "no layout yet");
-        assert!(!layout.laid_out(laid_on(1, found(11, Said::Looking(())))));
+        assert_eq!(layout.laid_out(laid_on(1, found(11, Said::Looking(())))), LaidOut::Shown);
         assert_eq!(sent(&mut layout, now), None, "its terminal is yet to be found");
-        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
         assert_eq!(layout.take_unsent(None::<()>, now), None, "no viewer yet");
         let sent_now = sent(&mut layout, now);
         assert_eq!(sent_now, Some((key(1), VecDeque::from([pasted("a"), pasted("b")]))));
@@ -2393,14 +2481,14 @@ mod tests {
         for focused in nowhere {
             let mut layout = Layout::new(worktree(1), None);
             layout.keep_unsent(pasted("a"), now);
-            assert!(!layout.laid_out(laid_on(1, focused)));
+            assert_eq!(layout.laid_out(laid_on(1, focused)), LaidOut::Shown);
             assert_eq!(sent(&mut layout, now), None);
-            assert!(!layout.laid_out(laid_on(1, terminal())));
+            assert_eq!(layout.laid_out(laid_on(1, terminal())), LaidOut::Shown);
             assert_eq!(sent(&mut layout, now), Some((key(1), VecDeque::new())));
         }
         let mut layout = Layout::new(worktree(1), Some(key(1)));
         layout.keep_unsent(pasted("a"), now);
-        assert!(!layout.laid_out(laid_on(1, terminal())));
+        assert_eq!(layout.laid_out(laid_on(1, terminal())), LaidOut::Shown);
         assert_eq!(sent(&mut layout, now), None, "lune types not into itself");
         assert!(matches!(layout.unsent.held, Held::Nothing));
     }
@@ -2409,10 +2497,10 @@ mod tests {
     fn events_kept_for_a_terminal_never_reach_the_one_put_in_its_view_in_its_place() {
         let now = Instant::now();
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
         layout.keep_unsent(pasted("a"), now);
         assert_eq!(layout.take_unsent(None::<()>, now), None, "its viewer is lost");
-        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(2)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
         assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())), "remade");
     }
 
@@ -2422,15 +2510,15 @@ mod tests {
         let now = Instant::now();
         let mut layout = Layout::new(worktree(1), None);
         layout.keep_unsent(pasted("a"), now);
-        layout.go(worktree(2));
-        assert!(!layout.laid_out(laid_on(2, view(21, (0, 0, 20, 4), Some(2)))));
+        layout.go(worktree(2), now);
+        assert_eq!(layout.laid_out(laid_on(2, view(21, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
         assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())), "gone to");
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid_on(1, found(11, Said::Looking(())))));
+        assert_eq!(layout.laid_out(laid_on(1, found(11, Said::Looking(())))), LaidOut::Shown);
         layout.keep_unsent(pasted("a"), now);
         let followed = laid_on(2, view(21, (0, 0, 20, 4), Some(2)));
         assert!(layout.followed(&followed));
-        assert!(!layout.laid_out(followed));
+        assert_eq!(layout.laid_out(followed), LaidOut::Shown);
         assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())), "followed");
     }
 
@@ -2439,15 +2527,15 @@ mod tests {
         use show_response::view::Found as Said;
         let now = Instant::now();
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid_on(1, found(11, Said::Looking(())))));
+        assert_eq!(layout.laid_out(laid_on(1, found(11, Said::Looking(())))), LaidOut::Shown);
         layout.keep_unsent(pasted("a"), now);
-        assert!(!layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
         assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())));
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
         layout.keep_unsent(pasted("a"), now);
         assert_eq!(layout.take_unsent(None::<()>, now), None, "no viewer yet");
-        assert!(!layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
         layout.keep_unsent(pasted("b"), now);
         assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::from([pasted("b")]))));
     }
@@ -2457,7 +2545,7 @@ mod tests {
         let now = Instant::now();
         let later = now + UNSENT_FOR;
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
         layout.keep_unsent(pasted("a"), now);
         assert_eq!(sent(&mut layout, later), Some((key(1), VecDeque::from([pasted("a")]))));
         let too_late = later + Duration::from_millis(1);
@@ -2506,7 +2594,7 @@ mod tests {
             shown: Some(show_response::laid::Shown::Tiled(31)),
         })
         .unwrap();
-        assert!(!layout.laid_out(laid_browser));
+        assert_eq!(layout.laid_out(laid_browser), LaidOut::Shown);
         let (_, url, _) = layout.focused_browser().unwrap();
         assert_eq!(url.map(BrowserUrl::as_str), Some("https://example.com/pull/809"));
 
@@ -2545,7 +2633,7 @@ mod tests {
             shown: Some(show_response::laid::Shown::Tiled(12)),
         })
         .unwrap();
-        assert!(!layout.laid_out(laid));
+        assert_eq!(layout.laid_out(laid), LaidOut::Shown);
         assert!(layout.reviews());
         assert!(layout.has_review());
         assert!(layout.review_needs_load());
@@ -2609,7 +2697,7 @@ diff --git a/src/lib.rs b/src/lib.rs
     #[test]
     fn framed_reports_whether_the_screen_changed() {
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
         assert_eq!(layout.framed(whole(1, &["ab"], None)), Ok(true));
         assert_eq!(layout.framed(whole(1, &["ab"], None)), Ok(false));
         let size = frames::Size { columns: side(2), rows: side(1) };
@@ -2645,21 +2733,21 @@ diff --git a/src/lib.rs b/src/lib.rs
     fn events_typed_while_awaiting_a_focus_change_wait_past_stale_layouts_and_reach_the_new_view() {
         use show_response::view::Found as Said;
         let now = Instant::now();
-        let at = |n| NonZeroU64::new(n).unwrap();
+        let at = |n| AskNumber::of(n).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
         layout.await_focus(at(2), now);
         layout.keep_unsent(pasted("a"), now);
         layout.keep_unsent(pasted("b"), now);
         assert_eq!(sent(&mut layout, now), None, "held while awaiting the new view");
-        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
-        layout.heard_laid(Some(at(1)));
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        layout.heard_laid(Some(at(1)), now);
         assert_eq!(sent(&mut layout, now), None, "an earlier layout leaves them held");
-        assert!(!layout.laid_out(laid_on(1, found(12, Said::Looking(())))));
-        layout.heard_laid(Some(at(2)));
+        assert_eq!(layout.laid_out(laid_on(1, found(12, Said::Looking(())))), LaidOut::Shown);
+        layout.heard_laid(Some(at(2)), now);
         assert_eq!(sent(&mut layout, now), None, "still waits for the new terminal's key");
-        assert!(!layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))));
-        layout.heard_laid(Some(at(2)));
+        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        layout.heard_laid(Some(at(2)), now);
         let expected = Some((key(2), VecDeque::from([pasted("a"), pasted("b")])));
         assert_eq!(sent(&mut layout, now), expected, "flushes in order into the new view");
     }
@@ -2667,9 +2755,9 @@ diff --git a/src/lib.rs b/src/lib.rs
     #[test]
     fn events_typed_while_awaiting_a_refused_or_superseded_focus_change_are_dropped() {
         let now = Instant::now();
-        let at = |n| NonZeroU64::new(n).unwrap();
+        let at = |n| AskNumber::of(n).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
         layout.await_focus(at(2), now);
         layout.keep_unsent(pasted("for-new"), now);
         layout.heard_refused(Some(at(1)), now);
@@ -2683,11 +2771,11 @@ diff --git a/src/lib.rs b/src/lib.rs
         layout.keep_unsent(pasted("first"), now);
         layout.await_focus(at(4), now);
         layout.keep_unsent(pasted("second"), now);
-        assert!(!layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))));
-        layout.heard_laid(Some(at(3)));
+        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        layout.heard_laid(Some(at(3)), now);
         assert_eq!(sent(&mut layout, now), None, "superseded reply leaves newer wait standing");
-        assert!(!layout.laid_out(laid_on(1, view(13, (0, 0, 20, 4), Some(3)))));
-        layout.heard_laid(Some(at(4)));
+        assert_eq!(layout.laid_out(laid_on(1, view(13, (0, 0, 20, 4), Some(3)))), LaidOut::Shown);
+        layout.heard_laid(Some(at(4)), now);
         assert_eq!(sent(&mut layout, now), Some((key(3), VecDeque::from([pasted("second")]))));
 
         layout.await_focus(at(5), now);
@@ -2699,13 +2787,13 @@ diff --git a/src/lib.rs b/src/lib.rs
     #[test]
     fn an_older_daemon_with_no_heard_number_unblocks_an_awaited_focus_change() {
         let now = Instant::now();
-        let at = NonZeroU64::new(2).unwrap();
+        let at = AskNumber::of(2).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))));
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
         layout.await_focus(at, now);
         layout.keep_unsent(pasted("a"), now);
-        assert!(!layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))));
-        layout.heard_laid(None);
+        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        layout.heard_laid(None, now);
         assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::from([pasted("a")]))));
     }
 
@@ -2714,11 +2802,99 @@ diff --git a/src/lib.rs b/src/lib.rs
         use show_response::view::Found as Said;
         let now = Instant::now();
         let mut layout = Layout::new(worktree(1), None);
-        assert!(!layout.laid_out(laid_on(1, found(11, Said::Welcome(())))));
+        assert_eq!(layout.laid_out(laid_on(1, found(11, Said::Welcome(())))), LaidOut::Shown);
         assert!(layout.welcomes());
-        layout.await_focus(NonZeroU64::new(2).unwrap(), now);
+        layout.await_focus(AskNumber::of(2).unwrap(), now);
         assert!(!layout.welcomes(), "keys typed after leaving welcome wait for the next view");
-        layout.heard_refused(NonZeroU64::new(2), now);
+        layout.heard_refused(AskNumber::of(2), now);
         assert!(layout.welcomes());
+    }
+
+    #[test]
+    fn a_crossing_edge_drops_kept_events_while_a_staying_edge_flushes_them() {
+        let now = Instant::now();
+        let at = |n| AskNumber::of(n).unwrap();
+        let mut layout = Layout::new(worktree(1), None);
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+
+        layout.await_focus(at(2), now);
+        layout.keep_unsent(pasted("crossing"), now);
+        layout.heard_edged(Some(at(1)), true, now);
+        assert_eq!(sent(&mut layout, now), None, "an earlier edge leaves the wait standing");
+        layout.heard_edged(Some(at(2)), true, now);
+        assert_eq!(sent(&mut layout, now), Some((key(1), VecDeque::new())), "dropped on cross");
+
+        layout.await_focus(at(3), now);
+        layout.keep_unsent(pasted("staying"), now);
+        layout.heard_edged(Some(at(3)), false, now);
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(1), VecDeque::from([pasted("staying")]))),
+            "flushed when focus stayed on the view",
+        );
+    }
+
+    #[test]
+    fn leaving_a_worktree_drops_events_kept_for_an_awaited_focus_change() {
+        let now = Instant::now();
+        let at = |n| AskNumber::of(n).unwrap();
+        let mut layout = Layout::new(worktree(1), None);
+        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        layout.await_focus(at(2), now);
+        layout.keep_unsent(pasted("before-left"), now);
+        assert!(layout.left(worktree(1), now));
+        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(2), VecDeque::new())),
+            "events kept before the worktree left never leak into a later layout",
+        );
+    }
+
+    #[test]
+    fn opening_a_view_after_stepping_cancels_the_pending_step_edge() {
+        let unserved = tempfile::tempdir().unwrap();
+        let (events, _heard) = std::sync::mpsc::channel();
+        let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
+        let greeting = Greeting { foreground: None, background: None };
+        let folder = unserved.path().to_owned();
+        let browser_config = embedded::Config {
+            mode: embedded::Mode::Unsupported,
+            cell: CellPixels {
+                width: NonZeroU16::new(10).unwrap(),
+                height: NonZeroU16::new(20).unwrap(),
+            },
+            colours: Colours::default(),
+        };
+        let mut viewed = Viewed::start(
+            1,
+            folder,
+            Machine::Local,
+            worktree(1),
+            size,
+            greeting,
+            None,
+            browser_config,
+            &events,
+        );
+        let one = vec![view(11, (0, 0, 20, 4), Some(1))];
+        assert!(matches!(viewed.heard(laid_in(1, one)), Heeded::Changed));
+        let step = NonZeroU64::new(1).unwrap();
+        viewed.awaited = Some(step);
+        viewed.open_beside_focused(Opens::Shell);
+        assert_eq!(viewed.awaited, None, "opening a view clears a pending step");
+        let edged = Heard::Edged {
+            worktree: worktree(1),
+            direction: Direction::Left,
+            step,
+            heard: AskNumber::of(2),
+        };
+        assert!(
+            matches!(viewed.heard(edged), Heeded::Quiet),
+            "opening a view cancels an earlier step's edge",
+        );
+        viewed.awaited = Some(step);
+        viewed.welcome();
+        assert_eq!(viewed.awaited, None, "opening welcome clears a pending step");
     }
 }

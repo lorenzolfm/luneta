@@ -24,7 +24,10 @@ use luned::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
 use luned::folder::Folder;
 use luned::Daemon;
 use luned::release;
-use luned::{Asked, Beside, Destination, Heard, Where, BRIDGE_HELD_MAX, RESTORE_PAUSE, SWEEP};
+use luned::{
+    AskNumber, Asked, Beside, Destination, Direction, Heard, Where, BRIDGE_HELD_MAX, RESTORE_PAUSE,
+    SWEEP,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Status, Streaming};
@@ -2664,7 +2667,7 @@ fn show_echoes_asked_numbers_on_laid_refused_and_across_stranding() {
     };
     let (initial, initial_heard) = next_laid("initial layout");
     assert!(initial.is_empty());
-    assert_eq!(initial_heard, NonZeroU64::new(1), "Hello echoes 1");
+    assert_eq!(initial_heard, Some(AskNumber::HELLO), "Hello echoes 1");
 
     let open_at = show.ask_awaited(Asked::Open { beside: Beside::Alone, opens: command(&WAITS) });
     let (opened, opened_heard) = next_laid("opened terminal");
@@ -2675,6 +2678,19 @@ fn show_echoes_asked_numbers_on_laid_refused_and_across_stranding() {
     let (same, focus_heard) = next_laid("no-op focus still echoes asked number");
     assert_eq!(focus_heard, Some(focus_at));
     assert_eq!(same.focused().map(|it| it.id), Some(view));
+
+    let step = NonZeroU64::new(1).unwrap();
+    let edged_at = show.ask_awaited(Asked::Step { direction: Direction::Left, step });
+    match lune_waits::heard("edged step", &hearing) {
+        Heard::Edged { worktree, direction, step: echoed, heard } => {
+            assert_eq!(worktree, first);
+            assert_eq!(direction, Direction::Left);
+            assert_eq!(echoed, step);
+            assert_eq!(heard, Some(edged_at));
+        },
+        other => panic!("expected Edged, got {other:?}"),
+    }
+    lune_waits::never("an edged ask sends no extra Laid", || hearing.try_recv().ok());
 
     let missing = ViewId::of(999_999).unwrap();
     let refused_at = show.ask_awaited(Asked::Focus(missing));

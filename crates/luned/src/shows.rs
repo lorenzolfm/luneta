@@ -19,7 +19,41 @@ use crate::tasks;
 
 const SAID_MAX: usize = 64;
 
-const HELLO: u64 = 1;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AskNumber(NonZeroU64);
+
+impl AskNumber {
+    pub const HELLO: AskNumber = AskNumber(NonZeroU64::new(1).expect("hello ask number is 1"));
+
+    #[must_use]
+    pub const fn of(number: u64) -> Option<AskNumber> {
+        match NonZeroU64::new(number) {
+            Some(number) => Some(AskNumber(number)),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    #[must_use]
+    pub const fn wire(number: Option<AskNumber>) -> u64 {
+        match number {
+            Some(number) => number.get(),
+            None => 0,
+        }
+    }
+
+    fn next(self) -> AskNumber {
+        let next = self.0.checked_add(1).expect("asks fit in u64");
+        assert!(next.get() > Self::HELLO.get(), "awaited asks count up past hello");
+        AskNumber(next)
+    }
+}
+
+const _: () = assert!(AskNumber::HELLO.get() == 1);
 
 pub use lune_domain::projects::layout::{Direction, Growth, Rect};
 
@@ -261,11 +295,11 @@ fn tiles(views: &[View], size: Size, shows: Shows) -> Result<(), String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
-    Laid { laid: Laid, heard: Option<NonZeroU64> },
-    Edged { worktree: WorktreeId, direction: Direction, step: NonZeroU64 },
+    Laid { laid: Laid, heard: Option<AskNumber> },
+    Edged { worktree: WorktreeId, direction: Direction, step: NonZeroU64, heard: Option<AskNumber> },
     Sent(WorktreeId),
     Left(WorktreeId),
-    Refused { why: String, heard: Option<NonZeroU64> },
+    Refused { why: String, heard: Option<AskNumber> },
     Forgotten(String),
     Lost(String),
 }
@@ -296,7 +330,7 @@ pub enum Asked {
 }
 
 impl Asked {
-    fn said(self, asked: u64) -> api::ShowRequest {
+    fn said(self, asked_number: Option<AskNumber>) -> api::ShowRequest {
         use show_request::Event;
         let event = match self {
             Asked::Size(size) => Event::Size(size_said(size)),
@@ -343,16 +377,27 @@ impl Asked {
             Asked::Fullscreen => Event::Fullscreen(()),
             Asked::Arrange(arranged) => Event::Arrange(arranged.to_api().into()),
         };
-        api::ShowRequest { event: Some(event), asked }
+        api::ShowRequest { event: Some(event), asked: AskNumber::wire(asked_number) }
     }
 }
 
-fn edged_heard(edged: &show_response::Edged) -> Result<Heard, String> {
+fn edged_heard(edged: &show_response::Edged, heard: Option<AskNumber>) -> Result<Heard, String> {
     let worktree = WorktreeId::of(edged.worktree).ok_or("an edge of worktree 0")?;
     let direction = crate::layouts::direction_of(edged.direction);
     let direction = direction.map_err(|why| format!("an edge: {why}"))?;
     let step = NonZeroU64::new(edged.step).ok_or("an edge of step 0")?;
-    Ok(Heard::Edged { worktree, direction, step })
+    Ok(Heard::Edged { worktree, direction, step, heard })
+}
+
+fn heard_next(heard: u64, heard_max: u64, sent_max: u64) -> Result<Option<AskNumber>, String> {
+    assert!(heard_max <= sent_max, "heard sequence never passes sent sequence");
+    if heard < heard_max {
+        return Err(format!("luned echoed heard {heard} after {heard_max}"));
+    }
+    if heard > sent_max {
+        return Err(format!("luned echoed heard {heard} past {sent_max}"));
+    }
+    Ok(AskNumber::of(heard))
 }
 
 pub(crate) fn direction_said(direction: Direction) -> show_request::Direction {
@@ -371,20 +416,21 @@ fn size_said(size: Size) -> show_request::Size {
 }
 
 pub struct Show {
-    outbox: Outbox<(u64, Asked)>,
-    asks: u64,
+    outbox: Outbox<(Option<AskNumber>, Asked)>,
+    asked_last: AskNumber,
 }
 
 impl Show {
     pub fn ask(&self, asked: Asked) {
-        self.outbox.say((0, asked));
+        self.outbox.say((None, asked));
     }
 
-    pub fn ask_awaited(&mut self, asked: Asked) -> NonZeroU64 {
-        self.asks = self.asks.checked_add(1).expect("asks fit in u64");
-        let at = NonZeroU64::new(self.asks).expect("asks count up from 2");
-        self.outbox.say((at.get(), asked));
-        at
+    pub fn ask_awaited(&mut self, asked: Asked) -> AskNumber {
+        let next = self.asked_last.next();
+        assert!(next > self.asked_last, "awaited asks climb strictly");
+        self.asked_last = next;
+        self.outbox.say((Some(next), asked));
+        next
     }
 }
 
@@ -433,13 +479,13 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
             told_aside(last);
         }
     }));
-    Show { outbox, asks: HELLO }
+    Show { outbox, asked_last: AskNumber::HELLO }
 }
 
 async fn stream(
     folder: &Folder,
     hello: show_request::Hello,
-    inbox: Inbox<(u64, Asked)>,
+    inbox: Inbox<(Option<AskNumber>, Asked)>,
     told: &mut impl FnMut(Heard),
 ) -> Result<Heard, Dropped> {
     let daemon = match crate::reach(folder).await {
@@ -448,7 +494,12 @@ async fn stream(
         Err(error) => return Ok(Heard::Lost(format!("luned is not reached: {error}"))),
     };
     let (sending, sent) = mpsc::channel(SAID_MAX);
-    let first = api::ShowRequest { event: Some(show_request::Event::Hello(hello)), asked: HELLO };
+    let mut sent_max = AskNumber::HELLO.get();
+    let mut heard_max: u64 = 0;
+    let first = api::ShowRequest {
+        event: Some(show_request::Event::Hello(hello)),
+        asked: AskNumber::HELLO.get(),
+    };
     let said = tokio_stream::once(first).chain(ReceiverStream::new(sent));
     let hearing = match daemon.show(crate::ANSWER, said).await {
         Ok(hearing) => hearing,
@@ -465,14 +516,29 @@ async fn stream(
             },
             Some(Next::Untaken) => return Ok(Heard::Lost(untaken())),
             Some(Next::Dropped) => return Err(Dropped),
-            Some(Next::Said((at, asked))) => {
-                if let Err(TrySendError::Full(_)) = sending.try_send(asked.said(at)) {
+            Some(Next::Said((asked_number, asked))) => {
+                if let Some(asked_number) = asked_number {
+                    assert!(
+                        asked_number.get() > sent_max,
+                        "awaited asks climb strictly on one stream",
+                    );
+                    sent_max = asked_number.get();
+                }
+                if let Err(TrySendError::Full(_)) = sending.try_send(asked.said(asked_number)) {
                     return Ok(Heard::Lost(untaken()));
                 }
                 continue;
             },
         };
-        let heard = NonZeroU64::new(said.heard);
+        let heard = match heard_next(said.heard, heard_max, sent_max) {
+            Ok(heard) => {
+                heard_max = said.heard;
+                heard
+            },
+            Err(why) => {
+                return Ok(Heard::Lost(format!("luned said what lune cannot follow: {why}")));
+            },
+        };
         match said.event {
             Some(show_response::Event::Laid(laid)) => match Laid::heard(laid) {
                 Ok(laid) => told(Heard::Laid { laid, heard }),
@@ -480,7 +546,7 @@ async fn stream(
                     return Ok(Heard::Lost(format!("luned said what lune cannot follow: {why}")));
                 },
             },
-            Some(show_response::Event::Edged(edged)) => match edged_heard(&edged) {
+            Some(show_response::Event::Edged(edged)) => match edged_heard(&edged, heard) {
                 Ok(heard) => told(heard),
                 Err(why) => {
                     return Ok(Heard::Lost(format!("luned said what lune cannot follow: {why}")));
@@ -607,13 +673,32 @@ mod tests {
         let edged =
             |worktree, direction, step| show_response::Edged { worktree, direction, step };
         let left = show_request::Direction::Left.into();
-        let heard = edged_heard(&edged(2, left, 5));
+        let ask = AskNumber::of(3);
+        let heard = edged_heard(&edged(2, left, 5), ask);
         let (worktree, step) = (WorktreeId::of(2).unwrap(), NonZeroU64::new(5).unwrap());
-        assert_eq!(heard, Ok(Heard::Edged { worktree, direction: Direction::Left, step }));
-        assert!(edged_heard(&edged(0, left, 5)).is_err(), "worktree 0");
-        assert!(edged_heard(&edged(2, 0, 5)).is_err(), "no direction");
-        assert!(edged_heard(&edged(2, 9, 5)).is_err(), "an unknown direction");
-        assert!(edged_heard(&edged(2, left, 0)).is_err(), "step 0");
+        let expected = Heard::Edged { worktree, direction: Direction::Left, step, heard: ask };
+        assert_eq!(heard, Ok(expected));
+        assert!(edged_heard(&edged(0, left, 5), ask).is_err(), "worktree 0");
+        assert!(edged_heard(&edged(2, 0, 5), ask).is_err(), "no direction");
+        assert!(edged_heard(&edged(2, 9, 5), ask).is_err(), "an unknown direction");
+        assert!(edged_heard(&edged(2, left, 0), ask).is_err(), "step 0");
+    }
+
+    #[test]
+    fn heard_sequences_stay_monotonic_and_within_what_was_sent() {
+        let one = AskNumber::HELLO;
+        let two = one.next();
+        assert_eq!(one.get(), 1);
+        assert_eq!(two.get(), 2);
+        assert_eq!(AskNumber::wire(None), 0);
+        assert_eq!(AskNumber::wire(Some(two)), 2);
+        assert_eq!(heard_next(0, 0, 1), Ok(None), "older daemon sends 0");
+        assert_eq!(heard_next(1, 0, 1), Ok(Some(one)));
+        assert_eq!(heard_next(1, 1, 2), Ok(Some(one)), "unchanged heard is valid");
+        assert_eq!(heard_next(2, 1, 2), Ok(Some(two)));
+        assert!(heard_next(1, 2, 2).is_err(), "heard cannot go backward");
+        assert!(heard_next(0, 2, 2).is_err(), "heard cannot drop back to 0");
+        assert!(heard_next(3, 2, 2).is_err(), "heard cannot pass what was sent");
     }
 
     #[test]

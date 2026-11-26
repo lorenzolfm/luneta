@@ -922,6 +922,7 @@ impl Daemon for Host {
             let held = Held { stream: answer.into_inner(), _permit: permit };
             return Ok(Response::new(Box::pin(held)));
         }
+        let asked_number = crate::AskNumber::of(asked);
         let worktree = layouts::id("worktree", worktree).map(WorktreeId::new);
         let worktree = worktree.map_err(Status::invalid_argument)?;
         let size = layouts::size_of(size).map_err(Status::invalid_argument)?;
@@ -935,7 +936,7 @@ impl Daemon for Host {
                 size,
                 runs_in,
                 again,
-                asked,
+                asked_number,
                 out,
                 answer,
             };
@@ -946,18 +947,18 @@ impl Daemon for Host {
         let layouts = self.layouts.clone();
         tokio::spawn(async move {
             loop {
-                let (seq, asked) = match heard.message().await {
+                let (asked_number, asked) = match heard.message().await {
                     Ok(Some(ShowRequest { event: Some(event), asked })) => {
-                        (asked, layouts::Asked::of_api(event))
+                        (crate::AskNumber::of(asked), layouts::Asked::of_api(event))
                     },
                     Ok(Some(ShowRequest { event: None, asked })) => {
-                        (asked, Err("a word says nothing".to_owned()))
+                        (crate::AskNumber::of(asked), Err("a word says nothing".to_owned()))
                     },
                     Ok(None) | Err(_) => break,
                 };
                 let layouts = layouts.clone();
                 let told = task::spawn_blocking(move || {
-                    layouts.send(layouts::Command::Asked { client, seq, asked }).is_ok()
+                    layouts.send(layouts::Command::Asked { client, asked_number, asked }).is_ok()
                 });
                 if !matches!(told.await, Ok(true)) {
                     return;
