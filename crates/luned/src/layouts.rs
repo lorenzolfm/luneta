@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::layout::{self, Direction, Order, Sides, Towards, SIDE_MAX};
-use lune_domain::projects::{Ask, Change, Closing, Dir, Home, Id, Line, Placed};
+use lune_domain::projects::{Ask, Change, Closing, Dir, Id, Line, Placed};
 use lune_domain::projects::{Holds, ProjectName, Worktree};
 use lune_domain::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
 use lune_domain::projects::{Session, Size, Terminal, TerminalViewId, Used, View, ViewId};
@@ -33,8 +33,10 @@ use crate::watch::Troubles;
 use crate::{shells, Directory};
 
 use errands::{Errands, Unrun};
+use homes::{Homes, LookTimeout, Spotted};
 
 mod errands;
+mod homes;
 
 pub const CLIENTS_MAX: usize = 64;
 
@@ -50,15 +52,13 @@ const RESTORE_ATTEMPTS_MAX: u32 = 3;
 
 const RESTORES_PER_PASS: usize = 8;
 
-const REHOMES_PER_PASS: usize = 4;
-
 const RESTORE_SETTLE: Duration = Duration::from_secs(30);
 
 const TYPING_WAIT: Duration = Duration::from_secs(3);
 
 const TYPING_WAIT_MAX: Duration = Duration::from_secs(30);
 
-const FOLDER_LOOK: Duration = Duration::from_secs(1);
+const FOLDER_LOOK: LookTimeout = LookTimeout::of(Duration::from_secs(1));
 
 const UNSHOWN_SIZE: Size =
     Size { columns: NonZeroU16::new(80).unwrap(), rows: NonZeroU16::new(24).unwrap() };
@@ -69,8 +69,6 @@ const _: () = assert!(ANSWERS_MAX > 1);
 const _: () = assert!(RESTORE_ATTEMPTS_MAX > 0);
 const _: () = assert!(RESTORES_PER_PASS > 0);
 const _: () = assert!(RESTORES_PER_PASS <= VIEWS_MAX);
-const _: () = assert!(REHOMES_PER_PASS > 0);
-const _: () = assert!(REHOMES_PER_PASS <= VIEWS_MAX);
 const _: () = assert!(RESTORE_SETTLE.as_nanos() > RESTORE_PAUSE.as_nanos());
 const _: () = assert!(TYPING_WAIT.as_nanos() < TYPING_WAIT_MAX.as_nanos());
 const _: () = assert!(UNSHOWN_SIZE.columns.get() <= SIDE_MAX);
@@ -286,19 +284,23 @@ pub fn start(
 ) -> io::Result<SyncSender<Command>> {
     let (send, commands) = mpsc::sync_channel(COMMANDS_MAX);
     let errands = Errands::start();
+    let mut homes = Homes::start(FOLDER_LOOK)?;
+    if let Some(projects) = store.projects() {
+        homes.seed(projects);
+    }
     let layouts = Layouts {
         store,
         core,
         follower,
         mux: Terminals,
         errands,
+        homes,
         clients: BTreeMap::new(),
         stranded: BTreeMap::new(),
         arrivals: 0,
         known: BTreeMap::new(),
         listed: BTreeMap::new(),
         looked: false,
-        unhomed: BTreeSet::new(),
         restore_round: BTreeSet::new(),
         restore_last_at: None,
         restore_attempts: Attempts::default(),
@@ -317,13 +319,13 @@ struct Layouts {
     follower: SyncSender<()>,
     mux: Terminals,
     errands: Errands,
+    homes: Homes,
     clients: BTreeMap<ClientId, Client>,
     stranded: BTreeMap<ClientId, Stranded>,
     arrivals: u64,
     known: BTreeMap<TerminalViewId, Known>,
     listed: BTreeMap<TerminalKey, server::Terminal>,
     looked: bool,
-    unhomed: BTreeSet<TerminalViewId>,
     restore_round: BTreeSet<TerminalViewId>,
     restore_last_at: Option<Instant>,
     restore_attempts: Attempts,
@@ -440,10 +442,12 @@ fn run(mut layouts: Layouts, commands: &Receiver<Command>, sweep: Duration) {
             Ok(command) => layouts.heard(command),
             Err(RecvTimeoutError::Timeout) => {},
             Err(RecvTimeoutError::Disconnected) => {
+                layouts.rehome_spotted();
                 layouts.flushed();
                 return;
             },
         }
+        layouts.rehome_spotted();
         if swept.elapsed() >= sweep {
             layouts.read_runs();
             layouts.rehome_due();
@@ -548,8 +552,9 @@ impl Layouts {
                 let layouts = held.into_iter().flat_map(Project::worktrees);
                 let layouts = layouts.map(Worktree::layout);
                 let terminals = layouts.flat_map(Layout::terminals).map(Terminal::id);
-                self.unhomed.extend(terminals);
-                assert!(self.unhomed.len() <= VIEWS_MAX, "only held terminals wait for a home");
+                for terminal in terminals {
+                    self.homes.mark(terminal);
+                }
             },
             Command::Unreached { since } => {
                 let gone = |known: &Known| match known.heard {
@@ -734,6 +739,8 @@ impl Layouts {
             Err(failure) => {
                 if let Err(why) = self.followed(Change::Unopen { terminal }) {
                     self.troubles.say(format!("terminal {terminal} stays lost: {why}"));
+                } else {
+                    self.homes.forget(terminal);
                 }
                 Err(failure.to_string())
             },
@@ -856,6 +863,7 @@ impl Layouts {
     fn forget_closed(&mut self, terminals: &[TerminalViewId]) {
         for terminal in terminals {
             self.known.remove(terminal);
+            self.homes.forget(*terminal);
         }
         let projects = self.store.projects().expect("projects just changed are kept");
         for terminal in terminals {
@@ -1240,10 +1248,10 @@ impl Layouts {
         let size = fit(shown, layout, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
         let inner = placed(layout, terminal.view(), size);
         let inner = inner.expect("a layout lays out the terminals it holds");
-        let folder = if is_folder(&kept_folder)? {
-            kept_folder
+        let (folder, changed_folder) = if is_folder(&kept_folder)? {
+            (kept_folder, false)
         } else if is_folder(&worktree_folder)? {
-            worktree_folder
+            (worktree_folder, true)
         } else {
             let (kept, theirs) = (kept_folder.as_str(), worktree_folder.as_str());
             return Err(format!("neither {kept} nor its worktree's {theirs} is a folder"));
@@ -1275,6 +1283,9 @@ impl Layouts {
         let remade = Remade { at: Instant::now(), restored: restore };
         self.made(terminal, key, Some(inner), Some(remade));
         assert_eq!(self.known.get(&terminal).map(|it| it.key), Some(key), "a remade one is known");
+        if changed_folder {
+            self.homes.forget(terminal);
+        }
         if let Runs::Command(line) = runs {
             let unrun = Ran { terminal, folder, runs: Runs::Unrun(line) };
             if let Err(why) = self.changed(Change::Ran(vec![unrun])) {
@@ -1387,6 +1398,7 @@ impl Layouts {
         }
         if let Some(terminal) = terminal {
             self.known.remove(&terminal);
+            self.homes.forget(terminal);
         }
         for client in self.clients.values_mut().filter(|client| client.focus == Some(view)) {
             client.focus = heir;
@@ -1536,41 +1548,51 @@ impl Layouts {
             self.troubles.say(format!("what the terminals run is not kept: {why}"));
             return;
         }
-        self.unhomed.extend(elsewhere);
+        for terminal in elsewhere {
+            self.homes.mark(terminal);
+        }
     }
 
     fn rehome_due(&mut self) {
         let Some(projects) = self.store.projects() else {
+            self.homes.clear();
             return;
         };
-        self.unhomed.retain(|terminal| projects.holding_terminal(terminal.view()).is_some());
-        assert!(self.unhomed.len() <= VIEWS_MAX, "only held terminals wait for a home");
-        for _ in 0..REHOMES_PER_PASS {
-            let Some(terminal) = self.unhomed.pop_first() else {
-                return;
-            };
-            self.rehome(terminal);
-        }
+        self.homes.dispatch(projects);
     }
 
-    fn rehome(&mut self, terminal: TerminalViewId) {
+    fn rehome_spotted(&mut self) {
+        for _ in 0..homes::LOOKS_MAX {
+            let Some(spotted) = self.homes.spotted() else {
+                return;
+            };
+            self.rehome(spotted);
+        }
+        assert!(self.homes.is_idle(), "draining every slot empties the homes");
+    }
+
+    fn rehome(&mut self, spotted: Spotted) {
+        let (terminal, folder, spot) = spotted.into_parts();
         let Some(projects) = self.store.projects() else {
             return;
         };
-        let held = projects.holding_terminal(terminal.view());
-        let (_, held) = held.expect("a terminal waiting for a home is held");
-        let folder = held.folder().clone();
+        let Some((from, held)) = projects.holding_terminal(terminal.view()) else {
+            return;
+        };
+        if *held.folder() != folder {
+            return;
+        }
         let stays = format!("terminal {terminal}, gone to {}, stays", folder.as_str());
-        let spot = match projects::spot::of(&folder, FOLDER_LOOK) {
+        let spot = match spot {
             Ok(spot) => spot,
             Err(why) => return self.troubles.say(format!("{stays}: its worktree is unknown: {why}")),
         };
-        let projects = self.store.projects().expect("projects just looked at are kept");
-        let to = match projects.home(terminal.view(), &spot) {
-            Home::Stays => return,
-            Home::In(to) => MoveTo::Worktree(to),
-            Home::Made { project, spot } => MoveTo::Made { project, spot },
+        let Some(to) = projects.home(terminal, &spot) else {
+            return;
         };
+        if let MoveTo::Worktree(to) = to {
+            assert_ne!(to, from.id(), "terminal {terminal} moves only to another worktree");
+        }
         if let Err(why) = self.moved(terminal, to) {
             self.troubles.say(format!("{stays}: {why}"));
         }
@@ -1593,11 +1615,7 @@ impl Layouts {
         let shown = self.clients.values().filter(|it| Some(it.worktree) == bound || follows(it));
         let size = fit(shown, target, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
         let followed = self.clients.values().any(follows);
-        let move_to = Change::Move { terminal, to, size, focused: followed };
-        let moved = self.store.change(move_to).map_err(Failed::said)?;
-        let Some(Made::Worktree(to) | Made::Found(to)) = moved else {
-            unreachable!("a move says the worktree it went to, not {moved:?}");
-        };
+        let to = self.store.moved(terminal, to, size, followed).map_err(Failed::said)?;
         for client in self.clients.values_mut().filter(|client| follows(client)) {
             client.worktree = to;
         }
@@ -1861,8 +1879,8 @@ fn runs_in_front(is: &Is) -> bool {
 fn is_folder(folder: &Dir) -> Result<bool, String> {
     let mut test = process::Command::new("/bin/sh");
     test.args(["-c", r#"test -d "$1""#, "sh", folder.as_str()]);
-    let secs = FOLDER_LOOK.as_secs();
-    match program::run(&mut test, FOLDER_LOOK) {
+    let secs = FOLDER_LOOK.get().as_secs();
+    match program::run(&mut test, FOLDER_LOOK.get()) {
         Ok(Looked::Ended { status, .. }) => Ok(status.success()),
         Ok(Looked::Stuck) => Err(format!("{} did not answer in {secs}s", folder.as_str())),
         Err(error) => Err(format!("{} is not looked at: {error}", folder.as_str())),
