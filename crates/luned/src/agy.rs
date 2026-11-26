@@ -435,7 +435,7 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
     let envelope: Envelope = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     let proof = match &envelope.proc_start {
-        Some(recorded) => (recorded == start).then_some(Proof::Started),
+        Some(recorded) => (recorded == start).then_some(Proof::Started { written: modified }),
         None => dated_since(modified, started).then_some(Proof::Dated),
     };
     let Some(proof) = proof else {

@@ -34,6 +34,12 @@ snapshots:
       style: primary
       start: 26
       end: 45
+  fn f() -> bool { if let Some(Wrapped::Status) = wrap(ActiveStatus::Working) { true } else { false } }:
+    labels:
+    - source: ActiveStatus::Working
+      style: primary
+      start: 53
+      end: 74
   'fn f(id: AgentId, update: RungUpdate) -> Report { Report::new(claude::READS, id, update) }':
     labels:
     - source: Report::new

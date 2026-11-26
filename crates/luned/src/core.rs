@@ -852,14 +852,25 @@ fn contested<'a>(reported: impl Iterator<Item = &'a ReportedAgent>) -> HashMap<A
         }
         let harnesses: HashSet<Harness> = claims.iter().map(|(harness, _)| *harness).collect();
         assert_eq!(harnesses.len(), claims.len(), "each harness's reader claims an agent once");
-        let mut started = claims.iter().filter(|(_, proof)| *proof == Proof::Started);
-        let contest = match (started.next(), started.next()) {
-            (Some((harness, _)), None) => Contest::Won(*harness),
-            (None, _) | (Some(_), Some(_)) => Contest::Unproven,
-        };
-        contested.insert(agent.clone(), contest);
+        contested.insert(agent.clone(), contest_of(&claims));
     }
     contested
+}
+
+fn contest_of(claims: &[(Harness, Proof)]) -> Contest {
+    let mut started: Vec<(SystemTime, Harness)> = claims
+        .iter()
+        .filter_map(|(harness, proof)| match proof {
+            Proof::Started { written } => Some((*written, *harness)),
+            Proof::Dated => None,
+        })
+        .collect();
+    started.sort_unstable_by_key(|(written, _)| std::cmp::Reverse(*written));
+    match started.as_slice() {
+        [(_, harness)] => Contest::Won(*harness),
+        [(last, harness), (before, _), ..] if last > before => Contest::Won(*harness),
+        [] | [_, _, ..] => Contest::Unproven,
+    }
 }
 
 const OSC_DATED_LATE: Duration = Duration::from_secs(1);
@@ -1001,7 +1012,8 @@ mod tests {
             terminal: Some(terminal),
         };
         let feed = RungUpdate::Active { status: ActiveStatus::Working, at: Some(at(10)) };
-        let reported = ReportedAgent::new(claude::READS, id, sighting, feed, Proof::Started);
+        let proof = Proof::Started { written: at(10) };
+        let reported = ReportedAgent::new(claude::READS, id, sighting, feed, proof);
         core.send(Command::Agents(Scan {
             agents: vec![reported],
             unread: Vec::new(),
@@ -1269,11 +1281,24 @@ mod tests {
         core.send(Command::PiAgents(vec![claim(pi::READS, Proof::Dated)])).unwrap();
         assert_eq!(listed().len(), 0, "two dated claims prove neither");
 
-        core.send(claude_said(vec![claim(claude::READS, Proof::Started)])).unwrap();
+        let written = |secs| Proof::Started { written: UNIX_EPOCH + Duration::from_secs(secs) };
+        core.send(claude_said(vec![claim(claude::READS, written(5))])).unwrap();
         let settled = listed();
         assert_eq!(settled.len(), 1);
         assert_eq!(settled[0].harness, Some(api::Harness::ClaudeCode.into()));
         assert_eq!(settled[0].status_rung, Some(api::StatusRung::Feed.into()));
+
+        core.send(Command::PiAgents(vec![claim(pi::READS, written(7))])).unwrap();
+        let execed = listed();
+        assert_eq!(execed.len(), 1, "of two started claims, the one written last stands");
+        assert_eq!(execed[0].harness, Some(api::Harness::Pi.into()));
+        assert_eq!(execed[0].status_rung, Some(api::StatusRung::Extension.into()));
+
+        core.send(Command::PiAgents(vec![claim(pi::READS, written(5))])).unwrap();
+        assert_eq!(listed().len(), 0, "two started claims written at once prove neither");
+
+        core.send(Command::PiAgents(vec![claim(pi::READS, Proof::Dated)])).unwrap();
+        assert_eq!(listed()[0].harness, Some(api::Harness::ClaudeCode.into()));
 
         core.send(claude_said(Vec::new())).unwrap();
         assert_eq!(listed().len(), 0, "two dated claims still prove neither");
@@ -1314,7 +1339,8 @@ mod tests {
                 terminal: Some(terminal),
             };
             let working = RungUpdate::Active { status: ActiveStatus::Working, at: Some(at(10)) };
-            ReportedAgent::new(reads, id.clone(), sighting, working, Proof::Started)
+            let proof = Proof::Started { written: at(started) };
+            ReportedAgent::new(reads, id.clone(), sighting, working, proof)
         };
 
         core.send(Command::Agents(Scan {
@@ -1398,7 +1424,8 @@ mod tests {
                 terminal: Some(term),
             };
             let working = RungUpdate::Active { status: ActiveStatus::Working, at: Some(at) };
-            agents.push(ReportedAgent::new(claude::READS, id, sighting, working, Proof::Started));
+            let proof = Proof::Started { written: at };
+            agents.push(ReportedAgent::new(claude::READS, id, sighting, working, proof));
             let children = (0..lune_protocol::PROGRAM_STATUS_RECORDS_MAX)
                 .map(|child| ChildProgramStatus {
                     id: ChildId::parse(&format!(

@@ -275,10 +275,14 @@ fn plan(harness: Harness) -> Result<Plan, String> {
                     ("cwd", Kept::As("/recorded")),
                     ("procStart", Kept::As("1")),
                     ("status", Kept::Said),
-                    ("statusMessage", Kept::Said),
+                    ("statusMessage", Kept::As("recorded")),
                     ("statusSince", Kept::Said),
                     ("mode", Kept::Said),
-                    ("phase", Kept::Said),
+                    ("phase.kind", Kept::Said),
+                    ("phase.resting.status", Kept::Said),
+                    ("phase.resting.message", Kept::As("recorded")),
+                    ("phase.outcome.status", Kept::Said),
+                    ("phase.outcome.message", Kept::As("recorded")),
                     ("promptOpen", Kept::Said),
                 ],
                 files: vec![(Rung::Extension, lune_folder()?.join("pi"))],
@@ -995,6 +999,9 @@ fn identifiers() -> Result<Vec<String>, String> {
         .filter_map(|name| std::env::var_os(name)?.into_string().ok())
         .collect();
     identifiers.push(said_by("hostname", &[])?);
+    if let Ok(email) = said_by("git", &["config", "user.email"]) {
+        identifiers.push(email);
+    }
     identifiers.retain(|identifier| identifier.trim().len() >= IDENTIFIER_BYTES_MIN);
     Ok(identifiers)
 }

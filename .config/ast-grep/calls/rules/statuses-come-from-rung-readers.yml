@@ -36,11 +36,10 @@ rule:
             - kind: tuple_struct_pattern
             - kind: struct_pattern
             - kind: or_pattern
-            - kind: let_condition
-              has:
-                field: pattern
-                stopBy: end
-                kind: scoped_identifier
+    - not:
+        inside:
+          kind: let_condition
+          field: pattern
     - not:
         inside:
           stopBy: end

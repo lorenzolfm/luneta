@@ -227,7 +227,7 @@ impl ReportedAgent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Proof {
-    Started,
+    Started { written: SystemTime },
     Dated,
 }
 

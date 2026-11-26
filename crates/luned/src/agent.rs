@@ -153,10 +153,6 @@ pub fn read_file_text(file: fs::File) -> io::Result<Vec<u8>> {
     }
 }
 
-pub fn file_text(path: &Path) -> io::Result<Vec<u8>> {
-    read_file_text(fs::File::open(path)?)
-}
-
 pub fn nonempty<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Said, D::Error> {
     let value = String::deserialize(text)?;
     (!value.trim().is_empty())

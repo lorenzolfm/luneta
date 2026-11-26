@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
+use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -12,7 +13,7 @@ use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, file_text, moment, named_pid, nonempty, terminal_or_trouble, Name, Sighting,
+    absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble, Name, Sighting,
     Source, Unread, FILE_BYTES_MAX,
 };
 use crate::mux;
@@ -129,10 +130,11 @@ struct Session {
     started_at: Option<SystemTime>,
     name: Option<Name>,
     feed: Feed,
+    written: SystemTime,
 }
 
 impl Session {
-    fn parse(raw: RawFile) -> io::Result<Self> {
+    fn parse(raw: RawFile, written: SystemTime) -> io::Result<Self> {
         let proc_start = raw
             .proc_start
             .into_start()
@@ -160,6 +162,7 @@ impl Session {
             started_at: raw.started_at.map(moment),
             name,
             feed,
+            written,
         })
     }
 }
@@ -237,8 +240,8 @@ impl SessionFiles {
                 continue;
             };
             let was = self.seen.remove(&pid);
-            let now = match file_text(&path) {
-                Ok(text) => match parse_leading_file(&text) {
+            let now = match written_text(&path) {
+                Ok((text, written)) => match parse_leading_file(&text, written) {
                     Ok(file) => Seen::Whole(file),
                     Err(error) => torn(was, first, &path, &error),
                 },
@@ -315,7 +318,13 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
 const SDK_ENTRYPOINT_PREFIX: &str = "sdk-";
 const _: () = assert!(SDK_ENTRYPOINT_PREFIX.is_ascii());
 
-fn parse_leading_file(bytes: &[u8]) -> io::Result<Session> {
+fn written_text(path: &Path) -> io::Result<(Vec<u8>, SystemTime)> {
+    let file = fs::File::open(path)?;
+    let written = file.metadata()?.modified()?;
+    Ok((read_file_text(file)?, written))
+}
+
+fn parse_leading_file(bytes: &[u8], written: SystemTime) -> io::Result<Session> {
     let bytes_len = u64::try_from(bytes.len()).expect("a slice length fits a u64");
     assert!(bytes_len <= FILE_BYTES_MAX);
     let mut stream = serde_json::Deserializer::from_slice(bytes).into_iter::<RawFile>();
@@ -326,12 +335,12 @@ fn parse_leading_file(bytes: &[u8]) -> io::Result<Session> {
     };
     assert!(stream.byte_offset() > 0);
     assert!(stream.byte_offset() <= bytes.len());
-    Session::parse(raw)
+    Session::parse(raw, written)
 }
 
 #[cfg(test)]
 pub(crate) fn update_of_file(bytes: &[u8]) -> io::Result<RungUpdate> {
-    Ok(parse_leading_file(bytes)?.feed.update())
+    Ok(parse_leading_file(bytes, SystemTime::UNIX_EPOCH)?.feed.update())
 }
 
 fn has_sdk_prefix(text: &str) -> bool {
@@ -349,7 +358,8 @@ fn reported(id: AgentId, session: &Session, terminal: Option<TerminalKey>) -> Re
         entrypoint: session.feed.entrypoint(),
         terminal,
     };
-    ReportedAgent::new(READS, id, sighting, session.feed.update(), Proof::Started)
+    let proof = Proof::Started { written: session.written };
+    ReportedAgent::new(READS, id, sighting, session.feed.update(), proof)
 }
 
 #[cfg(test)]
@@ -388,7 +398,7 @@ mod tests {
         for tail in tails {
             let mut bytes = base.to_vec();
             bytes.extend_from_slice(tail);
-            let parsed = parse_leading_file(&bytes).unwrap();
+            let parsed = parse_leading_file(&bytes, SystemTime::UNIX_EPOCH).unwrap();
             assert_eq!(parsed.id.as_str(), "s1");
             assert_eq!(
                 parsed.feed.update(),
@@ -405,7 +415,7 @@ mod tests {
             br#"{"sessionId":"s1","cwd":"/w","procStart":""}"#,
             br#"{"sessionId":"s1","cwd":"/w","procStart":"   "}"#,
         ] {
-            assert!(parse_leading_file(invalid).is_err());
+            assert!(parse_leading_file(invalid, SystemTime::UNIX_EPOCH).is_err());
         }
     }
 
@@ -416,7 +426,7 @@ mod tests {
             ProcessStart::spelled("100".to_owned()).unwrap(),
         );
         let session = |entrypoint: Option<&str>| {
-            Session::parse(RawFile {
+            let raw = RawFile {
                 session_id: Said::new("s1".to_owned()).unwrap(),
                 cwd: Directory::parse("/w".to_owned()).unwrap(),
                 proc_start: RawStart::Spelled("100".to_owned()),
@@ -428,8 +438,8 @@ mod tests {
                 name: None,
                 name_source: None,
                 entrypoint: entrypoint.map(str::to_owned),
-            })
-            .unwrap()
+            };
+            Session::parse(raw, SystemTime::UNIX_EPOCH).unwrap()
         };
         for sdk in ["sdk-cli", "sdk-ts", "  SDK-py  ", "sdk-"] {
             let entry = reported(id.clone(), &session(Some(sdk)), None);

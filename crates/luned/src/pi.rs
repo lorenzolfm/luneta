@@ -332,7 +332,7 @@ fn read(
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     let file = File::parse(raw)?;
     let proof = match &file.proc_start {
-        Some(recorded) => (recorded == start).then_some(Proof::Started),
+        Some(recorded) => (recorded == start).then_some(Proof::Started { written: modified }),
         None => dated_since(modified, started).then_some(Proof::Dated),
     };
     Ok(proof.map(|proof| (file, proof)))

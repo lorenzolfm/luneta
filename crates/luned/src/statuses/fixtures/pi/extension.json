@@ -11,7 +11,7 @@
       "phase": {
         "kind": "resting",
         "resting": {
-          "message": "OAuth refresh failed for anthropic: Anthropic token refresh request failed. url=https://platform.claude.com/v1/oauth/token; details=TypeError: ECONNREFUSED: Unable to connect. Is the computer able to access the url?; code=ECONNREFUSED; errno=0; stack=TypeError: ECONNREFUSED: Unable to connect. Is the computer able to access the url?",
+          "message": "recorded",
           "status": "error"
         }
       },
@@ -19,7 +19,7 @@
       "promptOpen": false,
       "sessionId": "recorded",
       "status": "error",
-      "statusMessage": "OAuth refresh failed for anthropic: Anthropic token refresh request failed. url=https://platform.claude.com/v1/oauth/token; details=TypeError: ECONNREFUSED: Unable to connect. Is the computer able to access the url?; code=ECONNREFUSED; errno=0; stack=TypeError: ECONNREFUSED: Unable to connect. Is the computer able to access the url?",
+      "statusMessage": "recorded",
       "statusSince": 1795685626544
     },
     "exit": null,
