@@ -13,6 +13,7 @@ const STOPPED_MAX: usize = 64;
 pub struct Shell {
     ran: Option<Ran>,
     stopped: Vec<(Group, Option<Said>)>,
+    version: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +61,7 @@ impl Shell {
         in_front: bool,
         job: impl Fn(Group) -> Option<Job>,
     ) {
+        let before = self.version;
         let last_command = marks.iter().rposition(|mark| matches!(mark, Mark::Command(_)));
         for (at, mark) in marks.into_iter().enumerate() {
             let typed_ahead = last_command.is_some_and(|last| at < last);
@@ -67,6 +69,7 @@ impl Shell {
                 self.marked(mark, now, &job);
             }
         }
+        assert!(self.version >= before);
     }
 
     fn marked(&mut self, mark: Mark, now: Now, job: impl Fn(Group) -> Option<Job>) {
@@ -74,6 +77,7 @@ impl Shell {
             Mark::Prompt => {
                 if self.ran.is_none() {
                     self.ran = Some(Ran::Ready);
+                    self.version += 1;
                 }
             },
             Mark::Command(line) => {
@@ -84,6 +88,7 @@ impl Shell {
                 let typed = command.as_ref().map(Said::as_str);
                 if typed.is_some_and(execs) {
                     self.ran = None;
+                    self.version += 1;
                     return;
                 }
                 let resumes = typed.is_some_and(is_fg);
@@ -97,6 +102,7 @@ impl Shell {
                 let front = Front::Working;
                 let going = Going { command, since, started, resumes, front, seen: None };
                 self.ran = Some(Ran::Going(going));
+                self.version += 1;
             },
             Mark::Done(status) => {
                 let Some(Ran::Going(going)) = self.ran.take_if(|ran| matches!(ran, Ran::Going(_)))
@@ -125,6 +131,7 @@ impl Shell {
                     };
                     self.ran = Some(going.ended(ending, now));
                 }
+                self.version += 1;
             },
         }
     }
@@ -134,7 +141,14 @@ impl Shell {
         matches!(self.ran, Some(Ran::Going(_)))
     }
 
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     pub fn saw(&mut self, group: Group, program: u32, front: Front) {
+        assert!(group.leader() > 0);
+        assert!(program > 0);
         if let Some(Ran::Going(going)) = &mut self.ran {
             going.front = front;
             if group.leader() != program {
@@ -144,6 +158,9 @@ impl Shell {
     }
 
     pub fn gone(&mut self) {
+        if self.ran.is_some() {
+            self.version += 1;
+        }
         self.ran = None;
         self.stopped.clear();
     }
@@ -417,7 +434,26 @@ mod tests {
         let mut shell = Shell::default();
         shell.marked(Mark::Prompt, at(0), NONE_STOPPED);
         shell.marked(command("ls"), at(1), NONE_STOPPED);
+        let before = shell.version();
         shell.gone();
         assert_eq!(shell.said(), None);
+        assert!(shell.version() > before);
+    }
+
+    #[test]
+    fn ignored_marks_leave_the_shell_version_unchanged() {
+        let now = shell_at(Instant::now());
+        let mut shell = Shell::default();
+        assert_eq!(shell.version(), 0);
+        shell.read(vec![Mark::Prompt, command("ssh host")], now(1), true, NONE_STOPPED);
+        let going_version = shell.version();
+        assert_eq!(going_version, 2);
+        let remote = vec![Mark::Prompt, command("ls"), Mark::Done(Some(0)), Mark::Prompt];
+        shell.read(remote, now(2), false, NONE_STOPPED);
+        assert_eq!(shell.version(), going_version);
+        shell.saw(Group(40), 10, Front::Interactive);
+        assert_eq!(shell.version(), going_version);
+        shell.read(vec![Mark::Done(Some(0)), Mark::Prompt], now(3), true, NONE_STOPPED);
+        assert_eq!(shell.version(), going_version + 1);
     }
 }

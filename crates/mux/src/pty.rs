@@ -67,6 +67,7 @@ pub fn raise_files_limit() -> io::Result<()> {
 pub struct Pty {
     pub near: File,
     far: OwnedFd,
+    device: u64,
 }
 
 impl Pty {
@@ -78,11 +79,13 @@ impl Pty {
         let path = Path::new(OsStr::from_bytes(path.as_bytes()));
         let flags = OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC;
         let far = rustix::fs::open(path, flags, Mode::empty())?;
+        let device = device_of(&far)?;
+        assert!(device != 0, "an opened pseudoterminal has a device");
         rustix::io::fcntl_setfd(&near, rustix::io::FdFlags::CLOEXEC)?;
         let mut modes = termios::tcgetattr(&far)?;
         modes.input_modes.set(InputModes::IUTF8, true);
         termios::tcsetattr(&far, OptionalActions::Now, &modes)?;
-        let pty = Pty { near: File::from(near), far };
+        let pty = Pty { near: File::from(near), far, device };
         pty.resize(size)?;
         let flags = rustix::fs::fcntl_getfl(&pty.near)?;
         rustix::fs::fcntl_setfl(&pty.near, flags | OFlags::NONBLOCK)?;
@@ -150,8 +153,10 @@ impl Pty {
         Modes::of(&self.far)
     }
 
-    pub fn device(&self) -> io::Result<u64> {
-        Ok(device_of(&self.far)?)
+    #[must_use]
+    pub fn device(&self) -> u64 {
+        assert!(self.device != 0);
+        self.device
     }
 
     pub fn spawned(&self, opens: &Opens, vars: &[(&str, String)]) -> io::Result<Led> {

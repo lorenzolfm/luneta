@@ -18,23 +18,29 @@ const RELAYS: [&str; 2] = ["sudo", "script"];
 
 const PROCESSES_MAX: usize = 512;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub modes: Option<Modes>,
+    pub device: u64,
+}
+
 #[must_use]
-pub fn of_terminal(modes: Option<Modes>, ours: Option<u64>, program: u32, group: Group) -> Front {
+pub fn of_terminal(snapshot: Snapshot, program: u32, group: Group) -> Front {
+    assert!(snapshot.device != 0);
+    assert!(program > 0);
+    assert!(group.leader() > 0);
     let processes = tree(program);
     let front = in_front(&processes, group);
-    let said = of(modes, &front, group.leader() == program);
+    let said = of(snapshot.modes, &front, group.leader() == program);
     if said != Front::Interactive {
         return said;
     }
-    let Some(ours) = ours else {
-        return said;
-    };
     let relays = front.iter().filter(|process| RELAYS.contains(&process.name.as_str()));
     let children = relays.flat_map(|relay| {
         processes.iter().filter(move |child| child.parent == relay.pid)
     });
     let inner = children.filter_map(|child| Some((child, child.terminal?)));
-    match inner.into_iter().find(|(_, terminal)| terminal.device != ours) {
+    match inner.into_iter().find(|(_, terminal)| terminal.device != snapshot.device) {
         Some((child, terminal)) => {
             let Some(inner) = terminal.front else {
                 return behind(modes_at(terminal.device), &[]);

@@ -20,6 +20,7 @@ use tonic::Status;
 use crate::api;
 use crate::asked::{Colours, Dumped, Input, Size, TerminalKey};
 use crate::frame::{self, Flags};
+use crate::front;
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leader;
 use crate::looker::{Asked, Gone, Looker, Seen};
@@ -238,6 +239,7 @@ pub fn start(
             Err(error) => {
                 eprintln!("lune-mux: terminal {terminal}'s screen could not be made: {error}");
                 drop(pty);
+                drop(looker);
                 mux.lost(terminal);
                 leader.end();
                 return;
@@ -253,7 +255,12 @@ pub fn start(
                 closed,
                 woken,
                 screen,
-                program: Program::Runs { pty, unread: Unread::default() },
+                program: Program::Runs(Box::new(Running {
+                    pty,
+                    unread: Unread::default(),
+                    looker,
+                    looks: Looks::first(),
+                })),
                 buffer: vec![0; READ_BYTES].into_boxed_slice(),
                 watchers: Vec::new(),
                 dirty: false,
@@ -264,9 +271,6 @@ pub fn start(
                 host: host(),
                 pid,
                 shell: Shell::default(),
-                looks: Looks::first(),
-                looker,
-                marked: 0,
                 told: Told::default(),
                 statuses_version: 0,
             };
@@ -304,14 +308,21 @@ enum Does {
     Nothing,
 }
 
+struct Running {
+    pty: Pty,
+    unread: Unread,
+    looker: Looker,
+    looks: Looks,
+}
+
 enum Program {
-    Runs { pty: Pty, unread: Unread },
+    Runs(Box<Running>),
     Gone,
 }
 
 impl Program {
     fn owed(&self) -> bool {
-        matches!(self, Program::Runs { unread, .. } if !unread.is_empty())
+        matches!(self, Program::Runs(running) if !running.unread.is_empty())
     }
 }
 
@@ -335,9 +346,6 @@ struct Thread {
     host: String,
     pid: u32,
     shell: Shell,
-    looks: Looks,
-    looker: Looker,
-    marked: u64,
     told: Told,
     statuses_version: u64,
 }
@@ -348,54 +356,79 @@ struct Told {
     ran: Option<api::Ran>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pace {
+    Idle { due: Option<Instant> },
+    InFlight,
+}
+
 struct Looks {
-    due: Option<Instant>,
+    pace: Pace,
     last: Option<Instant>,
     heard: bool,
-    asking: bool,
 }
 
 impl Looks {
     fn first() -> Looks {
-        Looks { due: Some(Instant::now()), last: None, heard: false, asking: false }
+        Looks { pace: Pace::Idle { due: Some(Instant::now()) }, last: None, heard: false }
     }
 
+    #[must_use]
     fn waits_until(&self) -> Option<Instant> {
-        self.due.filter(|_| !self.asking)
+        match self.pace {
+            Pace::Idle { due } => due,
+            Pace::InFlight => None,
+        }
     }
 
-    fn asked(&mut self, now: Instant, going: bool) {
-        assert!(!self.asking, "a terminal asks one look at a time");
-        self.looked(now, going);
-        self.asking = true;
+    #[must_use]
+    fn is_in_flight(&self) -> bool {
+        self.pace == Pace::InFlight
     }
 
-    fn answered(&mut self) -> bool {
-        std::mem::take(&mut self.asking)
+    fn asked(&mut self) {
+        assert!(matches!(self.pace, Pace::Idle { due: Some(_) }), "a look is due before it is asked");
+        self.pace = Pace::InFlight;
+    }
+
+    fn answered(&mut self, now: Instant, going: bool) {
+        assert_eq!(self.pace, Pace::InFlight, "a seen look was asked");
+        self.schedule_next(now, going);
+    }
+
+    fn looked_locally(&mut self, now: Instant, going: bool) {
+        assert!(matches!(self.pace, Pace::Idle { due: Some(_) }), "a look is due before it runs");
+        self.schedule_next(now, going);
     }
 
     fn heard(&mut self, now: Instant) {
-        let soonest = self.last.map_or(now, |last| (last + LOOK_AGAIN).max(now));
-        self.due = Some(self.due.map_or(soonest, |due| due.min(soonest)));
         self.heard = true;
+        let Pace::Idle { due } = self.pace else {
+            return;
+        };
+        let soonest = self.last.map_or(now, |last| (last + LOOK_AGAIN).max(now));
+        self.pace = Pace::Idle { due: Some(due.map_or(soonest, |due| due.min(soonest))) };
         self.assert_paced();
     }
 
-    fn looked(&mut self, now: Instant, going: bool) {
+    fn schedule_next(&mut self, now: Instant, going: bool) {
+        if let Some(last) = self.last {
+            assert!(now >= last, "time does not go backwards");
+        }
         self.last = Some(now);
-        self.due = if std::mem::take(&mut self.heard) {
+        let due = if std::mem::take(&mut self.heard) {
             Some(now + LOOK_AGAIN)
         } else if going {
             Some(now + LOOK_WHILE_GOING)
         } else {
             None
         };
+        self.pace = Pace::Idle { due };
         self.assert_paced();
     }
 
     fn assert_paced(&self) {
-        if let (Some(due), Some(last)) = (self.due, self.last) {
+        if let (Pace::Idle { due: Some(due) }, Some(last)) = (self.pace, self.last) {
             assert!(due >= last + LOOK_AGAIN, "{:?} after the last", due.duration_since(last));
         }
     }
@@ -436,7 +469,9 @@ impl Thread {
                 self.write()?;
             }
             self.seen()?;
-            if self.looks.waits_until().is_some_and(|due| due <= Instant::now()) {
+            if let Program::Runs(running) = &self.program
+                && running.looks.waits_until().is_some_and(|due| due <= Instant::now())
+            {
                 self.look()?;
             }
             self.frame()?;
@@ -445,34 +480,52 @@ impl Thread {
 
     fn look(&mut self) -> io::Result<()> {
         let now = Instant::now();
-        let Program::Runs { pty, .. } = &self.program else {
-            self.looks = Looks::default();
+        let terminal = self.key.id;
+        let Program::Runs(running) = &mut self.program else {
             return Ok(());
         };
+        assert!(!running.looks.is_in_flight(), "a terminal asks one look at a time");
+        assert!(running.looks.waits_until().is_some(), "a look is due before it is asked");
         let going = self.shell.going();
+        let Some(group) = running.pty.front_group() else {
+            running.looks.looked_locally(now, going);
+            self.tell(None);
+            return Ok(());
+        };
+        let front = going.then(|| front::Snapshot {
+            modes: pty_modes(terminal, &running.pty),
+            device: running.pty.device(),
+        });
         let asked = Asked {
             program: self.pid,
-            group: pty.front_group(),
-            going,
-            modes: pty.modes().ok(),
-            device: pty.device().ok(),
-            marked: self.marked,
+            group,
+            front,
+            shell_version: self.shell.version(),
         };
-        self.looker.ask(asked).map_err(looks_gone)?;
-        self.looks.asked(now, going);
+        running.looker.ask(asked).map_err(looks_gone)?;
+        running.looks.asked();
         Ok(())
     }
 
     fn seen(&mut self) -> io::Result<()> {
-        let Some(Seen { foreground, front, marked }) = self.looker.seen().map_err(looks_gone)?
+        let Program::Runs(running) = &mut self.program else {
+            return Ok(());
+        };
+        let Some(Seen { foreground, front, shell_version }) =
+            running.looker.take_seen().map_err(looks_gone)?
         else {
             return Ok(());
         };
-        if !self.looks.answered() || marked != self.marked {
+        let going = self.shell.going();
+        running.looks.answered(Instant::now(), going);
+        let current = self.shell.version();
+        assert!(shell_version <= current, "a look cannot come from future marks");
+        if shell_version != current {
             return Ok(());
         }
-        if let Some((group, front)) = front {
-            self.shell.saw(group, self.pid, front);
+        assert_eq!(front.is_some(), self.shell.going());
+        if let Some((group, front_state)) = front {
+            self.shell.saw(group, self.pid, front_state);
         }
         self.tell(foreground);
         Ok(())
@@ -488,7 +541,12 @@ impl Thread {
 
     fn timeout(&self) -> Option<Duration> {
         let now = Instant::now();
-        let look = self.looks.waits_until().map(|due| due.saturating_duration_since(now));
+        let look = match &self.program {
+            Program::Runs(running) => {
+                running.looks.waits_until().map(|due| due.saturating_duration_since(now))
+            },
+            Program::Gone => None,
+        };
         match (self.framing(), look) {
             (Some(framing), Some(look)) => Some(framing.min(look)),
             (framing, look) => framing.or(look),
@@ -520,12 +578,12 @@ impl Thread {
             PollFd::new(&self.woken, PollFlags::empty()),
         ];
         let mut count = 1;
-        if let Program::Runs { pty, unread } = &self.program {
+        if let Program::Runs(running) = &self.program {
             let mut flags = PollFlags::IN;
-            if !unread.is_empty() {
+            if !running.unread.is_empty() {
                 flags |= PollFlags::OUT;
             }
-            fds[1] = PollFd::from_borrowed_fd(pty.near.as_fd(), flags);
+            fds[1] = PollFd::from_borrowed_fd(running.pty.near.as_fd(), flags);
             count = 2;
         }
         match rustix::event::poll(&mut fds[..count], wait.as_ref()) {
@@ -616,11 +674,11 @@ impl Thread {
             }
         }
         let terminal = self.key.id;
-        let Program::Runs { pty, unread } = &mut self.program else {
+        let Program::Runs(running) = &mut self.program else {
             let ended = format!("terminal {terminal}'s program ended");
             return Err(Status::failed_precondition(ended));
         };
-        type_into(terminal, pty, unread, &bytes).map_err(|refused| {
+        type_into(terminal, &running.pty, &mut running.unread, &bytes).map_err(|refused| {
             let told = refused_text(terminal, refused);
             match refused {
                 Refused::Behind { .. } => Status::resource_exhausted(told),
@@ -630,15 +688,14 @@ impl Thread {
     }
 
     fn exited(&mut self, exit: Exit) -> io::Result<bool> {
-        if let Program::Runs { unread, .. } = &mut self.program {
-            unread.clear();
+        if let Program::Runs(running) = &mut self.program {
+            running.unread.clear();
         }
         self.read(LAST_WORDS_BYTES_MAX)?;
         let ended_statuses = self.screen.program_exited();
         self.statuses_version = self.screen.program_statuses_version();
         self.program = Program::Gone;
         self.shell.gone();
-        self.looks = Looks::default();
         self.told = Told::default();
         self.dirty = true;
         self.frame()?;
@@ -665,8 +722,8 @@ impl Thread {
             return Ok(());
         }
         let answers = self.screen.resize(size).map_err(io::Error::other)?;
-        if let Program::Runs { pty, .. } = &self.program {
-            pty.resize(size)?;
+        if let Program::Runs(running) = &self.program {
+            running.pty.resize(size)?;
         }
         self.answered(&answers);
         let scrollback = self.screen.scrollback();
@@ -684,8 +741,9 @@ impl Thread {
         match self.does(input).map_err(io::Error::other)? {
             Does::Write(bytes) => {
                 let terminal = self.key.id;
-                if let Program::Runs { pty, unread } = &mut self.program
-                    && let Err(refused) = type_into(terminal, pty, unread, &bytes)
+                if let Program::Runs(running) = &mut self.program
+                    && let Err(refused) =
+                        type_into(terminal, &running.pty, &mut running.unread, &bytes)
                 {
                     eprintln!("lune-mux: {}: input dropped", refused_text(terminal, refused));
                 }
@@ -720,10 +778,10 @@ impl Thread {
     }
 
     fn answered(&mut self, answers: &Answers) {
-        let Program::Runs { unread, .. } = &mut self.program else {
+        let Program::Runs(running) = &mut self.program else {
             return;
         };
-        answers_lost(self.key.id, unread.answer(answers));
+        answers_lost(self.key.id, running.unread.answer(answers));
     }
 
     fn back(&mut self, client: ClientId, by: Option<isize>) {
@@ -743,9 +801,10 @@ impl Thread {
     }
 
     fn read(&mut self, most: usize) -> io::Result<()> {
-        let Program::Runs { pty, unread } = &mut self.program else {
+        let Program::Runs(running) = &mut self.program else {
             return Ok(());
         };
+        let Running { pty, unread, looks, .. } = &mut **running;
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
         let mut pushed = Pushed::Rows(0);
@@ -780,7 +839,7 @@ impl Thread {
         if total == 0 {
             return Ok(());
         }
-        self.looks.heard(Instant::now());
+        looks.heard(Instant::now());
         if !marks.is_empty() {
             let now = Now::current();
             let in_front = pty.front_group() == Some(Group(self.pid));
@@ -789,7 +848,6 @@ impl Thread {
                 Some(if leader.stopped { Job::Stopped } else { Job::Runs })
             };
             self.shell.read(marks, now, in_front, job);
-            self.marked += 1;
         }
         self.dirty = true;
         let scrollback = self.screen.scrollback();
@@ -814,9 +872,10 @@ impl Thread {
     }
 
     fn write(&mut self) -> io::Result<()> {
-        let Program::Runs { pty, unread } = &mut self.program else {
+        let Program::Runs(running) = &mut self.program else {
             return Ok(());
         };
+        let Running { pty, unread, .. } = &mut **running;
         while let Some(lined_up) = unread.line_up() {
             match pty.near.write(lined_up) {
                 Ok(written) => {
@@ -964,6 +1023,17 @@ fn answers_lost(terminal: TerminalId, kept: Kept) {
     }
 }
 
+fn pty_modes(terminal: TerminalId, pty: &Pty) -> Option<crate::pty::Modes> {
+    match pty.modes() {
+        Ok(modes) => Some(modes),
+        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) => None,
+        Err(error) => {
+            eprintln!("lune-mux: terminal {terminal}'s modes could not be read: {error}");
+            None
+        },
+    }
+}
+
 fn looks_gone(Gone: Gone) -> io::Error {
     io::Error::other("its looks are gone")
 }
@@ -1046,33 +1116,46 @@ mod tests {
         let at = |millis| start + Duration::from_millis(millis);
         let mut looks = Looks::first();
         looks.heard(start);
-        assert_eq!(looks.due, Some(start));
-        looks.looked(start, true);
-        assert_eq!(looks.due, Some(at(100)));
-        looks.looked(at(100), true);
-        assert_eq!(looks.due, Some(at(1100)));
+        assert_eq!(looks.waits_until(), Some(start));
+        looks.asked();
+        looks.answered(start, true);
+        assert_eq!(looks.waits_until(), Some(at(100)));
+        looks.asked();
+        looks.answered(at(100), true);
+        assert_eq!(looks.waits_until(), Some(at(1100)));
         looks.heard(at(300));
-        assert_eq!(looks.due, Some(at(300)));
-        looks.looked(at(300), true);
+        assert_eq!(looks.waits_until(), Some(at(300)));
+        looks.asked();
+        looks.answered(at(300), true);
         looks.heard(at(310));
-        assert_eq!(looks.due, Some(at(400)));
-        looks.looked(at(400), false);
-        assert_eq!(looks.due, Some(at(500)));
-        looks.looked(at(500), false);
-        assert_eq!(looks.due, None);
+        assert_eq!(looks.waits_until(), Some(at(400)));
+        looks.asked();
+        looks.answered(at(400), false);
+        assert_eq!(looks.waits_until(), Some(at(500)));
+        looks.asked();
+        looks.answered(at(500), false);
+        assert_eq!(looks.waits_until(), None);
     }
 
     #[test]
-    fn a_look_asked_holds_the_next_until_it_is_answered() {
+    fn a_look_asked_holds_the_next_and_waits_after_it_finishes() {
         let start = Instant::now();
         let at = |millis| start + Duration::from_millis(millis);
         let mut looks = Looks::first();
-        looks.asked(start, true);
-        looks.heard(at(300));
+        looks.asked();
+        looks.heard(at(50));
         assert_eq!(looks.waits_until(), None);
-        assert!(looks.answered());
-        assert_eq!(looks.waits_until(), Some(at(300)));
-        assert!(!looks.answered());
+        looks.answered(at(250), true);
+        assert_eq!(looks.waits_until(), Some(at(350)));
+        looks.looked_locally(at(350), false);
+        assert_eq!(looks.waits_until(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "a seen look was asked")]
+    fn answering_an_idle_look_panics() {
+        let mut looks = Looks::first();
+        looks.answered(Instant::now(), false);
     }
 
     #[test]
