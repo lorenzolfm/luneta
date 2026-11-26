@@ -946,13 +946,13 @@ mod tests {
     }
 
     fn claude_end(records: &[Value]) -> TranscriptEnd {
-        TranscriptEnd::Claude(records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"))
+        let lines = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        TranscriptEnd::Claude(luned::transcripts::TailLines::new(lines).unwrap())
     }
 
     fn agy_end(records: &[Value]) -> TranscriptEnd {
-        TranscriptEnd::Antigravity(
-            records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"),
-        )
+        let lines = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        TranscriptEnd::Antigravity(luned::transcripts::TailLines::new(lines).unwrap())
     }
 
     fn assistant(blocks: &Value) -> Value {

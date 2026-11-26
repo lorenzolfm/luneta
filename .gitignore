@@ -4,3 +4,4 @@
 /mutants.out*
 /ios/build
 /ios/Lune.xcodeproj
+/docs/media/*.gif

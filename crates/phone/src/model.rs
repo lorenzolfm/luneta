@@ -343,21 +343,44 @@ fn worktree_of(
 }
 
 fn view_of(on: Option<&str>, view: &api::Terminal) -> View {
-    let found = match &view.found {
-        Some(terminal::Found::Key(key)) => match TerminalKey::of(on, key) {
+    let key_of = |key: Option<&api::TerminalKey>| match key {
+        Some(key) => match TerminalKey::of(on, key) {
             Ok(key) => Found::Key { key },
             Err(why) => Found::Unread { why },
         },
-        Some(terminal::Found::Lost(())) => Found::Lost,
-        Some(terminal::Found::Looking(())) => Found::Looking,
-        None => Found::Untold,
+        None => Found::Unread { why: "no terminal key".to_owned() },
+    };
+    let (found, topic, command) = match &view.state {
+        Some(terminal::State::Running(running)) => (
+            key_of(running.key.as_ref()),
+            running.titled.as_ref().and_then(|titled| titled.topic.clone()),
+            running.command.clone(),
+        ),
+        Some(terminal::State::Ended(ended)) => (
+            key_of(ended.key.as_ref()),
+            ended.titled.as_ref().and_then(|titled| titled.topic.clone()),
+            None,
+        ),
+        Some(terminal::State::Unlisted(key)) => (key_of(Some(key)), None, None),
+        Some(terminal::State::StateLost(())) => (Found::Lost, None, None),
+        Some(terminal::State::StateLooking(())) => (Found::Looking, None, None),
+        None => {
+            let found = match &view.found {
+                Some(terminal::Found::Key(key)) => key_of(Some(key)),
+                Some(terminal::Found::Lost(())) => Found::Lost,
+                Some(terminal::Found::Looking(())) => Found::Looking,
+                None => Found::Untold,
+            };
+            let topic = view.titled.as_ref().and_then(|titled| titled.topic.clone());
+            (found, topic, view.command.clone())
+        },
     };
     View {
         id: view.id,
         found,
         name: view.name.clone(),
-        topic: view.titled.as_ref().and_then(|titled| titled.topic.clone()),
-        command: view.command.clone(),
+        topic,
+        command,
         folder: view.folder.clone(),
     }
 }
@@ -556,7 +579,7 @@ mod tests {
     fn a_view_says_whether_its_terminal_is_found_lost_looked_for_or_unread() {
         let found = |found| view_of(Some("far"), &api::Terminal { found, ..api::Terminal::default() }).found;
         let three = TerminalKey::of(Some("far"), &key(3)).unwrap();
-        assert_eq!(found(Some(terminal::Found::Key(key(3)))), Found::Key { key: three });
+        assert_eq!(found(Some(terminal::Found::Key(key(3)))), Found::Key { key: three.clone() });
         assert_eq!(found(Some(terminal::Found::Lost(()))), Found::Lost);
         assert_eq!(found(Some(terminal::Found::Looking(()))), Found::Looking);
         assert_eq!(found(None), Found::Untold);
@@ -565,6 +588,65 @@ mod tests {
             let unread = found(Some(terminal::Found::Key(unmade)));
             assert!(matches!(unread, Found::Unread { .. }), "{unmade:?}: {unread:?}");
         }
+
+        let running = view_of(
+            Some("far"),
+            &api::Terminal {
+                state: Some(terminal::State::Running(terminal::Running {
+                    key: Some(key(3)),
+                    command: Some("claude".to_owned()),
+                    titled: Some(api::Titled { topic: Some("Fixing".to_owned()) }),
+                    shell: None,
+                })),
+                ..api::Terminal::default()
+            },
+        );
+        assert_eq!(running.found, Found::Key { key: three.clone() });
+        assert_eq!(running.command.as_deref(), Some("claude"));
+        assert_eq!(running.topic.as_deref(), Some("Fixing"));
+
+        let ended = view_of(
+            Some("far"),
+            &api::Terminal {
+                command: Some("stale".to_owned()),
+                state: Some(terminal::State::Ended(terminal::Ended {
+                    key: Some(key(3)),
+                    titled: Some(api::Titled { topic: Some("Done".to_owned()) }),
+                })),
+                ..api::Terminal::default()
+            },
+        );
+        assert_eq!(ended.found, Found::Key { key: three.clone() });
+        assert_eq!(ended.command, None);
+        assert_eq!(ended.topic.as_deref(), Some("Done"));
+
+        let unlisted = view_of(
+            Some("far"),
+            &api::Terminal {
+                state: Some(terminal::State::Unlisted(key(3))),
+                ..api::Terminal::default()
+            },
+        );
+        assert_eq!(unlisted.found, Found::Key { key: three });
+        assert_eq!(unlisted.command, None);
+        assert_eq!(unlisted.topic, None);
+
+        let lost = view_of(
+            Some("far"),
+            &api::Terminal {
+                state: Some(terminal::State::StateLost(())),
+                ..api::Terminal::default()
+            },
+        );
+        assert_eq!(lost.found, Found::Lost);
+        let looking = view_of(
+            Some("far"),
+            &api::Terminal {
+                state: Some(terminal::State::StateLooking(())),
+                ..api::Terminal::default()
+            },
+        );
+        assert_eq!(looking.found, Found::Looking);
     }
 
     #[test]

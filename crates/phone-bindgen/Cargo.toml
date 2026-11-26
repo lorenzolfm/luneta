@@ -2,6 +2,7 @@
 name = "lune-phone-bindgen"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 license.workspace = true
 publish = false
 description = "UniFFI's Swift generator at the version lune-phone is built with, so the iPhone app's bindings come from the library they bind"

@@ -257,9 +257,17 @@ fn terminals(host: &api::Host) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, St
         worktrees.extend(project.worktrees().ok_or_else(unsaid)?);
     }
     let terminal = |terminal: &api::Terminal| {
-        let key = match &terminal.found {
-            Some(Found::Key(key)) => TerminalKey::of(key).ok(),
-            Some(Found::Lost(()) | Found::Looking(())) | None => None,
+        let key = match &terminal.state {
+            Some(
+                api::terminal::State::Running(api::terminal::Running { key: Some(key), .. })
+                | api::terminal::State::Ended(api::terminal::Ended { key: Some(key), .. })
+                | api::terminal::State::Unlisted(key),
+            ) => TerminalKey::of(key).ok(),
+            Some(_) => None,
+            None => match &terminal.found {
+                Some(Found::Key(key)) => TerminalKey::of(key).ok(),
+                Some(Found::Lost(()) | Found::Looking(())) | None => None,
+            },
         };
         (key, PathBuf::from(&terminal.folder))
     };

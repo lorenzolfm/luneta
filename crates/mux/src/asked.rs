@@ -66,8 +66,42 @@ impl Size {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbsoluteCwd(String);
+
+impl AbsoluteCwd {
+    pub fn parse(field: &str, raw: String) -> Result<AbsoluteCwd, Status> {
+        if raw.contains('\0') {
+            return Err(refused(field, "has a NUL"));
+        }
+        if !Path::new(&raw).is_absolute() {
+            return Err(refused(field, "is not an absolute path"));
+        }
+        Ok(AbsoluteCwd(raw))
+    }
+
+    #[must_use]
+    pub fn of_path(raw: String) -> Option<AbsoluteCwd> {
+        if raw.contains('\0') || !Path::new(&raw).is_absolute() {
+            return None;
+        }
+        Some(AbsoluteCwd(raw))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for AbsoluteCwd {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Opens {
-    pub cwd: String,
+    pub cwd: AbsoluteCwd,
     pub program: String,
     pub args: Vec<String>,
     pub ends: Ends,
@@ -82,12 +116,7 @@ pub enum Ends {
 impl Opens {
     pub fn parse(field: &str, opens: Option<api::Opens>) -> Result<Opens, Status> {
         let opens = present(field, opens)?;
-        if opens.cwd.contains('\0') {
-            return Err(refused(&format!("{field}.cwd"), "has a NUL"));
-        }
-        if !Path::new(&opens.cwd).is_absolute() {
-            return Err(refused(&format!("{field}.cwd"), "is not an absolute path"));
-        }
+        let cwd = AbsoluteCwd::parse(&format!("{field}.cwd"), opens.cwd)?;
         let api::Program { argv } = present(&format!("{field}.program"), opens.program)?;
         let argv_field = format!("{field}.program.argv");
         let Some((program, args)) = argv.split_first() else {
@@ -107,7 +136,7 @@ impl Opens {
                 return Err(refused(&format!("{field}.ends"), "is not one of CLOSES or HOLDS"));
             },
         };
-        Ok(Opens { cwd: opens.cwd, program, args, ends })
+        Ok(Opens { cwd, program, args, ends })
     }
 }
 

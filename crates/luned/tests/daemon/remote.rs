@@ -1232,7 +1232,9 @@ fn an_image_is_kept_on_another_machine_through_the_bridge() {
         let asked = Png::new(small.clone()).unwrap().asked(None);
         let mut answer = daemon.keep_image(asked).await.unwrap().into_inner();
         let path = answer.message().await.unwrap().expect("an answer").path;
-        assert!(fs::read(&path).unwrap() == small);
+        let kept = fs::read(&path).unwrap();
+        assert_eq!(kept.len(), small.len(), "the small image's byte count");
+        assert_eq!(kept, small, "the small image came as it went");
         assert_eq!((images_in(&here), images_in(&far)), (1, 1));
 
         let refused = |status: Result<String, Status>, code: Code| {

@@ -2,7 +2,6 @@ use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::Path;
 use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,13 +25,15 @@ use crate::id::{ClientId, TerminalId};
 use crate::leader::Leader;
 use crate::looker::{Ask, Foreground, Gone, InFlight, Looker, Seen, Taken};
 use crate::marks::Mark;
-use crate::mux::Mux;
+use crate::mux::{MetaUpdate, Mux};
 use crate::panics::{self, Panicked};
 use crate::process::{self, Group, ProcessId};
 use crate::pty::{Led, Pty, Queue, Raise, SignalKey};
 use crate::ran::{Job, Now, Shell};
 use crate::screen::{Answers, Looked, Pushed, Screen, View, Wheel};
 use crate::unread::{Kept, Oldest, Refused, TYPED_BYTES_MAX, Unread};
+
+use titles::Titles;
 
 const SCROLLBACK_BYTES: usize = 10_000_000;
 
@@ -285,8 +286,7 @@ pub fn start(
                 dirty: false,
                 framed: Instant::now().checked_sub(FRAME_GAP).unwrap_or_else(Instant::now),
                 synced: None,
-                title: String::new(),
-                pwd: String::new(),
+                titles: Titles::default(),
                 host: host(),
                 statuses_version: 0,
             };
@@ -359,8 +359,7 @@ struct Thread {
     dirty: bool,
     framed: Instant,
     synced: Option<Instant>,
-    title: String,
-    pwd: String,
+    titles: Titles,
     host: String,
     statuses_version: u64,
 }
@@ -369,6 +368,149 @@ struct Thread {
 struct Told {
     foreground: Option<Foreground>,
     ran: Option<Doing>,
+}
+
+mod titles {
+    use std::time::{Duration, Instant};
+
+    use crate::asked::AbsoluteCwd;
+    use crate::mux::{FinalMeta, MetaUpdate};
+
+    const TITLE_AGAIN: Duration = Duration::from_millis(100);
+
+    #[derive(Default)]
+    pub(super) struct Titles {
+        told: String,
+        pace: TitlePace,
+        pwd: Option<String>,
+    }
+
+    #[derive(Default)]
+    enum TitlePace {
+        #[default]
+        Fresh,
+        Sent { at: Instant },
+        Pending { next: String, last: Instant },
+    }
+
+    impl Titles {
+        pub(super) fn due(&self) -> Option<Instant> {
+            match self.pace {
+                TitlePace::Pending { last, .. } => Some(last + TITLE_AGAIN),
+                TitlePace::Fresh | TitlePace::Sent { .. } => None,
+            }
+        }
+
+        pub(super) fn observed(
+            &mut self,
+            title: Option<String>,
+            pwd: Option<String>,
+            host: &str,
+            now: Instant,
+        ) -> Option<MetaUpdate> {
+            let cwd = self.take_cwd(pwd, host);
+            let pending_title = match title {
+                Some(title) if title != self.told => Some(title),
+                Some(_) => {
+                    if let TitlePace::Pending { last, .. } = self.pace {
+                        self.pace = TitlePace::Sent { at: last };
+                    }
+                    None
+                },
+                None => match &self.pace {
+                    TitlePace::Pending { next, .. } => Some(next.clone()),
+                    TitlePace::Fresh | TitlePace::Sent { .. } => None,
+                },
+            };
+            if let Some(cwd) = cwd {
+                if let Some(next) = pending_title {
+                    self.told.clone_from(&next);
+                    self.pace = TitlePace::Sent { at: now };
+                    return Some(MetaUpdate::Both { title: next, cwd });
+                }
+                return Some(MetaUpdate::Cwd(cwd));
+            }
+            let next = pending_title?;
+            assert_ne!(next, self.told);
+            let last = match self.pace {
+                TitlePace::Fresh => None,
+                TitlePace::Sent { at } => Some(at),
+                TitlePace::Pending { last, .. } => Some(last),
+            };
+            let Some(last) = last else {
+                self.told.clone_from(&next);
+                self.pace = TitlePace::Sent { at: now };
+                return Some(MetaUpdate::Title(next));
+            };
+            if last + TITLE_AGAIN <= now {
+                self.told.clone_from(&next);
+                self.pace = TitlePace::Sent { at: now };
+                return Some(MetaUpdate::Title(next));
+            }
+            self.pace = TitlePace::Pending { next, last };
+            None
+        }
+
+        pub(super) fn take_due(&mut self, now: Instant) -> Option<String> {
+            match std::mem::replace(&mut self.pace, TitlePace::Fresh) {
+                TitlePace::Pending { next, last } if last + TITLE_AGAIN <= now => {
+                    self.told.clone_from(&next);
+                    self.pace = TitlePace::Sent { at: now };
+                    Some(next)
+                },
+                other => {
+                    self.pace = other;
+                    None
+                },
+            }
+        }
+
+        pub(super) fn finish(
+            &mut self,
+            title: Option<String>,
+            pwd: Option<String>,
+            host: &str,
+        ) -> FinalMeta {
+            let cwd = self.take_cwd(pwd, host);
+            let pending = match std::mem::replace(&mut self.pace, TitlePace::Fresh) {
+                TitlePace::Pending { next, .. } => Some(next),
+                TitlePace::Fresh | TitlePace::Sent { .. } => None,
+            };
+            let title = match title {
+                Some(title) if title != self.told => Some(title),
+                Some(_) => None,
+                None => pending,
+            };
+            if let Some(title) = &title {
+                self.told.clone_from(title);
+            }
+            FinalMeta { title, cwd }
+        }
+
+        fn take_cwd(&mut self, pwd: Option<String>, host: &str) -> Option<AbsoluteCwd> {
+            match pwd {
+                Some(pwd) if self.pwd.as_deref() != Some(pwd.as_str()) => {
+                    let cwd = local_cwd(&pwd, host);
+                    self.pwd = Some(pwd);
+                    cwd
+                },
+                Some(_) | None => None,
+            }
+        }
+    }
+
+    pub(super) fn local_cwd(said: &str, host: &str) -> Option<AbsoluteCwd> {
+        let after = said.strip_prefix("file://")?;
+        let (named, path) = after.split_at(after.find('/')?);
+        let local = named.is_empty()
+            || named.eq_ignore_ascii_case("localhost")
+            || named.eq_ignore_ascii_case(host);
+        if !local {
+            return None;
+        }
+        let path = percent_encoding::percent_decode_str(path).decode_utf8().ok()?;
+        AbsoluteCwd::of_path(path.into_owned())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -573,22 +715,21 @@ impl Thread {
                 let running = running.look_if_due(self.key.id, &self.mux)?;
                 self.program = Program::Runs(running);
             }
+            if let Some(title) = self.titles.take_due(Instant::now()) {
+                self.mux.titled(self.key.id, MetaUpdate::Title(title));
+            }
             self.frame()?;
         }
     }
 
     fn timeout(&self) -> Option<Duration> {
         let now = Instant::now();
+        let due = |at: Option<Instant>| at.map(|at| at.saturating_duration_since(now));
         let look = match &self.program {
-            Program::Runs(running) => {
-                running.looks.waits_until().map(|due| due.saturating_duration_since(now))
-            },
+            Program::Runs(running) => running.looks.waits_until(),
             Program::Gone => None,
         };
-        match (self.framing(), look) {
-            (Some(framing), Some(look)) => Some(framing.min(look)),
-            (framing, look) => framing.or(look),
-        }
+        [self.framing(), due(look), due(self.titles.due())].into_iter().flatten().min()
     }
 
     fn framing(&self) -> Option<Duration> {
@@ -729,13 +870,15 @@ impl Thread {
         if let Program::Runs(running) = &mut self.program {
             running.unread.clear();
         }
-        self.read(LAST_WORDS_BYTES_MAX)?;
+        self.drain_pty(LAST_WORDS_BYTES_MAX)?;
+        let final_meta =
+            self.titles.finish(self.screen.title(), self.screen.pwd(), &self.host);
         let ended_statuses = self.screen.program_exited();
         self.statuses_version = self.screen.program_statuses_version();
         self.program = Program::Gone;
         self.dirty = true;
         self.frame()?;
-        Ok(self.mux.ended(self.key.id, exit, ended_statuses))
+        Ok(self.mux.ended(self.key.id, exit, ended_statuses, final_meta))
     }
 
     fn tell_statuses(&mut self) {
@@ -837,8 +980,21 @@ impl Thread {
     }
 
     fn read(&mut self, most: usize) -> io::Result<()> {
-        let Program::Runs(running) = &mut self.program else {
+        if !self.drain_pty(most)? {
             return Ok(());
+        }
+        if let Some(update) =
+            self.titles.observed(self.screen.title(), self.screen.pwd(), &self.host, Instant::now())
+        {
+            self.mux.titled(self.key.id, update);
+        }
+        self.tell_statuses();
+        Ok(())
+    }
+
+    fn drain_pty(&mut self, most: usize) -> io::Result<bool> {
+        let Program::Runs(running) = &mut self.program else {
+            return Ok(false);
         };
         let Running { pty, unread, looks, pid, shell, .. } = &mut **running;
         let mut total = 0;
@@ -873,7 +1029,7 @@ impl Thread {
         }
         answers_lost(self.key.id, Kept { too_long, oldest });
         if total == 0 {
-            return Ok(());
+            return Ok(false);
         }
         looks.heard(Instant::now());
         if !marks.is_empty() {
@@ -895,16 +1051,7 @@ impl Thread {
             (true, since) => since,
             (false, _) => None,
         };
-        let title = self.screen.title().unwrap_or_else(|| self.title.clone());
-        let pwd = self.screen.pwd().unwrap_or_else(|| self.pwd.clone());
-        if title != self.title || pwd != self.pwd {
-            let cwd = (pwd != self.pwd).then(|| local_cwd(&pwd, &self.host)).flatten();
-            self.title.clone_from(&title);
-            self.pwd = pwd;
-            self.mux.titled(self.key.id, title, cwd);
-        }
-        self.tell_statuses();
-        Ok(())
+        Ok(true)
     }
 
     fn write(&mut self) -> io::Result<()> {
@@ -1078,22 +1225,6 @@ fn host() -> String {
     rustix::system::uname().nodename().to_string_lossy().into_owned()
 }
 
-fn local_cwd(said: &str, host: &str) -> Option<String> {
-    let after = said.strip_prefix("file://")?;
-    let (named, path) = after.split_at(after.find('/')?);
-    let local = named.is_empty()
-        || named.eq_ignore_ascii_case("localhost")
-        || named.eq_ignore_ascii_case(host);
-    if !local {
-        return None;
-    }
-    let path = percent_encoding::percent_decode_str(path).decode_utf8().ok()?;
-    if path.contains('\0') {
-        return None;
-    }
-    Some(path.into_owned()).filter(|path| Path::new(path).is_absolute())
-}
-
 fn wheeled(
     screen: &mut Screen,
     wheel: Wheel,
@@ -1197,8 +1328,69 @@ mod tests {
     }
 
     #[test]
+    fn title_updates_coalesce_within_the_window_while_cwd_goes_at_once() {
+        use crate::asked::AbsoluteCwd;
+        use crate::mux::FinalMeta;
+
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let cwd = |path: &str| AbsoluteCwd::of_path(path.to_owned()).unwrap();
+        let mut titles = Titles::default();
+
+        assert_eq!(titles.observed(Some(String::new()), None, "here", start), None);
+        assert_eq!(titles.due(), None);
+
+        assert_eq!(
+            titles.observed(Some("⠋ Task".to_owned()), None, "here", start),
+            Some(MetaUpdate::Title("⠋ Task".to_owned())),
+        );
+        assert_eq!(titles.due(), None);
+
+        assert_eq!(titles.observed(Some("⠙ Task".to_owned()), None, "here", at(20)), None);
+        assert_eq!(titles.due(), Some(at(100)));
+        assert_eq!(titles.take_due(at(99)), None);
+
+        assert_eq!(titles.observed(Some("⠹ Task".to_owned()), None, "here", at(50)), None);
+        assert_eq!(titles.due(), Some(at(100)));
+
+        assert_eq!(titles.observed(Some("⠋ Task".to_owned()), None, "here", at(60)), None);
+        assert_eq!(titles.due(), None);
+
+        assert_eq!(titles.observed(Some("⠸ Task".to_owned()), None, "here", at(70)), None);
+        assert_eq!(titles.due(), Some(at(100)));
+        assert_eq!(titles.take_due(at(100)), Some("⠸ Task".to_owned()));
+        assert_eq!(titles.due(), None);
+
+        assert_eq!(
+            titles.observed(None, Some("file://there/tmp".to_owned()), "here", at(110)),
+            None,
+        );
+        assert_eq!(
+            titles.observed(None, Some("file://here/tmp".to_owned()), "here", at(115)),
+            Some(MetaUpdate::Cwd(cwd("/tmp"))),
+        );
+
+        assert_eq!(titles.observed(Some("⠼ Task".to_owned()), None, "here", at(120)), None);
+        assert_eq!(titles.due(), Some(at(200)));
+        assert_eq!(
+            titles.observed(None, Some("file://here/var".to_owned()), "here", at(130)),
+            Some(MetaUpdate::Both { title: "⠼ Task".to_owned(), cwd: cwd("/var") }),
+        );
+        assert_eq!(titles.due(), None);
+
+        assert_eq!(titles.observed(Some("⠴ Task".to_owned()), None, "here", at(150)), None);
+        assert_eq!(titles.due(), Some(at(230)));
+        assert_eq!(
+            titles.finish(None, Some("file://here/opt".to_owned()), "here"),
+            FinalMeta { title: Some("⠴ Task".to_owned()), cwd: Some(cwd("/opt")) },
+        );
+        assert_eq!(titles.due(), None);
+        assert_eq!(titles.finish(None, None, "here"), FinalMeta::default());
+    }
+
+    #[test]
     fn a_cwd_is_one_this_machine_has() {
-        let cwd = |said: &str| local_cwd(said, "here");
+        let cwd = |said: &str| titles::local_cwd(said, "here").map(|cwd| cwd.as_str().to_owned());
         assert_eq!(cwd("file://here/home/a%20b"), Some("/home/a b".to_owned()));
         assert_eq!(cwd("file://HERE/tmp"), Some("/tmp".to_owned()));
         assert_eq!(cwd("file:///tmp"), Some("/tmp".to_owned()));

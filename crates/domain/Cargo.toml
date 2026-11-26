@@ -2,6 +2,7 @@
 name = "lune-domain"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 license.workspace = true
 publish = false
 description = "What lune's projects are, apart from any IO: their worktrees, views and layouts, how a change to them is checked, how they are kept as text, the rows a client reads them into, and the names, agents and terminals they hold"
