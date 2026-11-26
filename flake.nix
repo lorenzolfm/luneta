@@ -60,7 +60,6 @@
           );
 
           cargoFiles = pkgs.lib.fileset.unions [
-            ./.cargo/config.toml
             ./crates
             ./proto
             ./skills/lune/SKILL.md
