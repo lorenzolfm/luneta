@@ -1,4 +1,4 @@
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs::{self, File};
@@ -14,6 +14,8 @@ const WINDOW_BYTES: u64 = 2 * 1024 * 1024;
 pub const TAILS_BYTES: usize = 512 * 1024;
 
 pub const IDS_MAX: usize = 32;
+
+pub const STEPS_MAX: usize = 64;
 
 const TITLE_CHARS: usize = 120;
 const ASKED_CHARS: usize = 500;
@@ -52,6 +54,12 @@ const ON_WHAT_FIELDS: [&str; 13] = [
 ];
 
 const _: () = assert!(ALL_KINDS.len() == KINDS.len() + AGY_KINDS.len());
+const _: () = assert!(WINDOW_BYTES > 0);
+const _: () = assert!(WINDOW_BYTES < u64::MAX);
+const _: () = assert!(WINDOW_BYTES < usize::MAX as u64);
+const _: () = assert!(TAILS_BYTES > 0);
+const _: () = assert!(TAILS_BYTES as u64 <= WINDOW_BYTES);
+const _: () = assert!(STEPS_MAX > 0);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Folders {
@@ -86,13 +94,23 @@ impl TranscriptEnd {
     }
 
     pub fn of_api(said: api::transcript_ends_response::TranscriptEnd) -> Result<Self, String> {
-        match api::Harness::try_from(said.harness) {
-            Ok(api::Harness::ClaudeCode) => Ok(TranscriptEnd::Claude(said.lines)),
-            Ok(api::Harness::Antigravity) => Ok(TranscriptEnd::Antigravity(said.lines)),
-            Ok(api::Harness::Pi) => Err("pi keeps no transcript this lune reads".to_owned()),
-            Ok(api::Harness::Unspecified) => Err("it names no harness".to_owned()),
-            Err(_) => Err(format!("harness {} is one this lune does not know", said.harness)),
+        if said.lines.len() > TAILS_BYTES {
+            return Err(format!(
+                "transcript end: {} bytes, of {TAILS_BYTES} at the most",
+                said.lines.len()
+            ));
         }
+        let end = match api::Harness::try_from(said.harness) {
+            Ok(api::Harness::ClaudeCode) => TranscriptEnd::Claude(said.lines),
+            Ok(api::Harness::Antigravity) => TranscriptEnd::Antigravity(said.lines),
+            Ok(api::Harness::Pi) => return Err("pi keeps no transcript this lune reads".to_owned()),
+            Ok(api::Harness::Unspecified) => return Err("it names no harness".to_owned()),
+            Err(_) => {
+                return Err(format!("harness {} is one this lune does not know", said.harness));
+            },
+        };
+        assert!(end.lines().len() <= TAILS_BYTES);
+        Ok(end)
     }
 }
 
@@ -216,34 +234,54 @@ pub fn find(projects: &Path, id: &SessionId) -> Option<PathBuf> {
     found_in(&project_dirs(projects), id)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TailLimits {
+    pub share_bytes_max: usize,
+    pub steps_max: usize,
+}
+
 #[derive(Debug)]
 pub struct Tail {
     path: PathBuf,
-    share: usize,
-    steps: usize,
-    looked: Option<u64>,
-    read: u64,
+    share_bytes_max: usize,
+    steps_max: usize,
+    file_bytes_seen: Option<u64>,
+    read_offset: u64,
     torn: bool,
-    kept: VecDeque<Kept>,
+    kept: VecDeque<KeptRecord>,
     kept_bytes: usize,
 }
 
 #[derive(Debug)]
-struct Kept {
-    at: u64,
+struct KeptRecord {
+    offset: u64,
     bytes: usize,
     note: Note,
 }
 
+struct ReadPlan {
+    reset: bool,
+    read_offset: u64,
+    torn: bool,
+    read_bytes: u64,
+}
+
 impl Tail {
     #[must_use]
-    pub fn new(path: PathBuf, share: usize, steps: usize) -> Tail {
+    pub fn new(path: PathBuf, limits: TailLimits) -> Tail {
+        assert!(!path.as_os_str().is_empty(), "a tail reads a named path");
+        assert!(limits.share_bytes_max > 0, "a tail keeps at least one byte");
+        assert!(
+            u64::try_from(limits.share_bytes_max).is_ok_and(|bytes| bytes <= WINDOW_BYTES),
+            "a tail's share fits within the window"
+        );
+        assert!(limits.steps_max <= STEPS_MAX, "a tail's steps fit within the maximum");
         Tail {
             path,
-            share,
-            steps,
-            looked: None,
-            read: 0,
+            share_bytes_max: limits.share_bytes_max,
+            steps_max: limits.steps_max,
+            file_bytes_seen: None,
+            read_offset: 0,
             torn: false,
             kept: VecDeque::new(),
             kept_bytes: 0,
@@ -251,62 +289,156 @@ impl Tail {
     }
 
     pub fn grown(&mut self) -> io::Result<Option<Digest>> {
-        if self.looked == Some(fs::metadata(&self.path)?.len()) {
+        assert!(self.kept_bytes <= self.share_bytes_max);
+        if self.torn {
+            assert!(self.kept.is_empty(), "a torn tail keeps no records");
+        }
+        if self.kept.is_empty() {
+            assert_eq!(self.kept_bytes, 0);
+        }
+        if self.file_bytes_seen == Some(fs::metadata(&self.path)?.len()) {
             return Ok(None);
         }
         let mut file = File::open(&self.path)?;
-        let length = file.metadata()?.len();
-        if length < self.read || length - self.read > WINDOW_BYTES {
-            let from = length.saturating_sub(WINDOW_BYTES);
-            self.kept.clear();
-            self.kept_bytes = 0;
-            self.read = from.saturating_sub(1);
-            self.torn = from > 0;
+        let file_bytes = file.metadata()?.len();
+        let plan = self.plan_read(file_bytes);
+        file.seek(SeekFrom::Start(plan.read_offset))?;
+        let read_capacity = usize::try_from(plan.read_bytes).expect("window read fits in memory");
+        let mut appended_bytes = Vec::with_capacity(read_capacity);
+        file.take(plan.read_bytes).read_to_end(&mut appended_bytes)?;
+        let read_actual = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
+        if read_actual < plan.read_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "transcript shrank while reading",
+            ));
         }
-        assert!(length - self.read <= WINDOW_BYTES + 1, "a look reads no more than the window");
-        file.seek(SeekFrom::Start(self.read))?;
-        let mut grown = Vec::new();
-        file.take(length - self.read).read_to_end(&mut grown)?;
-        self.take_in(&grown);
-        let window = length.saturating_sub(WINDOW_BYTES);
-        while self.kept.front().is_some_and(|kept| kept.at < window) {
-            self.forget_first();
-        }
-        self.looked = Some(length);
-        Ok(Some(fold(self.kept.iter().map(|kept| &kept.note), self.steps)))
+        assert_eq!(read_actual, plan.read_bytes);
+        self.apply_read(&plan, &appended_bytes, file_bytes);
+        let digest =
+            fold(self.kept.iter().map(|record| Cow::Borrowed(&record.note)), self.steps_max);
+        assert!(digest.steps.len() <= self.steps_max);
+        Ok(Some(digest))
     }
 
-    fn take_in(&mut self, grown: &[u8]) {
-        let mut rest = grown;
+    fn plan_read(&self, file_bytes: u64) -> ReadPlan {
+        if let Some(seen_bytes) = self.file_bytes_seen {
+            assert!(self.read_offset <= seen_bytes, "the read cursor stays within what was seen");
+        } else {
+            assert_eq!(self.read_offset, 0, "an unread tail starts at byte zero");
+        }
+        let grew_from_seen =
+            self.file_bytes_seen.is_none_or(|seen_bytes| file_bytes >= seen_bytes);
+        let within_window = if grew_from_seen {
+            assert!(file_bytes >= self.read_offset);
+            file_bytes - self.read_offset <= WINDOW_BYTES
+        } else {
+            false
+        };
+        let plan = if within_window {
+            ReadPlan {
+                reset: false,
+                read_offset: self.read_offset,
+                torn: self.torn,
+                read_bytes: file_bytes - self.read_offset,
+            }
+        } else {
+            let window_offset = file_bytes.saturating_sub(WINDOW_BYTES);
+            let read_offset = window_offset.saturating_sub(1);
+            ReadPlan {
+                reset: true,
+                read_offset,
+                torn: window_offset > 0,
+                read_bytes: file_bytes - read_offset,
+            }
+        };
+        assert!(plan.read_offset <= file_bytes, "a read starts within the file");
+        assert!(plan.read_bytes <= WINDOW_BYTES + 1, "a look reads no more than the window");
+        plan
+    }
+
+    fn apply_read(&mut self, plan: &ReadPlan, appended_bytes: &[u8], file_bytes: u64) {
+        let actual = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
+        assert_eq!(actual, plan.read_bytes);
+        assert_eq!(plan.read_offset + plan.read_bytes, file_bytes);
+        if plan.reset {
+            self.kept.clear();
+            self.kept_bytes = 0;
+            self.read_offset = plan.read_offset;
+            self.torn = plan.torn;
+        } else {
+            assert_eq!(self.read_offset, plan.read_offset);
+            assert_eq!(self.torn, plan.torn);
+        }
+        self.take_in(appended_bytes);
+        let window_offset = file_bytes.saturating_sub(WINDOW_BYTES);
+        while self.kept.front().is_some_and(|record| record.offset < window_offset) {
+            self.forget_first();
+        }
+        self.file_bytes_seen = Some(file_bytes);
+        assert!(self.read_offset <= file_bytes);
+        assert!(self.kept_bytes <= self.share_bytes_max);
+        if let Some(first) = self.kept.front() {
+            assert!(first.offset >= window_offset);
+        }
+        if self.kept.is_empty() {
+            assert_eq!(self.kept_bytes, 0);
+        }
+    }
+
+    fn take_in(&mut self, appended_bytes: &[u8]) {
+        let read_max = usize::try_from(WINDOW_BYTES + 1).expect("window fits in memory");
+        assert!(appended_bytes.len() <= read_max, "a look takes no more than the window");
+        let read_before = self.read_offset;
+        let mut rest = appended_bytes;
         while let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
             if self.torn {
                 self.torn = false;
             } else {
-                self.keep(self.read, &rest[..end]);
+                self.keep(self.read_offset, &rest[..end]);
             }
-            self.read += end as u64 + 1;
+            let line_bytes = u64::try_from(end).expect("line length fits in u64") + 1;
+            self.read_offset += line_bytes;
             rest = &rest[end + 1..];
         }
+        let consumed = self.read_offset - read_before;
+        let trailing = u64::try_from(rest.len()).expect("slice length fits in u64");
+        let total = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
+        assert_eq!(consumed + trailing, total, "every byte read is consumed or awaits newline");
     }
 
-    fn keep(&mut self, at: u64, line: &[u8]) {
+    fn keep(&mut self, offset: u64, line: &[u8]) {
+        assert!(!self.torn, "a torn record is never kept");
+        if let Some(last) = self.kept.back() {
+            assert!(offset > last.offset, "records arrive at strictly increasing offsets");
+        }
         let record = String::from_utf8_lossy(line);
         let record = record.strip_suffix('\r').unwrap_or(&record);
         if !ALL_KINDS.iter().any(|kind| record.contains(kind)) {
             return;
         }
         let bytes = record.len() + 1;
-        self.kept.push_back(Kept { at, bytes, note: noted(record, note_any) });
+        assert!(bytes > 0);
+        if bytes > self.share_bytes_max {
+            self.kept.clear();
+            self.kept_bytes = 0;
+            return;
+        }
+        self.kept.push_back(KeptRecord { offset, bytes, note: noted(record, note_any) });
         self.kept_bytes += bytes;
-        while self.kept_bytes > self.share {
+        while self.kept_bytes > self.share_bytes_max {
             self.forget_first();
         }
-        assert!(self.kept_bytes <= self.share);
+        assert!(self.kept_bytes <= self.share_bytes_max);
     }
 
     fn forget_first(&mut self) {
-        let forgot = self.kept.pop_front().expect("a tail over its share keeps a record");
+        let forgot = self.kept.pop_front().expect("a tail forgetting a record keeps at least one");
+        assert!(self.kept_bytes >= forgot.bytes, "kept bytes cover every kept record");
         self.kept_bytes -= forgot.bytes;
+        if self.kept.is_empty() {
+            assert_eq!(self.kept_bytes, 0);
+        }
     }
 }
 
@@ -409,14 +541,18 @@ impl Digest {
 }
 
 #[must_use]
-pub fn digest_end(end: &TranscriptEnd, steps: usize) -> Digest {
-    match end {
-        TranscriptEnd::Claude(lines) => fold(notes(lines, note_claude), steps),
-        TranscriptEnd::Antigravity(lines) => fold(notes(lines, note_agy), steps),
-    }
+pub fn digest_end(end: &TranscriptEnd, steps_max: usize) -> Digest {
+    assert!(end.lines().len() <= TAILS_BYTES, "a transcript end fits within the tail share");
+    assert!(steps_max <= STEPS_MAX, "steps kept fit within the maximum");
+    let digest = match end {
+        TranscriptEnd::Claude(lines) => fold(notes(lines, note_claude), steps_max),
+        TranscriptEnd::Antigravity(lines) => fold(notes(lines, note_agy), steps_max),
+    };
+    assert!(digest.steps.len() <= steps_max);
+    digest
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Note {
     Silent,
     Titled(String),
@@ -425,11 +561,15 @@ enum Note {
     Stepped(Vec<String>),
 }
 
-fn notes(end: &str, of: fn(&Value) -> Note) -> Vec<Note> {
-    end.lines().map(|line| noted(line, of)).collect()
+fn notes(end: &str, of: fn(&Value) -> Note) -> impl Iterator<Item = Cow<'static, Note>> + '_ {
+    assert!(end.len() <= TAILS_BYTES, "notes read no more than the tail share");
+    end.lines().map(move |line| Cow::Owned(noted(line, of)))
 }
 
 fn noted(line: &str, of: fn(&Value) -> Note) -> Note {
+    let line_max = usize::try_from(WINDOW_BYTES + 1).expect("window fits in memory");
+    assert!(line.len() <= line_max, "a record fits within the window");
+    assert!(!line.as_bytes().contains(&b'\n'), "a record is one line");
     let Ok(record) = serde_json::from_str::<Value>(line) else {
         return Note::Silent;
     };
@@ -439,32 +579,50 @@ fn noted(line: &str, of: fn(&Value) -> Note) -> Note {
     of(&record)
 }
 
-fn fold<N: Borrow<Note>>(notes: impl IntoIterator<Item = N>, steps: usize) -> Digest {
-    let mut title = None;
-    let mut asked: Option<Asked> = None;
-    let mut last: VecDeque<String> = VecDeque::with_capacity(steps + 1);
+fn fold<'a>(notes: impl IntoIterator<Item = Cow<'a, Note>>, steps_max: usize) -> Digest {
+    assert!(steps_max <= STEPS_MAX, "steps kept fit within the maximum");
+    let mut title: Option<Cow<'a, str>> = None;
+    let mut asked: Option<Cow<'a, Asked>> = None;
+    let mut last: VecDeque<Cow<'a, str>> = VecDeque::with_capacity(steps_max);
     for note in notes {
-        match note.borrow() {
-            Note::Silent => {},
-            Note::Titled(said) => title = Some(said.clone()),
-            Note::Recorded(prompt) => {
-                if !asked.as_ref().is_some_and(|typed| prompt.cuts(typed)) {
-                    asked = Some(prompt.clone());
+        match note {
+            Cow::Borrowed(Note::Silent) | Cow::Owned(Note::Silent) => {},
+            Cow::Borrowed(Note::Titled(said)) => title = Some(Cow::Borrowed(said.as_str())),
+            Cow::Owned(Note::Titled(said)) => title = Some(Cow::Owned(said)),
+            Cow::Borrowed(Note::Recorded(prompt)) => {
+                if asked.as_deref().is_none_or(|typed| !prompt.cuts(typed)) {
+                    asked = Some(Cow::Borrowed(prompt));
                 }
             },
-            Note::Typed(typed) => asked = Some(typed.clone()),
-            Note::Stepped(stepped) => {
+            Cow::Owned(Note::Recorded(prompt)) => {
+                if asked.as_deref().is_none_or(|typed| !prompt.cuts(typed)) {
+                    asked = Some(Cow::Owned(prompt));
+                }
+            },
+            Cow::Borrowed(Note::Typed(typed)) => asked = Some(Cow::Borrowed(typed)),
+            Cow::Owned(Note::Typed(typed)) => asked = Some(Cow::Owned(typed)),
+            Cow::Borrowed(Note::Stepped(stepped)) => {
                 for step in stepped {
-                    push_step(&mut last, step.clone(), steps);
+                    push_step(&mut last, Cow::Borrowed(step.as_str()), steps_max);
+                }
+            },
+            Cow::Owned(Note::Stepped(stepped)) => {
+                for step in stepped {
+                    push_step(&mut last, Cow::Owned(step), steps_max);
                 }
             },
         }
     }
-    assert!(last.len() <= steps);
-    Digest { title, asked, steps: last.into() }
+    assert!(last.len() <= steps_max);
+    Digest {
+        title: title.map(Cow::into_owned),
+        asked: asked.map(Cow::into_owned),
+        steps: last.into_iter().map(Cow::into_owned).collect(),
+    }
 }
 
 fn note_any(record: &Value) -> Note {
+    assert_ne!(record["isSidechain"].as_bool(), Some(true));
     match note_claude(record) {
         Note::Silent => note_agy(record),
         note => note,
@@ -472,6 +630,7 @@ fn note_any(record: &Value) -> Note {
 }
 
 fn note_claude(record: &Value) -> Note {
+    assert_ne!(record["isSidechain"].as_bool(), Some(true));
     match record["type"].as_str() {
         Some("ai-title") => record["aiTitle"]
             .as_str()
@@ -480,10 +639,12 @@ fn note_claude(record: &Value) -> Note {
             let prompt = record["lastPrompt"].as_str().and_then(Asked::recorded);
             prompt.map_or(Note::Silent, Note::Recorded)
         },
-        Some("user")
-            if record["isMeta"].as_bool() != Some(true)
-                && record["isCompactSummary"].as_bool() != Some(true) =>
-        {
+        Some("user") => {
+            let is_meta = record["isMeta"].as_bool() == Some(true);
+            let is_compact_summary = record["isCompactSummary"].as_bool() == Some(true);
+            if is_meta || is_compact_summary {
+                return Note::Silent;
+            }
             typed_by_you(&record["message"]["content"])
                 .map_or(Note::Silent, |typed| Note::Typed(Asked::typed(&typed)))
         },
@@ -496,11 +657,17 @@ fn note_claude(record: &Value) -> Note {
 }
 
 fn note_agy(record: &Value) -> Note {
+    assert_ne!(record["isSidechain"].as_bool(), Some(true));
     match record["type"].as_str() {
-        Some("USER_INPUT") if record["source"].as_str() != Some("SYSTEM") => record["content"]
-            .as_str()
-            .and_then(agy_user_text)
-            .map_or(Note::Silent, |typed| Note::Typed(Asked::typed(typed))),
+        Some("USER_INPUT") => {
+            if record["source"].as_str() == Some("SYSTEM") {
+                return Note::Silent;
+            }
+            record["content"]
+                .as_str()
+                .and_then(agy_user_text)
+                .map_or(Note::Silent, |typed| Note::Typed(Asked::typed(typed)))
+        },
         Some("PLANNER_RESPONSE") => {
             let mut stepped = Vec::new();
             if let Some(text) =
@@ -625,7 +792,7 @@ fn turn_of_agy(end: &str) -> Turn {
     Turn { tool, said }
 }
 
-fn push_step(last: &mut VecDeque<String>, step: String, steps_max: usize) {
+fn push_step<T>(last: &mut VecDeque<T>, step: T, steps_max: usize) {
     assert!(last.len() <= steps_max);
     if steps_max == 0 {
         return;
@@ -1035,7 +1202,8 @@ mod tests {
         });
         fs::write(&path, format!("{user}\n{tool}\n{reply}\n")).unwrap();
 
-        let summary = Tail::new(path.clone(), 8192, 4).grown().unwrap().unwrap();
+        let limits = TailLimits { share_bytes_max: 8192, steps_max: 4 };
+        let summary = Tail::new(path.clone(), limits).grown().unwrap().unwrap();
         assert_eq!(summary.asked, Some(Asked::Whole("audit this".to_owned())));
         assert_eq!(summary.steps, ["ran write_file: /w/a.rs", "said: Done auditing."]);
         assert_eq!(last_said(&path, 100).unwrap(), Some("Done auditing.".to_owned()));
@@ -1049,6 +1217,8 @@ mod tests {
         assert_eq!(on_what(&literal_args), Some("123"));
         assert_eq!(literal_args["Query"], json!("true"));
     }
+
+    const TEST_LIMITS: TailLimits = TailLimits { share_bytes_max: 8192, steps_max: 4 };
 
     fn said(text: &str) -> String {
         let content = json!([{"type": "text", "text": text}]);
@@ -1074,7 +1244,7 @@ mod tests {
     fn a_tail_reads_only_what_was_added_since_its_last_look() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let mut tail = Tail::new(path.clone(), 8192, 4);
+        let mut tail = Tail::new(path.clone(), TEST_LIMITS);
         added(&path, &said("first"));
         assert_eq!(steps(&mut tail), ["said: first"]);
         assert_eq!(tail.grown().unwrap(), None);
@@ -1090,7 +1260,7 @@ mod tests {
     fn a_record_half_written_waits_for_its_end() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let mut tail = Tail::new(path.clone(), 8192, 4);
+        let mut tail = Tail::new(path.clone(), TEST_LIMITS);
         let first = said("first");
         let (start, end) = first.split_at(first.len() / 2);
         added(&path, start);
@@ -1103,8 +1273,8 @@ mod tests {
     fn a_tail_tells_what_a_whole_read_tells() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let (share, kept) = (700, 3);
-        let mut tail = Tail::new(path.clone(), share, kept);
+        let limits = TailLimits { share_bytes_max: 700, steps_max: 3 };
+        let mut tail = Tail::new(path.clone(), limits);
         let aside = json!({"type": "user", "isSidechain": true, "message": {"content": "aside"}});
         let records = |n: usize| match n % 5 {
             0 => format!("{}\n", typed(&format!("prompt {n}"))),
@@ -1115,7 +1285,10 @@ mod tests {
         };
         for n in 0..40 {
             added(&path, &records(n));
-            let whole = fold(notes(&end(&path, share, &ALL_KINDS).unwrap(), note_any), kept);
+            let whole = fold(
+                notes(&end(&path, limits.share_bytes_max, &ALL_KINDS).unwrap(), note_any),
+                limits.steps_max,
+            );
             assert_eq!(tail.grown().unwrap(), Some(whole), "after record {n}");
         }
     }
@@ -1125,8 +1298,8 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
         let window = usize::try_from(WINDOW_BYTES).unwrap();
-        let mut looked_between = Tail::new(path.clone(), 8192, 4);
-        let mut looked_after = Tail::new(path.clone(), 8192, 4);
+        let mut looked_between = Tail::new(path.clone(), TEST_LIMITS);
+        let mut looked_after = Tail::new(path.clone(), TEST_LIMITS);
         added(&path, &said("old"));
         assert_eq!(steps(&mut looked_between), ["said: old"]);
         assert_eq!(steps(&mut looked_after), ["said: old"]);
@@ -1136,7 +1309,7 @@ mod tests {
         added(&path, &said("new"));
         assert_eq!(steps(&mut looked_between), ["said: new"]);
         assert_eq!(steps(&mut looked_after), ["said: new"]);
-        let mut fresh = Tail::new(path.clone(), 8192, 4);
+        let mut fresh = Tail::new(path.clone(), TEST_LIMITS);
         assert_eq!(steps(&mut fresh), ["said: new"]);
     }
 
@@ -1144,10 +1317,84 @@ mod tests {
     fn a_transcript_written_anew_is_read_anew() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let mut tail = Tail::new(path.clone(), 8192, 4);
+        let mut tail = Tail::new(path.clone(), TEST_LIMITS);
         added(&path, &format!("{}{}", said("first"), said("second")));
         assert_eq!(steps(&mut tail), ["said: first", "said: second"]);
         fs::write(&path, said("other")).unwrap();
         assert_eq!(steps(&mut tail), ["said: other"]);
+    }
+
+    #[test]
+    fn a_transcript_that_shrank_with_a_half_written_record_is_read_anew() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let mut tail = Tail::new(path.clone(), TEST_LIMITS);
+        let first = said("first");
+        let trailing = " ".repeat(200);
+        added(&path, &format!("{first}{trailing}"));
+        assert_eq!(steps(&mut tail), ["said: first"]);
+
+        let replaced = said("replaced and longer than first");
+        assert!(replaced.len() > first.len());
+        assert!(replaced.len() < first.len() + trailing.len());
+        fs::write(&path, &replaced).unwrap();
+        assert_eq!(steps(&mut tail), ["said: replaced and longer than first"]);
+    }
+
+    #[test]
+    fn a_record_over_the_share_clears_earlier_records_without_keeping_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let limits = TailLimits { share_bytes_max: 200, steps_max: 4 };
+        let mut tail = Tail::new(path.clone(), limits);
+        added(&path, &said("before"));
+        assert_eq!(steps(&mut tail), ["said: before"]);
+
+        let oversized = said(&"x".repeat(300));
+        assert!(oversized.len() > limits.share_bytes_max);
+        added(&path, &oversized);
+        let whole = fold(
+            notes(&end(&path, limits.share_bytes_max, &ALL_KINDS).unwrap(), note_any),
+            limits.steps_max,
+        );
+        assert_eq!(tail.grown().unwrap(), Some(whole));
+        assert_eq!(tail.kept.len(), 0);
+        assert_eq!(tail.kept_bytes, 0);
+
+        added(&path, &said("after"));
+        assert_eq!(steps(&mut tail), ["said: after"]);
+    }
+
+    #[test]
+    fn a_failed_read_leaves_a_tail_unchanged() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let mut tail = Tail::new(path.clone(), TEST_LIMITS);
+        added(&path, &said("first"));
+        assert_eq!(steps(&mut tail), ["said: first"]);
+
+        let read_before = tail.read_offset;
+        let seen_before = tail.file_bytes_seen;
+        added(&path, &said("second"));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(tail.grown().is_err());
+        assert_eq!(tail.read_offset, read_before);
+        assert_eq!(tail.file_bytes_seen, seen_before);
+        assert_eq!(tail.kept.len(), 1);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(steps(&mut tail), ["said: first", "said: second"]);
+    }
+
+    #[test]
+    fn a_transcript_end_over_the_tail_share_is_refused() {
+        let oversized = api::transcript_ends_response::TranscriptEnd {
+            harness: api::Harness::ClaudeCode.into(),
+            lines: "x".repeat(TAILS_BYTES + 1),
+        };
+        let refused = TranscriptEnd::of_api(oversized).unwrap_err();
+        assert!(refused.contains(&TAILS_BYTES.to_string()), "{refused}");
     }
 }

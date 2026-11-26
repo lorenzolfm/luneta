@@ -342,7 +342,15 @@ fn ends_of(answer: TranscriptEndsResponse) -> (HashMap<SessionId, TranscriptEnd>
         Ok((session(id)?, end))
     };
     let said: Vec<Result<(SessionId, TranscriptEnd), String>> = if typed_ends.is_empty() {
-        ends.into_iter().map(|(id, end)| read(&id, Ok(TranscriptEnd::Claude(end)))).collect()
+        ends.into_iter()
+            .map(|(id, lines)| {
+                let end = luned::api::transcript_ends_response::TranscriptEnd {
+                    harness: luned::api::Harness::ClaudeCode.into(),
+                    lines,
+                };
+                read(&id, TranscriptEnd::of_api(end))
+            })
+            .collect()
     } else {
         typed_ends.into_iter().map(|(id, end)| read(&id, TranscriptEnd::of_api(end))).collect()
     };
@@ -476,12 +484,26 @@ mod tests {
         ];
         assert_eq!(unread, unread_said);
 
-        let ends = [(claude.to_owned(), "l".to_owned()), ("x".to_owned(), "l".to_owned())];
+        let ends = [
+            (claude.to_owned(), "l".to_owned()),
+            ("x".to_owned(), "l".to_owned()),
+            (pi.to_owned(), "x".repeat(luned::transcripts::TAILS_BYTES + 1)),
+        ];
         let (ends, typed_ends) = (HashMap::from(ends), HashMap::new());
         let older = TranscriptEndsResponse { ends, typed_ends };
         let (read, unread) = ends_of(older);
         assert_eq!(read, HashMap::from([(id(claude), TranscriptEnd::Claude("l".to_owned()))]));
-        assert_eq!(unread, vec!["\"x\" names no session".to_owned()]);
+        assert_eq!(
+            unread,
+            vec![
+                "\"x\" names no session".to_owned(),
+                format!(
+                    "{pi}: transcript end: {} bytes, of {} at the most",
+                    luned::transcripts::TAILS_BYTES + 1,
+                    luned::transcripts::TAILS_BYTES
+                ),
+            ]
+        );
     }
 
     #[test]

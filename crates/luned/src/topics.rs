@@ -11,7 +11,7 @@ use tokio::sync::watch::Receiver;
 
 use crate::agent::{Agent, Name};
 use crate::core::{self, Command};
-use crate::transcripts::{self, one_line, Asked, Digest, SessionId, Tail};
+use crate::transcripts::{self, one_line, Asked, Digest, SessionId, Tail, TailLimits};
 use crate::watch::Troubles;
 use crate::{claude, program};
 
@@ -22,8 +22,12 @@ const WRITING: Duration = Duration::from_mins(1);
 const CALLS_MAX: usize = 4;
 
 const STEPS: usize = 8;
+const _: () = assert!(STEPS > 0);
+const _: () = assert!(STEPS <= transcripts::STEPS_MAX);
 
 const SHARE: usize = 256 * 1024;
+const _: () = assert!(SHARE > 0);
+const _: () = assert!(SHARE <= transcripts::TAILS_BYTES);
 
 const TOPIC_CHARS: usize = 80;
 
@@ -87,16 +91,26 @@ impl Kept {
     }
 
     fn grown(&mut self, projects: &Path, id: &SessionId) -> io::Result<Option<Digest>> {
-        let mut tail = match self.transcript.take() {
-            Some(tail) => tail,
-            None => match transcripts::find(projects, id) {
-                Some(path) => Tail::new(path, SHARE, STEPS),
-                None => return Ok(None),
-            },
+        assert_ne!(id.as_str(), "");
+        let tail = if let Some(tail) = &mut self.transcript {
+            tail
+        } else {
+            let Some(path) = transcripts::find(projects, id) else {
+                return Ok(None);
+            };
+            let limits = TailLimits { share_bytes_max: SHARE, steps_max: STEPS };
+            self.transcript.insert(Tail::new(path, limits))
         };
-        let grown = tail.grown()?;
-        self.transcript = Some(tail);
-        Ok(grown)
+        let result = tail.grown();
+        if let Err(error) = &result
+            && error.kind() == io::ErrorKind::NotFound
+        {
+            self.transcript = None;
+        }
+        if let Ok(Some(digest)) = &result {
+            assert!(digest.steps.len() <= STEPS);
+        }
+        result
     }
 }
 
@@ -904,9 +918,29 @@ mod tests {
             let agents = [agent(ID, status, 2)];
             mode(0o000);
             assert_eq!(topics.look(&agents, true), []);
+            assert!(topics.kept[ID].transcript.is_some());
             mode(0o644);
             assert_eq!(topics.look(&agents, true).len(), 1);
         }
+    }
+
+    #[test]
+    fn a_vanished_transcript_clears_its_tail_and_is_found_again() {
+        let projects = Projects::new();
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
+        let mut topics = with_a_topic(&projects, &busy);
+        assert!(topics.kept[ID].transcript.is_some());
+
+        fs::remove_file(projects.transcript(ID)).unwrap();
+        assert_eq!(topics.look(&busy, true), []);
+        assert!(topics.kept[ID].transcript.is_none());
+
+        fs::create_dir(projects.0.path().join("-other")).unwrap();
+        let relocated = projects.0.path().join(format!("-other/{ID}.jsonl"));
+        let record = json!({"type": "user", "message": {"content": "now the tabs"}});
+        fs::write(&relocated, format!("{record}\n")).unwrap();
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        assert!(topics.kept[ID].transcript.is_some());
     }
 
     #[test]
