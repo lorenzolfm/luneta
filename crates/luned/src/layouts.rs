@@ -513,7 +513,7 @@ impl Layouts {
             },
             Command::Listed(listed) => self.heard_listed(listed),
             Command::Emptied { since } => {
-                let none = TerminalsListed { terminals: Vec::new(), whole: true, since };
+                let none = TerminalsListed { terminals: BTreeMap::new(), whole: true, since };
                 self.heard_listed(none);
                 self.known.clear();
                 self.listed.clear();
@@ -1070,7 +1070,8 @@ impl Layouts {
             .and_then(|focus| projects.holding_terminal(focus))
             .and_then(|(_, focused)| self.known.get(&focused.id()))
             .and_then(|known| self.listed.get(&known.key))
-            .and_then(|listed| Dir::parse(&listed.cwd).ok())
+            .and_then(|listed| listed.cwd.as_ref())
+            .and_then(|cwd| Dir::parse(cwd.as_str()).ok())
             .filter(|cwd| home.below(cwd).is_some());
         let folder = listed_cwd.unwrap_or(home);
         let cwd = Directory::from(&folder);
@@ -1411,17 +1412,16 @@ impl Layouts {
             }
         }
         let Some(projects) = self.store.projects() else {
-            self.listed = by_key(terminals);
+            self.listed = terminals;
             return;
         };
         let mut found: BTreeMap<TerminalViewId, (TerminalKey, Option<Size>)> = BTreeMap::new();
-        let mut keys: BTreeSet<TerminalKey> = BTreeSet::new();
-        for listed in &terminals {
+        for (&key, listed) in &terminals {
             let Some(view) = tagged(&listed.tag) else {
                 continue;
             };
             let Some((_, held)) = projects.holding_terminal(view) else {
-                let id = listed.key.id;
+                let id = key.id;
                 let unheld = format!("terminal {id} is tagged {view}, no terminal of a layout");
                 self.troubles.say(unheld);
                 continue;
@@ -1432,12 +1432,7 @@ impl Layouts {
                 self.troubles.say(why);
                 continue;
             }
-            if !keys.insert(listed.key) {
-                let why = format!("two terminals share key {}; the first is kept", listed.key.id);
-                self.troubles.say(why);
-                continue;
-            }
-            found.insert(terminal, (listed.key, listed.size));
+            found.insert(terminal, (key, listed.size));
         }
         let ended: Vec<TerminalViewId> = if whole {
             let gone = |(terminal, known): &(&TerminalViewId, &Known)| {
@@ -1449,6 +1444,8 @@ impl Layouts {
             self.troubles.say(unread.to_owned());
             Vec::new()
         };
+        let before_keys: BTreeMap<TerminalViewId, TerminalKey> =
+            self.known.iter().map(|(terminal, known)| (*terminal, known.key)).collect();
         let owners: BTreeMap<TerminalKey, TerminalViewId> =
             found.iter().map(|(terminal, (key, _))| (*key, *terminal)).collect();
         self.known.retain(|terminal, known| {
@@ -1472,14 +1469,16 @@ impl Layouts {
         }
         let keys: BTreeSet<TerminalKey> = self.known.values().map(|known| known.key).collect();
         assert_eq!(keys.len(), self.known.len(), "no two terminals share a key of lune-mux");
-        self.listed = by_key(terminals);
+        let before = std::mem::replace(&mut self.listed, terminals);
         for terminal in ended {
             if let Err(failed) = self.closed(terminal.view()) {
                 let stays = format!("terminal {terminal} ended, and stays in its layout");
                 self.troubles.say(format!("{stays}: {}", failed.said()));
             }
         }
-        self.read_runs();
+        if runs_changed(&self.known, &before_keys, &before, &self.listed) {
+            self.read_runs();
+        }
     }
 
     fn read_runs(&mut self) {
@@ -1500,7 +1499,11 @@ impl Layouts {
             let Some((_, held)) = projects.holding_terminal(terminal.view()) else {
                 continue;
             };
-            let folder = Dir::parse(&listed.cwd).unwrap_or_else(|_| held.folder().clone());
+            let folder = listed
+                .cwd
+                .as_ref()
+                .and_then(|cwd| Dir::parse(cwd.as_str()).ok())
+                .unwrap_or_else(|| held.folder().clone());
             let mut runs = runs_of(listed, &agents, held.runs(), shell);
             let front = match &listed.is {
                 Is::Running { front: Some(front), .. } => Some(front.pid),
@@ -1616,27 +1619,15 @@ impl Layouts {
         let Some(projects) = self.store.projects() else {
             return;
         };
-        let located = |(_, terminal): (&Worktree, &Terminal)| {
-            let id = terminal.id();
-            let located = match self.known.get(&id) {
-                Some(known) => {
-                    let listed = self.listed.get(&known.key).cloned().map(Box::new);
-                    Located::Shown(Shown { key: known.key, listed })
-                },
-                None if self.looked => Located::Lost,
-                None => Located::Looking,
-            };
-            (id.view(), located)
-        };
-        let now: BTreeMap<ViewId, Located> = projects.terminals().map(located).collect();
-        if self.told.as_ref() == Some(&now) {
-            return;
-        }
-        if self.core.send(Core::Terminals(now.clone())).is_err() {
-            self.troubles.say("the core hears the layouts' terminals no more".to_owned());
-            return;
-        }
-        self.told = Some(now);
+        tell_core_terminals(
+            &self.core,
+            &mut self.told,
+            &mut self.troubles,
+            projects,
+            &self.known,
+            &self.listed,
+            self.looked,
+        );
     }
 
     fn settle(&mut self) {
@@ -1732,6 +1723,54 @@ impl Layouts {
         let both = clients.keys().any(|it| stranded.contains_key(it));
         assert!(!both, "a client shows or is stranded");
     }
+}
+
+fn runs_changed(
+    known: &BTreeMap<TerminalViewId, Known>,
+    before_keys: &BTreeMap<TerminalViewId, TerminalKey>,
+    before: &BTreeMap<TerminalKey, server::Terminal>,
+    after: &BTreeMap<TerminalKey, server::Terminal>,
+) -> bool {
+    known.iter().any(|(terminal, known)| {
+        if before_keys.get(terminal) != Some(&known.key) {
+            return true;
+        }
+        let was = before.get(&known.key).map(|it| (&it.cwd, &it.is));
+        let now = after.get(&known.key).map(|it| (&it.cwd, &it.is));
+        was != now
+    })
+}
+
+fn tell_core_terminals(
+    core: &SyncSender<Core>,
+    told: &mut Option<BTreeMap<ViewId, Located>>,
+    troubles: &mut Troubles,
+    projects: &Projects,
+    known: &BTreeMap<TerminalViewId, Known>,
+    listed: &BTreeMap<TerminalKey, server::Terminal>,
+    looked: bool,
+) {
+    let located = |(_, terminal): (&Worktree, &Terminal)| {
+        let id = terminal.id();
+        let located = match known.get(&id) {
+            Some(known) => Located::Shown(match listed.get_key_value(&known.key) {
+                Some((&key, listed)) => Shown::listed(key, listed),
+                None => Shown::unlisted(known.key),
+            }),
+            None if looked => Located::Lost,
+            None => Located::Looking,
+        };
+        (id.view(), located)
+    };
+    let now: BTreeMap<ViewId, Located> = projects.terminals().map(located).collect();
+    if told.as_ref() == Some(&now) {
+        return;
+    }
+    if core.send(Core::Terminals(now.clone())).is_err() {
+        troubles.say("the core hears the layouts' terminals no more".to_owned());
+        return;
+    }
+    *told = Some(now);
 }
 
 fn untyped(terminals: &[TerminalViewId], why: &str) -> String {
@@ -1841,14 +1880,6 @@ fn told(out: &Out, word: api::ShowResponse) -> bool {
 
 fn half_closed(closed: String) -> impl FnOnce(Failed) -> Failed {
     move |failed| Failed::Unclosed(format!("{closed} closed, and {}", failed.said()))
-}
-
-fn by_key(terminals: Vec<server::Terminal>) -> BTreeMap<TerminalKey, server::Terminal> {
-    let count = terminals.len();
-    let listed: BTreeMap<_, _> =
-        terminals.into_iter().map(|terminal| (terminal.key, terminal)).collect();
-    assert_eq!(listed.len(), count, "a listing holds each terminal once");
-    listed
 }
 
 fn placement(
@@ -2035,7 +2066,8 @@ mod tests {
     use std::time::SystemTime;
 
     use lune_domain::agent::{Harness, Rung};
-    use lune_protocol::program_status::ProgramStatuses;
+    use lune_domain::projects::{Spot, Subfolder};
+    use lune_protocol::program_status::{AppName, ProgramPhase, ProgramStatus, ProgramStatuses};
     use lune_protocol::said::Said;
     use lune_protocol::shell::Front;
 
@@ -2045,14 +2077,11 @@ mod tests {
     use crate::statuses::{ActiveStatus, Decided};
 
     fn listed(is: Is) -> server::Terminal {
-        let key = TerminalKey { id: 1.try_into().unwrap(), made: OwnMade::from_nanos(5) };
-        let (tag, cwd, title) = (Vec::new(), "/w".to_owned(), String::new());
         server::Terminal {
-            key,
-            tag,
+            tag: Vec::new(),
             size: None,
-            cwd,
-            title,
+            cwd: Some(Directory::parse("/w".to_owned()).unwrap()),
+            title: String::new(),
             is,
             statuses: ProgramStatuses::default(),
         }
@@ -2341,5 +2370,196 @@ mod tests {
         for event in refused {
             assert!(Asked::of_api(event.clone()).is_err(), "{event:?}");
         }
+    }
+
+    #[test]
+    fn a_terminal_whose_title_only_cycles_spinner_glyphs_sends_no_core_terminals() {
+        let mut next = 0u64;
+        let mut fresh = || {
+            next += 1;
+            Ok(Id::of(next).unwrap())
+        };
+        let dir = Dir::parse("/w/lune").unwrap();
+        let main = Subfolder::parse("main").unwrap();
+        let subfolders = Listed::of(BTreeSet::from([main.clone()])).unwrap();
+        let (projects, made) = Projects::default()
+            .changed(
+                Change::AddProject {
+                    spot: Spot::in_clone(dir.clone(), subfolders.clone(), None),
+                    name: None,
+                },
+                None,
+                &mut fresh,
+            )
+            .unwrap();
+        let Some(Made::Project(project)) = made else { panic!("project made") };
+        let (projects, _) = projects
+            .changed(
+                Change::AddWorktree {
+                    project,
+                    spot: Spot::in_clone(dir, subfolders, Some(main)),
+                    name: None,
+                    opens: Opens::Shell,
+                },
+                None,
+                &mut fresh,
+            )
+            .unwrap();
+        let terminal = projects.terminals().next().unwrap().1.id();
+        let key = TerminalKey { id: 1.try_into().unwrap(), made: OwnMade::from_nanos(5) };
+        let known = BTreeMap::from([(
+            terminal,
+            Known { key, heard: Heard::Seen, settled: None, agent_front: None, remade: None },
+        )]);
+        let before_keys = BTreeMap::from([(terminal, key)]);
+
+        let make_listed = |title: &str,
+                           cwd: &str,
+                           size: Option<Size>,
+                           is: Is,
+                           statuses: ProgramStatuses| {
+            BTreeMap::from([(
+                key,
+                server::Terminal {
+                    tag: tag(terminal.view()),
+                    size,
+                    cwd: Directory::parse(cwd.to_owned()).ok(),
+                    title: title.to_owned(),
+                    is,
+                    statuses,
+                },
+            )])
+        };
+        let running = |pid: u32, argv: &[&str], doing: Option<Doing>| Is::Running {
+            root: AgentPid::new(10).unwrap(),
+            front: Some(Foreground {
+                pid: AgentPid::new(pid).unwrap(),
+                argv: own(argv),
+            }),
+            doing,
+        };
+
+        let (core, commands) = mpsc::sync_channel(8);
+        let mut told = None;
+        let mut troubles = Troubles::default();
+        let tell = |told: &mut Option<BTreeMap<ViewId, Located>>,
+                    troubles: &mut Troubles,
+                    listed: &BTreeMap<TerminalKey, server::Terminal>| {
+            tell_core_terminals(&core, told, troubles, &projects, &known, listed, true);
+            commands.try_recv().ok()
+        };
+
+        let first = make_listed(
+            "⠋ Fixing the tests",
+            "/w/lune/main",
+            Some(Size::of(80, 24).unwrap()),
+            running(20, &["claude"], None),
+            ProgramStatuses::default(),
+        );
+        assert!(matches!(tell(&mut told, &mut troubles, &first), Some(Core::Terminals(_))));
+
+        for spinner in ["⠙ Fixing the tests", "⠹ Fixing the tests", "✳ Fixing the tests"] {
+            let next = make_listed(
+                spinner,
+                "/w/lune/main",
+                Some(Size::of(80, 24).unwrap()),
+                running(20, &["claude"], None),
+                ProgramStatuses::default(),
+            );
+            assert!(tell(&mut told, &mut troubles, &next).is_none(), "{spinner}");
+            assert!(!runs_changed(&known, &before_keys, &first, &next), "{spinner}");
+        }
+
+        let resized_and_osc = make_listed(
+            "⠸ Fixing the tests",
+            "/w/lune/main",
+            Some(Size::of(120, 40).unwrap()),
+            running(20, &["claude"], None),
+            ProgramStatuses {
+                root: Some(ProgramStatus {
+                    phase: ProgramPhase::Working { progress: None },
+                    app: Some(AppName::parse("claude-code").unwrap()),
+                    title: None,
+                    at: None,
+                }),
+                children: Vec::new(),
+            },
+        );
+        assert!(tell(&mut told, &mut troubles, &resized_and_osc).is_none());
+        assert!(!runs_changed(&known, &before_keys, &first, &resized_and_osc));
+
+        let other_pid_same_command = make_listed(
+            "⠼ Fixing the tests",
+            "/w/lune/main",
+            Some(Size::of(80, 24).unwrap()),
+            running(21, &["claude"], None),
+            ProgramStatuses::default(),
+        );
+        assert!(tell(&mut told, &mut troubles, &other_pid_same_command).is_none());
+        assert!(runs_changed(&known, &before_keys, &first, &other_pid_same_command));
+
+        let new_topic = make_listed(
+            "✳ Updating the docs",
+            "/w/lune/main",
+            Some(Size::of(80, 24).unwrap()),
+            running(20, &["claude"], None),
+            ProgramStatuses::default(),
+        );
+        assert!(matches!(tell(&mut told, &mut troubles, &new_topic), Some(Core::Terminals(_))));
+
+        let plain_one = make_listed(
+            "vim a.rs",
+            "/w/lune/main",
+            Some(Size::of(80, 24).unwrap()),
+            running(20, &["claude"], None),
+            ProgramStatuses::default(),
+        );
+        assert!(matches!(tell(&mut told, &mut troubles, &plain_one), Some(Core::Terminals(_))));
+
+        let plain_two = make_listed(
+            "vim b.rs",
+            "/w/lune/main",
+            Some(Size::of(80, 24).unwrap()),
+            running(20, &["claude"], None),
+            ProgramStatuses::default(),
+        );
+        assert!(tell(&mut told, &mut troubles, &plain_two).is_none());
+
+        let moved = make_listed(
+            "vim b.rs",
+            "/w/lune/main/src",
+            Some(Size::of(80, 24).unwrap()),
+            running(20, &["claude"], None),
+            ProgramStatuses::default(),
+        );
+        assert!(matches!(tell(&mut told, &mut troubles, &moved), Some(Core::Terminals(_))));
+        assert!(runs_changed(&known, &before_keys, &plain_two, &moved));
+
+        let new_command = make_listed(
+            "vim b.rs",
+            "/w/lune/main/src",
+            Some(Size::of(80, 24).unwrap()),
+            running(20, &["cargo", "test"], None),
+            ProgramStatuses::default(),
+        );
+        assert!(matches!(tell(&mut told, &mut troubles, &new_command), Some(Core::Terminals(_))));
+
+        let prompted = make_listed(
+            "vim b.rs",
+            "/w/lune/main/src",
+            Some(Size::of(80, 24).unwrap()),
+            running(20, &["cargo", "test"], Some(Doing::Ready)),
+            ProgramStatuses::default(),
+        );
+        assert!(matches!(tell(&mut told, &mut troubles, &prompted), Some(Core::Terminals(_))));
+
+        let ended = make_listed(
+            "vim b.rs",
+            "/w/lune/main/src",
+            Some(Size::of(80, 24).unwrap()),
+            Is::Ended,
+            ProgramStatuses::default(),
+        );
+        assert!(matches!(tell(&mut told, &mut troubles, &ended), Some(Core::Terminals(_))));
     }
 }

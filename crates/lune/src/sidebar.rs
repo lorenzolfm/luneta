@@ -866,17 +866,39 @@ enum KnownTerminal {
 
 impl KnownTerminal {
     fn of(terminal: &rows::Terminal) -> Self {
-        let Some(key) = terminal.key else {
-            return KnownTerminal::Unfound(terminal.id);
-        };
-        KnownTerminal::Found(KnownView {
-            id: terminal.id,
-            key,
-            cwd: terminal.cwd.clone(),
-            command: terminal.command.clone(),
-            topic: terminal.titled.as_ref().and_then(|titled| titled.topic.clone()),
-            told: terminal.told.clone(),
-        })
+        match &terminal.found {
+            rows::Found::Running { key, command, titled, told } => KnownTerminal::Found(KnownView {
+                id: terminal.id,
+                key: *key,
+                cwd: terminal.cwd.clone(),
+                command: command.as_ref().map(|said| said.as_str().to_owned()),
+                topic: titled
+                    .as_ref()
+                    .and_then(|titled| titled.topic.as_ref())
+                    .map(|said| said.as_str().to_owned()),
+                told: told.clone(),
+            }),
+            rows::Found::Ended { key, titled } => KnownTerminal::Found(KnownView {
+                id: terminal.id,
+                key: *key,
+                cwd: terminal.cwd.clone(),
+                command: None,
+                topic: titled
+                    .as_ref()
+                    .and_then(|titled| titled.topic.as_ref())
+                    .map(|said| said.as_str().to_owned()),
+                told: Told::Unhooked,
+            }),
+            rows::Found::Unlisted(key) => KnownTerminal::Found(KnownView {
+                id: terminal.id,
+                key: *key,
+                cwd: terminal.cwd.clone(),
+                command: None,
+                topic: None,
+                told: Told::Unhooked,
+            }),
+            rows::Found::Lost | rows::Found::Looking => KnownTerminal::Unfound(terminal.id),
+        }
     }
 
     fn id(&self) -> ViewId {
@@ -6002,6 +6024,7 @@ mod tests {
                     shell: view.shell.clone(),
                     held: view.held,
                     name: None,
+                    state: None,
                 };
                 let id = tab_of(session.id, view.tab).get();
                 match worktrees.iter_mut().find(|it| it.id == id) {
@@ -7616,6 +7639,11 @@ mod tests {
             let held = clone.worktrees.iter_mut().flat_map(|worktree| &mut worktree.terminals);
             for held in held.filter(|held| held.id == terminal) {
                 held.found = Some(api::terminal::Found::Looking(()));
+                held.state = Some(api::terminal::State::StateLooking(()));
+                held.command = None;
+                held.titled = None;
+                held.shell = None;
+                held.held = false;
             }
         }
         host
@@ -7639,6 +7667,7 @@ mod tests {
         assert_ne!(marked, unmarked);
 
         sidebar.hear(looked_for(s(true), 2));
+        assert!(sidebar.shelves[0].kept().is_some(), "{:?}", sidebar.shelves[0].refused());
         tick(&mut sidebar, 160_000);
         tick(&mut sidebar, 171_000);
         sidebar.hear(s(true));

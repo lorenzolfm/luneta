@@ -548,3 +548,30 @@ fn a_viewer_back_in_the_scrollback_stays_on_its_rows() {
         assert_eq!(reading.rows_of(key.id), rows);
     });
 }
+
+#[test]
+fn rapid_title_changes_before_exit_still_list_the_last_title() {
+    run(async {
+        let server = Server::start().await;
+        let mut mux = server.client().await;
+        let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
+        let says = "printf '\\033]0;frame-1\\007'; echo ready; read x; \
+            printf '\\033]0;frame-2\\007'; printf '\\033]0;frame-last\\007'";
+        let key = new_terminal(&mut mux, script(says, api::Ends::Holds), b"t", size(20, 4)).await;
+        let mut viewer = Viewer::new(&mut mux).await;
+        viewer.show(&[key]).await;
+        viewer.until_row(key.id, "ready").await;
+        watched_until(&mut watch, "the first title", |listing| {
+            terminal(listing, &key).is_some_and(|terminal| terminal.title == "frame-1")
+        })
+        .await;
+        viewer.press_enter(key).await;
+        let listing = watched_until(&mut watch, "the program ended with its last title", |listing| {
+            terminal(listing, &key).is_some_and(|terminal| {
+                matches!(terminal.program, Some(api::terminal::Program::Ended(_)))
+            })
+        })
+        .await;
+        assert_eq!(terminal(&listing, &key).unwrap().title, "frame-last");
+    });
+}

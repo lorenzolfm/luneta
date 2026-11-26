@@ -1,30 +1,39 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::SystemTime;
 
-use lune_protocol::made::Made;
-use lune_protocol::program_status::bound_fair;
 use lune_protocol::socket::Unreached;
-use lune_protocol::LISTING_CHILDREN_BYTES_MAX;
-use prost::Message as _;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
 use crate::api;
-use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
+use crate::asked::{AbsoluteCwd, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leaders;
 use crate::panics::Shared;
 use crate::program_status::{EndedProgramStatuses, Snapshot as ProgramStatuses};
-use crate::terminal::{self, Exit, Handle, Placing, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
+use crate::terminal::{self, Exit, Handle, Placing, ViewerOut};
+
+use model::{MetaMut, Model, Terminal, Terminals, Viewers};
 
 pub const TERMINALS_MAX: usize = lune_protocol::MUX_TERMINALS_MAX;
 
 pub const CLIENTS_MAX: usize = 256;
 
 const _: () = assert!(SHOWN_MAX <= TERMINALS_MAX);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MetaUpdate {
+    Title(String),
+    Cwd(AbsoluteCwd),
+    Both { title: String, cwd: AbsoluteCwd },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FinalMeta {
+    pub title: Option<String>,
+    pub cwd: Option<AbsoluteCwd>,
+}
 
 pub struct Mux {
     model: Shared<Model>,
@@ -81,75 +90,11 @@ impl Drop for Reserved {
     }
 }
 
-enum Model {
-    Holds(Holding),
-    Ended(Ending),
-}
-
-#[derive(Default)]
-struct Holding {
-    last: Ids,
-    terminals: BTreeMap<TerminalId, Slot>,
-    viewing: BTreeMap<ClientId, Viewing>,
-    empty: Empty,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Empty {
-    #[default]
-    Waits,
-    Ends,
-}
-
-enum Slot {
-    Starting,
-    Placed(Box<Terminal>),
-}
-
-#[derive(Default)]
-struct Ids {
-    terminal: Option<TerminalId>,
-    client: Option<ClientId>,
-    came: u64,
-}
-
-struct Terminal {
-    key: TerminalKey,
-    tag: Tag,
-    size: Size,
-    title: String,
-    cwd: String,
-    program: Program,
-    handle: Handle,
-}
-
-enum Program {
-    Runs {
-        pid: u32,
-        ends: Ends,
-        foreground: Option<api::Foreground>,
-        ran: Option<api::Ran>,
-        statuses: ProgramStatuses,
-    },
-    Ended {
-        exit: Exit,
-        statuses: EndedProgramStatuses,
-    },
-}
-
-struct Viewing {
-    out: ViewerOut,
-    colours: Colours,
-    runs_in: Option<TerminalKey>,
-    shows: BTreeMap<TerminalKey, u64>,
-    _gone: oneshot::Sender<()>,
-}
-
 impl Mux {
     #[must_use]
     pub fn new() -> Arc<Mux> {
         let (listing, _) = watch::channel(Listed::Holds(api::Listing::default()));
-        let model = Shared::new(Model::Holds(Holding::default()));
+        let model = Shared::new(Model::new());
         Arc::new(Mux { model, listing, leaders: Leaders::new() })
     }
 
@@ -172,19 +117,41 @@ impl Mux {
     fn change<T>(&self, change: impl FnOnce(&mut Model) -> T) -> T {
         let mut model = self.model.lock();
         let changed = change(&mut model);
-        let listed = match &mut *model {
-            Model::Holds(holding) => {
-                holding.settle();
-                Listed::Holds(holding.listing())
-            },
-            Model::Ended(ending) => Listed::Ended(ending.clone()),
-        };
+        model.settle();
+        self.publish(&model);
+        changed
+    }
+
+    fn change_viewers<T>(
+        &self,
+        when_ended: impl FnOnce(&Ending) -> T,
+        change: impl FnOnce(&Terminals, &mut Viewers) -> T,
+    ) -> T {
+        let mut model = self.model.lock();
+        model.change_viewers(when_ended, change)
+    }
+
+    fn change_terminal_meta<E>(
+        &self,
+        lookup: impl FnOnce(&mut Model) -> Result<&mut Terminal, E>,
+        change: impl FnOnce(&mut MetaMut<'_>),
+    ) -> Result<(), E> {
+        let mut model = self.model.lock();
+        let terminal = lookup(&mut model)?;
+        let modified = model::mutate_meta(terminal, change);
+        if modified {
+            self.publish(&model);
+        }
+        Ok(())
+    }
+
+    fn publish(&self, model: &Model) {
+        let listed = model.listed();
         self.listing.send_if_modified(|said| {
             let modified = *said != listed;
             *said = listed;
             modified
         });
-        changed
     }
 
     pub fn reserve_terminal(self: &Arc<Mux>) -> Result<Reserved, Status> {
@@ -201,21 +168,20 @@ impl Mux {
     }
 
     pub fn size_terminal(&self, key: TerminalKey, size: Size) -> Result<(), Status> {
-        self.change(|model| {
-            model.terminal_mut(key)?.size = size;
-            Ok(())
-        })
+        let mut model = self.model.lock();
+        if model.terminal_mut(key)?.set_size(size) {
+            model.settle();
+            self.publish(&model);
+        }
+        Ok(())
     }
 
     pub fn tag_terminal(&self, key: TerminalKey, tag: Tag) -> Result<(), Status> {
-        self.change(|model| {
-            model.terminal_mut(key)?.tag = tag;
-            Ok(())
-        })
+        self.change_terminal_meta(|model| model.terminal_mut(key), |meta| meta.set_tag(tag))
     }
 
     pub fn terminal(&self, key: TerminalKey) -> Result<Handle, Status> {
-        Ok(self.model.lock().terminal(key)?.handle.clone())
+        Ok(self.model.lock().terminal(key)?.handle().clone())
     }
 
     pub fn view(
@@ -224,16 +190,10 @@ impl Mux {
         out: ViewerOut,
         gone: oneshot::Sender<()>,
     ) -> Result<ClientId, Status> {
-        self.change(|model| {
-            let holding = model.holding()?;
-            refuse_if_full(holding.viewing.len(), CLIENTS_MAX, "clients")?;
-            let client = ClientId::next(&mut holding.last.client);
-            let Greeting { colours, runs_in } = greeting;
-            let viewing = Viewing { out, colours, runs_in, shows: BTreeMap::new(), _gone: gone };
-            let was = holding.viewing.insert(client, viewing);
-            assert!(was.is_none(), "viewer {client} is new");
-            Ok(client)
-        })
+        self.change_viewers(
+            |ending| Err(model::ending_status(ending)),
+            |_, viewers| viewers.view(greeting, out, gone),
+        )
     }
 
     pub fn show(
@@ -241,51 +201,40 @@ impl Mux {
         client: ClientId,
         keys: &BTreeSet<TerminalKey>,
     ) -> Result<Vec<Status>, Status> {
-        self.change(|model| model.show(client, keys))
+        self.change_viewers(
+            |_| Err(model::no_client(client)),
+            |terminals, viewers| viewers.show(terminals, client, keys),
+        )
     }
 
     pub fn typed(&self, client: ClientId, terminal: TerminalKey) -> Result<Handle, Status> {
-        let model = self.model.lock();
-        let Model::Holds(holding) = &*model else {
-            return Err(no_client(client));
-        };
-        let viewing = holding.viewing.get(&client).ok_or_else(|| no_client(client))?;
-        if !viewing.shows.contains_key(&terminal) {
-            let not_shown = format!("terminal {} is not shown", terminal.id);
-            return Err(Status::failed_precondition(not_shown));
-        }
-        let terminal = holding.terminal(terminal).expect("a shown terminal is the model's");
-        Ok(terminal.handle.clone())
+        self.model.lock().typed(client, terminal)
     }
 
     pub fn unview(&self, client: ClientId) {
-        self.change(|model| {
-            if let Model::Holds(holding) = model {
-                holding.viewing.remove(&client);
-            }
-        });
+        self.change_viewers(|_| {}, |_, viewers| viewers.unview(client));
     }
 
     pub fn listing(&self) -> api::Listing {
-        match &*self.model.lock() {
-            Model::Holds(holding) => holding.listing(),
-            Model::Ended(_) => api::Listing::default(),
-        }
+        self.model.lock().listing()
     }
 
     pub fn lost(&self, terminal: TerminalId) {
         self.change(|model| model.close(terminal));
     }
 
-    pub fn titled(&self, terminal: TerminalId, title: String, cwd: Option<String>) {
-        self.change(|model| {
-            if let Some(found) = model.terminal_of_id_mut(terminal) {
-                found.title = title;
-                if let Some(cwd) = cwd {
-                    found.cwd = cwd;
-                }
-            }
-        });
+    pub fn titled(&self, terminal: TerminalId, update: MetaUpdate) {
+        let _ = self.change_terminal_meta(
+            |model| model.terminal_of_id_mut(terminal).ok_or(()),
+            |meta| match update {
+                MetaUpdate::Title(title) => meta.set_title(title),
+                MetaUpdate::Cwd(cwd) => meta.set_cwd(cwd),
+                MetaUpdate::Both { title, cwd } => {
+                    meta.set_title(title);
+                    meta.set_cwd(cwd);
+                },
+            },
+        );
     }
 
     pub fn looked(
@@ -294,22 +243,18 @@ impl Mux {
         foreground: Option<api::Foreground>,
         ran: Option<api::Ran>,
     ) {
-        self.change(|model| {
-            let found = model.terminal_of_id_mut(terminal).map(|found| &mut found.program);
-            if let Some(Program::Runs { foreground: was, ran: said, .. }) = found {
-                (*was, *said) = (foreground, ran);
-            }
-        });
+        let _ = self.change_terminal_meta(
+            |model| model.terminal_of_id_mut(terminal).ok_or(()),
+            |meta| meta.set_looked(foreground, ran),
+        );
     }
 
     pub fn program_statuses(&self, terminal: TerminalId, statuses: ProgramStatuses) {
         assert!(statuses.children.len() <= crate::program_status::RECORDS_MAX);
-        self.change(|model| {
-            let found = model.terminal_of_id_mut(terminal).map(|found| &mut found.program);
-            if let Some(Program::Runs { statuses: was, .. }) = found {
-                *was = statuses;
-            }
-        });
+        let _ = self.change_terminal_meta(
+            |model| model.terminal_of_id_mut(terminal).ok_or(()),
+            |meta| meta.set_program_statuses(statuses),
+        );
     }
 
     pub fn ended(
@@ -317,286 +262,620 @@ impl Mux {
         terminal: TerminalId,
         exit: Exit,
         statuses: EndedProgramStatuses,
+        final_meta: FinalMeta,
     ) -> bool {
         assert!(statuses.children.len() <= crate::program_status::RECORDS_MAX);
-        self.change(|model| {
-            let Some(found) = model.terminal_of_id_mut(terminal) else {
-                return true;
-            };
-            if let Program::Runs { ends: Ends::Closes, .. } = found.program {
-                model.close(terminal);
-                return true;
-            }
-            found.program = Program::Ended { exit, statuses };
-            false
-        })
+        let mut model = self.model.lock();
+        let (closed, changed) = model.ended(terminal, exit, statuses, final_meta);
+        if changed {
+            model.settle();
+            self.publish(&model);
+        }
+        closed
     }
 }
 
-impl Model {
-    fn holding(&mut self) -> Result<&mut Holding, Status> {
-        match self {
-            Model::Holds(holding) => Ok(holding),
-            Model::Ended(Ending::Emptied) => {
-                Err(Status::unavailable("it is ending, as nothing is left in it"))
-            },
-            Model::Ended(Ending::Unreached(unreached)) => {
-                Err(Status::unavailable(format!("it is ending: {unreached}")))
-            },
-        }
+mod model {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::time::SystemTime;
+
+    use lune_protocol::made::Made;
+    use lune_protocol::program_status::bound_fair;
+    use lune_protocol::socket::Unreached;
+    use lune_protocol::LISTING_CHILDREN_BYTES_MAX;
+    use prost::Message as _;
+    use tokio::sync::mpsc::error::TrySendError;
+    use tokio::sync::oneshot;
+    use tonic::Status;
+
+    use super::{CLIENTS_MAX, Ending, FinalMeta, Listed, TERMINALS_MAX};
+    use crate::api;
+    use crate::asked::{AbsoluteCwd, Colours, Ends, Greeting, SHOWN_MAX, Size, Tag, TerminalKey};
+    use crate::id::{ClientId, TerminalId};
+    use crate::program_status::{EndedProgramStatuses, Snapshot as ProgramStatuses};
+    use crate::terminal::{Exit, Handle, Placing, Viewer, ViewerOut, Wanted};
+
+    pub(super) enum Model {
+        Holds(Holding),
+        Ended(Ending),
     }
 
-    fn reserve(&mut self) -> Result<TerminalKey, Status> {
-        let holding = self.holding()?;
-        refuse_if_full(holding.terminals.len(), TERMINALS_MAX, "terminals")?;
-        let made = made_now()?;
-        let id = TerminalId::next(&mut holding.last.terminal);
-        let was = holding.terminals.insert(id, Slot::Starting);
-        assert!(was.is_none(), "terminal {id} is new");
-        Ok(TerminalKey { id, made })
+    #[derive(Default)]
+    pub(super) struct Holding {
+        pub(super) terminals: Terminals,
+        pub(super) viewers: Viewers,
     }
 
-    fn place(
-        &mut self,
+    #[derive(Default)]
+    pub(super) struct Terminals {
+        last: Option<TerminalId>,
+        slots: BTreeMap<TerminalId, Slot>,
+        empty: Empty,
+    }
+
+    #[derive(Default)]
+    pub(super) struct Viewers {
+        last_client: Option<ClientId>,
+        came: u64,
+        viewing: BTreeMap<ClientId, Viewing>,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    enum Empty {
+        #[default]
+        Waits,
+        Ends,
+    }
+
+    enum Slot {
+        Starting,
+        Placed(Box<Terminal>),
+    }
+
+    pub(super) struct Terminal {
         key: TerminalKey,
-        spawned: Result<(Terminal, Placing), Status>,
-    ) -> Result<TerminalKey, Status> {
-        let (terminal, placing) = spawned?;
-        let holding = self.holding()?;
-        assert_eq!(terminal.key, key);
-        let slot = holding.terminals.get_mut(&key.id).expect("a reserved terminal has its slot");
-        assert!(matches!(slot, Slot::Starting), "terminal {} is placed once", key.id);
-        *slot = Slot::Placed(Box::new(terminal));
-        holding.empty = Empty::Ends;
-        placing.placed();
-        Ok(key)
+        tag: Tag,
+        size: Size,
+        title: String,
+        cwd: AbsoluteCwd,
+        program: Program,
+        handle: Handle,
     }
 
-    fn unreserve(&mut self, terminal: TerminalId) {
-        if let Model::Holds(holding) = self
-            && let Some(Slot::Starting) = holding.terminals.get(&terminal)
-        {
-            holding.terminals.remove(&terminal);
+    enum Program {
+        Runs {
+            pid: u32,
+            ends: Ends,
+            foreground: Option<api::Foreground>,
+            ran: Option<api::Ran>,
+            statuses: ProgramStatuses,
+        },
+        Ended {
+            exit: Exit,
+            statuses: EndedProgramStatuses,
+        },
+    }
+
+    struct Viewing {
+        out: ViewerOut,
+        colours: Colours,
+        runs_in: Option<TerminalKey>,
+        shows: BTreeMap<TerminalKey, u64>,
+        _gone: oneshot::Sender<()>,
+    }
+
+    pub(super) struct MetaMut<'a> {
+        terminal: &'a mut Terminal,
+        modified: bool,
+    }
+
+    pub(super) fn mutate_meta(
+        terminal: &mut Terminal,
+        change: impl FnOnce(&mut MetaMut<'_>),
+    ) -> bool {
+        let mut meta = MetaMut { terminal, modified: false };
+        change(&mut meta);
+        meta.modified
+    }
+
+    impl MetaMut<'_> {
+        pub(super) fn set_tag(&mut self, tag: Tag) {
+            if self.terminal.tag != tag {
+                self.terminal.tag = tag;
+                self.modified = true;
+            }
+        }
+
+        pub(super) fn set_title(&mut self, title: String) {
+            if matches!(self.terminal.program, Program::Runs { .. })
+                && self.terminal.title != title
+            {
+                self.terminal.title = title;
+                self.modified = true;
+            }
+        }
+
+        pub(super) fn set_cwd(&mut self, cwd: AbsoluteCwd) {
+            if matches!(self.terminal.program, Program::Runs { .. }) && self.terminal.cwd != cwd {
+                self.terminal.cwd = cwd;
+                self.modified = true;
+            }
+        }
+
+        pub(super) fn set_looked(
+            &mut self,
+            foreground: Option<api::Foreground>,
+            ran: Option<api::Ran>,
+        ) {
+            let Program::Runs { foreground: was, ran: said, .. } = &mut self.terminal.program
+            else {
+                return;
+            };
+            if *was == foreground && *said == ran {
+                return;
+            }
+            (*was, *said) = (foreground, ran);
+            self.modified = true;
+        }
+
+        pub(super) fn set_program_statuses(&mut self, statuses: ProgramStatuses) {
+            let Program::Runs { statuses: was, .. } = &mut self.terminal.program else {
+                return;
+            };
+            if *was == statuses {
+                return;
+            }
+            *was = statuses;
+            self.modified = true;
+        }
+    }
+
+    impl Terminal {
+        pub(super) fn running(
+            key: TerminalKey,
+            tag: Tag,
+            size: Size,
+            cwd: AbsoluteCwd,
+            pid: u32,
+            ends: Ends,
+            handle: Handle,
+        ) -> Terminal {
+            Terminal {
+                key,
+                tag,
+                size,
+                title: String::new(),
+                cwd,
+                program: Program::Runs {
+                    pid,
+                    ends,
+                    foreground: None,
+                    ran: None,
+                    statuses: ProgramStatuses::default(),
+                },
+                handle,
+            }
+        }
+
+        pub(super) fn handle(&self) -> &Handle {
+            &self.handle
+        }
+
+        pub(super) fn set_size(&mut self, size: Size) -> bool {
+            if self.size == size {
+                return false;
+            }
+            self.size = size;
+            true
+        }
+
+        fn said(&self) -> api::Terminal {
+            let (program, statuses) = match &self.program {
+                Program::Runs { pid, foreground, ran, statuses, .. } => {
+                    let (foreground, ran) = (foreground.clone(), ran.clone());
+                    let program =
+                        api::terminal::Program::Runs(api::Running { pid: *pid, foreground, ran });
+                    (program, statuses.to_mux())
+                },
+                Program::Ended { exit, statuses } => {
+                    (api::terminal::Program::Ended(exit.said()), statuses.to_mux())
+                },
+            };
+            api::Terminal {
+                key: Some(self.key.said()),
+                tag: self.tag.said(),
+                size: Some(self.size.said()),
+                title: self.title.clone(),
+                cwd: self.cwd.as_str().to_owned(),
+                program: Some(program),
+                statuses,
+            }
+        }
+    }
+
+    impl Model {
+        pub(super) fn new() -> Model {
+            Model::Holds(Holding::default())
+        }
+
+        pub(super) fn settle(&self) {
+            if let Model::Holds(holding) = self {
+                holding.settle();
+            }
+        }
+
+        pub(super) fn change_viewers<T>(
+            &mut self,
+            when_ended: impl FnOnce(&Ending) -> T,
+            change: impl FnOnce(&Terminals, &mut Viewers) -> T,
+        ) -> T {
+            match self {
+                Model::Holds(holding) => {
+                    let changed = change(&holding.terminals, &mut holding.viewers);
+                    holding.settle();
+                    changed
+                },
+                Model::Ended(ending) => when_ended(ending),
+            }
+        }
+
+        pub(super) fn listed(&self) -> Listed {
+            match self {
+                Model::Holds(holding) => Listed::Holds(holding.terminals.listing()),
+                Model::Ended(ending) => Listed::Ended(ending.clone()),
+            }
+        }
+
+        pub(super) fn listing(&self) -> api::Listing {
+            match self {
+                Model::Holds(holding) => holding.terminals.listing(),
+                Model::Ended(_) => api::Listing::default(),
+            }
+        }
+
+        fn holding(&mut self) -> Result<&mut Holding, Status> {
+            match self {
+                Model::Holds(holding) => Ok(holding),
+                Model::Ended(ending) => Err(ending_status(ending)),
+            }
+        }
+
+        pub(super) fn reserve(&mut self) -> Result<TerminalKey, Status> {
+            let holding = self.holding()?;
+            refuse_if_full(holding.terminals.slots.len(), TERMINALS_MAX, "terminals")?;
+            let made = made_now()?;
+            let id = TerminalId::next(&mut holding.terminals.last);
+            let was = holding.terminals.slots.insert(id, Slot::Starting);
+            assert!(was.is_none(), "terminal {id} is new");
+            Ok(TerminalKey { id, made })
+        }
+
+        pub(super) fn place(
+            &mut self,
+            key: TerminalKey,
+            spawned: Result<(Terminal, Placing), Status>,
+        ) -> Result<TerminalKey, Status> {
+            let (terminal, placing) = spawned?;
+            let holding = self.holding()?;
+            assert_eq!(terminal.key, key);
+            let slot = holding
+                .terminals
+                .slots
+                .get_mut(&key.id)
+                .expect("a reserved terminal has its slot");
+            assert!(matches!(slot, Slot::Starting), "terminal {} is placed once", key.id);
+            *slot = Slot::Placed(Box::new(terminal));
+            holding.terminals.empty = Empty::Ends;
+            placing.placed();
+            Ok(key)
+        }
+
+        pub(super) fn unreserve(&mut self, terminal: TerminalId) {
+            if let Model::Holds(holding) = self
+                && let Some(Slot::Starting) = holding.terminals.slots.get(&terminal)
+            {
+                holding.terminals.slots.remove(&terminal);
+                self.end_if_empty();
+            }
+        }
+
+        pub(super) fn end_if_unused(&mut self) {
+            if let Model::Holds(holding) = self {
+                holding.terminals.empty = Empty::Ends;
+            }
             self.end_if_empty();
         }
-    }
 
-    fn end_if_unused(&mut self) {
-        if let Model::Holds(holding) = self {
-            holding.empty = Empty::Ends;
+        fn end_if_empty(&mut self) {
+            if let Model::Holds(holding) = self
+                && holding.terminals.empty == Empty::Ends
+                && holding.terminals.slots.is_empty()
+            {
+                *self = Model::Ended(Ending::Emptied);
+            }
         }
-        self.end_if_empty();
-    }
 
-    fn end_if_empty(&mut self) {
-        if let Model::Holds(holding) = self
-            && holding.empty == Empty::Ends
-            && holding.terminals.is_empty()
-        {
-            *self = Model::Ended(Ending::Emptied);
+        pub(super) fn end_unreached(&mut self, unreached: Unreached) -> Option<usize> {
+            let Model::Holds(holding) = self else {
+                return None;
+            };
+            let closed = holding.terminals.slots.len();
+            for terminal in holding.terminals.placed() {
+                terminal.handle.close();
+            }
+            *self = Model::Ended(Ending::Unreached(unreached));
+            Some(closed)
+        }
+
+        pub(super) fn close(&mut self, terminal: TerminalId) {
+            if let Model::Holds(holding) = self
+                && holding.close(terminal)
+            {
+                self.end_if_empty();
+            }
+        }
+
+        pub(super) fn ended(
+            &mut self,
+            terminal: TerminalId,
+            exit: Exit,
+            statuses: EndedProgramStatuses,
+            final_meta: FinalMeta,
+        ) -> (bool, bool) {
+            let Some(found) = self.terminal_of_id_mut(terminal) else {
+                return (true, false);
+            };
+            match found.program {
+                Program::Runs { ends: Ends::Closes, .. } => {
+                    self.close(terminal);
+                    (true, true)
+                },
+                Program::Runs { ends: Ends::Holds, .. } => {
+                    if let Some(title) = final_meta.title {
+                        found.title = title;
+                    }
+                    if let Some(cwd) = final_meta.cwd {
+                        found.cwd = cwd;
+                    }
+                    found.program = Program::Ended { exit, statuses };
+                    (false, true)
+                },
+                Program::Ended { .. } => (false, false),
+            }
+        }
+
+        pub(super) fn terminal_of_id_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
+            let Model::Holds(holding) = self else {
+                return None;
+            };
+            holding.terminals.placed_mut(terminal)
+        }
+
+        pub(super) fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
+            let Model::Holds(holding) = self else {
+                return Err(unmade(key));
+            };
+            holding.terminals.terminal(key)
+        }
+
+        pub(super) fn terminal_mut(&mut self, key: TerminalKey) -> Result<&mut Terminal, Status> {
+            let Model::Holds(holding) = self else {
+                return Err(unmade(key));
+            };
+            let found = holding.terminals.placed_mut(key.id).filter(|found| found.key == key);
+            found.ok_or_else(|| unmade(key))
+        }
+
+        pub(super) fn typed(
+            &self,
+            client: ClientId,
+            terminal: TerminalKey,
+        ) -> Result<Handle, Status> {
+            let Model::Holds(holding) = self else {
+                return Err(no_client(client));
+            };
+            holding.viewers.typed(&holding.terminals, client, terminal)
         }
     }
 
-    fn end_unreached(&mut self, unreached: Unreached) -> Option<usize> {
-        let Model::Holds(holding) = self else {
-            return None;
-        };
-        let closed = holding.terminals.len();
-        for terminal in holding.placed() {
-            terminal.handle.close();
+    impl Terminals {
+        fn placed(&self) -> impl Iterator<Item = &Terminal> {
+            self.slots.values().filter_map(|slot| match slot {
+                Slot::Placed(terminal) => Some(terminal.as_ref()),
+                Slot::Starting => None,
+            })
         }
-        *self = Model::Ended(Ending::Unreached(unreached));
-        Some(closed)
-    }
 
-    fn close(&mut self, terminal: TerminalId) {
-        if let Model::Holds(holding) = self
-            && holding.close(terminal)
-        {
-            self.end_if_empty();
+        fn placed_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
+            match self.slots.get_mut(&terminal)? {
+                Slot::Placed(terminal) => Some(terminal.as_mut()),
+                Slot::Starting => None,
+            }
+        }
+
+        fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
+            match self.slots.get(&key.id) {
+                Some(Slot::Placed(terminal)) if terminal.key == key => Ok(terminal),
+                Some(Slot::Placed(_) | Slot::Starting) | None => Err(unmade(key)),
+            }
+        }
+
+        fn listing(&self) -> api::Listing {
+            let mut terminals: Vec<api::Terminal> = self.placed().map(Terminal::said).collect();
+            bound_fair(
+                &mut terminals,
+                |terminal| terminal.statuses.as_mut().map(|statuses| &mut statuses.children),
+                |child| child.encoded_len().saturating_add(16),
+                LISTING_CHILDREN_BYTES_MAX,
+            );
+            for terminal in &mut terminals {
+                if terminal
+                    .statuses
+                    .as_ref()
+                    .is_some_and(|statuses| statuses.root.is_none() && statuses.children.is_empty())
+                {
+                    terminal.statuses = None;
+                }
+            }
+            api::Listing { terminals }
         }
     }
 
-    fn terminal_of_id_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
-        let Model::Holds(holding) = self else {
-            return None;
-        };
-        holding.placed_mut(terminal)
+    impl Viewers {
+        pub(super) fn view(
+            &mut self,
+            greeting: Greeting,
+            out: ViewerOut,
+            gone: oneshot::Sender<()>,
+        ) -> Result<ClientId, Status> {
+            refuse_if_full(self.viewing.len(), CLIENTS_MAX, "clients")?;
+            let client = ClientId::next(&mut self.last_client);
+            let Greeting { colours, runs_in } = greeting;
+            let viewing = Viewing { out, colours, runs_in, shows: BTreeMap::new(), _gone: gone };
+            let was = self.viewing.insert(client, viewing);
+            assert!(was.is_none(), "viewer {client} is new");
+            Ok(client)
+        }
+
+        pub(super) fn show(
+            &mut self,
+            terminals: &Terminals,
+            client: ClientId,
+            keys: &BTreeSet<TerminalKey>,
+        ) -> Result<Vec<Status>, Status> {
+            let viewing = self.viewing.get(&client).ok_or_else(|| no_client(client))?;
+            if let Some(runs_in) = viewing.runs_in
+                && keys.contains(&runs_in)
+            {
+                return Err(Status::failed_precondition(format!(
+                    "the viewer runs in terminal {}, and never shows itself",
+                    runs_in.id
+                )));
+            }
+            assert!(keys.len() <= SHOWN_MAX);
+            let mut now = BTreeMap::new();
+            let mut gone = Vec::new();
+            for key in keys {
+                if let Err(refusal) = terminals.terminal(*key) {
+                    gone.push(refusal);
+                    continue;
+                }
+                let came = viewing.shows.get(key).copied().unwrap_or_else(|| {
+                    self.came += 1;
+                    self.came
+                });
+                now.insert(*key, came);
+            }
+            assert_eq!(now.len() + gone.len(), keys.len());
+            self.viewing.get_mut(&client).expect("a viewer found above").shows = now;
+            Ok(gone)
+        }
+
+        pub(super) fn unview(&mut self, client: ClientId) {
+            self.viewing.remove(&client);
+        }
+
+        fn typed(
+            &self,
+            terminals: &Terminals,
+            client: ClientId,
+            terminal: TerminalKey,
+        ) -> Result<Handle, Status> {
+            let viewing = self.viewing.get(&client).ok_or_else(|| no_client(client))?;
+            if !viewing.shows.contains_key(&terminal) {
+                let not_shown = format!("terminal {} is not shown", terminal.id);
+                return Err(Status::failed_precondition(not_shown));
+            }
+            let terminal = terminals.terminal(terminal).expect("a shown terminal is the model's");
+            Ok(terminal.handle.clone())
+        }
     }
 
-    fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
-        let Model::Holds(holding) = self else {
-            return Err(unmade(key));
-        };
-        holding.terminal(key)
+    impl Holding {
+        fn close(&mut self, terminal: TerminalId) -> bool {
+            let Some(Slot::Placed(closed)) = self.terminals.slots.get(&terminal) else {
+                return false;
+            };
+            closed.handle.close();
+            let key = closed.key;
+            self.terminals.slots.remove(&terminal);
+            for (client, viewing) in &mut self.viewers.viewing {
+                if viewing.shows.remove(&key).is_some() {
+                    told_closed(*client, &viewing.out, key);
+                }
+            }
+            true
+        }
+
+        fn settle(&self) {
+            assert!(self.viewers.viewing.len() <= CLIENTS_MAX);
+            assert!(self.terminals.slots.len() <= TERMINALS_MAX);
+            let placed = self.terminals.placed().next().is_some();
+            assert!(
+                !placed || self.terminals.empty == Empty::Ends,
+                "a placed terminal ends the first wait"
+            );
+            let mut by_terminal: BTreeMap<TerminalKey, Vec<Viewer>> = BTreeMap::new();
+            for (client, viewing) in &self.viewers.viewing {
+                assert!(viewing.shows.len() <= SHOWN_MAX);
+                if let Some(runs_in) = viewing.runs_in {
+                    let shown = viewing.shows.contains_key(&runs_in);
+                    assert!(
+                        !shown,
+                        "viewer {client} shows terminal {}, which it runs in",
+                        runs_in.id
+                    );
+                }
+                for (key, came) in &viewing.shows {
+                    let frames = viewing.out.clone();
+                    let colours = viewing.colours;
+                    let viewer = Viewer { client: *client, frames, colours, came: *came };
+                    by_terminal.entry(*key).or_default().push(viewer);
+                }
+            }
+            for terminal in self.terminals.placed() {
+                let viewers = by_terminal.remove(&terminal.key).unwrap_or_default();
+                terminal.handle.want(Wanted { size: terminal.size, viewers: viewers.into() });
+            }
+            assert!(by_terminal.is_empty(), "every shown terminal is the model's");
+        }
     }
 
-    fn terminal_mut(&mut self, key: TerminalKey) -> Result<&mut Terminal, Status> {
-        let Model::Holds(holding) = self else {
-            return Err(unmade(key));
-        };
-        let found = holding.placed_mut(key.id).filter(|found| found.key == key);
-        found.ok_or_else(|| unmade(key))
+    pub(super) fn ending_status(ending: &Ending) -> Status {
+        match ending {
+            Ending::Emptied => Status::unavailable("it is ending, as nothing is left in it"),
+            Ending::Unreached(unreached) => Status::unavailable(format!("it is ending: {unreached}")),
+        }
     }
 
-    fn show(
-        &mut self,
-        client: ClientId,
-        keys: &BTreeSet<TerminalKey>,
-    ) -> Result<Vec<Status>, Status> {
-        let Model::Holds(holding) = self else {
-            return Err(no_client(client));
-        };
-        holding.show(client, keys)
+    pub(super) fn no_client(client: ClientId) -> Status {
+        Status::not_found(format!("no client {client}"))
     }
-}
 
-impl Holding {
-    fn placed(&self) -> impl Iterator<Item = &Terminal> {
-        self.terminals.values().filter_map(|slot| match slot {
-            Slot::Placed(terminal) => Some(terminal.as_ref()),
-            Slot::Starting => None,
+    fn made_now() -> Result<Made, Status> {
+        Made::of(SystemTime::now()).ok_or_else(|| {
+            Status::failed_precondition("the clock says a time before 1970, or after 2554")
         })
     }
 
-    fn placed_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
-        match self.terminals.get_mut(&terminal)? {
-            Slot::Placed(terminal) => Some(terminal.as_mut()),
-            Slot::Starting => None,
-        }
+    fn unmade(key: TerminalKey) -> Status {
+        Status::not_found(format!("no terminal {} made then", key.id))
     }
 
-    fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
-        match self.terminals.get(&key.id) {
-            Some(Slot::Placed(terminal)) if terminal.key == key => Ok(terminal),
-            Some(Slot::Placed(_) | Slot::Starting) | None => Err(unmade(key)),
-        }
-    }
-
-    fn show(
-        &mut self,
-        client: ClientId,
-        keys: &BTreeSet<TerminalKey>,
-    ) -> Result<Vec<Status>, Status> {
-        let viewing = self.viewing.get(&client).ok_or_else(|| no_client(client))?;
-        if let Some(runs_in) = viewing.runs_in
-            && keys.contains(&runs_in)
+    fn told_closed(client: ClientId, out: &ViewerOut, key: TerminalKey) {
+        let closed = api::to_viewer::Event::Closed(api::Closed { terminal: Some(key.said()) });
+        if let Err(TrySendError::Full(_)) = out.try_send(Ok(api::ToViewer { event: Some(closed) }))
         {
-            return Err(Status::failed_precondition(format!(
-                "the viewer runs in terminal {}, and never shows itself",
-                runs_in.id
-            )));
-        }
-        assert!(keys.len() <= SHOWN_MAX);
-        let mut now = BTreeMap::new();
-        let mut gone = Vec::new();
-        for key in keys {
-            if let Err(refusal) = self.terminal(*key) {
-                gone.push(refusal);
-                continue;
-            }
-            let came = viewing.shows.get(key).copied().unwrap_or_else(|| {
-                self.last.came += 1;
-                self.last.came
-            });
-            now.insert(*key, came);
-        }
-        assert_eq!(now.len() + gone.len(), keys.len());
-        self.viewing.get_mut(&client).expect("a viewer found above").shows = now;
-        Ok(gone)
-    }
-
-    fn close(&mut self, terminal: TerminalId) -> bool {
-        let Some(Slot::Placed(closed)) = self.terminals.get(&terminal) else {
-            return false;
-        };
-        closed.handle.close();
-        let key = closed.key;
-        self.terminals.remove(&terminal);
-        for (client, viewing) in &mut self.viewing {
-            if viewing.shows.remove(&key).is_some() {
-                told_closed(*client, &viewing.out, key);
-            }
-        }
-        true
-    }
-
-    fn settle(&mut self) {
-        assert!(self.viewing.len() <= CLIENTS_MAX);
-        assert!(self.terminals.len() <= TERMINALS_MAX);
-        let placed = self.placed().next().is_some();
-        assert!(!placed || self.empty == Empty::Ends, "a placed terminal ends the first wait");
-        let mut by_terminal: BTreeMap<TerminalKey, Vec<Viewer>> = BTreeMap::new();
-        for (client, viewing) in &self.viewing {
-            assert!(viewing.shows.len() <= SHOWN_MAX);
-            if let Some(runs_in) = viewing.runs_in {
-                let shown = viewing.shows.contains_key(&runs_in);
-                assert!(!shown, "viewer {client} shows terminal {}, which it runs in", runs_in.id);
-            }
-            for (key, came) in &viewing.shows {
-                let frames = viewing.out.clone();
-                let colours = viewing.colours;
-                let viewer = Viewer { client: *client, frames, colours, came: *came };
-                by_terminal.entry(*key).or_default().push(viewer);
-            }
-        }
-        for terminal in self.placed() {
-            let viewers = by_terminal.remove(&terminal.key).unwrap_or_default();
-            terminal.handle.want(Wanted { size: terminal.size, viewers: viewers.into() });
-        }
-        assert!(by_terminal.is_empty(), "every shown terminal is the model's");
-    }
-
-    fn listing(&self) -> api::Listing {
-        let mut terminals: Vec<api::Terminal> = self.placed().map(Terminal::said).collect();
-        bound_fair(
-            &mut terminals,
-            |terminal| terminal.statuses.as_mut().map(|statuses| &mut statuses.children),
-            |child| child.encoded_len().saturating_add(16),
-            LISTING_CHILDREN_BYTES_MAX,
-        );
-        for terminal in &mut terminals {
-            if terminal
-                .statuses
-                .as_ref()
-                .is_some_and(|statuses| statuses.root.is_none() && statuses.children.is_empty())
-            {
-                terminal.statuses = None;
-            }
-        }
-        api::Listing { terminals }
-    }
-}
-
-impl Terminal {
-    fn said(&self) -> api::Terminal {
-        let (program, statuses) = match &self.program {
-            Program::Runs { pid, foreground, ran, statuses, .. } => {
-                let (foreground, ran) = (foreground.clone(), ran.clone());
-                let program =
-                    api::terminal::Program::Runs(api::Running { pid: *pid, foreground, ran });
-                (program, statuses.to_mux())
-            },
-            Program::Ended { exit, statuses } => {
-                (api::terminal::Program::Ended(exit.said()), statuses.to_mux())
-            },
-        };
-        api::Terminal {
-            key: Some(self.key.said()),
-            tag: self.tag.said(),
-            size: Some(self.size.said()),
-            title: self.title.clone(),
-            cwd: self.cwd.clone(),
-            program: Some(program),
-            statuses,
+            eprintln!("lune-mux: viewer {client} had no room to hear terminal {} closed", key.id);
         }
     }
-}
 
-fn made_now() -> Result<Made, Status> {
-    Made::of(SystemTime::now()).ok_or_else(|| {
-        Status::failed_precondition("the clock says a time before 1970, or after 2554")
-    })
+    fn refuse_if_full(count: usize, max: usize, what: &str) -> Result<(), Status> {
+        if count < max {
+            return Ok(());
+        }
+        Err(Status::resource_exhausted(format!("it holds {max} {what} at most")))
+    }
 }
 
 fn spawned(
@@ -618,44 +897,9 @@ fn spawned(
     })?;
     let started = terminal::start(Arc::clone(mux), key, pty, child, size)
         .map_err(|error| failed("the terminal did not start", error))?;
-    let terminal = Terminal {
-        key,
-        tag,
-        size,
-        title: String::new(),
-        cwd: opens.cwd.clone(),
-        program: Program::Runs {
-            pid: started.pid,
-            ends: opens.ends,
-            foreground: None,
-            ran: None,
-            statuses: ProgramStatuses::default(),
-        },
-        handle: started.handle,
-    };
+    let terminal =
+        Terminal::running(key, tag, size, opens.cwd.clone(), started.pid, opens.ends, started.handle);
     Ok((terminal, started.placing))
-}
-
-fn unmade(key: TerminalKey) -> Status {
-    Status::not_found(format!("no terminal {} made then", key.id))
-}
-
-fn told_closed(client: ClientId, out: &ViewerOut, key: TerminalKey) {
-    let closed = api::to_viewer::Event::Closed(api::Closed { terminal: Some(key.said()) });
-    if let Err(TrySendError::Full(_)) = out.try_send(Ok(api::ToViewer { event: Some(closed) })) {
-        eprintln!("lune-mux: viewer {client} had no room to hear terminal {} closed", key.id);
-    }
-}
-
-fn no_client(client: ClientId) -> Status {
-    Status::not_found(format!("no client {client}"))
-}
-
-fn refuse_if_full(count: usize, max: usize, what: &str) -> Result<(), Status> {
-    if count < max {
-        return Ok(());
-    }
-    Err(Status::resource_exhausted(format!("it holds {max} {what} at most")))
 }
 
 #[cfg(test)]
@@ -669,12 +913,18 @@ pub(crate) mod tests {
     use rustix::process::{self, Pid};
     use tonic::Code;
 
-    use super::{Ending, Listed, Mux, spawned};
+    use super::{Ending, FinalMeta, Listed, MetaUpdate, Mux, spawned};
     use crate::api::Listing;
-    use crate::asked::{Ends, Opens, Size, Tag};
+    use crate::asked::{AbsoluteCwd, Ends, Opens, Size, Tag};
+    use crate::program_status::EndedProgramStatuses;
+    use crate::terminal::Exit;
 
     pub(crate) fn panic_holding_the_model() {
         Mux::new().change(|_| panic!("the model's assertion fails"));
+    }
+
+    fn cwd(path: &str) -> AbsoluteCwd {
+        AbsoluteCwd::of_path(path.to_owned()).unwrap()
     }
 
     fn opens() -> Opens {
@@ -684,12 +934,12 @@ pub(crate) mod tests {
     fn script(script: &str, args: &[&str]) -> Opens {
         let program = "/bin/sh".to_owned();
         let args = ["-c", script].iter().chain(args).map(|arg| (*arg).to_owned()).collect();
-        Opens { cwd: "/".to_owned(), program, args, ends: Ends::Holds }
+        Opens { cwd: cwd("/"), program, args, ends: Ends::Holds }
     }
 
     fn unstartable() -> Opens {
-        let (cwd, program) = ("/".to_owned(), "/nonexistent/program".to_owned());
-        Opens { cwd, program, args: Vec::new(), ends: Ends::Holds }
+        let program = "/nonexistent/program".to_owned();
+        Opens { cwd: cwd("/"), program, args: Vec::new(), ends: Ends::Holds }
     }
 
     fn size() -> Size {
@@ -817,5 +1067,98 @@ pub(crate) mod tests {
             let listing = mux.listing();
             listing.terminals.iter().any(|terminal| terminal.title == "early").then_some(())
         });
+    }
+
+    #[test]
+    fn unchanged_metadata_and_viewer_changes_wake_no_listing_watch() {
+        use std::collections::BTreeSet;
+
+        use tokio::sync::{mpsc, oneshot};
+
+        use crate::asked::{Colours, Greeting};
+
+        let mux = Mux::new();
+        let key = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        let mut watched = mux.watched();
+        let _ = watched.borrow_and_update();
+
+        mux.titled(key.id, MetaUpdate::Title("one".to_owned()));
+        assert!(watched.has_changed().unwrap());
+        let _ = watched.borrow_and_update();
+
+        mux.titled(key.id, MetaUpdate::Title("one".to_owned()));
+        assert!(!watched.has_changed().unwrap());
+
+        mux.titled(key.id, MetaUpdate::Cwd(cwd("/")));
+        assert!(!watched.has_changed().unwrap());
+
+        mux.size_terminal(key, size()).unwrap();
+        assert!(!watched.has_changed().unwrap());
+
+        let (out, _in) = mpsc::channel(1);
+        let (gone, _let_go) = oneshot::channel();
+        let client =
+            mux.view(Greeting { colours: Colours::default(), runs_in: None }, out, gone).unwrap();
+        assert!(!watched.has_changed().unwrap());
+        assert!(mux.show(client, &BTreeSet::from([key])).unwrap().is_empty());
+        assert!(!watched.has_changed().unwrap());
+        mux.unview(client);
+        assert!(!watched.has_changed().unwrap());
+
+        mux.titled(key.id, MetaUpdate::Cwd(cwd("/tmp")));
+        assert!(watched.has_changed().unwrap());
+        let _ = watched.borrow_and_update();
+
+        assert!(!mux.ended(
+            key.id,
+            Exit::Code(0),
+            EndedProgramStatuses::default(),
+            FinalMeta { title: Some("done".to_owned()), cwd: Some(cwd("/var")) },
+        ));
+        assert!(watched.has_changed().unwrap());
+        let listed = watched.borrow_and_update().clone();
+        let Listed::Holds(listing) = listed else { panic!("held") };
+        assert_eq!(listing.terminals[0].title, "done");
+        assert_eq!(listing.terminals[0].cwd, "/var");
+
+        mux.titled(key.id, MetaUpdate::Both { title: "late".to_owned(), cwd: cwd("/opt") });
+        assert!(!watched.has_changed().unwrap());
+        assert!(!mux.ended(
+            key.id,
+            Exit::Code(1),
+            EndedProgramStatuses::default(),
+            FinalMeta { title: Some("again".to_owned()), cwd: None },
+        ));
+        assert!(!watched.has_changed().unwrap());
+        let listing = mux.listing();
+        assert_eq!(listing.terminals[0].title, "done");
+        assert_eq!(listing.terminals[0].cwd, "/var");
+
+        mux.close_terminal(key).unwrap();
+    }
+
+    #[test]
+    fn closing_terminal_ended_removes_it_without_applying_final_metadata() {
+        let mux = Mux::new();
+        let keeper = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        let closing_opens = Opens { ends: Ends::Closes, ..opens() };
+        let closing = mux.reserve_terminal().unwrap().start(&closing_opens, tag(), size()).unwrap();
+        let mut watched = mux.watched();
+        let _ = watched.borrow_and_update();
+
+        assert!(mux.ended(
+            closing.id,
+            Exit::Code(0),
+            EndedProgramStatuses::default(),
+            FinalMeta { title: Some("bye".to_owned()), cwd: Some(cwd("/tmp")) },
+        ));
+        assert!(watched.has_changed().unwrap());
+        let Listed::Holds(listing) = watched.borrow_and_update().clone() else {
+            panic!("keeper holds the mux open");
+        };
+        assert_eq!(listing.terminals.len(), 1);
+        assert_eq!(listing.terminals[0].key.unwrap().id, keeper.id.said());
+
+        mux.close_terminal(keeper).unwrap();
     }
 }

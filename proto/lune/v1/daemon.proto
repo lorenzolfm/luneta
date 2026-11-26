@@ -743,6 +743,25 @@ message Terminal {
   Shell shell = 8;
   bool held = 9;
   optional string name = 10;
+  oneof state {
+    Running running = 11;
+    Ended ended = 12;
+    TerminalKey unlisted = 13;
+    google.protobuf.Empty state_lost = 14;
+    google.protobuf.Empty state_looking = 15;
+  }
+
+  message Running {
+    TerminalKey key = 1;
+    optional string command = 2;
+    Titled titled = 3;
+    Shell shell = 4;
+  }
+
+  message Ended {
+    TerminalKey key = 1;
+    Titled titled = 2;
+  }
 }
 
 enum Stage {
