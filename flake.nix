@@ -31,7 +31,15 @@
       ];
 
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      toolchainToml = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
       inherit (cargoToml.workspace.package) version;
+      rustVersion =
+        cargoToml.workspace.package.rust-version
+          or (throw "Cargo.toml has no [workspace.package].rust-version");
+      toolchainChannel =
+        toolchainToml.toolchain.channel or (throw "rust-toolchain.toml has no [toolchain].channel");
+      workspaceMembers = cargoToml.workspace.members or [ ];
+      workspaceExclude = cargoToml.workspace.exclude or [ ];
 
       build =
         system:
@@ -40,7 +48,48 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
-          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          stableChannel =
+            builtins.isString toolchainChannel
+            && builtins.match "[0-9]+\\.[0-9]+\\.[0-9]+" toolchainChannel != null;
+          crateDirs = builtins.attrNames (
+            pkgs.lib.filterAttrs (_: kind: kind == "directory") (builtins.readDir ./crates)
+          );
+          missingRustVersion = builtins.filter (
+            dir:
+            let
+              manifestPath = ./crates + "/${dir}/Cargo.toml";
+              manifest = builtins.fromTOML (builtins.readFile manifestPath);
+            in
+            !(builtins.pathExists manifestPath)
+            || (manifest.package.rust-version or null) != { workspace = true; }
+          ) crateDirs;
+          noRepoCargoConfig =
+            !(builtins.pathExists ./.cargo/config.toml) && !(builtins.pathExists ./.cargo/config);
+          toolchainChecks = [
+            {
+              ok = stableChannel;
+              message = "rust-toolchain.toml pins ${builtins.toJSON toolchainChannel}, not a stable X.Y.Z release";
+            }
+            {
+              ok = toolchainChannel == rustVersion;
+              message = "rust-toolchain.toml pins ${builtins.toJSON toolchainChannel}, but Cargo.toml sets rust-version = ${builtins.toJSON rustVersion}";
+            }
+            {
+              ok = workspaceMembers == [ "crates/*" ] && workspaceExclude == [ ];
+              message = "Cargo.toml workspace members changed; update flake.nix's rust-version inheritance check";
+            }
+            {
+              ok = missingRustVersion == [ ];
+              message = "crates missing rust-version.workspace = true: ${pkgs.lib.concatStringsSep ", " missingRustVersion}";
+            }
+            {
+              ok = noRepoCargoConfig;
+              message = "a tracked .cargo/config(.toml) is ignored by flake.nix's cargoFiles while dev and plain cargo read it; remove it or wire it into cargoFiles and ci.yml";
+            }
+          ];
+          toolchain = pkgs.lib.foldr (
+            check: next: pkgs.lib.throwIfNot check.ok check.message next
+          ) (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml) toolchainChecks;
 
           localToolchain =
             if pkgs.stdenv.hostPlatform.isDarwin then
@@ -60,7 +109,6 @@
           );
 
           cargoFiles = pkgs.lib.fileset.unions [
-            ./.cargo/config.toml
             ./crates
             ./proto
             ./skills/lune/SKILL.md

@@ -2,6 +2,7 @@
 name = "lune"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 license.workspace = true
 publish = false
 description = "lune: the terminals of a worktree beside a sidebar of the host, and the CLI that asks luned, as a library under a thin binary"
