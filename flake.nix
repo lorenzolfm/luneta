@@ -342,6 +342,19 @@
                   touch "$out"
                 '';
             deadnix = nixLint pkgs.deadnix "--hidden --fail .";
+            profiles =
+              let
+                failures = import ./nix/profiles.nix { root = ./.; };
+              in
+              pkgs.runCommand "lune-profiles" { } (
+                if failures == [ ] then
+                  ''touch "$out"''
+                else
+                  ''
+                    printf '%s\n' ${pkgs.lib.escapeShellArgs failures} >&2
+                    exit 1
+                  ''
+              );
             comments =
               let
                 comments = import ./nix/comments.nix { inherit pkgs; };

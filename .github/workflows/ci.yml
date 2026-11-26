@@ -91,6 +91,7 @@ jobs:
           .#checks.x86_64-linux.statix
           .#checks.x86_64-linux.deadnix
           .#checks.x86_64-linux.comments
+          .#checks.x86_64-linux.profiles
           .#checks.x86_64-linux.swift
           .#checks.x86_64-linux.typescript
 
