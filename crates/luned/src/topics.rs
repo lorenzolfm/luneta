@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender};
@@ -12,7 +11,7 @@ use tokio::sync::watch::Receiver;
 
 use crate::agent::{Agent, Name};
 use crate::core::{self, Command};
-use crate::transcripts::{self, one_line, Asked, Digest, SessionId};
+use crate::transcripts::{self, one_line, Asked, Digest, SessionId, Tail};
 use crate::watch::Troubles;
 use crate::{claude, program};
 
@@ -75,7 +74,7 @@ struct Kept {
     topic: Option<Said>,
     status_since: Option<SystemTime>,
     read_due: bool,
-    transcript: Option<(PathBuf, u64)>,
+    transcript: Option<Tail>,
     due: Option<Digest>,
     left: Option<Instant>,
     behind: bool,
@@ -88,21 +87,16 @@ impl Kept {
     }
 
     fn grown(&mut self, projects: &Path, id: &SessionId) -> io::Result<Option<Digest>> {
-        let (path, was) = match self.transcript.take() {
-            Some((path, was)) => (path, Some(was)),
+        let mut tail = match self.transcript.take() {
+            Some(tail) => tail,
             None => match transcripts::find(projects, id) {
-                Some(path) => (path, None),
+                Some(path) => Tail::new(path, SHARE, STEPS),
                 None => return Ok(None),
             },
         };
-        let length = fs::metadata(&path)?.len();
-        if was == Some(length) {
-            self.transcript = Some((path, length));
-            return Ok(None);
-        }
-        let digest = transcripts::told(&path, SHARE, STEPS)?;
-        self.transcript = Some((path, length));
-        Ok(Some(digest))
+        let grown = tail.grown()?;
+        self.transcript = Some(tail);
+        Ok(grown)
     }
 }
 
@@ -346,7 +340,7 @@ pub fn follow(
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{OpenOptions, Permissions};
+    use std::fs::{self, OpenOptions, Permissions};
     use std::io::Write as _;
     use std::num::NonZeroU32;
     use std::os::unix::fs::PermissionsExt as _;

@@ -216,8 +216,98 @@ pub fn find(projects: &Path, id: &SessionId) -> Option<PathBuf> {
     found_in(&project_dirs(projects), id)
 }
 
-pub fn told(path: &Path, share: usize, steps: usize) -> io::Result<Digest> {
-    Ok(digest(&end(path, share, &ALL_KINDS)?, steps))
+#[derive(Debug)]
+pub struct Tail {
+    path: PathBuf,
+    share: usize,
+    steps: usize,
+    looked: Option<u64>,
+    read: u64,
+    torn: bool,
+    kept: VecDeque<Kept>,
+    kept_bytes: usize,
+}
+
+#[derive(Debug)]
+struct Kept {
+    at: u64,
+    bytes: usize,
+    note: Note,
+}
+
+impl Tail {
+    #[must_use]
+    pub fn new(path: PathBuf, share: usize, steps: usize) -> Tail {
+        Tail {
+            path,
+            share,
+            steps,
+            looked: None,
+            read: 0,
+            torn: false,
+            kept: VecDeque::new(),
+            kept_bytes: 0,
+        }
+    }
+
+    pub fn grown(&mut self) -> io::Result<Option<Digest>> {
+        if self.looked == Some(fs::metadata(&self.path)?.len()) {
+            return Ok(None);
+        }
+        let mut file = File::open(&self.path)?;
+        let length = file.metadata()?.len();
+        if length < self.read || length - self.read > WINDOW_BYTES {
+            let from = length.saturating_sub(WINDOW_BYTES);
+            self.kept.clear();
+            self.kept_bytes = 0;
+            self.read = from.saturating_sub(1);
+            self.torn = from > 0;
+        }
+        assert!(length - self.read <= WINDOW_BYTES + 1, "a look reads no more than the window");
+        file.seek(SeekFrom::Start(self.read))?;
+        let mut grown = Vec::new();
+        file.take(length - self.read).read_to_end(&mut grown)?;
+        self.take_in(&grown);
+        let window = length.saturating_sub(WINDOW_BYTES);
+        while self.kept.front().is_some_and(|kept| kept.at < window) {
+            self.forget_first();
+        }
+        self.looked = Some(length);
+        Ok(Some(fold(self.kept.iter().map(|kept| &kept.note), self.steps)))
+    }
+
+    fn take_in(&mut self, grown: &[u8]) {
+        let mut rest = grown;
+        while let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
+            if self.torn {
+                self.torn = false;
+            } else {
+                self.keep(self.read, &rest[..end]);
+            }
+            self.read += end as u64 + 1;
+            rest = &rest[end + 1..];
+        }
+    }
+
+    fn keep(&mut self, at: u64, line: &[u8]) {
+        let record = String::from_utf8_lossy(line);
+        let record = record.strip_suffix('\r').unwrap_or(&record);
+        if !ALL_KINDS.iter().any(|kind| record.contains(kind)) {
+            return;
+        }
+        let bytes = record.len() + 1;
+        self.kept.push_back(Kept { at, bytes, note: noted(record, note_any) });
+        self.kept_bytes += bytes;
+        while self.kept_bytes > self.share {
+            self.forget_first();
+        }
+        assert!(self.kept_bytes <= self.share);
+    }
+
+    fn forget_first(&mut self) {
+        let forgot = self.kept.pop_front().expect("a tail over its share keeps a record");
+        self.kept_bytes -= forgot.bytes;
+    }
 }
 
 pub fn last_said(path: &Path, chars_max: usize) -> io::Result<Option<String>> {
@@ -321,129 +411,116 @@ impl Digest {
 #[must_use]
 pub fn digest_end(end: &TranscriptEnd, steps: usize) -> Digest {
     match end {
-        TranscriptEnd::Claude(lines) => digest_claude(lines, steps),
-        TranscriptEnd::Antigravity(lines) => digest_agy(lines, steps),
+        TranscriptEnd::Claude(lines) => fold(notes(lines, note_claude), steps),
+        TranscriptEnd::Antigravity(lines) => fold(notes(lines, note_agy), steps),
     }
 }
 
-fn digest_claude(end: &str, steps: usize) -> Digest {
+#[derive(Debug, PartialEq, Eq)]
+enum Note {
+    Silent,
+    Titled(String),
+    Recorded(Asked),
+    Typed(Asked),
+    Stepped(Vec<String>),
+}
+
+fn notes(end: &str, of: fn(&Value) -> Note) -> Vec<Note> {
+    end.lines().map(|line| noted(line, of)).collect()
+}
+
+fn noted(line: &str, of: fn(&Value) -> Note) -> Note {
+    let Ok(record) = serde_json::from_str::<Value>(line) else {
+        return Note::Silent;
+    };
+    if record["isSidechain"].as_bool() == Some(true) {
+        return Note::Silent;
+    }
+    of(&record)
+}
+
+fn fold<N: Borrow<Note>>(notes: impl IntoIterator<Item = N>, steps: usize) -> Digest {
     let mut title = None;
     let mut asked: Option<Asked> = None;
     let mut last: VecDeque<String> = VecDeque::with_capacity(steps + 1);
-    for line in end.lines() {
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if record["isSidechain"].as_bool() == Some(true) {
-            continue;
+    for note in notes {
+        match note.borrow() {
+            Note::Silent => {},
+            Note::Titled(said) => title = Some(said.clone()),
+            Note::Recorded(prompt) => {
+                if !asked.as_ref().is_some_and(|typed| prompt.cuts(typed)) {
+                    asked = Some(prompt.clone());
+                }
+            },
+            Note::Typed(typed) => asked = Some(typed.clone()),
+            Note::Stepped(stepped) => {
+                for step in stepped {
+                    push_step(&mut last, step.clone(), steps);
+                }
+            },
         }
-        apply_claude_record(&record, &mut title, &mut asked, &mut last, steps);
     }
     assert!(last.len() <= steps);
-    Digest { title: title.map(|title| one_line(&title, TITLE_CHARS)), asked, steps: last.into() }
+    Digest { title, asked, steps: last.into() }
 }
 
-fn digest_agy(end: &str, steps: usize) -> Digest {
-    let mut asked: Option<Asked> = None;
-    let mut last: VecDeque<String> = VecDeque::with_capacity(steps + 1);
-    for line in end.lines() {
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if record["isSidechain"].as_bool() == Some(true) {
-            continue;
-        }
-        apply_agy_record(&record, &mut asked, &mut last, steps);
+fn note_any(record: &Value) -> Note {
+    match note_claude(record) {
+        Note::Silent => note_agy(record),
+        note => note,
     }
-    assert!(last.len() <= steps);
-    Digest { title: None, asked, steps: last.into() }
 }
 
-#[must_use]
-pub fn digest(end: &str, steps: usize) -> Digest {
-    let mut title = None;
-    let mut asked: Option<Asked> = None;
-    let mut last: VecDeque<String> = VecDeque::with_capacity(steps + 1);
-    for line in end.lines() {
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if record["isSidechain"].as_bool() == Some(true) {
-            continue;
-        }
-        apply_claude_record(&record, &mut title, &mut asked, &mut last, steps);
-        apply_agy_record(&record, &mut asked, &mut last, steps);
-    }
-    assert!(last.len() <= steps);
-    Digest { title: title.map(|title| one_line(&title, TITLE_CHARS)), asked, steps: last.into() }
-}
-
-fn apply_claude_record(
-    record: &Value,
-    title: &mut Option<String>,
-    asked: &mut Option<Asked>,
-    last: &mut VecDeque<String>,
-    steps: usize,
-) {
+fn note_claude(record: &Value) -> Note {
     match record["type"].as_str() {
-        Some("ai-title") => {
-            *title = record["aiTitle"].as_str().map(str::to_owned).or_else(|| title.take());
-        },
+        Some("ai-title") => record["aiTitle"]
+            .as_str()
+            .map_or(Note::Silent, |title| Note::Titled(one_line(title, TITLE_CHARS))),
         Some("last-prompt") => {
-            if let Some(prompt) = record["lastPrompt"].as_str().and_then(Asked::recorded)
-                && !asked.as_ref().is_some_and(|typed| prompt.cuts(typed))
-            {
-                *asked = Some(prompt);
-            }
+            let prompt = record["lastPrompt"].as_str().and_then(Asked::recorded);
+            prompt.map_or(Note::Silent, Note::Recorded)
         },
         Some("user")
             if record["isMeta"].as_bool() != Some(true)
                 && record["isCompactSummary"].as_bool() != Some(true) =>
         {
-            let typed = typed_by_you(&record["message"]["content"]);
-            *asked = typed.as_deref().map(Asked::typed).or_else(|| asked.take());
+            typed_by_you(&record["message"]["content"])
+                .map_or(Note::Silent, |typed| Note::Typed(Asked::typed(&typed)))
         },
         Some("assistant") => {
             let blocks = record["message"]["content"].as_array().into_iter().flatten();
-            for step in blocks.filter_map(step) {
-                push_step(last, step, steps);
-            }
+            Note::Stepped(blocks.filter_map(step).collect())
         },
-        _ => {},
+        _ => Note::Silent,
     }
 }
 
-fn apply_agy_record(
-    record: &Value,
-    asked: &mut Option<Asked>,
-    last: &mut VecDeque<String>,
-    steps: usize,
-) {
+fn note_agy(record: &Value) -> Note {
     match record["type"].as_str() {
-        Some("USER_INPUT") if record["source"].as_str() != Some("SYSTEM") => {
-            if let Some(typed) = record["content"].as_str().and_then(agy_user_text) {
-                *asked = Some(Asked::typed(typed));
-            }
-        },
+        Some("USER_INPUT") if record["source"].as_str() != Some("SYSTEM") => record["content"]
+            .as_str()
+            .and_then(agy_user_text)
+            .map_or(Note::Silent, |typed| Note::Typed(Asked::typed(typed))),
         Some("PLANNER_RESPONSE") => {
+            let mut stepped = Vec::new();
             if let Some(text) =
                 record["content"].as_str().map(str::trim).filter(|text| !text.is_empty())
             {
-                push_step(last, format!("said: {}", one_line(text, STEP_CHARS)), steps);
+                stepped.push(format!("said: {}", one_line(text, STEP_CHARS)));
             }
             for call in record["tool_calls"].as_array().into_iter().flatten() {
                 let Some(name) = call["name"].as_str() else {
                     continue;
                 };
                 let args = agy_args(&call["args"]);
-                let step = match on_what(&args) {
+                stepped.push(match on_what(&args) {
                     Some(what) => format!("ran {name}: {}", one_line(what, STEP_CHARS)),
                     None => format!("ran {name}"),
-                };
-                push_step(last, step, steps);
+                });
             }
+            Note::Stepped(stepped)
         },
-        _ => {},
+        _ => Note::Silent,
     }
 }
 
@@ -738,6 +815,10 @@ mod tests {
         }
     }
 
+    fn digest(end: &str, steps: usize) -> Digest {
+        fold(notes(end, note_any), steps)
+    }
+
     fn asked(records: &[serde_json::Value]) -> Option<String> {
         let end: Vec<String> = records.iter().map(ToString::to_string).collect();
         digest(&end.join("\n"), 1).asked.as_ref().map(ToString::to_string)
@@ -930,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn told_and_last_said_read_antigravity_transcript_files_and_ignore_non_summary_args() {
+    fn a_tail_and_last_said_read_antigravity_transcript_files_and_ignore_non_summary_args() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
         let user = json!({
@@ -954,7 +1035,7 @@ mod tests {
         });
         fs::write(&path, format!("{user}\n{tool}\n{reply}\n")).unwrap();
 
-        let summary = told(&path, 8192, 4).unwrap();
+        let summary = Tail::new(path.clone(), 8192, 4).grown().unwrap().unwrap();
         assert_eq!(summary.asked, Some(Asked::Whole("audit this".to_owned())));
         assert_eq!(summary.steps, ["ran write_file: /w/a.rs", "said: Done auditing."]);
         assert_eq!(last_said(&path, 100).unwrap(), Some("Done auditing.".to_owned()));
@@ -969,4 +1050,104 @@ mod tests {
         assert_eq!(literal_args["Query"], json!("true"));
     }
 
+    fn said(text: &str) -> String {
+        let content = json!([{"type": "text", "text": text}]);
+        format!("{}\n", json!({"type": "assistant", "message": {"content": content}}))
+    }
+
+    fn unsaid(bytes: usize) -> String {
+        let bare = json!({"type": "progress", "data": ""}).to_string().len() + 1;
+        let data = "x".repeat(bytes - bare);
+        format!("{}\n", json!({"type": "progress", "data": data}))
+    }
+
+    fn added(path: &Path, text: &str) {
+        let mut file = fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        io::Write::write_all(&mut file, text.as_bytes()).unwrap();
+    }
+
+    fn steps(tail: &mut Tail) -> Vec<String> {
+        tail.grown().unwrap().expect("the transcript grew").steps
+    }
+
+    #[test]
+    fn a_tail_reads_only_what_was_added_since_its_last_look() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let mut tail = Tail::new(path.clone(), 8192, 4);
+        added(&path, &said("first"));
+        assert_eq!(steps(&mut tail), ["said: first"]);
+        assert_eq!(tail.grown().unwrap(), None);
+
+        let length = usize::try_from(fs::metadata(&path).unwrap().len()).unwrap();
+        fs::write(&path, format!("{}\n", " ".repeat(length - 1))).unwrap();
+        assert_eq!(tail.grown().unwrap(), None);
+        added(&path, &said("second"));
+        assert_eq!(steps(&mut tail), ["said: first", "said: second"]);
+    }
+
+    #[test]
+    fn a_record_half_written_waits_for_its_end() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let mut tail = Tail::new(path.clone(), 8192, 4);
+        let first = said("first");
+        let (start, end) = first.split_at(first.len() / 2);
+        added(&path, start);
+        assert_eq!(steps(&mut tail), Vec::<String>::new());
+        added(&path, end);
+        assert_eq!(steps(&mut tail), ["said: first"]);
+    }
+
+    #[test]
+    fn a_tail_tells_what_a_whole_read_tells() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let (share, kept) = (700, 3);
+        let mut tail = Tail::new(path.clone(), share, kept);
+        let aside = json!({"type": "user", "isSidechain": true, "message": {"content": "aside"}});
+        let records = |n: usize| match n % 5 {
+            0 => format!("{}\n", typed(&format!("prompt {n}"))),
+            1 => said(&format!("step {n}")),
+            2 => unsaid(100 + n),
+            3 => format!("{}\n", json!({"type": "ai-title", "aiTitle": format!("title {n}")})),
+            _ => format!("{aside}\n"),
+        };
+        for n in 0..40 {
+            added(&path, &records(n));
+            let whole = fold(notes(&end(&path, share, &ALL_KINDS).unwrap(), note_any), kept);
+            assert_eq!(tail.grown().unwrap(), Some(whole), "after record {n}");
+        }
+    }
+
+    #[test]
+    fn a_tail_forgets_what_falls_out_of_its_window() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let window = usize::try_from(WINDOW_BYTES).unwrap();
+        let mut looked_between = Tail::new(path.clone(), 8192, 4);
+        let mut looked_after = Tail::new(path.clone(), 8192, 4);
+        added(&path, &said("old"));
+        assert_eq!(steps(&mut looked_between), ["said: old"]);
+        assert_eq!(steps(&mut looked_after), ["said: old"]);
+
+        added(&path, &unsaid(window - 10));
+        assert_eq!(steps(&mut looked_between), Vec::<String>::new());
+        added(&path, &said("new"));
+        assert_eq!(steps(&mut looked_between), ["said: new"]);
+        assert_eq!(steps(&mut looked_after), ["said: new"]);
+        let mut fresh = Tail::new(path.clone(), 8192, 4);
+        assert_eq!(steps(&mut fresh), ["said: new"]);
+    }
+
+    #[test]
+    fn a_transcript_written_anew_is_read_anew() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let mut tail = Tail::new(path.clone(), 8192, 4);
+        added(&path, &format!("{}{}", said("first"), said("second")));
+        assert_eq!(steps(&mut tail), ["said: first", "said: second"]);
+        fs::write(&path, said("other")).unwrap();
+        assert_eq!(steps(&mut tail), ["said: other"]);
+    }
 }
