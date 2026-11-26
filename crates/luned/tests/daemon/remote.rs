@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use lune_protocol::said::Said;
-use lune_protocol::watch::Watched;
+use lune_protocol::watch::{HostVersion, WatchedAfter, WatchedLocalAfter};
 use lune_waits::{eventually, Began, Span, QUIET};
 use luned::api::remote::unreached::{self, Stopped};
 use luned::api::remote::{self, Reached};
@@ -17,9 +17,10 @@ use luned::api::keep_checks_response::{failed, Failed};
 use luned::api::list_skills_response::Skill;
 use luned::api::projects::Held;
 use luned::api::{
-    self, AskRequest, FileIssueRequest, IssueRepositoriesRequest, IssueRepository,
-    KeepChecksRequest, KeepImageRequest, ListContentsRequest, ListRepositoriesRequest,
-    ListSkillsRequest, On, PasteRequest, PrintedFile as File, TranscriptEndsRequest, WatchRequest,
+    self, AskRequest, ClientWaiter, DaemonStanding, FileIssueRequest, IssueRepositoriesRequest,
+    IssueRepository, KeepChecksRequest, KeepImageRequest, ListContentsRequest,
+    ListRepositoriesRequest, ListSkillsRequest, On, PasteRequest, PrintedFile as File,
+    TranscriptEndsRequest, WatchChangesRequest, WatchLocalChangesRequest,
 };
 use luned::asks::{Asked, Step, Turn};
 use luned::images::{self, Png};
@@ -489,14 +490,19 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
     let folder = crate::host::folder_in(here.runtime.path()).unwrap();
     runtime.block_on(lune_waits::awaited("the host comes to rest", async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-        let mut after = None;
+        let mut after: Option<HostVersion> = None;
         loop {
-            let asked = WatchRequest { after, kept: None, shown: false };
-            let watched =
-                daemon.watch_changes(asked).await.unwrap().into_inner().read(after).unwrap();
-            match watched {
-                Watched::Unchanged(_) => return,
-                Watched::Host(version, _) => after = Some(version),
+            let asked = WatchChangesRequest {
+                after: after.map(HostVersion::to_api),
+                waiter: ClientWaiter::Client.into(),
+            };
+            let response = daemon.watch_changes(asked).await.unwrap().into_inner();
+            match after {
+                None => after = Some(response.read_host().unwrap().version()),
+                Some(seen) => match response.read_after(seen).unwrap() {
+                    WatchedAfter::Unchanged => return,
+                    WatchedAfter::Host(host) => after = Some(host.version()),
+                },
             }
         }
     }));
@@ -515,13 +521,14 @@ fn a_daemon_watch_carries_no_remotes_and_wakes_only_for_local_changes() {
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let (version, first) = runtime.block_on(async {
+    let version = runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-        let asked = WatchRequest { after: None, kept: Some(true), shown: false };
-        daemon.watch_changes(asked).await.unwrap().into_inner().read_host().unwrap()
+        let asked = WatchLocalChangesRequest {
+            after: None,
+            standing: DaemonStanding::Kept.into(),
+        };
+        daemon.watch_local_changes(asked).await.unwrap().into_inner().read_host().unwrap().version()
     });
-    assert_eq!(first.remotes, []);
-    assert_eq!(first.unread_hosts, None);
 
     let after_remote = std::thread::scope(|scope| {
         let waiting = scope.spawn(|| {
@@ -529,15 +536,24 @@ fn a_daemon_watch_carries_no_remotes_and_wakes_only_for_local_changes() {
                 tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             runtime.block_on(async {
                 let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-                let asked = WatchRequest { after: Some(version), kept: Some(true), shown: false };
-                daemon.watch_changes(asked).await.unwrap().into_inner().read(Some(version)).unwrap()
+                let asked = WatchLocalChangesRequest {
+                    after: Some(version.to_api()),
+                    standing: DaemonStanding::Kept.into(),
+                };
+                daemon
+                    .watch_local_changes(asked)
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .read_after(version)
+                    .unwrap()
             })
         });
         project_named(&far, "play");
         reached(&here, "far", |far| names(far) == ["play", "work"]);
         waiting.join().unwrap()
     });
-    assert_eq!(after_remote, Watched::Unchanged(version));
+    assert_eq!(after_remote, WatchedLocalAfter::Unchanged);
 
     let after_local = std::thread::scope(|scope| {
         let waiting = scope.spawn(|| {
@@ -545,19 +561,27 @@ fn a_daemon_watch_carries_no_remotes_and_wakes_only_for_local_changes() {
                 tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             runtime.block_on(async {
                 let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-                let asked = WatchRequest { after: Some(version), kept: Some(true), shown: false };
-                daemon.watch_changes(asked).await.unwrap().into_inner().read(Some(version)).unwrap()
+                let asked = WatchLocalChangesRequest {
+                    after: Some(version.to_api()),
+                    standing: DaemonStanding::Kept.into(),
+                };
+                daemon
+                    .watch_local_changes(asked)
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .read_after(version)
+                    .unwrap()
             })
         });
         project_named(&here, "local");
         waiting.join().unwrap()
     });
-    let Watched::Host(next, host) = after_local else {
+    let WatchedLocalAfter::Host(local) = after_local else {
         panic!("a local change wakes a daemon watch: {after_local:?}");
     };
-    assert!(next.seq > version.seq);
-    assert_eq!(host.remotes, []);
-    assert_eq!(host.unread_hosts, None);
+    let (next, host) = local.into_parts();
+    assert!(next.seq() > version.seq());
     let Some(Held::Kept(kept)) = host.projects.and_then(|projects| projects.held) else {
         panic!("luned keeps its projects");
     };
@@ -569,14 +593,22 @@ fn watch_through(host: &Host, span: Span) {
     let folder = crate::host::folder_in(host.runtime.path()).unwrap();
     runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-        let mut after = None;
+        let mut after: Option<HostVersion> = None;
         lune_waits::repeated_through(span, "the daemon answers a watch", async || {
-            let asked =
-                daemon.watch_changes(WatchRequest { after, kept: None, shown: false }).await;
-            let version = match asked.expect("the daemon ended").into_inner().read(after).unwrap() {
-                Watched::Host(version, _) | Watched::Unchanged(version) => version,
-            };
-            after = Some(version);
+            let asked = daemon
+                .watch_changes(WatchChangesRequest {
+                    after: after.map(HostVersion::to_api),
+                    waiter: ClientWaiter::Client.into(),
+                })
+                .await;
+            let response = asked.expect("the daemon ended").into_inner();
+            after = Some(match after {
+                None => response.read_host().unwrap().version(),
+                Some(seen) => match response.read_after(seen).unwrap() {
+                    WatchedAfter::Host(host) => host.version(),
+                    WatchedAfter::Unchanged => seen,
+                },
+            });
         })
         .await;
     });

@@ -1091,9 +1091,7 @@ mod tests {
         store.change(opened(first, Placed::Alone)).unwrap();
         store.change(opened(second, Placed::Beside { at: one, towards: Towards::Right })).unwrap();
         let listing = || {
-            core::ask(&core, |answer| Command::Host { scope: core::Scope::All, answer })
-                .expect("the core answers")
-                .version
+            core::ask(&core, Command::HostAll).expect("the core answers").version()
         };
         let tabbed = (listing(), store.revision());
         store.change(Change::Arrange { worktree, arranged: Arranged::Panes }).unwrap();

@@ -244,13 +244,12 @@ impl Occupied {
     }
 }
 
-fn terminals(projects: &api::Projects) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, String> {
-    let kept = match projects.held.as_ref() {
-        None => return Ok(Vec::new()),
-        Some(Held::Unkept(why)) => {
+fn terminals(projects: &Held) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, String> {
+    let kept = match projects {
+        Held::Unkept(why) => {
             return Err(format!("luned keeps no layouts, and may leave out a terminal: {why}"));
         },
-        Some(Held::Kept(kept)) => kept,
+        Held::Kept(kept) => kept,
     };
     let mut worktrees = Vec::new();
     for project in &kept.projects {
@@ -1045,12 +1044,11 @@ mod tests {
             pull_requests: Vec::new(),
             unread_files: Vec::new(),
             sayings: Vec::new(),
-            projects: api::Projects::default(),
+            projects: Held::Kept(api::projects::Kept::default()),
         }
     }
 
-    fn viewed(held: api::projects::Held) -> core::Local {
-        let projects = api::Projects { held: Some(held) };
+    fn viewed(projects: api::projects::Held) -> core::Local {
         core::Local { projects, ..empty_local() }
     }
 

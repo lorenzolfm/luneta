@@ -2,7 +2,7 @@ use std::error::Error;
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::process::{Command, Stdio};
 
-use luned::api::WatchRequest;
+use luned::api::{ClientWaiter, WatchChangesRequest};
 use luned::{Unbridged, BRIDGED};
 
 use crate::demand::Detached;
@@ -54,10 +54,9 @@ fn a_client_asks_the_daemon_of_the_folder_through_lune_bridge() {
         let mut bridged = luned::through(bridge(&host), PATIENT_ROUND_TRIP).await.unwrap();
         let info = bridged.info(()).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
-        let first = WatchRequest { after: None, kept: None, shown: false };
-        let (version, _) =
-            bridged.watch_changes(first).await.unwrap().into_inner().read_host().unwrap();
-        assert_eq!(version.pid, daemon.pid());
+        let first = WatchChangesRequest { after: None, waiter: ClientWaiter::Client.into() };
+        let version = bridged.watch_changes(first).await.unwrap().into_inner().read_host().unwrap().version();
+        assert_eq!(version.pid().get(), daemon.pid());
     });
 }
 

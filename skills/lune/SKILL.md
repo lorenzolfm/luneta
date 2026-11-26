@@ -73,8 +73,8 @@ lune info
 - `terminate` ends lune on every machine and forgets every project: see
   [Reset lune](#reset-lune).
 - `info` says which luned runs, for how long, and whether it is another build
-  than this lune. `lune watch [--after <pid>:<seq>]` is for programs, not
-  for you.
+  than this lune. `lune watch [--after <pid>:<seq>] [--changes]` is for
+  programs, not for you.
 
 In lune's ask box, only the commands its prompt lists run, and Claude Code
 denies the others. Where one you need is denied there, tell the user to run it

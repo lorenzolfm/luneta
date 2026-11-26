@@ -7,5 +7,6 @@ fn main() -> std::io::Result<()> {
     println!("cargo:rerun-if-changed={MUX}");
     prost_build::Config::new()
         .boxed(".lune.v1.WatchResponse.answer.host")
+        .boxed(".lune.v1.WatchLocalResponse.answer.host")
         .compile_protos(&[PROTO], &["../../proto"])
 }

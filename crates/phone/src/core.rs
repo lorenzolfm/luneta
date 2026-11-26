@@ -9,7 +9,7 @@ use std::time::Duration;
 use hyper_util::rt::TokioIo;
 use lune_protocol::said::Said;
 use lune_protocol::turn::Turn;
-use lune_protocol::watch::Watched;
+use lune_protocol::watch::{HostVersion, WatchedAfter};
 use tokio::net::UnixStream;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{mpsc, watch};
@@ -656,16 +656,7 @@ impl Core {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Poll {
     Immediate,
-    Long { after: api::Version },
-}
-
-impl Poll {
-    fn after(self) -> Option<api::Version> {
-        match self {
-            Poll::Immediate => None,
-            Poll::Long { after } => Some(after),
-        }
-    }
+    Long { after: HostVersion },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -696,7 +687,7 @@ impl BackedOff {
 #[derive(Debug, PartialEq, Eq)]
 enum Watch {
     Fresh,
-    Heard { after: api::Version, shown: Model },
+    Heard { after: HostVersion, shown: Model },
     Lost { why: Said, failed: NonZeroU32 },
     Woken { why: Said },
 }
@@ -709,7 +700,7 @@ impl Watch {
         }
     }
 
-    fn heard(self, after: api::Version, model: Model) -> (Watch, Option<Model>) {
+    fn heard(self, after: HostVersion, model: Model) -> (Watch, Option<Model>) {
         let changed = match self {
             Watch::Heard { shown, .. } => shown != model,
             Watch::Fresh | Watch::Lost { .. } | Watch::Woken { .. } => true,
@@ -739,30 +730,56 @@ async fn watched(
     loop {
         let asked_at = Instant::now();
         let poll = watch.poll();
-        if matches!(poll, Poll::Immediate) {
-            woken.mark_unchanged();
-        }
-        let after = poll.after();
-        let asked = api::WatchRequest { after, kept: None, shown: true };
-        let why = match watch_unary(patience, daemon.watch_changes(asked)).await {
-            Ok(response) => match response.read(after) {
-                Ok(Watched::Host(version, host)) => {
-                    let (next, model) = watch.heard(version, Model::of(&host));
-                    watch = next;
-                    if let Some(model) = model {
-                        observer.changed(model);
-                    }
-                    sleep_until(asked_at + waits::PACE).await;
-                    continue;
-                },
-                Ok(Watched::Unchanged(_)) => {
-                    sleep_until(asked_at + waits::PACE).await;
-                    continue;
-                },
-                Err(why) => Said::new(format!("{why}, which the core does not read"))
-                    .expect("loss literal is non-empty"),
+        let why = match poll {
+            Poll::Immediate => {
+                woken.mark_unchanged();
+                let asked = api::WatchChangesRequest {
+                    after: None,
+                    waiter: api::ClientWaiter::Window.into(),
+                };
+                match watch_unary(patience, daemon.watch_changes(asked)).await {
+                    Ok(response) => match response.read_host() {
+                        Ok(host) => {
+                            let (next, model) = watch.heard(host.version(), Model::of(host.host()));
+                            watch = next;
+                            if let Some(model) = model {
+                                observer.changed(model);
+                            }
+                            sleep_until(asked_at + waits::PACE).await;
+                            continue;
+                        },
+                        Err(why) => Said::new(format!("{why}, which the core does not read"))
+                            .expect("loss literal is non-empty"),
+                    },
+                    Err(why) => why,
+                }
             },
-            Err(why) => why,
+            Poll::Long { after } => {
+                let asked = api::WatchChangesRequest {
+                    after: Some(after.to_api()),
+                    waiter: api::ClientWaiter::Window.into(),
+                };
+                match watch_unary(patience, daemon.watch_changes(asked)).await {
+                    Ok(response) => match response.read_after(after) {
+                        Ok(WatchedAfter::Host(host)) => {
+                            let (next, model) = watch.heard(host.version(), Model::of(host.host()));
+                            watch = next;
+                            if let Some(model) = model {
+                                observer.changed(model);
+                            }
+                            sleep_until(asked_at + waits::PACE).await;
+                            continue;
+                        },
+                        Ok(WatchedAfter::Unchanged) => {
+                            sleep_until(asked_at + waits::PACE).await;
+                            continue;
+                        },
+                        Err(why) => Said::new(format!("{why}, which the core does not read"))
+                            .expect("loss literal is non-empty"),
+                    },
+                    Err(why) => why,
+                }
+            },
         };
         if matches!(poll, Poll::Long { .. }) {
             woken.mark_unchanged();
@@ -1028,7 +1045,7 @@ mod tests {
 
     #[test]
     fn a_woken_watch_starts_its_backoff_over_without_repeating_the_same_loss() {
-        let version = |seq| api::Version { pid: 1, seq };
+        let version = |seq| HostVersion::new(NonZeroU32::new(1).unwrap(), seq);
         let model = Model { here: crate::model::Held::Untold, far: Vec::new(), inbox: Vec::new() };
         let watch = Watch::Fresh;
         assert_eq!(watch.poll(), Poll::Immediate);

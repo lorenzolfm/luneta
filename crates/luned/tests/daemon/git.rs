@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
 use std::fs::{self, Permissions};
+use std::num::NonZeroU32;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
+use lune_protocol::watch::HostVersion;
 use lune_waits::{eventually, Began, Gap, Lasted};
 use luned::api::change_projects_request::{Change, ForgetProject};
 use luned::api::checkout::Head;
 use luned::api::git_status::{NoCheckout, Stands};
 use luned::api::projects::Held;
-use luned::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream, Version};
+use luned::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream};
 use luned::checks::PullPage;
 use luned::{parked_watch, SETTLE, WATCH};
 use prost::Message as _;
@@ -25,16 +27,29 @@ fn number(pull_request: &api::PullRequest) -> u32 {
 }
 
 impl Host {
-    fn watch(&self, after: Option<Version>) -> (api::WatchResponse, Lasted) {
+    fn watch(&self, after: Option<HostVersion>) -> (api::Host, Lasted) {
         let mut command = self.vars().command(&LUNE);
         command.arg("watch");
         if let Some(after) = after {
-            command.arg(format!("--after={}:{}", after.pid, after.seq));
+            command.arg(format!("--after={after}"));
         }
         let asked = Began::now();
         let output = command.stderr(Stdio::inherit()).output().unwrap();
         let lasted = asked.lasted();
         assert!(output.status.success(), "lune watch failed");
+        (api::Host::decode(output.stdout.as_slice()).unwrap(), lasted)
+    }
+
+    fn watch_changes(&self, after: Option<HostVersion>) -> (api::WatchResponse, Lasted) {
+        let mut command = self.vars().command(&LUNE);
+        command.args(["watch", "--changes"]);
+        if let Some(after) = after {
+            command.arg(format!("--after={after}"));
+        }
+        let asked = Began::now();
+        let output = command.stderr(Stdio::inherit()).output().unwrap();
+        let lasted = asked.lasted();
+        assert!(output.status.success(), "lune watch --changes failed");
         (api::WatchResponse::decode(output.stdout.as_slice()).unwrap(), lasted)
     }
 }
@@ -1312,43 +1327,52 @@ fn lune_watch_waits_for_the_host_to_change_but_not_for_long() {
     let host = Host::new();
     let mut daemon = start(host.vars()).unwrap();
 
-    let (first, _) = host.watch(None);
-    let Some(Answer::Host(first)) = first.answer else {
-        panic!("a watch with no --after gives a host: {first:?}");
-    };
-    let version = first.version.unwrap();
-    assert_eq!(version.pid, daemon.pid());
+    let zero_pid = host.vars().command(&LUNE).args(["watch", "--after=0:0"]).output().unwrap();
+    assert!(!zero_pid.status.success(), "lune watch refuses --after=0:0");
+
+    let (first_host, _) = host.watch(None);
+    let version = HostVersion::of_api(first_host.version.unwrap()).unwrap();
+    assert_eq!(version.pid().get(), daemon.pid());
     let parked = format!("luned: {}", parked_watch(version));
     let parked = |line: &str| line == parked;
 
-    let (same, lasted) = host.watch(Some(version));
-    assert_eq!(same.answer, Some(Answer::Unchanged(version)));
+    let (same_host, lasted) = host.watch(Some(version));
+    assert_eq!(same_host.version, Some(version.to_api()));
     lasted.at_least(WATCH, "lune watch waits a whole watch for a change");
     daemon.says_at_least("the watch says it waits", 1, parked);
+
+    let (same_changes, lasted) = host.watch_changes(Some(version));
+    assert_eq!(same_changes.answer, Some(Answer::Unchanged(version.to_api())));
+    lasted.at_least(WATCH, "lune watch --changes waits a whole watch for a change");
+    daemon.says_at_least("the changes watch says it waits", 2, parked);
 
     let play = scratch();
     let play = play.path().join("play");
     fs::create_dir(&play).unwrap();
     let (changed, _) = thread::scope(|scope| {
-        let waiting = scope.spawn(|| host.watch(Some(version)));
-        daemon.says_at_least("the next watch says it waits", 2, parked);
+        let waiting = scope.spawn(|| host.watch_changes(Some(version)));
+        daemon.says_at_least("the next watch says it waits", 3, parked);
         watched(&host, &play.display().to_string());
         waiting.join().unwrap()
     });
     let Some(Answer::Host(changed)) = changed.answer else {
         panic!("a changed watch gives a host: {changed:?}");
     };
-    assert!(changed.version.unwrap().seq > version.seq);
+    let changed_version = HostVersion::of_api(changed.version.unwrap()).unwrap();
+    assert!(changed_version.seq() > version.seq());
     let kept = changed.projects.and_then(|projects| projects.held);
     let Some(Held::Kept(kept)) = kept else { panic!("luned keeps no projects: {kept:?}") };
     assert!(kept.projects.iter().any(|project| project.name == "play"), "{kept:?}");
 
-    let another = Version { pid: version.pid + 1, ..changed.version.unwrap() };
-    let (answered, _) = host.watch(Some(another));
+    let another = HostVersion::new(
+        NonZeroU32::new(version.pid().get() + 1).unwrap(),
+        changed_version.seq(),
+    );
+    let (answered, _) = host.watch_changes(Some(another));
     let Some(Answer::Host(answered)) = answered.answer else {
         panic!("a watch for another pid gives a host: {answered:?}");
     };
-    assert_eq!(answered.version.unwrap().pid, version.pid);
+    assert_eq!(answered.version.unwrap().pid, version.pid().get());
 }
 
 #[test]

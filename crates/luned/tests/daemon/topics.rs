@@ -3,7 +3,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use lune_waits::{eventually, Span};
-use luned::api::{self, remote::Reached, WatchRequest};
+use luned::api::{self, remote::Reached, ClientWaiter, WatchChangesRequest};
 use luned::SWEEP;
 use serde_json::json;
 
@@ -62,8 +62,8 @@ fn seen(host: &Host) -> api::Host {
     let folder = folder_in(host.runtime.path()).unwrap();
     runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-        let asked = WatchRequest { after: None, kept: None, shown: true };
-        daemon.watch_changes(asked).await.unwrap().into_inner().read_host().unwrap().1
+        let asked = WatchChangesRequest { after: None, waiter: ClientWaiter::Window.into() };
+        daemon.watch_changes(asked).await.unwrap().into_inner().read_host().unwrap().into_host()
     })
 }
 

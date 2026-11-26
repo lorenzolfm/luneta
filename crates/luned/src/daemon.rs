@@ -18,6 +18,7 @@ use lune_domain::projects::{folder_has_one_worktree, Holders, Made, Opens, Owned
 use lune_domain::projects::{Dir, ProjectId, WorktreeId};
 use lune_protocol::said::Said;
 use lune_protocol::socket::{self, Bound, Found};
+use lune_protocol::watch::{HostVersion, LocalVersion};
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
 use tokio::runtime::Handle;
@@ -56,7 +57,7 @@ use crate::answers::{self, Answer, Runs, Unanswered};
 use crate::mux::Failure;
 use crate::panics::Hooked;
 use crate::asks::{Asked, Step};
-use crate::core::{self, After, Command, Full, Scope, Snapshot, Wakes};
+use crate::core::{self, AllSnapshot, Command, LocalSnapshot, Wakes, WatchDecision};
 use crate::directory::Directory;
 use crate::projects::{Changed, Lock, Opened, Store};
 use crate::layouts::{self, Root, Unrooted};
@@ -105,9 +106,8 @@ pub const WATCH: Duration = Duration::from_secs(4);
 const _: () = assert!(WATCH.as_millis() < client::ANSWER.waits().as_millis());
 
 #[must_use]
-pub fn parked_watch(version: api::Version) -> String {
-    let api::Version { pid, seq } = version;
-    format!("a watch waits for a change past {pid}:{seq}")
+pub fn parked_watch(version: HostVersion) -> String {
+    format!("a watch waits for a change past {version}")
 }
 
 pub(crate) const QUESTIONS_MAX: u32 = 16;
@@ -478,8 +478,10 @@ impl Watchers {
             Waiter::Daemon(Standing::Idle) => return None,
             Waiter::Daemon(Standing::Kept) => (&self.daemons, None, None),
             Waiter::Daemon(Standing::Window) => (&self.daemons, Some(&self.far_windows), None),
-            Waiter::Client => (&self.clients, None, Some(Standing::Kept)),
-            Waiter::Window => (&self.clients, Some(&self.windows), Some(Standing::Window)),
+            Waiter::Client(ClientWaiter::Client) => (&self.clients, None, Some(Standing::Kept)),
+            Waiter::Client(ClientWaiter::Window) => {
+                (&self.clients, Some(&self.windows), Some(Standing::Window))
+            },
         };
         let waits = (Waits::on(watching), showing.map(Waits::on));
         if let Some(standing) = standing {
@@ -496,25 +498,40 @@ impl Watchers {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Waiter {
+enum ClientWaiter {
     Client,
     Window,
+}
+
+impl ClientWaiter {
+    fn parse(said: i32) -> Result<Self, Status> {
+        match api::ClientWaiter::try_from(said) {
+            Ok(api::ClientWaiter::Client) => Ok(ClientWaiter::Client),
+            Ok(api::ClientWaiter::Window) => Ok(ClientWaiter::Window),
+            Ok(api::ClientWaiter::Unspecified) | Err(_) => {
+                Err(Status::invalid_argument("waiter: unknown watch waiter"))
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Waiter {
+    Client(ClientWaiter),
     Daemon(Standing),
 }
 
 impl Waiter {
-    fn of(request: &api::WatchRequest) -> Self {
+    fn parse_legacy(request: &api::WatchRequest) -> Result<Self, Status> {
         match (request.kept, request.shown) {
-            (None, false) => Waiter::Client,
-            (None, true) => Waiter::Window,
-            (Some(kept), shown) => Waiter::Daemon(Standing::of(kept, shown)),
-        }
-    }
-
-    fn scope(self) -> Scope {
-        match self {
-            Waiter::Client | Waiter::Window => Scope::All,
-            Waiter::Daemon(_) => Scope::Local,
+            (None, false) => Ok(Waiter::Client(ClientWaiter::Client)),
+            (None, true) => Ok(Waiter::Client(ClientWaiter::Window)),
+            (Some(false), false) => Ok(Waiter::Daemon(Standing::Idle)),
+            (Some(false), true) => {
+                Err(Status::invalid_argument("a daemon cannot be both idle and showing a window"))
+            },
+            (Some(true), false) => Ok(Waiter::Daemon(Standing::Kept)),
+            (Some(true), true) => Ok(Waiter::Daemon(Standing::Window)),
         }
     }
 }
@@ -580,25 +597,69 @@ impl Daemon for Host {
         &self,
         request: Request<api::WatchRequest>,
     ) -> Result<Response<api::Host>, Status> {
-        let (scope, answer) = self.watch_state(request.into_inner()).await?;
-        let snapshot = match answer {
-            WatchAnswer::Host(snapshot) => snapshot,
-            WatchAnswer::Unchanged(_) => self.host(scope).await?,
+        let request = request.into_inner();
+        let waiter = Waiter::parse_legacy(&request)?;
+        let host = match waiter {
+            Waiter::Client(waiter) => {
+                let after = request
+                    .after
+                    .map(HostVersion::of_api)
+                    .transpose()
+                    .map_err(|why| Status::invalid_argument(format!("after: {why}")))?;
+                self.watch_all(waiter, after).await?.into_snapshot().to_api()
+            },
+            Waiter::Daemon(standing) => {
+                let after = request
+                    .after
+                    .map(LocalVersion::of_legacy_api)
+                    .transpose()
+                    .map_err(|why| Status::invalid_argument(format!("after: {why}")))?;
+                self.watch_local(standing, after).await?.into_snapshot().to_legacy_api()
+            },
         };
-        assert_eq!(snapshot.remotes.is_some(), scope == Scope::All);
-        Ok(Response::new(snapshot.to_api()))
+        Ok(Response::new(host))
     }
 
     async fn watch_changes(
         &self,
-        request: Request<api::WatchRequest>,
+        request: Request<api::WatchChangesRequest>,
     ) -> Result<Response<api::WatchResponse>, Status> {
-        let (_, answer) = self.watch_state(request.into_inner()).await?;
-        let response = match answer {
-            WatchAnswer::Host(snapshot) => api::WatchResponse::host(snapshot.to_api()),
-            WatchAnswer::Unchanged(version) => api::WatchResponse::unchanged(version),
+        let request = request.into_inner();
+        let waiter = ClientWaiter::parse(request.waiter)?;
+        let after = request
+            .after
+            .map(HostVersion::of_api)
+            .transpose()
+            .map_err(|why| Status::invalid_argument(format!("after: {why}")))?;
+        let response = match self.watch_all(waiter, after).await? {
+            WatchAnswer::Changed(snapshot) => {
+                api::WatchResponse::host(snapshot.version(), snapshot.to_api())
+            },
+            WatchAnswer::Unchanged(snapshot) => api::WatchResponse::unchanged(snapshot.version()),
         };
-        assert!(response.answer.is_some());
+        Ok(Response::new(response))
+    }
+
+    async fn watch_local_changes(
+        &self,
+        request: Request<api::WatchLocalChangesRequest>,
+    ) -> Result<Response<api::WatchLocalResponse>, Status> {
+        let request = request.into_inner();
+        let standing = Standing::parse_api(request.standing)
+            .map_err(|why| Status::invalid_argument(format!("standing: {why}")))?;
+        let after = request
+            .after
+            .map(LocalVersion::of_api)
+            .transpose()
+            .map_err(|why| Status::invalid_argument(format!("after: {why}")))?;
+        let response = match self.watch_local(standing, after).await? {
+            WatchAnswer::Changed(snapshot) => {
+                api::WatchLocalResponse::host(snapshot.version(), snapshot.to_remote_api())
+            },
+            WatchAnswer::Unchanged(snapshot) => {
+                api::WatchLocalResponse::unchanged(snapshot.version())
+            },
+        };
         Ok(Response::new(response))
     }
 
@@ -784,7 +845,7 @@ impl Daemon for Host {
             let answer = daemon.paste(pasted.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let holders = holders(&self.host(Scope::Local).await?.local.projects)?;
+        let holders = holders(&self.host_local().await?.into_local().projects)?;
         let answer = late(move || pasted.answer(&holders).map_err(unready));
         Ok(Response::new(Box::pin(answer)))
     }
@@ -801,7 +862,7 @@ impl Daemon for Host {
             let answer = daemon.prunes(prunes::asked(None, &dir)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let local = self.host(Scope::Local).await?.local;
+        let local = self.host_local().await?.into_local();
         let answer = late(move || {
             let occupied = || Occupied::of(&local, Lunes::running()?);
             let planned = prunes::plan(&dir, occupied).map_err(Status::failed_precondition)?;
@@ -827,9 +888,9 @@ impl Daemon for Host {
         let core = self.core.clone();
         let answer = late(move || {
             let occupied = || {
-                let local = core::ask(&core, |answer| Command::Host { scope: Scope::Local, answer })
+                let local = core::ask(&core, Command::HostLocal)
                     .ok_or("luned's core did not say")?
-                    .local;
+                    .into_local();
                 Occupied::of(&local, Lunes::running()?)
             };
             let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied)
@@ -1238,8 +1299,8 @@ where
     ReceiverStream::new(answered)
 }
 
-fn holders(projects: &api::Projects) -> Result<Holders, Status> {
-    match projects.held.as_ref().expect("luned's own host says whether it keeps its projects") {
+fn holders(projects: &api::projects::Held) -> Result<Holders, Status> {
+    match projects {
         api::projects::Held::Kept(kept) => {
             Holders::of_api(&kept.projects).map_err(Status::internal)
         },
@@ -1537,67 +1598,82 @@ impl Host {
         answered.await.map_err(|_| stopped())
     }
 
-    async fn host(&self, scope: Scope) -> Result<Snapshot, Status> {
-        self.ask(|answer| Command::Host { scope, answer }).await
+    async fn host_all(&self) -> Result<AllSnapshot, Status> {
+        self.ask(Command::HostAll).await
     }
 
-    async fn watch_state(
+    async fn host_local(&self) -> Result<LocalSnapshot, Status> {
+        self.ask(Command::HostLocal).await
+    }
+
+    async fn watch_all(
         &self,
-        request: api::WatchRequest,
-    ) -> Result<(Scope, WatchAnswer), Status> {
-        let waiter = Waiter::of(&request);
-        let scope = waiter.scope();
-        let _waits = self.watchers.waits(waiter);
-        let Some(version) = request.after else {
-            let snapshot = self.host(scope).await?;
-            assert_eq!(snapshot.remotes.is_some(), scope == Scope::All);
-            return Ok((scope, WatchAnswer::Host(snapshot)));
+        waiter: ClientWaiter,
+        after: Option<HostVersion>,
+    ) -> Result<WatchAnswer<AllSnapshot>, Status> {
+        let _waits = self.watchers.waits(Waiter::Client(waiter));
+        let Some(version) = after else {
+            return Ok(WatchAnswer::Changed(self.host_all().await?));
         };
-        let (tell, told) = oneshot::channel();
-        let answered = self.send_question(|answer| Command::Watch {
-            scope,
-            after: After { version, parked: tell },
-            answer,
-        })?;
-        let deadline = tokio::time::Instant::now() + WATCH;
-        let aloud = matches!(waiter, Waiter::Client);
-        match timeout_at(deadline, told).await {
-            Ok(Ok(heard)) => {
-                assert_eq!(heard, version, "a watch parks only at the version asked");
-                if aloud {
-                    log::say(&parked_watch(heard));
-                }
-                match timeout_at(deadline, answered).await {
-                    Ok(Ok(Ok(snapshot))) => {
-                        assert_eq!(snapshot.remotes.is_some(), scope == Scope::All);
-                        Ok((scope, WatchAnswer::Host(snapshot)))
-                    },
-                    Ok(Ok(Err(Full))) => {
-                        unreachable!("a parked watch cannot also be refused as full")
-                    },
-                    Ok(Err(_)) => Err(stopped()),
-                    Err(_) => Ok((scope, WatchAnswer::Unchanged(heard))),
-                }
-            },
-            Ok(Err(_)) => match timeout_at(deadline, answered).await {
-                Ok(Ok(Ok(snapshot))) => {
-                    assert_eq!(snapshot.remotes.is_some(), scope == Scope::All);
-                    Ok((scope, WatchAnswer::Host(snapshot)))
-                },
-                Ok(Ok(Err(Full))) => {
-                    Err(Status::resource_exhausted("too many clients wait for the host"))
-                },
-                Ok(Err(_)) => Err(stopped()),
-                Err(_) => Err(Status::deadline_exceeded(client::unanswered(WATCH))),
-            },
-            Err(_) => Err(Status::deadline_exceeded(client::unanswered(WATCH))),
-        }
+        let decided =
+            self.send_question(|decision| Command::WatchAll { after: version, decision })?;
+        await_decision(decided, || {
+            if waiter == ClientWaiter::Client {
+                log::say(&parked_watch(version));
+            }
+        })
+        .await
+    }
+
+    async fn watch_local(
+        &self,
+        standing: Standing,
+        after: Option<LocalVersion>,
+    ) -> Result<WatchAnswer<LocalSnapshot>, Status> {
+        let _waits = self.watchers.waits(Waiter::Daemon(standing));
+        let Some(version) = after else {
+            return Ok(WatchAnswer::Changed(self.host_local().await?));
+        };
+        let decided =
+            self.send_question(|decision| Command::WatchLocal { after: version, decision })?;
+        await_decision(decided, || {}).await
     }
 }
 
-enum WatchAnswer {
-    Host(Snapshot),
-    Unchanged(api::Version),
+async fn await_decision<S>(
+    decided: oneshot::Receiver<WatchDecision<S>>,
+    on_parked: impl FnOnce(),
+) -> Result<WatchAnswer<S>, Status> {
+    let deadline = tokio::time::Instant::now() + WATCH;
+    match timeout_at(deadline, decided).await {
+        Ok(Ok(WatchDecision::Now(snapshot))) => Ok(WatchAnswer::Changed(snapshot)),
+        Ok(Ok(WatchDecision::Full)) => {
+            Err(Status::resource_exhausted("too many clients wait for the host"))
+        },
+        Ok(Ok(WatchDecision::Parked { at, woken })) => {
+            on_parked();
+            match timeout_at(deadline, woken).await {
+                Ok(Ok(snapshot)) => Ok(WatchAnswer::Changed(snapshot)),
+                Ok(Err(_)) => Err(stopped()),
+                Err(_) => Ok(WatchAnswer::Unchanged(at)),
+            }
+        },
+        Ok(Err(_)) => Err(stopped()),
+        Err(_) => Err(Status::deadline_exceeded(client::unanswered(WATCH))),
+    }
+}
+
+enum WatchAnswer<S> {
+    Changed(S),
+    Unchanged(S),
+}
+
+impl<S> WatchAnswer<S> {
+    fn into_snapshot(self) -> S {
+        match self {
+            WatchAnswer::Changed(snapshot) | WatchAnswer::Unchanged(snapshot) => snapshot,
+        }
+    }
 }
 
 fn stopped() -> Status {
@@ -1613,30 +1689,43 @@ mod tests {
     use tokio_stream::StreamExt as _;
     use tonic::{Code, Request};
 
-    use super::{talked, Alone, Host, Waiter, Watchers, UNTALKED};
+    use super::{talked, Alone, ClientWaiter, Host, Waiter, Watchers, UNTALKED};
     use crate::api::daemon_server::Daemon as _;
+    use crate::api::watch_local_response::Answer as LocalAnswer;
     use crate::api::watch_response::Answer;
-    use crate::api::{Version, WatchRequest};
+    use crate::api::{
+        self, LocalVersion, Version, WatchChangesRequest, WatchLocalChangesRequest, WatchRequest,
+    };
     use crate::asks::Step;
-    use crate::core::{self, Scope, Wakes};
+    use crate::core::{self, Wakes};
     use crate::remote::Standing;
 
     #[test]
     fn a_watch_request_says_who_waits() {
-        let asked = |kept, shown| Waiter::of(&WatchRequest { after: None, kept, shown });
-        assert_eq!(asked(None, false), Waiter::Client);
-        assert_eq!(asked(None, false).scope(), Scope::All);
-        assert_eq!(asked(None, true), Waiter::Window);
-        assert_eq!(asked(None, true).scope(), Scope::All);
-        assert_eq!(asked(Some(false), false), Waiter::Daemon(Standing::Idle));
-        assert_eq!(asked(Some(false), true), Waiter::Daemon(Standing::Idle));
-        assert_eq!(asked(Some(true), false), Waiter::Daemon(Standing::Kept));
-        assert_eq!(asked(Some(true), true), Waiter::Daemon(Standing::Window));
+        let asked = |kept, shown| Waiter::parse_legacy(&WatchRequest { after: None, kept, shown });
+        assert_eq!(asked(None, false).unwrap(), Waiter::Client(ClientWaiter::Client));
+        assert_eq!(asked(None, true).unwrap(), Waiter::Client(ClientWaiter::Window));
+        assert_eq!(asked(Some(false), false).unwrap(), Waiter::Daemon(Standing::Idle));
+        assert_eq!(asked(Some(false), true).unwrap_err().code(), Code::InvalidArgument);
+        assert_eq!(asked(Some(true), false).unwrap(), Waiter::Daemon(Standing::Kept));
+        assert_eq!(asked(Some(true), true).unwrap(), Waiter::Daemon(Standing::Window));
+        assert_eq!(
+            ClientWaiter::parse(api::ClientWaiter::Client.into()).unwrap(),
+            ClientWaiter::Client
+        );
+        assert_eq!(
+            ClientWaiter::parse(api::ClientWaiter::Window.into()).unwrap(),
+            ClientWaiter::Window
+        );
+        assert_eq!(
+            ClientWaiter::parse(api::ClientWaiter::Unspecified.into()).unwrap_err().code(),
+            Code::InvalidArgument
+        );
         for standing in [Standing::Idle, Standing::Kept, Standing::Window] {
-            let waiter = Waiter::of(&standing.question(None));
-            assert_eq!(waiter, Waiter::Daemon(standing));
-            assert_eq!(waiter.scope(), Scope::Local);
+            let asked = standing.question(None);
+            assert_eq!(Standing::parse_api(asked.standing), Ok(standing));
         }
+        assert!(Standing::parse_api(api::DaemonStanding::Unspecified.into()).is_err());
     }
 
     #[test]
@@ -1654,11 +1743,11 @@ mod tests {
         let watchers = Watchers::default();
         let standing = || *watchers.standing.borrow();
         let shown = || *watchers.shown.borrow();
-        let _client = watchers.waits(Waiter::Client);
+        let _client = watchers.waits(Waiter::Client(ClientWaiter::Client));
         assert_eq!((standing(), shown()), (Standing::Kept, false));
-        let _window = watchers.waits(Waiter::Window);
+        let _window = watchers.waits(Waiter::Client(ClientWaiter::Window));
         assert_eq!((standing(), shown()), (Standing::Window, true));
-        let _another = watchers.waits(Waiter::Client);
+        let _another = watchers.waits(Waiter::Client(ClientWaiter::Client));
         assert_eq!(standing(), Standing::Window);
     }
 
@@ -1714,41 +1803,111 @@ mod tests {
                 core::start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap(),
             );
             let first = host
-                .watch_changes(Request::new(WatchRequest { after: None, kept: None, shown: true }))
+                .watch_changes(Request::new(WatchChangesRequest {
+                    after: None,
+                    waiter: api::ClientWaiter::Window.into(),
+                }))
                 .await
                 .unwrap()
                 .into_inner();
-            let (version, _) = first.read_host().unwrap();
+            let version = first.read_host().unwrap().version();
+            let first_local = host
+                .watch_local_changes(Request::new(WatchLocalChangesRequest {
+                    after: None,
+                    standing: api::DaemonStanding::Kept.into(),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            let local_version = first_local.read_host().unwrap().version();
 
-            let (wedged_tx, _wedged_rx) = mpsc::sync_channel(2);
+            let zero_all = host
+                .watch_changes(Request::new(WatchChangesRequest {
+                    after: Some(Version { pid: 0, seq: 0 }),
+                    waiter: api::ClientWaiter::Window.into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(zero_all.code(), Code::InvalidArgument);
+            let zero_local = host
+                .watch_local_changes(Request::new(WatchLocalChangesRequest {
+                    after: Some(LocalVersion { pid: 0, seq: 0 }),
+                    standing: api::DaemonStanding::Kept.into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(zero_local.code(), Code::InvalidArgument);
+            let zero_legacy = host
+                .watch(Request::new(WatchRequest {
+                    after: Some(Version { pid: 0, seq: 0 }),
+                    kept: None,
+                    shown: true,
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(zero_legacy.code(), Code::InvalidArgument);
+            let unspecified_waiter = host
+                .watch_changes(Request::new(WatchChangesRequest {
+                    after: None,
+                    waiter: api::ClientWaiter::Unspecified.into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(unspecified_waiter.code(), Code::InvalidArgument);
+            let unspecified_standing = host
+                .watch_local_changes(Request::new(WatchLocalChangesRequest {
+                    after: None,
+                    standing: api::DaemonStanding::Unspecified.into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(unspecified_standing.code(), Code::InvalidArgument);
+
+            let (wedged_tx, _wedged_rx) = mpsc::sync_channel(3);
             let wedged = host_with(wedged_tx);
             let asked = Version { pid: 1, seq: 0 };
+            let asked_local = LocalVersion { pid: 1, seq: 0 };
 
-            let (timed_out, stalled, legacy_timed_out, legacy_stalled) = tokio::join!(
-                host.watch_changes(Request::new(WatchRequest {
-                    after: Some(version),
-                    kept: None,
-                    shown: true,
-                })),
-                wedged.watch_changes(Request::new(WatchRequest {
-                    after: Some(asked),
-                    kept: None,
-                    shown: true,
-                })),
-                host.watch(Request::new(WatchRequest {
-                    after: Some(version),
-                    kept: None,
-                    shown: true,
-                })),
-                wedged.watch(Request::new(WatchRequest {
-                    after: Some(asked),
-                    kept: None,
-                    shown: true,
-                })),
+            let (timed_out, stalled, local_timed_out, local_stalled, legacy_timed_out, legacy_stalled) =
+                tokio::join!(
+                    host.watch_changes(Request::new(WatchChangesRequest {
+                        after: Some(version.to_api()),
+                        waiter: api::ClientWaiter::Window.into(),
+                    })),
+                    wedged.watch_changes(Request::new(WatchChangesRequest {
+                        after: Some(asked),
+                        waiter: api::ClientWaiter::Window.into(),
+                    })),
+                    host.watch_local_changes(Request::new(WatchLocalChangesRequest {
+                        after: Some(local_version.to_api()),
+                        standing: api::DaemonStanding::Kept.into(),
+                    })),
+                    wedged.watch_local_changes(Request::new(WatchLocalChangesRequest {
+                        after: Some(asked_local),
+                        standing: api::DaemonStanding::Kept.into(),
+                    })),
+                    host.watch(Request::new(WatchRequest {
+                        after: Some(version.to_api()),
+                        kept: None,
+                        shown: true,
+                    })),
+                    wedged.watch(Request::new(WatchRequest {
+                        after: Some(asked),
+                        kept: None,
+                        shown: true,
+                    })),
+                );
+            assert_eq!(
+                timed_out.unwrap().into_inner().answer,
+                Some(Answer::Unchanged(version.to_api()))
             );
-            assert_eq!(timed_out.unwrap().into_inner().answer, Some(Answer::Unchanged(version)));
             assert_eq!(stalled.unwrap_err().code(), Code::DeadlineExceeded);
-            assert_eq!(legacy_timed_out.unwrap().into_inner().version, Some(version));
+            assert_eq!(
+                local_timed_out.unwrap().into_inner().answer,
+                Some(LocalAnswer::Unchanged(local_version.to_api()))
+            );
+            assert_eq!(local_stalled.unwrap_err().code(), Code::DeadlineExceeded);
+            assert_eq!(legacy_timed_out.unwrap().into_inner().version, Some(version.to_api()));
             assert_eq!(legacy_stalled.unwrap_err().code(), Code::DeadlineExceeded);
         });
     }
