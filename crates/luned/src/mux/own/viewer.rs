@@ -56,6 +56,11 @@ impl Framed {
     pub fn frame(&self) -> &Frame {
         &self.frame
     }
+
+    #[must_use]
+    pub fn into_frame(self) -> Frame {
+        self.frame
+    }
 }
 
 #[derive(Debug)]

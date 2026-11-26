@@ -27,7 +27,7 @@ use crate::answers::{CellPixels, Colours};
 use crate::attached::{
     below_bar, border, draw_screen, draw_tab_spans, key_said, link, mouse_said, on_views,
     screen_rect, selects, span_under, spot_in, tab_columns_max, tab_spans, tab_spans_capped,
-    text, within, Pointer, Screen, Selection, Spot, TabSpan, TAB_BAR_ROWS, TAB_PAD,
+    text, within, Pointer, Row, Screen, Selection, Spot, TabSpan, TAB_BAR_ROWS, TAB_PAD,
 };
 use crate::copied::Excerpt;
 use crate::desktop;
@@ -454,42 +454,42 @@ impl Layout {
         keys
     }
 
-    fn framed(&mut self, frame: &Frame) -> Result<(), String> {
+    fn framed(&mut self, frame: Frame) -> Result<(), String> {
         let key = frame.terminal();
         if !self.wanted().contains(&key) {
             return Ok(());
         }
-        let before = self.screens.remove(&key);
-        let size = before.as_ref().map(|screen| screen.size);
-        let lines = match (frame.rows(), before) {
-            (Rows::Whole(lines), _) => lines.clone(),
-            (Rows::Changed(rows), Some(screen)) if screen.size == frame.size() => {
-                let mut lines = screen.lines;
-                let count = usize::from(screen.size.rows.get());
+        let (size, cursor, tracks_mouse) = (frame.size(), frame.cursor(), frame.tracks_mouse());
+        match frame.into_rows() {
+            Rows::Whole(lines) => {
+                let was = self.screens.get(&key).map(|screen| screen.size);
+                let lines: Vec<Row> = lines.into_iter().map(Row::from).collect();
+                let count = usize::from(size.rows.get());
                 assert_eq!(lines.len(), count, "a screen holds a line for each of its rows");
-                for (index, line) in rows {
-                    lines[usize::from(*index)] = line.clone();
-                }
-                lines
-            },
-            (Rows::Changed(_), None) => return Ok(()),
-            (Rows::Changed(_), Some(screen)) => {
-                let sides = |size: frames::Size| format!("{}x{}", size.columns, size.rows);
-                let (had, sides) = (sides(screen.size), sides(frame.size()));
+                let screen = Screen { size, lines, cursor, tracks_mouse };
                 self.screens.insert(key, screen);
-                return Err(format!("a frame of {sides} changes the rows of {had}"));
+                if self.focused_key() == Some(key) && was != Some(size) {
+                    self.pointer = self.pointer.unselected();
+                }
             },
-        };
-        if self.focused_key() == Some(key) && size != Some(frame.size()) {
-            self.pointer = self.pointer.unselected();
+            Rows::Changed(rows) => {
+                let Some(screen) = self.screens.get_mut(&key) else {
+                    return Ok(());
+                };
+                if screen.size != size {
+                    let sides = |size: frames::Size| format!("{}x{}", size.columns, size.rows);
+                    let (had, sides) = (sides(screen.size), sides(size));
+                    return Err(format!("a frame of {sides} changes the rows of {had}"));
+                }
+                let count = usize::from(screen.size.rows.get());
+                assert_eq!(screen.lines.len(), count, "a screen holds a line for each of its rows");
+                for (index, line) in rows {
+                    screen.lines[usize::from(index)].replace(line);
+                }
+                screen.cursor = cursor;
+                screen.tracks_mouse = tracks_mouse;
+            },
         }
-        let screen = Screen {
-            size: frame.size(),
-            lines,
-            cursor: frame.cursor(),
-            tracks_mouse: frame.tracks_mouse(),
-        };
-        self.screens.insert(key, screen);
         Ok(())
     }
 
@@ -765,13 +765,6 @@ impl Layout {
         browsers: Option<&Browsers>,
         kitty_cell_px: Option<(NonZeroU16, NonZeroU16)>,
     ) -> (Option<Position>, Vec<RibbonOverlay>) {
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                if let Some(cell) = buffer.cell_mut((x, y)) {
-                    cell.reset();
-                }
-            }
-        }
         let bar = Rect { height: area.height.min(TAB_BAR_ROWS), ..area };
         let views = Rect { y: area.y + bar.height, height: area.height - bar.height, ..area };
         let spans = tab_spans(self.named_tabs(), bar.width);
@@ -1366,7 +1359,7 @@ impl Viewed {
                 return Heeded::Note(format!("lune's viewer: {why}"));
             },
         };
-        let frame = framed.frame();
+        let frame = framed.into_frame();
         if !watching.showing.contains(&frame.terminal()) {
             return Heeded::Quiet;
         }
@@ -1777,8 +1770,8 @@ mod tests {
         assert!(!layout.laid_out(laid(halves(), 11, false)));
         let cursor =
             Cursor { row: 1, column: 2, shape: frames::CursorShape::Block, blinking: false };
-        layout.framed(&whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
-        layout.framed(&whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
+        layout.framed(whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
+        layout.framed(whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
         layout
     }
 
@@ -1847,6 +1840,7 @@ mod tests {
         let lost = vec![view(11, (0, 0, 10, 4), None), view(12, (10, 0, 10, 4), Some(2))];
         here.laid_out(laid(lost, 11, false));
         assert_eq!(here.wanted(), BTreeSet::new(), "lune never shows the terminal it runs in");
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
         here.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None, None);
         assert_eq!(row(&buffer, 2, 1, 9), "lost: lu");
         assert_eq!(row(&buffer, 2, 11, 19), "lune run");
@@ -1943,16 +1937,16 @@ mod tests {
         layout.select_to(spot(3, 30));
         assert_eq!(layout.selected().as_deref(), Some("abcdefgh\nijklmnop"));
         assert!(matches!(layout.pointer, Pointer::Shown(_)));
-        layout.framed(&whole(2, &["ab"], None)).unwrap();
+        layout.framed(whole(2, &["ab"], None)).unwrap();
         assert!(matches!(layout.pointer, Pointer::Shown(_)));
-        layout.framed(&whole(1, &["ab"], None)).unwrap();
+        layout.framed(whole(1, &["ab"], None)).unwrap();
         assert_eq!(layout.pointer, Pointer::Free);
     }
 
     #[test]
     fn a_click_on_a_link_copies_it_and_the_pointer_over_one_underlines_it() {
         let mut layout = split_layout();
-        layout.framed(&whole(1, &["a/b.rs x", "ijklmnop"], None)).unwrap();
+        layout.framed(whole(1, &["a/b.rs x", "ijklmnop"], None)).unwrap();
         layout.select_from(spot(2, 3));
         assert_eq!(layout.selected().as_deref(), Some("a/b.rs"));
         let lit = Selection { from: At { row: 0, column: 0 }, to: At { row: 0, column: 5 } };
@@ -1976,10 +1970,10 @@ mod tests {
         assert_eq!(layout.pointed(spot(2, 13)), None, "only in the focused terminal");
         let size = frames::Size { columns: side(8), rows: side(2) };
         let rows = Rows::Whole(lines(&["a/b.rs x", "ijklmnop"]));
-        layout.framed(&Frame::new(key(1), size, rows, None, true).unwrap()).unwrap();
+        layout.framed(Frame::new(key(1), size, rows, None, true).unwrap()).unwrap();
         let taken = "where the program takes the mouse, none shows";
         assert_eq!(layout.pointed(spot(2, 2)), None, "{taken}");
-        layout.framed(&whole(1, &["x a/b.rs"], None)).unwrap();
+        layout.framed(whole(1, &["x a/b.rs"], None)).unwrap();
         let past = "past a screen shorter than its view, none shows";
         assert_eq!(layout.pointed(spot(3, 8)), None, "{past}");
         layout.select_from(spot(3, 8));
@@ -1996,15 +1990,65 @@ mod tests {
         let changed = Rows::Changed(vec![(0, lines(&["c"]).remove(0))]);
         let size = frames::Size { columns: side(1), rows: side(1) };
         let frame = Frame::new(key(1), size, changed, None, false).unwrap();
-        let why = layout.framed(&frame).unwrap_err();
+        let why = layout.framed(frame).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 8x2");
         layout.laid_out(laid(vec![view(12, (0, 0, 20, 4), Some(2))], 12, false));
         assert_eq!(layout.screens.keys().copied().collect::<Vec<_>>(), [key(2)]);
-        layout.framed(&whole(1, &["no"], None)).unwrap();
+        layout.framed(whole(1, &["no"], None)).unwrap();
         let lacked = "a terminal its layout lacks gets no screen";
         assert!(!layout.screens.contains_key(&key(1)), "{lacked}");
         layout.go(worktree(2));
         assert_eq!(layout.focused(), None, "a layout of another worktree lays out nothing here");
+    }
+
+    #[test]
+    fn a_frame_moves_its_glyphs_into_the_screen_without_cloning_and_replaces_only_changed_rows() {
+        let ptr_of = |shows: &Shows| match shows {
+            Shows::Narrow(grapheme) | Shows::Wide(grapheme) => grapheme.as_str().as_ptr(),
+            Shows::Blank => panic!("expected a grapheme"),
+        };
+        let mut layout = Layout::new(worktree(1), None);
+        assert!(!layout.laid_out(laid(halves(), 11, false)));
+        let first = whole(1, &["abcdefgh", "ijklmnop"], None);
+        let Rows::Whole(initial) = first.rows() else { unreachable!() };
+        let row0_ptr = ptr_of(&initial[0].glyphs()[0].shows);
+        let row1_ptr = ptr_of(&initial[1].glyphs()[0].shows);
+        layout.framed(first).unwrap();
+        let screen = &layout.screens[&key(1)];
+        assert_eq!(ptr_of(&screen.lines[0].glyphs()[0].shows), row0_ptr);
+        assert_eq!(ptr_of(&screen.lines[1].glyphs()[0].shows), row1_ptr);
+
+        let updated = lines(&["QRSTUVWX"]).remove(0);
+        let updated_ptr = ptr_of(&updated.glyphs()[0].shows);
+        let cursor =
+            Some(Cursor { row: 1, column: 3, shape: frames::CursorShape::Bar, blinking: true });
+        let size = frames::Size { columns: side(8), rows: side(2) };
+        let changed = Frame::new(key(1), size, Rows::Changed(vec![(1, updated)]), cursor, true);
+        layout.framed(changed.unwrap()).unwrap();
+        let screen = &layout.screens[&key(1)];
+        assert_eq!(ptr_of(&screen.lines[0].glyphs()[0].shows), row0_ptr, "row 0 stayed in place");
+        assert_eq!(ptr_of(&screen.lines[1].glyphs()[0].shows), updated_ptr, "row 1 moved in");
+        assert_eq!(screen.cursor, cursor);
+        assert!(screen.tracks_mouse);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
+        let (cursor_at, _) = layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None, None);
+        assert_eq!(row(&buffer, 2, 1, 9), "abcdefgh");
+        assert_eq!(row(&buffer, 3, 1, 9), "QRSTUVWX");
+        assert_eq!(cursor_at, Some(Position::new(4, 3)));
+    }
+
+    #[test]
+    fn drawing_a_layout_leaves_untouched_cells_in_its_area_alone() {
+        let mut layout = split_layout();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
+        for spot in [(2, 5), (22, 2), (19, 0)] {
+            buffer[spot].set_symbol("x");
+        }
+        let _ = layout.draw(&mut buffer, Rect::new(2, 0, 22, 6), None, None, None);
+        for spot in [(2, 5), (22, 2), (19, 0)] {
+            assert_eq!(buffer[spot].symbol(), "x", "layout draw does not reset untouched cells");
+        }
+        assert_eq!(row(&buffer, 2, 2, 12), "│abcdefgh│");
     }
 
     fn laid_in(id: u64, views: Vec<show_response::View>) -> Heard {

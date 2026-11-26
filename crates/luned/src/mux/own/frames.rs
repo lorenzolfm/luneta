@@ -132,6 +132,11 @@ impl Line {
     }
 
     #[must_use]
+    pub fn into_glyphs(self) -> Vec<Glyph> {
+        self.glyphs
+    }
+
+    #[must_use]
     pub fn wraps_wide(&self) -> bool {
         self.ending == Ending::WrapsWide
     }
@@ -306,6 +311,11 @@ impl Frame {
     #[must_use]
     pub fn rows(&self) -> &Rows {
         &self.rows
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> Rows {
+        self.rows
     }
 
     #[must_use]

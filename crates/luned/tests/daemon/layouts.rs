@@ -2195,18 +2195,19 @@ fn seen_and_typed_into(
             Seen::Frame(framed) => framed,
             Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
         };
-        let frame = framed.frame();
+        let frame = framed.into_frame();
         assert_eq!(frame.terminal(), key, "the mux shows only the terminal asked for");
         assert_eq!((frame.size().columns.get(), frame.size().rows.get()), (78, 22));
-        match frame.rows() {
-            Rows::Whole(whole) => lines.clone_from(whole),
+        let cursor = frame.cursor();
+        match frame.into_rows() {
+            Rows::Whole(whole) => lines = whole,
             Rows::Changed(rows) => {
                 for (row, line) in rows {
-                    lines[usize::from(*row)] = line.clone();
+                    lines[usize::from(row)] = line;
                 }
             },
         }
-        screen_of(&lines, frame.cursor())
+        screen_of(&lines, cursor)
     };
     let patience = Patience::begun();
     let prompted = loop {
