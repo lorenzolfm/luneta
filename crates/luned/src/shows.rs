@@ -432,16 +432,18 @@ async fn stream(
     inbox: Inbox<Asked>,
     told: &mut impl FnMut(Heard),
 ) -> Result<Heard, Dropped> {
-    let mut daemon = match crate::connect(folder, crate::ANSWER).await {
-        Ok(daemon) => daemon,
+    let daemon = match crate::reach(folder).await {
+        Ok(crate::Reached::Matched(daemon)) => daemon,
+        Ok(crate::Reached::Unmatched(unmatched)) => return Ok(Heard::Lost(unmatched.to_string())),
         Err(error) => return Ok(Heard::Lost(format!("luned is not reached: {error}"))),
     };
     let (sending, sent) = mpsc::channel(SAID_MAX);
     let first = api::ShowRequest { event: Some(show_request::Event::Hello(hello)) };
     let said = tokio_stream::once(first).chain(ReceiverStream::new(sent));
-    let hearing = match daemon.show(said).await {
-        Ok(hearing) => hearing.into_inner(),
-        Err(status) => return Ok(ended(&status)),
+    let hearing = match daemon.show(crate::ANSWER, said).await {
+        Ok(hearing) => hearing,
+        Err(crate::Unasked::Unsent(unsent)) => return Ok(Heard::Lost(unsent.to_string())),
+        Err(crate::Unasked::Asked(status)) => return Ok(ended(&status)),
     };
     let mut next = pin!(inbox.merged(hearing));
     loop {

@@ -47,11 +47,11 @@ pub fn run(url: Option<&str>, folder: &Path) -> ExitCode {
         })),
     };
     let ran = tasks::shared().block_on(async {
-        let mut daemon = daemon::current(folder).await?.daemon;
+        let daemon = daemon::current(folder).await?.daemon;
         daemon
-            .change_projects(request)
+            .change_projects(luned::ANSWER, request)
             .await
-            .map_err(|status| status.message().to_owned())?;
+            .map_err(|unasked| unasked.said(None))?;
         Ok::<(), String>(())
     });
     match ran {

@@ -24,49 +24,66 @@ use luned::rebases::{self, Rebased, Unrebased};
 use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
 use luned::skills::{Name, Runs, Skill};
 use luned::transcripts::{Reading, SessionId, TailLines, TranscriptEnd, IDS_MAX, TAILS_BYTES};
-use luned::{log, said_by, told_by, Daemon, Destination, Directory};
+use luned::{log, said_by, told_by, Answer, Destination, Directory, Held, Shared, Unasked};
 use tokio::runtime::Handle;
-use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 use tokio_stream::{Stream, StreamExt as _};
-use tonic::{Code, Response, Status, Streaming};
+use tonic::{Code, Status, Streaming};
 
 use crate::agents::Harness;
 use crate::daemon;
 use crate::machines::Machine;
 
-pub const ANSWER: Duration = Duration::from_secs(6);
+pub const ANSWER: Answer = Answer::of(Duration::from_secs(6));
 
 const SLOW: Duration = Duration::from_secs(1);
 
+enum AnswerError {
+    Refused(String),
+    Asked(String, Code),
+    InDoubt(String),
+}
+
+impl AnswerError {
+    fn into_string(self) -> String {
+        match self {
+            AnswerError::Refused(why) | AnswerError::Asked(why, _) | AnswerError::InDoubt(why) => {
+                why
+            },
+        }
+    }
+}
+
 pub struct Luned {
     tasks: Handle,
-    daemon: Daemon,
+    daemon: Shared,
     on: Machine,
-    patience: Duration,
+    patience: Answer,
 }
 
 impl Luned {
-    pub fn on(on: &Machine, patience: Duration) -> Result<Luned, String> {
+    pub fn on(on: &Machine, patience: Answer) -> Result<Luned, String> {
         let unfound = |unfound| format!("{unfound}, to find luned in");
         let folder = luned::folder::find().map_err(unfound)?;
         Luned::at(&folder, on, patience)
     }
 
-    pub fn at(folder: &Path, on: &Machine, patience: Duration) -> Result<Luned, String> {
+    pub fn at(folder: &Path, on: &Machine, patience: Answer) -> Result<Luned, String> {
         let tasks = luned::tasks::shared();
         let reached = daemon::running(folder);
-        let daemon = match tasks.block_on(async { tokio::time::timeout(patience, reached).await }) {
+        let wait = patience.waits();
+        let daemon = match tasks.block_on(async { tokio::time::timeout(wait, reached).await }) {
             Ok(reached) => reached?,
-            Err(_) => return Err(format!("luned did not answer in {}s", patience.as_secs_f32())),
+            Err(_) => return Err(format!("luned did not answer in {}s", wait.as_secs_f32())),
         };
         Ok(Luned { tasks, daemon, on: on.clone(), patience })
     }
 
     pub fn repositories(&mut self) -> Result<Found, String> {
         let request = ListRepositoriesRequest { on: self.asked_on() };
-        let listed =
-            self.ask(|mut daemon| async move { daemon.list_repositories(request).await })?;
+        let listed = self.ask(|daemon, patience| async move {
+            daemon.list_repositories(patience, request).await
+        })?;
         let Found { repositories, owned, unread } = repositories_of(listed);
         let on = self.on.destination();
         let unread = unread.into_iter().map(|note| told_by(on, &note)).collect();
@@ -75,7 +92,9 @@ impl Luned {
 
     pub fn contents(&mut self, dir: &Directory) -> Result<String, String> {
         let request = ListContentsRequest { on: self.asked_on(), dir: dir.to_string() };
-        let listed = self.ask(|mut daemon| async move { daemon.list_contents(request).await })?;
+        let listed = self.ask(|daemon, patience| async move {
+            daemon.list_contents(patience, request).await
+        })?;
         Ok(listed.listed)
     }
 
@@ -83,7 +102,9 @@ impl Luned {
         let harness = Some(harness.to_api().into());
         let dir = dir.as_str().to_owned();
         let request = ListSkillsRequest { on: self.asked_on(), dir, harness };
-        let listed = self.ask(|mut daemon| async move { daemon.list_skills(request).await })?;
+        let listed = self.ask(|daemon, patience| async move {
+            daemon.list_skills(patience, request).await
+        })?;
         let skill = |skill: luned::api::list_skills_response::Skill| {
             let runs = if skill.only_you { Runs::OnlyForYou } else { Runs::ForAnyone };
             Some(Skill { name: Name::new(skill.name)?, description: skill.description, runs })
@@ -93,9 +114,8 @@ impl Luned {
 
     pub fn checks(&mut self, page: &PullPage) -> Result<Failing, String> {
         let request = KeepChecksRequest { on: self.asked_on(), url: page.url().to_owned() };
-        let (patience, mut daemon) = (self.patience, self.daemon.clone());
-        let answer = self.answer_of(checks::FETCHING, async move {
-            timeout(patience, daemon.keep_checks(request)).await
+        let answer = self.answer_of(checks::FETCHING, |daemon, patience| async move {
+            daemon.keep_checks(patience, request).await
         })?;
         let newer = || {
             let why = "its luned says the log of a check in words this lune cannot read, as a \
@@ -117,7 +137,9 @@ impl Luned {
 
     pub fn ends(&mut self, reading: &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
         let request = reading.asked(self.asked_on());
-        let answer = self.ask(|mut daemon| async move { daemon.transcript_ends(request).await })?;
+        let answer = self.ask(|daemon, patience| async move {
+            daemon.transcript_ends(patience, request).await
+        })?;
         let (read, unread) = ends_of(answer, reading);
         if let Some(why) = unread.summary() {
             log::say(&told_by(self.on.destination(), &why));
@@ -127,7 +149,9 @@ impl Luned {
 
     pub fn printed(&mut self, terminal: TerminalKey, typed: &Said) -> Result<Printed, String> {
         let request = printed::asked(self.asked_on(), terminal, typed);
-        let kept = self.ask(|mut daemon| async move { daemon.keep_printed(request).await })?;
+        let kept = self.ask(|daemon, patience| async move {
+            daemon.keep_printed(patience, request).await
+        })?;
         Printed::of_api(kept).map_err(|why| told_by(self.on.destination(), &why))
     }
 
@@ -138,17 +162,13 @@ impl Luned {
         hear: &dyn Fn(Step),
     ) -> Option<Result<(), String>> {
         let request = asked.asked(self.asked_on());
-        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let (patience, daemon) = (self.patience, self.daemon.clone());
         let on = self.on.destination();
-        let deadline = Instant::now() + asks::TURN + patience;
-        let secs = patience.as_secs_f32();
+        let deadline = Instant::now() + asks::TURN + patience.waits();
         self.tasks.block_on(async move {
-            let steps = match tokio::time::timeout(patience, daemon.ask(request)).await {
-                Ok(Ok(steps)) => steps.into_inner(),
-                Ok(Err(status)) => return Some(Err(said_by(on, &status))),
-                Err(_) => {
-                    return Some(Err(told_by(on, &format!("luned did not answer in {secs}s"))));
-                },
+            let steps = match daemon.ask(patience, request).await {
+                Ok(steps) => steps,
+                Err(unasked) => return Some(Err(unasked.said(on))),
             };
             heard(on, steps, deadline, wanted, hear).await
         })
@@ -156,32 +176,35 @@ impl Luned {
 
     pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
         let (patience, daemon, on) = (self.patience, self.daemon.clone(), self.on.destination());
-        self.tasks.block_on(pasted.ready_on(daemon, on, patience))
+        self.tasks.block_on(pasted.ready_through(&daemon, on, patience))
     }
 
     pub fn issue_remotes(&mut self, dir: &Directory) -> Result<Vec<Remote>, String> {
         let request = IssueRepositoriesRequest { on: self.asked_on(), dir: dir.to_string() };
-        let listed =
-            self.ask(|mut daemon| async move { daemon.issue_repositories(request).await })?;
+        let listed = self.ask(|daemon, patience| async move {
+            daemon.issue_repositories(patience, request).await
+        })?;
         let remotes = listed.repositories.into_iter().map(Remote::of);
         remotes.collect::<Result<_, _>>().map_err(|why| told_by(self.on.destination(), &why))
     }
 
     pub fn file_issue(&mut self, filing: &Filing) -> Result<Filed, Unfiled> {
         let request = filing.asked(self.asked_on());
-        let (patience, mut daemon) = (self.patience, self.daemon.clone());
-        let answer = self.answer_or_code(issues::AT_MOST, async move {
-            timeout(patience, daemon.file_issue(request)).await
+        let answer = self.answer_or_code(issues::AT_MOST, |daemon, patience| async move {
+            daemon.file_issue(patience, request).await
         });
-        let answer = answer.map_err(|(why, code)| Unfiled::of(why, code))?;
+        let answer = answer.map_err(|error| match error {
+            AnswerError::Refused(why) => Unfiled::Refused(why),
+            AnswerError::Asked(why, code) => Unfiled::of(why, Some(code)),
+            AnswerError::InDoubt(why) => Unfiled::InDoubt(why),
+        })?;
         Filed::of(answer).map_err(|why| Unfiled::InDoubt(told_by(self.on.destination(), &why)))
     }
 
     pub fn prunes(&mut self, dir: &Directory) -> Result<Plan, String> {
         let request = prunes::asked(self.asked_on(), dir);
-        let (patience, mut daemon) = (self.patience, self.daemon.clone());
-        let answer = self.answer_of(prunes::PLANNING, async move {
-            timeout(patience, daemon.prunes(request)).await
+        let answer = self.answer_of(prunes::PLANNING, |daemon, patience| async move {
+            daemon.prunes(patience, request).await
         })?;
         Ok(answer.into())
     }
@@ -192,46 +215,54 @@ impl Luned {
         agreed: &BTreeSet<Deleting>,
     ) -> Result<Pruned, String> {
         let request = prunes::told(self.asked_on(), dir, agreed);
-        let (patience, mut daemon) = (self.patience, self.daemon.clone());
-        let answer = self.answer_of(prunes::PLANNING + prunes::DELETING, async move {
-            timeout(patience, daemon.prune(request)).await
-        })?;
+        let answer =
+            self.answer_of(prunes::PLANNING + prunes::DELETING, |daemon, patience| async move {
+                daemon.prune(patience, request).await
+            })?;
         prunes::pruned_of(answer)
     }
 
     pub fn rebase(&mut self, dir: &Directory, branch: Option<&Said>) -> Result<Rebased, Unrebased> {
         let request = rebases::asked(self.asked_on(), dir, branch);
-        let (patience, mut daemon) = (self.patience, self.daemon.clone());
-        let answer = self.answer_or_code(rebases::REBASING, async move {
-            timeout(patience, daemon.rebase(request)).await
+        let answer = self.answer_or_code(rebases::REBASING, |daemon, patience| async move {
+            daemon.rebase(patience, request).await
         });
-        let answer = answer.map_err(|(why, code)| Unrebased::of(why, code))?;
+        let answer = answer.map_err(|error| match error {
+            AnswerError::Refused(why) => Unrebased::Refused(why),
+            AnswerError::Asked(why, code) => Unrebased::of(why, Some(code)),
+            AnswerError::InDoubt(why) => Unrebased::InDoubt(why),
+        })?;
         let on = self.on.destination();
         Rebased::of_api(answer, branch).map_err(|why| Unrebased::InDoubt(told_by(on, &why)))
     }
 
-    fn answer_of<T>(
+    fn answer_of<T, F>(
         &mut self,
         late: Duration,
-        asking: impl Future<Output = Result<Result<Response<Streaming<T>>, Status>, Elapsed>>,
-    ) -> Result<T, String> {
-        self.answer_or_code(late, asking).map_err(|(why, _)| why)
+        asking: impl FnOnce(Shared, Answer) -> F,
+    ) -> Result<T, String>
+    where
+        F: Future<Output = Result<Held<Streaming<T>>, Unasked>>,
+    {
+        self.answer_or_code(late, asking).map_err(AnswerError::into_string)
     }
 
-    fn answer_or_code<T>(
+    fn answer_or_code<T, F>(
         &mut self,
         late: Duration,
-        asking: impl Future<Output = Result<Result<Response<Streaming<T>>, Status>, Elapsed>>,
-    ) -> Result<T, (String, Option<Code>)> {
-        let on = self.on.destination();
-        let secs = self.patience.as_secs_f32();
-        self.tasks.block_on(async {
-            let said = |status: &Status| (said_by(on, status), Some(status.code()));
-            let told = |why: &str| (told_by(on, why), None);
-            let mut answer = match asking.await {
-                Ok(Ok(answer)) => answer.into_inner(),
-                Ok(Err(status)) => return Err(said(&status)),
-                Err(_) => return Err(told(&format!("luned did not answer in {secs}s"))),
+        asking: impl FnOnce(Shared, Answer) -> F,
+    ) -> Result<T, AnswerError>
+    where
+        F: Future<Output = Result<Held<Streaming<T>>, Unasked>>,
+    {
+        let (on, patience, daemon) = (self.on.destination(), self.patience, self.daemon.clone());
+        self.tasks.block_on(async move {
+            let said = |status: &Status| AnswerError::Asked(said_by(on, status), status.code());
+            let told = |why: &str| AnswerError::InDoubt(told_by(on, why));
+            let mut answer = match asking(daemon, patience).await {
+                Ok(answer) => answer,
+                Err(Unasked::Unsent(unsent)) => return Err(AnswerError::Refused(unsent.to_string())),
+                Err(Unasked::Asked(status)) => return Err(said(&status)),
             };
             match timeout(late, answer.message()).await {
                 Ok(Ok(Some(answer))) => Ok(answer),
@@ -244,20 +275,17 @@ impl Luned {
 
     pub fn keep_image(&mut self, png: Png, slow: impl FnOnce()) -> Result<String, String> {
         let request = png.asked(self.asked_on());
-        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let (patience, daemon) = (self.patience, self.daemon.clone());
         let on = self.on.destination();
         let told = |why: &str| Err(told_by(on, why));
-        let secs = patience.as_secs_f32();
         let minutes = images::PATIENCE.as_secs() / 60;
         self.tasks.block_on(async move {
             let kept = async {
-                let answer = tokio::time::timeout(patience, daemon.keep_image(request)).await;
-                let mut answer = match answer {
-                    Ok(Ok(answer)) => answer.into_inner(),
-                    Ok(Err(status)) => return Err(said_by(on, &status)),
-                    Err(_) => return told(&format!("luned did not answer in {secs}s")),
+                let mut answer = match daemon.keep_image(patience, request).await {
+                    Ok(answer) => answer,
+                    Err(unasked) => return Err(unasked.said(on)),
                 };
-                let deadline = images::PATIENCE + patience;
+                let deadline = images::PATIENCE + patience.waits();
                 match tokio::time::timeout(deadline, answer.message()).await {
                     Ok(Ok(Some(kept))) if kept.path.starts_with('/') => Ok(kept.path),
                     Ok(Ok(Some(kept))) => {
@@ -282,27 +310,12 @@ impl Luned {
         Some(On { destination: on.to_string() })
     }
 
-    fn ask<T, F>(&mut self, asked: impl FnOnce(Daemon) -> F) -> Result<T, String>
+    fn ask<T, F>(&mut self, asked: impl FnOnce(Shared, Answer) -> F) -> Result<T, String>
     where
-        F: Future<Output = Result<tonic::Response<T>, Status>>,
+        F: Future<Output = Result<T, Unasked>>,
     {
-        self.answer(asked)?.map_err(|status| said_by(self.on.destination(), &status))
-    }
-
-    fn answer<T, F>(
-        &mut self,
-        asked: impl FnOnce(Daemon) -> F,
-    ) -> Result<Result<T, Status>, String>
-    where
-        F: Future<Output = Result<tonic::Response<T>, Status>>,
-    {
-        let (patience, daemon) = (self.patience, self.daemon.clone());
-        let asked = async move { tokio::time::timeout(patience, asked(daemon)).await };
-        let (on, secs) = (self.on.destination(), self.patience.as_secs_f32());
-        match self.tasks.block_on(asked) {
-            Ok(answer) => Ok(answer.map(Response::into_inner)),
-            Err(_) => Err(told_by(on, &format!("luned did not answer in {secs}s"))),
-        }
+        let (patience, daemon, on) = (self.patience, self.daemon.clone(), self.on.destination());
+        self.tasks.block_on(asked(daemon, patience)).map_err(|unasked| unasked.said(on))
     }
 }
 

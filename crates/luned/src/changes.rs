@@ -29,6 +29,14 @@ impl Unchanged {
     }
 
     #[must_use]
+    pub fn of_asked(unasked: &crate::Unasked) -> Unchanged {
+        match unasked {
+            crate::Unasked::Unsent(unsent) => Unchanged::Refused(unsent.to_string()),
+            crate::Unasked::Asked(status) => Unchanged::of(status),
+        }
+    }
+
+    #[must_use]
     pub fn said(self, refused: &str, in_doubt: &str) -> String {
         match self {
             Unchanged::Refused(why) => format!("{refused}: {why}"),
@@ -49,6 +57,16 @@ impl Unadded {
         match status.code() {
             Code::AlreadyExists => Unadded::Nests(status.message().to_owned()),
             _ => Unadded::Unchanged(Unchanged::of(status)),
+        }
+    }
+
+    #[must_use]
+    pub fn of_asked(unasked: &crate::Unasked) -> Unadded {
+        match unasked {
+            crate::Unasked::Unsent(unsent) => {
+                Unadded::Unchanged(Unchanged::Refused(unsent.to_string()))
+            },
+            crate::Unasked::Asked(status) => Unadded::of(status),
         }
     }
 }

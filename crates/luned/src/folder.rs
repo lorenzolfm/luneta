@@ -154,7 +154,7 @@ impl Folder {
 
 pub fn open(path: &Path) -> Result<Option<Folder>, Refusal> {
     match check(path) {
-        Ok(()) => Ok(Some(Folder(path.to_owned()))),
+        Ok(real) => Ok(Some(Folder(real))),
         Err(Refusal::Io(_, error)) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(refusal) => Err(refusal),
     }
@@ -166,8 +166,7 @@ pub fn make(path: &Path) -> Result<Folder, Refusal> {
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {},
         Err(error) => return Err(Refusal::Io(path.to_owned(), error)),
     }
-    check(path)?;
-    Ok(Folder(path.to_owned()))
+    Ok(Folder(check(path)?))
 }
 
 pub fn held(folder: &Folder) -> Result<bool, Refusal> {
@@ -184,19 +183,31 @@ pub fn held(folder: &Folder) -> Result<bool, Refusal> {
     }
 }
 
-fn check(folder: &Path) -> Result<(), Refusal> {
+fn check(folder: &Path) -> Result<PathBuf, Refusal> {
     let found = fs::symlink_metadata(folder);
     let found = found.map_err(|error| Refusal::Io(folder.to_owned(), error))?;
     if !found.is_dir() {
         return Err(Refusal::NotYours(folder.to_owned()));
     }
-    if found.uid() != rustix::process::getuid().as_raw() {
+    let uid = rustix::process::getuid().as_raw();
+    if found.uid() != uid {
         return Err(Refusal::NotYours(folder.to_owned()));
     }
     if found.mode() & 0o077 != 0 {
         return Err(Refusal::Open(folder.to_owned()));
     }
-    Ok(())
+    let real = fs::canonicalize(folder).map_err(|error| Refusal::Io(folder.to_owned(), error))?;
+    let checked = fs::symlink_metadata(&real).map_err(|error| Refusal::Io(real.clone(), error))?;
+    if !checked.is_dir()
+        || checked.dev() != found.dev()
+        || checked.ino() != found.ino()
+        || checked.uid() != uid
+        || checked.mode() & 0o077 != 0
+    {
+        return Err(Refusal::NotYours(folder.to_owned()));
+    }
+    assert!(real.is_absolute(), "a checked folder is absolute: {}", real.display());
+    Ok(real)
 }
 
 #[cfg(test)]

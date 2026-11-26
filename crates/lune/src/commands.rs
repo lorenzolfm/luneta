@@ -13,12 +13,12 @@ use luned::api::projects::Held;
 use luned::api::remote::Reached;
 use luned::api::say::Does;
 use luned::api::{
-    Agent, ListAgentsResponse, Say, SayRequest, Utterance, Version, WatchRequest,
+    Agent, InfoResponse, ListAgentsResponse, Say, SayRequest, Utterance, Version,
 };
 use luned::folder::SOCKET;
 pub use luned::log::causes;
 use luned::sayings::BYTES_MAX;
-use luned::{release, Daemon, Destination};
+use luned::{release, Destination, LocalWatch, PeerPid, Shared};
 use prost::Message as _;
 
 use crate::agreed::{self, Agreed};
@@ -205,7 +205,7 @@ fn version(spelled: &str) -> Result<Version, String> {
 
 pub fn run(command: &Command, folder: &Path) -> ExitCode {
     match command {
-        Command::Info => ask(folder, daemon::of_any_build(folder), info),
+        Command::Info => ask(folder, daemon::info(folder), info),
         Command::Agents => ask(folder, daemon::running(folder), agents),
         Command::Watch { after } => {
             let current = async {
@@ -225,10 +225,10 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
     }
 }
 
-fn ask<R, F, Asked>(folder: &Path, reaching: R, asking: F) -> ExitCode
+fn ask<C, R, F, Asked>(folder: &Path, reaching: R, asking: F) -> ExitCode
 where
-    R: Future<Output = Result<Daemon, Unreached>>,
-    F: FnOnce(Daemon) -> Asked,
+    R: Future<Output = Result<C, Unreached>>,
+    F: FnOnce(C) -> Asked,
     Asked: Future<Output = Result<(), Box<dyn Error>>>,
 {
     let tasks = luned::tasks::shared();
@@ -261,8 +261,8 @@ fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
         if now { Does::Now(utterance) } else { Does::InTurn(utterance) }
     };
     let say = Some(Say { does: Some(does) });
-    ask(folder, daemon::running(folder), |mut daemon| async move {
-        daemon.say(SayRequest { say }).await?;
+    ask(folder, daemon::running(folder), |daemon| async move {
+        daemon.say(luned::ANSWER, SayRequest { say }).await?;
         Ok(())
     })
 }
@@ -326,21 +326,20 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
 }
 
 async fn first_reach(
-    mut daemon: Daemon,
+    daemon: Shared,
     destination: &Destination,
 ) -> Result<Option<Reached>, Box<dyn Error>> {
     let deadline = tokio::time::Instant::now() + luned::REACH + Duration::from_secs(5);
     let spelled = destination.to_string();
-    let mut after = None;
+    let mut watching = daemon.watching(luned::ANSWER, LocalWatch::Client)?;
     loop {
-        let asked = daemon.watch(WatchRequest { after, kept: None, shown: false });
-        let Ok(host) = tokio::time::timeout_at(deadline, asked).await else {
+        let Ok(watched) = tokio::time::timeout_at(deadline, watching.next()).await else {
             return Ok(None);
         };
-        let host = host?.into_inner();
+        let host = watched?.host;
         let named = host.remotes.into_iter().find(|remote| remote.destination == spelled);
         match named.and_then(|remote| remote.reached) {
-            None | Some(Reached::Reaching(())) => after = host.version,
+            None | Some(Reached::Reaching(())) => {},
             reached => return Ok(reached),
         }
     }
@@ -348,28 +347,28 @@ async fn first_reach(
 
 pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
     luned::tasks::shared().block_on(async {
-        let mut daemon = daemon::running(folder).await?;
-        let listed = daemon.list_agents(()).await;
-        listed.map(tonic::Response::into_inner).map_err(|error| causes(&error))
+        let daemon = daemon::running(folder).await?;
+        daemon.list_agents(luned::ANSWER).await.map_err(|error| causes(&error))
     })
 }
 
-async fn info(mut daemon: Daemon) -> Result<(), Box<dyn Error>> {
-    let info = daemon.info(()).await?.into_inner();
+async fn info(info: InfoResponse) -> Result<(), Box<dyn Error>> {
     let started = info.started_at.and_then(|at| SystemTime::try_from(at).ok());
     let build = release::spelled(&info.version, info.built);
+    let pid = PeerPid::new(info.pid);
+    let pid_said = pid.map_or_default(|pid| format!(" (pid {pid})"));
     match started.and_then(|at| at.elapsed().ok()) {
-        Some(up) => println!("luned {build} (pid {}), up {}", info.pid, span(up.as_secs())),
-        None => println!("luned {build} (pid {})", info.pid),
+        Some(up) => println!("luned {build}{pid_said}, up {}", span(up.as_secs())),
+        None => println!("luned {build}{pid_said}"),
     }
     if let release::Of::Other(other) = release::of(&info.version, info.built) {
-        eprintln!("lune: {}", daemon::unmatched(&other, info.pid));
+        eprintln!("lune: {}", daemon::unmatched(&other, pid));
     }
     Ok(())
 }
 
-async fn agents(mut daemon: Daemon) -> Result<(), Box<dyn Error>> {
-    let listed = daemon.list_agents(()).await?.into_inner();
+async fn agents(daemon: Shared) -> Result<(), Box<dyn Error>> {
+    let listed = daemon.list_agents(luned::ANSWER).await?;
     let seated = |agent: &Agent| {
         seat_of(agent).unwrap_or_else(|(seat, why)| {
             eprintln!("lune: luned lists an agent in {why}");
@@ -424,10 +423,13 @@ pub fn unread(unread: Unread) -> String {
 }
 
 async fn watch(
-    mut daemon: Daemon,
+    daemon: Shared,
     after: Option<Version>,
 ) -> Result<(), Box<dyn Error>> {
-    let host = daemon.watch(WatchRequest { after, kept: None, shown: false }).await?.into_inner();
+    let host = match after {
+        None => daemon.snapshot(luned::ANSWER, false).await?,
+        Some(version) => daemon.watching(luned::ANSWER, LocalWatch::Client)?.once(version).await?,
+    };
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&host.encode_to_vec())?;
     stdout.flush()?;

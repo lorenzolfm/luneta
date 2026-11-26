@@ -799,9 +799,10 @@ mod tests {
     fn a_lune_that_waited_for_the_lock_looks_at_the_folder_again() {
         let root = tempfile::tempdir().expect("a folder");
         let folder = root.path().join("lune");
+        let real = fs::canonicalize(root.path()).expect("a folder").join("lune");
 
         let gone = || fs::remove_dir_all(&folder).expect("it goes");
-        assert_eq!(socket_after_waiting(&folder, gone), Ok(folder.join(SOCKET)));
+        assert_eq!(socket_after_waiting(&folder, gone), Ok(real.join(SOCKET)));
         assert!(folder.is_dir(), "it makes the folder again");
 
         let open = || {

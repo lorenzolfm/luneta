@@ -2102,10 +2102,12 @@ fn a_machine_whose_answer_stalls_may_have_made_the_worktree() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let stalled = ssh.stalls_answers("far");
     let said = runtime.block_on(async {
-        let daemon = luned::connect(&folder, PATIENT).await.unwrap();
+        let luned::Reached::Matched(daemon) = luned::reach(&folder).await.unwrap() else {
+            panic!("the own build did not match");
+        };
         let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
         let pasted = Pasted::new(Work::Link(issue), Vec::new());
-        pasted.ready_on(daemon, Some(&"far".parse().unwrap()), GIVES_UP).await
+        pasted.ready_through(&daemon, Some(&"far".parse().unwrap()), luned::Answer::of(GIVES_UP)).await
     });
     drop(stalled);
     let Err(Unready::InDoubt(why)) = said else {

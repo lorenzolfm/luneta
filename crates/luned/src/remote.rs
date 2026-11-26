@@ -782,14 +782,16 @@ async fn matched(
     match release::of(&info.version, info.built) {
         release::Of::Own => Ok(daemon),
         release::Of::Other(other) => {
-            Err(Failed::of(unmatched(&other, info.pid), Stopped::Unmatched))
+            let pid = client::PeerPid::new(info.pid);
+            Err(Failed::of(unmatched(&other, pid), Stopped::Unmatched))
         },
     }
 }
 
-fn unmatched(other: &release::Other, pid: u32) -> String {
+fn unmatched(other: &release::Other, pid: Option<client::PeerPid>) -> String {
+    let pid = pid.map_or_default(|pid| format!(" (pid {pid})"));
     let own = release::SAID.as_str();
-    format!("luned {other} (pid {pid}) is another build than this one, {own}")
+    format!("luned {other}{pid} is another build than this one, {own}")
 }
 
 fn ssh(
@@ -880,11 +882,10 @@ mod tests {
     use tonic::transport::Channel;
 
     use super::*;
-    use crate::api::daemon_client::DaemonClient;
 
     fn unreached_daemon() -> client::Daemon {
         let channel = Channel::from_static("http://[::1]:1").connect_lazy();
-        DaemonClient::new(client::Within::new(channel, client::ANSWER.waits(), client::unanswered))
+        client::unwatched(channel, client::ANSWER)
     }
 
     fn answered() -> Seen {

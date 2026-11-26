@@ -19,7 +19,6 @@ use wt::repo::Repo;
 use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response;
 use crate::api::{On, PasteRequest, PasteResponse};
-use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common, Git};
 use crate::program::{self, Ran};
 use crate::projects::{self, SPOT_LOOK};
@@ -617,6 +616,13 @@ impl Unready {
             _ => Unready::InDoubt(why),
         }
     }
+
+    fn of_asked(on: Option<&Destination>, unasked: &crate::Unasked) -> Unready {
+        match unasked {
+            crate::Unasked::Unsent(unsent) => Unready::Failed(unsent.to_string()),
+            crate::Unasked::Asked(status) => Unready::of(on, status),
+        }
+    }
 }
 
 impl From<String> for Unready {
@@ -720,22 +726,20 @@ impl Pasted {
         Ok(PasteResponse { at_head: self.wanted == Wanted::AtHead, ..answer })
     }
 
-    pub async fn ready_on(
+    pub async fn ready_through(
         &self,
-        mut daemon: Daemon,
+        daemon: &crate::Shared,
         on: Option<&Destination>,
-        patience: Duration,
+        patience: crate::Answer,
     ) -> Result<Ready<usize>, Unready> {
         let request = self.asked(on.map(|on| On { destination: on.to_string() }));
-        let secs = patience.as_secs_f32();
         let minutes = PATIENCE.as_secs() / 60;
         let in_doubt = |why: String| Err(Unready::InDoubt(remote::told_by(on, &why)));
-        let mut answer = match timeout(patience, daemon.paste(request)).await {
-            Ok(Ok(answer)) => answer.into_inner(),
-            Ok(Err(status)) => return Err(Unready::of(on, &status)),
-            Err(_) => return in_doubt(format!("luned did not answer in {secs}s")),
-        };
-        match timeout(PATIENCE + patience, answer.message()).await {
+        let mut answer = daemon
+            .paste(patience, request)
+            .await
+            .map_err(|unasked| Unready::of_asked(on, &unasked))?;
+        match timeout(PATIENCE + patience.waits(), answer.message()).await {
             Ok(Ok(Some(ready))) => self.answered(ready).or_else(in_doubt),
             Ok(Ok(None)) => in_doubt("luned's answer ended with nothing in it".to_owned()),
             Ok(Err(status)) => Err(Unready::of(on, &status)),

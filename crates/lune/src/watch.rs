@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 
-use luned::api::{Version, WatchRequest};
+use luned::LocalWatch;
 use tokio::time::Instant;
 
 use crate::commands::causes;
@@ -26,25 +26,19 @@ pub fn start(folder: PathBuf, events: Sender<Event>) {
 async fn watch(folder: PathBuf, events: Sender<Event>) {
     loop {
         let reaching = Instant::now();
-        let mut after: Option<Version> = None;
         let failure = match daemon::current(&folder).await {
-            Ok(Current { mut daemon, .. }) => {
-                loop {
-                    match daemon.watch(WatchRequest { after, kept: None, shown: true }).await {
-                        Ok(host) => {
-                            let host = host.into_inner();
-                            let Some(version) = host.version else {
-                                break "an answer with no version, which this lune does not read"
-                                    .to_owned();
-                            };
-                            after = Some(version);
-                            if events.send(Event::Daemon(Ok(host))).is_err() {
+            Ok(Current { daemon, .. }) => match daemon.watching(luned::ANSWER, LocalWatch::Window) {
+                Ok(mut watching) => loop {
+                    match watching.next().await {
+                        Ok(watched) => {
+                            if events.send(Event::Daemon(Ok(watched.host))).is_err() {
                                 return;
                             }
                         },
-                        Err(status) => break causes(&status),
+                        Err(error) => break causes(&error),
                     }
-                }
+                },
+                Err(unsent) => unsent.to_string(),
             },
             Err(why) => why,
         };
