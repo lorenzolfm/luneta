@@ -4,8 +4,8 @@ use rustix::fs::{Mode, OFlags};
 
 use lune_protocol::shell::Front;
 
-use crate::process::{self, Group, Process};
-use crate::pty::{self, Modes, Pty};
+use crate::process::{self, Group, Process, ProcessId};
+use crate::pty::{self, Modes};
 
 const READING: [&str; 2] = ["wait_woken", "n_tty_read"];
 
@@ -18,24 +18,26 @@ const RELAYS: [&str; 2] = ["sudo", "script"];
 
 const PROCESSES_MAX: usize = 512;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub modes: Modes,
+    pub device: pty::Device,
+}
+
 #[must_use]
-pub fn of_terminal(pty: &Pty, program: u32, group: Group) -> Front {
-    let modes = pty.modes().ok();
+pub fn of_terminal(snapshot: Snapshot, program: ProcessId, group: Group) -> Front {
     let processes = tree(program);
     let front = in_front(&processes, group);
-    let said = of(modes, &front, group.leader() == program);
+    let said = of(snapshot.modes, &front, group.leader() == program);
     if said != Front::Interactive {
         return said;
     }
-    let Ok(ours) = pty.device() else {
-        return said;
-    };
     let relays = front.iter().filter(|process| RELAYS.contains(&process.name.as_str()));
     let children = relays.flat_map(|relay| {
-        processes.iter().filter(move |child| child.parent == relay.pid)
+        processes.iter().filter(move |child| child.parent == Some(relay.pid))
     });
     let inner = children.filter_map(|child| Some((child, child.terminal?)));
-    match inner.into_iter().find(|(_, terminal)| terminal.device != ours) {
+    match inner.into_iter().find(|(_, terminal)| terminal.device != snapshot.device.raw()) {
         Some((child, terminal)) => {
             let Some(inner) = terminal.front else {
                 return behind(modes_at(terminal.device), &[]);
@@ -47,15 +49,15 @@ pub fn of_terminal(pty: &Pty, program: u32, group: Group) -> Front {
     }
 }
 
-fn of(modes: Option<Modes>, front: &[&Process], shell: bool) -> Front {
+fn of(modes: Modes, front: &[&Process], shell: bool) -> Front {
     match by_modes(modes, front) {
         Front::Interactive if shell => Front::Asking,
         front => front,
     }
 }
 
-fn by_modes(modes: Option<Modes>, front: &[&Process]) -> Front {
-    let Modes { lines, echo } = modes.unwrap_or(Modes { lines: true, echo: true });
+fn by_modes(modes: Modes, front: &[&Process]) -> Front {
+    let Modes { lines, echo } = modes;
     let reading = || front.iter().any(|process| READING.contains(&process.sleeps.as_str()));
     if !lines {
         Front::Interactive
@@ -67,7 +69,7 @@ fn by_modes(modes: Option<Modes>, front: &[&Process]) -> Front {
 }
 
 fn behind(modes: Option<Modes>, front: &[&Process]) -> Front {
-    if modes.is_some() {
+    if let Some(modes) = modes {
         return by_modes(modes, front);
     }
     if front.iter().any(|process| TAKING_OVER.contains(&process.name.as_str())) {
@@ -77,7 +79,7 @@ fn behind(modes: Option<Modes>, front: &[&Process]) -> Front {
     }
 }
 
-fn tree(root: u32) -> Vec<Process> {
+fn tree(root: ProcessId) -> Vec<Process> {
     let Some(first) = process::process(root) else {
         return Vec::new();
     };
@@ -90,7 +92,9 @@ fn tree(root: u32) -> Vec<Process> {
             if processes.len() == PROCESSES_MAX {
                 return processes;
             }
-            if let Some(child) = process::process(child).filter(|child| child.parent == pid) {
+            if let Some(child) =
+                process::process(child).filter(|child| child.parent == Some(pid))
+            {
                 processes.push(child);
             }
         }
@@ -130,10 +134,11 @@ mod tests {
     use super::*;
 
     fn process(pid: u32, name: &str, sleeps: &str) -> Process {
+        let pid = ProcessId::new(pid).unwrap();
         Process {
             pid,
-            parent: 1,
-            group: Group(pid),
+            parent: ProcessId::new(1),
+            group: Group::of_process(pid),
             name: name.to_owned(),
             sleeps: sleeps.to_owned(),
             stopped: false,
@@ -141,9 +146,9 @@ mod tests {
         }
     }
 
-    const LINES: Option<Modes> = Some(Modes { lines: true, echo: true });
-    const KEYS: Option<Modes> = Some(Modes { lines: false, echo: false });
-    const HIDDEN: Option<Modes> = Some(Modes { lines: true, echo: false });
+    const LINES: Modes = Modes { lines: true, echo: true };
+    const KEYS: Modes = Modes { lines: false, echo: false };
+    const HIDDEN: Modes = Modes { lines: true, echo: false };
 
     #[test]
     fn the_modes_and_a_read_say_what_the_command_does() {
@@ -155,7 +160,6 @@ mod tests {
         assert_eq!(of(LINES, &[&sleeping], false), Front::Working);
         assert_eq!(of(LINES, &[&sleeping, &reading], false), Front::Asking);
         assert_eq!(of(LINES, &[&socket], false), Front::Asking);
-        assert_eq!(of(None, &[&sleeping], false), Front::Working);
     }
 
     #[test]
@@ -171,7 +175,7 @@ mod tests {
         let make = process(3, "make", "");
         assert_eq!(behind(None, &[&vim]), Front::Interactive);
         assert_eq!(behind(None, &[&make]), Front::Working);
-        assert_eq!(behind(HIDDEN, &[&make]), Front::Asking);
-        assert_eq!(behind(KEYS, &[&make]), Front::Interactive);
+        assert_eq!(behind(Some(HIDDEN), &[&make]), Front::Asking);
+        assert_eq!(behind(Some(KEYS), &[&make]), Front::Interactive);
     }
 }

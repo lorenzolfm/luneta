@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use lune_protocol::shell::Doing;
 use lune_protocol::socket::Unreached;
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
@@ -9,6 +10,7 @@ use crate::api;
 use crate::asked::{AbsoluteCwd, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leaders;
+use crate::looker::Foreground;
 use crate::panics::Shared;
 use crate::program_status::{EndedProgramStatuses, Snapshot as ProgramStatuses};
 use crate::pty::{self, Pty};
@@ -240,8 +242,8 @@ impl Mux {
     pub fn looked(
         &self,
         terminal: TerminalId,
-        foreground: Option<api::Foreground>,
-        ran: Option<api::Ran>,
+        foreground: Option<Foreground>,
+        ran: Option<Doing>,
     ) {
         let _ = self.change_terminal_meta(
             |model| model.terminal_of_id_mut(terminal).ok_or(()),
@@ -281,6 +283,7 @@ mod model {
 
     use lune_protocol::made::Made;
     use lune_protocol::program_status::bound_fair;
+    use lune_protocol::shell::Doing;
     use lune_protocol::socket::Unreached;
     use lune_protocol::LISTING_CHILDREN_BYTES_MAX;
     use prost::Message as _;
@@ -292,6 +295,8 @@ mod model {
     use crate::api;
     use crate::asked::{AbsoluteCwd, Colours, Ends, Greeting, SHOWN_MAX, Size, Tag, TerminalKey};
     use crate::id::{ClientId, TerminalId};
+    use crate::looker::Foreground;
+    use crate::process::ProcessId;
     use crate::program_status::{EndedProgramStatuses, Snapshot as ProgramStatuses};
     use crate::terminal::{Exit, Handle, Placing, Viewer, ViewerOut, Wanted};
 
@@ -344,10 +349,10 @@ mod model {
 
     enum Program {
         Runs {
-            pid: u32,
+            pid: ProcessId,
             ends: Ends,
-            foreground: Option<api::Foreground>,
-            ran: Option<api::Ran>,
+            foreground: Option<Foreground>,
+            ran: Option<Doing>,
             statuses: ProgramStatuses,
         },
         Ended {
@@ -404,8 +409,8 @@ mod model {
 
         pub(super) fn set_looked(
             &mut self,
-            foreground: Option<api::Foreground>,
-            ran: Option<api::Ran>,
+            foreground: Option<Foreground>,
+            ran: Option<Doing>,
         ) {
             let Program::Runs { foreground: was, ran: said, .. } = &mut self.terminal.program
             else {
@@ -436,7 +441,7 @@ mod model {
             tag: Tag,
             size: Size,
             cwd: AbsoluteCwd,
-            pid: u32,
+            pid: ProcessId,
             ends: Ends,
             handle: Handle,
         ) -> Terminal {
@@ -472,9 +477,13 @@ mod model {
         fn said(&self) -> api::Terminal {
             let (program, statuses) = match &self.program {
                 Program::Runs { pid, foreground, ran, statuses, .. } => {
-                    let (foreground, ran) = (foreground.clone(), ran.clone());
-                    let program =
-                        api::terminal::Program::Runs(api::Running { pid: *pid, foreground, ran });
+                    let foreground = foreground.as_ref().map(Foreground::said);
+                    let ran = ran.as_ref().map(Doing::to_mux);
+                    let program = api::terminal::Program::Runs(api::Running {
+                        pid: pid.get(),
+                        foreground,
+                        ran,
+                    });
                     (program, statuses.to_mux())
                 },
                 Program::Ended { exit, statuses } => {
