@@ -4,6 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
@@ -514,6 +515,32 @@ fn patch_base(
     Ok((EMPTY_TREE.to_owned(), Said::new("empty".to_owned()).expect("empty is non-empty")))
 }
 
+fn open_untracked_at(root: &OwnedFd, rel_path: &RelativePath) -> Result<OwnedFd, Errno> {
+    let mut parts = rel_path.as_str().split('/');
+    let Some(mut current_name) = parts.next() else {
+        return Err(Errno::INVAL);
+    };
+    let mut held: Option<OwnedFd> = None;
+    for next_name in parts {
+        let parent = held.as_ref().unwrap_or(root);
+        let dir = rustix::fs::openat(
+            parent,
+            current_name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        held = Some(dir);
+        current_name = next_name;
+    }
+    let parent = held.as_ref().unwrap_or(root);
+    rustix::fs::openat(
+        parent,
+        current_name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+}
+
 fn read_untracked(
     dir: &str,
     git: &impl Fn(&'static str, &[&'static str], &[&str]) -> Result<Ran, String>,
@@ -521,7 +548,12 @@ fn read_untracked(
     let listed = git("ls-files", &["--others", "--exclude-standard", "-z"], &[])?
         .answer()
         .map_err(|why| format!("git ls-files said {why}"))?;
-    let root = Path::new(dir);
+    let root = rustix::fs::open(
+        Path::new(dir),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| format!("worktree {dir} could not be opened: {error}"))?;
     let file_limit = u64::try_from(UNTRACKED_BYTES_MAX).expect("UNTRACKED_BYTES_MAX fits u64");
     let mut files = Vec::new();
     let mut total_bytes = 0usize;
@@ -547,14 +579,11 @@ fn read_untracked(
             truncated = true;
             continue;
         };
-        let full = root.join(rel_path.as_path());
-        let fd = match rustix::fs::open(
-            &full,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
+        let fd = match open_untracked_at(&root, &rel_path) {
             Ok(fd) => fd,
-            Err(Errno::NOENT | Errno::LOOP | Errno::NOTDIR) => continue,
+            Err(Errno::NOENT | Errno::LOOP | Errno::NOTDIR | Errno::ISDIR | Errno::NXIO) => {
+                continue;
+            },
             Err(_) => {
                 truncated = true;
                 continue;
@@ -1552,5 +1581,23 @@ mod tests {
         assert!(out.truncated());
         let paths: Vec<&str> = out.untracked().iter().map(|file| file.path().as_str()).collect();
         assert_eq!(paths, ["small.txt"]);
+
+        std::os::unix::fs::symlink(outside.path(), path.join("escape")).unwrap();
+        let root_fd = rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        let escaped = super::RelativePath::parse("escape/secret.txt".to_owned()).unwrap();
+        assert!(super::open_untracked_at(&root_fd, &escaped).is_err());
+
+        let fifo_path = path.join("pipe.fifo");
+        let status = std::process::Command::new("mkfifo").arg(&fifo_path).status().unwrap();
+        assert!(status.success());
+        let fifo = super::RelativePath::parse("pipe.fifo".to_owned()).unwrap();
+        if let Ok(fd) = super::open_untracked_at(&root_fd, &fifo) {
+            assert!(!fs::File::from(fd).metadata().unwrap().file_type().is_file());
+        }
     }
 }

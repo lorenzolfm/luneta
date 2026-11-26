@@ -326,12 +326,12 @@ impl ReviewPane {
                     viewer.unfocus_sidebar();
                 }
             }
-            KeyCode::Char('e') if bare => {
+            KeyCode::Char('e') if bare && !viewer.sidebar().is_focused() => {
                 if let Some(excerpt) = viewer.selected_excerpt() {
                     return ReviewAction::Explain(excerpt);
                 }
             }
-            KeyCode::Char('?') if shift || bare => {
+            KeyCode::Char('?') if (shift || bare) && !viewer.sidebar().is_focused() => {
                 if let Some(excerpt) = viewer.selected_excerpt() {
                     return ReviewAction::Ask(excerpt);
                 }
@@ -715,17 +715,28 @@ fn draw_tree(buffer: &mut Buffer, area: Rect, viewer: &Viewer, scroll: usize, fo
         match &entry.node {
             TreeNode::Dir {
                 name,
+                path,
                 added,
                 deleted,
-                ..
             } => {
-                let stats = format!("+{added} -{deleted}");
-                let lead = format!(" {indent}▾ ");
-                let room = width.saturating_sub(lead.width() + stats.width() + 2);
+                let stats = format!(" +{added} -{deleted}");
+                let chevron = if viewer.is_folded(path) { "▸" } else { "▾" };
+                let lead = format!(" {indent}{chevron} ");
+                let room = width.saturating_sub(lead.width() + stats.width() + 1);
                 let shown = sidebar::cut(name, room);
+                let pad = width.saturating_sub(lead.width() + shown.width() + stats.width());
                 let line = Line::from(vec![
                     Span::styled(lead, Style::new().fg(moonlight::MUTE).bg(bg)),
                     Span::styled(shown, Style::new().fg(moonlight::BLUE).bg(bg)),
+                    Span::styled(" ".repeat(pad), Style::new().bg(bg)),
+                    Span::styled(
+                        format!(" +{added}"),
+                        Style::new().fg(moonlight::GREEN).bg(bg),
+                    ),
+                    Span::styled(
+                        format!(" -{deleted}"),
+                        Style::new().fg(moonlight::RED).bg(bg),
+                    ),
                 ]);
                 buffer.set_line(area.x, y, &line, area.width);
             }
@@ -951,7 +962,7 @@ fn draw_line_number_and_bg(
         );
     }
     if let Some(number) = line_number {
-        let number_text = format!("{number:>4}");
+        let number_text = format_line_number(number);
         let mut style = Style::new().fg(number_fg).bg(base_bg);
         if is_cursor {
             style = style.add_modifier(Modifier::BOLD);
@@ -964,6 +975,20 @@ fn draw_line_number_and_bg(
             style,
         );
     }
+}
+
+fn format_line_number(number: u32) -> String {
+    let cols = usize::from(LINE_NUMBER_COLS);
+    if number < 100_000 {
+        format!("{number:>cols$}")
+    } else {
+        let tail = number % 10_000;
+        format!("…{tail:04}")
+    }
+}
+
+fn blank_line_number() -> String {
+    " ".repeat(usize::from(LINE_NUMBER_COLS))
 }
 
 fn draw_left_row(
@@ -1196,8 +1221,8 @@ fn draw_unified(buffer: &mut Buffer, area: Rect, viewer: &Viewer, focused: bool)
                 } => {
                     let line = at.get(viewer.patch());
                     (
-                        format!("{old_line:>4}"),
-                        format!("{new_line:>4}"),
+                        format_line_number(*old_line),
+                        format_line_number(*new_line),
                         " ",
                         moonlight::MUTE,
                         row_bg(Color::Reset, is_cursor, is_selected),
@@ -1210,8 +1235,8 @@ fn draw_unified(buffer: &mut Buffer, area: Rect, viewer: &Viewer, focused: bool)
                 UnifiedRow::Deleted { old_line, at } => {
                     let line = at.get(viewer.patch());
                     (
-                        format!("{old_line:>4}"),
-                        "    ".to_owned(),
+                        format_line_number(*old_line),
+                        blank_line_number(),
                         "-",
                         moonlight::RED,
                         row_bg(DEL_BG, is_cursor, is_selected),
@@ -1224,8 +1249,8 @@ fn draw_unified(buffer: &mut Buffer, area: Rect, viewer: &Viewer, focused: bool)
                 UnifiedRow::Added { new_line, at } => {
                     let line = at.get(viewer.patch());
                     (
-                        "    ".to_owned(),
-                        format!("{new_line:>4}"),
+                        blank_line_number(),
+                        format_line_number(*new_line),
                         "+",
                         moonlight::GREEN,
                         row_bg(ADD_BG, is_cursor, is_selected),
@@ -1480,7 +1505,7 @@ pub fn emit_kitty_ribbon(out: &mut impl io::Write, overlay: &RibbonOverlay) -> i
 }
 
 pub fn clear_kitty_ribbon(out: &mut impl io::Write, image_id: NonZeroU32) -> io::Result<()> {
-    write!(out, "\x1b_Ga=d,d=i,i={image_id},q=2\x1b\\")
+    write!(out, "\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\")
 }
 
 #[cfg(test)]
@@ -1599,5 +1624,58 @@ diff --git a/src/lib.rs b/src/lib.rs
         pane.draw(&mut narrow_buf, narrow, true, None);
         let header: String = (0..narrow.width).map(|x| narrow_buf[(x, 0)].symbol()).collect();
         assert!(!header.contains("[split]"), "{header}");
+
+        let mut clear_wire = Vec::new();
+        clear_kitty_ribbon(&mut clear_wire, KITTY_BASE_ID).unwrap();
+        assert_eq!(
+            String::from_utf8(clear_wire).unwrap(),
+            format!("\x1b_Ga=d,d=I,i={KITTY_BASE_ID},q=2\x1b\\")
+        );
+    }
+
+    #[test]
+    fn folded_directory_shows_collapsed_chevron_and_five_digit_lines_keep_unified_markers() {
+        let patch = "\
+diff --git a/crates/a/one.rs b/crates/a/one.rs
+--- a/crates/a/one.rs
++++ a/crates/a/one.rs
+@@ -10000,2 +10000,2 @@
+-old_big();
++new_big();
+ ctx();
+diff --git a/crates/a/two.rs b/crates/a/two.rs
+--- a/crates/a/two.rs
++++ a/crates/a/two.rs
+@@ -1 +1,2 @@
+ keep();
++more();
+";
+        let mut pane = ReviewPane::loading();
+        pane.loaded(Ok(loaded_diff(patch)), rev(1));
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        pane.draw(&mut buf, area, true, None);
+        let row1: String = (0..28).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(row1.contains('▾'), "{row1}");
+        assert!(row1.contains("+2 -1"), "{row1}");
+        let split_row: String = (29..120).map(|x| buf[(x, 3)].symbol()).collect();
+        assert!(split_row.contains("10000"), "{split_row}");
+
+        pane.key(&KeyEvent::from(KeyCode::Tab));
+        assert_eq!(pane.key(&KeyEvent::from(KeyCode::Char('e'))), ReviewAction::None);
+        pane.key(&KeyEvent::from(KeyCode::Enter));
+        let mut folded_buf = Buffer::empty(area);
+        pane.draw(&mut folded_buf, area, true, None);
+        let folded_row1: String = (0..28).map(|x| folded_buf[(x, 1)].symbol()).collect();
+        assert!(folded_row1.contains('▸'), "{folded_row1}");
+
+        pane.key(&KeyEvent::from(KeyCode::Tab));
+        pane.key(&KeyEvent::from(KeyCode::Char('s')));
+        let mut unified_buf = Buffer::empty(area);
+        pane.draw(&mut unified_buf, area, true, None);
+        let del_row: String = (29..80).map(|x| unified_buf[(x, 3)].symbol()).collect();
+        assert!(del_row.contains("10000"), "{del_row}");
+        assert!(del_row.contains(" - old_big();"), "{del_row}");
+        assert_eq!(format_line_number(123_456), "…3456");
     }
 }

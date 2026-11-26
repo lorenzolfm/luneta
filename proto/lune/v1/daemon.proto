@@ -131,6 +131,7 @@ message AskRequest {
   optional fixed64 before = 7;
   repeated uint32 marked_issues = 8;
   repeated uint32 marked_pulls = 9;
+  bool review_only = 10;
 }
 
 message AskResponse {
@@ -932,13 +933,6 @@ message ReadDiffRequest {
   fixed64 worktree = 2;
 }
 
-// Wire invariants enforced by both luned and the client:
-// - base and head are non-empty single-line labels without control characters.
-// - patch is at most PATCH_BYTES_MAX (8 MiB).
-// - untracked has at most UNTRACKED_FILES_MAX (64) entries, each with a valid
-//   safe relative path (non-empty, no root/parent/curdir/control chars),
-//   per-file content at most UNTRACKED_BYTES_MAX (128 KiB) with no NUL bytes,
-//   and cumulative content at most UNTRACKED_TOTAL_BYTES_MAX (1 MiB).
 message ReadDiffResponse {
   string base = 1;
   string head = 2;

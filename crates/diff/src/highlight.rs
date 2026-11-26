@@ -606,8 +606,9 @@ fn highlight_code(line: &str, language: Language) -> Vec<TokenSpan> {
         ) && byte == b'@'
         {
             let start = at;
-            at = scan_ident(bytes, at + 1);
-            if at > start + 1 {
+            let end = scan_ident(bytes, at + 1);
+            if end > start + 1 {
+                at = end;
                 spans.push(TokenSpan {
                     start,
                     end: at,
@@ -853,6 +854,34 @@ mod tests {
             assert!(line.is_char_boundary(span.start));
             assert!(line.is_char_boundary(span.end));
             prev = span.end;
+        }
+    }
+
+    #[test]
+    fn trailing_or_bare_at_sign_does_not_panic_or_skip_following_token() {
+        for language in [Language::Python, Language::Swift, Language::TypeScript] {
+            for line in ["@", " * @", "matrix @", "a @ \"quoted\"", "@decorator"] {
+                let spans = highlight_line(line, language);
+                for span in &spans {
+                    assert!(span.start < span.end && span.end <= line.len());
+                }
+            }
+            let quoted = "a @ \"quoted\"";
+            let spans = highlight_line(quoted, language);
+            assert!(
+                spans
+                    .iter()
+                    .any(|s| &quoted[s.start..s.end] == "\"quoted\"" && s.role == SyntaxRole::String),
+                "{language:?}: {spans:?}"
+            );
+            let bare_quoted = "@\"quoted\"";
+            let spans = highlight_line(bare_quoted, language);
+            assert!(
+                spans.iter().any(
+                    |s| &bare_quoted[s.start..s.end] == "\"quoted\"" && s.role == SyntaxRole::String
+                ),
+                "{language:?}: {spans:?}"
+            );
         }
     }
 }

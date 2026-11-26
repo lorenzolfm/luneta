@@ -496,6 +496,8 @@ impl Ribbons {
 enum FetchFlight {
     Idle,
     InFlight {
+        on: Machine,
+        worktree: WorktreeId,
         revision: NonZeroU64,
         refetch: bool,
     },
@@ -1136,7 +1138,7 @@ impl App {
             },
             Event::DiffLoaded { on, worktree, revision, loaded } => {
                 let refetch = match &self.diff.flight {
-                    FetchFlight::InFlight { revision: inflight_rev, refetch }
+                    FetchFlight::InFlight { revision: inflight_rev, refetch, .. }
                         if *inflight_rev == revision =>
                     {
                         let should_refetch = *refetch;
@@ -1163,12 +1165,12 @@ impl App {
                     let (tabs, titles) = self.projected.tabs(right.machine(), right.worktree());
                     right.tabs(tabs, titles);
                 }
-                let review_status = self.review_git_status(&host);
                 if let Some(Homed::Gone { on }) = self.name_home() {
                     self.go_other_than(&on, None);
                 }
                 let projected = &self.projected;
                 self.homes.forget(|home| gone(projected, home));
+                let review_status = self.review_git_status(&host);
                 self.sidebar.heard(host);
                 self.seat();
                 if review_status != self.diff.git_status {
@@ -2323,12 +2325,25 @@ impl App {
         else {
             return;
         };
-        if let FetchFlight::InFlight { refetch, .. } = &mut self.diff.flight {
+        if let FetchFlight::InFlight {
+            on: inflight_on,
+            worktree: inflight_worktree,
+            refetch,
+            ..
+        } = &mut self.diff.flight
+            && *inflight_on == on
+            && *inflight_worktree == worktree
+        {
             *refetch = true;
             return;
         }
         let revision = self.diff.next_revision();
-        self.diff.flight = FetchFlight::InFlight { revision, refetch: false };
+        self.diff.flight = FetchFlight::InFlight {
+            on: on.clone(),
+            worktree,
+            revision,
+            refetch: false,
+        };
         let (luned, events) = (self.luned.clone(), self.events.clone());
         thread::spawn(move || {
             let loaded = caught(DIFF_PANICKED, || worktrees::read_diff(&luned, &on, worktree));

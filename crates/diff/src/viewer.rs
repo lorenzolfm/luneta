@@ -8,7 +8,7 @@ use crate::patch::{FilePath, Patch};
 use crate::ribbon::GUTTER_COLS;
 use crate::tree::{FileTree, TreeNode};
 
-pub const LINE_NUMBER_COLS: u16 = 4;
+pub const LINE_NUMBER_COLS: u16 = 5;
 
 pub const SPLIT_MIN_WIDTH: u16 = 88;
 
@@ -494,6 +494,34 @@ impl Viewer {
     }
 
     #[must_use]
+    pub fn is_folded(&self, path: &str) -> bool {
+        self.folded.contains(path)
+    }
+
+    #[must_use]
+    fn diff_file_at(&self, row: usize) -> Option<usize> {
+        match self.active_layout {
+            ActiveLayout::Split => self
+                .split
+                .rows
+                .get(row)
+                .and_then(SplitLine::file_index)
+                .or_else(|| {
+                    self.split
+                        .files
+                        .iter()
+                        .find(|span| row >= span.start_row && row < span.end_row)
+                        .map(|span| span.file)
+                }),
+            ActiveLayout::Unified => self
+                .unified
+                .rows
+                .get(row)
+                .map(UnifiedRow::file_index),
+        }
+    }
+
+    #[must_use]
     pub fn current_file(&self) -> Option<usize> {
         if self.sidebar.is_focused()
             && let Some(entry) = self.tree.entries.get(self.tree_cursor)
@@ -501,25 +529,7 @@ impl Viewer {
         {
             return Some(file);
         }
-        match self.active_layout {
-            ActiveLayout::Split => self
-                .split
-                .rows
-                .get(self.cursor)
-                .and_then(SplitLine::file_index)
-                .or_else(|| {
-                    self.split
-                        .files
-                        .iter()
-                        .find(|span| self.cursor >= span.start_row && self.cursor < span.end_row)
-                        .map(|span| span.file)
-                }),
-            ActiveLayout::Unified => self
-                .unified
-                .rows
-                .get(self.cursor)
-                .map(UnifiedRow::file_index),
-        }
+        self.diff_file_at(self.cursor)
     }
 
     pub fn move_down(&mut self, step: usize, viewport: usize) {
@@ -734,7 +744,7 @@ impl Viewer {
         let start_row = (*range.start()).min(count - 1);
         let end_row = (*range.end()).min(count - 1);
         assert!(start_row <= end_row, "excerpt row range is ordered");
-        let file_index = self.current_file()?;
+        let file_index = self.diff_file_at(start_row)?;
         assert!(file_index < self.patch.files.len(), "excerpt file index in bounds");
         let path = self.patch.files[file_index].path().clone();
         let mut lines: Option<LineRange> = None;
@@ -744,6 +754,9 @@ impl Viewer {
         let byte_budget = EXCERPT_BYTES_MAX - EXCERPT_TRUNCATED_MARKER.len() - 1;
 
         for row_index in start_row..=end_row {
+            if self.diff_file_at(row_index) != Some(file_index) {
+                break;
+            }
             if emitted_lines >= EXCERPT_LINES_MAX {
                 truncated = true;
                 break;
@@ -760,6 +773,25 @@ impl Viewer {
                     let SplitLine::Pair { left, right } = row else {
                         continue;
                     };
+                    let left_entry = match left {
+                        LeftRow::Deleted { .. } => Some((Some('-'), left.text(&self.patch))),
+                        LeftRow::Context { .. } if matches!(right, RightRow::Spacer) => {
+                            Some((Some(' '), left.text(&self.patch)))
+                        }
+                        LeftRow::HunkHeader { text, .. } if matches!(right, RightRow::Spacer) => {
+                            Some((None, text.as_str()))
+                        }
+                        LeftRow::Context { .. } | LeftRow::HunkHeader { .. } | LeftRow::Spacer => {
+                            None
+                        }
+                    };
+                    if let Some((prefix, text)) = left_entry {
+                        if !push_excerpt_line(&mut snippet, prefix, text, byte_budget) {
+                            truncated = true;
+                            break;
+                        }
+                        emitted_lines += 1;
+                    }
                     let right_entry = match right {
                         RightRow::Added { .. } => Some((Some('+'), right.text(&self.patch))),
                         RightRow::Context { .. } => Some((Some(' '), right.text(&self.patch))),
@@ -767,20 +799,8 @@ impl Viewer {
                         RightRow::Spacer => None,
                     };
                     if let Some((prefix, text)) = right_entry {
-                        if !push_excerpt_line(&mut snippet, prefix, text, byte_budget) {
-                            truncated = true;
-                            break;
-                        }
-                        emitted_lines += 1;
-                    }
-                    if let LeftRow::Deleted { .. } = left {
                         if emitted_lines >= EXCERPT_LINES_MAX
-                            || !push_excerpt_line(
-                                &mut snippet,
-                                Some('-'),
-                                left.text(&self.patch),
-                                byte_budget,
-                            )
+                            || !push_excerpt_line(&mut snippet, prefix, text, byte_budget)
                         {
                             truncated = true;
                             break;
@@ -1286,5 +1306,47 @@ diff --git a/src/b.rs b/src/b.rs
         let dotted = "prefix İ suffix";
         let range = find_case_insensitive_range(dotted, "İ").unwrap();
         assert_eq!(&dotted[range], "İ");
+    }
+
+    #[test]
+    fn excerpt_uses_diff_cursor_file_stays_within_one_file_and_orders_split_lines() {
+        let patch = Patch::parse(SAMPLE.as_bytes());
+        let mut viewer = Viewer::new(patch, "main".to_owned(), "feat".to_owned());
+        viewer.sync_layout(120);
+        viewer.move_down(3, 20);
+        viewer.toggle_focus(true);
+        viewer.bottom(20);
+        assert_eq!(viewer.current_file(), Some(1));
+        let excerpt = viewer.selected_excerpt().unwrap();
+        assert_eq!(excerpt.path, "src/a.rs");
+        assert_eq!(excerpt.snippet, "-    old_call();\n+    new_call();");
+
+        viewer.unfocus_sidebar();
+        viewer.toggle_select();
+        viewer.bottom(20);
+        let across = viewer.selected_excerpt().unwrap();
+        assert_eq!(across.path, "src/a.rs");
+        assert!(!across.snippet.contains("added_line"));
+
+        let drifted = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ a/src/a.rs
+@@ -1,4 +1,2 @@
+-one
+-two
+-three
++one_new
+ tail_ctx
+";
+        let mut split_viewer = Viewer::new(
+            Patch::parse(drifted.as_bytes()),
+            "main".to_owned(),
+            "feat".to_owned(),
+        );
+        split_viewer.sync_layout(120);
+        split_viewer.bottom(20);
+        let tail = split_viewer.selected_excerpt().unwrap();
+        assert!(tail.snippet.contains(" tail_ctx"), "{:?}", tail.snippet);
     }
 }

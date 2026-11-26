@@ -743,16 +743,22 @@ impl Parser {
 
 fn bound_line(line: &str) -> String {
     let line = line.strip_suffix('\r').unwrap_or(line);
-    if line.len() <= LINE_BYTES_MAX {
-        return line.to_owned();
+    let slice = if line.len() <= LINE_BYTES_MAX {
+        line
+    } else {
+        let mut end = LINE_BYTES_MAX;
+        while end > 0 && !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        assert!(end <= LINE_BYTES_MAX, "bounded line stays within LINE_BYTES_MAX");
+        assert!(line.is_char_boundary(end), "bounded line ends on UTF-8 boundary");
+        &line[..end]
+    };
+    if slice.as_bytes().contains(&0) {
+        slice.replace('\0', "")
+    } else {
+        slice.to_owned()
     }
-    let mut end = LINE_BYTES_MAX;
-    while end > 0 && !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    assert!(end <= LINE_BYTES_MAX, "bounded line stays within LINE_BYTES_MAX");
-    assert!(line.is_char_boundary(end), "bounded line ends on UTF-8 boundary");
-    line[..end].to_owned()
 }
 
 fn parse_hunk_header(line: &str) -> Option<HunkBuilder> {
@@ -958,20 +964,23 @@ deleted file mode 100644
     fn malformed_pathless_headers_are_skipped_and_binary_ignores_hunks() {
         assert!(FilePath::parse("").is_none());
         assert!(FilePath::parse("///").is_none());
-        let raw = "\
-diff --git \"unclosed
-diff --git a/bin.dat b/bin.dat
-Binary files a/bin.dat and b/bin.dat differ
-@@ -1 +1 @@
--old
-+new
-";
+        let raw = [
+            "diff --git \"unclosed",
+            "diff --git a/bin.dat b/bin.dat",
+            "Binary files a/bin.dat and b/bin.dat differ",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+            "",
+        ]
+        .join("\n");
         let patch = Patch::parse(raw.as_bytes());
         assert_eq!(patch.files.len(), 1);
         assert_eq!(patch.files[0].path(), &"bin.dat");
         assert!(patch.files[0].is_binary());
         assert_eq!(patch.files[0].hunks(), []);
         assert_eq!((patch.added, patch.deleted), (0, 0));
+        assert_eq!(bound_line("a\0b"), "ab");
     }
 
     #[test]

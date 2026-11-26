@@ -26,7 +26,7 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 
 const COLOUR_LONGEST: usize = 32;
 
-const APC_LONGEST: usize = 64;
+const APC_LONGEST: usize = 256;
 
 const END_SIGNALS: [i32; 2] = [SIGHUP, SIGTERM];
 
@@ -615,8 +615,22 @@ fn apc(bytes: &[u8]) -> Parsed {
             }
         },
         [.., ESC] => Parsed::Partial,
-        [.., ESC, _] => typed(),
-        [.., last] if !last.is_ascii_graphic() || payload.len() > APC_LONGEST => typed(),
+        [.., ESC, _] => {
+            if payload.contains(&b';') {
+                Parsed::Unknown
+            } else {
+                typed()
+            }
+        },
+        [.., last]
+            if (!last.is_ascii_graphic() && last != b' ') || payload.len() > APC_LONGEST =>
+        {
+            if payload.contains(&b';') {
+                Parsed::Unknown
+            } else {
+                typed()
+            }
+        },
         _ => Parsed::Partial,
     }
 }
@@ -787,6 +801,11 @@ mod tests {
             [Sent::Answer(Answer::Graphics)]
         );
         assert_eq!(sent(&[b"\x1b_Gi=31;EINVAL\x1b\\"]), []);
+        assert_eq!(sent(&[b"\x1b_Gi=31;EINVAL: invalid width\x1b\\"]), []);
+        assert_eq!(
+            sent(&[b"\x1b_Gi=31;ENOTSUP: graphics protocol not supported\x1b\\"]),
+            []
+        );
     }
 
     #[test]
