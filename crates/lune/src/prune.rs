@@ -8,11 +8,11 @@ use luned::asks::Turn;
 use luned::prunes::{Came, Deleting, Goes, Outcome, Plan, Pruned, Pushed, name_of};
 use luned::Directory;
 
-use crate::away::{self, Away};
 use crate::agreed::{self, Agreed, PLANNED};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
+use crate::reach::{self, Luned};
 
 pub use luned::prunes::UNTOLD;
 
@@ -25,7 +25,7 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
         Ok(dir) => dir,
         Err(why) => return failed(&why),
     };
-    let mut luned = match Away::at(folder, &Machine::Local, away::ANSWER) {
+    let mut luned = match Luned::at(folder, &Machine::Local, reach::ANSWER) {
         Ok(luned) => luned,
         Err(why) => return failed(&untold(&why)),
     };
@@ -171,7 +171,7 @@ pub fn plan(menu: u64, on: Machine, dir: Directory, events: &Sender<Event>) {
 }
 
 fn planned(on: &Machine, dir: &Directory) -> Result<Plan, String> {
-    Away::on(on, away::ANSWER)?.prunes(dir)
+    Luned::on(on, reach::ANSWER)?.prunes(dir)
 }
 
 pub fn delete(
@@ -186,7 +186,7 @@ pub fn delete(
 }
 
 fn deleted(on: &Machine, dir: &Directory, agreed: &BTreeSet<Deleting>) -> Result<Pruned, String> {
-    Away::on(on, away::ANSWER)?.prune(dir, agreed)
+    Luned::on(on, reach::ANSWER)?.prune(dir, agreed)
 }
 
 pub fn note(outcomes: &[Outcome]) -> Option<String> {

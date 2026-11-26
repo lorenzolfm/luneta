@@ -2,10 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use lune_protocol::said::Said;
 use lune_waits::eventually;
+use tonic::Code;
 use luned::api::daemon_client::DaemonClient;
 use luned::api::projects::Held;
-use luned::api::On;
+use luned::api::{On, RebaseRequest};
 use luned::rebases::{self, Came, Rebased};
 use luned::Directory;
 use serde_json::json;
@@ -200,6 +202,42 @@ fn lune_rebase_moves_a_stacked_branch_onto_its_open_pull_request_s_base() {
 }
 
 #[test]
+fn lune_rebase_with_no_luned_moves_nothing() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let repository = Repository::new(&scratch);
+    let fix = &repository.fix;
+    commit(fix, "own", "o\n");
+    commit(&repository.up, "theirs", "t\n");
+    let before = tip(fix);
+    let refused = rebased(&host, fix);
+    let why = stderr(&refused);
+    assert_eq!(refused.status.code(), Some(1), "{why}");
+    assert!(why.starts_with("lune: no rebase: no luned runs in "), "{why}");
+    assert_eq!(tip(fix), before, "the branch stays where it was");
+}
+
+#[test]
+fn a_rebase_asked_of_luned_for_a_branch_with_no_name_is_refused() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let repository = Repository::new(&scratch);
+    let _luned = start(host.vars()).unwrap();
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let dir = repository.fix.display().to_string();
+    let request = RebaseRequest { on: None, dir, branch: Some(String::new()) };
+    let refused = runtime.block_on(async {
+        let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
+        daemon.rebase(request).await.map(drop).unwrap_err()
+    });
+    let said = (refused.code(), refused.message());
+    assert_eq!(said, (Code::InvalidArgument, "branch: it names no branch"));
+}
+
+#[test]
 fn a_rebase_in_a_repository_a_folder_s_project_holds_starts_no_agent_in_the_folder() {
     let owned = Owned::new();
     let host = &owned.host;
@@ -251,10 +289,11 @@ fn a_far_worktree_is_rebased_on_its_own_machine() {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
         let on = || Some(On { destination: "far".to_owned() });
         let dir = Directory::parse(repository.fix.display().to_string()).unwrap();
+        let fix = Said::new("fix".to_owned()).unwrap();
         let mut rebase = async |came: Came| {
-            let answer = daemon.rebase(rebases::asked(on(), &dir, Some("fix"))).await.unwrap();
+            let answer = daemon.rebase(rebases::asked(on(), &dir, Some(&fix))).await.unwrap();
             let answer = answer.into_inner().message().await.unwrap().unwrap();
-            let rebased = Rebased::of_api(answer).unwrap();
+            let rebased = Rebased::of_api(answer, Some(&fix)).unwrap();
             assert_eq!((rebased.branch.as_str(), rebased.onto.as_str()), ("fix", "origin/main"));
             assert_eq!(rebased.came, came);
         };

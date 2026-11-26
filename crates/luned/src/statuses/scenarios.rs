@@ -341,5 +341,6 @@ fn heard_osc_7501(reads: Declared, step: Step, value: &Value) -> Result<Heard, S
         ));
     }
     let reads = OscReads::of(reads.harness());
-    Ok(Heard::Said(osc_7501::report(reads, agent(), &root, Vec::new()).update().clone()))
+    let told = Report::osc_7501(reads, agent(), osc_7501::phase(&root.phase), root.at, Vec::new());
+    Ok(Heard::Said(told.update().clone()))
 }

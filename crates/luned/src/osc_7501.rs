@@ -1,10 +1,6 @@
-use lune_domain::agent::OscReads;
-use lune_protocol::program_status::{
-    ChildProgramStatus, OscBlockedKind, ProgramPhase, ProgramStatus,
-};
+use lune_protocol::program_status::{ChildProgramStatus, OscBlockedKind, ProgramPhase};
 
-use crate::process::AgentId;
-use crate::statuses::{ActiveStatus, BlockedReason, Report, Subagent, SubagentPhase};
+use crate::statuses::{ActiveStatus, BlockedReason, Subagent, SubagentPhase};
 
 fn reason(kind: Option<OscBlockedKind>) -> BlockedReason {
     match kind {
@@ -37,15 +33,6 @@ fn subagent_phase(phase: &ProgramPhase) -> SubagentPhase {
         },
         ProgramPhase::Error { message } => SubagentPhase::Error { message: message.clone() },
     }
-}
-
-pub(crate) fn report(
-    reads: OscReads,
-    agent: AgentId,
-    status: &ProgramStatus,
-    subagents: Vec<Subagent>,
-) -> Report {
-    Report::osc_7501(reads, agent, phase(&status.phase), status.at, subagents)
 }
 
 pub(crate) fn subagent(child: &ChildProgramStatus) -> Subagent {

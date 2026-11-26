@@ -4,10 +4,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lune_protocol::github::State;
+use lune_protocol::said::Said;
 use lune_protocol::CONFLICTED_NAMED_MAX;
 use tonic::{Code, Status};
 
-use crate::api::rebase_response::{self, Came as Said};
+use crate::api::rebase_response::{self, Came as Told};
 use crate::api::{On, RebaseRequest, RebaseResponse};
 use crate::directory::Directory;
 use crate::git::{self, Common, DefaultBranch, Git};
@@ -41,8 +42,8 @@ const _: () = assert!(FETCHING.as_secs() + PICKING.as_secs() < RUNNING_MAX.as_se
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rebased {
-    pub branch: String,
-    pub onto: String,
+    pub branch: Said,
+    pub onto: Said,
     pub came: Came,
 }
 
@@ -87,7 +88,7 @@ pub enum Unrebased {
 
 struct Ready {
     top: String,
-    branch: String,
+    branch: Said,
     onto: Onto,
     before: String,
 }
@@ -99,16 +100,18 @@ enum Onto {
 
 struct NamedBranch(String);
 
-pub fn rebase(dir: &Directory, expected: Option<&str>) -> Result<Rebased, Unrebased> {
+pub(crate) fn rebase(dir: &Directory, expected: Option<&Said>) -> Result<Rebased, Unrebased> {
     let until = Instant::now() + RUNNING_MAX;
     let Ready { top, branch, onto, before } =
         ready(dir, expected, until).map_err(Unrebased::Refused)?;
-    let (onto, reference) = (onto.to_string(), onto.reference());
+    let reference = onto.reference();
+    let onto = Said::new(onto.to_string()).expect("what a rebase goes onto names a branch");
     let doubt = |why: String| in_doubt(&top, &why);
-    let came = match picked(&top, &reference, &branch, until)? {
-        Picked::Ended if tip(&top, &branch, until).map_err(doubt)? == before => Came::Already,
+    let named = branch.as_str();
+    let came = match picked(&top, &reference, named, until)? {
+        Picked::Ended if tip(&top, named, until).map_err(doubt)? == before => Came::Already,
         Picked::Ended => {
-            Came::Clean { ahead: ahead(&top, &reference, &branch, until).map_err(doubt)? }
+            Came::Clean { ahead: ahead(&top, &reference, named, until).map_err(doubt)? }
         },
         Picked::Stopped => {
             let at = stopped_at(&top, until).map_err(doubt)?;
@@ -118,7 +121,7 @@ pub fn rebase(dir: &Directory, expected: Option<&str>) -> Result<Rebased, Unreba
     Ok(Rebased { branch, onto, came })
 }
 
-fn ready(dir: &Directory, expected: Option<&str>, until: Instant) -> Result<Ready, String> {
+fn ready(dir: &Directory, expected: Option<&Said>, until: Instant) -> Result<Ready, String> {
     let top = says(dir.as_str(), "rev-parse", &["--show-toplevel"], &[], until)?;
     if top.is_empty() {
         return Err(format!("{dir} is in no worktree of a repository"));
@@ -130,18 +133,18 @@ fn ready(dir: &Directory, expected: Option<&str>, until: Instant) -> Result<Read
         return Err(format!("{top} is on no branch, and a rebase moves a branch"));
     };
     if let Some(expected) = expected
-        && expected != branch
+        && *expected != branch
     {
         return Err(format!("{top} is on {branch} now, not {expected}"));
     }
     if !committed(&top, until)? {
         return Err(format!("{top} has changes not committed: commit or stash them first"));
     }
-    let onto = onto(&top, &branch, until)?;
+    let onto = onto(&top, branch.as_str(), until)?;
     if let Some((remote, branch)) = onto.to_fetch() {
         sync::fetch(&top, remote, branch, left(until, FETCHING)?)?;
     }
-    let before = tip(&top, &branch, until)?;
+    let before = tip(&top, branch.as_str(), until)?;
     Ok(Ready { top, branch, onto, before })
 }
 
@@ -255,9 +258,9 @@ fn found(top: &str, path: &str) -> Result<bool, String> {
     path.try_exists().map_err(|error| format!("{} does not read: {error}", path.display()))
 }
 
-fn branch(top: &str, until: Instant) -> Result<Option<String>, String> {
+fn branch(top: &str, until: Instant) -> Result<Option<Said>, String> {
     let head = says(top, "rev-parse", &["--symbolic-full-name", "HEAD"], &[], until)?;
-    Ok(head.strip_prefix("refs/heads/").filter(|branch| !branch.is_empty()).map(str::to_owned))
+    Ok(head.strip_prefix("refs/heads/").and_then(|branch| Said::new(branch.to_owned())))
 }
 
 fn committed(top: &str, until: Instant) -> Result<bool, String> {
@@ -464,36 +467,46 @@ fn files(conflicted: &Conflicted) -> String {
 }
 
 #[must_use]
-pub fn asked(on: Option<On>, dir: &Directory, branch: Option<&str>) -> RebaseRequest {
-    RebaseRequest { on, dir: dir.as_str().to_owned(), branch: branch.map(str::to_owned) }
+pub fn asked(on: Option<On>, dir: &Directory, branch: Option<&Said>) -> RebaseRequest {
+    let branch = branch.map(|branch| branch.as_str().to_owned());
+    RebaseRequest { on, dir: dir.as_str().to_owned(), branch }
 }
 
 impl Rebased {
     #[must_use]
     pub fn to_api(&self) -> RebaseResponse {
         let came = match &self.came {
-            Came::Already => Said::Already(()),
-            Came::Clean { ahead } => Said::Clean(rebase_response::Clean { ahead: *ahead }),
+            Came::Already => Told::Already(()),
+            Came::Clean { ahead } => Told::Clean(rebase_response::Clean { ahead: *ahead }),
             Came::Stopped(Stopped { at, conflicted }) => {
                 let (at, named) = (at.clone(), conflicted.named.clone());
                 let conflicted_count = conflicted.count;
-                Said::Stopped(rebase_response::Stopped { at, conflicted: named, conflicted_count })
+                Told::Stopped(rebase_response::Stopped { at, conflicted: named, conflicted_count })
             },
         };
-        RebaseResponse { branch: self.branch.clone(), onto: self.onto.clone(), came: Some(came) }
+        let (branch, onto) = (self.branch.as_str().to_owned(), self.onto.as_str().to_owned());
+        RebaseResponse { branch, onto, came: Some(came) }
     }
 
-    pub fn of_api(said: RebaseResponse) -> Result<Rebased, String> {
+    pub fn of_api(said: RebaseResponse, asked: Option<&Said>) -> Result<Rebased, String> {
+        let branch = Said::new(said.branch).ok_or("luned named no branch it rebased")?;
+        let unnamed = || format!("luned named nothing it rebased {branch} onto");
+        let onto = Said::new(said.onto).ok_or_else(unnamed)?;
+        if let Some(asked) = asked
+            && *asked != branch
+        {
+            return Err(format!("luned rebased {branch}, not {asked}"));
+        }
         let came = match said.came.ok_or("luned said nothing of how the rebase came out")? {
-            Said::Already(()) => Came::Already,
-            Said::Clean(rebase_response::Clean { ahead }) => Came::Clean { ahead },
-            Said::Stopped(rebase_response::Stopped { at, conflicted, conflicted_count }) => {
+            Told::Already(()) => Came::Already,
+            Told::Clean(rebase_response::Clean { ahead }) => Came::Clean { ahead },
+            Told::Stopped(rebase_response::Stopped { at, conflicted, conflicted_count }) => {
                 let conflicted = Conflicted::new(conflicted, conflicted_count)
                     .map_err(|why| format!("luned said the rebase stopped, but {why}"))?;
                 Came::Stopped(Stopped { at, conflicted })
             },
         };
-        Ok(Rebased { branch: said.branch, onto: said.onto, came })
+        Ok(Rebased { branch, onto, came })
     }
 }
 
@@ -536,8 +549,12 @@ mod tests {
         Directory::parse(dir.to_str().unwrap().to_owned()).unwrap()
     }
 
+    fn branch_named(name: &str) -> Said {
+        Said::new(name.to_owned()).unwrap()
+    }
+
     fn refusal(dir: &Path, expected: Option<&str>) -> String {
-        match rebase(&directory(dir), expected) {
+        match rebase(&directory(dir), expected.map(branch_named).as_ref()) {
             Err(Unrebased::Refused(why)) => why,
             other => panic!("{} is not refused: {other:?}", dir.display()),
         }
@@ -573,9 +590,9 @@ mod tests {
         let cloned = Cloned::new();
         commit(&cloned.dir, "own", "o\n", "own");
         commit(&cloned.up, "theirs", "t\n", "theirs");
-        let rebased = rebase(&directory(&cloned.dir), Some("issue-429")).unwrap();
-        let onto = ("issue-429".to_owned(), "origin/main".to_owned());
-        assert_eq!((rebased.branch, rebased.onto), onto);
+        let rebased = rebase(&directory(&cloned.dir), Some(&branch_named("issue-429"))).unwrap();
+        let onto = (rebased.branch.as_str(), rebased.onto.as_str());
+        assert_eq!(onto, ("issue-429", "origin/main"));
         assert_eq!(rebased.came, Came::Clean { ahead: 1 });
         let up = git(&cloned.up, &["rev-parse", "main"]);
         assert_eq!(cloned.head("HEAD~"), up, "the default branch is fetched first");
@@ -595,7 +612,7 @@ mod tests {
         fs::write(cloned.dir.join(".git/HEAD"), format!("ref: refs/heads/{named}\n")).unwrap();
         commit(&cloned.dir, "own", "o\n", "own");
         commit(&cloned.up, "theirs", "t\n", "theirs");
-        let rebased = rebase(&directory(&cloned.dir), Some(named)).unwrap();
+        let rebased = rebase(&directory(&cloned.dir), Some(&branch_named(named))).unwrap();
         assert_eq!((rebased.branch.as_str(), rebased.came), (named, Came::Clean { ahead: 1 }));
         assert!(!cloned.dir.join("ran").exists(), "git took the branch for --exec and ran it");
         let up = git(&cloned.up, &["rev-parse", "main"]);
@@ -749,11 +766,29 @@ mod tests {
         let at = Some("abc x".to_owned());
         let stopped = Stopped { at, conflicted: Conflicted::of(files(30)) };
         for came in [Came::Already, Came::Clean { ahead: 3 }, Came::Stopped(stopped)] {
-            let rebased = Rebased { branch: "b".to_owned(), onto: "origin/main".to_owned(), came };
-            assert_eq!(Rebased::of_api(rebased.to_api()), Ok(rebased));
+            let (branch, onto) = (branch_named("b"), branch_named("origin/main"));
+            let rebased = Rebased { branch, onto, came };
+            let asked = Some(&rebased.branch);
+            assert_eq!(Rebased::of_api(rebased.to_api(), asked), Ok(rebased.clone()));
+            assert_eq!(Rebased::of_api(rebased.to_api(), None), Ok(rebased));
         }
         let unsaid = RebaseResponse { branch: "b".to_owned(), onto: "main".to_owned(), came: None };
-        assert!(Rebased::of_api(unsaid).is_err());
+        assert!(Rebased::of_api(unsaid, None).is_err());
+    }
+
+    #[test]
+    fn a_rebase_said_over_the_wire_names_the_branch_asked_for_and_what_it_went_onto() {
+        let said = |branch: &str, onto: &str| RebaseResponse {
+            branch: branch.to_owned(),
+            onto: onto.to_owned(),
+            came: Some(Told::Already(())),
+        };
+        let unnamed = Rebased::of_api(said("", "main"), None).unwrap_err();
+        assert_eq!(unnamed, "luned named no branch it rebased");
+        let nowhere = Rebased::of_api(said("b", ""), None).unwrap_err();
+        assert_eq!(nowhere, "luned named nothing it rebased b onto");
+        let other = Rebased::of_api(said("b", "main"), Some(&branch_named("fix"))).unwrap_err();
+        assert_eq!(other, "luned rebased b, not fix");
     }
 
     #[test]
@@ -769,9 +804,9 @@ mod tests {
         let said = RebaseResponse {
             branch: "b".to_owned(),
             onto: "main".to_owned(),
-            came: Some(Said::Stopped(stopped)),
+            came: Some(Told::Stopped(stopped)),
         };
-        let refused = Rebased::of_api(said).unwrap_err();
+        let refused = Rebased::of_api(said, None).unwrap_err();
         let starts = "luned said the rebase stopped, but it names 3 files";
         assert!(refused.starts_with(starts), "{refused}");
     }

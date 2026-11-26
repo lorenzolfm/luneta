@@ -2,6 +2,7 @@
 name = "luned"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 license.workspace = true
 publish = false
 description = "The lune daemon: the projects and views of this machine, the terminals of lune-mux that show them, and what the agents in them do, served to lune and the phone"

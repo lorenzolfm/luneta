@@ -6,12 +6,12 @@ mod aloud;
 mod answers;
 mod ask;
 mod attached;
-mod away;
 mod bridge;
 mod brief;
 mod browser;
 mod checks;
 mod clipboard;
+mod clock;
 mod close;
 mod commands;
 mod copied;
@@ -43,6 +43,7 @@ mod printed;
 mod projected;
 mod prune;
 mod pull;
+mod reach;
 mod rebase;
 mod screen;
 mod sidebar;
@@ -107,6 +108,7 @@ enum Command {
     },
 }
 
+#[must_use]
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
     let folder: Result<PathBuf, String> = folder::find().map_err(|unfound| format!("{unfound}, to find luned in"));

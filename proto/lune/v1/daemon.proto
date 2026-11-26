@@ -13,6 +13,7 @@ service Daemon {
   rpc Watch(WatchRequest) returns (Host);
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
   rpc KeepChecks(KeepChecksRequest) returns (stream KeepChecksResponse);
+  rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);
   rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
   rpc ListContents(ListContentsRequest) returns (ListContentsResponse);
   rpc TranscriptEnds(TranscriptEndsRequest) returns (TranscriptEndsResponse);
@@ -58,6 +59,25 @@ message PrintedFile {
   string path = 1;
   uint64 lines = 2;
   uint64 left_out = 3;
+}
+
+message KeepPrintedRequest {
+  On on = 1;
+  TerminalKey terminal = 2;
+  string typed = 3;
+}
+
+message KeepPrintedResponse {
+  oneof printed {
+    PrintedFile after = 1;
+    google.protobuf.Empty nothing = 2;
+    PrintedFile unsure = 3;
+    Top top = 4;
+  }
+
+  message Top {
+    optional PrintedFile kept = 1;
+  }
 }
 
 message KeepChecksRequest {
@@ -723,6 +743,25 @@ message Terminal {
   Shell shell = 8;
   bool held = 9;
   optional string name = 10;
+  oneof state {
+    Running running = 11;
+    Ended ended = 12;
+    TerminalKey unlisted = 13;
+    google.protobuf.Empty state_lost = 14;
+    google.protobuf.Empty state_looking = 15;
+  }
+
+  message Running {
+    TerminalKey key = 1;
+    optional string command = 2;
+    Titled titled = 3;
+    Shell shell = 4;
+  }
+
+  message Ended {
+    TerminalKey key = 1;
+    Titled titled = 2;
+  }
 }
 
 enum Stage {

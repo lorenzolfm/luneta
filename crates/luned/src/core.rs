@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use lune_domain::agent::{Harness, Rung};
+use lune_domain::agent::{Harness, OscReads, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{Dir, Holds, Name, Project, Projects, Seen, Stage, Subfolder};
 use lune_domain::projects::{Listed, ViewId, Worktree, WorktreeId};
@@ -30,15 +30,92 @@ use crate::titles::{self, Titled};
 use crate::projects::Revision;
 use crate::remote::{Destination, Line, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
-use crate::statuses::{Proof, Report, ReportedAgent, Statuses, Subagent};
+use crate::statuses::{ActiveStatus, Proof, Report, ReportedAgent, Statuses, Subagent};
 use crate::transcripts::SessionId;
 use crate::watch::Troubles;
 use crate::Directory;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Shown {
-    pub key: TerminalKey,
-    pub listed: Option<Box<server::Terminal>>,
+pub enum Shown {
+    Unlisted(TerminalKey),
+    Listed {
+        key: TerminalKey,
+        cwd: Option<Dir>,
+        titled: Option<Titled>,
+        program: Program,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Program {
+    Running { command: Option<Said>, doing: Option<Doing> },
+    Ended,
+}
+
+impl Shown {
+    #[must_use]
+    pub fn unlisted(key: TerminalKey) -> Shown {
+        Shown::Unlisted(key)
+    }
+
+    #[must_use]
+    pub fn listed(key: TerminalKey, listed: &server::Terminal) -> Shown {
+        let cwd = listed.cwd.as_ref().and_then(|cwd| Dir::parse(cwd.as_str()).ok());
+        let titled = titles::titled(&listed.title);
+        let program = match &listed.is {
+            Is::Running { front, doing, .. } => Program::Running {
+                command: front.as_ref().and_then(|front| Said::new(front.argv.join(" "))),
+                doing: doing.clone(),
+            },
+            Is::Ended => Program::Ended,
+        };
+        Shown::Listed { key, cwd, titled, program }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MuxTerminal {
+    cwd: Option<Directory>,
+    root: AgentPid,
+    front: Option<server::Foreground>,
+    shell_idle: bool,
+    reads: OscReads,
+    status: ActiveStatus,
+    at: Option<SystemTime>,
+    subagents: Vec<Subagent>,
+}
+
+impl MuxTerminal {
+    #[must_use]
+    pub fn of(terminal: &server::Terminal) -> Option<MuxTerminal> {
+        assert!(terminal.statuses.children.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
+        let Is::Running { root, front, doing } = &terminal.is else {
+            return None;
+        };
+        let root_record = terminal.statuses.root.as_ref()?;
+        let root_app = root_record.app.as_ref()?;
+        let reads = Harness::from_osc_7501_app(root_app.as_str())?;
+        let subagents: Vec<Subagent> = terminal
+            .statuses
+            .children
+            .iter()
+            .filter(|child| child.status.app.as_ref() == Some(root_app))
+            .map(osc_7501::subagent)
+            .collect();
+        assert!(subagents.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
+        let shell_idle =
+            matches!(doing, Some(Doing::Ready | Doing::Ended { .. } | Doing::Stopped { .. }));
+        Some(MuxTerminal {
+            cwd: terminal.cwd.clone(),
+            root: *root,
+            front: front.clone(),
+            shell_idle,
+            reads,
+            status: osc_7501::phase(&root_record.phase),
+            at: root_record.at,
+            subagents,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +141,7 @@ pub enum Command {
     Agents(Scan),
     PiAgents(Vec<ReportedAgent>),
     AgyAgents(Vec<ReportedAgent>),
-    MuxTerminals(Vec<server::Terminal>),
+    MuxTerminals(BTreeMap<TerminalKey, MuxTerminal>),
     Terminals(BTreeMap<ViewId, Located>),
     GitStatus {
         dir: String,
@@ -160,7 +237,7 @@ struct Known {
     pi: Vec<ReportedAgent>,
     agy: Vec<ReportedAgent>,
     contested: HashMap<AgentId, Contest>,
-    mux_terminals: BTreeMap<TerminalKey, server::Terminal>,
+    mux_terminals: BTreeMap<TerminalKey, MuxTerminal>,
     osc_agents: Vec<SeenAgent>,
     osc_processes: HashMap<(TerminalKey, AgentPid), CachedProcess>,
     osc_troubles: Troubles,
@@ -234,13 +311,12 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 known.agy = now;
                 known.settle_readers();
             },
+            Command::MuxTerminals(now) if now == known.mux_terminals => continue,
             Command::MuxTerminals(now) => {
-                let count = now.len();
-                known.mux_terminals =
-                    now.into_iter().map(|terminal| (terminal.key, terminal)).collect();
-                assert_eq!(known.mux_terminals.len(), count, "a mux terminal's key comes twice");
+                known.mux_terminals = now;
                 known.reconcile_osc_statuses();
             },
+            Command::Terminals(now) if now == known.terminals => continue,
             Command::Terminals(now) => {
                 let before = known.dirs();
                 known.terminals = now;
@@ -382,11 +458,12 @@ impl Known {
     }
 
     fn dirs(&self) -> BTreeSet<String> {
-        let listed = self.terminals.values().filter_map(|found| match found {
-            Located::Shown(Shown { listed: Some(listed), .. }) => Dir::parse(&listed.cwd).ok(),
-            Located::Shown(Shown { listed: None, .. }) | Located::Lost | Located::Looking => None,
+        let cwds = self.terminals.values().filter_map(|found| match found {
+            Located::Shown(Shown::Listed { cwd: Some(cwd), .. }) => Some(cwd.as_str().to_owned()),
+            Located::Shown(Shown::Listed { cwd: None, .. } | Shown::Unlisted(_))
+            | Located::Lost
+            | Located::Looking => None,
         });
-        let cwds = listed.map(|cwd| cwd.as_str().to_owned());
         let present = |folder: &Dir| !self.missing.contains(folder);
         let folders = self.projects.iter().flat_map(Projects::worktree_folders).filter(present);
         cwds.chain(folders.map(|folder| folder.as_str().to_owned())).collect()
@@ -471,30 +548,11 @@ impl Known {
         let mut osc_reports = Vec::new();
         let mut osc_agents = Vec::new();
         let mut active_processes = HashSet::new();
-        for terminal in self.mux_terminals.values() {
-            assert!(terminal.statuses.children.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
-            let Is::Running { root, front, doing } = &terminal.is else {
-                continue;
-            };
-            let Some(root_record) = &terminal.statuses.root else {
-                continue;
-            };
-            let Some(root_app) = root_record.app.as_ref() else {
-                continue;
-            };
-            let Some(reads) = Harness::from_osc_7501_app(root_app.as_str()) else {
-                continue;
-            };
-            let harness = reads.harness();
-            let subagents: Vec<Subagent> = terminal
-                .statuses
-                .children
-                .iter()
-                .filter(|child| child.status.app.as_ref() == Some(root_app))
-                .map(osc_7501::subagent)
-                .collect();
-            if let Some(candidates) = by_terminal.get(&(terminal.key, harness)) {
-                let matched = front
+        for (&key, terminal) in &self.mux_terminals {
+            assert!(terminal.subagents.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
+            if let Some(candidates) = by_terminal.get(&(key, terminal.reads.harness())) {
+                let matched = terminal
+                    .front
                     .as_ref()
                     .and_then(|front| {
                         candidates.iter().copied().find(|seen| seen.id.pid() == front.pid)
@@ -506,25 +564,24 @@ impl Known {
                             .min_by_key(|seen| (!seen.at_a_prompt(), seen.started_at, seen.id.pid()))
                     })
                     .expect("terminal candidates entry is non-empty");
-                let in_foreground = match front {
+                let in_foreground = match &terminal.front {
                     None => true,
                     Some(front) if front.pid == matched.id.pid() => true,
-                    Some(front) if front.pid == *root => false,
+                    Some(front) if front.pid == terminal.root => false,
                     Some(front) => !known_pids.contains(&front.pid),
                 };
                 if in_foreground {
-                    let id = matched.id.clone();
-                    osc_reports.push(osc_7501::report(reads, id, root_record, subagents));
+                    osc_reports.push(osc_report(matched.id.clone(), terminal));
                 }
                 continue;
             }
-            if matches!(doing, Some(Doing::Ready | Doing::Ended { .. } | Doing::Stopped { .. })) {
+            if terminal.shell_idle {
                 continue;
             }
-            let Some(front) = front else {
+            let Some(front) = &terminal.front else {
                 continue;
             };
-            if !argv_matches_harness(&front.argv, harness) {
+            if !argv_matches_harness(&front.argv, terminal.reads.harness()) {
                 continue;
             }
             let pid = front.pid;
@@ -534,31 +591,36 @@ impl Known {
             let Some((id, started_at, cwd)) = resolve_osc_process(
                 &mut self.osc_processes,
                 &mut self.osc_troubles,
+                key,
                 terminal,
                 pid,
             ) else {
                 continue;
             };
-            if let (Some(recorded_at), Some(started_at)) = (root_record.at, started_at)
+            if let (Some(recorded_at), Some(started_at)) = (terminal.at, started_at)
                 && !osc_dated_since(recorded_at, started_at)
             {
                 continue;
             }
             known_pids.insert(pid);
-            active_processes.insert((terminal.key, pid));
-            let entrypoint =
-                harness.to_api().prompt_word().and_then(|word| Said::new(word.to_owned()));
+            active_processes.insert((key, pid));
+            let entrypoint = terminal
+                .reads
+                .harness()
+                .to_api()
+                .prompt_word()
+                .and_then(|word| Said::new(word.to_owned()));
             osc_agents.push(SeenAgent {
                 id: id.clone(),
-                harness,
+                harness: terminal.reads.harness(),
                 session_id: None,
                 cwd,
                 started_at,
                 name: None,
                 entrypoint,
-                terminal: Some(terminal.key),
+                terminal: Some(key),
             });
-            osc_reports.push(osc_7501::report(reads, id, root_record, subagents));
+            osc_reports.push(osc_report(id, terminal));
         }
         self.osc_processes.retain(|key, _| active_processes.contains(key));
         self.osc_troubles.done();
@@ -709,37 +771,68 @@ impl Known {
     }
 
     fn built_terminals(&self, worktree: &Worktree) -> Vec<api::Terminal> {
-        use api::terminal::Found as Told;
+        use api::terminal::{Ended, Found as Told, Running, State};
         let built = worktree.layout().terminals().map(|terminal| {
             let id = terminal.id().view();
             let found = self.terminals.get(&id).unwrap_or(&Located::Looking);
-            let (told, listed) = match found {
-                Located::Shown(Shown { key, listed }) => {
-                    (Told::Key((*key).into()), listed.as_deref())
+            let (told, state, folder, command, titled, shell, held) = match found {
+                Located::Shown(Shown::Listed { key, cwd, titled, program }) => {
+                    let api_key: api::TerminalKey = (*key).into();
+                    let folder = cwd.as_ref().unwrap_or_else(|| terminal.folder());
+                    let titled = titled.as_ref().map(Titled::to_api);
+                    match program {
+                        Program::Running { command, doing } => {
+                            let command = command.as_ref().map(|it| it.as_str().to_owned());
+                            let shell = doing.as_ref().map(Doing::to_api);
+                            let state = State::Running(Running {
+                                key: Some(api_key),
+                                command: command.clone(),
+                                titled: titled.clone(),
+                                shell: shell.clone(),
+                            });
+                            (Told::Key(api_key), state, folder, command, titled, shell, false)
+                        },
+                        Program::Ended => {
+                            let state =
+                                State::Ended(Ended { key: Some(api_key), titled: titled.clone() });
+                            (Told::Key(api_key), state, folder, None, titled, None, true)
+                        },
+                    }
                 },
-                Located::Lost => (Told::Lost(()), None),
-                Located::Looking => (Told::Looking(()), None),
-            };
-            let cwd = listed.and_then(|listed| Dir::parse(&listed.cwd).ok());
-            let folder = cwd.as_ref().unwrap_or_else(|| terminal.folder());
-            let (command, doing, held) = match listed.map(|listed| &listed.is) {
-                Some(Is::Running { front, doing, .. }) => {
-                    let command = front.as_ref().and_then(|front| Said::new(front.argv.join(" ")));
-                    (command, doing.as_ref(), false)
+                Located::Shown(Shown::Unlisted(key)) => {
+                    let api_key: api::TerminalKey = (*key).into();
+                    let state = State::Unlisted(api_key);
+                    (Told::Key(api_key), state, terminal.folder(), None, None, None, false)
                 },
-                Some(Is::Ended) => (None, None, true),
-                None => (None, None, false),
+                Located::Lost => (
+                    Told::Lost(()),
+                    State::StateLost(()),
+                    terminal.folder(),
+                    None,
+                    None,
+                    None,
+                    false,
+                ),
+                Located::Looking => (
+                    Told::Looking(()),
+                    State::StateLooking(()),
+                    terminal.folder(),
+                    None,
+                    None,
+                    None,
+                    false,
+                ),
             };
-            let titled = listed.and_then(|listed| titles::titled(&listed.title));
             api::Terminal {
                 id: id.get(),
                 found: Some(told),
                 folder: folder.as_str().to_owned(),
-                command: command.map(String::from),
-                titled: titled.as_ref().map(Titled::to_api),
-                shell: doing.map(Doing::to_api),
+                command,
+                titled,
+                shell,
                 held,
                 name: terminal.name().map(|name| name.as_str().to_owned()),
+                state: Some(state),
             }
         });
         built.collect()
@@ -873,6 +966,11 @@ fn contest_of(claims: &[(Harness, Proof)]) -> Contest {
     }
 }
 
+fn osc_report(agent: AgentId, terminal: &MuxTerminal) -> Report {
+    let (status, subagents) = (terminal.status.clone(), terminal.subagents.clone());
+    Report::osc_7501(terminal.reads, agent, status, terminal.at, subagents)
+}
+
 const OSC_DATED_LATE: Duration = Duration::from_secs(1);
 
 const RUNNERS: [&str; 12] = [
@@ -937,11 +1035,12 @@ fn arg_matches_harness(arg: &str, harness: Harness) -> bool {
 fn resolve_osc_process(
     cache: &mut HashMap<(TerminalKey, AgentPid), CachedProcess>,
     troubles: &mut Troubles,
-    terminal: &server::Terminal,
+    key: TerminalKey,
+    terminal: &MuxTerminal,
     pid: AgentPid,
 ) -> Option<(AgentId, Option<SystemTime>, Directory)> {
-    let parsed_cwd = Directory::parse(terminal.cwd.clone()).ok();
-    if let Some(cached) = cache.get(&(terminal.key, pid)) {
+    let parsed_cwd = terminal.cwd.clone();
+    if let Some(cached) = cache.get(&(key, pid)) {
         let cwd = parsed_cwd.or_else(|| cached.cwd.clone())?;
         return Some((cached.id.clone(), cached.started_at, cwd));
     }
@@ -954,10 +1053,7 @@ fn resolve_osc_process(
         process_cwd_or_trouble(pid, troubles)
     };
     let cwd = parsed_cwd.or_else(|| process_cwd.clone())?;
-    cache.insert(
-        (terminal.key, pid),
-        CachedProcess { id: id.clone(), started_at, cwd: process_cwd },
-    );
+    cache.insert((key, pid), CachedProcess { id: id.clone(), started_at, cwd: process_cwd });
     Some((id, started_at, cwd))
 }
 
@@ -979,6 +1075,7 @@ mod tests {
 
     use lune_domain::agent::Declared;
     use lune_domain::mux::OwnMade;
+    use lune_domain::projects::{Change, Id, Made, Opens, Spot, Subfolder};
     use lune_protocol::agent_status::{AgentStatus, BlockedReason};
     use lune_protocol::program_status::{
         AppName, ChildId, ChildProgramStatus, Message, OscBlockedKind, ProgramPhase,
@@ -991,6 +1088,19 @@ mod tests {
 
     fn key(id: u32) -> TerminalKey {
         TerminalKey { id: NonZeroU32::new(id).unwrap(), made: OwnMade::from_nanos(10) }
+    }
+
+    fn mux_terminals(
+        terminals: impl IntoIterator<Item = (TerminalKey, server::Terminal)>,
+    ) -> BTreeMap<TerminalKey, MuxTerminal> {
+        terminals
+            .into_iter()
+            .filter_map(|(key, terminal)| Some((key, MuxTerminal::of(&terminal)?)))
+            .collect()
+    }
+
+    fn dir(path: &str) -> Directory {
+        Directory::parse(path.to_owned()).unwrap()
     }
 
     #[test]
@@ -1045,26 +1155,31 @@ mod tests {
                 at: Some(at(21)),
             },
         };
-        let mux_terminal = |front_pid: AgentPid, statuses: ProgramStatuses| server::Terminal {
-            key: terminal,
-            tag: Vec::new(),
-            size: None,
-            cwd: "/w".to_owned(),
-            title: String::new(),
-            is: Is::Running {
-                root: AgentPid::new(100).unwrap(),
-                front: Some(server::Foreground {
-                    pid: front_pid,
-                    argv: vec!["claude".to_owned()],
-                }),
-                doing: None,
-            },
-            statuses,
+        let mux_terminal = |front_pid: AgentPid, statuses: ProgramStatuses| {
+            (
+                terminal,
+                server::Terminal {
+                    tag: Vec::new(),
+                    size: None,
+                    cwd: Some(dir("/w")),
+                    title: String::new(),
+                    is: Is::Running {
+                        root: AgentPid::new(100).unwrap(),
+                        front: Some(server::Foreground {
+                            pid: front_pid,
+                            argv: vec!["claude".to_owned()],
+                        }),
+                        doing: None,
+                    },
+                    statuses,
+                },
+            )
         };
 
         let statuses =
             ProgramStatuses { root: Some(root_status), children: vec![child_status] };
-        core.send(Command::MuxTerminals(vec![mux_terminal(pid, statuses.clone())])).unwrap();
+        core.send(Command::MuxTerminals(mux_terminals([mux_terminal(pid, statuses.clone())])))
+            .unwrap();
         let after = listed();
         assert_eq!(after.len(), 1);
         assert_eq!(
@@ -1092,15 +1207,15 @@ mod tests {
             }),
             children: Vec::new(),
         };
-        core.send(Command::MuxTerminals(vec![mux_terminal(pid, stopped)])).unwrap();
+        core.send(Command::MuxTerminals(mux_terminals([mux_terminal(pid, stopped)]))).unwrap();
         let interrupted = listed();
         assert_eq!(AgentStatus::of_api(&interrupted[0]), AgentStatus::Stopped);
         assert!(!interrupted[0].is_finished_turn());
 
-        core.send(Command::MuxTerminals(vec![mux_terminal(
+        core.send(Command::MuxTerminals(mux_terminals([mux_terminal(
             AgentPid::new(100).unwrap(),
             statuses,
-        )]))
+        )])))
         .unwrap();
         let fallback = listed();
         assert_eq!(fallback.len(), 1);
@@ -1164,51 +1279,59 @@ mod tests {
         let pid = AgentPid::new(std::process::id()).unwrap();
         let root_pid = AgentPid::new(if pid.get() == 100 { 101 } else { 100 }).unwrap();
         let app = AppName::parse("claude-code").unwrap();
-        let make_terminal =
-            |argv: &[&str], doing: Option<Doing>, recorded_at: SystemTime| server::Terminal {
-                key: key(9),
-                tag: Vec::new(),
-                size: None,
-                cwd: "/w".to_owned(),
-                title: String::new(),
-                is: Is::Running {
-                    root: root_pid,
-                    front: Some(server::Foreground { pid, argv: words(argv) }),
-                    doing,
+        let make_terminal = |argv: &[&str], doing: Option<Doing>, recorded_at: SystemTime| {
+            (
+                key(9),
+                server::Terminal {
+                    tag: Vec::new(),
+                    size: None,
+                    cwd: Some(dir("/w")),
+                    title: String::new(),
+                    is: Is::Running {
+                        root: root_pid,
+                        front: Some(server::Foreground { pid, argv: words(argv) }),
+                        doing,
+                    },
+                    statuses: ProgramStatuses {
+                        root: Some(ProgramStatus {
+                            phase: ProgramPhase::Working { progress: None },
+                            app: Some(app.clone()),
+                            title: None,
+                            at: Some(recorded_at),
+                        }),
+                        children: Vec::new(),
+                    },
                 },
-                statuses: ProgramStatuses {
-                    root: Some(ProgramStatus {
-                        phase: ProgramPhase::Working { progress: None },
-                        app: Some(app.clone()),
-                        title: None,
-                        at: Some(recorded_at),
-                    }),
-                    children: Vec::new(),
-                },
-            };
+            )
+        };
         let listed = || ask(&core, Command::List).unwrap().agents;
 
-        core.send(Command::MuxTerminals(vec![make_terminal(
+        core.send(Command::MuxTerminals(mux_terminals([make_terminal(
             &["vim", "notes.txt"],
             None,
             SystemTime::now(),
-        )]))
+        )])))
         .unwrap();
         assert_eq!(listed(), []);
 
-        core.send(Command::MuxTerminals(vec![make_terminal(
+        core.send(Command::MuxTerminals(mux_terminals([make_terminal(
             &["claude"],
             Some(Doing::Stopped { command: None, at: SystemTime::now() }),
             SystemTime::now(),
-        )]))
+        )])))
         .unwrap();
         assert_eq!(listed(), []);
 
-        core.send(Command::MuxTerminals(vec![make_terminal(&["claude"], None, at(1))])).unwrap();
+        core.send(Command::MuxTerminals(mux_terminals([make_terminal(&["claude"], None, at(1))])))
+            .unwrap();
         assert_eq!(listed(), []);
 
-        core.send(Command::MuxTerminals(vec![make_terminal(&["claude"], None, SystemTime::now())]))
-            .unwrap();
+        core.send(Command::MuxTerminals(mux_terminals([make_terminal(
+            &["claude"],
+            None,
+            SystemTime::now(),
+        )])))
+        .unwrap();
         let active = listed();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].status_rung, Some(api::StatusRung::Osc7501.into()));
@@ -1220,35 +1343,37 @@ mod tests {
         let core = start(Wakes { git: wake(), github: wake() }).unwrap();
         let pid = AgentPid::new(std::process::id()).unwrap();
         let root_pid = AgentPid::new(if pid.get() == 100 { 101 } else { 100 }).unwrap();
-        let running = |program: &str, app: &str| server::Terminal {
-            key: key(11),
-            tag: Vec::new(),
-            size: None,
-            cwd: "/w".to_owned(),
-            title: String::new(),
-            is: Is::Running {
-                root: root_pid,
-                front: Some(server::Foreground { pid, argv: vec![program.to_owned()] }),
-                doing: None,
-            },
-            statuses: ProgramStatuses {
-                root: Some(ProgramStatus {
-                    phase: ProgramPhase::Working { progress: None },
-                    app: Some(AppName::parse(app).unwrap()),
-                    title: None,
-                    at: Some(SystemTime::now()),
-                }),
-                children: Vec::new(),
-            },
+        let running = |program: &str, app: &str| {
+            let terminal = server::Terminal {
+                tag: Vec::new(),
+                size: None,
+                cwd: Some(Directory::parse("/w".to_owned()).unwrap()),
+                title: String::new(),
+                is: Is::Running {
+                    root: root_pid,
+                    front: Some(server::Foreground { pid, argv: vec![program.to_owned()] }),
+                    doing: None,
+                },
+                statuses: ProgramStatuses {
+                    root: Some(ProgramStatus {
+                        phase: ProgramPhase::Working { progress: None },
+                        app: Some(AppName::parse(app).unwrap()),
+                        title: None,
+                        at: Some(SystemTime::now()),
+                    }),
+                    children: Vec::new(),
+                },
+            };
+            Command::MuxTerminals(mux_terminals([(key(11), terminal)]))
         };
         let listed = || ask(&core, Command::List).unwrap().agents;
 
-        core.send(Command::MuxTerminals(vec![running("pi", "pi")])).unwrap();
+        core.send(running("pi", "pi")).unwrap();
         let before = listed();
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].harness, Some(api::Harness::Pi.into()));
 
-        core.send(Command::MuxTerminals(vec![running("claude", "claude-code")])).unwrap();
+        core.send(running("claude", "claude-code")).unwrap();
         let after = listed();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].harness, Some(api::Harness::ClaudeCode.into()));
@@ -1353,29 +1478,34 @@ mod tests {
         .unwrap();
         core.send(Command::PiAgents(vec![reported(&pi_agent, Harness::Pi, "pi", 3)])).unwrap();
 
-        let osc_terminal = |front: Option<AgentPid>| server::Terminal {
-            key: terminal,
-            tag: Vec::new(),
-            size: None,
-            cwd: "/w".to_owned(),
-            title: String::new(),
-            is: Is::Running {
-                root: AgentPid::new(100).unwrap(),
-                front: front.map(|pid| server::Foreground { pid, argv: vec!["claude".to_owned()] }),
-                doing: None,
-            },
-            statuses: ProgramStatuses {
-                root: Some(ProgramStatus {
-                    phase: ProgramPhase::Blocked {
-                        kind: Some(OscBlockedKind::Permission),
-                        message: None,
+        let osc_terminal = |front: Option<AgentPid>| {
+            (
+                terminal,
+                server::Terminal {
+                    tag: Vec::new(),
+                    size: None,
+                    cwd: Some(dir("/w")),
+                    title: String::new(),
+                    is: Is::Running {
+                        root: AgentPid::new(100).unwrap(),
+                        front: front
+                            .map(|pid| server::Foreground { pid, argv: vec!["claude".to_owned()] }),
+                        doing: None,
                     },
-                    app: Some(AppName::parse("claude-code").unwrap()),
-                    title: None,
-                    at: Some(at(20)),
-                }),
-                children: Vec::new(),
-            },
+                    statuses: ProgramStatuses {
+                        root: Some(ProgramStatus {
+                            phase: ProgramPhase::Blocked {
+                                kind: Some(OscBlockedKind::Permission),
+                                message: None,
+                            },
+                            app: Some(AppName::parse("claude-code").unwrap()),
+                            title: None,
+                            at: Some(at(20)),
+                        }),
+                        children: Vec::new(),
+                    },
+                },
+            )
         };
 
         let osc_pids = || {
@@ -1388,13 +1518,13 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        core.send(Command::MuxTerminals(vec![osc_terminal(None)])).unwrap();
+        core.send(Command::MuxTerminals(mux_terminals([osc_terminal(None)]))).unwrap();
         assert_eq!(osc_pids(), [cli_pid.get()]);
 
-        core.send(Command::MuxTerminals(vec![osc_terminal(Some(sdk_pid))])).unwrap();
+        core.send(Command::MuxTerminals(mux_terminals([osc_terminal(Some(sdk_pid))]))).unwrap();
         assert_eq!(osc_pids(), [sdk_pid.get()]);
 
-        core.send(Command::MuxTerminals(vec![osc_terminal(Some(pi_pid))])).unwrap();
+        core.send(Command::MuxTerminals(mux_terminals([osc_terminal(Some(pi_pid))]))).unwrap();
         assert_eq!(osc_pids(), [] as [u32; 0]);
     }
 
@@ -1441,30 +1571,32 @@ mod tests {
                     },
                 })
                 .collect();
-            terminals.push(server::Terminal {
-                key: term,
-                tag: Vec::new(),
-                size: None,
-                cwd: "/w".to_owned(),
-                title: String::new(),
-                is: Is::Running {
-                    root: AgentPid::new(100).unwrap(),
-                    front: Some(server::Foreground { pid, argv: vec!["claude".to_owned()] }),
-                    doing: None,
+            terminals.push((
+                term,
+                server::Terminal {
+                    tag: Vec::new(),
+                    size: None,
+                    cwd: Some(dir("/w")),
+                    title: String::new(),
+                    is: Is::Running {
+                        root: AgentPid::new(100).unwrap(),
+                        front: Some(server::Foreground { pid, argv: vec!["claude".to_owned()] }),
+                        doing: None,
+                    },
+                    statuses: ProgramStatuses {
+                        root: Some(ProgramStatus {
+                            phase: ProgramPhase::Working { progress: None },
+                            app: Some(app.clone()),
+                            title: None,
+                            at: Some(at),
+                        }),
+                        children,
+                    },
                 },
-                statuses: ProgramStatuses {
-                    root: Some(ProgramStatus {
-                        phase: ProgramPhase::Working { progress: None },
-                        app: Some(app.clone()),
-                        title: None,
-                        at: Some(at),
-                    }),
-                    children,
-                },
-            });
+            ));
         }
         core.send(Command::Agents(Scan { agents, unread: Vec::new() })).unwrap();
-        core.send(Command::MuxTerminals(terminals)).unwrap();
+        core.send(Command::MuxTerminals(mux_terminals(terminals))).unwrap();
 
         let listed = ask(&core, Command::List).unwrap().agents;
         assert_eq!(listed.len(), usize::try_from(agent_count).unwrap());
@@ -1475,5 +1607,134 @@ mod tests {
             .sum();
         assert!(total_bytes <= lune_protocol::HOST_SUBAGENTS_BYTES_MAX);
         assert!(listed.iter().all(|agent| !agent.subagents.is_empty()));
+    }
+
+    #[test]
+    fn shown_terminal_renders_what_the_core_displays_and_ignores_spinner_frames() {
+        let wake = || mpsc::sync_channel(1).0;
+        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let mut next = 0u64;
+        let mut fresh = || {
+            next += 1;
+            Ok(Id::of(next).unwrap())
+        };
+        let root = Dir::parse("/w/lune").unwrap();
+        let main = Subfolder::parse("main").unwrap();
+        let listed = Listed::of(BTreeSet::from([main.clone()])).unwrap();
+        let (projects, made) = Projects::default()
+            .changed(
+                Change::AddProject {
+                    spot: Spot::in_clone(root.clone(), listed.clone(), None),
+                    name: None,
+                },
+                None,
+                &mut fresh,
+            )
+            .unwrap();
+        let Some(Made::Project(project)) = made else { panic!("project made") };
+        let (projects, _) = projects
+            .changed(
+                Change::AddWorktree {
+                    project,
+                    spot: Spot::in_clone(root, listed, Some(main)),
+                    name: None,
+                    opens: Opens::Shell,
+                },
+                None,
+                &mut fresh,
+            )
+            .unwrap();
+        let view = projects.terminals().next().unwrap().1.id().view();
+        core.send(Command::Projects { projects: Ok(projects), revision: Revision::default() })
+            .unwrap();
+
+        let term_key = key(5);
+        let frame = |title: &str, cwd: &str, is: Is| server::Terminal {
+            tag: b"t".to_vec(),
+            size: None,
+            cwd: Some(dir(cwd)),
+            title: title.to_owned(),
+            is,
+            statuses: ProgramStatuses::default(),
+        };
+        let running = Is::Running {
+            root: AgentPid::new(10).unwrap(),
+            front: Some(server::Foreground {
+                pid: AgentPid::new(20).unwrap(),
+                argv: vec!["claude".to_owned(), "--resume".to_owned()],
+            }),
+            doing: Some(Doing::Ready),
+        };
+        let unlisted = Shown::unlisted(term_key);
+        let first = Shown::listed(
+            term_key,
+            &frame("⠋ Fixing the tests", "/w/lune/main/src", running.clone()),
+        );
+        let second =
+            Shown::listed(term_key, &frame("⠙ Fixing the tests", "/w/lune/main/src", running));
+        assert_eq!(first, second);
+        assert_ne!(unlisted, first);
+
+        core.send(Command::Terminals(BTreeMap::from([(view, Located::Shown(unlisted))]))).unwrap();
+        let host = ask(&core, Command::Host).unwrap();
+        let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
+            panic!("projects kept");
+        };
+        let terminal = &kept.projects[0].worktrees().unwrap()[0].terminals[0];
+        assert_eq!(terminal.state, Some(api::terminal::State::Unlisted(term_key.into())));
+        assert_eq!(terminal.command, None);
+        assert_eq!(terminal.shell, None);
+        assert!(!terminal.held);
+
+        core.send(Command::Terminals(BTreeMap::from([(view, Located::Shown(first))]))).unwrap();
+        let host = ask(&core, Command::Host).unwrap();
+        let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
+            panic!("projects kept");
+        };
+        let terminal = &kept.projects[0].worktrees().unwrap()[0].terminals[0];
+        assert_eq!(terminal.folder, "/w/lune/main/src");
+        assert_eq!(terminal.command.as_deref(), Some("claude --resume"));
+        assert_eq!(
+            terminal.titled.as_ref().and_then(|it| it.topic.as_deref()),
+            Some("Fixing the tests")
+        );
+        assert_eq!(terminal.shell, Some(Doing::Ready.to_api()));
+        assert!(!terminal.held);
+        assert!(matches!(
+            &terminal.state,
+            Some(api::terminal::State::Running(api::terminal::Running {
+                key: Some(k),
+                command: Some(cmd),
+                titled: Some(titled),
+                shell: Some(shell),
+            })) if *k == term_key.into()
+                && cmd == "claude --resume"
+                && titled.topic.as_deref() == Some("Fixing the tests")
+                && *shell == Doing::Ready.to_api()
+        ));
+        assert!(ask(&core, Command::Dirs).unwrap().contains("/w/lune/main/src"));
+
+        let ended =
+            Shown::listed(term_key, &frame("✳ Fixing the tests", "/w/lune/main/src", Is::Ended));
+        core.send(Command::Terminals(BTreeMap::from([(view, Located::Shown(ended))]))).unwrap();
+        let host = ask(&core, Command::Host).unwrap();
+        let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
+            panic!("projects kept");
+        };
+        let terminal = &kept.projects[0].worktrees().unwrap()[0].terminals[0];
+        assert_eq!(terminal.command, None);
+        assert_eq!(terminal.shell, None);
+        assert!(terminal.held);
+        assert_eq!(
+            terminal.titled.as_ref().and_then(|it| it.topic.as_deref()),
+            Some("Fixing the tests")
+        );
+        assert!(matches!(
+            &terminal.state,
+            Some(api::terminal::State::Ended(api::terminal::Ended {
+                key: Some(k),
+                titled: Some(titled),
+            })) if *k == term_key.into() && titled.topic.as_deref() == Some("Fixing the tests")
+        ));
     }
 }

@@ -2,6 +2,7 @@
 name = "lune-waits"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 license.workspace = true
 publish = false
 description = "The one way lune's tests wait: on an event, under one patience no loaded machine runs out of"

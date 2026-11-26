@@ -23,6 +23,8 @@ mod phone;
 #[cfg(test)]
 mod pi;
 #[cfg(test)]
+mod printed;
+#[cfg(test)]
 mod projects;
 #[cfg(test)]
 mod prune;

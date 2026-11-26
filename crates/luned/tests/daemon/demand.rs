@@ -13,7 +13,8 @@ use luned::api::daemon_server::{Daemon, DaemonServer};
 use luned::api::{
     self, AskRequest, AskResponse, FileIssueRequest, FileIssueResponse, IssueRepositoriesRequest,
     IssueRepositoriesResponse, InfoResponse, KeepChecksRequest, KeepChecksResponse,
-    KeepImageRequest, KeepImageResponse, ListAgentsResponse, ListContentsRequest,
+    KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
+    ListAgentsResponse, ListContentsRequest,
     ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest,
     ListSkillsResponse,
     PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
@@ -633,6 +634,13 @@ impl Daemon for StandIn {
         _: Request<ListRepositoriesRequest>,
     ) -> Result<Response<ListRepositoriesResponse>, Status> {
         Err(Status::unimplemented("a stand-in knows no repository"))
+    }
+
+    async fn keep_printed(
+        &self,
+        _: Request<KeepPrintedRequest>,
+    ) -> Result<Response<KeepPrintedResponse>, Status> {
+        Err(Status::unimplemented("a stand-in keeps nothing printed"))
     }
 
     async fn list_contents(

@@ -1,5 +1,3 @@
-use std::ffi::OsString;
-use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -30,19 +28,7 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
         let reaching = Instant::now();
         let mut after: Option<Version> = None;
         let failure = match daemon::current(&folder).await {
-            Ok(Current { mut daemon, info, .. }) => {
-                let claude = info
-                    .claude_folder
-                    .map(|folder| PathBuf::from(OsString::from_vec(folder)))
-                    .or_else(luned::claude_folder);
-                let agy = info
-                    .agy_folder
-                    .map(|folder| PathBuf::from(OsString::from_vec(folder)))
-                    .or_else(luned::agy_folder);
-                let transcripts = luned::transcripts::Folders { claude, agy };
-                if events.send(Event::Reached { transcripts }).is_err() {
-                    return;
-                }
+            Ok(Current { mut daemon, .. }) => {
                 loop {
                     match daemon.watch(WatchRequest { after, kept: None, shown: true }).await {
                         Ok(host) => {

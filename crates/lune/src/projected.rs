@@ -170,12 +170,13 @@ mod tests {
     }
 
     fn terminal(id: u64, found: terminal::Found, topic: Option<&str>) -> api::Terminal {
+        let keyed = matches!(found, terminal::Found::Key(_));
         let titled = topic.map(|topic| api::Titled { topic: Some(topic.to_owned()) });
         api::Terminal {
             id,
             found: Some(found),
             folder: "/w/a".to_owned(),
-            command: Some("sleep 600".to_owned()),
+            command: keyed.then(|| "sleep 600".to_owned()),
             titled,
             ..api::Terminal::default()
         }
@@ -260,7 +261,7 @@ mod tests {
         assert_eq!(bar.project, seven(), "the tabs are the project's");
         assert_eq!(titles.get(&terminal).map(String::as_str), Some("Fixing"));
         let lost = ViewId::of(22).unwrap();
-        assert_eq!(titles.get(&lost).map(String::as_str), Some("sleep 600"));
+        assert_eq!(titles.get(&lost), None);
     }
 
     #[test]
@@ -308,6 +309,11 @@ mod tests {
         for worktree in rows(kept(&mut looking)) {
             for terminal in &mut worktree.terminals {
                 terminal.found = Some(terminal::Found::Looking(()));
+                terminal.command = None;
+                terminal.titled = None;
+                terminal.shell = None;
+                terminal.held = false;
+                terminal.state = None;
             }
         }
         let looking = Projected::adapted(&looking).unwrap();
