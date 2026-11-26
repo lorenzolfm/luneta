@@ -248,6 +248,19 @@ fn keys_typed_right_after_stepping_to_a_tab_reach_the_tab_stepped_to() {
 }
 
 #[test]
+fn keys_typed_right_after_stepping_into_a_staying_right_edge_reach_the_terminal() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("lune shows work", || shown(&owned, &dir.path));
+    seated(&window, "work/main");
+    window.send(&format!("{RIGHT}{TYPED}"));
+    eventually("the terminal that kept focus gets the keys", || {
+        window.shows(PRINTED).then_some(())
+    });
+}
+
+#[test]
 fn the_menu_opens_a_welcome_view_beside_the_terminal_and_d_d_in_it_closes_it() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");

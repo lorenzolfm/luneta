@@ -27,7 +27,7 @@ use luned::links::{self, Branch, Unready};
 use luned::projects::Opened;
 use luned::repositories::OWNED_FOLDER;
 use luned::work::{self, Listed};
-use luned::{Answer, Asked, Beside, Heard, Shared, Unasked};
+use luned::{Answer, Beside, FocusAsked, Heard, Shared, Unasked};
 use tonic::{Code, Status};
 
 use luned::Directory;
@@ -687,7 +687,7 @@ pub enum Opening {
 }
 
 enum Asking {
-    Unsent(Asked),
+    Unsent(FocusAsked),
     Sent { before: BTreeSet<ViewId> },
 }
 
@@ -703,14 +703,14 @@ pub fn opened(
     let (heard, hearing) = mpsc::channel();
     let at = luned::Where::Here { runs_in: None };
     let unvisited = true;
-    let show = luned::show(folder, at, worktree, size, unvisited, move |it| {
+    let mut show = luned::show(folder, at, worktree, size, unvisited, move |it| {
         drop(heard.send(it));
     });
     let beside = match opening {
         Opening::IfEmpty => Beside::Alone,
         Opening::Beside => Beside::Focused,
     };
-    let mut asking = Asking::Unsent(Asked::Open { beside, opens });
+    let mut asking = Asking::Unsent(FocusAsked::Open { beside, opens });
     let until = Instant::now() + OPENING;
     loop {
         let left = until.saturating_duration_since(Instant::now());
@@ -725,7 +725,7 @@ pub fn opened(
                 asking = match (asking, opening) {
                     (Asking::Unsent(_), Opening::IfEmpty) if !laid.is_empty() => return Ok(()),
                     (Asking::Unsent(open), Opening::IfEmpty | Opening::Beside) => {
-                        show.ask(open);
+                        let _ = show.ask_focus(open);
                         Asking::Sent { before: views }
                     },
                     (Asking::Sent { before }, _) if views.is_subset(&before) => {

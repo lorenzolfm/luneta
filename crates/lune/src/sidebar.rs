@@ -315,9 +315,16 @@ pub struct Seat {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeatedLayout {
+    Unlaid,
+    Disconnected(TerminalKey),
+    Live { arranged: Arranged, version: Option<api::Version>, terminal: Option<TerminalKey> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sitting {
     Home,
-    Worktree { worktree: WorktreeId, terminal: Option<TerminalKey>, arranged: Option<Arranged> },
+    Worktree { worktree: WorktreeId, layout: SeatedLayout },
 }
 
 impl Seat {
@@ -330,15 +337,25 @@ impl Seat {
 
     fn terminal(&self) -> Option<TerminalKey> {
         match self.at {
-            Sitting::Worktree { terminal, .. } => terminal,
-            Sitting::Home => None,
+            Sitting::Worktree { layout: SeatedLayout::Live { terminal, .. }, .. } => terminal,
+            Sitting::Worktree { layout: SeatedLayout::Disconnected(terminal), .. } => {
+                Some(terminal)
+            },
+            Sitting::Worktree { layout: SeatedLayout::Unlaid, .. } | Sitting::Home => None,
         }
     }
 
-    fn arranged(&self) -> Option<Arranged> {
+    fn live_arranged(&self) -> Option<(Arranged, Option<api::Version>)> {
         match self.at {
-            Sitting::Worktree { arranged, .. } => arranged,
-            Sitting::Home => None,
+            Sitting::Worktree {
+                layout: SeatedLayout::Live { arranged, version, .. },
+                ..
+            } => Some((arranged, version)),
+            Sitting::Worktree {
+                layout: SeatedLayout::Unlaid | SeatedLayout::Disconnected(_),
+                ..
+            }
+            | Sitting::Home => None,
         }
     }
 }
@@ -1043,12 +1060,22 @@ fn arranged_holding(
     listed: &Listed,
     view: ViewId,
 ) -> Option<Arranged> {
-    let known = shelf(shelves, on).iter().find(|it| it.listed() == listed)?;
+    let shelf = shelves.iter().find(|shelf| shelf.machine == *on)?;
+    let known = shelf.projects().iter().find(|it| it.listed() == listed)?;
     let holding = known.worktrees.iter().find(|it| it.terminal_ids().any(|id| id == view))?;
     let seated = seat.filter(|seat| {
         seat.on == *on && seat.worktree() == Some(holding.place.worktree)
     });
-    seated.and_then(Seat::arranged).or(holding.arranged)
+    let live = seated.and_then(Seat::live_arranged).and_then(|(arranged, version)| {
+        let current = match (version, shelf.version) {
+            (Some(seat_version), Some(shelf_version)) => {
+                seat_version.pid == shelf_version.pid && seat_version.seq >= shelf_version.seq
+            },
+            (None, _) | (_, None) => true,
+        };
+        current.then_some(arranged)
+    });
+    live.or(holding.arranged)
 }
 
 fn view_id_of(shelves: &[Shelf], on: &Machine, listed: &Listed, view: ViewKey) -> Option<ViewId> {
@@ -6595,16 +6622,17 @@ mod tests {
         let (project, terminal) = (worktree.project.id(), view.key());
         let at = Sitting::Worktree {
             worktree: worktree.worktree,
-            terminal: Some(terminal),
-            arranged: None,
+            layout: SeatedLayout::Disconnected(terminal),
         };
         sidebar.sit(Seat { on: Machine::Local, project, at });
     }
 
     fn seat_in(project: u64, view: Option<u32>) -> Seat {
-        let terminal = view.map(|view| view_key(project, view).key());
+        let layout = view.map_or(SeatedLayout::Unlaid, |view| {
+            SeatedLayout::Disconnected(view_key(project, view).key())
+        });
         let (worktree, project) = (tab_of(project, 0), ProjectId::of(project).unwrap());
-        let at = Sitting::Worktree { worktree, terminal, arranged: None };
+        let at = Sitting::Worktree { worktree, layout };
         Seat { on: Machine::Local, project, at }
     }
 
@@ -7338,7 +7366,7 @@ mod tests {
         let older = |view| view_place("older", 1, u32::from(view == 2), view);
         sit(&mut sidebar, &Place::View(older(1)));
         assert_eq!(sidebar.here_place(), Ok(older(1)));
-        let at = Sitting::Worktree { worktree: tab_of(1, 1), terminal: None, arranged: None };
+        let at = Sitting::Worktree { worktree: tab_of(1, 1), layout: SeatedLayout::Unlaid };
         sidebar.sit(Seat { at, ..seat_in(1, None) });
         assert_eq!(sidebar.here_place(), Err(NO_HERE_VIEW), "not the view of the worktree left");
         sit(&mut sidebar, &Place::View(older(2)));
@@ -10333,8 +10361,11 @@ mod tests {
         let older = view_place("older", 1, 0, 1);
         let at = Sitting::Worktree {
             worktree: older.worktree.worktree,
-            terminal: Some(older.view.key()),
-            arranged: Some(Arranged::Panes),
+            layout: SeatedLayout::Live {
+                arranged: Arranged::Panes,
+                version: None,
+                terminal: Some(older.view.key()),
+            },
         };
         let project = older.worktree.project.id();
         sidebar.sit(Seat { on: Machine::Local, project, at });
@@ -10352,6 +10383,52 @@ mod tests {
             other,
             Some(Target::View(_, ViewRow { arranged: Some(Arranged::Tabs), .. }))
         ));
+    }
+
+    #[test]
+    fn live_seat_arrangement_yields_to_newer_watch_version_and_disconnected_seat() {
+        let mut sidebar = fresh();
+        let version = |seq| api::Version { pid: 7, seq };
+        let mut built = host(
+            vec![own_session("older", 1, vec![view(1, 0, "/w/lune/main", "fish")])],
+            Vec::new(),
+        );
+        if let Some(api::Projects { held: Some(api::projects::Held::Kept(kept)) }) =
+            &mut built.projects
+        {
+            kept.version = Some(version(10));
+        }
+        sidebar.hear(built);
+        let older = view_place("older", 1, 0, 1);
+        let project = older.worktree.project.id();
+        let view_spot = own_view_of("older", 1, 1);
+        let arranged_of = |sidebar: &Sidebar| match sidebar.target_at(&Machine::Local, view_spot.clone()) {
+            Some(Target::View(_, row)) => row.arranged,
+            other => panic!("expected view target, got {other:?}"),
+        };
+
+        let seat_with = |layout| Seat {
+            on: Machine::Local,
+            project,
+            at: Sitting::Worktree { worktree: older.worktree.worktree, layout },
+        };
+        sidebar.sit(seat_with(SeatedLayout::Live {
+            arranged: Arranged::Panes,
+            version: Some(version(11)),
+            terminal: Some(older.view.key()),
+        }));
+        assert_eq!(arranged_of(&sidebar), Some(Arranged::Panes), "newer show beats older watch");
+
+        sidebar.sit(seat_with(SeatedLayout::Live {
+            arranged: Arranged::Panes,
+            version: Some(version(9)),
+            terminal: Some(older.view.key()),
+        }));
+        assert_eq!(arranged_of(&sidebar), Some(Arranged::Tabs), "newer watch beats stale show");
+
+        sidebar.sit(seat_with(SeatedLayout::Disconnected(older.view.key())));
+        assert_eq!(arranged_of(&sidebar), Some(Arranged::Tabs), "disconnected show yields to watch");
+        assert_eq!(sidebar.here_place(), Ok(older));
     }
 
     #[test]
@@ -12120,7 +12197,7 @@ mod tests {
         sidebar.hear(machines());
         let there = listed("main", 20);
         let (on, project, worktree) = (Machine::Remote(nixos()), there.project(), tab_of(20, 0));
-        let at = Sitting::Worktree { worktree, terminal: None, arranged: None };
+        let at = Sitting::Worktree { worktree, layout: SeatedLayout::Unlaid };
         sidebar.sit(Seat { on, project, at });
         let project = ProjectRow::of(there);
         let place = WorktreePlace { project, worktree: tab_of(20, 0) };

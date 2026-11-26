@@ -7,7 +7,7 @@ use lune_domain::projects::{Size, WorktreeId};
 use lune_waits::eventually;
 use luned::api::projects::Held;
 use luned::api::Project;
-use luned::{Asked, Beside, Heard, Where};
+use luned::{Beside, FocusAsked, Heard, Where};
 
 use crate::host::{folder_in, script, Host, LUNE};
 use crate::own::Owned;
@@ -102,8 +102,9 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
     let (heard, hearing) = mpsc::channel();
     let size = Size::of(80, 24).unwrap();
     let at = Where::Here { runs_in: None };
-    let show = luned::show(folder, at, here, size, false, move |it| drop(heard.send(it)));
-    show.ask(Asked::Open { beside: Beside::Alone, opens: command(&["sleep", "600"]) });
+    let mut show = luned::show(folder, at, here, size, false, move |it| drop(heard.send(it)));
+    let _ =
+        show.ask_focus(FocusAsked::Open { beside: Beside::Alone, opens: command(&["sleep", "600"]) });
     let laid = eventually("the layout lays out the terminal", || match hearing.try_recv() {
         Ok(Heard::Laid { laid, .. }) if !laid.is_empty() => Some(laid),
         Ok(_) | Err(_) => None,

@@ -1152,6 +1152,7 @@ message ShowResponse {
       fixed64 full = 5;
       fixed64 tabbed = 6;
     }
+    Version version = 7;
   }
 
   message View {
