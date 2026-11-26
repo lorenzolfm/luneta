@@ -192,7 +192,8 @@ impl Aim {
         }
         match (self.focus, now.focus) {
             (AimFocus::Awaiting(asked), AimFocus::Awaiting(current)) => asked == current,
-            (
+            (AimFocus::Unlaid, AimFocus::Awaiting(_))
+            | (
                 AimFocus::Awaiting(_) | AimFocus::Unlaid,
                 AimFocus::Unlaid | AimFocus::View(_) | AimFocus::Terminal(..),
             ) => true,
@@ -203,11 +204,10 @@ impl Aim {
                 before == now && had == has
             },
             (
-                AimFocus::Unlaid | AimFocus::View(_) | AimFocus::Terminal(..),
-                AimFocus::Awaiting(_),
+                AimFocus::View(_) | AimFocus::Terminal(..),
+                AimFocus::Awaiting(_) | AimFocus::Unlaid,
             )
-            | (AimFocus::View(_), AimFocus::Unlaid)
-            | (AimFocus::Terminal(..), AimFocus::Unlaid | AimFocus::View(_)) => false,
+            | (AimFocus::Terminal(..), AimFocus::View(_)) => false,
         }
     }
 }
@@ -610,7 +610,6 @@ impl Layout {
         if follows {
             self.worktree = laid.worktree();
             self.laid = None;
-            self.awaiting = None;
             self.pointer = Pointer::Free;
             self.unsent.drop_kept(
                 self.aim(),
@@ -1203,11 +1202,49 @@ enum WorktreeOpen {
     Ready,
 }
 
+enum ShowStream {
+    Disconnected,
+    Connecting(Show),
+    Live(Show),
+}
+
+impl ShowStream {
+    fn is_disconnected(&self) -> bool {
+        matches!(self, ShowStream::Disconnected)
+    }
+
+    fn is_live(&self) -> bool {
+        matches!(self, ShowStream::Live(_))
+    }
+
+    fn mark_live(&mut self) {
+        let current = std::mem::replace(self, ShowStream::Disconnected);
+        *self = match current {
+            ShowStream::Disconnected => ShowStream::Disconnected,
+            ShowStream::Connecting(show) | ShowStream::Live(show) => ShowStream::Live(show),
+        };
+    }
+
+    fn active(&self) -> Option<&Show> {
+        match self {
+            ShowStream::Disconnected => None,
+            ShowStream::Connecting(show) | ShowStream::Live(show) => Some(show),
+        }
+    }
+
+    fn active_mut(&mut self) -> Option<&mut Show> {
+        match self {
+            ShowStream::Disconnected => None,
+            ShowStream::Connecting(show) | ShowStream::Live(show) => Some(show),
+        }
+    }
+}
+
 pub struct Viewed {
     number: u64,
     folder: PathBuf,
     machine: Machine,
-    show: Option<Show>,
+    show: ShowStream,
     shown_at: Instant,
     laid_in: Option<WorktreeId>,
     size: Size,
@@ -1242,7 +1279,7 @@ impl Viewed {
             number,
             folder,
             machine,
-            show: None,
+            show: ShowStream::Disconnected,
             shown_at: Instant::now(),
             laid_in: None,
             size,
@@ -1279,7 +1316,8 @@ impl Viewed {
         let told = move |heard| drop(events.send(Event::Shown(number, heard)));
         let worktree = self.layout.worktree;
         let again = self.laid_in == Some(worktree);
-        self.show = Some(luned::show(opened, self.at(), worktree, self.size, again, told));
+        let show = luned::show(opened, self.at(), worktree, self.size, again, told);
+        self.show = ShowStream::Connecting(show);
         if self.machine == Machine::Local {
             for (view, tty) in self.browsers.active_ttys() {
                 self.ask(LayoutAsked::BrowserTty { view, tty: Some(tty) });
@@ -1319,13 +1357,12 @@ impl Viewed {
 
     #[must_use]
     pub fn live(&self) -> bool {
-        self.show.is_some()
+        self.show.is_live()
     }
 
     #[must_use]
     pub fn arranged(&self) -> Option<(Arranged, Option<luned::api::Version>)> {
-        self.show.as_ref()?;
-        self.layout.arranged()
+        self.show.is_live().then(|| self.layout.arranged()).flatten()
     }
 
     pub fn welcomes(&self) -> bool {
@@ -1450,7 +1487,7 @@ impl Viewed {
     }
 
     fn lose_stream(&mut self, now: Instant) {
-        self.show = None;
+        self.show = ShowStream::Disconnected;
         self.layout.stream_lost(now);
     }
 
@@ -1463,12 +1500,14 @@ impl Viewed {
                 if followed {
                     self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
                 }
-                let changed = laid.worktree() == self.layout.worktree
+                let was_live = self.show.is_live();
+                let laid_changed = laid.worktree() == self.layout.worktree
                     && self.layout.laid.as_ref() != Some(&laid);
                 let mut emptied = false;
                 match self.layout.laid_out(laid) {
                     LaidOut::Ignored => {},
                     LaidOut::Shown => {
+                        self.show.mark_live();
                         if self.opened.get(&self.layout.worktree) == Some(&WorktreeOpen::Requested)
                         {
                             self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
@@ -1476,6 +1515,7 @@ impl Viewed {
                         self.layout.heard_laid(heard, now);
                     },
                     LaidOut::Emptied => {
+                        self.show.mark_live();
                         self.layout.heard_laid(heard, now);
                         match self.opened.get(&self.layout.worktree) {
                             None => {
@@ -1493,7 +1533,8 @@ impl Viewed {
                 self.watch();
                 self.sync_browsers();
                 self.send_unsent();
-                match (emptied, followed, changed) {
+                let became_live = !was_live && self.show.is_live();
+                match (emptied, followed, laid_changed || became_live) {
                     (true, ..) => Heeded::Emptied,
                     (false, true, _) => Heeded::Followed,
                     (false, false, true) => Heeded::Changed,
@@ -1612,7 +1653,7 @@ impl Viewed {
     }
 
     pub fn ticked(&mut self) {
-        if self.show.is_none() && self.shown_at.elapsed() >= AGAIN {
+        if self.show.is_disconnected() && self.shown_at.elapsed() >= AGAIN {
             self.shown();
         }
         if self.watcher.is_none() {
@@ -1622,7 +1663,7 @@ impl Viewed {
     }
 
     fn ask(&mut self, asked: LayoutAsked) {
-        if let Some(show) = &self.show {
+        if let Some(show) = self.show.active() {
             show.ask(asked);
         }
     }
@@ -1638,7 +1679,7 @@ impl Viewed {
             | FocusAsked::Close(_)
             | FocusAsked::Focus(_) => None,
         };
-        if let Some(show) = &mut self.show {
+        if let Some(show) = self.show.active_mut() {
             let ask = show.ask_focus(asked);
             let waiting = match step {
                 Some(step) => WaitingFor::Step { ask, step },
@@ -2974,18 +3015,183 @@ diff --git a/src/lib.rs b/src/lib.rs
     }
 
     #[test]
-    fn following_a_rehomed_terminal_drops_events_kept_for_an_awaited_focus_change() {
+    fn following_a_rehomed_terminal_drops_old_events_and_keeps_unreached_wait() {
         let now = Instant::now();
         let at = |n| AskNumber::of(n).unwrap();
+        let step = NonZeroU64::new(1).unwrap();
         let mut layout = Layout::new(worktree(1), None);
         assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
         layout.await_focus(WaitingFor::Focus(at(2)), now);
         layout.keep_unsent(pasted("before-rehome"), now);
         let rehomed = laid_on(2, view(11, (0, 0, 20, 4), Some(1)));
         assert!(layout.followed(&rehomed, now));
-        assert!(layout.awaiting.is_none(), "rehome clears focus wait from the old worktree");
         assert_eq!(layout.laid_out(rehomed), LaidOut::Shown);
-        assert_eq!(sent(&mut layout, now), Some((key(1), VecDeque::new())));
+        layout.heard_laid(Echoed::Through(at(1)), now);
+        assert_eq!(layout.awaiting, Some(WaitingFor::Focus(at(2))), "unreached ask stays awaited");
+        layout.keep_unsent(pasted("after-rehome"), now);
+        assert_eq!(sent(&mut layout, now), None, "does not leak into rehomed terminal before ask");
+        assert_eq!(layout.laid_out(laid_on(2, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        layout.heard_laid(Echoed::Through(at(2)), now);
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(2), VecDeque::from([pasted("after-rehome")]))),
+            "drops old worktree input and flushes post-rehome input into the awaited view",
+        );
+
+        layout.await_focus(WaitingFor::Step { ask: at(3), step }, now);
+        layout.keep_unsent(pasted("before-step-rehome"), now);
+        let rehomed = laid_on(3, view(12, (0, 0, 20, 4), Some(2)));
+        assert!(layout.followed(&rehomed, now));
+        assert_eq!(layout.laid_out(rehomed), LaidOut::Shown);
+        layout.heard_laid(Echoed::Through(at(2)), now);
+        let edged =
+            layout.heard_edged(worktree(3), Direction::Left, step, Echoed::Through(at(3)), now);
+        assert_eq!(edged, EdgeHeard::Crosses(Across::Before), "pending step still resolves");
+        layout.crossed_edge(now);
+        assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())));
+
+        layout.await_focus(WaitingFor::Focus(at(4)), now);
+        layout.keep_unsent(pasted("before-reached-rehome"), now);
+        let rehomed = laid_on(4, view(12, (0, 0, 20, 4), Some(2)));
+        assert!(layout.followed(&rehomed, now));
+        assert_eq!(layout.laid_out(rehomed), LaidOut::Shown);
+        layout.heard_laid(Echoed::Through(at(4)), now);
+        assert!(layout.awaiting.is_none(), "reached rehome layout clears focus wait");
+        assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())));
+    }
+
+    #[test]
+    fn events_typed_before_an_empty_worktree_opens_its_first_shell_reach_that_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let served = dir.path().join("served");
+        luned::folder::make(&served).unwrap();
+        let (events, _heard) = std::sync::mpsc::channel();
+        let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
+        let greeting = Greeting { foreground: None, background: None };
+        let browser_config = embedded::Config {
+            mode: embedded::Mode::Unsupported,
+            cell: CellPixels {
+                width: NonZeroU16::new(10).unwrap(),
+                height: NonZeroU16::new(20).unwrap(),
+            },
+            colours: Colours::default(),
+        };
+        let mut viewed = Viewed::start(
+            1,
+            served,
+            Machine::Local,
+            worktree(1),
+            size,
+            greeting,
+            None,
+            browser_config,
+            &events,
+        );
+        viewed.watched_at = Some(Instant::now());
+        let at = |n| Echoed::Through(AskNumber::of(n).unwrap());
+        let empty = |id, heard| {
+            let size = Some(show_request::Size { columns: 20, rows: 4 });
+            let said =
+                show_response::Laid { worktree: id, size, views: Vec::new(), shown: None, version: None };
+            Heard::Laid { laid: Laid::heard(said).unwrap(), heard }
+        };
+        let shown = |id, v, k, heard| {
+            use show_response::laid::Shown as Said;
+            let size = Some(show_request::Size { columns: 20, rows: 4 });
+            let views = vec![view(v, (0, 0, 20, 4), Some(k))];
+            let said = show_response::Laid {
+                worktree: id,
+                size,
+                views,
+                shown: Some(Said::Tiled(v)),
+                version: None,
+            };
+            Heard::Laid { laid: Laid::heard(said).unwrap(), heard }
+        };
+
+        assert!(!viewed.paste("start-a"));
+        assert!(matches!(viewed.heard(empty(1, at(1))), Heeded::Changed));
+        assert!(!viewed.paste("start-b"));
+        assert!(matches!(viewed.heard(shown(1, 11, 1, at(2))), Heeded::Changed));
+        assert_eq!(
+            sent(&mut viewed.layout, Instant::now()),
+            Some((key(1), VecDeque::from([pasted("start-a"), pasted("start-b")]))),
+            "startup typeahead survives auto-opening Beside::Alone",
+        );
+
+        viewed.go(&Machine::Local, worktree(2));
+        assert!(!viewed.paste("go-a"));
+        assert!(matches!(viewed.heard(empty(2, at(3))), Heeded::Changed));
+        assert!(!viewed.paste("go-b"));
+        assert!(matches!(viewed.heard(shown(2, 21, 2, at(4))), Heeded::Changed));
+        assert_eq!(
+            sent(&mut viewed.layout, Instant::now()),
+            Some((key(2), VecDeque::from([pasted("go-a"), pasted("go-b")]))),
+            "go typeahead survives auto-opening Beside::Alone",
+        );
+    }
+
+    #[test]
+    fn reconnecting_show_hides_stale_arrangement_until_fresh_laid_arrives() {
+        use show_response::laid::Shown as Said;
+        let dir = tempfile::tempdir().unwrap();
+        let served = dir.path().join("served");
+        luned::folder::make(&served).unwrap();
+        let (events, _heard) = std::sync::mpsc::channel();
+        let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
+        let greeting = Greeting { foreground: None, background: None };
+        let browser_config = embedded::Config {
+            mode: embedded::Mode::Unsupported,
+            cell: CellPixels {
+                width: NonZeroU16::new(10).unwrap(),
+                height: NonZeroU16::new(20).unwrap(),
+            },
+            colours: Colours::default(),
+        };
+        let mut viewed = Viewed::start(
+            1,
+            served,
+            Machine::Local,
+            worktree(1),
+            size,
+            greeting,
+            None,
+            browser_config,
+            &events,
+        );
+        viewed.watched_at = Some(Instant::now());
+        assert!(!viewed.live(), "connecting show is not live yet");
+        assert_eq!(viewed.arranged(), None);
+
+        let one = vec![view(11, (0, 0, 20, 4), Some(1))];
+        assert!(matches!(viewed.heard(laid_in(1, one.clone())), Heeded::Changed));
+        assert!(viewed.live());
+        assert_eq!(viewed.arranged(), Some((Arranged::Panes, None)));
+
+        assert!(matches!(viewed.heard(Heard::Lost("gone".to_owned())), Heeded::Lost(_)));
+        assert!(!viewed.live());
+        assert_eq!(viewed.arranged(), None);
+        assert_eq!(viewed.focused(), Some(terminal(11)));
+
+        viewed.shown();
+        assert!(!viewed.live(), "reconnecting show stays not live until fresh Laid");
+        assert_eq!(viewed.arranged(), None, "stale pre-disconnect arrangement stays hidden");
+        assert_eq!(viewed.focused(), Some(terminal(11)));
+
+        let tabs = show_response::Laid {
+            worktree: 1,
+            size: Some(show_request::Size { columns: 20, rows: 4 }),
+            views: one,
+            shown: Some(Said::Tabbed(11)),
+            version: None,
+        };
+        let fresh = Heard::Laid {
+            laid: Laid::heard(tabs).unwrap(),
+            heard: Echoed::Through(AskNumber::HELLO),
+        };
+        assert!(matches!(viewed.heard(fresh), Heeded::Changed));
+        assert!(viewed.live());
+        assert_eq!(viewed.arranged(), Some((Arranged::Tabs, None)));
     }
 
     #[test]
