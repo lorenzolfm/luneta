@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,6 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use lune_domain::mux::TerminalKey;
 use notify::RecursiveMode;
 
 use crate::core;
@@ -28,6 +30,7 @@ pub fn follow(
         let mut watcher = None;
         let mut watching = Troubles::default();
         let mut troubles = Troubles::default();
+        let mut told_mux = BTreeMap::new();
         let socket = match server::socket() {
             Ok(socket) => Some(socket),
             Err(failure) => {
@@ -52,7 +55,7 @@ pub fn follow(
                     troubles.say(format!("lune-mux's terminals: {why}"));
                 }
                 troubles.done();
-                if core.send(core::Command::MuxTerminals(terminals.terminals.clone())).is_err() {
+                if !tell_mux(&core, &mut told_mux, &terminals.terminals) {
                     return false;
                 }
                 layouts.send(layouts::Command::Listed(terminals)).is_ok()
@@ -87,7 +90,7 @@ pub fn follow(
                 unreached = 0;
             }
             if let Some(unlisted) = unlisted {
-                if core.send(core::Command::MuxTerminals(Vec::new())).is_err() {
+                if !tell_mux(&core, &mut told_mux, &[]) {
                     return;
                 }
                 if layouts.send(unlisted).is_err() {
@@ -112,6 +115,104 @@ pub fn follow(
     Ok(())
 }
 
+fn tell_mux(
+    core: &SyncSender<core::Command>,
+    told: &mut BTreeMap<TerminalKey, core::MuxTerminal>,
+    terminals: &[server::Terminal],
+) -> bool {
+    let mut now = BTreeMap::new();
+    for terminal in terminals {
+        if let Some(reduced) = core::MuxTerminal::of(terminal) {
+            let previous = now.insert(reduced.key, reduced);
+            assert!(previous.is_none(), "a mux terminal's key comes twice");
+        }
+    }
+    if now == *told {
+        return true;
+    }
+    if core.send(core::Command::MuxTerminals(now.clone())).is_err() {
+        return false;
+    }
+    *told = now;
+    true
+}
+
 fn is_socket(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == SOCKET)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+    use std::sync::mpsc;
+
+    use lune_domain::mux::OwnMade;
+    use lune_domain::projects::Size;
+    use lune_protocol::program_status::{AppName, ProgramPhase, ProgramStatus, ProgramStatuses};
+
+    use super::*;
+    use crate::mux::own::server::{Foreground, Is};
+    use crate::process::AgentPid;
+
+    fn terminal(title: &str, size: Option<Size>, statuses: ProgramStatuses) -> server::Terminal {
+        server::Terminal {
+            key: TerminalKey { id: NonZeroU32::new(1).unwrap(), made: OwnMade::from_nanos(5) },
+            tag: b"t".to_vec(),
+            size,
+            cwd: "/w".to_owned(),
+            title: title.to_owned(),
+            is: Is::Running {
+                root: AgentPid::new(10).unwrap(),
+                front: Some(Foreground {
+                    pid: AgentPid::new(20).unwrap(),
+                    argv: vec!["claude".to_owned()],
+                }),
+                doing: None,
+            },
+            statuses,
+        }
+    }
+
+    fn osc(phase: ProgramPhase) -> ProgramStatuses {
+        ProgramStatuses {
+            root: Some(ProgramStatus {
+                phase,
+                app: Some(AppName::parse("claude-code").unwrap()),
+                title: None,
+                at: None,
+            }),
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_terminal_whose_title_only_cycles_spinner_glyphs_sends_no_mux_terminals() {
+        let (core, commands) = mpsc::sync_channel(8);
+        let mut told = BTreeMap::new();
+
+        for title in ["⠋ Working", "⠙ Working", "✳ Working"] {
+            assert!(tell_mux(&core, &mut told, &[terminal(title, None, ProgramStatuses::default())]));
+            assert!(commands.try_recv().is_err(), "{title}");
+        }
+
+        let working = osc(ProgramPhase::Working { progress: None });
+        assert!(tell_mux(&core, &mut told, &[terminal("⠋ Working", None, working.clone())]));
+        assert!(matches!(commands.try_recv(), Ok(core::Command::MuxTerminals(sent)) if sent.len() == 1));
+
+        let resized = Size::of(120, 40).unwrap();
+        for title in ["⠙ Working", "⠹ Working", "✳ Working"] {
+            assert!(tell_mux(&core, &mut told, &[terminal(title, Some(resized), working.clone())]));
+            assert!(commands.try_recv().is_err(), "{title}");
+        }
+
+        let done = osc(ProgramPhase::Done { message: None });
+        assert!(tell_mux(&core, &mut told, &[terminal("✳ Working", Some(resized), done)]));
+        assert!(matches!(commands.try_recv(), Ok(core::Command::MuxTerminals(sent)) if sent.len() == 1));
+
+        assert!(tell_mux(&core, &mut told, &[]));
+        assert!(matches!(commands.try_recv(), Ok(core::Command::MuxTerminals(sent)) if sent.is_empty()));
+
+        assert!(tell_mux(&core, &mut told, &[]));
+        assert!(commands.try_recv().is_err());
+    }
 }

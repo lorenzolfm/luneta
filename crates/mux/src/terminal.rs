@@ -52,6 +52,8 @@ const LAST_WORDS_BYTES_MAX: usize = 1024 * 1024;
 
 const LOOK_AGAIN: Duration = Duration::from_millis(100);
 
+const TITLE_AGAIN: Duration = Duration::from_millis(100);
+
 const LOOK_WHILE_GOING: Duration = Duration::from_secs(1);
 
 const WHEEL_ROWS: isize = 3;
@@ -257,8 +259,7 @@ pub fn start(
                 dirty: false,
                 framed: Instant::now().checked_sub(FRAME_GAP).unwrap_or_else(Instant::now),
                 synced: None,
-                title: String::new(),
-                pwd: String::new(),
+                titles: Titles::default(),
                 host: host(),
                 pid,
                 shell: Shell::default(),
@@ -326,8 +327,7 @@ struct Thread {
     dirty: bool,
     framed: Instant,
     synced: Option<Instant>,
-    title: String,
-    pwd: String,
+    titles: Titles,
     host: String,
     pid: u32,
     shell: Shell,
@@ -340,6 +340,94 @@ struct Thread {
 struct Told {
     foreground: Option<api::Foreground>,
     ran: Option<api::Ran>,
+}
+
+#[derive(Default)]
+struct Titles {
+    told: String,
+    title: String,
+    pwd: String,
+    due: Option<Instant>,
+    last: Option<Instant>,
+}
+
+impl Titles {
+    fn observed(
+        &mut self,
+        title: Option<String>,
+        pwd: Option<String>,
+        host: &str,
+        now: Instant,
+    ) -> Option<(String, Option<String>)> {
+        if let Some(title) = title {
+            self.title = title;
+        }
+        let cwd = match pwd {
+            Some(pwd) if pwd != self.pwd => {
+                let cwd = local_cwd(&pwd, host);
+                self.pwd = pwd;
+                cwd
+            },
+            Some(_) | None => None,
+        };
+        let title_changed = self.title != self.told;
+        if let Some(cwd) = cwd {
+            self.due = None;
+            if title_changed {
+                self.told.clone_from(&self.title);
+                self.last = Some(now);
+            }
+            self.assert_paced();
+            return Some((self.title.clone(), Some(cwd)));
+        }
+        if !title_changed {
+            self.due = None;
+            self.assert_paced();
+            return None;
+        }
+        let soonest = self.last.map_or(now, |last| (last + TITLE_AGAIN).max(now));
+        if soonest <= now {
+            self.told.clone_from(&self.title);
+            self.due = None;
+            self.last = Some(now);
+            self.assert_paced();
+            return Some((self.title.clone(), None));
+        }
+        self.due = Some(soonest);
+        self.assert_paced();
+        None
+    }
+
+    fn take_due(&mut self, now: Instant) -> Option<String> {
+        let due = self.due?;
+        if due > now {
+            return None;
+        }
+        self.due = None;
+        if self.title == self.told {
+            return None;
+        }
+        self.told.clone_from(&self.title);
+        self.last = Some(now);
+        self.assert_paced();
+        Some(self.title.clone())
+    }
+
+    fn flush(&mut self) -> Option<String> {
+        self.due = None;
+        if self.title == self.told {
+            return None;
+        }
+        self.told.clone_from(&self.title);
+        Some(self.title.clone())
+    }
+
+    fn assert_paced(&self) {
+        assert!(self.due.is_none() || self.title != self.told, "a title waits only when it differs");
+        if let (Some(due), Some(last)) = (self.due, self.last) {
+            assert!(due >= last + TITLE_AGAIN, "{:?} after the last", due.duration_since(last));
+        }
+    }
 }
 
 #[derive(Default)]
@@ -417,6 +505,9 @@ impl Thread {
             if self.looks.due.is_some_and(|due| due <= Instant::now()) {
                 self.look();
             }
+            if let Some(title) = self.titles.take_due(Instant::now()) {
+                self.mux.titled(self.key.id, title, None);
+            }
             self.frame()?;
         }
     }
@@ -448,11 +539,9 @@ impl Thread {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        let look = self.looks.due.map(|due| due.saturating_duration_since(Instant::now()));
-        match (self.framing(), look) {
-            (Some(framing), Some(look)) => Some(framing.min(look)),
-            (framing, look) => framing.or(look),
-        }
+        let now = Instant::now();
+        let due = |at: Option<Instant>| at.map(|at| at.saturating_duration_since(now));
+        [self.framing(), due(self.looks.due), due(self.titles.due)].into_iter().flatten().min()
     }
 
     fn framing(&self) -> Option<Duration> {
@@ -594,6 +683,9 @@ impl Thread {
             unread.clear();
         }
         self.read(LAST_WORDS_BYTES_MAX)?;
+        if let Some(title) = self.titles.flush() {
+            self.mux.titled(self.key.id, title, None);
+        }
         let ended_statuses = self.screen.program_exited();
         self.statuses_version = self.screen.program_statuses_version();
         self.program = Program::Gone;
@@ -760,12 +852,9 @@ impl Thread {
             (true, since) => since,
             (false, _) => None,
         };
-        let title = self.screen.title().unwrap_or_else(|| self.title.clone());
-        let pwd = self.screen.pwd().unwrap_or_else(|| self.pwd.clone());
-        if title != self.title || pwd != self.pwd {
-            let cwd = (pwd != self.pwd).then(|| local_cwd(&pwd, &self.host)).flatten();
-            self.title.clone_from(&title);
-            self.pwd = pwd;
+        if let Some((title, cwd)) =
+            self.titles.observed(self.screen.title(), self.screen.pwd(), &self.host, Instant::now())
+        {
             self.mux.titled(self.key.id, title, cwd);
         }
         self.tell_statuses();
@@ -1019,6 +1108,60 @@ mod tests {
         assert_eq!(looks.due, Some(at(500)));
         looks.looked(at(500), false);
         assert_eq!(looks.due, None);
+    }
+
+    #[test]
+    fn title_updates_coalesce_within_the_window_while_cwd_goes_at_once() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let mut titles = Titles::default();
+
+        assert_eq!(titles.observed(Some(String::new()), None, "here", start), None);
+        assert_eq!(titles.due, None);
+
+        assert_eq!(
+            titles.observed(Some("⠋ Task".to_owned()), None, "here", start),
+            Some(("⠋ Task".to_owned(), None)),
+        );
+        assert_eq!(titles.due, None);
+
+        assert_eq!(titles.observed(Some("⠙ Task".to_owned()), None, "here", at(20)), None);
+        assert_eq!(titles.due, Some(at(100)));
+        assert_eq!(titles.take_due(at(99)), None);
+
+        assert_eq!(titles.observed(Some("⠹ Task".to_owned()), None, "here", at(50)), None);
+        assert_eq!(titles.due, Some(at(100)));
+
+        assert_eq!(titles.observed(Some("⠋ Task".to_owned()), None, "here", at(60)), None);
+        assert_eq!(titles.due, None);
+
+        assert_eq!(titles.observed(Some("⠸ Task".to_owned()), None, "here", at(70)), None);
+        assert_eq!(titles.due, Some(at(100)));
+        assert_eq!(titles.take_due(at(100)), Some("⠸ Task".to_owned()));
+        assert_eq!(titles.due, None);
+
+        assert_eq!(
+            titles.observed(None, Some("file://there/tmp".to_owned()), "here", at(110)),
+            None,
+        );
+        assert_eq!(
+            titles.observed(None, Some("file://here/tmp".to_owned()), "here", at(115)),
+            Some(("⠸ Task".to_owned(), Some("/tmp".to_owned()))),
+        );
+
+        assert_eq!(titles.observed(Some("⠼ Task".to_owned()), None, "here", at(120)), None);
+        assert_eq!(titles.due, Some(at(200)));
+        assert_eq!(
+            titles.observed(None, Some("file://here/var".to_owned()), "here", at(130)),
+            Some(("⠼ Task".to_owned(), Some("/var".to_owned()))),
+        );
+        assert_eq!(titles.due, None);
+
+        assert_eq!(titles.observed(Some("⠴ Task".to_owned()), None, "here", at(150)), None);
+        assert_eq!(titles.due, Some(at(230)));
+        assert_eq!(titles.flush(), Some("⠴ Task".to_owned()));
+        assert_eq!(titles.due, None);
+        assert_eq!(titles.flush(), None);
     }
 
     #[test]

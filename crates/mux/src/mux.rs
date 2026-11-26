@@ -172,11 +172,34 @@ impl Mux {
     fn change<T>(&self, change: impl FnOnce(&mut Model) -> T) -> T {
         let mut model = self.model.lock();
         let changed = change(&mut model);
-        let listed = match &mut *model {
-            Model::Holds(holding) => {
-                holding.settle();
-                Listed::Holds(holding.listing())
-            },
+        if let Model::Holds(holding) = &mut *model {
+            holding.settle();
+        }
+        self.publish(&model);
+        changed
+    }
+
+    fn change_viewers<T>(&self, change: impl FnOnce(&mut Model) -> T) -> T {
+        let mut model = self.model.lock();
+        let changed = change(&mut model);
+        if let Model::Holds(holding) = &mut *model {
+            holding.settle();
+        }
+        changed
+    }
+
+    fn change_listed<T>(&self, change: impl FnOnce(&mut Model) -> (T, bool)) -> T {
+        let mut model = self.model.lock();
+        let (changed, modified) = change(&mut model);
+        if modified {
+            self.publish(&model);
+        }
+        changed
+    }
+
+    fn publish(&self, model: &Model) {
+        let listed = match model {
+            Model::Holds(holding) => Listed::Holds(holding.listing()),
             Model::Ended(ending) => Listed::Ended(ending.clone()),
         };
         self.listing.send_if_modified(|said| {
@@ -184,7 +207,6 @@ impl Mux {
             *said = listed;
             modified
         });
-        changed
     }
 
     pub fn reserve_terminal(self: &Arc<Mux>) -> Result<Reserved, Status> {
@@ -208,9 +230,13 @@ impl Mux {
     }
 
     pub fn tag_terminal(&self, key: TerminalKey, tag: Tag) -> Result<(), Status> {
-        self.change(|model| {
-            model.terminal_mut(key)?.tag = tag;
-            Ok(())
+        self.change_listed(|model| match model.terminal_mut(key) {
+            Ok(found) if found.tag == tag => (Ok(()), false),
+            Ok(found) => {
+                found.tag = tag;
+                (Ok(()), true)
+            },
+            Err(status) => (Err(status), false),
         })
     }
 
@@ -224,7 +250,7 @@ impl Mux {
         out: ViewerOut,
         gone: oneshot::Sender<()>,
     ) -> Result<ClientId, Status> {
-        self.change(|model| {
+        self.change_viewers(|model| {
             let holding = model.holding()?;
             refuse_if_full(holding.viewing.len(), CLIENTS_MAX, "clients")?;
             let client = ClientId::next(&mut holding.last.client);
@@ -241,7 +267,7 @@ impl Mux {
         client: ClientId,
         keys: &BTreeSet<TerminalKey>,
     ) -> Result<Vec<Status>, Status> {
-        self.change(|model| model.show(client, keys))
+        self.change_viewers(|model| model.show(client, keys))
     }
 
     pub fn typed(&self, client: ClientId, terminal: TerminalKey) -> Result<Handle, Status> {
@@ -259,7 +285,7 @@ impl Mux {
     }
 
     pub fn unview(&self, client: ClientId) {
-        self.change(|model| {
+        self.change_viewers(|model| {
             if let Model::Holds(holding) = model {
                 holding.viewing.remove(&client);
             }
@@ -278,13 +304,22 @@ impl Mux {
     }
 
     pub fn titled(&self, terminal: TerminalId, title: String, cwd: Option<String>) {
-        self.change(|model| {
-            if let Some(found) = model.terminal_of_id_mut(terminal) {
+        self.change_listed(|model| {
+            let Some(found) = model.terminal_of_id_mut(terminal) else {
+                return ((), false);
+            };
+            let mut modified = false;
+            if found.title != title {
                 found.title = title;
-                if let Some(cwd) = cwd {
-                    found.cwd = cwd;
-                }
+                modified = true;
             }
+            if let Some(cwd) = cwd
+                && found.cwd != cwd
+            {
+                found.cwd = cwd;
+                modified = true;
+            }
+            ((), modified)
         });
     }
 
@@ -294,21 +329,31 @@ impl Mux {
         foreground: Option<api::Foreground>,
         ran: Option<api::Ran>,
     ) {
-        self.change(|model| {
+        self.change_listed(|model| {
             let found = model.terminal_of_id_mut(terminal).map(|found| &mut found.program);
-            if let Some(Program::Runs { foreground: was, ran: said, .. }) = found {
-                (*was, *said) = (foreground, ran);
+            let Some(Program::Runs { foreground: was, ran: said, .. }) = found else {
+                return ((), false);
+            };
+            if *was == foreground && *said == ran {
+                return ((), false);
             }
+            (*was, *said) = (foreground, ran);
+            ((), true)
         });
     }
 
     pub fn program_statuses(&self, terminal: TerminalId, statuses: ProgramStatuses) {
         assert!(statuses.children.len() <= crate::program_status::RECORDS_MAX);
-        self.change(|model| {
+        self.change_listed(|model| {
             let found = model.terminal_of_id_mut(terminal).map(|found| &mut found.program);
-            if let Some(Program::Runs { statuses: was, .. }) = found {
-                *was = statuses;
+            let Some(Program::Runs { statuses: was, .. }) = found else {
+                return ((), false);
+            };
+            if *was == statuses {
+                return ((), false);
             }
+            *was = statuses;
+            ((), true)
         });
     }
 
@@ -817,5 +862,45 @@ pub(crate) mod tests {
             let listing = mux.listing();
             listing.terminals.iter().any(|terminal| terminal.title == "early").then_some(())
         });
+    }
+
+    #[test]
+    fn unchanged_metadata_and_viewer_changes_wake_no_listing_watch() {
+        use std::collections::BTreeSet;
+
+        use tokio::sync::{mpsc, oneshot};
+
+        use crate::asked::{Colours, Greeting};
+
+        let mux = Mux::new();
+        let key = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        let mut watched = mux.watched();
+        let _ = watched.borrow_and_update();
+
+        mux.titled(key.id, "one".to_owned(), None);
+        assert!(watched.has_changed().unwrap());
+        let _ = watched.borrow_and_update();
+
+        mux.titled(key.id, "one".to_owned(), None);
+        assert!(!watched.has_changed().unwrap());
+
+        mux.titled(key.id, "one".to_owned(), Some("/".to_owned()));
+        assert!(!watched.has_changed().unwrap());
+
+        let (out, _in) = mpsc::channel(1);
+        let (gone, _let_go) = oneshot::channel();
+        let client =
+            mux.view(Greeting { colours: Colours::default(), runs_in: None }, out, gone).unwrap();
+        assert!(!watched.has_changed().unwrap());
+        assert!(mux.show(client, &BTreeSet::from([key])).unwrap().is_empty());
+        assert!(!watched.has_changed().unwrap());
+        mux.unview(client);
+        assert!(!watched.has_changed().unwrap());
+
+        mux.titled(key.id, "one".to_owned(), Some("/tmp".to_owned()));
+        assert!(watched.has_changed().unwrap());
+        let _ = watched.borrow_and_update();
+
+        mux.close_terminal(key).unwrap();
     }
 }
