@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
-use std::task::{Context, Poll};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
@@ -178,16 +178,65 @@ const SAID_MAX: u64 = 4096;
 
 pub type Daemon = DaemonClient<Within<Channel>>;
 
+#[derive(Debug, Default)]
+struct GoneInner {
+    marked: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
 #[derive(Clone, Debug, Default)]
-struct Gone(Arc<AtomicBool>);
+struct Gone(Arc<GoneInner>);
 
 impl Gone {
     fn mark(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        if self.is() {
+            return;
+        }
+        let waker = {
+            let mut slot = self.0.waker.lock().unwrap_or_else(PoisonError::into_inner);
+            self.0.marked.store(true, Ordering::Release);
+            slot.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
 
     fn is(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.0.marked.load(Ordering::Acquire)
+    }
+
+    fn register(&self, waker: &Waker) -> bool {
+        let mut slot = self.0.waker.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.0.marked.load(Ordering::Acquire) {
+            *slot = None;
+            return false;
+        }
+        match slot.as_mut() {
+            Some(existing) => existing.clone_from(waker),
+            None => *slot = Some(waker.clone()),
+        }
+        true
+    }
+}
+
+struct MarkOnDrop(Option<Gone>);
+
+impl MarkOnDrop {
+    fn arm(gone: Gone) -> MarkOnDrop {
+        MarkOnDrop(Some(gone))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for MarkOnDrop {
+    fn drop(&mut self) {
+        if let Some(gone) = self.0.take() {
+            gone.mark();
+        }
     }
 }
 
@@ -918,18 +967,20 @@ async fn connect_matched(socket: PathBuf, verify: Answer) -> Result<Connected, U
         Opened::Connected { channel, gone, id } => (channel, gone, id),
         Opened::Changed => return Ok(Connected::Changed),
     };
+    let mut guard = MarkOnDrop::arm(gone.clone());
     let wait = verify.waits();
     assert!(!wait.is_zero(), "build verification waits some time for its answer");
     let mut verified = daemon(channel.clone(), Some(gone.clone()), verify);
     let Ok(answered) = tokio::time::timeout(wait, verified.info(())).await else {
-        gone.mark();
         return Err(Unreached::Asked(Status::deadline_exceeded(unanswered(wait))));
     };
     let info = answered.map_err(Unreached::Asked)?.into_inner();
     match release::of(&info.version, info.built) {
-        release::Of::Own => Ok(Connected::Matched { channel, gone, id }),
+        release::Of::Own => {
+            guard.disarm();
+            Ok(Connected::Matched { channel, gone, id })
+        },
         release::Of::Other(other) => {
-            gone.mark();
             Ok(Connected::Unmatched(Unmatched { other, pid: PeerPid::new(info.pid) }))
         },
     }
@@ -945,6 +996,7 @@ fn endpoint() -> Endpoint {
 
 async fn open(socket: PathBuf) -> Result<Opened, Error> {
     let gone = Gone::default();
+    let mut guard = MarkOnDrop::arm(gone.clone());
     let tracked = gone.clone();
     let verified = Arc::new(OnceLock::new());
     let recorded = Arc::clone(&verified);
@@ -974,6 +1026,7 @@ async fn open(socket: PathBuf) -> Result<Opened, Error> {
     match connected {
         Ok(channel) => {
             let id = *verified.get().expect("connect_with_connector ran the connector once");
+            guard.disarm();
             Ok(Opened::Connected { channel, gone, id })
         },
         Err(_) if changed.load(Ordering::Relaxed) => Ok(Opened::Changed),
@@ -987,9 +1040,13 @@ struct Tracked {
 }
 
 impl Tracked {
-    fn marked<T>(&self, polled: Poll<io::Result<T>>) -> Poll<io::Result<T>> {
-        if let Poll::Ready(Err(_)) = &polled {
-            self.gone.mark();
+    fn marked<T>(&self, context: &Context<'_>, polled: Poll<io::Result<T>>) -> Poll<io::Result<T>> {
+        match &polled {
+            Poll::Ready(Err(_)) => self.gone.mark(),
+            Poll::Pending if !self.gone.register(context.waker()) => {
+                return Poll::Ready(Err(went()));
+            },
+            Poll::Ready(Ok(_)) | Poll::Pending => {},
         }
         polled
     }
@@ -1001,6 +1058,9 @@ impl AsyncRead for Tracked {
         context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if self.gone.is() {
+            return Poll::Ready(Err(went()));
+        }
         let (before, room) = (buffer.filled().len(), buffer.remaining());
         let polled = Pin::new(&mut self.stream).poll_read(context, buffer);
         match &polled {
@@ -1014,6 +1074,9 @@ impl AsyncRead for Tracked {
                 }
             },
             Poll::Ready(Err(_)) => self.gone.mark(),
+            Poll::Pending if !self.gone.register(context.waker()) => {
+                return Poll::Ready(Err(went()));
+            },
             Poll::Pending => {},
         }
         polled
@@ -1026,8 +1089,11 @@ impl AsyncWrite for Tracked {
         context: &mut Context<'_>,
         buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if self.gone.is() {
+            return Poll::Ready(Err(went()));
+        }
         let polled = Pin::new(&mut self.stream).poll_write(context, buffer);
-        self.marked(polled)
+        self.marked(context, polled)
     }
 
     fn poll_write_vectored(
@@ -1035,8 +1101,11 @@ impl AsyncWrite for Tracked {
         context: &mut Context<'_>,
         buffers: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if self.gone.is() {
+            return Poll::Ready(Err(went()));
+        }
         let polled = Pin::new(&mut self.stream).poll_write_vectored(context, buffers);
-        self.marked(polled)
+        self.marked(context, polled)
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -1044,8 +1113,11 @@ impl AsyncWrite for Tracked {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.gone.is() {
+            return Poll::Ready(Err(went()));
+        }
         let polled = Pin::new(&mut self.stream).poll_flush(context);
-        self.marked(polled)
+        self.marked(context, polled)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -2074,14 +2146,13 @@ mod tests {
         let socket = folder.socket();
         let std_listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         std_listener.set_nonblocking(true).unwrap();
-        let (done, finishing) = oneshot::channel::<()>();
         let tasks = tasks::shared();
         let peer = tasks.spawn(async move {
             let listener = UnixListener::from_std(std_listener).unwrap();
             let (mut accepted, _) = listener.accept().await.unwrap();
             accepted.write_all(&ZERO_STREAMS_SETTINGS).await.unwrap();
-            let _ = finishing.await;
-            drop(accepted);
+            let mut buf = [0_u8; 64];
+            while matches!(accepted.read(&mut buf).await, Ok(read) if read > 0) {}
         });
         tasks.block_on(async {
             let began = Began::now();
@@ -2092,8 +2163,10 @@ mod tests {
             began.lasted().at_least(IMPATIENT.waits(), "build verification wait");
             assert_eq!(late.code(), Code::DeadlineExceeded, "{late:?}");
             assert_eq!(late.message(), "luned did not answer in 0.05s");
-            let _ = done.send(());
-            Patience::begun().awaited("stalled peer task ends", peer).await.unwrap();
+            Patience::begun()
+                .awaited("timed-out build verification closes its socket", peer)
+                .await
+                .unwrap();
         });
     }
 
