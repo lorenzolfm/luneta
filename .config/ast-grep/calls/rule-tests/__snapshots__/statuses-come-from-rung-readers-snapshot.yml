@@ -1,0 +1,48 @@
+id: statuses-come-from-rung-readers
+snapshots:
+  'const READS: Declared = Declared::of(Harness::Pi, Rung::Hook);':
+    labels:
+    - source: Declared::of
+      style: primary
+      start: 24
+      end: 36
+  'fn f() -> ActiveStatus { ActiveStatus::Blocked { reason: BlockedReason::Permission, message: None } }':
+    labels:
+    - source: 'ActiveStatus::Blocked { reason: BlockedReason::Permission, message: None }'
+      style: primary
+      start: 25
+      end: 99
+    - source: ActiveStatus::Blocked
+      style: secondary
+      start: 25
+      end: 46
+  fn f() -> ActiveStatus { ActiveStatus::Working }:
+    labels:
+    - source: ActiveStatus::Working
+      style: primary
+      start: 25
+      end: 46
+  fn f() -> RungUpdate { RungUpdate::Clear }:
+    labels:
+    - source: RungUpdate::Clear
+      style: primary
+      start: 23
+      end: 40
+  fn f() -> SubagentPhase { SubagentPhase::Idle }:
+    labels:
+    - source: SubagentPhase::Idle
+      style: primary
+      start: 26
+      end: 45
+  'fn f(id: AgentId, update: RungUpdate) -> Report { Report::new(claude::READS, id, update) }':
+    labels:
+    - source: Report::new
+      style: primary
+      start: 50
+      end: 61
+  'fn f(word: Said) -> ActiveStatus { ActiveStatus::Other(word) }':
+    labels:
+    - source: ActiveStatus::Other
+      style: primary
+      start: 35
+      end: 54

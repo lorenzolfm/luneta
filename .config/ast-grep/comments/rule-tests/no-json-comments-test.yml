@@ -1,0 +1,7 @@
+id: no-json-comments
+valid:
+  - '{"a": "// b"}'
+  - '{"a": "/* b */"}'
+invalid:
+  - "{\"a\": 1 // b\n}"
+  - '{"a": /* b */ 1}'

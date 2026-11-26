@@ -1,0 +1,17 @@
+id: statuses-come-from-rung-readers
+valid:
+  - "fn f(agent: &Agent) -> bool { matches!(agent.status.status(), Some(ActiveStatus::Working)) }"
+  - "fn f(status: &ActiveStatus) -> u8 { match status { ActiveStatus::Working => 1, ActiveStatus::Other(_) => 2, ActiveStatus::Blocked { .. } => 3, _ => 4 } }"
+  - "fn f(update: &RungUpdate) -> bool { if let RungUpdate::Active { status, .. } = update { true } else { false } }"
+  - "fn f(reads: Declared) -> Rung { reads.rung() }"
+  - "fn f(agent: &Agent) -> Option<Said> { agent.status.status().map(ActiveStatus::to_api) }"
+  - "mod tests { fn f() -> ActiveStatus { ActiveStatus::Working } }"
+  - "mod tests { fn f(id: AgentId) -> Report { Report::new(claude::READS, id, RungUpdate::Clear) } }"
+invalid:
+  - "fn f() -> ActiveStatus { ActiveStatus::Working }"
+  - "fn f(word: Said) -> ActiveStatus { ActiveStatus::Other(word) }"
+  - "fn f() -> ActiveStatus { ActiveStatus::Blocked { reason: BlockedReason::Permission, message: None } }"
+  - "fn f() -> RungUpdate { RungUpdate::Clear }"
+  - "fn f(id: AgentId, update: RungUpdate) -> Report { Report::new(claude::READS, id, update) }"
+  - "const READS: Declared = Declared::of(Harness::Pi, Rung::Hook);"
+  - "fn f() -> SubagentPhase { SubagentPhase::Idle }"

@@ -11,9 +11,7 @@ use lune_domain::projects::{Dir, Holds, Name, Project, Projects, Seen, Stage, Su
 use lune_domain::projects::{Listed, ViewId, Worktree, WorktreeId};
 use lune_protocol::git::{GitStatus, Head};
 use lune_protocol::github::PullRequest;
-use lune_protocol::program_status::{
-    bound_fair, ChildProgramStatus, OscBlockedKind, ProgramPhase, ProgramStatus,
-};
+use lune_protocol::program_status::bound_fair;
 use lune_protocol::said::Said;
 use lune_protocol::shell::Doing;
 use lune_protocol::HOST_SUBAGENTS_BYTES_MAX;
@@ -26,15 +24,13 @@ use crate::claude::Scan;
 use crate::git;
 use crate::github::Found;
 use crate::mux::own::server::{self, Is};
+use crate::osc_7501;
 use crate::process::{self, AgentId, AgentPid};
 use crate::titles::{self, Titled};
 use crate::projects::Revision;
 use crate::remote::{Destination, Line, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
-use crate::statuses::{
-    ActiveStatus, BlockedReason, Report, ReportedAgent, RungUpdate, Statuses, Subagent,
-    SubagentPhase,
-};
+use crate::statuses::{ReportedAgent, Statuses, Subagent};
 use crate::transcripts::SessionId;
 use crate::watch::Troubles;
 use crate::Directory;
@@ -462,15 +458,16 @@ impl Known {
             let Some(root_app) = root_record.app.as_ref() else {
                 continue;
             };
-            let Some(harness) = Harness::from_osc_7501_app(root_app.as_str()) else {
+            let Some(reads) = Harness::from_osc_7501_app(root_app.as_str()) else {
                 continue;
             };
+            let harness = reads.harness();
             let subagents: Vec<Subagent> = terminal
                 .statuses
                 .children
                 .iter()
                 .filter(|child| child.status.app.as_ref() == Some(root_app))
-                .map(osc_subagent)
+                .map(osc_7501::subagent)
                 .collect();
             if let Some(candidates) = by_terminal.get(&(terminal.key, harness)) {
                 let matched = front
@@ -492,7 +489,8 @@ impl Known {
                     Some(front) => !known_pids.contains(&front.pid),
                 };
                 if in_foreground {
-                    osc_reports.push(osc_report(matched.id.clone(), root_record, subagents));
+                    let id = matched.id.clone();
+                    osc_reports.push(osc_7501::report(reads, id, root_record, subagents));
                 }
                 continue;
             }
@@ -536,7 +534,7 @@ impl Known {
                 entrypoint,
                 terminal: Some(terminal.key),
             });
-            osc_reports.push(osc_report(id, root_record, subagents));
+            osc_reports.push(osc_7501::report(reads, id, root_record, subagents));
         }
         self.osc_processes.retain(|key, _| active_processes.contains(key));
         self.osc_troubles.done();
@@ -796,56 +794,6 @@ impl Known {
     }
 }
 
-fn osc_reason(kind: Option<OscBlockedKind>) -> BlockedReason {
-    match kind {
-        None => BlockedReason::Unspecified,
-        Some(OscBlockedKind::Permission) => BlockedReason::Permission,
-        Some(OscBlockedKind::Question) => BlockedReason::Question,
-        Some(OscBlockedKind::Auth) => BlockedReason::Auth,
-    }
-}
-
-fn osc_phase(phase: &ProgramPhase) -> ActiveStatus {
-    match phase {
-        ProgramPhase::Idle => ActiveStatus::Stopped,
-        ProgramPhase::Working { .. } => ActiveStatus::Working,
-        ProgramPhase::Done { message } => ActiveStatus::Done { message: message.clone() },
-        ProgramPhase::Blocked { kind, message } => {
-            ActiveStatus::Blocked { reason: osc_reason(*kind), message: message.clone() }
-        },
-        ProgramPhase::Error { message } => ActiveStatus::Error { message: message.clone() },
-    }
-}
-
-fn osc_subagent_phase(phase: &ProgramPhase) -> SubagentPhase {
-    match phase {
-        ProgramPhase::Idle => SubagentPhase::Stopped,
-        ProgramPhase::Working { progress } => SubagentPhase::Working { progress: *progress },
-        ProgramPhase::Done { message } => SubagentPhase::Done { message: message.clone() },
-        ProgramPhase::Blocked { kind, message } => {
-            SubagentPhase::Blocked { reason: osc_reason(*kind), message: message.clone() }
-        },
-        ProgramPhase::Error { message } => SubagentPhase::Error { message: message.clone() },
-    }
-}
-
-fn osc_report(agent: AgentId, status: &ProgramStatus, subagents: Vec<Subagent>) -> Report {
-    Report {
-        agent,
-        rung: Rung::Osc7501,
-        update: RungUpdate::Active { status: osc_phase(&status.phase), at: status.at, subagents },
-    }
-}
-
-fn osc_subagent(child: &ChildProgramStatus) -> Subagent {
-    Subagent {
-        id: child.id.clone(),
-        phase: osc_subagent_phase(&child.status.phase),
-        title: child.status.title.clone(),
-        status_since: child.status.at,
-    }
-}
-
 const OSC_DATED_LATE: Duration = Duration::from_secs(1);
 
 const RUNNERS: [&str; 12] = [
@@ -952,9 +900,14 @@ mod tests {
 
     use lune_domain::mux::OwnMade;
     use lune_protocol::agent_status::{AgentStatus, BlockedReason};
-    use lune_protocol::program_status::{AppName, ChildId, Message, ProgramStatuses, Progress, Title};
+    use lune_protocol::program_status::{
+        AppName, ChildId, ChildProgramStatus, Message, OscBlockedKind, ProgramPhase,
+        ProgramStatus, ProgramStatuses, Progress, Title,
+    };
 
     use super::*;
+    use crate::statuses::{ActiveStatus, Report, RungUpdate};
+    use crate::{agy, claude, pi};
 
     fn key(id: u32) -> TerminalKey {
         TerminalKey { id: NonZeroU32::new(id).unwrap(), made: OwnMade::from_nanos(10) }
@@ -980,15 +933,15 @@ mod tests {
             entrypoint: Said::new("cli".to_owned()),
             terminal: Some(terminal),
         };
-        let feed = Report {
-            agent: id,
-            rung: Rung::Feed,
-            update: RungUpdate::Active {
+        let feed = Report::new(
+            claude::READS,
+            id,
+            RungUpdate::Active {
                 status: ActiveStatus::Working,
                 at: Some(at(10)),
                 subagents: Vec::new(),
             },
-        };
+        );
         core.send(Command::Agents(Scan {
             agents: vec![ReportedAgent { seen, report: feed }],
             unread: Vec::new(),
@@ -1216,15 +1169,19 @@ mod tests {
                     entrypoint: Said::new(entrypoint.to_owned()),
                     terminal: Some(terminal),
                 },
-                report: Report {
-                    agent: id.clone(),
-                    rung: Rung::Feed,
-                    update: RungUpdate::Active {
+                report: Report::new(
+                    match harness {
+                        Harness::ClaudeCode => claude::READS,
+                        Harness::Pi => pi::READS,
+                        Harness::Antigravity => agy::READS,
+                    },
+                    id.clone(),
+                    RungUpdate::Active {
                         status: ActiveStatus::Working,
                         at: Some(at(10)),
                         subagents: Vec::new(),
                     },
-                },
+                ),
             }
         };
 
@@ -1232,11 +1189,11 @@ mod tests {
             agents: vec![
                 reported(&sdk_agent, Harness::ClaudeCode, "sdk-cli", 1),
                 reported(&cli_agent, Harness::ClaudeCode, "cli", 2),
-                reported(&pi_agent, Harness::Pi, "pi", 3),
             ],
             unread: Vec::new(),
         }))
         .unwrap();
+        core.send(Command::PiAgents(vec![reported(&pi_agent, Harness::Pi, "pi", 3)])).unwrap();
 
         let osc_terminal = |front: Option<AgentPid>| server::Terminal {
             key: terminal,
@@ -1311,15 +1268,15 @@ mod tests {
                     entrypoint: Said::new("cli".to_owned()),
                     terminal: Some(term),
                 },
-                report: Report {
-                    agent: id,
-                    rung: Rung::Feed,
-                    update: RungUpdate::Active {
+                report: Report::new(
+                    claude::READS,
+                    id,
+                    RungUpdate::Active {
                         status: ActiveStatus::Working,
                         at: Some(at),
                         subagents: Vec::new(),
                     },
-                },
+                ),
             });
             let children = (0..lune_protocol::PROGRAM_STATUS_RECORDS_MAX)
                 .map(|child| ChildProgramStatus {

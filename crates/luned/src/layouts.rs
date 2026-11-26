@@ -2034,7 +2034,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::SystemTime;
 
-    use lune_domain::agent::{Harness, Rung};
+    use lune_domain::agent::Harness;
     use lune_protocol::program_status::ProgramStatuses;
     use lune_protocol::said::Said;
     use lune_protocol::shell::Front;
@@ -2042,7 +2042,9 @@ mod tests {
     use super::*;
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
-    use crate::statuses::{ActiveStatus, Decided};
+    use crate::claude;
+    use crate::statuses::tests::decided;
+    use crate::statuses::ActiveStatus;
 
     fn listed(is: Is) -> server::Terminal {
         let key = TerminalKey { id: 1.try_into().unwrap(), made: OwnMade::from_nanos(5) };
@@ -2077,12 +2079,7 @@ mod tests {
             harness: Harness::ClaudeCode,
             session_id: Some(Said::new("7c22-ab".to_owned()).unwrap()),
             cwd: Directory::parse("/w".to_owned()).unwrap(),
-            status: Decided::Reported {
-                status: ActiveStatus::Idle,
-                since: None,
-                rung: Rung::Feed,
-                subagents: Vec::new(),
-            },
+            status: decided(claude::READS, ActiveStatus::Idle, None),
             started_at: Some(SystemTime::UNIX_EPOCH),
             name: None,
             entrypoint: None,

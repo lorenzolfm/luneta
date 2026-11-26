@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use lune_domain::agent::{Harness, Rung};
+use lune_domain::agent::{Declared, Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize;
@@ -90,6 +90,8 @@ const FOLDER: &str = "agy";
 const DATED_LATE: Duration = Duration::from_secs(1);
 
 const TORN: Duration = Duration::from_secs(1);
+
+pub(crate) const READS: Declared = Declared::of(Harness::Antigravity, Rung::Hook);
 
 const AGENT_FILES_MAX: usize = SOURCE_AGENTS_MAX;
 
@@ -369,16 +371,11 @@ fn reported(
     started: SystemTime,
     terminal: Option<TerminalKey>,
 ) -> ReportedAgent {
-    let update = match snapshot.status {
-        Some(status) => {
-            RungUpdate::Active { status, at: Some(snapshot.modified), subagents: Vec::new() }
-        },
-        None => RungUpdate::Clear,
-    };
-    let report = Report { agent: id.clone(), rung: Rung::Hook, update };
+    let update = update_of(snapshot.status, snapshot.modified);
+    let report = Report::new(READS, id.clone(), update);
     let seen = SeenAgent {
         id,
-        harness: Harness::Antigravity,
+        harness: READS.harness(),
         session_id: snapshot.session_id,
         cwd: snapshot.cwd,
         started_at: Some(started),
@@ -387,6 +384,20 @@ fn reported(
         terminal,
     };
     ReportedAgent { seen, report }
+}
+
+fn update_of(status: Option<ActiveStatus>, modified: SystemTime) -> RungUpdate {
+    match status {
+        Some(status) => RungUpdate::Active { status, at: Some(modified), subagents: Vec::new() },
+        None => RungUpdate::Clear,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn update_of_file(bytes: &[u8], modified: SystemTime) -> io::Result<RungUpdate> {
+    let envelope: Envelope = serde_json::from_slice(bytes)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    Ok(update_of(state_of(&envelope.state), modified))
 }
 
 fn temp_file_pid(path: &Path) -> Option<u32> {
@@ -1163,7 +1174,7 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].seen.session_id, None);
         assert!(matches!(
-            first[0].report.update,
+            first[0].report.update(),
             RungUpdate::Active { status: ActiveStatus::Idle, .. }
         ));
 

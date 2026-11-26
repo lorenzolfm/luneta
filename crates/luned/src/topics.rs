@@ -351,7 +351,7 @@ mod tests {
     use std::num::NonZeroU32;
     use std::os::unix::fs::PermissionsExt as _;
 
-    use lune_domain::agent::{Harness, Rung};
+    use lune_domain::agent::Harness;
     use lune_domain::mux::TerminalKey;
     use serde_json::json;
     use tempfile::TempDir;
@@ -360,7 +360,9 @@ mod tests {
     use crate::agent::Source;
     use crate::mux::OwnMade;
     use crate::process::AgentPid;
-    use crate::statuses::{ActiveStatus, BlockedReason, Decided};
+    use crate::claude;
+    use crate::statuses::tests::decided;
+    use crate::statuses::{ActiveStatus, BlockedReason};
     use crate::Directory;
 
     const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
@@ -375,12 +377,11 @@ mod tests {
             harness: Harness::ClaudeCode,
             session_id: Some(Said::new(id.to_owned()).unwrap()),
             cwd: Directory::parse("/w".to_owned()).unwrap(),
-            status: Decided::Reported {
+            status: decided(
+                claude::READS,
                 status,
-                since: Some(SystemTime::UNIX_EPOCH + Duration::from_mins(since)),
-                rung: Rung::Feed,
-                subagents: Vec::new(),
-            },
+                Some(SystemTime::UNIX_EPOCH + Duration::from_mins(since)),
+            ),
             started_at: Some(began() + Duration::from_secs(1)),
             name: None,
             entrypoint: Some(Said::new("cli".to_owned()).unwrap()),

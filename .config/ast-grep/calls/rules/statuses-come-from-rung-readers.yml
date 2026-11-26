@@ -1,0 +1,50 @@
+id: statuses-come-from-rung-readers
+language: rust
+files:
+  - crates/luned/src/**
+ignores:
+  - crates/luned/src/statuses.rs
+  - crates/luned/src/statuses/**
+  - crates/luned/src/osc_7501.rs
+  - crates/luned/src/claude.rs
+  - crates/luned/src/pi.rs
+  - crates/luned/src/agy.rs
+message: >-
+  An agent's status comes from a rung reader, and statuses.rs alone decides
+  which rung wins: build an ActiveStatus, a SubagentPhase, a RungUpdate, a
+  Declared or a Report only in statuses.rs or a reader of a rung its
+  harness's ladder declares (osc_7501.rs, claude.rs, pi.rs, agy.rs). A new
+  reader gets its rung in Harness::ladder, a Reading in statuses/scenarios.rs
+  and recordings from `dev record-status`, and its file joins this rule's
+  ignores.
+rule:
+  all:
+    - any:
+        - kind: scoped_identifier
+          regex: '^(ActiveStatus|SubagentPhase|RungUpdate)::[A-Z]'
+        - kind: scoped_identifier
+          regex: '^(Declared::of|Report::new)$'
+        - kind: struct_expression
+          has:
+            field: name
+            regex: '^(ActiveStatus|SubagentPhase|RungUpdate)::[A-Z]'
+    - not:
+        inside:
+          stopBy: end
+          any:
+            - kind: match_pattern
+            - kind: tuple_struct_pattern
+            - kind: struct_pattern
+            - kind: or_pattern
+            - kind: let_condition
+              has:
+                field: pattern
+                stopBy: end
+                kind: scoped_identifier
+    - not:
+        inside:
+          stopBy: end
+          kind: mod_item
+          has:
+            field: name
+            regex: ^tests$

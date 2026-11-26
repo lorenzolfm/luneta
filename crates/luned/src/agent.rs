@@ -173,34 +173,24 @@ pub fn moment(millis: u64) -> SystemTime {
 impl Agent {
     #[must_use]
     pub fn is_working(&self) -> bool {
-        matches!(self.status, Decided::Reported { status: ActiveStatus::Working, .. })
+        matches!(self.status.status(), Some(ActiveStatus::Working))
     }
 
     #[must_use]
     pub fn status_since(&self) -> Option<SystemTime> {
-        match &self.status {
-            Decided::Reported { since, .. } => *since,
-            Decided::Unreported => None,
-        }
+        self.status.since()
     }
 
     #[must_use]
     pub fn to_api(&self, topic: Option<Said>) -> api::Agent {
-        let (status, waiting_for, reported_status, status_since, status_rung, subagents) =
-            match &self.status {
-                Decided::Unreported => (None, None, None, None, None, Vec::new()),
-                Decided::Reported { status, since, rung, subagents } => {
-                    let (legacy_status, waiting_for, reported) = status.to_api();
-                    (
-                        Some(legacy_status),
-                        waiting_for,
-                        Some(reported),
-                        since.map(Into::into),
-                        Some(rung.to_api().into()),
-                        subagents.iter().map(Subagent::to_api).collect(),
-                    )
-                },
+        let (status, waiting_for, reported_status) =
+            match self.status.status().map(ActiveStatus::to_api) {
+                Some((legacy, waiting_for, reported)) => (Some(legacy), waiting_for, Some(reported)),
+                None => (None, None, None),
             };
+        let status_since = self.status.since().map(Into::into);
+        let status_rung = self.status.rung().map(|rung| rung.to_api().into());
+        let subagents = self.status.subagents().iter().map(Subagent::to_api).collect();
         api::Agent {
             pid: self.pid.get(),
             harness: Some(self.harness.to_api().into()),

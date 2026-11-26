@@ -1,0 +1,18 @@
+{
+  "recorded": {
+    "agent": "claude 2.1.332 (Claude Code)",
+    "by": "dev record-status",
+    "on": "2026-11-25"
+  },
+  "steps": {
+    "error": "\u001b]7501;state=working:app=claude-code\u0007\u001b]7501;state=error:app=claude-code:msg=VGhlcmUncyBhbiBpc3N1ZSB3aXRoIHRoZSBzZWxlY3RlZCBtb2RlbCAoY2xhdWRlLW5vLXN1Y2gtbW9kZWwtMCkuIEl0IG1heSBub3QgZXhpc3Qgb3IgeW91IG1heSBub3QgaGF2ZSBhY2Nlc3MgdG8gaXQuIFJ1biAvbW9kZWwgdG8gcGljayBhIGRpZmZlcmVudCBtb2RlbC4=\u0007",
+    "exit": "\u001b]7501;state=working:app=claude-code\u0007\u001b]7501;state=clear\u0007",
+    "finish": "\u001b]7501;state=done:app=claude-code\u0007\u001b]7501;state=done:app=claude-code:msg=bGlnaHRob3VzZSBzdG9yeTogQWRhIGd1aWRlcyB0aGUgTWFyaWdvbGQgaG9tZSBpbiBmb2c=\u0007",
+    "interrupt": "\u001b]7501;state=idle:app=claude-code\u0007",
+    "permission": "\u001b]7501;state=working:app=claude-code\u0007\u001b]7501;state=blocked:app=claude-code:kind=permission:msg=YXBwcm92ZSBCYXNoOiB0b3VjaCBsdW5lLXJlY29yZC1zdGF0dXMudHh0\u0007",
+    "prompt": "\u001b]7501;state=working:app=claude-code\u0007",
+    "question": "\u001b]7501;state=working:app=claude-code\u0007\u001b]7501;state=blocked:app=claude-code:kind=question:msg=YW5zd2VyOiBEbyB5b3UgcHJlZmVyIHJlZCBvciBibHVlPyAoUmVkIMK3IEJsdWUp\u0007",
+    "reject": "\u001b]7501;state=idle:app=claude-code\u0007",
+    "start": "\u001b]7501;state=idle:app=claude-code\u0007"
+  }
+}

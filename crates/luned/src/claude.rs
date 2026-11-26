@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use lune_domain::agent::{Harness, Rung};
+use lune_domain::agent::{Declared, Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize;
@@ -23,6 +23,8 @@ use crate::watch::{self, Troubles};
 use crate::Directory;
 
 pub const TORN: Duration = Duration::from_secs(1);
+
+pub(crate) const READS: Declared = Declared::of(Harness::ClaudeCode, Rung::Feed);
 
 pub fn one_answer(model: &str, system: &str, prompt: &str) -> io::Result<(Command, Stdio)> {
     let mut claude = Command::new("claude");
@@ -329,6 +331,11 @@ fn parse_leading_file(bytes: &[u8]) -> io::Result<Session> {
     Session::parse(raw)
 }
 
+#[cfg(test)]
+pub(crate) fn update_of_file(bytes: &[u8]) -> io::Result<RungUpdate> {
+    Ok(parse_leading_file(bytes)?.feed.update())
+}
+
 fn has_sdk_prefix(text: &str) -> bool {
     text.as_bytes()
         .get(..SDK_ENTRYPOINT_PREFIX.len())
@@ -336,10 +343,10 @@ fn has_sdk_prefix(text: &str) -> bool {
 }
 
 fn reported(id: AgentId, session: &Session, terminal: Option<TerminalKey>) -> ReportedAgent {
-    let report = Report { agent: id.clone(), rung: Rung::Feed, update: session.feed.update() };
+    let report = Report::new(READS, id.clone(), session.feed.update());
     let seen = SeenAgent {
         id,
-        harness: Harness::ClaudeCode,
+        harness: READS.harness(),
         session_id: Some(session.id.clone()),
         cwd: session.cwd.clone(),
         started_at: session.started_at,
@@ -435,12 +442,12 @@ mod tests {
         };
         for sdk in ["sdk-cli", "sdk-ts", "  SDK-py  ", "sdk-"] {
             let entry = reported(id.clone(), &session(Some(sdk)), None);
-            assert_eq!(entry.report.update, RungUpdate::Clear, "{sdk}");
+            assert_eq!(entry.report.update(), &RungUpdate::Clear, "{sdk}");
             assert_eq!(entry.seen.entrypoint.as_ref().map(Said::as_str), Some(sdk.trim()));
         }
         for interactive in [Some("cli"), Some("claude-vscode"), Some("sdk"), None] {
             let entry = reported(id.clone(), &session(interactive), None);
-            assert!(matches!(entry.report.update, RungUpdate::Active { .. }), "{interactive:?}");
+            assert!(matches!(entry.report.update(), RungUpdate::Active { .. }), "{interactive:?}");
         }
     }
 }

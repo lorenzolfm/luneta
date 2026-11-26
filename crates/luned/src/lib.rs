@@ -24,6 +24,7 @@ mod keeps;
 pub mod links;
 pub mod log;
 pub mod mux;
+mod osc_7501;
 mod owns;
 pub mod panics;
 mod pi;

@@ -28,7 +28,7 @@ use answering::Answering;
 pub use answering::Answers;
 pub use input::{Click, Wheel};
 
-use crate::asked::Size;
+pub use crate::asked::Size;
 use crate::marks::{Mark, Marks};
 use crate::program_status::{EndedProgramStatuses, ProgramStatuses, Snapshot};
 

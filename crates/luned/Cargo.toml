@@ -40,6 +40,7 @@ tonic-prost-build = "0.14.6"
 [dev-dependencies]
 alacritty_terminal = "0.26.0"
 base64 = "0.22.1"
+lune-mux = { path = "../mux" }
 lune-phone = { path = "../phone" }
 lune-waits = { path = "../waits" }
 rustix = { version = "1.1.4", features = ["fs", "pty", "termios"] }

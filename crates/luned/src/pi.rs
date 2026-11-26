@@ -5,7 +5,7 @@ use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use lune_domain::agent::{Harness, Rung};
+use lune_domain::agent::{Declared, Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::program_status::Message;
 use lune_protocol::said::Said;
@@ -31,6 +31,8 @@ const EXTENSION_FILE: &str = "lune.ts";
 const FOLDER: &str = "pi";
 
 const DATED_LATE: Duration = Duration::from_secs(1);
+
+pub(crate) const READS: Declared = Declared::of(Harness::Pi, Rung::Extension);
 
 #[must_use]
 pub fn folder() -> Option<PathBuf> {
@@ -336,16 +338,28 @@ fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
     modified.checked_add(DATED_LATE).is_none_or(|late| started <= late)
 }
 
+#[cfg(test)]
+pub(crate) fn update_of_file(bytes: &[u8]) -> io::Result<RungUpdate> {
+    let raw: RawFile = serde_json::from_slice(bytes)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    Ok(File::parse(raw)?.update())
+}
+
+impl File {
+    fn update(&self) -> RungUpdate {
+        RungUpdate::Active {
+            status: self.status.clone().into_active(),
+            at: Some(self.status_since),
+            subagents: Vec::new(),
+        }
+    }
+}
+
 fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
-    let update = RungUpdate::Active {
-        status: file.status.into_active(),
-        at: Some(file.status_since),
-        subagents: Vec::new(),
-    };
-    let report = Report { agent: id.clone(), rung: Rung::Extension, update };
+    let report = Report::new(READS, id.clone(), file.update());
     let seen = SeenAgent {
         id,
-        harness: Harness::Pi,
+        harness: READS.harness(),
         session_id: Some(file.session_id),
         cwd: file.cwd,
         started_at: Some(process.started),
