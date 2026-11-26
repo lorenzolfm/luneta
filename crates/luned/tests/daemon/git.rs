@@ -1409,10 +1409,10 @@ mod linux_inotify {
     type Watched = Vec<(u64, Option<BTreeSet<Descriptor>>)>;
 
     fn inotify_state(pid: u32) -> (usize, BTreeMap<u64, BTreeSet<Descriptor>>) {
-        let fd_dir = format!("/proc/{pid}/fd");
+        let descriptor_dir = format!("/proc/{pid}/fd");
         let mut instances = 0usize;
         let mut watches: BTreeMap<u64, BTreeSet<Descriptor>> = BTreeMap::new();
-        for entry in fs::read_dir(&fd_dir).unwrap().flatten() {
+        for entry in fs::read_dir(&descriptor_dir).unwrap().flatten() {
             let Ok(link) = fs::read_link(entry.path()) else {
                 continue;
             };
@@ -1420,25 +1420,28 @@ mod linux_inotify {
                 continue;
             }
             instances += 1;
-            let fd = entry.file_name().to_string_lossy().into_owned();
-            let Ok(text) = fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")) else {
+            let descriptor = entry.file_name().to_string_lossy().into_owned();
+            let Ok(text) = fs::read_to_string(format!("/proc/{pid}/fdinfo/{descriptor}")) else {
                 continue;
             };
             for line in text.lines() {
                 if !line.starts_with("inotify ") {
                     continue;
                 }
-                let mut wd = None;
+                let mut watch_descriptor = None;
                 let mut inode = None;
                 for token in line.split_ascii_whitespace() {
                     if let Some(value) = token.strip_prefix("wd:") {
-                        wd = value.parse::<u32>().ok();
+                        watch_descriptor = value.parse::<u32>().ok();
                     } else if let Some(value) = token.strip_prefix("ino:") {
                         inode = u64::from_str_radix(value, 16).ok();
                     }
                 }
-                if let (Some(wd), Some(inode)) = (wd, inode) {
-                    watches.entry(inode).or_default().insert((fd.clone(), wd));
+                if let (Some(watch_descriptor), Some(inode)) = (watch_descriptor, inode) {
+                    watches
+                        .entry(inode)
+                        .or_default()
+                        .insert((descriptor.clone(), watch_descriptor));
                 }
             }
         }
@@ -1519,9 +1522,9 @@ mod linux_inotify {
             || fs::write(extra.join("mod.rs"), "changed\n").unwrap(),
             modified,
         );
-        let extra_ino = fs::metadata(&extra).unwrap().ino();
+        let extra_inode = fs::metadata(&extra).unwrap().ino();
         let (_, watches_with_extra) = inotify_state(at_once.daemon.pid());
-        assert!(watches_with_extra.contains_key(&extra_ino));
+        assert!(watches_with_extra.contains_key(&extra_inode));
         assert_eq!(watched_descriptors(at_once.daemon.pid(), &stable), before);
 
         at_once.shows(
@@ -1533,7 +1536,7 @@ mod linux_inotify {
             clean,
         );
         let (_, watches_without_extra) = inotify_state(at_once.daemon.pid());
-        assert!(!watches_without_extra.contains_key(&extra_ino));
+        assert!(!watches_without_extra.contains_key(&extra_inode));
         assert_eq!(watched_descriptors(at_once.daemon.pid(), &stable), before);
     }
 
@@ -1551,10 +1554,10 @@ mod linux_inotify {
 
         let mut worktrees = Vec::new();
         for index in 0..4 {
-            let wt = path(&format!("wt-{index}"));
-            let branch = format!("wt-{index}");
-            assert!(git(&repo, &["worktree", "add", "-q", "-b", &branch, &spelled(&wt)]));
-            worktrees.push(wt);
+            let worktree = path(&format!("worktree-{index}"));
+            let branch = format!("worktree-{index}");
+            assert!(git(&repo, &["worktree", "add", "-q", "-b", &branch, &spelled(&worktree)]));
+            worktrees.push(worktree);
         }
         let mut others = Vec::new();
         for index in 0..2 {
@@ -1587,9 +1590,9 @@ mod linux_inotify {
         let (after, _) = inotify_state(daemon.pid());
         assert_eq!(after, before);
 
-        let wt_cwd = spelled(&worktrees[0]);
+        let worktree_cwd = spelled(&worktrees[0]);
         let changes = |it: &Checkout| it.changes.unwrap_or_default();
-        let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &wt_cwd };
+        let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &worktree_cwd };
         at_once.shows(
             "an edit in a shared-watcher worktree",
             || fs::write(worktrees[0].join("README"), "edited\n").unwrap(),
