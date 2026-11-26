@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::layout::Direction;
-use lune_domain::projects::{BrowserUrl, ViewId};
+use lune_domain::projects::{Argv, BrowserUrl, ViewId, WorktreeId};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
@@ -45,30 +46,61 @@ const _: () = assert!(CONNECTIONS_MAX > 0);
 const _: () = assert!(SPLIT_ARGS_MAX > 0);
 const _: () = assert!(CONNECTION_TIMEOUT.as_millis() > 0);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneRef {
-    pub id: String,
-    pub tab: String,
+    pub id: ViewId,
+    pub tab: WorktreeId,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+impl Serialize for PaneRef {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire {
+            id: String,
+            tab: String,
+        }
+        Wire { id: self.id.to_string(), tab: self.tab.to_string() }.serialize(serializer)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneInfo {
-    pub id: String,
-    pub tab: String,
+    pub id: ViewId,
+    pub tab: WorktreeId,
     pub tty: Option<String>,
     pub command: Option<String>,
 }
 
+impl Serialize for PaneInfo {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            id: String,
+            tab: String,
+            tty: Option<&'a str>,
+            command: Option<&'a str>,
+        }
+        Wire {
+            id: self.id.to_string(),
+            tab: self.tab.to_string(),
+            tty: self.tty.as_deref(),
+            command: self.command.as_deref(),
+        }
+        .serialize(serializer)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SplitTarget {
+pub enum SplitAction {
     Browser(Option<BrowserUrl>),
-    Command,
+    Command(Argv),
 }
 
 pub enum SocketCommand {
     CurrentPane {
         tty: Option<String>,
         cwd: Option<String>,
+        runtime: PathBuf,
         answer: oneshot::Sender<Result<Option<PaneRef>, String>>,
     },
     ListPanes {
@@ -84,7 +116,7 @@ pub enum SocketCommand {
     Split {
         from: ViewId,
         direction: Option<Direction>,
-        command: Vec<String>,
+        action: SplitAction,
         answer: oneshot::Sender<Result<(), String>>,
     },
     TerminalKey {
@@ -113,13 +145,58 @@ struct Caller {
     cwd: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct CurrentPaneParams {
+    #[serde(default)]
+    tty: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ListPanesParams {
+    #[serde(default)]
+    tty: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NeighborParams {
+    from: String,
+    direction: String,
+}
+
+#[derive(Deserialize)]
+struct SplitParams {
+    from: String,
+    #[serde(default)]
+    direction: Option<String>,
+    command: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct SendTextParams {
+    pane: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct FocusPaneParams {
+    pane: String,
+}
+
 #[derive(Serialize)]
 struct Reply {
     id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<ReplyError>,
+    #[serde(flatten)]
+    body: ReplyBody,
+}
+
+#[derive(Serialize)]
+enum ReplyBody {
+    #[serde(rename = "result")]
+    Result(Value),
+    #[serde(rename = "error")]
+    Error(ReplyError),
 }
 
 #[derive(Serialize)]
@@ -128,51 +205,63 @@ struct ReplyError {
 }
 
 #[must_use]
-pub fn browser_tty_path(runtime: &Path, view: ViewId) -> PathBuf {
-    assert_ne!(runtime.as_os_str(), "", "runtime folder is non-empty");
-    let path = runtime.join(format!("b-{view}.tty"));
-    assert_eq!(view_from_browser_tty(&path.to_string_lossy()), Some(view));
-    path
-}
-
-#[must_use]
 pub fn browser_client_tty_path(runtime: &Path, view: ViewId, pid: u32, sequence: u64) -> PathBuf {
     assert_ne!(runtime.as_os_str(), "", "runtime folder is non-empty");
     assert!(pid > 0, "process id is positive");
     let path = runtime.join(format!("b-{view}-{pid}-{sequence}.tty"));
-    assert_eq!(view_from_browser_tty(&path.to_string_lossy()), Some(view));
+    assert_eq!(view_from_browser_tty(runtime, &path.to_string_lossy()), Some(view));
     path
 }
 
 #[must_use]
-pub fn view_from_browser_tty(tty: &str) -> Option<ViewId> {
-    let name = Path::new(tty).file_name()?.to_str()?;
-    let stem = name.strip_prefix("b-")?.strip_suffix(".tty")?;
-    let hex = match stem.split_once('-') {
-        Some((id, suffix)) => {
-            let (pid, sequence) = suffix.split_once('-')?;
-            let pid_valid = !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit());
-            let seq_valid =
-                !sequence.is_empty() && sequence.bytes().all(|byte| byte.is_ascii_digit());
-            if !pid_valid || !seq_valid {
-                return None;
-            }
-            id
-        },
-        None => stem,
-    };
-    hex.parse().ok()
+pub fn is_browser_client_tty(tty: &str, view: ViewId) -> bool {
+    let path = Path::new(tty);
+    if !path.is_absolute() {
+        return false;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(parse_browser_client_tty_name)
+        == Some(view)
 }
 
 #[must_use]
-pub fn split_target(command: &[String]) -> SplitTarget {
+pub fn view_from_browser_tty(runtime: &Path, tty: &str) -> Option<ViewId> {
+    assert_ne!(runtime.as_os_str(), "", "runtime folder is non-empty");
+    let path = Path::new(tty);
+    if path.parent() != Some(runtime) {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    parse_browser_client_tty_name(name)
+}
+
+fn parse_browser_client_tty_name(name: &str) -> Option<ViewId> {
+    let stem = name.strip_prefix("b-")?.strip_suffix(".tty")?;
+    let (id, suffix) = stem.split_once('-')?;
+    let (pid, sequence) = suffix.split_once('-')?;
+    let pid_valid = !pid.is_empty()
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && pid.parse::<u32>().is_ok_and(|pid| pid > 0);
+    let seq_valid = !sequence.is_empty()
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+        && sequence.parse::<u64>().is_ok();
+    if !pid_valid || !seq_valid {
+        return None;
+    }
+    id.parse().ok()
+}
+
+pub fn parse_split_action(command: Vec<String>) -> Result<SplitAction, String> {
+    if command.len() > SPLIT_ARGS_MAX {
+        return Err(format!("split command exceeds {SPLIT_ARGS_MAX} arguments"));
+    }
     let Some(first) = command.first() else {
-        return SplitTarget::Command;
+        return Err("split command is empty".to_owned());
     };
     let basename = Path::new(first).file_name().and_then(|name| name.to_str()).unwrap_or(first);
     if basename == "terminal-browser" {
-        let rest = &command[1..command.len().min(SPLIT_ARGS_MAX + 1)];
-        return SplitTarget::Browser(extract_url_from_args(rest));
+        return extract_url_from_args(&command[1..]).map(SplitAction::Browser);
     }
     if matches!(basename, "sh" | "bash" | "zsh")
         && command.get(1).is_some_and(|arg| arg == "-c")
@@ -189,36 +278,36 @@ pub fn split_target(command: &[String]) -> SplitTarget {
             let invoked =
                 Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or(program);
             if invoked == "terminal-browser" {
-                return SplitTarget::Browser(extract_url_from_args(&tokens[program_index + 1..]));
+                return extract_url_from_args(&tokens[program_index + 1..]).map(SplitAction::Browser);
             }
         }
     }
-    SplitTarget::Command
+    Argv::parse(command).map(SplitAction::Command)
 }
 
-fn extract_url_from_args(args: &[String]) -> Option<BrowserUrl> {
+fn extract_url_from_args(args: &[String]) -> Result<Option<BrowserUrl>, String> {
     assert!(args.len() <= SPLIT_ARGS_MAX, "split args stay within bound");
     let mut after_open = false;
     for arg in args {
-        if arg == "open" {
+        if arg == "open" && !after_open {
             after_open = true;
             continue;
         }
         if arg.starts_with('-') {
             continue;
         }
+        if arg.eq_ignore_ascii_case("about:blank") {
+            return Ok(None);
+        }
         let has_about = arg.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("about:"));
         if arg.contains("://") || has_about {
-            if let Ok(url) = BrowserUrl::parse(arg) {
-                return Some(url);
-            }
-        } else if after_open
-            && let Ok(Some(url)) = BrowserUrl::from_user(arg)
-        {
-            return Some(url);
+            return BrowserUrl::parse(arg).map(Some);
+        }
+        if after_open {
+            return BrowserUrl::from_user(arg);
         }
     }
-    None
+    Ok(None)
 }
 
 pub struct Bound {
@@ -350,15 +439,15 @@ async fn handle_connection(
     let reply = match serde_json::from_str::<Request>(trimmed) {
         Ok(request) => {
             let id = request.id.clone();
-            match dispatch(request, runtime, &layouts).await {
-                Ok(result) => Reply { id, result: Some(result), error: None },
-                Err(message) => Reply { id, result: None, error: Some(ReplyError { message }) },
-            }
+            let body = match dispatch(request, runtime, &layouts).await {
+                Ok(result) => ReplyBody::Result(result),
+                Err(message) => ReplyBody::Error(ReplyError { message }),
+            };
+            Reply { id, body }
         },
         Err(error) => Reply {
             id: String::new(),
-            result: None,
-            error: Some(ReplyError { message: format!("invalid request: {error}") }),
+            body: ReplyBody::Error(ReplyError { message: format!("invalid request: {error}") }),
         },
     };
     let mut encoded = match serde_json::to_string(&reply) {
@@ -387,27 +476,31 @@ async fn dispatch(
     match request.method.as_str() {
         "hello" => Ok(json!({ "name": "lune", "methods": METHODS })),
         "getCurrentPane" => {
-            let tty = string_field(&request.params, "tty");
-            let cwd = string_field(&request.params, "cwd")
-                .or_else(|| request.caller.and_then(|caller| caller.cwd));
-            let pane = ask_layouts(layouts, |answer| {
-                SocketCommand::CurrentPane { tty, cwd, answer }
+            let params: CurrentPaneParams = parse_params(request.params)?;
+            let cwd = params.cwd.or_else(|| request.caller.and_then(|caller| caller.cwd));
+            let pane = ask_layouts(layouts, |answer| SocketCommand::CurrentPane {
+                tty: params.tty,
+                cwd,
+                runtime,
+                answer,
             })
             .await??;
             Ok(json!({ "pane": pane }))
         },
         "listPanes" => {
-            let tty = string_field(&request.params, "tty");
-            let panes = ask_layouts(layouts, |answer| {
-                SocketCommand::ListPanes { tty, runtime, answer }
+            let params: ListPanesParams = parse_params(request.params)?;
+            let panes = ask_layouts(layouts, |answer| SocketCommand::ListPanes {
+                tty: params.tty,
+                runtime,
+                answer,
             })
             .await??;
             Ok(json!({ "panes": panes }))
         },
         "neighbor" => {
-            let from = parse_view_field(&request.params, "from")?;
-            let direction = parse_direction_field(&request.params, "direction")?
-                .ok_or_else(|| "neighbor requires direction".to_owned())?;
+            let params: NeighborParams = parse_params(request.params)?;
+            let from = parse_view(&params.from, "from")?;
+            let direction = parse_direction(&params.direction)?;
             let pane = ask_layouts(layouts, |answer| {
                 SocketCommand::Neighbor { from, direction, answer }
             })
@@ -415,48 +508,35 @@ async fn dispatch(
             Ok(json!({ "pane": pane }))
         },
         "split" => {
-            let from = parse_view_field(&request.params, "from")?;
-            let direction = parse_direction_field(&request.params, "direction")?;
-            let array = request
-                .params
-                .get("command")
-                .and_then(Value::as_array)
-                .ok_or_else(|| "split requires command array".to_owned())?;
-            if array.len() > SPLIT_ARGS_MAX {
-                return Err(format!("split command exceeds {SPLIT_ARGS_MAX} arguments"));
-            }
-            let command = array
-                .iter()
-                .map(|item| {
-                    item.as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| "split command entries must be strings".to_owned())
-                })
-                .collect::<Result<Vec<String>, String>>()?;
-            assert!(command.len() <= SPLIT_ARGS_MAX, "split command fits SPLIT_ARGS_MAX");
+            let params: SplitParams = parse_params(request.params)?;
+            let from = parse_view(&params.from, "from")?;
+            let direction = params.direction.as_deref().map(parse_direction).transpose()?;
+            let action = parse_split_action(params.command)?;
             ask_layouts(layouts, |answer| SocketCommand::Split {
                 from,
                 direction,
-                command,
+                action,
                 answer,
             })
             .await??;
             Ok(json!({}))
         },
         "sendText" => {
-            let pane = parse_view_field(&request.params, "pane")?;
-            let text = string_field(&request.params, "text")
-                .ok_or_else(|| "sendText requires text".to_owned())?;
-            if text.is_empty() {
-                return Ok(json!({}));
-            }
+            let params: SendTextParams = parse_params(request.params)?;
+            let pane = parse_view(&params.pane, "pane")?;
             let key = ask_layouts(layouts, |answer| SocketCommand::TerminalKey { pane, answer })
                 .await??;
-            Terminals.paste_text(key, &text).await.map_err(|failure| failure.to_string())?;
+            if !params.text.is_empty() {
+                Terminals
+                    .paste_text(key, &params.text)
+                    .await
+                    .map_err(|failure| failure.to_string())?;
+            }
             Ok(json!({}))
         },
         "focusPane" => {
-            let pane = parse_view_field(&request.params, "pane")?;
+            let params: FocusPaneParams = parse_params(request.params)?;
+            let pane = parse_view(&params.pane, "pane")?;
             ask_layouts(layouts, |answer| SocketCommand::FocusPane { pane, answer }).await??;
             Ok(json!({}))
         },
@@ -478,27 +558,25 @@ async fn ask_layouts<T>(
     answered.await.map_err(|_| "luned layouts dropped request".to_owned())
 }
 
-fn string_field(params: &Value, key: &str) -> Option<String> {
-    assert_ne!(key, "", "field key is non-empty");
-    params.get(key).and_then(Value::as_str).map(str::to_owned)
+fn parse_params<T: DeserializeOwned>(params: Value) -> Result<T, String> {
+    let params = match params {
+        Value::Null => Value::Object(serde_json::Map::new()),
+        other => other,
+    };
+    serde_json::from_value(params).map_err(|error| format!("invalid params: {error}"))
 }
 
-fn parse_view_field(params: &Value, key: &str) -> Result<ViewId, String> {
+fn parse_view(raw: &str, key: &str) -> Result<ViewId, String> {
     assert_ne!(key, "", "view field key is non-empty");
-    let raw = string_field(params, key).ok_or_else(|| format!("missing field {key}"))?;
     raw.parse().map_err(|why| format!("{key}: {why}"))
 }
 
-fn parse_direction_field(params: &Value, key: &str) -> Result<Option<Direction>, String> {
-    assert_ne!(key, "", "direction field key is non-empty");
-    let Some(raw) = string_field(params, key) else {
-        return Ok(None);
-    };
-    match raw.as_str() {
-        "left" => Ok(Some(Direction::Left)),
-        "right" => Ok(Some(Direction::Right)),
-        "up" => Ok(Some(Direction::Up)),
-        "down" => Ok(Some(Direction::Down)),
+fn parse_direction(raw: &str) -> Result<Direction, String> {
+    match raw {
+        "left" => Ok(Direction::Left),
+        "right" => Ok(Direction::Right),
+        "up" => Ok(Direction::Up),
+        "down" => Ok(Direction::Down),
         other => Err(format!("unknown direction: {other}")),
     }
 }
@@ -511,14 +589,37 @@ mod tests {
 
     #[test]
     fn browser_tty_and_split_commands_parse_cleanly() {
+        let runtime = Path::new("/run/user/1000/lune");
         let id = ViewId::of(0x2a).unwrap();
-        let tty = browser_tty_path(Path::new("/run/user/1000/lune"), id);
-        assert_eq!(view_from_browser_tty(&tty.to_string_lossy()), Some(id));
-        let client_tty = browser_client_tty_path(Path::new("/run/user/1000/lune"), id, 4242, 7);
-        assert_eq!(view_from_browser_tty(&client_tty.to_string_lossy()), Some(id));
-        assert_eq!(view_from_browser_tty("/dev/pts/4"), None);
-        assert_eq!(view_from_browser_tty(&format!("/tmp/b-{id}-bad.tty")), None);
-        assert_eq!(view_from_browser_tty(&format!("/tmp/b-{id}-12-xx.tty")), None);
+        let client_tty = browser_client_tty_path(runtime, id, 4242, 7);
+        assert_eq!(view_from_browser_tty(runtime, &client_tty.to_string_lossy()), Some(id));
+        assert!(is_browser_client_tty(&client_tty.to_string_lossy(), id));
+        assert!(!is_browser_client_tty(&client_tty.to_string_lossy(), ViewId::of(0x2b).unwrap()));
+        assert!(!is_browser_client_tty(&format!("b-{id}-4242-7.tty"), id));
+        assert_eq!(
+            view_from_browser_tty(Path::new("/tmp"), &client_tty.to_string_lossy()),
+            None,
+            "browser tty outside runtime is rejected"
+        );
+        assert_eq!(
+            view_from_browser_tty(runtime, &format!("/run/user/1000/lune/b-{id}.tty")),
+            None,
+            "fabricated unsuffixed tty is rejected"
+        );
+        assert_eq!(view_from_browser_tty(runtime, "/dev/pts/4"), None);
+        assert_eq!(
+            view_from_browser_tty(runtime, &format!("/run/user/1000/lune/b-{id}-0-7.tty")),
+            None,
+            "zero pid is rejected"
+        );
+        assert_eq!(
+            view_from_browser_tty(runtime, &format!("/run/user/1000/lune/b-{id}-bad.tty")),
+            None
+        );
+        assert_eq!(
+            view_from_browser_tty(runtime, &format!("/run/user/1000/lune/b-{id}-12-xx.tty")),
+            None
+        );
 
         let direct = vec![
             "terminal-browser".to_owned(),
@@ -527,8 +628,8 @@ mod tests {
             "https://example.com".to_owned(),
         ];
         assert_eq!(
-            split_target(&direct),
-            SplitTarget::Browser(Some(BrowserUrl::parse("https://example.com").unwrap()))
+            parse_split_action(direct),
+            Ok(SplitAction::Browser(Some(BrowserUrl::parse("https://example.com").unwrap())))
         );
 
         let wrapped = vec![
@@ -537,22 +638,41 @@ mod tests {
             "exec '/nix/store/x/bin/terminal-browser' open 'http://localhost:3000'".to_owned(),
         ];
         assert_eq!(
-            split_target(&wrapped),
-            SplitTarget::Browser(Some(BrowserUrl::parse("http://localhost:3000").unwrap()))
+            parse_split_action(wrapped),
+            Ok(SplitAction::Browser(Some(BrowserUrl::parse("http://localhost:3000").unwrap())))
         );
 
         let start_page = vec!["terminal-browser".to_owned(), "open".to_owned()];
-        assert_eq!(split_target(&start_page), SplitTarget::Browser(None));
+        assert_eq!(parse_split_action(start_page), Ok(SplitAction::Browser(None)));
+
+        let blank_page =
+            vec!["terminal-browser".to_owned(), "open".to_owned(), "about:blank".to_owned()];
+        assert_eq!(parse_split_action(blank_page), Ok(SplitAction::Browser(None)));
+
+        let bad_url = vec![
+            "terminal-browser".to_owned(),
+            "open".to_owned(),
+            "javascript:alert(1)".to_owned(),
+        ];
+        assert!(parse_split_action(bad_url).is_err(), "invalid browser URL fails instead of defaulting");
 
         let other = vec!["vim".to_owned(), "notes.md".to_owned()];
-        assert_eq!(split_target(&other), SplitTarget::Command);
+        assert_eq!(
+            parse_split_action(other.clone()),
+            Ok(SplitAction::Command(Argv::parse(other).unwrap()))
+        );
 
         let shell_mention = vec![
             "sh".to_owned(),
             "-c".to_owned(),
             "rg terminal-browser crates/".to_owned(),
         ];
-        assert_eq!(split_target(&shell_mention), SplitTarget::Command);
+        assert_eq!(
+            parse_split_action(shell_mention.clone()),
+            Ok(SplitAction::Command(Argv::parse(shell_mention).unwrap()))
+        );
+
+        assert!(parse_split_action(Vec::new()).is_err());
     }
 
     #[test]
@@ -566,11 +686,17 @@ mod tests {
 
         let worker = std::thread::spawn(move || {
             while let Ok(layouts::Command::Socket(cmd)) = layouts_rx.recv() {
-                if let SocketCommand::CurrentPane { answer, .. } = cmd {
-                    let _ = answer.send(Ok(Some(PaneRef {
-                        id: "0000000000000004".to_owned(),
-                        tab: "0000000000000002".to_owned(),
-                    })));
+                match cmd {
+                    SocketCommand::CurrentPane { answer, .. } => {
+                        let _ = answer.send(Ok(Some(PaneRef {
+                            id: ViewId::of(4).unwrap(),
+                            tab: WorktreeId::of(2).unwrap(),
+                        })));
+                    },
+                    SocketCommand::TerminalKey { pane, answer } => {
+                        let _ = answer.send(Err(format!("view {pane} runs no terminal")));
+                    },
+                    _ => {},
                 }
             }
         });
@@ -596,6 +722,7 @@ mod tests {
             let hello = ask("{\"id\":\"1\",\"method\":\"hello\",\"params\":{\"protocol\":1}}\n").await;
             assert_eq!(hello["id"], "1");
             assert_eq!(hello["result"]["name"], "lune");
+            assert!(hello.get("error").is_none());
 
             let current = ask(
                 "{\"id\":\"2\",\"method\":\"getCurrentPane\",\"params\":{\"tty\":\"/dev/pts/1\"}}\n",
@@ -603,6 +730,34 @@ mod tests {
             .await;
             assert_eq!(current["result"]["pane"]["id"], "0000000000000004");
             assert_eq!(current["result"]["pane"]["tab"], "0000000000000002");
+
+            let bad_tty = ask(
+                "{\"id\":\"3\",\"method\":\"getCurrentPane\",\"params\":{\"tty\":42}}\n",
+            )
+            .await;
+            assert!(bad_tty["error"]["message"].is_string(), "wrong-type tty returns error");
+            assert!(bad_tty.get("result").is_none());
+
+            let bad_dir = ask(
+                "{\"id\":\"4\",\"method\":\"split\",\"params\":{\"from\":\"0000000000000004\",\"direction\":123,\"command\":[\"vim\"]}}\n",
+            )
+            .await;
+            assert!(bad_dir["error"]["message"].is_string(), "wrong-type direction returns error");
+
+            let bad_url = ask(
+                "{\"id\":\"5\",\"method\":\"split\",\"params\":{\"from\":\"0000000000000004\",\"command\":[\"terminal-browser\",\"open\",\"javascript:alert(1)\"]}}\n",
+            )
+            .await;
+            assert!(bad_url["error"]["message"].is_string(), "invalid URL in split returns error");
+
+            let empty_send = ask(
+                "{\"id\":\"6\",\"method\":\"sendText\",\"params\":{\"pane\":\"0000000000000004\",\"text\":\"\"}}\n",
+            )
+            .await;
+            assert!(
+                empty_send["error"]["message"].as_str().is_some_and(|m| m.contains("no terminal")),
+                "empty sendText still validates pane: {empty_send}"
+            );
 
             let mut oversized = UnixStream::connect(&socket_path).await.unwrap();
             let junk = vec![b'a'; REQUEST_BYTES_MAX + 512];

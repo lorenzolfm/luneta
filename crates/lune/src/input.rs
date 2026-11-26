@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io::{self, IsTerminal as _, Read as _};
+use std::num::NonZeroU16;
 use std::os::fd::AsFd as _;
 use std::str;
 use std::sync::atomic::AtomicBool;
@@ -343,17 +344,12 @@ fn window_report(parameters: &str) -> Parsed {
     let mut parts = parameters.split(';');
     let (Some(kind), Some(Ok(height)), Some(Ok(width)), None) = (
         parts.next(),
-        parts.next().map(str::parse::<u16>),
-        parts.next().map(str::parse::<u16>),
+        parts.next().map(str::parse::<NonZeroU16>),
+        parts.next().map(str::parse::<NonZeroU16>),
         parts.next(),
     ) else {
         return Parsed::Unknown;
     };
-    if width == 0 || height == 0 {
-        return Parsed::Unknown;
-    }
-    assert!(width > 0, "window report width is positive");
-    assert!(height > 0, "window report height is positive");
     let answer = match kind {
         "6" => Answer::CellSize(CellPixels { width, height }),
         "4" => Answer::WindowPixels(WindowPixels { width, height }),
@@ -745,13 +741,15 @@ mod tests {
             b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1b[4;1000;1600tx",
             b"\x1b_Gi=31;ENOTSUP\x1b\\y",
         ]);
+        let nz = |value| NonZeroU16::new(value).unwrap();
         assert_eq!(all, [
             Sent::Answer(Answer::Graphics),
-            Sent::Answer(Answer::CellSize(CellPixels { width: 10, height: 20 })),
-            Sent::Answer(Answer::WindowPixels(WindowPixels { width: 1600, height: 1000 })),
+            Sent::Answer(Answer::CellSize(CellPixels { width: nz(10), height: nz(20) })),
+            Sent::Answer(Answer::WindowPixels(WindowPixels { width: nz(1600), height: nz(1000) })),
             typed('x'),
             typed('y'),
         ]);
+        assert_eq!(sent(&[b"\x1b[6;0;10tz"]), [typed('z')]);
         let alt_underscore = pressed(KeyCode::Char('_'), KeyModifiers::ALT);
         assert_eq!(sent(&[b"\x1b_"]), std::slice::from_ref(&alt_underscore));
         assert_eq!(sent(&[b"\x1b_x"]), [alt_underscore, typed('x')]);

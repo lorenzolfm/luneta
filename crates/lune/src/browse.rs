@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use lune_domain::projects::BrowserUrl;
-use luned::api::change_projects_request::{Change, OpenBrowser};
+use luned::api::change_projects_request::{open_browser, Change, OpenBrowser};
 use luned::api::ChangeProjectsRequest;
 use luned::tasks;
 
@@ -26,25 +26,24 @@ pub fn run(url: Option<&str>, folder: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    let cwd = match current_folder() {
-        Ok(dir) => Some(dir),
-        Err(why) if from.is_none() => {
-            eprintln!("lune: {why}");
-            return ExitCode::FAILURE;
+    let target = match from {
+        Some(from) => open_browser::Target::From(open_browser::FromTerminal {
+            from: Some(from.into()),
+            fallback_folder: current_folder().ok(),
+        }),
+        None => match current_folder() {
+            Ok(dir) => open_browser::Target::Folder(dir),
+            Err(why) => {
+                eprintln!("lune: {why}");
+                return ExitCode::FAILURE;
+            },
         },
-        Err(_) => None,
     };
-    assert!(
-        cwd.is_some() || from.is_some(),
-        "open_browser always names a folder or terminal"
-    );
     let request = ChangeProjectsRequest {
         on: None,
         change: Some(Change::OpenBrowser(OpenBrowser {
-            worktree: None,
-            folder: cwd,
+            target: Some(target),
             url: url.map(|url| url.as_str().to_owned()),
-            from: from.map(Into::into),
         })),
     };
     let ran = tasks::shared().block_on(async {

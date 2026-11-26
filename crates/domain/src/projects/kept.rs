@@ -1394,6 +1394,8 @@ mod tests {
         assert!(serialized.contains(r#""url": "https://example.com/pr/1""#));
         let refused = "it is of version 11, which holds no browser";
         assert_eq!(parse(&text(11)), Err(refused.to_owned()));
+        let about_blank = text(12).replace("https://example.com/pr/1", "about:blank");
+        assert!(parse(&about_blank).is_err(), "about:blank is not stored; Start Page is omitted");
     }
 
     #[test]

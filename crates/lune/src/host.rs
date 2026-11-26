@@ -791,13 +791,15 @@ impl App {
         let areas = areas(Rect::new(0, 0, columns, rows), width.columns());
         let luned = daemon.clone().unwrap_or_default();
         let cell = embedded::cell_pixels(cell, window_pixels, columns, rows);
-        let browser_config = embedded::Config {
-            runtime: luned.clone(),
-            terminal_socket: luned.join(luned::terminal_socket::SOCKET),
-            cell,
-            colours,
-            supported: graphics.supported() && !desktop::elsewhere(),
+        let browser_mode = if graphics.supported() && !desktop::elsewhere() {
+            daemon
+                .clone()
+                .and_then(embedded::Folder::new)
+                .map_or(embedded::Mode::Unsupported, embedded::Mode::Supported)
+        } else {
+            embedded::Mode::Unsupported
         };
+        let browser_config = embedded::Config { mode: browser_mode, cell, colours };
         let (size, greeting, here) = (layout_size(areas.1), greeting(colours), Machine::Local);
         let (start, root) = match start {
             Some(Arrival::Worktree(start)) => (Some(start), None),
@@ -2221,18 +2223,21 @@ impl App {
     }
 
     fn can_embed_browser(&self) -> bool {
-        self.graphics.supported() && !desktop::elsewhere()
+        self.daemon.as_ref().is_some_and(|dir| !dir.as_os_str().is_empty())
+            && self.graphics.supported()
+            && !desktop::elsewhere()
     }
 
     fn browser_config(&self) -> embedded::Config {
-        assert!(self.cell.width > 0 && self.cell.height > 0);
-        embedded::Config {
-            runtime: self.luned.clone(),
-            terminal_socket: self.luned.join(luned::terminal_socket::SOCKET),
-            cell: self.cell,
-            colours: self.colours,
-            supported: self.can_embed_browser(),
-        }
+        let mode = if self.graphics.supported() && !desktop::elsewhere() {
+            self.daemon
+                .clone()
+                .and_then(embedded::Folder::new)
+                .map_or(embedded::Mode::Unsupported, embedded::Mode::Supported)
+        } else {
+            embedded::Mode::Unsupported
+        };
+        embedded::Config { mode, cell: self.cell, colours: self.colours }
     }
 
     fn browse_link(&mut self, link: &crate::pull::Link) {

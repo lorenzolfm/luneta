@@ -36,10 +36,6 @@ impl Browser {
         events: &Sender<Event>,
         now: Instant,
     ) -> Result<(), String> {
-        if !url.is_http() {
-            return Err("only http and https URLs open in the OS browser".to_owned());
-        }
-        assert!(url.is_http(), "only http or https URLs reach the OS opener");
         self.open_str(url.as_str(), events, now)
     }
 

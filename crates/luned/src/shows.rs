@@ -277,6 +277,7 @@ pub enum Asked {
     Welcome,
     Browser(Option<BrowserUrl>),
     Navigate { view: ViewId, url: Option<BrowserUrl> },
+    BrowserTty { view: ViewId, tty: Option<String> },
     Close(ViewId),
     Focus(ViewId),
     Step { direction: Direction, step: NonZeroU64 },
@@ -309,6 +310,9 @@ impl Asked {
                 view: view.get(),
                 url: url.map(|url| url.as_str().to_owned()),
             }),
+            Asked::BrowserTty { view, tty } => {
+                Event::BrowserTty(show_request::BrowserTty { view: view.get(), tty })
+            },
             Asked::Close(view) => Event::Close(view.get()),
             Asked::Focus(view) => {
                 let to = show_request::focus::To::View(view.get());

@@ -9,7 +9,8 @@ use lune_waits::{eventually, shell, Patience, Span, QUIET};
 use luned::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use luned::api::show_response::{self, view::Found, Laid, View};
 use luned::api::change_projects_request::{
-    Bring, Change, CloseProject, CloseView, CloseWorktree, OpenBrowser, RenameTerminal,
+    open_browser, Bring, Change, CloseProject, CloseView, CloseWorktree, OpenBrowser,
+    RenameTerminal,
 };
 use luned::api::change_projects_response::Made;
 use luned::api::projects::Held;
@@ -2221,10 +2222,11 @@ fn open_browser_and_terminal_socket_manage_views_and_panes() {
     let opened = projects::made(
         &owned.host,
         Change::OpenBrowser(OpenBrowser {
-            worktree: None,
-            folder: None,
+            target: Some(open_browser::Target::From(open_browser::FromTerminal {
+                from: Some(terminal_key),
+                fallback_folder: None,
+            })),
             url: Some("https://example.com/start".to_owned()),
-            from: Some(terminal_key),
         }),
     )
     .unwrap();
@@ -2263,24 +2265,49 @@ fn open_browser_and_terminal_socket_manage_views_and_panes() {
     }));
     assert_eq!(hello["result"]["name"], "lune");
 
-    let panes = eventually("listPanes reports terminal tty and browser tty", || {
+    eventually("listPanes reports terminal tty and null browser tty before registration", || {
+        let reply = ask_socket(&serde_json::json!({
+            "id": "2a",
+            "method": "listPanes",
+            "params": {}
+        }));
+        let panes = reply["result"]["panes"].as_array()?;
+        let has_terminal_tty = panes.iter().any(|pane| {
+            pane["id"].as_str() == Some(&format!("{terminal_id:016x}"))
+                && pane["tty"].as_str().is_some_and(|tty| tty.starts_with("/dev/"))
+        });
+        let browser_unregistered = panes.iter().any(|pane| {
+            pane["id"].as_str() == Some(&format!("{browser_id:016x}")) && pane["tty"].is_null()
+        });
+        (has_terminal_tty && browser_unregistered).then_some(())
+    });
+
+    let expected_browser_tty = luned::terminal_socket::browser_client_tty_path(
+        &owned.host.folder(),
+        lune_domain::projects::ViewId::of(browser_id).unwrap(),
+        std::process::id(),
+        1,
+    )
+    .to_string_lossy()
+    .into_owned();
+    shown.ask(Event::BrowserTty(show_request::BrowserTty {
+        view: browser_id,
+        tty: Some(expected_browser_tty.clone()),
+    }));
+
+    let panes = eventually("listPanes reports registered live browser tty", || {
+        owned.block_on(tokio::task::yield_now());
         let reply = ask_socket(&serde_json::json!({
             "id": "2",
             "method": "listPanes",
             "params": {}
         }));
         let panes = reply["result"]["panes"].as_array()?.clone();
-        let has_terminal_tty = panes.iter().any(|pane| {
-            pane["id"].as_str() == Some(&format!("{terminal_id:016x}"))
-                && pane["tty"].as_str().is_some_and(|tty| tty.starts_with("/dev/"))
-        });
         let has_browser_tty = panes.iter().any(|pane| {
             pane["id"].as_str() == Some(&format!("{browser_id:016x}"))
-                && pane["tty"]
-                    .as_str()
-                    .is_some_and(|tty| tty.ends_with(&format!("b-{browser_id:016x}.tty")))
+                && pane["tty"].as_str() == Some(expected_browser_tty.as_str())
         });
-        (has_terminal_tty && has_browser_tty).then_some(panes)
+        has_browser_tty.then_some(panes)
     });
 
     let browser_tty = panes
@@ -2296,6 +2323,29 @@ fn open_browser_and_terminal_socket_manage_views_and_panes() {
         "params": { "tty": browser_tty }
     }));
     assert_eq!(current_browser["result"]["pane"]["id"], format!("{browser_id:016x}"));
+
+    let outside_tty = format!("/tmp/b-{browser_id:016x}-1-1.tty");
+    let current_outside = ask_socket(&serde_json::json!({
+        "id": "3b",
+        "method": "getCurrentPane",
+        "params": { "tty": outside_tty }
+    }));
+    assert!(current_outside["result"]["pane"].is_null(), "{current_outside}");
+
+    let spoofed_terminal_tty = luned::terminal_socket::browser_client_tty_path(
+        &owned.host.folder(),
+        lune_domain::projects::ViewId::of(terminal_id).unwrap(),
+        std::process::id(),
+        2,
+    )
+    .to_string_lossy()
+    .into_owned();
+    let current_spoofed = ask_socket(&serde_json::json!({
+        "id": "3c",
+        "method": "getCurrentPane",
+        "params": { "tty": spoofed_terminal_tty }
+    }));
+    assert!(current_spoofed["result"]["pane"].is_null(), "{current_spoofed}");
 
     let split_reply = ask_socket(&serde_json::json!({
         "id": "4",
@@ -2326,4 +2376,48 @@ fn open_browser_and_terminal_socket_manage_views_and_panes() {
     shown.until("focusPane moves focus to the asked terminal", |laid| {
         focused_of(laid) == Some(terminal_id)
     });
+}
+
+#[test]
+fn open_browser_is_atomic_for_bare_clones_and_new_folders() {
+    let owned = Owned::new();
+
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch_path = fs::canonicalize(scratch.path()).unwrap();
+    let (up, clone) = (scratch_path.join("up"), scratch_path.join("clone"));
+    cloned_as_wt(&scratch_path, &up, &clone);
+    let before = fs::read_to_string(kept(&owned.host)).ok();
+    let err = projects::made(
+        &owned.host,
+        Change::OpenBrowser(OpenBrowser {
+            target: Some(open_browser::Target::Folder(clone.to_string_lossy().into_owned())),
+            url: Some("https://example.com".to_owned()),
+        }),
+    )
+    .unwrap_err();
+    assert!(err.message().contains("no open worktree"), "{err}");
+    assert_eq!(fs::read_to_string(kept(&owned.host)).ok(), before, "failed open_browser leaves projects untouched");
+
+    let fresh = directory("fresh-browser-folder");
+    let made = projects::made(
+        &owned.host,
+        Change::OpenBrowser(OpenBrowser {
+            target: Some(open_browser::Target::Folder(fresh.path.to_string_lossy().into_owned())),
+            url: Some("https://example.com/fresh".to_owned()),
+        }),
+    )
+    .unwrap();
+    let Some(Made::Worktree(worktree)) = made else {
+        panic!("expected Made::Worktree, got {made:?}");
+    };
+    let mut shown = Shown::new(&owned, worktree, 100, 30);
+    let laid = shown.until("new folder opens with only its browser view", |laid| {
+        laid.views.len() == 1
+            && matches!(
+                &laid.views[0].found,
+                Some(Found::Browser(browser))
+                    if browser.url.as_deref() == Some("https://example.com/fresh")
+            )
+    });
+    assert_eq!(laid.views.len(), 1, "no stray shell terminal is spawned");
 }

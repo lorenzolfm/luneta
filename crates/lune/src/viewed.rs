@@ -61,6 +61,9 @@ const BROWSER_UNSUPPORTED_TERMINAL: &str = "This terminal does not support Kitty
 
 const BROWSER_UNSUPPORTED_SSH: &str = "Inline browser graphics are unavailable over SSH.";
 
+const BROWSER_LIMIT_REACHED: &str =
+    "At the limit of inline browsers; close another to render this one.";
+
 const BROWSER_FALLBACK_HELP: &str =
     "o  open in OS browser   y  copy URL   d d  close it   Ctrl hjkl  another view";
 
@@ -512,7 +515,6 @@ impl Layout {
         match &view.found {
             Found::Browser { url } => browsers
                 .and_then(|browsers| browsers.title(view.id))
-                .filter(|title| !title.is_empty())
                 .or_else(|| url.as_ref().map(BrowserUrl::short))
                 .unwrap_or(BROWSER_TAB),
             Found::Welcome => WELCOME_TAB,
@@ -859,6 +861,18 @@ fn draw_browser(
                 ]);
                 return;
             },
+            Shown::AtLimit => {
+                paint_lines(buffer, seen, &[
+                    ("Browser", accent),
+                    ("", dim),
+                    (url_line, text_style),
+                    ("", dim),
+                    (BROWSER_LIMIT_REACHED, dim),
+                    ("", dim),
+                    (BROWSER_FALLBACK_HELP, dim),
+                ]);
+                return;
+            },
             Shown::Failed(why) => {
                 paint_lines(buffer, seen, &[
                     ("Browser", accent),
@@ -987,6 +1001,21 @@ impl Viewed {
         let worktree = self.layout.worktree;
         let again = self.laid_in == Some(worktree);
         self.show = Some(luned::show(opened, self.at(), worktree, self.size, again, told));
+        if self.machine == Machine::Local {
+            for (view, tty) in self.browsers.active_ttys() {
+                self.ask(Asked::BrowserTty { view, tty: Some(tty) });
+            }
+        }
+    }
+
+    fn flush_browser_ttys(&mut self) {
+        let changes = self.browsers.drain_tty_changes();
+        if self.machine != Machine::Local {
+            return;
+        }
+        for (view, tty) in changes {
+            self.ask(Asked::BrowserTty { view, tty });
+        }
     }
 
     #[must_use]
@@ -1018,7 +1047,9 @@ impl Viewed {
     }
 
     pub fn browser(&mut self, view: ViewId, heard: embedded::Heard) -> Heeded {
-        match self.browsers.heard(view, heard) {
+        let outcome = self.browsers.heard(view, heard);
+        self.flush_browser_ttys();
+        match outcome {
             Some(Outcome::Copy(text)) => Heeded::Copy(text),
             Some(Outcome::Navigated { view, url }) => {
                 self.ask(Asked::Navigate { view, url });
@@ -1034,12 +1065,13 @@ impl Viewed {
 
     pub fn colours(&mut self, colours: Colours) {
         self.browsers.colours(colours);
+        self.flush_browser_ttys();
         assert_eq!(self.browsers.config().colours, colours);
     }
 
     pub fn cell_resized(&mut self, cell: CellPixels) {
-        assert!(cell.width > 0 && cell.height > 0, "cell dimensions are positive");
         self.browsers.cell_resized(cell);
+        self.flush_browser_ttys();
         assert_eq!(self.browsers.config().cell, cell);
     }
 
@@ -1069,6 +1101,7 @@ impl Viewed {
     fn sync_browsers(&mut self) {
         let Some(laid) = self.layout.laid() else {
             self.browsers.clear();
+            self.flush_browser_ttys();
             return;
         };
         let drawn: BTreeMap<ViewId, Placed> =
@@ -1097,6 +1130,7 @@ impl Viewed {
             laid.focused().map(|view| view.id),
             self.window_focused,
         );
+        self.flush_browser_ttys();
     }
 
     pub fn heard(&mut self, heard: Heard) -> Heeded {
@@ -1284,6 +1318,7 @@ impl Viewed {
         self.opened.remove(&worktree);
         self.layout.go(worktree);
         self.browsers.clear();
+        let _ = self.browsers.drain_tty_changes();
         self.ask(Asked::Go(worktree));
         self.watch();
         self.browsers.drain_all_deletes()
@@ -1359,7 +1394,9 @@ impl Viewed {
         }
         if let Some((view, url, inner)) = self.layout.focused_browser() {
             let url = url.cloned();
-            if self.browsers.key(view, key) {
+            let handled = self.browsers.key(view, key);
+            self.flush_browser_ttys();
+            if handled {
                 return Heeded::Quiet;
             }
             if let Some(closed) = self.layout.closes(key, input) {
@@ -1380,7 +1417,14 @@ impl Viewed {
                         }
                     },
                     KeyCode::Char('r') if self.browsers.supported() => {
-                        self.browsers.retry(view, &self.machine, url.as_ref(), inner, self.window_focused);
+                        self.browsers.retry(
+                            view,
+                            &self.machine,
+                            url.as_ref(),
+                            inner,
+                            self.window_focused,
+                        );
+                        self.flush_browser_ttys();
                     },
                     _ => {},
                 }
@@ -1396,7 +1440,8 @@ impl Viewed {
     pub fn paste(&mut self, text: &str) {
         self.unselect();
         if let Some((view, _, _)) = self.layout.focused_browser() {
-            self.browsers.paste(view, text);
+            let _ = self.browsers.paste(view, text);
+            self.flush_browser_ttys();
             return;
         }
         self.type_focused(typed::Event::Paste(api::Paste { text: text.to_owned() }));
@@ -1421,7 +1466,8 @@ impl Viewed {
                 None
             },
             Moused::Browser { view, mouse, column, row } => {
-                self.browsers.mouse(view, mouse, column, row);
+                let _ = self.browsers.mouse(view, mouse, column, row);
+                self.flush_browser_ttys();
                 None
             },
         }
@@ -1856,11 +1902,9 @@ mod tests {
         let greeting = Greeting { foreground: None, background: None };
         let folder = unserved.path().to_owned();
         let browser_config = embedded::Config {
-            runtime: folder.clone(),
-            terminal_socket: folder.join(luned::terminal_socket::SOCKET),
-            cell: CellPixels { width: 10, height: 20 },
+            mode: embedded::Mode::Unsupported,
+            cell: CellPixels { width: side(10), height: side(20) },
             colours: Colours::default(),
-            supported: false,
         };
         let mut viewed = Viewed::start(
             1,
@@ -2055,11 +2099,9 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         let (events, _rx) = std::sync::mpsc::channel();
         let config = embedded::Config {
-            runtime: PathBuf::from("/tmp"),
-            terminal_socket: PathBuf::from("/tmp").join(luned::terminal_socket::SOCKET),
-            cell: crate::answers::CellPixels { width: 10, height: 20 },
+            mode: embedded::Mode::Unsupported,
+            cell: crate::answers::CellPixels { width: side(10), height: side(20) },
             colours: crate::answers::Colours::default(),
-            supported: false,
         };
         let browsers = embedded::Browsers::new(1, config, events);
         layout.draw(&mut buffer, area, None, Some(&browsers));

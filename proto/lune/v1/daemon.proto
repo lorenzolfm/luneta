@@ -857,10 +857,22 @@ message ChangeProjectsRequest {
   }
 
   message OpenBrowser {
-    optional fixed64 worktree = 1;
-    optional string folder = 2;
-    optional string url = 3;
-    TerminalKey from = 4;
+    oneof target {
+      InWorktree worktree = 1;
+      FromTerminal from = 2;
+      string folder = 3;
+    }
+    optional string url = 4;
+
+    message InWorktree {
+      fixed64 worktree = 1;
+      TerminalKey from = 2;
+    }
+
+    message FromTerminal {
+      TerminalKey from = 1;
+      optional string fallback_folder = 2;
+    }
   }
 }
 
@@ -949,6 +961,7 @@ message ShowRequest {
     Arrangement arrange = 11;
     Browser browser = 12;
     Navigate navigate = 13;
+    BrowserTty browser_tty = 14;
   }
 
   message Browser {
@@ -958,6 +971,11 @@ message ShowRequest {
   message Navigate {
     fixed64 view = 1;
     optional string url = 2;
+  }
+
+  message BrowserTty {
+    fixed64 view = 1;
+    optional string tty = 2;
   }
 
   message Hello {

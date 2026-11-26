@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num::NonZeroU16;
 
 use lune_protocol::v1 as api;
 
@@ -44,11 +45,6 @@ impl BrowserUrl {
                     return Err(format!("{text:?} names no host"));
                 }
             },
-            "about" => {
-                if rest.is_empty() {
-                    return Err(format!("the URL {text:?} uses an unsupported scheme"));
-                }
-            },
             _ => return Err(format!("the URL {text:?} uses an unsupported scheme")),
         }
         let canonical = if scheme == lower_scheme {
@@ -56,14 +52,17 @@ impl BrowserUrl {
         } else {
             format!("{lower_scheme}:{rest}")
         };
-        assert_ne!(canonical, "", "a parsed URL is non-empty");
+        assert!(
+            canonical.starts_with("http://") || canonical.starts_with("https://"),
+            "a parsed BrowserUrl uses http or https"
+        );
         assert!(canonical.len() <= URL_BYTES_MAX, "a parsed URL fits URL_BYTES_MAX");
         Ok(BrowserUrl(canonical))
     }
 
     pub fn from_user(text: &str) -> Result<Option<BrowserUrl>, String> {
         let trimmed = text.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("about:blank") {
             return Ok(None);
         }
         let has_about = trimmed.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("about:"));
@@ -89,7 +88,7 @@ impl BrowserUrl {
             return Err(format!("{trimmed:?} is no URL"));
         }
         if let Some(port) = port
-            && (port.is_empty() || port.parse::<u16>().is_err())
+            && !valid_port(port)
         {
             return Err(format!("{trimmed:?} is no URL"));
         }
@@ -102,34 +101,29 @@ impl BrowserUrl {
         } else {
             return Err(format!("{trimmed:?} is no URL"));
         };
-        let parsed = BrowserUrl::parse(&built)?;
-        assert!(parsed.is_http(), "a schemeless user URL resolves to http or https");
-        Ok(Some(parsed))
-    }
-
-    #[must_use]
-    pub fn is_http(&self) -> bool {
-        assert_ne!(self.0, "", "a BrowserUrl is non-empty");
-        self.0.starts_with("http://") || self.0.starts_with("https://")
+        BrowserUrl::parse(&built).map(Some)
     }
 
     #[must_use]
     pub fn short(&self) -> &str {
-        assert_ne!(self.0, "", "a BrowserUrl is non-empty");
         let stripped = self
             .0
             .strip_prefix("https://")
             .or_else(|| self.0.strip_prefix("http://"))
-            .unwrap_or(&self.0);
+            .expect("a BrowserUrl is http or https");
         stripped.trim_end_matches('/')
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
-        assert_ne!(self.0, "", "a BrowserUrl is non-empty");
-        assert!(self.0.len() <= URL_BYTES_MAX, "a BrowserUrl fits URL_BYTES_MAX");
         &self.0
     }
+}
+
+fn valid_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<NonZeroU16>().is_ok()
 }
 
 fn valid_http_authority(authority: &str) -> bool {
@@ -147,10 +141,10 @@ fn valid_http_authority(authority: &str) -> bool {
         if tail.is_empty() {
             return true;
         }
-        return tail.strip_prefix(':').is_some_and(|port| port.parse::<u16>().is_ok());
+        return tail.strip_prefix(':').is_some_and(valid_port);
     }
     if let Some((host, port)) = host_port.split_once(':') {
-        return !host.is_empty() && port.parse::<u16>().is_ok();
+        return !host.is_empty() && valid_port(port);
     }
     true
 }
@@ -1092,16 +1086,12 @@ mod tests {
             BrowserUrl::parse("http://localhost:3000/app").unwrap().as_str(),
             "http://localhost:3000/app"
         );
-        assert_eq!(BrowserUrl::parse("about:blank").unwrap().as_str(), "about:blank");
 
         assert_eq!(
             BrowserUrl::parse("HTTPS://example.com/Path").unwrap().as_str(),
             "https://example.com/Path"
         );
-        assert!(BrowserUrl::parse("HTTPS://example.com/").unwrap().is_http());
         assert_eq!(BrowserUrl::parse("HTTPS://example.com/").unwrap().short(), "example.com");
-        assert!(!BrowserUrl::parse("ABOUT:blank").unwrap().is_http());
-        assert_eq!(BrowserUrl::parse("ABOUT:blank").unwrap().as_str(), "about:blank");
 
         for bad in [
             "",
@@ -1109,6 +1099,9 @@ mod tests {
             "https://example.com/a b",
             "https://example.com/\x07",
             "example.com",
+            "about:blank",
+            "ABOUT:blank",
+            "about:settings",
             "javascript:alert(1)",
             "file:///etc/passwd",
             "https://",
@@ -1116,6 +1109,10 @@ mod tests {
             "https://:8080",
             "https://?query=1",
             "https://#frag",
+            "https://example.com:0",
+            "https://example.com:+80",
+            "https://[::1]:0",
+            "https://[::1]:+443",
             "https://example.com:99999",
             "http:example.com",
         ] {
@@ -1125,6 +1122,8 @@ mod tests {
         assert!(BrowserUrl::parse(&oversized).is_err());
 
         assert_eq!(BrowserUrl::from_user("   "), Ok(None));
+        assert_eq!(BrowserUrl::from_user("about:blank"), Ok(None));
+        assert_eq!(BrowserUrl::from_user("ABOUT:blank"), Ok(None));
         assert_eq!(
             BrowserUrl::from_user("example.com/docs").unwrap().unwrap().as_str(),
             "https://example.com/docs"
@@ -1142,15 +1141,20 @@ mod tests {
             "http://[::1]:5173"
         );
         assert_eq!(
-            BrowserUrl::from_user("ABOUT:blank").unwrap().unwrap().as_str(),
-            "about:blank"
-        );
-        assert_eq!(
             BrowserUrl::from_user("127.0.0.1:8080/health").unwrap().unwrap().as_str(),
             "http://127.0.0.1:8080/health"
         );
-        assert!(BrowserUrl::from_user("not a url").is_err());
-        assert!(BrowserUrl::from_user("localhost:99999").is_err());
-        assert!(BrowserUrl::from_user("javascript:alert(1)").is_err());
+        for bad in [
+            "not a url",
+            "localhost:0",
+            "localhost:+5173",
+            "[::1]:0",
+            "[::1]:+5173",
+            "localhost:99999",
+            "about:settings",
+            "javascript:alert(1)",
+        ] {
+            assert!(BrowserUrl::from_user(bad).is_err(), "{bad:?}");
+        }
     }
 }

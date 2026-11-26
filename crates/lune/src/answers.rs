@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io::{self, Write as _};
+use std::num::NonZeroU16;
 use std::str;
 use std::time::{Duration, Instant};
 
@@ -16,14 +17,14 @@ const WAIT_MAX: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellPixels {
-    pub width: u16,
-    pub height: u16,
+    pub width: NonZeroU16,
+    pub height: NonZeroU16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowPixels {
-    pub width: u16,
-    pub height: u16,
+    pub width: NonZeroU16,
+    pub height: NonZeroU16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,13 +161,17 @@ mod tests {
     fn the_answers_are_heard_until_what_the_terminal_is_and_the_keys_wait() {
         let (events, inbox) = mpsc::channel();
         let background = Rgb { r: 0x1e, g: 0x1e, b: 0x2e };
+        let cell = CellPixels {
+            width: NonZeroU16::new(10).unwrap(),
+            height: NonZeroU16::new(20).unwrap(),
+        };
         for event in [
             typed('l'),
             Event::Answered(Answer::Background(background)),
             typed('s'),
             Event::Answered(Answer::Kitty),
             Event::Answered(Answer::Graphics),
-            Event::Answered(Answer::CellSize(CellPixels { width: 10, height: 20 })),
+            Event::Answered(Answer::CellSize(cell)),
             Event::Answered(Answer::Device),
             Event::Answered(Answer::Foreground(background)),
         ] {
@@ -179,7 +184,7 @@ mod tests {
         assert_eq!(heard, Answers {
             kitty: true,
             graphics: true,
-            cell: Some(CellPixels { width: 10, height: 20 }),
+            cell: Some(cell),
             window_pixels: None,
             colours,
         });
