@@ -47,6 +47,7 @@ pub enum Found {
     Looking,
     Welcome,
     Browser { url: Option<BrowserUrl> },
+    Review,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,7 +62,11 @@ impl View {
     pub fn key(&self) -> Option<TerminalKey> {
         match &self.found {
             Found::Key(key) => Some(*key),
-            Found::Lost | Found::Looking | Found::Welcome | Found::Browser { .. } => None,
+            Found::Lost
+            | Found::Looking
+            | Found::Welcome
+            | Found::Browser { .. }
+            | Found::Review => None,
         }
     }
 }
@@ -211,6 +216,7 @@ fn heard_view(view: show_response::View) -> Result<View, String> {
                 .map_err(|why| format!("view {id}: {why}"))?;
             Found::Browser { url }
         },
+        Said::Review(()) => Found::Review,
     };
     Ok(View { id, rect, found })
 }
@@ -278,6 +284,7 @@ pub enum Asked {
     Browser(Option<BrowserUrl>),
     Navigate { view: ViewId, url: Option<BrowserUrl> },
     BrowserTty { view: ViewId, tty: Option<String> },
+    Review,
     Close(ViewId),
     Focus(ViewId),
     Step { direction: Direction, step: NonZeroU64 },
@@ -313,6 +320,7 @@ impl Asked {
             Asked::BrowserTty { view, tty } => {
                 Event::BrowserTty(show_request::BrowserTty { view: view.get(), tty })
             },
+            Asked::Review => Event::Review(()),
             Asked::Close(view) => Event::Close(view.get()),
             Asked::Focus(view) => {
                 let to = show_request::focus::To::View(view.get());

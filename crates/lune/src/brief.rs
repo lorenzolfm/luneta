@@ -10,7 +10,9 @@ use std::time::{Duration, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::names::SessionName;
 use luned::program::{self, Ran};
-use luned::transcripts::{digest_end, Digest, Reading, SessionId, TranscriptEnd, IDS_MAX};
+use luned::transcripts::{
+    digest_end, Digest, Reading, SessionId, StepsMax, TranscriptEnd, IDS_MAX,
+};
 use luned::{one_answer, Destination};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -85,11 +87,11 @@ impl Over {
         }
     }
 
-    fn steps(&self) -> usize {
+    fn steps(&self) -> StepsMax {
         match self {
-            Over::Sessions { .. } | Over::Machine(..) => 4,
-            Over::Session(..) => 8,
-            Over::Agent(..) => 24,
+            Over::Sessions { .. } | Over::Machine(..) => StepsMax::constant::<4>(),
+            Over::Session(..) => StepsMax::constant::<8>(),
+            Over::Agent(..) => StepsMax::constant::<24>(),
         }
     }
 
@@ -598,7 +600,7 @@ mod tests {
     use std::sync::Mutex;
 
     use luned::api::TranscriptEndsRequest;
-    use luned::transcripts::TAILS_BYTES;
+    use luned::transcripts::{TailLines, TAILS_BYTES};
     use serde_json::{json, Value};
 
     use super::*;
@@ -691,8 +693,8 @@ mod tests {
         let cut = r#"me": "cut short", "type":"user"}]}}"#.to_owned();
         let fold_lines = std::iter::once(cut).chain(lines(&fold_end)).collect::<Vec<_>>();
         let ends = HashMap::from([
-            (id(fold), TranscriptEnd::Claude(fold_lines.join("\n"))),
-            (id(quiet), TranscriptEnd::Claude(lines(&quiet_end).join("\n"))),
+            (id(fold), TranscriptEnd::Claude(TailLines::new(fold_lines.join("\n")).unwrap())),
+            (id(quiet), TranscriptEnd::Claude(TailLines::new(lines(&quiet_end).join("\n")).unwrap())),
         ]);
 
         let notes = vec![
@@ -789,7 +791,9 @@ Its transcript is unknown: Claude Code names none for it.
             let share = usize::try_from(share).expect("a share");
             assert!(ids.len() * share <= TAILS_BYTES, "{} shares of {share}", ids.len());
             let end = |asked: &String| {
-                let end = TranscriptEnd::Claude(tail(&transcripts[asked], share));
+                let end = TranscriptEnd::Claude(
+                    TailLines::new(tail(&transcripts[asked], share)).unwrap(),
+                );
                 (id(asked), end)
             };
             let ends: HashMap<_, _> = ids.iter().map(end).collect();
@@ -862,7 +866,10 @@ Its transcript is unknown: Claude Code names none for it.
         let said = |text: &str| {
             let block = json!({"type": "text", "text": text});
             TranscriptEnd::Claude(
-                json!({"type": "assistant", "message": {"content": [block]}}).to_string(),
+                TailLines::new(
+                    json!({"type": "assistant", "message": {"content": [block]}}).to_string(),
+                )
+                .unwrap(),
             )
         };
         let reads = |machine: &Machine, reading: &Reading| {

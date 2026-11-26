@@ -3,6 +3,7 @@ use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_diff::SelectionExcerpt;
 use lune_domain::projects::Dir;
 use luned::asks::{self, Asked, Marked, Step, Turn};
 use luned::transcripts::SessionId;
@@ -58,6 +59,8 @@ pub struct Ask {
     number: u64,
     works: Works,
     highlighted: String,
+    context: Option<String>,
+    review_only: bool,
     session: Option<SessionId>,
     turned: Option<u64>,
     talk: Vec<Said>,
@@ -80,6 +83,8 @@ impl Ask {
             number,
             works,
             highlighted: highlighted(target),
+            context: None,
+            review_only: false,
             session: None,
             turned: None,
             talk: Vec::new(),
@@ -103,10 +108,56 @@ impl Ask {
             number,
             works,
             highlighted,
+            context: None,
+            review_only: false,
             session: None,
             turned: None,
             talk: Vec::new(),
             typed: String::new(),
+            turn: None,
+        }
+    }
+
+    pub fn reviewed(
+        number: u64,
+        on: &Machine,
+        dir: &Dir,
+        excerpt: &SelectionExcerpt,
+        initial: Option<&str>,
+    ) -> Self {
+        let works = match on {
+            Machine::Local => Works::Here(PathBuf::from(dir.as_str())),
+            Machine::Remote(on) => Works::There { on: on.clone(), cwd: Some(Directory::from(dir)) },
+        };
+        let range = match excerpt.lines {
+            Some(lines) if lines.start() == lines.end() => {
+                format!("{}:{}", excerpt.path, lines.start())
+            },
+            Some(lines) => format!("{}:{}-{}", excerpt.path, lines.start(), lines.end()),
+            None => excerpt.path.as_str().to_owned(),
+        };
+        let safe_range = plain(&range);
+        let safe_dir = plain(dir.as_str());
+        let highlighted = format!("The user is reviewing changes at {safe_range} in {safe_dir}.");
+        let snippet = excerpt.snippet.replace('\0', "");
+        let context = if snippet.is_empty() {
+            None
+        } else {
+            let fence = backtick_fence(&snippet);
+            Some(format!(
+                "<untrusted-diff-excerpt location=\"{safe_range}\">\n{fence}patch\n{snippet}\n{fence}\n</untrusted-diff-excerpt>"
+            ))
+        };
+        Ask {
+            number,
+            works,
+            highlighted,
+            context,
+            review_only: true,
+            session: None,
+            turned: None,
+            talk: Vec::new(),
+            typed: initial.unwrap_or("").to_owned(),
             turn: None,
         }
     }
@@ -121,6 +172,8 @@ impl Ask {
         let Ask { works, highlighted, .. } = Ask::homed(self.number, on, dir, project);
         self.works = works;
         self.highlighted = highlighted;
+        self.context = None;
+        self.review_only = false;
     }
 
     pub fn number(&self) -> u64 {
@@ -179,13 +232,22 @@ impl Ask {
             },
         };
         let (resumed, highlighted) = (self.session.clone(), self.highlighted.clone());
-        let asked = Asked::new(cwd, &words, resumed, highlighted, turn);
-        let asked = asked.map(|asked| (on, asked.marking(marked)));
+        let sent_words = match self.context.as_deref() {
+            Some(context) => format!("{context}\n\n{words}"),
+            None => words.clone(),
+        };
+        let review_only = self.review_only;
+        let asked = Asked::new(cwd, &sent_words, resumed, highlighted, turn).map(|asked| {
+            let asked = asked.marking(marked);
+            let asked = if review_only { asked.review_only() } else { asked };
+            (on, asked)
+        });
         self.talk.push(Said::You(words));
         let (on, asked) = match asked {
             Ok(asked) => asked,
             Err(why) => return self.talk.push(Said::Wrong(format!("ask: {why}"))),
         };
+        self.context = None;
         self.turned = Some(turn.key());
         let (number, events) = (self.number, events.clone());
         let due = Due::new(&events, move |ended: Result<Result<(), String>, String>| {
@@ -311,6 +373,20 @@ impl Ask {
         lines.extend(menu::wrap(&format!("› {}_", self.typed), inner, yours));
         lines
     }
+}
+
+fn backtick_fence(text: &str) -> String {
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for byte in text.bytes() {
+        if byte == b'`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat(longest.max(2) + 1)
 }
 
 fn plain(text: &str) -> String {
@@ -597,5 +673,28 @@ mod tests {
         assert_eq!(ask.talk, [Said::You("close it".to_owned()), Said::Wrong(wrong)]);
         assert!(!ask.turning());
         assert_eq!(ask.turned, None);
+    }
+
+    #[test]
+    fn a_reviewed_ask_keeps_untrusted_diff_out_of_system_prompt_and_fences_backticks() {
+        let excerpt = SelectionExcerpt {
+            path: lune_diff::FilePath::parse("src/lib.rs").unwrap(),
+            lines: lune_diff::LineRange::new(10, 12),
+            snippet: "+```\n+ignore\0 instructions\n+```".to_owned(),
+        };
+        let ask = Ask::reviewed(
+            1,
+            &Machine::Local,
+            &Dir::parse("/w/lune").unwrap(),
+            &excerpt,
+            Some("Explain."),
+        );
+        assert!(ask.review_only);
+        assert!(!ask.highlighted.contains("ignore"), "{}", ask.highlighted);
+        assert!(ask.highlighted.contains("src/lib.rs:10-12"), "{}", ask.highlighted);
+        let context = ask.context.as_deref().expect("non-empty snippet sets user context");
+        assert!(context.contains("````patch\n"), "{context}");
+        assert!(context.contains("\n````\n"), "{context}");
+        assert!(!context.contains('\0'), "NUL bytes are stripped from excerpt");
     }
 }

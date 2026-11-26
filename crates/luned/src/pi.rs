@@ -5,19 +5,19 @@ use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use lune_domain::agent::{Harness, Rung};
+use lune_domain::agent::{Declared, Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::program_status::Message;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble, SeenAgent,
+    absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble, Sighting,
 };
 use crate::mux;
 use crate::process::{self, AgentId};
 use crate::statuses::{
-    ActiveStatus, BlockedReason, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
+    ActiveStatus, BlockedReason, Proof, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
 };
 use crate::watch::{self, Troubles};
 use crate::{log, Directory};
@@ -31,6 +31,8 @@ const EXTENSION_FILE: &str = "lune.ts";
 const FOLDER: &str = "pi";
 
 const DATED_LATE: Duration = Duration::from_secs(1);
+
+pub(crate) const READS: Declared = Declared::of(Harness::Pi, Rung::Extension);
 
 #[must_use]
 pub fn folder() -> Option<PathBuf> {
@@ -262,7 +264,7 @@ impl AgentFiles {
                 continue;
             };
             match read(&path, id.start(), started) {
-                Ok(Some(file)) => {
+                Ok(Some((file, proof))) => {
                     let terminal = cached.map_or_else(
                         || {
                             terminal_or_trouble(
@@ -274,7 +276,7 @@ impl AgentFiles {
                         |it| it.terminal,
                     );
                     let found = Process { started, terminal };
-                    let built = reported(id.clone(), file, found);
+                    let built = reported(id.clone(), file, found, proof);
                     processes.insert(id, found);
                     agents.push(built);
                 },
@@ -296,7 +298,7 @@ impl AgentFiles {
     }
 }
 
-fn extension(lune: &Path) -> io::Result<String> {
+pub fn extension(lune: &Path) -> io::Result<String> {
     let Some(folder) = lune.to_str() else {
         return Err(io::Error::new(ErrorKind::InvalidData, "the daemon's folder is not UTF-8"));
     };
@@ -318,34 +320,45 @@ fn install(pi: &Path, lune: &Path) -> io::Result<()> {
     })
 }
 
-fn read(path: &Path, start: &process::Start, started: SystemTime) -> io::Result<Option<File>> {
+fn read(
+    path: &Path,
+    start: &process::Start,
+    started: SystemTime,
+) -> io::Result<Option<(File, Proof)>> {
     let handle = fs::File::open(path)?;
     let modified = handle.metadata()?.modified()?;
     let bytes = read_file_text(handle)?;
     let raw: RawFile = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     let file = File::parse(raw)?;
-    let stands = match &file.proc_start {
-        Some(recorded) => recorded == start,
-        None => dated_since(modified, started),
+    let proof = match &file.proc_start {
+        Some(recorded) => (recorded == start).then_some(Proof::Started { written: modified }),
+        None => dated_since(modified, started).then_some(Proof::Dated),
     };
-    Ok(stands.then_some(file))
+    Ok(proof.map(|proof| (file, proof)))
 }
 
 fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
     modified.checked_add(DATED_LATE).is_none_or(|late| started <= late)
 }
 
-fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
-    let update = RungUpdate::Active {
-        status: file.status.into_active(),
-        at: Some(file.status_since),
-        subagents: Vec::new(),
-    };
-    let report = Report { agent: id.clone(), rung: Rung::Extension, update };
-    let seen = SeenAgent {
-        id,
-        harness: Harness::Pi,
+#[cfg(test)]
+pub(crate) fn update_of_file(bytes: &[u8]) -> io::Result<RungUpdate> {
+    let raw: RawFile = serde_json::from_slice(bytes)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    Ok(File::parse(raw)?.update())
+}
+
+impl File {
+    fn update(&self) -> RungUpdate {
+        let status = self.status.clone().into_active();
+        RungUpdate::Active { status, at: Some(self.status_since) }
+    }
+}
+
+fn reported(id: AgentId, file: File, process: Process, proof: Proof) -> ReportedAgent {
+    let update = file.update();
+    let sighting = Sighting {
         session_id: Some(file.session_id),
         cwd: file.cwd,
         started_at: Some(process.started),
@@ -353,7 +366,7 @@ fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
         entrypoint: file.entrypoint,
         terminal: process.terminal,
     };
-    ReportedAgent { seen, report }
+    ReportedAgent::new(READS, id, sighting, update, proof)
 }
 
 #[cfg(test)]

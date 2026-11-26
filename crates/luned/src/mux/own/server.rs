@@ -767,7 +767,12 @@ fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<St
             let front = match runs.foreground {
                 Some(front) => {
                     if let Some(pid) = AgentPid::new(front.pid) {
-                        Some(Foreground { pid, argv: front.argv })
+                        if front.argv.is_empty() {
+                            warnings.push(format!("terminal {}'s foreground has no argv", key.id));
+                            None
+                        } else {
+                            Some(Foreground { pid, argv: front.argv })
+                        }
                     } else {
                         warnings.push(format!(
                             "terminal {}'s foreground pid {} is invalid",
@@ -1406,5 +1411,37 @@ mod tests {
         assert_eq!(terminals[1].statuses.root, None);
         assert_eq!(unread.len(), 1, "{unread:?}");
         assert_eq!(unsaid.len(), 7, "{unsaid:?}");
+    }
+
+    #[test]
+    fn a_foreground_with_invalid_pid_or_empty_argv_is_left_out_with_a_warning() {
+        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let listed = [
+            (1, Some(api::Foreground { pid: 0, argv: vec!["sh".to_owned()] })),
+            (2, Some(api::Foreground { pid: 1, argv: vec!["sh".to_owned()] })),
+            (3, Some(api::Foreground { pid: 42, argv: Vec::new() })),
+            (4, Some(api::Foreground { pid: 42, argv: vec!["sh".to_owned()] })),
+        ]
+        .into_iter()
+        .map(|(id, foreground)| api::Terminal {
+            key: Some(api::TerminalKey { id, made_at }),
+            cwd: "/w".to_owned(),
+            program: Some(api::terminal::Program::Runs(api::Running {
+                pid: 70,
+                foreground,
+                ran: None,
+            })),
+            ..api::Terminal::default()
+        });
+        let (terminals, unread, unsaid) = super::terminals(listed.collect());
+        assert_eq!((terminals.len(), unread.len(), unsaid.len()), (4, 0, 3), "{unsaid:?}");
+        let fronts: Vec<Option<u32>> = terminals
+            .iter()
+            .map(|(key, terminal)| match &terminal.is {
+                Is::Running { front, .. } => front.as_ref().map(|front| front.pid.get()),
+                Is::Ended => panic!("terminal {} runs", key.id),
+            })
+            .collect();
+        assert_eq!(fronts, [None, None, None, Some(42)]);
     }
 }

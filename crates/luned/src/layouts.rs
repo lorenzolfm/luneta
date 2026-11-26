@@ -104,6 +104,7 @@ pub enum Command {
     Rooted { root: Dir, listed: Listed },
     Root { project: ProjectId, answer: oneshot::Sender<Result<Root, Unrooted>> },
     Socket(SocketCommand),
+    WorktreeFolder { worktree: WorktreeId, answer: oneshot::Sender<Result<Dir, Unrooted>> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +137,7 @@ pub enum Asked {
     Browser(Option<BrowserUrl>),
     Navigate { view: ViewId, url: Option<BrowserUrl> },
     BrowserTty { view: ViewId, tty: Option<String> },
+    Review,
     Close(ViewId),
     Focus(Focus),
     Resize { sides: Sides, growth: layout::Growth },
@@ -218,6 +220,7 @@ impl Asked {
                 }
                 Asked::BrowserTty { view, tty }
             },
+            Event::Review(()) => Asked::Review,
             Event::Close(view) => Asked::Close(id("close", view).map(ViewId::new)?),
             Event::Focus(show_request::Focus { to, step }) => {
                 use show_request::focus::To;
@@ -577,6 +580,9 @@ impl Layouts {
             Command::Root { project, answer } => {
                 let _ = answer.send(self.root(project));
             },
+            Command::WorktreeFolder { worktree, answer } => {
+                let _ = answer.send(self.worktree_folder(worktree));
+            },
             Command::Rooted { root, listed } => {
                 let rooted = Change::Rooted { root: root.clone(), listed };
                 if let Err(why) = self.followed(rooted) {
@@ -705,7 +711,7 @@ impl Layouts {
                         self.live_browser_tty(worktree.id(), browser.id(), tty, runtime),
                         Some("terminal-browser".to_owned()),
                     ),
-                    View::Welcome(id) => (*id, None, None),
+                    View::Welcome(id) | View::Review(id) => (*id, None, None),
                 };
                 panes.push(PaneInfo { id, tab: worktree.id(), tty, command });
             }
@@ -1212,6 +1218,12 @@ impl Layouts {
         })
     }
 
+    fn worktree_folder(&self, worktree: WorktreeId) -> Result<Dir, Unrooted> {
+        let projects = self.kept().map_err(Unrooted::Unkept)?;
+        let (project, found) = projects.find(worktree).ok_or(Unrooted::Unknown)?;
+        project.folder(found.id()).ok_or(Unrooted::Unknown)
+    }
+
     fn kept(&self) -> Result<&Projects, String> {
         match self.store.projects() {
             Some(projects) => Ok(projects),
@@ -1295,6 +1307,7 @@ impl Layouts {
                     },
                 }
             },
+            Asked::Review => self.review(client)?,
             Asked::Close(view) => {
                 if !self.layout(worktree)?.holds(view) {
                     return Ok(Done::Quiet);
@@ -1586,6 +1599,24 @@ impl Layouts {
         self.place_browser(worktree, focus, beside, None, url, size)
     }
 
+    fn review(&mut self, client: ClientId) -> Result<(), String> {
+        let Client { worktree, focus, .. } = self.clients[&client];
+        let size = self.size_of(client);
+        let view = self.store.fresh().map_err(Failed::said)?;
+        let projects = self.kept()?;
+        let (_, shown) = projects.find(worktree).ok_or("the worktree is gone")?;
+        let beside = if focus.is_some() { Beside::Focused } else { Beside::Largest };
+        let (placed, _) = placement(shown.layout(), focus, beside, view, size)?;
+        self.changed(Change::Open { worktree, view: View::Review(view), placed, size })?;
+        let projects = self.kept()?;
+        let held_in = projects.holding_view(view).map(|(it, _)| it.id());
+        assert_eq!(held_in, Some(worktree), "review view {view} opened in its worktree");
+        assert!(projects.holding_terminal(view).is_none(), "review view {view} runs no terminal");
+        self.client(client).focus = Some(view);
+        let last_focus = self.layout(worktree).map(Layout::last_focus);
+        assert_eq!(last_focus, Ok(Some(view)), "review view {view} opens focused");
+        Ok(())
+    }
     fn made(
         &mut self,
         terminal: TerminalViewId,
@@ -2462,6 +2493,7 @@ fn laid(
             View::Browser(browser) => Found::Browser(show_response::view::Browser {
                 url: browser.url().map(|url| url.as_str().to_owned()),
             }),
+            View::Review(_) => Found::Review(()),
             View::Terminal(terminal) => match known.get(&terminal.id()) {
                 Some(known) => Found::Key(api::TerminalKey {
                     id: known.key.id.get(),
@@ -2565,7 +2597,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::SystemTime;
 
-    use lune_domain::agent::{Harness, Rung};
+    use lune_domain::agent::Harness;
     use lune_domain::projects::{Spot, Subfolder};
     use lune_protocol::program_status::{AppName, ProgramPhase, ProgramStatus, ProgramStatuses};
     use lune_protocol::said::Said;
@@ -2574,7 +2606,9 @@ mod tests {
     use super::*;
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
-    use crate::statuses::{ActiveStatus, Decided};
+    use crate::claude;
+    use crate::statuses::tests::decided;
+    use crate::statuses::ActiveStatus;
 
     fn listed(is: Is) -> server::Terminal {
         server::Terminal {
@@ -2607,12 +2641,7 @@ mod tests {
             harness: Harness::ClaudeCode,
             session_id: Some(Said::new("7c22-ab".to_owned()).unwrap()),
             cwd: Directory::parse("/w".to_owned()).unwrap(),
-            status: Decided::Reported {
-                status: ActiveStatus::Idle,
-                since: None,
-                rung: Rung::Feed,
-                subagents: Vec::new(),
-            },
+            status: decided(claude::READS, ActiveStatus::Idle, None),
             started_at: Some(SystemTime::UNIX_EPOCH),
             name: None,
             entrypoint: None,

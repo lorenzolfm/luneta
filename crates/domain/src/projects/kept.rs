@@ -14,7 +14,7 @@ use super::{
 use super::{VIEWS_MAX, WORKTREES_MAX};
 use crate::agent::Harness;
 
-const VERSION: u32 = 12;
+const VERSION: u32 = 13;
 
 const WITHOUT_LAYOUTS: u32 = 1;
 
@@ -32,9 +32,9 @@ const ROWS_UNOPENED: u32 = 8;
 
 const WITHOUT_LAST_FOCUS: u32 = 9;
 
-const WITHOUT_SHOWN: u32 = 10;
+const WITHOUT_REVIEWS: u32 = 11;
 
-const WITHOUT_BROWSERS: u32 = 11;
+const WITHOUT_BROWSERS: u32 = 12;
 
 const CHAR_BYTES_MAX: usize = 4;
 
@@ -239,6 +239,7 @@ enum KeptNode {
     Terminal(KeptTerminal),
     Welcome(KeptWelcome),
     Browser(KeptBrowser),
+    Review(KeptReview),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -253,6 +254,12 @@ struct KeptBrowser {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptReview {
+    id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -320,7 +327,7 @@ pub fn parse(
     }
     if version > UNROOTED {
         return match version {
-            version if version > WITHOUT_SHOWN => read_laid(version, parsed::<Laid>(text, version)?),
+            WITHOUT_REVIEWS..=VERSION => read_laid(version, parsed::<Laid>(text, version)?),
             LAID_AS_VIEW => {
                 let viewed = parsed::<Viewed>(text, version)?;
                 read_laid(version, viewed.into_iter().map(Viewed::laid).collect())
@@ -400,6 +407,9 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     }
     if version <= WITHOUT_BROWSERS && nodes().any(|it| matches!(it, KeptNode::Browser(_))) {
         return Err(format!("it is of version {version}, which holds no browser"));
+    }
+    if version <= WITHOUT_REVIEWS && nodes().any(|it| matches!(it, KeptNode::Review(_))) {
+        return Err(format!("it is of version {version}, which holds no review"));
     }
     if version <= WITHOUT_UNRUN && nodes().any(unrun) {
         return Err(format!("it is of version {version}, which holds no line left unrun"));
@@ -809,6 +819,9 @@ fn read_tree(tree: Vec<KeptNode>) -> Result<Vec<Preordered<View>>, String> {
             let url = url.as_deref().map(BrowserUrl::parse).transpose().map_err(why)?;
             Ok(Preordered::View(View::Browser(Browser::new(id, url))))
         },
+        KeptNode::Review(KeptReview { id }) => {
+            id.parse().map(|id| Preordered::View(View::Review(id)))
+        },
     });
     tree.collect()
 }
@@ -846,6 +859,9 @@ impl KeptLayout {
                 id: browser.id().to_string(),
                 url: browser.url().map(|url| url.as_str().to_owned()),
             }),
+            Preordered::View(View::Review(id)) => {
+                KeptNode::Review(KeptReview { id: id.to_string() })
+            },
         });
         let shown = KeptShown::of(layout.shape()?);
         Some(KeptLayout { shown, tree: tree.collect() })
@@ -1079,7 +1095,7 @@ mod tests {
         let change = Change::AddProject { spot: alone("/home/me/Vault"), name: None };
         (projects, _) = projects.changed(change, None, &mut draw).unwrap();
         let want = r#"{
-  "version": 12,
+  "version": 13,
   "projects": [
     {
       "id": "0000000000000001",
@@ -1142,20 +1158,21 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        assert_eq!(parse(&want.replace(r#""version": 12"#, r#""version": 11"#)), Ok(projects.clone()));
+        assert_eq!(parse(&want.replace(r#""version": 13"#, r#""version": 12"#)), Ok(projects.clone()));
+        assert_eq!(parse(&want.replace(r#""version": 13"#, r#""version": 11"#)), Ok(projects.clone()));
         let tabbed = "\n              \"shown\": {\n                \"tabs\": {}\n              },";
         let older = want.replace(tabbed, "");
         assert!(parse(&older).unwrap_err().contains("missing field `shown`"));
         for before in [7, 8, 9, 10] {
-            let before = older.replace(r#""version": 12"#, &format!(r#""version": {before}"#));
+            let before = older.replace(r#""version": 13"#, &format!(r#""version": {before}"#));
             assert_eq!(parse(&before), Ok(projects.clone()));
         }
-        let shown_before = want.replace(r#""version": 12"#, r#""version": 10"#);
+        let shown_before = want.replace(r#""version": 13"#, r#""version": 10"#);
         assert!(parse(&shown_before).unwrap_err().contains("unknown field `shown`"));
-        let viewed = older.replace(r#""version": 12"#, r#""version": 6"#);
+        let viewed = older.replace(r#""version": 13"#, r#""version": 6"#);
         assert_eq!(parse(&viewed.replace(r#""layout": {"#, r#""view": {"#)), Ok(projects.clone()));
         assert!(parse(&viewed).unwrap_err().contains("unknown field `layout`"));
-        let before = want.replace(r#""version": 12"#, r#""version": 5"#);
+        let before = want.replace(r#""version": 13"#, r#""version": 5"#);
         assert!(parse(&before).unwrap_err().contains("unknown field `holds`"));
 
         let unopened = r#""clone": [
@@ -1167,7 +1184,7 @@ mod tests {
         let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), None)));
         for before in [7, 8] {
             let version = format!(r#""version": {before}"#);
-            let before = with_unopened.replace(r#""version": 12"#, &version);
+            let before = with_unopened.replace(r#""version": 13"#, &version);
             let read = rooted_as(&before, alone).unwrap();
             assert_eq!(read.projects, projects, "a worktree an old file kept with no view goes");
             assert!(read.migrated, "and the file is written again at once");
@@ -1213,7 +1230,7 @@ mod tests {
         (projects, _) = projects.changed(panes, None, &mut draw).unwrap();
         projects = projects.relaid(Relaid::Fill { worktree, full: Some(vim) }).unwrap();
         let want = r#"{
-  "version": 12,
+  "version": 13,
   "projects": [
     {
       "id": "0000000000000001",
@@ -1284,7 +1301,8 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        assert_eq!(parse(&want.replace(r#""version": 12"#, r#""version": 11"#)), Ok(projects.clone()));
+        assert_eq!(parse(&want.replace(r#""version": 13"#, r#""version": 12"#)), Ok(projects.clone()));
+        assert_eq!(parse(&want.replace(r#""version": 13"#, r#""version": 11"#)), Ok(projects.clone()));
         let (_, top) = projects.find(worktree).unwrap();
         assert_eq!(top.layout().last_focus(), Some(vim), "a full view is the last focus");
         let tabs = Change::Arrange { worktree, arranged: Arranged::Tabs };
@@ -1306,9 +1324,9 @@ mod tests {
         let older = want.replace(&shown, &format!("{vim_full},"));
         for before in [7, 8, 9, 10] {
             let version = format!(r#""version": {before}"#);
-            let older = older.replace(r#""version": 12"#, &version);
+            let older = older.replace(r#""version": 13"#, &version);
             assert_eq!(parse(&older), Ok(as_tabs.clone()), "an older file shows tabs");
-            let refused = parse(&want.replace(r#""version": 12"#, &version)).unwrap_err();
+            let refused = parse(&want.replace(r#""version": 13"#, &version)).unwrap_err();
             assert!(refused.contains("unknown field `shown`"), "an older file shows no panes");
         }
         assert!(parse(&older).unwrap_err().contains("unknown field `full`"));
@@ -1326,16 +1344,16 @@ mod tests {
         let older_focus = r#""last_focus": "0000000000000003""#;
         let older_both = format!("{vim_full},\n              {older_focus}");
         let older_both = older.replace(vim_full, &older_both);
-        let older_both = older_both.replace(r#""version": 12"#, r#""version": 10"#);
+        let older_both = older_both.replace(r#""version": 13"#, r#""version": 10"#);
         let refused = parse(&older_both).unwrap_err();
         assert!(refused.contains("and so is focused on no other view"), "{refused}");
         let older_on_shell = older.replace(vim_full, older_focus);
         for before in [7, 8, 9] {
             let version = format!(r#""version": {before}"#);
             let refused = format!("it is of version {before}, which keeps no last focus");
-            assert_eq!(parse(&older_on_shell.replace(r#""version": 12"#, &version)), Err(refused));
+            assert_eq!(parse(&older_on_shell.replace(r#""version": 13"#, &version)), Err(refused));
         }
-        let viewed = older.replace(r#""version": 12"#, r#""version": 6"#);
+        let viewed = older.replace(r#""version": 13"#, r#""version": 6"#);
         assert_eq!(parse(&viewed.replace(r#""layout": {"#, r#""view": {"#)), Ok(as_tabs));
         assert!(parse(&viewed).unwrap_err().contains("unknown field `layout`"));
         let relaid = want.replace(r#""layout": {"#, r#""view": {"#);
@@ -1369,7 +1387,29 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_view_is_kept_with_its_url_and_only_from_version_12() {
+    fn a_review_view_is_kept_by_its_id_alone_and_only_from_version_12() {
+        let text = |version: u32| {
+            format!(
+                r#"{{"version": {version}, "projects": [{{"id": "0000000000000001", "name": "a",
+                "dir": "/a", "holds": {{"clone": [{{"id": "0000000000000002", "worktree": "b",
+                "layout": {{"shown": {{"tabs": {{}}}}, "tree": [
+                {{"split": {{"towards": "right", "share": 500000}}}},
+                {{"terminal": {{"id": "0000000000000003", "folder": "/a/b", "runs": "shell"}}}},
+                {{"review": {{"id": "0000000000000004"}}}}]}}}}]}}}}]}}"#
+            )
+        };
+        let projects = parse(&text(12)).unwrap();
+        let (_, worktree) = projects.find(WorktreeId::of(2).unwrap()).unwrap();
+        let views: Vec<&View> = worktree.layout().views().collect();
+        assert!(matches!(views[..], [View::Terminal(_), View::Review(id)] if id.get() == 4));
+        assert_eq!(parse(&written(&projects)), Ok(projects.clone()));
+        assert!(written(&projects).contains(r#""review": {"#));
+        let refused = "it is of version 11, which holds no review";
+        assert_eq!(parse(&text(11)), Err(refused.to_owned()));
+    }
+
+    #[test]
+    fn a_browser_view_is_kept_with_its_url_and_only_from_version_13() {
         let text = |version: u32| {
             format!(
                 r#"{{"version": {version}, "projects": [{{"id": "0000000000000001", "name": "a",
@@ -1380,7 +1420,7 @@ mod tests {
                 {{"browser": {{"id": "0000000000000004"}}}}]}}}}]}}}}]}}"#
             )
         };
-        let projects = parse(&text(12)).unwrap();
+        let projects = parse(&text(13)).unwrap();
         let (_, worktree) = projects.find(WorktreeId::of(2).unwrap()).unwrap();
         let views: Vec<&View> = worktree.layout().views().collect();
         let expected_url = BrowserUrl::parse("https://example.com/pr/1").unwrap();
@@ -1392,9 +1432,9 @@ mod tests {
         assert_eq!(parse(&serialized), Ok(projects.clone()));
         assert!(serialized.contains(r#""browser": {"#));
         assert!(serialized.contains(r#""url": "https://example.com/pr/1""#));
-        let refused = "it is of version 11, which holds no browser";
-        assert_eq!(parse(&text(11)), Err(refused.to_owned()));
-        let about_blank = text(12).replace("https://example.com/pr/1", "about:blank");
+        let refused = "it is of version 12, which holds no browser";
+        assert_eq!(parse(&text(12)), Err(refused.to_owned()));
+        let about_blank = text(13).replace("https://example.com/pr/1", "about:blank");
         assert!(parse(&about_blank).is_err(), "about:blank is not stored; Start Page is omitted");
     }
 

@@ -13,6 +13,7 @@ use rustix::process::{self, Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus};
 use tokio::sync::watch;
 
 use crate::id::TerminalId;
+use crate::process::ProcessId;
 use crate::pty::Led;
 use crate::terminal::Exit;
 
@@ -59,8 +60,8 @@ impl Leader {
     }
 
     #[must_use]
-    pub fn pid(&self) -> u32 {
-        self.pid.as_raw_nonzero().get().cast_unsigned()
+    pub fn pid(&self) -> ProcessId {
+        ProcessId::of(self.pid)
     }
 
     pub fn end(self) {

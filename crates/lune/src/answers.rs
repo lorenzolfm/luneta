@@ -54,6 +54,14 @@ pub struct Answers {
     pub colours: Colours,
 }
 
+#[must_use]
+pub fn cell_px() -> Option<(NonZeroU16, NonZeroU16)> {
+    let winsize = rustix::termios::tcgetwinsize(io::stdout()).ok()?;
+    let width = NonZeroU16::new(winsize.ws_xpixel.checked_div(winsize.ws_col)?)?;
+    let height = NonZeroU16::new(winsize.ws_ypixel.checked_div(winsize.ws_row)?)?;
+    Some((width, height))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Colours {
     foreground: Option<Rgb>,

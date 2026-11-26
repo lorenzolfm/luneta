@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender};
@@ -12,7 +11,10 @@ use tokio::sync::watch::Receiver;
 
 use crate::agent::{Agent, Name};
 use crate::core::{self, Command};
-use crate::transcripts::{self, one_line, Asked, Digest, SessionId};
+use crate::transcripts::{
+    self, one_line, Asked, Digest, SessionId, ShareBytes, StepsMax, Tail, TailLimits,
+    TranscriptHarness,
+};
 use crate::watch::Troubles;
 use crate::{claude, program};
 
@@ -22,9 +24,13 @@ const WRITING: Duration = Duration::from_mins(1);
 
 const CALLS_MAX: usize = 4;
 
-const STEPS: usize = 8;
+const STEPS: StepsMax = StepsMax::constant::<8>();
+const _: () = assert!(STEPS.get() > 0);
 
-const SHARE: usize = 256 * 1024;
+const SHARE: ShareBytes = ShareBytes::constant::<{ 256 * 1024 }>();
+const _: () = assert!(SHARE.get() <= transcripts::TAILS_BYTES);
+
+const TAIL_LIMITS: TailLimits = TailLimits::new(SHARE, STEPS);
 
 const TOPIC_CHARS: usize = 80;
 
@@ -75,7 +81,7 @@ struct Kept {
     topic: Option<Said>,
     status_since: Option<SystemTime>,
     read_due: bool,
-    transcript: Option<(PathBuf, u64)>,
+    transcript: Option<Tail>,
     due: Option<Digest>,
     left: Option<Instant>,
     behind: bool,
@@ -88,21 +94,23 @@ impl Kept {
     }
 
     fn grown(&mut self, projects: &Path, id: &SessionId) -> io::Result<Option<Digest>> {
-        let (path, was) = match self.transcript.take() {
-            Some((path, was)) => (path, Some(was)),
-            None => match transcripts::find(projects, id) {
-                Some(path) => (path, None),
-                None => return Ok(None),
-            },
+        let tail = if let Some(tail) = &mut self.transcript {
+            tail
+        } else {
+            let Some(path) = transcripts::find(projects, id) else {
+                return Ok(None);
+            };
+            let tail = Tail::new(path, TranscriptHarness::Claude, TAIL_LIMITS)
+                .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
+            self.transcript.insert(tail)
         };
-        let length = fs::metadata(&path)?.len();
-        if was == Some(length) {
-            self.transcript = Some((path, length));
-            return Ok(None);
+        let result = tail.grown();
+        if let Err(error) = &result
+            && error.kind() == io::ErrorKind::NotFound
+        {
+            self.transcript = None;
         }
-        let digest = transcripts::told(&path, SHARE, STEPS)?;
-        self.transcript = Some((path, length));
-        Ok(Some(digest))
+        result
     }
 }
 
@@ -346,12 +354,12 @@ pub fn follow(
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{OpenOptions, Permissions};
+    use std::fs::{self, OpenOptions, Permissions};
     use std::io::Write as _;
     use std::num::NonZeroU32;
     use std::os::unix::fs::PermissionsExt as _;
 
-    use lune_domain::agent::{Harness, Rung};
+    use lune_domain::agent::Harness;
     use lune_domain::mux::TerminalKey;
     use serde_json::json;
     use tempfile::TempDir;
@@ -360,7 +368,9 @@ mod tests {
     use crate::agent::Source;
     use crate::mux::OwnMade;
     use crate::process::AgentPid;
-    use crate::statuses::{ActiveStatus, BlockedReason, Decided};
+    use crate::claude;
+    use crate::statuses::tests::decided;
+    use crate::statuses::{ActiveStatus, BlockedReason};
     use crate::Directory;
 
     const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
@@ -375,12 +385,11 @@ mod tests {
             harness: Harness::ClaudeCode,
             session_id: Some(Said::new(id.to_owned()).unwrap()),
             cwd: Directory::parse("/w".to_owned()).unwrap(),
-            status: Decided::Reported {
+            status: decided(
+                claude::READS,
                 status,
-                since: Some(SystemTime::UNIX_EPOCH + Duration::from_mins(since)),
-                rung: Rung::Feed,
-                subagents: Vec::new(),
-            },
+                Some(SystemTime::UNIX_EPOCH + Duration::from_mins(since)),
+            ),
             started_at: Some(began() + Duration::from_secs(1)),
             name: None,
             entrypoint: Some(Said::new("cli".to_owned()).unwrap()),
@@ -910,9 +919,29 @@ mod tests {
             let agents = [agent(ID, status, 2)];
             mode(0o000);
             assert_eq!(topics.look(&agents, true), []);
+            assert!(topics.kept[ID].transcript.is_some());
             mode(0o644);
             assert_eq!(topics.look(&agents, true).len(), 1);
         }
+    }
+
+    #[test]
+    fn a_vanished_transcript_clears_its_tail_and_is_found_again() {
+        let projects = Projects::new();
+        let busy = [agent(ID, ActiveStatus::Working, 2)];
+        let mut topics = with_a_topic(&projects, &busy);
+        assert!(topics.kept[ID].transcript.is_some());
+
+        fs::remove_file(projects.transcript(ID)).unwrap();
+        assert_eq!(topics.look(&busy, true), []);
+        assert!(topics.kept[ID].transcript.is_none());
+
+        fs::create_dir(projects.0.path().join("-other")).unwrap();
+        let relocated = projects.0.path().join(format!("-other/{ID}.jsonl"));
+        let record = json!({"type": "user", "message": {"content": "now the tabs"}});
+        fs::write(&relocated, format!("{record}\n")).unwrap();
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        assert!(topics.kept[ID].transcript.is_some());
     }
 
     #[test]

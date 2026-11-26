@@ -685,8 +685,8 @@ mod tests {
         let refused = [
             ("{", "EOF"),
             (
-                r#"{"version": 13, "projects": []}"#,
-                "version 13, and this luned reads only 1 to 12",
+                r#"{"version": 14, "projects": []}"#,
+                "version 14, and this luned reads only 1 to 13",
             ),
             (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),

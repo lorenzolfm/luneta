@@ -7,19 +7,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use lune_domain::agent::{Harness, Rung};
+use lune_domain::agent::{Declared, Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::agent::{
-    named_pid, terminal_or_trouble, Name, SeenAgent, Source, FILE_BYTES_MAX,
+    named_pid, terminal_or_trouble, Name, Sighting, Source, FILE_BYTES_MAX,
 };
 use crate::mux;
 use crate::process::{self, AgentId};
 use crate::statuses::{
-    self, ActiveStatus, BlockedReason, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
+    self, ActiveStatus, BlockedReason, Proof, ReportedAgent, RungUpdate,
+    SOURCE_AGENTS_MAX,
 };
 use crate::watch::{self, Troubles};
 use crate::{log, Directory};
@@ -91,6 +92,8 @@ const DATED_LATE: Duration = Duration::from_secs(1);
 
 const TORN: Duration = Duration::from_secs(1);
 
+pub(crate) const READS: Declared = Declared::of(Harness::Antigravity, Rung::Hook);
+
 const AGENT_FILES_MAX: usize = SOURCE_AGENTS_MAX;
 
 const SCRIPT_BYTES_MAX: u64 = 64 * 1024;
@@ -140,6 +143,7 @@ struct Snapshot {
     name: Option<Name>,
     status: Option<ActiveStatus>,
     modified: SystemTime,
+    proof: Proof,
 }
 
 #[derive(Clone)]
@@ -369,16 +373,8 @@ fn reported(
     started: SystemTime,
     terminal: Option<TerminalKey>,
 ) -> ReportedAgent {
-    let update = match snapshot.status {
-        Some(status) => {
-            RungUpdate::Active { status, at: Some(snapshot.modified), subagents: Vec::new() }
-        },
-        None => RungUpdate::Clear,
-    };
-    let report = Report { agent: id.clone(), rung: Rung::Hook, update };
-    let seen = SeenAgent {
-        id,
-        harness: Harness::Antigravity,
+    let update = update_of(snapshot.status, snapshot.modified);
+    let sighting = Sighting {
         session_id: snapshot.session_id,
         cwd: snapshot.cwd,
         started_at: Some(started),
@@ -386,7 +382,21 @@ fn reported(
         entrypoint: Some(Said::new("tui".to_owned()).expect("tui is not empty")),
         terminal,
     };
-    ReportedAgent { seen, report }
+    ReportedAgent::new(READS, id, sighting, update, snapshot.proof)
+}
+
+fn update_of(status: Option<ActiveStatus>, modified: SystemTime) -> RungUpdate {
+    match status {
+        Some(status) => RungUpdate::Active { status, at: Some(modified) },
+        None => RungUpdate::Clear,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn update_of_file(bytes: &[u8], modified: SystemTime) -> io::Result<RungUpdate> {
+    let envelope: Envelope = serde_json::from_slice(bytes)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    Ok(update_of(state_of(&envelope.state), modified))
 }
 
 fn temp_file_pid(path: &Path) -> Option<u32> {
@@ -424,14 +434,13 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
     let bytes = read_bounded_file(file, FILE_BYTES_MAX)?;
     let envelope: Envelope = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    let stands = if let Some(recorded) = &envelope.proc_start {
-        recorded == start
-    } else {
-        dated_since(modified, started)
+    let proof = match &envelope.proc_start {
+        Some(recorded) => (recorded == start).then_some(Proof::Started { written: modified }),
+        None => dated_since(modified, started).then_some(Proof::Dated),
     };
-    if !stands {
+    let Some(proof) = proof else {
         return Ok(None);
-    }
+    };
     let Some(cwd) = envelope.state.cwd() else {
         return Err(io::Error::new(ErrorKind::InvalidData, "cwd is missing or relative"));
     };
@@ -442,6 +451,7 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
         name: envelope.state.name(),
         status,
         modified,
+        proof,
     }))
 }
 
@@ -1161,9 +1171,9 @@ mod tests {
 
         let first = files.scan();
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].seen.session_id, None);
+        assert_eq!(first[0].seen().session_id, None);
         assert!(matches!(
-            first[0].report.update,
+            first[0].report().update(),
             RungUpdate::Active { status: ActiveStatus::Idle, .. }
         ));
 

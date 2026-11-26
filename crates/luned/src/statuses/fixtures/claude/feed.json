@@ -1,0 +1,108 @@
+{
+  "recorded": {
+    "agent": "claude 2.1.332 (Claude Code)",
+    "by": "dev record-status",
+    "on": "2026-11-25"
+  },
+  "steps": {
+    "error": {
+      "cwd": "/recorded",
+      "entrypoint": "cli",
+      "kind": "interactive",
+      "pidDomain": "recorded",
+      "procStart": "1",
+      "sessionId": "recorded",
+      "startedAt": 1795649446616,
+      "status": "idle",
+      "statusUpdatedAt": 1795649449554,
+      "version": "2.1.332"
+    },
+    "exit": null,
+    "finish": {
+      "cwd": "/recorded",
+      "entrypoint": "cli",
+      "kind": "interactive",
+      "pidDomain": "recorded",
+      "procStart": "1",
+      "sessionId": "recorded",
+      "startedAt": 1795649395072,
+      "status": "idle",
+      "statusUpdatedAt": 1795649423981,
+      "version": "2.1.332"
+    },
+    "interrupt": {
+      "cwd": "/recorded",
+      "entrypoint": "cli",
+      "kind": "interactive",
+      "pidDomain": "recorded",
+      "procStart": "1",
+      "sessionId": "recorded",
+      "startedAt": 1795649395072,
+      "status": "idle",
+      "statusUpdatedAt": 1795649442795,
+      "version": "2.1.332"
+    },
+    "permission": {
+      "cwd": "/recorded",
+      "entrypoint": "cli",
+      "kind": "interactive",
+      "pidDomain": "recorded",
+      "procStart": "1",
+      "sessionId": "recorded",
+      "startedAt": 1795649395072,
+      "status": "waiting",
+      "statusUpdatedAt": 1795649430104,
+      "version": "2.1.332",
+      "waitingFor": "permission prompt"
+    },
+    "prompt": {
+      "cwd": "/recorded",
+      "entrypoint": "cli",
+      "kind": "interactive",
+      "pidDomain": "recorded",
+      "procStart": "1",
+      "sessionId": "recorded",
+      "startedAt": 1795649395072,
+      "status": "busy",
+      "statusUpdatedAt": 1795649397452,
+      "version": "2.1.332"
+    },
+    "question": {
+      "cwd": "/recorded",
+      "entrypoint": "cli",
+      "kind": "interactive",
+      "pidDomain": "recorded",
+      "procStart": "1",
+      "sessionId": "recorded",
+      "startedAt": 1795649395072,
+      "status": "waiting",
+      "statusUpdatedAt": 1795649435332,
+      "version": "2.1.332",
+      "waitingFor": "input needed"
+    },
+    "reject": {
+      "cwd": "/recorded",
+      "entrypoint": "cli",
+      "kind": "interactive",
+      "pidDomain": "recorded",
+      "procStart": "1",
+      "sessionId": "recorded",
+      "startedAt": 1795649395072,
+      "status": "idle",
+      "statusUpdatedAt": 1795649432199,
+      "version": "2.1.332"
+    },
+    "start": {
+      "cwd": "/recorded",
+      "entrypoint": "cli",
+      "kind": "interactive",
+      "pidDomain": "recorded",
+      "procStart": "1",
+      "sessionId": "recorded",
+      "startedAt": 1795649395072,
+      "status": "idle",
+      "statusUpdatedAt": 1795649395001,
+      "version": "2.1.332"
+    }
+  }
+}

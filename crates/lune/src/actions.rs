@@ -115,6 +115,7 @@ actions! {
     NewView,
     NewWelcome,
     NewBrowser,
+    NewReview,
     ShowTabs,
     ShowPanes,
     NewWorktree,
@@ -273,6 +274,10 @@ impl Action {
             Action::NewBrowser => {
                 let new = menu(&['n', 'b']);
                 spec("new browser view…", &["url", "page", "site", "http"], new, CHECKED_OUT)
+            },
+            Action::NewReview => {
+                let new = menu(&['n', 'r']);
+                spec("new review view", &["changes", "patch", "pull request", "split"], new, VIEW)
             },
             Action::ShowTabs => {
                 spec("Show as tabs", &["arrange", "layout", "views"], menu(&['t']), VIEW)

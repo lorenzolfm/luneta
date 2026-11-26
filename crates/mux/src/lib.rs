@@ -9,6 +9,7 @@ mod frame;
 mod front;
 mod id;
 mod leader;
+mod looker;
 mod marks;
 mod mux;
 mod process;

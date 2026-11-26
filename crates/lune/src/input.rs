@@ -27,7 +27,7 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 
 const COLOUR_LONGEST: usize = 32;
 
-const APC_LONGEST: usize = 128;
+const APC_LONGEST: usize = 256;
 
 const END_SIGNALS: [i32; 2] = [SIGHUP, SIGTERM];
 
@@ -622,15 +622,14 @@ fn apc(bytes: &[u8]) -> Parsed {
         let alt = KeyEvent::new(KeyCode::Char('_'), KeyModifiers::ALT);
         Parsed::Split(Sent::Input(Input::Key(alt)), 2)
     };
-    let body = match bytes[2..] {
+    let payload = match bytes[2..] {
         [] => return Parsed::Partial,
-        [b'G', ref body @ ..] => body,
+        [b'G', ref rest @ ..] => rest,
         _ => return typed(),
     };
-    match *body {
-        [ref payload @ .., ESC, b'\\'] => {
-            let ok = payload == b"i=31;OK"
-                || (payload.starts_with(b"i=31,") && payload.ends_with(b";OK"));
+    match *payload {
+        [ref body @ .., ESC, b'\\'] => {
+            let ok = body.ends_with(b";OK") || body == b"OK";
             if ok {
                 Parsed::Whole(Sent::Answer(Answer::Graphics))
             } else {
@@ -638,9 +637,21 @@ fn apc(bytes: &[u8]) -> Parsed {
             }
         },
         [.., ESC] => Parsed::Partial,
-        [.., ESC, _] => typed(),
-        [.., last] if !(last.is_ascii_graphic() || last == b' ') || body.len() > APC_LONGEST => {
-            typed()
+        [.., ESC, _] => {
+            if payload.contains(&b';') {
+                Parsed::Unknown
+            } else {
+                typed()
+            }
+        },
+        [.., last]
+            if (!last.is_ascii_graphic() && last != b' ') || payload.len() > APC_LONGEST =>
+        {
+            if payload.contains(&b';') {
+                Parsed::Unknown
+            } else {
+                typed()
+            }
         },
         _ => Parsed::Partial,
     }
@@ -829,6 +840,16 @@ mod tests {
         let paste = Sent::Input(Input::Paste("ls\r".to_owned()));
         assert_eq!(sent(&[b"\x1b[", b"200~ls\r\x1b[201~"]), [paste]);
         assert_eq!(sent(&[b"\x1bO", b"A"]), [pressed(KeyCode::Up, KeyModifiers::NONE)]);
+        assert_eq!(
+            sent(&[b"\x1b_Gi=31;", b"OK\x1b\\"]),
+            [Sent::Answer(Answer::Graphics)]
+        );
+        assert_eq!(sent(&[b"\x1b_Gi=31;EINVAL\x1b\\"]), []);
+        assert_eq!(sent(&[b"\x1b_Gi=31;EINVAL: invalid width\x1b\\"]), []);
+        assert_eq!(
+            sent(&[b"\x1b_Gi=31;ENOTSUP: graphics protocol not supported\x1b\\"]),
+            []
+        );
     }
 
     #[test]

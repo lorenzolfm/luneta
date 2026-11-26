@@ -1,0 +1,16 @@
+id: no-json-comments
+snapshots:
+  '{"a": /* b */ 1}':
+    labels:
+    - source: /* b */
+      style: primary
+      start: 6
+      end: 13
+  ? |-
+    {"a": 1 // b
+    }
+  : labels:
+    - source: // b
+      style: primary
+      start: 8
+      end: 12

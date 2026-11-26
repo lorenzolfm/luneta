@@ -1515,6 +1515,7 @@ dependencies = [
  "cpal",
  "crossterm",
  "frizbee",
+ "lune-diff",
  "lune-domain",
  "lune-protocol",
  "lune-waits",
@@ -1538,6 +1539,10 @@ dependencies = [
  "xn",
  "zbus",
 ]
+
+[[package]]
+name = "lune-diff"
+version = "0.3.0"
 
 [[package]]
 name = "lune-domain"
@@ -1623,6 +1628,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "lune-domain",
+ "lune-mux",
  "lune-phone",
  "lune-protocol",
  "lune-waits",

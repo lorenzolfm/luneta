@@ -1,4 +1,5 @@
 pub mod agent_status;
+pub mod diff;
 pub mod git;
 pub mod github;
 pub mod made;
@@ -27,6 +28,14 @@ pub const LISTING_CHILDREN_BYTES_MAX: usize = 8 * 1024 * 1024;
 
 pub const HOST_SUBAGENTS_BYTES_MAX: usize = 512 * 1024;
 
+pub const PATCH_BYTES_MAX: usize = 8 * 1024 * 1024;
+
+pub const UNTRACKED_FILES_MAX: usize = 64;
+
+pub const UNTRACKED_BYTES_MAX: usize = 128 * 1024;
+
+pub const UNTRACKED_TOTAL_BYTES_MAX: usize = 1024 * 1024;
+
 pub const PROGRAM_STATUS_RECORDS_MAX: usize = program_status::RECORDS_MAX;
 
 pub const PROGRAM_STATUS_PROGRESS_PERCENT_MAX: u8 = program_status::PROGRESS_PERCENT_MAX;
@@ -35,6 +44,8 @@ const _: () = assert!(matches!(TERMINAL_BROWSER_SOCKET.as_bytes(), [_, ..]));
 const _: () = assert!(MUX_TERMINALS_MAX >= 64);
 const _: () = assert!(LISTING_CHILDREN_BYTES_MAX < RPC_MESSAGE_BYTES_MAX);
 const _: () = assert!(HOST_SUBAGENTS_BYTES_MAX * 17 < RPC_MESSAGE_BYTES_MAX);
+const _: () = assert!(UNTRACKED_BYTES_MAX <= UNTRACKED_TOTAL_BYTES_MAX);
+const _: () = assert!(PATCH_BYTES_MAX + UNTRACKED_TOTAL_BYTES_MAX < RPC_MESSAGE_BYTES_MAX);
 
 #[allow(
     clippy::allow_attributes,

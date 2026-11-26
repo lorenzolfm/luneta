@@ -1,0 +1,6 @@
+id: no-json-comments
+language: json
+message: >-
+  No comments. Say it in the code: a name, a type, a test.
+rule:
+  kind: comment

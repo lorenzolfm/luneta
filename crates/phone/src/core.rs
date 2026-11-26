@@ -803,6 +803,7 @@ impl Conversation {
             before: turn.before(),
             marked_issues: marked.issues,
             marked_pulls: marked.pulls,
+            review_only: false,
         };
         let (tell, told) = mpsc::channel(STEPS_HELD);
         let talk = Talk { rpc: self.core.rpc.clone(), tell };

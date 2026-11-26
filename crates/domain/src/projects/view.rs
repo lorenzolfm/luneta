@@ -256,6 +256,7 @@ pub enum View {
     Terminal(Terminal),
     Welcome(ViewId),
     Browser(Browser),
+    Review(ViewId),
 }
 
 impl View {
@@ -263,7 +264,7 @@ impl View {
     pub fn terminal(&self) -> Option<&Terminal> {
         match self {
             View::Terminal(terminal) => Some(terminal),
-            View::Welcome(_) | View::Browser(_) => None,
+            View::Welcome(_) | View::Browser(_) | View::Review(_) => None,
         }
     }
 
@@ -271,7 +272,7 @@ impl View {
     pub fn browser(&self) -> Option<&Browser> {
         match self {
             View::Browser(browser) => Some(browser),
-            View::Terminal(_) | View::Welcome(_) => None,
+            View::Terminal(_) | View::Welcome(_) | View::Review(_) => None,
         }
     }
 }
@@ -280,7 +281,7 @@ impl Leaf for View {
     fn id(&self) -> ViewId {
         match self {
             View::Terminal(terminal) => terminal.id.view(),
-            View::Welcome(id) => *id,
+            View::Welcome(id) | View::Review(id) => *id,
             View::Browser(browser) => browser.id,
         }
     }
@@ -762,7 +763,7 @@ impl Layout {
         let laid = self.0.as_mut().expect("a layout asked for its terminal is laid");
         match laid.tree.get_mut(terminal.view()).expect("its layout holds the terminal") {
             View::Terminal(held) => held,
-            View::Welcome(_) | View::Browser(_) => {
+            View::Welcome(_) | View::Browser(_) | View::Review(_) => {
                 unreachable!("terminal {terminal} is made only as a terminal")
             },
         }
@@ -772,7 +773,7 @@ impl Layout {
         let laid = self.0.as_mut().expect("a layout asked for its browser is laid");
         match laid.tree.get_mut(view).expect("its layout holds the browser") {
             View::Browser(held) => Ok(held),
-            View::Terminal(_) | View::Welcome(_) => {
+            View::Terminal(_) | View::Welcome(_) | View::Review(_) => {
                 Err(format!("view {view} runs no browser"))
             },
         }
