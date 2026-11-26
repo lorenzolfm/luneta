@@ -1,0 +1,118 @@
+{
+  "recorded": {
+    "agent": "agy 1.5.17",
+    "by": "dev record-status",
+    "on": "2026-11-25"
+  },
+  "steps": {
+    "error": {
+      "procStart": "1",
+      "state": {
+        "agent_state": "idle",
+        "conversation_id": "recorded",
+        "cwd": "/recorded",
+        "session_id": "recorded",
+        "workspace": {
+          "current_dir": "/recorded"
+        }
+      }
+    },
+    "exit": {
+      "procStart": "1",
+      "state": {
+        "agent_state": "idle",
+        "conversation_id": "recorded",
+        "cwd": "/recorded",
+        "session_id": "recorded",
+        "workspace": {
+          "current_dir": "/recorded"
+        }
+      }
+    },
+    "finish": {
+      "procStart": "1",
+      "state": {
+        "agent_state": "idle",
+        "conversation_id": "recorded",
+        "cwd": "/recorded",
+        "session_id": "recorded",
+        "workspace": {
+          "current_dir": "/recorded"
+        }
+      }
+    },
+    "interrupt": {
+      "procStart": "1",
+      "state": {
+        "agent_state": "idle",
+        "conversation_id": "recorded",
+        "cwd": "/recorded",
+        "session_id": "recorded",
+        "workspace": {
+          "current_dir": "/recorded"
+        }
+      }
+    },
+    "permission": {
+      "procStart": "1",
+      "state": {
+        "agent_state": "tool_use",
+        "conversation_id": "recorded",
+        "cwd": "/recorded",
+        "session_id": "recorded",
+        "tool_confirmation_pending": true,
+        "workspace": {
+          "current_dir": "/recorded"
+        }
+      }
+    },
+    "prompt": {
+      "procStart": "1",
+      "state": {
+        "agent_state": "working",
+        "conversation_id": "recorded",
+        "cwd": "/recorded",
+        "session_id": "recorded",
+        "workspace": {
+          "current_dir": "/recorded"
+        }
+      }
+    },
+    "question": {
+      "procStart": "1",
+      "state": {
+        "agent_state": "tool_use",
+        "conversation_id": "recorded",
+        "cwd": "/recorded",
+        "session_id": "recorded",
+        "workspace": {
+          "current_dir": "/recorded"
+        }
+      }
+    },
+    "reject": {
+      "procStart": "1",
+      "state": {
+        "agent_state": "idle",
+        "conversation_id": "recorded",
+        "cwd": "/recorded",
+        "session_id": "recorded",
+        "workspace": {
+          "current_dir": "/recorded"
+        }
+      }
+    },
+    "start": {
+      "procStart": "1",
+      "state": {
+        "agent_state": "idle",
+        "conversation_id": "recorded",
+        "cwd": "/recorded",
+        "session_id": "recorded",
+        "workspace": {
+          "current_dir": "/recorded"
+        }
+      }
+    }
+  }
+}

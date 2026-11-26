@@ -1,0 +1,15 @@
+{
+  "recorded": {
+    "agent": "pi 1.6.1",
+    "by": "dev record-status",
+    "on": "2026-11-26"
+  },
+  "steps": {
+    "error": "\u001b]7501;state=working:app=pi\u001b\\\u001b]7501;state=error:app=pi:msg=cmVjb3JkZWQ=\u001b\\",
+    "exit": "\u001b]7501;state=clear\u001b\\",
+    "finish": "\u001b]7501;state=done:app=pi\u001b\\",
+    "interrupt": "\u001b]7501;state=idle:app=pi\u001b\\",
+    "prompt": "\u001b]7501;state=working:app=pi\u001b\\",
+    "start": "\u001b]7501;state=idle:app=pi\u001b\\"
+  }
+}

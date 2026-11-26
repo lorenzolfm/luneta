@@ -1,0 +1,18 @@
+{
+  "recorded": {
+    "agent": "claude 2.1.332 (Claude Code)",
+    "by": "dev record-status",
+    "on": "2026-11-25"
+  },
+  "steps": {
+    "error": "\u001b]7501;state=working:app=claude-code\u0007\u001b]7501;state=error:app=claude-code:msg=cmVjb3JkZWQ=\u0007",
+    "exit": "\u001b]7501;state=working:app=claude-code\u0007\u001b]7501;state=clear\u0007",
+    "finish": "\u001b]7501;state=done:app=claude-code\u0007\u001b]7501;state=done:app=claude-code:msg=cmVjb3JkZWQ=\u0007",
+    "interrupt": "\u001b]7501;state=idle:app=claude-code\u0007",
+    "permission": "\u001b]7501;state=working:app=claude-code\u0007\u001b]7501;state=blocked:app=claude-code:kind=permission:msg=cmVjb3JkZWQ=\u0007",
+    "prompt": "\u001b]7501;state=working:app=claude-code\u0007",
+    "question": "\u001b]7501;state=working:app=claude-code\u0007\u001b]7501;state=blocked:app=claude-code:kind=question:msg=cmVjb3JkZWQ=\u0007",
+    "reject": "\u001b]7501;state=idle:app=claude-code\u0007",
+    "start": "\u001b]7501;state=idle:app=claude-code\u0007"
+  }
+}

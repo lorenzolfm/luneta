@@ -1,0 +1,87 @@
+{
+  "recorded": {
+    "agent": "pi 1.6.1",
+    "by": "dev record-status",
+    "on": "2026-11-26"
+  },
+  "steps": {
+    "error": {
+      "cwd": "/recorded",
+      "mode": "tui",
+      "phase": {
+        "kind": "resting",
+        "resting": {
+          "message": "recorded",
+          "status": "error"
+        }
+      },
+      "procStart": "1",
+      "promptOpen": false,
+      "sessionId": "recorded",
+      "status": "error",
+      "statusMessage": "recorded",
+      "statusSince": 1795685626544
+    },
+    "exit": null,
+    "finish": {
+      "cwd": "/recorded",
+      "mode": "tui",
+      "phase": {
+        "kind": "resting",
+        "resting": {
+          "status": "done"
+        }
+      },
+      "procStart": "1",
+      "promptOpen": false,
+      "sessionId": "recorded",
+      "status": "done",
+      "statusSince": 1795685598479
+    },
+    "interrupt": {
+      "cwd": "/recorded",
+      "mode": "tui",
+      "phase": {
+        "kind": "resting",
+        "resting": {
+          "status": "stopped"
+        }
+      },
+      "procStart": "1",
+      "promptOpen": false,
+      "sessionId": "recorded",
+      "status": "stopped",
+      "statusSince": 1795685606870
+    },
+    "prompt": {
+      "cwd": "/recorded",
+      "mode": "tui",
+      "phase": {
+        "kind": "running",
+        "outcome": {
+          "status": "done"
+        }
+      },
+      "procStart": "1",
+      "promptOpen": false,
+      "sessionId": "recorded",
+      "status": "busy",
+      "statusSince": 1795685569524
+    },
+    "start": {
+      "cwd": "/recorded",
+      "mode": "tui",
+      "phase": {
+        "kind": "resting",
+        "resting": {
+          "status": "stopped"
+        }
+      },
+      "procStart": "1",
+      "promptOpen": false,
+      "sessionId": "recorded",
+      "status": "stopped",
+      "statusSince": 1795685567388
+    }
+  }
+}

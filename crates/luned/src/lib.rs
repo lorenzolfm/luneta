@@ -24,6 +24,7 @@ mod keeps;
 pub mod links;
 pub mod log;
 pub mod mux;
+mod osc_7501;
 mod owns;
 pub mod panics;
 mod pi;
@@ -56,6 +57,7 @@ pub mod work;
 pub mod zoxide;
 
 pub use agy::folder as agy_folder;
+pub use pi::extension as pi_extension;
 pub use claude::{folder as claude_folder, one_answer, TORN};
 pub use client::{connect, listening, stream, through, unanswered, Answer, Daemon, RoundTrip};
 pub use client::{Unbridged, ANSWER, BRIDGED, REACH};

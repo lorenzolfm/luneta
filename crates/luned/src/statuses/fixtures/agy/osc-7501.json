@@ -1,0 +1,18 @@
+{
+  "recorded": {
+    "agent": "agy 1.5.17",
+    "by": "dev record-status",
+    "on": "2026-11-25"
+  },
+  "steps": {
+    "error": "\u001b]7501;state=working:app=antigravity\u0007\u001b]7501;state=error:app=antigravity:msg=cmVjb3JkZWQ=\u0007",
+    "exit": "\u001b]7501;state=idle:app=antigravity\u0007",
+    "finish": "\u001b]7501;state=done:app=antigravity:msg=cmVjb3JkZWQ=\u0007",
+    "interrupt": "\u001b]7501;state=idle:app=antigravity\u0007",
+    "permission": "\u001b]7501;state=idle:app=antigravity\u0007\u001b]7501;state=working:app=antigravity\u0007\u001b]7501;state=blocked:kind=permission:app=antigravity:msg=cmVjb3JkZWQ=\u0007",
+    "prompt": "\u001b]7501;state=working:app=antigravity\u0007",
+    "question": "\u001b]7501;state=working:app=antigravity\u0007\u001b]7501;state=blocked:kind=question:app=antigravity:msg=cmVjb3JkZWQ=\u0007",
+    "reject": "\u001b]7501;state=idle:app=antigravity\u0007",
+    "start": "\u001b]7501;state=idle:app=antigravity\u0007"
+  }
+}
