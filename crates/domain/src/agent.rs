@@ -349,10 +349,17 @@ const CLAUDE_CODE: Ladder = Ladder {
 
 const NO_PERMISSION_IN_PI: Tells = Tells::No { why: "pi asks no permission before a tool runs" };
 
+const NO_REJECT_IN_PI: Tells =
+    Tells::No { why: "pi asks no permission before a tool runs, so there is none to reject" };
+
 const NO_QUESTION_IN_PI: Tells = Tells::No { why: "pi has no tool that asks the user a question" };
 
-const PI_STEPS: Steps =
-    Steps { permission: NO_PERMISSION_IN_PI, question: NO_QUESTION_IN_PI, ..Steps::EVERY };
+const PI_STEPS: Steps = Steps {
+    permission: NO_PERMISSION_IN_PI,
+    reject: NO_REJECT_IN_PI,
+    question: NO_QUESTION_IN_PI,
+    ..Steps::EVERY
+};
 
 const PI: Ladder = Ladder {
     osc_7501: Some(Osc7501 { app: "pi", steps: PI_STEPS }),

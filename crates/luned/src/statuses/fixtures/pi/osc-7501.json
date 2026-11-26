@@ -1,0 +1,15 @@
+{
+  "recorded": {
+    "agent": "pi 1.6.1",
+    "by": "dev record-status",
+    "on": "2026-11-26"
+  },
+  "steps": {
+    "error": "\u001b]7501;state=working:app=pi\u001b\\\u001b]7501;state=error:app=pi:msg=T0F1dGggcmVmcmVzaCBmYWlsZWQgZm9yIGFudGhyb3BpYzogQW50aHJvcGljIHRva2VuIHJlZnJlc2ggcmVxdWVzdCBmYWlsZWQuIHVybD1odHRwczovL3BsYXRmb3JtLmNsYXVkZS5jb20vdjEvb2F1dGgvdG9rZW47IGRldGFpbHM9VHlwZUVycm9yOiBFQ09OTlJFRlVTRUQ6IFVuYWJsZSB0byBjb25uZWN0LiBJcyB0aGUgY29tcHV0ZXIgYWJsZSB0byBhY2Nlc3MgdGhlIHVybD87IGNvZGU9RUNPTk5SRUZVU0VEOyBlcnJubz0wOyBzdGFjaz1UeXBlRXJyb3I6IEVDT05OUkVGVVNFRDogVW5hYmxlIHRvIGNvbm5lY3QuIElzIHRoZSBjb21wdXRlciBhYmxlIHRvIGFjY2VzcyB0aGUgdXJsPw==\u001b\\",
+    "exit": "\u001b]7501;state=clear\u001b\\",
+    "finish": "\u001b]7501;state=done:app=pi\u001b\\",
+    "interrupt": "\u001b]7501;state=idle:app=pi\u001b\\",
+    "prompt": "\u001b]7501;state=working:app=pi\u001b\\",
+    "start": "\u001b]7501;state=idle:app=pi\u001b\\"
+  }
+}

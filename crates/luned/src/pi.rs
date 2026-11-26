@@ -298,7 +298,7 @@ impl AgentFiles {
     }
 }
 
-fn extension(lune: &Path) -> io::Result<String> {
+pub fn extension(lune: &Path) -> io::Result<String> {
     let Some(folder) = lune.to_str() else {
         return Err(io::Error::new(ErrorKind::InvalidData, "the daemon's folder is not UTF-8"));
     };

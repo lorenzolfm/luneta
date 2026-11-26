@@ -66,6 +66,8 @@ impl Move {
 }
 
 struct Run {
+    reaches_model: bool,
+    model: &'static [&'static str],
     args: Vec<&'static str>,
     env: Vec<(&'static str, &'static str)>,
     moves: Vec<Move>,
@@ -85,6 +87,7 @@ enum Folder {
 
 struct Plan {
     folder: Folder,
+    args: Vec<String>,
     dialogs: &'static [(&'static str, &'static [u8])],
     keeps: &'static [(&'static str, Kept)],
     files: Vec<(Rung, PathBuf)>,
@@ -103,6 +106,25 @@ const STORY: &str = "Write a 400 word story about a lighthouse keeper. Use no to
 const COUNT: &str = "Count from 1 to 2000, one number per line. Use no tools.";
 
 const TOUCH: &str = "Use your shell tool to run: touch lune-record-status.txt";
+
+fn kept_folder(named: &str) -> Result<PathBuf, String> {
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|cache| cache.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .ok_or("neither XDG_CACHE_HOME nor HOME is set")?;
+    Ok(cache.join("lune").join(named))
+}
+
+fn pi_extension() -> Result<Vec<String>, String> {
+    let folder = kept_folder("record-status-pi")?;
+    fs::create_dir_all(&folder).map_err(|error| format!("{}: {error}", folder.display()))?;
+    let file = folder.join("lune.ts");
+    let text = luned::pi_extension(&lune_folder()?).map_err(|error| error.to_string())?;
+    fs::write(&file, text).map_err(|error| format!("{}: {error}", file.display()))?;
+    let path = file.to_str().ok_or("the cache folder is not UTF-8")?;
+    Ok(vec!["--no-extensions".to_owned(), "--extension".to_owned(), path.to_owned()])
+}
 
 fn lune_folder() -> Result<PathBuf, String> {
     luned::folder::find().map_err(|error| error.to_string())
@@ -159,11 +181,14 @@ fn exited(command: &'static str, records: bool) -> Move {
 }
 
 fn failed(
+    model: &'static [&'static str],
     args: Vec<&'static str>,
     env: Vec<(&'static str, &'static str)>,
     exit: &'static str,
 ) -> Run {
     Run {
+        reaches_model: false,
+        model,
         args,
         env,
         moves: vec![
@@ -177,7 +202,8 @@ fn failed(
 fn plan(harness: Harness) -> Result<Plan, String> {
     Ok(match harness {
         Harness::ClaudeCode => {
-            let asks = ["--model", "haiku", "--permission-mode", "default"];
+            let model = &["--model", "haiku"];
+            let asks = ["--permission-mode", "default"];
             let mut moves = vec![started()];
             moves.extend(prompted());
             moves.extend(asked_and_rejected());
@@ -188,6 +214,7 @@ fn plan(harness: Harness) -> Result<Plan, String> {
             moves.push(exited("/exit", true));
             Plan {
                 folder: Folder::Temporary,
+                args: vec![],
                 dialogs: &[("Yes, I trust this folder", b"\r")],
                 keeps: &[
                     ("sessionId", Kept::As("recorded")),
@@ -209,8 +236,8 @@ fn plan(harness: Harness) -> Result<Plan, String> {
                         .join("sessions"),
                 )],
                 runs: vec![
-                    Run { args: asks.to_vec(), env: vec![], moves },
-                    failed(vec!["--model", "claude-no-such-model-0"], vec![], "/exit"),
+                    Run { reaches_model: true, model, args: asks.to_vec(), env: vec![], moves },
+                    failed(&[], vec!["--model", "claude-no-such-model-0"], vec![], "/exit"),
                 ],
             }
         },
@@ -219,9 +246,10 @@ fn plan(harness: Harness) -> Result<Plan, String> {
             moves.extend(prompted());
             moves.extend(interrupted());
             moves.push(exited("/quit", true));
-            let model = ["--model", "anthropic/claude-haiku-4-5"];
+            let model = &["--model", "anthropic/claude-haiku-4-5"];
             Plan {
                 folder: Folder::Kept,
+                args: pi_extension()?,
                 dialogs: &[],
                 keeps: &[
                     ("sessionId", Kept::As("recorded")),
@@ -236,8 +264,8 @@ fn plan(harness: Harness) -> Result<Plan, String> {
                 ],
                 files: vec![(Rung::Extension, lune_folder()?.join("pi"))],
                 runs: vec![
-                    Run { args: model.to_vec(), env: vec![], moves },
-                    failed(model.to_vec(), OFFLINE.to_vec(), "/quit"),
+                    Run { reaches_model: true, model, args: vec![], env: vec![], moves },
+                    failed(model, vec![], OFFLINE.to_vec(), "/quit"),
                 ],
             }
         },
@@ -250,9 +278,11 @@ fn plan(harness: Harness) -> Result<Plan, String> {
             ));
             moves.extend(interrupted());
             moves.push(exited("/quit", true));
-            let asks = ["--model", "gemini-3.8-flash-medium", "--mode", "accept-edits"];
+            let model = &["--model", "gemini-3.8-flash-medium"];
+            let asks = ["--mode", "accept-edits"];
             Plan {
                 folder: Folder::Kept,
+                args: vec![],
                 dialogs: &[("Yes, I trust this folder", b"\r"), ("esc to dismiss", ESC)],
                 keeps: &[
                     ("procStart", Kept::As("1")),
@@ -266,8 +296,8 @@ fn plan(harness: Harness) -> Result<Plan, String> {
                 ],
                 files: vec![(Rung::Hook, lune_folder()?.join("agy"))],
                 runs: vec![
-                    Run { args: asks.to_vec(), env: vec![], moves },
-                    failed(asks.to_vec(), OFFLINE.to_vec(), "/quit"),
+                    Run { reaches_model: true, model, args: asks.to_vec(), env: vec![], moves },
+                    failed(model, asks.to_vec(), OFFLINE.to_vec(), "/quit"),
                 ],
             }
         },
@@ -415,11 +445,18 @@ struct Session {
 }
 
 impl Session {
-    fn start(harness: Harness, plan: &Plan, run: &Run, cwd: &Path) -> Result<Session, String> {
+    fn start(
+        harness: Harness,
+        launch: &Launch,
+        plan: &Plan,
+        run: &Run,
+        cwd: &Path,
+    ) -> Result<Session, String> {
         let pty = opened().map_err(|error| format!("a terminal: {error}"))?;
         let stdio = || pty.far.try_clone().map(Stdio::from);
-        let mut command = Command::new(harness.program());
-        command.args(&run.args).current_dir(cwd);
+        let mut command = launch.command(harness, run);
+        command.args(&plan.args);
+        command.current_dir(cwd);
         for (name, _) in std::env::vars_os() {
             let Some(name) = name.to_str() else {
                 continue;
@@ -676,12 +713,48 @@ fn said_by(program: &str, args: &[&str]) -> Result<String, String> {
     }
 }
 
+struct Launch {
+    program: String,
+    args: Vec<String>,
+    picks_model: bool,
+}
+
+impl Launch {
+    fn of(harness: Harness, launcher: &[String]) -> Launch {
+        match launcher {
+            [] => Launch { program: harness.program().to_owned(), args: vec![], picks_model: false },
+            [program, args @ ..] => {
+                Launch { program: program.clone(), args: args.to_vec(), picks_model: true }
+            },
+        }
+    }
+
+    fn command(&self, harness: Harness, run: &Run) -> Command {
+        let launched = run.reaches_model && self.picks_model;
+        let mut command =
+            Command::new(if launched { self.program.as_str() } else { harness.program() });
+        if launched {
+            command.args(&self.args);
+        } else {
+            command.args(run.model);
+        }
+        command.args(&run.args);
+        command
+    }
+
+    fn version(&self) -> Result<String, String> {
+        let mut args: Vec<&str> = self.args.iter().map(String::as_str).collect();
+        args.push("--version");
+        said_by(&self.program, &args)
+    }
+}
+
 struct Recordings {
     osc_7501: BTreeMap<String, Value>,
     files: Vec<(Rung, PathBuf, BTreeMap<String, Value>)>,
 }
 
-fn record(harness: Harness, cwd: &Path) -> Result<Recordings, String> {
+fn record(harness: Harness, launch: &Launch, cwd: &Path) -> Result<Recordings, String> {
     let plan = plan(harness)?;
     let mut declared: Vec<Rung> = plan.files.iter().map(|(rung, _)| *rung).collect();
     if harness.osc_7501_app().is_some() {
@@ -702,7 +775,7 @@ fn record(harness: Harness, cwd: &Path) -> Result<Recordings, String> {
             .collect(),
     };
     for run in &plan.runs {
-        let mut session = Session::start(harness, &plan, run, cwd)?;
+        let mut session = Session::start(harness, launch, &plan, run, cwd)?;
         let mut pids: Vec<Option<u32>> = vec![None; recordings.files.len()];
         let first = run.moves.first().expect("a run makes a move");
         let until = Instant::now() + PATIENCE;
@@ -724,7 +797,7 @@ fn record(harness: Harness, cwd: &Path) -> Result<Recordings, String> {
                 harness.program()
             );
             drop(session);
-            session = Session::start(harness, &plan, run, cwd)?;
+            session = Session::start(harness, launch, &plan, run, cwd)?;
             session.wait(first.until, 0)?;
         }
         session.answering = false;
@@ -799,27 +872,21 @@ fn write(
     Ok(())
 }
 
-fn run(named: &str) -> Result<(), String> {
+fn run(named: &str, launcher: &[String]) -> Result<(), String> {
     let Some(harness) = Harness::ALL.into_iter().find(|harness| harness.program() == named) else {
         let known: Vec<&str> = Harness::ALL.iter().map(|harness| harness.program()).collect();
         return Err(format!("{named:?} is no harness; say one of {}", known.join(", ")));
     };
-    let agent = format!("{} {}", harness.program(), said_by(harness.program(), &["--version"])?);
+    let launch = Launch::of(harness, launcher);
+    let agent = format!("{} {}", harness.program(), launch.version()?);
     let on = said_by("date", &["-u", "+%F"])?;
     let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
     let cwd = match plan(harness)?.folder {
         Folder::Temporary => temporary.path().to_owned(),
-        Folder::Kept => {
-            let cache = std::env::var_os("XDG_CACHE_HOME")
-                .map(PathBuf::from)
-                .filter(|cache| cache.is_absolute())
-                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-                .ok_or("neither XDG_CACHE_HOME nor HOME is set")?;
-            cache.join("lune/record-status")
-        },
+        Folder::Kept => kept_folder("record-status")?,
     };
     fs::create_dir_all(&cwd).map_err(|error| format!("{}: {error}", cwd.display()))?;
-    let recordings = record(harness, &cwd);
+    let recordings = record(harness, &launch, &cwd);
     let _ = fs::remove_file(cwd.join("lune-record-status.txt"));
     let recordings = recordings?;
     if harness.osc_7501_app().is_some() {
@@ -833,11 +900,17 @@ fn run(named: &str) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [named] = args.as_slice() else {
-        eprintln!("usage: {RECORDER} <harness>");
-        return ExitCode::from(2);
+    let (named, launcher) = match args.as_slice() {
+        [named] => (named, &[][..]),
+        [named, dashes, launcher @ ..] if dashes == "--" && !launcher.is_empty() => {
+            (named, launcher)
+        },
+        _ => {
+            eprintln!("usage: {RECORDER} <harness> [-- <launcher> [args...]]");
+            return ExitCode::from(2);
+        },
     };
-    match run(named) {
+    match run(named, launcher) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
             eprintln!("{RECORDER}: {why}");
