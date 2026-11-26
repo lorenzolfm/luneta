@@ -29,19 +29,31 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
         let mut after: Option<Version> = None;
         let failure = match daemon::current(&folder).await {
             Ok(Current { daemon, .. }) => match daemon.watching(luned::ANSWER) {
-                Ok(mut watching) => loop {
-                    match watching.watch(WatchRequest { after, kept: None, shown: true }).await {
-                        Ok(host) => {
-                            let Some(version) = host.version else {
-                                break "an answer with no version, which this lune does not read"
-                                    .to_owned();
-                            };
-                            after = Some(version);
-                            if events.send(Event::Daemon(Ok(host))).is_err() {
-                                return;
-                            }
-                        },
-                        Err(status) => break causes(&status),
+                Ok(mut watching) => {
+                    let mut watched: u64 = 0;
+                    loop {
+                        if watched > 0 {
+                            assert!(
+                                after.is_some(),
+                                "each watch after the first parks past the version last seen"
+                            );
+                        }
+                        match watching.watch(WatchRequest { after, kept: None, shown: true }).await
+                        {
+                            Ok(host) => {
+                                let Some(version) = host.version else {
+                                    break "an answer with no version, which this lune does not \
+                                           read"
+                                        .to_owned();
+                                };
+                                after = Some(version);
+                                watched = watched.saturating_add(1);
+                                if events.send(Event::Daemon(Ok(host))).is_err() {
+                                    return;
+                                }
+                            },
+                            Err(status) => break causes(&status),
+                        }
                     }
                 },
                 Err(status) => causes(&status),

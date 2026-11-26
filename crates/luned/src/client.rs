@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, BufReader, ReadBuf};
 use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio::time::{timeout_at, Instant};
 use tokio_stream::Stream;
 use tonic::transport::{Channel, Endpoint, Error, Uri};
@@ -45,17 +45,20 @@ const _: () = assert!(QUIET.as_millis() < ANSWER.waits().as_millis());
 
 const KEPT_MAX: usize = 16;
 
+const CONNECTING_MAX: usize = KEPT_MAX;
+
 pub const HELD_MAX: usize = remote::HELD_MAX;
 
 pub const ASKED_MAX: usize = QUESTIONS_MAX as usize - HELD_MAX;
 
 pub const ASKED_WAITING_MAX: usize = 32;
 
-const STREAM_WINDOW: u32 = 64 * 1024;
+const STREAM_WINDOW_BYTES: u32 = 64 * 1024;
 
-const CONNECTION_WINDOW: u32 = QUESTIONS_MAX * STREAM_WINDOW;
+const CONNECTION_WINDOW_BYTES: u32 = QUESTIONS_MAX * STREAM_WINDOW_BYTES;
 
 const _: () = assert!(KEPT_MAX > 0, "lune keeps at least one channel to luned");
+const _: () = assert!(CONNECTING_MAX > 0, "lune connects to at least one luned at once");
 const _: () = assert!(HELD_MAX > 0, "lune holds at least one stream to luned");
 const _: () = assert!(ASKED_MAX > 0, "lune keeps room for questions to luned");
 const _: () = assert!(ASKED_WAITING_MAX > 0, "short bursts of questions wait their turn");
@@ -64,11 +67,13 @@ const _: () = assert!(
     "the one connection to luned holds every stream and question lune puts on it"
 );
 const _: () = assert!(
-    CONNECTION_WINDOW as u64 <= i32::MAX as u64,
+    CONNECTION_WINDOW_BYTES as u64 <= i32::MAX as u64,
     "a window of every stream lune does not read fits in what HTTP/2 lets a connection hold"
 );
 
 static KEPT: Mutex<BTreeMap<PathBuf, Kept>> = Mutex::new(BTreeMap::new());
+
+static CONNECTING: Semaphore = Semaphore::const_new(CONNECTING_MAX);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Answer(Duration);
@@ -108,7 +113,7 @@ impl RoundTrip {
 
 const SAID_MAX: u64 = 4096;
 
-pub type Daemon = DaemonClient<Within<Watched<Channel>>>;
+pub type Daemon = DaemonClient<Within<Channel>>;
 
 #[derive(Clone, Debug, Default)]
 struct Gone(Arc<AtomicBool>);
@@ -123,49 +128,17 @@ impl Gone {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Watched<S> {
-    inner: S,
-    gone: Gone,
-}
-
-impl<S: Service<R>, R> Service<R> for Watched<S>
-where
-    S::Future: Send + 'static,
-{
-    type Response = S::Response;
-    type Error = S::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<S::Response, S::Error>> + Send>>;
-
-    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), S::Error>> {
-        let polled = self.inner.poll_ready(context);
-        if let Poll::Ready(Err(_)) = &polled {
-            self.gone.mark();
-        }
-        polled
-    }
-
-    fn call(&mut self, request: R) -> Self::Future {
-        let gone = self.gone.clone();
-        let asked = self.inner.call(request);
-        Box::pin(async move {
-            let heard = asked.await;
-            if heard.is_err() {
-                gone.mark();
-            }
-            heard
-        })
-    }
-}
-
-fn daemon(channel: Channel, gone: Gone, answer: Answer) -> Daemon {
-    DaemonClient::new(Within::new(Watched { inner: channel, gone }, answer.0, unanswered))
-        .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX)
+fn daemon(channel: Channel, gone: Option<Gone>, answer: Answer) -> Daemon {
+    let within = match gone {
+        Some(gone) => Within::watched(channel, answer.0, unanswered, gone),
+        None => Within::new(channel, answer.0, unanswered),
+    };
+    DaemonClient::new(within).max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX)
 }
 
 #[cfg(test)]
 pub(crate) fn unwatched(channel: Channel, answer: Answer) -> Daemon {
-    daemon(channel, Gone::default(), answer)
+    daemon(channel, None, answer)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,42 +160,96 @@ struct Budget {
 
 impl Budget {
     fn new() -> Budget {
-        Budget {
+        let budget = Budget {
             held: Arc::new(Semaphore::new(HELD_MAX)),
             asked: Arc::new(Semaphore::new(ASKED_MAX)),
             waiting: Semaphore::new(ASKED_WAITING_MAX),
-        }
+        };
+        assert_eq!(budget.held.available_permits(), HELD_MAX, "stream budget starts full");
+        assert_eq!(budget.asked.available_permits(), ASKED_MAX, "question budget starts full");
+        assert_eq!(
+            budget.waiting.available_permits(),
+            ASKED_WAITING_MAX,
+            "question wait queue starts empty"
+        );
+        budget
     }
 
     fn hold(&self) -> Result<OwnedSemaphorePermit, Status> {
+        assert!(!self.held.is_closed(), "the channel's stream budget is never closed");
         assert!(
             self.held.available_permits() <= HELD_MAX,
             "the stream budget holds at most {HELD_MAX} places"
         );
-        Arc::clone(&self.held).try_acquire_owned().map_err(|_| {
-            Status::failed_precondition(format!(
-                "lune holds at most {HELD_MAX} streams to luned at once"
-            ))
-        })
+        let permit = match Arc::clone(&self.held).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits) => {
+                return Err(Status::failed_precondition(format!(
+                    "lune holds at most {HELD_MAX} streams to luned at once"
+                )));
+            },
+            Err(TryAcquireError::Closed) => {
+                assert!(!self.held.is_closed(), "the channel's stream budget is never closed");
+                return Err(Status::internal("the channel's stream budget closed"));
+            },
+        };
+        assert!(
+            self.held.available_permits() < HELD_MAX,
+            "a held stream occupies a place in the stream budget"
+        );
+        Ok(permit)
     }
 
-    async fn ask(&self, deadline: Instant, answer: Duration) -> Result<OwnedSemaphorePermit, Status> {
-        assert!(!answer.is_zero(), "a question waits some time for its answer");
+    async fn ask(&self, deadline: Instant, answer: Answer) -> Result<OwnedSemaphorePermit, Status> {
+        let wait = answer.waits();
+        assert!(!wait.is_zero(), "a question waits some time for its answer");
+        assert!(!self.asked.is_closed(), "the channel's question budget is never closed");
+        assert!(!self.waiting.is_closed(), "the channel's question wait queue is never closed");
         assert!(
             self.asked.available_permits() <= ASKED_MAX,
             "the question budget holds at most {ASKED_MAX} places"
         );
-        if let Ok(permit) = Arc::clone(&self.asked).try_acquire_owned() {
-            return Ok(permit);
-        }
-        let _waiting = self.waiting.try_acquire().map_err(|_| {
-            Status::failed_precondition(format!(
-                "lune has at most {ASKED_WAITING_MAX} questions waiting on luned at once"
-            ))
-        })?;
-        let acquired = timeout_at(deadline, Arc::clone(&self.asked).acquire_owned()).await;
-        let permit = acquired.map_err(|_| Status::failed_precondition(unanswered(answer)))?;
-        Ok(permit.expect("the channel's question budget is never closed"))
+        assert!(
+            self.waiting.available_permits() <= ASKED_WAITING_MAX,
+            "the question wait queue holds at most {ASKED_WAITING_MAX} places"
+        );
+        let permit = match Arc::clone(&self.asked).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits) => {
+                let _waiting = match self.waiting.try_acquire() {
+                    Ok(waiting) => waiting,
+                    Err(TryAcquireError::NoPermits) => {
+                        return Err(Status::failed_precondition(format!(
+                            "lune has at most {ASKED_WAITING_MAX} questions waiting on luned at \
+                             once"
+                        )));
+                    },
+                    Err(TryAcquireError::Closed) => {
+                        assert!(
+                            !self.waiting.is_closed(),
+                            "the channel's question wait queue is never closed"
+                        );
+                        return Err(Status::internal("the channel's question wait queue closed"));
+                    },
+                };
+                assert!(
+                    self.waiting.available_permits() < ASKED_WAITING_MAX,
+                    "a waiting question occupies a place in the wait queue"
+                );
+                let acquired = timeout_at(deadline, Arc::clone(&self.asked).acquire_owned()).await;
+                let permit = acquired.map_err(|_| Status::failed_precondition(unanswered(wait)))?;
+                permit.expect("the channel's question budget is never closed")
+            },
+            Err(TryAcquireError::Closed) => {
+                assert!(!self.asked.is_closed(), "the channel's question budget is never closed");
+                return Err(Status::internal("the channel's question budget closed"));
+            },
+        };
+        assert!(
+            self.asked.available_permits() < ASKED_MAX,
+            "an active question occupies a place in the question budget"
+        );
+        Ok(permit)
     }
 }
 
@@ -254,6 +281,7 @@ pub struct Watching {
 impl Watching {
     pub async fn watch(&mut self, request: api::WatchRequest) -> Result<api::Host, Status> {
         let wait = self.answer.waits();
+        assert!(!wait.is_zero(), "a watch waits some time for its answer");
         match tokio::time::timeout(wait, self.daemon.watch(request)).await {
             Ok(watched) => watched.map(Response::into_inner),
             Err(_) => Err(Status::deadline_exceeded(unanswered(wait))),
@@ -274,7 +302,7 @@ impl Shared {
     }
 
     fn daemon(&self, answer: Answer) -> Daemon {
-        daemon(self.channel.clone(), self.gone.clone(), answer)
+        daemon(self.channel.clone(), Some(self.gone.clone()), answer)
     }
 
     pub async fn ask<T, F>(
@@ -283,11 +311,30 @@ impl Shared {
         asking: impl FnOnce(Daemon) -> F,
     ) -> Result<T, Status>
     where
+        T: prost::Message,
         F: Future<Output = Result<Response<T>, Status>>,
     {
         let wait = answer.waits();
-        let deadline = Instant::now() + wait;
-        let _permit = self.budget.ask(deadline, wait).await?;
+        assert!(!wait.is_zero(), "a question waits some time for its answer");
+        self.ask_until(Instant::now() + wait, answer, asking).await
+    }
+
+    async fn ask_until<T, F>(
+        &self,
+        deadline: Instant,
+        answer: Answer,
+        asking: impl FnOnce(Daemon) -> F,
+    ) -> Result<T, Status>
+    where
+        T: prost::Message,
+        F: Future<Output = Result<Response<T>, Status>>,
+    {
+        let wait = answer.waits();
+        assert!(!wait.is_zero(), "a question waits some time for its answer");
+        let _permit = self.budget.ask(deadline, answer).await?;
+        if Instant::now() >= deadline {
+            return Err(Status::failed_precondition(unanswered(wait)));
+        }
         let daemon = self.daemon(answer);
         match timeout_at(deadline, asking(daemon)).await {
             Ok(answered) => answered.map(Response::into_inner),
@@ -299,11 +346,12 @@ impl Shared {
         &self,
         answer: Answer,
         asking: impl FnOnce(Daemon) -> F,
-    ) -> Result<Held<T>, Status>
+    ) -> Result<Held<Streaming<T>>, Status>
     where
-        F: Future<Output = Result<Response<T>, Status>>,
+        F: Future<Output = Result<Response<Streaming<T>>, Status>>,
     {
         let wait = answer.waits();
+        assert!(!wait.is_zero(), "a held stream waits some time for its answer");
         let permit = self.budget.hold()?;
         let daemon = self.daemon(answer);
         let heard = match tokio::time::timeout(wait, asking(daemon)).await {
@@ -390,21 +438,28 @@ struct Kept {
     socket_id: SocketId,
 }
 
+fn lock_kept() -> MutexGuard<'static, BTreeMap<PathBuf, Kept>> {
+    KEPT.lock().expect("lune's kept channel map is never poisoned")
+}
+
 #[must_use]
 pub fn kept(folder: &Folder) -> Option<Shared> {
     kept_at(&folder.socket())
 }
 
 fn kept_at(socket: &Path) -> Option<Shared> {
-    let current = socket_id(socket);
-    let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
-    kept.retain(|_, held| !held.shared.gone.is());
-    let found = if let Some(held) = kept.get(socket) {
-        if current == Some(held.socket_id) {
-            Some(held.shared.clone())
+    let mut kept = lock_kept();
+    assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
+    kept.retain(|_, entry| !entry.shared.gone.is());
+    let found = if let Some(entry) = kept.get(socket) {
+        if socket_id(socket) == Some(entry.socket_id) {
+            assert!(!entry.shared.gone.is(), "a kept channel returned is not gone");
+            Some(entry.shared.clone())
         } else {
-            held.shared.gone.mark();
-            kept.remove(socket);
+            entry.shared.gone.mark();
+            let removed = kept.remove(socket);
+            assert!(removed.is_some(), "the evicted channel was in the cache");
+            assert!(!kept.contains_key(socket), "an evicted channel is no longer kept");
             None
         }
     } else {
@@ -418,23 +473,28 @@ fn keep(socket: &Path, fresh: Kept) -> Shared {
     if fresh.shared.gone.is() {
         return fresh.shared;
     }
-    let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
-    kept.retain(|_, held| !held.shared.gone.is());
+    let mut kept = lock_kept();
+    assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
+    kept.retain(|_, entry| !entry.shared.gone.is());
     if socket_id(socket) != Some(fresh.socket_id) {
         fresh.shared.gone.mark();
         return fresh.shared;
     }
     if let Some(existing) = kept.get(socket) {
         if existing.socket_id == fresh.socket_id {
+            assert!(!existing.shared.gone.is(), "a kept channel returned is not gone");
+            fresh.shared.gone.mark();
             return existing.shared.clone();
         }
         existing.shared.gone.mark();
-    }
-    if kept.len() == KEPT_MAX && !kept.contains_key(socket) {
-        kept.pop_first();
+    } else if kept.len() == KEPT_MAX {
+        let evicted = kept.pop_first();
+        assert!(evicted.is_some(), "a full channel cache drops one entry to make room");
     }
     let shared = fresh.shared.clone();
     kept.insert(socket.to_owned(), fresh);
+    assert!(!shared.gone.is(), "a newly kept channel is not gone");
+    assert!(kept.contains_key(socket), "a newly kept channel is in the cache");
     assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
     shared
 }
@@ -449,10 +509,39 @@ pub async fn reach(folder: &Folder) -> Result<Reached, Unreached> {
     if let Some(shared) = kept_at(&socket) {
         return Ok(Reached::Matched(shared));
     }
+    assert!(!CONNECTING.is_closed(), "the channel connect budget is never closed");
+    assert!(
+        CONNECTING.available_permits() <= CONNECTING_MAX,
+        "the channel connect budget holds at most {CONNECTING_MAX} places"
+    );
+    let connecting = match CONNECTING.try_acquire() {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => {
+            return Err(Unreached::Asked(Status::failed_precondition(format!(
+                "lune connects to at most {CONNECTING_MAX} luneds at once"
+            ))));
+        },
+        Err(TryAcquireError::Closed) => {
+            assert!(!CONNECTING.is_closed(), "the channel connect budget is never closed");
+            return Err(Unreached::Asked(Status::internal("the channel connect budget closed")));
+        },
+    };
+    assert!(
+        CONNECTING.available_permits() < CONNECTING_MAX,
+        "an active connect occupies a place in the connect budget"
+    );
+    if let Some(shared) = kept_at(&socket) {
+        return Ok(Reached::Matched(shared));
+    }
     let at = socket.clone();
-    let connected = tasks::shared().spawn(async move { connect_matched(at).await });
-    let connected =
-        connected.await.unwrap_or_else(|ended| std::panic::resume_unwind(ended.into_panic()))?;
+    let connected = tasks::shared().spawn(async move {
+        let _connecting = connecting;
+        connect_matched(at, ANSWER).await
+    });
+    let connected = connected.await.unwrap_or_else(|ended| {
+        assert!(ended.is_panic(), "a connect task spawned by reach is never cancelled");
+        std::panic::resume_unwind(ended.into_panic())
+    })?;
     match connected {
         Connected::Matched { channel, gone, id: Some(socket_id) } => {
             let kept = Kept { shared: Shared::new(channel, gone), socket_id };
@@ -465,10 +554,16 @@ pub async fn reach(folder: &Folder) -> Result<Reached, Unreached> {
     }
 }
 
-async fn connect_matched(socket: PathBuf) -> Result<Connected, Unreached> {
+async fn connect_matched(socket: PathBuf, verify: Answer) -> Result<Connected, Unreached> {
     let (channel, gone, id) = open(socket).await.map_err(Unreached::Connect)?;
-    let mut verified = daemon(channel.clone(), gone.clone(), ANSWER);
-    let info = verified.info(()).await.map_err(Unreached::Asked)?.into_inner();
+    let wait = verify.waits();
+    assert!(!wait.is_zero(), "build verification waits some time for its answer");
+    let mut verified = daemon(channel.clone(), Some(gone.clone()), verify);
+    let Ok(answered) = tokio::time::timeout(wait, verified.info(())).await else {
+        gone.mark();
+        return Err(Unreached::Asked(Status::deadline_exceeded(unanswered(wait))));
+    };
+    let info = answered.map_err(Unreached::Asked)?.into_inner();
     match release::of(&info.version, info.built) {
         release::Of::Own => Ok(Connected::Matched { channel, gone, id }),
         release::Of::Other(other) => {
@@ -481,8 +576,9 @@ async fn connect_matched(socket: PathBuf) -> Result<Connected, Unreached> {
 fn endpoint() -> Endpoint {
     Endpoint::from_static("http://luned")
         .connect_timeout(CONNECT)
-        .initial_stream_window_size(STREAM_WINDOW)
-        .initial_connection_window_size(CONNECTION_WINDOW)
+        .http2_adaptive_window(false)
+        .initial_stream_window_size(STREAM_WINDOW_BYTES)
+        .initial_connection_window_size(CONNECTION_WINDOW_BYTES)
 }
 
 async fn open(socket: PathBuf) -> Result<(Channel, Gone, Option<SocketId>), Error> {
@@ -523,35 +619,44 @@ impl Tracked {
 impl AsyncRead for Tracked {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let (before, room) = (buf.filled().len(), buf.remaining());
-        let polled = Pin::new(&mut self.stream).poll_read(cx, buf);
-        let ended = matches!(polled, Poll::Ready(Ok(()))) && room > 0;
-        if ended && buf.filled().len() == before {
-            self.gone.mark();
+        let (before, room) = (buffer.filled().len(), buffer.remaining());
+        let polled = Pin::new(&mut self.stream).poll_read(context, buffer);
+        match &polled {
+            Poll::Ready(Ok(())) => {
+                assert!(
+                    buffer.filled().len() >= before,
+                    "AsyncRead never shrinks the filled region of its buffer"
+                );
+                if room > 0 && buffer.filled().len() == before {
+                    self.gone.mark();
+                }
+            },
+            Poll::Ready(Err(_)) => self.gone.mark(),
+            Poll::Pending => {},
         }
-        self.marked(polled)
+        polled
     }
 }
 
 impl AsyncWrite for Tracked {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
+        context: &mut Context<'_>,
+        buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let polled = Pin::new(&mut self.stream).poll_write(cx, buf);
+        let polled = Pin::new(&mut self.stream).poll_write(context, buffer);
         self.marked(polled)
     }
 
     fn poll_write_vectored(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
+        context: &mut Context<'_>,
+        buffers: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        let polled = Pin::new(&mut self.stream).poll_write_vectored(cx, bufs);
+        let polled = Pin::new(&mut self.stream).poll_write_vectored(context, buffers);
         self.marked(polled)
     }
 
@@ -559,14 +664,14 @@ impl AsyncWrite for Tracked {
         self.stream.is_write_vectored()
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let polled = Pin::new(&mut self.stream).poll_flush(cx);
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let polled = Pin::new(&mut self.stream).poll_flush(context);
         self.marked(polled)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.gone.mark();
-        Pin::new(&mut self.stream).poll_shutdown(cx)
+        Pin::new(&mut self.stream).poll_shutdown(context)
     }
 }
 
@@ -581,12 +686,23 @@ pub struct Within<S> {
     inner: S,
     answer: Duration,
     unanswered: fn(Duration) -> String,
+    gone: Option<Gone>,
 }
 
 impl<S> Within<S> {
     pub(crate) fn new(inner: S, answer: Duration, unanswered: fn(Duration) -> String) -> Self {
         assert!(!answer.is_zero(), "a call waits some time for its answer");
-        Within { inner, answer, unanswered }
+        Within { inner, answer, unanswered, gone: None }
+    }
+
+    fn watched(
+        inner: S,
+        answer: Duration,
+        unanswered: fn(Duration) -> String,
+        gone: Gone,
+    ) -> Self {
+        assert!(!answer.is_zero(), "a call waits some time for its answer");
+        Within { inner, answer, unanswered, gone: Some(gone) }
     }
 }
 
@@ -600,15 +716,27 @@ where
     type Future = Pin<Box<dyn Future<Output = Result<S::Response, BoxError>> + Send>>;
 
     fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
-        self.inner.poll_ready(context).map_err(Into::into)
+        let polled = self.inner.poll_ready(context);
+        if let Poll::Ready(Err(_)) = &polled
+            && let Some(gone) = &self.gone
+        {
+            gone.mark();
+        }
+        polled.map_err(Into::into)
     }
 
     fn call(&mut self, request: R) -> Self::Future {
-        let (answer, unanswered) = (self.answer, self.unanswered);
+        let (answer, unanswered, gone) = (self.answer, self.unanswered, self.gone.clone());
         let asked = self.inner.call(request);
         Box::pin(async move {
             match tokio::time::timeout(answer, asked).await {
-                Ok(heard) => heard.map_err(Into::into),
+                Ok(Ok(heard)) => Ok(heard),
+                Ok(Err(error)) => {
+                    if let Some(gone) = gone {
+                        gone.mark();
+                    }
+                    Err(error.into())
+                },
                 Err(_) => Err(Status::deadline_exceeded(unanswered(answer)).into()),
             }
         })
@@ -631,7 +759,7 @@ pub async fn connect(folder: &Folder, answer: Answer) -> Result<Daemon, Error> {
             }
         }))
         .await?;
-    Ok(daemon(channel, Gone::default(), answer))
+    Ok(daemon(channel, None, answer))
 }
 
 pub async fn through(
@@ -651,7 +779,7 @@ pub async fn through(
             }
         }))
         .await?;
-    Ok(daemon(channel, Gone::default(), round_trip.answer))
+    Ok(daemon(channel, None, round_trip.answer))
 }
 
 fn went() -> io::Error {
@@ -773,25 +901,28 @@ mod tests {
     use std::io::ErrorKind;
     use std::pin::Pin;
     use std::process::Command;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
     use std::time::Duration;
 
     use lune_waits::{eventually_async, Began, Patience};
+    use tokio::io::AsyncWriteExt as _;
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::{mpsc, oneshot, Notify};
+    use tokio::time::Instant;
     use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
     use tokio_stream::{Stream, StreamExt as _};
     use tonic::body::Body;
     use tonic::codegen::http::{Request, Response};
-    use tonic::transport::Server;
+    use tonic::transport::{Channel, Server};
     use tonic::{Code, Request as GrpcRequest, Response as GrpcResponse, Status, Streaming};
     use tower::{service_fn, BoxError, ServiceExt as _};
 
     use super::{
-        keep, kept, reach, socket_id, through, unanswered, Answer, Gone, Kept, Reached, RoundTrip,
-        Tracked, Unbridged, Watched, Within, ANSWER, ASKED_MAX, ASKED_WAITING_MAX, HELD_MAX,
-        QUESTIONS_MAX, STREAM_WINDOW,
+        connect_matched, keep, kept, kept_at, lock_kept, reach, socket_id, through, unanswered,
+        Answer, Gone, Kept, Reached, RoundTrip, Shared, Tracked, Unbridged, Unreached, Within,
+        ANSWER, ASKED_MAX, ASKED_WAITING_MAX, CONNECTING, CONNECTING_MAX, HELD_MAX, KEPT_MAX,
+        QUESTIONS_MAX, STREAM_WINDOW_BYTES,
     };
     use crate::changes::Unchanged;
     use crate::api::daemon_client::DaemonClient;
@@ -1260,15 +1391,22 @@ mod tests {
         assert!(gone.is(), "a connection let go of without a word is gone");
 
         tasks.block_on(async {
+            const IMPATIENT: Answer = Answer::of(Duration::from_millis(50));
             let gone = Gone::default();
             let ok = service_fn(|()| async { Ok::<_, &'static str>(()) });
-            let mut watched = Watched { inner: ok, gone: gone.clone() };
+            let mut watched = Within::watched(ok, ANSWER.waits(), unanswered, gone.clone());
             watched.ready().await.unwrap();
             watched.oneshot(()).await.unwrap();
             assert!(!gone.is(), "an Ok transport response leaves the channel alive");
 
+            let silent = service_fn(|()| pending::<Result<(), &'static str>>());
+            let watched = Within::watched(silent, IMPATIENT.waits(), unanswered, gone.clone());
+            let late = watched.oneshot(()).await.unwrap_err();
+            assert_eq!(late.downcast_ref::<Status>().unwrap().code(), Code::DeadlineExceeded);
+            assert!(!gone.is(), "a call deadline leaves the channel alive");
+
             let broken = service_fn(|()| async { Err::<(), _>("goaway") });
-            let watched = Watched { inner: broken, gone: gone.clone() };
+            let watched = Within::watched(broken, ANSWER.waits(), unanswered, gone.clone());
             assert!(watched.oneshot(()).await.is_err());
             assert!(gone.is(), "a transport error marks the channel gone");
         });
@@ -1438,7 +1576,7 @@ mod tests {
                     .unwrap();
                 flooders.push(stream);
             }
-            let filled = FLOODERS * (STREAM_WINDOW as usize);
+            let filled = FLOODERS * (STREAM_WINDOW_BYTES as usize);
             eventually_async("unread streams fill their stream windows", async || {
                 (stub.flooded.load(Ordering::Relaxed) >= filled).then_some(())
             })
@@ -1454,6 +1592,96 @@ mod tests {
             assert_eq!(served.accepted(), 1);
             drop(flooders);
         });
+    }
+
+    #[test]
+    fn an_expired_deadline_refuses_an_ask_without_sending_it() {
+        let tasks = tasks::shared();
+        tasks.block_on(async {
+            let channel = Channel::from_static("http://[::1]:1").connect_lazy();
+            let shared = Shared::new(channel, Gone::default());
+            let sent = AtomicBool::new(false);
+            let late = shared
+                .ask_until(Instant::now(), ANSWER, |mut daemon| {
+                    sent.store(true, Ordering::Relaxed);
+                    async move { daemon.list_agents(()).await }
+                })
+                .await
+                .expect_err("an expired deadline refuses before sending");
+            assert!(!sent.load(Ordering::Relaxed), "an expired ask never sends its RPC");
+            assert_eq!(late.code(), Code::FailedPrecondition, "{late:?}");
+            assert!(matches!(Unchanged::of(&late), Unchanged::Refused(_)));
+        });
+    }
+
+    #[test]
+    fn build_verification_bounds_a_peer_that_accepts_but_never_becomes_ready() {
+        const IMPATIENT: Answer = Answer::of(Duration::from_millis(50));
+        const ZERO_STREAMS_SETTINGS: [u8; 15] = [0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
+        let (_dir, folder) = temp_folder();
+        let socket = folder.socket();
+        let std_listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let (done, finishing) = oneshot::channel::<()>();
+        let tasks = tasks::shared();
+        let peer = tasks.spawn(async move {
+            let listener = UnixListener::from_std(std_listener).unwrap();
+            let (mut accepted, _) = listener.accept().await.unwrap();
+            accepted.write_all(&ZERO_STREAMS_SETTINGS).await.unwrap();
+            let _ = finishing.await;
+            drop(accepted);
+        });
+        tasks.block_on(async {
+            let began = Began::now();
+            let result = connect_matched(socket, IMPATIENT).await;
+            let Err(Unreached::Asked(late)) = result else {
+                panic!("a peer with zero concurrent streams did not time out in poll_ready");
+            };
+            began.lasted().at_least(IMPATIENT.waits(), "build verification wait");
+            assert_eq!(late.code(), Code::DeadlineExceeded, "{late:?}");
+            assert_eq!(late.message(), "luned did not answer in 0.05s");
+            let _ = done.send(());
+            Patience::begun().awaited("stalled peer task ends", peer).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn kept_channels_evict_the_first_socket_at_kept_max_and_connects_stop_at_connecting_max() {
+        let tasks = tasks::shared();
+        let _entered = tasks.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let mut listeners = Vec::new();
+        let mut paths = Vec::new();
+        let mut created = Vec::new();
+        for index in 0..=KEPT_MAX {
+            let path = dir.path().join(format!("s{index:02}.sock"));
+            listeners.push(std::os::unix::net::UnixListener::bind(&path).unwrap());
+            let id = socket_id(&path).unwrap();
+            let channel = Channel::from_static("http://[::1]:1").connect_lazy();
+            let shared = Shared::new(channel, Gone::default());
+            let stored = keep(&path, Kept { shared, socket_id: id });
+            created.push(stored);
+            paths.push(path);
+        }
+        assert!(kept_at(&paths[0]).is_none(), "the first entry is evicted past KEPT_MAX");
+        assert!(kept_at(&paths[KEPT_MAX]).is_some(), "the newest entry stays kept");
+        assert!(lock_kept().len() <= KEPT_MAX);
+        for shared in &created {
+            shared.gone.mark();
+        }
+        assert!(kept_at(&paths[KEPT_MAX]).is_none());
+        drop(listeners);
+
+        let (_folder_dir, folder) = temp_folder();
+        let most = u32::try_from(CONNECTING_MAX).unwrap();
+        let held = CONNECTING.try_acquire_many(most).unwrap();
+        let refused = tasks.block_on(reach(&folder));
+        let Err(Unreached::Asked(status)) = refused else {
+            panic!("a connect past CONNECTING_MAX was not refused");
+        };
+        assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
+        assert!(status.message().contains(&format!("at most {CONNECTING_MAX}")));
+        drop(held);
     }
 
     #[test]

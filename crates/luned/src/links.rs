@@ -727,9 +727,8 @@ impl Pasted {
         patience: Duration,
     ) -> Result<Ready<usize>, Unready> {
         let request = self.asked(on.map(|on| On { destination: on.to_string() }));
-        let answer = timeout(patience, daemon.paste(request)).await;
-        let answer = answer.map(|got| got.map(tonic::Response::into_inner));
-        self.ready_from(answer, on, patience).await
+        let asked = async move { daemon.paste(request).await.map(tonic::Response::into_inner) };
+        self.ready_from(asked, on, patience).await
     }
 
     pub async fn ready_through(
@@ -740,12 +739,12 @@ impl Pasted {
     ) -> Result<Ready<usize>, Unready> {
         let request = self.asked(on.map(|on| On { destination: on.to_string() }));
         let asked = daemon.hold(crate::ANSWER, |mut daemon| async move { daemon.paste(request).await });
-        self.ready_from(timeout(patience, asked).await, on, patience).await
+        self.ready_from(asked, on, patience).await
     }
 
     async fn ready_from<S>(
         &self,
-        answer: Result<Result<S, Status>, tokio::time::error::Elapsed>,
+        asking: impl Future<Output = Result<S, Status>>,
         on: Option<&Destination>,
         patience: Duration,
     ) -> Result<Ready<usize>, Unready>
@@ -753,10 +752,11 @@ impl Pasted {
         S: tokio_stream::Stream<Item = Result<PasteResponse, Status>> + Unpin,
     {
         use tokio_stream::StreamExt as _;
+        assert!(!patience.is_zero(), "pasting waits some time for luned to answer");
         let secs = patience.as_secs_f32();
         let minutes = PATIENCE.as_secs() / 60;
         let in_doubt = |why: String| Err(Unready::InDoubt(remote::told_by(on, &why)));
-        let mut answer = match answer {
+        let mut answer = match timeout(patience, asking).await {
             Ok(Ok(answer)) => answer,
             Ok(Err(status)) => return Err(Unready::of(on, &status)),
             Err(_) => return in_doubt(format!("luned did not answer in {secs}s")),

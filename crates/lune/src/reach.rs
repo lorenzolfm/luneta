@@ -290,6 +290,7 @@ impl Luned {
 
     fn ask<T, F>(&mut self, asked: impl FnOnce(Daemon) -> F) -> Result<T, String>
     where
+        T: prost::Message,
         F: Future<Output = Result<tonic::Response<T>, Status>>,
     {
         self.answer(asked)?.map_err(|status| said_by(self.on.destination(), &status))
@@ -300,6 +301,7 @@ impl Luned {
         asked: impl FnOnce(Daemon) -> F,
     ) -> Result<Result<T, Status>, String>
     where
+        T: prost::Message,
         F: Future<Output = Result<tonic::Response<T>, Status>>,
     {
         let (patience, daemon) = (self.patience, self.daemon.clone());

@@ -97,15 +97,22 @@ pub async fn of_any_build(path: &Path) -> Result<Daemon, Unreached> {
 }
 
 pub async fn current(path: &Path) -> Result<Current, String> {
-    if let Ok(Some(folder)) = folder::open(path)
-        && let Some(daemon) = luned::kept(&folder)
-    {
-        return Ok(Current { folder, daemon });
+    match folder::open(path) {
+        Ok(Some(folder)) => {
+            if let Some(daemon) = luned::kept(&folder) {
+                return Ok(Current { folder, daemon });
+            }
+        },
+        Ok(None) => {},
+        Err(refusal) => return Err(refusal.to_string()),
     }
     let (path, tasks) = (path.to_owned(), luned::tasks::shared());
     let reaching = tasks.clone();
     let reached = tasks.spawn_blocking(move || reaching.block_on(reach(&path)));
-    reached.await.unwrap_or_else(|ended| std::panic::resume_unwind(ended.into_panic()))
+    reached.await.unwrap_or_else(|ended| {
+        assert!(ended.is_panic(), "a daemon reach task is never cancelled");
+        std::panic::resume_unwind(ended.into_panic())
+    })
 }
 
 async fn reach(path: &Path) -> Result<Current, String> {
@@ -358,6 +365,21 @@ mod tests {
         let reaching = tasks.spawn(async move { current(&path).await.map(|_| ()) });
         let reached = tasks.block_on(reaching).unwrap();
         let refused = folder::Refusal::Open(open.path().to_owned()).to_string();
-        assert_eq!(reached, Err(refused), "a worker hands the reach to a thread that may block");
+        assert_eq!(reached, Err(refused), "an open folder is refused without blocking");
+
+        let blocked = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(blocked.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let missing = blocked.path().join("lune");
+        let path = missing.clone();
+        let reaching = tasks.spawn(async move { current(&path).await.map(|_| ()) });
+        let reached = tasks.block_on(reaching).unwrap();
+        std::fs::set_permissions(blocked.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let Err(why) = reached else {
+            panic!("a missing folder in a read-only parent was made");
+        };
+        assert!(
+            why.contains(&missing.display().to_string()),
+            "a worker hands the reach to a thread that may block: {why}"
+        );
     }
 }
