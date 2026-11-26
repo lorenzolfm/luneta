@@ -20,17 +20,17 @@ use tokio::sync::oneshot;
 
 use crate::agent::{Agent, SeenAgent, Unread};
 use crate::api;
-use crate::claude::Scan;
+use crate::claude::{self, Scan};
 use crate::git;
 use crate::github::Found;
 use crate::mux::own::server::{self, Is};
-use crate::osc_7501;
+use crate::{agy, osc_7501, pi};
 use crate::process::{self, AgentId, AgentPid};
 use crate::titles::{self, Titled};
 use crate::projects::Revision;
 use crate::remote::{Destination, Line, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
-use crate::statuses::{ReportedAgent, Statuses, Subagent};
+use crate::statuses::{Proof, Report, ReportedAgent, Statuses, Subagent};
 use crate::transcripts::SessionId;
 use crate::watch::Troubles;
 use crate::Directory;
@@ -159,6 +159,7 @@ struct Known {
     found: Scan,
     pi: Vec<ReportedAgent>,
     agy: Vec<ReportedAgent>,
+    contested: HashMap<AgentId, Option<Harness>>,
     mux_terminals: BTreeMap<TerminalKey, server::Terminal>,
     osc_agents: Vec<SeenAgent>,
     osc_processes: HashMap<(TerminalKey, AgentPid), CachedProcess>,
@@ -185,6 +186,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         found: Scan { agents: Vec::new(), unread: Vec::new() },
         pi: Vec::new(),
         agy: Vec::new(),
+        contested: HashMap::new(),
         mux_terminals: BTreeMap::new(),
         osc_agents: Vec::new(),
         osc_processes: HashMap::new(),
@@ -212,26 +214,23 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let pids: HashSet<AgentPid> =
                     now.agents.iter().map(|agent| agent.seen.id.pid()).collect();
                 assert_eq!(pids.len(), now.agents.len(), "an agent's pid comes twice");
-                let reports = now.agents.iter().map(|agent| agent.report.clone()).collect();
+                assert!(now.agents.iter().all(|agent| agent.report.reads() == claude::READS));
                 known.found = now;
-                known.agent_statuses.replace_rung(Rung::Feed, reports);
-                known.reconcile_osc_statuses();
+                known.settle_readers();
             },
             Command::PiAgents(now) => {
                 let pids: HashSet<AgentPid> = now.iter().map(|agent| agent.seen.id.pid()).collect();
                 assert_eq!(pids.len(), now.len(), "an agent's pid comes twice");
-                let reports = now.iter().map(|agent| agent.report.clone()).collect();
+                assert!(now.iter().all(|agent| agent.report.reads() == pi::READS));
                 known.pi = now;
-                known.agent_statuses.replace_rung(Rung::Extension, reports);
-                known.reconcile_osc_statuses();
+                known.settle_readers();
             },
             Command::AgyAgents(now) => {
                 let pids: HashSet<AgentPid> = now.iter().map(|agent| agent.seen.id.pid()).collect();
                 assert_eq!(pids.len(), now.len(), "an agent's pid comes twice");
-                let reports = now.iter().map(|agent| agent.report.clone()).collect();
+                assert!(now.iter().all(|agent| agent.report.reads() == agy::READS));
                 known.agy = now;
-                known.agent_statuses.replace_rung(Rung::Hook, reports);
-                known.reconcile_osc_statuses();
+                known.settle_readers();
             },
             Command::MuxTerminals(now) => {
                 let count = now.len();
@@ -432,10 +431,38 @@ impl Known {
         self.statuses.iter().filter_map(tracking).collect()
     }
 
+    fn readers(&self) -> impl Iterator<Item = &ReportedAgent> {
+        standing(&self.found.agents, &self.pi, &self.agy, &self.contested)
+    }
+
+    fn settle_readers(&mut self) {
+        self.contested = contested(self.found.agents.iter().chain(&self.pi).chain(&self.agy));
+        for (agent, winner) in &self.contested {
+            for harness in Harness::ALL {
+                if *winner != Some(harness) {
+                    self.agent_statuses.forget(agent, harness);
+                }
+            }
+        }
+        for reads in [claude::READS, pi::READS, agy::READS] {
+            let reports: Vec<Report> = self
+                .readers()
+                .map(|reported| &reported.report)
+                .filter(|report| report.reads() == reads)
+                .cloned()
+                .collect();
+            for report in &reports {
+                self.agent_statuses.claim(report.agent(), reads.harness());
+            }
+            self.agent_statuses.replace_rung(reads.rung(), reports);
+        }
+        self.reconcile_osc_statuses();
+    }
+
     fn reconcile_osc_statuses(&mut self) {
         let mut by_terminal: HashMap<(TerminalKey, Harness), Vec<&SeenAgent>> = HashMap::new();
         let mut known_pids: HashSet<AgentPid> = HashSet::new();
-        for reported in self.found.agents.iter().chain(&self.pi).chain(&self.agy) {
+        for reported in standing(&self.found.agents, &self.pi, &self.agy, &self.contested) {
             known_pids.insert(reported.seen.id.pid());
             if let Some(terminal) = reported.seen.terminal {
                 by_terminal
@@ -544,11 +571,7 @@ impl Known {
         self.osc_agents = osc_agents;
         self.agent_statuses.replace_rung(Rung::Osc7501, osc_reports);
         let live: HashSet<AgentId> = self
-            .found
-            .agents
-            .iter()
-            .chain(&self.pi)
-            .chain(&self.agy)
+            .readers()
             .map(|reported| reported.seen.id.clone())
             .chain(self.osc_agents.iter().map(|seen| seen.id.clone()))
             .collect();
@@ -556,11 +579,7 @@ impl Known {
     }
 
     fn all_agents(&self) -> Vec<Agent> {
-        self.found
-            .agents
-            .iter()
-            .chain(&self.pi)
-            .chain(&self.agy)
+        self.readers()
             .map(|reported| &reported.seen)
             .chain(&self.osc_agents)
             .map(|seen| self.agent_statuses.apply(seen))
@@ -794,6 +813,45 @@ impl Known {
     }
 }
 
+fn standing<'a>(
+    claude: &'a [ReportedAgent],
+    pi: &'a [ReportedAgent],
+    agy: &'a [ReportedAgent],
+    contested: &'a HashMap<AgentId, Option<Harness>>,
+) -> impl Iterator<Item = &'a ReportedAgent> {
+    let stands = |reported: &&ReportedAgent| match contested.get(&reported.seen.id) {
+        None => true,
+        Some(winner) => *winner == Some(reported.seen.harness),
+    };
+    claude.iter().chain(pi).chain(agy).filter(stands)
+}
+
+fn contested<'a>(
+    reported: impl Iterator<Item = &'a ReportedAgent>,
+) -> HashMap<AgentId, Option<Harness>> {
+    let mut claims: HashMap<&AgentId, Vec<(Harness, Proof)>> = HashMap::new();
+    for reported in reported {
+        let claim = (reported.seen.harness, reported.proof);
+        claims.entry(&reported.seen.id).or_default().push(claim);
+    }
+    let mut contested = HashMap::new();
+    for (agent, claims) in claims {
+        assert!(claims.len() <= Harness::ALL.len(), "each harness's reader claims an agent once");
+        if claims.len() == 1 {
+            continue;
+        }
+        let harnesses: HashSet<Harness> = claims.iter().map(|(harness, _)| *harness).collect();
+        assert_eq!(harnesses.len(), claims.len(), "each harness's reader claims an agent once");
+        let mut started = claims.iter().filter(|(_, proof)| *proof == Proof::Started);
+        let winner = match (started.next(), started.next()) {
+            (Some((harness, _)), None) => Some(*harness),
+            (None, _) | (Some(_), Some(_)) => None,
+        };
+        contested.insert(agent.clone(), winner);
+    }
+    contested
+}
+
 const OSC_DATED_LATE: Duration = Duration::from_secs(1);
 
 const RUNNERS: [&str; 12] = [
@@ -898,6 +956,7 @@ mod tests {
     use std::num::NonZeroU32;
     use std::time::{Duration, UNIX_EPOCH};
 
+    use lune_domain::agent::Declared;
     use lune_domain::mux::OwnMade;
     use lune_protocol::agent_status::{AgentStatus, BlockedReason};
     use lune_protocol::program_status::{
@@ -907,7 +966,6 @@ mod tests {
 
     use super::*;
     use crate::statuses::{ActiveStatus, Report, RungUpdate};
-    use crate::{agy, claude, pi};
 
     fn key(id: u32) -> TerminalKey {
         TerminalKey { id: NonZeroU32::new(id).unwrap(), made: OwnMade::from_nanos(10) }
@@ -943,7 +1001,7 @@ mod tests {
             },
         );
         core.send(Command::Agents(Scan {
-            agents: vec![ReportedAgent { seen, report: feed }],
+            agents: vec![ReportedAgent { seen, report: feed, proof: Proof::Started }],
             unread: Vec::new(),
         }))
         .unwrap();
@@ -1143,6 +1201,57 @@ mod tests {
     }
 
     #[test]
+    fn readers_that_claim_one_process_settle_on_the_claim_its_start_proves() {
+        let wake = || mpsc::sync_channel(1).0;
+        let core = start(Wakes { git: wake(), github: wake() }).unwrap();
+        let start_id = process::start(std::process::id()).unwrap();
+        let id = AgentId::new(AgentPid::new(301).unwrap(), start_id);
+        let claim = |reads: Declared, proof: Proof| ReportedAgent {
+            seen: SeenAgent {
+                id: id.clone(),
+                harness: reads.harness(),
+                session_id: Said::new("s-301".to_owned()),
+                cwd: Directory::parse("/w".to_owned()).unwrap(),
+                started_at: None,
+                name: None,
+                entrypoint: Said::new("cli".to_owned()),
+                terminal: None,
+            },
+            report: Report::new(
+                reads,
+                id.clone(),
+                RungUpdate::Active {
+                    status: ActiveStatus::Working,
+                    at: None,
+                    subagents: Vec::new(),
+                },
+            ),
+            proof,
+        };
+        let listed = || ask(&core, Command::List).unwrap().agents;
+        let claude_said = |agents| Command::Agents(Scan { agents, unread: Vec::new() });
+
+        core.send(Command::AgyAgents(vec![claim(agy::READS, Proof::Dated)])).unwrap();
+        assert_eq!(listed().len(), 1);
+        core.send(Command::PiAgents(vec![claim(pi::READS, Proof::Dated)])).unwrap();
+        assert_eq!(listed().len(), 0, "two dated claims prove neither");
+
+        core.send(claude_said(vec![claim(claude::READS, Proof::Started)])).unwrap();
+        let settled = listed();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].harness, Some(api::Harness::ClaudeCode.into()));
+        assert_eq!(settled[0].status_rung, Some(api::StatusRung::Feed.into()));
+
+        core.send(claude_said(Vec::new())).unwrap();
+        assert_eq!(listed().len(), 0, "two dated claims still prove neither");
+        core.send(Command::PiAgents(Vec::new())).unwrap();
+        let left = listed();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].harness, Some(api::Harness::Antigravity.into()));
+        assert_eq!(left[0].status_rung, Some(api::StatusRung::Hook.into()));
+    }
+
+    #[test]
     fn osc_7501_attributes_deterministically_when_multiple_agents_share_a_terminal() {
         let wake = || mpsc::sync_channel(1).0;
         let core = start(Wakes { git: wake(), github: wake() }).unwrap();
@@ -1182,6 +1291,7 @@ mod tests {
                         subagents: Vec::new(),
                     },
                 ),
+                proof: Proof::Started,
             }
         };
 
@@ -1277,6 +1387,7 @@ mod tests {
                         subagents: Vec::new(),
                     },
                 ),
+                proof: Proof::Started,
             });
             let children = (0..lune_protocol::PROGRAM_STATUS_RECORDS_MAX)
                 .map(|child| ChildProgramStatus {

@@ -19,7 +19,8 @@ use crate::agent::{
 use crate::mux;
 use crate::process::{self, AgentId};
 use crate::statuses::{
-    self, ActiveStatus, BlockedReason, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
+    self, ActiveStatus, BlockedReason, Proof, Report, ReportedAgent, RungUpdate,
+    SOURCE_AGENTS_MAX,
 };
 use crate::watch::{self, Troubles};
 use crate::{log, Directory};
@@ -142,6 +143,7 @@ struct Snapshot {
     name: Option<Name>,
     status: Option<ActiveStatus>,
     modified: SystemTime,
+    proof: Proof,
 }
 
 #[derive(Clone)]
@@ -383,7 +385,7 @@ fn reported(
         entrypoint: Some(Said::new("tui".to_owned()).expect("tui is not empty")),
         terminal,
     };
-    ReportedAgent { seen, report }
+    ReportedAgent { seen, report, proof: snapshot.proof }
 }
 
 fn update_of(status: Option<ActiveStatus>, modified: SystemTime) -> RungUpdate {
@@ -435,14 +437,13 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
     let bytes = read_bounded_file(file, FILE_BYTES_MAX)?;
     let envelope: Envelope = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    let stands = if let Some(recorded) = &envelope.proc_start {
-        recorded == start
-    } else {
-        dated_since(modified, started)
+    let proof = match &envelope.proc_start {
+        Some(recorded) => (recorded == start).then_some(Proof::Started),
+        None => dated_since(modified, started).then_some(Proof::Dated),
     };
-    if !stands {
+    let Some(proof) = proof else {
         return Ok(None);
-    }
+    };
     let Some(cwd) = envelope.state.cwd() else {
         return Err(io::Error::new(ErrorKind::InvalidData, "cwd is missing or relative"));
     };
@@ -453,6 +454,7 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
         name: envelope.state.name(),
         status,
         modified,
+        proof,
     }))
 }
 

@@ -16,6 +16,7 @@ use lune_domain::agent::{Harness, Rung, Step};
 use lune_mux::screen::{Screen, Size};
 use lune_protocol::program_status::{OscBlockedKind, ProgramPhase};
 use rustix::fs::{Mode, OFlags};
+use rustix::io::Errno;
 use rustix::pty::OpenptFlags;
 use rustix::termios::{self, Winsize};
 use serde_json::{Value, json};
@@ -31,6 +32,24 @@ const TICK: Duration = Duration::from_millis(100);
 const TYPED_GAP: Duration = Duration::from_millis(400);
 
 const SEQUENCE_BYTES_MAX: usize = 8192;
+
+const HEARD_BYTES_MAX: usize = 64 * 1024;
+
+const PHASES_MAX: usize = 4096;
+
+const READS_QUEUED_MAX: usize = 64;
+
+const READ_BYTES_MAX: usize = 64 * 1024;
+
+const ANCESTORS_MAX: usize = 64;
+
+const IDENTIFIER_BYTES_MIN: usize = 3;
+
+const OSC_7501_KEPT: [&str; 5] = ["state", "kind", "app", "progress", "id"];
+
+const OSC_7501_REPLACED: [&str; 2] = ["msg", "title"];
+
+const RECORDED_IN_BASE64: &str = "cmVjb3JkZWQ=";
 
 const ESC: &[u8] = b"\x1b";
 
@@ -130,18 +149,18 @@ fn lune_folder() -> Result<PathBuf, String> {
     luned::folder::find().map_err(|error| error.to_string())
 }
 
-fn secs(count: u64) -> Duration {
+fn seconds(count: u64) -> Duration {
     Duration::from_secs(count)
 }
 
 fn started() -> Move {
-    Move::to(vec![], Want::Resting, Some(Step::Start), secs(2))
+    Move::to(vec![], Want::Resting, Some(Step::Start), seconds(2))
 }
 
 fn prompted() -> Vec<Move> {
     vec![
-        Move::to(vec![Input::Line(STORY)], Want::Working, Some(Step::Prompt), secs(1)),
-        Move::to(vec![], Want::Done, Some(Step::Finish), secs(5)),
+        Move::to(vec![Input::Line(STORY)], Want::Working, Some(Step::Prompt), seconds(1)),
+        Move::to(vec![], Want::Done, Some(Step::Finish), seconds(5)),
     ]
 }
 
@@ -151,9 +170,9 @@ fn asked_and_rejected() -> Vec<Move> {
             vec![Input::Line(TOUCH)],
             Want::Blocked(OscBlockedKind::Permission),
             Some(Step::Permission),
-            secs(2),
+            seconds(2),
         ),
-        Move::to(vec![Input::Keys(ESC)], Want::Resting, Some(Step::Reject), secs(2)),
+        Move::to(vec![Input::Keys(ESC)], Want::Resting, Some(Step::Reject), seconds(2)),
     ]
 }
 
@@ -163,21 +182,21 @@ fn asked(question: &'static str) -> Vec<Move> {
             vec![Input::Line(question)],
             Want::Blocked(OscBlockedKind::Question),
             Some(Step::Question),
-            secs(2),
+            seconds(2),
         ),
-        Move::to(vec![Input::Keys(ESC)], Want::Settled, None, secs(2)),
+        Move::to(vec![Input::Keys(ESC)], Want::Settled, None, seconds(2)),
     ]
 }
 
 fn interrupted() -> Vec<Move> {
     vec![
-        Move::to(vec![Input::Line(COUNT)], Want::Working, None, secs(3)),
-        Move::to(vec![Input::Keys(ESC)], Want::Resting, Some(Step::Interrupt), secs(2)),
+        Move::to(vec![Input::Line(COUNT)], Want::Working, None, seconds(3)),
+        Move::to(vec![Input::Keys(ESC)], Want::Resting, Some(Step::Interrupt), seconds(2)),
     ]
 }
 
 fn exited(command: &'static str, records: bool) -> Move {
-    Move::to(vec![Input::Line(command)], Want::Ended, records.then_some(Step::Exit), secs(1))
+    Move::to(vec![Input::Line(command)], Want::Ended, records.then_some(Step::Exit), seconds(1))
 }
 
 fn failed(
@@ -192,8 +211,8 @@ fn failed(
         args,
         env,
         moves: vec![
-            Move::to(vec![], Want::Resting, None, secs(2)),
-            Move::to(vec![Input::Line("Say hi.")], Want::Error, Some(Step::Error), secs(3)),
+            Move::to(vec![], Want::Resting, None, seconds(2)),
+            Move::to(vec![Input::Line("Say hi.")], Want::Error, Some(Step::Error), seconds(3)),
             exited(exit, false),
         ],
     }
@@ -321,6 +340,7 @@ struct Sequences {
     open: Option<Vec<u8>>,
     escaped: bool,
     heard: Vec<u8>,
+    overflowed: bool,
 }
 
 impl Sequences {
@@ -338,10 +358,7 @@ impl Sequences {
 
     fn byte(&mut self, byte: u8) {
         let Some(open) = self.open.as_mut() else {
-            if self.escaped && byte == b']' {
-                self.open = Some(b"\x1b]".to_vec());
-            }
-            self.escaped = byte == 0x1b;
+            self.outside(byte);
             return;
         };
         if self.escaped {
@@ -352,9 +369,8 @@ impl Sequences {
                 return;
             }
             self.open = None;
-            self.escaped = false;
-            self.byte(0x1b);
-            self.byte(byte);
+            self.escaped = true;
+            self.outside(byte);
             return;
         }
         match byte {
@@ -368,19 +384,89 @@ impl Sequences {
         }
     }
 
+    fn outside(&mut self, byte: u8) {
+        assert!(self.open.is_none());
+        if self.escaped && byte == b']' {
+            self.open = Some(b"\x1b]".to_vec());
+        }
+        self.escaped = byte == 0x1b;
+    }
+
     fn close(&mut self) {
         let Some(sequence) = self.open.take() else {
             return;
         };
-        let status = sequence.starts_with(b"\x1b]7501;") && !sequence.starts_with(b"\x1b]7501;?");
-        if status || sequence.starts_with(b"\x1b]133;") {
-            self.heard.extend_from_slice(&sequence);
+        assert!(sequence.starts_with(b"\x1b]"));
+        assert!(sequence.len() <= SEQUENCE_BYTES_MAX + 2);
+        let Some(kept) = scrubbed(&sequence) else {
+            return;
+        };
+        if self.heard.len() + kept.len() > HEARD_BYTES_MAX {
+            self.overflowed = true;
+            return;
         }
+        self.heard.extend_from_slice(&kept);
+        assert!(self.heard.len() <= HEARD_BYTES_MAX);
     }
 
-    fn take(&mut self) -> String {
-        String::from_utf8_lossy(&std::mem::take(&mut self.heard)).into_owned()
+    fn take(&mut self) -> Result<String, String> {
+        let heard = std::mem::take(&mut self.heard);
+        if std::mem::take(&mut self.overflowed) {
+            let why = format!("the agent wrote over {HEARD_BYTES_MAX} bytes of records in a move");
+            return Err(why);
+        }
+        String::from_utf8(heard).map_err(|error| format!("the agent's records: {error}"))
     }
+}
+
+fn scrubbed(sequence: &[u8]) -> Option<Vec<u8>> {
+    let (body, end): (&[u8], &[u8]) = if let Some(body) = sequence.strip_suffix(b"\x1b\\") {
+        (body, b"\x1b\\")
+    } else if let Some(body) = sequence.strip_suffix(b"\x07") {
+        (body, b"\x07")
+    } else {
+        unreachable!("a sequence closes on ST or BEL")
+    };
+    if let Some(fields) = body.strip_prefix(b"\x1b]7501;") {
+        if fields.starts_with(b"?") {
+            return None;
+        }
+        let fields = std::str::from_utf8(fields).ok()?;
+        let kept: Vec<String> = fields
+            .split(':')
+            .filter_map(|field| {
+                let (key, value) = field.split_once('=')?;
+                if OSC_7501_KEPT.contains(&key) {
+                    Some(format!("{key}={value}"))
+                } else if OSC_7501_REPLACED.contains(&key) {
+                    Some(format!("{key}={RECORDED_IN_BASE64}"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        return Some([b"\x1b]7501;", kept.join(":").as_bytes(), end].concat());
+    }
+    let fields = body.strip_prefix(b"\x1b]133;")?;
+    let mut parts = fields.split(|byte| *byte == b';');
+    let mark = parts.next()?;
+    let [letter] = mark else {
+        return None;
+    };
+    if !letter.is_ascii_uppercase() {
+        return None;
+    }
+    let mut kept = [b"\x1b]133;", mark].concat();
+    if let Some(code) = parts.next()
+        && *letter == b'D'
+        && !code.is_empty()
+        && code.iter().all(u8::is_ascii_digit)
+    {
+        kept.push(b';');
+        kept.extend_from_slice(code);
+    }
+    kept.extend_from_slice(end);
+    Some(kept)
 }
 
 struct Pty {
@@ -425,8 +511,12 @@ struct Running(Child);
 impl Drop for Running {
     fn drop(&mut self) {
         if matches!(self.0.try_wait(), Ok(None)) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            if let Err(error) = self.0.kill() {
+                eprintln!("{RECORDER}: stopping the agent: {error}");
+            }
+            if let Err(error) = self.0.wait() {
+                eprintln!("{RECORDER}: waiting for the agent to stop: {error}");
+            }
         }
     }
 }
@@ -434,7 +524,7 @@ impl Drop for Running {
 struct Session {
     agent: Running,
     near: File,
-    heard: Receiver<Option<Vec<u8>>>,
+    heard: Receiver<Vec<u8>>,
     screen: Screen,
     sequences: Sequences,
     dialogs: &'static [(&'static str, &'static [u8])],
@@ -479,19 +569,24 @@ impl Session {
         let Pty { near, far } = pty;
         drop(far);
         let mut reading = near.try_clone().map_err(|error| error.to_string())?;
-        let (tell, heard) = mpsc::channel();
+        let (tell, heard) = mpsc::sync_channel(READS_QUEUED_MAX);
         thread::spawn(move || {
-            let mut buffer = vec![0; 64 * 1024];
+            let mut buffer = vec![0; READ_BYTES_MAX];
             loop {
                 match reading.read(&mut buffer) {
-                    Ok(0) | Err(_) => {
-                        let _ = tell.send(None);
-                        return;
-                    },
+                    Ok(0) => return,
                     Ok(read) => {
-                        if tell.send(Some(buffer[..read].to_vec())).is_err() {
+                        if tell.send(buffer[..read].to_vec()).is_err() {
                             return;
                         }
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+                    Err(error) if error.raw_os_error() == Some(Errno::IO.raw_os_error()) => {
+                        return;
+                    },
+                    Err(error) => {
+                        eprintln!("{RECORDER}: reading the agent's terminal: {error}");
+                        return;
                     },
                 }
             }
@@ -528,7 +623,7 @@ impl Session {
                 return Ok(());
             }
             match self.heard.recv_timeout((until - now).min(TICK)) {
-                Ok(Some(bytes)) => {
+                Ok(bytes) => {
                     let mut ends = self.sequences.hear(&bytes);
                     ends.push(bytes.len());
                     let mut from = 0;
@@ -537,7 +632,7 @@ impl Session {
                         from = end;
                     }
                 },
-                Ok(None) | Err(RecvTimeoutError::Disconnected) => self.ended = true,
+                Err(RecvTimeoutError::Disconnected) => self.ended = true,
                 Err(RecvTimeoutError::Timeout) => {
                     if self.answering {
                         self.answer_dialogs()?;
@@ -558,16 +653,18 @@ impl Session {
         }
         let phase = self.phase();
         if self.phases.last() != Some(&phase) {
+            if self.phases.len() >= PHASES_MAX {
+                return Err(format!("the agent went through over {PHASES_MAX} phases"));
+            }
             eprintln!("{RECORDER}: the agent is at {phase:?}");
             self.phases.push(phase);
         }
+        assert!(self.phases.len() <= PHASES_MAX);
         Ok(())
     }
 
     fn answer_dialogs(&mut self) -> Result<(), String> {
-        let Ok(text) = self.screen.dumped_text() else {
-            return Ok(());
-        };
+        let text = self.screen.dumped_text().map_err(|error| format!("the screen: {error:?}"))?;
         for (index, (shown, keys)) in self.dialogs.iter().enumerate() {
             if !self.answered[index] && text.contains(shown) {
                 self.answered[index] = true;
@@ -616,25 +713,47 @@ impl Session {
     }
 
     fn shown(&self) -> String {
-        let text = self.screen.dumped_text().unwrap_or_default();
+        let text = self
+            .screen
+            .dumped_text()
+            .unwrap_or_else(|error| format!("(the screen does not dump: {error:?})"));
         let lines: Vec<&str> = text.lines().collect();
         lines[lines.len().saturating_sub(ROWS.into())..].join("\n")
     }
 }
 
-fn file_pid(folder: &Path, agent: u32) -> Option<u32> {
+fn file_pid(folder: &Path, agent: u32) -> Result<Option<u32>, String> {
     if folder.join(format!("{agent}.json")).exists() {
-        return Some(agent);
+        return Ok(Some(agent));
     }
-    let entries = fs::read_dir(folder).ok()?;
-    entries
-        .filter_map(|entry| entry.ok()?.path().file_stem()?.to_str()?.parse::<u32>().ok())
-        .find(|&pid| descends(pid, agent))
+    let entries = match fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", folder.display())),
+    };
+    if !Path::new("/proc/self/stat").exists() {
+        return Err(format!(
+            "{}: finding the file of a process the agent started reads /proc, which this system lacks",
+            folder.display()
+        ));
+    }
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", folder.display()))?;
+        let path = entry.path();
+        let Some(pid) = path.file_stem().and_then(OsStr::to_str).and_then(|stem| stem.parse().ok())
+        else {
+            continue;
+        };
+        if descends(pid, agent) {
+            return Ok(Some(pid));
+        }
+    }
+    Ok(None)
 }
 
 fn descends(pid: u32, from: u32) -> bool {
     let mut at = pid;
-    for _ in 0..64 {
+    for _ in 0..ANCESTORS_MAX {
         if at == from {
             return true;
         }
@@ -680,9 +799,9 @@ fn kept(value: &Value, keeps: &[(&str, Kept)]) -> Value {
         let Some(found) = names.iter().try_fold(value, |at, name| at.get(name)) else {
             continue;
         };
-        let said = match (keep, found) {
-            (Kept::As(with), Value::String(_)) => Value::String((*with).to_owned()),
-            (Kept::As(_) | Kept::Said, found) => found.clone(),
+        let said = match keep {
+            Kept::As(with) => Value::String((*with).to_owned()),
+            Kept::Said => found.clone(),
         };
         let (last, parents) = names.split_last().expect("a kept path names a key");
         let mut at = &mut kept;
@@ -694,6 +813,12 @@ fn kept(value: &Value, keeps: &[(&str, Kept)]) -> Value {
                 .or_insert_with(|| Value::Object(serde_json::Map::new()));
         }
         at.as_object_mut().expect("a kept path ends in an object").insert((*last).to_owned(), said);
+    }
+    for (path, keep) in keeps {
+        if let Kept::As(with) = keep {
+            let found = path.split('.').try_fold(&kept, |at, name| at.get(name));
+            assert!(found.is_none_or(|found| found.as_str() == Some(*with)), "{path} is replaced");
+        }
     }
     kept
 }
@@ -798,50 +923,46 @@ fn record(harness: Harness, launch: &Launch, cwd: &Path) -> Result<Recordings, S
             );
             drop(session);
             session = Session::start(harness, launch, &plan, run, cwd)?;
-            session.wait(first.until, 0)?;
+            if !session.wait(first.until, 0)? {
+                return Err(unmet(&session, 0, first));
+            }
         }
         session.answering = false;
-        for (index, step) in run.moves.iter().enumerate() {
-            let from = session.phases.len().saturating_sub(1);
-            session.type_in(&step.inputs)?;
-            let met = session.wait(step.until, from)?;
-            if !met {
-                eprintln!(
-                    "{RECORDER}: move {index} waited {PATIENCE:?} for {:?} and the agent is at {:?}; its screen:\n{}",
-                    step.until,
-                    session.phase(),
-                    session.shown()
-                );
+        for (index, planned) in run.moves.iter().enumerate() {
+            let from = if planned.inputs.is_empty() {
+                session.phases.len().saturating_sub(1)
+            } else {
+                session.phases.len()
+            };
+            session.type_in(&planned.inputs)?;
+            if !session.wait(planned.until, from)? {
+                return Err(unmet(&session, index, planned));
             }
-            let until = Instant::now() + step.settle;
+            let until = Instant::now() + planned.settle;
             while Instant::now() < until && !session.ended {
                 session.pump(until)?;
             }
             for ((_, folder, _), pid) in recordings.files.iter().zip(&mut pids) {
                 if pid.is_none() {
-                    *pid = file_pid(folder, session.pid());
+                    *pid = file_pid(folder, session.pid())?;
                 }
             }
-            let sequences = session.sequences.take();
-            let Some(records) = step.records else {
+            let sequences = session.sequences.take()?;
+            let Some(records) = planned.records else {
                 continue;
             };
-            if !met {
-                eprintln!("{RECORDER}: {} goes unrecorded", records.name());
-                continue;
-            }
             eprintln!("{RECORDER}: recorded {} at {:?}", records.name(), session.phase());
             if harness.osc_7501_app().is_some() {
                 recordings.osc_7501.insert(records.name().to_owned(), Value::String(sequences));
             }
             for ((rung, folder, steps), pid) in recordings.files.iter_mut().zip(&pids) {
                 let Some(pid) = *pid else {
-                    eprintln!(
-                        "{RECORDER}: {} has no file of agent {} for {rung:?}",
+                    return Err(format!(
+                        "{}: no file of agent {} tells {rung:?} at {}, so nothing is written",
                         folder.display(),
-                        session.pid()
-                    );
-                    continue;
+                        session.pid(),
+                        records.name()
+                    ));
                 };
                 let file = snapshot(&folder.join(format!("{pid}.json")))?;
                 steps.insert(records.name().to_owned(), kept(&file, plan.keeps));
@@ -851,22 +972,49 @@ fn record(harness: Harness, launch: &Launch, cwd: &Path) -> Result<Recordings, S
     Ok(recordings)
 }
 
-fn write(
-    harness: Harness,
-    rung: Rung,
-    agent: &str,
-    on: &str,
-    steps: &BTreeMap<String, Value>,
-) -> Result<(), String> {
+fn unmet(session: &Session, index: usize, planned: &Move) -> String {
+    format!(
+        "move {index} waited {PATIENCE:?} for {:?} and the agent is at {:?}, so nothing is written; its screen:\n{}",
+        planned.until,
+        session.phase(),
+        session.shown()
+    )
+}
+
+fn fixture_text(agent: &str, on: &str, steps: &BTreeMap<String, Value>) -> Result<String, String> {
+    let fixture =
+        json!({ "recorded": { "by": RECORDER, "agent": agent, "on": on }, "steps": steps });
+    let mut text = serde_json::to_string_pretty(&fixture).map_err(|error| error.to_string())?;
+    text.push('\n');
+    Ok(text)
+}
+
+fn identifiers() -> Result<Vec<String>, String> {
+    let mut identifiers: Vec<String> = ["HOME", "USER", "LOGNAME"]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name)?.into_string().ok())
+        .collect();
+    identifiers.push(said_by("hostname", &[])?);
+    identifiers.retain(|identifier| identifier.trim().len() >= IDENTIFIER_BYTES_MIN);
+    Ok(identifiers)
+}
+
+fn refuse_identifiers(rung: Rung, text: &str, identifiers: &[String]) -> Result<(), String> {
+    match identifiers.iter().find(|identifier| text.contains(identifier.as_str())) {
+        Some(found) => Err(format!(
+            "the {} fixture holds {found:?}, which names this machine or its user, so nothing is written",
+            rung.name()
+        )),
+        None => Ok(()),
+    }
+}
+
+fn write(harness: Harness, rung: Rung, text: &str) -> Result<(), String> {
     let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src/statuses/fixtures")
         .join(harness.program());
     fs::create_dir_all(&folder).map_err(|error| format!("{}: {error}", folder.display()))?;
     let path = folder.join(format!("{}.json", rung.name()));
-    let fixture =
-        json!({ "recorded": { "by": RECORDER, "agent": agent, "on": on }, "steps": steps });
-    let mut text = serde_json::to_string_pretty(&fixture).map_err(|error| error.to_string())?;
-    text.push('\n');
     fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))?;
     eprintln!("{RECORDER}: wrote {}", path.display());
     Ok(())
@@ -880,6 +1028,7 @@ fn run(named: &str, launcher: &[String]) -> Result<(), String> {
     let launch = Launch::of(harness, launcher);
     let agent = format!("{} {}", harness.program(), launch.version()?);
     let on = said_by("date", &["-u", "+%F"])?;
+    let identifiers = identifiers()?;
     let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
     let cwd = match plan(harness)?.folder {
         Folder::Temporary => temporary.path().to_owned(),
@@ -887,13 +1036,26 @@ fn run(named: &str, launcher: &[String]) -> Result<(), String> {
     };
     fs::create_dir_all(&cwd).map_err(|error| format!("{}: {error}", cwd.display()))?;
     let recordings = record(harness, &launch, &cwd);
-    let _ = fs::remove_file(cwd.join("lune-record-status.txt"));
+    let touched = cwd.join("lune-record-status.txt");
+    let removed = match fs::remove_file(&touched) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", touched.display())),
+    };
     let recordings = recordings?;
+    removed?;
+    let mut fixtures = Vec::with_capacity(recordings.files.len() + 1);
     if harness.osc_7501_app().is_some() {
-        write(harness, Rung::Osc7501, &agent, &on, &recordings.osc_7501)?;
+        fixtures.push((Rung::Osc7501, fixture_text(&agent, &on, &recordings.osc_7501)?));
     }
-    for (rung, _, steps) in recordings.files {
-        write(harness, rung, &agent, &on, &steps)?;
+    for (rung, _, steps) in &recordings.files {
+        fixtures.push((*rung, fixture_text(&agent, &on, steps)?));
+    }
+    for (rung, text) in &fixtures {
+        refuse_identifiers(*rung, text, &identifiers)?;
+    }
+    for (rung, text) in &fixtures {
+        write(harness, *rung, text)?;
     }
     Ok(())
 }

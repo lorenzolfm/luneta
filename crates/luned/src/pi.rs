@@ -17,7 +17,7 @@ use crate::agent::{
 use crate::mux;
 use crate::process::{self, AgentId};
 use crate::statuses::{
-    ActiveStatus, BlockedReason, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
+    ActiveStatus, BlockedReason, Proof, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
 };
 use crate::watch::{self, Troubles};
 use crate::{log, Directory};
@@ -264,7 +264,7 @@ impl AgentFiles {
                 continue;
             };
             match read(&path, id.start(), started) {
-                Ok(Some(file)) => {
+                Ok(Some((file, proof))) => {
                     let terminal = cached.map_or_else(
                         || {
                             terminal_or_trouble(
@@ -276,7 +276,7 @@ impl AgentFiles {
                         |it| it.terminal,
                     );
                     let found = Process { started, terminal };
-                    let built = reported(id.clone(), file, found);
+                    let built = reported(id.clone(), file, found, proof);
                     processes.insert(id, found);
                     agents.push(built);
                 },
@@ -320,18 +320,22 @@ fn install(pi: &Path, lune: &Path) -> io::Result<()> {
     })
 }
 
-fn read(path: &Path, start: &process::Start, started: SystemTime) -> io::Result<Option<File>> {
+fn read(
+    path: &Path,
+    start: &process::Start,
+    started: SystemTime,
+) -> io::Result<Option<(File, Proof)>> {
     let handle = fs::File::open(path)?;
     let modified = handle.metadata()?.modified()?;
     let bytes = read_file_text(handle)?;
     let raw: RawFile = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     let file = File::parse(raw)?;
-    let stands = match &file.proc_start {
-        Some(recorded) => recorded == start,
-        None => dated_since(modified, started),
+    let proof = match &file.proc_start {
+        Some(recorded) => (recorded == start).then_some(Proof::Started),
+        None => dated_since(modified, started).then_some(Proof::Dated),
     };
-    Ok(stands.then_some(file))
+    Ok(proof.map(|proof| (file, proof)))
 }
 
 fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
@@ -355,7 +359,7 @@ impl File {
     }
 }
 
-fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
+fn reported(id: AgentId, file: File, process: Process, proof: Proof) -> ReportedAgent {
     let report = Report::new(READS, id.clone(), file.update());
     let seen = SeenAgent {
         id,
@@ -367,7 +371,7 @@ fn reported(id: AgentId, file: File, process: Process) -> ReportedAgent {
         entrypoint: file.entrypoint,
         terminal: process.terminal,
     };
-    ReportedAgent { seen, report }
+    ReportedAgent { seen, report, proof }
 }
 
 #[cfg(test)]

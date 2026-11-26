@@ -5,13 +5,13 @@
     "on": "2026-11-25"
   },
   "steps": {
-    "error": "\u001b]7501;state=working:app=antigravity\u0007\u001b]7501;state=error:app=antigravity:msg=ZmFpbGVkIHRvIGNvbnN0cnVjdCBleGVjdXRvcjogcGxhbiBtb2RlbCBub3Qgc3BlY2lmaWVkOyB5b3UgbXVzdCBzcGVjaWZ5IGEgdmFsaWQgbW9kZWw=\u0007",
+    "error": "\u001b]7501;state=working:app=antigravity\u0007\u001b]7501;state=error:app=antigravity:msg=cmVjb3JkZWQ=\u0007",
     "exit": "\u001b]7501;state=idle:app=antigravity\u0007",
-    "finish": "\u001b]7501;state=done:app=antigravity:msg=QXJ0aHVyIGFkanVzdGVkIGhpcyB3b29sIGNhcCBhZ2FpbnN0IHRoZSBzYWx0IHNwcmF5IGhpc3Npbmcgb3ZlciB0aGUgamFnZ2VkIHJpYnMgb2YgV2lkb3figJlzIFNob2FsLiBBdCBzZXZlbnR5LXR3bywgaGlzIGtuZWVzIHByb3Rlc3RlZCBldmVyeSB0dXJuIG9mIHRoZSBzcGlyYWwgc3RhaXJjYXNlLCB5ZXQgaGUgY2xpbWJlZCB3aXRoIHRoZSBtZWFz4oCm\u0007",
+    "finish": "\u001b]7501;state=done:app=antigravity:msg=cmVjb3JkZWQ=\u0007",
     "interrupt": "\u001b]7501;state=idle:app=antigravity\u0007",
-    "permission": "\u001b]7501;state=idle:app=antigravity\u0007\u001b]7501;state=working:app=antigravity\u0007\u001b]7501;state=blocked:kind=permission:app=antigravity:msg=QXBwcm92ZSBCYXNoOiB0b3VjaCBsdW5lLXJlY29yZC1zdGF0dXMudHh0\u0007",
+    "permission": "\u001b]7501;state=idle:app=antigravity\u0007\u001b]7501;state=working:app=antigravity\u0007\u001b]7501;state=blocked:kind=permission:app=antigravity:msg=cmVjb3JkZWQ=\u0007",
     "prompt": "\u001b]7501;state=working:app=antigravity\u0007",
-    "question": "\u001b]7501;state=working:app=antigravity\u0007\u001b]7501;state=blocked:kind=question:app=antigravity:msg=V2hpY2ggY29sb3IgZG8geW91IHByZWZlcj8=\u0007",
+    "question": "\u001b]7501;state=working:app=antigravity\u0007\u001b]7501;state=blocked:kind=question:app=antigravity:msg=cmVjb3JkZWQ=\u0007",
     "reject": "\u001b]7501;state=idle:app=antigravity\u0007",
     "start": "\u001b]7501;state=idle:app=antigravity\u0007"
   }

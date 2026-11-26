@@ -49,7 +49,7 @@ const fn reads_each_declared_rung_once(readings: &[Reading]) -> bool {
             let mut reading = 0;
             while reading < readings.len() {
                 let read = readings[reading].reads;
-                if read.harness() as u8 == of as u8 && read.rung() as u8 == at as u8 {
+                if read.harness().is(of) && read.rung().is(at) {
                     reads += 1;
                 }
                 reading += 1;
@@ -121,7 +121,7 @@ fn recorded_step(reads: Declared, fixture: &Fixture, step: Step) -> Result<Optio
     };
     let reading = READINGS
         .iter()
-        .find(|reading| reading.reads.is(reads))
+        .find(|reading| reading.reads == reads)
         .expect("READINGS reads each declared rung");
     let heard = (reading.heard)(reads, step, value)
         .map_err(|why| format!("{}: {}: {why}", shown(reads), step.name()))?;
@@ -196,12 +196,20 @@ fn agent() -> AgentId {
     AgentId::new(AgentPid::new(42).unwrap(), Start::spelled("100".to_owned()).unwrap())
 }
 
+const RECORDINGS_TEST: &str =
+    "every_declared_rung_tells_each_step_from_its_recording_or_says_why_not";
+
 fn told(reads: Declared, step: Step) -> Option<(RungUpdate, ActiveStatus)> {
     if reads.steps().tells(step) != Tells::Yes {
         return None;
     }
-    let fixture = fixture(reads).ok()?;
-    match recorded_step(reads, &fixture, step).ok()?? {
+    let fixture = fixture(reads).unwrap_or_else(|why| panic!("{why}; see {RECORDINGS_TEST}"));
+    let heard = recorded_step(reads, &fixture, step)
+        .unwrap_or_else(|why| panic!("{why}; see {RECORDINGS_TEST}"))
+        .unwrap_or_else(|| {
+            panic!("{}: {} has no recording; see {RECORDINGS_TEST}", shown(reads), step.name())
+        });
+    match heard {
         Heard::Said(RungUpdate::Active { status, at, subagents }) => {
             Some((RungUpdate::Active { status: status.clone(), at, subagents }, status))
         },
@@ -223,13 +231,22 @@ fn gone(reads: Declared, statuses: &mut Statuses) {
 
 #[test]
 fn the_highest_rung_that_tells_a_step_wins_and_the_next_takes_over_when_it_goes() {
-    let mut pairs = 0;
     for harness in Harness::ALL {
+        let mut pairs = 0;
+        let mut declared = 0;
         let rungs: Vec<Declared> =
             harness.rungs().map(|rung| Declared::of(harness, rung)).collect();
         for (place, &higher) in rungs.iter().enumerate() {
             for &lower in &rungs[place + 1..] {
                 for step in Step::ALL {
+                    if step == Step::Exit {
+                        continue;
+                    }
+                    let told_by_both =
+                        [higher, lower].iter().all(|reads| reads.steps().tells(step) == Tells::Yes);
+                    if told_by_both {
+                        declared += 1;
+                    }
                     let (Some((high, high_status)), Some((low, low_status))) =
                         (told(higher, step), told(lower, step))
                     else {
@@ -257,8 +274,11 @@ fn the_highest_rung_that_tells_a_step_wins_and_the_next_takes_over_when_it_goes(
                 }
             }
         }
+        assert_eq!(pairs, declared, "{harness:?}: each step two of its rungs tell is played");
+        if rungs.len() > 1 {
+            assert_ne!(pairs, 0, "{harness:?}: two of its rungs tell some step");
+        }
     }
-    assert!(pairs > 0, "some harness has two rungs that tell a step");
 }
 
 fn bytes_of(value: &Value) -> Result<Vec<u8>, String> {
@@ -306,7 +326,8 @@ fn heard_osc_7501(reads: Declared, step: Step, value: &Value) -> Result<Heard, S
         .map_err(|error| format!("a screen: {error:?}"))?;
     screen.write(bytes.as_bytes()).map_err(|error| format!("writing: {error:?}"))?;
     if step == Step::Exit {
-        let _ = screen.program_exited();
+        screen.program_exited();
+        assert!(screen.program_statuses().root.is_none(), "an exit ends the root record");
     }
     let Some(root) = screen.program_statuses().root else {
         return Ok(Heard::Gone);

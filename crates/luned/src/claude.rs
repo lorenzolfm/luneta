@@ -17,7 +17,7 @@ use crate::agent::{
 };
 use crate::mux;
 use crate::process::{self, AgentId, AgentPid};
-use crate::statuses::{self, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
+use crate::statuses::{self, Proof, Report, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
 use crate::{log, program};
 use crate::watch::{self, Troubles};
 use crate::Directory;
@@ -354,7 +354,7 @@ fn reported(id: AgentId, session: &Session, terminal: Option<TerminalKey>) -> Re
         entrypoint: session.feed.entrypoint(),
         terminal,
     };
-    ReportedAgent { seen, report }
+    ReportedAgent { seen, report, proof: Proof::Started }
 }
 
 #[cfg(test)]

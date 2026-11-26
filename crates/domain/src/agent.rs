@@ -33,6 +33,11 @@ impl Rung {
     }
 
     #[must_use]
+    pub const fn is(self, other: Rung) -> bool {
+        self as u8 == other as u8
+    }
+
+    #[must_use]
     pub const fn to_api(self) -> api::StatusRung {
         match self {
             Rung::Osc7501 => api::StatusRung::Osc7501,
@@ -120,7 +125,8 @@ impl Harness {
         Some(Declared::of(harness, Rung::Osc7501))
     }
 
-    const fn is(self, other: Harness) -> bool {
+    #[must_use]
+    pub const fn is(self, other: Harness) -> bool {
         self as u8 == other as u8
     }
 }
@@ -219,21 +225,28 @@ impl Steps {
         }
     }
 
-    const fn are_sound(&self) -> bool {
-        let mut told = 0;
+    const fn tell_a_step(&self) -> bool {
         let mut index = 0;
         while index < Step::ALL.len() {
-            match self.tells(Step::ALL[index]) {
-                Tells::Yes => told += 1,
-                Tells::No { why } => {
-                    if why.is_empty() {
-                        return false;
-                    }
-                },
+            if matches!(self.tells(Step::ALL[index]), Tells::Yes) {
+                return true;
             }
             index += 1;
         }
-        told > 0
+        false
+    }
+
+    const fn say_why_of_each_gap(&self) -> bool {
+        let mut index = 0;
+        while index < Step::ALL.len() {
+            if let Tells::No { why } = self.tells(Step::ALL[index])
+                && why.is_empty()
+            {
+                return false;
+            }
+            index += 1;
+        }
+        true
     }
 }
 
@@ -274,24 +287,67 @@ impl Ladder {
         self.steps(rung).is_some()
     }
 
-    const fn is_sound(&self) -> bool {
-        let mut declared = 0;
+    const fn holds(&self, sound: Sound) -> bool {
+        match sound {
+            Sound::RungDeclared => self.declares_a_rung(),
+            Sound::StepTold => self.each_rung_tells_a_step(),
+            Sound::GapExplained => self.each_rung_says_why_of_each_gap(),
+            Sound::AppNamed => match &self.osc_7501 {
+                Some(osc_7501) => !osc_7501.app.is_empty(),
+                None => true,
+            },
+            Sound::AppAscii => match &self.osc_7501 {
+                Some(osc_7501) => osc_7501.app.is_ascii(),
+                None => true,
+            },
+        }
+    }
+
+    const fn declares_a_rung(&self) -> bool {
         let mut index = 0;
         while index < Rung::ALL.len() {
-            if let Some(steps) = self.steps(Rung::ALL[index]) {
-                if !steps.are_sound() {
-                    return false;
-                }
-                declared += 1;
+            if self.declares(Rung::ALL[index]) {
+                return true;
             }
             index += 1;
         }
-        let app_is_sound = match &self.osc_7501 {
-            Some(osc_7501) => !osc_7501.app.is_empty() && osc_7501.app.is_ascii(),
-            None => true,
-        };
-        declared > 0 && app_is_sound
+        false
     }
+
+    const fn each_rung_tells_a_step(&self) -> bool {
+        let mut index = 0;
+        while index < Rung::ALL.len() {
+            if let Some(steps) = self.steps(Rung::ALL[index])
+                && !steps.tell_a_step()
+            {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
+
+    const fn each_rung_says_why_of_each_gap(&self) -> bool {
+        let mut index = 0;
+        while index < Rung::ALL.len() {
+            if let Some(steps) = self.steps(Rung::ALL[index])
+                && !steps.say_why_of_each_gap()
+            {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Sound {
+    RungDeclared,
+    StepTold,
+    GapExplained,
+    AppNamed,
+    AppAscii,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -325,13 +381,9 @@ impl Declared {
         self.harness.ladder().steps(self.rung).expect("a declared rung has its steps")
     }
 
-    #[must_use]
-    pub const fn is(self, other: Declared) -> bool {
-        self.harness.is(other.harness) && self.rung as u8 == other.rung as u8
-    }
 }
 
-const NO_DONE_IN_SESSIONS: Tells = Tells::No {
+const NO_FINISH_IN_SESSIONS: Tells = Tells::No {
     why: "Claude Code's sessions file says idle when a turn ends, finished or not",
 };
 
@@ -340,7 +392,11 @@ const NO_ERROR_IN_SESSIONS: Tells =
 
 const CLAUDE_CODE: Ladder = Ladder {
     osc_7501: Some(Osc7501 { app: "claude-code", steps: Steps::EVERY }),
-    feed: Some(Steps { finish: NO_DONE_IN_SESSIONS, error: NO_ERROR_IN_SESSIONS, ..Steps::EVERY }),
+    feed: Some(Steps {
+        finish: NO_FINISH_IN_SESSIONS,
+        error: NO_ERROR_IN_SESSIONS,
+        ..Steps::EVERY
+    }),
     extension: None,
     hook: None,
     transcript: None,
@@ -391,13 +447,21 @@ const ANTIGRAVITY: Ladder = Ladder {
     screen: None,
 };
 
-const fn ladders_are_sound() -> bool {
+const fn every_ladder(sound: Sound) -> bool {
+    let mut index = 0;
+    while index < Harness::ALL.len() {
+        if !Harness::ALL[index].ladder().holds(sound) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn apps_are_distinct() -> bool {
     let mut index = 0;
     while index < Harness::ALL.len() {
         let harness = Harness::ALL[index];
-        if !harness.ladder().is_sound() {
-            return false;
-        }
         let mut other = index + 1;
         while other < Harness::ALL.len() {
             if same_app(harness, Harness::ALL[other]) {
@@ -430,10 +494,20 @@ const fn same_app(one: Harness, other: Harness) -> bool {
     }
 }
 
+const _: () = assert!(every_ladder(Sound::RungDeclared), "each harness's ladder declares a rung");
+
+const _: () = assert!(every_ladder(Sound::StepTold), "each declared rung tells at least one step");
+
 const _: () = assert!(
-    ladders_are_sound(),
-    "each harness declares a rung, each declared rung tells a step and says why it tells none of the rest, and no two harnesses share an OSC 7501 app"
+    every_ladder(Sound::GapExplained),
+    "each step a declared rung does not tell says why in Tells::No"
 );
+
+const _: () = assert!(every_ladder(Sound::AppNamed), "each OSC 7501 app has a name");
+
+const _: () = assert!(every_ladder(Sound::AppAscii), "each OSC 7501 app is ASCII");
+
+const _: () = assert!(apps_are_distinct(), "no two harnesses share an OSC 7501 app");
 
 #[cfg(test)]
 mod tests {
