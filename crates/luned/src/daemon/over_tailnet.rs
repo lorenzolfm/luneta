@@ -46,6 +46,7 @@ fn served_change(change: Option<&Change>) -> Result<(), Status> {
         Some(Change::ForgetProject(_)) => unserved_change("ForgetProject"),
         Some(Change::CloseProject(_)) => unserved_change("CloseProject"),
         Some(Change::Bring(_)) => unserved_change("Bring"),
+        Some(Change::OpenBrowser(_)) => unserved_change("OpenBrowser"),
     }
 }
 
@@ -303,6 +304,7 @@ mod tests {
             ("ForgetProject", Some(Change::ForgetProject(change::ForgetProject::default()))),
             ("CloseProject", Some(Change::CloseProject(change::CloseProject::default()))),
             ("Bring", Some(Change::Bring(change::Bring::default()))),
+            ("OpenBrowser", Some(Change::OpenBrowser(change::OpenBrowser::default()))),
             ("with no change", None),
         ];
         for (named, change) in unserved {

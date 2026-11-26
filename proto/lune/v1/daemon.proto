@@ -816,6 +816,7 @@ message ChangeProjectsRequest {
     CloseWorktree close_worktree = 14;
     Bring bring = 15;
     CloseView close_view = 16;
+    OpenBrowser open_browser = 17;
   }
 
   message AddProject {
@@ -894,6 +895,25 @@ message ChangeProjectsRequest {
 
   message CloseView {
     TerminalKey terminal = 1;
+  }
+
+  message OpenBrowser {
+    oneof target {
+      InWorktree worktree = 1;
+      FromTerminal from = 2;
+      string folder = 3;
+    }
+    optional string url = 4;
+
+    message InWorktree {
+      fixed64 worktree = 1;
+      TerminalKey from = 2;
+    }
+
+    message FromTerminal {
+      TerminalKey from = 1;
+      optional string fallback_folder = 2;
+    }
   }
 }
 
@@ -999,6 +1019,23 @@ message ShowRequest {
     google.protobuf.Empty welcome = 10;
     Arrangement arrange = 11;
     google.protobuf.Empty review = 12;
+    Browser browser = 13;
+    Navigate navigate = 14;
+    BrowserTty browser_tty = 15;
+  }
+
+  message Browser {
+    optional string url = 1;
+  }
+
+  message Navigate {
+    fixed64 view = 1;
+    optional string url = 2;
+  }
+
+  message BrowserTty {
+    fixed64 view = 1;
+    optional string tty = 2;
   }
 
   message Hello {
@@ -1122,6 +1159,11 @@ message ShowResponse {
       google.protobuf.Empty looking = 5;
       google.protobuf.Empty welcome = 6;
       google.protobuf.Empty review = 7;
+      Browser browser = 8;
+    }
+
+    message Browser {
+      optional string url = 1;
     }
   }
 

@@ -14,6 +14,8 @@ pub mod unread;
 
 pub const TAILNET_PORT: u16 = 7473;
 
+pub const TERMINAL_BROWSER_SOCKET: &str = "terminal-browser.sock";
+
 pub const CONFLICTED_NAMED_MAX: usize = 20;
 
 pub const MUX_STREAMS_MAX: u32 = 256;
@@ -38,6 +40,7 @@ pub const PROGRAM_STATUS_RECORDS_MAX: usize = program_status::RECORDS_MAX;
 
 pub const PROGRAM_STATUS_PROGRESS_PERCENT_MAX: u8 = program_status::PROGRESS_PERCENT_MAX;
 
+const _: () = assert!(matches!(TERMINAL_BROWSER_SOCKET.as_bytes(), [_, ..]));
 const _: () = assert!(MUX_TERMINALS_MAX >= 64);
 const _: () = assert!(LISTING_CHILDREN_BYTES_MAX < RPC_MESSAGE_BYTES_MAX);
 const _: () = assert!(HOST_SUBAGENTS_BYTES_MAX * 17 < RPC_MESSAGE_BYTES_MAX);

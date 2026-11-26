@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io::{self, IsTerminal as _, Read as _};
+use std::num::NonZeroU16;
 use std::os::fd::AsFd as _;
 use std::str;
 use std::sync::atomic::AtomicBool;
@@ -16,7 +17,7 @@ use signal_hook::consts::{SIGHUP, SIGTERM, SIGWINCH};
 use signal_hook::flag;
 use signal_hook::iterator::Signals;
 
-use crate::answers::{self, Answer, Theme};
+use crate::answers::{self, Answer, CellPixels, Theme, WindowPixels};
 use crate::host::Event;
 
 const ESC: u8 = 0x1b;
@@ -334,8 +335,27 @@ fn numbered(parameters: &[u8], last: u8) -> Parsed {
         b'~' => special_key(parameters),
         b'u' => kitty_key(parameters),
         b'M' => rxvt_mouse(parameters),
+        b't' => window_report(parameters),
         _ => modified_key(parameters, last),
     }
+}
+
+fn window_report(parameters: &str) -> Parsed {
+    let mut parts = parameters.split(';');
+    let (Some(kind), Some(Ok(height)), Some(Ok(width)), None) = (
+        parts.next(),
+        parts.next().map(str::parse::<NonZeroU16>),
+        parts.next().map(str::parse::<NonZeroU16>),
+        parts.next(),
+    ) else {
+        return Parsed::Unknown;
+    };
+    let answer = match kind {
+        "6" => Answer::CellSize(CellPixels { width, height }),
+        "4" => Answer::WindowPixels(WindowPixels { width, height }),
+        _ => return Parsed::Unknown,
+    };
+    Parsed::Whole(Sent::Answer(answer))
 }
 
 fn held(field: &str) -> Option<(KeyModifiers, KeyEventState, KeyEventKind)> {
@@ -596,6 +616,8 @@ fn osc(bytes: &[u8]) -> Parsed {
 }
 
 fn apc(bytes: &[u8]) -> Parsed {
+    assert!(bytes.len() >= 2, "apc starts with ESC _");
+    assert_eq!(bytes[..2], [ESC, b'_'], "apc prefix matches ESC _");
     let typed = || {
         let alt = KeyEvent::new(KeyCode::Char('_'), KeyModifiers::ALT);
         Parsed::Split(Sent::Input(Input::Key(alt)), 2)
@@ -724,6 +746,28 @@ mod tests {
         assert_eq!(sent(&[b"\x1b[?997;1n"]), [Sent::Answer(Answer::Turned(Theme::Dark))]);
         assert_eq!(sent(&[b"\x1b[?997;2n"]), [Sent::Answer(Answer::Turned(Theme::Light))]);
         assert_eq!(sent(&[b"\x1b[?2026;2$yx"]), [typed('x')]);
+    }
+
+    #[test]
+    fn kitty_graphics_and_cell_size_replies_are_heard() {
+        let all = sent(&[
+            b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1b[4;1000;1600tx",
+            b"\x1b_Gi=31;ENOTSUP\x1b\\y",
+            b"\x1b_Gi=31;EINVAL: invalid data\x1b\\w",
+        ]);
+        let nz = |value| NonZeroU16::new(value).unwrap();
+        assert_eq!(all, [
+            Sent::Answer(Answer::Graphics),
+            Sent::Answer(Answer::CellSize(CellPixels { width: nz(10), height: nz(20) })),
+            Sent::Answer(Answer::WindowPixels(WindowPixels { width: nz(1600), height: nz(1000) })),
+            typed('x'),
+            typed('y'),
+            typed('w'),
+        ]);
+        assert_eq!(sent(&[b"\x1b[6;0;10tz"]), [typed('z')]);
+        let alt_underscore = pressed(KeyCode::Char('_'), KeyModifiers::ALT);
+        assert_eq!(sent(&[b"\x1b_"]), std::slice::from_ref(&alt_underscore));
+        assert_eq!(sent(&[b"\x1b_x"]), [alt_underscore, typed('x')]);
     }
 
     #[test]

@@ -9,7 +9,8 @@ use lune_waits::{eventually, shell, Patience, Span, QUIET};
 use luned::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use luned::api::show_response::{self, view::Found, Laid, View};
 use luned::api::change_projects_request::{
-    Bring, Change, CloseProject, CloseView, CloseWorktree, RenameTerminal,
+    open_browser, Bring, Change, CloseProject, CloseView, CloseWorktree, OpenBrowser,
+    RenameTerminal,
 };
 use luned::api::change_projects_response::Made;
 use luned::api::projects::Held;
@@ -267,7 +268,14 @@ fn full_of(laid: &Laid) -> Option<u64> {
 fn key(view: &View) -> Option<TerminalKey> {
     match &view.found {
         Some(Found::Key(key)) => Some(*key),
-        Some(Found::Lost(()) | Found::Looking(()) | Found::Welcome(()) | Found::Review(())) | None => None,
+        Some(
+            Found::Lost(())
+            | Found::Looking(())
+            | Found::Welcome(())
+            | Found::Browser(_)
+            | Found::Review(()),
+        )
+        | None => None,
     }
 }
 
@@ -777,7 +785,7 @@ fn a_layout_comes_back_with_its_terminals_when_luned_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 12,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 13,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();
@@ -2171,7 +2179,7 @@ fn seen_and_typed_into(
     assert!(laid().is_empty());
     show.ask(Asked::Open { beside: Beside::Largest, opens: command(&shell::AT_A_PROMPT) });
     let opened = laid();
-    let view = *opened.views().next().expect("the layout lays out the terminal opened");
+    let view = opened.views().next().expect("the layout lays out the terminal opened").clone();
     let key = view.key().expect("luned says the key of a terminal it opened");
     assert_eq!(opened.focused(), Some(&view));
 
@@ -2322,4 +2330,286 @@ fn a_viewer_is_seen_while_others_on_the_same_lune_mux_hold_their_frames() {
 
     let (_fresh, seeing) = watching();
     let _seen = frame(Patience::begun(), "a frame comes while others hold theirs", &seeing);
+}
+
+#[test]
+fn a_browser_view_opens_navigates_and_comes_back_when_luned_starts_again() {
+    let mut owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 100, 30);
+    shown.ask(Event::Browser(show_request::Browser {
+        url: Some("https://example.com".to_owned()),
+    }));
+    let opened = shown.until("the browser view opens with its url", |laid| {
+        laid.views.iter().any(|view| {
+            matches!(
+                &view.found,
+                Some(Found::Browser(browser)) if browser.url.as_deref() == Some("https://example.com")
+            )
+        })
+    });
+    let browser_id = opened
+        .views
+        .iter()
+        .find_map(|view| matches!(&view.found, Some(Found::Browser(_))).then_some(view.id))
+        .unwrap();
+
+    shown.ask(Event::Navigate(show_request::Navigate {
+        view: browser_id,
+        url: Some("https://example.com/docs".to_owned()),
+    }));
+    let navigated = shown.until("the browser view reports its navigated url", |laid| {
+        laid.views.iter().any(|view| {
+            view.id == browser_id
+                && matches!(
+                    &view.found,
+                    Some(Found::Browser(browser))
+                        if browser.url.as_deref() == Some("https://example.com/docs")
+                )
+        })
+    });
+    drop(shown);
+    eventually("the navigated browser url is kept in projects", || {
+        fs::read_to_string(kept(&owned.host))
+            .unwrap()
+            .contains("https://example.com/docs")
+            .then_some(())
+    });
+
+    owned.stop_daemon();
+    owned.start_daemon();
+    let mut again = Shown::new(&owned, worktree, 100, 30);
+    let restored = again.until("the browser view comes back after restart", |laid| {
+        laid.views.iter().any(|view| {
+            view.id == browser_id
+                && matches!(
+                    &view.found,
+                    Some(Found::Browser(browser))
+                        if browser.url.as_deref() == Some("https://example.com/docs")
+                )
+        })
+    });
+    assert_eq!(restored, navigated);
+}
+
+#[test]
+fn open_browser_and_terminal_socket_manage_views_and_panes() {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::os::unix::net::UnixStream;
+
+    let owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 120, 40);
+    shown.open_panes();
+    let terminal_id = shown.open();
+    let with_key = shown.until("terminal key is ready", |laid| {
+        laid.views.iter().find(|view| view.id == terminal_id).and_then(key).is_some()
+    });
+    let terminal_key = with_key
+        .views
+        .iter()
+        .find(|view| view.id == terminal_id)
+        .and_then(key)
+        .unwrap();
+    let opened = projects::made(
+        &owned.host,
+        Change::OpenBrowser(OpenBrowser {
+            target: Some(open_browser::Target::From(open_browser::FromTerminal {
+                from: Some(terminal_key),
+                fallback_folder: None,
+            })),
+            url: Some("https://example.com/start".to_owned()),
+        }),
+    )
+    .unwrap();
+    assert_eq!(opened, Some(Made::Taken(worktree)));
+    let laid = shown.until("open_browser adds a browser view", |laid| {
+        laid.views.iter().any(|view| {
+            matches!(
+                &view.found,
+                Some(Found::Browser(browser))
+                    if browser.url.as_deref() == Some("https://example.com/start")
+            )
+        })
+    });
+    let browser_id = laid
+        .views
+        .iter()
+        .find_map(|view| matches!(&view.found, Some(Found::Browser(_))).then_some(view.id))
+        .unwrap();
+
+    let socket = owned.host.folder().join(luned::terminal_socket::SOCKET);
+    let ask_socket = |payload: &serde_json::Value| -> serde_json::Value {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        let line = format!("{payload}\n");
+        stream.write_all(line.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut reply = String::new();
+        reader.read_line(&mut reply).unwrap();
+        serde_json::from_str(&reply).unwrap()
+    };
+
+    let hello = ask_socket(&serde_json::json!({
+        "id": "1",
+        "method": "hello",
+        "params": { "protocol": 1 }
+    }));
+    assert_eq!(hello["result"]["name"], "lune");
+
+    eventually("listPanes reports terminal tty and null browser tty before registration", || {
+        let reply = ask_socket(&serde_json::json!({
+            "id": "2a",
+            "method": "listPanes",
+            "params": {}
+        }));
+        let panes = reply["result"]["panes"].as_array()?;
+        let has_terminal_tty = panes.iter().any(|pane| {
+            pane["id"].as_str() == Some(&format!("{terminal_id:016x}"))
+                && pane["tty"].as_str().is_some_and(|tty| tty.starts_with("/dev/"))
+        });
+        let browser_unregistered = panes.iter().any(|pane| {
+            pane["id"].as_str() == Some(&format!("{browser_id:016x}")) && pane["tty"].is_null()
+        });
+        (has_terminal_tty && browser_unregistered).then_some(())
+    });
+
+    let expected_browser_tty = luned::terminal_socket::browser_client_tty_path(
+        &owned.host.folder(),
+        lune_domain::projects::ViewId::of(browser_id).unwrap(),
+        std::process::id(),
+        1,
+    )
+    .to_string_lossy()
+    .into_owned();
+    shown.ask(Event::BrowserTty(show_request::BrowserTty {
+        view: browser_id,
+        tty: Some(expected_browser_tty.clone()),
+    }));
+
+    let panes = eventually("listPanes reports registered live browser tty", || {
+        owned.block_on(tokio::task::yield_now());
+        let reply = ask_socket(&serde_json::json!({
+            "id": "2",
+            "method": "listPanes",
+            "params": {}
+        }));
+        let panes = reply["result"]["panes"].as_array()?.clone();
+        let has_browser_tty = panes.iter().any(|pane| {
+            pane["id"].as_str() == Some(&format!("{browser_id:016x}"))
+                && pane["tty"].as_str() == Some(expected_browser_tty.as_str())
+        });
+        has_browser_tty.then_some(panes)
+    });
+
+    let browser_tty = panes
+        .iter()
+        .find(|pane| pane["id"].as_str() == Some(&format!("{browser_id:016x}")))
+        .unwrap()["tty"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let current_browser = ask_socket(&serde_json::json!({
+        "id": "3",
+        "method": "getCurrentPane",
+        "params": { "tty": browser_tty }
+    }));
+    assert_eq!(current_browser["result"]["pane"]["id"], format!("{browser_id:016x}"));
+
+    let outside_tty = format!("/tmp/b-{browser_id:016x}-1-1.tty");
+    let current_outside = ask_socket(&serde_json::json!({
+        "id": "3b",
+        "method": "getCurrentPane",
+        "params": { "tty": outside_tty }
+    }));
+    assert!(current_outside["result"]["pane"].is_null(), "{current_outside}");
+
+    let spoofed_terminal_tty = luned::terminal_socket::browser_client_tty_path(
+        &owned.host.folder(),
+        lune_domain::projects::ViewId::of(terminal_id).unwrap(),
+        std::process::id(),
+        2,
+    )
+    .to_string_lossy()
+    .into_owned();
+    let current_spoofed = ask_socket(&serde_json::json!({
+        "id": "3c",
+        "method": "getCurrentPane",
+        "params": { "tty": spoofed_terminal_tty }
+    }));
+    assert!(current_spoofed["result"]["pane"].is_null(), "{current_spoofed}");
+
+    let split_reply = ask_socket(&serde_json::json!({
+        "id": "4",
+        "method": "split",
+        "params": {
+            "from": format!("{terminal_id:016x}"),
+            "direction": "right",
+            "command": ["terminal-browser", "open", "https://rust-lang.org"]
+        }
+    }));
+    assert!(split_reply.get("error").is_none(), "{split_reply}");
+    shown.until("split with terminal-browser opens a new browser view", |laid| {
+        laid.views.iter().any(|view| {
+            matches!(
+                &view.found,
+                Some(Found::Browser(browser))
+                    if browser.url.as_deref() == Some("https://rust-lang.org")
+            )
+        })
+    });
+
+    let focus_reply = ask_socket(&serde_json::json!({
+        "id": "5",
+        "method": "focusPane",
+        "params": { "pane": format!("{terminal_id:016x}") }
+    }));
+    assert!(focus_reply.get("error").is_none(), "{focus_reply}");
+    shown.until("focusPane moves focus to the asked terminal", |laid| {
+        focused_of(laid) == Some(terminal_id)
+    });
+}
+
+#[test]
+fn open_browser_is_atomic_for_bare_clones_and_new_folders() {
+    let owned = Owned::new();
+
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch_path = fs::canonicalize(scratch.path()).unwrap();
+    let (up, clone) = (scratch_path.join("up"), scratch_path.join("clone"));
+    cloned_as_wt(&scratch_path, &up, &clone);
+    let before = fs::read_to_string(kept(&owned.host)).ok();
+    let err = projects::made(
+        &owned.host,
+        Change::OpenBrowser(OpenBrowser {
+            target: Some(open_browser::Target::Folder(clone.to_string_lossy().into_owned())),
+            url: Some("https://example.com".to_owned()),
+        }),
+    )
+    .unwrap_err();
+    assert!(err.message().contains("no open worktree"), "{err}");
+    assert_eq!(fs::read_to_string(kept(&owned.host)).ok(), before, "failed open_browser leaves projects untouched");
+
+    let fresh = directory("fresh-browser-folder");
+    let made = projects::made(
+        &owned.host,
+        Change::OpenBrowser(OpenBrowser {
+            target: Some(open_browser::Target::Folder(fresh.path.to_string_lossy().into_owned())),
+            url: Some("https://example.com/fresh".to_owned()),
+        }),
+    )
+    .unwrap();
+    let Some(Made::Worktree(worktree)) = made else {
+        panic!("expected Made::Worktree, got {made:?}");
+    };
+    let mut shown = Shown::new(&owned, worktree, 100, 30);
+    let laid = shown.until("new folder opens with only its browser view", |laid| {
+        laid.views.len() == 1
+            && matches!(
+                &laid.views[0].found,
+                Some(Found::Browser(browser))
+                    if browser.url.as_deref() == Some("https://example.com/fresh")
+            )
+    });
+    assert_eq!(laid.views.len(), 1, "no stray shell terminal is spawned");
 }

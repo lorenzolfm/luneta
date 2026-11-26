@@ -163,6 +163,7 @@ mod tests {
             size,
             cwd: Some(Directory::parse("/w".to_owned()).unwrap()),
             title: title.to_owned(),
+            tty: None,
             is: Is::Running {
                 root: AgentPid::new(10).unwrap(),
                 front: Some(Foreground {

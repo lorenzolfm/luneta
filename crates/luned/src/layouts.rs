@@ -9,11 +9,15 @@ use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::layout::{self, Direction, Order, Sides, Towards, SIDE_MAX};
-use lune_domain::projects::{Ask, Change, Closing, Dir, Id, Line, Placed};
+use lune_domain::projects::{
+    Ask, Browser, BrowserTarget, BrowserUrl, Change, Closing, Dir, Id, Line, Placed,
+};
 use lune_domain::projects::{Holds, ProjectName, Worktree};
 use lune_domain::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
 use lune_domain::projects::{Session, Size, Terminal, TerminalViewId, Used, View, ViewId};
-use lune_domain::projects::{WorktreeId, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
+use lune_domain::projects::{
+    WorktreeId, LAYOUT_VIEWS_MAX, LINE_BYTES_MAX, PATH_BYTES_MAX, VIEWS_MAX,
+};
 use lune_domain::projects::{quoted, Argv, Arranged, Listed, Opens, WORKTREES_MAX};
 use lune_protocol::shell::Doing;
 use tokio::sync::{mpsc as answers, oneshot};
@@ -29,6 +33,7 @@ use crate::program::{self, Ran as Looked};
 use crate::projects::{self, Changed, Failed, Store};
 use crate::shells::Shell;
 use crate::shows::direction_said;
+use crate::terminal_socket::{self, PaneInfo, PaneRef, SocketCommand, SplitAction};
 use crate::watch::Troubles;
 use crate::{shells, Directory};
 
@@ -98,6 +103,7 @@ pub enum Command {
     Worktrees { root: Dir, listed: Listed, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, listed: Listed },
     Root { project: ProjectId, answer: oneshot::Sender<Result<Root, Unrooted>> },
+    Socket(SocketCommand),
     WorktreeFolder { worktree: WorktreeId, answer: oneshot::Sender<Result<Dir, Unrooted>> },
 }
 
@@ -128,6 +134,9 @@ pub enum Asked {
     Go(WorktreeId),
     Open { beside: Beside, opens: Opens },
     Welcome,
+    Browser(Option<BrowserUrl>),
+    Navigate { view: ViewId, url: Option<BrowserUrl> },
+    BrowserTty { view: ViewId, tty: Option<String> },
     Review,
     Close(ViewId),
     Focus(Focus),
@@ -183,6 +192,34 @@ impl Asked {
                 Asked::Open { beside, opens }
             },
             Event::Welcome(()) => Asked::Welcome,
+            Event::Browser(show_request::Browser { url }) => {
+                let url = url
+                    .as_deref()
+                    .map(BrowserUrl::parse)
+                    .transpose()
+                    .map_err(|why| format!("browser: {why}"))?;
+                Asked::Browser(url)
+            },
+            Event::Navigate(show_request::Navigate { view, url }) => {
+                let view = id("navigate", view).map(ViewId::new)?;
+                let url = url
+                    .as_deref()
+                    .map(BrowserUrl::parse)
+                    .transpose()
+                    .map_err(|why| format!("navigate: {why}"))?;
+                Asked::Navigate { view, url }
+            },
+            Event::BrowserTty(show_request::BrowserTty { view, tty }) => {
+                let view = id("browser_tty", view).map(ViewId::new)?;
+                if let Some(tty) = &tty
+                    && (tty.is_empty()
+                        || tty.len() > PATH_BYTES_MAX
+                        || tty.chars().any(char::is_control))
+                {
+                    return Err("browser_tty: invalid tty path".to_owned());
+                }
+                Asked::BrowserTty { view, tty }
+            },
             Event::Review(()) => Asked::Review,
             Event::Close(view) => Asked::Close(id("close", view).map(ViewId::new)?),
             Event::Focus(show_request::Focus { to, step }) => {
@@ -342,6 +379,7 @@ struct Client {
     size: Size,
     runs_in: Option<TerminalKey>,
     focus: Option<ViewId>,
+    browser_ttys: BTreeMap<ViewId, String>,
     out: Out,
     said: Option<api::ShowResponse>,
 }
@@ -483,6 +521,7 @@ impl Layouts {
                         self.bring(worktree, from).map(|made| alone(Some(made)))
                     },
                     Ask::CloseView(terminal) => self.close_view(terminal).map(alone),
+                    Ask::OpenBrowser { target, url } => self.open_browser(target, url),
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|(made, opened)| Changed { made, opened, kept }));
@@ -572,7 +611,253 @@ impl Layouts {
                 self.known.retain(|_, known| !gone(known));
                 self.listed.clear();
             },
+            Command::Socket(command) => self.socket_command(command),
         }
+    }
+
+    fn socket_command(&mut self, command: SocketCommand) {
+        assert!(self.clients.len() <= CLIENTS_MAX, "layouts tracks at most CLIENTS_MAX clients");
+        match command {
+            SocketCommand::CurrentPane { tty, cwd, runtime, answer } => {
+                let _ = answer
+                    .send(self.socket_current_pane(tty.as_deref(), cwd.as_deref(), &runtime));
+            },
+            SocketCommand::ListPanes { tty, runtime, answer } => {
+                let _ = answer.send(self.socket_list_panes(tty.as_deref(), &runtime));
+            },
+            SocketCommand::Neighbor { from, direction, answer } => {
+                let _ = answer.send(self.socket_neighbor(from, direction));
+            },
+            SocketCommand::Split { from, direction, action, answer } => {
+                let _ = answer.send(self.socket_split(from, direction, action));
+            },
+            SocketCommand::TerminalKey { pane, answer } => {
+                let _ = answer.send(self.socket_terminal_key(pane));
+            },
+            SocketCommand::FocusPane { pane, answer } => {
+                let _ = answer.send(self.socket_focus_pane(pane));
+            },
+        }
+    }
+
+    fn socket_current_pane(
+        &self,
+        tty: Option<&str>,
+        cwd: Option<&str>,
+        runtime: &Path,
+    ) -> Result<Option<PaneRef>, String> {
+        assert_ne!(runtime.as_os_str(), "", "runtime folder is non-empty");
+        let projects = self.kept()?;
+        assert!(self.known.len() <= VIEWS_MAX, "known terminals stay within VIEWS_MAX");
+        if let Some(tty) = tty {
+            if let Some(view) = terminal_socket::view_from_browser_tty(runtime, tty)
+                && let Some((worktree, _)) = projects.holding_browser(view)
+            {
+                return Ok(Some(PaneRef { id: view, tab: worktree.id() }));
+            }
+            for (terminal, known) in &self.known {
+                if self.listed.get(&known.key).and_then(|listed| listed.tty.as_deref()) == Some(tty)
+                    && let Some((worktree, _)) = projects.holding_view(terminal.view())
+                {
+                    return Ok(Some(PaneRef { id: terminal.view(), tab: worktree.id() }));
+                }
+            }
+        }
+        if let Some(cwd) = cwd {
+            for (terminal, known) in &self.known {
+                if self
+                    .listed
+                    .get(&known.key)
+                    .and_then(|listed| listed.cwd.as_ref())
+                    .is_some_and(|listed_cwd| listed_cwd.as_str() == cwd)
+                    && let Some((worktree, _)) = projects.holding_view(terminal.view())
+                {
+                    return Ok(Some(PaneRef { id: terminal.view(), tab: worktree.id() }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn socket_list_panes(
+        &self,
+        tty: Option<&str>,
+        runtime: &Path,
+    ) -> Result<Vec<PaneInfo>, String> {
+        assert_ne!(runtime.as_os_str(), "", "runtime folder is non-empty");
+        let projects = self.kept()?;
+        let scoped = self.socket_current_pane(tty, None, runtime)?.map(|pane| pane.tab);
+        let mut panes = Vec::new();
+        for (_, worktree) in projects.worktrees() {
+            if scoped.is_some_and(|tab| tab != worktree.id()) {
+                continue;
+            }
+            for view in worktree.layout().views() {
+                let (id, tty, command) = match view {
+                    View::Terminal(terminal) => {
+                        let listed = self
+                            .known
+                            .get(&terminal.id())
+                            .and_then(|known| self.listed.get(&known.key));
+                        let tty = listed.and_then(|it| it.tty.clone());
+                        let command = listed.and_then(|it| match &it.is {
+                            Is::Running { front: Some(front), .. } => front.argv.first().cloned(),
+                            Is::Running { front: None, .. } | Is::Ended => None,
+                        });
+                        (terminal.id().view(), tty, command)
+                    },
+                    View::Browser(browser) => (
+                        browser.id(),
+                        self.live_browser_tty(worktree.id(), browser.id(), tty, runtime),
+                        Some("terminal-browser".to_owned()),
+                    ),
+                    View::Welcome(id) | View::Review(id) => (*id, None, None),
+                };
+                panes.push(PaneInfo { id, tab: worktree.id(), tty, command });
+            }
+        }
+        assert!(panes.len() <= VIEWS_MAX, "listed panes never exceed VIEWS_MAX");
+        Ok(panes)
+    }
+
+    fn live_browser_tty(
+        &self,
+        worktree: WorktreeId,
+        view: ViewId,
+        caller_tty: Option<&str>,
+        runtime: &Path,
+    ) -> Option<String> {
+        let valid = |registered: &str| {
+            terminal_socket::view_from_browser_tty(runtime, registered) == Some(view)
+        };
+        let matching_client = caller_tty.and_then(|caller| {
+            self.clients
+                .values()
+                .filter(|client| client.worktree == worktree)
+                .find(|client| client.browser_ttys.values().any(|it| it == caller))
+        });
+        if let Some(client) = matching_client
+            && let Some(registered) = client.browser_ttys.get(&view)
+            && valid(registered)
+        {
+            return Some(registered.clone());
+        }
+        self.clients
+            .values()
+            .filter(|client| client.worktree == worktree)
+            .find_map(|client| {
+                let registered = client.browser_ttys.get(&view)?;
+                valid(registered).then(|| registered.clone())
+            })
+    }
+
+    fn socket_neighbor(
+        &self,
+        from: ViewId,
+        direction: Direction,
+    ) -> Result<Option<PaneRef>, String> {
+        let projects = self.kept()?;
+        let Some((worktree, _)) = projects.holding_view(from) else {
+            return Ok(None);
+        };
+        let shown = self.clients.values().filter(|it| it.worktree == worktree.id());
+        let size = fit(shown, worktree.layout(), &self.known)
+            .map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let Some(neighbor) = worktree.layout().beside(from, direction, size) else {
+            return Ok(None);
+        };
+        assert_ne!(neighbor, from, "a view's neighbour is another view");
+        assert!(worktree.layout().holds(neighbor), "the neighbour belongs to the same worktree");
+        Ok(Some(PaneRef { id: neighbor, tab: worktree.id() }))
+    }
+
+    fn socket_split(
+        &mut self,
+        from: ViewId,
+        direction: Option<Direction>,
+        action: SplitAction,
+    ) -> Result<(), String> {
+        let projects = self.kept()?;
+        let Some((worktree_ref, _)) = projects.holding_view(from) else {
+            return Err(format!("no layout holds view {from}"));
+        };
+        let worktree = worktree_ref.id();
+        let shown = self.clients.values().filter(|it| it.worktree == worktree);
+        let size = fit(shown, worktree_ref.layout(), &self.known)
+            .map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let preferred = match direction {
+            Some(Direction::Left | Direction::Right) => Beside::Towards(Towards::Right),
+            Some(Direction::Up | Direction::Down) => Beside::Towards(Towards::Down),
+            None => Beside::Focused,
+        };
+        let argv = match action {
+            SplitAction::Browser(url) => {
+                let view = self
+                    .place_browser(
+                        worktree,
+                        Some(from),
+                        preferred,
+                        Some(Beside::Focused),
+                        url,
+                        size,
+                    )
+                    .map_err(Failed::said)?;
+                for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
+                    client.focus = Some(view);
+                }
+                return Ok(());
+            },
+            SplitAction::Command(argv) => argv,
+        };
+        let opens = Opens::Command(argv);
+        let terminal = self.store.fresh_terminal().map_err(Failed::said)?;
+        let projects = self.kept()?;
+        let (project, found) = projects.find(worktree).ok_or("the worktree is gone")?;
+        let (placed, inner) =
+            placement(found.layout(), Some(from), preferred, terminal.view(), size).or_else(
+                |_| placement(found.layout(), Some(from), Beside::Focused, terminal.view(), size),
+            )?;
+        let folder = project.folder(worktree).ok_or("its project holds it not")?;
+        let cwd = Directory::from(&folder);
+        let made = Terminal::new(terminal, folder, opens.runs());
+        self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
+        self.spawned(terminal, &cwd, &opens, inner)?;
+        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
+            client.focus = Some(terminal.view());
+        }
+        let last_focus = self.layout(worktree).map(Layout::last_focus);
+        assert_eq!(last_focus, Ok(Some(terminal.view())), "split terminal opens focused");
+        Ok(())
+    }
+
+    fn socket_terminal_key(&self, pane: ViewId) -> Result<TerminalKey, String> {
+        let projects = self.kept()?;
+        let Some((_, terminal)) = projects.holding_terminal(pane) else {
+            return Err(format!("view {pane} runs no terminal"));
+        };
+        let Some(known) = self.known.get(&terminal.id()) else {
+            return Err(format!("terminal {pane} is not running"));
+        };
+        assert_eq!(terminal.id().view(), pane, "resolved terminal matches requested pane");
+        Ok(known.key)
+    }
+
+    fn socket_focus_pane(&mut self, pane: ViewId) -> Result<(), String> {
+        let projects = self.kept()?;
+        let Some((worktree_ref, _)) = projects.holding_view(pane) else {
+            return Err(format!("no layout holds view {pane}"));
+        };
+        let worktree = worktree_ref.id();
+        self.relaid(Relaid::Focus { view: pane })?;
+        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
+            client.focus = Some(pane);
+        }
+        assert_eq!(
+            self.layout(worktree).map(Layout::last_focus),
+            Ok(Some(pane)),
+            "focused pane becomes the worktree's last focus"
+        );
+        Ok(())
     }
 
     fn came(
@@ -594,7 +879,15 @@ impl Layouts {
         let focus = arrival(shown);
         self.arrivals += 1;
         let id = ClientId(self.arrivals);
-        let client = Client { worktree, size, runs_in, focus, out, said: None };
+        let client = Client {
+            worktree,
+            size,
+            runs_in,
+            focus,
+            browser_ttys: BTreeMap::new(),
+            out,
+            said: None,
+        };
         assert!(self.clients.insert(id, client).is_none(), "a client comes once");
         if !again {
             self.went(worktree);
@@ -617,7 +910,15 @@ impl Layouts {
                 let focus = arrival(shown);
                 let stranded = self.stranded.remove(&client).expect("a stranded client asked");
                 let Stranded { size, runs_in, out, .. } = stranded;
-                let arrived = Client { worktree: to, size, runs_in, focus, out, said: None };
+                let arrived = Client {
+                    worktree: to,
+                    size,
+                    runs_in,
+                    focus,
+                    browser_ttys: BTreeMap::new(),
+                    out,
+                    said: None,
+                };
                 assert!(self.clients.insert(client, arrived).is_none(), "a client is held once");
                 self.went(to);
                 return;
@@ -819,6 +1120,9 @@ impl Layouts {
         if let Some(why) = kept? {
             self.unwritten(&why);
         }
+        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
+            client.browser_ttys.clear();
+        }
         self.forget_closed(&terminals);
         Ok(None)
     }
@@ -966,10 +1270,43 @@ impl Layouts {
                 let moved = self.client(client);
                 moved.worktree = to;
                 moved.focus = focus;
+                moved.browser_ttys.clear();
                 self.went(to);
             },
             Asked::Open { beside, opens } => self.open(client, beside, &opens)?,
             Asked::Welcome => self.welcome(client)?,
+            Asked::Browser(url) => self.browser(client, url)?,
+            Asked::Navigate { view, url } => {
+                if !self.layout(worktree)?.holds(view) {
+                    return Ok(Done::Quiet);
+                }
+                if self.kept()?.holding_browser(view).is_none() {
+                    return Err(format!("view {view} runs no browser"));
+                }
+                self.changed(Change::Navigate { view, url })?;
+            },
+            Asked::BrowserTty { view, tty } => {
+                if !self.layout(worktree)?.holds(view) {
+                    return Ok(Done::Quiet);
+                }
+                if self.kept()?.holding_browser(view).is_none() {
+                    return Err(format!("view {view} runs no browser"));
+                }
+                let client_state = self.client(client);
+                match tty {
+                    Some(tty) => {
+                        if !terminal_socket::is_browser_client_tty(&tty, view) {
+                            return Err(format!(
+                                "browser_tty: {tty:?} is no browser tty for view {view}"
+                            ));
+                        }
+                        client_state.browser_ttys.insert(view, tty);
+                    },
+                    None => {
+                        client_state.browser_ttys.remove(&view);
+                    },
+                }
+            },
             Asked::Review => self.review(client)?,
             Asked::Close(view) => {
                 if !self.layout(worktree)?.holds(view) {
@@ -1124,6 +1461,144 @@ impl Layouts {
         Ok(())
     }
 
+    fn place_browser(
+        &mut self,
+        worktree: WorktreeId,
+        focus: Option<ViewId>,
+        preferred: Beside,
+        fallback: Option<Beside>,
+        url: Option<BrowserUrl>,
+        size: Size,
+    ) -> Result<ViewId, Failed> {
+        let view = self.store.fresh()?;
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        let (_, shown) = projects
+            .find(worktree)
+            .ok_or_else(|| Failed::Refused(format!("no worktree has the id {worktree}")))?;
+        let placed = match placement(shown.layout(), focus, preferred, view, size) {
+            Ok((placed, _)) => placed,
+            Err(why) => match fallback {
+                Some(fallback) => {
+                    placement(shown.layout(), focus, fallback, view, size)
+                        .map_err(Failed::Refused)?
+                        .0
+                },
+                None => return Err(Failed::Refused(why)),
+            },
+        };
+        let browser = View::Browser(Browser::new(view, url));
+        self.store.change(Change::Open { worktree, view: browser, placed, size })?;
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        let held_in = projects.holding_browser(view).map(|(it, _)| it.id());
+        assert_eq!(held_in, Some(worktree), "browser view {view} opened in its worktree");
+        let last_focus = self.layout(worktree).map(Layout::last_focus);
+        assert_eq!(last_focus, Ok(Some(view)), "browser view {view} opens focused");
+        Ok(view)
+    }
+
+    fn browser(&mut self, client: ClientId, url: Option<BrowserUrl>) -> Result<(), String> {
+        let Client { worktree, focus, .. } = self.clients[&client];
+        let size = self.size_of(client);
+        let beside = if focus.is_some() { Beside::Focused } else { Beside::Largest };
+        let view = self
+            .place_browser(worktree, focus, beside, None, url, size)
+            .map_err(Failed::said)?;
+        self.client(client).focus = Some(view);
+        assert_eq!(self.clients[&client].focus, Some(view), "client focuses opened browser");
+        Ok(())
+    }
+
+    fn open_browser(
+        &mut self,
+        target: BrowserTarget,
+        url: Option<BrowserUrl>,
+    ) -> Result<(Option<Made>, Option<projects::Opened>), Failed> {
+        let known_view = |key: TerminalKey| {
+            self.known.iter().find(|(_, known)| known.key == key).map(|(it, _)| it.view())
+        };
+        let (resolved, from_key) = match target {
+            BrowserTarget::Worktree { worktree, from } => {
+                let projects = self.kept().map_err(Failed::NotKept)?;
+                let in_same = from.and_then(known_view).filter(|view| {
+                    projects.holding_view(*view).is_some_and(|(held, _)| held.id() == worktree)
+                });
+                (Ok((worktree, in_same)), from)
+            },
+            BrowserTarget::From { from, fallback } => {
+                let projects = self.kept().map_err(Failed::NotKept)?;
+                let found = known_view(from).and_then(|view| {
+                    projects.holding_view(view).map(|(held, _)| (held.id(), Some(view)))
+                });
+                match (found, fallback) {
+                    (Some(existing), _) => (Ok(existing), Some(from)),
+                    (None, Some(spot)) => (Err(spot), Some(from)),
+                    (None, None) => {
+                        return Err(Failed::Refused("no worktree holds that terminal".to_owned()));
+                    },
+                }
+            },
+            BrowserTarget::Folder(spot) => (Err(spot), None),
+        };
+        let (worktree, view, created) = match resolved {
+            Ok((worktree, beside_view)) => {
+                let view = self.open_browser_in(worktree, beside_view, url)?;
+                (worktree, view, false)
+            },
+            Err(spot) => {
+                let existing = self.kept().map_err(Failed::NotKept)?.existing_worktree_for(&spot);
+                if let Some(worktree) = existing {
+                    let view = self.open_browser_in(worktree, None, url)?;
+                    (worktree, view, false)
+                } else {
+                    let made = self.store.change(Change::StartBrowser { spot, url })?;
+                    let Some(Made::Worktree(worktree)) = made else {
+                        unreachable!("StartBrowser for an unmade spot returns Made::Worktree");
+                    };
+                    let projects = self.kept().map_err(Failed::NotKept)?;
+                    let (_, shown) = projects
+                        .find(worktree)
+                        .expect("a worktree just started for a browser is held");
+                    let view = shown
+                        .layout()
+                        .last_focus()
+                        .expect("a started browser worktree focuses its new browser view");
+                    assert!(
+                        projects.holding_browser(view).is_some(),
+                        "started browser view {view} is a browser"
+                    );
+                    (worktree, view, true)
+                }
+            },
+        };
+        let made = match from_key {
+            Some(from_key) => self.bring(worktree, from_key)?,
+            None if created => Made::Worktree(worktree),
+            None => Made::Found(worktree),
+        };
+        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
+            client.focus = Some(view);
+        }
+        Ok((Some(made), Some(projects::Opened::View(view))))
+    }
+
+    fn open_browser_in(
+        &mut self,
+        worktree: WorktreeId,
+        beside_view: Option<ViewId>,
+        url: Option<BrowserUrl>,
+    ) -> Result<ViewId, Failed> {
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        let (_, shown) = projects
+            .find(worktree)
+            .ok_or_else(|| Failed::Refused(format!("no worktree has the id {worktree}")))?;
+        let shown_clients = self.clients.values().filter(|it| it.worktree == worktree);
+        let size = fit(shown_clients, shown.layout(), &self.known)
+            .map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let focus = beside_view.or_else(|| shown.layout().last_focus());
+        let beside = if focus.is_some() { Beside::Focused } else { Beside::Largest };
+        self.place_browser(worktree, focus, beside, None, url, size)
+    }
+
     fn review(&mut self, client: ClientId) -> Result<(), String> {
         let Client { worktree, focus, .. } = self.clients[&client];
         let size = self.size_of(client);
@@ -1142,7 +1617,6 @@ impl Layouts {
         assert_eq!(last_focus, Ok(Some(view)), "review view {view} opens focused");
         Ok(())
     }
-
     fn made(
         &mut self,
         terminal: TerminalViewId,
@@ -1432,8 +1906,11 @@ impl Layouts {
             self.known.remove(&terminal);
             self.homes.forget(terminal);
         }
-        for client in self.clients.values_mut().filter(|client| client.focus == Some(view)) {
-            client.focus = heir;
+        for client in self.clients.values_mut() {
+            client.browser_ttys.remove(&view);
+            if client.focus == Some(view) {
+                client.focus = heir;
+            }
         }
         let projects = self.kept().map_err(Failed::NotKept)?;
         assert!(projects.holding_view(view).is_none(), "view {view} left its layout");
@@ -1650,6 +2127,7 @@ impl Layouts {
         let to = self.store.moved(terminal, to, size, followed).map_err(Failed::said)?;
         for client in self.clients.values_mut().filter(|client| follows(client)) {
             client.worktree = to;
+            client.browser_ttys.clear();
         }
         if followed {
             self.went(to);
@@ -2012,6 +2490,9 @@ fn laid(
         let id = layout::Leaf::id(view);
         let found = match view {
             View::Welcome(_) => Found::Welcome(()),
+            View::Browser(browser) => Found::Browser(show_response::view::Browser {
+                url: browser.url().map(|url| url.as_str().to_owned()),
+            }),
             View::Review(_) => Found::Review(()),
             View::Terminal(terminal) => match known.get(&terminal.id()) {
                 Some(known) => Found::Key(api::TerminalKey {
@@ -2135,6 +2616,7 @@ mod tests {
             size: None,
             cwd: Some(Directory::parse("/w".to_owned()).unwrap()),
             title: String::new(),
+            tty: None,
             is,
             statuses: ProgramStatuses::default(),
         }
@@ -2473,6 +2955,7 @@ mod tests {
                     size,
                     cwd: Directory::parse(cwd.to_owned()).ok(),
                     title: title.to_owned(),
+                    tty: None,
                     is,
                     statuses,
                 },

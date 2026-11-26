@@ -41,6 +41,7 @@ gh pr view          # the pull request of the branch you run on
 
 ```sh
 lune start <folder|branch|'#issue'|issue or PR link>
+lune browse [<url>]
 lune agents
 lune prune [--repo <dir>] [--yes <plan>]
 lune rebase [<dir>]
@@ -53,6 +54,8 @@ lune info
 
 - `start` starts a worktree, with an agent on an issue, and takes the user
   there: see [Start a worktree](#start-a-worktree).
+- `browse` opens an embedded browser view beside your view (or in the current
+  worktree), on `<url>` or the start page when omitted.
 - `agents` lists the agents that run on this machine.
 - `prune` deletes the worktrees of a repository's merged pull requests: see
   [Merged worktrees](#merged-worktrees).
@@ -75,7 +78,7 @@ in a terminal instead.
 
 ## What the user does in lune
 
-Past what `start` and `rebase` open, the worktrees `prune` deletes, and what
+Past what `start`, `browse` and `rebase` open, the worktrees `prune` deletes, and what
 `terminate` ends and forgets, no command opens, closes, moves or renames a view,
 a worktree's row or a project, and only `start` takes the user anywhere.
 The user does those in lune, whose menu (`Alt a`) and palette (`Super k`) list
@@ -86,6 +89,8 @@ each action by name. When they ask you for one, tell them which:
   path typed in it. Enter goes to a project, or makes one of the clone or the
   folder.
 - "new view" opens a shell beside the view they are on.
+- "new browser view…" (`n b`) opens an embedded browser view on a URL (or its
+  start page) beside the view they are on.
 - "close the view", "close the worktree" and "close the project" end the
   shells and agents in their views.
 - "/thermo-nuclear-review", "/tigerstyle" and

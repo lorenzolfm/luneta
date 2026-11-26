@@ -9,11 +9,23 @@ use alacritty_terminal::vte::ansi::Rgb;
 use crate::host::Inbox;
 
 const QUESTIONS: &[u8] =
-    b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+    b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[14t\x1b[c";
 
 pub const TURNED: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[c";
 
 const WAIT_MAX: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellPixels {
+    pub width: NonZeroU16,
+    pub height: NonZeroU16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowPixels {
+    pub width: NonZeroU16,
+    pub height: NonZeroU16,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
@@ -21,6 +33,8 @@ pub enum Answer {
     Background(Rgb),
     Kitty,
     Graphics,
+    CellSize(CellPixels),
+    WindowPixels(WindowPixels),
     Device,
     Turned(Theme),
 }
@@ -35,6 +49,8 @@ pub enum Theme {
 pub struct Answers {
     pub kitty: bool,
     pub graphics: bool,
+    pub cell: Option<CellPixels>,
+    pub window_pixels: Option<WindowPixels>,
     pub colours: Colours,
 }
 
@@ -57,7 +73,12 @@ impl Colours {
         match answer {
             Answer::Foreground(colour) => self.foreground = Some(colour),
             Answer::Background(colour) => self.background = Some(colour),
-            Answer::Kitty | Answer::Graphics | Answer::Device | Answer::Turned(_) => {},
+            Answer::Kitty
+            | Answer::Graphics
+            | Answer::CellSize(_)
+            | Answer::WindowPixels(_)
+            | Answer::Device
+            | Answer::Turned(_) => {},
         }
     }
 
@@ -83,6 +104,8 @@ fn hear(inbox: &mut Inbox, deadline: Instant) -> Answers {
             Answer::Device => break,
             Answer::Kitty => answers.kitty = true,
             Answer::Graphics => answers.graphics = true,
+            Answer::CellSize(cell) => answers.cell = Some(cell),
+            Answer::WindowPixels(pixels) => answers.window_pixels = Some(pixels),
             Answer::Foreground(_) | Answer::Background(_) => answers.colours.hear(answer),
             Answer::Turned(_) => {},
         }
@@ -146,12 +169,17 @@ mod tests {
     fn the_answers_are_heard_until_what_the_terminal_is_and_the_keys_wait() {
         let (events, inbox) = mpsc::channel();
         let background = Rgb { r: 0x1e, g: 0x1e, b: 0x2e };
+        let cell = CellPixels {
+            width: NonZeroU16::new(10).unwrap(),
+            height: NonZeroU16::new(20).unwrap(),
+        };
         for event in [
             typed('l'),
             Event::Answered(Answer::Background(background)),
             typed('s'),
             Event::Answered(Answer::Kitty),
             Event::Answered(Answer::Graphics),
+            Event::Answered(Answer::CellSize(cell)),
             Event::Answered(Answer::Device),
             Event::Answered(Answer::Foreground(background)),
         ] {
@@ -161,7 +189,13 @@ mod tests {
         let heard = hear(&mut inbox, Instant::now() + Duration::from_secs(10));
         let mut colours = Colours::default();
         colours.hear(Answer::Background(background));
-        assert_eq!(heard, Answers { kitty: true, graphics: true, colours });
+        assert_eq!(heard, Answers {
+            kitty: true,
+            graphics: true,
+            cell: Some(cell),
+            window_pixels: None,
+            colours,
+        });
         assert!(is_typed(inbox.try_next().as_ref(), 'l'));
         assert!(is_typed(inbox.try_next().as_ref(), 's'));
         assert!(matches!(inbox.try_next(), Some(Event::Answered(Answer::Foreground(_)))));

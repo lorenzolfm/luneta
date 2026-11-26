@@ -4,7 +4,7 @@ use std::num::NonZeroU64;
 use std::pin::pin;
 
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{Arranged, Opens, Size, ViewId, WorktreeId};
+use lune_domain::projects::{Arranged, BrowserUrl, Opens, Size, ViewId, WorktreeId};
 use lune_domain::projects::{FRAME_CELLS, LAYOUT_VIEWS_MAX};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
@@ -40,16 +40,17 @@ fn cells(rect: Rect) -> u64 {
     u64::from(rect.columns) * u64::from(rect.rows)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Found {
     Key(TerminalKey),
     Lost,
     Looking,
     Welcome,
+    Browser { url: Option<BrowserUrl> },
     Review,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct View {
     pub id: ViewId,
     pub rect: Rect,
@@ -59,9 +60,13 @@ pub struct View {
 impl View {
     #[must_use]
     pub fn key(&self) -> Option<TerminalKey> {
-        match self.found {
-            Found::Key(key) => Some(key),
-            Found::Lost | Found::Looking | Found::Welcome | Found::Review => None,
+        match &self.found {
+            Found::Key(key) => Some(*key),
+            Found::Lost
+            | Found::Looking
+            | Found::Welcome
+            | Found::Browser { .. }
+            | Found::Review => None,
         }
     }
 }
@@ -202,6 +207,15 @@ fn heard_view(view: show_response::View) -> Result<View, String> {
         Said::Lost(()) => Found::Lost,
         Said::Looking(()) => Found::Looking,
         Said::Welcome(()) => Found::Welcome,
+        Said::Browser(browser) => {
+            let url = browser
+                .url
+                .as_deref()
+                .map(BrowserUrl::parse)
+                .transpose()
+                .map_err(|why| format!("view {id}: {why}"))?;
+            Found::Browser { url }
+        },
         Said::Review(()) => Found::Review,
     };
     Ok(View { id, rect, found })
@@ -267,6 +281,9 @@ pub enum Asked {
     Go(WorktreeId),
     Open { beside: Beside, opens: Opens },
     Welcome,
+    Browser(Option<BrowserUrl>),
+    Navigate { view: ViewId, url: Option<BrowserUrl> },
+    BrowserTty { view: ViewId, tty: Option<String> },
     Review,
     Close(ViewId),
     Focus(ViewId),
@@ -293,6 +310,16 @@ impl Asked {
                 Event::Open(show_request::Open { beside, opens })
             },
             Asked::Welcome => Event::Welcome(()),
+            Asked::Browser(url) => {
+                Event::Browser(show_request::Browser { url: url.map(|url| url.as_str().to_owned()) })
+            },
+            Asked::Navigate { view, url } => Event::Navigate(show_request::Navigate {
+                view: view.get(),
+                url: url.map(|url| url.as_str().to_owned()),
+            }),
+            Asked::BrowserTty { view, tty } => {
+                Event::BrowserTty(show_request::BrowserTty { view: view.get(), tty })
+            },
             Asked::Review => Event::Review(()),
             Asked::Close(view) => Event::Close(view.get()),
             Asked::Focus(view) => {
@@ -527,8 +554,8 @@ mod tests {
         let read = Laid::heard(laid(halves(), Some(tiled(2)))).unwrap();
         let terminals: Vec<u64> = read.views().map(|view| view.id.get()).collect();
         assert_eq!(terminals, [2, 1], "the focused terminal first");
-        let focused = read.focused().map(|view| (view.id.get(), view.found));
-        assert_eq!(focused, Some((2, Found::Lost)));
+        let focused = read.focused().map(|view| (view.id.get(), &view.found));
+        assert_eq!(focused, Some((2, &Found::Lost)));
         assert_eq!(read.keys().len(), 1);
         let drawn: Vec<(u64, u16)> =
             read.drawn().iter().map(|(view, rect)| (view.id.get(), rect.columns)).collect();

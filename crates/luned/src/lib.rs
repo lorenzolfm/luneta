@@ -46,6 +46,7 @@ mod streams;
 pub mod skills;
 mod tailnet;
 pub mod tasks;
+pub mod terminal_socket;
 pub mod state;
 pub mod terminate;
 mod titles;

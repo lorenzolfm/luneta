@@ -24,9 +24,9 @@ pub use spot::{clone_root, porcelain, Bareness, CloneRoot, Listed, Spot, BARE};
 pub use spot::CLONE_WORKTREES_MAX;
 pub use view::{quoted, Argv, Arranged, Layout, Line, Opens, Placed, Prompted, Runs, Session};
 pub use view::{Focus, Shape};
-pub use view::{Terminal, TerminalViewId};
+pub use view::{Browser, BrowserUrl, Terminal, TerminalViewId};
 pub use view::View;
-pub use view::{LINE_BYTES_MAX, SESSION_BYTES_MAX};
+pub use view::{LINE_BYTES_MAX, SESSION_BYTES_MAX, URL_BYTES_MAX};
 
 pub const PROJECTS_MAX: usize = 64;
 
@@ -648,6 +648,8 @@ pub enum Change {
     Swap { one: ViewId, other: ViewId },
     Arrange { worktree: WorktreeId, arranged: Arranged },
     Ran(Vec<Ran>),
+    Navigate { view: ViewId, url: Option<BrowserUrl> },
+    StartBrowser { spot: Spot, url: Option<BrowserUrl> },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -691,6 +693,13 @@ pub enum Closing {
 }
 
 #[derive(Debug)]
+pub enum BrowserTarget {
+    Worktree { worktree: WorktreeId, from: Option<TerminalKey> },
+    From { from: TerminalKey, fallback: Option<Spot> },
+    Folder(Spot),
+}
+
+#[derive(Debug)]
 pub enum Ask {
     Change(Change),
     CloseWorktree { worktree: WorktreeId, seen: BTreeSet<ViewId> },
@@ -701,6 +710,10 @@ pub enum Ask {
     },
     Bring { worktree: WorktreeId, from: TerminalKey },
     CloseView(TerminalKey),
+    OpenBrowser {
+        target: BrowserTarget,
+        url: Option<BrowserUrl>,
+    },
 }
 
 impl Ask {
@@ -798,6 +811,37 @@ impl Ask {
                     to: name(to).map_err(field("to"))?,
                 }
             },
+            Asked::OpenBrowser(asked::OpenBrowser { target, url }) => {
+                use asked::open_browser::{FromTerminal, InWorktree, Target};
+                let target =
+                    match target.ok_or("open_browser: it names no worktree, folder or terminal")? {
+                        Target::Worktree(InWorktree { worktree, from }) => {
+                            let worktree = id("worktree", worktree).map(WorktreeId)?;
+                            let from = from
+                                .as_ref()
+                                .map(TerminalKey::of)
+                                .transpose()
+                                .map_err(field("from"))?;
+                            BrowserTarget::Worktree { worktree, from }
+                        },
+                        Target::From(FromTerminal { from, fallback_folder }) => {
+                            let from = from.ok_or("from: it names no terminal")?;
+                            let from = TerminalKey::of(&from).map_err(field("from"))?;
+                            let fallback = fallback_folder
+                                .as_deref()
+                                .map(spot)
+                                .transpose()
+                                .map_err(field("fallback_folder"))?;
+                            BrowserTarget::From { from, fallback }
+                        },
+                        Target::Folder(folder) => {
+                            let spot = spot(&folder).map_err(field("folder"))?;
+                            BrowserTarget::Folder(spot)
+                        },
+                    };
+                let url = url.as_deref().map(BrowserUrl::parse).transpose().map_err(field("url"))?;
+                return Ok(Ask::OpenBrowser { target, url });
+            },
         };
         Ok(Ask::Change(change))
     }
@@ -832,10 +876,13 @@ impl Change {
             | Change::RenameTerminal { .. }
             | Change::Open { .. }
             | Change::Close { .. }
-            | Change::Unopen { .. } => true,
-            Change::Went { .. } | Change::Swap { .. } | Change::Arrange { .. } | Change::Ran(_) => {
-                false
-            },
+            | Change::Unopen { .. }
+            | Change::StartBrowser { .. } => true,
+            Change::Went { .. }
+            | Change::Swap { .. }
+            | Change::Arrange { .. }
+            | Change::Ran(_)
+            | Change::Navigate { .. } => false,
         }
     }
 }
@@ -1020,7 +1067,10 @@ impl Projects {
     fn added_at<'a>(&self, change: &'a Change) -> Option<&'a Dir> {
         match change {
             Change::AddProject { spot, .. } => Some(spot.dir()),
-            Change::Start { spot, .. } | Change::Pull { spot, .. } | Change::Join { spot, .. } => {
+            Change::Start { spot, .. }
+            | Change::StartBrowser { spot, .. }
+            | Change::Pull { spot, .. }
+            | Change::Join { spot, .. } => {
                 self.inside(spot).is_none().then_some(spot.dir())
             },
             _ => None,
@@ -1230,6 +1280,40 @@ impl Projects {
                     changed.layout_of(terminal.view())?.terminal_mut(terminal).ran(folder, runs);
                 }
                 None
+            },
+            Change::Navigate { view, url } => {
+                changed.layout_of(view)?.browser_mut(view)?.navigated(url);
+                None
+            },
+            Change::StartBrowser { spot, url } => {
+                if self.view_count() >= VIEWS_MAX {
+                    let many = format!("there are {VIEWS_MAX} views");
+                    return Err(format!("{many}, as many as are kept"));
+                }
+                let (project, within) = match self.inside(&spot) {
+                    Some(found) => found,
+                    None => changed.made_inside(&spot, None, &mut draw)?,
+                };
+                let made = changed.worktree_in(project, within, None, &mut draw)?;
+                let last = || changed.project_of(project).and_then(Project::last_used);
+                let worktree = made
+                    .or_else(last)
+                    .ok_or_else(|| "that project has no open worktree".to_owned())?;
+                let view = ViewId(changed.fresh(&mut draw)?);
+                let browser = View::Browser(Browser::new(view, url));
+                let layout = &mut changed.worktree_mut(worktree)?.layout;
+                if layout.is_empty() {
+                    *layout = Layout::first(browser);
+                    layout.focused(view);
+                } else {
+                    let default_size = Size::of(80, 24).expect("80x24 is a valid size");
+                    let placed = layout
+                        .room_for(view, layout.last_focus(), default_size)
+                        .ok_or_else(|| format!("worktree {worktree} has no room for a browser view"))?;
+                    layout.opened(browser, placed, default_size)?;
+                    layout.focused(view);
+                }
+                Some(self.made(worktree))
             },
         };
         Projects::kept_as(&changed);
@@ -1549,6 +1633,16 @@ impl Projects {
         self.worktrees().find(|(_, it)| it.id == worktree)
     }
 
+    #[must_use]
+    pub fn existing_worktree_for(&self, spot: &Spot) -> Option<WorktreeId> {
+        let (project, within) = self.inside(spot)?;
+        match within {
+            Within::Worktree(worktree) => Some(worktree),
+            Within::Project => self.project_of(project).and_then(Project::last_used),
+            Within::Unmade(_) => None,
+        }
+    }
+
     fn made(&self, worktree: WorktreeId) -> Made {
         match self.find(worktree) {
             Some(_) => Made::Found(worktree),
@@ -1578,6 +1672,12 @@ impl Projects {
     pub fn holding_terminal(&self, terminal: ViewId) -> Option<(&Worktree, &Terminal)> {
         let (worktree, view) = self.holding_view(terminal)?;
         Some((worktree, view.terminal()?))
+    }
+
+    #[must_use]
+    pub fn holding_browser(&self, view: ViewId) -> Option<(&Worktree, &Browser)> {
+        let (worktree, found) = self.holding_view(view)?;
+        Some((worktree, found.browser()?))
     }
 
     pub fn terminals(&self) -> impl Iterator<Item = (&Worktree, &Terminal)> {
@@ -3111,5 +3211,41 @@ mod tests {
         assert_eq!(stage(State::Open, 1), Stage::ChecksFailing);
         assert_eq!(stage(State::Closed, 1), Stage::Working);
         assert_eq!(stage(State::Merged, 1), Stage::Merged);
+    }
+
+    #[test]
+    fn open_browser_target_and_start_browser_are_typed_and_atomic() {
+        use api::change_projects_request::{open_browser, Change as Asked, OpenBrowser};
+
+        let missing = Asked::OpenBrowser(OpenBrowser { target: None, url: None });
+        assert!(Ask::of_api(missing, |_| panic!("spot must not run")).is_err());
+
+        let by_worktree = Asked::OpenBrowser(OpenBrowser {
+            target: Some(open_browser::Target::Worktree(open_browser::InWorktree {
+                worktree: 5,
+                from: None,
+            })),
+            url: Some("https://example.com".to_owned()),
+        });
+        let ask = Ask::of_api(by_worktree, |_| panic!("spot must not run for worktree target"))
+            .unwrap();
+        assert!(matches!(
+            ask,
+            Ask::OpenBrowser {
+                target: BrowserTarget::Worktree { worktree, from: None },
+                url: Some(_),
+            } if worktree == WorktreeId::of(5).unwrap()
+        ));
+
+        let bare_spot = Spot::in_clone(dir("/w/bare"), Listed::of(BTreeSet::new()).unwrap(), None);
+        let projects = Projects::default();
+        let failed = change(
+            &projects,
+            Change::StartBrowser {
+                spot: bare_spot,
+                url: Some(BrowserUrl::parse("https://example.com").unwrap()),
+            },
+        );
+        assert_eq!(failed.unwrap_err(), "that project has no open worktree");
     }
 }

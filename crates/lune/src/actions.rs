@@ -114,6 +114,7 @@ actions! {
     FixChecks,
     NewView,
     NewWelcome,
+    NewBrowser,
     NewReview,
     ShowTabs,
     ShowPanes,
@@ -269,6 +270,10 @@ impl Action {
             Action::NewWelcome => {
                 let new = menu(&['n', 'h']);
                 spec("new welcome view", &["home", "start", "greeting"], new, VIEW)
+            },
+            Action::NewBrowser => {
+                let new = menu(&['n', 'b']);
+                spec("new browser view…", &["url", "page", "site", "http"], new, CHECKED_OUT)
             },
             Action::NewReview => {
                 let new = menu(&['n', 'r']);

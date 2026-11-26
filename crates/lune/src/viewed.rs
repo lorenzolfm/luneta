@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::vte::ansi::CursorShape;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{Arranged, Opens, ProjectId, Size, ViewId, WorktreeId};
+use lune_domain::projects::{Arranged, BrowserUrl, Opens, ProjectId, Size, ViewId, WorktreeId};
 use luned::folder;
 use luned::log;
 use luned::mux::own::api::{self, typed};
@@ -23,12 +23,15 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::answers::{CellPixels, Colours};
 use crate::attached::{
     below_bar, border, draw_screen, draw_tab_spans, key_said, link, mouse_said, on_views,
     screen_rect, selects, span_under, spot_in, tab_columns_max, tab_spans, tab_spans_capped,
     text, within, Pointer, Screen, Selection, Spot, TabSpan, TAB_BAR_ROWS, TAB_PAD,
 };
 use crate::copied::Excerpt;
+use crate::desktop;
+use crate::embedded::{self, Browsers, Desired, Outcome, PointerShape, Shown};
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::moonlight;
@@ -51,8 +54,23 @@ const UNTITLED: &str = "terminal";
 
 const WELCOME_TAB: &str = "welcome";
 
+const BROWSER_TAB: &str = "browser";
+
 const WELCOME: [&str; 4] =
     ["Welcome", "", "This view runs no terminal.", "d d  close it   Ctrl hjkl  another view"];
+
+const BROWSER_UNSUPPORTED_TERMINAL: &str = "This terminal does not support Kitty graphics.";
+
+const BROWSER_UNSUPPORTED_SSH: &str = "Inline browser graphics are unavailable over SSH.";
+
+const BROWSER_LIMIT_REACHED: &str =
+    "At the limit of inline browsers; close another to render this one.";
+
+const BROWSER_FALLBACK_HELP: &str =
+    "o  open in OS browser   y  copy URL   d d  close it   Ctrl hjkl  another view";
+
+const BROWSER_RETRY_HELP: &str =
+    "r  retry   o  open in OS browser   y  copy URL   d d  close it   Ctrl hjkl  another view";
 
 const CLOSE: char = 'd';
 
@@ -87,6 +105,7 @@ enum Moused {
     Go(WorktreeId),
     Focus(ViewId),
     Sent(TerminalKey, api::Mouse),
+    Browser { view: ViewId, mouse: MouseEvent, column: u16, row: u16 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +120,8 @@ pub enum Heeded {
     Edged(Across),
     Sent(WorktreeId),
     Note(String),
+    Copy(String),
+    OpenOsBrowser(BrowserUrl),
     Emptied,
     Forgotten(String),
     Lost(String),
@@ -257,6 +278,21 @@ impl Layout {
         self.laid().and_then(Laid::focused).is_some_and(|view| view.found == Found::Welcome)
     }
 
+    fn browses(&self) -> bool {
+        self.laid()
+            .and_then(Laid::focused)
+            .is_some_and(|view| matches!(view.found, Found::Browser { .. }))
+    }
+
+    fn focused_browser(&self) -> Option<(ViewId, Option<&BrowserUrl>, Rect)> {
+        let (view, placed) = self.laid()?.focused_at()?;
+        let Found::Browser { url } = &view.found else {
+            return None;
+        };
+        let inner = screen_rect(view_rect(Rect::default(), placed));
+        Some((view.id, url.as_ref(), inner))
+    }
+
     fn reviews(&self) -> bool {
         self.laid().and_then(Laid::focused).is_some_and(|view| view.found == Found::Review)
     }
@@ -271,10 +307,10 @@ impl Layout {
 
     fn closes(&mut self, key: &KeyEvent, input: u64) -> Option<ViewId> {
         assert!(
-            self.welcomes() || self.reviews(),
-            "only a welcome or review view is closed by its keys"
+            self.welcomes() || self.browses() || self.reviews(),
+            "only a welcome, browser, or review view is closed by its keys"
         );
-        let focused = self.focused().expect("a welcome or review view is focused");
+        let focused = self.focused().expect("a welcome, browser, or review view is focused");
         let closing = std::mem::replace(&mut self.closing, Closing::Unarmed);
         let pressed = key.kind == KeyEventKind::Press && key.modifiers.is_empty();
         if !pressed || key.code != KeyCode::Char(CLOSE) {
@@ -318,11 +354,11 @@ impl Layout {
         let Some(focused) = self.laid().and_then(Laid::focused) else {
             return Typing::Later;
         };
-        match focused.found {
-            Found::Key(key) if Some(key) == self.runs_in => Typing::Never,
-            Found::Key(key) => Typing::Into(key),
+        match &focused.found {
+            Found::Key(key) if Some(*key) == self.runs_in => Typing::Never,
+            Found::Key(key) => Typing::Into(*key),
             Found::Looking => Typing::Later,
-            Found::Lost | Found::Welcome | Found::Review => Typing::Never,
+            Found::Lost | Found::Welcome | Found::Browser { .. } | Found::Review => Typing::Never,
         }
     }
 
@@ -487,7 +523,7 @@ impl Layout {
         tabs.map(|tab| (tab.worktree, tab.name.as_str()))
     }
 
-    fn view_tabs(&self, outer: Rect) -> Vec<TabSpan<ViewId>> {
+    fn view_tabs(&self, outer: Rect, browsers: Option<&Browsers>) -> Vec<TabSpan<ViewId>> {
         let Some(laid) = self.laid().filter(|laid| laid.shows() == Some(Shows::Tabs)) else {
             return Vec::new();
         };
@@ -498,23 +534,7 @@ impl Layout {
         let focused = laid.focused().expect("a layout shown as tabs focuses one").id;
         let named: Vec<(ViewId, String)> = laid
             .in_order()
-            .map(|view| {
-                let title = self
-                    .titles
-                    .get(&view.id)
-                    .map(String::as_str)
-                    .filter(|it| !it.is_empty());
-                let label = match (title, view.found) {
-                    (Some(title), _) => title.to_owned(),
-                    (None, Found::Welcome) => WELCOME_TAB.to_owned(),
-                    (None, Found::Review) => self
-                        .reviews
-                        .get(&view.id)
-                        .map_or_else(|| review::TAB.to_owned(), ReviewPane::tab_label),
-                    (None, _) => UNTITLED.to_owned(),
-                };
-                (view.id, label)
-            })
+            .map(|view| (view.id, self.view_title(view, browsers)))
             .collect();
         let named_refs: Vec<(ViewId, &str)> =
             named.iter().map(|(id, name)| (*id, name.as_str())).collect();
@@ -527,18 +547,52 @@ impl Layout {
         drawn.expect("the focused tab is drawn on a border of a column or more")
     }
 
-    fn tab_under(&self, at: Position) -> Option<ViewId> {
+    fn view_title(&self, view: &View, browsers: Option<&Browsers>) -> String {
+        match &view.found {
+            Found::Browser { url } => browsers
+                .and_then(|browsers| browsers.title(view.id))
+                .or_else(|| url.as_ref().map(BrowserUrl::short))
+                .unwrap_or(BROWSER_TAB)
+                .to_owned(),
+            Found::Welcome => WELCOME_TAB.to_owned(),
+            Found::Review => self
+                .titles
+                .get(&view.id)
+                .filter(|it| !it.is_empty())
+                .cloned()
+                .unwrap_or_else(|| {
+                    self.reviews
+                        .get(&view.id)
+                        .map_or_else(|| review::TAB.to_owned(), ReviewPane::tab_label)
+                }),
+            Found::Key(_) | Found::Lost | Found::Looking => self
+                .titles
+                .get(&view.id)
+                .map(String::as_str)
+                .filter(|it| !it.is_empty())
+                .unwrap_or(UNTITLED)
+                .to_owned(),
+        }
+    }
+
+    fn tab_under(&self, at: Position, browsers: Option<&Browsers>) -> Option<ViewId> {
         let (_, placed) = self.laid()?.focused_at()?;
         let outer = view_rect(Rect::default(), placed);
         if at.y == outer.y {
             let column = at.x.checked_sub(outer.x)?.checked_sub(1)?;
-            span_under(&self.view_tabs(outer), column)
+            span_under(&self.view_tabs(outer, browsers), column)
         } else {
             None
         }
     }
 
-    fn moused(&mut self, mouse: MouseEvent, at: Spot, width: u16) -> Moused {
+    fn moused(
+        &mut self,
+        mouse: MouseEvent,
+        at: Spot,
+        width: u16,
+        browsers: Option<&Browsers>,
+    ) -> Moused {
         let down = matches!(mouse.kind, MouseEventKind::Down(_));
         if self.pointer == Pointer::Sending {
             if !down {
@@ -554,7 +608,7 @@ impl Layout {
                 Some(_) | None => Moused::Nothing,
             };
         };
-        let under = self.tab_under(spot).or_else(|| {
+        let under = self.tab_under(spot, browsers).or_else(|| {
             let drawn = self.drawn().into_iter();
             let mut under =
                 drawn.filter(|(_, placed)| view_rect(Rect::default(), *placed).contains(spot));
@@ -584,6 +638,34 @@ impl Layout {
 
     fn sent(&mut self, mouse: MouseEvent, at: Position) -> Moused {
         let sending = self.pointer == Pointer::Sending;
+        if let Some((view, _, inner)) = self.focused_browser()
+            && !inner.is_empty()
+        {
+            let inside = inner.contains(at);
+            let sends = match mouse.kind {
+                MouseEventKind::Down(_) => {
+                    self.pointer = if inside { Pointer::Sending } else { Pointer::Free };
+                    inside
+                },
+                MouseEventKind::Drag(_) => sending,
+                MouseEventKind::Up(_) => {
+                    if sending {
+                        self.pointer = Pointer::Free;
+                    }
+                    sending
+                },
+                MouseEventKind::Moved
+                | MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight => inside,
+            };
+            if sends {
+                let spot = spot_in(inner, at);
+                return Moused::Browser { view, mouse, column: spot.column, row: spot.row };
+            }
+            return Moused::Nothing;
+        }
         let Some((inner, key, _)) = self.focused_screen() else {
             if sending {
                 self.pointer = Pointer::Free;
@@ -680,6 +762,7 @@ impl Layout {
         buffer: &mut Buffer,
         area: Rect,
         hover: Option<Spot>,
+        browsers: Option<&Browsers>,
         kitty_cell_px: Option<(NonZeroU16, NonZeroU16)>,
     ) -> (Option<Position>, Vec<RibbonOverlay>) {
         for y in area.top()..area.bottom() {
@@ -698,8 +781,11 @@ impl Layout {
         let focused = self.focused();
         let selection = self.pointer.selection();
         let pointed = hover.and_then(|at| self.pointed(at));
-        let drawn_views: Vec<(ViewId, Found, Placed)> =
-            self.drawn().into_iter().map(|(view, placed)| (view.id, view.found, placed)).collect();
+        let drawn_views: Vec<(ViewId, Found, Placed)> = self
+            .drawn()
+            .into_iter()
+            .map(|(view, placed)| (view.id, view.found.clone(), placed))
+            .collect();
         let mut cursor = None;
         let mut overlays = Vec::new();
         let mut review_slot = 0u32;
@@ -712,14 +798,24 @@ impl Layout {
             } else {
                 Style::new().fg(moonlight::MUTE)
             };
-            let tabs = self.view_tabs(outer);
-            let titled = match (self.titles.get(&view_id).map(String::as_str), view_found) {
-                (Some(t), _) if !t.is_empty() => t.to_owned(),
-                (_, Found::Review) => self
-                    .reviews
+            let tabs = self.view_tabs(outer, browsers);
+            let titled = match &view_found {
+                Found::Browser { url } => browsers
+                    .and_then(|browsers| browsers.title(view_id))
+                    .or_else(|| url.as_ref().map(BrowserUrl::short))
+                    .unwrap_or(BROWSER_TAB)
+                    .to_owned(),
+                Found::Review => self
+                    .titles
                     .get(&view_id)
-                    .map_or_else(|| review::TAB.to_owned(), ReviewPane::tab_label),
-                _ => String::new(),
+                    .filter(|t| !t.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        self.reviews
+                            .get(&view_id)
+                            .map_or_else(|| review::TAB.to_owned(), ReviewPane::tab_label)
+                    }),
+                _ => self.titles.get(&view_id).cloned().unwrap_or_default(),
             };
             let title = if tabs.is_empty() { titled.as_str() } else { "" };
             border(buffer, views, outer, title, Style::new().fg(edge), named);
@@ -728,10 +824,10 @@ impl Layout {
             if seen.is_empty() {
                 continue;
             }
-            let said = match view_found {
-                Found::Key(key) if Some(key) == self.runs_in => HERE,
+            let said = match &view_found {
+                Found::Key(key) if Some(*key) == self.runs_in => HERE,
                 Found::Key(key) => {
-                    if let Some(screen) = self.screens.get(&key) {
+                    if let Some(screen) = self.screens.get(key) {
                         let lit = |span: Option<Selection>| span.filter(|_| mine);
                         let drawn = draw_screen(buffer, seen, screen, lit(selection), lit(pointed));
                         if mine {
@@ -747,6 +843,10 @@ impl Layout {
                     for (line, y) in WELCOME.iter().zip(seen.top()..seen.bottom()) {
                         buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
                     }
+                    continue;
+                },
+                Found::Browser { url } => {
+                    draw_browser(buffer, seen, view_id, url.as_ref(), mine, colour, browsers);
                     continue;
                 },
                 Found::Review => {
@@ -825,6 +925,82 @@ fn draw_view_tabs(
     }
 }
 
+fn paint_lines(buffer: &mut Buffer, seen: Rect, lines: &[(&str, Style)]) {
+    assert!((1..=8).contains(&lines.len()), "browser status panel paints 1 to 8 lines");
+    for (&(line, style), y) in lines.iter().zip(seen.top()..seen.bottom()) {
+        buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
+    }
+}
+
+fn draw_browser(
+    buffer: &mut Buffer,
+    seen: Rect,
+    view: ViewId,
+    url: Option<&BrowserUrl>,
+    mine: bool,
+    colour: Color,
+    browsers: Option<&Browsers>,
+) {
+    assert!(!seen.is_empty(), "drawn browser rect is non-empty");
+    let url_line = url.map_or("Start page", BrowserUrl::as_str);
+    let accent = Style::new().fg(if mine { colour } else { moonlight::MUTE });
+    let text_style = Style::new().fg(moonlight::TEXT);
+    let dim = Style::new().fg(moonlight::MUTE);
+    if let Some(browsers) = browsers
+        && browsers.supported()
+    {
+        match browsers.draw(view, buffer, seen) {
+            Shown::Live => return,
+            Shown::Starting => {
+                paint_lines(buffer, seen, &[
+                    ("Starting browser…", accent),
+                    ("", dim),
+                    (url_line, text_style),
+                ]);
+                return;
+            },
+            Shown::AtLimit => {
+                paint_lines(buffer, seen, &[
+                    ("Browser", accent),
+                    ("", dim),
+                    (url_line, text_style),
+                    ("", dim),
+                    (BROWSER_LIMIT_REACHED, dim),
+                    ("", dim),
+                    (BROWSER_FALLBACK_HELP, dim),
+                ]);
+                return;
+            },
+            Shown::Failed(why) => {
+                paint_lines(buffer, seen, &[
+                    ("Browser", accent),
+                    ("", dim),
+                    (url_line, text_style),
+                    ("", dim),
+                    (why, dim),
+                    ("", dim),
+                    (BROWSER_RETRY_HELP, dim),
+                ]);
+                return;
+            },
+        }
+    }
+    let why = if desktop::elsewhere() {
+        BROWSER_UNSUPPORTED_SSH
+    } else {
+        BROWSER_UNSUPPORTED_TERMINAL
+    };
+    paint_lines(buffer, seen, &[
+        ("Browser", accent),
+        ("", dim),
+        (url_line, text_style),
+        ("", dim),
+        (why, dim),
+        ("", dim),
+        (BROWSER_FALLBACK_HELP, dim),
+    ]);
+}
+
 fn view_rect(views: Rect, rect: Placed) -> Rect {
     let column = views.x.checked_add(rect.column).expect("a view's column is a terminal column");
     let row = views.y.checked_add(rect.row).expect("a view's row is a terminal row");
@@ -844,6 +1020,12 @@ fn where_on(machine: &Machine, runs_in_here: Option<TerminalKey>) -> Where {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorktreeOpen {
+    Requested,
+    Ready,
+}
+
 pub struct Viewed {
     number: u64,
     folder: PathBuf,
@@ -855,10 +1037,12 @@ pub struct Viewed {
     greeting: Greeting,
     runs_in_here: Option<TerminalKey>,
     layout: Layout,
+    browsers: Browsers,
+    window_focused: bool,
     watcher: Option<Watcher>,
     watchers: u64,
     watched_at: Option<Instant>,
-    opened: BTreeSet<WorktreeId>,
+    opened: BTreeMap<WorktreeId, WorktreeOpen>,
     steps: u64,
     awaited: Option<NonZeroU64>,
     events: Sender<Event>,
@@ -873,9 +1057,11 @@ impl Viewed {
         size: Size,
         greeting: Greeting,
         runs_in_here: Option<TerminalKey>,
+        browser_config: embedded::Config,
         events: &Sender<Event>,
     ) -> Viewed {
         let runs_in = where_on(&machine, runs_in_here).runs_in();
+        let browsers = Browsers::new(number, browser_config, events.clone());
         let mut viewed = Viewed {
             number,
             folder,
@@ -887,10 +1073,12 @@ impl Viewed {
             greeting,
             runs_in_here,
             layout: Layout::new(worktree, runs_in),
+            browsers,
+            window_focused: true,
             watcher: None,
             watchers: 0,
             watched_at: None,
-            opened: BTreeSet::new(),
+            opened: BTreeMap::new(),
             steps: 0,
             awaited: None,
             events: events.clone(),
@@ -917,6 +1105,21 @@ impl Viewed {
         let worktree = self.layout.worktree;
         let again = self.laid_in == Some(worktree);
         self.show = Some(luned::show(opened, self.at(), worktree, self.size, again, told));
+        if self.machine == Machine::Local {
+            for (view, tty) in self.browsers.active_ttys() {
+                self.ask(Asked::BrowserTty { view, tty: Some(tty) });
+            }
+        }
+    }
+
+    fn flush_browser_ttys(&mut self) {
+        let changes = self.browsers.drain_tty_changes();
+        if self.machine != Machine::Local {
+            return;
+        }
+        for (view, tty) in changes {
+            self.ask(Asked::BrowserTty { view, tty });
+        }
     }
 
     #[must_use]
@@ -943,6 +1146,97 @@ impl Viewed {
         self.layout.welcomes()
     }
 
+    pub fn browses(&self) -> bool {
+        self.layout.browses()
+    }
+
+    pub fn browser(&mut self, view: ViewId, heard: embedded::Heard) -> Heeded {
+        let outcome = self.browsers.heard(view, heard);
+        self.flush_browser_ttys();
+        match outcome {
+            Some(Outcome::Copy(text)) => Heeded::Copy(text),
+            Some(Outcome::Navigated { view, url }) => {
+                self.ask(Asked::Navigate { view, url });
+                Heeded::Quiet
+            },
+            Some(Outcome::Close(view)) => {
+                self.ask(Asked::Close(view));
+                Heeded::Quiet
+            },
+            None => Heeded::Quiet,
+        }
+    }
+
+    pub fn colours(&mut self, colours: Colours) {
+        self.browsers.colours(colours);
+        self.flush_browser_ttys();
+        assert_eq!(self.browsers.config().colours, colours);
+    }
+
+    pub fn cell_resized(&mut self, cell: CellPixels) {
+        self.browsers.cell_resized(cell);
+        self.flush_browser_ttys();
+        assert_eq!(self.browsers.config().cell, cell);
+    }
+
+    pub fn drain_graphics(&mut self) -> Vec<u8> {
+        self.browsers.drain_graphics()
+    }
+
+    pub fn drain_all_deletes(&mut self) -> Vec<u8> {
+        self.browsers.drain_all_deletes()
+    }
+
+    #[must_use]
+    pub fn pointer_shape(&self, hover: Option<Spot>) -> Option<&PointerShape> {
+        let at = on_views(hover?)?;
+        for (view, placed) in self.layout.drawn() {
+            if !matches!(view.found, Found::Browser { .. }) {
+                continue;
+            }
+            let inner = screen_rect(view_rect(Rect::default(), placed));
+            if inner.contains(at) {
+                return self.browsers.pointer(view.id);
+            }
+        }
+        None
+    }
+
+    fn sync_browsers(&mut self) {
+        let Some(laid) = self.layout.laid() else {
+            self.browsers.clear();
+            self.flush_browser_ttys();
+            return;
+        };
+        let drawn: BTreeMap<ViewId, Placed> =
+            laid.drawn().into_iter().map(|(view, placed)| (view.id, placed)).collect();
+        let desired: Vec<Desired<'_>> = laid
+            .in_order()
+            .filter_map(|view| {
+                let Found::Browser { url } = &view.found else {
+                    return None;
+                };
+                let (placed, visible) = match drawn.get(&view.id) {
+                    Some(&placed) => (placed, true),
+                    None => (view.rect, false),
+                };
+                let inner = screen_rect(view_rect(Rect::default(), placed));
+                Some(Desired { view: view.id, url: url.as_ref(), inner, visible })
+            })
+            .collect();
+        assert!(
+            desired.len() <= lune_domain::projects::LAYOUT_VIEWS_MAX,
+            "desired browsers stay within LAYOUT_VIEWS_MAX"
+        );
+        self.browsers.sync(
+            &self.machine,
+            &desired,
+            laid.focused().map(|view| view.id),
+            self.window_focused,
+        );
+        self.flush_browser_ttys();
+    }
+
     pub fn reviews(&self) -> bool {
         self.layout.reviews()
     }
@@ -961,17 +1255,23 @@ impl Viewed {
                 self.laid_in = Some(laid.worktree());
                 let followed = self.layout.followed(&laid);
                 if followed {
-                    self.opened.insert(self.layout.worktree);
+                    self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
                 }
                 let mut emptied = false;
                 if self.layout.laid_out(laid) {
-                    if self.opened.insert(self.layout.worktree) {
-                        self.ask(Asked::Open { beside: Beside::Alone, opens: Opens::Shell });
-                    } else {
-                        emptied = true;
+                    match self.opened.get(&self.layout.worktree) {
+                        None => {
+                            self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
+                            self.ask(Asked::Open { beside: Beside::Alone, opens: Opens::Shell });
+                        },
+                        Some(WorktreeOpen::Requested) => {},
+                        Some(WorktreeOpen::Ready) => emptied = true,
                     }
+                } else if self.opened.get(&self.layout.worktree) == Some(&WorktreeOpen::Requested) {
+                    self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
                 }
                 self.watch();
+                self.sync_browsers();
                 self.send_unsent();
                 match (emptied, followed) {
                     (true, _) => Heeded::Emptied,
@@ -993,6 +1293,7 @@ impl Viewed {
                     return Heeded::Quiet;
                 }
                 self.watch();
+                self.sync_browsers();
                 Heeded::Emptied
             },
             Heard::Refused(why) => Heeded::Note(format!("luned refused: {why}")),
@@ -1113,30 +1414,58 @@ impl Viewed {
         self.awaited = None;
     }
 
-    pub fn go(&mut self, on: &Machine, worktree: WorktreeId) {
+    pub fn go(&mut self, on: &Machine, worktree: WorktreeId) -> Vec<u8> {
         if *on != self.machine {
+            let deletes = self.browsers.drain_all_deletes();
             let (number, folder, on) = (self.number + 1, self.folder.clone(), on.clone());
             let (size, greeting, here) = (self.size, self.greeting, self.runs_in_here);
-            let events = self.events.clone();
-            *self = Viewed::start(number, folder, on, worktree, size, greeting, here, &events);
-            return;
+            let (browser_config, events) = (self.browsers.config().clone(), self.events.clone());
+            *self = Viewed::start(
+                number,
+                folder,
+                on,
+                worktree,
+                size,
+                greeting,
+                here,
+                browser_config,
+                &events,
+            );
+            return deletes;
         }
         if worktree == self.layout.worktree {
-            return;
+            return Vec::new();
         }
         self.opened.remove(&worktree);
         self.layout.go(worktree);
+        self.browsers.clear();
+        let _ = self.browsers.drain_tty_changes();
         self.ask(Asked::Go(worktree));
         self.watch();
+        self.browsers.drain_all_deletes()
+    }
+
+    fn mark_opening(&mut self) {
+        let state = if self.layout.laid().is_some_and(|laid| !laid.is_empty()) {
+            WorktreeOpen::Ready
+        } else {
+            WorktreeOpen::Requested
+        };
+        self.opened.entry(self.layout.worktree).or_insert(state);
     }
 
     pub fn welcome(&mut self) {
-        self.opened.insert(self.layout.worktree);
+        self.mark_opening();
         self.ask(Asked::Welcome);
     }
 
+    pub fn open_browser(&mut self, url: Option<BrowserUrl>) {
+        self.mark_opening();
+        self.ask(Asked::Browser(url));
+    }
+
     pub fn review(&mut self) {
-        self.opened.insert(self.layout.worktree);
+        self.mark_opening();
         self.ask(Asked::Review);
     }
 
@@ -1159,7 +1488,7 @@ impl Viewed {
     }
 
     pub fn open_beside_focused(&mut self, opens: Opens) {
-        self.opened.insert(self.layout.worktree);
+        self.mark_opening();
         self.ask(Asked::Open { beside: Beside::Focused, opens });
     }
 
@@ -1201,20 +1530,59 @@ impl Viewed {
         }
     }
 
-    pub fn key(&mut self, key: &KeyEvent, input: u64) -> ReviewAction {
+    pub fn key(&mut self, key: &KeyEvent, input: u64) -> (Heeded, ReviewAction) {
         self.unselect();
         if self.layout.held_after_close(key) {
-            return ReviewAction::None;
+            return (Heeded::Quiet, ReviewAction::None);
         }
         if self.layout.welcomes() {
             if let Some(view) = self.layout.closes(key, input) {
                 self.ask(Asked::Close(view));
             }
-            return ReviewAction::None;
+            return (Heeded::Quiet, ReviewAction::None);
+        }
+        if let Some((view, url, inner)) = self.layout.focused_browser() {
+            let url = url.cloned();
+            let handled = self.browsers.key(view, key);
+            self.flush_browser_ttys();
+            if handled {
+                return (Heeded::Quiet, ReviewAction::None);
+            }
+            if let Some(closed) = self.layout.closes(key, input) {
+                self.ask(Asked::Close(closed));
+                return (Heeded::Quiet, ReviewAction::None);
+            }
+            let pressed = key.kind == KeyEventKind::Press && key.modifiers.is_empty();
+            if pressed {
+                match key.code {
+                    KeyCode::Char('o') => {
+                        if let Some(url) = url {
+                            return (Heeded::OpenOsBrowser(url), ReviewAction::None);
+                        }
+                    },
+                    KeyCode::Char('y') => {
+                        if let Some(url) = url {
+                            return (Heeded::Copy(url.as_str().to_owned()), ReviewAction::None);
+                        }
+                    },
+                    KeyCode::Char('r') if self.browsers.supported() => {
+                        self.browsers.retry(
+                            view,
+                            &self.machine,
+                            url.as_ref(),
+                            inner,
+                            self.window_focused,
+                        );
+                        self.flush_browser_ttys();
+                    },
+                    _ => {},
+                }
+            }
+            return (Heeded::Quiet, ReviewAction::None);
         }
         if self.layout.reviews() {
             let Some(view) = self.layout.focused() else {
-                return ReviewAction::None;
+                return (Heeded::Quiet, ReviewAction::None);
             };
             let searching = self
                 .layout
@@ -1225,31 +1593,39 @@ impl Viewed {
                 self.layout.disarm_close();
             } else if let Some(closed) = self.layout.closes(key, input) {
                 self.ask(Asked::Close(closed));
-                return ReviewAction::None;
+                return (Heeded::Quiet, ReviewAction::None);
             }
-            return self
+            let action = self
                 .layout
                 .reviews
                 .get_mut(&view)
                 .map_or(ReviewAction::None, |pane| pane.key(key));
+            return (Heeded::Quiet, action);
         }
         if let Some(key) = key_said(key) {
             self.type_focused(typed::Event::Key(key));
         }
-        ReviewAction::None
+        (Heeded::Quiet, ReviewAction::None)
     }
 
     pub fn paste(&mut self, text: &str) {
         self.unselect();
+        if let Some((view, _, _)) = self.layout.focused_browser() {
+            let _ = self.browsers.paste(view, text);
+            self.flush_browser_ttys();
+            return;
+        }
         self.type_focused(typed::Event::Paste(api::Paste { text: text.to_owned() }));
     }
 
     pub fn focus(&mut self, focused: bool) {
+        self.window_focused = focused;
+        self.sync_browsers();
         self.type_focused(typed::Event::Focus(api::Focus { focused }));
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent, at: Spot, width: u16) -> Option<WorktreeId> {
-        match self.layout.moused(mouse, at, width) {
+        match self.layout.moused(mouse, at, width, Some(&self.browsers)) {
             Moused::Nothing => None,
             Moused::Go(worktree) => Some(worktree),
             Moused::Focus(terminal) => {
@@ -1258,6 +1634,11 @@ impl Viewed {
             },
             Moused::Sent(key, said) => {
                 self.type_in(key, typed::Event::Mouse(said));
+                None
+            },
+            Moused::Browser { view, mouse, column, row } => {
+                let _ = self.browsers.mouse(view, mouse, column, row);
+                self.flush_browser_ttys();
                 None
             },
         }
@@ -1292,7 +1673,7 @@ impl Viewed {
         hover: Option<Spot>,
         kitty_cell_px: Option<(NonZeroU16, NonZeroU16)>,
     ) -> (Option<Position>, Vec<RibbonOverlay>) {
-        self.layout.draw(buffer, area, hover, kitty_cell_px)
+        self.layout.draw(buffer, area, hover, Some(&self.browsers), kitty_cell_px)
     }
 
     #[must_use]
@@ -1417,7 +1798,7 @@ mod tests {
     fn each_terminal_draws_in_its_frame_under_the_worktrees_and_a_larger_area_keeps_a_margin() {
         let mut layout = split_layout();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
-        let (cursor, _) = layout.draw(&mut buffer, Rect::new(2, 0, 22, 6), None, None);
+        let (cursor, _) = layout.draw(&mut buffer, Rect::new(2, 0, 22, 6), None, None, None);
         assert_eq!(row(&buffer, 0, 2, 17), "\u{e0b6} one \u{e0b4}   two  ");
         assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (moonlight::INK, moonlight::MAUVE));
         assert_eq!((buffer[(2, 0)].fg, buffer[(2, 0)].bg), (moonlight::MAUVE, Color::Reset));
@@ -1430,7 +1811,7 @@ mod tests {
         assert_eq!(row(&buffer, 5, 2, 24), " ".repeat(22));
         assert_eq!(cursor, Some(Position::new(5, 3)));
         let mut small = Buffer::empty(Rect::new(0, 0, 14, 3));
-        assert_eq!(layout.draw(&mut small, Rect::new(0, 0, 14, 3), None, None).0, None);
+        assert_eq!(layout.draw(&mut small, Rect::new(0, 0, 14, 3), None, None, None).0, None);
         assert_eq!(row(&small, 1, 0, 14), "╭ p1 ────╮╭ p2");
         assert_eq!(row(&small, 2, 0, 14), "│abcdefgh││qrs");
     }
@@ -1459,14 +1840,14 @@ mod tests {
         let mut layout = split_layout();
         layout.laid_out(laid(halves(), 12, true));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None);
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None, None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭ p2 ──────────────╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
         let mut here = Layout::new(worktree(1), Some(key(2)));
         let lost = vec![view(11, (0, 0, 10, 4), None), view(12, (10, 0, 10, 4), Some(2))];
         here.laid_out(laid(lost, 11, false));
         assert_eq!(here.wanted(), BTreeSet::new(), "lune never shows the terminal it runs in");
-        here.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None);
+        here.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None, None);
         assert_eq!(row(&buffer, 2, 1, 9), "lost: lu");
         assert_eq!(row(&buffer, 2, 11, 19), "lune run");
     }
@@ -1487,7 +1868,7 @@ mod tests {
         };
         layout.laid_out(tabs(12));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None);
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None, None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭  p  ─ ● p ─  t  ─╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
         assert_eq!((buffer[(8, 1)].symbol(), buffer[(8, 1)].fg), (VIEW_DOT, moonlight::MAUVE));
@@ -1495,11 +1876,11 @@ mod tests {
         assert!(buffer[(10, 1)].modifier.contains(Modifier::BOLD));
         assert_eq!(buffer[(3, 1)].fg, moonlight::MUTE, "a tab not focused is dim");
         let down = mouse(MouseEventKind::Down(MouseButton::Left));
-        assert_eq!(layout.moused(down, spot(1, 2), 20), Moused::Focus(terminal(11)));
-        assert_eq!(layout.moused(down, spot(1, 14), 20), Moused::Focus(terminal(13)));
-        let on_the_focused = layout.moused(down, spot(1, 7), 20);
+        assert_eq!(layout.moused(down, spot(1, 2), 20, None), Moused::Focus(terminal(11)));
+        assert_eq!(layout.moused(down, spot(1, 14), 20, None), Moused::Focus(terminal(13)));
+        let on_the_focused = layout.moused(down, spot(1, 7), 20, None);
         assert_eq!(on_the_focused, Moused::Nothing, "the focused tab is there");
-        assert!(!matches!(layout.moused(down, spot(2, 3), 20), Moused::Focus(_)));
+        assert!(!matches!(layout.moused(down, spot(2, 3), 20, None), Moused::Focus(_)));
     }
 
     #[test]
@@ -1519,10 +1900,10 @@ mod tests {
         });
         layout.laid_out(tabs.unwrap());
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None);
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None, None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭  a  ─  a  ─ ● t ─╮");
         let drawn = |columns| {
-            let spans = layout.view_tabs(Rect::new(0, 0, columns, 4));
+            let spans = layout.view_tabs(Rect::new(0, 0, columns, 4), None);
             spans.iter().map(|span| (span.id, span.column, span.columns)).collect::<Vec<_>>()
         };
         let (one, two, three) = (terminal(11), terminal(12), terminal(13));
@@ -1540,16 +1921,16 @@ mod tests {
         let up = mouse(MouseEventKind::Up(MouseButton::Left));
         let at = |moused: Moused| match moused {
             Moused::Sent(key, said) => Some((key.id.get(), said.row, said.column)),
-            Moused::Nothing | Moused::Go(_) | Moused::Focus(_) => None,
+            Moused::Nothing | Moused::Go(_) | Moused::Focus(_) | Moused::Browser { .. } => None,
         };
-        assert_eq!(layout.moused(down, spot(2, 14), 22), Moused::Focus(terminal(12)));
-        assert_eq!(layout.moused(down, spot(0, 9), 22), Moused::Go(worktree(2)));
-        assert_eq!(layout.moused(down, spot(0, 1), 22), Moused::Nothing);
-        assert_eq!(layout.moused(down, spot(1, 0), 22), Moused::Nothing);
-        assert_eq!(at(layout.moused(down, spot(2, 3), 22)), Some((1, 0, 2)));
-        assert_eq!(at(layout.moused(drag, spot(0, 15), 22)), Some((1, 0, 7)));
-        assert_eq!(at(layout.moused(up, spot(4, 15), 22)), Some((1, 1, 7)));
-        assert_eq!(layout.moused(up, spot(2, 3), 22), Moused::Nothing);
+        assert_eq!(layout.moused(down, spot(2, 14), 22, None), Moused::Focus(terminal(12)));
+        assert_eq!(layout.moused(down, spot(0, 9), 22, None), Moused::Go(worktree(2)));
+        assert_eq!(layout.moused(down, spot(0, 1), 22, None), Moused::Nothing);
+        assert_eq!(layout.moused(down, spot(1, 0), 22, None), Moused::Nothing);
+        assert_eq!(at(layout.moused(down, spot(2, 3), 22, None)), Some((1, 0, 2)));
+        assert_eq!(at(layout.moused(drag, spot(0, 15), 22, None)), Some((1, 0, 7)));
+        assert_eq!(at(layout.moused(up, spot(4, 15), 22, None)), Some((1, 1, 7)));
+        assert_eq!(layout.moused(up, spot(2, 3), 22, None), Moused::Nothing);
     }
 
     #[test]
@@ -1588,7 +1969,7 @@ mod tests {
         assert_eq!(layout.selected(), None, "a click on a word copies nothing");
         assert_eq!(layout.pointer, Pointer::Free);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), Some(spot(2, 2)), None);
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), Some(spot(2, 2)), None, None);
         let underlined = |x| buffer[(x, 2)].modifier.contains(Modifier::UNDERLINED);
         let line: String = (1..9).map(|x| if underlined(x) { '_' } else { ' ' }).collect();
         assert_eq!(line, "______  ");
@@ -1697,8 +2078,22 @@ mod tests {
         let size = layout_size(side(20), side(6));
         let greeting = Greeting { foreground: None, background: None };
         let folder = unserved.path().to_owned();
-        let mut viewed =
-            Viewed::start(1, folder, Machine::Local, worktree(1), size, greeting, None, &events);
+        let browser_config = embedded::Config {
+            mode: embedded::Mode::Unsupported,
+            cell: CellPixels { width: side(10), height: side(20) },
+            colours: Colours::default(),
+        };
+        let mut viewed = Viewed::start(
+            1,
+            folder,
+            Machine::Local,
+            worktree(1),
+            size,
+            greeting,
+            None,
+            browser_config,
+            &events,
+        );
         let one = || vec![view(11, (0, 0, 20, 4), Some(1))];
         assert!(matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Quiet), "first, it opens");
         assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Quiet));
@@ -1713,6 +2108,46 @@ mod tests {
         assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Quiet));
         let again = viewed.heard(laid_in(1, Vec::new()));
         assert!(matches!(again, Heeded::Emptied), "emptied again, lune leaves it again");
+    }
+
+    #[test]
+    fn opening_browser_on_empty_worktree_waits_for_browser_before_allowing_emptied() {
+        use show_response::view::{Browser, Found as Said};
+        let unserved = tempfile::tempdir().unwrap();
+        let (events, _heard) = std::sync::mpsc::channel();
+        let size = layout_size(side(20), side(6));
+        let greeting = Greeting { foreground: None, background: None };
+        let browser_config = embedded::Config {
+            mode: embedded::Mode::Unsupported,
+            cell: CellPixels { width: side(10), height: side(20) },
+            colours: Colours::default(),
+        };
+        let mut viewed = Viewed::start(
+            1,
+            unserved.path().to_owned(),
+            Machine::Local,
+            worktree(1),
+            size,
+            greeting,
+            None,
+            browser_config,
+            &events,
+        );
+        viewed.open_browser(None);
+        assert!(
+            matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Quiet),
+            "initial empty Laid before Asked::Browser settles must not bounce user out"
+        );
+        let browser_view = show_response::View {
+            id: 31,
+            rect: Some(show_response::Rect { column: 0, row: 0, columns: 20, rows: 4 }),
+            found: Some(Said::Browser(Browser { url: None })),
+        };
+        assert!(matches!(viewed.heard(laid_in(1, vec![browser_view])), Heeded::Quiet));
+        assert!(
+            matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Emptied),
+            "closing the browser later leaves the emptied worktree"
+        );
     }
 
     fn pasted(text: &str) -> typed::Event {
@@ -1856,6 +2291,47 @@ mod tests {
     }
 
     #[test]
+    fn browser_view_draws_fallback_and_handles_open_copy_and_close_when_unsupported() {
+        use show_response::view::{Browser, Found as Said};
+        let mut layout = Layout::new(worktree(1), None);
+        let browser = show_response::View {
+            id: 31,
+            rect: Some(show_response::Rect { column: 0, row: 0, columns: 48, rows: 10 }),
+            found: Some(Said::Browser(Browser {
+                url: Some("https://example.com/pull/809".to_owned()),
+            })),
+        };
+        let laid_browser = Laid::heard(show_response::Laid {
+            worktree: 1,
+            size: Some(show_request::Size { columns: 48, rows: 10 }),
+            views: vec![browser],
+            shown: Some(show_response::laid::Shown::Tiled(31)),
+        })
+        .unwrap();
+        assert!(!layout.laid_out(laid_browser));
+        let (_, url, _) = layout.focused_browser().unwrap();
+        assert_eq!(url.map(BrowserUrl::as_str), Some("https://example.com/pull/809"));
+
+        let area = Rect::new(0, 0, 48, 12);
+        let mut buffer = Buffer::empty(area);
+        let (events, _rx) = std::sync::mpsc::channel();
+        let config = embedded::Config {
+            mode: embedded::Mode::Unsupported,
+            cell: crate::answers::CellPixels { width: side(10), height: side(20) },
+            colours: crate::answers::Colours::default(),
+        };
+        let browsers = embedded::Browsers::new(1, config, events);
+        let _ = layout.draw(&mut buffer, area, None, Some(&browsers), None);
+        let rendered: String = (0..area.height)
+            .map(|y| row(&buffer, y, 0, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("https://example.com/pull/809"), "{rendered}");
+        assert!(rendered.contains("o  open in OS browser"), "{rendered}");
+        assert!(rendered.contains("y  copy URL"), "{rendered}");
+    }
+
+    #[test]
     fn a_review_view_renders_loads_diff_and_handles_split_ribbons_and_keys() {
         use show_response::view::Found as Said;
         let mut layout = Layout::new(worktree(1), None);
@@ -1900,11 +2376,12 @@ diff --git a/src/lib.rs b/src/lib.rs
 
         let area = Rect::new(0, 0, 112, 15);
         let mut buf = Buffer::empty(area);
-        let (_, overlays_unicode) = layout.draw(&mut buf, area, None, None);
+        let (_, overlays_unicode) = layout.draw(&mut buf, area, None, None, None);
         assert!(overlays_unicode.is_empty());
 
         let mut buf_kitty = Buffer::empty(area);
-        let (_, overlays_kitty) = layout.draw(&mut buf_kitty, area, None, Some((side(8), side(16))));
+        let (_, overlays_kitty) =
+            layout.draw(&mut buf_kitty, area, None, None, Some((side(8), side(16))));
         assert_eq!(overlays_kitty.len(), 1);
         assert_eq!(overlays_kitty[0].image_id, review::KITTY_BASE_ID);
 

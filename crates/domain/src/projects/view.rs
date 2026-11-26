@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num::NonZeroU16;
 
 use lune_protocol::v1 as api;
 
@@ -10,6 +11,176 @@ use crate::agent::Harness;
 pub const LINE_BYTES_MAX: usize = 1024;
 
 pub const SESSION_BYTES_MAX: usize = 128;
+
+pub const URL_BYTES_MAX: usize = 2048;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserUrl(String);
+
+impl BrowserUrl {
+    pub fn parse(text: &str) -> Result<BrowserUrl, String> {
+        if text.is_empty() {
+            return Err("a URL is empty".to_owned());
+        }
+        if text.trim() != text {
+            return Err(format!("the URL {text:?} begins or ends with a space"));
+        }
+        if text.len() > URL_BYTES_MAX {
+            return Err(format!("a URL is longer than {URL_BYTES_MAX} bytes"));
+        }
+        if text.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+            return Err(format!("the URL {text:?} holds a space or control character"));
+        }
+        let Some((scheme, rest)) = text.split_once(':') else {
+            return Err(format!("the URL {text:?} names no scheme"));
+        };
+        let lower_scheme = scheme.to_ascii_lowercase();
+        match lower_scheme.as_str() {
+            "http" | "https" => {
+                let Some(after) = rest.strip_prefix("//") else {
+                    return Err(format!("{text:?} names no host"));
+                };
+                let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+                if !valid_http_authority(authority) {
+                    return Err(format!("{text:?} names no host"));
+                }
+            },
+            _ => return Err(format!("the URL {text:?} uses an unsupported scheme")),
+        }
+        let canonical = if scheme == lower_scheme {
+            text.to_owned()
+        } else {
+            format!("{lower_scheme}:{rest}")
+        };
+        assert!(
+            canonical.starts_with("http://") || canonical.starts_with("https://"),
+            "a parsed BrowserUrl uses http or https"
+        );
+        assert!(canonical.len() <= URL_BYTES_MAX, "a parsed URL fits URL_BYTES_MAX");
+        Ok(BrowserUrl(canonical))
+    }
+
+    pub fn from_user(text: &str) -> Result<Option<BrowserUrl>, String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("about:blank") {
+            return Ok(None);
+        }
+        let has_about = trimmed.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("about:"));
+        if trimmed.contains("://") || has_about {
+            return BrowserUrl::parse(trimmed).map(Some);
+        }
+        let host = trimmed.split(['/', '?', '#']).next().unwrap_or(trimmed);
+        let (name, port) = if let Some(rest) = host.strip_prefix('[') {
+            match rest.split_once(']') {
+                Some((addr, "")) => (addr, None),
+                Some((addr, tail)) => match tail.strip_prefix(':') {
+                    Some(port) => (addr, Some(port)),
+                    None => return Err(format!("{trimmed:?} is no URL")),
+                },
+                None => return Err(format!("{trimmed:?} is no URL")),
+            }
+        } else if let Some((name, port)) = host.split_once(':') {
+            (name, Some(port))
+        } else {
+            (host, None)
+        };
+        if name.is_empty() {
+            return Err(format!("{trimmed:?} is no URL"));
+        }
+        if let Some(port) = port
+            && !valid_port(port)
+        {
+            return Err(format!("{trimmed:?} is no URL"));
+        }
+        let local = name.eq_ignore_ascii_case("localhost")
+            || matches!(name, "127.0.0.1" | "0.0.0.0" | "::1");
+        let built = if local {
+            format!("http://{trimmed}")
+        } else if name.contains('.') || port.is_some() {
+            format!("https://{trimmed}")
+        } else {
+            return Err(format!("{trimmed:?} is no URL"));
+        };
+        BrowserUrl::parse(&built).map(Some)
+    }
+
+    #[must_use]
+    pub fn short(&self) -> &str {
+        let stripped = self
+            .0
+            .strip_prefix("https://")
+            .or_else(|| self.0.strip_prefix("http://"))
+            .expect("a BrowserUrl is http or https");
+        stripped.trim_end_matches('/')
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn valid_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<NonZeroU16>().is_ok()
+}
+
+fn valid_http_authority(authority: &str) -> bool {
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, rest)| rest);
+    if host_port.is_empty() {
+        return false;
+    }
+    if let Some(bracketed) = host_port.strip_prefix('[') {
+        let Some((address, tail)) = bracketed.split_once(']') else {
+            return false;
+        };
+        if address.is_empty() {
+            return false;
+        }
+        if tail.is_empty() {
+            return true;
+        }
+        return tail.strip_prefix(':').is_some_and(valid_port);
+    }
+    if let Some((host, port)) = host_port.split_once(':') {
+        return !host.is_empty() && valid_port(port);
+    }
+    true
+}
+
+impl fmt::Display for BrowserUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Browser {
+    id: ViewId,
+    url: Option<BrowserUrl>,
+}
+
+impl Browser {
+    #[must_use]
+    pub fn new(id: ViewId, url: Option<BrowserUrl>) -> Browser {
+        Browser { id, url }
+    }
+
+    #[must_use]
+    pub fn id(&self) -> ViewId {
+        self.id
+    }
+
+    #[must_use]
+    pub fn url(&self) -> Option<&BrowserUrl> {
+        self.url.as_ref()
+    }
+
+    pub(super) fn navigated(&mut self, url: Option<BrowserUrl>) {
+        self.url = url;
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalViewId(ViewId);
@@ -84,6 +255,7 @@ impl Terminal {
 pub enum View {
     Terminal(Terminal),
     Welcome(ViewId),
+    Browser(Browser),
     Review(ViewId),
 }
 
@@ -92,7 +264,15 @@ impl View {
     pub fn terminal(&self) -> Option<&Terminal> {
         match self {
             View::Terminal(terminal) => Some(terminal),
-            View::Welcome(_) | View::Review(_) => None,
+            View::Welcome(_) | View::Browser(_) | View::Review(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn browser(&self) -> Option<&Browser> {
+        match self {
+            View::Browser(browser) => Some(browser),
+            View::Terminal(_) | View::Welcome(_) | View::Review(_) => None,
         }
     }
 }
@@ -102,6 +282,7 @@ impl Leaf for View {
         match self {
             View::Terminal(terminal) => terminal.id.view(),
             View::Welcome(id) | View::Review(id) => *id,
+            View::Browser(browser) => browser.id,
         }
     }
 }
@@ -500,6 +681,10 @@ impl Layout {
         self.views().filter_map(View::terminal)
     }
 
+    pub fn browsers(&self) -> impl Iterator<Item = &Browser> {
+        self.views().filter_map(View::browser)
+    }
+
     #[must_use]
     pub fn holds(&self, terminal: ViewId) -> bool {
         self.tree().is_some_and(|tree| tree.holds(terminal))
@@ -578,8 +763,18 @@ impl Layout {
         let laid = self.0.as_mut().expect("a layout asked for its terminal is laid");
         match laid.tree.get_mut(terminal.view()).expect("its layout holds the terminal") {
             View::Terminal(held) => held,
-            View::Welcome(_) | View::Review(_) => {
+            View::Welcome(_) | View::Browser(_) | View::Review(_) => {
                 unreachable!("terminal {terminal} is made only as a terminal")
+            },
+        }
+    }
+
+    pub(super) fn browser_mut(&mut self, view: ViewId) -> Result<&mut Browser, String> {
+        let laid = self.0.as_mut().expect("a layout asked for its browser is laid");
+        match laid.tree.get_mut(view).expect("its layout holds the browser") {
+            View::Browser(held) => Ok(held),
+            View::Terminal(_) | View::Welcome(_) | View::Review(_) => {
+                Err(format!("view {view} runs no browser"))
             },
         }
     }
@@ -882,4 +1077,85 @@ mod tests {
         assert_eq!(argv.words(), ["agy", "-i", words.as_str()]);
     }
 
+    #[test]
+    fn browser_urls_validate_schemes_and_normalize_user_input() {
+        assert_eq!(
+            BrowserUrl::parse("https://github.com/lorenzolfm/lune/issues/809").unwrap().as_str(),
+            "https://github.com/lorenzolfm/lune/issues/809"
+        );
+        assert_eq!(
+            BrowserUrl::parse("http://localhost:3000/app").unwrap().as_str(),
+            "http://localhost:3000/app"
+        );
+
+        assert_eq!(
+            BrowserUrl::parse("HTTPS://example.com/Path").unwrap().as_str(),
+            "https://example.com/Path"
+        );
+        assert_eq!(BrowserUrl::parse("HTTPS://example.com/").unwrap().short(), "example.com");
+
+        for bad in [
+            "",
+            " https://example.com",
+            "https://example.com/a b",
+            "https://example.com/\x07",
+            "example.com",
+            "about:blank",
+            "ABOUT:blank",
+            "about:settings",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "https://",
+            "https:///",
+            "https://:8080",
+            "https://?query=1",
+            "https://#frag",
+            "https://example.com:0",
+            "https://example.com:+80",
+            "https://[::1]:0",
+            "https://[::1]:+443",
+            "https://example.com:99999",
+            "http:example.com",
+        ] {
+            assert!(BrowserUrl::parse(bad).is_err(), "{bad:?}");
+        }
+        let oversized = format!("https://example.com/{}", "a".repeat(URL_BYTES_MAX));
+        assert!(BrowserUrl::parse(&oversized).is_err());
+
+        assert_eq!(BrowserUrl::from_user("   "), Ok(None));
+        assert_eq!(BrowserUrl::from_user("about:blank"), Ok(None));
+        assert_eq!(BrowserUrl::from_user("ABOUT:blank"), Ok(None));
+        assert_eq!(
+            BrowserUrl::from_user("example.com/docs").unwrap().unwrap().as_str(),
+            "https://example.com/docs"
+        );
+        assert_eq!(
+            BrowserUrl::from_user("example.com?a=1").unwrap().unwrap().as_str(),
+            "https://example.com?a=1"
+        );
+        assert_eq!(
+            BrowserUrl::from_user("LOCALHOST:5173").unwrap().unwrap().as_str(),
+            "http://LOCALHOST:5173"
+        );
+        assert_eq!(
+            BrowserUrl::from_user("[::1]:5173").unwrap().unwrap().as_str(),
+            "http://[::1]:5173"
+        );
+        assert_eq!(
+            BrowserUrl::from_user("127.0.0.1:8080/health").unwrap().unwrap().as_str(),
+            "http://127.0.0.1:8080/health"
+        );
+        for bad in [
+            "not a url",
+            "localhost:0",
+            "localhost:+5173",
+            "[::1]:0",
+            "[::1]:+5173",
+            "localhost:99999",
+            "about:settings",
+            "javascript:alert(1)",
+        ] {
+            assert!(BrowserUrl::from_user(bad).is_err(), "{bad:?}");
+        }
+    }
 }

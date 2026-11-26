@@ -23,7 +23,7 @@ use crossterm::event::{
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use crossterm::{execute, queue};
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{self, Arranged, Opens, ProjectId, ViewId, WorktreeId};
+use lune_domain::projects::{self, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId};
 use lune_domain::rows;
 use luned::api::{Host, Version};
 use luned::changes::Unchanged;
@@ -44,7 +44,9 @@ use ratatui::{DefaultTerminal, Frame, Terminal};
 use crate::actions::{Chord, COLLAPSE, DOWN, GROW, LEFT, MENU, RIGHT, SHRINK, SWAP, UP};
 use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
-use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange};
+use crate::answers::{
+    self, Answer, CellPixels, Colours, DisableThemeChange, EnableThemeChange, WindowPixels,
+};
 use crate::ask::{self, Ask, Keyed};
 use crate::home::{self, Home};
 use crate::attached;
@@ -54,9 +56,10 @@ use crate::browser::Browser;
 use crate::checks;
 use crate::clock::Moment;
 use crate::close::Act;
-use crate::copied::{Clip, Copies};
+use crate::copied::{Clip, Copies, Excerpt};
 use crate::desktop::{self, Desktop, Reader, Told};
 use crate::dictation::{self, Dictated, Dictation};
+use crate::embedded;
 use crate::folds::{self, Folds};
 use crate::images::{self, Went};
 use crate::input;
@@ -137,6 +140,8 @@ pub const NOT_YET: &str = "lune does not do that to a worktree yet";
 
 const WELCOME_MENU: &str = "the menu is for terminals: d d closes this welcome view";
 
+const BROWSER_MENU: &str = "Super k opens actions; Ctrl w closes the browser; Ctrl hjkl switches view";
+
 const REVIEW_MENU: &str = "the menu is for terminals: d d closes this review view, e explains, ? asks";
 
 const HOME_MENU: &str = "the menu is for terminals: the project's is on its row in the sidebar";
@@ -158,6 +163,7 @@ pub enum Event {
     InputEnded(io::Error),
     Shown(u64, luned::Heard),
     Seen { number: u64, watcher: u64, seen: Seen },
+    Browser { number: u64, view: ViewId, heard: embedded::Heard },
     Daemon(Result<Host, String>),
     Notice(String),
     Unclosed { on: Machine, act: Act, ticket: u64, unchanged: Unchanged },
@@ -425,6 +431,22 @@ enum Homed {
     Gone { on: Machine },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Graphics {
+    Plain,
+    Kitty,
+}
+
+impl Graphics {
+    fn of(supported: bool) -> Graphics {
+        if supported { Graphics::Kitty } else { Graphics::Plain }
+    }
+
+    fn supported(self) -> bool {
+        self == Graphics::Kitty
+    }
+}
+
 const DEFAULT_CELL_PX: (NonZeroU16, NonZeroU16) = (
     NonZeroU16::new(8).expect("default cell width is positive"),
     NonZeroU16::new(16).expect("default cell height is positive"),
@@ -548,6 +570,12 @@ pub struct App {
     settling: Settling,
     drawn: Drawn,
     pointer: Option<Position>,
+    pointer_shape: Option<embedded::PointerShape>,
+    pending_graphics: Vec<u8>,
+    graphics: Graphics,
+    exact_cell: Option<CellPixels>,
+    cell: CellPixels,
+    window_pixels: Option<WindowPixels>,
     cursor: Option<(CursorShape, bool)>,
     title: Option<String>,
     colours: Colours,
@@ -653,7 +681,9 @@ pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
             unkept,
             colours: answers.colours,
             releases: answers.kitty,
-            graphics: answers.graphics,
+            graphics: Graphics::of(answers.graphics),
+            cell: answers.cell,
+            window_pixels: answers.window_pixels,
             desktop: Desktop::start(&events, folder.clone()),
         };
         run_in(&mut terminal, (folder, &dir), arriving, events, &mut inbox, &mut sent)
@@ -726,6 +756,7 @@ fn give_back(mut terminal: DefaultTerminal) -> io::Result<()> {
 }
 
 fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
+    terminal.write_all(b"\x1b]22;\x1b\\")?;
     execute!(
         terminal,
         EndSynchronizedUpdate,
@@ -750,11 +781,21 @@ fn run_in(
     let launch = Launch { folder, dir: dir.to_owned(), columns, rows };
     let mut app = App::opened(launch, &state::Folder::of_user(), arriving, events);
     let ran = run_loop(terminal, &mut app, inbox);
+    let mut deletes = std::mem::take(&mut app.pending_graphics);
+    if let Some(right) = app.viewed_mut() {
+        deletes.extend(right.drain_all_deletes());
+    }
+    let flushed = if deletes.is_empty() {
+        Ok(())
+    } else {
+        terminal.backend_mut().write_all(&deletes).and_then(|()| terminal.backend_mut().flush())
+    };
     if let Err(error) = app.clear_graphics(terminal.backend_mut()) {
         log::say(&format!("graphics cleanup failed: {error}"));
     }
     sent.extend(app.sent());
     ran?;
+    flushed?;
     Ok(app.failure())
 }
 
@@ -772,7 +813,9 @@ struct Arriving {
     unkept: Option<String>,
     colours: Colours,
     releases: bool,
-    graphics: bool,
+    graphics: Graphics,
+    cell: Option<CellPixels>,
+    window_pixels: Option<WindowPixels>,
     desktop: Desktop,
 }
 
@@ -791,7 +834,9 @@ impl App {
             unkept: None,
             colours: Colours::default(),
             releases: false,
-            graphics: false,
+            graphics: Graphics::Plain,
+            cell: None,
+            window_pixels: None,
             desktop: Desktop::unserved(&events),
         };
         let state_folder = state::Folder::at(state_folder.to_owned());
@@ -805,8 +850,18 @@ impl App {
         events: Sender<Event>,
     ) -> App {
         let Launch { folder, dir, columns, rows } = launch;
-        let Arriving { start, runs_in, news, unkept, colours, releases, graphics, desktop } =
-            arriving;
+        let Arriving {
+            start,
+            runs_in,
+            news,
+            unkept,
+            colours,
+            releases,
+            graphics,
+            cell,
+            window_pixels,
+            desktop,
+        } = arriving;
         let (width, width_unread) = Width::kept(state_folder);
         let folds = Folds::shared(state_folder);
         let folds_dirs = folds.dirs();
@@ -857,6 +912,10 @@ impl App {
         };
         let areas = areas(Rect::new(0, 0, columns, rows), width.columns());
         let luned = daemon.clone().unwrap_or_default();
+        let exact_cell = cell;
+        let cell = embedded::cell_pixels(exact_cell, window_pixels, columns, rows);
+        let browser_config =
+            embedded::Config { mode: browser_mode(graphics, &luned), cell, colours };
         let (size, greeting, here) = (layout_size(areas.1), greeting(colours), Machine::Local);
         let (start, root) = match start {
             Some(Arrival::Worktree(start)) => (Some(start), None),
@@ -864,8 +923,17 @@ impl App {
             None => (None, None),
         };
         let right = start.map(|start| {
-            let viewed =
-                Viewed::start(1, luned.clone(), here, start, size, greeting, runs_in, &events);
+            let viewed = Viewed::start(
+                1,
+                luned.clone(),
+                here,
+                start,
+                size,
+                greeting,
+                runs_in,
+                browser_config,
+                &events,
+            );
             Right::Worktree(viewed)
         });
         let focus = Focus::on(if right.is_some() { Side::Session } else { Side::Sidebar });
@@ -892,6 +960,12 @@ impl App {
             settling: Settling::default(),
             drawn: Drawn::Nothing,
             pointer: None,
+            pointer_shape: None,
+            pending_graphics: Vec::new(),
+            graphics,
+            exact_cell,
+            cell,
+            window_pixels,
             cursor: None,
             title: None,
             colours,
@@ -912,7 +986,7 @@ impl App {
             fetching: None,
             releases,
             diff: DiffFetch::new(),
-            ribbons: Ribbons::new(graphics),
+            ribbons: Ribbons::new(graphics.supported()),
             daemon,
             events,
             _watching: watching,
@@ -930,6 +1004,15 @@ impl App {
             app.give(Focus::on(Side::Session));
         }
         app
+    }
+}
+
+fn browser_mode(graphics: Graphics, luned: &Path) -> embedded::Mode {
+    if graphics.supported() && !desktop::elsewhere() {
+        embedded::Folder::new(luned.to_path_buf())
+            .map_or(embedded::Mode::Unsupported, embedded::Mode::Supported)
+    } else {
+        embedded::Mode::Unsupported
     }
 }
 
@@ -1130,6 +1213,12 @@ impl App {
                     self.heeded(heeded);
                 }
             },
+            Event::Browser { number, view, heard } => {
+                if let Some(right) = self.viewed_mut().filter(|it| it.number() == number) {
+                    let heeded = right.browser(view, heard);
+                    self.heeded(heeded);
+                }
+            },
             Event::Work { number, listed } => {
                 if let Some(home) = self.homes.iter_mut().find(|it| it.number() == number) {
                     home.listed(listed, Instant::now());
@@ -1205,9 +1294,7 @@ impl App {
             Event::Clicked(key) => self.clicked(&key),
             #[cfg(not(target_os = "macos"))]
             Event::IssueClicked(desktop::Came::Filed(link)) => {
-                if let Err(why) = self.browser.open(&link, &self.events, Instant::now()) {
-                    self.sidebar.notify(why);
-                }
+                self.browse_link(&link);
             },
             #[cfg(not(target_os = "macos"))]
             Event::IssueClicked(desktop::Came::Unfiled) => {
@@ -1584,6 +1671,8 @@ impl App {
                 self.sidebar.float_note(HOME_MENU.to_owned());
             } else if self.viewed().is_some_and(Viewed::welcomes) {
                 self.sidebar.float_note(WELCOME_MENU.to_owned());
+            } else if self.viewed().is_some_and(Viewed::browses) {
+                self.sidebar.float_note(BROWSER_MENU.to_owned());
             } else if self.viewed().is_some_and(Viewed::reviews) {
                 self.sidebar.float_note(REVIEW_MENU.to_owned());
             } else {
@@ -1626,7 +1715,9 @@ impl App {
     }
 
     fn palette(&self) -> Palette {
-        let non_terminal = self.viewed().is_some_and(|v| v.welcomes() || v.reviews());
+        let non_terminal = self
+            .viewed()
+            .is_some_and(|right| right.welcomes() || right.browses() || right.reviews());
         let (aim, origin) = match self.focus.side {
             Side::Sidebar => (self.sidebar.aimed_row(), Origin::Sidebar),
             Side::Session | Side::Collapsed if non_terminal => {
@@ -1638,14 +1729,15 @@ impl App {
     }
 
     fn key_to_session(&mut self, key: &KeyEvent) {
-        let action = match &mut self.right {
+        let (heeded, action) = match &mut self.right {
             Some(Right::Worktree(right)) => right.key(key, self.inputs),
             Some(Right::Home(shown)) => {
                 self.homes.shown_mut(shown).key(key, &mut self.asks, &self.events);
-                ReviewAction::None
+                (Heeded::Quiet, ReviewAction::None)
             },
-            None => ReviewAction::None,
+            None => (Heeded::Quiet, ReviewAction::None),
         };
+        self.heeded(heeded);
         match action {
             ReviewAction::None => {},
             ReviewAction::Reload => self.fetch_diff(),
@@ -1745,7 +1837,8 @@ impl App {
     }
 
     fn drop_shown(&mut self) {
-        if let Some(Right::Worktree(right)) = self.right.take() {
+        if let Some(Right::Worktree(mut right)) = self.right.take() {
+            self.pending_graphics.extend(right.drain_all_deletes());
             let number = right.number();
             let dropped = self.shown_number_dropped;
             assert!(number > dropped, "a shown number grows past the last dropped");
@@ -2078,11 +2171,7 @@ impl App {
             Asked::CopyText(excerpt) => {
                 let _ = self.events.send(Event::Copy(Clip::Excerpt(excerpt)));
             },
-            Asked::Browse(link) => {
-                if let Err(why) = self.browser.open(&link, &self.events, Instant::now()) {
-                    self.sidebar.notify(why);
-                }
-            },
+            Asked::Browse(link) => self.browse_link(&link),
             Asked::Go { on, place } => {
                 self.go(&on, &place);
                 self.leave();
@@ -2093,6 +2182,9 @@ impl App {
             },
             Asked::Welcome { asking, on, session, view } => {
                 self.welcome(asking, &on, &session, view);
+            },
+            Asked::Browser { asking, on, place, url } => {
+                self.open_browser(asking, &on, &place, url);
             },
             Asked::Review { asking, on, session, view } => {
                 self.review(asking, &on, &session, view);
@@ -2268,6 +2360,60 @@ impl App {
         self.go_worktree(on, worktree, Some(terminal));
         self.shown().welcome();
         self.give_opened(Opener::of(asking));
+    }
+
+    fn open_browser(
+        &mut self,
+        asking: sidebar::Held,
+        on: &Machine,
+        place: &menu::BrowserPlace,
+        url: Option<BrowserUrl>,
+    ) {
+        match place {
+            menu::BrowserPlace::View { session, view } => {
+                let project = self.projected.project(on, session.project());
+                let held = project.and_then(|project| project.view_of(view.key()));
+                let Some((worktree, terminal)) = held else {
+                    return self.sidebar.notify(format!("menu: luned lists no view {view}"));
+                };
+                self.go_worktree(on, worktree, Some(terminal));
+            },
+            menu::BrowserPlace::Worktree(worktree) => {
+                self.go_worktree(on, *worktree, None);
+            },
+        }
+        self.shown().open_browser(url);
+        self.give_opened(Opener::of(asking));
+    }
+
+    fn can_embed_browser(&self) -> bool {
+        matches!(browser_mode(self.graphics, &self.luned), embedded::Mode::Supported(_))
+    }
+
+    fn browser_config(&self) -> embedded::Config {
+        embedded::Config {
+            mode: browser_mode(self.graphics, &self.luned),
+            cell: self.cell,
+            colours: self.colours,
+        }
+    }
+
+    fn browse_link(&mut self, link: &crate::pull::Link) {
+        if self.can_embed_browser() && self.viewed().is_some() {
+            match BrowserUrl::parse(&link.url()) {
+                Ok(url) => {
+                    self.shown().open_browser(Some(url));
+                    self.leave();
+                    return;
+                },
+                Err(why) => {
+                    log::say(&format!("pull link did not parse as browser URL: {why}"));
+                },
+            }
+        }
+        if let Err(why) = self.browser.open(link, &self.events, Instant::now()) {
+            self.sidebar.notify(why);
+        }
     }
 
     fn review(&mut self, asking: sidebar::Held, on: &Machine, session: &Listed, view: ViewKey) {
@@ -2741,15 +2887,26 @@ impl App {
         terminal: Option<ViewId>,
     ) {
         if let Some(right) = self.viewed_mut() {
-            right.go(on, worktree);
+            let deletes = right.go(on, worktree);
+            self.pending_graphics.extend(deletes);
         } else {
             self.drop_shown();
             let (size, greeting) = (layout_size(self.areas.1), greeting(self.colours));
             let (folder, events) = (self.luned.clone(), &self.events);
             let (number, on) = (self.shown_number_dropped + 1, on.clone());
             let runs_in = self.runs_in;
-            let started =
-                Viewed::start(number, folder, on, worktree, size, greeting, runs_in, events);
+            let browser_config = self.browser_config();
+            let started = Viewed::start(
+                number,
+                folder,
+                on,
+                worktree,
+                size,
+                greeting,
+                runs_in,
+                browser_config,
+                events,
+            );
             self.right = Some(Right::Worktree(started));
         }
         let right = self.shown();
@@ -2841,6 +2998,16 @@ impl App {
                 self.go_worktree(&on, worktree, None);
             },
             Heeded::Note(note) => self.sidebar.notify(note),
+            Heeded::Copy(text) => {
+                if let Some(excerpt) = Excerpt::of(text) {
+                    let _ = self.events.send(Event::Copy(Clip::Excerpt(excerpt)));
+                }
+            },
+            Heeded::OpenOsBrowser(url) => {
+                if let Err(why) = self.browser.open_url(&url, &self.events, Instant::now()) {
+                    self.sidebar.notify(why);
+                }
+            },
             Heeded::Emptied => self.leave_view(),
             Heeded::Forgotten(why) => {
                 self.leave_view();
@@ -3028,15 +3195,45 @@ impl App {
         }
     }
 
-    fn answered(&mut self, answer: Answer, terminal: &mut DefaultTerminal) -> io::Result<()> {
+    fn answered<W: io::Write>(
+        &mut self,
+        answer: Answer,
+        terminal: &mut Terminal<CrosstermBackend<W>>,
+    ) -> io::Result<()> {
         match answer {
-            Answer::Foreground(_) | Answer::Background(_) => self.colours.hear(answer),
+            Answer::Foreground(_) | Answer::Background(_) => {
+                self.colours.hear(answer);
+                let colours = self.colours;
+                if let Some(right) = self.viewed_mut() {
+                    right.colours(colours);
+                }
+            },
             Answer::Turned(_) => {
                 let backend = terminal.backend_mut();
                 backend.write_all(answers::TURNED)?;
                 backend.flush()?;
             },
-            Answer::Graphics => self.ribbons.enable(),
+            Answer::CellSize(cell) => {
+                self.exact_cell = Some(cell);
+                self.cell = cell;
+                if let Some(right) = self.viewed_mut() {
+                    right.cell_resized(cell);
+                }
+            },
+            Answer::WindowPixels(window_pixels) => {
+                self.window_pixels = Some(window_pixels);
+                let cols = self.areas.0.width + self.areas.1.width;
+                let rows = self.areas.1.height;
+                let cell = embedded::cell_pixels(self.exact_cell, Some(window_pixels), cols, rows);
+                self.cell = cell;
+                if let Some(right) = self.viewed_mut() {
+                    right.cell_resized(cell);
+                }
+            },
+            Answer::Graphics => {
+                self.graphics = Graphics::Kitty;
+                self.ribbons.enable();
+            },
             Answer::Device | Answer::Kitty => {},
         }
         Ok(())
@@ -3052,12 +3249,34 @@ impl App {
     }
 
     fn frame(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        let mut graphics = std::mem::take(&mut self.pending_graphics);
+        if let Some(right) = self.viewed_mut() {
+            graphics.extend(right.drain_graphics());
+        }
+        if !graphics.is_empty() {
+            terminal.backend_mut().write_all(&graphics)?;
+        }
         terminal.draw(|frame| self.paint(frame))?;
         self.paint_graphics(terminal.backend_mut())?;
         let cursor = self.viewed().map_or(UNSHOWN_CURSOR, Viewed::cursor_style);
         if self.cursor != Some(cursor) {
             self.cursor = Some(cursor);
             execute!(terminal.backend_mut(), cursor_style(cursor))?;
+        }
+        let (_, right_area) = self.areas;
+        let covered = self.covered();
+        let hover = self
+            .pointer
+            .filter(|at| !covered && right_area.contains(*at))
+            .map(|at| attached::Spot { row: at.y - right_area.y, column: at.x - right_area.x });
+        let shape = self.viewed().and_then(|right| right.pointer_shape(hover)).cloned();
+        if self.pointer_shape != shape {
+            self.pointer_shape.clone_from(&shape);
+            let seq = match &shape {
+                Some(shape) => format!("\x1b]22;{}\x1b\\", shape.as_str()),
+                None => "\x1b]22;\x1b\\".to_owned(),
+            };
+            terminal.backend_mut().write_all(seq.as_bytes())?;
         }
         if let Some(title) = self.sidebar.own_title()
             && self.title.as_deref() != Some(title)
@@ -3464,5 +3683,39 @@ mod tests {
         }
         assert!(!stopped.holds(1), "the oldest goes once the most are held");
         assert!((2..=last).all(|ticket| stopped.holds(ticket)));
+    }
+
+    #[test]
+    fn embedded_browser_config_survives_watch_and_late_window_pixels_keep_exact_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let launch = Launch {
+            folder: Ok(dir.path().to_owned()),
+            dir: dir.path().to_owned(),
+            columns: 120,
+            rows: 40,
+        };
+        let (mut app, _inbox) = App::open(launch, state.path());
+        app.graphics = Graphics::Kitty;
+        assert!(app.daemon.is_none(), "App::watch already consumed self.daemon");
+        assert_eq!(app.can_embed_browser(), !desktop::elsewhere());
+        assert_eq!(app.browser_config().mode, browser_mode(Graphics::Kitty, &app.luned));
+        if !desktop::elsewhere() {
+            assert!(matches!(app.browser_config().mode, embedded::Mode::Supported(_)));
+        }
+
+        let nz = |value| NonZeroU16::new(value).unwrap();
+        let exact = CellPixels { width: nz(11), height: nz(23) };
+        let viewport = Viewport::Fixed(Rect::new(0, 0, 120, 40));
+        let backend = CrosstermBackend::new(Writes::default());
+        let mut terminal = Terminal::with_options(backend, TerminalOptions { viewport }).unwrap();
+        app.answered(Answer::CellSize(exact), &mut terminal).unwrap();
+        assert_eq!(app.cell, exact);
+        app.answered(
+            Answer::WindowPixels(WindowPixels { width: nz(1200), height: nz(800) }),
+            &mut terminal,
+        )
+        .unwrap();
+        assert_eq!(app.cell, exact, "late WindowPixels must not clobber exact CellSize");
     }
 }

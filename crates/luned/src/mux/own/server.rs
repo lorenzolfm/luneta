@@ -699,6 +699,7 @@ pub struct Terminal {
     pub size: Option<Size>,
     pub cwd: Option<Directory>,
     pub title: String,
+    pub tty: Option<String>,
     pub is: Is,
     pub statuses: ProgramStatuses,
 }
@@ -797,8 +798,8 @@ fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<St
         ProgramStatuses::of_mux(terminal.statuses, key.id.get(), ended)?;
     warnings.extend(status_warnings);
     assert!(statuses.children.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
-    let (tag, title) = (terminal.tag, terminal.title);
-    Ok((key, Terminal { tag, size, cwd, title, is, statuses }, warnings))
+    let (tag, title, tty) = (terminal.tag, terminal.title, terminal.tty);
+    Ok((key, Terminal { tag, size, cwd, title, tty, is, statuses }, warnings))
 }
 
 pub struct Terminals;
@@ -879,6 +880,49 @@ impl Terminals {
             Ok(())
         } else {
             Err(Failure::Called(Reply { code: Code::Unknown, said: reasons.join("; ") }))
+        }
+    }
+
+    pub async fn paste_text(&self, key: TerminalKey, text: &str) -> Result<(), Failure> {
+        use api::from_viewer::Event;
+        const MESSAGES_MAX: usize = 64;
+        assert_ne!(text, "", "a paste carries text");
+        let said = |event| api::FromViewer { event: Some(event) };
+        let hello = api::Greeting { colours: Some(colours(None, None)), runs_in: None };
+        let paste = api::typed::Event::Paste(api::Paste { text: text.to_owned() });
+        let typed = api::Typed { terminal: Some(key.said()), event: Some(paste) };
+        let words = vec![
+            said(Event::Hello(hello)),
+            said(Event::Showing(api::Showing { terminals: vec![key.said()] })),
+            said(Event::Typed(typed)),
+        ];
+        assert_eq!(words.len(), 3, "a hello, a showing and one paste");
+        let server = server().await?;
+        let deadline = tokio::time::Instant::now() + ANSWER;
+        let shown = server.shown(tokio_stream::iter(words)).await;
+        let mut heard = shown.map_err(|status| refused(&status))?;
+        let drained = async move {
+            let mut seen = 0usize;
+            while seen < MESSAGES_MAX {
+                let Some(word) = heard.message().await? else {
+                    break;
+                };
+                seen += 1;
+                if let Some(api::to_viewer::Event::Refused(refusal)) = word.event {
+                    return Ok::<_, Status>(Some(refusal.reason));
+                }
+            }
+            assert!(seen <= MESSAGES_MAX, "the paste drain stays within its message bound");
+            Ok(None)
+        };
+        let kept = || Failure::Own("lune-mux kept showing the paste too long".to_owned());
+        let refused_reason = tokio::time::timeout_at(deadline, drained)
+            .await
+            .map_err(|_| kept())?
+            .map_err(|status| refused(&status))?;
+        match refused_reason {
+            None => Ok(()),
+            Some(said) => Err(Failure::Called(Reply { code: Code::Unknown, said })),
         }
     }
 
