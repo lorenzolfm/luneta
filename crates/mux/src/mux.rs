@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use lune_protocol::made::Made;
 use lune_protocol::program_status::bound_fair;
+use lune_protocol::shell::Doing;
 use lune_protocol::socket::Unreached;
 use lune_protocol::LISTING_CHILDREN_BYTES_MAX;
 use prost::Message as _;
@@ -15,7 +16,9 @@ use crate::api;
 use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leaders;
+use crate::looker::Foreground;
 use crate::panics::Shared;
+use crate::process::ProcessId;
 use crate::program_status::{EndedProgramStatuses, Snapshot as ProgramStatuses};
 use crate::terminal::{self, Exit, Handle, Placing, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
@@ -125,10 +128,10 @@ struct Terminal {
 
 enum Program {
     Runs {
-        pid: u32,
+        pid: ProcessId,
         ends: Ends,
-        foreground: Option<api::Foreground>,
-        ran: Option<api::Ran>,
+        foreground: Option<Foreground>,
+        ran: Option<Doing>,
         statuses: ProgramStatuses,
     },
     Ended {
@@ -291,8 +294,8 @@ impl Mux {
     pub fn looked(
         &self,
         terminal: TerminalId,
-        foreground: Option<api::Foreground>,
-        ran: Option<api::Ran>,
+        foreground: Option<Foreground>,
+        ran: Option<Doing>,
     ) {
         self.change(|model| {
             let found = model.terminal_of_id_mut(terminal).map(|found| &mut found.program);
@@ -572,9 +575,13 @@ impl Terminal {
     fn said(&self) -> api::Terminal {
         let (program, statuses) = match &self.program {
             Program::Runs { pid, foreground, ran, statuses, .. } => {
-                let (foreground, ran) = (foreground.clone(), ran.clone());
-                let program =
-                    api::terminal::Program::Runs(api::Running { pid: *pid, foreground, ran });
+                let foreground = foreground.as_ref().map(Foreground::said);
+                let ran = ran.as_ref().map(Doing::to_mux);
+                let program = api::terminal::Program::Runs(api::Running {
+                    pid: pid.get(),
+                    foreground,
+                    ran,
+                });
                 (program, statuses.to_mux())
             },
             Program::Ended { exit, statuses } => {

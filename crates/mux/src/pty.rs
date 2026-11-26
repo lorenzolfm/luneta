@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
+use std::num::NonZeroU64;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::process::CommandExt as _;
@@ -67,7 +68,7 @@ pub fn raise_files_limit() -> io::Result<()> {
 pub struct Pty {
     pub near: File,
     far: OwnedFd,
-    device: u64,
+    device: Device,
 }
 
 impl Pty {
@@ -79,8 +80,7 @@ impl Pty {
         let path = Path::new(OsStr::from_bytes(path.as_bytes()));
         let flags = OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC;
         let far = rustix::fs::open(path, flags, Mode::empty())?;
-        let device = device_of(&far)?;
-        assert!(device != 0, "an opened pseudoterminal has a device");
+        let device = Device::of(&far)?;
         rustix::io::fcntl_setfd(&near, rustix::io::FdFlags::CLOEXEC)?;
         let mut modes = termios::tcgetattr(&far)?;
         modes.input_modes.set(InputModes::IUTF8, true);
@@ -103,8 +103,7 @@ impl Pty {
     }
 
     pub fn front_group(&self) -> Option<Group> {
-        let group = termios::tcgetpgrp(&self.near).ok()?;
-        u32::try_from(group.as_raw_nonzero().get()).ok().map(Group)
+        termios::tcgetpgrp(&self.near).ok().map(Group::of)
     }
 
     pub fn signal_key(&self, byte: u8) -> io::Result<Option<SignalKey>> {
@@ -154,8 +153,7 @@ impl Pty {
     }
 
     #[must_use]
-    pub fn device(&self) -> u64 {
-        assert!(self.device != 0);
+    pub fn device(&self) -> Device {
         self.device
     }
 
@@ -261,6 +259,23 @@ impl Modes {
         let modes = termios::tcgetattr(terminal)?.local_modes;
         let (lines, echo) = (modes.contains(LocalModes::ICANON), modes.contains(LocalModes::ECHO));
         Ok(Modes { lines, echo })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Device(NonZeroU64);
+
+impl Device {
+    pub fn of(terminal: impl AsFd) -> io::Result<Device> {
+        let raw = device_of(terminal)?;
+        NonZeroU64::new(raw)
+            .map(Device)
+            .ok_or_else(|| io::Error::other("an opened pseudoterminal has no device"))
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0.get()
     }
 }
 

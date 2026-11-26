@@ -3,9 +3,8 @@ use std::time::{Duration, Instant, SystemTime};
 use lune_protocol::said::Said;
 use lune_protocol::shell::{Doing, Ending, Front};
 
-use crate::api;
 use crate::marks::Mark;
-use crate::process::Group;
+use crate::process::{Group, ProcessId};
 
 const STOPPED_MAX: usize = 64;
 
@@ -77,7 +76,7 @@ impl Shell {
             Mark::Prompt => {
                 if self.ran.is_none() {
                     self.ran = Some(Ran::Ready);
-                    self.version += 1;
+                    self.bump_version();
                 }
             },
             Mark::Command(line) => {
@@ -88,7 +87,7 @@ impl Shell {
                 let typed = command.as_ref().map(Said::as_str);
                 if typed.is_some_and(execs) {
                     self.ran = None;
-                    self.version += 1;
+                    self.bump_version();
                     return;
                 }
                 let resumes = typed.is_some_and(is_fg);
@@ -102,7 +101,7 @@ impl Shell {
                 let front = Front::Working;
                 let going = Going { command, since, started, resumes, front, seen: None };
                 self.ran = Some(Ran::Going(going));
-                self.version += 1;
+                self.bump_version();
             },
             Mark::Done(status) => {
                 let Some(Ran::Going(going)) = self.ran.take_if(|ran| matches!(ran, Ran::Going(_)))
@@ -131,9 +130,14 @@ impl Shell {
                     };
                     self.ran = Some(going.ended(ending, now));
                 }
-                self.version += 1;
+                self.bump_version();
             },
         }
+    }
+
+    fn bump_version(&mut self) {
+        self.version =
+            self.version.checked_add(1).expect("shell marks change fewer than 2^64 times");
     }
 
     #[must_use]
@@ -146,27 +150,18 @@ impl Shell {
         self.version
     }
 
-    pub fn saw(&mut self, group: Group, program: u32, front: Front) {
-        assert!(group.leader() > 0);
-        assert!(program > 0);
-        if let Some(Ran::Going(going)) = &mut self.ran {
-            going.front = front;
-            if group.leader() != program {
-                going.seen = Some(group);
-            }
+    pub fn saw(&mut self, group: Group, program: ProcessId, front: Front) {
+        let Some(Ran::Going(going)) = &mut self.ran else {
+            unreachable!("front state is recorded only while a command is going");
+        };
+        going.front = front;
+        if group.leader() != program {
+            going.seen = Some(group);
         }
-    }
-
-    pub fn gone(&mut self) {
-        if self.ran.is_some() {
-            self.version += 1;
-        }
-        self.ran = None;
-        self.stopped.clear();
     }
 
     #[must_use]
-    pub fn said(&self) -> Option<api::Ran> {
+    pub fn said(&self) -> Option<Doing> {
         let doing = match self.ran.as_ref()? {
             Ran::Ready => Doing::Ready,
             Ran::Going(going) => {
@@ -178,7 +173,7 @@ impl Shell {
             },
             Ran::Stopped { command, at } => Doing::Stopped { command: command.clone(), at: *at },
         };
-        Some(doing.to_mux())
+        Some(doing)
     }
 }
 
@@ -244,10 +239,18 @@ mod tests {
         going.command.as_ref().map(Said::as_str)
     }
 
+    fn group(raw: u32) -> Group {
+        Group::new(raw).expect("test group is non-zero")
+    }
+
+    fn pid(raw: u32) -> ProcessId {
+        ProcessId::new(raw).expect("test pid is non-zero")
+    }
+
     const NONE_STOPPED: fn(Group) -> Option<Job> = |_| None;
 
     fn stopped_if(stopped: fn(u32) -> bool) -> impl Fn(Group) -> Option<Job> {
-        move |group| Some(if stopped(group.leader()) { Job::Stopped } else { Job::Runs })
+        move |group| Some(if stopped(group.leader().get()) { Job::Stopped } else { Job::Runs })
     }
 
     #[test]
@@ -259,10 +262,10 @@ mod tests {
         assert_eq!(shell.ran, Some(Ran::Ready));
         shell.marked(command("make\ntest"), now(2), NONE_STOPPED);
         assert_eq!(going(&shell), Some("make test"));
-        shell.saw(Group(40), 10, Front::Asking);
-        let said = shell.said().and_then(|said| said.is);
-        let Some(api::ran::Is::Going(going)) = said else { panic!("{said:?}") };
-        assert_eq!(going.front(), api::Front::Asking);
+        shell.saw(group(40), pid(10), Front::Asking);
+        let said = shell.said();
+        let Some(Doing::Going { front, .. }) = said else { panic!("{said:?}") };
+        assert_eq!(front, Front::Asking);
         shell.marked(Mark::Done(Some(2)), now(5), NONE_STOPPED);
         let make = ended(Some("make test"), 5, Some(Ending::Exited(2)), 3);
         assert_eq!(shell.ran, Some(make.clone()));
@@ -314,9 +317,9 @@ mod tests {
         let mut shell = Shell::default();
         shell.marked(Mark::Prompt, now(0), NONE_STOPPED);
         shell.marked(command("sleep 30"), now(1), NONE_STOPPED);
-        shell.saw(Group(10), 10, Front::Working);
-        shell.saw(Group(40), 10, Front::Working);
-        shell.saw(Group(10), 10, Front::Working);
+        shell.saw(group(10), pid(10), Front::Working);
+        shell.saw(group(40), pid(10), Front::Working);
+        shell.saw(group(10), pid(10), Front::Working);
         shell.marked(Mark::Done(Some(0)), now(3), &stopped);
         assert_eq!(shell.ran, Some(stopped_at("sleep 30", 3)));
         shell.marked(command("fg"), now(4), stopped_if(|_| false));
@@ -332,20 +335,20 @@ mod tests {
         let now = shell_at(Instant::now());
         let mut shell = Shell::default();
         shell.marked(Mark::Prompt, now(0), NONE_STOPPED);
-        for (group, line) in [(40, "vim a"), (41, "vim b")] {
+        for (raw_group, line) in [(40, "vim a"), (41, "vim b")] {
             shell.marked(command(line), now(1), NONE_STOPPED);
-            shell.saw(Group(group), 10, Front::Interactive);
+            shell.saw(group(raw_group), pid(10), Front::Interactive);
             shell.marked(Mark::Done(Some(0)), now(2), stopped_if(|_| true));
         }
         shell.marked(command("fg %1"), now(3), stopped_if(|_| true));
         let Some(Ran::Going(fg)) = &shell.ran else { panic!("{:?}", shell.ran) };
         assert_eq!((fg.command.as_ref().map(Said::as_str), fg.resumes), (Some("fg %1"), true));
         shell.marked(Mark::Done(Some(0)), now(4), NONE_STOPPED);
-        shell.marked(command("fg"), now(5), |group| (group == Group(40)).then_some(Job::Runs));
+        shell.marked(command("fg"), now(5), |seen| (seen == group(40)).then_some(Job::Runs));
         assert_eq!(going(&shell), Some("vim a"));
         shell.marked(Mark::Done(Some(0)), now(6), NONE_STOPPED);
         shell.marked(command("true"), now(6), NONE_STOPPED);
-        shell.saw(Group(42), 10, Front::Working);
+        shell.saw(group(42), pid(10), Front::Working);
         shell.marked(Mark::Done(Some(0)), now(7), NONE_STOPPED);
         assert_eq!(shell.ran, Some(ended(Some("true"), 7, Some(Ending::Exited(0)), 1)));
     }
@@ -356,13 +359,13 @@ mod tests {
         let mut shell = Shell::default();
         shell.marked(Mark::Prompt, now(0), NONE_STOPPED);
         shell.marked(command("vim a"), now(1), NONE_STOPPED);
-        shell.saw(Group(40), 10, Front::Interactive);
+        shell.saw(group(40), pid(10), Front::Interactive);
         shell.marked(Mark::Done(Some(0)), now(2), stopped_if(|_| true));
         shell.marked(command("fg %1"), now(3), stopped_if(|_| true));
-        shell.saw(Group(40), 10, Front::Interactive);
+        shell.saw(group(40), pid(10), Front::Interactive);
         shell.marked(Mark::Done(Some(0)), now(4), stopped_if(|_| true));
         assert_eq!(shell.ran, Some(stopped_at("vim a", 4)));
-        assert_eq!(shell.stopped, [(Group(40), said("vim a"))]);
+        assert_eq!(shell.stopped, [(group(40), said("vim a"))]);
         shell.marked(command("fg"), now(5), stopped_if(|_| true));
         assert_eq!(going(&shell), Some("vim a"));
         assert_eq!(shell.stopped, []);
@@ -374,13 +377,13 @@ mod tests {
         let mut shell = Shell::default();
         shell.marked(Mark::Prompt, now(0), NONE_STOPPED);
         shell.marked(command("vim a"), now(1), NONE_STOPPED);
-        shell.saw(Group(40), 10, Front::Interactive);
+        shell.saw(group(40), pid(10), Front::Interactive);
         shell.marked(Mark::Done(Some(0)), now(2), stopped_if(|_| true));
         shell.marked(command("less x"), now(3), stopped_if(|_| true));
-        shell.saw(Group(40), 10, Front::Interactive);
+        shell.saw(group(40), pid(10), Front::Interactive);
         shell.marked(Mark::Done(Some(0)), now(4), stopped_if(|_| true));
         assert_eq!(shell.ran, Some(stopped_at("less x", 4)));
-        assert_eq!(shell.stopped, [(Group(40), said("less x"))]);
+        assert_eq!(shell.stopped, [(group(40), said("less x"))]);
     }
 
     #[test]
@@ -430,17 +433,6 @@ mod tests {
     }
 
     #[test]
-    fn a_shell_gone_says_nothing() {
-        let mut shell = Shell::default();
-        shell.marked(Mark::Prompt, at(0), NONE_STOPPED);
-        shell.marked(command("ls"), at(1), NONE_STOPPED);
-        let before = shell.version();
-        shell.gone();
-        assert_eq!(shell.said(), None);
-        assert!(shell.version() > before);
-    }
-
-    #[test]
     fn ignored_marks_leave_the_shell_version_unchanged() {
         let now = shell_at(Instant::now());
         let mut shell = Shell::default();
@@ -451,7 +443,7 @@ mod tests {
         let remote = vec![Mark::Prompt, command("ls"), Mark::Done(Some(0)), Mark::Prompt];
         shell.read(remote, now(2), false, NONE_STOPPED);
         assert_eq!(shell.version(), going_version);
-        shell.saw(Group(40), 10, Front::Interactive);
+        shell.saw(group(40), pid(10), Front::Interactive);
         assert_eq!(shell.version(), going_version);
         shell.read(vec![Mark::Done(Some(0)), Mark::Prompt], now(3), true, NONE_STOPPED);
         assert_eq!(shell.version(), going_version + 1);

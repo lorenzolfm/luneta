@@ -8,29 +8,76 @@ use crate::api;
 use crate::front;
 use crate::id::TerminalId;
 use crate::panics::{self, Panicked};
-use crate::process::{self, Group};
+use crate::process::{self, Argv, Group, ProcessId};
 
 const IN_FLIGHT_MAX: usize = 1;
 
 const _: () = assert!(IN_FLIGHT_MAX == 1);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Foreground {
+    pub pid: ProcessId,
+    pub argv: Argv,
+}
+
+impl Foreground {
+    #[must_use]
+    pub fn said(&self) -> api::Foreground {
+        api::Foreground { pid: self.pid.get(), argv: self.argv.as_slice().to_vec() }
+    }
+}
+
 pub struct Looker {
-    requests: SyncSender<Asked>,
-    answers: Receiver<Seen>,
+    requests: SyncSender<Job>,
 }
 
-pub struct Asked {
-    pub program: u32,
-    pub group: Group,
-    pub front: Option<front::Snapshot>,
-    pub shell_version: u64,
+pub struct InFlight {
+    requests: SyncSender<Job>,
+    shell_version: u64,
+    reply: Reply,
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Seen {
-    pub foreground: Option<api::Foreground>,
-    pub front: Option<(Group, Front)>,
-    pub shell_version: u64,
+enum Reply {
+    Foreground(Receiver<Option<Foreground>>),
+    WithFront { group: Group, answers: Receiver<(Option<Foreground>, Front)> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ask {
+    Foreground {
+        program: ProcessId,
+        group: Group,
+    },
+    WithFront {
+        program: ProcessId,
+        group: Group,
+        snapshot: front::Snapshot,
+    },
+}
+
+enum Job {
+    Foreground {
+        program: ProcessId,
+        group: Group,
+        reply: SyncSender<Option<Foreground>>,
+    },
+    WithFront {
+        program: ProcessId,
+        group: Group,
+        snapshot: front::Snapshot,
+        reply: SyncSender<(Option<Foreground>, Front)>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Seen {
+    Foreground(Option<Foreground>),
+    WithFront { foreground: Option<Foreground>, group: Group, front: Front },
+}
+
+pub enum Taken {
+    Pending(InFlight),
+    Ready { looker: Looker, shell_version: u64, seen: Seen },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -41,26 +88,38 @@ impl Looker {
         terminal: TerminalId,
         woken: impl Fn() + Send + 'static,
     ) -> io::Result<Looker> {
-        Self::started_with(terminal, woken, Asked::walk)
+        Self::started_with(terminal, woken, walk_foreground, front::of_terminal)
     }
 
     fn started_with(
         terminal: TerminalId,
         woken: impl Fn() + Send + 'static,
-        walk: impl Fn(Asked) -> Seen + Send + 'static,
+        walk_foreground: impl Fn(ProcessId, Group) -> Option<Foreground> + Send + 'static,
+        walk_front: impl Fn(front::Snapshot, ProcessId, Group) -> Front + Send + 'static,
     ) -> io::Result<Looker> {
-        let (requests, inbox) = mpsc::sync_channel(IN_FLIGHT_MAX);
-        let (outbox, answers) = mpsc::sync_channel(IN_FLIGHT_MAX);
+        let (requests, inbox) = mpsc::sync_channel::<Job>(IN_FLIGHT_MAX);
         thread::Builder::new().name(format!("terminal {terminal} looks")).spawn(move || {
             let looked = panics::contained(|| {
-                while let Ok(asked) = inbox.recv() {
-                    let seen = walk(asked);
-                    match outbox.try_send(seen) {
-                        Ok(()) => {},
-                        Err(TrySendError::Disconnected(_)) => return,
-                        Err(TrySendError::Full(_)) => {
-                            unreachable!("a terminal asks one look at a time");
+                while let Ok(job) = inbox.recv() {
+                    let sent = match job {
+                        Job::Foreground { program, group, reply } => {
+                            let found = walk_foreground(program, group);
+                            if let Some(found) = &found {
+                                assert!(found.pid == group.leader() || found.pid == program);
+                            }
+                            send_once(&reply, found)
                         },
+                        Job::WithFront { program, group, snapshot, reply } => {
+                            let found = walk_foreground(program, group);
+                            if let Some(found) = &found {
+                                assert!(found.pid == group.leader() || found.pid == program);
+                            }
+                            let front = walk_front(snapshot, program, group);
+                            send_once(&reply, (found, front))
+                        },
+                    };
+                    if !sent {
+                        return;
                     }
                     woken();
                 }
@@ -69,78 +128,103 @@ impl Looker {
             if let Err(Panicked) = looked {
                 eprintln!("lune-mux: terminal {terminal}'s looks panicked");
                 drop(inbox);
-                drop(outbox);
                 woken();
             }
         })?;
-        Ok(Looker { requests, answers })
+        Ok(Looker { requests })
     }
 
-    pub fn ask(&self, asked: Asked) -> Result<(), Gone> {
-        assert!(asked.program > 0);
-        assert!(asked.group.leader() > 0);
-        if let Some(front) = asked.front {
-            assert!(front.device != 0);
-        }
-        match self.requests.try_send(asked) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Disconnected(_)) => Err(Gone),
-            Err(TrySendError::Full(_)) => unreachable!("a terminal asks one look at a time"),
-        }
-    }
-
-    pub fn take_seen(&self) -> Result<Option<Seen>, Gone> {
-        match self.answers.try_recv() {
-            Ok(seen) => {
-                if let Some(foreground) = &seen.foreground {
-                    assert!(foreground.pid > 0);
-                }
-                if let Some((group, _)) = seen.front {
-                    assert!(group.leader() > 0);
-                }
-                Ok(Some(seen))
+    pub fn ask(self, ask: Ask, shell_version: u64) -> Result<InFlight, Gone> {
+        let (job, reply) = match ask {
+            Ask::Foreground { program, group } => {
+                let (tx, rx) = mpsc::sync_channel(IN_FLIGHT_MAX);
+                (Job::Foreground { program, group, reply: tx }, Reply::Foreground(rx))
             },
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(Gone),
+            Ask::WithFront { program, group, snapshot } => {
+                let (tx, rx) = mpsc::sync_channel(IN_FLIGHT_MAX);
+                (
+                    Job::WithFront { program, group, snapshot, reply: tx },
+                    Reply::WithFront { group, answers: rx },
+                )
+            },
+        };
+        match self.requests.try_send(job) {
+            Ok(()) => Ok(InFlight { requests: self.requests, shell_version, reply }),
+            Err(TrySendError::Disconnected(_)) => Err(Gone),
+            Err(TrySendError::Full(_)) => unreachable!("an idle looker has no look in flight"),
         }
     }
 }
 
-impl Asked {
-    fn walk(self) -> Seen {
-        let Asked { program, group, front, shell_version } = self;
-        assert!(program > 0);
-        assert!(group.leader() > 0);
-        let foreground = foreground(group.leader()).or_else(|| foreground(program));
-        let front = front.map(|snapshot| {
-            assert!(snapshot.device != 0);
-            (group, front::of_terminal(snapshot, program, group))
-        });
-        if let Some(foreground) = &foreground {
-            assert!(foreground.pid == group.leader() || foreground.pid == program);
+impl InFlight {
+    pub fn take_seen(self) -> Result<Taken, Gone> {
+        let InFlight { requests, shell_version, reply } = self;
+        match reply {
+            Reply::Foreground(answers) => match answers.try_recv() {
+                Ok(foreground) => Ok(Taken::Ready {
+                    looker: Looker { requests },
+                    shell_version,
+                    seen: Seen::Foreground(foreground),
+                }),
+                Err(TryRecvError::Empty) => Ok(Taken::Pending(InFlight {
+                    requests,
+                    shell_version,
+                    reply: Reply::Foreground(answers),
+                })),
+                Err(TryRecvError::Disconnected) => Err(Gone),
+            },
+            Reply::WithFront { group, answers } => match answers.try_recv() {
+                Ok((foreground, front)) => Ok(Taken::Ready {
+                    looker: Looker { requests },
+                    shell_version,
+                    seen: Seen::WithFront { foreground, group, front },
+                }),
+                Err(TryRecvError::Empty) => Ok(Taken::Pending(InFlight {
+                    requests,
+                    shell_version,
+                    reply: Reply::WithFront { group, answers },
+                })),
+                Err(TryRecvError::Disconnected) => Err(Gone),
+            },
         }
-        Seen { foreground, front, shell_version }
     }
 }
 
-fn foreground(pid: u32) -> Option<api::Foreground> {
-    assert!(pid > 0);
-    let argv = process::argv(pid)?;
-    assert!(argv.iter().map(|arg| arg.len() + 1).sum::<usize>() <= process::ARGV_BYTES_MAX);
-    Some(api::Foreground { pid, argv })
+fn send_once<T>(reply: &SyncSender<T>, value: T) -> bool {
+    match reply.try_send(value) {
+        Ok(()) => true,
+        Err(TrySendError::Disconnected(_)) => false,
+        Err(TrySendError::Full(_)) => unreachable!("a fresh single-use reply channel is empty"),
+    }
+}
+
+fn walk_foreground(program: ProcessId, group: Group) -> Option<Foreground> {
+    foreground(group.leader()).or_else(|| foreground(program))
+}
+
+fn foreground(pid: ProcessId) -> Option<Foreground> {
+    Some(Foreground { pid, argv: process::argv(pid)? })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
     use std::sync::mpsc;
 
     use lune_waits::{eventually, heard};
 
     use super::*;
+    use crate::asked::Size;
+    use crate::pty::{Modes, Pty};
 
-    fn asked(shell_version: u64) -> Asked {
-        let pid = std::process::id();
-        Asked { program: pid, group: Group(pid), front: None, shell_version }
+    fn self_ids() -> (ProcessId, Group) {
+        let pid = ProcessId::new(std::process::id()).unwrap();
+        (pid, Group::of_process(pid))
+    }
+
+    fn ask_foreground() -> Ask {
+        let (program, group) = self_ids();
+        Ask::Foreground { program, group }
     }
 
     #[test]
@@ -148,15 +232,47 @@ mod tests {
         let (wake, woken) = mpsc::sync_channel(4);
         let terminal = TerminalId::next(&mut None);
         let looker = Looker::started(terminal, move || wake.send(()).unwrap()).unwrap();
-        assert_eq!(looker.take_seen(), Ok(None));
-        looker.ask(asked(7)).unwrap();
+        let waiting = looker.ask(ask_foreground(), 7).unwrap();
         let () = heard("the looker wakes the caller", &woken);
-        let seen = looker.take_seen().unwrap().expect("the answer is ready");
-        assert_eq!(seen.shell_version, 7);
-        assert_eq!(seen.front, None);
-        let foreground = seen.foreground.expect("this process reads its argv");
-        assert_eq!(foreground.pid, std::process::id());
-        assert_eq!(looker.take_seen(), Ok(None));
+        let Taken::Ready { looker, shell_version, seen } = waiting.take_seen().unwrap() else {
+            panic!("the answer is ready");
+        };
+        assert_eq!(shell_version, 7);
+        let Seen::Foreground(Some(foreground)) = seen else {
+            panic!("this process reads its argv: {seen:?}");
+        };
+        assert_eq!(foreground.pid, ProcessId::new(std::process::id()).unwrap());
+        drop(looker);
+    }
+
+    #[test]
+    fn a_with_front_look_returns_its_asked_group_and_front() {
+        let (wake, woken) = mpsc::sync_channel(4);
+        let terminal = TerminalId::next(&mut None);
+        let looker = Looker::started_with(
+            terminal,
+            move || wake.send(()).unwrap(),
+            |_, _| None,
+            |_, _, _| Front::Asking,
+        )
+        .unwrap();
+        let size = Size {
+            columns: NonZeroU16::new(80).unwrap(),
+            rows: NonZeroU16::new(24).unwrap(),
+        };
+        let pty = Pty::opened(size).unwrap();
+        let (program, group) = self_ids();
+        let snapshot = front::Snapshot {
+            modes: Modes { lines: true, echo: false },
+            device: pty.device(),
+        };
+        let waiting = looker.ask(Ask::WithFront { program, group, snapshot }, 11).unwrap();
+        let () = heard("the looker wakes the caller", &woken);
+        let Taken::Ready { shell_version, seen, .. } = waiting.take_seen().unwrap() else {
+            panic!("the answer is ready");
+        };
+        assert_eq!(shell_version, 11);
+        assert_eq!(seen, Seen::WithFront { foreground: None, group, front: Front::Asking });
     }
 
     #[test]
@@ -166,56 +282,43 @@ mod tests {
         let looker = Looker::started_with(
             terminal,
             move || wake.send(()).unwrap(),
-            |_| panic!("the walk panicked"),
+            |_, _| panic!("the walk panicked"),
+            |_, _, _| Front::Working,
         )
         .unwrap();
-        looker.ask(asked(1)).unwrap();
+        let waiting = looker.ask(ask_foreground(), 1).unwrap();
         let () = heard("the panicked looker wakes the caller", &woken);
-        assert_eq!(looker.take_seen(), Err(Gone));
-        assert_eq!(looker.ask(asked(2)), Err(Gone));
+        assert!(matches!(waiting.take_seen(), Err(Gone)));
     }
 
     #[test]
-    #[should_panic(expected = "a terminal asks one look at a time")]
-    fn asking_twice_while_a_look_is_in_flight_panics() {
+    fn an_in_flight_look_stays_pending_until_the_walk_answers() {
         let (entered, inside) = mpsc::sync_channel(1);
         let (release, released) = mpsc::sync_channel(1);
-        let terminal = TerminalId::next(&mut None);
-        let looker = Looker::started_with(
-            terminal,
-            || {},
-            move |asked| {
-                let _ = entered.send(());
-                let _ = released.recv();
-                Seen { foreground: None, front: None, shell_version: asked.shell_version }
-            },
-        )
-        .unwrap();
-        looker.ask(asked(1)).unwrap();
-        let () = heard("the first look is running", &inside);
-        looker.ask(asked(2)).unwrap();
-        let third = looker.ask(asked(3));
-        let _ = release.send(());
-        let _ = third;
-    }
-
-    #[test]
-    fn answering_into_an_uncollected_outbox_fails_fast_as_gone() {
         let (wake, woken) = mpsc::sync_channel(4);
         let terminal = TerminalId::next(&mut None);
         let looker = Looker::started_with(
             terminal,
             move || wake.send(()).unwrap(),
-            |asked| Seen { foreground: None, front: None, shell_version: asked.shell_version },
+            move |_, _| {
+                let _ = entered.send(());
+                let _ = released.recv();
+                None
+            },
+            |_, _, _| Front::Working,
         )
         .unwrap();
-        looker.ask(asked(1)).unwrap();
-        let () = heard("the first look answered", &woken);
-        looker.ask(asked(2)).unwrap();
-        let () = heard("the second look failed fast on a full outbox", &woken);
-        let first = looker.take_seen().unwrap().expect("the first answer is still queued");
-        assert_eq!(first.shell_version, 1);
-        assert_eq!(looker.take_seen(), Err(Gone));
+        let waiting = looker.ask(ask_foreground(), 3).unwrap();
+        let () = heard("the look is running", &inside);
+        let Taken::Pending(waiting) = waiting.take_seen().unwrap() else {
+            panic!("the look is still pending");
+        };
+        release.send(()).unwrap();
+        let () = heard("the look answered", &woken);
+        let Taken::Ready { shell_version, seen, .. } = waiting.take_seen().unwrap() else {
+            panic!("the look is ready");
+        };
+        assert_eq!((shell_version, seen), (3, Seen::Foreground(None)));
     }
 
     #[test]
@@ -234,7 +337,8 @@ mod tests {
             move || {
                 let _ = &guard;
             },
-            |asked| Seen { foreground: None, front: None, shell_version: asked.shell_version },
+            |_, _| None,
+            |_, _, _| Front::Working,
         )
         .unwrap();
         drop(looker);

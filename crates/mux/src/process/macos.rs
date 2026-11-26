@@ -4,11 +4,11 @@ use std::ptr;
 
 use lune_protocol::process::{EXEC_STRINGS_BYTES_MAX, laid_in_procargs};
 
-use super::{CHILDREN_MAX, Group, Process, Terminal};
+use super::{CHILDREN_MAX, Group, Process, ProcessId, Terminal};
 
 const NO_DEVICE: u32 = u32::MAX;
 
-pub fn process(pid: u32) -> Option<Process> {
+pub fn process(pid: ProcessId) -> Option<Process> {
     let size = c_int::try_from(size_of::<libc::proc_bsdinfo>()).expect("proc_bsdinfo is small");
     let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
     #[expect(
@@ -18,7 +18,7 @@ pub fn process(pid: u32) -> Option<Process> {
     )]
     let written = unsafe {
         libc::proc_pidinfo(
-            c_int::try_from(pid).ok()?,
+            c_int::try_from(pid.get()).ok()?,
             libc::PROC_PIDTBSDINFO,
             0,
             info.as_mut_ptr().cast::<c_void>(),
@@ -30,16 +30,18 @@ pub fn process(pid: u32) -> Option<Process> {
     }
     #[expect(unsafe_code, reason = "the call wrote all of `info`: `written` is its `size`")]
     let info = unsafe { info.assume_init() };
-    assert_eq!(info.pbi_pid, pid, "proc_pidinfo said another process");
+    let read_pid = ProcessId::new(info.pbi_pid)?;
+    assert_eq!(read_pid, pid, "proc_pidinfo said another process");
+    let group = Group::new(info.pbi_pgid)?;
     let name = info.pbi_comm.iter().map(|byte| byte.cast_unsigned()).take_while(|byte| *byte != 0);
     let terminal = (info.e_tdev != NO_DEVICE).then(|| Terminal {
         device: u64::from(info.e_tdev),
-        front: Some(info.e_tpgid).filter(|front| *front > 0).map(Group),
+        front: Group::new(info.e_tpgid),
     });
     Some(Process {
-        pid: info.pbi_pid,
-        parent: info.pbi_ppid,
-        group: Group(info.pbi_pgid),
+        pid: read_pid,
+        parent: ProcessId::new(info.pbi_ppid),
+        group,
         name: String::from_utf8_lossy(&name.collect::<Vec<u8>>()).into_owned(),
         sleeps: String::new(),
         stopped: info.pbi_status == libc::SSTOP,
@@ -47,8 +49,8 @@ pub fn process(pid: u32) -> Option<Process> {
     })
 }
 
-pub fn children(pid: u32) -> Vec<u32> {
-    let Ok(pid) = c_int::try_from(pid) else {
+pub fn children(pid: ProcessId) -> Vec<ProcessId> {
+    let Ok(pid) = c_int::try_from(pid.get()) else {
         return Vec::new();
     };
     let mut pids: Vec<libc::pid_t> = vec![0; CHILDREN_MAX];
@@ -63,11 +65,11 @@ pub fn children(pid: u32) -> Vec<u32> {
         return Vec::new();
     };
     pids.truncate(count.min(CHILDREN_MAX));
-    pids.into_iter().filter_map(|pid| u32::try_from(pid).ok().filter(|pid| *pid > 0)).collect()
+    pids.into_iter().filter_map(|pid| u32::try_from(pid).ok().and_then(ProcessId::new)).collect()
 }
 
-pub fn argv(pid: u32) -> Option<Vec<String>> {
-    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, c_int::try_from(pid).ok()?];
+pub fn argv(pid: ProcessId) -> Option<Vec<String>> {
+    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, c_int::try_from(pid.get()).ok()?];
     let mut size = 0;
     #[expect(
         unsafe_code,

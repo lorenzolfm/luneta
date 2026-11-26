@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use libghostty_vt::Error;
 use libghostty_vt::key::{Action, Key, Mods};
+use lune_protocol::shell::Doing;
 use rustix::event::{PollFd, PollFlags, Timespec};
 use tokio::sync::mpsc::{self, error::TryRecvError, error::TrySendError};
 use tokio::sync::{oneshot, watch};
@@ -23,11 +24,11 @@ use crate::frame::{self, Flags};
 use crate::front;
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leader;
-use crate::looker::{Asked, Gone, Looker, Seen};
+use crate::looker::{Ask, Foreground, Gone, InFlight, Looker, Seen, Taken};
 use crate::marks::Mark;
 use crate::mux::Mux;
 use crate::panics::{self, Panicked};
-use crate::process::{self, Group};
+use crate::process::{self, Group, ProcessId};
 use crate::pty::{Led, Pty, Queue, Raise, SignalKey};
 use crate::ran::{Job, Now, Shell};
 use crate::screen::{Answers, Looked, Pushed, Screen, View, Wheel};
@@ -195,7 +196,7 @@ impl Wake {
 
 pub struct Started {
     pub handle: Handle,
-    pub pid: u32,
+    pub pid: ProcessId,
     pub placing: Placing,
 }
 
@@ -258,8 +259,10 @@ pub fn start(
                 program: Program::Runs(Box::new(Running {
                     pty,
                     unread: Unread::default(),
-                    looker,
-                    looks: Looks::first(),
+                    looks: Looks::first(looker),
+                    pid,
+                    shell: Shell::default(),
+                    told: Told::default(),
                 })),
                 buffer: vec![0; READ_BYTES].into_boxed_slice(),
                 watchers: Vec::new(),
@@ -269,9 +272,6 @@ pub fn start(
                 title: String::new(),
                 pwd: String::new(),
                 host: host(),
-                pid,
-                shell: Shell::default(),
-                told: Told::default(),
                 statuses_version: 0,
             };
             let failed = match panics::contained(|| thread.run()) {
@@ -311,8 +311,10 @@ enum Does {
 struct Running {
     pty: Pty,
     unread: Unread,
-    looker: Looker,
     looks: Looks,
+    pid: ProcessId,
+    shell: Shell,
+    told: Told,
 }
 
 enum Program {
@@ -344,92 +346,174 @@ struct Thread {
     title: String,
     pwd: String,
     host: String,
-    pid: u32,
-    shell: Shell,
-    told: Told,
     statuses_version: u64,
 }
 
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct Told {
-    foreground: Option<api::Foreground>,
-    ran: Option<api::Ran>,
+    foreground: Option<Foreground>,
+    ran: Option<Doing>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pace {
-    Idle { due: Option<Instant> },
-    InFlight,
+enum Schedule {
+    Quiet { last: Instant },
+    Scheduled { due: Instant, last: Option<Instant>, heard: bool },
 }
 
-struct Looks {
-    pace: Pace,
-    last: Option<Instant>,
-    heard: bool,
+impl Schedule {
+    fn first(now: Instant) -> Schedule {
+        Schedule::Scheduled { due: now, last: None, heard: false }
+    }
+
+    #[must_use]
+    fn due(self) -> Option<Instant> {
+        match self {
+            Schedule::Quiet { .. } => None,
+            Schedule::Scheduled { due, .. } => Some(due),
+        }
+    }
+
+    fn heard(&mut self, now: Instant) {
+        *self = match *self {
+            Schedule::Quiet { last } => Schedule::Scheduled {
+                due: (last + LOOK_AGAIN).max(now),
+                last: Some(last),
+                heard: true,
+            },
+            Schedule::Scheduled { due, last, .. } => {
+                let soonest = last.map_or(now, |last| (last + LOOK_AGAIN).max(now));
+                Schedule::Scheduled { due: due.min(soonest), last, heard: true }
+            },
+        };
+        self.assert_paced();
+    }
+
+    fn next(last: Option<Instant>, heard: bool, now: Instant, going: bool) -> Schedule {
+        if let Some(last) = last {
+            assert!(now >= last, "time does not go backwards");
+        }
+        let schedule = if heard {
+            Schedule::Scheduled { due: now + LOOK_AGAIN, last: Some(now), heard: false }
+        } else if going {
+            Schedule::Scheduled { due: now + LOOK_WHILE_GOING, last: Some(now), heard: false }
+        } else {
+            Schedule::Quiet { last: now }
+        };
+        schedule.assert_paced();
+        schedule
+    }
+
+    fn assert_paced(self) {
+        if let Schedule::Scheduled { due, last: Some(last), .. } = self {
+            assert!(due >= last + LOOK_AGAIN, "{:?} after the last", due.duration_since(last));
+        }
+    }
+}
+
+enum Looks {
+    Idle { looker: Looker, schedule: Schedule },
+    InFlight { waiting: InFlight, last: Option<Instant>, heard: bool },
 }
 
 impl Looks {
-    fn first() -> Looks {
-        Looks { pace: Pace::Idle { due: Some(Instant::now()) }, last: None, heard: false }
+    fn first(looker: Looker) -> Looks {
+        Looks::Idle { looker, schedule: Schedule::first(Instant::now()) }
     }
 
     #[must_use]
     fn waits_until(&self) -> Option<Instant> {
-        match self.pace {
-            Pace::Idle { due } => due,
-            Pace::InFlight => None,
+        match self {
+            Looks::Idle { schedule, .. } => schedule.due(),
+            Looks::InFlight { .. } => None,
         }
-    }
-
-    #[must_use]
-    fn is_in_flight(&self) -> bool {
-        self.pace == Pace::InFlight
-    }
-
-    fn asked(&mut self) {
-        assert!(matches!(self.pace, Pace::Idle { due: Some(_) }), "a look is due before it is asked");
-        self.pace = Pace::InFlight;
-    }
-
-    fn answered(&mut self, now: Instant, going: bool) {
-        assert_eq!(self.pace, Pace::InFlight, "a seen look was asked");
-        self.schedule_next(now, going);
-    }
-
-    fn looked_locally(&mut self, now: Instant, going: bool) {
-        assert!(matches!(self.pace, Pace::Idle { due: Some(_) }), "a look is due before it runs");
-        self.schedule_next(now, going);
     }
 
     fn heard(&mut self, now: Instant) {
-        self.heard = true;
-        let Pace::Idle { due } = self.pace else {
-            return;
-        };
-        let soonest = self.last.map_or(now, |last| (last + LOOK_AGAIN).max(now));
-        self.pace = Pace::Idle { due: Some(due.map_or(soonest, |due| due.min(soonest))) };
-        self.assert_paced();
-    }
-
-    fn schedule_next(&mut self, now: Instant, going: bool) {
-        if let Some(last) = self.last {
-            assert!(now >= last, "time does not go backwards");
+        match self {
+            Looks::Idle { schedule, .. } => schedule.heard(now),
+            Looks::InFlight { heard, .. } => *heard = true,
         }
-        self.last = Some(now);
-        let due = if std::mem::take(&mut self.heard) {
-            Some(now + LOOK_AGAIN)
-        } else if going {
-            Some(now + LOOK_WHILE_GOING)
-        } else {
-            None
+    }
+}
+
+impl Running {
+    fn seen(mut self: Box<Running>, terminal: TerminalId, mux: &Mux) -> io::Result<Box<Running>> {
+        let ready = match self.looks {
+            idle @ Looks::Idle { .. } => {
+                self.looks = idle;
+                return Ok(self);
+            },
+            Looks::InFlight { waiting, last, heard } => match waiting.take_seen().map_err(looks_gone)? {
+                Taken::Pending(waiting) => {
+                    self.looks = Looks::InFlight { waiting, last, heard };
+                    return Ok(self);
+                },
+                Taken::Ready { looker, shell_version, seen } => {
+                    let going = self.shell.going();
+                    let schedule = Schedule::next(last, heard, Instant::now(), going);
+                    self.looks = Looks::Idle { looker, schedule };
+                    (shell_version, seen)
+                },
+            },
         };
-        self.pace = Pace::Idle { due };
-        self.assert_paced();
+        let (shell_version, seen) = ready;
+        if shell_version != self.shell.version() {
+            return Ok(self);
+        }
+        let foreground = match seen {
+            Seen::Foreground(foreground) => foreground,
+            Seen::WithFront { foreground, group, front } => {
+                self.shell.saw(group, self.pid, front);
+                foreground
+            },
+        };
+        self.tell(terminal, mux, foreground);
+        Ok(self)
     }
 
-    fn assert_paced(&self) {
-        if let (Pace::Idle { due: Some(due) }, Some(last)) = (self.pace, self.last) {
-            assert!(due >= last + LOOK_AGAIN, "{:?} after the last", due.duration_since(last));
+    fn look_if_due(
+        mut self: Box<Running>,
+        terminal: TerminalId,
+        mux: &Mux,
+    ) -> io::Result<Box<Running>> {
+        let now = Instant::now();
+        let (looker, last, heard) = match self.looks {
+            Looks::Idle { looker, schedule: Schedule::Scheduled { due, last, heard } }
+                if due <= now =>
+            {
+                (looker, last, heard)
+            },
+            looks => {
+                self.looks = looks;
+                return Ok(self);
+            },
+        };
+        let going = self.shell.going();
+        let Some(group) = self.pty.front_group() else {
+            let schedule = Schedule::next(last, heard, now, going);
+            self.looks = Looks::Idle { looker, schedule };
+            self.tell(terminal, mux, None);
+            return Ok(self);
+        };
+        let snapshot = going
+            .then(|| pty_modes(terminal, &self.pty))
+            .flatten()
+            .map(|modes| front::Snapshot { modes, device: self.pty.device() });
+        let ask = match snapshot {
+            Some(snapshot) => Ask::WithFront { program: self.pid, group, snapshot },
+            None => Ask::Foreground { program: self.pid, group },
+        };
+        let waiting = looker.ask(ask, self.shell.version()).map_err(looks_gone)?;
+        self.looks = Looks::InFlight { waiting, last, heard };
+        Ok(self)
+    }
+
+    fn tell(&mut self, terminal: TerminalId, mux: &Mux, foreground: Option<Foreground>) {
+        let told = Told { foreground, ran: self.shell.said() };
+        if told != self.told {
+            self.told = told.clone();
+            mux.looked(terminal, told.foreground, told.ran);
         }
     }
 }
@@ -468,74 +552,12 @@ impl Thread {
             if writable || self.program.owed() {
                 self.write()?;
             }
-            self.seen()?;
-            if let Program::Runs(running) = &self.program
-                && running.looks.waits_until().is_some_and(|due| due <= Instant::now())
-            {
-                self.look()?;
+            if let Program::Runs(running) = std::mem::replace(&mut self.program, Program::Gone) {
+                let running = running.seen(self.key.id, &self.mux)?;
+                let running = running.look_if_due(self.key.id, &self.mux)?;
+                self.program = Program::Runs(running);
             }
             self.frame()?;
-        }
-    }
-
-    fn look(&mut self) -> io::Result<()> {
-        let now = Instant::now();
-        let terminal = self.key.id;
-        let Program::Runs(running) = &mut self.program else {
-            return Ok(());
-        };
-        assert!(!running.looks.is_in_flight(), "a terminal asks one look at a time");
-        assert!(running.looks.waits_until().is_some(), "a look is due before it is asked");
-        let going = self.shell.going();
-        let Some(group) = running.pty.front_group() else {
-            running.looks.looked_locally(now, going);
-            self.tell(None);
-            return Ok(());
-        };
-        let front = going.then(|| front::Snapshot {
-            modes: pty_modes(terminal, &running.pty),
-            device: running.pty.device(),
-        });
-        let asked = Asked {
-            program: self.pid,
-            group,
-            front,
-            shell_version: self.shell.version(),
-        };
-        running.looker.ask(asked).map_err(looks_gone)?;
-        running.looks.asked();
-        Ok(())
-    }
-
-    fn seen(&mut self) -> io::Result<()> {
-        let Program::Runs(running) = &mut self.program else {
-            return Ok(());
-        };
-        let Some(Seen { foreground, front, shell_version }) =
-            running.looker.take_seen().map_err(looks_gone)?
-        else {
-            return Ok(());
-        };
-        let going = self.shell.going();
-        running.looks.answered(Instant::now(), going);
-        let current = self.shell.version();
-        assert!(shell_version <= current, "a look cannot come from future marks");
-        if shell_version != current {
-            return Ok(());
-        }
-        assert_eq!(front.is_some(), self.shell.going());
-        if let Some((group, front_state)) = front {
-            self.shell.saw(group, self.pid, front_state);
-        }
-        self.tell(foreground);
-        Ok(())
-    }
-
-    fn tell(&mut self, foreground: Option<api::Foreground>) {
-        let told = Told { foreground, ran: self.shell.said() };
-        if told != self.told {
-            self.told = told.clone();
-            self.mux.looked(self.key.id, told.foreground, told.ran);
         }
     }
 
@@ -695,8 +717,6 @@ impl Thread {
         let ended_statuses = self.screen.program_exited();
         self.statuses_version = self.screen.program_statuses_version();
         self.program = Program::Gone;
-        self.shell.gone();
-        self.told = Told::default();
         self.dirty = true;
         self.frame()?;
         Ok(self.mux.ended(self.key.id, exit, ended_statuses))
@@ -804,7 +824,7 @@ impl Thread {
         let Program::Runs(running) = &mut self.program else {
             return Ok(());
         };
-        let Running { pty, unread, looks, .. } = &mut **running;
+        let Running { pty, unread, looks, pid, shell, .. } = &mut **running;
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
         let mut pushed = Pushed::Rows(0);
@@ -842,12 +862,12 @@ impl Thread {
         looks.heard(Instant::now());
         if !marks.is_empty() {
             let now = Now::current();
-            let in_front = pty.front_group() == Some(Group(self.pid));
+            let in_front = pty.front_group() == Some(Group::of_process(*pid));
             let job = |group: Group| {
                 let leader = process::process(group.leader())?;
                 Some(if leader.stopped { Job::Stopped } else { Job::Runs })
             };
-            self.shell.read(marks, now, in_front, job);
+            shell.read(marks, now, in_front, job);
         }
         self.dirty = true;
         let scrollback = self.screen.scrollback();
@@ -1114,48 +1134,50 @@ mod tests {
     fn what_the_program_writes_brings_a_later_look_forward() {
         let start = Instant::now();
         let at = |millis| start + Duration::from_millis(millis);
-        let mut looks = Looks::first();
-        looks.heard(start);
-        assert_eq!(looks.waits_until(), Some(start));
-        looks.asked();
-        looks.answered(start, true);
-        assert_eq!(looks.waits_until(), Some(at(100)));
-        looks.asked();
-        looks.answered(at(100), true);
-        assert_eq!(looks.waits_until(), Some(at(1100)));
-        looks.heard(at(300));
-        assert_eq!(looks.waits_until(), Some(at(300)));
-        looks.asked();
-        looks.answered(at(300), true);
-        looks.heard(at(310));
-        assert_eq!(looks.waits_until(), Some(at(400)));
-        looks.asked();
-        looks.answered(at(400), false);
-        assert_eq!(looks.waits_until(), Some(at(500)));
-        looks.asked();
-        looks.answered(at(500), false);
-        assert_eq!(looks.waits_until(), None);
+        let mut schedule = Schedule::first(start);
+        schedule.heard(start);
+        assert_eq!(schedule.due(), Some(start));
+        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        schedule = Schedule::next(last, heard, start, true);
+        assert_eq!(schedule.due(), Some(at(100)));
+        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        schedule = Schedule::next(last, heard, at(100), true);
+        assert_eq!(schedule.due(), Some(at(1100)));
+        schedule.heard(at(300));
+        assert_eq!(schedule.due(), Some(at(300)));
+        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        schedule = Schedule::next(last, heard, at(300), true);
+        schedule.heard(at(310));
+        assert_eq!(schedule.due(), Some(at(400)));
+        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        schedule = Schedule::next(last, heard, at(400), false);
+        assert_eq!(schedule.due(), Some(at(500)));
+        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        schedule = Schedule::next(last, heard, at(500), false);
+        assert_eq!(schedule, Schedule::Quiet { last: at(500) });
+        assert_eq!(schedule.due(), None);
+        schedule.heard(at(520));
+        assert_eq!(schedule.due(), Some(at(600)));
     }
 
     #[test]
     fn a_look_asked_holds_the_next_and_waits_after_it_finishes() {
         let start = Instant::now();
         let at = |millis| start + Duration::from_millis(millis);
-        let mut looks = Looks::first();
-        looks.asked();
+        let looker = Looker::started(TerminalId::next(&mut None), || {}).unwrap();
+        let pid = ProcessId::new(std::process::id()).unwrap();
+        let ask = Ask::Foreground { program: pid, group: Group::of_process(pid) };
+        let waiting = looker.ask(ask, 0).unwrap();
+        let mut looks = Looks::InFlight { waiting, last: None, heard: false };
         looks.heard(at(50));
         assert_eq!(looks.waits_until(), None);
-        looks.answered(at(250), true);
-        assert_eq!(looks.waits_until(), Some(at(350)));
-        looks.looked_locally(at(350), false);
-        assert_eq!(looks.waits_until(), None);
-    }
-
-    #[test]
-    #[should_panic(expected = "a seen look was asked")]
-    fn answering_an_idle_look_panics() {
-        let mut looks = Looks::first();
-        looks.answered(Instant::now(), false);
+        let Looks::InFlight { last, heard, .. } = looks else { panic!("in flight") };
+        let schedule = Schedule::next(last, heard, at(250), true);
+        assert_eq!(schedule.due(), Some(at(350)));
+        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        let schedule = Schedule::next(last, heard, at(350), false);
+        assert_eq!(schedule, Schedule::Quiet { last: at(350) });
+        assert_eq!(schedule.due(), None);
     }
 
     #[test]
