@@ -7628,6 +7628,11 @@ mod tests {
             let held = clone.worktrees.iter_mut().flat_map(|worktree| &mut worktree.terminals);
             for held in held.filter(|held| held.id == terminal) {
                 held.found = Some(api::terminal::Found::Looking(()));
+                held.state = Some(api::terminal::State::StateLooking(()));
+                held.command = None;
+                held.titled = None;
+                held.shell = None;
+                held.held = false;
             }
         }
         host
@@ -7651,6 +7656,7 @@ mod tests {
         assert_ne!(marked, unmarked);
 
         sidebar.hear(looked_for(s(true), 2));
+        assert!(sidebar.shelves[0].kept().is_some(), "{:?}", sidebar.shelves[0].refused());
         tick(&mut sidebar, 160_000);
         tick(&mut sidebar, 171_000);
         sidebar.hear(s(true));
