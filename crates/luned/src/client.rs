@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, 
 use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit, TryAcquireError};
+use tokio::task::JoinHandle;
 use tokio::time::{timeout_at, Instant};
 use tokio_stream::Stream;
 use tonic::transport::{Channel, Endpoint, Error, Uri};
@@ -135,7 +136,7 @@ impl<const MAX: usize> OwnedSlots<MAX> {
 
 static KEPT: Mutex<BTreeMap<PathBuf, Kept>> = Mutex::new(BTreeMap::new());
 
-static CONNECTING: Slots<CONNECTING_MAX> = Slots::new();
+static CONNECTING: LazyLock<OwnedSlots<CONNECTING_MAX>> = LazyLock::new(OwnedSlots::new);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Answer(Duration);
@@ -806,8 +807,7 @@ fn kept_at(socket: &Path) -> Option<Shared> {
     assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
     kept.retain(|_, entry| !entry.shared.gone.is());
     let found = if let Some(entry) = kept.get(socket) {
-        if SocketId::at(socket) == Some(entry.socket_id) {
-            assert!(!entry.shared.gone.is(), "a kept channel returned is not gone");
+        if SocketId::at(socket) == Some(entry.socket_id) && !entry.shared.gone.is() {
             Some(entry.shared.clone())
         } else {
             entry.shared.gone.mark();
@@ -830,16 +830,20 @@ fn keep(socket: &Path, fresh: Kept) -> Option<Shared> {
     let current = SocketId::at(socket);
     if fresh.shared.gone.is() || current != Some(fresh.socket_id) {
         fresh.shared.gone.mark();
-        return current.and_then(|id| {
-            kept.get(socket).filter(|existing| existing.socket_id == id).map(|existing| {
-                assert!(!existing.shared.gone.is(), "a kept channel returned is not gone");
-                existing.shared.clone()
-            })
-        });
+        if let Some(id) = current
+            && let Some(existing) = kept.get(socket)
+        {
+            if existing.socket_id == id && !existing.shared.gone.is() {
+                return Some(existing.shared.clone());
+            }
+            existing.shared.gone.mark();
+            let removed = kept.remove(socket);
+            assert!(removed.is_some(), "the evicted channel was in the cache");
+        }
+        return None;
     }
     if let Some(existing) = kept.get(socket) {
-        if existing.socket_id == fresh.socket_id {
-            assert!(!existing.shared.gone.is(), "a kept channel returned is not gone");
+        if existing.socket_id == fresh.socket_id && !existing.shared.gone.is() {
             fresh.shared.gone.mark();
             return Some(existing.shared.clone());
         }
@@ -850,10 +854,17 @@ fn keep(socket: &Path, fresh: Kept) -> Option<Shared> {
     }
     let shared = fresh.shared.clone();
     kept.insert(socket.to_owned(), fresh);
-    assert!(!shared.gone.is(), "a newly kept channel is not gone");
     assert!(kept.contains_key(socket), "a newly kept channel is in the cache");
     assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
     Some(shared)
+}
+
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 enum Opened {
@@ -872,22 +883,26 @@ pub async fn reach(folder: &Folder) -> Result<Reached, Unreached> {
     if let Some(shared) = kept_at(&socket) {
         return Ok(Reached::Matched(shared));
     }
-    let _connecting = CONNECTING.try_acquire().ok_or(Unreached::Busy)?;
+    let mut connecting = CONNECTING.try_acquire().ok_or(Unreached::Busy)?;
     for _ in 0..REACH_ATTEMPTS_MAX {
         if let Some(shared) = kept_at(&socket) {
             return Ok(Reached::Matched(shared));
         }
         let at = socket.clone();
-        let connected = tasks::shared().spawn(async move { connect_matched(at, ANSWER).await });
-        let connected = connected.await.unwrap_or_else(|ended| {
+        let mut connected = AbortOnDrop(tasks::shared().spawn(async move {
+            let held = connecting;
+            let answered = connect_matched(at, ANSWER).await;
+            (held, answered)
+        }));
+        let (returned, answered) = (&mut connected.0).await.unwrap_or_else(|ended| {
             assert!(ended.is_panic(), "a connect task spawned by reach is never cancelled");
             std::panic::resume_unwind(ended.into_panic())
-        })?;
-        match connected {
+        });
+        connecting = returned;
+        match answered? {
             Connected::Matched { channel, gone, id } => {
                 let kept = Kept { shared: Shared::new(channel, gone), socket_id: id };
                 if let Some(shared) = keep(&socket, kept) {
-                    assert!(!shared.gone.is(), "a reached channel returned is not gone");
                     return Ok(Reached::Matched(shared));
                 }
             },
@@ -1278,12 +1293,12 @@ mod tests {
     use std::pin::Pin;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::{Arc, Barrier, Mutex, PoisonError};
     use std::time::Duration;
 
     use lune_protocol::socket::SocketId;
     use lune_waits::{eventually_async, Began, Patience};
-    use tokio::io::AsyncWriteExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::{mpsc, oneshot, Notify};
     use tokio::time::Instant;
@@ -2202,6 +2217,149 @@ mod tests {
         error: &'a (dyn Error + 'static),
     ) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
         std::iter::successors(Some(error), |&error| error.source())
+    }
+
+    #[test]
+    fn a_channel_going_during_cache_lookup_or_insert_never_panics_or_poisons_kept() {
+        const ROUNDS: usize = 512;
+        let tasks = tasks::shared();
+        let _entered = tasks.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("racy.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let id = SocketId::at(&path).unwrap();
+        let (to_marker, from_main) = std::sync::mpsc::channel::<(Gone, usize)>();
+        let barrier = Arc::new(Barrier::new(2));
+        let marker_barrier = Arc::clone(&barrier);
+        let marker = std::thread::spawn(move || {
+            while let Ok((gone, spins)) = from_main.recv() {
+                marker_barrier.wait();
+                for _ in 0..spins {
+                    std::hint::spin_loop();
+                }
+                gone.mark();
+                marker_barrier.wait();
+            }
+        });
+        for round in 0..ROUNDS {
+            let channel = Channel::from_static("http://[::1]:1").connect_lazy();
+            let gone = Gone::default();
+            let shared = Shared::new(channel, gone.clone());
+            let spins = (round % 128) * 16;
+            match round % 3 {
+                0 => {
+                    let _ = keep(&path, Kept { shared, socket_id: id });
+                    to_marker.send((gone, spins)).unwrap();
+                    barrier.wait();
+                    let _ = kept_at(&path);
+                    barrier.wait();
+                },
+                1 => {
+                    to_marker.send((gone, spins)).unwrap();
+                    barrier.wait();
+                    let _ = keep(&path, Kept { shared, socket_id: id });
+                    barrier.wait();
+                },
+                _ => {
+                    let _ = keep(&path, Kept { shared, socket_id: id });
+                    let second = Channel::from_static("http://[::1]:1").connect_lazy();
+                    let fresh_gone = Gone::default();
+                    let fresh = Shared::new(second, fresh_gone.clone());
+                    to_marker.send((gone, spins)).unwrap();
+                    barrier.wait();
+                    let _ = keep(&path, Kept { shared: fresh, socket_id: id });
+                    barrier.wait();
+                    fresh_gone.mark();
+                },
+            }
+        }
+        drop(to_marker);
+        marker.join().unwrap();
+        assert!(kept_at(&path).is_none(), "every marked channel is evicted without poisoning KEPT");
+    }
+
+    #[test]
+    fn cancelling_reach_aborts_its_connect_task_and_bounds_live_connects() {
+        const ZERO_STREAMS_SETTINGS: [u8; 15] = [0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
+        let (_dir, folder) = temp_folder();
+        let socket = folder.socket();
+        let std_listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel::<()>();
+        let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+        let tasks = tasks::shared();
+        let peer_live = Arc::clone(&live);
+        let peer_peak = Arc::clone(&peak);
+        let peer = tasks.spawn(async move {
+            let listener = UnixListener::from_std(std_listener).unwrap();
+            let mut readers = Vec::new();
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    incoming = listener.accept() => {
+                        let Ok((mut stream, _)) = incoming else {
+                            break;
+                        };
+                        let now = peer_live.fetch_add(1, Ordering::Relaxed) + 1;
+                        peer_peak.fetch_max(now, Ordering::Relaxed);
+                        let reader_live = Arc::clone(&peer_live);
+                        let accepted = accepted_tx.clone();
+                        readers.push(tokio::spawn(async move {
+                            let _ = stream.write_all(&ZERO_STREAMS_SETTINGS).await;
+                            let _ = accepted.send(());
+                            let mut buf = [0_u8; 64];
+                            while matches!(stream.read(&mut buf).await, Ok(read) if read > 0) {}
+                            reader_live.fetch_sub(1, Ordering::Relaxed);
+                        }));
+                    },
+                }
+            }
+            for reader in readers {
+                reader.abort();
+            }
+        });
+        tasks.block_on(async {
+            let mut held = Vec::with_capacity(CONNECTING_MAX - 1);
+            for _ in 0..(CONNECTING_MAX - 1) {
+                held.push(CONNECTING.try_acquire().unwrap());
+            }
+            let patience = Patience::begun();
+            for _ in 0..=CONNECTING_MAX {
+                eventually_async("a cancelled reach frees its CONNECTING slot", async || {
+                    tokio::select! {
+                        result = reach(&folder) => match result {
+                            Err(Unreached::Busy) => None,
+                            Err(error) => panic!("a stalled peer failed: {error:?}"),
+                            Ok(_) => panic!("a stalled peer answered"),
+                        },
+                        ready = accepted_rx.recv() => {
+                            assert!(ready.is_some());
+                            Some(())
+                        },
+                    }
+                })
+                .await;
+            }
+            assert!(
+                peak.load(Ordering::Relaxed) <= CONNECTING_MAX,
+                "cancelled reaches opened {} simultaneous sockets past CONNECTING_MAX ({CONNECTING_MAX})",
+                peak.load(Ordering::Relaxed)
+            );
+            eventually_async("cancelled reaches close their sockets", async || {
+                (live.load(Ordering::Relaxed) == 0).then_some(())
+            })
+            .await;
+            let last = eventually_async("the last CONNECTING slot returns", async || {
+                CONNECTING.try_acquire()
+            })
+            .await;
+            drop(last);
+            drop(held);
+            let _ = stop_tx.send(());
+            patience.awaited("stalled peer task ends", peer).await.unwrap();
+        });
     }
 
     #[test]
