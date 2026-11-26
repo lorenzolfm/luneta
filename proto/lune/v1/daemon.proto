@@ -1025,6 +1025,7 @@ message ShowRequest {
     Navigate navigate = 14;
     BrowserTty browser_tty = 15;
   }
+  fixed64 asked = 16;
 
   message Browser {
     optional string url = 1;
@@ -1134,6 +1135,7 @@ message ShowResponse {
     fixed64 sent = 4;
     fixed64 left = 5;
   }
+  fixed64 heard = 6;
 
   message Edged {
     fixed64 worktree = 1;

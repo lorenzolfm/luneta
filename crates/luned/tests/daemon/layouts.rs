@@ -1,11 +1,12 @@
 use std::fmt::{self, Display};
 use std::fs;
 use std::iter;
+use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
-use lune_domain::projects::{Opens, Size, WorktreeId};
+use lune_domain::projects::{Opens, Size, ViewId, WorktreeId};
 use lune_waits::{eventually, shell, Patience, Span, QUIET};
 use luned::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use luned::api::show_response::{self, view::Found, Laid, View};
@@ -95,7 +96,7 @@ impl<'a> Shown<'a> {
     fn greeted(owned: &'a Owned, hello: Hello) -> Shown<'a> {
         let folder = folder_in(owned.host.runtime.path()).unwrap();
         let (asks, asked) = mpsc::channel(16);
-        asks.try_send(ShowRequest { event: Some(Event::Hello(hello)) }).unwrap();
+        asks.try_send(ShowRequest { event: Some(Event::Hello(hello)), asked: 0 }).unwrap();
         let heard = owned.block_on(async move {
             let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
             daemon.show(ReceiverStream::new(asked)).await.unwrap().into_inner()
@@ -108,7 +109,7 @@ impl<'a> Shown<'a> {
     }
 
     fn ask(&self, event: Event) {
-        self.asks.try_send(ShowRequest { event: Some(event) }).unwrap();
+        self.asks.try_send(ShowRequest { event: Some(event), asked: 0 }).unwrap();
     }
 
     fn open(&mut self) -> u64 {
@@ -1926,10 +1927,10 @@ async fn shown_through(
     let on = Some(On { destination: "far".to_owned() });
     let hello = Hello { worktree, size: Some(size(80, 24)), runs_in: None, again: false, on };
     let (asks, asked) = mpsc::channel(1);
-    asks.send(ShowRequest { event: Some(Event::Hello(hello)) }).await.unwrap();
+    asks.send(ShowRequest { event: Some(Event::Hello(hello)), asked: 0 }).await.unwrap();
     let mut heard = daemon.show(ReceiverStream::new(asked)).await?.into_inner();
     match heard.message().await? {
-        Some(ShowResponse { event: Some(show_response::Event::Laid(_)) }) => Ok((asks, heard)),
+        Some(ShowResponse { event: Some(show_response::Event::Laid(_)), .. }) => Ok((asks, heard)),
         other => panic!("a show through the bridge is laid out first, not {other:?}"),
     }
 }
@@ -1994,7 +1995,7 @@ fn the_shows_and_viewers_lune_drops_give_their_places_on_a_bridge_back() {
         let at = Where::On(destination.clone());
         let show = luned::show(luned.clone(), at, shown_in, size, false, told);
         let laid = move || match lune_waits::heard("luned lays the show out", &hearing) {
-            Heard::Laid(laid) => laid,
+            Heard::Laid { laid, .. } => laid,
             other => panic!("a show within the most is laid out, not {other:?}"),
         };
         (show, laid)
@@ -2113,7 +2114,7 @@ fn frames_are_refused_words_out_of_turn_a_machine_misnamed_and_a_terminal_here_n
     let on = Some(On { destination: "far".to_owned() });
     let size = Some(size(80, 24));
     let hello = Hello { worktree, size, runs_in, again: false, on };
-    let words = vec![ShowRequest { event: Some(Event::Hello(hello)) }];
+    let words = vec![ShowRequest { event: Some(Event::Hello(hello)), asked: 0 }];
     let show_refused = owned.block_on(async move {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
         daemon.show(tokio_stream::iter(words)).await.err()
@@ -2187,8 +2188,8 @@ fn seen_and_typed_into(
     let told = move |it| drop(heard.send(it));
     let show = luned::show(folder, at, worktree, size, false, told);
     let laid = || match lune_waits::heard("luned lays the layout out", &hearing) {
-        Heard::Laid(laid) => laid,
-        Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
+        Heard::Laid { laid, .. } => laid,
+        Heard::Refused { why, .. } | Heard::Forgotten(why) | Heard::Lost(why) => {
             panic!("the layout is not laid out: {why}")
         },
         Heard::Edged { direction, .. } => panic!("the layout is at its {direction:?} edge"),
@@ -2266,8 +2267,8 @@ fn a_viewer_reads_no_more_frames_than_lune_has_taken() {
     let told = move |it| drop(heard.send(it));
     let show = luned::show(folder, Where::Here { runs_in: None }, worktree, size, false, told);
     let laid = || match lune_waits::heard("luned lays the layout out", &hearing) {
-        Heard::Laid(laid) => laid,
-        Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
+        Heard::Laid { laid, .. } => laid,
+        Heard::Refused { why, .. } | Heard::Forgotten(why) | Heard::Lost(why) => {
             panic!("the layout is not laid out: {why}")
         },
         Heard::Edged { direction, .. } => panic!("the layout is at its {direction:?} edge"),
@@ -2310,8 +2311,8 @@ fn a_viewer_is_seen_while_others_on_the_same_lune_mux_hold_their_frames() {
     let told = move |it| drop(heard.send(it));
     let show = luned::show(folder, Where::Here { runs_in: None }, worktree, size, false, told);
     let laid = || match lune_waits::heard("luned lays the layout out", &hearing) {
-        Heard::Laid(laid) => laid,
-        Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
+        Heard::Laid { laid, .. } => laid,
+        Heard::Refused { why, .. } | Heard::Forgotten(why) | Heard::Lost(why) => {
             panic!("the layout is not laid out: {why}")
         },
         Heard::Edged { direction, .. } => panic!("the layout is at its {direction:?} edge"),
@@ -2633,4 +2634,72 @@ fn open_browser_is_atomic_for_bare_clones_and_new_folders() {
             )
     });
     assert_eq!(laid.views.len(), 1, "no stray shell terminal is spawned");
+}
+
+#[test]
+fn show_echoes_asked_numbers_on_laid_refused_and_across_stranding() {
+    let owned = Owned::new();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let dir = |name: &str| {
+        let path = home.join(name);
+        fs::create_dir(&path).unwrap();
+        let made = project(&owned.host, &path, None);
+        (made, WorktreeId::of(worktree(&owned.host, made, &path)).unwrap())
+    };
+    let ((first_project, first), (_, second)) = (dir("first"), dir("second"));
+    let folder = folder_in(owned.host.runtime.path()).unwrap();
+    let (heard, hearing) = std::sync::mpsc::channel();
+    let size = Size::of(80, 24).unwrap();
+    let mut show = luned::show(
+        folder,
+        Where::Here { runs_in: None },
+        first,
+        size,
+        false,
+        move |it| drop(heard.send(it)),
+    );
+    let next_laid = |what: &str| match lune_waits::heard(what, &hearing) {
+        Heard::Laid { laid, heard } => (laid, heard),
+        other => panic!("expected Laid ({what}), got {other:?}"),
+    };
+    let (initial, initial_heard) = next_laid("initial layout");
+    assert!(initial.is_empty());
+    assert_eq!(initial_heard, NonZeroU64::new(1), "Hello echoes 1");
+
+    let open_at = show.ask_awaited(Asked::Open { beside: Beside::Alone, opens: command(&WAITS) });
+    let (opened, opened_heard) = next_laid("opened terminal");
+    assert_eq!(opened_heard, Some(open_at));
+    let view = opened.focused().expect("opened view focused").id;
+
+    let focus_at = show.ask_awaited(Asked::Focus(view));
+    let (same, focus_heard) = next_laid("no-op focus still echoes asked number");
+    assert_eq!(focus_heard, Some(focus_at));
+    assert_eq!(same.focused().map(|it| it.id), Some(view));
+
+    let missing = ViewId::of(999_999).unwrap();
+    let refused_at = show.ask_awaited(Asked::Focus(missing));
+    match lune_waits::heard("refused focus", &hearing) {
+        Heard::Refused { heard, .. } => assert_eq!(heard, Some(refused_at)),
+        other => panic!("expected Refused, got {other:?}"),
+    }
+    lune_waits::never("a refused ask sends no extra Laid", || hearing.try_recv().ok());
+
+    let close = Change::CloseProject(CloseProject {
+        project: first_project,
+        worktrees: vec![first.get()],
+        seen: vec![view.get()],
+    });
+    asked(&owned.host, close).unwrap();
+    assert_eq!(lune_waits::heard("closing project strands client", &hearing), Heard::Left(first));
+
+    let stranded_refused = show.ask_awaited(Asked::Welcome);
+    match lune_waits::heard("refused while stranded", &hearing) {
+        Heard::Refused { heard, .. } => assert_eq!(heard, Some(stranded_refused)),
+        other => panic!("expected Refused while stranded, got {other:?}"),
+    }
+
+    let go_at = show.ask_awaited(Asked::Go(second));
+    let (went, go_heard) = next_laid("go to second worktree from stranded");
+    assert_eq!(went.worktree(), second);
+    assert_eq!(go_heard, Some(go_at));
 }

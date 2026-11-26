@@ -64,6 +64,20 @@ fn as_panes(owned: &Owned, window: &mut Window, folder: &Path) {
     });
 }
 
+fn seated(window: &Window, view: &str) {
+    let want = format!(" {view}");
+    eventually(&format!("the sidebar seats {view}"), || {
+        window
+            .screen()
+            .iter()
+            .any(|line| {
+                let sidebar = in_sidebar(line);
+                sidebar.starts_with('▌') && sidebar.contains(&want)
+            })
+            .then_some(())
+    });
+}
+
 fn frames(window: &Window) -> Option<usize> {
     window.screen().iter().map(|line| line.matches('╭').count()).max()
 }
@@ -141,7 +155,7 @@ fn the_menu_opens_a_view_beside_the_one_lune_shows_and_closes_it() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    seated(&window, "work/main");
     as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("a second terminal opens in the layout", || {
@@ -175,7 +189,7 @@ fn views_open_as_tabs_ctrl_h_and_ctrl_l_step_through_them_and_the_menu_shows_pan
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    seated(&window, "work/main");
     window.send(SPLIT);
     eventually("a second terminal opens as a tab of the first", || {
         let terminals = shown(&owned, &dir.path)?.terminals;
@@ -200,12 +214,25 @@ fn views_open_as_tabs_ctrl_h_and_ctrl_l_step_through_them_and_the_menu_shows_pan
 }
 
 #[test]
+fn keys_typed_right_after_opening_a_tab_reach_the_tab_opened() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("lune shows work", || shown(&owned, &dir.path));
+    seated(&window, "work/main");
+    window.send(&format!("{SPLIT}{TYPED}"));
+    eventually("the tab opened has the keys", || window.shows(PRINTED).then_some(()));
+    window.send(LEFT);
+    eventually("the first tab got none of them", || (!window.shows(PRINTED)).then_some(()));
+}
+
+#[test]
 fn the_menu_opens_a_welcome_view_beside_the_terminal_and_d_d_in_it_closes_it() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    seated(&window, "work/main");
     as_panes(&owned, &mut window, &dir.path);
     window.send(WELCOME);
     eventually("a welcome view is drawn beside the terminal", || {
@@ -229,7 +256,7 @@ fn the_menu_and_its_note_over_the_view_give_the_keys_back_as_they_close() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    seated(&window, "work/main");
     assert!(!window.shows(MENU_SHOWS), "no menu is open yet");
     window.send(MENU);
     window.spot_of(MENU_SHOWS);
@@ -255,7 +282,7 @@ fn super_k_runs_an_action_and_asks_for_a_name_in_its_own_box() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    seated(&window, "work/main");
     window.send(PALETTE);
     window.spot_of("─ Actions ");
     window.send("new view\r");
@@ -293,7 +320,7 @@ fn a_view_opened_from_the_sidebar_or_its_menu_takes_the_keys() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    seated(&window, "work/main");
     as_panes(&owned, &mut window, &dir.path);
     let mut before = tops(&window);
     for (keys, count) in [(format!("{SIDEBAR}nv"), 2), (format!("{SIDEBAR}{MENU}nv"), 3)] {
@@ -379,7 +406,7 @@ fn ctrl_h_and_ctrl_l_move_between_views_and_alt_equals_and_minus_resize_the_focu
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    seated(&window, "work/main");
     as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
@@ -449,7 +476,7 @@ fn an_edge_answered_after_a_click_on_another_view_leaves_the_keys_with_the_view(
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    seated(&window, "work/main");
     as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
@@ -485,7 +512,7 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     let first = eventually("lune shows work", || shown(&owned, &dir.path)).id;
-    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    seated(&window, "work/main");
     as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));

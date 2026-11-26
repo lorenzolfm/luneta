@@ -19,6 +19,8 @@ use crate::tasks;
 
 const SAID_MAX: usize = 64;
 
+const HELLO: u64 = 1;
+
 pub use lune_domain::projects::layout::{Direction, Growth, Rect};
 
 fn right(rect: Rect) -> u32 {
@@ -259,11 +261,11 @@ fn tiles(views: &[View], size: Size, shows: Shows) -> Result<(), String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
-    Laid(Laid),
+    Laid { laid: Laid, heard: Option<NonZeroU64> },
     Edged { worktree: WorktreeId, direction: Direction, step: NonZeroU64 },
     Sent(WorktreeId),
     Left(WorktreeId),
-    Refused(String),
+    Refused { why: String, heard: Option<NonZeroU64> },
     Forgotten(String),
     Lost(String),
 }
@@ -294,7 +296,7 @@ pub enum Asked {
 }
 
 impl Asked {
-    fn said(self) -> api::ShowRequest {
+    fn said(self, asked: u64) -> api::ShowRequest {
         use show_request::Event;
         let event = match self {
             Asked::Size(size) => Event::Size(size_said(size)),
@@ -341,7 +343,7 @@ impl Asked {
             Asked::Fullscreen => Event::Fullscreen(()),
             Asked::Arrange(arranged) => Event::Arrange(arranged.to_api().into()),
         };
-        api::ShowRequest { event: Some(event) }
+        api::ShowRequest { event: Some(event), asked }
     }
 }
 
@@ -369,12 +371,20 @@ fn size_said(size: Size) -> show_request::Size {
 }
 
 pub struct Show {
-    outbox: Outbox<Asked>,
+    outbox: Outbox<(u64, Asked)>,
+    asks: u64,
 }
 
 impl Show {
     pub fn ask(&self, asked: Asked) {
-        self.outbox.say(asked);
+        self.outbox.say((0, asked));
+    }
+
+    pub fn ask_awaited(&mut self, asked: Asked) -> NonZeroU64 {
+        self.asks = self.asks.checked_add(1).expect("asks fit in u64");
+        let at = NonZeroU64::new(self.asks).expect("asks count up from 2");
+        self.outbox.say((at.get(), asked));
+        at
     }
 }
 
@@ -423,13 +433,13 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
             told_aside(last);
         }
     }));
-    Show { outbox }
+    Show { outbox, asks: HELLO }
 }
 
 async fn stream(
     folder: &Folder,
     hello: show_request::Hello,
-    inbox: Inbox<Asked>,
+    inbox: Inbox<(u64, Asked)>,
     told: &mut impl FnMut(Heard),
 ) -> Result<Heard, Dropped> {
     let daemon = match crate::reach(folder).await {
@@ -438,7 +448,7 @@ async fn stream(
         Err(error) => return Ok(Heard::Lost(format!("luned is not reached: {error}"))),
     };
     let (sending, sent) = mpsc::channel(SAID_MAX);
-    let first = api::ShowRequest { event: Some(show_request::Event::Hello(hello)) };
+    let first = api::ShowRequest { event: Some(show_request::Event::Hello(hello)), asked: HELLO };
     let said = tokio_stream::once(first).chain(ReceiverStream::new(sent));
     let hearing = match daemon.show(crate::ANSWER, said).await {
         Ok(hearing) => hearing,
@@ -455,16 +465,17 @@ async fn stream(
             },
             Some(Next::Untaken) => return Ok(Heard::Lost(untaken())),
             Some(Next::Dropped) => return Err(Dropped),
-            Some(Next::Said(asked)) => {
-                if let Err(TrySendError::Full(_)) = sending.try_send(asked.said()) {
+            Some(Next::Said((at, asked))) => {
+                if let Err(TrySendError::Full(_)) = sending.try_send(asked.said(at)) {
                     return Ok(Heard::Lost(untaken()));
                 }
                 continue;
             },
         };
+        let heard = NonZeroU64::new(said.heard);
         match said.event {
             Some(show_response::Event::Laid(laid)) => match Laid::heard(laid) {
-                Ok(laid) => told(Heard::Laid(laid)),
+                Ok(laid) => told(Heard::Laid { laid, heard }),
                 Err(why) => {
                     return Ok(Heard::Lost(format!("luned said what lune cannot follow: {why}")));
                 },
@@ -487,7 +498,7 @@ async fn stream(
                     return Ok(Heard::Lost("luned said lune's worktree 0 is gone".to_owned()));
                 },
             },
-            Some(show_response::Event::Refused(why)) => told(Heard::Refused(why)),
+            Some(show_response::Event::Refused(why)) => told(Heard::Refused { why, heard }),
             None => return Ok(Heard::Lost("luned said nothing to lune's layout".to_owned())),
         }
     }

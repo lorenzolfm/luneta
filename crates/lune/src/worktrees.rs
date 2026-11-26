@@ -716,11 +716,11 @@ pub fn opened(
         let left = until.saturating_duration_since(Instant::now());
         let late = |_| format!("luned opened no terminal in {}s", OPENING.as_secs());
         match hearing.recv_timeout(left).map_err(late)? {
-            Heard::Laid(laid) if laid.worktree() != worktree => {
+            Heard::Laid { laid, .. } if laid.worktree() != worktree => {
                 let other = laid.worktree();
                 return Err(format!("luned laid out worktree {other}, not {worktree}"));
             },
-            Heard::Laid(laid) => {
+            Heard::Laid { laid, .. } => {
                 let views: BTreeSet<ViewId> = laid.views().map(|view| view.id).collect();
                 asking = match (asking, opening) {
                     (Asking::Unsent(_), Opening::IfEmpty) if !laid.is_empty() => return Ok(()),
@@ -736,7 +736,7 @@ pub fn opened(
             },
             Heard::Edged { .. } | Heard::Sent(_) => {},
             Heard::Left(gone) => return Err(format!("worktree {gone} is gone")),
-            Heard::Refused(why) => return Err(format!("luned refused: {why}")),
+            Heard::Refused { why, .. } => return Err(format!("luned refused: {why}")),
             Heard::Forgotten(why) | Heard::Lost(why) => return Err(why),
         }
     }

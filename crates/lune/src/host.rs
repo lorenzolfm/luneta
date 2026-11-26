@@ -1256,7 +1256,7 @@ impl App {
     ) -> io::Result<()> {
         let relists = matches!(
             event,
-            Event::Daemon(_) | Event::Shown(_, luned::Heard::Laid(_))
+            Event::Daemon(_) | Event::Shown(_, luned::Heard::Laid { .. })
         );
         let mut dirty = match event {
             Event::Input(input) => self.input(input, now),
@@ -3222,7 +3222,7 @@ impl App {
         let right = self.shown();
         let _ = right.tabs(tabs, titles);
         if let Some(terminal) = terminal {
-            right.ask(luned::Asked::Focus(terminal));
+            right.focus_view(terminal);
         }
         self.seat();
     }
@@ -3282,7 +3282,8 @@ impl App {
             return;
         };
         let terminal = right.focused().and_then(|focused| project.terminal_key(focused));
-        let at = Sitting::Worktree { worktree, terminal };
+        let arranged = right.arranged();
+        let at = Sitting::Worktree { worktree, terminal, arranged };
         self.sidebar.sit(Seat { on, project: project.id, at });
     }
 
