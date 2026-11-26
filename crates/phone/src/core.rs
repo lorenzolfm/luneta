@@ -9,7 +9,7 @@ use std::time::Duration;
 use hyper_util::rt::TokioIo;
 use lune_protocol::said::Said;
 use lune_protocol::turn::Turn;
-use lune_protocol::watch::{HostVersion, WatchedAfter};
+use lune_protocol::watch::{HostVersion, VersionedHost, WatchedAfter};
 use tokio::net::UnixStream;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{mpsc, watch};
@@ -305,16 +305,52 @@ fn tailnet(named: &str) -> Result<Endpoint, Unanswered> {
         .keep_alive_while_idle(false))
 }
 
-async fn watch_unary<T>(
+fn watch_failed(unanswered: &Unanswered) -> Said {
+    Said::new(unanswered.why().to_owned()).expect("unanswered reasons from unary are non-empty")
+}
+
+fn unreadable(why: &str) -> Said {
+    Said::new(format!("{why}, which the core does not read")).expect("loss literal is non-empty")
+}
+
+enum WatchCall<T> {
+    Answered(T),
+    Unimplemented,
+    Failed(Said),
+}
+
+async fn watch_at<T>(
+    deadline: Instant,
     within: NonZeroDuration,
     asked: impl Future<Output = Result<Response<T>, Status>>,
-) -> Result<T, Said> {
-    let unanswered = match timeout(within.get(), asked).await {
-        Ok(Ok(answer)) => return Ok(answer.into_inner()),
-        Ok(Err(status)) => Unanswered::of(&status, Refusals::Others),
-        Err(_) => Unanswered::late(within.get()),
+) -> WatchCall<T> {
+    match timeout_at(deadline, asked).await {
+        Ok(Ok(answer)) => WatchCall::Answered(answer.into_inner()),
+        Ok(Err(status)) if status.code() == Code::Unimplemented => WatchCall::Unimplemented,
+        Ok(Err(status)) => {
+            WatchCall::Failed(watch_failed(&Unanswered::of(&status, Refusals::Others)))
+        },
+        Err(_) => WatchCall::Failed(watch_failed(&Unanswered::late(within.get()))),
+    }
+}
+
+async fn watch_legacy_at(
+    deadline: Instant,
+    within: NonZeroDuration,
+    daemon: &mut Daemon,
+    after: Option<HostVersion>,
+) -> Result<VersionedHost, Said> {
+    let asked = api::WatchRequest {
+        after: after.map(HostVersion::to_api),
+        kept: None,
+        shown: true,
     };
-    Err(Said::new(unanswered.why().to_owned()).expect("unanswered reasons from unary are non-empty"))
+    let host = match timeout_at(deadline, daemon.watch(asked)).await {
+        Ok(Ok(answer)) => answer.into_inner(),
+        Ok(Err(status)) => return Err(watch_failed(&Unanswered::of(&status, Refusals::Others))),
+        Err(_) => return Err(watch_failed(&Unanswered::late(within.get()))),
+    };
+    VersionedHost::of_api(Box::new(host)).map_err(unreadable)
 }
 
 impl Core {
@@ -654,9 +690,20 @@ impl Core {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WatchMode {
+    Changes,
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Poll {
     Immediate,
-    Long { after: HostVersion },
+    Long { after: HostVersion, mode: WatchMode },
+}
+
+enum PollOutcome {
+    Host { host: VersionedHost, mode: WatchMode },
+    Unchanged { mode: WatchMode },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -687,7 +734,7 @@ impl BackedOff {
 #[derive(Debug, PartialEq, Eq)]
 enum Watch {
     Fresh,
-    Heard { after: HostVersion, shown: Model },
+    Heard { after: HostVersion, mode: WatchMode, shown: Model },
     Lost { why: Said, failed: NonZeroU32 },
     Woken { why: Said },
 }
@@ -695,18 +742,27 @@ enum Watch {
 impl Watch {
     fn poll(&self) -> Poll {
         match self {
-            Watch::Heard { after, .. } => Poll::Long { after: *after },
+            Watch::Heard { after, mode, .. } => Poll::Long { after: *after, mode: *mode },
             Watch::Fresh | Watch::Lost { .. } | Watch::Woken { .. } => Poll::Immediate,
         }
     }
 
-    fn heard(self, after: HostVersion, model: Model) -> (Watch, Option<Model>) {
+    fn heard(self, after: HostVersion, mode: WatchMode, model: Model) -> (Watch, Option<Model>) {
         let changed = match self {
             Watch::Heard { shown, .. } => shown != model,
             Watch::Fresh | Watch::Lost { .. } | Watch::Woken { .. } => true,
         };
         let shown = changed.then(|| model.clone());
-        (Watch::Heard { after, shown: model }, shown)
+        (Watch::Heard { after, mode, shown: model }, shown)
+    }
+
+    fn unchanged(self, mode: WatchMode) -> Watch {
+        match self {
+            Watch::Heard { after, shown, .. } => Watch::Heard { after, mode, shown },
+            Watch::Fresh | Watch::Lost { .. } | Watch::Woken { .. } => {
+                unreachable!("an unchanged watch follows a long poll")
+            },
+        }
     }
 
     fn lost(self, why: Said) -> BackedOff {
@@ -716,6 +772,64 @@ impl Watch {
             Watch::Fresh | Watch::Heard { .. } => (true, NonZeroU32::MIN),
         };
         BackedOff { why, failed, tell }
+    }
+}
+
+async fn poll_watch(
+    daemon: &mut Daemon,
+    deadline: Instant,
+    patience: NonZeroDuration,
+    poll: Poll,
+) -> Result<PollOutcome, Said> {
+    match poll {
+        Poll::Immediate => {
+            let asked = api::WatchChangesRequest {
+                after: None,
+                waiter: api::ClientWaiter::Window.into(),
+            };
+            match watch_at(deadline, patience, daemon.watch_changes(asked)).await {
+                WatchCall::Answered(response) => {
+                    let host = response.read_host().map_err(unreadable)?;
+                    Ok(PollOutcome::Host { host, mode: WatchMode::Changes })
+                },
+                WatchCall::Unimplemented => {
+                    let host = watch_legacy_at(deadline, patience, daemon, None).await?;
+                    Ok(PollOutcome::Host { host, mode: WatchMode::Legacy })
+                },
+                WatchCall::Failed(why) => Err(why),
+            }
+        },
+        Poll::Long { after, mode: WatchMode::Changes } => {
+            let asked = api::WatchChangesRequest {
+                after: Some(after.to_api()),
+                waiter: api::ClientWaiter::Window.into(),
+            };
+            match watch_at(deadline, patience, daemon.watch_changes(asked)).await {
+                WatchCall::Answered(response) => match response.read_after(after).map_err(unreadable)? {
+                    WatchedAfter::Host(host) => {
+                        Ok(PollOutcome::Host { host, mode: WatchMode::Changes })
+                    },
+                    WatchedAfter::Unchanged => Ok(PollOutcome::Unchanged { mode: WatchMode::Changes }),
+                },
+                WatchCall::Unimplemented => {
+                    let host = watch_legacy_at(deadline, patience, daemon, Some(after)).await?;
+                    if host.version() == after {
+                        Ok(PollOutcome::Unchanged { mode: WatchMode::Legacy })
+                    } else {
+                        Ok(PollOutcome::Host { host, mode: WatchMode::Legacy })
+                    }
+                },
+                WatchCall::Failed(why) => Err(why),
+            }
+        },
+        Poll::Long { after, mode: WatchMode::Legacy } => {
+            let host = watch_legacy_at(deadline, patience, daemon, Some(after)).await?;
+            if host.version() == after {
+                Ok(PollOutcome::Unchanged { mode: WatchMode::Legacy })
+            } else {
+                Ok(PollOutcome::Host { host, mode: WatchMode::Legacy })
+            }
+        },
     }
 }
 
@@ -729,57 +843,27 @@ async fn watched(
     let mut watch = Watch::Fresh;
     loop {
         let asked_at = Instant::now();
+        let deadline = asked_at + patience.get();
         let poll = watch.poll();
-        let why = match poll {
-            Poll::Immediate => {
-                woken.mark_unchanged();
-                let asked = api::WatchChangesRequest {
-                    after: None,
-                    waiter: api::ClientWaiter::Window.into(),
-                };
-                match watch_unary(patience, daemon.watch_changes(asked)).await {
-                    Ok(response) => match response.read_host() {
-                        Ok(host) => {
-                            let (next, model) = watch.heard(host.version(), Model::of(host.host()));
-                            watch = next;
-                            if let Some(model) = model {
-                                observer.changed(model);
-                            }
-                            sleep_until(asked_at + waits::PACE).await;
-                            continue;
-                        },
-                        Err(why) => Said::new(format!("{why}, which the core does not read"))
-                            .expect("loss literal is non-empty"),
-                    },
-                    Err(why) => why,
+        if matches!(poll, Poll::Immediate) {
+            woken.mark_unchanged();
+        }
+        let why = match poll_watch(&mut daemon, deadline, patience, poll).await {
+            Ok(PollOutcome::Host { host, mode }) => {
+                let (next, model) = watch.heard(host.version(), mode, Model::of(host.host()));
+                watch = next;
+                if let Some(model) = model {
+                    observer.changed(model);
                 }
+                sleep_until(asked_at + waits::PACE).await;
+                continue;
             },
-            Poll::Long { after } => {
-                let asked = api::WatchChangesRequest {
-                    after: Some(after.to_api()),
-                    waiter: api::ClientWaiter::Window.into(),
-                };
-                match watch_unary(patience, daemon.watch_changes(asked)).await {
-                    Ok(response) => match response.read_after(after) {
-                        Ok(WatchedAfter::Host(host)) => {
-                            let (next, model) = watch.heard(host.version(), Model::of(host.host()));
-                            watch = next;
-                            if let Some(model) = model {
-                                observer.changed(model);
-                            }
-                            sleep_until(asked_at + waits::PACE).await;
-                            continue;
-                        },
-                        Ok(WatchedAfter::Unchanged) => {
-                            sleep_until(asked_at + waits::PACE).await;
-                            continue;
-                        },
-                        Err(why) => Said::new(format!("{why}, which the core does not read"))
-                            .expect("loss literal is non-empty"),
-                    },
-                    Err(why) => why,
-                }
+            Ok(PollOutcome::Unchanged { mode }) => {
+                watch = watch.unchanged(mode);
+                sleep_until(asked_at + waits::PACE).await;
+                continue;
             },
+            Err(why) => why,
         };
         if matches!(poll, Poll::Long { .. }) {
             woken.mark_unchanged();
@@ -1049,11 +1133,14 @@ mod tests {
         let model = Model { here: crate::model::Held::Untold, far: Vec::new(), inbox: Vec::new() };
         let watch = Watch::Fresh;
         assert_eq!(watch.poll(), Poll::Immediate);
-        let (watch, shown) = watch.heard(version(1), model.clone());
+        let (watch, shown) = watch.heard(version(1), WatchMode::Changes, model.clone());
         assert_eq!(shown, Some(model.clone()));
-        assert_eq!(watch.poll(), Poll::Long { after: version(1) });
-        let (watch, shown) = watch.heard(version(2), model.clone());
+        assert_eq!(watch.poll(), Poll::Long { after: version(1), mode: WatchMode::Changes });
+        let watch = watch.unchanged(WatchMode::Legacy);
+        assert_eq!(watch.poll(), Poll::Long { after: version(1), mode: WatchMode::Legacy });
+        let (watch, shown) = watch.heard(version(2), WatchMode::Legacy, model.clone());
         assert_eq!(shown, None, "an unchanged model is not told twice");
+        assert_eq!(watch.poll(), Poll::Long { after: version(2), mode: WatchMode::Legacy });
 
         let first = watch.lost(said("down"));
         assert_eq!((first.tell(), first.failed().get()), (Some("down"), 1));
@@ -1070,12 +1157,13 @@ mod tests {
         assert_eq!((reset.tell(), reset.failed().get()), (None, 1), "same loss is not repeated, backoff starts over");
         let other = reset.wake().lost(said("other"));
         assert_eq!((other.tell(), other.failed().get()), (Some("other"), 1));
-        let (_, shown) = other.wake().heard(version(3), model.clone());
+        let (watch, shown) = other.wake().heard(version(3), WatchMode::Changes, model.clone());
         assert_eq!(
             shown,
             Some(model),
             "even the same model as before brings Tree and Inbox back",
         );
+        assert_eq!(watch.poll(), Poll::Long { after: version(3), mode: WatchMode::Changes });
     }
 
     #[test]

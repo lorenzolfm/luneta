@@ -555,32 +555,48 @@ fn a_daemon_watch_carries_no_remotes_and_wakes_only_for_local_changes() {
     });
     assert_eq!(after_remote, WatchedLocalAfter::Unchanged);
 
-    let after_local = std::thread::scope(|scope| {
+    let (next, host) = std::thread::scope(|scope| {
         let waiting = scope.spawn(|| {
             let runtime =
                 tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            runtime.block_on(async {
+            runtime.block_on(lune_waits::awaited("a local change wakes a daemon watch", async {
                 let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-                let asked = WatchLocalChangesRequest {
-                    after: Some(version.to_api()),
-                    standing: DaemonStanding::Kept.into(),
-                };
-                daemon
-                    .watch_local_changes(asked)
-                    .await
-                    .unwrap()
-                    .into_inner()
-                    .read_after(version)
-                    .unwrap()
-            })
+                let mut after = version;
+                loop {
+                    let asked = WatchLocalChangesRequest {
+                        after: Some(after.to_api()),
+                        standing: DaemonStanding::Kept.into(),
+                    };
+                    match daemon
+                        .watch_local_changes(asked)
+                        .await
+                        .unwrap()
+                        .into_inner()
+                        .read_after(after)
+                        .unwrap()
+                    {
+                        WatchedLocalAfter::Host(local) => {
+                            let (next, host) = local.into_parts();
+                            let has_local = match host.projects.as_ref().and_then(|p| p.held.as_ref())
+                            {
+                                Some(Held::Kept(kept)) => {
+                                    kept.projects.iter().any(|project| project.name == "local")
+                                },
+                                Some(Held::Unkept(_)) | None => false,
+                            };
+                            if has_local {
+                                return (next, host);
+                            }
+                            after = next;
+                        },
+                        WatchedLocalAfter::Unchanged => {},
+                    }
+                }
+            }))
         });
         project_named(&here, "local");
         waiting.join().unwrap()
     });
-    let WatchedLocalAfter::Host(local) = after_local else {
-        panic!("a local change wakes a daemon watch: {after_local:?}");
-    };
-    let (next, host) = local.into_parts();
     assert!(next.seq() > version.seq());
     let Some(Held::Kept(kept)) = host.projects.and_then(|projects| projects.held) else {
         panic!("luned keeps its projects");
