@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
@@ -7,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self as std_mpsc, Receiver, SyncSender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use libghostty_vt::Error;
 use libghostty_vt::key::{Action, Key, Mods};
@@ -24,12 +25,14 @@ use crate::front;
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leader;
 use crate::looker::{Ask, Foreground, Gone, InFlight, Looker, Seen, Taken};
-use crate::marks::Mark;
+use crate::marks::{Mark, RESUME_REPORTS_PER_TURN_MAX, push_bounded_resume_report};
 use crate::mux::{MetaUpdate, Mux};
 use crate::panics::{self, Panicked};
 use crate::process::{self, Group, ProcessId};
+use crate::program_resume::{OsInspector, ProgramResumes, ResumeToken};
 use crate::pty::{Led, Pty, Queue, Raise, SignalKey};
 use crate::ran::{Job, Now, Shell};
+use crate::resume_exec;
 use crate::screen::{Answers, Looked, Pushed, Screen, View, Wheel};
 use crate::unread::{Kept, Oldest, Refused, TYPED_BYTES_MAX, Unread};
 
@@ -231,6 +234,8 @@ pub fn start(
     pty: Pty,
     child: Led,
     size: Size,
+    token: ResumeToken,
+    resume_guard: Option<resume_exec::Guard>,
 ) -> io::Result<Started> {
     let terminal = key.id;
     let (to, inbox) = mpsc::channel(MESSAGES_MAX);
@@ -246,9 +251,11 @@ pub fn start(
     let waking = wake.clone();
     let (leader, exits) = Leader::waited(terminal, child, mux.leaders(), move || waking.wake())?;
     let pid = leader.pid();
+    let pty_device = Some(pty.device().raw());
     let waking = wake.clone();
     let looker = Looker::started(terminal, move || waking.wake())?;
     thread::Builder::new().name(format!("terminal {terminal}")).spawn(move || {
+        let _resume_guard = resume_guard;
         if placed.recv().is_err() {
             return;
         }
@@ -289,6 +296,7 @@ pub fn start(
                 titles: Titles::default(),
                 host: host(),
                 statuses_version: 0,
+                resumes: Resumes::new(ProgramResumes::new(token, pid.get(), pty_device)),
             };
             let failed = match panics::contained(|| thread.run()) {
                 Ok(Ok(())) => None,
@@ -362,6 +370,44 @@ struct Thread {
     titles: Titles,
     host: String,
     statuses_version: u64,
+    resumes: Resumes,
+}
+
+struct Resumes {
+    held: ProgramResumes,
+    told: u64,
+}
+
+impl Resumes {
+    fn new(held: ProgramResumes) -> Resumes {
+        Resumes { held, told: 0 }
+    }
+
+    fn tell(&mut self, terminal: TerminalId, mux: &Mux) {
+        let version = self.held.version();
+        if version == self.told {
+            return;
+        }
+        self.told = version;
+        mux.program_resumes(terminal, self.held.snapshot());
+    }
+
+    fn looked(&mut self, terminal: TerminalId, mux: &Mux, look: Look) -> Schedule {
+        let Look { last, heard, now, going } = look;
+        self.held.reap_exited(now, &OsInspector);
+        self.tell(terminal, mux);
+        let going = going || !self.held.is_empty();
+        let schedule = Schedule::next(last, heard, now, going);
+        if self.held.has_exiting() { schedule.by(now + LOOK_AGAIN) } else { schedule }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Look {
+    last: Option<Instant>,
+    heard: bool,
+    now: Instant,
+    going: bool,
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -567,6 +613,20 @@ impl Schedule {
             assert!(due >= last + LOOK_AGAIN, "{:?} after the last", due.duration_since(last));
         }
     }
+
+    #[must_use]
+    fn by(self, soon: Instant) -> Schedule {
+        let schedule = match self {
+            Schedule::Quiet { last } => {
+                Schedule::Scheduled { due: soon, last: Some(last), heard: false }
+            },
+            Schedule::Scheduled { due, last, heard } => {
+                Schedule::Scheduled { due: due.min(soon), last, heard }
+            },
+        };
+        schedule.assert_paced();
+        schedule
+    }
 }
 
 enum Looks {
@@ -596,7 +656,12 @@ impl Looks {
 }
 
 impl Running {
-    fn seen(mut self: Box<Running>, terminal: TerminalId, mux: &Mux) -> io::Result<Box<Running>> {
+    fn seen(
+        mut self: Box<Running>,
+        terminal: TerminalId,
+        mux: &Mux,
+        resumes: &mut Resumes,
+    ) -> io::Result<Box<Running>> {
         let ready = match self.looks {
             idle @ Looks::Idle { .. } => {
                 self.looks = idle;
@@ -609,7 +674,8 @@ impl Running {
                 },
                 Taken::Ready { looker, shell_version, seen } => {
                     let going = self.shell.going();
-                    let schedule = Schedule::next(last, heard, Instant::now(), going);
+                    let look = Look { last, heard, now: Instant::now(), going };
+                    let schedule = resumes.looked(terminal, mux, look);
                     self.looks = Looks::Idle { looker, schedule };
                     (shell_version, seen)
                 },
@@ -634,6 +700,7 @@ impl Running {
         mut self: Box<Running>,
         terminal: TerminalId,
         mux: &Mux,
+        resumes: &mut Resumes,
     ) -> io::Result<Box<Running>> {
         let now = Instant::now();
         let (looker, last, heard) = match self.looks {
@@ -649,7 +716,7 @@ impl Running {
         };
         let going = self.shell.going();
         let Some(group) = self.pty.front_group() else {
-            let schedule = Schedule::next(last, heard, now, going);
+            let schedule = resumes.looked(terminal, mux, Look { last, heard, now, going });
             self.looks = Looks::Idle { looker, schedule };
             self.tell(terminal, mux, None);
             return Ok(self);
@@ -711,8 +778,8 @@ impl Thread {
                 self.write()?;
             }
             if let Program::Runs(running) = std::mem::replace(&mut self.program, Program::Gone) {
-                let running = running.seen(self.key.id, &self.mux)?;
-                let running = running.look_if_due(self.key.id, &self.mux)?;
+                let running = running.seen(self.key.id, &self.mux, &mut self.resumes)?;
+                let running = running.look_if_due(self.key.id, &self.mux, &mut self.resumes)?;
                 self.program = Program::Runs(running);
             }
             if let Some(title) = self.titles.take_due(Instant::now()) {
@@ -999,6 +1066,7 @@ impl Thread {
         let Running { pty, unread, looks, pid, shell, .. } = &mut **running;
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
+        let mut resume_reports: VecDeque<Vec<u8>> = VecDeque::new();
         let mut pushed = Pushed::Rows(0);
         let mut too_long = 0;
         let mut oldest = Oldest::Kept;
@@ -1015,6 +1083,9 @@ impl Thread {
                         oldest = Oldest::Lost;
                     }
                     marks.extend(written.marks);
+                    for body in written.resume_reports {
+                        push_bounded_resume_report(&mut resume_reports, body);
+                    }
                     pushed = pushed.then(written.pushed);
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
@@ -1040,6 +1111,20 @@ impl Thread {
                 Some(if leader.stopped { Job::Stopped } else { Job::Runs })
             };
             shell.read(marks, now, in_front, job);
+        }
+        if !resume_reports.is_empty() {
+            assert!(resume_reports.len() <= RESUME_REPORTS_PER_TURN_MAX);
+            let now_wall = SystemTime::now();
+            let real_uid = rustix::process::getuid().as_raw();
+            let effective_uid = rustix::process::geteuid().as_raw();
+            self.resumes.held.apply_reports(
+                &resume_reports,
+                now_wall,
+                real_uid,
+                effective_uid,
+                &OsInspector,
+            );
+            self.resumes.tell(self.key.id, &self.mux);
         }
         self.dirty = true;
         let scrollback = self.screen.scrollback();

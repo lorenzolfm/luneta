@@ -740,6 +740,20 @@ impl Daemon for StandIn {
     ) -> Result<Response<Self::FramesStream>, Status> {
         Err(Status::unimplemented("a stand-in shows no terminal"))
     }
+
+    async fn list_resume(
+        &self,
+        _: Request<api::ListResumeRequest>,
+    ) -> Result<Response<api::ListResumeResponse>, Status> {
+        Err(Status::unimplemented("a stand-in lists no resume records"))
+    }
+
+    async fn reload_resume(
+        &self,
+        _: Request<api::ReloadResumeRequest>,
+    ) -> Result<Response<api::ReloadResumeResponse>, Status> {
+        Err(Status::unimplemented("a stand-in reloads no resume rules"))
+    }
 }
 
 #[test]

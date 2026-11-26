@@ -14,11 +14,14 @@ use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
 use rustix::time::{clock_gettime, ClockId};
 
 use lune_protocol::process::{arguments, entries, EXEC_STRINGS_BYTES_MAX};
+use lune_protocol::program_resume::{ARGV_BYTES_MAX, ProcessArgv};
 
 use super::{
-    program_named, readable_fd, Found, Id, Mine, Start, Unended, Unread, Unreadable,
+    program_named, readable_fd, Found, Id, Mine, ProcessMeta, Start, Unended, Unread, Unreadable,
     SPURIOUS_WAKES_MAX,
 };
+
+const META_ARGV_BYTES_MAX: usize = ARGV_BYTES_MAX;
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -132,6 +135,78 @@ pub fn environ(pid: u32) -> Result<Vec<OsString>, Unread> {
 
 pub fn cwd(pid: u32) -> Result<PathBuf, Unread> {
     fs::read_link(proc(pid, "cwd")).map_err(|error| unread(pid, &error))
+}
+
+#[must_use]
+pub fn parent(pid: u32) -> Option<u32> {
+    stat_summary(pid).map(|(_, parent)| parent)
+}
+
+#[must_use]
+pub fn meta(pid: u32) -> Option<ProcessMeta> {
+    let (name, parent) = stat_summary(pid)?;
+    let status = fs::read_to_string(proc(pid, "status")).ok()?;
+    let (uid, euid) = uids_in_status(&status)?;
+    let exe = fs::read_link(proc(pid, "exe"))
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .map(|path| path.strip_suffix(" (deleted)").unwrap_or(&path).to_owned());
+    let argv = read_meta_argv(pid);
+    Some(ProcessMeta { pid, parent, uid, euid, name, exe, argv })
+}
+
+fn stat_summary(pid: u32) -> Option<(String, u32)> {
+    let stat = fs::read_to_string(proc(pid, "stat")).ok()?;
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let parsed_pid = stat[..open].trim().parse::<u32>().ok()?;
+    assert_eq!(parsed_pid, pid, "/proc/{pid}/stat is another's");
+    let name = stat[open + 1..close].to_owned();
+    let mut fields = stat[close + 1..].split_whitespace();
+    let state = fields.next()?;
+    let parent = fields.next()?.parse::<u32>().ok()?;
+    let threads = fields.nth(15)?;
+    if matches!(state, "X" | "x") || (state == "Z" && threads == "1") {
+        return None;
+    }
+    Some((name, parent))
+}
+
+#[must_use]
+pub fn same_root(pid: u32, root_pid: u32) -> bool {
+    if pid == root_pid {
+        return true;
+    }
+    let Ok(a) = fs::metadata(proc(pid, "root")) else {
+        return false;
+    };
+    let Ok(b) = fs::metadata(proc(root_pid, "root")) else {
+        return false;
+    };
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+fn read_meta_argv(pid: u32) -> Option<ProcessArgv> {
+    let file = File::open(proc(pid, "cmdline")).ok()?;
+    let most = u64::try_from(META_ARGV_BYTES_MAX).expect("16 KiB fit a u64");
+    let mut raw = Vec::with_capacity(META_ARGV_BYTES_MAX);
+    file.take(most).read_to_end(&mut raw).ok()?;
+    let args = arguments(&raw)?;
+    let words: Vec<String> =
+        args.into_iter().map(|arg| String::from_utf8_lossy(arg).into_owned()).collect();
+    Some(ProcessArgv::bounded(words))
+}
+
+fn uids_in_status(status: &str) -> Option<(u32, u32)> {
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            let mut fields = rest.split_ascii_whitespace();
+            let uid = fields.next()?.parse::<u32>().ok()?;
+            let euid = fields.next()?.parse::<u32>().ok()?;
+            return Some((uid, euid));
+        }
+    }
+    None
 }
 
 fn exec_strings(pid: u32, leaf: &str) -> Result<Vec<u8>, Unread> {

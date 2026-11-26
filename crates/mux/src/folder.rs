@@ -44,6 +44,11 @@ pub struct Claim {
 }
 
 impl Claim {
+    #[must_use]
+    pub fn folder(&self) -> &Path {
+        self.socket.parent().expect("socket lives in its claimed folder")
+    }
+
     pub fn bind(&self) -> io::Result<(UnixListener, Bound)> {
         socket::bind(&self.socket)
     }

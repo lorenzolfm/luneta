@@ -16,7 +16,7 @@ use rustix::termios::{
     self, InputModes, LocalModes, OptionalActions, QueueSelector, SpecialCodeIndex, Winsize,
 };
 
-use crate::asked::{Opens, Size};
+use crate::asked::{Size, SpawnSpec};
 use crate::process::Group;
 
 pub const TERMINAL_VAR: &str = "LUNE_MUX_TERMINAL";
@@ -25,7 +25,8 @@ pub const TERMINAL_MADE_VAR: &str = "LUNE_MUX_TERMINAL_MADE";
 
 pub const TERMINAL_BROWSER_SOCKET_VAR: &str = "TERMINAL_BROWSER_TERMINAL_SOCKET";
 
-const OWN_VARS: [&str; 2] = [TERMINAL_VAR, TERMINAL_MADE_VAR];
+const OWN_VARS: [&str; 3] =
+    [TERMINAL_VAR, TERMINAL_MADE_VAR, lune_protocol::program_resume::TOKEN_VAR];
 
 pub const ZELLIJ_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 
@@ -166,10 +167,10 @@ impl Pty {
         self.device
     }
 
-    pub fn spawned(&self, opens: &Opens, vars: &[(&str, String)]) -> io::Result<Led> {
-        let mut command = Command::new(&opens.program);
-        command.args(&opens.args);
-        command.current_dir(&opens.cwd);
+    pub fn spawned(&self, spec: &SpawnSpec, vars: &[(&str, String)]) -> io::Result<Led> {
+        let mut command = Command::new(&spec.program);
+        command.args(&spec.args);
+        command.current_dir(&spec.cwd);
         command.stdin(self.far.try_clone()?).stdout(self.far.try_clone()?);
         command.stderr(self.far.try_clone()?);
         for name in ZELLIJ_VARS.iter().chain(&OWN_VARS) {
@@ -326,7 +327,6 @@ mod tests {
     use std::num::NonZeroU16;
 
     use super::*;
-    use crate::asked::Ends;
 
     fn opened() -> Pty {
         let columns = NonZeroU16::new(80).unwrap();
@@ -428,13 +428,12 @@ mod tests {
         changed(&pty, |modes| modes.local_modes.set(LocalModes::ECHO, false));
         let script =
             "trap 'printf T; sleep 1000' INT; printf %0500d 0; : > \"$0\"; sleep 1000 & wait";
-        let opens = Opens {
+        let spec = SpawnSpec {
             cwd: crate::asked::AbsoluteCwd::of_path("/".to_owned()).unwrap(),
             program: "/bin/sh".to_owned(),
             args: vec!["-c".to_owned(), script.to_owned(), written.to_str().unwrap().to_owned()],
-            ends: Ends::Closes,
         };
-        let mut child = pty.spawned(&opens, &[]).unwrap().child();
+        let mut child = pty.spawned(&spec, &[]).unwrap().child();
         let output_written = || written.exists().then_some(());
         lune_waits::eventually("the program's output is written", output_written);
         #[cfg(target_os = "linux")]

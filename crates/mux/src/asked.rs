@@ -6,6 +6,7 @@ use std::path::Path;
 use libghostty_vt::key::{self as keys, Mods};
 use libghostty_vt::mouse;
 use lune_protocol::made::Made;
+use lune_protocol::program_resume::{ResumeArgv, ShellKind};
 use tonic::Status;
 
 use crate::api;
@@ -100,11 +101,22 @@ impl AsRef<Path> for AbsoluteCwd {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Opens {
+pub struct SpawnSpec {
     pub cwd: AbsoluteCwd,
     pub program: String,
     pub args: Vec<String>,
-    pub ends: Ends,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Launch {
+    Direct { program: String, args: Vec<String>, ends: Ends },
+    ResumeInShell { shell: String, kind: ShellKind, resume: ResumeArgv },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opens {
+    pub cwd: AbsoluteCwd,
+    pub launch: Launch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +129,37 @@ impl Opens {
     pub fn parse(field: &str, opens: Option<api::Opens>) -> Result<Opens, Status> {
         let opens = present(field, opens)?;
         let cwd = AbsoluteCwd::parse(&format!("{field}.cwd"), opens.cwd)?;
+        if let Some(resume) = opens.resume_in_shell {
+            if opens.program.is_some() {
+                return Err(refused(
+                    &format!("{field}.program"),
+                    "cannot be set with resume_in_shell",
+                ));
+            }
+            if !matches!(api::Ends::try_from(opens.ends), Ok(api::Ends::Unspecified)) {
+                return Err(refused(
+                    &format!("{field}.ends"),
+                    "cannot be set with resume_in_shell",
+                ));
+            }
+            let shell_field = format!("{field}.resume_in_shell.shell");
+            if resume.shell.is_empty() {
+                return Err(refused(&shell_field, "is empty"));
+            }
+            if resume.shell.contains('\0') {
+                return Err(refused(&shell_field, "has a NUL"));
+            }
+            let kind = ShellKind::of_path(&resume.shell)
+                .ok_or_else(|| refused(&shell_field, "is not a supported shell"))?;
+            let argv_field = format!("{field}.resume_in_shell.argv");
+            let api::Program { argv } = present(&argv_field, resume.argv)?;
+            let resume_argv =
+                ResumeArgv::parse(argv).map_err(|why| refused(&argv_field, why))?;
+            return Ok(Opens {
+                cwd,
+                launch: Launch::ResumeInShell { shell: resume.shell, kind, resume: resume_argv },
+            });
+        }
         let api::Program { argv } = present(&format!("{field}.program"), opens.program)?;
         let argv_field = format!("{field}.program.argv");
         let Some((program, args)) = argv.split_first() else {
@@ -136,7 +179,7 @@ impl Opens {
                 return Err(refused(&format!("{field}.ends"), "is not one of CLOSES or HOLDS"));
             },
         };
-        Ok(Opens { cwd, program, args, ends })
+        Ok(Opens { cwd, launch: Launch::Direct { program, args, ends } })
     }
 }
 
@@ -564,7 +607,10 @@ mod tests {
     fn opens_needs_an_absolute_cwd_a_program_and_an_end() {
         let opens = |cwd: &str, program, ends: api::Ends| {
             let ends = ends.into();
-            Opens::parse("opens", Some(api::Opens { cwd: cwd.to_owned(), program, ends }))
+            Opens::parse(
+                "opens",
+                Some(api::Opens { cwd: cwd.to_owned(), program, ends, resume_in_shell: None }),
+            )
         };
         let program = |argv: &[&str]| {
             let argv = argv.iter().map(|arg| (*arg).to_owned()).collect();
@@ -572,7 +618,14 @@ mod tests {
         };
         let shell = program(&["/bin/sh"]);
         let opened = opens("/", program(&["ls", "-l"]), api::Ends::Holds).unwrap();
-        assert_eq!((opened.program.as_str(), opened.args), ("ls", vec!["-l".to_owned()]));
+        assert_eq!(
+            opened.launch,
+            Launch::Direct {
+                program: "ls".to_owned(),
+                args: vec!["-l".to_owned()],
+                ends: Ends::Holds,
+            }
+        );
         let refused = [
             (opens("tmp", shell.clone(), api::Ends::Holds), "opens.cwd is not an absolute path"),
             (opens("/", None, api::Ends::Holds), "opens.program is missing"),
@@ -580,11 +633,54 @@ mod tests {
             (opens("/", program(&[""]), api::Ends::Holds), "opens.program.argv names no program"),
             (opens("/", program(&["ls", "a\0"]), api::Ends::Holds), "opens.program.argv has a NUL"),
             (opens("/\0", shell.clone(), api::Ends::Holds), "opens.cwd has a NUL"),
-            (opens("/", shell, api::Ends::Unspecified), "opens.ends is not one of CLOSES or HOLDS"),
+            (opens("/", shell.clone(), api::Ends::Unspecified), "opens.ends is not one of CLOSES or HOLDS"),
         ];
         for (opens, message) in refused {
             assert_eq!(opens.unwrap_err().message(), message);
         }
+
+        let resume = |shell_path: &str, argv, prog, ends: api::Ends| {
+            Opens::parse(
+                "opens",
+                Some(api::Opens {
+                    cwd: "/".to_owned(),
+                    program: prog,
+                    ends: ends.into(),
+                    resume_in_shell: Some(api::opens::ResumeInShell {
+                        shell: shell_path.to_owned(),
+                        argv,
+                    }),
+                }),
+            )
+        };
+        let parsed_resume =
+            resume("/bin/bash", program(&["nvim"]), None, api::Ends::Unspecified).unwrap();
+        assert_eq!(
+            parsed_resume.launch,
+            Launch::ResumeInShell {
+                shell: "/bin/bash".to_owned(),
+                kind: ShellKind::Bash,
+                resume: ResumeArgv::parse(vec!["nvim".to_owned()]).unwrap(),
+            }
+        );
+        assert_eq!(
+            resume("/bin/bash", program(&["nvim"]), shell, api::Ends::Unspecified)
+                .unwrap_err()
+                .message(),
+            "opens.program cannot be set with resume_in_shell"
+        );
+        assert_eq!(
+            resume("/bin/bash", program(&["nvim"]), None, api::Ends::Holds)
+                .unwrap_err()
+                .message(),
+            "opens.ends cannot be set with resume_in_shell"
+        );
+        assert_eq!(
+            resume("/bin/tcsh", program(&["nvim"]), None, api::Ends::Unspecified)
+                .unwrap_err()
+                .message(),
+            "opens.resume_in_shell.shell is not a supported shell"
+        );
     }
 
     #[test]

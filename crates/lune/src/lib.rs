@@ -47,6 +47,7 @@ mod prune;
 mod pull;
 mod reach;
 mod rebase;
+mod resume;
 mod review;
 mod screen;
 mod sidebar;

@@ -12,9 +12,9 @@ use crate::api::{
     IssueRepositoriesResponse, KeepChecksRequest, KeepImageRequest, KeepPrintedRequest,
     KeepPrintedResponse, ListAgentsResponse,
     ListContentsRequest, ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse,
-    ListSkillsRequest, ListSkillsResponse, ListWorkRequest, MakeWorktreeRequest, PasteRequest,
-    PruneRequest, PrunesRequest, ReadDiffRequest, RebaseRequest, SayRequest, ShowRequest,
-    TranscriptEndsRequest,
+    ListResumeRequest, ListResumeResponse, ListSkillsRequest, ListSkillsResponse, ListWorkRequest,
+    MakeWorktreeRequest, PasteRequest, PruneRequest, PrunesRequest, ReadDiffRequest, RebaseRequest,
+    ReloadResumeRequest, ReloadResumeResponse, SayRequest, ShowRequest, TranscriptEndsRequest,
     TranscriptEndsResponse, WaitingRequest, WaitingResponse,
 };
 use crate::mux::own::api::FromViewer;
@@ -259,6 +259,20 @@ impl Daemon for OverTailnet {
     ) -> Result<Response<Self::FramesStream>, Status> {
         self.0.frames_served(request, served_said).await
     }
+
+    async fn list_resume(
+        &self,
+        _: Request<ListResumeRequest>,
+    ) -> Result<Response<ListResumeResponse>, Status> {
+        Err(unserved("ListResume"))
+    }
+
+    async fn reload_resume(
+        &self,
+        _: Request<ReloadResumeRequest>,
+    ) -> Result<Response<ReloadResumeResponse>, Status> {
+        Err(unserved("ReloadResume"))
+    }
 }
 
 #[cfg(test)]
@@ -414,6 +428,11 @@ mod tests {
                 ("Say", device.say(api::SayRequest::default()).await.map(drop)),
                 ("ReadDiff", device.read_diff(api::ReadDiffRequest::default()).await.map(drop)),
                 ("Show", device.show(tokio_stream::iter(Vec::<ShowRequest>::new())).await.map(drop)),
+                ("ListResume", device.list_resume(api::ListResumeRequest::default()).await.map(drop)),
+                (
+                    "ReloadResume",
+                    device.reload_resume(api::ReloadResumeRequest::default()).await.map(drop),
+                ),
             ];
             let changed = |change| api::ChangeProjectsRequest { on: None, change: Some(change) };
             let opening = |runs: Option<Runs>| api::MakeWorktreeRequest { opens: runs.map(|runs| api::Opens { runs: Some(runs) }), ..Default::default() };

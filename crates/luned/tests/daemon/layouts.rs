@@ -1,6 +1,7 @@
 use std::fmt::{self, Display};
 use std::fs;
 use std::iter;
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
@@ -1423,22 +1424,40 @@ fn a_command_that_spans_lines_is_kept_untyped_when_its_terminal_is_restored() {
 fn an_agent_resumes_when_luned_starts_with_no_mux() {
     let mut owned = Owned::new();
     let worktree = worktree_in_home(&owned);
+    let asked = owned.host.home.path().join("claude-asked");
+    let path = std::env::var_os("PATH").expect("tests run with PATH");
+    let node = std::env::split_paths(&path)
+        .map(|dir| dir.join("node"))
+        .find(|candidate| candidate.is_file())
+        .expect("node must be on PATH");
+    let claude = owned.host.bin().join("claude");
+    let wrote = format!(
+        "#!{node}\n\
+         const fs = require('node:fs');\n\
+         const args = process.argv.slice(2);\n\
+         if (args[0] === '--resume') {{\n\
+           fs.writeFileSync('{asked}.part', args.join(' ') + '\\n');\n\
+           fs.renameSync('{asked}.part', '{asked}');\n\
+         }}\n\
+         setInterval(() => {{}}, 1000);\n",
+        node = node.display(),
+        asked = asked.display(),
+    );
+    fs::write(&claude, wrote).unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
     let mut shown = Shown::new(&owned, worktree, 80, 24);
-    let terminal = shown.open();
+    let terminal = shown.open_running(&["claude"]);
     let pid = root_of(&owned, terminal);
+    let uuid = "015d3962-6f9e-45c3-92bc-c7cef5068215";
     let sessions = owned.host.home.path().join(".claude/sessions");
     fs::create_dir_all(&sessions).unwrap();
-    let file = file_of_pid("resumed-7c22", pid, "idle");
+    let mut file = file_of_pid(uuid, pid, "idle");
+    file["cwd"] = serde_json::json!(work_folder(&owned).to_str().unwrap());
     fs::write(sessions.join(format!("{pid}.json")), file.to_string()).unwrap();
-    let agent = r#""agent": {"harness": "claude-code", "session": "resumed-7c22"}"#;
-    eventually("the agent is kept as what the terminal runs", || {
-        let file = fs::read_to_string(kept(&owned.host)).ok()?;
-        file.replace(['\n', ' '], "").contains(&agent.replace(' ', "")).then_some(())
+    let store = owned.host.home.path().join(".local/state/lune/resume/records.json");
+    eventually("the agent is saved in the resume store", || {
+        fs::read_to_string(&store).ok()?.contains(uuid).then_some(())
     });
-    let asked = owned.host.home.path().join("claude-asked");
-    let claude = owned.host.bin().join("claude");
-    let wrote = format!("echo \"$*\" > '{0}.part' && mv '{0}.part' '{0}'\nexec sleep 600\n", asked.display());
-    script(&claude, &wrote);
     drop(shown);
     owned.stop_daemon();
     owned.kill_mux();
@@ -1446,7 +1465,7 @@ fn an_agent_resumes_when_luned_starts_with_no_mux() {
     let mut again = Shown::new(&owned, worktree, 80, 24);
     again.until("the terminal restored", |laid| laid.views.iter().all(|view| key(view).is_some()));
     let said = eventually("the agent is started again", || fs::read_to_string(&asked).ok());
-    assert_eq!(said, "--resume resumed-7c22\n");
+    assert_eq!(said, format!("--resume {uuid}\n"));
 }
 
 #[test]

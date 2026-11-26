@@ -65,6 +65,12 @@ message Opens {
   string cwd = 1;
   Program program = 2;
   Ends ends = 3;
+  optional ResumeInShell resume_in_shell = 4;
+
+  message ResumeInShell {
+    string shell = 1;
+    Program argv = 2;
+  }
 }
 
 message Program {
@@ -158,6 +164,34 @@ message Terminal {
   optional string tty = 9;
 }
 
+message TerminalResumes {
+  ResumeRecord chosen = 1;
+  repeated ResumeRecord others = 2;
+}
+
+enum ProcessPlacement {
+  PROCESS_PLACEMENT_UNSPECIFIED = 0;
+  PROCESS_PLACEMENT_ROOT = 1;
+  PROCESS_PLACEMENT_SHELL_HOSTED = 2;
+  PROCESS_PLACEMENT_WRAPPED = 3;
+}
+
+message ResumeRecord {
+  uint32 pid = 1;
+  string proc_start = 2;
+  uint32 uid = 3;
+  string process_name = 4;
+  optional string process_exe = 5;
+  optional Program process_argv = 6;
+  ProcessPlacement placement = 7;
+  repeated string argv = 8;
+  oneof cwd {
+    string explicit_cwd = 9;
+    string inferred_cwd = 10;
+  }
+  google.protobuf.Timestamp reported_at = 11;
+}
+
 message ProgramStatuses {
   ProgramStatus root = 1;
   repeated ChildProgramStatus children = 2;
@@ -211,6 +245,7 @@ message Running {
   uint32 pid = 1;
   Foreground foreground = 2;
   Ran ran = 3;
+  optional TerminalResumes resumes = 4;
 }
 
 message Foreground {

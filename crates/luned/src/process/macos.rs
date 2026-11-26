@@ -13,9 +13,10 @@ use sysinfo::{
 };
 
 use lune_protocol::process::{laid_in_procargs, EXEC_STRINGS_BYTES_MAX};
+use lune_protocol::program_resume::ProcessArgv;
 
 use super::{
-    program_named, readable_fd, Found, Id, Mine, Start, Unended, Unread, Unreadable,
+    program_named, readable_fd, Found, Id, Mine, ProcessMeta, Start, Unended, Unread, Unreadable,
     SPURIOUS_WAKES_MAX,
 };
 
@@ -50,6 +51,116 @@ pub fn cwd(pid: u32) -> Result<PathBuf, Unread> {
 pub fn environ(pid: u32) -> Result<Vec<OsString>, Unread> {
     let procargs = procargs(pid)?;
     laid_in_procargs(&procargs).and_then(|laid| laid.environ()).map_err(unparsed)
+}
+
+#[must_use]
+pub fn parent(pid: u32) -> Option<u32> {
+    bsd_info(pid).map(|bsd| bsd.pbi_ppid)
+}
+
+#[must_use]
+pub fn meta(pid: u32) -> Option<ProcessMeta> {
+    let bsd = bsd_info(pid)?;
+    let name_bytes: Vec<u8> =
+        bsd.pbi_comm.iter().map(|ch| ch.cast_unsigned()).take_while(|b| *b != 0).collect();
+    let name = String::from_utf8_lossy(&name_bytes).into_owned();
+    let exe = pid_exe(pid);
+    let argv = procargs(pid).ok().and_then(|raw| {
+        let laid = laid_in_procargs(&raw).ok()?;
+        (!laid.argv.is_empty()).then(|| {
+            let words: Vec<String> =
+                laid.argv.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+            ProcessArgv::bounded(words)
+        })
+    });
+    Some(ProcessMeta {
+        pid: bsd.pbi_pid,
+        parent: bsd.pbi_ppid,
+        uid: bsd.pbi_ruid,
+        euid: bsd.pbi_uid,
+        name,
+        exe,
+        argv,
+    })
+}
+
+fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
+    let native = libc::c_int::try_from(pid).ok()?;
+    let size = libc::c_int::try_from(size_of::<libc::proc_bsdinfo>()).expect("it fits a c_int");
+    #[expect(
+        unsafe_code,
+        reason = "proc_pidinfo writes at most the size it is given into a proc_bsdinfo of that size"
+    )]
+    let (read, bsd) = unsafe {
+        let mut bsd: libc::proc_bsdinfo = std::mem::zeroed();
+        let into = (&raw mut bsd).cast();
+        let read = libc::proc_pidinfo(native, libc::PROC_PIDTBSDINFO, 0, into, size);
+        (read, bsd)
+    };
+    if read != size {
+        return None;
+    }
+    assert_eq!(bsd.pbi_pid, pid, "proc_pidinfo said another process");
+    if bsd.pbi_status == libc::SZOMB {
+        return None;
+    }
+    Some(bsd)
+}
+
+#[must_use]
+pub fn same_root(pid: u32, root_pid: u32) -> bool {
+    if pid == root_pid {
+        return true;
+    }
+    let Some(a) = vnode_root(pid) else {
+        return false;
+    };
+    let Some(b) = vnode_root(root_pid) else {
+        return false;
+    };
+    a == b
+}
+
+fn pid_exe(pid: u32) -> Option<String> {
+    let native = libc::c_int::try_from(pid).ok()?;
+    let max = usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE).expect("max path fits usize");
+    let mut buf = vec![0u8; max];
+    let buf_len = u32::try_from(buf.len()).expect("max path fits u32");
+    #[expect(
+        unsafe_code,
+        reason = "proc_pidpath writes at most `buf_len` bytes into `buf`"
+    )]
+    let written = unsafe { libc::proc_pidpath(native, buf.as_mut_ptr().cast(), buf_len) };
+    let written = usize::try_from(written).ok().filter(|n| *n > 0 && *n <= buf.len())?;
+    String::from_utf8(buf[..written].to_vec()).ok()
+}
+
+fn vnode_root(pid: u32) -> Option<String> {
+    let native = libc::c_int::try_from(pid).ok()?;
+    let size =
+        libc::c_int::try_from(size_of::<libc::proc_vnodepathinfo>()).expect("it fits a c_int");
+    #[expect(
+        unsafe_code,
+        reason = "proc_pidinfo writes at most `size` bytes into `info`"
+    )]
+    let (read, info) = unsafe {
+        let mut info: libc::proc_vnodepathinfo = std::mem::zeroed();
+        let ptr = (&raw mut info).cast();
+        let read = libc::proc_pidinfo(native, libc::PROC_PIDVNODEPATHINFO, 0, ptr, size);
+        (read, info)
+    };
+    if read != size {
+        return None;
+    }
+    let bytes: Vec<u8> = info
+        .pvi_rdir
+        .vip_path
+        .as_flattened()
+        .iter()
+        .map(|ch| ch.cast_unsigned())
+        .take_while(|b| *b != 0)
+        .collect();
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn unparsed(why: &str) -> Unread {

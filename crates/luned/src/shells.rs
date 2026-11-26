@@ -71,6 +71,11 @@ impl Shell {
         let named = Path::new(&self.0).file_name().and_then(|name| name.to_str());
         named.expect("a shell's path ends in its name, in UTF-8")
     }
+
+    #[must_use]
+    pub fn resume_kind(&self) -> Option<lune_protocol::program_resume::ShellKind> {
+        lune_protocol::program_resume::ShellKind::of_path(&self.0)
+    }
 }
 
 struct Named {

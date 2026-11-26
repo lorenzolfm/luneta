@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::Path;
 use std::process;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -14,28 +14,36 @@ use lune_domain::projects::{
 };
 use lune_domain::projects::{Holds, ProjectName, Worktree};
 use lune_domain::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
-use lune_domain::projects::{Session, Side, Size, Terminal, TerminalViewId, Used, View, ViewId};
+use lune_domain::projects::{Side, Size, Terminal, TerminalViewId, Used, View, ViewId};
 use lune_domain::projects::{
     WorktreeId, LAYOUT_VIEWS_MAX, LINE_BYTES_MAX, PATH_BYTES_MAX, VIEWS_MAX,
 };
 use lune_domain::projects::{quoted, Argv, Arranged, Listed, Opens, WORKTREES_MAX};
+use lune_protocol::program_resume::{
+    ResumeArgv, ResumeCwdSource, ResumeRecord, ShellKind, escape_for_display,
+};
+use lune_protocol::program_status::bound_fair;
 use lune_protocol::shell::Doing;
+use lune_protocol::LIST_RESUME_RECORDS_BYTES_MAX;
+use prost::Message as _;
 use tokio::sync::{mpsc as answers, oneshot};
 use tonic::Status;
 
-use crate::agent::Agent;
 use crate::api::{self, show_request, show_response};
 use crate::core::{self, Command as Core, Located, Shown};
 use crate::mux::own::server::{self, Is, Terminals, TerminalsListed};
 use crate::mux::{Failure, Runs as Opened};
-use crate::process::AgentPid;
 use crate::program::{self, Ran as Looked};
 use crate::projects::{self, Changed, Failed, Store};
+use crate::resume::config::{self as resume_config, ConfigState};
+use crate::resume::store::{RecordSource, ResumeAttempt, ResumeStore, StoredResume};
+use crate::resume::synthesize::{LiveTerminal, Synthesizer};
+use crate::resume::{self, trust};
 use crate::shells::Shell;
 use crate::shows::direction_said;
 use crate::terminal_socket::{self, PaneInfo, PaneRef, SocketCommand, SplitAction};
 use crate::watch::Troubles;
-use crate::{shells, Directory};
+use crate::{log, shells, Directory};
 
 use errands::{Errands, Unrun};
 use homes::{Homes, LookTimeout, Spotted};
@@ -103,6 +111,11 @@ pub enum Command {
     Worktrees { root: Dir, listed: Listed, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, listed: Listed },
     Root { project: ProjectId, answer: oneshot::Sender<Result<Root, Unrooted>> },
+    ListResume {
+        terminal_id: Option<NonZeroU32>,
+        answer: oneshot::Sender<api::ListResumeResponse>,
+    },
+    ReloadResume { answer: oneshot::Sender<api::ReloadResumeResponse> },
     Socket(SocketCommand),
     WorktreeFolder { worktree: WorktreeId, answer: oneshot::Sender<Result<Dir, Unrooted>> },
 }
@@ -324,6 +337,24 @@ pub fn start(
 ) -> io::Result<SyncSender<Command>> {
     let (send, commands) = mpsc::sync_channel(COMMANDS_MAX);
     let errands = Errands::start();
+    let resume_config = resume_config::load();
+    match &resume_config {
+        ConfigState::Loaded(config) => {
+            for warning in &config.warnings {
+                log::say(&format!("resume config: {warning}"));
+            }
+        },
+        ConfigState::Incomplete { error, warnings, .. } => {
+            log::say(&format!("resume config failed to load (program resume disabled): {error}"));
+            for warning in warnings {
+                log::say(&format!("resume config: {warning}"));
+            }
+        },
+    }
+    let (resume_store, resume_store_warning) = ResumeStore::open(store.projects().is_some());
+    if let Some(why) = resume_store_warning {
+        log::say(&format!("resume records: {why}"));
+    }
     let mut homes = Homes::start(FOLDER_LOOK)?;
     if let Some(projects) = store.projects() {
         homes.seed(projects);
@@ -347,6 +378,9 @@ pub fn start(
         told: None,
         troubles: Troubles::default(),
         shell: shells::your_shell(),
+        resume_config,
+        resume_store,
+        resume_synth: Synthesizer::default(),
     };
     let thread = thread::Builder::new().name("layouts".to_owned());
     thread.spawn(move || run(layouts, &commands, sweep))?;
@@ -372,6 +406,9 @@ struct Layouts {
     told: Option<BTreeMap<ViewId, Located>>,
     troubles: Troubles,
     shell: Shell,
+    resume_config: ConfigState,
+    resume_store: ResumeStore,
+    resume_synth: Synthesizer,
 }
 
 struct Client {
@@ -395,7 +432,6 @@ struct Known {
     key: TerminalKey,
     heard: Heard,
     settled: Option<Size>,
-    agent_front: Option<AgentPid>,
     remade: Option<Remade>,
 }
 
@@ -414,7 +450,7 @@ struct Remade {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Restored {
     Typing { line: Line, due: Instant, by: Instant },
-    Resumed,
+    Resuming { deadline: Instant },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -579,6 +615,12 @@ impl Layouts {
             },
             Command::Root { project, answer } => {
                 let _ = answer.send(self.root(project));
+            },
+            Command::ListResume { terminal_id, answer } => {
+                let _ = answer.send(self.list_resume(terminal_id));
+            },
+            Command::ReloadResume { answer } => {
+                let _ = answer.send(self.reload_resume());
             },
             Command::WorktreeFolder { worktree, answer } => {
                 let _ = answer.send(self.worktree_folder(worktree));
@@ -1171,9 +1213,14 @@ impl Layouts {
     }
 
     fn forget_closed(&mut self, terminals: &[TerminalViewId]) {
+        let views: Vec<ViewId> = terminals.iter().map(|it| it.view()).collect();
         for terminal in terminals {
             self.known.remove(terminal);
+            self.resume_synth.remove(*terminal);
             self.homes.forget(*terminal);
+        }
+        if let Err(why) = self.resume_store.remove_many(&views) {
+            self.troubles.say(format!("saved resume records were not removed: {why}"));
         }
         let projects = self.store.projects().expect("projects just changed are kept");
         for terminal in terminals {
@@ -1626,7 +1673,7 @@ impl Layouts {
     ) {
         let heard_none = !self.known.values().any(|known| known.heard == Heard::Seen);
         let heard = Heard::Made(Instant::now());
-        let known = Known { key, heard, settled: sized, agent_front: None, remade };
+        let known = Known { key, heard, settled: sized, remade };
         assert!(self.known.insert(terminal, known).is_none(), "terminal {terminal} is made once");
         if heard_none {
             match self.follower.try_send(()) {
@@ -1762,8 +1809,23 @@ impl Layouts {
             let (kept, theirs) = (kept_folder.as_str(), worktree_folder.as_str());
             return Err(format!("neither {kept} nor its worktree's {theirs} is a folder"));
         };
+        let tagged = tag(terminal.view());
+
+        if let Some(stored) = self.resume_store.get(terminal.view()).cloned() {
+            return self.remade_saved(
+                terminal,
+                &folder,
+                changed_folder,
+                &runs,
+                inner,
+                tagged,
+                &stored,
+            );
+        }
+
         let cwd = Directory::from(&folder);
         let args: Vec<String>;
+        let mut reset_to_shell = false;
         let (opened, restore) = match &runs {
             Runs::Shell => (Opened::Shell(&self.shell), None),
             Runs::Command(line) | Runs::Unrun(line) => {
@@ -1779,12 +1841,40 @@ impl Layouts {
                 (Opened::Shell(&self.shell), restore)
             },
             Runs::Agent { harness, session } => {
-                args = vec![harness.resumes().to_owned(), session.as_str().to_owned()];
-                let program = harness.program();
-                (Opened::Command { program, args: &args }, Some(Restored::Resumed))
+                let allowed = self.resume_store.unkept().is_none()
+                    && resume::allows_legacy_agent(
+                        &self.resume_config,
+                        *harness,
+                        session.as_str(),
+                        folder.as_str(),
+                        resume::running_as_root(),
+                    );
+                if allowed {
+                    let plain = Ran { terminal, folder: folder.clone(), runs: Runs::Shell };
+                    if let Err(why) = self.changed(Change::Ran(vec![plain])) {
+                        let program = escape_for_display(harness.program());
+                        log::say(&format!(
+                            "terminal {terminal}: not resuming saved program {program}, starting a shell (reason=store_unwritten: {why})"
+                        ));
+                        (Opened::Shell(&self.shell), None)
+                    } else {
+                        args = vec![harness.resumes().to_owned(), session.as_str().to_owned()];
+                        let program = harness.program();
+                        let restore = Some(Restored::Resuming {
+                            deadline: Instant::now() + RESTORE_SETTLE,
+                        });
+                        (Opened::Command { program, args: &args }, restore)
+                    }
+                } else {
+                    let program = escape_for_display(harness.program());
+                    log::say(&format!(
+                        "terminal {terminal}: not resuming saved program {program}, starting a shell (reason=not_trusted)"
+                    ));
+                    reset_to_shell = true;
+                    (Opened::Shell(&self.shell), None)
+                }
             },
         };
-        let tagged = tag(terminal.view());
         let key = self.mux.made(&cwd, opened, tagged, inner).map_err(|it| it.to_string())?;
         let remade = Remade { at: Instant::now(), restored: restore };
         self.made(terminal, key, Some(inner), Some(remade));
@@ -1792,10 +1882,85 @@ impl Layouts {
         if changed_folder {
             self.homes.forget(terminal);
         }
-        if let Runs::Command(line) = runs {
+        if reset_to_shell {
+            let plain = Ran { terminal, folder, runs: Runs::Shell };
+            if let Err(why) = self.changed(Change::Ran(vec![plain])) {
+                self.troubles.say(format!("terminal {terminal}'s shell state is not kept: {why}"));
+            }
+        } else if let Runs::Command(line) = runs {
             let unrun = Ran { terminal, folder, runs: Runs::Unrun(line) };
             if let Err(why) = self.changed(Change::Ran(vec![unrun])) {
                 self.troubles.say(format!("terminal {terminal}'s line is not kept as unrun: {why}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "remade_saved carries the prepared terminal restore fields")]
+    fn remade_saved(
+        &mut self,
+        terminal: TerminalViewId,
+        folder: &Dir,
+        changed_folder: bool,
+        runs: &Runs,
+        inner: Size,
+        tagged: Vec<u8>,
+        stored: &StoredResume,
+    ) -> Result<(), String> {
+        let decision = decide_saved_resume(stored, &self.resume_config, &self.shell, folder);
+        let (spawn_folder, opened, restore, clear_store) = match decision {
+            SavedChoice::Resume { argv, cwd, mode, rule } => {
+                if let Err(why) = self.resume_store.mark_tried(terminal.view()) {
+                    let program = escape_for_display(argv.program());
+                    log::say(&format!(
+                        "terminal {terminal}: not resuming saved program {program}, starting a shell (reason=store_unwritten: {why})"
+                    ));
+                    (folder.clone(), SavedOpen::Shell, None, false)
+                } else {
+                    let program = escape_for_display(argv.program());
+                    log::say(&format!(
+                        "terminal {terminal}: resuming saved program {program} (rule {rule})"
+                    ));
+                    let open = match mode {
+                        SavedResumeMode::Root => SavedOpen::Root(argv),
+                        SavedResumeMode::InShell(kind) => SavedOpen::InShell { kind, argv },
+                    };
+                    let restore = Some(Restored::Resuming {
+                        deadline: Instant::now() + RESTORE_SETTLE,
+                    });
+                    (cwd, open, restore, false)
+                }
+            },
+            SavedChoice::Skip { reason, program } => {
+                let program = escape_for_display(&program);
+                log::say(&format!(
+                    "terminal {terminal}: not resuming saved program {program}, starting a shell (reason={reason})"
+                ));
+                (folder.clone(), SavedOpen::Shell, None, true)
+            },
+        };
+        let cwd = Directory::from(&spawn_folder);
+        let opened = match &opened {
+            SavedOpen::Shell => Opened::Shell(&self.shell),
+            SavedOpen::Root(argv) => Opened::Command { program: argv.program(), args: argv.args() },
+            SavedOpen::InShell { kind, argv } => {
+                Opened::ResumeInShell { shell: &self.shell, kind: *kind, argv }
+            },
+        };
+        let key = self.mux.made(&cwd, opened, tagged, inner).map_err(|it| it.to_string())?;
+        let remade = Remade { at: Instant::now(), restored: restore };
+        self.made(terminal, key, Some(inner), Some(remade));
+        assert_eq!(self.known.get(&terminal).map(|it| it.key), Some(key), "a remade one is known");
+        if changed_folder || spawn_folder != *folder {
+            self.homes.forget(terminal);
+        }
+        if clear_store && let Err(why) = self.resume_store.remove(terminal.view()) {
+            self.troubles.say(format!("terminal {terminal}'s resume record: {why}"));
+        }
+        if *runs != Runs::Shell {
+            let plain = Ran { terminal, folder: spawn_folder, runs: Runs::Shell };
+            if let Err(why) = self.changed(Change::Ran(vec![plain])) {
+                self.troubles.say(format!("terminal {terminal}'s shell state is not kept: {why}"));
             }
         }
         Ok(())
@@ -1904,7 +2069,11 @@ impl Layouts {
         }
         if let Some(terminal) = terminal {
             self.known.remove(&terminal);
+            self.resume_synth.remove(terminal);
             self.homes.forget(terminal);
+            if let Err(why) = self.resume_store.remove(view) {
+                self.troubles.say(format!("terminal {terminal}'s resume record: {why}"));
+            }
         }
         for client in self.clients.values_mut() {
             client.browser_ttys.remove(&view);
@@ -1982,8 +2151,8 @@ impl Layouts {
                 },
                 Some(_) | None => {
                     let heard = Heard::Seen;
-                    let (settled, agent_front, remade) = (size, None, None);
-                    let known = Known { key, heard, settled, agent_front, remade };
+                    let (settled, remade) = (size, None);
+                    let known = Known { key, heard, settled, remade };
                     self.known.insert(terminal, known);
                 },
             }
@@ -2007,7 +2176,35 @@ impl Layouts {
             return;
         }
         let agents = core::ask(&self.core, Core::AllAgents).unwrap_or_default();
-        let Layouts { store, known, listed, shell, .. } = self;
+        let now = Instant::now();
+        let live_terminals: Vec<LiveTerminal> = self
+            .known
+            .iter()
+            .filter_map(|(&terminal, known)| {
+                let listed = self.listed.get(&known.key)?;
+                let Is::Running { root, front, resumes, .. } = &listed.is else {
+                    return None;
+                };
+                Some(LiveTerminal {
+                    terminal,
+                    key: known.key,
+                    root_pid: root.get(),
+                    front_pid: front.as_ref().map(|f| f.pid.get()),
+                    has_osc_7577: resumes.is_some(),
+                })
+            })
+            .collect();
+        self.resume_synth.refresh(&live_terminals, &agents, &self.resume_config, now);
+        let Layouts {
+            store,
+            known,
+            listed,
+            shell,
+            resume_store,
+            resume_synth,
+            troubles,
+            ..
+        } = self;
         let Some(projects) = store.projects() else {
             return;
         };
@@ -2020,28 +2217,46 @@ impl Layouts {
             let Some((_, held)) = projects.holding_terminal(terminal.view()) else {
                 continue;
             };
+            let chosen_osc = match &listed.is {
+                Is::Running { resumes: Some(resumes), .. } => Some(resumes.chosen().clone()),
+                Is::Running { resumes: None, .. } | Is::Ended => None,
+            };
+            let chosen_synth = resume_synth.get(*terminal).cloned();
+            let has_live_resume = chosen_osc.is_some() || chosen_synth.is_some();
+            if let Some(remade) = &mut known.remade
+                && let Some(Restored::Resuming { deadline }) = &remade.restored
+                && (has_live_resume || now >= *deadline)
+            {
+                remade.restored = None;
+            }
+            let still_resuming = matches!(
+                known.remade.as_ref().and_then(|remade| remade.restored.as_ref()),
+                Some(Restored::Resuming { .. })
+            );
+            let store_result = if let Some(record) = chosen_osc {
+                resume_store.upsert(terminal.view(), RecordSource::Osc7577, record)
+            } else if let Some(record) = chosen_synth {
+                resume_store.upsert(terminal.view(), RecordSource::Synthesized, record)
+            } else if !still_resuming {
+                resume_store.remove(terminal.view())
+            } else {
+                Ok(())
+            };
+            if let Err(why) = store_result {
+                troubles.say(format!("terminal {terminal}'s resume record is not kept: {why}"));
+            }
             let folder = listed
                 .cwd
                 .as_ref()
                 .and_then(|cwd| Dir::parse(cwd.as_str()).ok())
                 .unwrap_or_else(|| held.folder().clone());
-            let mut runs = runs_of(listed, &agents, held.runs(), shell);
-            let front = match &listed.is {
-                Is::Running { front: Some(front), .. } => Some(front.pid),
-                Is::Running { front: None, .. } | Is::Ended => None,
-            };
-            let was_agent = matches!(held.runs(), Runs::Agent { .. });
-            let same_front = front.is_some() && front == known.agent_front;
-            if was_agent && !matches!(runs, Runs::Agent { .. }) && same_front {
-                runs = held.runs().clone();
-            }
+            let mut runs = runs_of(listed, held.runs(), shell);
             let restored = known.remade.as_ref().and_then(|remade| remade.restored.as_ref());
-            if keeps(restored, held.runs(), &listed.is, &runs) {
+            if keeps(restored, held.runs(), &listed.is) {
                 runs = held.runs().clone();
             } else if let Some(remade) = &mut known.remade {
                 remade.restored = None;
             }
-            known.agent_front = front.filter(|_| matches!(runs, Runs::Agent { .. }));
             if folder != *held.folder() {
                 elsewhere.push(*terminal);
             }
@@ -2059,6 +2274,176 @@ impl Layouts {
         }
         for terminal in elsewhere {
             self.homes.mark(terminal);
+        }
+    }
+
+    fn reload_resume(&mut self) -> api::ReloadResumeResponse {
+        let response = resume::reload(&mut self.resume_config);
+        if let Some(api::reload_resume_response::Outcome::Failed(failed)) = &response.outcome {
+            log::say(&format!("resume config reload failed: {}", failed.error));
+        }
+        for warning in &response.warnings {
+            log::say(&format!("resume config: {warning}"));
+        }
+        response
+    }
+
+    fn list_resume(&self, terminal_id: Option<NonZeroU32>) -> api::ListResumeResponse {
+        let (config_path, config_warnings, config) = resume::config_to_api(&self.resume_config);
+        let as_root = resume::running_as_root();
+        let mut terminals = Vec::new();
+        let mut seen_keys = BTreeSet::new();
+
+        if let Some(projects) = self.store.projects() {
+            for (_, terminal) in projects.terminals() {
+                let known = self.known.get(&terminal.id());
+                let mux_key = known.map(|it| it.key);
+                if let Some(key) = mux_key {
+                    seen_keys.insert(key);
+                }
+                if let Some(want) = terminal_id
+                    && mux_key.is_none_or(|key| key.id != want)
+                {
+                    continue;
+                }
+                let listed = mux_key.and_then(|key| self.listed.get(&key));
+                let folder = listed
+                    .and_then(|l| l.cwd.as_ref())
+                    .and_then(|cwd| Dir::parse(cwd.as_str()).ok())
+                    .unwrap_or_else(|| terminal.folder().clone());
+                let stored = self.resume_store.get(terminal.id().view());
+                let osc_resumes = listed.and_then(|listed| match &listed.is {
+                    Is::Running { resumes, .. } => resumes.as_deref(),
+                    Is::Ended => None,
+                });
+                let mut records = Vec::new();
+                if let Some(resumes) = osc_resumes {
+                    records.push(evaluate_resume_record(
+                        RecordSource::Osc7577,
+                        resumes.chosen(),
+                        true,
+                        stored,
+                        &self.resume_config,
+                        as_root,
+                        Some(folder.as_str()),
+                    ));
+                    for record in resumes.others() {
+                        records.push(evaluate_resume_record(
+                            RecordSource::Osc7577,
+                            record,
+                            false,
+                            stored,
+                            &self.resume_config,
+                            as_root,
+                            Some(folder.as_str()),
+                        ));
+                    }
+                } else if let Some(synth) = self.resume_synth.get(terminal.id()) {
+                    records.push(evaluate_resume_record(
+                        RecordSource::Synthesized,
+                        synth,
+                        true,
+                        stored,
+                        &self.resume_config,
+                        as_root,
+                        Some(folder.as_str()),
+                    ));
+                } else if let Some(stored) = stored {
+                    records.push(evaluate_resume_record(
+                        stored.source,
+                        &stored.record,
+                        true,
+                        Some(stored),
+                        &self.resume_config,
+                        as_root,
+                        Some(folder.as_str()),
+                    ));
+                }
+                if records.is_empty() && terminal_id.is_none() {
+                    continue;
+                }
+                terminals.push(api::TerminalResumeRecords {
+                    owner: Some(api::terminal_resume_records::Owner::Layout(
+                        api::terminal_resume_records::LayoutTerminal {
+                            view_id: terminal.id().view().get(),
+                            terminal: mux_key.map(Into::into),
+                        },
+                    )),
+                    folder: folder.as_str().to_owned(),
+                    records,
+                });
+            }
+        }
+
+        for (key, listed) in &self.listed {
+            if seen_keys.contains(key) {
+                continue;
+            }
+            if let Some(want) = terminal_id
+                && key.id != want
+            {
+                continue;
+            }
+            let osc_resumes = match &listed.is {
+                Is::Running { resumes, .. } => resumes.as_deref(),
+                Is::Ended => None,
+            };
+            if osc_resumes.is_none() && terminal_id.is_none() {
+                continue;
+            }
+            let fallback_cwd = listed.cwd.as_ref().map(Directory::as_str);
+            let mut records = Vec::new();
+            if let Some(resumes) = osc_resumes {
+                records.push(evaluate_resume_record(
+                    RecordSource::Osc7577,
+                    resumes.chosen(),
+                    true,
+                    None,
+                    &self.resume_config,
+                    as_root,
+                    fallback_cwd,
+                ));
+                for record in resumes.others() {
+                    records.push(evaluate_resume_record(
+                        RecordSource::Osc7577,
+                        record,
+                        false,
+                        None,
+                        &self.resume_config,
+                        as_root,
+                        fallback_cwd,
+                    ));
+                }
+            }
+            terminals.push(api::TerminalResumeRecords {
+                owner: Some(api::terminal_resume_records::Owner::Untracked((*key).into())),
+                folder: fallback_cwd.unwrap_or_default().to_owned(),
+                records,
+            });
+        }
+
+        terminals.sort_by_key(|entry| match &entry.owner {
+            Some(api::terminal_resume_records::Owner::Layout(layout)) => (
+                layout.terminal.as_ref().map_or(u32::MAX, |k| k.id),
+                layout.view_id,
+            ),
+            Some(api::terminal_resume_records::Owner::Untracked(key)) => (key.id, 0),
+            None => (u32::MAX, u64::MAX),
+        });
+        bound_fair(
+            &mut terminals,
+            |entry| Some(&mut entry.records),
+            |record| record.encoded_len().saturating_add(16),
+            LIST_RESUME_RECORDS_BYTES_MAX,
+        );
+        if terminal_id.is_none() {
+            terminals.retain(|entry| !entry.records.is_empty());
+        }
+        api::ListResumeResponse {
+            config_path,
+            config_warnings,
+            config: Some(config),
+            terminals,
         }
     }
 
@@ -2340,10 +2725,126 @@ fn placed(layout: &Layout, terminal: ViewId, size: Size) -> Option<Size> {
     sized.find(|(view, _)| layout::Leaf::id(*view) == terminal).map(|(_, inner)| inner)
 }
 
-fn keeps(restored: Option<&Restored>, held: &Runs, is: &Is, read: &Runs) -> bool {
+enum SavedOpen {
+    Shell,
+    Root(ResumeArgv),
+    InShell { kind: ShellKind, argv: ResumeArgv },
+}
+
+enum SavedResumeMode {
+    Root,
+    InShell(ShellKind),
+}
+
+enum SavedChoice {
+    Resume { argv: ResumeArgv, cwd: Dir, mode: SavedResumeMode, rule: String },
+    Skip { reason: &'static str, program: String },
+}
+
+fn evaluate_resume_record(
+    source: RecordSource,
+    record: &ResumeRecord,
+    chosen: bool,
+    stored: Option<&StoredResume>,
+    config: &ConfigState,
+    as_root: bool,
+    fallback_cwd: Option<&str>,
+) -> api::ResumeRecordInfo {
+    let persistence = match stored {
+        Some(saved)
+            if saved.source == source
+                && saved.record.pid() == record.pid()
+                && saved.record.proc_start() == record.proc_start()
+                && saved.record.argv() == record.argv() =>
+        {
+            match saved.attempt {
+                ResumeAttempt::Pending => api::ResumePersistence::Saved,
+                ResumeAttempt::Tried => api::ResumePersistence::Tried,
+            }
+        },
+        _ => api::ResumePersistence::Unsaved,
+    };
+    let verdict = trust::evaluate(record, config, as_root, fallback_cwd, false);
+    resume::record_to_api(source, record, chosen, persistence, &verdict)
+}
+
+fn decide_saved_resume(
+    stored: &StoredResume,
+    config_state: &ConfigState,
+    shell: &Shell,
+    folder: &Dir,
+) -> SavedChoice {
+    let our_uid = rustix::process::getuid().as_raw();
+    assert_eq!(stored.record.uid(), our_uid, "stored resume records belong to current user");
+    let program = stored.record.argv().program().to_owned();
+    if config_state.is_incomplete() {
+        return SavedChoice::Skip { reason: "settings_incomplete", program };
+    }
+    let as_root = resume::running_as_root();
+    let allow_root = config_state.loaded().is_some_and(|cfg| cfg.allow_root);
+    if as_root && !allow_root {
+        return SavedChoice::Skip { reason: "program_resume_off", program };
+    }
+    if stored.attempt.is_tried() {
+        return SavedChoice::Skip { reason: "already_tried", program };
+    }
+    let (spawn_dir, eval_record) = match stored.record.cwd() {
+        Some(ResumeCwdSource::Explicit(dir)) => {
+            let Ok(parsed) = Dir::parse(dir.as_str()) else {
+                return SavedChoice::Skip { reason: "dir_gone", program };
+            };
+            if is_folder(&parsed) != Ok(true) {
+                return SavedChoice::Skip { reason: "dir_gone", program };
+            }
+            (parsed, stored.record.clone())
+        },
+        Some(ResumeCwdSource::Inferred(dir)) => {
+            if let Some(parsed) = Dir::parse(dir.as_str()).ok().filter(|d| is_folder(d) == Ok(true))
+            {
+                (parsed, stored.record.clone())
+            } else {
+                (folder.clone(), stored.record.clone().with_cwd(None))
+            }
+        },
+        None => (folder.clone(), stored.record.clone()),
+    };
+    let verdict = trust::evaluate(
+        &eval_record,
+        config_state,
+        as_root,
+        Some(spawn_dir.as_str()),
+        true,
+    );
+    let rule = match verdict {
+        trust::TrustVerdict::Trusted { rule } => rule,
+        trust::TrustVerdict::UntrustedGlobal(trust::GlobalUntrustedReason::ConfigIncomplete) => {
+            return SavedChoice::Skip { reason: "settings_incomplete", program };
+        },
+        trust::TrustVerdict::UntrustedGlobal(trust::GlobalUntrustedReason::Root) => {
+            return SavedChoice::Skip { reason: "program_resume_off", program };
+        },
+        trust::TrustVerdict::UntrustedGlobal(trust::GlobalUntrustedReason::NoRule)
+        | trust::TrustVerdict::UntrustedRule { .. } => {
+            return SavedChoice::Skip { reason: "not_trusted", program };
+        },
+    };
+    let mode = if stored.record.placement().is_root() {
+        SavedResumeMode::Root
+    } else if let Some(kind) = shell.resume_kind() {
+        SavedResumeMode::InShell(kind)
+    } else {
+        return SavedChoice::Skip { reason: "shell_unsupported", program };
+    };
+    assert!(!stored.attempt.is_tried());
+    if as_root {
+        assert!(allow_root);
+    }
+    SavedChoice::Resume { argv: stored.record.argv().clone(), cwd: spawn_dir, mode, rule }
+}
+
+fn keeps(restored: Option<&Restored>, held: &Runs, is: &Is) -> bool {
     match restored {
-        Some(Restored::Typing { .. }) => true,
-        Some(Restored::Resumed) => !matches!(read, Runs::Agent { .. }),
+        Some(Restored::Typing { .. } | Restored::Resuming { .. }) => true,
         None => matches!(held, Runs::Unrun(_)) && !ran_since(is),
     }
 }
@@ -2378,7 +2879,7 @@ fn ran(is: &Is) -> bool {
 
 fn runs_in_front(is: &Is) -> bool {
     match is {
-        Is::Running { root, front, doing } => {
+        Is::Running { root, front, doing, .. } => {
             matches!(doing, Some(Doing::Going { .. }))
                 || front.as_ref().is_some_and(|it| it.pid != *root)
         },
@@ -2536,17 +3037,10 @@ fn laid(
     api::ShowResponse { event: Some(show_response::Event::Laid(laid)) }
 }
 
-fn runs_of(listed: &server::Terminal, agents: &[Agent], before: &Runs, shell: &Shell) -> Runs {
-    let Is::Running { root, front, doing } = &listed.is else {
+fn runs_of(listed: &server::Terminal, before: &Runs, shell: &Shell) -> Runs {
+    let Is::Running { root, front, doing, .. } = &listed.is else {
         return before.clone();
     };
-    if let Some(front) = front
-        && let Some(agent) = agents.iter().find(|agent| agent.pid == front.pid)
-        && let Some(session_id) = agent.session_id.as_ref()
-        && let Ok(session) = Session::parse(session_id.as_str())
-    {
-        return Runs::Agent { harness: agent.harness, session };
-    }
     match (doing, front) {
         (Some(Doing::Ready | Doing::Ended { .. } | Doing::Stopped { .. }), _) => Runs::Shell,
         (Some(Doing::Going { command: Some(command), .. }), _) => runs_line(command.as_str()),
@@ -2597,7 +3091,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::SystemTime;
 
-    use lune_domain::agent::Harness;
     use lune_domain::projects::{Spot, Subfolder};
     use lune_protocol::program_status::{AppName, ProgramPhase, ProgramStatus, ProgramStatuses};
     use lune_protocol::said::Said;
@@ -2606,9 +3099,7 @@ mod tests {
     use super::*;
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
-    use crate::claude;
-    use crate::statuses::tests::decided;
-    use crate::statuses::ActiveStatus;
+    use crate::process::AgentPid;
 
     fn listed(is: Is) -> server::Terminal {
         server::Terminal {
@@ -2627,26 +3118,12 @@ mod tests {
             pid: AgentPid::new(pid).unwrap(),
             argv: argv.iter().map(|word| (*word).to_owned()).collect(),
         });
-        listed(Is::Running { root: AgentPid::new(10).unwrap(), front, doing })
+        listed(Is::Running { root: AgentPid::new(10).unwrap(), front, doing, resumes: None })
     }
 
     fn going(command: Option<&str>) -> Doing {
         let command = command.and_then(|command| Said::new(command.to_owned()));
         Doing::Going { command, since: SystemTime::UNIX_EPOCH, front: Front::Working }
-    }
-
-    fn agent(pid: u32) -> Agent {
-        Agent {
-            pid: AgentPid::new(pid).unwrap(),
-            harness: Harness::ClaudeCode,
-            session_id: Some(Said::new("7c22-ab".to_owned()).unwrap()),
-            cwd: Directory::parse("/w".to_owned()).unwrap(),
-            status: decided(claude::READS, ActiveStatus::Idle, None),
-            started_at: Some(SystemTime::UNIX_EPOCH),
-            name: None,
-            entrypoint: None,
-            terminal: None,
-        }
     }
 
     fn command(line: &str) -> Runs {
@@ -2664,43 +3141,38 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_runs_its_agent_its_command_or_its_shell() {
+    fn a_terminal_runs_its_command_or_its_shell() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("xonsh");
         fs::write(&path, "").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         let shell = Shell::of(path.into_os_string()).unwrap();
         let before = command("htop");
-        let of = |listed: &server::Terminal, agents: &[Agent]| {
-            runs_of(listed, agents, &before, &shell)
-        };
+        let of = |listed: &server::Terminal| runs_of(listed, &before, &shell);
         let claude = running(Some((20, &["claude"])), Some(going(Some("claude"))));
-        let session = Session::parse("7c22-ab").unwrap();
-        let agent_runs = Runs::Agent { harness: Harness::ClaudeCode, session };
-        assert_eq!(of(&claude, &[agent(20)]), agent_runs);
-        assert_eq!(of(&claude, &[agent(21)]), command("claude"));
-        assert_eq!(of(&running(Some((10, &["fish"])), Some(Doing::Ready)), &[]), Runs::Shell);
+        assert_eq!(of(&claude), command("claude"));
+        assert_eq!(of(&running(Some((10, &["fish"])), Some(Doing::Ready))), Runs::Shell);
         let vim = running(Some((20, &["vim", "notes"])), None);
-        assert_eq!(of(&vim, &[]), command("vim notes"));
-        assert_eq!(of(&running(Some((10, &["-bash"])), None), &[]), Runs::Shell);
-        assert_eq!(of(&running(Some((10, &["/nix/store/x/fish"])), None), &[]), Runs::Shell);
-        assert_eq!(of(&running(Some((10, &["-xonsh"])), None), &[]), Runs::Shell);
+        assert_eq!(of(&vim), command("vim notes"));
+        assert_eq!(of(&running(Some((10, &["-bash"])), None)), Runs::Shell);
+        assert_eq!(of(&running(Some((10, &["/nix/store/x/fish"])), None)), Runs::Shell);
+        assert_eq!(of(&running(Some((10, &["-xonsh"])), None)), Runs::Shell);
         let kanban = running(Some((10, &["lune", "kanban"])), None);
-        assert_eq!(of(&kanban, &[]), command("lune kanban"));
-        assert_eq!(of(&running(None, None), &[]), before);
-        assert_eq!(of(&running(None, Some(going(None))), &[]), before);
-        assert_eq!(of(&listed(Is::Ended), &[agent(20)]), before);
+        assert_eq!(of(&kanban), command("lune kanban"));
+        assert_eq!(of(&running(None, None)), before);
+        assert_eq!(of(&running(None, Some(going(None)))), before);
+        assert_eq!(of(&listed(Is::Ended)), before);
         let long = "é".repeat(LINE_BYTES_MAX);
         let too_long = running(Some((20, &[long.as_str()])), None);
         let cut = "é".repeat(LINE_BYTES_MAX / 2 - 1);
-        assert_eq!(of(&too_long, &[]), command(&format!("'{cut}")), "a line is cut on a char");
+        assert_eq!(of(&too_long), command(&format!("'{cut}")), "a line is cut on a char");
         let bell = running(Some((20, &["printf", "\u{7}"])), None);
-        assert_eq!(of(&bell, &[]), command("printf '\u{fffd}'"));
+        assert_eq!(of(&bell), command("printf '\u{fffd}'"));
         for argv in [&["ssh", "box"][..], &["bash", "-c", "make"], &["bash", "-lc", "make"]] {
-            assert_eq!(of(&running(Some((10, argv)), None), &[]), command(&quoted(&own(argv))));
+            assert_eq!(of(&running(Some((10, argv)), None)), command(&quoted(&own(argv))));
         }
         for argv in [&["-zsh"][..], &["fish", "--login"], &["bash", "-i"]] {
-            assert_eq!(of(&running(Some((10, argv)), None), &[]), Runs::Shell, "{argv:?}");
+            assert_eq!(of(&running(Some((10, argv)), None)), Runs::Shell, "{argv:?}");
         }
     }
 
@@ -2718,21 +3190,18 @@ mod tests {
         let ended = listed(Is::Ended);
         let ran_ls = running(Some((10, &["fish"])), Some(ended_ls()));
         for is in [&prompts, &started, &going, &vim, &ended, &ran_ls] {
-            assert!(!keeps(None, &shell, &is.is, &shell), "{is:?}");
-            assert!(!keeps(None, &command("make test"), &is.is, &shell), "{is:?}");
-            assert!(keeps(Some(&typing), &unrun, &is.is, &shell), "{is:?}");
+            assert!(!keeps(None, &shell, &is.is), "{is:?}");
+            assert!(!keeps(None, &command("make test"), &is.is), "{is:?}");
+            assert!(keeps(Some(&typing), &unrun, &is.is), "{is:?}");
         }
         for is in [&prompts, &started] {
-            assert!(keeps(None, &unrun, &is.is, &shell), "{is:?}");
+            assert!(keeps(None, &unrun, &is.is), "{is:?}");
         }
         for is in [&going, &vim, &ended, &ran_ls] {
-            assert!(!keeps(None, &unrun, &is.is, &shell), "{is:?}");
+            assert!(!keeps(None, &unrun, &is.is), "{is:?}");
         }
-        let session = Session::parse("7c22-ab").unwrap();
-        let agent = Runs::Agent { harness: Harness::ClaudeCode, session };
-        let resumed = Some(&Restored::Resumed);
-        assert!(keeps(resumed, &agent, &started.is, &command("claude --resume 7c22-ab")));
-        assert!(!keeps(resumed, &agent, &started.is, &agent));
+        let resuming = Some(&Restored::Resuming { deadline: now + Duration::from_secs(5) });
+        assert!(keeps(resuming, &shell, &started.is));
     }
 
     #[test]
@@ -2939,7 +3408,7 @@ mod tests {
         let key = TerminalKey { id: 1.try_into().unwrap(), made: OwnMade::from_nanos(5) };
         let known = BTreeMap::from([(
             terminal,
-            Known { key, heard: Heard::Seen, settled: None, agent_front: None, remade: None },
+            Known { key, heard: Heard::Seen, settled: None, remade: None },
         )]);
         let before_keys = BTreeMap::from([(terminal, key)]);
 
@@ -2968,6 +3437,7 @@ mod tests {
                 argv: own(argv),
             }),
             doing,
+            resumes: None,
         };
 
         let (core, commands) = mpsc::sync_channel(8);

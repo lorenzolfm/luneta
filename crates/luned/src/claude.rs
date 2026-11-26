@@ -381,7 +381,10 @@ mod tests {
         let mut unset: Vec<&OsStr> =
             claude.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name).collect();
         unset.sort_unstable();
-        assert_eq!(unset, ["LUNE_MUX_TERMINAL", "LUNE_MUX_TERMINAL_MADE"].map(OsStr::new));
+        assert_eq!(
+            unset,
+            ["LUNE_MUX_TERMINAL", "LUNE_MUX_TERMINAL_MADE", "OSC7577_TOKEN"].map(OsStr::new)
+        );
         let heard = Command::new("cat").stdin(told).output().unwrap();
         assert_eq!(heard.stdout, b"the prompt");
     }

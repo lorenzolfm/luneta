@@ -2,6 +2,7 @@ pub mod api;
 pub mod screen;
 pub mod folder;
 pub mod panics;
+pub mod resume_exec;
 pub mod serve;
 
 mod asked;
@@ -13,6 +14,7 @@ mod looker;
 mod marks;
 mod mux;
 mod process;
+mod program_resume;
 mod program_status;
 mod pty;
 mod ran;

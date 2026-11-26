@@ -35,6 +35,7 @@ pub mod projects;
 pub mod prunes;
 pub mod rebases;
 pub mod repositories;
+pub mod resume;
 mod remote;
 pub mod sayings;
 pub mod screens;

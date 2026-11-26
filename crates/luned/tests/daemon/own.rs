@@ -137,7 +137,12 @@ impl Owned {
         let socket = self.socket();
         let program = Some(mux_api::Program { argv });
         let ends = mux_api::Ends::Holds.into();
-        let opens = Some(mux_api::Opens { cwd: self.home(), program, ends });
+        let opens = Some(mux_api::Opens {
+            cwd: self.home(),
+            program,
+            ends,
+            resume_in_shell: None,
+        });
         let size = Some(mux_api::Size { columns: 80, rows: 24 });
         let request = mux_api::NewTerminalRequest { opens, tag: tag.to_vec(), size };
         self.runtime.block_on(async move {

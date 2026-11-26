@@ -2,19 +2,24 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use lune_protocol::program_resume::{TOKEN_VAR, TerminalResumes};
 use lune_protocol::shell::Doing;
 use lune_protocol::socket::Unreached;
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
 use crate::api;
-use crate::asked::{AbsoluteCwd, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
+use crate::asked::{
+    AbsoluteCwd, Ends, Greeting, Launch, Opens, SHOWN_MAX, Size, SpawnSpec, Tag, TerminalKey,
+};
 use crate::id::{ClientId, TerminalId};
 use crate::leader::Leaders;
 use crate::looker::Foreground;
 use crate::panics::Shared;
+use crate::program_resume::ResumeToken;
 use crate::program_status::{EndedProgramStatuses, Snapshot as ProgramStatuses};
 use crate::pty::{self, Pty};
+use crate::resume_exec;
 use crate::terminal::{self, Exit, Handle, Placing, ViewerOut};
 
 use model::{MetaMut, Model, Terminal, Terminals, Viewers};
@@ -42,6 +47,7 @@ pub struct Mux {
     model: Shared<Model>,
     listing: watch::Sender<Listed>,
     leaders: Leaders,
+    runtime_dir: Option<PathBuf>,
     browser_socket: Option<PathBuf>,
 }
 
@@ -98,14 +104,14 @@ impl Mux {
     #[cfg(test)]
     #[must_use]
     pub fn new() -> Arc<Mux> {
-        Mux::with_browser_socket(None)
+        Mux::serving(None, None)
     }
 
     #[must_use]
-    pub fn with_browser_socket(browser_socket: Option<PathBuf>) -> Arc<Mux> {
+    pub fn serving(runtime_dir: Option<PathBuf>, browser_socket: Option<PathBuf>) -> Arc<Mux> {
         let (listing, _) = watch::channel(Listed::Holds(api::Listing::default()));
         let model = Shared::new(Model::new());
-        Arc::new(Mux { model, listing, leaders: Leaders::new(), browser_socket })
+        Arc::new(Mux { model, listing, leaders: Leaders::new(), runtime_dir, browser_socket })
     }
 
     pub fn watched(&self) -> watch::Receiver<Listed> {
@@ -267,6 +273,13 @@ impl Mux {
         );
     }
 
+    pub fn program_resumes(&self, terminal: TerminalId, resumes: Option<TerminalResumes>) {
+        let _ = self.change_terminal_meta(
+            |model| model.terminal_of_id_mut(terminal).ok_or(()),
+            |meta| meta.set_program_resumes(resumes),
+        );
+    }
+
     pub fn ended(
         &self,
         terminal: TerminalId,
@@ -290,10 +303,11 @@ mod model {
     use std::time::SystemTime;
 
     use lune_protocol::made::Made;
+    use lune_protocol::program_resume::TerminalResumes;
     use lune_protocol::program_status::bound_fair;
     use lune_protocol::shell::Doing;
     use lune_protocol::socket::Unreached;
-    use lune_protocol::LISTING_CHILDREN_BYTES_MAX;
+    use lune_protocol::{LISTING_CHILDREN_BYTES_MAX, LISTING_RESUMES_BYTES_MAX};
     use prost::Message as _;
     use tokio::sync::mpsc::error::TrySendError;
     use tokio::sync::oneshot;
@@ -363,6 +377,7 @@ mod model {
             foreground: Option<Foreground>,
             ran: Option<Doing>,
             statuses: ProgramStatuses,
+            resumes: Option<Box<TerminalResumes>>,
         },
         Ended {
             exit: Exit,
@@ -442,6 +457,18 @@ mod model {
             *was = statuses;
             self.modified = true;
         }
+
+        pub(super) fn set_program_resumes(&mut self, resumes: Option<TerminalResumes>) {
+            let Program::Runs { resumes: was, .. } = &mut self.terminal.program else {
+                return;
+            };
+            let resumes = resumes.map(Box::new);
+            if *was == resumes {
+                return;
+            }
+            *was = resumes;
+            self.modified = true;
+        }
     }
 
     impl Terminal {
@@ -468,6 +495,7 @@ mod model {
                     foreground: None,
                     ran: None,
                     statuses: ProgramStatuses::default(),
+                    resumes: None,
                 },
                 handle,
             }
@@ -487,13 +515,15 @@ mod model {
 
         fn said(&self) -> api::Terminal {
             let (program, statuses) = match &self.program {
-                Program::Runs { pid, foreground, ran, statuses, .. } => {
+                Program::Runs { pid, foreground, ran, statuses, resumes, .. } => {
                     let foreground = foreground.as_ref().map(Foreground::said);
                     let ran = ran.as_ref().map(Doing::to_mux);
+                    let resumes = resumes.as_deref().map(TerminalResumes::to_mux);
                     let program = api::terminal::Program::Runs(api::Running {
                         pid: pid.get(),
                         foreground,
                         ran,
+                        resumes,
                     });
                     (program, statuses.to_mux())
                 },
@@ -738,7 +768,45 @@ mod model {
                     terminal.statuses = None;
                 }
             }
+            bound_listing_resumes(&mut terminals, LISTING_RESUMES_BYTES_MAX);
             api::Listing { terminals }
+        }
+    }
+
+    pub(super) fn bound_listing_resumes(terminals: &mut [api::Terminal], budget: usize) {
+        let mut lists: Vec<Option<Vec<api::ResumeRecord>>> = terminals
+            .iter_mut()
+            .map(|terminal| {
+                let Some(api::terminal::Program::Runs(runs)) = &mut terminal.program else {
+                    return None;
+                };
+                let resumes = runs.resumes.take()?;
+                let mut records = Vec::with_capacity(1 + resumes.others.len());
+                if let Some(chosen) = resumes.chosen {
+                    records.push(chosen);
+                }
+                records.extend(resumes.others);
+                (!records.is_empty()).then_some(records)
+            })
+            .collect();
+        bound_fair(
+            &mut lists,
+            Option::as_mut,
+            |record| record.encoded_len().saturating_add(16),
+            budget,
+        );
+        for (terminal, records) in terminals.iter_mut().zip(lists) {
+            let Some(api::terminal::Program::Runs(runs)) = &mut terminal.program else {
+                continue;
+            };
+            let Some(mut records) = records else {
+                continue;
+            };
+            if records.is_empty() {
+                continue;
+            }
+            let chosen = records.remove(0);
+            runs.resumes = Some(api::TerminalResumes { chosen: Some(chosen), others: records });
         }
     }
 
@@ -906,21 +974,46 @@ fn spawned(
     opens: &Opens,
     size: Size,
 ) -> Result<(Terminal, Placing), Status> {
-    let mut vars = vec![
+    let failed =
+        |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));
+    let token =
+        ResumeToken::generate().map_err(|error| failed("no resume token generated", error))?;
+    let (spec, ends, extra_vars, resume_guard) = match &opens.launch {
+        Launch::Direct { program, args, ends } => (
+            SpawnSpec { cwd: opens.cwd.clone(), program: program.clone(), args: args.clone() },
+            *ends,
+            Vec::new(),
+            None,
+        ),
+        Launch::ResumeInShell { shell, kind, resume } => {
+            let prep = resume_exec::prepare(
+                mux.runtime_dir.as_deref(),
+                &opens.cwd,
+                shell,
+                *kind,
+                resume,
+            )
+            .map_err(Status::failed_precondition)?;
+            (prep.spec, Ends::Closes, prep.vars, Some(prep.guard))
+        },
+    };
+    let mut vars: Vec<(&str, String)> = vec![
         (pty::TERMINAL_VAR, key.id.to_string()),
         (pty::TERMINAL_MADE_VAR, key.made.nanos().to_string()),
+        (TOKEN_VAR, token.as_str().to_owned()),
     ];
+    for (name, value) in &extra_vars {
+        vars.push((name.as_str(), value.clone()));
+    }
     if let Some(socket) = &mux.browser_socket {
         vars.push((pty::TERMINAL_BROWSER_SOCKET_VAR, socket.to_string_lossy().into_owned()));
     }
-    let failed =
-        |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));
     let pty = Pty::opened(size).map_err(|error| failed("no pseudoterminal opened", error))?;
     let tty = pty.tty().to_owned();
-    let child = pty.spawned(opens, &vars).map_err(|error| {
+    let child = pty.spawned(&spec, &vars).map_err(|error| {
         Status::failed_precondition(format!("opens did not start: {error}"))
     })?;
-    let started = terminal::start(Arc::clone(mux), key, pty, child, size)
+    let started = terminal::start(Arc::clone(mux), key, pty, child, size, token, resume_guard)
         .map_err(|error| failed("the terminal did not start", error))?;
     let terminal = Terminal::running(
         key,
@@ -929,7 +1022,7 @@ fn spawned(
         opens.cwd.clone(),
         tty,
         started.pid,
-        opens.ends,
+        ends,
         started.handle,
     );
     Ok((terminal, started.placing))
@@ -942,13 +1035,15 @@ pub(crate) mod tests {
 
     use lune_protocol::socket::{self, Found, Unreached};
     use lune_waits::eventually;
+    use prost::Message as _;
     use rustix::io::Errno;
     use rustix::process::{self, Pid};
     use tonic::Code;
 
+    use super::model::bound_listing_resumes;
     use super::{Ending, FinalMeta, Listed, MetaUpdate, Mux, spawned};
-    use crate::api::Listing;
-    use crate::asked::{AbsoluteCwd, Ends, Opens, Size, Tag};
+    use crate::api::{self, Listing};
+    use crate::asked::{AbsoluteCwd, Ends, Launch, Opens, Size, Tag};
     use crate::program_status::EndedProgramStatuses;
     use crate::terminal::Exit;
 
@@ -967,12 +1062,15 @@ pub(crate) mod tests {
     fn script(script: &str, args: &[&str]) -> Opens {
         let program = "/bin/sh".to_owned();
         let args = ["-c", script].iter().chain(args).map(|arg| (*arg).to_owned()).collect();
-        Opens { cwd: cwd("/"), program, args, ends: Ends::Holds }
+        Opens { cwd: cwd("/"), launch: Launch::Direct { program, args, ends: Ends::Holds } }
     }
 
     fn unstartable() -> Opens {
         let program = "/nonexistent/program".to_owned();
-        Opens { cwd: cwd("/"), program, args: Vec::new(), ends: Ends::Holds }
+        Opens {
+            cwd: cwd("/"),
+            launch: Launch::Direct { program, args: Vec::new(), ends: Ends::Holds },
+        }
     }
 
     fn size() -> Size {
@@ -1103,6 +1201,62 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn listing_resumes_are_fair_bounded_preserving_chosen_before_others() {
+        let make_record = |pid: u32, payload_bytes: usize| api::ResumeRecord {
+            pid,
+            proc_start: "100".to_owned(),
+            uid: 1000,
+            process_name: "nvim".to_owned(),
+            process_exe: None,
+            process_argv: None,
+            placement: api::ProcessPlacement::ShellHosted.into(),
+            argv: vec!["nvim".to_owned(), "x".repeat(payload_bytes)],
+            cwd: None,
+            reported_at: None,
+        };
+        let make_terminal = |id: u32, chosen: api::ResumeRecord, others: Vec<api::ResumeRecord>| {
+            api::Terminal {
+                key: Some(api::TerminalKey { id, made_at: None }),
+                program: Some(api::terminal::Program::Runs(api::Running {
+                    pid: id,
+                    foreground: None,
+                    ran: None,
+                    resumes: Some(api::TerminalResumes { chosen: Some(chosen), others }),
+                })),
+                ..api::Terminal::default()
+            }
+        };
+        let unit_cost = make_record(1, 200).encoded_len() + 16;
+        let mut terminals = vec![
+            make_terminal(1, make_record(10, 200), vec![make_record(11, 200), make_record(12, 200)]),
+            make_terminal(2, make_record(20, 200), vec![make_record(21, 200)]),
+            make_terminal(3, make_record(30, 200), vec![make_record(31, 200), make_record(32, 200)]),
+        ];
+        bound_listing_resumes(&mut terminals, unit_cost * 4);
+        let counts: Vec<(Option<u32>, usize)> = terminals
+            .iter()
+            .map(|t| match t.program.as_ref() {
+                Some(api::terminal::Program::Runs(runs)) => match &runs.resumes {
+                    Some(res) => (res.chosen.as_ref().map(|r| r.pid), res.others.len()),
+                    None => (None, 0),
+                },
+                _ => (None, 0),
+            })
+            .collect();
+        assert_eq!(counts, [(Some(10), 1), (Some(20), 0), (Some(30), 0)]);
+
+        bound_listing_resumes(&mut terminals, unit_cost);
+        let kept: Vec<bool> = terminals
+            .iter()
+            .map(|t| match t.program.as_ref() {
+                Some(api::terminal::Program::Runs(runs)) => runs.resumes.is_some(),
+                _ => false,
+            })
+            .collect();
+        assert_eq!(kept, [true, false, false]);
+    }
+
+    #[test]
     fn unchanged_metadata_and_viewer_changes_wake_no_listing_watch() {
         use std::collections::BTreeSet;
 
@@ -1174,7 +1328,14 @@ pub(crate) mod tests {
     fn closing_terminal_ended_removes_it_without_applying_final_metadata() {
         let mux = Mux::new();
         let keeper = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
-        let closing_opens = Opens { ends: Ends::Closes, ..opens() };
+        let closing_opens = Opens {
+            cwd: cwd("/"),
+            launch: Launch::Direct {
+                program: "/bin/sh".to_owned(),
+                args: vec!["-c".to_owned(), "read x".to_owned()],
+                ends: Ends::Closes,
+            },
+        };
         let closing = mux.reserve_terminal().unwrap().start(&closing_opens, tag(), size()).unwrap();
         let mut watched = mux.watched();
         let _ = watched.borrow_and_update();

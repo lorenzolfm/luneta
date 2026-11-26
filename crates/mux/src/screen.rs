@@ -2,6 +2,7 @@ mod answering;
 mod input;
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::rc::Rc;
 use std::time::SystemTime;
@@ -137,6 +138,7 @@ impl View {
 pub struct Written {
     pub answers: Answers,
     pub marks: Vec<Mark>,
+    pub resume_reports: VecDeque<Vec<u8>>,
     pub pushed: Pushed,
 }
 
@@ -215,7 +217,8 @@ impl Screen {
         let (wrote, answers) = self.answering.drive(|terminal| {
             let end = ScrollbackEnd::of(terminal);
             let mut marks = Vec::new();
-            scanner.write(terminal, bytes, &mut marks, |mark| match mark {
+            let mut resume_reports = VecDeque::new();
+            scanner.write(terminal, bytes, &mut marks, &mut resume_reports, |mark| match mark {
                 Mark::Prompt => statuses.borrow_mut().prompt_started(),
                 Mark::Command(_) => statuses.borrow_mut().command_started(),
                 Mark::Done(_) => {},
@@ -225,10 +228,10 @@ impl Screen {
             }
             assert_eq!((terminal.cols()?, terminal.rows()?), (columns, rows));
             let pushed = end.and_then(|end| end.pushed(terminal)).unwrap_or(Pushed::Lost);
-            Ok((marks, pushed))
+            Ok((marks, resume_reports, pushed))
         });
-        let (marks, pushed) = wrote?;
-        Ok(Written { answers, marks, pushed })
+        let (marks, resume_reports, pushed) = wrote?;
+        Ok(Written { answers, marks, resume_reports, pushed })
     }
 
     #[must_use]

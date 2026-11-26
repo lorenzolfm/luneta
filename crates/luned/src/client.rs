@@ -692,6 +692,23 @@ impl Shared {
         self.hold_stream(answer, |mut daemon| async move { daemon.list_work(request).await }).await
     }
 
+    pub async fn reload_resume(
+        &self,
+        answer: Answer,
+        request: api::ReloadResumeRequest,
+    ) -> Result<api::ReloadResumeResponse, Unasked> {
+        self.ask_unary(answer, |mut daemon| async move { daemon.reload_resume(request).await })
+            .await
+    }
+
+    pub async fn list_resume(
+        &self,
+        answer: Answer,
+        request: api::ListResumeRequest,
+    ) -> Result<api::ListResumeResponse, Unasked> {
+        self.ask_unary(answer, |mut daemon| async move { daemon.list_resume(request).await }).await
+    }
+
     pub async fn read_diff(
         &self,
         answer: Answer,
@@ -1743,6 +1760,20 @@ mod tests {
             &self,
             _: GrpcRequest<ReadDiffRequest>,
         ) -> Result<GrpcResponse<Self::ReadDiffStream>, Status> {
+            Err(unserved())
+        }
+
+        async fn list_resume(
+            &self,
+            _: GrpcRequest<api::ListResumeRequest>,
+        ) -> Result<GrpcResponse<api::ListResumeResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn reload_resume(
+            &self,
+            _: GrpcRequest<api::ReloadResumeRequest>,
+        ) -> Result<GrpcResponse<api::ReloadResumeResponse>, Status> {
             Err(unserved())
         }
     }

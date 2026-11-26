@@ -34,6 +34,8 @@ service Daemon {
   rpc Frames(stream FramesRequest) returns (stream lune.mux.v1.ToViewer);
   rpc Waiting(WaitingRequest) returns (WaitingResponse);
   rpc Answer(AnswerRequest) returns (google.protobuf.Empty);
+  rpc ListResume(ListResumeRequest) returns (ListResumeResponse);
+  rpc ReloadResume(ReloadResumeRequest) returns (ReloadResumeResponse);
 }
 
 message On {
@@ -1215,4 +1217,144 @@ message AnswerRequest {
     uint32 index = 1;
     string label = 2;
   }
+}
+
+message ListResumeRequest {
+  On on = 1;
+  optional uint32 terminal_id = 2;
+}
+
+message ListResumeResponse {
+  optional string config_path = 1;
+  repeated string config_warnings = 2;
+  oneof config {
+    LoadedResumeConfig loaded = 3;
+    string error = 4;
+  }
+  repeated TerminalResumeRecords terminals = 5;
+}
+
+message LoadedResumeConfig {
+  repeated ResumeRuleInfo rules = 1;
+  repeated DisabledRuleInfo disabled_rules = 2;
+}
+
+message ReloadResumeRequest {
+  On on = 1;
+}
+
+message ReloadResumeResponse {
+  optional string config_path = 1;
+  repeated string warnings = 2;
+  oneof outcome {
+    uint32 reloaded_rules = 3;
+    Failed failed = 4;
+  }
+
+  message Failed {
+    string error = 1;
+    optional uint32 kept_previous_rules = 2;
+  }
+}
+
+message ResumeRuleInfo {
+  string name = 1;
+  bool builtin = 2;
+  string command = 3;
+  repeated string dirs = 4;
+  optional FlagSummary flags = 5;
+  repeated string overrides = 6;
+
+  message FlagSummary {
+    uint32 kept = 1;
+    uint32 dropped = 2;
+  }
+}
+
+message DisabledRuleInfo {
+  string name = 1;
+  string reason = 2;
+}
+
+message TerminalResumeRecords {
+  oneof owner {
+    LayoutTerminal layout = 1;
+    TerminalKey untracked = 2;
+  }
+  string folder = 3;
+  repeated ResumeRecordInfo records = 4;
+
+  message LayoutTerminal {
+    fixed64 view_id = 1;
+    optional TerminalKey terminal = 2;
+  }
+}
+
+message ResumeRecordInfo {
+  ResumeRecordSource source = 1;
+  uint32 owner_pid = 2;
+  string owner_name = 3;
+  repeated string argv = 4;
+  oneof cwd {
+    string explicit_cwd = 5;
+    string inferred_cwd = 6;
+  }
+  ResumePlacement placement = 7;
+  bool chosen = 8;
+  ResumePersistence persistence = 9;
+  google.protobuf.Timestamp reported_at = 10;
+  oneof verdict {
+    string trusted_rule = 11;
+    Untrusted untrusted = 12;
+  }
+
+  message Untrusted {
+    oneof detail {
+      GlobalTrustReason global = 1;
+      RuleRejected by_rule = 2;
+    }
+  }
+
+  message RuleRejected {
+    string rule = 1;
+    RuleTrustReason reason = 2;
+  }
+}
+
+enum ResumePlacement {
+  RESUME_PLACEMENT_UNSPECIFIED = 0;
+  RESUME_PLACEMENT_ROOT = 1;
+  RESUME_PLACEMENT_SHELL_HOSTED = 2;
+  RESUME_PLACEMENT_WRAPPED = 3;
+}
+
+enum ResumePersistence {
+  RESUME_PERSISTENCE_UNSPECIFIED = 0;
+  RESUME_PERSISTENCE_UNSAVED = 1;
+  RESUME_PERSISTENCE_SAVED = 2;
+  RESUME_PERSISTENCE_TRIED = 3;
+}
+
+enum ResumeRecordSource {
+  RESUME_RECORD_SOURCE_UNSPECIFIED = 0;
+  RESUME_RECORD_SOURCE_OSC_7577 = 1;
+  RESUME_RECORD_SOURCE_SYNTHESIZED = 2;
+}
+
+enum GlobalTrustReason {
+  GLOBAL_TRUST_REASON_UNSPECIFIED = 0;
+  GLOBAL_TRUST_REASON_CONFIG_INCOMPLETE = 1;
+  GLOBAL_TRUST_REASON_NO_RULE = 2;
+  GLOBAL_TRUST_REASON_ROOT = 3;
+}
+
+enum RuleTrustReason {
+  RULE_TRUST_REASON_UNSPECIFIED = 0;
+  RULE_TRUST_REASON_PROGRAM_DIFFERS = 1;
+  RULE_TRUST_REASON_WRAPPED = 2;
+  RULE_TRUST_REASON_LAUNCH_UNREADABLE = 3;
+  RULE_TRUST_REASON_FLAG_NOT_LISTED = 4;
+  RULE_TRUST_REASON_FLAG_VALUE = 5;
+  RULE_TRUST_REASON_FLAGS_DIFFER = 6;
+  RULE_TRUST_REASON_DIR_NOT_ALLOWED = 7;
 }

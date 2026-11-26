@@ -458,6 +458,7 @@ fn forget_at(file: &Path) -> Result<Forgotten, String> {
         Err(error) if error.kind() == ErrorKind::NotFound => {},
         Err(error) => return Err(format!("{}: {error}", file.display())),
     }
+    crate::resume::store::forget_in(folder)?;
     drop(lock);
     Ok(held)
 }
@@ -663,13 +664,18 @@ mod tests {
         let spot = spot_at("/w/lune", "main");
         store.change(add_in(lune, spot)).unwrap();
         let held = store.projects().unwrap().clone();
+        let resume_file = file.parent().unwrap().join("resume").join("records.json");
+        fs::create_dir_all(resume_file.parent().unwrap()).unwrap();
+        fs::write(&resume_file, "{}").unwrap();
         let refused = forget_at(&file).unwrap_err();
         assert!(refused.starts_with("a luned keeps them still"), "{refused}");
         assert!(file.exists());
+        assert!(resume_file.exists());
 
         drop(store);
         assert_eq!(forget_at(&file), Ok(Forgotten::Read(held)));
         assert!(!file.exists());
+        assert!(!resume_file.exists());
         let again = store_at(Ok(file.clone()), core);
         assert_eq!(again.projects(), Some(&Projects::default()));
         drop(again);

@@ -16,6 +16,7 @@ use std::{env, fs};
 use hyper_util::rt::TokioIo;
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{Line, Size, VIEWS_MAX};
+use lune_protocol::program_resume::TerminalResumes;
 use lune_protocol::program_status::ProgramStatuses;
 use lune_protocol::shell::Doing;
 use rustix::process::{Pid, Signal};
@@ -732,15 +733,33 @@ fn mine(stream: UnixStream) -> io::Result<(UnixStream, Option<Pid>)> {
 }
 
 fn opens(cwd: &Directory, runs: Runs<'_>) -> api::Opens {
-    let (argv, ends) = match runs {
-        Runs::Shell(shell) => (vec![shell.as_str().to_owned()], api::Ends::Closes),
+    let cwd = cwd.as_str().to_owned();
+    match runs {
+        Runs::Shell(shell) => api::Opens {
+            cwd,
+            program: Some(api::Program { argv: vec![shell.as_str().to_owned()] }),
+            ends: api::Ends::Closes.into(),
+            resume_in_shell: None,
+        },
         Runs::Command { program, args } => {
             let argv = std::iter::once(program.to_owned()).chain(args.iter().cloned()).collect();
-            (argv, api::Ends::Holds)
+            api::Opens {
+                cwd,
+                program: Some(api::Program { argv }),
+                ends: api::Ends::Holds.into(),
+                resume_in_shell: None,
+            }
         },
-    };
-    let program = Some(api::Program { argv });
-    api::Opens { cwd: cwd.as_str().to_owned(), program, ends: ends.into() }
+        Runs::ResumeInShell { shell, argv, .. } => api::Opens {
+            cwd,
+            program: None,
+            ends: api::Ends::Unspecified.into(),
+            resume_in_shell: Some(api::opens::ResumeInShell {
+                shell: shell.as_str().to_owned(),
+                argv: Some(api::Program { argv: argv.words().to_vec() }),
+            }),
+        },
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -835,7 +854,12 @@ pub struct Terminal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Is {
     Ended,
-    Running { root: AgentPid, front: Option<Foreground>, doing: Option<Doing> },
+    Running {
+        root: AgentPid,
+        front: Option<Foreground>,
+        doing: Option<Doing>,
+        resumes: Option<Box<TerminalResumes>>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -918,7 +942,9 @@ fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<St
                     None
                 },
             };
-            Is::Running { root, front, doing }
+            let (resumes, resume_warnings) = TerminalResumes::of_mux(runs.resumes, key.id.get());
+            warnings.extend(resume_warnings);
+            Is::Running { root, front, doing, resumes: resumes.map(Box::new) }
         },
     };
     let ended = matches!(is, Is::Ended);
@@ -1544,6 +1570,7 @@ mod tests {
                 pid: 70,
                 foreground: None,
                 ran,
+                resumes: None,
             })),
             ..api::Terminal::default()
         });
@@ -1623,6 +1650,7 @@ mod tests {
             pid: 70,
             foreground: None,
             ran: None,
+            resumes: None,
         }));
         let working = |progress| api::ProgramStatus {
             phase: Some(Phase::Working(api::ProgramStatusWorking { progress })),
@@ -1700,6 +1728,31 @@ mod tests {
     }
 
     #[test]
+    fn malformed_terminal_resumes_warns_without_dropping_terminal() {
+        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let missing_chosen = api::Terminal {
+            key: Some(api::TerminalKey { id: 1, made_at }),
+            cwd: "/w".to_owned(),
+            program: Some(api::terminal::Program::Runs(api::Running {
+                pid: 70,
+                foreground: None,
+                ran: None,
+                resumes: Some(api::TerminalResumes { chosen: None, others: Vec::new() }),
+            })),
+            ..api::Terminal::default()
+        };
+        let (terminals, unread, unsaid) = super::terminals(vec![missing_chosen]);
+        let terminals: Vec<&Terminal> = terminals.values().collect();
+        assert_eq!(terminals.len(), 1);
+        assert!(unread.is_empty(), "{unread:?}");
+        assert_eq!(unsaid.len(), 1, "{unsaid:?}");
+        let Is::Running { resumes, .. } = &terminals[0].is else {
+            panic!("expected running terminal");
+        };
+        assert!(resumes.is_none());
+    }
+
+    #[test]
     fn a_foreground_with_invalid_pid_or_empty_argv_is_left_out_with_a_warning() {
         let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
         let listed = [
@@ -1716,6 +1769,7 @@ mod tests {
                 pid: 70,
                 foreground,
                 ran: None,
+                resumes: None,
             })),
             ..api::Terminal::default()
         });

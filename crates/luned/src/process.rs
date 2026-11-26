@@ -6,6 +6,7 @@ use std::num::NonZeroU32;
 use std::os::fd::OwnedFd;
 use std::process::ChildStdout;
 
+use lune_protocol::program_resume::{ProcessArgv, ProcessPlacement, is_shell_ancestor};
 use rustix::io::Errno;
 use rustix::process::Pid;
 use tokio::io::unix::AsyncFd;
@@ -24,7 +25,60 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("luned reads processes on Linux and macOS, and on nothing else yet");
 
-pub use os::{cwd, environ, signalled, start, started, Domain};
+pub use os::{cwd, environ, meta, parent, same_root, signalled, start, started, Domain};
+
+pub const ANCESTOR_DEPTH_MAX: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessMeta {
+    pub pid: u32,
+    pub parent: u32,
+    pub uid: u32,
+    pub euid: u32,
+    pub name: String,
+    pub exe: Option<String>,
+    pub argv: Option<ProcessArgv>,
+}
+
+#[must_use]
+pub fn placement(pid: u32, pty_root_pid: u32) -> ProcessPlacement {
+    assert!(pid > 0);
+    assert!(pty_root_pid > 0);
+    if pid == pty_root_pid {
+        return ProcessPlacement::Root;
+    }
+    if !same_root(pid, pty_root_pid) {
+        return ProcessPlacement::Wrapped;
+    }
+    let Some(first) = meta(pid) else {
+        return ProcessPlacement::Wrapped;
+    };
+    let mut current = first.parent;
+    let mut visited = vec![pid];
+    for _ in 0..ANCESTOR_DEPTH_MAX {
+        if current <= 1 || visited.contains(&current) {
+            break;
+        }
+        visited.push(current);
+        let Some(ancestor) = meta(current) else {
+            return ProcessPlacement::Wrapped;
+        };
+        let is_root = ancestor.pid == pty_root_pid;
+        if !is_shell_ancestor(
+            &ancestor.name,
+            ancestor.exe.as_deref(),
+            ancestor.argv.as_ref().map(ProcessArgv::words),
+            is_root,
+        ) {
+            return ProcessPlacement::Wrapped;
+        }
+        if is_root {
+            return ProcessPlacement::ShellHosted;
+        }
+        current = ancestor.parent;
+    }
+    ProcessPlacement::Wrapped
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AgentPid(NonZeroU32);

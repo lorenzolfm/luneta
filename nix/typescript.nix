@@ -1,6 +1,14 @@
 { pkgs }:
 let
   nodeTypes = pkgs.writeText "node.d.ts" ''
+    declare module "node:crypto" {
+      export interface Hash {
+        update(data: string): Hash;
+        digest(encoding: "hex"): string;
+      }
+      export function createHash(algorithm: "sha256"): Hash;
+    }
+
     declare module "node:fs" {
       export interface Stats {
         readonly uid: number;
@@ -9,6 +17,7 @@ let
         isDirectory(): boolean;
         isFile(): boolean;
       }
+      export function appendFileSync(path: string, data: string): void;
       export function lstatSync(path: string): Stats;
       export function mkdirSync(
         path: string,
@@ -26,12 +35,19 @@ let
 
     declare namespace NodeJS {
       interface Process {
+        readonly argv: readonly string[];
+        readonly env: Record<string, string | undefined>;
         readonly pid: number;
         readonly getuid?: () => number;
       }
     }
 
     declare const process: NodeJS.Process;
+
+    declare const Buffer: {
+      from(input: string, encoding: "utf8"): { toString(encoding: "base64"): string };
+      byteLength(input: string, encoding: "utf8"): number;
+    };
   '';
 in
 pkgs.writeShellApplication {

@@ -3,6 +3,7 @@ use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 
 use lune_domain::mux::TerminalKey;
+use lune_protocol::program_resume::{ResumeArgv, ShellKind};
 
 use crate::{process, shells};
 
@@ -36,6 +37,7 @@ impl From<Failure> for String {
 pub enum Runs<'a> {
     Shell(&'a shells::Shell),
     Command { program: &'a str, args: &'a [String] },
+    ResumeInShell { shell: &'a shells::Shell, kind: ShellKind, argv: &'a ResumeArgv },
 }
 
 pub fn terminal_of(id: &process::Id) -> Result<Option<TerminalKey>, String> {

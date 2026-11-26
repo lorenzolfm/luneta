@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::future::Future;
 use std::io::{self, Read as _, Write as _};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -28,6 +29,7 @@ use crate::daemon::{self, Unreached};
 use crate::machines::{self, Added};
 use crate::prune;
 use crate::rebase;
+use crate::resume;
 use crate::start;
 use crate::terminate;
 
@@ -194,6 +196,32 @@ pub enum Command {
         )]
         stop: bool,
     },
+    #[command(
+        about = "Inspect program resume rules and per-terminal OSC 7577 resume records, or \
+                 reload resume settings from config.toml. Without `--rules`, asks luned and \
+                 exits 5 where none runs"
+    )]
+    Resume {
+        #[arg(
+            long,
+            conflicts_with_all = ["reload", "terminal"],
+            help = "Validate config.toml locally and print active and disabled resume rules"
+        )]
+        rules: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["rules", "terminal"],
+            help = "Reload resume trust rules from config.toml in the running luned"
+        )]
+        reload: bool,
+        #[arg(
+            long,
+            value_name = "ID",
+            conflicts_with_all = ["rules", "reload"],
+            help = "Show resume records for a single terminal id"
+        )]
+        terminal: Option<NonZeroU32>,
+    },
 }
 
 fn version(spelled: &str) -> Result<Version, String> {
@@ -219,6 +247,16 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Prune { repo, yes } => prune::run(repo.as_deref(), *yes, folder),
         Command::Rebase { dir } => rebase::run(dir.as_deref(), folder),
         Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
+        Command::Resume { rules, reload, terminal } => {
+            let action = if *rules {
+                resume::Action::Rules
+            } else if *reload {
+                resume::Action::Reload
+            } else {
+                resume::Action::List { terminal: *terminal }
+            };
+            resume::run(action, folder)
+        },
         Command::Terminate { yes, here, ending } => terminate::run(*yes, *here, *ending, folder),
         Command::Start { what } => start::run(what, folder),
         Command::Browse { url } => browse::run(url.as_deref(), folder),
