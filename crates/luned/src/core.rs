@@ -91,7 +91,7 @@ impl MuxTerminal {
     #[must_use]
     pub fn of(terminal: &server::Terminal) -> Option<MuxTerminal> {
         assert!(terminal.statuses.children.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
-        let Is::Running { root, front, doing } = &terminal.is else {
+        let Is::Running { root, front, doing, .. } = &terminal.is else {
             return None;
         };
         let root_record = terminal.statuses.root.as_ref()?;
@@ -1227,6 +1227,7 @@ mod tests {
                             argv: vec!["claude".to_owned()],
                         }),
                         doing: None,
+                        resumes: None,
                     },
                     statuses,
                 },
@@ -1349,6 +1350,7 @@ mod tests {
                         root: root_pid,
                         front: Some(server::Foreground { pid, argv: words(argv) }),
                         doing,
+                        resumes: None,
                     },
                     statuses: ProgramStatuses {
                         root: Some(ProgramStatus {
@@ -1412,6 +1414,7 @@ mod tests {
                     root: root_pid,
                     front: Some(server::Foreground { pid, argv: vec![program.to_owned()] }),
                     doing: None,
+                    resumes: None,
                 },
                 statuses: ProgramStatuses {
                     root: Some(ProgramStatus {
@@ -1551,6 +1554,7 @@ mod tests {
                         front: front
                             .map(|pid| server::Foreground { pid, argv: vec!["claude".to_owned()] }),
                         doing: None,
+                        resumes: None,
                     },
                     statuses: ProgramStatuses {
                         root: Some(ProgramStatus {
@@ -1643,6 +1647,7 @@ mod tests {
                         root: AgentPid::new(100).unwrap(),
                         front: Some(server::Foreground { pid, argv: vec!["claude".to_owned()] }),
                         doing: None,
+                        resumes: None,
                     },
                     statuses: ProgramStatuses {
                         root: Some(ProgramStatus {
@@ -1772,6 +1777,7 @@ mod tests {
                 argv: vec!["claude".to_owned(), "--resume".to_owned()],
             }),
             doing: Some(Doing::Ready),
+            resumes: None,
         };
         let unlisted = Shown::unlisted(term_key);
         let first = Shown::listed(

@@ -123,6 +123,7 @@ pub fn shell() -> api::Opens {
         cwd: "/".to_owned(),
         program: Some(api::Program { argv: shell::AT_A_PROMPT.map(str::to_owned).to_vec() }),
         ends: api::Ends::Closes.into(),
+        resume_in_shell: None,
     }
 }
 
@@ -132,6 +133,7 @@ pub fn script(script: &str, ends: api::Ends) -> api::Opens {
         cwd: "/".to_owned(),
         program: Some(api::Program { argv }),
         ends: ends.into(),
+        resume_in_shell: None,
     }
 }
 

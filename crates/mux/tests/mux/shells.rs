@@ -37,6 +37,7 @@ fn bash(script: &str) -> api::Opens {
         cwd: "/".to_owned(),
         program: Some(api::Program { argv }),
         ends: api::Ends::Holds.into(),
+        resume_in_shell: None,
     }
 }
 

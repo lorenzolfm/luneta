@@ -48,6 +48,7 @@ impl<'a> Vars<'a> {
         let names = [
             "XDG_RUNTIME_DIR",
             "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
             "XDG_STATE_HOME",
             "TMPDIR",
             "HOME",
@@ -60,6 +61,7 @@ impl<'a> Vars<'a> {
             "LUNE_MUX_PANE",
             "LUNE_MUX_TERMINAL",
             "LUNE_MUX_TERMINAL_MADE",
+            "OSC7577_TOKEN",
         ];
         let turns = ["LUNE_TURN", "LUNE_TURN_BEFORE"];
         for name in names.into_iter().chain(views).chain(turns) {

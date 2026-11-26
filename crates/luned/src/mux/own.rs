@@ -60,6 +60,7 @@ pub(crate) fn in_no_terminal(command: &mut Command) {
     for name in TERMINAL_VARS {
         command.env_remove(name);
     }
+    command.env_remove(lune_protocol::program_resume::TOKEN_VAR);
 }
 
 #[cfg(test)]

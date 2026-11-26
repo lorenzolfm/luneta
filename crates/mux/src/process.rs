@@ -8,11 +8,13 @@ mod os;
 #[path = "process/macos.rs"]
 mod os;
 
-pub use os::{children, process};
+pub use os::{children, owner_info, process, same_root};
 
 pub const CHILDREN_MAX: usize = 256;
 
-pub const ARGV_BYTES_MAX: usize = 16 * 1024;
+pub const ARGV_BYTES_MAX: usize = lune_protocol::program_resume::ARGV_BYTES_MAX;
+
+pub const ANCESTOR_DEPTH_MAX: usize = 64;
 
 #[must_use]
 pub fn argv(pid: ProcessId) -> Option<Argv> {
@@ -85,6 +87,24 @@ impl fmt::Display for ProcessId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
+}
+
+#[must_use]
+pub fn process_argv(pid: u32) -> Option<lune_protocol::program_resume::ProcessArgv> {
+    os::argv(ProcessId::new(pid)?).map(lune_protocol::program_resume::ProcessArgv::bounded)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerInfo {
+    pub pid: u32,
+    pub parent: u32,
+    pub uid: u32,
+    pub euid: u32,
+    pub proc_start: String,
+    pub name: String,
+    pub exe: Option<String>,
+    pub cwd: Option<String>,
+    pub terminal_device: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

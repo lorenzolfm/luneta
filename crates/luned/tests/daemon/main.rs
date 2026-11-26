@@ -33,6 +33,8 @@ mod rebase;
 #[cfg(test)]
 mod remote;
 #[cfg(test)]
+mod resume;
+#[cfg(test)]
 mod say;
 #[cfg(test)]
 mod starts;

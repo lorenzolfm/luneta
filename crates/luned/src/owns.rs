@@ -171,6 +171,7 @@ mod tests {
                     argv: vec!["claude".to_owned()],
                 }),
                 doing: None,
+                resumes: None,
             },
             statuses,
         };

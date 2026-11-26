@@ -1,16 +1,30 @@
+use std::collections::VecDeque;
+
 use libghostty_vt::terminal::{Boundary, StringEnd};
 use libghostty_vt::{Error, Terminal};
+use lune_protocol::program_resume::{BODY_BYTES_MAX as RESUME_BODY_BYTES_MAX, OSC_PREFIX as RESUME};
 use percent_encoding::percent_decode;
+
+pub const RESUME_REPORTS_PER_TURN_MAX: usize = 64;
 
 const MARK_BYTES_MAX: usize = 16 * 1024;
 
+const RESUME_BYTES_MAX: usize = RESUME.len() + RESUME_BODY_BYTES_MAX;
+
 const MARK: &[u8] = b"133;";
+
+const _: () = assert!(RESUME_REPORTS_PER_TURN_MAX > 0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mark {
     Prompt,
     Command(Option<String>),
     Done(Option<i32>),
+}
+
+enum ParsedOsc {
+    Mark(Mark),
+    Resume(Vec<u8>),
 }
 
 #[derive(Default)]
@@ -30,6 +44,7 @@ impl Marks {
         terminal: &mut Terminal<'_, '_>,
         bytes: &[u8],
         marks: &mut Vec<Mark>,
+        resume_reports: &mut VecDeque<Vec<u8>>,
         mut on_mark: impl FnMut(&Mark),
     ) -> Result<(), Error> {
         let mut at = 0;
@@ -42,9 +57,15 @@ impl Marks {
             if stop.reached.contains(Boundary::OSC_END) {
                 let mut osc = self.osc.take().expect("an OSC that ends started, as Ghostty said");
                 osc.keep(&bytes[from..at - 1]);
-                if let Some(mark) = osc.end(stop.end == Some(StringEnd::Cancelled)) {
-                    on_mark(&mark);
-                    marks.push(mark);
+                match osc.end(stop.end == Some(StringEnd::Cancelled)) {
+                    Some(ParsedOsc::Mark(mark)) => {
+                        on_mark(&mark);
+                        marks.push(mark);
+                    },
+                    Some(ParsedOsc::Resume(body)) => {
+                        push_bounded_resume_report(resume_reports, body);
+                    },
+                    None => {},
                 }
             }
             if stop.reached.contains(Boundary::OSC_START) {
@@ -59,31 +80,57 @@ impl Marks {
     }
 }
 
+pub fn push_bounded_resume_report(reports: &mut VecDeque<Vec<u8>>, body: Vec<u8>) {
+    assert!(reports.len() <= RESUME_REPORTS_PER_TURN_MAX);
+    if reports.len() == RESUME_REPORTS_PER_TURN_MAX {
+        reports.pop_front();
+    }
+    reports.push_back(body);
+    assert!(reports.len() <= RESUME_REPORTS_PER_TURN_MAX);
+}
+
 impl Osc {
     fn keep(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            let markable = self.text.starts_with(MARK) || MARK.starts_with(&self.text);
-            if !markable {
+            let matches_mark = self.text.starts_with(MARK) || MARK.starts_with(&self.text);
+            let matches_resume = self.text.starts_with(RESUME) || RESUME.starts_with(&self.text);
+            if !matches_mark && !matches_resume {
                 break;
             }
-            if self.text.len() < MARK_BYTES_MAX {
+            let limit = self.limit();
+            if self.text.len() < limit {
                 self.text.push(byte);
             } else {
                 self.over = true;
                 break;
             }
         }
-        assert!(self.text.len() <= MARK_BYTES_MAX);
+        let limit = self.limit();
+        assert!(self.text.len() <= limit);
         if self.over {
-            assert_eq!(self.text.len(), MARK_BYTES_MAX);
+            assert_eq!(self.text.len(), limit);
         }
     }
 
-    fn end(self, cancelled: bool) -> Option<Mark> {
+    fn limit(&self) -> usize {
+        if self.text.starts_with(RESUME) {
+            RESUME_BYTES_MAX
+        } else {
+            MARK_BYTES_MAX
+        }
+    }
+
+    fn end(self, cancelled: bool) -> Option<ParsedOsc> {
         if cancelled {
             return None;
         }
-        mark(self.text.strip_prefix(MARK)?, self.over)
+        if let Some(body) = self.text.strip_prefix(RESUME) {
+            if self.over {
+                return None;
+            }
+            return Some(ParsedOsc::Resume(body.to_vec()));
+        }
+        mark(self.text.strip_prefix(MARK)?, self.over).map(ParsedOsc::Mark)
     }
 }
 
@@ -122,13 +169,18 @@ mod tests {
     use super::*;
 
     fn read(chunks: &[&[u8]]) -> Vec<Mark> {
+        read_both(chunks).0
+    }
+
+    fn read_both(chunks: &[&[u8]]) -> (Vec<Mark>, Vec<Vec<u8>>) {
         let mut terminal = Terminal::new(10, 2).unwrap();
         let mut scanner = Marks::default();
         let mut marks = Vec::new();
+        let mut resumes = VecDeque::new();
         for chunk in chunks {
-            scanner.write(&mut terminal, chunk, &mut marks, |_| {}).unwrap();
+            scanner.write(&mut terminal, chunk, &mut marks, &mut resumes, |_| {}).unwrap();
         }
-        marks
+        (marks, resumes.into_iter().collect())
     }
 
     fn command(line: &str) -> Mark {
@@ -196,5 +248,48 @@ mod tests {
         assert_eq!(read(&[long.as_bytes()]), [Mark::Command(None), Mark::Done(Some(0))]);
         let fits = format!("\x1b]133;C;cmdline_url={}\x07", "a".repeat(MARK_BYTES_MAX - 20));
         assert_eq!(read(&[fits.as_bytes()]), [command(&"a".repeat(MARK_BYTES_MAX - 20))]);
+    }
+
+    #[test]
+    fn osc_7577_reads_across_splits_and_ignores_cancelled_and_oversized() {
+        let body = b"pid=42:time=1795543200:clear=1:mac=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut wire = Vec::new();
+        wire.extend_from_slice(b"hi\x1b]7577;");
+        wire.extend_from_slice(body);
+        wire.extend_from_slice(b"\x1b\\\x1b]133;A\x07\x1b]7577;");
+        wire.extend_from_slice(body);
+        wire.extend_from_slice(b"\x07");
+
+        let whole = read_both(&[&wire]);
+        assert_eq!(whole.0, [Mark::Prompt]);
+        assert_eq!(whole.1, [body.to_vec(), body.to_vec()]);
+        for at in 0..=wire.len() {
+            assert_eq!(read_both(&[&wire[..at], &wire[at..]]), whole, "split at {at}");
+        }
+        let singles: Vec<&[u8]> = wire.chunks(1).collect();
+        assert_eq!(read_both(&singles), whole);
+
+        assert_eq!(read_both(&[b"\x1b]7577;pid=1\x18\x07"]).1, Vec::<Vec<u8>>::new());
+        let too_long = format!("\x1b]7577;{}\x07", "a".repeat(RESUME_BODY_BYTES_MAX + 1));
+        assert_eq!(read_both(&[too_long.as_bytes()]).1, Vec::<Vec<u8>>::new());
+        let exact = "a".repeat(RESUME_BODY_BYTES_MAX);
+        let fits = format!("\x1b]7577;{exact}\x07");
+        assert_eq!(read_both(&[fits.as_bytes()]).1, [exact.into_bytes()]);
+    }
+
+    #[test]
+    fn osc_7577_caps_reports_per_turn_and_keeps_latest() {
+        let mut wire = Vec::new();
+        let total = RESUME_REPORTS_PER_TURN_MAX + 25;
+        for index in 0..total {
+            wire.extend_from_slice(format!("\x1b]7577;seq={index}\x07").as_bytes());
+        }
+        let (_, reports) = read_both(&[&wire]);
+        assert_eq!(reports.len(), RESUME_REPORTS_PER_TURN_MAX);
+        assert_eq!(reports.first().map(Vec::as_slice), Some(b"seq=25".as_slice()));
+        assert_eq!(
+            reports.last().map(Vec::as_slice),
+            Some(format!("seq={}", total - 1).as_bytes())
+        );
     }
 }

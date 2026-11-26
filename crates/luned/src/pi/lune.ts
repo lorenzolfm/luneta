@@ -1,10 +1,202 @@
-import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  appendFileSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 const FOLDER = "LUNE_FOLDER";
 const FILE_BYTES_MAX = 64 * 1024;
 const MESSAGE_BYTES_MAX = 1024;
 const MESSAGE_RAW_CODE_UNITS_MAX = MESSAGE_BYTES_MAX * 4;
+const OSC7577_TOKEN_VAR = "OSC7577_TOKEN";
+const OSC7577_PAYLOAD_BYTES_MAX = 2048;
+const OSC7577_TOKEN_LEN_MIN = 22;
+const OSC7577_TOKEN_LEN_MAX = 64;
+
+type ResumeFlagSpec = {
+  readonly action: "keep" | "drop";
+  readonly values: "none" | "one";
+};
+
+const PI_RESUME_FLAGS: Readonly<Record<string, ResumeFlagSpec>> = {
+  "--no-extensions": { action: "keep", values: "none" },
+  "--no-prompt-templates": { action: "keep", values: "none" },
+  "--no-skills": { action: "keep", values: "none" },
+  "--no-themes": { action: "keep", values: "none" },
+  "--no-tools": { action: "keep", values: "none" },
+  "--offline": { action: "keep", values: "none" },
+  "--verbose": { action: "keep", values: "none" },
+  "-e": { action: "keep", values: "one" },
+  "--api-key": { action: "keep", values: "one" },
+  "--append-system-prompt": { action: "keep", values: "one" },
+  "--extension": { action: "keep", values: "one" },
+  "--model": { action: "keep", values: "one" },
+  "--models": { action: "keep", values: "one" },
+  "--prompt-template": { action: "keep", values: "one" },
+  "--provider": { action: "keep", values: "one" },
+  "--session-dir": { action: "keep", values: "one" },
+  "--skill": { action: "keep", values: "one" },
+  "--system-prompt": { action: "keep", values: "one" },
+  "--theme": { action: "keep", values: "one" },
+  "--thinking": { action: "keep", values: "one" },
+  "--tools": { action: "keep", values: "one" },
+  "-c": { action: "drop", values: "none" },
+  "--continue": { action: "drop", values: "none" },
+  "-r": { action: "drop", values: "none" },
+  "--resume": { action: "drop", values: "none" },
+  "--fork": { action: "drop", values: "one" },
+  "--session": { action: "drop", values: "one" },
+};
+
+class OscToken {
+  readonly #value: string;
+
+  private constructor(value: string) {
+    this.#value = value;
+  }
+
+  static parse(raw: unknown): OscToken | undefined {
+    if (typeof raw !== "string") return undefined;
+    if (raw.length < OSC7577_TOKEN_LEN_MIN || raw.length > OSC7577_TOKEN_LEN_MAX) return undefined;
+    for (let i = 0; i < raw.length; i += 1) {
+      const code = raw.charCodeAt(i);
+      const ok =
+        (code >= 0x41 && code <= 0x5a) ||
+        (code >= 0x61 && code <= 0x7a) ||
+        (code >= 0x30 && code <= 0x39) ||
+        code === 0x2d ||
+        code === 0x5f;
+      if (!ok) return undefined;
+    }
+    return new OscToken(raw);
+  }
+
+  get value(): string {
+    return this.#value;
+  }
+}
+
+const OSC7577_GLOBAL_KEY = Symbol.for("lune.osc7577.token");
+
+function captureOscToken(): OscToken | undefined {
+  const store = globalThis as Record<symbol, unknown>;
+  const raw = process.env[OSC7577_TOKEN_VAR];
+  delete process.env[OSC7577_TOKEN_VAR];
+  if (typeof raw === "string") {
+    const parsed = OscToken.parse(raw);
+    if (parsed !== undefined) {
+      store[OSC7577_GLOBAL_KEY] = parsed.value;
+      return parsed;
+    }
+    delete store[OSC7577_GLOBAL_KEY];
+    return undefined;
+  }
+  return OscToken.parse(store[OSC7577_GLOBAL_KEY]);
+}
+
+const OSC7577_TOKEN = captureOscToken();
+
+function hasControlChar(text: string): boolean {
+  for (const ch of text) {
+    const codePoint = ch.codePointAt(0);
+    if (codePoint === undefined) return true;
+    if (codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f)) return true;
+  }
+  return false;
+}
+
+function parsePiLaunchFlags(args: readonly string[]): readonly string[] | undefined {
+  const kept: string[] = [];
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i];
+    if (arg === undefined || arg === "--") break;
+    if (!arg.startsWith("-") || arg === "-") {
+      i += 1;
+      continue;
+    }
+    let flagName = arg;
+    let inlineVal: string | undefined;
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      if (eq !== -1) {
+        flagName = arg.slice(0, eq);
+        inlineVal = arg.slice(eq + 1);
+      }
+    }
+    const spec = PI_RESUME_FLAGS[flagName];
+    if (spec === undefined) return undefined;
+    const values: string[] = [];
+    let next = i + 1;
+    switch (spec.values) {
+      case "none":
+        if (inlineVal !== undefined) return undefined;
+        break;
+      case "one":
+        if (inlineVal !== undefined) {
+          values.push(inlineVal);
+        } else {
+          const val = args[i + 1];
+          if (val === undefined) return undefined;
+          values.push(val);
+          next = i + 2;
+        }
+        break;
+      default:
+        return assertNever(spec.values);
+    }
+    if (spec.action === "keep") {
+      const single = values.length === 1 ? values[0] : undefined;
+      if (flagName.startsWith("--") && single !== undefined && single.startsWith("-")) {
+        kept.push(`${flagName}=${single}`);
+      } else {
+        kept.push(flagName, ...values);
+      }
+    }
+    i = next;
+  }
+  return kept;
+}
+
+function writeOsc7577(token: OscToken, bodyWithoutMac: string): boolean {
+  const mac = createHash("sha256").update(`${bodyWithoutMac}:${token.value}`).digest("hex");
+  invariant(mac.length === 64, "sha256 hex digest must be 64 bytes");
+  const payload = `${bodyWithoutMac}:mac=${mac}`;
+  if (Buffer.byteLength(payload, "utf8") > OSC7577_PAYLOAD_BYTES_MAX) return false;
+  const sequence = `\x1b]7577;${payload}\x1b\\`;
+  const wrote = quietly(() => {
+    appendFileSync("/dev/tty", sequence);
+    return true;
+  });
+  return wrote === true;
+}
+
+function buildOsc7577Body(
+  identity: SessionIdentity,
+  keptFlags: readonly string[],
+): string | undefined {
+  const argv = ["pi", "--session", identity.sessionId, ...keptFlags];
+  invariant(argv.length >= 3, "pi resume argv holds program and session");
+  for (const word of argv) {
+    if (hasControlChar(word)) return undefined;
+  }
+  if (!identity.cwd.startsWith("/") || hasControlChar(identity.cwd)) return undefined;
+  const encodedArgv = argv.map((word) => Buffer.from(word, "utf8").toString("base64")).join(",");
+  const encodedCwd = Buffer.from(identity.cwd, "utf8").toString("base64");
+  const time = Math.floor(Date.now() / 1000);
+  return `pid=${process.pid}:time=${time}:argv=${encodedArgv}:cwd=${encodedCwd}`;
+}
+
+function clearOsc7577(token: OscToken): boolean {
+  const time = Math.floor(Date.now() / 1000);
+  return writeOsc7577(token, `pid=${process.pid}:time=${time}:clear=1`);
+}
 
 function invariant(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -491,6 +683,8 @@ function quietly<T>(work: () => T): T | undefined {
 
 export default function (pi: Pi): void {
   const started = quietly(procStart);
+  const keptFlags = parsePiLaunchFlags(process.argv.slice(2));
+  let reportedResume: { readonly sessionId: string; readonly cwd: string } | undefined;
   let lifecycle: Lifecycle = {
     kind: "active",
     phase: { kind: "resting", resting: { status: "stopped" } },
@@ -498,9 +692,42 @@ export default function (pi: Pi): void {
     disk: { kind: "unwritten" },
   };
 
+  function clearReportedResume(): void {
+    if (OSC7577_TOKEN === undefined || reportedResume === undefined) return;
+    if (clearOsc7577(OSC7577_TOKEN)) {
+      reportedResume = undefined;
+    }
+  }
+
+  function syncResume(identity: SessionIdentity): void {
+    if (OSC7577_TOKEN === undefined) return;
+    if (keptFlags === undefined) {
+      clearReportedResume();
+      return;
+    }
+    if (
+      reportedResume !== undefined &&
+      reportedResume.sessionId === identity.sessionId &&
+      reportedResume.cwd === identity.cwd
+    ) {
+      return;
+    }
+    const body = buildOsc7577Body(identity, keptFlags);
+    if (body === undefined) {
+      clearReportedResume();
+      return;
+    }
+    if (writeOsc7577(OSC7577_TOKEN, body)) {
+      reportedResume = { sessionId: identity.sessionId, cwd: identity.cwd };
+    } else {
+      clearReportedResume();
+    }
+  }
+
   function sync(state: ActiveState, ctx: Context): void {
     const identity = parseIdentity(ctx);
     if (identity === undefined) return;
+    syncResume(identity);
     const next: Snapshot = { phase: state.phase, promptOpen: state.promptOpen };
     if (
       state.disk.kind === "synced" &&
@@ -566,6 +793,7 @@ export default function (pi: Pi): void {
           snapshot: restored.snapshot,
           since: restored.since,
         };
+        syncResume(restored.identity);
         break;
       case "needsRewrite":
         lifecycle.disk = {
@@ -632,6 +860,7 @@ export default function (pi: Pi): void {
     if (lifecycle.kind !== "active") return;
     lifecycle = { kind: "shutDown" };
     if (event.reason !== "quit") return;
+    clearReportedResume();
     quietly(() => {
       const file = fileOfThisProcess();
       if (file) rmSync(file, { force: true });

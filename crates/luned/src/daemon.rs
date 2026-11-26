@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Write as _};
 use std::mem;
+use std::num::NonZeroU32;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -43,11 +44,12 @@ use crate::api::{
     IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest,
     KeepPrintedRequest, KeepPrintedResponse,
     KeepImageResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
-    ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, ListSkillsResponse,
+    ListRepositoriesRequest, ListRepositoriesResponse, ListResumeRequest, ListResumeResponse,
+    ListSkillsRequest, ListSkillsResponse,
     ListWorkRequest, ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest,
     PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
-    ReadDiffRequest, ReadDiffResponse, RebaseRequest, RebaseResponse, SayRequest, ShowRequest,
-    ShowResponse, TranscriptEndsRequest,
+    ReadDiffRequest, ReadDiffResponse, RebaseRequest, RebaseResponse, ReloadResumeRequest,
+    ReloadResumeResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
     TranscriptEndsResponse, FramesRequest, AnswerRequest, WaitingRequest, WaitingResponse,
 };
 use crate::answers::{self, Answer, Runs, Unanswered};
@@ -1102,6 +1104,49 @@ impl Daemon for Host {
             kept.map(|path| KeepImageResponse { path }).map_err(Status::failed_precondition)
         });
         Ok(Response::new(Box::pin(answer)))
+    }
+
+    async fn list_resume(
+        &self,
+        request: Request<ListResumeRequest>,
+    ) -> Result<Response<ListResumeResponse>, Status> {
+        let ListResumeRequest { on, terminal_id } = request.into_inner();
+        let terminal_id = terminal_id
+            .map(|id| {
+                NonZeroU32::new(id)
+                    .ok_or_else(|| Status::invalid_argument("terminal_id: no id is 0"))
+            })
+            .transpose()?;
+        if let Some(mut daemon) = self.bridged(on).await? {
+            let terminal_id = terminal_id.map(NonZeroU32::get);
+            return daemon.list_resume(ListResumeRequest { on: None, terminal_id }).await;
+        }
+        let layouts = self.layouts.clone();
+        let listed = task::spawn_blocking(move || {
+            layouts::ask(&layouts, |answer| layouts::Command::ListResume { terminal_id, answer })
+        })
+        .await
+        .map_err(|error| unfinished(&error))?;
+        let response = listed.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
+        Ok(Response::new(response))
+    }
+
+    async fn reload_resume(
+        &self,
+        request: Request<ReloadResumeRequest>,
+    ) -> Result<Response<ReloadResumeResponse>, Status> {
+        let ReloadResumeRequest { on } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on).await? {
+            return daemon.reload_resume(ReloadResumeRequest { on: None }).await;
+        }
+        let layouts = self.layouts.clone();
+        let reloaded = task::spawn_blocking(move || {
+            layouts::ask(&layouts, |answer| layouts::Command::ReloadResume { answer })
+        })
+        .await
+        .map_err(|error| unfinished(&error))?;
+        let response = reloaded.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
+        Ok(Response::new(response))
     }
 }
 

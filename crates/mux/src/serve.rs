@@ -285,7 +285,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     let listener = UnixListener::from_std(listener)?;
     let browser_socket =
         bound.socket().parent().map(|dir| dir.join(lune_protocol::TERMINAL_BROWSER_SOCKET));
-    let mux = Mux::with_browser_socket(browser_socket);
+    let mux = Mux::serving(Some(claim.folder().to_owned()), browser_socket);
     let mut watched = mux.watched();
     let listening = format!("{}{}\n", lune_protocol::MUX_LISTENING, bound.socket().display());
     let _ = io::stderr().write_all(listening.as_bytes());

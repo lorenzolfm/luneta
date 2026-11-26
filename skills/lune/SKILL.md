@@ -48,6 +48,7 @@ lune rebase [<dir>]
 lune ssh <destination>
 lune say [--now] [<text>]
 lune say --stop
+lune resume [--rules] [--reload] [--terminal <id>]
 lune terminate [--yes <plan>]
 lune info
 ```
@@ -66,6 +67,9 @@ lune info
   luned's ssh asks nothing, so a machine whose host key ssh has yet to know is
   reached once the user has run `ssh` to it themselves. Tell them so.
 - `say` reads text aloud on the machine the user sits at: see the `say` skill.
+- `resume` inspects per-terminal program resume records and trust rules, validates
+  local resume config with `--rules`, or reloads `config.toml` in luned with
+  `--reload`.
 - `terminate` ends lune on every machine and forgets every project: see
   [Reset lune](#reset-lune).
 - `info` says which luned runs, for how long, and whether it is another build
