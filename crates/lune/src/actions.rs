@@ -114,6 +114,7 @@ actions! {
     FixChecks,
     NewView,
     NewWelcome,
+    NewReview,
     ShowTabs,
     ShowPanes,
     NewWorktree,
@@ -268,6 +269,10 @@ impl Action {
             Action::NewWelcome => {
                 let new = menu(&['n', 'h']);
                 spec("new welcome view", &["home", "start", "greeting"], new, VIEW)
+            },
+            Action::NewReview => {
+                let new = menu(&['n', 'r']);
+                spec("new review view", &["changes", "patch", "pull request", "split"], new, VIEW)
             },
             Action::ShowTabs => {
                 spec("Show as tabs", &["arrange", "layout", "views"], menu(&['t']), VIEW)

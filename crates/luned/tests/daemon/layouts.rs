@@ -13,7 +13,7 @@ use luned::api::change_projects_request::{
 };
 use luned::api::change_projects_response::Made;
 use luned::api::projects::Held;
-use luned::api::{terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Worktree};
+use luned::api::{terminal, ReadDiffRequest, ShowRequest, ShowResponse, Terminal, TerminalKey, Worktree};
 use luned::api::{frames_request, Arrangement, On, FramesRequest};
 use luned::mux::own::api::{self as mux_api, typed, Listing};
 use luned::mux::own::frames::{Line, Rows, Shows};
@@ -267,7 +267,7 @@ fn full_of(laid: &Laid) -> Option<u64> {
 fn key(view: &View) -> Option<TerminalKey> {
     match &view.found {
         Some(Found::Key(key)) => Some(*key),
-        Some(Found::Lost(()) | Found::Looking(()) | Found::Welcome(())) | None => None,
+        Some(Found::Lost(()) | Found::Looking(()) | Found::Welcome(()) | Found::Review(())) | None => None,
     }
 }
 
@@ -699,6 +699,54 @@ fn a_welcome_view_opens_beside_the_focus_and_closes_as_a_terminal_does() {
 }
 
 #[test]
+fn a_review_view_opens_beside_the_focus_persists_and_reads_the_worktree_diff() {
+    let owned = Owned::new();
+    let repo = fs::canonicalize(owned.host.home.path()).unwrap().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "main"]);
+    fs::write(repo.join("lib.rs"), "fn alpha() {}\n").unwrap();
+    git(&repo, &["add", "lib.rs"]);
+    git(&repo, &["commit", "-m", "init"]);
+    git(&repo, &["checkout", "-b", "feat"]);
+    fs::write(repo.join("lib.rs"), "fn alpha() { let x = 1; }\n").unwrap();
+    fs::write(repo.join("added.rs"), "fn beta() {}\n").unwrap();
+
+    let project_id = project(&owned.host, &repo, None);
+    let worktree = worktree(&owned.host, project_id, &repo);
+    let mut shown = Shown::new(&owned, worktree, 120, 30);
+    let terminal = shown.open();
+    shown.ask(Event::Review(()));
+    let reviews = |view: &View| matches!(view.found, Some(Found::Review(())));
+    let laid = shown.until("a review view", |laid| laid.views.len() == 2);
+    let review = laid.views.iter().find(|view| reviews(view)).expect("a review").id;
+    assert_eq!(focused_of(&laid), Some(review), "the review view opened takes the focus");
+    assert_eq!(owned.listing().terminals.len(), 1, "the mux holds no review view");
+    eventually("the review view is kept within a sweep", || {
+        fs::read_to_string(kept(&owned.host)).unwrap().contains(r#""review": {"#).then_some(())
+    });
+
+    let folder = folder_in(owned.host.runtime.path()).expect("luned has made its folder");
+    let read = owned.block_on(async {
+        let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
+        let mut stream =
+            daemon.read_diff(ReadDiffRequest { on: None, worktree }).await.unwrap().into_inner();
+        stream.message().await.unwrap().expect("a diff answer")
+    });
+    assert_eq!(read.base, "main");
+    assert_eq!(read.head, "feat");
+    assert!(!read.truncated);
+    let patch_text = String::from_utf8(read.patch).unwrap();
+    assert!(patch_text.contains("-fn alpha() {}"));
+    assert!(patch_text.contains("+fn alpha() { let x = 1; }"));
+    assert_eq!(read.untracked.len(), 1);
+    assert_eq!(read.untracked[0].path, "added.rs");
+
+    shown.ask(Event::Close(review));
+    let laid = shown.until("the review view closed", |laid| laid.views.len() == 1);
+    assert_eq!((laid.views[0].id, focused_of(&laid)), (terminal, Some(terminal)));
+}
+
+#[test]
 fn a_worktree_stays_when_its_layout_s_last_terminal_closes_and_the_mux_takes_the_next() {
     let owned = Owned::new();
     let staying = worktree_in_home(&owned);
@@ -729,7 +777,7 @@ fn a_layout_comes_back_with_its_terminals_when_luned_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 11,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 12,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();

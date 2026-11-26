@@ -29,6 +29,7 @@ service Daemon {
   rpc ChangeProjects(ChangeProjectsRequest) returns (ChangeProjectsResponse);
   rpc MakeWorktree(MakeWorktreeRequest) returns (stream MakeWorktreeResponse);
   rpc ListWork(ListWorkRequest) returns (stream ListWorkResponse);
+  rpc ReadDiff(ReadDiffRequest) returns (stream ReadDiffResponse);
   rpc Show(stream ShowRequest) returns (stream ShowResponse);
   rpc Frames(stream FramesRequest) returns (stream lune.mux.v1.ToViewer);
   rpc Waiting(WaitingRequest) returns (WaitingResponse);
@@ -150,6 +151,7 @@ message AskRequest {
   optional fixed64 before = 7;
   repeated uint32 marked_issues = 8;
   repeated uint32 marked_pulls = 9;
+  bool review_only = 10;
 }
 
 message AskResponse {
@@ -965,6 +967,24 @@ message ListWorkResponse {
   }
 }
 
+message ReadDiffRequest {
+  On on = 1;
+  fixed64 worktree = 2;
+}
+
+message ReadDiffResponse {
+  string base = 1;
+  string head = 2;
+  bytes patch = 3;
+  bool truncated = 4;
+  repeated Untracked untracked = 5;
+
+  message Untracked {
+    string path = 1;
+    string content = 2;
+  }
+}
+
 message ShowRequest {
   oneof event {
     Hello hello = 1;
@@ -978,6 +998,7 @@ message ShowRequest {
     google.protobuf.Empty fullscreen = 9;
     google.protobuf.Empty welcome = 10;
     Arrangement arrange = 11;
+    google.protobuf.Empty review = 12;
   }
 
   message Hello {
@@ -1100,6 +1121,7 @@ message ShowResponse {
       google.protobuf.Empty lost = 4;
       google.protobuf.Empty looking = 5;
       google.protobuf.Empty welcome = 6;
+      google.protobuf.Empty review = 7;
     }
   }
 

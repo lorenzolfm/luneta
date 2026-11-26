@@ -96,6 +96,13 @@ pub fn run_tail(command: &mut Command, limit: Duration, most: u64) -> io::Result
     Ok(ran)
 }
 
+pub fn run_prefix(command: &mut Command, limit: Duration, most: u64) -> io::Result<(Ran, u64)> {
+    assert!(most > 0, "prefix byte cap must be positive");
+    let (kills, keeps) = (Kills::Program, Keeps::Prefix { most });
+    let Ok(ran) = running::<Infallible>(command, limit, None, kills, Stdio::null(), keeps)?;
+    Ok(ran)
+}
+
 pub fn run_alone(command: &mut Command, limit: Duration) -> io::Result<Ran> {
     let kills = Kills::Group;
     let (command, stdin) = (alone(command), Stdio::null());
@@ -131,6 +138,7 @@ enum Kills {
 #[derive(Clone, Copy)]
 enum Keeps {
     First { most: u64, over: io::ErrorKind },
+    Prefix { most: u64 },
     Last { most: u64 },
 }
 
@@ -263,19 +271,21 @@ fn read(
 ) -> io::Result<Receiver<io::Result<Said>>> {
     in_thread(move || {
         let (most, over) = match keeps {
-            Keeps::First { most, over } => (most, over),
+            Keeps::First { most, over } => (most, Some(over)),
+            Keeps::Prefix { most } => (most, None),
             Keeps::Last { most } => return last_lines(&mut pipe, most),
         };
         let mut all = Vec::new();
         let read = (&mut pipe).take(most).read_to_end(&mut all);
         let past = read.and_then(|_| io::copy(&mut pipe, &mut io::sink()));
-        match past {
-            Ok(0) => Ok((all, 0)),
-            Ok(_) => {
+        match (past, over) {
+            (Ok(0), _) => Ok((all, 0)),
+            (Ok(extra), None) => Ok((all, extra)),
+            (Ok(_), Some(over)) => {
                 let more = format!("it said more than {most} bytes");
                 Err(io::Error::new(over, more))
             },
-            Err(error) => Err(error),
+            (Err(error), _) => Err(error),
         }
     })
 }
@@ -542,5 +552,14 @@ pub(crate) mod tests {
         process::kill_process(pid(&started), Signal::KILL).expect("what sh started runs on");
         assert!(matches!(ran, Ok(Ran::Stuck)), "{:?}", ran.err());
         assert!(process::test_kill_process(pid(&ran_as)).is_err(), "sh was not waited for");
+    }
+
+    #[test]
+    fn a_program_asked_for_its_prefix_keeps_up_to_the_bound_and_counts_what_followed() {
+        let mut sh = Command::new("sh");
+        sh.args(["-c", "printf 'abcdefghij'"]);
+        let (ran, extra) = super::run_prefix(&mut sh, Duration::from_secs(5), 4).unwrap();
+        assert_eq!(ran.answer().unwrap(), b"abcd");
+        assert_eq!(extra, 6);
     }
 }

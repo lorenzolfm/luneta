@@ -98,6 +98,7 @@ pub enum Command {
     Worktrees { root: Dir, listed: Listed, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, listed: Listed },
     Root { project: ProjectId, answer: oneshot::Sender<Result<Root, Unrooted>> },
+    WorktreeFolder { worktree: WorktreeId, answer: oneshot::Sender<Result<Dir, Unrooted>> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,6 +128,7 @@ pub enum Asked {
     Go(WorktreeId),
     Open { beside: Beside, opens: Opens },
     Welcome,
+    Review,
     Close(ViewId),
     Focus(Focus),
     Resize { sides: Sides, growth: layout::Growth },
@@ -181,6 +183,7 @@ impl Asked {
                 Asked::Open { beside, opens }
             },
             Event::Welcome(()) => Asked::Welcome,
+            Event::Review(()) => Asked::Review,
             Event::Close(view) => Asked::Close(id("close", view).map(ViewId::new)?),
             Event::Focus(show_request::Focus { to, step }) => {
                 use show_request::focus::To;
@@ -537,6 +540,9 @@ impl Layouts {
             },
             Command::Root { project, answer } => {
                 let _ = answer.send(self.root(project));
+            },
+            Command::WorktreeFolder { worktree, answer } => {
+                let _ = answer.send(self.worktree_folder(worktree));
             },
             Command::Rooted { root, listed } => {
                 let rooted = Change::Rooted { root: root.clone(), listed };
@@ -908,6 +914,12 @@ impl Layouts {
         })
     }
 
+    fn worktree_folder(&self, worktree: WorktreeId) -> Result<Dir, Unrooted> {
+        let projects = self.kept().map_err(Unrooted::Unkept)?;
+        let (project, found) = projects.find(worktree).ok_or(Unrooted::Unknown)?;
+        project.folder(found.id()).ok_or(Unrooted::Unknown)
+    }
+
     fn kept(&self) -> Result<&Projects, String> {
         match self.store.projects() {
             Some(projects) => Ok(projects),
@@ -958,6 +970,7 @@ impl Layouts {
             },
             Asked::Open { beside, opens } => self.open(client, beside, &opens)?,
             Asked::Welcome => self.welcome(client)?,
+            Asked::Review => self.review(client)?,
             Asked::Close(view) => {
                 if !self.layout(worktree)?.holds(view) {
                     return Ok(Done::Quiet);
@@ -1108,6 +1121,25 @@ impl Layouts {
         self.client(client).focus = Some(view);
         let last_focus = self.layout(worktree).map(Layout::last_focus);
         assert_eq!(last_focus, Ok(Some(view)), "welcome view {view} opens focused");
+        Ok(())
+    }
+
+    fn review(&mut self, client: ClientId) -> Result<(), String> {
+        let Client { worktree, focus, .. } = self.clients[&client];
+        let size = self.size_of(client);
+        let view = self.store.fresh().map_err(Failed::said)?;
+        let projects = self.kept()?;
+        let (_, shown) = projects.find(worktree).ok_or("the worktree is gone")?;
+        let beside = if focus.is_some() { Beside::Focused } else { Beside::Largest };
+        let (placed, _) = placement(shown.layout(), focus, beside, view, size)?;
+        self.changed(Change::Open { worktree, view: View::Review(view), placed, size })?;
+        let projects = self.kept()?;
+        let held_in = projects.holding_view(view).map(|(it, _)| it.id());
+        assert_eq!(held_in, Some(worktree), "review view {view} opened in its worktree");
+        assert!(projects.holding_terminal(view).is_none(), "review view {view} runs no terminal");
+        self.client(client).focus = Some(view);
+        let last_focus = self.layout(worktree).map(Layout::last_focus);
+        assert_eq!(last_focus, Ok(Some(view)), "review view {view} opens focused");
         Ok(())
     }
 
@@ -1980,6 +2012,7 @@ fn laid(
         let id = layout::Leaf::id(view);
         let found = match view {
             View::Welcome(_) => Found::Welcome(()),
+            View::Review(_) => Found::Review(()),
             View::Terminal(terminal) => match known.get(&terminal.id()) {
                 Some(known) => Found::Key(api::TerminalKey {
                     id: known.key.id.get(),
