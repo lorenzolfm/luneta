@@ -1596,6 +1596,72 @@ fn a_client_is_answered_while_rehome_waits_on_git_and_a_stale_look_is_dropped() 
 }
 
 #[test]
+fn a_terminal_rehomes_after_luned_restarts_while_git_was_stalled() {
+    let mut owned = Owned::new();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let (up, clone) = (home.join("up"), home.join("clone"));
+    cloned_as_wt(&home, &up, &clone);
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "../feat", "feat"]);
+    let made = project(&owned.host, &clone, None);
+    let main = worktree(&owned.host, made, &clone.join("main"));
+    let mut shown = Shown::new(&owned, main, 80, 24);
+    let [stays] = shown.terminals()[..] else { panic!("a worktree is made with its first") };
+
+    let feat = clone.join("feat");
+    let feat_str = feat.to_str().unwrap();
+    let gate = home.join("git-gate");
+    let started = home.join("git-started");
+    fs::write(&gate, "").unwrap();
+    let wrapper = format!(
+        "PATH=\"${{PATH#\"${{0%/*}}:\"}}\"\n\
+         if [ -f '{gate}' ] && case \"$*\" in *'{feat}'*) true;; *) false;; esac; then\n\
+             touch '{started}'\n\
+             while [ -f '{gate}' ]; do sleep 0.05; done\n\
+         fi\n\
+         exec git \"$@\"\n",
+        gate = gate.display(),
+        feat = feat.display(),
+        started = started.display(),
+    );
+    script(&owned.host.bin().join("git"), &wrapper);
+
+    let line = format!(
+        "cd '{feat}' && printf '\\033]7;file://localhost%s\\007' \"$PWD\"; exec sleep 601",
+        feat = feat.display(),
+    );
+    let goes = shown.open_running(&["sh", "-c", &line]);
+
+    eventually("rehome starts git on feat while flushed keeps its folder in main", || {
+        let kept_feat = fs::read_to_string(kept(&owned.host))
+            .is_ok_and(|file| file.contains(feat_str));
+        (started.exists() && kept_feat).then_some(())
+    });
+    let before: Vec<u64> = watched(&owned, main).iter().map(|it| it.id).collect();
+    assert_eq!(before, [stays, goes], "the terminal is still in main while git is stalled");
+
+    drop(shown);
+    owned.stop_daemon();
+    fs::remove_file(&gate).unwrap();
+    owned.start_daemon();
+
+    let went = eventually("the terminal moves to feat after restart", || {
+        let host = owned.host.host();
+        let Some(Held::Kept(kept)) = host.projects.and_then(|projects| projects.held) else {
+            return None;
+        };
+        kept.projects
+            .iter()
+            .flat_map(|project| project.worktrees().unwrap())
+            .find(|worktree| worktree.folder == feat_str)
+            .cloned()
+    });
+    let terminals: Vec<u64> = went.terminals.iter().map(|it| it.id).collect();
+    assert_eq!(terminals, [goes], "startup seeding rehomes the terminal left outside its worktree");
+    let left: Vec<u64> = watched(&owned, main).iter().map(|it| it.id).collect();
+    assert_eq!(left, [stays], "the terminal beside it stays");
+}
+
+#[test]
 fn where_a_terminal_is_and_what_it_runs_reach_the_file() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
