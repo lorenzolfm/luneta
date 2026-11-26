@@ -84,6 +84,7 @@ impl Terminal {
 pub enum View {
     Terminal(Terminal),
     Welcome(ViewId),
+    Review(ViewId),
 }
 
 impl View {
@@ -91,7 +92,7 @@ impl View {
     pub fn terminal(&self) -> Option<&Terminal> {
         match self {
             View::Terminal(terminal) => Some(terminal),
-            View::Welcome(_) => None,
+            View::Welcome(_) | View::Review(_) => None,
         }
     }
 }
@@ -100,7 +101,7 @@ impl Leaf for View {
     fn id(&self) -> ViewId {
         match self {
             View::Terminal(terminal) => terminal.id.view(),
-            View::Welcome(id) => *id,
+            View::Welcome(id) | View::Review(id) => *id,
         }
     }
 }
@@ -577,7 +578,9 @@ impl Layout {
         let laid = self.0.as_mut().expect("a layout asked for its terminal is laid");
         match laid.tree.get_mut(terminal.view()).expect("its layout holds the terminal") {
             View::Terminal(held) => held,
-            View::Welcome(_) => unreachable!("terminal {terminal} is made only as a terminal"),
+            View::Welcome(_) | View::Review(_) => {
+                unreachable!("terminal {terminal} is made only as a terminal")
+            },
         }
     }
 

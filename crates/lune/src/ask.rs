@@ -3,6 +3,7 @@ use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_diff::SelectionExcerpt;
 use lune_domain::projects::Dir;
 use luned::asks::{self, Asked, Marked, Step, Turn};
 use luned::transcripts::SessionId;
@@ -107,6 +108,45 @@ impl Ask {
             turned: None,
             talk: Vec::new(),
             typed: String::new(),
+            turn: None,
+        }
+    }
+
+    pub fn reviewed(
+        number: u64,
+        on: &Machine,
+        dir: &Dir,
+        excerpt: &SelectionExcerpt,
+        initial: Option<&str>,
+    ) -> Self {
+        let works = match on {
+            Machine::Local => Works::Here(PathBuf::from(dir.as_str())),
+            Machine::Remote(on) => Works::There { on: on.clone(), cwd: Some(Directory::from(dir)) },
+        };
+        let range = match excerpt.lines {
+            Some(lines) if lines.start() == lines.end() => {
+                format!("{}:{}", excerpt.path, lines.start())
+            },
+            Some(lines) => format!("{}:{}-{}", excerpt.path, lines.start(), lines.end()),
+            None => excerpt.path.as_str().to_owned(),
+        };
+        let highlighted = if excerpt.snippet.is_empty() {
+            format!("The user is reviewing changes at {range} in {}.", dir.as_str())
+        } else {
+            format!(
+                "The user is reviewing changes at {range} in {}:\n```patch\n{}\n```",
+                dir.as_str(),
+                excerpt.snippet
+            )
+        };
+        Ask {
+            number,
+            works,
+            highlighted,
+            session: None,
+            turned: None,
+            talk: Vec::new(),
+            typed: initial.unwrap_or("").to_owned(),
             turn: None,
         }
     }

@@ -12,7 +12,8 @@ use crate::api::{
     IssueRepositoriesResponse, KeepChecksRequest, KeepImageRequest, ListAgentsResponse,
     ListContentsRequest, ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse,
     ListSkillsRequest, ListSkillsResponse, ListWorkRequest, MakeWorktreeRequest, PasteRequest,
-    PruneRequest, PrunesRequest, RebaseRequest, SayRequest, ShowRequest, TranscriptEndsRequest,
+    PruneRequest, PrunesRequest, ReadDiffRequest, RebaseRequest, SayRequest, ShowRequest,
+    TranscriptEndsRequest,
     TranscriptEndsResponse, WaitingRequest, WaitingResponse,
 };
 use crate::mux::own::api::FromViewer;
@@ -87,6 +88,7 @@ impl Daemon for OverTailnet {
     type PasteStream = <Host as Daemon>::PasteStream;
     type PruneStream = <Host as Daemon>::PruneStream;
     type PrunesStream = <Host as Daemon>::PrunesStream;
+    type ReadDiffStream = <Host as Daemon>::ReadDiffStream;
     type RebaseStream = <Host as Daemon>::RebaseStream;
     type ShowStream = <Host as Daemon>::ShowStream;
 
@@ -125,6 +127,13 @@ impl Daemon for OverTailnet {
         request: Request<ListWorkRequest>,
     ) -> Result<Response<Self::ListWorkStream>, Status> {
         Daemon::list_work(&*self.0, request).await
+    }
+
+    async fn read_diff(
+        &self,
+        _: Request<ReadDiffRequest>,
+    ) -> Result<Response<Self::ReadDiffStream>, Status> {
+        Err(unserved("ReadDiff"))
     }
 
     async fn make_worktree(
@@ -392,6 +401,7 @@ mod tests {
                 ("Paste", device.paste(api::PasteRequest::default()).await.map(drop)),
                 ("KeepImage", device.keep_image(tokio_stream::iter(Vec::<KeepImageRequest>::new())).await.map(drop)),
                 ("Say", device.say(api::SayRequest::default()).await.map(drop)),
+                ("ReadDiff", device.read_diff(api::ReadDiffRequest::default()).await.map(drop)),
                 ("Show", device.show(tokio_stream::iter(Vec::<ShowRequest>::new())).await.map(drop)),
             ];
             let changed = |change| api::ChangeProjectsRequest { on: None, change: Some(change) };

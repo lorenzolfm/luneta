@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
@@ -14,10 +14,16 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use lune_domain::projects::Dir;
+use lune_protocol::diff::{ReadDiff, RelativePath, UntrackedFile};
 use lune_protocol::git::{self, Changed, GitStatus, Head};
 use lune_protocol::said::Said;
+pub use lune_protocol::PATCH_BYTES_MAX;
+use lune_protocol::{UNTRACKED_BYTES_MAX, UNTRACKED_FILES_MAX, UNTRACKED_TOTAL_BYTES_MAX};
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use rustix::fs::{Mode, OFlags};
+use rustix::io::Errno;
 
 use crate::core;
 use crate::directory::Directory;
@@ -29,7 +35,13 @@ const LIMIT: Duration = Duration::from_mins(1);
 
 const TREE_DIRS_MAX: usize = 4096;
 
+const UNTRACKED_PATHS_INSPECTED_MAX: usize = 1024;
+
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 const _: () = assert!(program::SAID_MAX <= u32::MAX as u64);
+const _: () = assert!(UNTRACKED_PATHS_INSPECTED_MAX >= UNTRACKED_FILES_MAX);
+const _: () = assert!(PATCH_BYTES_MAX + UNTRACKED_TOTAL_BYTES_MAX < lune_protocol::RPC_MESSAGE_BYTES_MAX);
 
 pub const REPOSITORY_VARS: [&str; 13] = [
     "GIT_DIR",
@@ -149,6 +161,10 @@ pub struct Named(Command);
 impl Named {
     pub fn run(mut self, limit: Duration) -> io::Result<Ran> {
         program::run(read_by_luned(&mut self.0), limit)
+    }
+
+    pub fn run_prefix(mut self, limit: Duration, most: u64) -> io::Result<(Ran, u64)> {
+        program::run_prefix(read_by_luned(&mut self.0), limit, most)
     }
 
     pub fn run_alone(mut self, limit: Duration) -> io::Result<Ran> {
@@ -417,6 +433,173 @@ pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
         deleted = deleted.checked_add(fewer).ok_or(room)?;
     }
     Ok(Changed::new(added, deleted))
+}
+
+pub fn patch(dir: &Dir) -> Result<ReadDiff, String> {
+    let dir = dir.as_str();
+    let git = |command: &'static str, args: &[&'static str], names: &[&str]| {
+        let mut git = Git::at(dir, command);
+        git.args(args.iter().copied()).fetching_nothing_lazily();
+        git.named(names).run(LIMIT).map_err(|error| format!("git could not be run: {error}"))
+    };
+    let head_branch = branch(dir)?;
+    let head = head_branch
+        .clone()
+        .and_then(Said::new)
+        .unwrap_or_else(|| Said::new("HEAD".to_owned()).expect("HEAD is non-empty"));
+    let (fork, base) = patch_base(dir, head_branch.as_deref(), &git)?;
+    let patch_limit = u64::try_from(PATCH_BYTES_MAX).expect("PATCH_BYTES_MAX fits u64");
+    let mut diff_index = Git::at(dir, "diff-index");
+    diff_index
+        .args(["-p", "-M", "--no-textconv", "--no-color", "-U3"])
+        .fetching_nothing_lazily();
+    let (ran, extra_bytes) = diff_index
+        .named([fork.as_str()])
+        .run_prefix(LIMIT, patch_limit)
+        .map_err(|error| format!("git could not be run: {error}"))?;
+    let mut raw = ran.answer().map_err(|why| format!("git diff-index said {why}"))?;
+    let mut truncated = extra_bytes > 0 || raw.len() > PATCH_BYTES_MAX;
+    if truncated {
+        raw.truncate(PATCH_BYTES_MAX);
+        if let Some(newline) = raw.iter().rposition(|&byte| byte == b'\n') {
+            raw.truncate(newline + 1);
+        }
+    }
+    let (untracked, untracked_truncated) = read_untracked(dir, &git)?;
+    truncated |= untracked_truncated;
+    ReadDiff::new(base, head, raw, truncated, untracked)
+}
+
+fn patch_base(
+    dir: &str,
+    head_branch: Option<&str>,
+    git: &impl Fn(&'static str, &[&'static str], &[&str]) -> Result<Ran, String>,
+) -> Result<(String, Said), String> {
+    if let Some(branch) = head_branch {
+        let tip = format!("refs/heads/{branch}");
+        let bases = defaults();
+        let mut listing = vec![tip.as_str()];
+        listing.extend(bases.iter().map(String::as_str));
+        let listed = git("for-each-ref", &[LISTING], &listing)?;
+        let listed = listed.answer().map_err(|why| format!("git for-each-ref said {why}"))?;
+        let listed = String::from_utf8_lossy(&listed);
+        let listed = refs(&listed);
+        if let Some(&(tip_oid, _)) = listed.get(tip.as_str())
+            && let Some((base_oid, target)) = first_default(&bases, &listed)
+            && let Some(default) = DefaultBranch::of(target)
+            && default.branch() != branch
+        {
+            match git("merge-base", &[], &[tip_oid, base_oid])? {
+                Ran::Ended { status, .. } if status.code() == Some(1) => {},
+                ran => {
+                    let fork = ran.answer().map_err(|why| format!("git merge-base said {why}"))?;
+                    if let Some(fork) = one_line(fork)
+                        && let Some(label) = Said::new(default.to_string())
+                    {
+                        return Ok((fork, label));
+                    }
+                },
+            }
+        }
+    }
+    match git("rev-parse", &["--verify", "--quiet"], &["HEAD"])? {
+        Ran::Ended { status, stdout, .. } if status.success() => {
+            if let Some(head_oid) = one_line(stdout) {
+                return Ok((head_oid, Said::new("HEAD".to_owned()).expect("HEAD is non-empty")));
+            }
+        },
+        Ran::Ended { .. } => {},
+        Ran::Stuck => return Err(format!("git rev-parse in {dir} did not answer in time")),
+    }
+    Ok((EMPTY_TREE.to_owned(), Said::new("empty".to_owned()).expect("empty is non-empty")))
+}
+
+fn read_untracked(
+    dir: &str,
+    git: &impl Fn(&'static str, &[&'static str], &[&str]) -> Result<Ran, String>,
+) -> Result<(Vec<UntrackedFile>, bool), String> {
+    let listed = git("ls-files", &["--others", "--exclude-standard", "-z"], &[])?
+        .answer()
+        .map_err(|why| format!("git ls-files said {why}"))?;
+    let root = Path::new(dir);
+    let file_limit = u64::try_from(UNTRACKED_BYTES_MAX).expect("UNTRACKED_BYTES_MAX fits u64");
+    let mut files = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut inspected = 0usize;
+    let mut truncated = false;
+    for raw_path in listed.split(|&byte| byte == 0) {
+        if raw_path.is_empty() {
+            continue;
+        }
+        if inspected >= UNTRACKED_PATHS_INSPECTED_MAX {
+            truncated = true;
+            break;
+        }
+        inspected += 1;
+        if files.len() >= UNTRACKED_FILES_MAX {
+            truncated = true;
+            break;
+        }
+        let Ok(rel) = std::str::from_utf8(raw_path) else {
+            continue;
+        };
+        let Ok(rel_path) = RelativePath::parse(rel.to_owned()) else {
+            truncated = true;
+            continue;
+        };
+        let full = root.join(rel_path.as_path());
+        let fd = match rustix::fs::open(
+            &full,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT | Errno::LOOP | Errno::NOTDIR) => continue,
+            Err(_) => {
+                truncated = true;
+                continue;
+            },
+        };
+        let file = File::from(fd);
+        let Ok(meta) = file.metadata() else {
+            truncated = true;
+            continue;
+        };
+        if !meta.file_type().is_file() {
+            continue;
+        }
+        if meta.len() > file_limit {
+            truncated = true;
+            continue;
+        }
+        let mut bytes = Vec::new();
+        if file.take(file_limit + 1).read_to_end(&mut bytes).is_err() {
+            truncated = true;
+            continue;
+        }
+        if bytes.len() > UNTRACKED_BYTES_MAX {
+            truncated = true;
+            continue;
+        }
+        if bytes.contains(&0) {
+            continue;
+        }
+        if total_bytes.saturating_add(bytes.len()) > UNTRACKED_TOTAL_BYTES_MAX {
+            truncated = true;
+            break;
+        }
+        let Ok(content) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let Ok(untracked) = UntrackedFile::new(rel_path, content) else {
+            truncated = true;
+            continue;
+        };
+        total_bytes += untracked.content().len();
+        files.push(untracked);
+    }
+    assert!(inspected <= UNTRACKED_PATHS_INSPECTED_MAX, "inspected untracked paths stay bounded");
+    Ok((files, truncated))
 }
 
 const DEFAULT_REMOTES: [&str; 3] = ["upstream", "github", "origin"];
@@ -1319,5 +1502,55 @@ mod tests {
         File::options().write(true).open(&lock).unwrap().set_modified(modified).unwrap();
         fs::rename(&lock, &index).unwrap();
         assert_ne!(stamp(&index), before);
+    }
+
+    #[test]
+    fn a_branch_patch_includes_committed_uncommitted_and_untracked_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        scratch(path, &["init", "-b", "main"]).unwrap();
+        fs::write(path.join("a.rs"), "fn a() {}\n").unwrap();
+        scratch(path, &["add", "a.rs"]).unwrap();
+        scratch(path, &["commit", "-m", "init"]).unwrap();
+        scratch(path, &["checkout", "-b", "feat"]).unwrap();
+        fs::write(path.join("a.rs"), "fn a() { let x = 1; }\n").unwrap();
+        scratch(path, &["add", "a.rs"]).unwrap();
+        scratch(path, &["commit", "-m", "change"]).unwrap();
+        fs::write(path.join("a.rs"), "fn a() { let x = 2; }\n").unwrap();
+        fs::write(path.join("b.rs"), "fn b() {}\n").unwrap();
+
+        let dir = super::Dir::parse(path.to_str().unwrap()).unwrap();
+        let out = super::patch(&dir).unwrap();
+        assert_eq!(out.base().as_str(), "main");
+        assert_eq!(out.head().as_str(), "feat");
+        assert!(!out.truncated());
+        let text = String::from_utf8(out.patch().to_vec()).unwrap();
+        assert!(text.contains("-fn a() {}"));
+        assert!(text.contains("+fn a() { let x = 2; }"));
+        assert_eq!(out.untracked().len(), 1);
+        assert_eq!(out.untracked()[0].path().as_str(), "b.rs");
+        assert_eq!(out.untracked()[0].content(), "fn b() {}\n");
+    }
+
+    #[test]
+    fn untracked_symlinks_are_skipped_and_oversized_files_mark_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        scratch(path, &["init", "-b", "main"]).unwrap();
+        fs::write(path.join("a.rs"), "fn a() {}\n").unwrap();
+        scratch(path, &["add", "a.rs"]).unwrap();
+        scratch(path, &["commit", "-m", "init"]).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, "do not read").unwrap();
+        std::os::unix::fs::symlink(&secret, path.join("link.txt")).unwrap();
+        fs::write(path.join("huge.txt"), "x".repeat(super::UNTRACKED_BYTES_MAX + 10)).unwrap();
+        fs::write(path.join("small.txt"), "hello\n").unwrap();
+
+        let dir = super::Dir::parse(path.to_str().unwrap()).unwrap();
+        let out = super::patch(&dir).unwrap();
+        assert!(out.truncated());
+        let paths: Vec<&str> = out.untracked().iter().map(|file| file.path().as_str()).collect();
+        assert_eq!(paths, ["small.txt"]);
     }
 }

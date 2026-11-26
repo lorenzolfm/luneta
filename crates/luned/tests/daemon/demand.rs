@@ -621,6 +621,15 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in lists no work"))
     }
 
+    type ReadDiffStream = tokio_stream::Empty<Result<api::ReadDiffResponse, Status>>;
+
+    async fn read_diff(
+        &self,
+        _: Request<api::ReadDiffRequest>,
+    ) -> Result<Response<Self::ReadDiffStream>, Status> {
+        Err(Status::unimplemented("a stand-in reads no diff"))
+    }
+
     async fn list_skills(
         &self,
         _: Request<ListSkillsRequest>,

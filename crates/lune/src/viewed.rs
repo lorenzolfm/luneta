@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::num::{NonZeroU16, NonZeroU64};
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::vte::ansi::CursorShape;
@@ -31,6 +32,7 @@ use crate::copied::Excerpt;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::moonlight;
+use crate::review::{self, KittyTarget, LoadedDiff, ReviewAction, ReviewPane, RibbonOverlay};
 use crate::sidebar::colour_of;
 
 const AGAIN: Duration = Duration::from_secs(1);
@@ -109,6 +111,7 @@ struct Layout {
     runs_in: Option<TerminalKey>,
     laid: Option<Laid>,
     screens: BTreeMap<TerminalKey, Screen>,
+    reviews: BTreeMap<ViewId, ReviewPane>,
     pointer: Pointer,
     worktree_tabs: Option<WorktreeTabs>,
     titles: BTreeMap<ViewId, String>,
@@ -233,6 +236,7 @@ impl Layout {
             runs_in,
             laid: None,
             screens: BTreeMap::new(),
+            reviews: BTreeMap::new(),
             pointer: Pointer::Free,
             worktree_tabs: None,
             titles: BTreeMap::new(),
@@ -253,9 +257,24 @@ impl Layout {
         self.laid().and_then(Laid::focused).is_some_and(|view| view.found == Found::Welcome)
     }
 
+    fn reviews(&self) -> bool {
+        self.laid().and_then(Laid::focused).is_some_and(|view| view.found == Found::Review)
+    }
+
+    fn has_review(&self) -> bool {
+        !self.reviews.is_empty()
+    }
+
+    fn review_needs_load(&self) -> bool {
+        self.reviews.values().any(ReviewPane::is_loading)
+    }
+
     fn closes(&mut self, key: &KeyEvent, input: u64) -> Option<ViewId> {
-        assert!(self.welcomes(), "only a welcome view is closed by its keys");
-        let focused = self.focused().expect("a welcome view welcomes when focused");
+        assert!(
+            self.welcomes() || self.reviews(),
+            "only a welcome or review view is closed by its keys"
+        );
+        let focused = self.focused().expect("a welcome or review view is focused");
         let closing = std::mem::replace(&mut self.closing, Closing::Unarmed);
         let pressed = key.kind == KeyEventKind::Press && key.modifiers.is_empty();
         if !pressed || key.code != KeyCode::Char(CLOSE) {
@@ -269,6 +288,12 @@ impl Layout {
         }
         self.closing = Closing::Armed { view: focused, input };
         None
+    }
+
+    fn disarm_close(&mut self) {
+        if matches!(self.closing, Closing::Armed { .. }) {
+            self.closing = Closing::Unarmed;
+        }
     }
 
     fn held_after_close(&mut self, key: &KeyEvent) -> bool {
@@ -297,7 +322,7 @@ impl Layout {
             Found::Key(key) if Some(key) == self.runs_in => Typing::Never,
             Found::Key(key) => Typing::Into(key),
             Found::Looking => Typing::Later,
-            Found::Lost | Found::Welcome => Typing::Never,
+            Found::Lost | Found::Welcome | Found::Review => Typing::Never,
         }
     }
 
@@ -336,6 +361,7 @@ impl Layout {
         self.worktree = worktree;
         self.laid = None;
         self.screens.clear();
+        self.reviews.clear();
         self.pointer = Pointer::Free;
     }
 
@@ -369,6 +395,15 @@ impl Layout {
             }
         }
         let empty = laid.is_empty();
+        let review_ids: BTreeSet<ViewId> = laid
+            .views()
+            .filter(|view| view.found == Found::Review)
+            .map(|view| view.id)
+            .collect();
+        self.reviews.retain(|id, _| review_ids.contains(id));
+        for id in review_ids {
+            self.reviews.entry(id).or_insert_with(ReviewPane::loading);
+        }
         self.laid = Some(laid);
         let wanted = self.wanted();
         self.screens.retain(|key, _| wanted.contains(key));
@@ -461,14 +496,30 @@ impl Layout {
             return Vec::new();
         }
         let focused = laid.focused().expect("a layout shown as tabs focuses one").id;
-        let named = laid.in_order().map(|view| {
-            let title = self.titles.get(&view.id).map(String::as_str).filter(|it| !it.is_empty());
-            let fallback = if view.found == Found::Welcome { WELCOME_TAB } else { UNTITLED };
-            (view.id, title.unwrap_or(fallback))
-        });
-        let named: Vec<(ViewId, &str)> = named.collect();
-        let from_each = (0..named.len()).map(|hidden| {
-            let shown = &named[hidden..];
+        let named: Vec<(ViewId, String)> = laid
+            .in_order()
+            .map(|view| {
+                let title = self
+                    .titles
+                    .get(&view.id)
+                    .map(String::as_str)
+                    .filter(|it| !it.is_empty());
+                let label = match (title, view.found) {
+                    (Some(title), _) => title.to_owned(),
+                    (None, Found::Welcome) => WELCOME_TAB.to_owned(),
+                    (None, Found::Review) => self
+                        .reviews
+                        .get(&view.id)
+                        .map_or_else(|| review::TAB.to_owned(), ReviewPane::tab_label),
+                    (None, _) => UNTITLED.to_owned(),
+                };
+                (view.id, label)
+            })
+            .collect();
+        let named_refs: Vec<(ViewId, &str)> =
+            named.iter().map(|(id, name)| (*id, name.as_str())).collect();
+        let from_each = (0..named_refs.len()).map(|hidden| {
+            let shown = &named_refs[hidden..];
             tab_spans_capped(shown.iter().copied(), width, tab_columns_max(shown, width))
         });
         let mut drawn = from_each;
@@ -514,6 +565,19 @@ impl Layout {
             && Some(under) != self.focused()
         {
             return Moused::Focus(under);
+        }
+        if let Some((view, placed)) = self.laid().and_then(Laid::focused_at)
+            && view.found == Found::Review
+        {
+            let inner = screen_rect(view_rect(Rect::default(), placed));
+            if inner.contains(spot) {
+                let local = Position::new(spot.x - inner.x, spot.y - inner.y);
+                let id = view.id;
+                if let Some(pane) = self.reviews.get_mut(&id) {
+                    pane.mouse(mouse, local);
+                }
+            }
+            return Moused::Nothing;
         }
         self.sent(mouse, spot)
     }
@@ -611,7 +675,13 @@ impl Layout {
         link(screen, at).map(|(span, _)| span)
     }
 
-    fn draw(&self, buffer: &mut Buffer, area: Rect, hover: Option<Spot>) -> Option<Position> {
+    fn draw(
+        &mut self,
+        buffer: &mut Buffer,
+        area: Rect,
+        hover: Option<Spot>,
+        kitty_cell_px: Option<(NonZeroU16, NonZeroU16)>,
+    ) -> (Option<Position>, Vec<RibbonOverlay>) {
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
                 if let Some(cell) = buffer.cell_mut((x, y)) {
@@ -628,9 +698,13 @@ impl Layout {
         let focused = self.focused();
         let selection = self.pointer.selection();
         let pointed = hover.and_then(|at| self.pointed(at));
+        let drawn_views: Vec<(ViewId, Found, Placed)> =
+            self.drawn().into_iter().map(|(view, placed)| (view.id, view.found, placed)).collect();
         let mut cursor = None;
-        for (view, placed) in self.drawn() {
-            let mine = Some(view.id) == focused;
+        let mut overlays = Vec::new();
+        let mut review_slot = 0u32;
+        for (view_id, view_found, placed) in drawn_views {
+            let mine = Some(view_id) == focused;
             let outer = view_rect(views, placed);
             let edge = if mine { moonlight::MUTE } else { moonlight::LIFTED };
             let named = if mine {
@@ -639,15 +713,22 @@ impl Layout {
                 Style::new().fg(moonlight::MUTE)
             };
             let tabs = self.view_tabs(outer);
-            let titled = self.titles.get(&view.id).map_or("", String::as_str);
-            let title = if tabs.is_empty() { titled } else { "" };
+            let titled = match (self.titles.get(&view_id).map(String::as_str), view_found) {
+                (Some(t), _) if !t.is_empty() => t.to_owned(),
+                (_, Found::Review) => self
+                    .reviews
+                    .get(&view_id)
+                    .map_or_else(|| review::TAB.to_owned(), ReviewPane::tab_label),
+                _ => String::new(),
+            };
+            let title = if tabs.is_empty() { titled.as_str() } else { "" };
             border(buffer, views, outer, title, Style::new().fg(edge), named);
-            draw_view_tabs(buffer, views, outer, &tabs, view.id, colour);
+            draw_view_tabs(buffer, views, outer, &tabs, view_id, colour);
             let seen = screen_rect(outer).intersection(views);
             if seen.is_empty() {
                 continue;
             }
-            let said = match view.found {
+            let said = match view_found {
                 Found::Key(key) if Some(key) == self.runs_in => HERE,
                 Found::Key(key) => {
                     if let Some(screen) = self.screens.get(&key) {
@@ -668,11 +749,26 @@ impl Layout {
                     }
                     continue;
                 },
+                Found::Review => {
+                    let kitty = kitty_cell_px.map(|cell_px| {
+                        let image_id = review::KITTY_BASE_ID
+                            .checked_add(review_slot)
+                            .unwrap_or(NonZeroU32::MAX);
+                        review_slot = review_slot.saturating_add(1);
+                        KittyTarget { cell_px, image_id }
+                    });
+                    if let Some(pane) = self.reviews.get_mut(&view_id)
+                        && let Some(overlay) = pane.draw(buffer, seen, mine, kitty)
+                    {
+                        overlays.push(overlay);
+                    }
+                    continue;
+                },
             };
             let style = Style::new().fg(moonlight::MUTE);
             buffer.set_stringn(seen.x, seen.y, said, usize::from(seen.width), style);
         }
-        cursor
+        (cursor, overlays)
     }
 
     fn cursor_style(&self) -> (CursorShape, bool) {
@@ -845,6 +941,18 @@ impl Viewed {
 
     pub fn welcomes(&self) -> bool {
         self.layout.welcomes()
+    }
+
+    pub fn reviews(&self) -> bool {
+        self.layout.reviews()
+    }
+
+    pub fn has_review(&self) -> bool {
+        self.layout.has_review()
+    }
+
+    pub fn review_needs_load(&self) -> bool {
+        self.layout.review_needs_load()
     }
 
     pub fn heard(&mut self, heard: Heard) -> Heeded {
@@ -1027,6 +1135,25 @@ impl Viewed {
         self.ask(Asked::Welcome);
     }
 
+    pub fn review(&mut self) {
+        self.opened.insert(self.layout.worktree);
+        self.ask(Asked::Review);
+    }
+
+    pub fn diff_loaded(
+        &mut self,
+        worktree: WorktreeId,
+        loaded: &Result<Arc<LoadedDiff>, String>,
+        revision: NonZeroU64,
+    ) {
+        if self.layout.worktree != worktree {
+            return;
+        }
+        for pane in self.layout.reviews.values_mut() {
+            pane.loaded(loaded.clone(), revision);
+        }
+    }
+
     pub fn arrange(&mut self, arranged: Arranged) {
         self.ask(Asked::Arrange(arranged));
     }
@@ -1074,20 +1201,42 @@ impl Viewed {
         }
     }
 
-    pub fn key(&mut self, key: &KeyEvent, input: u64) {
+    pub fn key(&mut self, key: &KeyEvent, input: u64) -> ReviewAction {
         self.unselect();
         if self.layout.held_after_close(key) {
-            return;
+            return ReviewAction::None;
         }
         if self.layout.welcomes() {
             if let Some(view) = self.layout.closes(key, input) {
                 self.ask(Asked::Close(view));
             }
-            return;
+            return ReviewAction::None;
+        }
+        if self.layout.reviews() {
+            let Some(view) = self.layout.focused() else {
+                return ReviewAction::None;
+            };
+            let searching = self
+                .layout
+                .reviews
+                .get(&view)
+                .is_some_and(ReviewPane::is_searching);
+            if searching {
+                self.layout.disarm_close();
+            } else if let Some(closed) = self.layout.closes(key, input) {
+                self.ask(Asked::Close(closed));
+                return ReviewAction::None;
+            }
+            return self
+                .layout
+                .reviews
+                .get_mut(&view)
+                .map_or(ReviewAction::None, |pane| pane.key(key));
         }
         if let Some(key) = key_said(key) {
             self.type_focused(typed::Event::Key(key));
         }
+        ReviewAction::None
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -1136,8 +1285,14 @@ impl Viewed {
     }
 
     #[must_use]
-    pub fn draw(&self, buffer: &mut Buffer, area: Rect, hover: Option<Spot>) -> Option<Position> {
-        self.layout.draw(buffer, area, hover)
+    pub fn draw(
+        &mut self,
+        buffer: &mut Buffer,
+        area: Rect,
+        hover: Option<Spot>,
+        kitty_cell_px: Option<(NonZeroU16, NonZeroU16)>,
+    ) -> (Option<Position>, Vec<RibbonOverlay>) {
+        self.layout.draw(buffer, area, hover, kitty_cell_px)
     }
 
     #[must_use]
@@ -1260,9 +1415,9 @@ mod tests {
 
     #[test]
     fn each_terminal_draws_in_its_frame_under_the_worktrees_and_a_larger_area_keeps_a_margin() {
-        let layout = split_layout();
+        let mut layout = split_layout();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
-        let cursor = layout.draw(&mut buffer, Rect::new(2, 0, 22, 6), None);
+        let (cursor, _) = layout.draw(&mut buffer, Rect::new(2, 0, 22, 6), None, None);
         assert_eq!(row(&buffer, 0, 2, 17), "\u{e0b6} one \u{e0b4}   two  ");
         assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (moonlight::INK, moonlight::MAUVE));
         assert_eq!((buffer[(2, 0)].fg, buffer[(2, 0)].bg), (moonlight::MAUVE, Color::Reset));
@@ -1275,7 +1430,7 @@ mod tests {
         assert_eq!(row(&buffer, 5, 2, 24), " ".repeat(22));
         assert_eq!(cursor, Some(Position::new(5, 3)));
         let mut small = Buffer::empty(Rect::new(0, 0, 14, 3));
-        assert_eq!(layout.draw(&mut small, Rect::new(0, 0, 14, 3), None), None);
+        assert_eq!(layout.draw(&mut small, Rect::new(0, 0, 14, 3), None, None).0, None);
         assert_eq!(row(&small, 1, 0, 14), "╭ p1 ────╮╭ p2");
         assert_eq!(row(&small, 2, 0, 14), "│abcdefgh││qrs");
     }
@@ -1304,14 +1459,14 @@ mod tests {
         let mut layout = split_layout();
         layout.laid_out(laid(halves(), 12, true));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭ p2 ──────────────╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
         let mut here = Layout::new(worktree(1), Some(key(2)));
         let lost = vec![view(11, (0, 0, 10, 4), None), view(12, (10, 0, 10, 4), Some(2))];
         here.laid_out(laid(lost, 11, false));
         assert_eq!(here.wanted(), BTreeSet::new(), "lune never shows the terminal it runs in");
-        here.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
+        here.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None);
         assert_eq!(row(&buffer, 2, 1, 9), "lost: lu");
         assert_eq!(row(&buffer, 2, 11, 19), "lune run");
     }
@@ -1332,7 +1487,7 @@ mod tests {
         };
         layout.laid_out(tabs(12));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭  p  ─ ● p ─  t  ─╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
         assert_eq!((buffer[(8, 1)].symbol(), buffer[(8, 1)].fg), (VIEW_DOT, moonlight::MAUVE));
@@ -1364,7 +1519,7 @@ mod tests {
         });
         layout.laid_out(tabs.unwrap());
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None, None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭  a  ─  a  ─ ● t ─╮");
         let drawn = |columns| {
             let spans = layout.view_tabs(Rect::new(0, 0, columns, 4));
@@ -1433,7 +1588,7 @@ mod tests {
         assert_eq!(layout.selected(), None, "a click on a word copies nothing");
         assert_eq!(layout.pointer, Pointer::Free);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), Some(spot(2, 2)));
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), Some(spot(2, 2)), None);
         let underlined = |x| buffer[(x, 2)].modifier.contains(Modifier::UNDERLINED);
         let line: String = (1..9).map(|x| if underlined(x) { '_' } else { ' ' }).collect();
         assert_eq!(line, "______  ");
@@ -1698,5 +1853,73 @@ mod tests {
         let first = (0..UNSENT_MAX).map(|index| pasted(&index.to_string()));
         assert_eq!(kept, first.collect::<Vec<typed::Event>>());
         assert!(matches!(unsent.held, Held::Nothing), "a batch sent starts the count over");
+    }
+
+    #[test]
+    fn a_review_view_renders_loads_diff_and_handles_split_ribbons_and_keys() {
+        use show_response::view::Found as Said;
+        let mut layout = Layout::new(worktree(1), None);
+        let mut review_view = view(12, (0, 0, 112, 14), None);
+        review_view.found = Some(Said::Review(()));
+        let laid = Laid::heard(show_response::Laid {
+            worktree: 1,
+            size: Some(show_request::Size { columns: 112, rows: 14 }),
+            views: vec![review_view],
+            shown: Some(show_response::laid::Shown::Tiled(12)),
+        })
+        .unwrap();
+        assert!(!layout.laid_out(laid));
+        assert!(layout.reviews());
+        assert!(layout.has_review());
+        assert!(layout.review_needs_load());
+
+        let patch = "\
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,3 @@
+ fn demo() {
+-    old();
++    new();
+ }
+";
+        let response = Arc::new(
+            LoadedDiff::of_wire(luned::api::ReadDiffResponse {
+                base: "main".to_owned(),
+                head: "feat".to_owned(),
+                patch: patch.as_bytes().to_vec(),
+                truncated: false,
+                untracked: Vec::new(),
+            })
+            .unwrap(),
+        );
+        for pane in layout.reviews.values_mut() {
+            pane.loaded(Ok(Arc::clone(&response)), NonZeroU64::MIN);
+        }
+        assert!(!layout.review_needs_load());
+
+        let area = Rect::new(0, 0, 112, 15);
+        let mut buf = Buffer::empty(area);
+        let (_, overlays_unicode) = layout.draw(&mut buf, area, None, None);
+        assert!(overlays_unicode.is_empty());
+
+        let mut buf_kitty = Buffer::empty(area);
+        let (_, overlays_kitty) = layout.draw(&mut buf_kitty, area, None, Some((side(8), side(16))));
+        assert_eq!(overlays_kitty.len(), 1);
+        assert_eq!(overlays_kitty[0].image_id, review::KITTY_BASE_ID);
+
+        let pane = layout.reviews.get_mut(&terminal(12)).unwrap();
+        pane.key(&KeyEvent::from(KeyCode::Char('j')));
+        pane.key(&KeyEvent::from(KeyCode::Char('j')));
+        let action = pane.key(&KeyEvent::from(KeyCode::Char('e')));
+        assert!(matches!(action, ReviewAction::Explain(ref ex) if ex.path == "src/lib.rs"));
+
+        let kind = |kind| KeyEvent::new_with_kind(KeyCode::Char(CLOSE), KeyModifiers::NONE, kind);
+        let (d, held) = (kind(KeyEventKind::Press), kind(KeyEventKind::Repeat));
+        assert_eq!(layout.closes(&d, 1), None);
+        assert_eq!(layout.closes(&held, 2), None, "holding d does not close a review pane");
+        assert_eq!(layout.closes(&d, 3), None);
+        assert_eq!(layout.closes(&d, 4), Some(terminal(12)), "d d closes the review pane");
+        assert!(layout.held_after_close(&held), "trailing repeat d is swallowed after close");
     }
 }

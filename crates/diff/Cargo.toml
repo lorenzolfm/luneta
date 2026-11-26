@@ -1,0 +1,10 @@
+[package]
+name = "lune-diff"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+description = "Unified diff parsing, word-level emphasis, lexical syntax highlighting, unpadded split layouts with Bezier connector ribbons, and interactive diff viewer state"
+
+[lints]
+workspace = true

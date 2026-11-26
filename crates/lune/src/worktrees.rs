@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::mux::TerminalKey;
@@ -19,7 +19,9 @@ use luned::api::change_projects_response::Made;
 use luned::api::ChangeProjectsResponse;
 use luned::api::make_worktree_response::Landed as Answered;
 use luned::api::projects::Held;
-use luned::api::{self, ChangeProjectsRequest, ListWorkRequest, MakeWorktreeRequest, On};
+use luned::api::{
+    self, ChangeProjectsRequest, ListWorkRequest, MakeWorktreeRequest, On, ReadDiffRequest,
+};
 use luned::api::{Version, WatchRequest};
 use luned::changes::{Unadded, Unchanged};
 use luned::links::{self, Branch, Unready};
@@ -33,6 +35,7 @@ use luned::Directory;
 
 use crate::daemon;
 use crate::machines::Machine;
+use crate::review::LoadedDiff;
 use crate::sidebar::Reorder;
 
 const ASKING: Duration = Duration::from_secs(15);
@@ -278,6 +281,22 @@ pub fn work(path: &Path, machine: &Machine, project: ProjectId) -> Result<Listed
         let listed = answer.message().await.map_err(said)?;
         let listed = listed.ok_or("luned ended its answer with no list")?;
         Listed::of(listed)
+    };
+    asked_or(path, WORK_PATIENCE, asking, |late| late).unwrap_or_else(Err)
+}
+
+pub fn read_diff(
+    path: &Path,
+    machine: &Machine,
+    worktree: WorktreeId,
+) -> Result<Arc<LoadedDiff>, String> {
+    let request = ReadDiffRequest { on: on(machine), worktree: worktree.get() };
+    let asking = async |daemon: &mut Daemon| {
+        let said = |status: Status| status.message().to_owned();
+        let mut answer = daemon.read_diff(request).await.map_err(said)?.into_inner();
+        let read = answer.message().await.map_err(said)?;
+        let read = read.ok_or_else(|| "luned ended its answer with no patch".to_owned())?;
+        LoadedDiff::of_wire(read).map(Arc::new)
     };
     asked_or(path, WORK_PATIENCE, asking, |late| late).unwrap_or_else(Err)
 }

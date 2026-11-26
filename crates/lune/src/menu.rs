@@ -601,6 +601,7 @@ impl Chain {
             | Offer::FixChecks(_)
             | Offer::NewView(_)
             | Offer::NewWelcome(_)
+            | Offer::NewReview(_)
             | Offer::Arrange(..)
             | Offer::CloseView(_)
             | Offer::CloseWorktree(_)
@@ -749,6 +750,7 @@ enum Offer<'t> {
     FixChecks(&'t ViewRow),
     NewView(&'t ViewRow),
     NewWelcome(&'t ViewRow),
+    NewReview(&'t ViewRow),
     Arrange(&'t ViewRow, Arranged),
     NewWorktree(ProjectId),
     NewMachine,
@@ -886,6 +888,7 @@ impl Target {
             (Action::FixChecks, Target::View(_, row)) => Offer::FixChecks(row),
             (Action::NewView, Target::View(_, row)) => Offer::NewView(row),
             (Action::NewWelcome, Target::View(_, row)) => Offer::NewWelcome(row),
+            (Action::NewReview, Target::View(_, row)) => Offer::NewReview(row),
             (Action::ShowTabs, Target::View(_, row)) if row.arranged == Some(Arranged::Panes) => {
                 Offer::Arrange(row, Arranged::Tabs)
             },
@@ -1209,6 +1212,7 @@ pub enum Done {
     Forget(Destination),
     Worktree(Machine, ProjectId, Branch),
     Welcome { on: Machine, session: Listed, view: ViewKey },
+    Review { on: Machine, session: Listed, view: ViewKey },
     Arrange { on: Machine, session: Listed, view: ViewKey, arranged: Arranged },
     OpenIn { on: Machine, worktree: WorktreeId, command: Argv },
     Said(String),
@@ -1479,6 +1483,11 @@ impl Menu {
                 let on = target.machine().clone();
                 let (session, view) = (row.place.listed().clone(), row.place.view());
                 Did::Closed(Done::Welcome { on, session, view })
+            },
+            Offer::NewReview(row) => {
+                let on = target.machine().clone();
+                let (session, view) = (row.place.listed().clone(), row.place.view());
+                Did::Closed(Done::Review { on, session, view })
             },
             Offer::Arrange(row, arranged) => {
                 let on = target.machine().clone();
@@ -2861,6 +2870,7 @@ mod tests {
                 "─ New ───────────── lune/main ─",
                 " v  new view",
                 " h  new welcome view",
+                " r  new review view",
                 " w  new worktree…",
                 " m  new machine…",
                 " <BS> - Back, <ESC> - Close",
@@ -3581,9 +3591,10 @@ mod tests {
         let (session, at) = (project().listed().clone(), ViewKey::terminal(4));
         assert_eq!(wants, Wants::Open { session, view: at, opens });
         let (menu, _) = stays(opened(view.clone(), Some('n')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..5], [
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..6], [
             " v  new view",
             " h  new welcome view",
+            " r  new review view",
             " w  new worktree…",
             " m  new machine…",
         ]);

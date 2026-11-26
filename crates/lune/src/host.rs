@@ -3,11 +3,12 @@ use std::env;
 use std::io::{self, Write as _};
 use std::iter;
 use std::mem;
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -70,6 +71,7 @@ use crate::peers;
 use crate::picker::{self, List, Palette, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found};
+use crate::review::{self, LoadedDiff, ReviewAction, RibbonCacheKey, RibbonOverlay};
 use crate::sidebar::{
     self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat,
     Sidebar, Sitting, ViewKey,
@@ -126,9 +128,15 @@ const CLOSE_PANICKED: &str = "lune could not ask luned for the close: asking pan
 
 const WORK_PANICKED: &str = "lune could not ask luned for the work: asking panicked";
 
+const DIFF_PANICKED: &str = "lune could not ask luned for the changes: asking panicked";
+
+const EXPLAIN_PROMPT: &str = "Explain why this is built this way.";
+
 pub const NOT_YET: &str = "lune does not do that to a worktree yet";
 
 const WELCOME_MENU: &str = "the menu is for terminals: d d closes this welcome view";
+
+const REVIEW_MENU: &str = "the menu is for terminals: d d closes this review view, e explains, ? asks";
 
 const HOME_MENU: &str = "the menu is for terminals: the project's is on its row in the sidebar";
 
@@ -188,6 +196,12 @@ pub enum Event {
     News,
     Agent,
     Work { number: u64, listed: Result<work::Listed, String> },
+    DiffLoaded {
+        on: Machine,
+        worktree: WorktreeId,
+        revision: NonZeroU64,
+        loaded: Result<Arc<LoadedDiff>, String>,
+    },
     Alerted(alerts::Read),
     Clicked(alerts::Key),
     #[cfg(not(target_os = "macos"))]
@@ -411,6 +425,107 @@ enum Homed {
     Gone { on: Machine },
 }
 
+const DEFAULT_CELL_PX: (NonZeroU16, NonZeroU16) = (
+    NonZeroU16::new(8).expect("default cell width is positive"),
+    NonZeroU16::new(16).expect("default cell height is positive"),
+);
+
+struct KittyRibbons {
+    cell_px: (NonZeroU16, NonZeroU16),
+    measured_area: Option<Rect>,
+    pending: Vec<RibbonOverlay>,
+    shown: Vec<(NonZeroU32, RibbonCacheKey)>,
+}
+
+impl KittyRibbons {
+    fn new() -> KittyRibbons {
+        KittyRibbons {
+            cell_px: DEFAULT_CELL_PX,
+            measured_area: None,
+            pending: Vec::new(),
+            shown: Vec::new(),
+        }
+    }
+
+    fn cell_px(&mut self, frame_area: Rect) -> (NonZeroU16, NonZeroU16) {
+        if self.measured_area != Some(frame_area) {
+            self.measured_area = Some(frame_area);
+            self.cell_px = answers::cell_px().unwrap_or(DEFAULT_CELL_PX);
+        }
+        self.cell_px
+    }
+}
+
+enum Ribbons {
+    Unsupported,
+    Supported(KittyRibbons),
+}
+
+impl Ribbons {
+    fn new(supported: bool) -> Ribbons {
+        if supported {
+            Ribbons::Supported(KittyRibbons::new())
+        } else {
+            Ribbons::Unsupported
+        }
+    }
+
+    fn enable(&mut self) {
+        if matches!(self, Ribbons::Unsupported) {
+            *self = Ribbons::Supported(KittyRibbons::new());
+        }
+    }
+
+    fn cell_px(&mut self, frame_area: Rect, covered: bool) -> Option<(NonZeroU16, NonZeroU16)> {
+        if covered {
+            return None;
+        }
+        match self {
+            Ribbons::Unsupported => None,
+            Ribbons::Supported(kitty) => Some(kitty.cell_px(frame_area)),
+        }
+    }
+
+    fn set_pending(&mut self, overlays: Vec<RibbonOverlay>) {
+        if let Ribbons::Supported(kitty) = self {
+            kitty.pending = overlays;
+        }
+    }
+}
+
+enum FetchFlight {
+    Idle,
+    InFlight {
+        revision: NonZeroU64,
+        refetch: bool,
+    },
+}
+
+struct DiffFetch {
+    last_revision: Option<NonZeroU64>,
+    flight: FetchFlight,
+    git_status: Option<(Machine, WorktreeId, luned::api::GitStatus)>,
+}
+
+impl DiffFetch {
+    fn new() -> DiffFetch {
+        DiffFetch {
+            last_revision: None,
+            flight: FetchFlight::Idle,
+            git_status: None,
+        }
+    }
+
+    fn next_revision(&mut self) -> NonZeroU64 {
+        let next = match self.last_revision {
+            None => NonZeroU64::MIN,
+            Some(prev) => prev.checked_add(1).expect("diff revisions do not wrap"),
+        };
+        self.last_revision = Some(next);
+        next
+    }
+}
+
 pub struct App {
     right: Option<Right>,
     homes: home::Homes,
@@ -450,6 +565,8 @@ pub struct App {
     speech: Option<Speech>,
     fetching: Option<Fetch>,
     releases: bool,
+    diff: DiffFetch,
+    ribbons: Ribbons,
     transcripts: luned::transcripts::Folders,
     daemon: Option<PathBuf>,
     events: Sender<Event>,
@@ -535,6 +652,7 @@ pub fn run(named: Option<&str>, folder: Result<PathBuf, String>) -> ExitCode {
             unkept,
             colours: answers.colours,
             releases: answers.kitty,
+            graphics: answers.graphics,
             desktop: Desktop::start(&events, folder.clone()),
         };
         run_in(&mut terminal, (folder, &dir), arriving, events, &mut inbox, &mut sent)
@@ -631,6 +749,9 @@ fn run_in(
     let launch = Launch { folder, dir: dir.to_owned(), columns, rows };
     let mut app = App::opened(launch, &state::Folder::of_user(), arriving, events);
     let ran = run_loop(terminal, &mut app, inbox);
+    if let Err(error) = app.clear_graphics(terminal.backend_mut()) {
+        log::say(&format!("graphics cleanup failed: {error}"));
+    }
     sent.extend(app.sent());
     ran?;
     Ok(app.failure())
@@ -650,6 +771,7 @@ struct Arriving {
     unkept: Option<String>,
     colours: Colours,
     releases: bool,
+    graphics: bool,
     desktop: Desktop,
 }
 
@@ -668,6 +790,7 @@ impl App {
             unkept: None,
             colours: Colours::default(),
             releases: false,
+            graphics: false,
             desktop: Desktop::unserved(&events),
         };
         let state_folder = state::Folder::at(state_folder.to_owned());
@@ -681,7 +804,8 @@ impl App {
         events: Sender<Event>,
     ) -> App {
         let Launch { folder, dir, columns, rows } = launch;
-        let Arriving { start, runs_in, news, unkept, colours, releases, desktop } = arriving;
+        let Arriving { start, runs_in, news, unkept, colours, releases, graphics, desktop } =
+            arriving;
         let (width, width_unread) = Width::kept(state_folder);
         let folds = Folds::shared(state_folder);
         let folds_dirs = folds.dirs();
@@ -786,6 +910,8 @@ impl App {
             speech: None,
             fetching: None,
             releases,
+            diff: DiffFetch::new(),
+            ribbons: Ribbons::new(graphics),
             transcripts: luned::transcripts::Folders::default(),
             daemon,
             events,
@@ -995,6 +1121,7 @@ impl App {
                     let heeded = right.heard(heard);
                     self.heeded(heeded);
                 }
+                self.maybe_fetch_diff(false);
             },
             Event::Seen { number, watcher, seen } => {
                 if let Some(right) = self.viewed_mut().filter(|it| it.number() == number) {
@@ -1007,6 +1134,25 @@ impl App {
                     home.listed(listed, Instant::now());
                 }
             },
+            Event::DiffLoaded { on, worktree, revision, loaded } => {
+                let refetch = match &self.diff.flight {
+                    FetchFlight::InFlight { revision: inflight_rev, refetch }
+                        if *inflight_rev == revision =>
+                    {
+                        let should_refetch = *refetch;
+                        self.diff.flight = FetchFlight::Idle;
+                        should_refetch
+                    },
+                    FetchFlight::Idle | FetchFlight::InFlight { .. } => false,
+                };
+                if let Some(right) = self.viewed_mut()
+                    && *right.machine() == on
+                    && right.worktree() == worktree
+                {
+                    right.diff_loaded(worktree, &loaded, revision);
+                }
+                self.maybe_fetch_diff(refetch);
+            },
             Event::Reached { transcripts } => self.transcripts = transcripts,
             Event::Daemon(Ok(host)) => {
                 self.projected = Projected::adapted(&host).unwrap_or_else(|why| {
@@ -1017,6 +1163,7 @@ impl App {
                     let (tabs, titles) = self.projected.tabs(right.machine(), right.worktree());
                     right.tabs(tabs, titles);
                 }
+                let review_status = self.review_git_status(&host);
                 if let Some(Homed::Gone { on }) = self.name_home() {
                     self.go_other_than(&on, None);
                 }
@@ -1024,6 +1171,10 @@ impl App {
                 self.homes.forget(|home| gone(projected, home));
                 self.sidebar.heard(host);
                 self.seat();
+                if review_status != self.diff.git_status {
+                    self.diff.git_status = review_status;
+                    self.maybe_fetch_diff(true);
+                }
                 if let Some(machines) = self.sidebar.reaches() {
                     let acts = self.alerts.heard(machines, Instant::now());
                     self.alert(acts);
@@ -1433,6 +1584,8 @@ impl App {
                 self.sidebar.float_note(HOME_MENU.to_owned());
             } else if self.viewed().is_some_and(Viewed::welcomes) {
                 self.sidebar.float_note(WELCOME_MENU.to_owned());
+            } else if self.viewed().is_some_and(Viewed::reviews) {
+                self.sidebar.float_note(REVIEW_MENU.to_owned());
             } else {
                 self.sidebar.float_menu();
             }
@@ -1473,10 +1626,10 @@ impl App {
     }
 
     fn palette(&self) -> Palette {
-        let welcomes = self.viewed().is_some_and(Viewed::welcomes);
+        let non_terminal = self.viewed().is_some_and(|v| v.welcomes() || v.reviews());
         let (aim, origin) = match self.focus.side {
             Side::Sidebar => (self.sidebar.aimed_row(), Origin::Sidebar),
-            Side::Session | Side::Collapsed if welcomes => {
+            Side::Session | Side::Collapsed if non_terminal => {
                 (self.sidebar.aimed_worktree(), Origin::Views)
             },
             Side::Session | Side::Collapsed => (self.sidebar.aimed_view(), Origin::Views),
@@ -1485,10 +1638,19 @@ impl App {
     }
 
     fn key_to_session(&mut self, key: &KeyEvent) {
-        match &mut self.right {
+        let action = match &mut self.right {
             Some(Right::Worktree(right)) => right.key(key, self.inputs),
-            Some(Right::Home(shown)) => self.homes.shown_mut(shown).key(key, &mut self.asks, &self.events),
-            None => {},
+            Some(Right::Home(shown)) => {
+                self.homes.shown_mut(shown).key(key, &mut self.asks, &self.events);
+                ReviewAction::None
+            },
+            None => ReviewAction::None,
+        };
+        match action {
+            ReviewAction::None => {},
+            ReviewAction::Reload => self.fetch_diff(),
+            ReviewAction::Explain(excerpt) => self.open_review_ask(&excerpt, true),
+            ReviewAction::Ask(excerpt) => self.open_review_ask(&excerpt, false),
         }
     }
 
@@ -1932,6 +2094,9 @@ impl App {
             Asked::Welcome { asking, on, session, view } => {
                 self.welcome(asking, &on, &session, view);
             },
+            Asked::Review { asking, on, session, view } => {
+                self.review(asking, &on, &session, view);
+            },
             Asked::Arrange { asking, on, session, view, arranged } => {
                 self.arrange(asking, &on, &session, view, arranged);
             },
@@ -2103,6 +2268,91 @@ impl App {
         self.go_worktree(on, worktree, Some(terminal));
         self.shown().welcome();
         self.give_opened(Opener::of(asking));
+    }
+
+    fn review(&mut self, asking: sidebar::Held, on: &Machine, session: &Listed, view: ViewKey) {
+        let project = self.projected.project(on, session.project());
+        let held = project.and_then(|project| project.view_of(view.key()));
+        let Some((worktree, terminal)) = held else {
+            return self.sidebar.notify(format!("menu: luned lists no view {view}"));
+        };
+        self.go_worktree(on, worktree, Some(terminal));
+        self.shown().review();
+        self.give_opened(Opener::of(asking));
+    }
+
+    fn review_git_status(&self, host: &Host) -> Option<(Machine, WorktreeId, luned::api::GitStatus)> {
+        let right = self.viewed()?;
+        if !right.has_review() {
+            return None;
+        }
+        let (_, worktree) = self.projected.holding(right.machine(), right.worktree())?;
+        let dir = worktree.folder.as_str();
+        let statuses = match right.machine() {
+            Machine::Local => host.git_statuses.as_slice(),
+            Machine::Remote(destination) => {
+                let spelled = destination.to_string();
+                let found = host.remotes.iter().find(|r| r.destination == spelled)?;
+                match &found.reached {
+                    Some(luned::api::remote::Reached::Host(far)) => far.git_statuses.as_slice(),
+                    _ => return None,
+                }
+            },
+        };
+        let status = statuses.iter().find(|status| status.dir == dir)?.clone();
+        Some((right.machine().clone(), right.worktree(), status))
+    }
+
+    fn maybe_fetch_diff(&mut self, force: bool) {
+        let Some(right) = self.viewed() else {
+            return;
+        };
+        if !right.has_review() {
+            return;
+        }
+        if !force && !right.review_needs_load() {
+            return;
+        }
+        self.fetch_diff();
+    }
+
+    fn fetch_diff(&mut self) {
+        let Some((on, worktree)) = self
+            .viewed()
+            .map(|right| (right.machine().clone(), right.worktree()))
+        else {
+            return;
+        };
+        if let FetchFlight::InFlight { refetch, .. } = &mut self.diff.flight {
+            *refetch = true;
+            return;
+        }
+        let revision = self.diff.next_revision();
+        self.diff.flight = FetchFlight::InFlight { revision, refetch: false };
+        let (luned, events) = (self.luned.clone(), self.events.clone());
+        thread::spawn(move || {
+            let loaded = caught(DIFF_PANICKED, || worktrees::read_diff(&luned, &on, worktree));
+            let _ = events.send(Event::DiffLoaded { on, worktree, revision, loaded });
+        });
+    }
+
+    fn open_review_ask(&mut self, excerpt: &lune_diff::SelectionExcerpt, send_now: bool) {
+        let Some(right) = self.viewed() else {
+            return;
+        };
+        let on = right.machine().clone();
+        let Some((_, worktree)) = self.projected.holding(&on, right.worktree()) else {
+            self.sidebar.notify("review: luned has not named this worktree's folder yet".to_owned());
+            return;
+        };
+        let dir = worktree.folder.clone();
+        self.asks += 1;
+        let initial = send_now.then_some(EXPLAIN_PROMPT);
+        let mut ask = Ask::reviewed(self.asks, &on, &dir, excerpt, initial);
+        if send_now {
+            ask.send(Marked::default(), &self.events);
+        }
+        self.give(Focus { side: self.focus.side, over: Some(Over::Ask(ask)) });
     }
 
     fn arrange(
@@ -2773,6 +3023,7 @@ impl App {
                 backend.write_all(answers::TURNED)?;
                 backend.flush()?;
             },
+            Answer::Graphics => self.ribbons.enable(),
             Answer::Device | Answer::Kitty => {},
         }
         Ok(())
@@ -2789,6 +3040,7 @@ impl App {
 
     fn frame(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         terminal.draw(|frame| self.paint(frame))?;
+        self.paint_graphics(terminal.backend_mut())?;
         let cursor = self.viewed().map_or(UNSHOWN_CURSOR, Viewed::cursor_style);
         if self.cursor != Some(cursor) {
             self.cursor = Some(cursor);
@@ -2803,11 +3055,60 @@ impl App {
         Ok(())
     }
 
+    fn paint_graphics(&mut self, out: &mut impl io::Write) -> io::Result<()> {
+        let Ribbons::Supported(kitty) = &mut self.ribbons else {
+            return Ok(());
+        };
+        let pending = mem::take(&mut kitty.pending);
+        let next_keys: Vec<(NonZeroU32, RibbonCacheKey)> =
+            pending.iter().map(|overlay| (overlay.image_id, overlay.key)).collect();
+        if next_keys == kitty.shown {
+            return Ok(());
+        }
+        let mut wrote = false;
+        for &(old_id, _) in &kitty.shown {
+            if !pending.iter().any(|overlay| overlay.image_id == old_id) {
+                review::clear_kitty_ribbon(out, old_id)?;
+                wrote = true;
+            }
+        }
+        for overlay in &pending {
+            let unchanged = kitty
+                .shown
+                .iter()
+                .any(|&(id, key)| id == overlay.image_id && key == overlay.key);
+            if !unchanged {
+                review::clear_kitty_ribbon(out, overlay.image_id)?;
+                review::emit_kitty_ribbon(out, overlay)?;
+                wrote = true;
+            }
+        }
+        if wrote {
+            out.flush()?;
+        }
+        kitty.shown = next_keys;
+        Ok(())
+    }
+
+    fn clear_graphics(&mut self, out: &mut impl io::Write) -> io::Result<()> {
+        let Ribbons::Supported(kitty) = &mut self.ribbons else {
+            return Ok(());
+        };
+        if kitty.shown.is_empty() {
+            return Ok(());
+        }
+        for (id, _) in kitty.shown.drain(..) {
+            review::clear_kitty_ribbon(out, id)?;
+        }
+        out.flush()
+    }
+
     pub fn paint(&mut self, frame: &mut Frame<'_>) {
         let now = SystemTime::now();
         let collapsed = self.focus.side == Side::Collapsed;
         let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
-        let (sidebar, right) = areas(frame.area(), own);
+        let frame_area = frame.area();
+        let (sidebar, right) = areas(frame_area, own);
         self.areas = (sidebar, right);
         let size = window(right);
         if let Some(right) = self.viewed_mut() {
@@ -2825,17 +3126,19 @@ impl App {
         let uncovered = |at: &Position| !covered && right.contains(*at);
         let spot = |at: Position| attached::Spot { row: at.y - right.y, column: at.x - right.x };
         let hover = self.pointer.filter(uncovered).map(spot);
-        let cursor = match &self.right {
-            Some(Right::Worktree(shown)) => shown.draw(buffer, right, hover),
+        let kitty_cell_px = self.ribbons.cell_px(frame_area, covered);
+        let (cursor, overlays) = match &mut self.right {
+            Some(Right::Worktree(shown)) => shown.draw(buffer, right, hover, kitty_cell_px),
             Some(Right::Home(shown)) => {
                 self.homes.shown(shown).draw(buffer, right, now);
-                None
+                (None, Vec::new())
             },
             None => {
                 draw_unshown(buffer, right);
-                None
+                (None, Vec::new())
             },
         };
+        self.ribbons.set_pending(overlays);
         let drawn = match &self.focus.over {
             Some(Over::Brief(briefing)) => {
                 briefing.draw(buffer, right, now);

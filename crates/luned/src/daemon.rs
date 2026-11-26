@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use lune_domain::agent::Harness;
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{folder_has_one_worktree, Holders, Made, Opens, OwnedFolder};
-use lune_domain::projects::{ProjectId, WorktreeId};
+use lune_domain::projects::{Dir, ProjectId, WorktreeId};
 use lune_protocol::socket::{self, Bound, Found};
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
@@ -44,7 +44,8 @@ use crate::api::{
     ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, ListSkillsResponse,
     ListWorkRequest, ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest,
     PasteResponse, PrintedFile, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
-    RebaseRequest, RebaseResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
+    ReadDiffRequest, ReadDiffResponse, RebaseRequest, RebaseResponse, SayRequest, ShowRequest,
+    ShowResponse, TranscriptEndsRequest,
     TranscriptEndsResponse, FramesRequest, AnswerRequest, WaitingRequest, WaitingResponse,
 };
 use crate::answers::{self, Answer, Runs, Unanswered};
@@ -994,6 +995,29 @@ impl Daemon for Host {
         Ok(Response::new(Box::pin(answer)))
     }
 
+    type ReadDiffStream = Pin<Box<dyn Stream<Item = Result<ReadDiffResponse, Status>> + Send>>;
+
+    async fn read_diff(
+        &self,
+        request: Request<ReadDiffRequest>,
+    ) -> Result<Response<Self::ReadDiffStream>, Status> {
+        let ReadDiffRequest { on, worktree } = request.into_inner();
+        let unnamed = || Status::invalid_argument("worktree: no id is 0");
+        let worktree = WorktreeId::of(worktree).ok_or_else(unnamed)?;
+        if let Some(mut daemon) = self.bridged(on).await? {
+            let asked = ReadDiffRequest { on: None, worktree: worktree.get() };
+            let answer = daemon.read_diff(asked).await?.into_inner();
+            return Ok(Response::new(Box::pin(answer)));
+        }
+        let layouts = self.layouts.clone();
+        let answer = late(move || {
+            let dir = worktree_folder(&layouts, worktree)?;
+            let out = git::patch(&dir).map_err(Status::failed_precondition)?;
+            Ok(out.into_api())
+        });
+        Ok(Response::new(Box::pin(answer)))
+    }
+
     async fn keep_image(
         &self,
         request: Request<Streaming<KeepImageRequest>>,
@@ -1163,6 +1187,19 @@ fn rooted(layouts: &SyncSender<layouts::Command>, project: ProjectId) -> Result<
     root.map_err(|not| match not {
         Unrooted::Unkept(why) => Status::failed_precondition(why),
         Unrooted::Unknown => Status::not_found(format!("no project has the id {project}")),
+    })
+}
+
+fn worktree_folder(
+    layouts: &SyncSender<layouts::Command>,
+    worktree: WorktreeId,
+) -> Result<Dir, Status> {
+    let asked =
+        layouts::ask(layouts, |answer| layouts::Command::WorktreeFolder { worktree, answer });
+    let dir = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
+    dir.map_err(|not| match not {
+        Unrooted::Unkept(why) => Status::failed_precondition(why),
+        Unrooted::Unknown => Status::not_found(format!("no worktree has the id {worktree}")),
     })
 }
 

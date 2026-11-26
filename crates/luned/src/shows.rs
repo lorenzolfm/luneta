@@ -46,6 +46,7 @@ pub enum Found {
     Lost,
     Looking,
     Welcome,
+    Review,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,7 +61,7 @@ impl View {
     pub fn key(&self) -> Option<TerminalKey> {
         match self.found {
             Found::Key(key) => Some(key),
-            Found::Lost | Found::Looking | Found::Welcome => None,
+            Found::Lost | Found::Looking | Found::Welcome | Found::Review => None,
         }
     }
 }
@@ -201,6 +202,7 @@ fn heard_view(view: show_response::View) -> Result<View, String> {
         Said::Lost(()) => Found::Lost,
         Said::Looking(()) => Found::Looking,
         Said::Welcome(()) => Found::Welcome,
+        Said::Review(()) => Found::Review,
     };
     Ok(View { id, rect, found })
 }
@@ -265,6 +267,7 @@ pub enum Asked {
     Go(WorktreeId),
     Open { beside: Beside, opens: Opens },
     Welcome,
+    Review,
     Close(ViewId),
     Focus(ViewId),
     Step { direction: Direction, step: NonZeroU64 },
@@ -290,6 +293,7 @@ impl Asked {
                 Event::Open(show_request::Open { beside, opens })
             },
             Asked::Welcome => Event::Welcome(()),
+            Asked::Review => Event::Review(()),
             Asked::Close(view) => Event::Close(view.get()),
             Asked::Focus(view) => {
                 let to = show_request::focus::To::View(view.get());

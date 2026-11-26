@@ -44,6 +44,7 @@ mod projected;
 mod prune;
 mod pull;
 mod rebase;
+mod review;
 mod screen;
 mod sidebar;
 mod skills;
