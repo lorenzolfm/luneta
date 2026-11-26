@@ -176,7 +176,7 @@ mod tests {
     use lune_waits::{Began, eventually};
 
     use super::*;
-    use crate::asked::{Ends, Opens, Size};
+    use crate::asked::{AbsoluteCwd, Ends, Opens, Size};
     use crate::panics::Shared;
     use crate::pty::Pty;
 
@@ -185,7 +185,7 @@ mod tests {
         let rows = NonZeroU16::new(24).unwrap();
         let pty = Pty::opened(Size { columns, rows }).unwrap();
         let opens = Opens {
-            cwd: "/".to_owned(),
+            cwd: AbsoluteCwd::of_path("/".to_owned()).unwrap(),
             program: "/bin/sh".to_owned(),
             args: vec!["-c".to_owned(), script.to_owned()],
             ends: Ends::Closes,

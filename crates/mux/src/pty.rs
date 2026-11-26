@@ -400,7 +400,7 @@ mod tests {
         let script =
             "trap 'printf T; sleep 1000' INT; printf %0500d 0; : > \"$0\"; sleep 1000 & wait";
         let opens = Opens {
-            cwd: "/".to_owned(),
+            cwd: crate::asked::AbsoluteCwd::of_path("/".to_owned()).unwrap(),
             program: "/bin/sh".to_owned(),
             args: vec!["-c".to_owned(), script.to_owned(), written.to_str().unwrap().to_owned()],
             ends: Ends::Closes,

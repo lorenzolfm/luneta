@@ -109,6 +109,7 @@ enum Command {
     },
 }
 
+#[must_use]
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
     let folder: Result<PathBuf, String> = folder::find().map_err(|unfound| format!("{unfound}, to find luned in"));
