@@ -4,9 +4,10 @@ use std::thread;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use luned::Destination;
 
-use crate::away::{self, Away};
 use crate::clipboard;
 use crate::host::Event;
+use crate::machines::Machine;
+use crate::reach::{self, Luned};
 
 pub const KEY: (KeyCode, KeyModifiers) = (KeyCode::Char('v'), KeyModifiers::CONTROL);
 
@@ -48,7 +49,8 @@ fn went(on: Destination, key: KeyEvent, events: &Sender<Event>) -> Went {
     let slow = || {
         let _ = events.send(Event::ImageSlow(on.clone()));
     };
-    let kept = Away::reach(&on, away::ANSWER).and_then(|mut away| away.keep_image(png, slow));
+    let luned = Luned::on(&Machine::Remote(on.clone()), reach::ANSWER);
+    let kept = luned.and_then(|mut luned| luned.keep_image(png, slow));
     match kept {
         Ok(path) => Went::Kept { on, path },
         Err(why) => Went::Failed(why),

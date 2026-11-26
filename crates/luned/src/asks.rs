@@ -293,7 +293,7 @@ impl Asked {
         }
     }
 
-    pub fn talk(
+    pub(crate) fn talk(
         &self,
         wanted: &dyn Fn() -> bool,
         hear: &dyn Fn(Step),

@@ -8,7 +8,9 @@ pub use luned::printed::{Kept, Printed};
 
 use crate::due::Due;
 use crate::host::Event;
+use crate::machines::Machine;
 use crate::menu::Ended;
+use crate::reach::{self, Luned};
 
 pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
     let cannot = "with an exit status my shell cannot say";
@@ -56,6 +58,7 @@ pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
 
 pub fn read(
     menu: u64,
+    on: Machine,
     terminal: Result<TerminalKey, String>,
     ended: Ended,
     events: &Sender<Event>,
@@ -63,7 +66,8 @@ pub fn read(
     let due = Due::new(events, move |printed| Event::Printed { menu, printed });
     thread::spawn(move || {
         let typed = typed(&ended);
-        due.pay(terminal.and_then(|terminal| luned::printed::kept_in(terminal, &typed)));
+        let kept = |terminal| Luned::on(&on, reach::ANSWER)?.printed(terminal, &typed);
+        due.pay(terminal.and_then(kept));
     });
 }
 
