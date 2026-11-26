@@ -645,7 +645,6 @@ pub enum Change {
     Open { worktree: WorktreeId, view: View, placed: Placed, size: Size },
     Close { view: ViewId },
     Unopen { terminal: TerminalViewId },
-    Move { terminal: TerminalViewId, to: MoveTo, size: Size, focused: bool },
     Swap { one: ViewId, other: ViewId },
     Arrange { worktree: WorktreeId, arranged: Arranged },
     Ran(Vec<Ran>),
@@ -665,10 +664,10 @@ pub enum Relaid {
     Focus { view: ViewId },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MoveTo {
     Worktree(WorktreeId),
-    Made { project: ProjectId, spot: Spot },
+    Made { project: ProjectId, subfolder: Subfolder },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -878,7 +877,6 @@ impl Change {
             | Change::Open { .. }
             | Change::Close { .. }
             | Change::Unopen { .. }
-            | Change::Move { .. }
             | Change::StartBrowser { .. } => true,
             Change::Went { .. }
             | Change::Swap { .. }
@@ -887,13 +885,6 @@ impl Change {
             | Change::Navigate { .. } => false,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Home {
-    Stays,
-    In(WorktreeId),
-    Made { project: ProjectId, spot: Spot },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1272,36 +1263,6 @@ impl Projects {
                 self.close_view(&mut changed, terminal.view())?;
                 None
             },
-            Change::Move { terminal, to, size, focused } => {
-                let held_in = self.holding_terminal(terminal.view()).map(|(it, _)| it.id());
-                let from = held_in.ok_or_else(|| unknown("terminal", terminal))?;
-                let to = match to {
-                    MoveTo::Worktree(to) => to,
-                    MoveTo::Made { project, spot } => changed.made_for(project, &spot, &mut draw)?,
-                };
-                if from == to {
-                    return Err(format!("terminal {terminal} is in worktree {to} already"));
-                }
-                let (_, target) = changed.find(to).ok_or_else(|| unknown("worktree", to))?;
-                let placed = if target.layout.is_empty() {
-                    Placed::Alone
-                } else {
-                    let room = target.layout.room_for(terminal.view(), None, size);
-                    room.ok_or_else(|| format!("worktree {to} has no room for {terminal}"))?
-                };
-                let layout = changed.layout_of(terminal.view())?;
-                let moved = layout.terminal_mut(terminal).clone();
-                layout.closed(terminal.view());
-                changed.left(from);
-                let landed = &mut changed.worktree_mut(to)?.layout;
-                landed.opened(View::Terminal(moved), placed, size)?;
-                if focused {
-                    landed.focused(terminal.view());
-                }
-                let held_in = changed.holding_terminal(terminal.view()).map(|(it, _)| it.id());
-                assert_eq!(held_in, Some(to), "terminal {terminal} moved to worktree {to}");
-                Some(self.made(to))
-            },
             Change::Swap { one, other } => {
                 let layout = changed.layout_of(one)?;
                 if !layout.holds(other) {
@@ -1357,6 +1318,48 @@ impl Projects {
         };
         Projects::kept_as(&changed);
         Ok((changed, made))
+    }
+
+    pub fn moved(
+        &self,
+        terminal: TerminalViewId,
+        to: MoveTo,
+        size: Size,
+        focused: bool,
+        mut draw: impl FnMut() -> io::Result<Id>,
+    ) -> Result<(Projects, WorktreeId), String> {
+        let held_in = self.holding_terminal(terminal.view()).map(|(it, _)| it.id());
+        let from = held_in.ok_or_else(|| unknown("terminal", terminal))?;
+        let mut changed = self.clone();
+        let to = match to {
+            MoveTo::Worktree(to) => to,
+            MoveTo::Made { project, subfolder } => {
+                changed.worktree_made(project, &subfolder, None, &mut draw)?
+            },
+        };
+        if from == to {
+            return Err(format!("terminal {terminal} is in worktree {to} already"));
+        }
+        let (_, target) = changed.find(to).ok_or_else(|| unknown("worktree", to))?;
+        let placed = if target.layout.is_empty() {
+            Placed::Alone
+        } else {
+            let room = target.layout.room_for(terminal.view(), None, size);
+            room.ok_or_else(|| format!("worktree {to} has no room for {terminal}"))?
+        };
+        let layout = changed.layout_of(terminal.view())?;
+        let moved = layout.terminal_mut(terminal).clone();
+        layout.closed(terminal.view());
+        changed.left(from);
+        let landed = &mut changed.worktree_mut(to)?.layout;
+        landed.opened(View::Terminal(moved), placed, size)?;
+        if focused {
+            landed.focused(terminal.view());
+        }
+        let held_in = changed.holding_terminal(terminal.view()).map(|(it, _)| it.id());
+        assert_eq!(held_in, Some(to), "terminal {terminal} moved to worktree {to}");
+        Projects::kept_as(&changed);
+        Ok((changed, to))
     }
 
     pub fn relaid(&self, relaid: Relaid) -> Result<Projects, String> {
@@ -1516,20 +1519,6 @@ impl Projects {
         Ok(())
     }
 
-    fn made_for(
-        &mut self,
-        project: ProjectId,
-        spot: &Spot,
-        draw: &mut impl FnMut() -> io::Result<Id>,
-    ) -> Result<WorktreeId, String> {
-        let held = self.project_of(project).ok_or_else(|| unknown("project", project))?;
-        match held.within(spot) {
-            Some(Within::Unmade(subfolder)) => self.worktree_made(project, &subfolder, None, draw),
-            Some(Within::Worktree(found)) => Ok(found),
-            Some(Within::Project) | None => Err(held.unplaced(spot)),
-        }
-    }
-
     fn named(&mut self, worktree: WorktreeId, name: Option<Name>) -> Result<(), String> {
         let row = self.worktree_mut(worktree)?;
         if row.renamed.is_none() {
@@ -1662,15 +1651,12 @@ impl Projects {
     }
 
     #[must_use]
-    pub fn home(&self, terminal: ViewId, spot: &Spot) -> Home {
-        let Some((from, _)) = self.holding_terminal(terminal) else {
-            return Home::Stays;
-        };
+    pub fn home(&self, terminal: TerminalViewId, spot: &Spot) -> Option<MoveTo> {
+        let (from, _) = self.holding_terminal(terminal.view())?;
         match self.inside(spot) {
-            Some((_, Within::Worktree(home))) if home == from.id => Home::Stays,
-            Some((_, Within::Worktree(home))) => Home::In(home),
-            Some((project, Within::Unmade(_))) => Home::Made { project, spot: spot.clone() },
-            Some((_, Within::Project)) | None => Home::Stays,
+            Some((_, Within::Worktree(home))) if home != from.id => Some(MoveTo::Worktree(home)),
+            Some((project, Within::Unmade(subfolder))) => Some(MoveTo::Made { project, subfolder }),
+            Some((_, Within::Worktree(_) | Within::Project)) | None => None,
         }
     }
 
@@ -2677,31 +2663,36 @@ mod tests {
         let name = Some(Name::parse("tests").unwrap());
         (projects, _) = change(&projects, Change::RenameTerminal { terminal: two, to: name }).unwrap();
         let size = Size::of(80, 24).unwrap();
-        let moving = |terminal: ViewId, to| {
-            Change::Move { terminal: TerminalViewId::new(terminal), to, size, focused: false }
+        let mut drawn = counting();
+        let mut moving = |projects: &Projects, terminal: ViewId, to| {
+            let taken = |id: &Id| projects.holds(*id);
+            projects.moved(TerminalViewId::new(terminal), to, size, false, || loop {
+                let id = drawn()?;
+                if !taken(&id) {
+                    return Ok(id);
+                }
+            })
         };
-        let made;
-        (projects, made) = change(&projects, moving(two, MoveTo::Worktree(feat))).unwrap();
-        assert_eq!(made, Some(Made::Found(feat)), "a move into a worktree there finds it");
+        let to;
+        (projects, to) = moving(&projects, two, MoveTo::Worktree(feat)).unwrap();
+        assert_eq!(to, feat, "a move into a worktree there lands in it");
         assert_eq!(layout(&projects, main).tree().unwrap().views(), [one]);
         assert_eq!(layout(&projects, feat).tree().unwrap().views(), [three, two]);
         let (_, moved) = projects.holding_terminal(two).unwrap();
         assert_eq!(moved.name().map(Name::as_str), Some("tests"), "a terminal moves whole");
-        let again = change(&projects, moving(two, MoveTo::Worktree(feat)));
+        let again = moving(&projects, two, MoveTo::Worktree(feat));
         assert!(again.unwrap_err().contains("already"));
         let nowhere = MoveTo::Worktree(WorktreeId::of(99).unwrap());
-        assert!(change(&projects, moving(two, nowhere)).unwrap_err().contains("no worktree"));
+        assert!(moving(&projects, two, nowhere).unwrap_err().contains("no worktree"));
 
-        let fix = MoveTo::Made { project: lune, spot: spot_at("/w/lune", "fix") };
-        let (moved, made) = change(&projects, moving(one, fix)).unwrap();
+        let fix = MoveTo::Made { project: lune, subfolder: tree("fix") };
+        let (moved, fix) = moving(&projects, one, fix).unwrap();
         projects = moved;
-        let Some(Made::Worktree(fix)) = made else {
-            panic!("a move to a worktree with no row makes its row, not {made:?}");
-        };
         assert_eq!(layout(&projects, fix).tree().unwrap().views(), [one], "holding the one moved");
         assert!(projects.find(main).is_none(), "a worktree goes with its last terminal moved out");
-        let outside = MoveTo::Made { project: lune, spot: spot_at("/w/elo", "main") };
-        assert!(change(&projects, moving(two, outside)).unwrap_err().contains("in no worktree"));
+        let vault = project(&mut projects, "/w/vault");
+        let into_folder = MoveTo::Made { project: vault, subfolder: tree("sub") };
+        assert!(moving(&projects, two, into_folder).unwrap_err().contains("holds no worktree"));
     }
 
     #[test]
@@ -2726,13 +2717,12 @@ mod tests {
         assert_eq!(last_focus(&projects, main), Some(three), "a closed view's heir takes it");
         let size = Size::of(80, 24).unwrap();
         let (terminal, to) = (TerminalViewId::new(three), MoveTo::Worktree(feat));
-        let unfollowed = Change::Move { terminal, to, size, focused: false };
-        (projects, _) = change(&projects, unfollowed).unwrap();
+        (projects, _) = projects.moved(terminal, to, size, false, counting()).unwrap();
         assert_eq!(last_focus(&projects, main), Some(one), "and a moved view's heir");
         assert_eq!(last_focus(&projects, feat), None, "a moved view takes no focus where it goes");
         projects = projects.relaid(Relaid::Focus { view: four }).unwrap();
-        let followed = Change::Move { terminal, to: MoveTo::Worktree(main), size, focused: true };
-        (projects, _) = change(&projects, followed).unwrap();
+        (projects, _) =
+            projects.moved(terminal, MoveTo::Worktree(main), size, true, counting()).unwrap();
         let both = (last_focus(&projects, main), last_focus(&projects, feat));
         assert_eq!(both, (Some(three), Some(four)), "unless a client followed it there");
 
@@ -2763,18 +2753,18 @@ mod tests {
         let vault = project(&mut projects, "/w/vault");
         let main = at(&projects, "/w/lune/main").unwrap();
         let feat = at(&projects, "/w/lune/feat").unwrap();
-        let terminal = first(&projects, main);
+        let terminal = TerminalViewId::new(first(&projects, main));
         let home = |spot: Spot| projects.home(terminal, &spot);
-        assert_eq!(home(spot_at("/w/lune", "main")), Home::Stays);
-        assert_eq!(home(spot_at("/w/lune", "feat")), Home::In(feat));
-        let fix = spot_at("/w/lune", "fix");
-        assert_eq!(home(fix.clone()), Home::Made { project: lune, spot: fix });
-        assert_eq!(home(clone_of("/w/lune", &[])), Home::Stays, "no worktree holds the root");
-        assert_eq!(home(folder("/w/vault/notes")), Home::In(own(&projects, vault)));
-        assert_eq!(home(folder("/home/me")), Home::Stays, "outside every project");
-        assert_eq!(home(spot_at("/home/me/elo", "main")), Home::Stays);
-        let gone = ViewId::of(7).unwrap();
-        assert_eq!(projects.home(gone, &spot_at("/w/lune", "feat")), Home::Stays);
+        assert_eq!(home(spot_at("/w/lune", "main")), None);
+        assert_eq!(home(spot_at("/w/lune", "feat")), Some(MoveTo::Worktree(feat)));
+        let fix = MoveTo::Made { project: lune, subfolder: tree("fix") };
+        assert_eq!(home(spot_at("/w/lune", "fix")), Some(fix));
+        assert_eq!(home(clone_of("/w/lune", &[])), None, "no worktree holds the root");
+        assert_eq!(home(folder("/w/vault/notes")), Some(MoveTo::Worktree(own(&projects, vault))));
+        assert_eq!(home(folder("/home/me")), None, "outside every project");
+        assert_eq!(home(spot_at("/home/me/elo", "main")), None);
+        let gone = TerminalViewId::new(ViewId::of(7).unwrap());
+        assert_eq!(projects.home(gone, &spot_at("/w/lune", "feat")), None);
     }
 
     #[test]

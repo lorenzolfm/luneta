@@ -8,8 +8,8 @@ use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Duration;
 
-use lune_domain::projects::{parse, written, Change, Closing, Dir, Made, Parsed, Projects};
-use lune_domain::projects::{Refused, Relaid, Spot, TerminalViewId, ViewId};
+use lune_domain::projects::{parse, written, Change, Closing, Dir, Made, MoveTo, Parsed, Projects};
+use lune_domain::projects::{Refused, Relaid, Size, Spot, TerminalViewId, ViewId, WorktreeId};
 use lune_domain::projects::{FILE_BYTES_MAX, PATH_BYTES_MAX};
 
 use super::{gone, random_id, spot, SPOT_LOOK};
@@ -248,6 +248,21 @@ impl Store {
         }
         self.took(changed)?;
         Ok(made)
+    }
+
+    pub fn moved(
+        &mut self,
+        terminal: TerminalViewId,
+        to: MoveTo,
+        size: Size,
+        focused: bool,
+    ) -> Result<WorktreeId, Failed> {
+        let (changed, to) =
+            self.kept()?.moved(terminal, to, size, focused, random_id).map_err(Failed::Refused)?;
+        assert_ne!(self.projects(), Some(&changed), "a terminal moved changes the projects");
+        self.written_as(&changed)?;
+        self.took(changed)?;
+        Ok(to)
     }
 
     pub fn relaid(&mut self, relaid: Relaid) -> Result<(), Failed> {
