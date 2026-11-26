@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
@@ -7,6 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::brief;
+use crate::clock::Now;
 use crate::menu::{self, Hint};
 use crate::named::{self, Written};
 use crate::sidebar::{self, ACCENT};
@@ -274,7 +275,7 @@ impl Dictation {
         matches!(self.stage, Stage::Hearing(_) | Stage::Naming { .. })
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: (SystemTime, Instant)) {
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: Now) {
         let Some((inner, room)) = brief::room(over) else {
             return;
         };
@@ -293,7 +294,7 @@ impl Dictation {
                 let mut lines = menu::wrap(said.trim(), inner, Style::new());
                 lines.push(Line::default());
                 let dim = Style::new().add_modifier(Modifier::DIM);
-                lines.extend(menu::waiting(WRITING, inner, dim, sidebar::frame(now.0)));
+                lines.extend(menu::waiting(WRITING, inner, dim, sidebar::frame(now.wall)));
                 (lines, vec![(Hint::Esc, "Cancel")], String::new())
             },
         };
@@ -319,9 +320,9 @@ impl Hearing {
         self.listening.finish();
     }
 
-    fn lines(&self, inner: usize, now: (SystemTime, Instant)) -> Shown {
+    fn lines(&self, inner: usize, now: Now) -> Shown {
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let frame = sidebar::frame(now.0);
+        let frame = sidebar::frame(now.wall);
         let written = written(self.words.trim(), &self.skills);
         let words = written.to_string();
         let mut lines = menu::wrap(&words, inner, Style::new());
@@ -360,7 +361,7 @@ impl Hearing {
             Key::Done(_) => vec![(Hint::Esc, "Cancel")],
         };
         let heard = match self.model {
-            Model::Listening(since) => now.1.saturating_duration_since(since),
+            Model::Listening(since) => now.at.saturating_duration_since(since),
             Model::Opening | Model::Loading => Duration::ZERO,
         };
         let seconds = heard.as_secs();
@@ -415,6 +416,7 @@ fn bar(level: f32) -> char {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::{Receiver, TryRecvError};
+    use std::time::SystemTime;
 
     use super::*;
     use crate::moonlight;
@@ -576,7 +578,7 @@ mod tests {
         for row in area.rows() {
             buffer.set_string(row.x, row.y, "z".repeat(usize::from(width)), Style::new());
         }
-        dictation.draw(&mut buffer, area, (SystemTime::UNIX_EPOCH, now));
+        dictation.draw(&mut buffer, area, Now { wall: SystemTime::UNIX_EPOCH, at: now });
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
             assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
         }

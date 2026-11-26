@@ -51,6 +51,7 @@ use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::checks;
+use crate::clock::Now;
 use crate::close::Act;
 use crate::copied::{Clip, Copies};
 use crate::desktop::{self, Desktop, Reader, Told};
@@ -955,7 +956,7 @@ fn run_loop(
         }
         app.ticked(Instant::now());
         app.alerting(Instant::now());
-        app.sidebar.ticked(SystemTime::now(), Instant::now(), app.focused);
+        app.sidebar.ticked(Now::read(), app.focused);
         app.draw(terminal)?;
     }
 }
@@ -1208,7 +1209,8 @@ impl App {
             Some(Over::Picker(picker)) => picker.due(),
             _ => None,
         };
-        let shows = self.sidebar.due(SystemTime::now()).map(|left| Instant::now() + left);
+        let now = Instant::now();
+        let shows = self.sidebar.due(now).map(|left| now + left);
         let home = self.home().and_then(Home::due);
         picker.into_iter().chain(self.alerts.due()).chain(shows).chain(home).min()
     }
@@ -1388,7 +1390,7 @@ impl App {
                 if chord == MENU {
                     self.sidebar.close_menu();
                 } else {
-                    let asked = self.sidebar.key(key, SystemTime::now());
+                    let asked = self.sidebar.key(key, Now::read());
                     self.follow(asked);
                 }
                 return;
@@ -1415,7 +1417,7 @@ impl App {
                 self.key_to_session(key);
             },
             Holder::Terminal | Holder::Sidebar(_) => {
-                let asked = self.sidebar.key(key, SystemTime::now());
+                let asked = self.sidebar.key(key, Now::read());
                 self.follow(asked);
             },
             Holder::Box(_) => unreachable!("a box takes the key"),
@@ -1612,7 +1614,7 @@ impl App {
 
     fn clip(&mut self, terminal: &mut DefaultTerminal, clip: Clip) -> io::Result<()> {
         if let Some(copied) = self.copies.clip(terminal.backend_mut(), clip)? {
-            self.sidebar.copied(copied, SystemTime::now());
+            self.sidebar.copied(copied, Instant::now());
         }
         Ok(())
     }
@@ -1800,11 +1802,11 @@ impl App {
     fn hit(&mut self, hit: Hit) {
         match hit {
             Hit::Keys(keyed, key) => {
-                let asked = self.sidebar.keys_clicked(keyed, &key, SystemTime::now());
+                let asked = self.sidebar.keys_clicked(keyed, &key, Now::read());
                 self.follow(asked);
             },
             Hit::Menu(menu, choice) if self.focus.over.is_none() => {
-                let asked = self.sidebar.chose(menu, choice, SystemTime::now());
+                let asked = self.sidebar.chose(menu, choice, Now::read());
                 self.follow(asked);
             },
             Hit::Picker(number, pick) => {
@@ -2800,7 +2802,8 @@ impl App {
     }
 
     pub fn paint(&mut self, frame: &mut Frame<'_>) {
-        let now = SystemTime::now();
+        let clock = Now::read();
+        let now = clock.wall;
         let collapsed = self.focus.side == Side::Collapsed;
         let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
         let (sidebar, right) = areas(frame.area(), own);
@@ -2811,10 +2814,10 @@ impl App {
         }
         let buffer = frame.buffer_mut();
         let beside = if collapsed {
-            self.sidebar.draw_collapsed(buffer, sidebar, now);
+            self.sidebar.draw_collapsed(buffer, sidebar, clock);
             Drawn::Nothing
         } else {
-            self.sidebar.draw(buffer, sidebar, now)
+            self.sidebar.draw(buffer, sidebar, clock)
         };
         self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
         let covered = self.covered();
@@ -2852,7 +2855,7 @@ impl App {
                     Where::Issue(issue) => issue.draw(buffer, right, now),
                     Where::Session(_) => {},
                 }
-                dictation.draw(buffer, right, (now, Instant::now()));
+                dictation.draw(buffer, right, clock);
                 Drawn::Nothing
             },
             None => match self.sidebar.floating() {

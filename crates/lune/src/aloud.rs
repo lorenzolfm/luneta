@@ -3,7 +3,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use luned::api::say::Does;
@@ -149,12 +149,12 @@ fn drawn_width(line: &Line<'_>, width: usize) -> usize {
 struct Waiting {
     whose: Whose,
     text: String,
-    came: Option<SystemTime>,
+    came: Option<Instant>,
 }
 
 impl Waiting {
-    fn stale(&self, now: SystemTime) -> bool {
-        self.came.is_some_and(|came| now.duration_since(came).is_ok_and(|age| age > STALE))
+    fn stale(&self, now: Instant) -> bool {
+        self.came.is_some_and(|came| now.saturating_duration_since(came) > STALE)
     }
 }
 
@@ -184,7 +184,7 @@ struct Queue {
 }
 
 impl Queue {
-    fn hear(&mut self, machines: Vec<(Machine, Option<Vec<Saying>>)>, read: bool, at: SystemTime) {
+    fn hear(&mut self, machines: Vec<(Machine, Option<Vec<Saying>>)>, read: bool, at: Instant) {
         let watched: HashSet<&Machine> = machines.iter().map(|(on, _)| on).collect();
         self.heard.retain(|on, _| watched.contains(on));
         for (on, sayings) in machines {
@@ -208,7 +208,7 @@ impl Queue {
         }
     }
 
-    fn take(&mut self, on: &Machine, saying: Saying, at: SystemTime) {
+    fn take(&mut self, on: &Machine, saying: Saying, at: Instant) {
         let does = saying.say.and_then(|say| say.does);
         let waiting = |utterance: Utterance| {
             let Utterance { text } = utterance;
@@ -244,7 +244,7 @@ impl Queue {
         self.paused = false;
     }
 
-    fn pause(&mut self, at: SystemTime) {
+    fn pause(&mut self, at: Instant) {
         if !self.paused {
             self.at_once.take_if(|waiting| waiting.stale(at));
             self.in_turn.retain(|waiting| !waiting.stale(at));
@@ -268,7 +268,7 @@ impl Queue {
         self.now.is_some() || self.waits()
     }
 
-    fn next(&mut self, now: SystemTime) -> Option<Next> {
+    fn next(&mut self, now: Instant) -> Option<Next> {
         loop {
             let next = self.at_once.take().or_else(|| self.in_turn.pop_front())?;
             if !self.paused && next.stale(now) {
@@ -349,7 +349,7 @@ impl Aloud {
     }
 
     pub fn hear(&mut self, machines: Vec<(Machine, Option<Vec<Saying>>)>, read: bool) {
-        self.queue.hear(machines, read, SystemTime::now());
+        self.queue.hear(machines, read, Instant::now());
         self.go_on();
     }
 
@@ -360,7 +360,7 @@ impl Aloud {
         }
         let selected = selected.map(plain).filter(|text| !text.is_empty());
         let text = selected.ok_or(NothingToRead)?;
-        let came = Some(SystemTime::now());
+        let came = Some(Instant::now());
         self.queue.after(Waiting { whose: Whose::Selection, text, came });
         self.go_on();
         Ok(())
@@ -368,7 +368,7 @@ impl Aloud {
 
     pub fn press(&mut self, button: Button) {
         match button {
-            Button::Pause => self.queue.pause(SystemTime::now()),
+            Button::Pause => self.queue.pause(Instant::now()),
             Button::GoOn => self.queue.unpause(),
             Button::Stop => self.queue.stop(),
         }
@@ -431,7 +431,7 @@ impl Aloud {
             }
             return;
         }
-        let Some(Next { spoken, whose, text }) = self.queue.next(SystemTime::now()) else {
+        let Some(Next { spoken, whose, text }) = self.queue.next(Instant::now()) else {
             return;
         };
         let held = &self.held;
@@ -455,6 +455,7 @@ impl Aloud {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
     use std::time::Duration;
 
     use luned::api::Say;
@@ -467,8 +468,9 @@ mod tests {
 
     const PID: u32 = 7;
 
-    fn at(seconds: u64) -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_hours(1) + Duration::from_secs(seconds)
+    fn at(seconds: u64) -> Instant {
+        static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+        *START + Duration::from_secs(seconds)
     }
 
     fn far() -> Machine {
