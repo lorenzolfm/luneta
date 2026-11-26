@@ -1,5 +1,5 @@
 {
-  description = "lune — zellij beside a sidebar of its sessions and agents, and its daemon";
+  description = "lune — the terminals of a worktree beside a sidebar of every project and the agents in them, its daemon, and its own multiplexer";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";

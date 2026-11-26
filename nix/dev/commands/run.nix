@@ -7,7 +7,7 @@
 {
   name = "run";
   usage = "[args...]";
-  help = "the daemon, cargo run of luned, on your own zellij and claude";
+  help = "the daemon, cargo run of luned";
   tools = buildTools ++ [ pkgs.git ];
   inheritPath = true;
   text = ''

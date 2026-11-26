@@ -52,6 +52,7 @@ use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::checks;
+use crate::clock::Moment;
 use crate::close::Act;
 use crate::copied::{Clip, Copies};
 use crate::desktop::{self, Desktop, Reader, Told};
@@ -1081,9 +1082,10 @@ fn run_loop(
             say_ends(ASKED_TO_QUIT);
             return Ok(());
         }
-        app.ticked(Instant::now());
-        app.alerting(Instant::now());
-        app.sidebar.ticked(SystemTime::now(), Instant::now(), app.focused);
+        let now = Moment::now();
+        app.ticked(now.steady);
+        app.alerting(now.steady);
+        app.sidebar.ticked(now, app.focused);
         app.draw(terminal)?;
     }
 }
@@ -1361,7 +1363,7 @@ impl App {
             Some(Over::Picker(picker)) => picker.due(),
             _ => None,
         };
-        let shows = self.sidebar.due(SystemTime::now()).map(|left| Instant::now() + left);
+        let shows = self.sidebar.due(Instant::now());
         let home = self.home().and_then(Home::due);
         picker.into_iter().chain(self.alerts.due()).chain(shows).chain(home).min()
     }
@@ -1541,7 +1543,7 @@ impl App {
                 if chord == MENU {
                     self.sidebar.close_menu();
                 } else {
-                    let asked = self.sidebar.key(key, SystemTime::now());
+                    let asked = self.sidebar.key(key, Moment::at(now));
                     self.follow(asked);
                 }
                 return;
@@ -1568,7 +1570,7 @@ impl App {
                 self.key_to_session(key);
             },
             Holder::Terminal | Holder::Sidebar(_) => {
-                let asked = self.sidebar.key(key, SystemTime::now());
+                let asked = self.sidebar.key(key, Moment::at(now));
                 self.follow(asked);
             },
             Holder::Box(_) => unreachable!("a box takes the key"),
@@ -1776,7 +1778,7 @@ impl App {
 
     fn clip(&mut self, terminal: &mut DefaultTerminal, clip: Clip) -> io::Result<()> {
         if let Some(copied) = self.copies.clip(terminal.backend_mut(), clip)? {
-            self.sidebar.copied(copied, SystemTime::now());
+            self.sidebar.copied(copied, Instant::now());
         }
         Ok(())
     }
@@ -1964,11 +1966,11 @@ impl App {
     fn hit(&mut self, hit: Hit) {
         match hit {
             Hit::Keys(keyed, key) => {
-                let asked = self.sidebar.keys_clicked(keyed, &key, SystemTime::now());
+                let asked = self.sidebar.keys_clicked(keyed, &key, Moment::now());
                 self.follow(asked);
             },
             Hit::Menu(menu, choice) if self.focus.over.is_none() => {
-                let asked = self.sidebar.chose(menu, choice, SystemTime::now());
+                let asked = self.sidebar.chose(menu, choice, Moment::now());
                 self.follow(asked);
             },
             Hit::Picker(number, pick) => {
@@ -3115,7 +3117,7 @@ impl App {
     }
 
     pub fn paint(&mut self, frame: &mut Frame<'_>) {
-        let now = SystemTime::now();
+        let now = Moment::now();
         let collapsed = self.focus.side == Side::Collapsed;
         let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
         let frame_area = frame.area();
@@ -3132,7 +3134,7 @@ impl App {
         } else {
             self.sidebar.draw(buffer, sidebar, now)
         };
-        self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
+        self.settling.drawn(self.sidebar.aloud_buttons(), now.steady);
         let covered = self.covered();
         let uncovered = |at: &Position| !covered && right.contains(*at);
         let spot = |at: Position| attached::Spot { row: at.y - right.y, column: at.x - right.x };
@@ -3141,7 +3143,7 @@ impl App {
         let (cursor, overlays) = match &mut self.right {
             Some(Right::Worktree(shown)) => shown.draw(buffer, right, hover, kitty_cell_px),
             Some(Right::Home(shown)) => {
-                self.homes.shown(shown).draw(buffer, right, now);
+                self.homes.shown(shown).draw(buffer, right, now.system);
                 (None, Vec::new())
             },
             None => {
@@ -3152,29 +3154,29 @@ impl App {
         self.ribbons.set_pending(overlays);
         let drawn = match &self.focus.over {
             Some(Over::Brief(briefing)) => {
-                briefing.draw(buffer, right, now);
+                briefing.draw(buffer, right, now.system);
                 Drawn::Nothing
             },
             Some(Over::Ask(ask)) => {
-                ask.draw(buffer, right, now);
+                ask.draw(buffer, right, now.system);
                 Drawn::Nothing
             },
             Some(Over::Issue(issue)) => {
-                issue.draw(buffer, right, now);
+                issue.draw(buffer, right, now.system);
                 Drawn::Nothing
             },
-            Some(Over::Picker(picker)) => picker.draw(buffer, right, now),
+            Some(Over::Picker(picker)) => picker.draw(buffer, right, now.system),
             Some(Over::Dictation(dictation, under)) => {
                 match under {
-                    Where::Ask(ask) => ask.draw(buffer, right, now),
-                    Where::Issue(issue) => issue.draw(buffer, right, now),
+                    Where::Ask(ask) => ask.draw(buffer, right, now.system),
+                    Where::Issue(issue) => issue.draw(buffer, right, now.system),
                     Where::Session(_) => {},
                 }
-                dictation.draw(buffer, right, (now, Instant::now()));
+                dictation.draw(buffer, right, now);
                 Drawn::Nothing
             },
             None => match self.sidebar.floating() {
-                Some(Floating::Menu(menu)) => menu.draw(buffer, right, now),
+                Some(Floating::Menu(menu)) => menu.draw(buffer, right, now.system),
                 Some(Floating::Note(note)) => {
                     menu::draw_note(buffer, right, note);
                     Drawn::Nothing

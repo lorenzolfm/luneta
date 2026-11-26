@@ -11,6 +11,7 @@ mod brief;
 mod browser;
 mod checks;
 mod clipboard;
+mod clock;
 mod close;
 mod commands;
 mod copied;
