@@ -1,11 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
+use std::mem;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,14 +16,26 @@ use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
 use crate::mux;
+use crate::program::{self, Wanted};
 use crate::work::{self, Item};
-use crate::{git, program};
+use crate::{git, log};
 
 pub const MODEL: &str = "sonnet";
 
 pub const TURN: Duration = Duration::from_mins(10);
 
-pub const LOOK: Duration = Duration::from_millis(5);
+const LINES_QUEUED_MAX: usize = 64;
+
+const LINE_BYTES_MAX: usize = 16 * 1024 * 1024;
+
+const LINES_PER_TURN_MAX: usize = 65_536;
+
+const SPURIOUS_WAKES_MAX: usize = 1024;
+
+const _: () = assert!(TURN.as_secs().is_multiple_of(60));
+const _: () = assert!(LINES_QUEUED_MAX > 0);
+const _: () = assert!(LINES_PER_TURN_MAX > 0);
+const _: () = assert!(LINE_BYTES_MAX as u64 <= program::SAID_MAX);
 
 pub use lune_protocol::turn::{Turn, BEFORE_VAR, TURN_VAR};
 
@@ -295,10 +308,10 @@ impl Asked {
 
     pub(crate) fn talk(
         &self,
-        wanted: &dyn Fn() -> bool,
+        wanted: &Wanted,
         hear: &dyn Fn(Step),
     ) -> Option<Result<(), String>> {
-        talk(self.claude(), &told(&self.marked, &self.words), wanted, hear)
+        talk(self.claude(), &told(&self.marked, &self.words), TURN, LINES_PER_TURN_MAX, wanted, hear)
     }
 
     fn claude(&self) -> Command {
@@ -414,12 +427,235 @@ fn step(block: &Value) -> Option<Step> {
     }
 }
 
+enum NextLine {
+    Line(String),
+    Failed(io::Error),
+    Eof,
+    GivenUp,
+    Late,
+}
+
+enum Producer {
+    Reading,
+    Eof,
+    Failed(io::Error),
+}
+
+enum LinesState {
+    Open { queued: VecDeque<String>, producer: Producer },
+    GivenUp,
+    Closed,
+}
+
+struct Lines {
+    state: Mutex<LinesState>,
+    changed: Condvar,
+}
+
+struct LineWriter {
+    lines: Arc<Lines>,
+}
+
+struct LineReader {
+    lines: Arc<Lines>,
+}
+
+struct LineCancel {
+    lines: Arc<Lines>,
+}
+
+fn line_channel() -> (LineWriter, LineReader, LineCancel) {
+    let lines = Arc::new(Lines {
+        state: Mutex::new(LinesState::Open {
+            queued: VecDeque::with_capacity(LINES_QUEUED_MAX),
+            producer: Producer::Reading,
+        }),
+        changed: Condvar::new(),
+    });
+    (
+        LineWriter { lines: Arc::clone(&lines) },
+        LineReader { lines: Arc::clone(&lines) },
+        LineCancel { lines },
+    )
+}
+
+impl LineCancel {
+    fn give_up(&self) {
+        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*state, LinesState::Open { .. }) {
+            *state = LinesState::GivenUp;
+            self.lines.changed.notify_all();
+        }
+    }
+}
+
+impl LineWriter {
+    fn push(&mut self, line: String) -> bool {
+        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        for _ in 0..SPURIOUS_WAKES_MAX {
+            match &mut *state {
+                LinesState::Open { queued, producer } => {
+                    assert!(
+                        matches!(producer, Producer::Reading),
+                        "lines are pushed only while reading"
+                    );
+                    if queued.len() < LINES_QUEUED_MAX {
+                        queued.push_back(line);
+                        assert!(queued.len() <= LINES_QUEUED_MAX, "queued lines stay within bound");
+                        self.lines.changed.notify_all();
+                        return true;
+                    }
+                    state = self.lines.changed.wait(state).unwrap_or_else(PoisonError::into_inner);
+                },
+                LinesState::GivenUp | LinesState::Closed => return false,
+            }
+        }
+        if let LinesState::Open { producer, .. } = &mut *state
+            && matches!(producer, Producer::Reading)
+        {
+            *producer = Producer::Failed(io::Error::other(
+                "claude stdout queue woke too many times without space",
+            ));
+            self.lines.changed.notify_all();
+        }
+        false
+    }
+
+    fn finish(self, outcome: io::Result<()>) {
+        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let LinesState::Open { producer, .. } = &mut *state
+            && matches!(producer, Producer::Reading)
+        {
+            *producer = match outcome {
+                Ok(()) => Producer::Eof,
+                Err(error) => Producer::Failed(error),
+            };
+            self.lines.changed.notify_all();
+        }
+    }
+}
+
+impl Drop for LineWriter {
+    fn drop(&mut self) {
+        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let LinesState::Open { producer, .. } = &mut *state
+            && matches!(producer, Producer::Reading)
+        {
+            *producer = Producer::Failed(io::Error::other(
+                "claude stdout reader ended before reporting eof",
+            ));
+            self.lines.changed.notify_all();
+        }
+    }
+}
+
+impl LineReader {
+    fn next(&mut self, deadline: Instant, wanted: &Wanted) -> NextLine {
+        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        for _ in 0..SPURIOUS_WAKES_MAX {
+            if !wanted.still() {
+                return NextLine::GivenUp;
+            }
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return NextLine::Late;
+            };
+            match &mut *state {
+                LinesState::GivenUp | LinesState::Closed => return NextLine::GivenUp,
+                LinesState::Open { queued, producer } => {
+                    if let Some(line) = queued.pop_front() {
+                        self.lines.changed.notify_all();
+                        return NextLine::Line(line);
+                    }
+                    match producer {
+                        Producer::Reading => {},
+                        Producer::Eof => return NextLine::Eof,
+                        Producer::Failed(_) => {
+                            if let LinesState::Open { producer: Producer::Failed(error), .. } =
+                                mem::replace(&mut *state, LinesState::Closed)
+                            {
+                                return NextLine::Failed(error);
+                            }
+                        },
+                    }
+                },
+            }
+            let (next, result) =
+                self.lines.changed.wait_timeout(state, left).unwrap_or_else(PoisonError::into_inner);
+            state = next;
+            if result.timed_out() {
+                if matches!(*state, LinesState::GivenUp | LinesState::Closed) || !wanted.still() {
+                    return NextLine::GivenUp;
+                }
+                if deadline.checked_duration_since(Instant::now()).is_none() {
+                    return NextLine::Late;
+                }
+            }
+        }
+        if matches!(*state, LinesState::GivenUp | LinesState::Closed) || !wanted.still() {
+            NextLine::GivenUp
+        } else {
+            NextLine::Late
+        }
+    }
+}
+
+impl Drop for LineReader {
+    fn drop(&mut self) {
+        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        *state = LinesState::Closed;
+        self.lines.changed.notify_all();
+    }
+}
+
+fn read_line_bounded(
+    reader: &mut impl io::BufRead,
+    bytes_max: usize,
+) -> io::Result<Option<String>> {
+    assert!(bytes_max > 0, "a line bound holds at least one byte");
+    let limit = u64::try_from(bytes_max).expect("usize fits a u64") + 1;
+    let mut raw = Vec::new();
+    let read = reader.by_ref().take(limit).read_until(b'\n', &mut raw)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if raw.len() > bytes_max {
+        let message = format!("claude said a line past {bytes_max} bytes");
+        return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+    }
+    if raw.ends_with(b"\n") {
+        raw.pop();
+        if raw.ends_with(b"\r") {
+            raw.pop();
+        }
+    }
+    String::from_utf8(raw)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn stop_child(child: &mut Child) {
+    if let Err(error) = child.kill()
+        && error.kind() != io::ErrorKind::InvalidInput
+    {
+        log::say(&format!("claude could not be killed: {error}"));
+    }
+    if let Err(error) = child.wait() {
+        log::say(&format!("claude could not be waited for: {error}"));
+    }
+}
+
 fn talk(
     mut command: Command,
     words: &str,
-    wanted: &dyn Fn() -> bool,
+    limit: Duration,
+    lines_max: usize,
+    wanted: &Wanted,
     hear: &dyn Fn(Step),
 ) -> Option<Result<(), String>> {
+    assert!(lines_max > 0, "a turn allows at least one line");
+    if !wanted.still() {
+        return None;
+    }
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -432,22 +668,41 @@ fn talk(
         },
         Err(error) => return Some(Err(format!("claude could not be run: {error}"))),
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(words.as_bytes());
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(error) = stdin.write_all(words.as_bytes())
+        && error.kind() != io::ErrorKind::BrokenPipe
+    {
+        log::say(&format!("claude did not hear its prompt: {error}"));
     }
     let unread = |child: &mut Child, error: io::Error| {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(child);
         Some(Err(format!("no thread reads what claude says: {error}")))
     };
     let stdout = child.stdout.take().expect("its stdout is piped");
-    let (said, lines) = mpsc::channel();
+    let (mut writer, mut lines, cancel_lines) = line_channel();
+    let _watching = wanted.on_give_up(move || {
+        cancel_lines.give_up();
+    });
     let reading = thread::Builder::new().name("claude says".to_owned()).spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if said.send(line).is_err() {
-                return;
+        let mut reader = BufReader::new(stdout);
+        for _ in 0..=lines_max {
+            match read_line_bounded(&mut reader, LINE_BYTES_MAX) {
+                Ok(Some(line)) => {
+                    if !writer.push(line) {
+                        return;
+                    }
+                },
+                Ok(None) => {
+                    writer.finish(Ok(()));
+                    return;
+                },
+                Err(error) => {
+                    writer.finish(Err(error));
+                    return;
+                },
             }
         }
+        writer.finish(Ok(()));
     });
     if let Err(error) = reading {
         return unread(&mut child, error);
@@ -462,11 +717,15 @@ fn talk(
         Ok(stderr) => stderr,
         Err(error) => return unread(&mut child, error),
     };
-    let deadline = Instant::now() + TURN;
+    let deadline = Instant::now() + limit;
     let (mut ended, mut spoke) = (None, false);
-    loop {
-        match lines.recv_timeout(LOOK) {
-            Ok(Ok(line)) => {
+    for lines_read in 0..=lines_max {
+        match lines.next(deadline, wanted) {
+            NextLine::Line(line) => {
+                if lines_read == lines_max {
+                    stop_child(&mut child);
+                    return Some(Err(format!("claude said more than {lines_max} lines")));
+                }
                 for read in read(&line) {
                     match read {
                         Read::Step(step) => {
@@ -477,16 +736,25 @@ fn talk(
                     }
                 }
             },
-            Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => {},
+            NextLine::Failed(error) => {
+                stop_child(&mut child);
+                return Some(Err(format!("claude's output could not be read: {error}")));
+            },
+            NextLine::Eof => break,
+            NextLine::GivenUp => {
+                stop_child(&mut child);
+                return None;
+            },
+            NextLine::Late => {
+                stop_child(&mut child);
+                let minutes = TURN.as_secs() / 60;
+                return Some(Err(format!("claude was still at it after {minutes} minutes")));
+            },
         }
-        let stuck = Instant::now() >= deadline;
-        if stuck || !wanted() {
-            let _ = child.kill();
-            let _ = child.wait();
-            let minutes = TURN.as_secs() / 60;
-            return stuck.then(|| Err(format!("claude was still at it after {minutes} minutes")));
-        }
+    }
+    if !wanted.still() {
+        stop_child(&mut child);
+        return None;
     }
     let status = child.wait();
     let stderr = stderr.join().unwrap_or_default();
@@ -759,11 +1027,14 @@ mod tests {
 
     #[test]
     fn a_turn_hands_on_what_claude_writes_and_ends_as_it_says() {
+        let always = Wanted::always();
         let heard = |script: &str, words: &str| {
             let mut sh = Command::new("sh");
             sh.args(["-c", script]);
             let heard = RefCell::new(Vec::new());
-            let ended = talk(sh, words, &|| true, &|said| heard.borrow_mut().push(said));
+            let ended = talk(sh, words, TURN, LINES_PER_TURN_MAX, &always, &|said| {
+                heard.borrow_mut().push(said);
+            });
             (heard.into_inner(), ended)
         };
         let init = r#"{"type":"system","subtype":"init","session_id":"7c22"}"#;
@@ -787,17 +1058,66 @@ mod tests {
 
         let mut gone = Command::new("sh");
         gone.current_dir("/w/gone");
-        let ended = talk(gone, "", &|| true, &|_| {});
+        let ended = talk(gone, "", TURN, LINES_PER_TURN_MAX, &always, &|_| {});
         assert_eq!(ended, Some(Err("/w/gone, where the agent works, is gone".to_owned())));
-        let ended = talk(Command::new("/w/gone/claude"), "", &|| true, &|_| {});
+        let ended =
+            talk(Command::new("/w/gone/claude"), "", TURN, LINES_PER_TURN_MAX, &always, &|_| {});
         assert_eq!(ended, Some(Err("claude is not on the PATH".to_owned())));
     }
 
     #[test]
     fn a_turn_given_up_kills_claude() {
-        let ended = given_up("claude, which ends only if killed, ends", |wanted| {
-            talk(outlasting_patience(), "", wanted, &|_| {})
+        let ended = given_up("claude, which ends only if killed, ends", |ready, wanted| {
+            talk(outlasting_patience(ready), "", TURN, LINES_PER_TURN_MAX, wanted, &|_| {})
         });
         assert_eq!(ended, None);
+    }
+
+    #[test]
+    fn a_turn_flooding_stdout_still_ends_at_its_deadline() {
+        const DEADLINE: Duration = Duration::from_millis(50);
+
+        let mut flood = Command::new("sh");
+        flood.args(["-c", r"while echo '{}'; do :; done"]);
+        let ended = talk(flood, "", DEADLINE, LINES_PER_TURN_MAX, &Wanted::always(), &|_| {});
+        assert_eq!(ended, Some(Err("claude was still at it after 10 minutes".to_owned())));
+    }
+
+    #[test]
+    fn a_turn_accepts_up_to_its_line_limit_and_refuses_past_it() {
+        let done = r#"{"type":"result","subtype":"success","is_error":false,"result":"Ok."}"#;
+        let always = Wanted::always();
+
+        let mut exact = Command::new("sh");
+        exact.args(["-c", &format!("echo '{{}}'; echo '{{}}'; echo '{done}'")]);
+        let heard = RefCell::new(Vec::new());
+        let ended = talk(exact, "", TURN, 3, &always, &|step| heard.borrow_mut().push(step));
+        assert_eq!(ended, Some(Ok(())));
+        assert_eq!(heard.into_inner(), [Step::Said("Ok.".to_owned())]);
+
+        let mut over = Command::new("sh");
+        over.args(["-c", &format!("echo '{{}}'; echo '{{}}'; echo '{{}}'; echo '{done}'")]);
+        let ended = talk(over, "", TURN, 3, &always, &|_| {});
+        assert_eq!(ended, Some(Err("claude said more than 3 lines".to_owned())));
+    }
+
+    #[test]
+    fn a_dropped_line_writer_wakes_its_reader_with_an_error() {
+        let (writer, mut reader, _cancel) = line_channel();
+        drop(writer);
+        let outcome = reader.next(Instant::now() + TURN, &Wanted::always());
+        assert!(matches!(outcome, NextLine::Failed(_)));
+    }
+
+    #[test]
+    fn a_bounded_line_reads_up_to_its_limit_and_refuses_longer() {
+        let mut cursor = io::Cursor::new(b"ok\r\nsecond\n".as_slice());
+        assert_eq!(read_line_bounded(&mut cursor, 16).unwrap(), Some("ok".to_owned()));
+        assert_eq!(read_line_bounded(&mut cursor, 16).unwrap(), Some("second".to_owned()));
+        assert_eq!(read_line_bounded(&mut cursor, 16).unwrap(), None);
+
+        let mut huge = io::Cursor::new(b"123456789\n".as_slice());
+        let error = read_line_bounded(&mut huge, 4).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write as _};
 use std::mem;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
@@ -74,12 +74,17 @@ use crate::statuses::ReportedAgent;
 use crate::checks::{Failing, Log};
 use crate::{
     agy, changes, checks, claude, client, devices, eza, fetches, git, github, keeps, log, owns, pi,
-    printed, projects, release, remote, repositories, skills, state, tailnet, topics, watch, work,
+    printed, program, projects, release, remote, repositories, skills, state, tailnet, topics,
+    watch, work,
 };
 
 mod over_tailnet;
 
 use over_tailnet::OverTailnet;
+
+pub const LISTENING: lune_protocol::ReadyPrefix =
+    lune_protocol::ReadyPrefix::try_new("luned: listening on ")
+        .expect("luned readiness prefix is valid");
 
 pub const SWEEP: Duration = Duration::from_secs(2);
 
@@ -187,6 +192,7 @@ pub async fn serve(
     claim: Claim,
     projects: Result<Lock, String>,
     unkept: Option<String>,
+    detached: bool,
 ) -> io::Result<()> {
     let (listener, bound) = claim.bind()?;
     let devices_file = if projects.is_ok() {
@@ -203,8 +209,9 @@ pub async fn serve(
     let started = SystemTime::now();
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
+    let (wake_projects, projects_woken) = mpsc::sync_channel(1);
     let github = wake_github.clone();
-    let wakes = Wakes { git: wake_git.clone(), github };
+    let wakes = Wakes { git: wake_git.clone(), github, projects: wake_projects.clone() };
     let core = core::start(wakes)?;
     let store = Store::open(projects, core.clone())?;
     if let Some(why) = store.unkept() {
@@ -212,7 +219,7 @@ pub async fn serve(
     }
     let (wake_owns, owns_woken) = mpsc::sync_channel(1);
     let layouts = layouts::start(core.clone(), store, wake_owns.clone(), SWEEP)?;
-    projects::follow(core.clone(), layouts.clone(), SWEEP)?;
+    projects::follow(core.clone(), layouts.clone(), wake_projects, projects_woken, SWEEP)?;
     let (end, ending) = oneshot::channel();
     let claude_folder = claude::folder();
     let agy_folder = agy::folder();
@@ -295,6 +302,9 @@ pub async fn serve(
             .add_service(DaemonServer::from_arc(host))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
     );
+    if detached {
+        announce_ready(&claim.socket);
+    }
     let _ = beginning.await;
     let drained = async move {
         let tailnet_ended = match tailnet_served {
@@ -319,6 +329,27 @@ pub async fn serve(
             log::say(&format!("clients still connected after {secs}s are left"));
             Ok(())
         },
+    }
+}
+
+fn announce_ready(socket: &Path) {
+    assert!(socket.is_absolute(), "announced socket path is absolute");
+    {
+        let mut out = io::stdout().lock();
+        let written = writeln!(out, "{LISTENING}{}", socket.display()).and_then(|()| out.flush());
+        if let Err(error) = written
+            && error.kind() != ErrorKind::BrokenPipe
+        {
+            log::say(&format!("stdout did not take its listening line: {error}"));
+        }
+    }
+    match OpenOptions::new().write(true).open("/dev/null") {
+        Ok(null) => {
+            if let Err(error) = rustix::stdio::dup2_stdout(&null) {
+                log::say(&format!("stdout did not turn to /dev/null: {error}"));
+            }
+        },
+        Err(error) => log::say(&format!("/dev/null did not open for stdout: {error}")),
     }
 }
 
@@ -1172,18 +1203,35 @@ fn unready(why: Unready) -> Status {
 
 fn talked<T>(talk: T) -> ReceiverStream<Result<AskResponse, Status>>
 where
-    T: FnOnce(&dyn Fn() -> bool, &dyn Fn(Step)) -> Option<Result<(), String>> + Send + 'static,
+    T: FnOnce(&program::Wanted, &dyn Fn(Step)) -> Option<Result<(), String>> + Send + 'static,
 {
     let (heard, steps) = tokio::sync::mpsc::channel(STEPS_WAITING);
+    let (cancel, wanted) = program::cancel();
+    let (done, mut finished) = oneshot::channel::<()>();
+    let closed = heard.clone();
+    task::spawn(async move {
+        let mut closing = std::pin::pin!(closed.closed());
+        std::future::poll_fn(|cx| {
+            if closing.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(());
+            }
+            if Pin::new(&mut finished).poll(cx).is_ready() {
+                return Poll::Ready(());
+            }
+            Poll::Pending
+        })
+        .await;
+        cancel.give_up();
+    });
     let failed = heard.clone();
     let talking = task::spawn_blocking(move || {
-        let wanted = || !heard.is_closed();
         let hear = |step: Step| {
             let _ = heard.blocking_send(Ok(step.answer()));
         };
         if let Some(Err(why)) = talk(&wanted, &hear) {
             let _ = heard.blocking_send(Err(Status::failed_precondition(why)));
         }
+        let _ = done.send(());
     });
     task::spawn(async move {
         if talking.await.is_err() {

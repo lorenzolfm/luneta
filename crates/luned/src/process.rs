@@ -3,9 +3,13 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::num::NonZeroU32;
+use std::os::fd::OwnedFd;
+use std::process::ChildStdout;
 
 use rustix::io::Errno;
 use rustix::process::Pid;
+use tokio::io::unix::AsyncFd;
+use tokio::io::Interest;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -171,6 +175,85 @@ pub fn ends(pid: u32) -> io::Result<()> {
     }
 }
 
+pub struct Exit(os::Exit);
+
+impl Exit {
+    pub fn watch(pid: Pid) -> io::Result<Option<Exit>> {
+        os::Exit::watch(pid).map(|exit| exit.map(Exit))
+    }
+
+    pub fn signal(&self, signal: rustix::process::Signal) -> Result<(), Errno> {
+        self.0.signal(signal)
+    }
+
+    pub async fn wait(self) -> io::Result<()> {
+        self.0.wait().await
+    }
+}
+
+pub use lune_protocol::{ReadyPrefix, READY_BYTES_MAX};
+
+const READY_READS_MAX: usize = READY_BYTES_MAX * 2;
+
+pub(super) const SPURIOUS_WAKES_MAX: usize = 1024;
+
+const _: () = assert!(READY_READS_MAX >= READY_BYTES_MAX);
+const _: () = assert!(SPURIOUS_WAKES_MAX > 0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadyLine {
+    Matched,
+    Ended,
+    Overflow,
+}
+
+#[expect(
+    unsafe_code,
+    reason = "AsyncFd::register_with_interest requires an open fd whose number stays fixed for \
+              its lifetime; an OwnedFd owns its descriptor exclusively until AsyncFd drops it"
+)]
+fn readable_fd(fd: OwnedFd) -> io::Result<AsyncFd<OwnedFd>> {
+    unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) }.map_err(io::Error::from)
+}
+
+pub async fn read_ready_line(stdout: ChildStdout, prefix: ReadyPrefix) -> io::Result<ReadyLine> {
+    rustix::io::ioctl_fionbio(&stdout, true).map_err(io::Error::from)?;
+    let ready = readable_fd(OwnedFd::from(stdout))?;
+    let mut line = Vec::with_capacity(prefix.len());
+    let mut chunk = [0_u8; 512];
+    let mut bytes_total = 0_usize;
+    for _ in 0..READY_READS_MAX {
+        let mut guard = ready.readable().await?;
+        let read = guard.try_io(|inner| {
+            rustix::io::read(inner.get_ref(), &mut chunk).map_err(io::Error::from)
+        });
+        match read {
+            Ok(Ok(0)) => return Ok(ReadyLine::Ended),
+            Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {},
+            Ok(Err(error)) => return Err(error),
+            Ok(Ok(bytes_read)) => {
+                assert!(bytes_read <= chunk.len(), "read returned more bytes than chunk capacity");
+                for &byte in &chunk[..bytes_read] {
+                    bytes_total += 1;
+                    if bytes_total > READY_BYTES_MAX {
+                        return Ok(ReadyLine::Overflow);
+                    }
+                    if byte == b'\n' {
+                        if line.as_slice() == prefix.as_bytes() {
+                            return Ok(ReadyLine::Matched);
+                        }
+                        line.clear();
+                    } else if line.len() < prefix.len() {
+                        line.push(byte);
+                    }
+                }
+            },
+            Err(_would_block) => {},
+        }
+    }
+    Err(io::Error::other("stdout stayed unread across too many wakeups"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::env;
@@ -320,5 +403,66 @@ mod tests {
     fn no_end_is_heard_of_a_pid_no_process_can_have() {
         assert!(super::ends(0).is_err());
         assert!(super::ends(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn an_exit_watch_wakes_as_its_process_ends_and_not_before() {
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = rustix::process::Pid::from_child(&child);
+        let exit = super::Exit::watch(pid).unwrap().expect("a running child is watched");
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (done, heard) = mpsc::channel();
+        let waiter = thread::spawn(move || {
+            let ended = runtime.block_on(exit.wait());
+            let _ = done.send(ended);
+        });
+        lune_waits::never("an exit watch wakes while its process runs", || heard.try_recv().ok());
+        child.kill().unwrap();
+        lune_waits::heard("an exit watch wakes when its process ends", &heard).unwrap();
+        waiter.join().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_ready_line_wakes_on_its_prefix_or_eof() {
+        let prefix = super::ReadyPrefix::try_new("luned: listening on ").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut child = Command::new("sh")
+            .args(["-c", "echo noise; echo 'luned: listening on /tmp/s'; exec sleep 60"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let heard = runtime.block_on(lune_waits::awaited(
+            "the ready line arrives while the child runs on",
+            super::read_ready_line(stdout, prefix),
+        ));
+        assert_eq!(heard.unwrap(), super::ReadyLine::Matched);
+        assert!(child.try_wait().unwrap().is_none(), "the child keeps running after saying it listens");
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let mut silent = Command::new("true").stdout(Stdio::piped()).spawn().unwrap();
+        let stdout = silent.stdout.take().unwrap();
+        let heard = runtime.block_on(lune_waits::awaited(
+            "an exiting child closes its stdout",
+            super::read_ready_line(stdout, prefix),
+        ));
+        assert_eq!(heard.unwrap(), super::ReadyLine::Ended);
+        silent.wait().unwrap();
+
+        let mut noisy = Command::new("head")
+            .args(["-c", &(super::READY_BYTES_MAX + 1).to_string(), "/dev/zero"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = noisy.stdout.take().unwrap();
+        let heard = runtime.block_on(lune_waits::awaited(
+            "a noisy child hits the ready byte bound",
+            super::read_ready_line(stdout, prefix),
+        ));
+        assert_eq!(heard.unwrap(), super::ReadyLine::Overflow);
+        let _ = noisy.kill();
+        let _ = noisy.wait();
     }
 }

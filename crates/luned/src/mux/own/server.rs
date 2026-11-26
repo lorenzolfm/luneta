@@ -3,9 +3,9 @@ use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind, IoSlice};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::pin::{pin, Pin};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
@@ -21,7 +21,7 @@ use lune_protocol::shell::Doing;
 use rustix::process::{Pid, Signal};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::{watch as tokio_watch, Semaphore, SemaphorePermit};
 use tokio_stream::Stream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::{Code, Response, Status, Streaming};
@@ -33,10 +33,18 @@ use super::in_no_terminal;
 use crate::changes::Unchanged;
 use crate::client::Within;
 use crate::mux::{Failure, Runs};
-use crate::process::AgentPid;
+use crate::process::{self, AgentPid, Exit, ReadyLine, ReadyPrefix};
+use crate::watch::{FolderNames, FolderWatch};
 use crate::{folder, log, release, tasks, Directory};
 
 pub const SOCKET: &str = "mux.sock";
+
+const LOCK: &str = "mux.lock";
+
+const FOLDER_NAMES: FolderNames =
+    FolderNames::try_new(SOCKET, LOCK).expect("mux socket and lock names are valid");
+
+const LISTENING: ReadyPrefix = lune_protocol::MUX_LISTENING;
 
 const PROGRAM: &str = "lune-mux";
 
@@ -57,7 +65,24 @@ const MAKING: Duration = Duration::from_secs(10);
 
 const STOPPING: Duration = Duration::from_secs(2);
 
-const LOOK: Duration = Duration::from_millis(10);
+const BIND_RETRY: Duration = Duration::from_millis(5);
+
+const BIND_RETRIES_MAX: u8 = 2;
+
+const STOP_CHECKS_MAX: usize = 256;
+
+const START_SPAWNS_MAX: usize = 128;
+
+const START_WAITS_MAX: usize = 256;
+
+const LISTEN_CHECKS_MAX: usize = 512;
+
+const AGAIN: Duration = Duration::from_millis(100);
+
+const _: () = assert!(STOP_CHECKS_MAX as u128 > STOPPING.as_millis() / AGAIN.as_millis());
+const _: () = assert!(START_SPAWNS_MAX as u128 > MAKING.as_millis() / AGAIN.as_millis());
+const _: () = assert!(START_WAITS_MAX > 0);
+const _: () = assert!(LISTEN_CHECKS_MAX as u128 > MAKING.as_millis() / AGAIN.as_millis());
 
 pub const PRESSES_MAX: usize = crate::choices::CHOICES_MAX - 1;
 
@@ -67,8 +92,6 @@ const _: () = assert!(
 );
 
 const _: () = assert!(PRESSES_MAX >= 2, "a text answer's paste and Enter go at once");
-
-const AGAIN: Duration = Duration::from_millis(100);
 
 const KEPT_MAX: usize = 16;
 
@@ -140,16 +163,50 @@ pub(super) enum Reached {
     Unmatched(Unmatched),
 }
 
-#[derive(Clone, Default)]
-struct Gone(Arc<AtomicBool>);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Connection {
+    Open,
+    Unavailable,
+    Closed,
+}
+
+#[derive(Clone)]
+struct Gone {
+    state: Arc<tokio_watch::Sender<Connection>>,
+    heard: tokio_watch::Receiver<Connection>,
+}
+
+impl Default for Gone {
+    fn default() -> Gone {
+        let (state, heard) = tokio_watch::channel(Connection::Open);
+        Gone { state: Arc::new(state), heard }
+    }
+}
 
 impl Gone {
-    fn mark(&self) {
-        self.0.store(true, Ordering::Relaxed);
+    fn mark_unavailable(&self) {
+        self.state.send_if_modified(|state| match *state {
+            Connection::Open => {
+                *state = Connection::Unavailable;
+                true
+            },
+            Connection::Unavailable | Connection::Closed => false,
+        });
+    }
+
+    fn mark_closed(&self) {
+        self.state.send_replace(Connection::Closed);
     }
 
     fn is(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        *self.heard.borrow() != Connection::Open
+    }
+
+    async fn closed(&self) {
+        let mut heard = self.heard.clone();
+        let Ok(_) = heard.wait_for(|state| *state == Connection::Closed).await else {
+            unreachable!("Gone holds its own sender");
+        };
     }
 }
 
@@ -157,6 +214,7 @@ impl Gone {
 pub(super) struct Matched {
     channel: Channel,
     gone: Gone,
+    pid: Option<Pid>,
 }
 
 impl Matched {
@@ -245,9 +303,13 @@ struct Tracked {
 }
 
 impl Tracked {
+    fn mark_closed(&self) {
+        self.gone.mark_closed();
+    }
+
     fn marked<T>(&self, polled: Poll<io::Result<T>>) -> Poll<io::Result<T>> {
         if let Poll::Ready(Err(_)) = &polled {
-            self.gone.mark();
+            self.mark_closed();
         }
         polled
     }
@@ -263,7 +325,7 @@ impl AsyncRead for Tracked {
         let polled = Pin::new(&mut self.stream).poll_read(cx, buf);
         let ended = matches!(polled, Poll::Ready(Ok(()))) && room > 0;
         if ended && buf.filled().len() == before {
-            self.gone.mark();
+            self.mark_closed();
         }
         self.marked(polled)
     }
@@ -298,14 +360,14 @@ impl AsyncWrite for Tracked {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.gone.mark();
+        self.mark_closed();
         Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 
 impl Drop for Tracked {
     fn drop(&mut self) {
-        self.gone.mark();
+        self.mark_closed();
     }
 }
 
@@ -334,15 +396,17 @@ impl Streams {
 struct Server {
     client: MuxClient<Within<Channel>>,
     gone: Gone,
+    pid: Option<Pid>,
 }
 
 impl Server {
     fn matched(matched: Matched) -> Server {
-        let Matched { channel, gone } = matched;
+        let Matched { channel, gone, pid } = matched;
         Server {
             client: MuxClient::new(Within::new(channel, ANSWER, unanswered))
                 .max_decoding_message_size(lune_protocol::RPC_MESSAGE_BYTES_MAX),
             gone,
+            pid,
         }
     }
 
@@ -358,15 +422,19 @@ impl Server {
         tasks::shared().block_on(Server::here())
     }
 
-    fn matched_or_stopped() -> Result<Option<Server>, Failure> {
-        match reached_here_blocking()? {
+    async fn matched_or_stopped() -> Result<Option<Server>, Failure> {
+        match reached_here().await? {
             Reached::Matched(matched) => Ok(Some(Server::matched(matched))),
             Reached::Unreached => Ok(None),
             Reached::Unmatched(unmatched) => {
-                stop(&unmatched)?;
+                stop(&unmatched).await?;
                 Ok(None)
             },
         }
+    }
+
+    fn matched_or_stopped_blocking() -> Result<Option<Server>, Failure> {
+        tasks::shared().block_on(Server::matched_or_stopped())
     }
 
     async fn asked<T, F>(
@@ -401,7 +469,7 @@ impl Server {
         if let Err(status) = &answer
             && status.code() == Code::Unavailable
         {
-            self.gone.mark();
+            self.gone.mark_unavailable();
         }
         answer
     }
@@ -417,7 +485,34 @@ fn reached_here_blocking() -> Result<Reached, Failure> {
     tasks::shared().block_on(reached_here())
 }
 
-fn stop(unmatched: &Unmatched) -> Result<(), Failure> {
+enum WatchedExit {
+    Watching(Exit),
+    Gone,
+    Unavailable,
+}
+
+fn watch_exit(pid: Pid) -> WatchedExit {
+    match Exit::watch(pid) {
+        Ok(Some(exit)) => WatchedExit::Watching(exit),
+        Ok(None) => WatchedExit::Gone,
+        Err(error) => {
+            log::say(&format!("lune-mux (pid {pid}) exit watch failed: {error}"));
+            WatchedExit::Unavailable
+        },
+    }
+}
+
+fn stop_blocking(unmatched: &Unmatched) -> Result<(), Failure> {
+    tasks::shared().block_on(stop(unmatched))
+}
+
+enum StopWait {
+    Exit(Pin<Box<dyn Future<Output = io::Result<()>> + Send>>),
+    Folder(FolderWatch),
+    Poll,
+}
+
+async fn stop(unmatched: &Unmatched) -> Result<(), Failure> {
     let unstopped = |why: String| Failure::Own(format!("{unmatched}, and is not stopped: {why}"));
     if let Some(pid) = unmatched.pid
         && Pid::from_raw(STARTED.load(Ordering::Relaxed)) == Some(pid)
@@ -433,20 +528,47 @@ fn stop(unmatched: &Unmatched) -> Result<(), Failure> {
     if pid == rustix::process::getpid() {
         return Err(unstopped("its socket leads back to luned itself".to_owned()));
     }
-    match rustix::process::kill_process(pid, Signal::TERM) {
-        Ok(()) | Err(rustix::io::Errno::SRCH) => {},
-        Err(error) => return Err(unstopped(error.to_string())),
-    }
-    log::say(&format!("{unmatched}, and is stopped"));
     let socket = socket()?;
+    let folder_watch = || socket.parent().and_then(|folder| FolderWatch::on(folder, FOLDER_NAMES));
+    let mut wait = match watch_exit(pid) {
+        WatchedExit::Watching(exit) => match exit.signal(Signal::TERM) {
+            Ok(()) => StopWait::Exit(Box::pin(exit.wait())),
+            Err(rustix::io::Errno::SRCH) => StopWait::Poll,
+            Err(error) => return Err(unstopped(error.to_string())),
+        },
+        WatchedExit::Gone => StopWait::Poll,
+        WatchedExit::Unavailable => {
+            let watch = folder_watch().map_or(StopWait::Poll, StopWait::Folder);
+            match rustix::process::kill_process(pid, Signal::TERM) {
+                Ok(()) => watch,
+                Err(rustix::io::Errno::SRCH) => StopWait::Poll,
+                Err(error) => return Err(unstopped(error.to_string())),
+            }
+        },
+    };
+    log::say(&format!("{unmatched}, and is stopped"));
     let stopped = Instant::now();
     let deadline = stopped + STOPPING;
     let mut answered = "it neither answers nor goes".to_owned();
-    loop {
-        let asked = tasks::shared().block_on(async {
-            tokio::time::timeout_at(deadline.into(), connect(&socket)).await
-        });
-        match asked {
+    for _ in 0..STOP_CHECKS_MAX {
+        wait = match wait {
+            StopWait::Exit(exit_wait) => {
+                match tokio::time::timeout_at(deadline.into(), exit_wait).await {
+                    Ok(Err(error)) => {
+                        log::say(&format!("lune-mux (pid {pid}) exit wait failed: {error}"));
+                        folder_watch().map_or(StopWait::Poll, StopWait::Folder)
+                    },
+                    Ok(Ok(())) | Err(_) => StopWait::Poll,
+                }
+            },
+            other => other,
+        };
+        let mark = match &mut wait {
+            StopWait::Folder(folder_watch) => Some(folder_watch.mark()),
+            StopWait::Exit(_) | StopWait::Poll => None,
+        };
+        let check_until = deadline.max(Instant::now() + CONNECT);
+        match tokio::time::timeout_at(check_until.into(), connect(&socket)).await {
             Ok(Ok(Reached::Unmatched(still))) if still.pid == unmatched.pid => {
                 "it still answers".clone_into(&mut answered);
             },
@@ -454,15 +576,21 @@ fn stop(unmatched: &Unmatched) -> Result<(), Failure> {
                 return Ok(());
             },
             Ok(Err(error)) => answered = format!("its socket says {error}"),
-            Err(_) => {},
+            Err(_) => "it neither answers nor goes".clone_into(&mut answered),
         }
         if Instant::now() >= deadline {
-            let waited = stopped.elapsed().as_millis();
-            let runs = format!("{unmatched}, and {waited}ms after it was stopped {answered}");
-            return Err(Failure::Own(runs));
+            break;
         }
-        thread::sleep(LOOK);
+        let until = (Instant::now() + AGAIN).min(deadline);
+        if let Some(mark) = mark {
+            let _ = tokio::time::timeout_at(until.into(), mark.changed()).await;
+        } else {
+            tokio::time::sleep_until(until.into()).await;
+        }
     }
+    let waited = stopped.elapsed().as_millis();
+    let runs = format!("{unmatched}, and {waited}ms after it was stopped {answered}");
+    Err(Failure::Own(runs))
 }
 
 fn unanswered(within: Duration) -> String {
@@ -567,7 +695,7 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
         .await
         .map_err(io::Error::other)?;
     if pid.is_some() && Pid::from_raw(MATCHED.load(Ordering::Relaxed)) == pid {
-        return Ok(Reached::Matched(Matched { channel, gone }));
+        return Ok(Reached::Matched(Matched { channel, gone, pid }));
     }
     let mut client = MuxClient::new(channel.clone());
     let asked = tokio::time::timeout(ANSWER, client.info(api::InfoRequest {})).await;
@@ -583,7 +711,7 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
                     if let Some(pid) = pid {
                         MATCHED.store(pid.as_raw_pid(), Ordering::Relaxed);
                     }
-                    return Ok(Reached::Matched(Matched { channel, gone }));
+                    return Ok(Reached::Matched(Matched { channel, gone, pid }));
                 },
                 release::Of::Other(other) => Some(other),
             }
@@ -663,7 +791,7 @@ pub fn followed(
             return Ok(Followed::Newer(unmatched.left_be()));
         },
         Reached::Unmatched(unmatched) => {
-            stop(&unmatched)?;
+            stop_blocking(&unmatched)?;
             return Ok(Followed::Unmatched);
         },
     };
@@ -1018,7 +1146,7 @@ fn on_started<T>(
         if Instant::now() >= deadline {
             return Err(Failure::Own("no lune-mux answered in time".to_owned()));
         }
-        let server = match Server::matched_or_stopped()? {
+        let server = match Server::matched_or_stopped_blocking()? {
             Some(server) => server,
             None => started(deadline)?,
         };
@@ -1031,45 +1159,140 @@ fn on_started<T>(
 }
 
 fn gone_by(server: &Server, deadline: Instant) -> Result<(), Failure> {
-    while server.ask(|mut client| async move { client.list(api::ListRequest {}).await }).is_ok() {
-        if Instant::now() >= deadline {
-            return Err(Failure::Own("the lune-mux that ends did not go in time".to_owned()));
-        }
-        thread::sleep(LOOK);
+    let exit = match server.pid {
+        Some(pid) => match watch_exit(pid) {
+            WatchedExit::Watching(exit) => Some(exit),
+            WatchedExit::Gone => return Ok(()),
+            WatchedExit::Unavailable => None,
+        },
+        None => None,
+    };
+    let gone = server.gone.clone();
+    let went = tasks::shared().block_on(async move {
+        let mut closed = pin!(gone.closed());
+        let mut exit_wait = exit.map(|exit| Box::pin(exit.wait()));
+        let wait = std::future::poll_fn(|cx| {
+            if closed.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(true);
+            }
+            if let Some(wait) = exit_wait.as_mut()
+                && let Poll::Ready(outcome) = wait.as_mut().poll(cx)
+            {
+                exit_wait = None;
+                match outcome {
+                    Ok(()) => return Poll::Ready(true),
+                    Err(error) => {
+                        log::say(&format!("lune-mux exit wait failed: {error}"));
+                    },
+                }
+            }
+            Poll::Pending
+        });
+        tokio::time::timeout_at(deadline.into(), wait).await.unwrap_or(false)
+    });
+    if went {
+        Ok(())
+    } else {
+        Err(Failure::Own("the lune-mux that ends did not go in time".to_owned()))
     }
-    Ok(())
+}
+
+fn lock_held(folder: &Path) -> Result<bool, Failure> {
+    let path = folder.join(LOCK);
+    let lock = match fs::File::open(&path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(Failure::Own(format!("{}: {error}", path.display()))),
+    };
+    match lock.try_lock() {
+        Ok(()) => Ok(false),
+        Err(fs::TryLockError::WouldBlock) => Ok(true),
+        Err(fs::TryLockError::Error(error)) => {
+            Err(Failure::Own(format!("{}: {error}", path.display())))
+        },
+    }
 }
 
 fn started(deadline: Instant) -> Result<Server, Failure> {
-    loop {
-        let mut started = Started::spawned()?;
-        match listened(&mut started, deadline) {
-            Ok(Some(server)) => {
-                started.reaped();
-                return Ok(server);
-            },
-            Ok(None) => started.reaped(),
-            Err(why) => return Err(started.given_up(why)),
-        }
-        let again = Instant::now() + AGAIN;
-        while Instant::now() < again {
-            if let Some(server) = Server::matched_or_stopped()? {
-                return Ok(server);
+    let folder = listened_in()?;
+    let mut watch = FolderWatch::on(&folder, FOLDER_NAMES);
+    tasks::shared().block_on(async move {
+        for _ in 0..START_SPAWNS_MAX {
+            let (mut started, child_watch) = Started::spawned(&folder)?;
+            match listened(&mut started, child_watch, &folder, watch.as_mut(), deadline).await {
+                Ok(Some(server)) => {
+                    started.reaped();
+                    return Ok(server);
+                },
+                Ok(None) => started.reaped(),
+                Err(why) => return Err(started.given_up(why)),
             }
-            thread::sleep(LOOK);
+            let again = (Instant::now() + AGAIN).min(deadline);
+            for _ in 0..START_WAITS_MAX {
+                let mark = watch.as_mut().map(FolderWatch::mark);
+                if let Some(server) = Server::matched_or_stopped().await? {
+                    return Ok(server);
+                }
+                if !lock_held(&folder)? {
+                    break;
+                }
+                if Instant::now() >= again {
+                    break;
+                }
+                if let Some(mark) = mark {
+                    if tokio::time::timeout_at(again.into(), mark.changed()).await.is_err() {
+                        break;
+                    }
+                } else {
+                    tokio::time::sleep_until(again.into()).await;
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(Failure::Own("another lune-mux held its folder too long".to_owned()));
+            }
         }
-        if Instant::now() >= deadline {
-            return Err(Failure::Own("another lune-mux held its folder too long".to_owned()));
-        }
-    }
+        Err(Failure::Own("another lune-mux held its folder too long".to_owned()))
+    })
 }
 
-fn listened(started: &mut Started, deadline: Instant) -> Result<Option<Server>, Failure> {
-    loop {
-        match reached_here_blocking()? {
+#[derive(Clone, Copy)]
+enum Woke {
+    Folder,
+    Process,
+    TimedOut,
+}
+
+enum ExitWait {
+    Watching(Pin<Box<dyn Future<Output = io::Result<()>> + Send>>),
+    Exited,
+    Unavailable,
+}
+
+async fn listened(
+    started: &mut Started,
+    child_watch: ChildWatch,
+    folder: &Path,
+    mut watch: Option<&mut FolderWatch>,
+    deadline: Instant,
+) -> Result<Option<Server>, Failure> {
+    let socket = folder.join(SOCKET);
+    let mut ready_wait = Some(Box::pin(process::read_ready_line(child_watch.stdout, LISTENING)));
+    let mut exit_wait = match child_watch.exit {
+        WatchedExit::Watching(exit) => ExitWait::Watching(Box::pin(exit.wait())),
+        WatchedExit::Gone => ExitWait::Exited,
+        WatchedExit::Unavailable => ExitWait::Unavailable,
+    };
+    let mut bind_retries = 0_u8;
+    for _ in 0..LISTEN_CHECKS_MAX {
+        let mark = watch.as_deref_mut().map(FolderWatch::mark);
+        match reached_here().await? {
             Reached::Matched(matched) => return Ok(Some(Server::matched(matched))),
             Reached::Unreached => {},
-            Reached::Unmatched(unmatched) => stop(&unmatched)?,
+            Reached::Unmatched(unmatched) => {
+                stop(&unmatched).await?;
+                continue;
+            },
         }
         let unread = |error| Failure::Own(format!("the lune-mux started is unread: {error}"));
         let ended = started.child.try_wait().map_err(unread)?;
@@ -1083,8 +1306,69 @@ fn listened(started: &mut Started, deadline: Instant) -> Result<Option<Server>, 
         if Instant::now() >= deadline {
             return Err(Failure::Own("lune-mux did not listen in time".to_owned()));
         }
-        thread::sleep(LOOK);
+        let child_exited = matches!(exit_wait, ExitWait::Exited);
+        let child_exit_unavailable = matches!(exit_wait, ExitWait::Unavailable);
+        let retry_bind = !child_exited && socket.exists() && bind_retries < BIND_RETRIES_MAX;
+        if retry_bind {
+            bind_retries += 1;
+        }
+        let until = if child_exited || retry_bind {
+            (Instant::now() + BIND_RETRY).min(deadline)
+        } else if mark.is_none() || child_exit_unavailable {
+            (Instant::now() + AGAIN).min(deadline)
+        } else {
+            deadline
+        };
+        let mut changed = pin!(async {
+            match mark {
+                Some(mark) => mark.changed().await,
+                None => std::future::pending().await,
+            }
+        });
+        let wait = std::future::poll_fn(|cx| {
+            if let Some(wait) = ready_wait.as_mut()
+                && let Poll::Ready(outcome) = wait.as_mut().poll(cx)
+            {
+                ready_wait = None;
+                match outcome {
+                    Ok(ReadyLine::Matched | ReadyLine::Ended) => {},
+                    Ok(ReadyLine::Overflow) => {
+                        log::say("lune-mux stdout passed its readiness byte limit");
+                    },
+                    Err(error) => {
+                        log::say(&format!("lune-mux stdout readiness read failed: {error}"));
+                    },
+                }
+                return Poll::Ready(Woke::Process);
+            }
+            if let ExitWait::Watching(wait) = &mut exit_wait
+                && let Poll::Ready(outcome) = wait.as_mut().poll(cx)
+            {
+                exit_wait = match outcome {
+                    Ok(()) => ExitWait::Exited,
+                    Err(error) => {
+                        log::say(&format!("lune-mux exit wait failed: {error}"));
+                        ExitWait::Unavailable
+                    },
+                };
+                return Poll::Ready(Woke::Process);
+            }
+            if changed.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Woke::Folder);
+            }
+            Poll::Pending
+        });
+        let woke = tokio::time::timeout_at(until.into(), wait).await.unwrap_or(Woke::TimedOut);
+        if matches!(woke, Woke::Folder) {
+            bind_retries = 0;
+        }
     }
+    Err(Failure::Own("lune-mux did not listen in time".to_owned()))
+}
+
+struct ChildWatch {
+    stdout: ChildStdout,
+    exit: WatchedExit,
 }
 
 struct Started {
@@ -1093,8 +1377,7 @@ struct Started {
 }
 
 impl Started {
-    fn spawned() -> Result<Started, Failure> {
-        let folder = listened_in()?;
+    fn spawned(folder: &Path) -> Result<(Started, ChildWatch), Failure> {
         let (reaper, handed) = mpsc::sync_channel::<Child>(1);
         let reaping = move || {
             if let Ok(mut child) = handed.recv()
@@ -1107,14 +1390,17 @@ impl Started {
         thread.map_err(|error| Failure::Own(format!("no thread to reap lune-mux: {error}")))?;
         let program = program();
         let mut command = Command::new(&program);
-        command.arg(&folder);
+        command.arg(folder);
         in_no_terminal(&mut command);
-        command.current_dir("/").stdin(Stdio::null()).stdout(Stdio::null());
+        command.current_dir("/").stdin(Stdio::null()).stdout(Stdio::piped());
         let spawned = command.spawn();
         let unstarted = |error| Failure::Own(format!("{}: {error}", program.display()));
-        let child = spawned.map_err(unstarted)?;
-        STARTED.store(Pid::from_child(&child).as_raw_pid(), Ordering::Relaxed);
-        Ok(Started { child, reaper })
+        let mut child = spawned.map_err(unstarted)?;
+        let pid = Pid::from_child(&child);
+        STARTED.store(pid.as_raw_pid(), Ordering::Relaxed);
+        let stdout = child.stdout.take().expect("its stdout is piped");
+        let exit = watch_exit(pid);
+        Ok((Started { child, reaper }, ChildWatch { stdout, exit }))
     }
 
     fn reaped(self) {
@@ -1150,7 +1436,7 @@ mod tests {
     #[test]
     fn luned_refuses_to_stop_a_lune_mux_whose_socket_leads_back_to_it() {
         let itself = Unmatched { pid: Some(rustix::process::getpid()), build: None };
-        let refused = stop(&itself);
+        let refused = stop_blocking(&itself);
         let Err(Failure::Own(why)) = refused else {
             panic!("luned stops itself: {refused:?}");
         };

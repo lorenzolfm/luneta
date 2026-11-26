@@ -83,7 +83,7 @@ fn main() -> ExitCode {
         },
     };
     let socket = claim.socket().to_owned();
-    if let Err(error) = runtime.block_on(luned::serve(hooked, claim, kept, unkept)) {
+    if let Err(error) = runtime.block_on(luned::serve(hooked, claim, kept, unkept, args.detached)) {
         log::say(&format!("{}: {error}", socket.display()));
         return ExitCode::FAILURE;
     }

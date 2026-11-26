@@ -1,4 +1,5 @@
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, IsTerminal as _, Write as _};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -286,7 +287,8 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
         bound.socket().parent().map(|dir| dir.join(lune_protocol::TERMINAL_BROWSER_SOCKET));
     let mux = Mux::with_browser_socket(browser_socket);
     let mut watched = mux.watched();
-    eprintln!("lune-mux: listening on {}", bound.socket().display());
+    let listening = format!("{}{}\n", lune_protocol::MUX_LISTENING, bound.socket().display());
+    let _ = io::stderr().write_all(listening.as_bytes());
     let (begun, mut beginning) = watch::channel(false);
     let unused = Arc::clone(&mux);
     tokio::spawn(async move {
@@ -314,6 +316,24 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
             )
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
     );
+    if !io::stdout().is_terminal() {
+        {
+            let mut out = io::stdout().lock();
+            if let Err(error) = out.write_all(listening.as_bytes()).and_then(|()| out.flush())
+                && error.kind() != io::ErrorKind::BrokenPipe
+            {
+                eprintln!("lune-mux: stdout did not take its listening line: {error}");
+            }
+        }
+        match OpenOptions::new().write(true).open("/dev/null") {
+            Ok(null) => {
+                if let Err(error) = rustix::stdio::dup2_stdout(&null) {
+                    eprintln!("lune-mux: stdout did not turn to /dev/null: {error}");
+                }
+            },
+            Err(error) => eprintln!("lune-mux: /dev/null did not open for stdout: {error}"),
+        }
+    }
     let _ = beginning.wait_for(|begun| *begun).await;
     drop(claim);
     let served = match tokio::time::timeout(DRAIN, served).await {

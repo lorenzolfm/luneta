@@ -1,14 +1,14 @@
-use std::cell::Cell;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender, TrySendError};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use luned::program;
+use luned::program::{self, Wanted};
 
 use crate::brief::Asking;
 use crate::due::Due;
@@ -38,6 +38,13 @@ const FETCH: Duration = Duration::from_hours(1);
 const CHECK: Duration = Duration::from_mins(2);
 
 const PROGRESS: Duration = Duration::from_millis(250);
+
+const LOCK_WAITS_MAX: usize = 32_768;
+
+const PROGRESS_TICKS_MAX: usize = 32_768;
+
+const _: () = assert!(LOCK_WAITS_MAX as u128 > FETCH.as_millis() / PROGRESS.as_millis());
+const _: () = assert!(PROGRESS_TICKS_MAX as u128 > FETCH.as_millis() / PROGRESS.as_millis());
 
 impl Pin {
     pub fn path(&self) -> Result<PathBuf, String> {
@@ -78,16 +85,16 @@ pub fn fetch(
     useful: fn() -> Result<(), String>,
 ) -> Asking {
     let due = Due::new(events, move |ended| event(Fetched::Ended(ended)));
-    let events = events.clone();
+    let events = Mutex::new(events.clone());
     Asking::on_thread(move |wanted| {
         let tell = |got: u64| {
-            let _ = events.send(event(Fetched::Got(got)));
+            let _ = events.lock().unwrap_or_else(PoisonError::into_inner).send(event(Fetched::Got(got)));
         };
         due.pay(useful().and_then(|()| all(pins, wanted, &tell)));
     })
 }
 
-fn all(pins: &[Pin], wanted: &dyn Fn() -> bool, tell: &dyn Fn(u64)) -> Result<(), String> {
+fn all(pins: &[Pin], wanted: &Wanted, tell: &(dyn Fn(u64) + Sync)) -> Result<(), String> {
     let mut before = 0;
     for pin in pins {
         fetching(pin, wanted, &|got| tell(before + got))?;
@@ -96,7 +103,7 @@ fn all(pins: &[Pin], wanted: &dyn Fn() -> bool, tell: &dyn Fn(u64)) -> Result<()
     Ok(())
 }
 
-fn fetching(pin: &Pin, wanted: &dyn Fn() -> bool, tell: &dyn Fn(u64)) -> Result<(), String> {
+fn fetching(pin: &Pin, wanted: &Wanted, tell: &(dyn Fn(u64) + Sync)) -> Result<(), String> {
     let path = pin.path()?;
     if pin.whole(&path) {
         return Ok(());
@@ -105,27 +112,37 @@ fn fetching(pin: &Pin, wanted: &dyn Fn() -> bool, tell: &dyn Fn(u64)) -> Result<
     fs::create_dir_all(folder)
         .map_err(|error| format!("no folder for the model, {}: {error}", folder.display()))?;
     let part = path.with_added_extension("part");
-    let told = Cell::new(Instant::now());
-    let still = || {
-        if told.get().elapsed() >= PROGRESS {
-            told.set(Instant::now());
-            if let Ok(got) = fs::metadata(&part) {
-                tell(got.len());
-            }
+    let report = || {
+        if let Ok(got) = fs::metadata(&part) {
+            tell(got.len());
         }
-        wanted()
     };
     let lock = File::create(path.with_added_extension("lock"))
         .map_err(|error| format!("the model takes no lock: {error}"))?;
-    loop {
+    let lock_deadline = Instant::now() + FETCH;
+    let mut locked = false;
+    for _ in 0..LOCK_WAITS_MAX {
         match lock.try_lock() {
-            Ok(()) => break,
-            Err(TryLockError::WouldBlock) if still() => thread::sleep(PROGRESS),
-            Err(TryLockError::WouldBlock) => return Err("given up".to_owned()),
+            Ok(()) => {
+                locked = true;
+                break;
+            },
+            Err(TryLockError::WouldBlock) => {
+                report();
+                if Instant::now() >= lock_deadline {
+                    return Err("another fetch held the model lock too long".to_owned());
+                }
+                if !wanted.wait_for(PROGRESS) {
+                    return Err("given up".to_owned());
+                }
+            },
             Err(TryLockError::Error(error)) => {
                 return Err(format!("the model takes no lock: {error}"));
             },
         }
+    }
+    if !locked {
+        return Err("another fetch held the model lock too long".to_owned());
     }
     if pin.whole(&path) {
         return Ok(());
@@ -137,7 +154,28 @@ fn fetching(pin: &Pin, wanted: &dyn Fn() -> bool, tell: &dyn Fn(u64)) -> Result<
         curl.args(["--fail", "--location", "--silent", "--show-error", "--retry", "3"]);
         curl.arg("--output").arg(&part).arg(pin.url);
         let held = lock.try_clone().map_err(|error| format!("the model takes no lock: {error}"))?;
-        match program::run_while_reading(&mut curl, FETCH, still, Stdio::from(held)) {
+        let ran = thread::scope(|scope| {
+            let (done, finished) = mpsc::sync_channel(1);
+            let _progress = thread::Builder::new()
+                .name("model fetch progress".to_owned())
+                .spawn_scoped(scope, move || {
+                    for _ in 0..PROGRESS_TICKS_MAX {
+                        match finished.recv_timeout(PROGRESS) {
+                            Err(RecvTimeoutError::Timeout) => report(),
+                            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                        }
+                    }
+                })?;
+            let ran = program::run_while_reading(&mut curl, FETCH, wanted, Stdio::from(held));
+            match done.try_send(()) {
+                Ok(()) | Err(TrySendError::Disconnected(())) => {},
+                Err(TrySendError::Full(())) => {
+                    unreachable!("fetch progress channel takes one done message");
+                },
+            }
+            ran
+        });
+        match ran {
             Ok(Some(ran)) => ran.answer().map(drop).map_err(|why| format!("curl: {why}")),
             Ok(None) => Err("given up".to_owned()),
             Err(error) => Err(format!("lune fetches the model with curl: {error}")),
@@ -153,7 +191,7 @@ fn fetching(pin: &Pin, wanted: &dyn Fn() -> bool, tell: &dyn Fn(u64)) -> Result<
     kept
 }
 
-fn check(pin: &Pin, file: &Path, wanted: &dyn Fn() -> bool) -> Result<(), String> {
+fn check(pin: &Pin, file: &Path, wanted: &Wanted) -> Result<(), String> {
     let bytes = fs::metadata(file).map_err(|error| format!("the model is gone: {error}"))?.len();
     if bytes != pin.bytes {
         return Err(format!("{} came {bytes} bytes long, and not {}", pin.file, pin.bytes));

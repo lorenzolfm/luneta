@@ -1,5 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::mem;
@@ -8,7 +9,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use tokio::sync::watch as tokio_watch;
 
 use crate::{log, process};
 
@@ -200,6 +203,125 @@ impl Troubles {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FolderNames {
+    socket: &'static str,
+    lock: &'static str,
+}
+
+impl FolderNames {
+    #[must_use]
+    pub const fn try_new(socket: &'static str, lock: &'static str) -> Option<Self> {
+        if !is_entry_name(socket)
+            || !is_entry_name(lock)
+            || same_bytes(socket.as_bytes(), lock.as_bytes())
+        {
+            return None;
+        }
+        Some(Self { socket, lock })
+    }
+}
+
+const fn is_entry_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || same_bytes(bytes, b".") || same_bytes(bytes, b"..") {
+        return false;
+    }
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'/' || bytes[at] == 0 {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
+
+const fn same_bytes(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut at = 0;
+    while at < left.len() {
+        if left[at] != right[at] {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
+
+pub struct FolderWatch {
+    _watcher: RecommendedWatcher,
+    _sender: tokio_watch::Sender<u64>,
+    events: tokio_watch::Receiver<u64>,
+}
+
+pub struct FolderMark<'a>(&'a mut tokio_watch::Receiver<u64>);
+
+impl FolderWatch {
+    #[must_use]
+    pub fn on(folder: &Path, names: FolderNames) -> Option<FolderWatch> {
+        let (changed, events) = tokio_watch::channel(0_u64);
+        let notify = changed.clone();
+        let handler = move |event: notify::Result<Event>| {
+            if folder_event(&event, names) {
+                notify.send_modify(|generation| {
+                    *generation = generation.wrapping_add(1);
+                });
+            }
+        };
+        let config = notify::Config::default().with_follow_symlinks(false);
+        let watcher = match RecommendedWatcher::new(handler, config) {
+            Ok(mut watcher) => match watcher.watch(folder, RecursiveMode::NonRecursive) {
+                Ok(()) => watcher,
+                Err(error) => {
+                    log::say(&format!("{} is polled on fallback alone: {error}", folder.display()));
+                    return None;
+                },
+            },
+            Err(error) => {
+                log::say(&format!("{} is polled on fallback alone: {error}", folder.display()));
+                return None;
+            },
+        };
+        Some(FolderWatch { _watcher: watcher, _sender: changed, events })
+    }
+
+    #[must_use]
+    pub fn mark(&mut self) -> FolderMark<'_> {
+        self.events.mark_unchanged();
+        FolderMark(&mut self.events)
+    }
+}
+
+impl FolderMark<'_> {
+    pub async fn changed(self) {
+        let Ok(()) = self.0.changed().await else {
+            unreachable!("FolderWatch holds its own sender");
+        };
+    }
+}
+
+fn folder_event(event: &notify::Result<Event>, names: FolderNames) -> bool {
+    let Ok(event) = event else {
+        return true;
+    };
+    if event.need_rescan() || event.paths.is_empty() {
+        return true;
+    }
+    let matches_name = |target: &str| {
+        event.paths.iter().any(|path| path.file_name().and_then(OsStr::to_str) == Some(target))
+    };
+    if matches!(event.kind, EventKind::Access(AccessKind::Close(AccessMode::Write))) {
+        return matches_name(names.lock);
+    }
+    if event.kind.is_access() {
+        return false;
+    }
+    matches_name(names.socket)
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -248,5 +370,49 @@ mod tests {
             .unwrap();
         assert_eq!(lune_waits::heard("the first read", &heard), 0);
         assert_eq!(lune_waits::heard("the read before the sweep", &heard), 1);
+    }
+
+    #[test]
+    fn a_folder_watch_hears_its_socket_and_lock_release_alone() {
+        use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, ModifyKind};
+
+        let names = FolderNames::try_new("luned.sock", "luned.lock").unwrap();
+        let read = |kind, name: &str| {
+            let event = Ok(Event::new(kind).add_path(PathBuf::from("/run/lune").join(name)));
+            folder_event(&event, names)
+        };
+        assert!(read(EventKind::Create(CreateKind::File), "luned.sock"));
+        assert!(!read(EventKind::Modify(ModifyKind::Data(DataChange::Any)), "luned.log"));
+        assert!(read(EventKind::Access(AccessKind::Close(AccessMode::Write)), "luned.lock"));
+        assert!(!read(EventKind::Access(AccessKind::Close(AccessMode::Read)), "luned.lock"));
+        assert!(!read(EventKind::Access(AccessKind::Close(AccessMode::Write)), "luned.log"));
+        assert!(!read(EventKind::Create(CreateKind::File), "other"));
+    }
+
+    #[test]
+    fn folder_names_reject_empty_duplicate_dot_slash_and_nul() {
+        assert_eq!(FolderNames::try_new("", "luned.lock"), None);
+        assert_eq!(FolderNames::try_new("luned.sock", ""), None);
+        assert_eq!(FolderNames::try_new("same", "same"), None);
+        assert_eq!(FolderNames::try_new("a/b", "luned.lock"), None);
+        assert_eq!(FolderNames::try_new(".", "luned.lock"), None);
+        assert_eq!(FolderNames::try_new("luned.sock", ".."), None);
+        assert_eq!(FolderNames::try_new("a\0b", "luned.lock"), None);
+        assert!(FolderNames::try_new("luned.sock", "luned.lock").is_some());
+    }
+
+    #[test]
+    fn a_folder_watch_wakes_on_a_marked_socket_creation() {
+        let scratch = tempfile::tempdir().unwrap();
+        let names = FolderNames::try_new("luned.sock", "luned.lock").unwrap();
+        let mut watch = FolderWatch::on(scratch.path(), names).expect("scratch folder is watched");
+        let mark = watch.mark();
+        fs::write(scratch.path().join("luned.sock"), "").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(lune_waits::awaited(
+            "creating the watched socket wakes FolderWatch",
+            mark.changed(),
+        ));
+        assert!(FolderWatch::on(&scratch.path().join("missing"), names).is_none());
     }
 }
