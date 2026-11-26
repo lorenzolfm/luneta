@@ -296,22 +296,7 @@
             deadnix = nixLint pkgs.deadnix "--hidden --fail .";
             profiles =
               let
-                inherit (cargoToml) profile;
-                overridden = builtins.attrNames (profile.dev.package // profile.release.package);
-                native = builtins.filter (
-                  name:
-                  builtins.elem name [
-                    "transcribe-cpp"
-                    "transcribe-cpp-sys"
-                  ]
-                ) overridden;
-                failures =
-                  pkgs.lib.optional (profile.dev.package != profile.release.package)
-                    "Cargo.toml: [profile.dev.package.*] and [profile.release.package.*] differ; the speech crates run at opt-level 3 in both profiles, so change them together"
-                  ++ map (
-                    name:
-                    "Cargo.toml: ${name} gets a profile override, but transcribe-cpp-sys builds its native core with CMake Release whatever the Rust profile, so the override changes nothing"
-                  ) native;
+                failures = import ./nix/profiles.nix { root = ./.; };
               in
               pkgs.runCommand "lune-profiles" { } (
                 if failures == [ ] then
