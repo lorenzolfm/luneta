@@ -452,7 +452,6 @@ enum TailState {
     Torn {
         identity: FileIdentity,
         read_offset: u64,
-        pending_bytes: u64,
     },
     Aligned {
         identity: FileIdentity,
@@ -466,8 +465,10 @@ impl TailState {
     fn seen_stamp(&self) -> Option<FileStamp> {
         match self {
             TailState::Unread => None,
-            TailState::Torn { identity, read_offset, pending_bytes }
-            | TailState::Aligned { identity, read_offset, pending_bytes, .. } => {
+            TailState::Torn { identity, read_offset } => {
+                Some(FileStamp { identity: *identity, bytes: *read_offset })
+            },
+            TailState::Aligned { identity, read_offset, pending_bytes, .. } => {
                 Some(FileStamp { identity: *identity, bytes: *read_offset + *pending_bytes })
             },
         }
@@ -506,12 +507,13 @@ impl Tail {
         let limits = self.limits;
         let harness = self.harness;
         match &mut self.state {
-            TailState::Torn { identity, read_offset, pending_bytes }
+            TailState::Torn { identity, read_offset }
                 if *identity == stamp.identity
-                    && stamp.bytes >= *read_offset + *pending_bytes
+                    && stamp.bytes >= *read_offset
                     && stamp.bytes - *read_offset <= WINDOW_BYTES =>
             {
-                let appended_bytes = read_slice(&mut file, *read_offset, stamp.bytes - *read_offset)?;
+                let appended_bytes =
+                    read_slice(&mut file, *read_offset, stamp.bytes - *read_offset)?;
                 self.state = apply_torn(
                     *identity,
                     *read_offset,
@@ -596,9 +598,10 @@ fn apply_torn(
     share_bytes_max: ShareBytes,
     harness: TranscriptHarness,
 ) -> TailState {
+    let read_len = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
+    assert_eq!(read_offset + read_len, file_bytes, "torn read reaches the file's end");
     let Some(end) = appended_bytes.iter().position(|&byte| byte == b'\n') else {
-        let pending_bytes = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
-        return TailState::Torn { identity, read_offset, pending_bytes };
+        return TailState::Torn { identity, read_offset: file_bytes };
     };
     read_offset += u64::try_from(end).expect("line length fits in u64") + 1;
     let mut kept = KeptWindow::new(share_bytes_max);
@@ -1678,5 +1681,32 @@ mod tests {
         });
         added(&path, &format!("{agy_marker_in_progress}\n"));
         assert_eq!(steps(&mut tail), ["said: before"]);
+    }
+
+    #[test]
+    fn a_torn_tail_advances_incrementally_until_the_torn_line_ends() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let window = usize::try_from(WINDOW_BYTES).unwrap();
+        let mut tail = claude_tail(path.clone(), TEST_LIMITS);
+
+        let initial_len = window + 10;
+        fs::write(&path, "x".repeat(initial_len)).unwrap();
+        assert_eq!(steps(&mut tail), Vec::<String>::new());
+        assert!(matches!(tail.state, TailState::Torn { read_offset, .. } if read_offset == initial_len as u64));
+        assert_eq!(tail.grown().unwrap(), None);
+
+        let hidden = format!("\n{}", said("hidden"));
+        fs::write(&path, format!("{}{}", "x".repeat(initial_len - hidden.len()), hidden)).unwrap();
+        added(&path, &"y".repeat(50));
+        assert_eq!(steps(&mut tail), Vec::<String>::new());
+        assert!(matches!(
+            tail.state,
+            TailState::Torn { read_offset, .. } if read_offset == (initial_len + 50) as u64
+        ));
+
+        added(&path, &format!("\n{}", said("after")));
+        assert_eq!(steps(&mut tail), ["said: after"]);
+        assert!(matches!(tail.state, TailState::Aligned { .. }));
     }
 }

@@ -119,8 +119,7 @@ impl Luned {
         let request = reading.asked(self.asked_on());
         let answer = self.ask(|mut daemon| async move { daemon.transcript_ends(request).await })?;
         let (read, unread) = ends_of(answer, reading);
-        if let Some(first) = unread.first() {
-            let why = format!("{} transcript ends were not read, as {first}", unread.len());
+        if let Some(why) = unread.summary() {
             log::say(&told_by(self.on.destination(), &why));
         }
         Ok(read)
@@ -335,10 +334,23 @@ async fn heard(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct UnreadEnds {
+    notes: Vec<String>,
+    count: usize,
+}
+
+impl UnreadEnds {
+    fn summary(&self) -> Option<String> {
+        let first = self.notes.first()?;
+        Some(format!("{} transcript ends were not read, as {first}", self.count))
+    }
+}
+
 fn ends_of(
     answer: TranscriptEndsResponse,
     reading: &Reading,
-) -> (HashMap<SessionId, TranscriptEnd>, Vec<String>) {
+) -> (HashMap<SessionId, TranscriptEnd>, UnreadEnds) {
     let TranscriptEndsResponse { ends, typed_ends } = answer;
     let asked = reading.ids();
     let share = reading.share();
@@ -364,28 +376,26 @@ fn ends_of(
     } else {
         typed_ends.into_iter().map(|(id, end)| read(&id, TranscriptEnd::of_api(end))).collect()
     };
-    let (mut read, mut unread) = (HashMap::new(), Vec::new());
+    let (mut read, mut notes) = (HashMap::new(), Vec::new());
     for said in said {
         match said {
             Ok((id, end)) => {
                 read.insert(id, end);
             },
-            Err(why) => unread.push(why),
+            Err(why) => notes.push(why),
         }
     }
-    unread.sort();
-    let extra = unread.len().saturating_sub(UNREAD_MAX);
-    if extra > 0 {
-        unread.truncate(UNREAD_MAX);
-        unread.push(format!("and {extra} more transcript ends were not read"));
-    }
+    let count = notes.len();
+    notes.sort();
+    notes.truncate(UNREAD_MAX);
     assert!(read.len() <= IDS_MAX, "read transcript ends stop at the most");
     assert!(
         read.values().map(|end| end.lines().len()).sum::<usize>() <= TAILS_BYTES,
         "read transcript ends fit within the tail share"
     );
-    assert!(unread.len() <= UNREAD_MAX + 1, "unread transcript notes stop at the most");
-    (read, unread)
+    assert!(notes.len() <= UNREAD_MAX, "unread transcript notes stop at the most");
+    assert!(notes.len() <= count, "kept unread notes do not outnumber unread ends");
+    (read, UnreadEnds { notes, count })
 }
 
 fn session(id: &str) -> Result<SessionId, String> {
@@ -508,7 +518,8 @@ mod tests {
             format!("{pi}: pi keeps no transcript this lune reads"),
             format!("{unasked}: was not asked for"),
         ];
-        assert_eq!(unread, unread_said);
+        assert_eq!(unread.notes, unread_said);
+        assert_eq!(unread.count, unread_said.len());
 
         let over_share = TAILS_BYTES / 2 + 1;
         let ends = [
@@ -521,7 +532,7 @@ mod tests {
         let (read, unread) = ends_of(older, &reading);
         assert_eq!(read, HashMap::from([(id(claude), one.clone())]));
         assert_eq!(
-            unread,
+            unread.notes,
             vec![
                 "\"x\" names no session".to_owned(),
                 format!(
@@ -530,6 +541,7 @@ mod tests {
                 ),
             ]
         );
+        assert_eq!(unread.count, 2);
 
         let over_tails = Reading::new(vec![id(claude), id(pi)], TAILS_BYTES / 2).unwrap();
         let ends = HashMap::from([
@@ -540,12 +552,13 @@ mod tests {
             ends_of(TranscriptEndsResponse { ends, typed_ends: HashMap::new() }, &over_tails);
         assert_eq!(read, HashMap::from([(id(claude), one)]));
         assert_eq!(
-            unread,
+            unread.notes,
             vec![format!(
                 "{pi}: transcript end: {} bytes, of {TAILS_BYTES} at the most",
                 TAILS_BYTES + 1
             )]
         );
+        assert_eq!(unread.count, 1);
 
         let many_bad: HashMap<String, String> =
             (0..UNREAD_MAX + 3).map(|n| (format!("bad-{n}"), "l".to_owned())).collect();
@@ -554,8 +567,23 @@ mod tests {
             &reading,
         );
         assert!(read.is_empty());
-        assert_eq!(unread.len(), UNREAD_MAX + 1);
-        assert_eq!(unread.last().map(String::as_str), Some("and 3 more transcript ends were not read"));
+        assert_eq!(unread.notes.len(), UNREAD_MAX);
+        assert_eq!(unread.count, UNREAD_MAX + 3);
+        assert_eq!(
+            unread.summary(),
+            Some(format!("{} transcript ends were not read, as bad-0: was not asked for", UNREAD_MAX + 3))
+        );
+
+        let (read, unread) = ends_of(
+            TranscriptEndsResponse {
+                ends: HashMap::from([(claude.to_owned(), "l".to_owned())]),
+                typed_ends: HashMap::new(),
+            },
+            &reading,
+        );
+        assert_eq!(read.len(), 1);
+        assert_eq!(unread, UnreadEnds { notes: Vec::new(), count: 0 });
+        assert_eq!(unread.summary(), None);
     }
 
     #[test]
