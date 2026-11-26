@@ -3341,17 +3341,17 @@ impl App {
         let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
         let frame_area = frame.area();
         let (sidebar, right) = areas(frame_area, own);
+        assert!(!sidebar.intersects(right), "sidebar and pane do not overlap");
         self.areas = (sidebar, right);
         let size = window(right);
         if let Some(right) = self.viewed_mut() {
             right.resize(size.columns, size.lines);
         }
-        let buffer = frame.buffer_mut();
         let beside = if collapsed {
-            self.sidebar.draw_collapsed(buffer, sidebar, now);
+            self.sidebar.draw_collapsed(frame.buffer_mut(), sidebar, now);
             Drawn::Nothing
         } else {
-            self.sidebar.draw(buffer, sidebar, now)
+            self.sidebar.draw(frame.buffer_mut(), sidebar, now)
         };
         self.settling.drawn(self.sidebar.aloud_buttons(), now.steady);
         let covered = self.covered();
@@ -3360,17 +3360,18 @@ impl App {
         let hover = self.pointer.filter(uncovered).map(spot);
         let kitty_cell_px = self.ribbons.cell_px(frame_area, covered);
         let (cursor, overlays) = match &mut self.right {
-            Some(Right::Worktree(shown)) => shown.draw(buffer, right, hover, kitty_cell_px),
+            Some(Right::Worktree(shown)) => shown.draw(frame, right, hover, kitty_cell_px),
             Some(Right::Home(shown)) => {
-                self.homes.shown(shown).draw(buffer, right, now.system);
+                self.homes.shown(shown).draw(frame.buffer_mut(), right, now.system);
                 (None, Vec::new())
             },
             None => {
-                draw_unshown(buffer, right);
+                draw_unshown(frame.buffer_mut(), right);
                 (None, Vec::new())
             },
         };
         self.ribbons.set_pending(overlays);
+        let buffer = frame.buffer_mut();
         let drawn = match &self.focus.over {
             Some(Over::Brief(briefing)) => {
                 briefing.draw(buffer, right, now.system);

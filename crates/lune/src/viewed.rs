@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::vte::ansi::CursorShape;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{Arranged, BrowserUrl, Opens, ProjectId, Size, ViewId, WorktreeId};
+use lune_domain::projects::{
+    Arranged, BrowserUrl, Opens, ProjectId, Size, ViewId, WorktreeId, LAYOUT_VIEWS_MAX,
+};
 use luned::folder;
 use luned::log;
 use luned::mux::own::api::{self, typed};
@@ -460,14 +462,17 @@ impl Layout {
             return Ok(());
         }
         let (size, cursor, tracks_mouse) = (frame.size(), frame.cursor(), frame.tracks_mouse());
+        if let Some(cursor) = cursor {
+            assert!(cursor.row < size.rows.get(), "a cursor's row lies inside its frame");
+            assert!(cursor.column < size.columns.get(), "a cursor's column lies inside its frame");
+        }
+        let count = usize::from(size.rows.get());
         match frame.into_rows() {
             Rows::Whole(lines) => {
-                let was = self.screens.get(&key).map(|screen| screen.size);
-                let lines: Vec<Row> = lines.into_iter().map(Row::from).collect();
-                let count = usize::from(size.rows.get());
                 assert_eq!(lines.len(), count, "a screen holds a line for each of its rows");
+                let lines: Vec<Row> = lines.into_iter().map(Row::from).collect();
                 let screen = Screen { size, lines, cursor, tracks_mouse };
-                self.screens.insert(key, screen);
+                let was = self.screens.insert(key, screen).map(|screen| screen.size);
                 if self.focused_key() == Some(key) && was != Some(size) {
                     self.pointer = self.pointer.unselected();
                 }
@@ -481,10 +486,12 @@ impl Layout {
                     let (had, sides) = (sides(screen.size), sides(size));
                     return Err(format!("a frame of {sides} changes the rows of {had}"));
                 }
-                let count = usize::from(screen.size.rows.get());
                 assert_eq!(screen.lines.len(), count, "a screen holds a line for each of its rows");
+                assert!(rows.len() <= count, "a frame changes at most each of its rows");
                 for (index, line) in rows {
-                    screen.lines[usize::from(index)].replace(line);
+                    let row = usize::from(index);
+                    assert!(row < count, "a changed row lies inside its screen");
+                    screen.lines[row].replace(line);
                 }
                 screen.cursor = cursor;
                 screen.tracks_mouse = tracks_mouse;
@@ -765,6 +772,10 @@ impl Layout {
         browsers: Option<&Browsers>,
         kitty_cell_px: Option<(NonZeroU16, NonZeroU16)>,
     ) -> (Option<Position>, Vec<RibbonOverlay>) {
+        if area.is_empty() {
+            return (None, Vec::new());
+        }
+        assert_eq!(buffer.area.intersection(area), area, "a layout is drawn inside the buffer");
         let bar = Rect { height: area.height.min(TAB_BAR_ROWS), ..area };
         let views = Rect { y: area.y + bar.height, height: area.height - bar.height, ..area };
         let spans = tab_spans(self.named_tabs(), bar.width);
@@ -779,6 +790,10 @@ impl Layout {
             .into_iter()
             .map(|(view, placed)| (view.id, view.found.clone(), placed))
             .collect();
+        assert!(
+            drawn_views.len() <= LAYOUT_VIEWS_MAX,
+            "a layout draws at most {LAYOUT_VIEWS_MAX} views"
+        );
         let mut cursor = None;
         let mut overlays = Vec::new();
         let mut review_slot = 0u32;
@@ -860,6 +875,9 @@ impl Layout {
             };
             let style = Style::new().fg(moonlight::MUTE);
             buffer.set_stringn(seen.x, seen.y, said, usize::from(seen.width), style);
+        }
+        if let Some(at) = cursor {
+            assert!(views.contains(at), "a drawn cursor lies inside the layout's views");
         }
         (cursor, overlays)
     }
@@ -1359,17 +1377,16 @@ impl Viewed {
                 return Heeded::Note(format!("lune's viewer: {why}"));
             },
         };
-        let frame = framed.into_frame();
-        if !watching.showing.contains(&frame.terminal()) {
+        if !watching.showing.contains(&framed.frame().terminal()) {
             return Heeded::Quiet;
         }
-        match self.layout.framed(frame) {
+        framed.take(|frame| match self.layout.framed(frame) {
             Ok(()) => Heeded::Quiet,
             Err(why) => {
                 self.unwatch();
                 Heeded::Note(format!("lune-mux said what lune cannot follow: {why}"))
             },
-        }
+        })
     }
 
     fn unwatch(&mut self) {
@@ -1661,12 +1678,12 @@ impl Viewed {
     #[must_use]
     pub fn draw(
         &mut self,
-        buffer: &mut Buffer,
+        frame: &mut ratatui::Frame<'_>,
         area: Rect,
         hover: Option<Spot>,
         kitty_cell_px: Option<(NonZeroU16, NonZeroU16)>,
     ) -> (Option<Position>, Vec<RibbonOverlay>) {
-        self.layout.draw(buffer, area, hover, Some(&self.browsers), kitty_cell_px)
+        self.layout.draw(frame.buffer_mut(), area, hover, Some(&self.browsers), kitty_cell_px)
     }
 
     #[must_use]
