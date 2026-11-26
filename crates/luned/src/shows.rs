@@ -440,12 +440,11 @@ async fn stream(
     let (sending, sent) = mpsc::channel(SAID_MAX);
     let first = api::ShowRequest { event: Some(show_request::Event::Hello(hello)) };
     let said = tokio_stream::once(first).chain(ReceiverStream::new(sent));
-    let hearing =
-        match daemon.hold(crate::ANSWER, |mut daemon| async move { daemon.show(said).await }).await
-        {
-            Ok(hearing) => hearing,
-            Err(status) => return Ok(ended(&status)),
-        };
+    let hearing = match daemon.show(crate::ANSWER, said).await {
+        Ok(hearing) => hearing,
+        Err(crate::Unasked::Unsent(unsent)) => return Ok(Heard::Lost(unsent.to_string())),
+        Err(crate::Unasked::Asked(status)) => return Ok(ended(&status)),
+    };
     let mut next = pin!(inbox.merged(hearing));
     loop {
         let said = match next.next().await {

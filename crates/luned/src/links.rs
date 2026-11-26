@@ -19,7 +19,6 @@ use wt::repo::Repo;
 use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response;
 use crate::api::{On, PasteRequest, PasteResponse};
-use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common, Git};
 use crate::program::{self, Ran};
 use crate::projects::{self, SPOT_LOOK};
@@ -617,6 +616,13 @@ impl Unready {
             _ => Unready::InDoubt(why),
         }
     }
+
+    fn of_asked(on: Option<&Destination>, unasked: &crate::Unasked) -> Unready {
+        match unasked {
+            crate::Unasked::Unsent(unsent) => Unready::Failed(unsent.to_string()),
+            crate::Unasked::Asked(status) => Unready::of(on, status),
+        }
+    }
 }
 
 impl From<String> for Unready {
@@ -720,51 +726,23 @@ impl Pasted {
         Ok(PasteResponse { at_head: self.wanted == Wanted::AtHead, ..answer })
     }
 
-    pub async fn ready_on(
-        &self,
-        mut daemon: Daemon,
-        on: Option<&Destination>,
-        patience: Duration,
-    ) -> Result<Ready<usize>, Unready> {
-        let request = self.asked(on.map(|on| On { destination: on.to_string() }));
-        let asked = async move { daemon.paste(request).await.map(tonic::Response::into_inner) };
-        self.ready_from(asked, on, patience).await
-    }
-
     pub async fn ready_through(
         &self,
         daemon: &crate::Shared,
         on: Option<&Destination>,
-        patience: Duration,
+        patience: crate::Answer,
     ) -> Result<Ready<usize>, Unready> {
         let request = self.asked(on.map(|on| On { destination: on.to_string() }));
-        let asked = daemon.hold(crate::ANSWER, |mut daemon| async move { daemon.paste(request).await });
-        self.ready_from(asked, on, patience).await
-    }
-
-    async fn ready_from<S>(
-        &self,
-        asking: impl Future<Output = Result<S, Status>>,
-        on: Option<&Destination>,
-        patience: Duration,
-    ) -> Result<Ready<usize>, Unready>
-    where
-        S: tokio_stream::Stream<Item = Result<PasteResponse, Status>> + Unpin,
-    {
-        use tokio_stream::StreamExt as _;
-        assert!(!patience.is_zero(), "pasting waits some time for luned to answer");
-        let secs = patience.as_secs_f32();
         let minutes = PATIENCE.as_secs() / 60;
         let in_doubt = |why: String| Err(Unready::InDoubt(remote::told_by(on, &why)));
-        let mut answer = match timeout(patience, asking).await {
-            Ok(Ok(answer)) => answer,
-            Ok(Err(status)) => return Err(Unready::of(on, &status)),
-            Err(_) => return in_doubt(format!("luned did not answer in {secs}s")),
-        };
-        match timeout(PATIENCE + patience, answer.next()).await {
-            Ok(Some(Ok(ready))) => self.answered(ready).or_else(in_doubt),
-            Ok(None) => in_doubt("luned's answer ended with nothing in it".to_owned()),
-            Ok(Some(Err(status))) => Err(Unready::of(on, &status)),
+        let mut answer = daemon
+            .paste(patience, request)
+            .await
+            .map_err(|unasked| Unready::of_asked(on, &unasked))?;
+        match timeout(PATIENCE + patience.waits(), answer.message()).await {
+            Ok(Ok(Some(ready))) => self.answered(ready).or_else(in_doubt),
+            Ok(Ok(None)) => in_doubt("luned's answer ended with nothing in it".to_owned()),
+            Ok(Err(status)) => Err(Unready::of(on, &status)),
             Err(_) => in_doubt(format!("luned had found nothing after {minutes} minutes")),
         }
     }

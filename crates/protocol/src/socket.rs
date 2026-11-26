@@ -5,11 +5,24 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SocketId {
+    device: u64,
+    inode: u64,
+}
+
+impl SocketId {
+    #[must_use]
+    pub fn at(socket: &Path) -> Option<SocketId> {
+        let found = fs::symlink_metadata(socket).ok()?;
+        found.file_type().is_socket().then_some(SocketId { device: found.dev(), inode: found.ino() })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Bound {
     socket: PathBuf,
-    device: u64,
-    inode: u64,
+    id: SocketId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,7 +71,8 @@ impl Bound {
         if !found.file_type().is_socket() {
             return Err(io::Error::other("it is no socket just after it was bound"));
         }
-        Ok(Bound { socket: socket.to_owned(), device: found.dev(), inode: found.ino() })
+        let id = SocketId { device: found.dev(), inode: found.ino() };
+        Ok(Bound { socket: socket.to_owned(), id })
     }
 
     #[must_use]
@@ -66,12 +80,17 @@ impl Bound {
         &self.socket
     }
 
+    #[must_use]
+    pub fn id(&self) -> SocketId {
+        self.id
+    }
+
     pub fn found(&self) -> io::Result<Found> {
         let lost = |lost| Ok(Found::Lost(Unreached { socket: self.socket.clone(), lost }));
         match fs::symlink_metadata(&self.socket) {
             Ok(found)
                 if found.file_type().is_socket()
-                    && (found.dev(), found.ino()) == (self.device, self.inode) =>
+                    && SocketId { device: found.dev(), inode: found.ino() } == self.id =>
             {
                 Ok(Found::Ours)
             },

@@ -61,8 +61,9 @@ pub use agy::folder as agy_folder;
 pub use pi::extension as pi_extension;
 pub use claude::{folder as claude_folder, one_answer, TORN};
 pub use client::{
-    connect, kept, listening, reach, stream, through, unanswered, Answer, Daemon, Held, Reached,
-    RoundTrip, Shared, Unbridged, Unmatched, Unreached, Watching, ANSWER, BRIDGED, REACH,
+    connect, info_of_any_build, kept, listening, reach, stream, through, unanswered, Answer,
+    Daemon, Held, LocalWatch, PeerPid, Reached, RoundTrip, Shared, Unasked, Unbridged, Unmatched,
+    Unreached, Unsent, WatchError, WatchedHost, Watching, ANSWER, BRIDGED, REACH,
 };
 pub use daemon::{parked_watch, serve, Claim, ALONE, ANSWERING_MAX, SWEEP, WATCH};
 pub use keeps::KEPT;

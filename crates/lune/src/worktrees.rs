@@ -20,15 +20,14 @@ use luned::api::ChangeProjectsResponse;
 use luned::api::make_worktree_response::Landed as Answered;
 use luned::api::projects::Held;
 use luned::api::{
-    self, ChangeProjectsRequest, ListWorkRequest, MakeWorktreeRequest, On, ReadDiffRequest,
+    self, ChangeProjectsRequest, ListWorkRequest, MakeWorktreeRequest, On, ReadDiffRequest, Version,
 };
-use luned::api::{Version, WatchRequest};
 use luned::changes::{Unadded, Unchanged};
 use luned::links::{self, Branch, Unready};
 use luned::projects::Opened;
 use luned::repositories::OWNED_FOLDER;
 use luned::work::{self, Listed};
-use luned::{Asked, Beside, Heard, Shared};
+use luned::{Answer, Asked, Beside, Heard, Shared, Unasked};
 use tonic::{Code, Status};
 
 use luned::Directory;
@@ -38,9 +37,9 @@ use crate::machines::Machine;
 use crate::review::LoadedDiff;
 use crate::sidebar::Reorder;
 
-const ASKING: Duration = Duration::from_secs(15);
+const ASKING: Answer = Answer::of(Duration::from_secs(15));
 
-const WORK_PATIENCE: Duration = work::ANSWERED_MAX.saturating_add(ASKING);
+const WORK_PATIENCE: Duration = work::ANSWERED_MAX.saturating_add(ASKING.waits());
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Folder {
@@ -132,22 +131,13 @@ fn in_kept<T>(path: &Path, project: ProjectId, made: Result<T, String>) -> Resul
     Err(if went { Tried::Went(why) } else { Tried::Failed(why) })
 }
 
-fn asked<T, E: From<String>>(
+fn on_current<T, E>(
     path: &Path,
     asking: impl AsyncFnOnce(&Shared) -> Result<T, E>,
-) -> Result<T, E> {
-    asked_or(path, ASKING, asking, E::from).unwrap_or_else(|unasked| Err(E::from(unasked)))
-}
-
-fn asked_or<T, E>(
-    path: &Path,
-    within: Duration,
-    asking: impl AsyncFnOnce(&Shared) -> Result<T, E>,
-    late: impl FnOnce(String) -> E,
 ) -> Result<Result<T, E>, String> {
     luned::tasks::shared().block_on(async {
         let daemon = daemon::current(path).await?.daemon;
-        Ok(answered_within(within, asking(&daemon), late).await)
+        Ok(asking(&daemon).await)
     })
 }
 
@@ -169,45 +159,38 @@ pub fn holders(path: &Path) -> Result<Holders, String> {
 }
 
 fn kept_as_said(path: &Path) -> Result<Vec<api::Project>, String> {
-    asked(path, async |daemon| {
-        let request = WatchRequest { after: None, kept: None, shown: false };
-        let host = daemon
-            .ask(luned::ANSWER, |mut daemon| async move { daemon.watch(request).await })
-            .await
-            .map_err(|status| status.message().to_owned())?;
+    on_current(path, async |daemon| {
+        let host = daemon.snapshot(ASKING, false).await.map_err(|unasked| unasked.said(None))?;
         match host.projects.and_then(|projects| projects.held) {
             Some(Held::Kept(kept)) => Ok(kept.projects),
             Some(Held::Unkept(why)) => Err(format!("luned keeps no projects: {why}")),
             None => Err("luned is older than its projects".to_owned()),
         }
     })
+    .unwrap_or_else(Err)
 }
 
 fn change_answered<E: From<Unchanged>>(
     path: &Path,
     on: Option<On>,
     change: Change,
-    read: fn(&Status) -> E,
+    read: fn(&Unasked) -> E,
 ) -> Result<ChangeProjectsResponse, E> {
     let request = ChangeProjectsRequest { on, change: Some(change) };
-    let asking = async |daemon: &Shared| {
-        let asked = daemon
-            .ask(luned::ANSWER, |mut daemon| async move { daemon.change_projects(request).await });
-        asked.await.map_err(|status| read(&status))
-    };
-    let late = |late| E::from(Unchanged::InDoubt(late));
-    let answered = asked_or(path, ASKING, asking, late);
+    let answered = on_current(path, async |daemon| {
+        daemon.change_projects(ASKING, request).await.map_err(|unasked| read(&unasked))
+    });
     answered.unwrap_or_else(|unasked| Err(E::from(Unchanged::Refused(unasked))))
 }
 
 fn changed_on(path: &Path, on: Option<On>, change: Change) -> Result<Option<Made>, Unchanged> {
-    change_answered(path, on, change, Unchanged::of).map(|answered| answered.made)
+    change_answered(path, on, change, Unchanged::of_asked).map(|answered| answered.made)
 }
 
 fn add_project(path: &Path, dir: &str, name: Option<&str>) -> Result<ProjectId, Unadded> {
     let (dir, name) = (dir.to_owned(), name.map(str::to_owned));
     let change = Change::AddProject(AddProject { dir, name });
-    let answered = change_answered(path, None, change, Unadded::of)?;
+    let answered = change_answered(path, None, change, Unadded::of_asked)?;
     project_of(answered.made).map_err(Unadded::from)
 }
 
@@ -257,13 +240,18 @@ pub fn branched(
 ) -> Result<Landed, String> {
     let (on, project, branch) = (on(machine), project.get(), branch.as_str().to_owned());
     let request = MakeWorktreeRequest { on, project, branch, opens: None };
+    let late = |late: String| Unready::InDoubt(format!("{late}, so the worktree may be made"));
     let asking = async |daemon: &Shared| {
-        let unready = |status: Status| unbranched(&status);
         let mut answer = daemon
-            .hold(luned::ANSWER, |mut daemon| async move { daemon.make_worktree(request).await })
+            .make_worktree(luned::ANSWER, request)
             .await
-            .map_err(unready)?;
-        let answered = answer.message().await.map_err(unready)?;
+            .map_err(|unasked| unbranched_asked(&unasked))?;
+        let answered = answered_within(
+            links::WORKTREE_PATIENCE,
+            async { answer.message().await.map_err(|status| unbranched(&status)) },
+            late,
+        )
+        .await?;
         let unsaid = || Unready::InDoubt("luned ended its answer with no worktree".to_owned());
         let id = |id| WorktreeId::of(id).ok_or_else(|| Unready::InDoubt(zero("worktree")));
         match answered.and_then(|answered| answered.landed).ok_or_else(unsaid)? {
@@ -271,9 +259,7 @@ pub fn branched(
             Answered::Found(found) => id(found).map(Landed::Found),
         }
     };
-    let late = |late: String| Unready::InDoubt(format!("{late}, so the worktree may be made"));
-    let made = asked_or(path, links::WORKTREE_PATIENCE, asking, late);
-    let made = made.unwrap_or_else(|unasked| Err(Unready::Failed(unasked)));
+    let made = on_current(path, asking).unwrap_or_else(|unasked| Err(Unready::Failed(unasked)));
     made.map_err(|unready| match unready {
         Unready::Nowhere(why) | Unready::Failed(why) => format!("no worktree made: {why}"),
         Unready::InDoubt(why) => why,
@@ -283,16 +269,27 @@ pub fn branched(
 pub fn work(path: &Path, machine: &Machine, project: ProjectId) -> Result<Listed, String> {
     let request = ListWorkRequest { on: on(machine), project: project.get() };
     let asking = async |daemon: &Shared| {
-        let said = |status: Status| status.message().to_owned();
         let mut answer = daemon
-            .hold(luned::ANSWER, |mut daemon| async move { daemon.list_work(request).await })
+            .list_work(luned::ANSWER, request)
             .await
-            .map_err(said)?;
-        let listed = answer.message().await.map_err(said)?;
+            .map_err(|unasked| unasked.said(None))?;
+        let listed = answered_within(
+            WORK_PATIENCE,
+            async { answer.message().await.map_err(|status| status.message().to_owned()) },
+            |late| late,
+        )
+        .await?;
         let listed = listed.ok_or("luned ended its answer with no list")?;
         Listed::of(listed)
     };
-    asked_or(path, WORK_PATIENCE, asking, |late| late).unwrap_or_else(Err)
+    on_current(path, asking).unwrap_or_else(Err)
+}
+
+fn unbranched_asked(unasked: &Unasked) -> Unready {
+    match unasked {
+        Unasked::Unsent(unsent) => Unready::Failed(unsent.to_string()),
+        Unasked::Asked(status) => unbranched(status),
+    }
 }
 
 pub fn read_diff(
@@ -301,14 +298,21 @@ pub fn read_diff(
     worktree: WorktreeId,
 ) -> Result<Arc<LoadedDiff>, String> {
     let request = ReadDiffRequest { on: on(machine), worktree: worktree.get() };
-    let asking = async |daemon: &mut Daemon| {
-        let said = |status: Status| status.message().to_owned();
-        let mut answer = daemon.read_diff(request).await.map_err(said)?.into_inner();
-        let read = answer.message().await.map_err(said)?;
+    let asking = async |daemon: &Shared| {
+        let mut answer = daemon
+            .read_diff(luned::ANSWER, request)
+            .await
+            .map_err(|unasked| unasked.said(None))?;
+        let read = answered_within(
+            WORK_PATIENCE,
+            async { answer.message().await.map_err(|status| status.message().to_owned()) },
+            |late| late,
+        )
+        .await?;
         let read = read.ok_or_else(|| "luned ended its answer with no patch".to_owned())?;
         LoadedDiff::of_wire(read).map(Arc::new)
     };
-    asked_or(path, WORK_PATIENCE, asking, |late| late).unwrap_or_else(Err)
+    on_current(path, asking).unwrap_or_else(Err)
 }
 
 fn unbranched(status: &Status) -> Unready {
@@ -393,7 +397,7 @@ pub fn reordered(
             Change::ReorderWorktrees(ReorderWorktrees { project, worktrees, seen })
         },
     };
-    change_answered(path, on(machine), change, Unchanged::of).map(|answered| answered.kept)
+    change_answered(path, on(machine), change, Unchanged::of_asked).map(|answered| answered.kept)
 }
 
 fn holds(dir: &str, folder: &Path) -> bool {
@@ -523,7 +527,8 @@ pub fn pulled(
         name: name.to_owned(),
         agent: agent.map(Argv::to_api),
     });
-    let pulled = change_answered(path, on(machine), change, Unchanged::of).and_then(pulled_of);
+    let pulled =
+        change_answered(path, on(machine), change, Unchanged::of_asked).and_then(pulled_of);
     match pulled {
         Ok(Pulled::Unopened { worktree, why }) => {
             let why = format!("{cwd} is {name}'s worktree, and its command does not run: {why}");

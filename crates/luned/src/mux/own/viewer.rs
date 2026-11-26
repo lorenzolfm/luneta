@@ -215,10 +215,10 @@ async fn hearing(
             let first = FramesRequest { event: Some(frames_request::Event::Hello(hello)) };
             let said = |said| FramesRequest { event: Some(frames_request::Event::Said(said)) };
             let words = tokio_stream::once(first).chain(sent.map(said));
-            let heard = daemon
-                .hold(crate::ANSWER, |mut daemon| async move { daemon.frames(words).await })
-                .await;
-            let heard = heard.map_err(|status| said_by_luned(&status))?;
+            let heard = daemon.frames(crate::ANSWER, words).await.map_err(|unasked| match unasked {
+                crate::Unasked::Unsent(unsent) => unsent.to_string(),
+                crate::Unasked::Asked(status) => said_by_luned(&status),
+            })?;
             Ok(Hearing::On(heard))
         },
     }
