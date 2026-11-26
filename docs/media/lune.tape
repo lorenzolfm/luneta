@@ -49,6 +49,8 @@ Type@1ms `}` Enter
 Type@1ms `trap cleanup EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM` Enter
 Type@1ms `demo="$(mktemp -d)"` Enter
 Type@1ms `[ -n "$demo" ]; [ -d "$demo" ]` Enter
+Type@1ms `demo="$(cd -- "$demo" && pwd -P)"` Enter
+Type@1ms `[[ $demo == /* ]]; [ -d "$demo" ]` Enter
 Type@1ms `export HOME="$demo/home" XDG_RUNTIME_DIR="$demo/run"` Enter
 Type@1ms `mkdir -p -m 700 "$XDG_RUNTIME_DIR"` Enter
 Type@1ms `mkdir -p "$HOME/.config/fish" "$HOME/code/notes" "$HOME/code/dotfiles"` Enter
