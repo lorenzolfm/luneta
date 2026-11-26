@@ -11,7 +11,10 @@ use tokio::sync::watch::Receiver;
 
 use crate::agent::{Agent, Name};
 use crate::core::{self, Command};
-use crate::transcripts::{self, one_line, Asked, Digest, SessionId, Tail, TailLimits};
+use crate::transcripts::{
+    self, one_line, Asked, Digest, SessionId, ShareBytes, StepsMax, Tail, TailLimits,
+    TranscriptHarness,
+};
 use crate::watch::Troubles;
 use crate::{claude, program};
 
@@ -21,13 +24,13 @@ const WRITING: Duration = Duration::from_mins(1);
 
 const CALLS_MAX: usize = 4;
 
-const STEPS: usize = 8;
-const _: () = assert!(STEPS > 0);
-const _: () = assert!(STEPS <= transcripts::STEPS_MAX);
+const STEPS: StepsMax = StepsMax::constant::<8>();
+const _: () = assert!(STEPS.get() > 0);
 
-const SHARE: usize = 256 * 1024;
-const _: () = assert!(SHARE > 0);
-const _: () = assert!(SHARE <= transcripts::TAILS_BYTES);
+const SHARE: ShareBytes = ShareBytes::constant::<{ 256 * 1024 }>();
+const _: () = assert!(SHARE.get() <= transcripts::TAILS_BYTES);
+
+const TAIL_LIMITS: TailLimits = TailLimits::new(SHARE, STEPS);
 
 const TOPIC_CHARS: usize = 80;
 
@@ -91,24 +94,21 @@ impl Kept {
     }
 
     fn grown(&mut self, projects: &Path, id: &SessionId) -> io::Result<Option<Digest>> {
-        assert_ne!(id.as_str(), "");
         let tail = if let Some(tail) = &mut self.transcript {
             tail
         } else {
             let Some(path) = transcripts::find(projects, id) else {
                 return Ok(None);
             };
-            let limits = TailLimits { share_bytes_max: SHARE, steps_max: STEPS };
-            self.transcript.insert(Tail::new(path, limits))
+            let tail = Tail::new(path, TranscriptHarness::Claude, TAIL_LIMITS)
+                .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
+            self.transcript.insert(tail)
         };
         let result = tail.grown();
         if let Err(error) = &result
             && error.kind() == io::ErrorKind::NotFound
         {
             self.transcript = None;
-        }
-        if let Ok(Some(digest)) = &result {
-            assert!(digest.steps.len() <= STEPS);
         }
         result
     }

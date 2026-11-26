@@ -5,6 +5,7 @@ use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use lune_protocol::said::Said;
 use serde_json::Value;
 
 use crate::api::{self, On, TranscriptEndsRequest};
@@ -67,17 +68,59 @@ pub struct Folders {
     pub agy: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptHarness {
+    Claude,
+    Antigravity,
+}
+
+impl TranscriptHarness {
+    const fn kinds(self) -> &'static [&'static str] {
+        match self {
+            TranscriptHarness::Claude => &KINDS,
+            TranscriptHarness::Antigravity => &AGY_KINDS,
+        }
+    }
+
+    const fn note_fn(self) -> fn(&Value) -> Note {
+        match self {
+            TranscriptHarness::Claude => note_claude,
+            TranscriptHarness::Antigravity => note_agy,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TailLines(String);
+
+impl TailLines {
+    pub fn new(lines: String) -> Result<Self, String> {
+        if lines.len() > TAILS_BYTES {
+            return Err(format!(
+                "transcript end: {} bytes, of {TAILS_BYTES} at the most",
+                lines.len()
+            ));
+        }
+        Ok(TailLines(lines))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptEnd {
-    Claude(String),
-    Antigravity(String),
+    Claude(TailLines),
+    Antigravity(TailLines),
 }
 
 impl TranscriptEnd {
     #[must_use]
     pub fn lines(&self) -> &str {
         match self {
-            TranscriptEnd::Claude(lines) | TranscriptEnd::Antigravity(lines) => lines,
+            TranscriptEnd::Claude(lines) | TranscriptEnd::Antigravity(lines) => lines.as_str(),
         }
     }
 
@@ -89,28 +132,19 @@ impl TranscriptEnd {
         };
         api::transcript_ends_response::TranscriptEnd {
             harness: harness.into(),
-            lines: lines.clone(),
+            lines: lines.as_str().to_owned(),
         }
     }
 
     pub fn of_api(said: api::transcript_ends_response::TranscriptEnd) -> Result<Self, String> {
-        if said.lines.len() > TAILS_BYTES {
-            return Err(format!(
-                "transcript end: {} bytes, of {TAILS_BYTES} at the most",
-                said.lines.len()
-            ));
+        let lines = TailLines::new(said.lines)?;
+        match api::Harness::try_from(said.harness) {
+            Ok(api::Harness::ClaudeCode) => Ok(TranscriptEnd::Claude(lines)),
+            Ok(api::Harness::Antigravity) => Ok(TranscriptEnd::Antigravity(lines)),
+            Ok(api::Harness::Pi) => Err("pi keeps no transcript this lune reads".to_owned()),
+            Ok(api::Harness::Unspecified) => Err("it names no harness".to_owned()),
+            Err(_) => Err(format!("harness {} is one this lune does not know", said.harness)),
         }
-        let end = match api::Harness::try_from(said.harness) {
-            Ok(api::Harness::ClaudeCode) => TranscriptEnd::Claude(said.lines),
-            Ok(api::Harness::Antigravity) => TranscriptEnd::Antigravity(said.lines),
-            Ok(api::Harness::Pi) => return Err("pi keeps no transcript this lune reads".to_owned()),
-            Ok(api::Harness::Unspecified) => return Err("it names no harness".to_owned()),
-            Err(_) => {
-                return Err(format!("harness {} is one this lune does not know", said.harness));
-            },
-        };
-        assert!(end.lines().len() <= TAILS_BYTES);
-        Ok(end)
     }
 }
 
@@ -151,7 +185,7 @@ impl Reading {
         if share == 0 {
             return Err("share: no bytes of each transcript".to_owned());
         }
-        if ids.len().saturating_mul(share) > TAILS_BYTES {
+        if ids.len().max(1).saturating_mul(share) > TAILS_BYTES {
             return Err(format!(
                 "share: {share} bytes of each of {} transcripts, of {TAILS_BYTES} together at the \
                  most",
@@ -159,6 +193,16 @@ impl Reading {
             ));
         }
         Ok(Reading { ids, share })
+    }
+
+    #[must_use]
+    pub fn ids(&self) -> &[SessionId] {
+        &self.ids
+    }
+
+    #[must_use]
+    pub fn share(&self) -> usize {
+        self.share
     }
 
     pub fn shared<K>(groups: Vec<(K, Vec<SessionId>)>) -> Result<Vec<(K, Reading)>, String> {
@@ -235,21 +279,107 @@ pub fn find(projects: &Path, id: &SessionId) -> Option<PathBuf> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TailLimits {
-    pub share_bytes_max: usize,
-    pub steps_max: usize,
+pub struct ShareBytes(usize);
+
+impl ShareBytes {
+    pub const fn new(bytes: usize) -> Result<Self, &'static str> {
+        if bytes == 0 {
+            return Err("a tail keeps at least one byte");
+        }
+        if bytes > WINDOW_BYTES as usize {
+            return Err("a tail's share fits within the window");
+        }
+        Ok(Self(bytes))
+    }
+
+    #[must_use]
+    pub const fn constant<const BYTES: usize>() -> Self {
+        const {
+            assert!(BYTES > 0, "a tail keeps at least one byte");
+            assert!(BYTES <= WINDOW_BYTES as usize, "a tail's share fits within the window");
+        }
+        Self(BYTES)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
 }
 
-#[derive(Debug)]
-pub struct Tail {
-    path: PathBuf,
-    share_bytes_max: usize,
-    steps_max: usize,
-    file_bytes_seen: Option<u64>,
-    read_offset: u64,
-    torn: bool,
-    kept: VecDeque<KeptRecord>,
-    kept_bytes: usize,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepsMax(usize);
+
+impl StepsMax {
+    pub const fn new(steps: usize) -> Result<Self, &'static str> {
+        if steps > STEPS_MAX {
+            return Err("steps kept fit within the maximum");
+        }
+        Ok(Self(steps))
+    }
+
+    #[must_use]
+    pub const fn constant<const STEPS: usize>() -> Self {
+        const {
+            assert!(STEPS <= STEPS_MAX, "steps kept fit within the maximum");
+        }
+        Self(STEPS)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TailLimits {
+    share_bytes_max: ShareBytes,
+    steps_max: StepsMax,
+}
+
+impl TailLimits {
+    #[must_use]
+    pub const fn new(share_bytes_max: ShareBytes, steps_max: StepsMax) -> Self {
+        Self { share_bytes_max, steps_max }
+    }
+
+    #[must_use]
+    pub const fn share_bytes_max(self) -> ShareBytes {
+        self.share_bytes_max
+    }
+
+    #[must_use]
+    pub const fn steps_max(self) -> StepsMax {
+        self.steps_max
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    identity: FileIdentity,
+    bytes: u64,
+}
+
+impl FileStamp {
+    fn of(meta: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt as _;
+            FileIdentity { dev: meta.dev(), ino: meta.ino() }
+        };
+        #[cfg(not(unix))]
+        let identity = FileIdentity {};
+        FileStamp { identity, bytes: meta.len() }
+    }
 }
 
 #[derive(Debug)]
@@ -259,191 +389,252 @@ struct KeptRecord {
     note: Note,
 }
 
-struct ReadPlan {
-    reset: bool,
-    read_offset: u64,
-    torn: bool,
-    read_bytes: u64,
+#[derive(Debug)]
+struct KeptWindow {
+    records: VecDeque<KeptRecord>,
+    bytes: usize,
+    share_bytes_max: ShareBytes,
 }
 
-impl Tail {
-    #[must_use]
-    pub fn new(path: PathBuf, limits: TailLimits) -> Tail {
-        assert!(!path.as_os_str().is_empty(), "a tail reads a named path");
-        assert!(limits.share_bytes_max > 0, "a tail keeps at least one byte");
-        assert!(
-            u64::try_from(limits.share_bytes_max).is_ok_and(|bytes| bytes <= WINDOW_BYTES),
-            "a tail's share fits within the window"
-        );
-        assert!(limits.steps_max <= STEPS_MAX, "a tail's steps fit within the maximum");
-        Tail {
-            path,
-            share_bytes_max: limits.share_bytes_max,
-            steps_max: limits.steps_max,
-            file_bytes_seen: None,
-            read_offset: 0,
-            torn: false,
-            kept: VecDeque::new(),
-            kept_bytes: 0,
-        }
+impl KeptWindow {
+    fn new(share_bytes_max: ShareBytes) -> Self {
+        Self { records: VecDeque::new(), bytes: 0, share_bytes_max }
     }
 
-    pub fn grown(&mut self) -> io::Result<Option<Digest>> {
-        assert!(self.kept_bytes <= self.share_bytes_max);
-        if self.torn {
-            assert!(self.kept.is_empty(), "a torn tail keeps no records");
-        }
-        if self.kept.is_empty() {
-            assert_eq!(self.kept_bytes, 0);
-        }
-        if self.file_bytes_seen == Some(fs::metadata(&self.path)?.len()) {
-            return Ok(None);
-        }
-        let mut file = File::open(&self.path)?;
-        let file_bytes = file.metadata()?.len();
-        let plan = self.plan_read(file_bytes);
-        file.seek(SeekFrom::Start(plan.read_offset))?;
-        let read_capacity = usize::try_from(plan.read_bytes).expect("window read fits in memory");
-        let mut appended_bytes = Vec::with_capacity(read_capacity);
-        file.take(plan.read_bytes).read_to_end(&mut appended_bytes)?;
-        let read_actual = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
-        if read_actual < plan.read_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "transcript shrank while reading",
-            ));
-        }
-        assert_eq!(read_actual, plan.read_bytes);
-        self.apply_read(&plan, &appended_bytes, file_bytes);
-        let digest =
-            fold(self.kept.iter().map(|record| Cow::Borrowed(&record.note)), self.steps_max);
-        assert!(digest.steps.len() <= self.steps_max);
-        Ok(Some(digest))
-    }
-
-    fn plan_read(&self, file_bytes: u64) -> ReadPlan {
-        if let Some(seen_bytes) = self.file_bytes_seen {
-            assert!(self.read_offset <= seen_bytes, "the read cursor stays within what was seen");
-        } else {
-            assert_eq!(self.read_offset, 0, "an unread tail starts at byte zero");
-        }
-        let grew_from_seen =
-            self.file_bytes_seen.is_none_or(|seen_bytes| file_bytes >= seen_bytes);
-        let within_window = if grew_from_seen {
-            assert!(file_bytes >= self.read_offset);
-            file_bytes - self.read_offset <= WINDOW_BYTES
-        } else {
-            false
-        };
-        let plan = if within_window {
-            ReadPlan {
-                reset: false,
-                read_offset: self.read_offset,
-                torn: self.torn,
-                read_bytes: file_bytes - self.read_offset,
-            }
-        } else {
-            let window_offset = file_bytes.saturating_sub(WINDOW_BYTES);
-            let read_offset = window_offset.saturating_sub(1);
-            ReadPlan {
-                reset: true,
-                read_offset,
-                torn: window_offset > 0,
-                read_bytes: file_bytes - read_offset,
-            }
-        };
-        assert!(plan.read_offset <= file_bytes, "a read starts within the file");
-        assert!(plan.read_bytes <= WINDOW_BYTES + 1, "a look reads no more than the window");
-        plan
-    }
-
-    fn apply_read(&mut self, plan: &ReadPlan, appended_bytes: &[u8], file_bytes: u64) {
-        let actual = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
-        assert_eq!(actual, plan.read_bytes);
-        assert_eq!(plan.read_offset + plan.read_bytes, file_bytes);
-        if plan.reset {
-            self.kept.clear();
-            self.kept_bytes = 0;
-            self.read_offset = plan.read_offset;
-            self.torn = plan.torn;
-        } else {
-            assert_eq!(self.read_offset, plan.read_offset);
-            assert_eq!(self.torn, plan.torn);
-        }
-        self.take_in(appended_bytes);
-        let window_offset = file_bytes.saturating_sub(WINDOW_BYTES);
-        while self.kept.front().is_some_and(|record| record.offset < window_offset) {
-            self.forget_first();
-        }
-        self.file_bytes_seen = Some(file_bytes);
-        assert!(self.read_offset <= file_bytes);
-        assert!(self.kept_bytes <= self.share_bytes_max);
-        if let Some(first) = self.kept.front() {
-            assert!(first.offset >= window_offset);
-        }
-        if self.kept.is_empty() {
-            assert_eq!(self.kept_bytes, 0);
-        }
-    }
-
-    fn take_in(&mut self, appended_bytes: &[u8]) {
-        let read_max = usize::try_from(WINDOW_BYTES + 1).expect("window fits in memory");
-        assert!(appended_bytes.len() <= read_max, "a look takes no more than the window");
-        let read_before = self.read_offset;
-        let mut rest = appended_bytes;
-        while let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
-            if self.torn {
-                self.torn = false;
-            } else {
-                self.keep(self.read_offset, &rest[..end]);
-            }
-            let line_bytes = u64::try_from(end).expect("line length fits in u64") + 1;
-            self.read_offset += line_bytes;
-            rest = &rest[end + 1..];
-        }
-        let consumed = self.read_offset - read_before;
-        let trailing = u64::try_from(rest.len()).expect("slice length fits in u64");
-        let total = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
-        assert_eq!(consumed + trailing, total, "every byte read is consumed or awaits newline");
-    }
-
-    fn keep(&mut self, offset: u64, line: &[u8]) {
-        assert!(!self.torn, "a torn record is never kept");
-        if let Some(last) = self.kept.back() {
+    fn push(&mut self, offset: u64, record: &str, harness: TranscriptHarness) {
+        if let Some(last) = self.records.back() {
             assert!(offset > last.offset, "records arrive at strictly increasing offsets");
         }
-        let record = String::from_utf8_lossy(line);
-        let record = record.strip_suffix('\r').unwrap_or(&record);
-        if !ALL_KINDS.iter().any(|kind| record.contains(kind)) {
+        if !harness.kinds().iter().any(|kind| record.contains(kind)) {
             return;
         }
         let bytes = record.len() + 1;
-        assert!(bytes > 0);
-        if bytes > self.share_bytes_max {
-            self.kept.clear();
-            self.kept_bytes = 0;
+        if bytes > self.share_bytes_max.get() {
+            self.records.clear();
+            self.bytes = 0;
             return;
         }
-        self.kept.push_back(KeptRecord { offset, bytes, note: noted(record, note_any) });
-        self.kept_bytes += bytes;
-        while self.kept_bytes > self.share_bytes_max {
+        self.records.push_back(KeptRecord { offset, bytes, note: noted(record, harness.note_fn()) });
+        self.bytes += bytes;
+        while self.bytes > self.share_bytes_max.get() {
             self.forget_first();
         }
-        assert!(self.kept_bytes <= self.share_bytes_max);
+        assert!(self.bytes <= self.share_bytes_max.get());
+    }
+
+    fn evict_before(&mut self, window_offset: u64) {
+        while self.records.front().is_some_and(|record| record.offset < window_offset) {
+            self.forget_first();
+        }
+        if let Some(first) = self.records.front() {
+            assert!(first.offset >= window_offset);
+        }
     }
 
     fn forget_first(&mut self) {
-        let forgot = self.kept.pop_front().expect("a tail forgetting a record keeps at least one");
-        assert!(self.kept_bytes >= forgot.bytes, "kept bytes cover every kept record");
-        self.kept_bytes -= forgot.bytes;
-        if self.kept.is_empty() {
-            assert_eq!(self.kept_bytes, 0);
+        let forgot =
+            self.records.pop_front().expect("a tail forgetting a record keeps at least one");
+        assert!(self.bytes >= forgot.bytes, "kept bytes cover every kept record");
+        self.bytes -= forgot.bytes;
+        if self.records.is_empty() {
+            assert_eq!(self.bytes, 0);
+        }
+    }
+
+    fn notes(&self) -> impl Iterator<Item = Cow<'_, Note>> {
+        self.records.iter().map(|record| Cow::Borrowed(&record.note))
+    }
+}
+
+#[derive(Debug)]
+enum TailState {
+    Unread,
+    Torn {
+        identity: FileIdentity,
+        read_offset: u64,
+        pending_bytes: u64,
+    },
+    Aligned {
+        identity: FileIdentity,
+        read_offset: u64,
+        pending_bytes: u64,
+        kept: KeptWindow,
+    },
+}
+
+impl TailState {
+    fn seen_stamp(&self) -> Option<FileStamp> {
+        match self {
+            TailState::Unread => None,
+            TailState::Torn { identity, read_offset, pending_bytes }
+            | TailState::Aligned { identity, read_offset, pending_bytes, .. } => {
+                Some(FileStamp { identity: *identity, bytes: *read_offset + *pending_bytes })
+            },
         }
     }
 }
 
+#[derive(Debug)]
+pub struct Tail {
+    path: PathBuf,
+    harness: TranscriptHarness,
+    limits: TailLimits,
+    state: TailState,
+}
+
+impl Tail {
+    pub fn new(
+        path: PathBuf,
+        harness: TranscriptHarness,
+        limits: TailLimits,
+    ) -> Result<Tail, &'static str> {
+        if path.as_os_str().is_empty() {
+            return Err("a tail reads a named path");
+        }
+        Ok(Tail { path, harness, limits, state: TailState::Unread })
+    }
+
+    pub fn grown(&mut self) -> io::Result<Option<Digest>> {
+        if self.state.seen_stamp() == Some(FileStamp::of(&fs::metadata(&self.path)?)) {
+            return Ok(None);
+        }
+        let mut file = File::open(&self.path)?;
+        let stamp = FileStamp::of(&file.metadata()?);
+        if self.state.seen_stamp() == Some(stamp) {
+            return Ok(None);
+        }
+        let limits = self.limits;
+        let harness = self.harness;
+        match &mut self.state {
+            TailState::Torn { identity, read_offset, pending_bytes }
+                if *identity == stamp.identity
+                    && stamp.bytes >= *read_offset + *pending_bytes
+                    && stamp.bytes - *read_offset <= WINDOW_BYTES =>
+            {
+                let appended_bytes = read_slice(&mut file, *read_offset, stamp.bytes - *read_offset)?;
+                self.state = apply_torn(
+                    *identity,
+                    *read_offset,
+                    &appended_bytes,
+                    stamp.bytes,
+                    limits.share_bytes_max,
+                    harness,
+                );
+            },
+            TailState::Aligned { identity, read_offset, pending_bytes, kept }
+                if *identity == stamp.identity
+                    && stamp.bytes >= *read_offset + *pending_bytes
+                    && stamp.bytes - *read_offset <= WINDOW_BYTES =>
+            {
+                let appended_bytes = read_slice(&mut file, *read_offset, stamp.bytes - *read_offset)?;
+                let trailing = take_aligned(read_offset, kept, &appended_bytes, harness);
+                kept.evict_before(stamp.bytes.saturating_sub(WINDOW_BYTES));
+                *pending_bytes = trailing;
+            },
+            _ => {
+                let window_offset = stamp.bytes.saturating_sub(WINDOW_BYTES);
+                if window_offset == 0 {
+                    let appended_bytes = read_slice(&mut file, 0, stamp.bytes)?;
+                    let mut read_offset = 0;
+                    let mut kept = KeptWindow::new(limits.share_bytes_max);
+                    let pending_bytes =
+                        take_aligned(&mut read_offset, &mut kept, &appended_bytes, harness);
+                    self.state = TailState::Aligned {
+                        identity: stamp.identity,
+                        read_offset,
+                        pending_bytes,
+                        kept,
+                    };
+                } else {
+                    let read_offset = window_offset - 1;
+                    let appended_bytes =
+                        read_slice(&mut file, read_offset, stamp.bytes - read_offset)?;
+                    self.state = apply_torn(
+                        stamp.identity,
+                        read_offset,
+                        &appended_bytes,
+                        stamp.bytes,
+                        limits.share_bytes_max,
+                        harness,
+                    );
+                }
+            },
+        }
+        let digest = match &self.state {
+            TailState::Unread | TailState::Torn { .. } => {
+                Digest { title: None, asked: None, steps: Vec::new() }
+            },
+            TailState::Aligned { kept, .. } => fold(kept.notes(), self.limits.steps_max),
+        };
+        assert!(digest.steps.len() <= self.limits.steps_max.get());
+        Ok(Some(digest))
+    }
+}
+
+fn read_slice(file: &mut File, seek_offset: u64, read_bytes: u64) -> io::Result<Vec<u8>> {
+    assert!(read_bytes <= WINDOW_BYTES + 1, "a look reads no more than the window");
+    file.seek(SeekFrom::Start(seek_offset))?;
+    let capacity = usize::try_from(read_bytes).expect("window read fits in memory");
+    let mut appended_bytes = Vec::with_capacity(capacity);
+    file.take(read_bytes).read_to_end(&mut appended_bytes)?;
+    let read_actual = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
+    if read_actual < read_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "transcript shrank while reading",
+        ));
+    }
+    assert_eq!(read_actual, read_bytes);
+    Ok(appended_bytes)
+}
+
+fn apply_torn(
+    identity: FileIdentity,
+    mut read_offset: u64,
+    appended_bytes: &[u8],
+    file_bytes: u64,
+    share_bytes_max: ShareBytes,
+    harness: TranscriptHarness,
+) -> TailState {
+    let Some(end) = appended_bytes.iter().position(|&byte| byte == b'\n') else {
+        let pending_bytes = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
+        return TailState::Torn { identity, read_offset, pending_bytes };
+    };
+    read_offset += u64::try_from(end).expect("line length fits in u64") + 1;
+    let mut kept = KeptWindow::new(share_bytes_max);
+    let pending_bytes =
+        take_aligned(&mut read_offset, &mut kept, &appended_bytes[end + 1..], harness);
+    kept.evict_before(file_bytes.saturating_sub(WINDOW_BYTES));
+    TailState::Aligned { identity, read_offset, pending_bytes, kept }
+}
+
+fn take_aligned(
+    read_offset: &mut u64,
+    kept: &mut KeptWindow,
+    appended_bytes: &[u8],
+    harness: TranscriptHarness,
+) -> u64 {
+    let read_max = usize::try_from(WINDOW_BYTES + 1).expect("window fits in memory");
+    assert!(appended_bytes.len() <= read_max, "a look takes no more than the window");
+    let read_before = *read_offset;
+    let mut rest = appended_bytes;
+    while let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
+        let record = String::from_utf8_lossy(&rest[..end]);
+        let record = record.strip_suffix('\r').unwrap_or(&record);
+        kept.push(*read_offset, record, harness);
+        let line_bytes = u64::try_from(end).expect("line length fits in u64") + 1;
+        *read_offset += line_bytes;
+        rest = &rest[end + 1..];
+    }
+    let consumed = *read_offset - read_before;
+    let trailing = u64::try_from(rest.len()).expect("slice length fits in u64");
+    let total = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
+    assert_eq!(consumed + trailing, total, "every byte read is consumed or awaits newline");
+    trailing
+}
+
 pub fn last_said(path: &Path, chars_max: usize) -> io::Result<Option<String>> {
-    Ok(last_said_in(&end(path, TAILS_BYTES, &ALL_KINDS)?, chars_max))
+    Ok(last_said_in(end(path, TAILS_BYTES, &ALL_KINDS)?.as_str(), chars_max))
 }
 
 fn last_said_in(end: &str, chars_max: usize) -> Option<String> {
@@ -492,7 +683,8 @@ fn too_many(count: usize) -> String {
     format!("ids: {count} transcripts, of {IDS_MAX} at the most")
 }
 
-fn end(path: &Path, share: usize, kinds: &[&str]) -> io::Result<String> {
+fn end(path: &Path, share: usize, kinds: &[&str]) -> io::Result<TailLines> {
+    assert!(share <= TAILS_BYTES, "a tail share fits within the maximum");
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
     file.seek(SeekFrom::Start(length.saturating_sub(WINDOW_BYTES)))?;
@@ -510,12 +702,12 @@ fn end(path: &Path, share: usize, kinds: &[&str]) -> io::Result<String> {
         kept.push(record);
     }
     kept.reverse();
-    Ok(kept.join("\n"))
+    Ok(TailLines::new(kept.join("\n")).expect("end stops within TAILS_BYTES"))
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Digest {
-    pub title: Option<String>,
+    pub title: Option<Said>,
     pub asked: Option<Asked>,
     pub steps: Vec<String>,
 }
@@ -541,29 +733,36 @@ impl Digest {
 }
 
 #[must_use]
-pub fn digest_end(end: &TranscriptEnd, steps_max: usize) -> Digest {
-    assert!(end.lines().len() <= TAILS_BYTES, "a transcript end fits within the tail share");
-    assert!(steps_max <= STEPS_MAX, "steps kept fit within the maximum");
+pub fn digest_end(end: &TranscriptEnd, steps_max: StepsMax) -> Digest {
     let digest = match end {
         TranscriptEnd::Claude(lines) => fold(notes(lines, note_claude), steps_max),
         TranscriptEnd::Antigravity(lines) => fold(notes(lines, note_agy), steps_max),
     };
-    assert!(digest.steps.len() <= steps_max);
+    assert!(digest.steps.len() <= steps_max.get());
     digest
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Note {
     Silent,
-    Titled(String),
+    Titled(Said),
     Recorded(Asked),
     Typed(Asked),
-    Stepped(Vec<String>),
+    Stepped { first: Said, rest: Vec<Said> },
 }
 
-fn notes(end: &str, of: fn(&Value) -> Note) -> impl Iterator<Item = Cow<'static, Note>> + '_ {
-    assert!(end.len() <= TAILS_BYTES, "notes read no more than the tail share");
-    end.lines().map(move |line| Cow::Owned(noted(line, of)))
+impl Note {
+    fn stepped(steps: Vec<Said>) -> Self {
+        let mut steps = steps.into_iter();
+        match steps.next() {
+            Some(first) => Note::Stepped { first, rest: steps.collect() },
+            None => Note::Silent,
+        }
+    }
+}
+
+fn notes(end: &TailLines, of: fn(&Value) -> Note) -> impl Iterator<Item = Cow<'static, Note>> + '_ {
+    end.as_str().lines().map(move |line| Cow::Owned(noted(line, of)))
 }
 
 fn noted(line: &str, of: fn(&Value) -> Note) -> Note {
@@ -579,15 +778,15 @@ fn noted(line: &str, of: fn(&Value) -> Note) -> Note {
     of(&record)
 }
 
-fn fold<'a>(notes: impl IntoIterator<Item = Cow<'a, Note>>, steps_max: usize) -> Digest {
-    assert!(steps_max <= STEPS_MAX, "steps kept fit within the maximum");
-    let mut title: Option<Cow<'a, str>> = None;
+fn fold<'a>(notes: impl IntoIterator<Item = Cow<'a, Note>>, steps_max: StepsMax) -> Digest {
+    let steps_max = steps_max.get();
+    let mut title: Option<Cow<'a, Said>> = None;
     let mut asked: Option<Cow<'a, Asked>> = None;
     let mut last: VecDeque<Cow<'a, str>> = VecDeque::with_capacity(steps_max);
     for note in notes {
         match note {
             Cow::Borrowed(Note::Silent) | Cow::Owned(Note::Silent) => {},
-            Cow::Borrowed(Note::Titled(said)) => title = Some(Cow::Borrowed(said.as_str())),
+            Cow::Borrowed(Note::Titled(said)) => title = Some(Cow::Borrowed(said)),
             Cow::Owned(Note::Titled(said)) => title = Some(Cow::Owned(said)),
             Cow::Borrowed(Note::Recorded(prompt)) => {
                 if asked.as_deref().is_none_or(|typed| !prompt.cuts(typed)) {
@@ -601,14 +800,16 @@ fn fold<'a>(notes: impl IntoIterator<Item = Cow<'a, Note>>, steps_max: usize) ->
             },
             Cow::Borrowed(Note::Typed(typed)) => asked = Some(Cow::Borrowed(typed)),
             Cow::Owned(Note::Typed(typed)) => asked = Some(Cow::Owned(typed)),
-            Cow::Borrowed(Note::Stepped(stepped)) => {
-                for step in stepped {
+            Cow::Borrowed(Note::Stepped { first, rest }) => {
+                push_step(&mut last, Cow::Borrowed(first.as_str()), steps_max);
+                for step in rest {
                     push_step(&mut last, Cow::Borrowed(step.as_str()), steps_max);
                 }
             },
-            Cow::Owned(Note::Stepped(stepped)) => {
-                for step in stepped {
-                    push_step(&mut last, Cow::Owned(step), steps_max);
+            Cow::Owned(Note::Stepped { first, rest }) => {
+                push_step(&mut last, Cow::Owned(String::from(first)), steps_max);
+                for step in rest {
+                    push_step(&mut last, Cow::Owned(String::from(step)), steps_max);
                 }
             },
         }
@@ -621,20 +822,13 @@ fn fold<'a>(notes: impl IntoIterator<Item = Cow<'a, Note>>, steps_max: usize) ->
     }
 }
 
-fn note_any(record: &Value) -> Note {
-    assert_ne!(record["isSidechain"].as_bool(), Some(true));
-    match note_claude(record) {
-        Note::Silent => note_agy(record),
-        note => note,
-    }
-}
-
 fn note_claude(record: &Value) -> Note {
     assert_ne!(record["isSidechain"].as_bool(), Some(true));
     match record["type"].as_str() {
         Some("ai-title") => record["aiTitle"]
             .as_str()
-            .map_or(Note::Silent, |title| Note::Titled(one_line(title, TITLE_CHARS))),
+            .and_then(|title| Said::new(one_line(title, TITLE_CHARS)))
+            .map_or(Note::Silent, Note::Titled),
         Some("last-prompt") => {
             let prompt = record["lastPrompt"].as_str().and_then(Asked::recorded);
             prompt.map_or(Note::Silent, Note::Recorded)
@@ -650,7 +844,7 @@ fn note_claude(record: &Value) -> Note {
         },
         Some("assistant") => {
             let blocks = record["message"]["content"].as_array().into_iter().flatten();
-            Note::Stepped(blocks.filter_map(step).collect())
+            Note::stepped(blocks.filter_map(step).collect())
         },
         _ => Note::Silent,
     }
@@ -673,19 +867,20 @@ fn note_agy(record: &Value) -> Note {
             if let Some(text) =
                 record["content"].as_str().map(str::trim).filter(|text| !text.is_empty())
             {
-                stepped.push(format!("said: {}", one_line(text, STEP_CHARS)));
+                stepped.extend(Said::new(format!("said: {}", one_line(text, STEP_CHARS))));
             }
             for call in record["tool_calls"].as_array().into_iter().flatten() {
                 let Some(name) = call["name"].as_str() else {
                     continue;
                 };
                 let args = agy_args(&call["args"]);
-                stepped.push(match on_what(&args) {
+                let text = match on_what(&args) {
                     Some(what) => format!("ran {name}: {}", one_line(what, STEP_CHARS)),
                     None => format!("ran {name}"),
-                });
+                };
+                stepped.extend(Said::new(text));
             }
-            Note::Stepped(stepped)
+            Note::stepped(stepped)
         },
         _ => Note::Silent,
     }
@@ -714,8 +909,8 @@ impl Turn {
     #[must_use]
     pub fn of(end: &TranscriptEnd) -> Turn {
         match end {
-            TranscriptEnd::Claude(lines) => turn_of_claude(lines),
-            TranscriptEnd::Antigravity(lines) => turn_of_agy(lines),
+            TranscriptEnd::Claude(lines) => turn_of_claude(lines.as_str()),
+            TranscriptEnd::Antigravity(lines) => turn_of_agy(lines.as_str()),
         }
     }
 }
@@ -927,21 +1122,22 @@ fn without_paste_marks(text: &str) -> String {
     bare.replace("</pasted_content>", "")
 }
 
-fn step(block: &Value) -> Option<String> {
-    match block["type"].as_str()? {
+fn step(block: &Value) -> Option<Said> {
+    let text = match block["type"].as_str()? {
         "text" => {
             let text = block["text"].as_str()?.trim();
-            (!text.is_empty()).then(|| format!("said: {}", one_line(text, STEP_CHARS)))
+            (!text.is_empty()).then(|| format!("said: {}", one_line(text, STEP_CHARS)))?
         },
         "tool_use" => {
             let name = block["name"].as_str()?;
-            Some(match on_what(&block["input"]) {
+            match on_what(&block["input"]) {
                 Some(what) => format!("ran {name}: {}", one_line(what, STEP_CHARS)),
                 None => format!("ran {name}"),
-            })
+            }
         },
-        _ => None,
-    }
+        _ => return None,
+    };
+    Said::new(text)
 }
 
 #[must_use]
@@ -982,8 +1178,14 @@ mod tests {
         }
     }
 
+    fn digest_with(end: &str, harness: TranscriptHarness, steps: usize) -> Digest {
+        let lines = TailLines::new(end.to_owned()).unwrap();
+        let steps_max = StepsMax::new(steps).unwrap();
+        fold(notes(&lines, harness.note_fn()), steps_max)
+    }
+
     fn digest(end: &str, steps: usize) -> Digest {
-        fold(notes(end, note_any), steps)
+        digest_with(end, TranscriptHarness::Claude, steps)
     }
 
     fn asked(records: &[serde_json::Value]) -> Option<String> {
@@ -1150,7 +1352,7 @@ mod tests {
             "content": "  Fixed the sidebar.  "
         });
         let end = [user, tool, reply].map(|v| v.to_string()).join("\n");
-        let parsed = digest(&end, 4);
+        let parsed = digest_with(&end, TranscriptHarness::Antigravity, 4);
         assert_eq!(parsed.asked, Some(Asked::Whole("fix the sidebar".to_owned())));
         assert_eq!(parsed.steps, [
             "ran run_command: Run tests",
@@ -1174,7 +1376,8 @@ mod tests {
         let reading = Reading::new(vec![id.clone()], 4096).unwrap();
         let folders = Folders { claude: None, agy: Some(agy) };
         let ends = reading.ends(&folders);
-        assert_eq!(ends.get(&id), Some(&TranscriptEnd::Antigravity(line.to_string())));
+        let expected = TranscriptEnd::Antigravity(TailLines::new(line.to_string()).unwrap());
+        assert_eq!(ends.get(&id), Some(&expected));
     }
 
     #[test]
@@ -1202,12 +1405,19 @@ mod tests {
         });
         fs::write(&path, format!("{user}\n{tool}\n{reply}\n")).unwrap();
 
-        let limits = TailLimits { share_bytes_max: 8192, steps_max: 4 };
-        let summary = Tail::new(path.clone(), limits).grown().unwrap().unwrap();
+        let limits = TailLimits::new(ShareBytes::constant::<8192>(), StepsMax::constant::<4>());
+        let summary = Tail::new(path.clone(), TranscriptHarness::Antigravity, limits)
+            .unwrap()
+            .grown()
+            .unwrap()
+            .unwrap();
         assert_eq!(summary.asked, Some(Asked::Whole("audit this".to_owned())));
         assert_eq!(summary.steps, ["ran write_file: /w/a.rs", "said: Done auditing."]);
         assert_eq!(last_said(&path, 100).unwrap(), Some("Done auditing.".to_owned()));
-        assert_eq!(digest(&format!("{reply}\n"), 0).steps, Vec::<String>::new());
+        assert_eq!(
+            digest_with(&format!("{reply}\n"), TranscriptHarness::Antigravity, 0).steps,
+            Vec::<String>::new()
+        );
 
         let decoded = agy_args(&tool["tool_calls"][0]["args"]);
         assert_eq!(decoded["Path"], json!("/w/a.rs"));
@@ -1218,7 +1428,12 @@ mod tests {
         assert_eq!(literal_args["Query"], json!("true"));
     }
 
-    const TEST_LIMITS: TailLimits = TailLimits { share_bytes_max: 8192, steps_max: 4 };
+    const TEST_LIMITS: TailLimits =
+        TailLimits::new(ShareBytes::constant::<8192>(), StepsMax::constant::<4>());
+
+    fn claude_tail(path: PathBuf, limits: TailLimits) -> Tail {
+        Tail::new(path, TranscriptHarness::Claude, limits).unwrap()
+    }
 
     fn said(text: &str) -> String {
         let content = json!([{"type": "text", "text": text}]);
@@ -1244,7 +1459,7 @@ mod tests {
     fn a_tail_reads_only_what_was_added_since_its_last_look() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let mut tail = Tail::new(path.clone(), TEST_LIMITS);
+        let mut tail = claude_tail(path.clone(), TEST_LIMITS);
         added(&path, &said("first"));
         assert_eq!(steps(&mut tail), ["said: first"]);
         assert_eq!(tail.grown().unwrap(), None);
@@ -1260,7 +1475,7 @@ mod tests {
     fn a_record_half_written_waits_for_its_end() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let mut tail = Tail::new(path.clone(), TEST_LIMITS);
+        let mut tail = claude_tail(path.clone(), TEST_LIMITS);
         let first = said("first");
         let (start, end) = first.split_at(first.len() / 2);
         added(&path, start);
@@ -1273,8 +1488,8 @@ mod tests {
     fn a_tail_tells_what_a_whole_read_tells() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let limits = TailLimits { share_bytes_max: 700, steps_max: 3 };
-        let mut tail = Tail::new(path.clone(), limits);
+        let limits = TailLimits::new(ShareBytes::constant::<700>(), StepsMax::constant::<3>());
+        let mut tail = claude_tail(path.clone(), limits);
         let aside = json!({"type": "user", "isSidechain": true, "message": {"content": "aside"}});
         let records = |n: usize| match n % 5 {
             0 => format!("{}\n", typed(&format!("prompt {n}"))),
@@ -1286,8 +1501,8 @@ mod tests {
         for n in 0..40 {
             added(&path, &records(n));
             let whole = fold(
-                notes(&end(&path, limits.share_bytes_max, &ALL_KINDS).unwrap(), note_any),
-                limits.steps_max,
+                notes(&end(&path, limits.share_bytes_max().get(), &KINDS).unwrap(), note_claude),
+                limits.steps_max(),
             );
             assert_eq!(tail.grown().unwrap(), Some(whole), "after record {n}");
         }
@@ -1298,8 +1513,8 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
         let window = usize::try_from(WINDOW_BYTES).unwrap();
-        let mut looked_between = Tail::new(path.clone(), TEST_LIMITS);
-        let mut looked_after = Tail::new(path.clone(), TEST_LIMITS);
+        let mut looked_between = claude_tail(path.clone(), TEST_LIMITS);
+        let mut looked_after = claude_tail(path.clone(), TEST_LIMITS);
         added(&path, &said("old"));
         assert_eq!(steps(&mut looked_between), ["said: old"]);
         assert_eq!(steps(&mut looked_after), ["said: old"]);
@@ -1309,7 +1524,7 @@ mod tests {
         added(&path, &said("new"));
         assert_eq!(steps(&mut looked_between), ["said: new"]);
         assert_eq!(steps(&mut looked_after), ["said: new"]);
-        let mut fresh = Tail::new(path.clone(), TEST_LIMITS);
+        let mut fresh = claude_tail(path.clone(), TEST_LIMITS);
         assert_eq!(steps(&mut fresh), ["said: new"]);
     }
 
@@ -1317,7 +1532,7 @@ mod tests {
     fn a_transcript_written_anew_is_read_anew() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let mut tail = Tail::new(path.clone(), TEST_LIMITS);
+        let mut tail = claude_tail(path.clone(), TEST_LIMITS);
         added(&path, &format!("{}{}", said("first"), said("second")));
         assert_eq!(steps(&mut tail), ["said: first", "said: second"]);
         fs::write(&path, said("other")).unwrap();
@@ -1325,10 +1540,31 @@ mod tests {
     }
 
     #[test]
+    fn a_transcript_replaced_atomically_is_read_anew_at_equal_or_larger_length() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let temp = scratch.path().join("transcript.jsonl.tmp");
+        let mut tail = claude_tail(path.clone(), TEST_LIMITS);
+        added(&path, &said("first"));
+        assert_eq!(steps(&mut tail), ["said: first"]);
+
+        let same_len = said("other");
+        assert_eq!(same_len.len(), said("first").len());
+        fs::write(&temp, &same_len).unwrap();
+        fs::rename(&temp, &path).unwrap();
+        assert_eq!(steps(&mut tail), ["said: other"]);
+
+        let longer = format!("{}{}", said("fresh one"), said("fresh two"));
+        fs::write(&temp, &longer).unwrap();
+        fs::rename(&temp, &path).unwrap();
+        assert_eq!(steps(&mut tail), ["said: fresh one", "said: fresh two"]);
+    }
+
+    #[test]
     fn a_transcript_that_shrank_with_a_half_written_record_is_read_anew() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let mut tail = Tail::new(path.clone(), TEST_LIMITS);
+        let mut tail = claude_tail(path.clone(), TEST_LIMITS);
         let first = said("first");
         let trailing = " ".repeat(200);
         added(&path, &format!("{first}{trailing}"));
@@ -1345,21 +1581,24 @@ mod tests {
     fn a_record_over_the_share_clears_earlier_records_without_keeping_it() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let limits = TailLimits { share_bytes_max: 200, steps_max: 4 };
-        let mut tail = Tail::new(path.clone(), limits);
+        let limits = TailLimits::new(ShareBytes::constant::<200>(), StepsMax::constant::<4>());
+        let mut tail = claude_tail(path.clone(), limits);
         added(&path, &said("before"));
         assert_eq!(steps(&mut tail), ["said: before"]);
 
         let oversized = said(&"x".repeat(300));
-        assert!(oversized.len() > limits.share_bytes_max);
+        assert!(oversized.len() > limits.share_bytes_max().get());
         added(&path, &oversized);
         let whole = fold(
-            notes(&end(&path, limits.share_bytes_max, &ALL_KINDS).unwrap(), note_any),
-            limits.steps_max,
+            notes(&end(&path, limits.share_bytes_max().get(), &KINDS).unwrap(), note_claude),
+            limits.steps_max(),
         );
         assert_eq!(tail.grown().unwrap(), Some(whole));
-        assert_eq!(tail.kept.len(), 0);
-        assert_eq!(tail.kept_bytes, 0);
+        let TailState::Aligned { kept, .. } = &tail.state else {
+            panic!("expected aligned tail, got {:?}", tail.state);
+        };
+        assert_eq!(kept.records.len(), 0);
+        assert_eq!(kept.bytes, 0);
 
         added(&path, &said("after"));
         assert_eq!(steps(&mut tail), ["said: after"]);
@@ -1371,18 +1610,24 @@ mod tests {
 
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("transcript.jsonl");
-        let mut tail = Tail::new(path.clone(), TEST_LIMITS);
+        let mut tail = claude_tail(path.clone(), TEST_LIMITS);
         added(&path, &said("first"));
         assert_eq!(steps(&mut tail), ["said: first"]);
 
-        let read_before = tail.read_offset;
-        let seen_before = tail.file_bytes_seen;
+        let stamp_before = tail.state.seen_stamp();
+        let offset_before = match &tail.state {
+            TailState::Aligned { read_offset, .. } => *read_offset,
+            other => panic!("expected aligned tail, got {other:?}"),
+        };
         added(&path, &said("second"));
         fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
         assert!(tail.grown().is_err());
-        assert_eq!(tail.read_offset, read_before);
-        assert_eq!(tail.file_bytes_seen, seen_before);
-        assert_eq!(tail.kept.len(), 1);
+        assert_eq!(tail.state.seen_stamp(), stamp_before);
+        let TailState::Aligned { read_offset, kept, .. } = &tail.state else {
+            panic!("expected aligned tail, got {:?}", tail.state);
+        };
+        assert_eq!(*read_offset, offset_before);
+        assert_eq!(kept.records.len(), 1);
 
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(steps(&mut tail), ["said: first", "said: second"]);
@@ -1396,5 +1641,42 @@ mod tests {
         };
         let refused = TranscriptEnd::of_api(oversized).unwrap_err();
         assert!(refused.contains(&TAILS_BYTES.to_string()), "{refused}");
+        assert!(TailLines::new("x".repeat(TAILS_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn invalid_tail_limits_and_empty_paths_are_rejected_without_panicking() {
+        assert!(ShareBytes::new(0).is_err());
+        assert!(ShareBytes::new(WINDOW_BYTES as usize + 1).is_err());
+        assert!(ShareBytes::new(WINDOW_BYTES as usize).is_ok());
+        assert!(StepsMax::new(STEPS_MAX + 1).is_err());
+        assert!(StepsMax::new(STEPS_MAX).is_ok());
+        assert!(Tail::new(PathBuf::new(), TranscriptHarness::Claude, TEST_LIMITS).is_err());
+        assert!(Reading::new(Vec::new(), TAILS_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn blank_titles_and_empty_step_records_are_silent_and_harnesses_stay_separate() {
+        let blank_title = json!({"type": "ai-title", "aiTitle": "   "});
+        let thinking = json!({"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "hmm"}]}});
+        let empty_agy = json!({"type": "PLANNER_RESPONSE", "content": "  ", "tool_calls": []});
+        assert_eq!(note_claude(&blank_title), Note::Silent);
+        assert_eq!(note_claude(&thinking), Note::Silent);
+        assert_eq!(note_agy(&empty_agy), Note::Silent);
+        assert_eq!(digest(&format!("{blank_title}\n{thinking}"), 4).title, None);
+
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join("transcript.jsonl");
+        let limits = TailLimits::new(ShareBytes::constant::<200>(), StepsMax::constant::<4>());
+        let mut tail = claude_tail(path.clone(), limits);
+        added(&path, &said("before"));
+        assert_eq!(steps(&mut tail), ["said: before"]);
+
+        let agy_marker_in_progress = json!({
+            "type": "progress",
+            "data": format!(r#""type":"USER_INPUT" {}"#, "x".repeat(300))
+        });
+        added(&path, &format!("{agy_marker_in_progress}\n"));
+        assert_eq!(steps(&mut tail), ["said: before"]);
     }
 }
