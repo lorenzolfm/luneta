@@ -1339,3 +1339,275 @@ fn lune_watch_waits_for_the_host_to_change_but_not_for_long() {
     let (answered, _) = host.watch(Some(another));
     assert_eq!(answered.version.unwrap().pid, version.pid);
 }
+
+#[test]
+fn forgetting_one_worktree_leaves_another_of_the_same_repository_watched() {
+    let host = Host::new();
+    let dirs = scratch();
+    let path = |name: &str| dirs.path().join(name);
+    let (origin, repo, elsewhere) = (path("origin.git"), path("repo"), path("elsewhere"));
+    let (first, second, beside) = (path("first"), path("second"), path("beside"));
+    for dir in [&origin, &repo] {
+        fs::create_dir(dir).unwrap();
+    }
+    assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
+    assert!(git(&repo, &["init", "-q", "-b", "main"]));
+    commit(&repo, "README", "start\n");
+    let spelled = |dir: &Path| dir.display().to_string();
+    assert!(git(&repo, &["remote", "add", "origin", &spelled(&origin)]));
+    assert!(git(&repo, &["push", "-q", "-u", "origin", "main"]));
+    assert!(git(&repo, &["worktree", "add", "-q", "-b", "first", &spelled(&first), "origin/main"]));
+    assert!(git(
+        &repo,
+        &["worktree", "add", "-q", "-b", "second", &spelled(&second), "origin/main"],
+    ));
+    assert!(git(&repo, &["worktree", "add", "-q", "--detach", &spelled(&beside)]));
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
+
+    let mut daemon = start(host.vars()).unwrap();
+    let (first_id, first_cwd) = watched(&host, &spelled(&first));
+    let (_, second_cwd) = watched(&host, &spelled(&second));
+    eventually("git says how both worktrees stand", || {
+        (checkout(&host, &first_cwd).is_some() && checkout(&host, &second_cwd).is_some())
+            .then_some(())
+    });
+
+    forgotten(&host, first_id);
+    eventually("what git said of the first worktree goes", || {
+        host.host().git_statuses.iter().all(|status| status.dir != first_cwd).then_some(())
+    });
+
+    let fetched = || {
+        commit(&elsewhere, "next", "pushed\n");
+        assert!(git(&elsewhere, &["push", "-q"]));
+        assert!(git(&beside, &["fetch", "-q"]));
+    };
+    let behind = |it: &Checkout| match &it.head {
+        Some(Head::Branch(branch)) => {
+            branch.upstream.map(|it| (it.ahead, it.behind)) == Some((0, 1))
+        },
+        _ => false,
+    };
+    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &second_cwd };
+    at_once.shows("a fetch after the sibling worktree was forgotten", fetched, behind);
+}
+
+#[cfg(target_os = "linux")]
+mod linux_inotify {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use std::os::unix::fs::MetadataExt as _;
+    use std::path::Path;
+
+    use lune_waits::eventually;
+    use luned::api::{Changes, Checkout};
+
+    use super::{AtOnce, checkout, commit, git, in_no_repository, on_branch, scratch, watched};
+    use crate::host::{Host, start};
+
+    type Descriptor = (String, u32);
+    type Watched = Vec<(u64, Option<BTreeSet<Descriptor>>)>;
+
+    fn inotify_state(pid: u32) -> (usize, BTreeMap<u64, BTreeSet<Descriptor>>) {
+        let descriptor_dir = format!("/proc/{pid}/fd");
+        let mut instances = 0usize;
+        let mut watches: BTreeMap<u64, BTreeSet<Descriptor>> = BTreeMap::new();
+        for entry in fs::read_dir(&descriptor_dir).unwrap().flatten() {
+            let Ok(link) = fs::read_link(entry.path()) else {
+                continue;
+            };
+            if link != Path::new("anon_inode:inotify") {
+                continue;
+            }
+            instances += 1;
+            let descriptor = entry.file_name().to_string_lossy().into_owned();
+            let Ok(text) = fs::read_to_string(format!("/proc/{pid}/fdinfo/{descriptor}")) else {
+                continue;
+            };
+            for line in text.lines() {
+                if !line.starts_with("inotify ") {
+                    continue;
+                }
+                let mut watch_descriptor = None;
+                let mut inode = None;
+                for token in line.split_ascii_whitespace() {
+                    if let Some(value) = token.strip_prefix("wd:") {
+                        watch_descriptor = value.parse::<u32>().ok();
+                    } else if let Some(value) = token.strip_prefix("ino:") {
+                        inode = u64::from_str_radix(value, 16).ok();
+                    }
+                }
+                if let (Some(watch_descriptor), Some(inode)) = (watch_descriptor, inode) {
+                    watches
+                        .entry(inode)
+                        .or_default()
+                        .insert((descriptor.clone(), watch_descriptor));
+                }
+            }
+        }
+        (instances, watches)
+    }
+
+    fn watched_descriptors(pid: u32, paths: &[&Path]) -> Watched {
+        let (_, watches) = inotify_state(pid);
+        paths
+            .iter()
+            .map(|path| {
+                let inode = fs::metadata(path).unwrap().ino();
+                (inode, watches.get(&inode).cloned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_commit_that_adds_no_folder_keeps_its_watches_and_new_folders_update_incrementally() {
+        let host = Host::new();
+        let dirs = scratch();
+        let repo = dirs.path().join("repo");
+        let src = repo.join("src");
+        fs::create_dir_all(&src).unwrap();
+        assert!(git(&repo, &["init", "-q", "-b", "main"]));
+        commit(&repo, "src/lib.rs", "start\n");
+
+        let cwd = repo.display().to_string();
+        let mut daemon = start(host.vars()).unwrap();
+        watched(&host, &cwd);
+        eventually("git says how the repository stands", || checkout(&host, &cwd));
+
+        let changes = |it: &Checkout| it.changes.unwrap_or_default();
+        let clean = |it: &Checkout| changes(it) == Changes::default();
+        let modified = |it: &Checkout| changes(it).modified == 1;
+        let git_dir = repo.join(".git");
+        let refs_dir = git_dir.join("refs");
+        let stable = [repo.as_path(), src.as_path(), git_dir.as_path(), refs_dir.as_path()];
+
+        let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+        at_once.shows(
+            "an edit in src",
+            || fs::write(src.join("lib.rs"), "edited\n").unwrap(),
+            modified,
+        );
+        let before = watched_descriptors(at_once.daemon.pid(), &stable);
+        assert!(
+            before.iter().all(|(_, entries)| entries.as_ref().is_some_and(|set| !set.is_empty()))
+        );
+
+        at_once.shows(
+            "a commit with no new folder",
+            || {
+                assert!(git(&repo, &["add", "src/lib.rs"]));
+                assert!(git(&repo, &["commit", "-q", "-m", "edit"]));
+            },
+            clean,
+        );
+        assert_eq!(watched_descriptors(at_once.daemon.pid(), &stable), before);
+
+        let extra = repo.join("extra");
+        at_once.shows(
+            "a commit adding a new folder",
+            || {
+                fs::create_dir(&extra).unwrap();
+                fs::write(extra.join("mod.rs"), "extra\n").unwrap();
+                assert!(git(&repo, &["add", "extra/mod.rs"]));
+            },
+            |it| changes(it).staged == 1,
+        );
+        at_once.shows(
+            "committing the new folder",
+            || assert!(git(&repo, &["commit", "-q", "-m", "extra"])),
+            clean,
+        );
+        at_once.shows(
+            "an edit in the added folder",
+            || fs::write(extra.join("mod.rs"), "changed\n").unwrap(),
+            modified,
+        );
+        let extra_inode = fs::metadata(&extra).unwrap().ino();
+        let (_, watches_with_extra) = inotify_state(at_once.daemon.pid());
+        assert!(watches_with_extra.contains_key(&extra_inode));
+        assert_eq!(watched_descriptors(at_once.daemon.pid(), &stable), before);
+
+        at_once.shows(
+            "removing the added folder",
+            || {
+                assert!(git(&repo, &["rm", "-q", "-f", "-r", "extra"]));
+                assert!(git(&repo, &["commit", "-q", "-m", "drop"]));
+            },
+            clean,
+        );
+        let (_, watches_without_extra) = inotify_state(at_once.daemon.pid());
+        assert!(!watches_without_extra.contains_key(&extra_inode));
+        assert_eq!(watched_descriptors(at_once.daemon.pid(), &stable), before);
+    }
+
+    #[test]
+    fn luned_uses_a_constant_number_of_inotify_instances_across_worktrees() {
+        let host = Host::new();
+        let dirs = scratch();
+        let path = |name: &str| dirs.path().join(name);
+        let spelled = |dir: &Path| dir.display().to_string();
+
+        let repo = path("repo");
+        fs::create_dir(&repo).unwrap();
+        assert!(git(&repo, &["init", "-q", "-b", "main"]));
+        commit(&repo, "README", "start\n");
+
+        let mut worktrees = Vec::new();
+        for index in 0..4 {
+            let worktree = path(&format!("worktree-{index}"));
+            let branch = format!("worktree-{index}");
+            assert!(git(&repo, &["worktree", "add", "-q", "-b", &branch, &spelled(&worktree)]));
+            worktrees.push(worktree);
+        }
+        let mut others = Vec::new();
+        for index in 0..2 {
+            let other = path(&format!("other-{index}"));
+            fs::create_dir(&other).unwrap();
+            assert!(git(&other, &["init", "-q", "-b", "main"]));
+            commit(&other, "file", "start\n");
+            others.push(other);
+        }
+        let mut plains = Vec::new();
+        for index in 0..2 {
+            let plain = path(&format!("plain-{index}"));
+            fs::create_dir(&plain).unwrap();
+            plains.push(plain);
+        }
+
+        let mut daemon = start(host.vars()).unwrap();
+        let repo_cwd = spelled(&repo);
+        watched(&host, &repo_cwd);
+        eventually("git says how the first checkout stands", || checkout(&host, &repo_cwd));
+        let (before, _) = inotify_state(daemon.pid());
+
+        for dir in worktrees.iter().chain(&others).chain(&plains) {
+            watched(&host, &spelled(dir));
+        }
+        let expected = 1 + worktrees.len() + others.len() + plains.len();
+        eventually("git says how every watched directory stands", || {
+            (host.host().git_statuses.len() == expected).then_some(())
+        });
+        let (after, _) = inotify_state(daemon.pid());
+        assert_eq!(after, before);
+
+        let worktree_cwd = spelled(&worktrees[0]);
+        let changes = |it: &Checkout| it.changes.unwrap_or_default();
+        let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &worktree_cwd };
+        at_once.shows(
+            "an edit in a shared-watcher worktree",
+            || fs::write(worktrees[0].join("README"), "edited\n").unwrap(),
+            |it| changes(it).modified == 1,
+        );
+
+        let plain_cwd = spelled(&plains[0]);
+        in_no_repository(&host, &plain_cwd);
+        let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &plain_cwd };
+        at_once.shows(
+            "a repository started in a shared-watcher plain directory",
+            || assert!(git(&plains[0], &["init", "-q", "-b", "fresh"])),
+            on_branch("fresh"),
+        );
+        let (after_init, _) = inotify_state(at_once.daemon.pid());
+        assert_eq!(after_init, before);
+    }
+}

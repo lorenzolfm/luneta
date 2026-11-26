@@ -7,8 +7,10 @@ use std::time::{Duration, SystemTime};
 
 use lune_domain::agent::{Harness, OscReads, Rung};
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{Dir, Holds, Name, Project, Projects, Seen, Stage, Subfolder};
-use lune_domain::projects::{Listed, ViewId, Worktree, WorktreeId};
+use lune_domain::projects::{
+    Dir, Holds, Listed, Name, Project, Projects, Seen, Stage, Subfolder, ViewId, Worktree,
+    WorktreeId, VIEWS_MAX, WORKTREES_MAX,
+};
 use lune_protocol::git::{GitStatus, Head};
 use lune_protocol::github::PullRequest;
 use lune_protocol::program_status::bound_fair;
@@ -137,6 +139,38 @@ pub enum Listing {
     Unlisted(String),
 }
 
+pub const FOLLOW_DIRS_MAX: usize = WORKTREES_MAX + VIEWS_MAX;
+
+const _: () = assert!(FOLLOW_DIRS_MAX > 0);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FollowDirs(BTreeSet<Dir>);
+
+impl FollowDirs {
+    fn new(dirs: BTreeSet<Dir>) -> Self {
+        assert!(dirs.len() <= FOLLOW_DIRS_MAX);
+        FollowDirs(dirs)
+    }
+
+    #[must_use]
+    pub fn contains(&self, dir: &Dir) -> bool {
+        self.0.contains(dir)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Dir> {
+        self.0.iter()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_subset(&self, other: &FollowDirs) -> bool {
+        self.0.is_subset(&other.0)
+    }
+}
+
 pub enum Command {
     Agents(Scan),
     PiAgents(Vec<ReportedAgent>),
@@ -144,7 +178,7 @@ pub enum Command {
     MuxTerminals(BTreeMap<TerminalKey, MuxTerminal>),
     Terminals(BTreeMap<ViewId, Located>),
     GitStatus {
-        dir: String,
+        dir: Dir,
         status: GitStatus,
         why: Option<git::Why>,
         answer: oneshot::Sender<Option<String>>,
@@ -157,7 +191,7 @@ pub enum Command {
     Listed(BTreeMap<Dir, Listing>),
     Remote { destination: Destination, reached: Reached },
     Say { said: ToSay, at: SystemTime, answer: oneshot::Sender<()> },
-    Dirs(oneshot::Sender<BTreeSet<String>>),
+    Dirs(oneshot::Sender<FollowDirs>),
     ProjectFolders(oneshot::Sender<BTreeSet<Dir>>),
     Clones(oneshot::Sender<BTreeMap<Dir, BTreeSet<WorktreeId>>>),
     Plain(oneshot::Sender<BTreeSet<Dir>>),
@@ -244,7 +278,7 @@ struct Known {
     osc_troubles: Troubles,
     agent_statuses: Statuses,
     terminals: BTreeMap<ViewId, Located>,
-    statuses: BTreeMap<String, GitStatus>,
+    statuses: BTreeMap<Dir, GitStatus>,
     pull_requests: BTreeMap<String, Found>,
     topics: HashMap<SessionId, Said>,
     remotes: Vec<Remote>,
@@ -319,6 +353,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Terminals(now) if now == known.terminals => continue,
             Command::Terminals(now) => {
+                assert!(now.len() <= VIEWS_MAX);
                 let before = known.dirs();
                 known.terminals = now;
                 if !known.dirs().is_subset(&before) {
@@ -333,7 +368,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let before = known.branch(&dir).map(str::to_owned);
                 let changed = known.statuses.get(&dir).is_some_and(|was| *was != status);
                 known.statuses.insert(dir.clone(), status);
-                let _ = answer.send(why.filter(|_| changed).and_then(|why| why.said(&dir)));
+                let _ = answer.send(why.filter(|_| changed).and_then(|why| why.said(dir.as_str())));
                 if known.branch(&dir).is_some_and(|now| before.as_deref() != Some(now)) {
                     wake(&wakes.github);
                 }
@@ -469,25 +504,25 @@ impl Known {
         (clones, plain)
     }
 
-    fn dirs(&self) -> BTreeSet<String> {
-        let cwds = self.terminals.values().filter_map(|found| match found {
-            Located::Shown(Shown::Listed { cwd: Some(cwd), .. }) => Some(cwd.as_str().to_owned()),
+    fn dirs(&self) -> FollowDirs {
+        let listed = self.terminals.values().filter_map(|found| match found {
+            Located::Shown(Shown::Listed { cwd: Some(cwd), .. }) => Some(cwd.clone()),
             Located::Shown(Shown::Listed { cwd: None, .. } | Shown::Unlisted(_))
             | Located::Lost
             | Located::Looking => None,
         });
         let present = |folder: &Dir| !self.missing.contains(folder);
         let folders = self.projects.iter().flat_map(Projects::worktree_folders).filter(present);
-        cwds.chain(folders.map(|folder| folder.as_str().to_owned())).collect()
+        FollowDirs::new(listed.chain(folders).collect())
     }
 
     fn forget_dirs(&mut self) {
         let dirs = self.dirs();
         self.statuses.retain(|dir, _| dirs.contains(dir));
-        self.pull_requests.retain(|dir, _| dirs.contains(dir));
+        self.pull_requests.retain(|dir, _| Dir::parse(dir).is_ok_and(|dir| dirs.contains(&dir)));
     }
 
-    fn branch(&self, dir: &str) -> Option<&str> {
+    fn branch(&self, dir: &Dir) -> Option<&str> {
         match self.statuses.get(dir)? {
             GitStatus::Checkout { head: Head::Branch { name, .. }, .. } => Some(name.as_str()),
             GitStatus::Checkout { head: Head::Detached, .. }
@@ -496,19 +531,19 @@ impl Known {
         }
     }
 
-    fn pull_request(&self, dir: &str) -> Option<&PullRequest> {
-        let found = self.pull_requests.get(dir)?;
+    fn pull_request(&self, dir: &Dir) -> Option<&PullRequest> {
+        let found = self.pull_requests.get(dir.as_str())?;
         let on_its_branch = self.branch(dir) == Some(found.branch.as_str());
         on_its_branch.then_some(&found.pull_request)
     }
 
     fn branches(&self) -> BTreeMap<String, String> {
-        let branch = |dir: &String| Some((dir.clone(), self.branch(dir)?.to_owned()));
+        let branch = |dir: &Dir| Some((dir.as_str().to_owned(), self.branch(dir)?.to_owned()));
         self.statuses.keys().filter_map(branch).collect()
     }
 
     fn tracking(&self) -> BTreeMap<String, Branch> {
-        let tracking = |(dir, status): (&String, &GitStatus)| {
+        let tracking = |(dir, status): (&Dir, &GitStatus)| {
             let GitStatus::Checkout {
                 repository: Some(repository),
                 head: Head::Branch { name, upstream: Some(_), .. },
@@ -517,7 +552,10 @@ impl Known {
             else {
                 return None;
             };
-            Some((dir.clone(), Branch { repository: repository.clone(), name: name.clone() }))
+            Some((
+                dir.as_str().to_owned(),
+                Branch { repository: repository.clone(), name: name.clone() },
+            ))
         };
         self.statuses.iter().filter_map(tracking).collect()
     }
@@ -699,12 +737,19 @@ impl Known {
         let pull_requests = self
             .pull_requests
             .keys()
-            .filter_map(|dir| Some(self.pull_request(dir)?.to_api(dir)))
+            .filter_map(|dir| {
+                let parsed = Dir::parse(dir).ok()?;
+                Some(self.pull_request(&parsed)?.to_api(dir))
+            })
             .collect();
         let remotes = self.remotes.iter().map(Remote::to_api).collect();
         api::Host {
             version: None,
-            git_statuses: self.statuses.iter().map(|(dir, status)| status.to_api(dir)).collect(),
+            git_statuses: self
+                .statuses
+                .iter()
+                .map(|(dir, status)| status.to_api(dir.as_str()))
+                .collect(),
             agents,
             unread,
             pull_requests,
@@ -740,14 +785,14 @@ impl Known {
         let holds = |project: &Project| match project.holds() {
             Holds::Folder(own) => {
                 let dir = project.dir();
-                let given = self.branch(dir.as_str()).unwrap_or_else(|| dir.last());
+                let given = self.branch(dir).unwrap_or_else(|| dir.last());
                 api::project::Holds::Folder(worktree(dir.clone(), given, own))
             },
             Holds::Clone(rows) => {
                 let listing = Some(self.listing(project.dir(), rows));
                 let rows = rows.iter().map(|(subfolder, it)| {
                     let folder = project.dir().at(subfolder);
-                    let given = match self.branch(folder.as_str()) {
+                    let given = match self.branch(&folder) {
                         Some(branch) if subfolder.named_for(branch) => branch,
                         Some(_) | None => subfolder.as_str(),
                     };
@@ -854,11 +899,10 @@ impl Known {
         if self.missing.contains(folder) {
             return Seen::Missing;
         }
-        if !self.statuses.contains_key(folder.as_str()) {
+        if !self.statuses.contains_key(folder) {
             return Seen::Unread;
         }
-        let dir = folder.as_str();
-        Seen::Read(Stage::of(self.branch(dir), self.pull_request(dir)))
+        Seen::Read(Stage::of(self.branch(folder), self.pull_request(folder)))
     }
 
     fn version(&self) -> api::Version {
@@ -1627,6 +1671,52 @@ mod tests {
     }
 
     #[test]
+    fn dirs_and_git_status_preserve_validated_dir_keys() {
+        let wake = || mpsc::sync_channel(1).0;
+        let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
+        let make_terminal = |id: u32, cwd: Option<Directory>| {
+            let terminal = server::Terminal {
+                tag: Vec::new(),
+                size: None,
+                cwd,
+                title: String::new(),
+                tty: None,
+                is: Is::Ended,
+                statuses: ProgramStatuses::default(),
+            };
+            (
+                ViewId::of(u64::from(id)).unwrap(),
+                Located::Shown(Shown::listed(key(id), &terminal)),
+            )
+        };
+        let terminals = BTreeMap::from([
+            make_terminal(1, Some(dir("/w/repo"))),
+            make_terminal(2, None),
+            make_terminal(3, Some(dir("/"))),
+            (ViewId::of(4).unwrap(), Located::Shown(Shown::unlisted(key(4)))),
+        ]);
+        core.send(Command::Terminals(terminals)).unwrap();
+
+        let expected = Dir::parse("/w/repo").unwrap();
+        let dirs = ask(&core, Command::Dirs).unwrap();
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs.contains(&expected));
+
+        let stored = ask(&core, |answer| Command::GitStatus {
+            dir: expected.clone(),
+            status: GitStatus::Outside,
+            why: Some(git::Why::Swept),
+            answer,
+        })
+        .unwrap();
+        assert_eq!(stored, None);
+
+        let host = ask(&core, Command::Host).unwrap();
+        assert_eq!(host.git_statuses.len(), 1);
+        assert_eq!(host.git_statuses[0].dir, expected.as_str());
+    }
+
+    #[test]
     fn shown_terminal_renders_what_the_core_displays_and_ignores_spinner_frames() {
         let wake = || mpsc::sync_channel(1).0;
         let core = start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap();
@@ -1730,7 +1820,7 @@ mod tests {
                 && titled.topic.as_deref() == Some("Fixing the tests")
                 && *shell == Doing::Ready.to_api()
         ));
-        assert!(ask(&core, Command::Dirs).unwrap().contains("/w/lune/main/src"));
+        assert!(ask(&core, Command::Dirs).unwrap().contains(&Dir::parse("/w/lune/main/src").unwrap()));
 
         let ended =
             Shown::listed(term_key, &frame("✳ Fixing the tests", "/w/lune/main/src", Is::Ended));
