@@ -12,7 +12,7 @@ use lune_domain::projects::layout::{self, Direction, Order, Sides, Towards, SIDE
 use lune_domain::projects::{Ask, Change, Closing, Dir, Home, Id, Line, Placed};
 use lune_domain::projects::{Holds, ProjectName, Worktree};
 use lune_domain::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Relaid, Runs};
-use lune_domain::projects::{Session, Size, Spot, Terminal, TerminalViewId, Used, View, ViewId};
+use lune_domain::projects::{Session, Size, Terminal, TerminalViewId, Used, View, ViewId};
 use lune_domain::projects::{WorktreeId, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
 use lune_domain::projects::{quoted, Argv, Arranged, Listed, Opens, WORKTREES_MAX};
 use lune_protocol::shell::Doing;
@@ -33,7 +33,7 @@ use crate::watch::Troubles;
 use crate::{shells, Directory};
 
 use errands::{Errands, Unrun};
-use homes::Homes;
+use homes::{Homes, Spotted};
 
 mod errands;
 mod homes;
@@ -71,6 +71,7 @@ const _: () = assert!(RESTORES_PER_PASS > 0);
 const _: () = assert!(RESTORES_PER_PASS <= VIEWS_MAX);
 const _: () = assert!(RESTORE_SETTLE.as_nanos() > RESTORE_PAUSE.as_nanos());
 const _: () = assert!(TYPING_WAIT.as_nanos() < TYPING_WAIT_MAX.as_nanos());
+const _: () = assert!(!FOLDER_LOOK.is_zero());
 const _: () = assert!(UNSHOWN_SIZE.columns.get() <= SIDE_MAX);
 const _: () = assert!(UNSHOWN_SIZE.rows.get() <= SIDE_MAX);
 
@@ -98,7 +99,6 @@ pub enum Command {
     Worktrees { root: Dir, listed: Listed, seen: BTreeSet<WorktreeId> },
     Rooted { root: Dir, listed: Listed },
     Root { project: ProjectId, answer: oneshot::Sender<Result<Root, Unrooted>> },
-    Spotted { terminal: TerminalViewId, folder: Dir, spot: Result<Spot, String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,7 +285,7 @@ pub fn start(
 ) -> io::Result<SyncSender<Command>> {
     let (send, commands) = mpsc::sync_channel(COMMANDS_MAX);
     let errands = Errands::start();
-    let homes = Homes::start(send.clone(), FOLDER_LOOK)?;
+    let homes = Homes::start(FOLDER_LOOK)?;
     let layouts = Layouts {
         store,
         core,
@@ -446,6 +446,7 @@ fn run(mut layouts: Layouts, commands: &Receiver<Command>, sweep: Duration) {
                 return;
             },
         }
+        layouts.rehome_spotted();
         if swept.elapsed() >= sweep {
             layouts.read_runs();
             layouts.rehome_due();
@@ -535,10 +536,6 @@ impl Layouts {
             },
             Command::Root { project, answer } => {
                 let _ = answer.send(self.root(project));
-            },
-            Command::Spotted { terminal, folder, spot } => {
-                self.homes.looked(terminal);
-                self.rehome(terminal, &folder, spot);
             },
             Command::Rooted { root, listed } => {
                 let rooted = Change::Rooted { root: root.clone(), listed };
@@ -1549,26 +1546,46 @@ impl Layouts {
         };
         unhomed.retain(|terminal| projects.holding_terminal(terminal.view()).is_some());
         assert!(unhomed.len() <= VIEWS_MAX, "only held terminals wait for a home");
-        let due: Vec<TerminalViewId> =
-            unhomed.iter().copied().filter(|terminal| !homes.looking(*terminal)).collect();
+        let room = homes.room();
+        if room == 0 {
+            return;
+        }
+        let due: Vec<TerminalViewId> = unhomed
+            .iter()
+            .copied()
+            .filter(|terminal| !homes.looking(*terminal))
+            .take(room)
+            .collect();
+        assert!(due.len() <= room, "a sweep sends no more looks than the homes have room for");
         for terminal in due {
             let held = projects.holding_terminal(terminal.view());
             let (_, held) = held.expect("a terminal waiting for a home is held");
-            if !homes.look(terminal, held.folder().clone()) {
-                return;
-            }
-            unhomed.remove(&terminal);
+            homes.look(terminal, held.folder().clone());
+            let waited = unhomed.remove(&terminal);
+            assert!(waited, "a terminal sent for a look was waiting for a home");
         }
     }
 
-    fn rehome(&mut self, terminal: TerminalViewId, folder: &Dir, spot: Result<Spot, String>) {
+    fn rehome_spotted(&mut self) {
+        for _ in 0..homes::LOOKS_MAX {
+            let Some(spotted) = self.homes.spotted() else {
+                return;
+            };
+            self.rehome(spotted);
+        }
+        assert_eq!(self.homes.room(), homes::LOOKS_MAX, "draining every slot empties the homes");
+    }
+
+    fn rehome(&mut self, spotted: Spotted) {
+        let Spotted { terminal, folder, spot } = spotted;
+        assert!(!self.homes.looking(terminal), "terminal {terminal} is rehomed once its look ends");
         let Some(projects) = self.store.projects() else {
             return;
         };
-        let Some((_, held)) = projects.holding_terminal(terminal.view()) else {
+        let Some((from, held)) = projects.holding_terminal(terminal.view()) else {
             return;
         };
-        if held.folder() != folder {
+        if *held.folder() != folder {
             return;
         }
         let stays = format!("terminal {terminal}, gone to {}, stays", folder.as_str());
@@ -1576,9 +1593,13 @@ impl Layouts {
             Ok(spot) => spot,
             Err(why) => return self.troubles.say(format!("{stays}: its worktree is unknown: {why}")),
         };
+        let from = from.id();
         let to = match projects.home(terminal.view(), &spot) {
             Home::Stays => return,
-            Home::In(to) => MoveTo::Worktree(to),
+            Home::In(to) => {
+                assert_ne!(to, from, "terminal {terminal} moves only to another worktree");
+                MoveTo::Worktree(to)
+            },
             Home::Made { project, spot } => MoveTo::Made { project, spot },
         };
         if let Err(why) = self.moved(terminal, to) {

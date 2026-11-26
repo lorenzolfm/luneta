@@ -1524,6 +1524,78 @@ fn a_terminal_gone_to_another_worktree_moves_there_and_its_client_follows() {
 }
 
 #[test]
+fn a_client_is_answered_while_rehome_waits_on_git_and_a_stale_look_is_dropped() {
+    let owned = Owned::new();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let (up, clone) = (home.join("up"), home.join("clone"));
+    cloned_as_wt(&home, &up, &clone);
+    worktree_added(&clone, "stale");
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "../feat", "feat"]);
+    let made = project(&owned.host, &clone, None);
+    let main = worktree(&owned.host, made, &clone.join("main"));
+    let mut shown = Shown::new(&owned, main, 80, 24);
+    let [stays] = shown.terminals()[..] else { panic!("a worktree is made with its first") };
+
+    let stale = clone.join("stale");
+    let feat = clone.join("feat");
+    let gate = home.join("git-gate");
+    let started = home.join("git-started");
+    let move_on = home.join("move-on");
+    fs::write(&gate, "").unwrap();
+    let wrapper = format!(
+        "PATH=\"${{PATH#\"${{0%/*}}:\"}}\"\n\
+         if [ -f '{gate}' ] && case \"$*\" in *'{stale}'*) true;; *) false;; esac; then\n\
+             touch '{started}'\n\
+             while [ -f '{gate}' ]; do sleep 0.05; done\n\
+         fi\n\
+         exec git \"$@\"\n",
+        gate = gate.display(),
+        stale = stale.display(),
+        started = started.display(),
+    );
+    script(&owned.host.bin().join("git"), &wrapper);
+
+    let line = format!(
+        "cd '{stale}' && printf '\\033]7;file://localhost%s\\007' \"$PWD\"\n\
+         while [ ! -f '{move_on}' ]; do sleep 0.05; done\n\
+         cd '{feat}' && printf '\\033]7;file://localhost%s\\007' \"$PWD\"\n\
+         exec sleep 601",
+        stale = stale.display(),
+        move_on = move_on.display(),
+        feat = feat.display(),
+    );
+    let goes = shown.open_running(&["sh", "-c", &line]);
+
+    eventually("rehome starts git on the stalled folder", || started.exists().then_some(()));
+
+    let up_edge = Some(focus::To::Direction(show_request::Direction::Up.into()));
+    shown.ask(Event::Focus(show_request::Focus { to: up_edge, step: 1 }));
+    assert_eq!(shown.until_edged().worktree, main, "Show answers while rehome waits on git");
+
+    let rename = RenameTerminal { terminal: stays, to: Some("kept".to_owned()) };
+    assert_eq!(
+        asked(&owned.host, Change::RenameTerminal(rename)).unwrap(),
+        None,
+        "ChangeProjects answers while rehome waits on git"
+    );
+
+    fs::write(&move_on, "").unwrap();
+    let feat_str = feat.to_str().unwrap();
+    eventually("luned sees the terminal moved on to feat", || {
+        watched(&owned, main).into_iter().find(|it| it.id == goes && it.folder == feat_str)
+    });
+    fs::remove_file(&gate).unwrap();
+
+    let laid = shown.until("the terminal moves to feat, not stale", |laid| laid.worktree != main);
+    let went = watched_worktree(&owned, laid.worktree).expect("its worktree is watched");
+    assert_eq!(went.folder, feat_str, "the stale look is dropped and the newer folder wins");
+    let terminals: Vec<u64> = laid.views.iter().map(|view| view.id).collect();
+    assert_eq!((terminals, focused_of(&laid)), (vec![goes], Some(goes)));
+    let left: Vec<u64> = watched(&owned, main).iter().map(|it| it.id).collect();
+    assert_eq!(left, [stays], "the terminal beside it stays");
+}
+
+#[test]
 fn where_a_terminal_is_and_what_it_runs_reach_the_file() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
