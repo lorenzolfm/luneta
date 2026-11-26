@@ -55,7 +55,7 @@ pub fn owned_folder() -> Option<OwnedFolder> {
     Some(OwnedFolder::of(named, led))
 }
 
-pub fn found() -> Found {
+pub(crate) fn found() -> Found {
     let mut unread = Vec::new();
     let owned = match owned() {
         Ok(Owned { folders, left_out }) => {

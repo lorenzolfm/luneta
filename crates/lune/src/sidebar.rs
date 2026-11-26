@@ -9,11 +9,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{Arranged, ProjectName, WorktreeId};
-use lune_domain::projects::{self, Argv, Dir, Holders, Opens, Plain, ProjectId, Used, ViewId};
+use lune_domain::projects::{self, Argv, Dir, Opens, ProjectId, Used, ViewId};
 use lune_domain::rows::{self, Told};
 use lune_protocol::agent_status::AgentStatus;
 use lune_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
 use lune_protocol::github::{PullRequest, State, Verdict};
+use lune_protocol::said::Said;
 use lune_protocol::shell::{Doing, Ending, Front};
 use lune_protocol::unread;
 #[cfg(test)]
@@ -104,8 +105,6 @@ const PROJECT_DOT: &str = "●";
 const MACHINE_LEAD: usize = 5;
 const MISSING: &str = " missing";
 const NO_PROJECTS: &str = "no projects";
-const UNSEEN_PROJECTS: &str =
-    "luned has not said yet what projects this machine keeps, so nothing is made: paste it again";
 const COMPUTER: &str = "\u{f108}";
 const EDGE: &str = "│";
 const INDENT: &str = " ";
@@ -630,7 +629,7 @@ enum Heads {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Checkout {
-    branch: String,
+    branch: Said,
     status: String,
     changed: Option<Changed>,
     pull_request: Option<Numbered>,
@@ -649,7 +648,7 @@ pub trait Branched {
 
 impl Branched for Checkout {
     fn branch(&self) -> &str {
-        &self.branch
+        self.branch.as_str()
     }
 }
 
@@ -1224,7 +1223,7 @@ pub enum Asked {
     OpenWorktree { on: Machine, project: ProjectRow },
     Prunes { menu: u64, on: Machine, dir: Directory },
     Prune { menu: u64, on: Machine, dir: Directory, agreed: BTreeSet<prunes::Deleting> },
-    Rebase { menu: u64, on: Machine, dir: Directory, branch: String },
+    Rebase { menu: u64, on: Machine, dir: Directory, branch: Said },
     Go { on: Machine, place: Place },
     Take,
     Copy(Link),
@@ -1252,7 +1251,6 @@ pub enum Asked {
         wanted: Wanted,
         worked: Vec<Worked>,
         others: Others,
-        held_here: Holders,
     },
     Find { menu: u64, on: Machine, dir: Directory, agent: agents::Harness },
     Printed { menu: u64, on: Machine, session: Listed, view: ViewKey, ended: menu::Ended },
@@ -2270,7 +2268,7 @@ impl Sidebar {
             let mut worktrees = Vec::with_capacity(known.worktrees.len());
             for worktree in &known.worktrees {
                 let branch = statuses.get(worktree.folder.as_str()).and_then(|status| {
-                    Some(checkout(&GitStatus::of_api(status)?, None)?.branch)
+                    Some(String::from(checkout(&GitStatus::of_api(status)?, None)?.branch))
                 });
                 let terminals = worktree.views().map(|view| ViewKey::Terminal(view.key));
                 worktrees.push(Worktree {
@@ -3877,10 +3875,10 @@ impl Sidebar {
                 unreachable!("an open is asked of the host before the menu is kept")
             },
             Wants::Pull(work, wanted) => {
-                match self.worked(&on).and_then(|worked| Ok((worked, self.held_here()?))) {
-                    Ok((worked, held_here)) => {
+                match self.worked(&on) {
+                    Ok(worked) => {
                         let others = self.others(&on);
-                        Asked::Pull { menu: number, on, work, wanted, worked, others, held_here }
+                        Asked::Pull { menu: number, on, work, wanted, worked, others }
                     },
                     Err(why) => self.pulled(number, Err(why)),
                 }
@@ -3993,23 +3991,6 @@ impl Sidebar {
         Ok(worked)
     }
 
-    fn held_here(&self) -> Result<Holders, String> {
-        let Some(seen) = self.seen(&Machine::Local) else {
-            return Err(UNSEEN_PROJECTS.to_owned());
-        };
-        let mut holders = Holders::default();
-        for it in seen.projects {
-            match &it.unopened {
-                Unopened::Folder => {
-                    let name = it.listed().name().clone();
-                    holders.plain.push(Plain { dir: it.dir.clone(), name });
-                },
-                Unopened::Unlisted(_) | Unopened::Listed(_) => holders.clones.push(it.dir.clone()),
-            }
-        }
-        Ok(holders)
-    }
-
     fn others(&self, on: &Machine) -> Others {
         let Some(host) = &self.host else {
             return Vec::new();
@@ -4111,7 +4092,8 @@ impl Sidebar {
                     };
                     let cwd = view.cwd.as_str();
                     let branch = statuses.get(cwd).and_then(|status| {
-                        checkout(&GitStatus::of_api(status)?, None).map(|checkout| checkout.branch)
+                        let checkout = checkout(&GitStatus::of_api(status)?, None);
+                        checkout.map(|checkout| checkout.branch.into())
                     });
                     notes.push(Note {
                         on: machine.clone(),
@@ -5125,7 +5107,7 @@ fn log_unasked(plan: &prunes::Plan) {
     }
 }
 
-fn git_in(seen: Option<&Seen<'_>>, dir: &Directory) -> (Option<String>, Option<String>) {
+fn git_in(seen: Option<&Seen<'_>>, dir: &Directory) -> (Option<Said>, Option<String>) {
     let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
     let status = statuses.into_iter().find(|status| status.dir == dir.as_str());
     let Some(status) = status.and_then(GitStatus::of_api) else {
@@ -5156,7 +5138,7 @@ fn checkout(status: &GitStatus, pull_request: Option<&PullRequest>) -> Option<Ch
         return None;
     };
     Some(Checkout {
-        branch: name.as_str().to_owned(),
+        branch: name.clone(),
         status: glyphs(changes, *stashes, *upstream),
         changed: *changed,
         pull_request: pull_request.and_then(numbered),
@@ -5407,11 +5389,11 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             }
             let mut lines = vec![Line::from(spans)];
             if let Named::Apart { name, checkout } = named {
-                assert_ne!(name, &checkout.branch, "a name apart is not its branch");
+                assert_ne!(name, checkout.branch.as_str(), "a name apart is not its branch");
                 let at = lines.len();
                 let (drawn, numbered, branch_room) = checkout_line(*here, checkout, at, width);
                 lines.push(drawn);
-                cuts.extend(cut_at(at, LABEL, &checkout.branch, branch_room));
+                cuts.extend(cut_at(at, LABEL, checkout.branch.as_str(), branch_room));
                 number = numbered;
             }
             RowLines { lines, number, cuts }
@@ -5643,7 +5625,7 @@ fn checkout_line(
     let held = beside.width();
     let status = &checkout.status;
     let room = width.saturating_sub(LABEL + beside.taken() + 1);
-    let branch = cut(&checkout.branch, room);
+    let branch = cut(checkout.branch.as_str(), room);
     let gap = width.saturating_sub(LABEL + cells(&branch) + held + status.width() + 1);
     let mut spans = vec![
         margin(here),
@@ -9304,9 +9286,8 @@ mod tests {
         let work = Work::Link(link.clone());
         let wanted = Wanted::AsItIs;
         let on = Machine::Local;
-        let clones = vec![Dir::parse("/w").unwrap(), Dir::parse("/w").unwrap()];
-        let (others, held_here) = (Vec::new(), Holders { plain: Vec::new(), clones });
-        let pull = Asked::Pull { menu: 1, on, work, wanted, worked, others, held_here };
+        let others = Vec::new();
+        let pull = Asked::Pull { menu: 1, on, work, wanted, worked, others };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
 
         let at = At::Unopened;
@@ -9577,7 +9558,7 @@ mod tests {
             assert_eq!(wanted, Wanted::AsItIs);
             let at = At::Unopened;
             let (folder, work) = ("/w/lune/issue-5", Readied::Link(Link::parse(page).unwrap()));
-            let branch = branch.map(str::to_owned);
+            let branch = branch.and_then(|branch| Said::new(branch.to_owned()));
             let ready = Ready { at, folder: directory(folder), branch, moved_off, work };
             let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
             (matches!(asked, Asked::Make { .. }), sidebar.notice)
@@ -9610,7 +9591,7 @@ mod tests {
                 panic!("no job for the key");
             };
             let at = At::Unopened;
-            let branch = Some("dev-docs".to_owned());
+            let branch = Said::new("dev-docs".to_owned());
             let (folder, work) = ("/w/lune/issue-5", Readied::Link(Link::parse(page).unwrap()));
             let ready = Ready { at, folder: directory(folder), branch, moved_off: true, work };
             let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
@@ -9753,7 +9734,7 @@ mod tests {
         };
         sidebar.focus(Keys::Terminal);
         let at = At::Unopened;
-        let branch = Some("dev-docs".to_owned());
+        let branch = Said::new("dev-docs".to_owned());
         let (folder, work) = ("/w/lune/issue-5", Readied::Link(Link::parse(page).unwrap()));
         let ready = Ready { at, folder: directory(folder), branch, moved_off: true, work };
         let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
@@ -9815,7 +9796,7 @@ mod tests {
             terminal: ViewId::of(1),
             cwd: Cwd::At(Folder {
                 dir: directory("/w/lune/main"),
-                branch: Some("feat/menu".to_owned()),
+                branch: Said::new("feat/menu".to_owned()),
                 repository: None,
                 pull_request: None,
             }),
@@ -11246,12 +11227,12 @@ mod tests {
         let dir = Directory::parse("/w/b".to_owned()).unwrap();
         let on = Machine::Remote(nixos());
         let number = sidebar.menus + 1;
-        let branch = "fix".to_owned();
+        let branch = Said::new("fix".to_owned()).unwrap();
         assert_eq!(sidebar.key(&char('r'), now), Asked::Rebase { menu: number, on, dir, branch });
         assert!(sidebar.open().expect("the menu").rebasing());
         let rebased = rebases::Rebased {
-            branch: "fix".to_owned(),
-            onto: "origin/main".to_owned(),
+            branch: Said::new("fix".to_owned()).unwrap(),
+            onto: Said::new("origin/main".to_owned()).unwrap(),
             came: rebases::Came::Already,
         };
         assert_eq!(sidebar.rebased(number, Ok(rebased)), Asked::Nothing);
@@ -11442,9 +11423,8 @@ mod tests {
         let others = vec![(Machine::Local, Ok(local)), unreached("me@vps"), unreached("pi")];
         let asked = Work::Link(link.clone());
         let wanted = Wanted::AsItIs;
-        let held_here = Holders { plain: Vec::new(), clones: vec![Dir::parse("/w").unwrap()] };
         let (menu, on_it, work) = (number, on.clone(), asked);
-        let pull = Asked::Pull { menu, on: on_it, work, wanted, worked, others, held_here };
+        let pull = Asked::Pull { menu, on: on_it, work, wanted, worked, others };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
         let at = At::Unopened;
         let folder = directory("/w/n/feat");

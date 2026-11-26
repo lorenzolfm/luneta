@@ -9,6 +9,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use lune_domain::projects::{held_by_folder, CloneRoot, Dir, Holders, ProjectName};
+use lune_protocol::said::Said;
 use tokio::time::timeout;
 use tonic::{Code, Status};
 use wt::cmd::add::{self, Fetch, Plan};
@@ -559,7 +560,7 @@ pub enum At<P> {
 pub struct Ready<P> {
     pub at: At<P>,
     pub folder: Directory,
-    pub branch: Option<String>,
+    pub branch: Option<Said>,
     pub moved_off: bool,
     pub work: Readied,
 }
@@ -593,7 +594,7 @@ impl Ready<usize> {
             Readied::Link(_) => None,
             Readied::File { real } => Some(real),
         };
-        let folder = folder.into();
+        let (folder, branch) = (folder.into(), branch.map(String::from));
         PasteResponse { at: Some(at), folder, branch, file, at_head: false, moved_off }
     }
 }
@@ -706,7 +707,7 @@ impl Pasted {
         PasteRequest { on, work: Some(work), worked, at_head, reads_moved_off }
     }
 
-    pub fn ready(&self, holders: &Holders) -> Result<Ready<usize>, Unready> {
+    pub(crate) fn ready(&self, holders: &Holders) -> Result<Ready<usize>, Unready> {
         let (worked, reads_moved_off) = (self.worked.as_slice(), self.reads_moved_off);
         match &self.work {
             Work::Link(link) => ready(link, self.wanted, reads_moved_off, worked, holders),
@@ -749,6 +750,8 @@ impl Pasted {
                 .to_owned());
         }
         let folder = Directory::parse(folder).map_err(|why| format!("folder: {why}"))?;
+        let unnamed = || "branch: it names no branch".to_owned();
+        let branch = branch.map(|branch| Said::new(branch).ok_or_else(unnamed)).transpose()?;
         let work = match (&self.work, file) {
             (Work::Link(link), None) => Readied::Link(link.clone()),
             (Work::Link(_), Some(file)) => return Err(format!("file: {file:?} is of no link")),
@@ -894,7 +897,7 @@ fn ready_file(
 
 struct MovedOff {
     folder: Directory,
-    on: Option<String>,
+    on: Option<Said>,
 }
 
 impl MovedOff {
@@ -920,7 +923,8 @@ fn sits_there(dir: &str, there: &str, own: &str) -> Result<Option<MovedOff>, Str
         return Ok(None);
     };
     let on = entry.lines().find_map(|line| line.strip_prefix("branch refs/heads/"));
-    Ok(directory(there).map(|folder| MovedOff { folder, on: on.map(str::to_owned) }))
+    let on = on.and_then(|on| Said::new(on.to_owned()));
+    Ok(directory(there).map(|folder| MovedOff { folder, on }))
 }
 
 fn wt_makes(root: &Dir, branch: &str) -> String {
@@ -949,8 +953,9 @@ fn opened_worktree(
     Ok(Ready { at, branch, moved_off: false, folder, work })
 }
 
-fn branch_of(dir: &str) -> Result<Option<String>, Unready> {
-    git::branch_within(dir, ANSWER).map_err(|why| Unready::InDoubt(format!("no branch read {why}")))
+fn branch_of(dir: &str) -> Result<Option<Said>, Unready> {
+    let unread = |why| Unready::InDoubt(format!("no branch read {why}"));
+    Ok(git::branch_within(dir, ANSWER).map_err(unread)?.and_then(Said::new))
 }
 
 fn opened_in(folder: &Directory, worked: &[Worked]) -> At<usize> {
@@ -2178,7 +2183,7 @@ mod tests {
         let of_file = || Readied::File { real: "/w/cdk/main/plan.md".to_owned() };
         for at in [At::There(1), At::Unopened] {
             let folder = directory("/w/cdk/issue-2736");
-            let branch = Some("issue-2736".to_owned());
+            let branch = Said::new("issue-2736".to_owned());
             let ready = Ready { at, folder, branch, moved_off: false, work: of_link() };
             assert_eq!(asked_of_link.answered(ready.clone().answer()), Ok(ready.clone()));
             let ready = Ready { work: of_file(), ..ready };

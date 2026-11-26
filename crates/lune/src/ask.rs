@@ -12,13 +12,13 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
-use crate::away::{self, Away};
 use crate::brief::{self, Asking};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint, ViewRow, ProjectTarget, Target};
 use crate::moonlight;
+use crate::reach::{self, Luned};
 use crate::sidebar::{self, ACCENT};
 
 const TITLE: &str = "Ask";
@@ -172,9 +172,10 @@ impl Ask {
         }
         let turn = Turn::after(self.turned);
         let (on, cwd) = match &self.works {
-            Works::Here(cwd) => (None, Some(cwd.clone())),
+            Works::Here(cwd) => (Machine::Local, Some(cwd.clone())),
             Works::There { on, cwd } => {
-                (Some(on.clone()), cwd.as_ref().map(|cwd| PathBuf::from(cwd.as_str())))
+                let cwd = cwd.as_ref().map(|cwd| PathBuf::from(cwd.as_str()));
+                (Machine::Remote(on.clone()), cwd)
             },
         };
         let (resumed, highlighted) = (self.session.clone(), self.highlighted.clone());
@@ -195,12 +196,9 @@ impl Ask {
             let hear = |step| {
                 let _ = events.send(Event::Heard { number, heard: Heard::Step(step) });
             };
-            let ended = match on {
-                None => asked.talk(wanted, &hear),
-                Some(on) => match Away::reach(&on, away::ANSWER) {
-                    Ok(mut away) => away.talk(&asked, wanted, &hear),
-                    Err(why) => Some(Err(format!("{on}: {why}"))),
-                },
+            let ended = match Luned::on(&on, reach::ANSWER) {
+                Ok(mut luned) => luned.talk(&asked, wanted, &hear),
+                Err(why) => Some(Err(why)),
             };
             if let Some(ended) = ended {
                 due.pay(Ok(ended));
@@ -364,7 +362,7 @@ mod tests {
             place: ViewPlace::new_in("lune", 3, 1, 4),
             terminal: None,
             cwd: Cwd::of(Some(Directory::parse("/w/lune/main".to_owned()).unwrap()), |dir| {
-                let branch = Some("feat/ask".to_owned());
+                let branch = lune_protocol::said::Said::new("feat/ask".to_owned());
                 Folder { dir, branch, repository: None, pull_request: None }
             }),
             ran: Ran::Unhooked,

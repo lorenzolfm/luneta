@@ -10,19 +10,19 @@ use std::time::{Duration, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::names::SessionName;
 use luned::program::{self, Ran};
-use luned::transcripts::{digest_end, Digest, Folders, Reading, SessionId, TranscriptEnd, IDS_MAX};
+use luned::transcripts::{digest_end, Digest, Reading, SessionId, TranscriptEnd, IDS_MAX};
 use luned::{one_answer, Destination};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
-use crate::away::{self, Away};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::moonlight;
+use crate::reach::{self, Luned};
 use crate::sidebar::{self, ViewKey};
 
 const MODEL: &str = "haiku";
@@ -332,15 +332,8 @@ impl Brief {
 type Reads<'a> =
     dyn Fn(&Machine, &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> + Sync + 'a;
 
-pub fn read(
-    on: &Machine,
-    reading: &Reading,
-    folders: &Folders,
-) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
-    match on {
-        Machine::Local => Ok(reading.ends(folders)),
-        Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.ends(reading),
-    }
+pub fn read(on: &Machine, reading: &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
+    Luned::on(on, reach::ANSWER)?.ends(reading)
 }
 
 fn leaves_out(left_out: &[Note]) -> String {
@@ -405,7 +398,6 @@ pub struct Written {
 pub fn ask(
     number: u64,
     brief: Brief,
-    folders: Folders,
     events: &Sender<Event>,
 ) -> Briefing {
     let title = brief.title().to_owned();
@@ -415,8 +407,7 @@ pub fn ask(
     });
     let asking = Asking::on_thread(move |wanted| {
         let at = clock();
-        let reads = |on: &Machine, reading: &Reading| read(on, reading, &folders);
-        let prompt = brief.prompt(&reads, SystemTime::now);
+        let prompt = brief.prompt(&read, SystemTime::now);
         if !wanted() {
             return;
         }
@@ -602,7 +593,6 @@ pub fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> 
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::ExitStatus;
     use std::sync::Mutex;
@@ -643,9 +633,19 @@ mod tests {
     }
 
     fn read_here(
-        folders: Folders,
+        ends: HashMap<SessionId, TranscriptEnd>,
     ) -> impl Fn(&Machine, &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> + Sync {
-        move |on, reading| read(on, reading, &folders)
+        move |_, reading| {
+            let TranscriptEndsRequest { ids, .. } = reading.asked(None);
+            let asked =
+                |(id, _): &(&SessionId, &TranscriptEnd)| ids.iter().any(|it| it == id.as_str());
+            let read = |(id, end): (&SessionId, &TranscriptEnd)| (id.clone(), end.clone());
+            Ok(ends.iter().filter(asked).map(read).collect())
+        }
+    }
+
+    fn id(id: &str) -> SessionId {
+        SessionId::parse(id).expect("a UUID")
     }
 
     #[expect(clippy::unnecessary_wraps, reason = "it is a `Reads`")]
@@ -685,18 +685,15 @@ mod tests {
             json!({"type": "user", "message": {"content": "<command-name>/clear</command-name>"}}),
             json!({"type": "user", "isMeta": true, "message": {"content": "a reminder"}}),
         ];
-        let lines = |records: &[Value]| -> String {
-            records.iter().map(|record| record.to_string() + "\n").collect()
+        let lines = |records: &[Value]| -> Vec<String> {
+            records.iter().map(Value::to_string).collect()
         };
-        let claude = tempfile::tempdir().expect("a directory");
-        let projects = claude.path().join("projects");
-        let project = projects.join("-w-b");
-        fs::create_dir_all(&project).expect("a directory");
-        fs::create_dir_all(projects.join("-w-a")).expect("a directory");
-        let cut = r#"me": "cut short", "type":"user"}]}}"#;
-        let fold_file = format!("{cut}\n{}", lines(&fold_end));
-        fs::write(project.join(format!("{fold}.jsonl")), fold_file).expect("a file");
-        fs::write(project.join(format!("{quiet}.jsonl")), lines(&quiet_end)).expect("a file");
+        let cut = r#"me": "cut short", "type":"user"}]}}"#.to_owned();
+        let fold_lines = std::iter::once(cut).chain(lines(&fold_end)).collect::<Vec<_>>();
+        let ends = HashMap::from([
+            (id(fold), TranscriptEnd::Claude(fold_lines.join("\n"))),
+            (id(quiet), TranscriptEnd::Claude(lines(&quiet_end).join("\n"))),
+        ]);
 
         let notes = vec![
             note("a", 1, "fold", None),
@@ -706,8 +703,7 @@ mod tests {
             Note { since: None, ..note("b", 7, "spare", None) },
         ];
         let brief = Brief::new(every(&["a", "b"]), notes).expect("a brief");
-        let folders = Folders { claude: Some(claude.path().to_owned()), agy: None };
-        let prompt = brief.prompt(&read_here(folders), now).expect("a reading");
+        let prompt = brief.prompt(&read_here(ends), now).expect("a reading");
         let notes = prompt.split_once("The notes:\n").expect("the notes").1;
         assert_eq!(
             notes,
@@ -751,24 +747,30 @@ Its transcript is unknown: Claude Code names none for it.
 
     #[test]
     fn a_brief_reads_a_share_of_each_transcript_of_what_the_notes_tell() {
-        let claude = tempfile::tempdir().expect("a directory");
-        let project = claude.path().join("projects/-w");
-        fs::create_dir_all(&project).expect("a directory");
-        let asked = json!({"type": "api-request", "params": {"system": "x".repeat(64 * 1024)}});
         let ids: Vec<String> =
             (0..MAX_NOTES).map(|n| format!("{n:08x}-0000-4000-8000-000000000000")).collect();
-        for (n, id) in ids.iter().enumerate() {
+        let transcript = |(n, id): (usize, &String)| {
             let said = |step: usize| {
                 let text = format!("agent {n}, step {step}: {}", "y".repeat(1024));
                 json!({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
             };
-            let mut records: Vec<String> = (0..64).map(|step| said(step).to_string()).collect();
-            records.push(asked.to_string());
-            let transcript = records.join("\n") + "\n";
-            fs::write(project.join(format!("{id}.jsonl")), transcript).expect("a file");
-        }
+            (id.clone(), (0..64).map(|step| said(step).to_string()).collect())
+        };
+        let transcripts: HashMap<String, Vec<String>> =
+            ids.iter().enumerate().map(transcript).collect();
+        let tail = |records: &[String], share: usize| -> String {
+            let mut taken = 0;
+            let fits = |record: &&str| {
+                taken += record.len() + 1;
+                taken <= share
+            };
+            let mut kept: Vec<&str> =
+                records.iter().rev().map(String::as_str).take_while(fits).collect();
+            kept.reverse();
+            kept.join("\n")
+        };
 
-        let note = |(n, id): (usize, &String)| Note {
+        let note = |(n, asked): (usize, &String)| Note {
             on: Machine::Local,
             session: named("a"),
             view: ViewKey::terminal(n as u32 + 1),
@@ -777,15 +779,20 @@ Its transcript is unknown: Claude Code names none for it.
             since: None,
             branch: None,
             cwd: "/w".to_owned(),
-            transcript: Transcript::Named(SessionId::parse(id).expect("a UUID")),
+            transcript: Transcript::Named(id(asked)),
         };
         let notes = ids.iter().enumerate().map(note).collect();
         let brief = Brief::new(every(&["a"]), notes).expect("a brief");
         let kept = Mutex::new(0);
-        let folders = Folders { claude: Some(claude.path().to_owned()), agy: None };
-        let here = read_here(folders);
-        let told = brief.told(&|on, reading| {
-            let ends = here(on, reading)?;
+        let told = brief.told(&|_, reading| {
+            let TranscriptEndsRequest { ids, share, .. } = reading.asked(None);
+            let share = usize::try_from(share).expect("a share");
+            assert!(ids.len() * share <= TAILS_BYTES, "{} shares of {share}", ids.len());
+            let end = |asked: &String| {
+                let end = TranscriptEnd::Claude(tail(&transcripts[asked], share));
+                (id(asked), end)
+            };
+            let ends: HashMap<_, _> = ids.iter().map(end).collect();
             *kept.lock().expect("no panic") += ends.values().map(|end| end.lines().len()).sum::<usize>();
             Ok(ends)
         });

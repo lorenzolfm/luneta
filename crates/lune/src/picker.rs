@@ -23,15 +23,15 @@ use unicode_width::UnicodeWidthStr;
 use luned::links::{Branch, Work};
 use luned::repositories::{self, Repository};
 use luned::transcripts::SessionId;
-use luned::{eza, screens, Destination, Directory};
+use luned::{screens, Destination, Directory};
 
 use crate::actions::{self, Action, Pasted, Spec};
 use crate::alerts::Doing;
-use crate::away::{self, Away};
 use crate::close::{self, Act, Plan};
 use crate::fuzzy::{Fuzzy, Score, Typos};
 use crate::host::Event;
 use crate::moonlight;
+use crate::reach::{self, Luned};
 use crate::screen;
 use crate::machines::Machine;
 use crate::menu::{self, Chain, Chained, Done, Hint, Origin, Pull, Target};
@@ -313,20 +313,11 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
             })
         },
         Ask::Repositories { on, ask } => Box::new(move || {
-            let found = match &on {
-                Machine::Local => Ok(repositories::found()),
-                Machine::Remote(destination) => {
-                    reach(destination).and_then(|mut away| away.repositories())
-                },
-            };
+            let found = Luned::on(&on, reach::ANSWER).and_then(|mut luned| luned.repositories());
             Heard::Repositories { on, ask, found }
         }),
         Ask::List { on, path } => Box::new(move || {
-            let listed = match &on {
-                Machine::Local => eza::listed(&path),
-                Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                    .and_then(|mut away| away.contents(&path)),
-            };
+            let listed = Luned::on(&on, reach::ANSWER).and_then(|mut luned| luned.contents(&path));
             Heard::Listed { on, path, listed }
         }),
     };
@@ -334,10 +325,6 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
         let heard = hear();
         let _ = events.send(Event::Picker { number, heard });
     });
-}
-
-fn reach(destination: &Destination) -> Result<Away, String> {
-    Away::reach(destination, away::ANSWER).map_err(|why| format!("{destination}: {why}"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

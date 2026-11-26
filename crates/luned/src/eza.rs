@@ -16,7 +16,7 @@ const LIST: [&str; 7] = [
     "--no-quotes",
 ];
 
-pub fn listed(path: &Directory) -> Result<String, String> {
+pub(crate) fn listed(path: &Directory) -> Result<String, String> {
     let path = path.as_str();
     let mut eza = Command::new("eza");
     eza.args(LIST).arg("--").arg(path);

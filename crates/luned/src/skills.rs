@@ -103,7 +103,7 @@ fn env_dir(name: &str) -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
 }
 
-pub fn found_in(cwd: &Directory, harness: Harness) -> Result<Vec<Skill>, String> {
+pub(crate) fn found_in(cwd: &Directory, harness: Harness) -> Result<Vec<Skill>, String> {
     match harness {
         Harness::ClaudeCode => claude_found_in(cwd),
         Harness::Pi => {

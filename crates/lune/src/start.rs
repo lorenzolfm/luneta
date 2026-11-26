@@ -11,6 +11,7 @@ use luned::program;
 use luned::Directory;
 
 use crate::agents::Kept;
+use crate::reach::{self, Luned};
 use crate::state;
 use crate::machines::Machine;
 use crate::worktrees::{self, Landed, Landing, Opening, Went};
@@ -185,8 +186,8 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let others = dirs.map(|dir| Worked { dir, pull: None, here: false }).collect::<Vec<_>>();
     let here = Worked { dir, pull: None, here: true };
     let worked = std::iter::once(here).chain(others).collect();
-    let holders = worktrees::holders(path)?;
-    let ready = Pasted::new(Work::Link(link.clone()), worked).ready(&holders).map_err(said)?;
+    let pasted = Pasted::new(Work::Link(link.clone()), worked);
+    let ready = Luned::at(path, &Machine::Local, reach::ANSWER)?.paste(&pasted).map_err(said)?;
     let folder = PathBuf::from(ready.folder.as_str());
     let off = ready.moved_off.then(|| Work::Link(link.clone()).off_branch(ready.branch.as_deref()));
     let agent = match (link.kind(), &off) {

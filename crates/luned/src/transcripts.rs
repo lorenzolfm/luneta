@@ -85,12 +85,13 @@ impl TranscriptEnd {
         }
     }
 
-    #[must_use]
-    pub fn of_api(said: api::transcript_ends_response::TranscriptEnd) -> Option<Self> {
+    pub fn of_api(said: api::transcript_ends_response::TranscriptEnd) -> Result<Self, String> {
         match api::Harness::try_from(said.harness) {
-            Ok(api::Harness::ClaudeCode) => Some(TranscriptEnd::Claude(said.lines)),
-            Ok(api::Harness::Antigravity) => Some(TranscriptEnd::Antigravity(said.lines)),
-            Ok(api::Harness::Pi | api::Harness::Unspecified) | Err(_) => None,
+            Ok(api::Harness::ClaudeCode) => Ok(TranscriptEnd::Claude(said.lines)),
+            Ok(api::Harness::Antigravity) => Ok(TranscriptEnd::Antigravity(said.lines)),
+            Ok(api::Harness::Pi) => Err("pi keeps no transcript this lune reads".to_owned()),
+            Ok(api::Harness::Unspecified) => Err("it names no harness".to_owned()),
+            Err(_) => Err(format!("harness {} is one this lune does not know", said.harness)),
         }
     }
 }
@@ -168,7 +169,7 @@ impl Reading {
     }
 
     #[must_use]
-    pub fn ends(&self, folders: &Folders) -> HashMap<SessionId, TranscriptEnd> {
+    pub(crate) fn ends(&self, folders: &Folders) -> HashMap<SessionId, TranscriptEnd> {
         let dirs = folders.claude.as_deref().map(|claude| project_dirs(&claude.join("projects")));
         let mut ends = HashMap::new();
         for id in &self.ids {
