@@ -99,37 +99,28 @@ impl Looker {
     ) -> io::Result<Looker> {
         let (requests, inbox) = mpsc::sync_channel::<Job>(IN_FLIGHT_MAX);
         thread::Builder::new().name(format!("terminal {terminal} looks")).spawn(move || {
-            let looked = panics::contained(|| {
-                while let Ok(job) = inbox.recv() {
-                    let sent = match job {
-                        Job::Foreground { program, group, reply } => {
-                            let found = walk_foreground(program, group);
-                            if let Some(found) = &found {
-                                assert!(found.pid == group.leader() || found.pid == program);
-                            }
-                            send_once(&reply, found)
-                        },
-                        Job::WithFront { program, group, snapshot, reply } => {
-                            let found = walk_foreground(program, group);
-                            if let Some(found) = &found {
-                                assert!(found.pid == group.leader() || found.pid == program);
-                            }
-                            let front = walk_front(snapshot, program, group);
-                            send_once(&reply, (found, front))
-                        },
-                    };
-                    if !sent {
+            while let Ok(job) = inbox.recv() {
+                let ran = panics::contained(|| run_job(job, &walk_foreground, &walk_front));
+                match ran {
+                    Ok(true) => {
+                        if panics::contained(&woken).is_err() {
+                            eprintln!("lune-mux: terminal {terminal}'s look wake panicked");
+                            drop(inbox);
+                            return;
+                        }
+                    },
+                    Ok(false) => return,
+                    Err(Panicked) => {
+                        eprintln!("lune-mux: terminal {terminal}'s looks panicked");
+                        drop(inbox);
+                        if panics::contained(&woken).is_err() {
+                            eprintln!("lune-mux: terminal {terminal}'s look wake panicked");
+                        }
                         return;
-                    }
-                    woken();
+                    },
                 }
-                assert!(matches!(inbox.try_recv(), Err(TryRecvError::Disconnected)));
-            });
-            if let Err(Panicked) = looked {
-                eprintln!("lune-mux: terminal {terminal}'s looks panicked");
-                drop(inbox);
-                woken();
             }
+            assert!(matches!(inbox.try_recv(), Err(TryRecvError::Disconnected)));
         })?;
         Ok(Looker { requests })
     }
@@ -190,6 +181,30 @@ impl InFlight {
     }
 }
 
+fn run_job(
+    job: Job,
+    walk_foreground: &(impl Fn(ProcessId, Group) -> Option<Foreground> + ?Sized),
+    walk_front: &(impl Fn(front::Snapshot, ProcessId, Group) -> Front + ?Sized),
+) -> bool {
+    match job {
+        Job::Foreground { program, group, reply } => {
+            let found = walk_foreground(program, group);
+            if let Some(found) = &found {
+                assert!(found.pid == group.leader() || found.pid == program);
+            }
+            send_once(&reply, found)
+        },
+        Job::WithFront { program, group, snapshot, reply } => {
+            let found = walk_foreground(program, group);
+            if let Some(found) = &found {
+                assert!(found.pid == group.leader() || found.pid == program);
+            }
+            let front = walk_front(snapshot, program, group);
+            send_once(&reply, (found, front))
+        },
+    }
+}
+
 fn send_once<T>(reply: &SyncSender<T>, value: T) -> bool {
     match reply.try_send(value) {
         Ok(()) => true,
@@ -209,13 +224,23 @@ fn foreground(pid: ProcessId) -> Option<Foreground> {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU16;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
 
-    use lune_waits::{eventually, heard};
+    use lune_waits::heard;
 
     use super::*;
     use crate::asked::Size;
     use crate::pty::{Modes, Pty};
+
+    struct OnDrop(SyncSender<bool>);
+
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(thread::panicking());
+        }
+    }
 
     fn self_ids() -> (ProcessId, Group) {
         let pid = ProcessId::new(std::process::id()).unwrap();
@@ -323,12 +348,6 @@ mod tests {
 
     #[test]
     fn dropping_the_looker_ends_its_thread() {
-        struct OnDrop(SyncSender<()>);
-        impl Drop for OnDrop {
-            fn drop(&mut self) {
-                let _ = self.0.send(());
-            }
-        }
         let (ended, done) = mpsc::sync_channel(1);
         let guard = OnDrop(ended);
         let terminal = TerminalId::next(&mut None);
@@ -342,6 +361,54 @@ mod tests {
         )
         .unwrap();
         drop(looker);
-        eventually("the looker thread exits on drop", || done.try_recv().ok());
+        assert!(!heard("the looker thread exits on drop", &done));
+    }
+
+    #[test]
+    fn a_panicking_wake_is_contained_called_once_and_ends_the_looker() {
+        let (ended, done) = mpsc::sync_channel(1);
+        let guard = OnDrop(ended);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let terminal = TerminalId::next(&mut None);
+        let looker = Looker::started_with(
+            terminal,
+            move || {
+                let _ = &guard;
+                counted.fetch_add(1, Ordering::Relaxed);
+                panic!("the wake panicked");
+            },
+            |_, _| None,
+            |_, _, _| Front::Working,
+        )
+        .unwrap();
+        let waiting = looker.ask(ask_foreground(), 5).unwrap();
+        assert!(!heard("the looker thread exits after a panicking wake", &done));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let Taken::Ready { looker, shell_version, seen } = waiting.take_seen().unwrap() else {
+            panic!("the answer was sent before the wake panicked");
+        };
+        assert_eq!((shell_version, seen), (5, Seen::Foreground(None)));
+        assert!(matches!(looker.ask(ask_foreground(), 6), Err(Gone)));
+    }
+
+    #[test]
+    fn a_panicking_walk_whose_wake_also_panics_stays_contained() {
+        let (ended, done) = mpsc::sync_channel(1);
+        let guard = OnDrop(ended);
+        let terminal = TerminalId::next(&mut None);
+        let looker = Looker::started_with(
+            terminal,
+            move || {
+                let _ = &guard;
+                panic!("the wake panicked");
+            },
+            |_, _| panic!("the walk panicked"),
+            |_, _, _| Front::Working,
+        )
+        .unwrap();
+        let waiting = looker.ask(ask_foreground(), 1).unwrap();
+        assert!(!heard("the looker thread exits after both walk and wake panic", &done));
+        assert!(matches!(waiting.take_seen(), Err(Gone)));
     }
 }

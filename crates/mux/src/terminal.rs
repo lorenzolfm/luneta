@@ -186,10 +186,26 @@ struct Wake(Arc<UnixStream>);
 
 impl Wake {
     fn wake(&self) {
+        if let Err(error) = self.try_wake() {
+            eprintln!("lune-mux: a terminal's wake failed: {error}");
+        }
+    }
+
+    fn try_wake(&self) -> io::Result<()> {
         match (&*self.0).write(&[0]) {
-            Ok(written) => assert_eq!(written, 1),
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {},
-            Err(error) => eprintln!("lune-mux: a terminal's wake failed: {error}"),
+            Ok(written) => {
+                assert_eq!(written, 1);
+                Ok(())
+            },
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+                ) =>
+            {
+                Ok(())
+            },
+            Err(error) => Err(error),
         }
     }
 }
@@ -1192,5 +1208,21 @@ mod tests {
         assert_eq!(cwd("file://here"), None);
         assert_eq!(cwd("file://here/%FE"), None);
         assert_eq!(cwd("file://here/a%00b"), None);
+    }
+
+    #[test]
+    fn waking_a_closed_terminal_is_quiet_whether_or_not_bytes_waited() {
+        let (wake, woken) = UnixStream::pair().unwrap();
+        wake.set_nonblocking(true).unwrap();
+        let wake = Wake(Arc::new(wake));
+        drop(woken);
+        assert!(wake.try_wake().is_ok());
+
+        let (wake, woken) = UnixStream::pair().unwrap();
+        wake.set_nonblocking(true).unwrap();
+        let wake = Wake(Arc::new(wake));
+        assert!(wake.try_wake().is_ok());
+        drop(woken);
+        assert!(wake.try_wake().is_ok());
     }
 }
